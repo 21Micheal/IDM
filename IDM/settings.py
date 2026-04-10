@@ -5,6 +5,7 @@ Reads environment via django-environ. Copy .env.example → .env and adjust.
 from pathlib import Path
 from datetime import timedelta
 import environ
+import dj_database_url
 
 BASE_DIR = Path(__file__).resolve().parent.parent
 
@@ -60,13 +61,23 @@ MIDDLEWARE = [
     "django.middleware.clickjacking.XFrameOptionsMiddleware",
 ]
 
-ROOT_URLCONF = "config.urls"
-WSGI_APPLICATION = "config.wsgi.application"
-ASGI_APPLICATION = "config.asgi.application"
+ROOT_URLCONF = "IDM.urls"
+WSGI_APPLICATION = "IDM.wsgi.application"
+ASGI_APPLICATION = "IDM.asgi.application"
 
 # ── Database ────────────────────────────────────────────────────────────────
 DATABASES = {
-    "default": env.db("DATABASE_URL", default="sqlite:///db.sqlite3")
+    "default": dj_database_url.parse(
+        env("DATABASE_URL"),
+        conn_max_age=600,
+        engine="django.db.backends.mysql",
+    )
+}
+
+# MySQL options to avoid charset warnings and ensure strict mode
+DATABASES["default"]["OPTIONS"] = {
+    "charset": "utf8mb4",
+    "init_command": "SET sql_mode='STRICT_TRANS_TABLES'",
 }
 
 # ── Auth & JWT ───────────────────────────────────────────────────────────────

@@ -8,14 +8,18 @@ ENV PYTHONUNBUFFERED 1
 WORKDIR /app
 
 # Install system dependencies
-# 1. build-essential, pkg-config, and default-libmysqlclient-dev are required for the mysqlclient header files.
-# 2. libmagic1 is required by the 'python-magic' library used in your serializers for file type detection.
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    build-essential \
+    gcc \
+    python3-dev \
+    # Dependencies for python-ldap:
+    libldap2-dev \
+    libsasl2-dev \
+    libssl-dev \
+    # Dependencies for mysqlclient:
     default-libmysqlclient-dev \
     pkg-config \
+    # Dependency for python-magic:
     libmagic1 \
-    && apt-get clean \
     && rm -rf /var/lib/apt/lists/*
 
 # Install Python dependencies

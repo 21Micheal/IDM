@@ -65,6 +65,8 @@ services:
         condition: service_healthy
       redis:
         condition: service_healthy
+      elasticsearch:
+        condition: service_started
 
   celery_worker:
     build:
@@ -75,11 +77,18 @@ services:
     environment:
       - DATABASE_URL=mysql://idm_user:${DB_PASSWORD:-idm_password}@db:3306/idm_db
       - REDIS_URL=redis://:${REDIS_PASSWORD:-changeme}@redis:6379/0
+      - ELASTICSEARCH_URL=http://elasticsearch:9200   # ← add
+      - MEDIA_ROOT=/app/media  
     volumes:
       - .:/app
+      - media_files:/app/media   
     depends_on:
-      - db
-      - redis
+      db:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      elasticsearch:
+        condition: service_started
 
   frontend:
     build:
