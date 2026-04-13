@@ -23,14 +23,17 @@ from .permissions import DocumentPermission
 from apps.audit.mixins import AuditMixin
 
 
-class DocumentTypeViewSet(AuditMixin, viewsets.ModelViewSet):
+class DocumentTypeViewSet(viewsets.ModelViewSet):
     """CRUD for document types. Admin only for write operations."""
     queryset = DocumentType.objects.prefetch_related("metadata_fields").filter(is_active=True)
     serializer_class = DocumentTypeSerializer
+    filter_backends = [SearchFilter, OrderingFilter]
+    search_fields = ["name", "code", "description"]
+    ordering_fields = ["name", "code", "created_at"]
 
     def get_permissions(self):
         if self.action in ("create", "update", "partial_update", "destroy"):
-            return [permissions.IsAuthenticated(), IsAdminUser()]
+            return [permissions.IsAuthenticated(), permissions.IsAdminUser()]
         return [permissions.IsAuthenticated()]
 
     def perform_create(self, serializer):
@@ -48,13 +51,13 @@ class DocumentViewSet(AuditMixin, viewsets.ModelViewSet):
     DELETE /documents/{id}/      → soft-delete (set status=void)
 
     Extra actions:
-    POST /documents/{id}/submit/        → submit for approval
-    POST /documents/{id}/archive/       → archive
+    POST /documents/{id}/submit/         → submit for approval
+    POST /documents/{id}/archive/        → archive
     POST /documents/{id}/upload_version/ → upload new file revision
-    POST /documents/{id}/restore_version/ → restore to a prior version
-    GET  /documents/{id}/preview_url/   → signed URL or viewer URL
-    POST /documents/{id}/comments/      → add comment
-    GET  /documents/{id}/audit_trail/   → audit events for this document
+    POST /documents/{id}/restore_version/→ restore to a prior version
+    GET  /documents/{id}/preview_url/    → signed URL or viewer URL
+    POST /documents/{id}/comments/       → add comment
+    GET  /documents/{id}/audit_trail/    → audit events for this document
     """
     permission_classes = [permissions.IsAuthenticated, DocumentPermission]
     filter_backends = [DjangoFilterBackend, SearchFilter, OrderingFilter]
@@ -84,6 +87,23 @@ class DocumentViewSet(AuditMixin, viewsets.ModelViewSet):
         if self.action == "create":
             return DocumentUploadSerializer
         return DocumentDetailSerializer
+
+    def create(self, request, *args, **kwargs):
+        """
+        Override create so the POST /documents/ response uses DocumentDetailSerializer
+        (which includes `id`, `reference_number`, versions, comments, etc.) rather
+        than the write-only DocumentUploadSerializer that has no `id` field.
+        Without this the frontend receives `data.id === undefined` and navigates
+        to /documents/undefined/.
+        """
+        upload_serializer = self.get_serializer(data=request.data)
+        upload_serializer.is_valid(raise_exception=True)
+        doc = upload_serializer.save()
+        self.record_audit("document.uploaded", doc)
+        # Re-serialise with the full detail serializer so `id` is present
+        detail = DocumentDetailSerializer(doc, context={"request": request})
+        headers = self.get_success_headers(detail.data)
+        return Response(detail.data, status=status.HTTP_201_CREATED, headers=headers)
 
     def perform_destroy(self, instance):
         # Soft delete
@@ -158,7 +178,7 @@ class DocumentViewSet(AuditMixin, viewsets.ModelViewSet):
         doc.save()
 
         self.record_audit("document.version_uploaded", doc, {"version": new_version})
-        return Response(DocumentVersionSerializer(version).data, status=201)
+        return Response(DocumentVersionSerializer(version).data, status=status.HTTP_201_CREATED)
 
     @action(detail=True, methods=["post"])
     def restore_version(self, request, pk=None):
@@ -208,7 +228,7 @@ class DocumentViewSet(AuditMixin, viewsets.ModelViewSet):
         serializer = DocumentCommentSerializer(data=request.data)
         serializer.is_valid(raise_exception=True)
         serializer.save(document=doc, author=request.user)
-        return Response(serializer.data, status=201)
+        return Response(serializer.data, status=status.HTTP_201_CREATED)
 
     @action(detail=True, methods=["get"])
     def audit_trail(self, request, pk=None):

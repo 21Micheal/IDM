@@ -1,5 +1,3 @@
-version: "3.9"
-
 services:
   db:
     image: mysql:8.0
@@ -27,7 +25,11 @@ services:
       - redis_data:/data
     ports:
       - "6379:6379"
-
+    healthcheck:
+      test: ["CMD", "redis-cli", "-a", "${REDIS_PASSWORD:-redis.21myk}", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
   elasticsearch:
     image: docker.elastic.co/elasticsearch/elasticsearch:8.12.0
     restart: unless-stopped
@@ -46,7 +48,7 @@ services:
       dockerfile: Dockerfile 
     restart: unless-stopped
     # Changed 'config' to 'IDM'
-    command: gunicorn IDM.wsgi:application --bind 0.0.0.0:8000 --workers 4 --timeout 120
+    command: python manage.py runserver 0.0.0.0:8000
     environment:
       - DEBUG=${DEBUG:-False}
       - SECRET_KEY=${SECRET_KEY:-insecure-dev-secret-change-me}

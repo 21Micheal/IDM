@@ -125,38 +125,40 @@ export default function DocumentUploadForm() {
   });
 
   return (
-    <div className="max-w-2xl mx-auto p-6">
+    <div className="max-w-3xl mx-auto py-8 px-4 sm:px-6 lg:px-8">
       {/* Progress */}
-      <div className="flex items-center gap-2 mb-8">
+      <div className="flex items-center justify-center gap-4 mb-10">
         {(["File", "Type", "Details"] as const).map((label, i) => (
           <div key={label} className="flex items-center gap-2">
-            <div className={cn(
-              "w-7 h-7 rounded-full flex items-center justify-center text-xs font-medium",
-              step > i + 1 ? "bg-indigo-600 text-white" :
-              step === i + 1 ? "bg-indigo-600 text-white ring-4 ring-indigo-100" :
-              "bg-slate-200 text-slate-500"
-            )}>
-              {i + 1}
+            <div className="flex flex-col items-center gap-1">
+              <div className={cn(
+                "w-9 h-9 rounded-full flex items-center justify-center text-sm font-bold transition-all",
+                step > i + 1 ? "bg-emerald-500 text-white shadow-lg shadow-emerald-100" :
+                step === i + 1 ? "bg-indigo-600 text-white ring-4 ring-indigo-50 shadow-lg" :
+                "bg-slate-100 text-slate-400 border border-slate-200"
+              )}>
+                {i + 1}
+              </div>
+              <span className={cn("text-[11px] uppercase tracking-wider font-bold", step === i + 1 ? "text-indigo-600" : "text-slate-400")}>
+                {label}
+              </span>
             </div>
-            <span className={cn("text-sm", step === i + 1 ? "text-slate-900 font-medium" : "text-slate-400")}>
-              {label}
-            </span>
-            {i < 2 && <ChevronRight className="w-4 h-4 text-slate-300" />}
+            {i < 2 && <div className={cn("h-px w-12 mb-4", step > i + 1 ? "bg-emerald-500" : "bg-slate-200")} />}
           </div>
         ))}
       </div>
 
       {/* ── Step 1: File drop ───────────────────────────────────────────────── */}
       {step === 1 && (
-        <div>
-          <h2 className="text-lg font-semibold text-slate-900 mb-4">Select file to upload</h2>
+        <div className="bg-white rounded-2xl shadow-sm border border-slate-200 p-8">
+          <h2 className="text-xl font-bold text-slate-900 mb-6 text-center">Upload your document</h2>
           <div
             {...getRootProps()}
             className={cn(
               "border-2 border-dashed rounded-xl p-12 text-center cursor-pointer transition-colors",
               isDragActive
-                ? "border-indigo-400 bg-indigo-50"
-                : "border-slate-300 hover:border-indigo-300 hover:bg-slate-50"
+                ? "border-indigo-500 bg-indigo-50"
+                : "border-slate-200 hover:border-indigo-400 hover:bg-slate-50 bg-slate-50/50"
             )}
           >
             <input {...getInputProps()} />
@@ -174,9 +176,9 @@ export default function DocumentUploadForm() {
 
       {/* ── Step 2: Document type selection ────────────────────────────────── */}
       {step === 2 && (
-        <div>
-          <h2 className="text-lg font-semibold text-slate-900 mb-1">Choose document type</h2>
-          <p className="text-slate-500 text-sm mb-5">
+        <div className="bg-white rounded-2xl shadow-sm border border-slate-200 p-8">
+          <h2 className="text-xl font-bold text-slate-900 mb-1">Select document type</h2>
+          <p className="text-slate-500 text-sm mb-6">
             The type determines the metadata fields and approval workflow.
           </p>
 
@@ -196,9 +198,9 @@ export default function DocumentUploadForm() {
                 key={t.id}
                 onClick={() => { setSelectedType(t); form.setValue("document_type_id", t.id); setStep(3); }}
                 className={cn(
-                  "text-left p-4 rounded-xl border-2 transition-all hover:border-indigo-300 hover:bg-indigo-50",
+                  "text-left p-4 rounded-xl border transition-all hover:border-indigo-300 hover:bg-indigo-50/50",
                   selectedType?.id === t.id
-                    ? "border-indigo-500 bg-indigo-50"
+                    ? "border-indigo-500 bg-indigo-50 ring-1 ring-indigo-500"
                     : "border-slate-200"
                 )}
               >
@@ -215,10 +217,10 @@ export default function DocumentUploadForm() {
 
       {/* ── Step 3: Metadata form ───────────────────────────────────────────── */}
       {step === 3 && selectedType && (
-        <form onSubmit={handleSubmit} className="space-y-5">
+        <form onSubmit={handleSubmit} className="space-y-6 bg-white rounded-2xl shadow-sm border border-slate-200 p-8">
           <div className="flex items-center justify-between mb-2">
-            <h2 className="text-lg font-semibold text-slate-900">Document details</h2>
-            <span className="text-xs text-slate-500 bg-slate-100 px-2 py-1 rounded-full">
+            <h2 className="text-xl font-bold text-slate-900">Finalize details</h2>
+            <span className="text-xs font-bold text-indigo-700 bg-indigo-50 border border-indigo-100 px-3 py-1 rounded-full">
               {selectedType.name}
             </span>
           </div>

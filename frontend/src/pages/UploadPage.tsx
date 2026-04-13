@@ -4,7 +4,7 @@ import { useDropzone } from "react-dropzone";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { useForm, Controller } from "react-hook-form";
 import { documentsAPI, documentTypesAPI } from "@/services/api";
-import { Upload, File, X, Loader2, ChevronDown } from "lucide-react";
+import { Upload, File, X, Loader2 } from "lucide-react";
 import { toast } from "react-toastify";
 import type { DocumentType, MetadataField } from "@/types";
 
@@ -19,7 +19,9 @@ function DynamicField({ field, register, control, errors }: {
   if (field.field_type === "select") {
     return (
       <div>
-        <label className="label">{field.label}{field.is_required && <span className="text-red-500 ml-1">*</span>}</label>
+        <label className="label">
+          {field.label}{field.is_required && <span className="text-red-500 ml-1">*</span>}
+        </label>
         <Controller
           name={`metadata.${field.key}`}
           control={control}
@@ -33,6 +35,9 @@ function DynamicField({ field, register, control, errors }: {
             </select>
           )}
         />
+        {errors[`metadata.${field.key}`] && (
+          <p className="text-red-500 text-xs mt-1">{errors[`metadata.${field.key}`]?.message}</p>
+        )}
       </div>
     );
   }
@@ -52,13 +57,19 @@ function DynamicField({ field, register, control, errors }: {
   if (field.field_type === "textarea") {
     return (
       <div>
-        <label className="label">{field.label}{field.is_required && <span className="text-red-500 ml-1">*</span>}</label>
+        <label className="label">
+          {field.label}{field.is_required && <span className="text-red-500 ml-1">*</span>}
+        </label>
         <textarea {...register(`metadata.${field.key}`, rules)} rows={3} className="input" />
+        {errors[`metadata.${field.key}`] && (
+          <p className="text-red-500 text-xs mt-1">{errors[`metadata.${field.key}`]?.message}</p>
+        )}
       </div>
     );
   }
 
-  const inputType = field.field_type === "date" ? "date"
+  const inputType =
+    field.field_type === "date" ? "date"
     : field.field_type === "number" || field.field_type === "currency" ? "number"
     : "text";
 
@@ -89,7 +100,9 @@ export default function UploadPage() {
 
   const { data: docTypes } = useQuery({
     queryKey: ["document-types"],
-    queryFn: () => documentTypesAPI.list().then((r) => r.data.results as DocumentType[]),
+    // DocumentTypeViewSet has no pagination_class, so it returns a plain array,
+    // NOT a paginated { count, results: [] } object. Use r.data directly.
+    queryFn: () => documentTypesAPI.list().then((r) => r.data as DocumentType[]),
   });
 
   const selectedType = docTypes?.find((t) => t.id === selectedTypeId);
@@ -118,6 +131,8 @@ export default function UploadPage() {
   const uploadMutation = useMutation({
     mutationFn: (formData: FormData) => documentsAPI.upload(formData),
     onSuccess: ({ data }) => {
+      // data now comes from DocumentDetailSerializer so `id` and
+      // `reference_number` are always present.
       toast.success(`Document uploaded: ${data.reference_number}`);
       queryClient.invalidateQueries({ queryKey: ["documents"] });
       navigate(`/documents/${data.id}`);
@@ -128,6 +143,10 @@ export default function UploadPage() {
   const onSubmit = (values: Record<string, unknown>) => {
     if (!droppedFile) {
       toast.error("Please select a file to upload");
+      return;
+    }
+    if (!selectedTypeId) {
+      toast.error("Please select a document type");
       return;
     }
     const fd = new FormData();

@@ -1,0 +1,62 @@
+%PDF-1.4
+%‚„œ”
+1 0 obj
+<< /Type /Catalog /Pages 2 0 R >>
+endobj
+
+2 0 obj
+<< /Type /Pages /Kids [3 0 R] /Count 1 >>
+endobj
+
+3 0 obj
+<< /Type /Page /Parent 2 0 R /MediaBox [0 0 595 842] /Contents 4 0 R /Resources << /Font << /F1 5 0 R >> >> >>
+endobj
+
+4 0 obj
+<< /Length 546 >>
+stream
+BT
+/F1 14 Tf
+50 780 Td
+16 TL
+(INVOICE) Tj T*
+() Tj T*
+(Reference:  INV-00001) Tj T*
+(Date:       11 April 2026) Tj T*
+(Supplier:   Acme Corp Ltd) Tj T*
+(Amount:     USD 4,500.00) Tj T*
+() Tj T*
+(Description:) Tj T*
+(  Professional services - Q1 2026) Tj T*
+(  Software licences x 5) Tj T*
+() Tj T*
+(Subtotal:   USD 4,500.00) Tj T*
+(Tax \(16%\):  USD   720.00) Tj T*
+(Total:      USD 5,220.00) Tj T*
+() Tj T*
+(Bank: First National Bank) Tj T*
+(Account: 0123456789) Tj T*
+(Sort code: 00-11-22) Tj T*
+() Tj T*
+(Thank you for your business.) Tj T*
+ET
+endstream
+endobj
+
+5 0 obj
+<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>
+endobj
+
+xref
+0 6
+0000000000 65535 f 
+0000000015 00000 n 
+0000000065 00000 n 
+0000000123 00000 n 
+0000000250 00000 n 
+0000000848 00000 n 
+trailer
+<< /Size 6 /Root 1 0 R >>
+startxref
+919
+%%EOF

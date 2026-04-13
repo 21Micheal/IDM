@@ -1,67 +1,515 @@
-from rest_framework import generics, status, permissions
-from rest_framework.views import APIView
-from rest_framework.response import Response
-from rest_framework_simplejwt.tokens import RefreshToken
-from django_otp.plugins.otp_totp.models import TOTPDevice
+"""
+apps/accounts/views.py
+"""
 from django.contrib.auth import authenticate
-import qrcode, io, base64
-from .models import User
-from .serializers import UserSerializer
+from django.contrib.auth.password_validation import validate_password
+from django.core.exceptions import ValidationError as DjangoValidationError
+from django.utils.crypto import get_random_string
+from django.utils import timezone
+
+from rest_framework import generics, status, permissions, viewsets, filters
+from rest_framework.decorators import action
+from rest_framework.response import Response
+from rest_framework.views import APIView
+from rest_framework_simplejwt.tokens import RefreshToken
+
+from .models import User, Department, Role, EmailOTP, UserGroup, GroupPermission, UserGroupMembership
+from .serializers import (
+    UserSerializer, UserCreateSerializer, UserUpdateSerializer,
+    DepartmentSerializer, UserSummarySerializer,
+    UserGroupSerializer, GroupPermissionSerializer, UserGroupMembershipSerializer,
+)
+from .email_otp import send_otp_email
+from apps.audit.models import AuditLog, AuditEvent
+
+
+# ── Permission helpers ────────────────────────────────────────────────────────
+
+class IsAdminRole(permissions.BasePermission):
+    def has_permission(self, request, view):
+        return (
+            request.user
+            and request.user.is_authenticated
+            and request.user.role == Role.ADMIN
+        )
+
+
+# ── Auth ──────────────────────────────────────────────────────────────────────
 
 class LoginView(APIView):
+    """
+    Step 1 of login.
+    - Validates credentials.
+    - Always requires MFA (email OTP) since it is now default.
+    - Returns {mfa_required: True, user_id}
+    """
     permission_classes = [permissions.AllowAny]
 
     def post(self, request):
-        email = request.data.get("email", "")
+        email    = request.data.get("email", "").strip().lower()
         password = request.data.get("password", "")
+
         user = authenticate(request, username=email, password=password)
+
         if not user:
-            return Response({"detail": "Invalid credentials."}, status=401)
-        if user.mfa_enabled:
-            return Response({"mfa_required": True, "user_id": str(user.id)}, status=200)
-        refresh = RefreshToken.for_user(user)
-        return Response({"access": str(refresh.access_token), "refresh": str(refresh)})
+            AuditLog.objects.create(
+                event=AuditEvent.USER_LOGIN_FAILED,
+                object_type="User",
+                object_repr=email,
+                ip_address=request.META.get("REMOTE_ADDR"),
+                user_agent=request.META.get("HTTP_USER_AGENT", "")[:500],
+            )
+            return Response({"detail": "Invalid email or password."}, status=401)
+
+        if not user.is_active:
+            return Response({"detail": "This account has been deactivated."}, status=403)
+
+        # Update login metadata
+        user.last_login_ip = request.META.get("REMOTE_ADDR")
+        user.last_login = timezone.now()
+        user.save(update_fields=["last_login_ip", "last_login"])
+
+        # Since MFA is now default, always send OTP
+        try:
+            send_otp_email(user, purpose="login")
+        except Exception:
+            return Response(
+                {"detail": "Could not send OTP email. Contact your administrator."},
+                status=503,
+            )
+
+        return Response({"mfa_required": True, "user_id": str(user.id)}, status=200)
+
 
 class VerifyOTPView(APIView):
+    """
+    Step 2 of login - verifies the emailed OTP and issues JWT tokens.
+    """
     permission_classes = [permissions.AllowAny]
 
     def post(self, request):
-        user_id = request.data.get("user_id")
-        otp = request.data.get("otp")
+        user_id = request.data.get("user_id", "")
+        code    = request.data.get("otp", "").strip()
+
         try:
-            user = User.objects.get(id=user_id)
+            user = User.objects.get(id=user_id, is_active=True)
         except User.DoesNotExist:
-            return Response({"detail": "Invalid."}, status=400)
-        device = TOTPDevice.objects.filter(user=user, confirmed=True).first()
-        if not device or not device.verify_token(otp):
-            return Response({"detail": "Invalid OTP."}, status=400)
+            return Response({"detail": "Invalid request."}, status=400)
+
+        otp = (
+            EmailOTP.objects
+            .filter(user=user, purpose="login", is_used=False)
+            .order_by("-created_at")
+            .first()
+        )
+
+        if not otp or not otp.verify(code):
+            return Response(
+                {"detail": "Invalid or expired code. Request a new one."},
+                status=400,
+            )
+
+        # Update last_login again after successful OTP
+        user.last_login = timezone.now()
+        user.save(update_fields=["last_login"])
+
         refresh = RefreshToken.for_user(user)
-        return Response({"access": str(refresh.access_token), "refresh": str(refresh)})
+
+        AuditLog.objects.create(
+            event=AuditEvent.USER_LOGIN,
+            actor=user,
+            object_type="User",
+            object_id=str(user.id),
+            object_repr=user.email,
+            ip_address=request.META.get("REMOTE_ADDR"),
+            user_agent=request.META.get("HTTP_USER_AGENT", "")[:500],
+        )
+
+        return Response({
+            "access":               str(refresh.access_token),
+            "refresh":              str(refresh),
+            "must_change_password": user.must_change_password,
+        })
+
+
+class ResendOTPView(APIView):
+    """Resend OTP without re-authenticating credentials."""
+    permission_classes = [permissions.AllowAny]
+
+    def post(self, request):
+        user_id = request.data.get("user_id", "")
+        try:
+            user = User.objects.get(id=user_id, is_active=True)
+        except User.DoesNotExist:
+            return Response({"detail": "If that account exists, a new code has been sent."})
+
+        try:
+            send_otp_email(user, purpose="login")
+        except Exception:
+            return Response({"detail": "Could not send email."}, status=503)
+
+        return Response({"detail": "A new code has been sent to your email."})
+
 
 class MeView(generics.RetrieveUpdateAPIView):
-    serializer_class = UserSerializer
+    permission_classes = [permissions.IsAuthenticated]
+
     def get_object(self):
         return self.request.user
 
-class MFASetupView(APIView):
-    def post(self, request):
-        user = request.user
-        device, _ = TOTPDevice.objects.get_or_create(user=user, name="default")
-        config_url = device.config_url
-        qr = qrcode.make(config_url)
-        buf = io.BytesIO()
-        qr.save(buf, format="PNG")
-        qr_b64 = base64.b64encode(buf.getvalue()).decode()
-        return Response({"qr_code": f"data:image/png;base64,{qr_b64}", "config_url": config_url})
+    def get_serializer_class(self):
+        if self.request.method in ("PUT", "PATCH"):
+            return UserUpdateSerializer
+        return UserSerializer
 
-class MFAConfirmView(APIView):
+
+class ChangePasswordView(APIView):
+    """
+    Used both for voluntary password changes AND the forced first-login change.
+    Clears must_change_password on success.
+    """
+    permission_classes = [permissions.IsAuthenticated]
+
     def post(self, request):
-        token = request.data.get("token")
-        device = TOTPDevice.objects.filter(user=request.user, name="default").first()
-        if not device or not device.verify_token(token):
-            return Response({"detail": "Invalid token."}, status=400)
-        device.confirmed = True
-        device.save()
-        request.user.mfa_enabled = True
+        old_password = request.data.get("old_password", "")
+        new_password = request.data.get("new_password", "")
+
+        if not request.user.check_password(old_password):
+            return Response({"detail": "Current password is incorrect."}, status=400)
+
+        if old_password == new_password:
+            return Response(
+                {"detail": "New password must be different from the current password."},
+                status=400,
+            )
+
+        try:
+            validate_password(new_password, user=request.user)
+        except DjangoValidationError as e:
+            return Response({"detail": list(e.messages)}, status=400)
+
+        request.user.set_password(new_password)
+        request.user.must_change_password = False
+        request.user.save(update_fields=["password", "must_change_password"])
+
+        return Response({"detail": "Password updated successfully."})
+
+
+class EnableMFAView(APIView):
+    """Toggle email OTP on/off for the authenticated user (kept for admin flexibility)."""
+    permission_classes = [permissions.IsAuthenticated]
+
+    def post(self, request):
+        enable = request.data.get("enable", True)
+        request.user.mfa_enabled = bool(enable)
         request.user.save(update_fields=["mfa_enabled"])
-        return Response({"detail": "MFA enabled."})
+
+        state = "enabled" if request.user.mfa_enabled else "disabled"
+        AuditLog.objects.create(
+            event=AuditEvent.USER_MFA_CHANGED,
+            actor=request.user,
+            object_type="User",
+            object_id=str(request.user.id),
+            object_repr=request.user.email,
+            changes={"mfa": state},
+            ip_address=request.META.get("REMOTE_ADDR"),
+        )
+        return Response({"detail": f"Email OTP {state}.", "mfa_enabled": request.user.mfa_enabled})
+
+
+# ── User management ───────────────────────────────────────────────────────────
+
+class UserViewSet(viewsets.ModelViewSet):
+    filter_backends = [filters.SearchFilter, filters.OrderingFilter]
+    search_fields   = ["email", "first_name", "last_name", "department__name"]
+    ordering_fields = ["email", "first_name", "created_at", "role"]
+    ordering        = ["first_name"]
+
+    def get_permissions(self):
+        if self.action in (
+            "create", "destroy", "reset_password",
+            "toggle_active", "partial_update", "update",
+        ):
+            return [permissions.IsAuthenticated(), IsAdminRole()]
+        return [permissions.IsAuthenticated()]
+
+    def get_queryset(self):
+        user = self.request.user
+        qs   = User.objects.select_related("department").prefetch_related("group_memberships__group")
+        if user.role != Role.ADMIN:
+            return qs.filter(id=user.id)
+
+        role       = self.request.query_params.get("role")
+        department = self.request.query_params.get("department")
+        is_active  = self.request.query_params.get("is_active")
+        if role:       qs = qs.filter(role=role)
+        if department: qs = qs.filter(department__id=department)
+        if is_active is not None:
+            qs = qs.filter(is_active=is_active.lower() == "true")
+        return qs
+
+    def get_serializer_class(self):
+        if self.action == "create":
+            return UserCreateSerializer
+        if self.action in ("update", "partial_update"):
+            return UserUpdateSerializer
+        return UserSerializer
+
+    def perform_create(self, serializer):
+        user = serializer.save()
+
+        temp_password = serializer.context.get("temp_password")
+
+        # Send welcome email
+        if temp_password:
+            self._send_welcome_email(user, temp_password)
+
+        # Log the creation
+        AuditLog.objects.create(
+            event=AuditEvent.PERMISSION_CHANGED,
+            actor=self.request.user,
+            object_type="User",
+            object_id=str(user.id),
+            object_repr=user.email,
+            changes={"action": "created", "role": user.role},
+            ip_address=self.request.META.get("REMOTE_ADDR"),
+        )
+
+        # Return clear, admin-friendly response with temporary password prominently displayed
+        return Response({
+            "detail": "User created successfully. A welcome email has been sent with login instructions.",
+            "user": UserSerializer(user).data,
+            "temporary_password": temp_password,
+            "message": f"""
+                Important: Give this temporary password to the user:
+
+                {temp_password}
+
+                The user must change this password on their first login.
+                MFA (Email OTP) is enabled by default.
+            """.strip()
+        }, status=status.HTTP_201_CREATED)
+
+    def _send_welcome_email(self, user, temp_password):
+        from django.core.mail import send_mail
+        from django.conf import settings
+
+        frontend_url = getattr(settings, 'FRONTEND_URL', 'http://localhost:3000')
+
+        try:
+            send_mail(
+                subject="Welcome to DocVault — Your Account Details",
+                message=f"""Hello {user.first_name},
+
+Your DocVault account has been created by an administrator.
+
+Login Details:
+    Email:     {user.email}
+    Password:  {temp_password}
+
+Important:
+• You will be required to set a new strong password on your first login.
+• Email OTP (MFA) is enabled by default for security.
+
+Login here: {frontend_url}
+
+If you did not expect this account, please contact your administrator immediately.
+
+— DocVault Administration
+""",
+                from_email=settings.DEFAULT_FROM_EMAIL,
+                recipient_list=[user.email],
+                fail_silently=False,   # Changed to False so you notice if email fails
+            )
+        except Exception as e:
+            # Log the email failure but don't fail user creation
+            print(f"Failed to send welcome email to {user.email}: {e}")
+
+    def perform_destroy(self, instance):
+        instance.is_active = False
+        instance.save(update_fields=["is_active"])
+        AuditLog.objects.create(
+            event=AuditEvent.PERMISSION_CHANGED,
+            actor=self.request.user,
+            object_type="User", 
+            object_id=str(instance.id), 
+            object_repr=instance.email,
+            changes={"action": "deactivated"},
+            ip_address=self.request.META.get("REMOTE_ADDR"),
+        )
+
+    @action(detail=True, methods=["post"])
+    def reset_password(self, request, pk=None):
+        user = self.get_object()
+        temp_password = get_random_string(
+            length=12,
+            allowed_chars="abcdefghjkmnpqrstuvwxyzABCDEFGHJKMNPQRSTUVWXYZ23456789!@#$",
+        )
+        user.set_password(temp_password)
+        user.must_change_password = True
+        user.save(update_fields=["password", "must_change_password"])
+
+        # Email the new temp password
+        from django.core.mail import send_mail
+        from django.conf import settings
+        try:
+            send_mail(
+                subject="DocVault — your password has been reset",
+                message=f"""Hello {user.first_name},
+
+Your password has been reset by an administrator.
+
+  Temporary password: {temp_password}
+
+You will be required to set a new password when you next log in.
+
+— DocVault Administration
+""",
+                from_email=settings.DEFAULT_FROM_EMAIL,
+                recipient_list=[user.email],
+                fail_silently=True,
+            )
+        except Exception:
+            pass
+
+        AuditLog.objects.create(
+            event=AuditEvent.PERMISSION_CHANGED,
+            actor=request.user,
+            object_type="User", 
+            object_id=str(user.id), 
+            object_repr=user.email,
+            changes={"action": "password_reset"},
+            ip_address=request.META.get("REMOTE_ADDR"),
+        )
+        return Response({
+            "detail": "Password reset. A new temporary password has been emailed to the user.",
+            "temporary_password": temp_password,
+        })
+
+    @action(detail=True, methods=["post"])
+    def toggle_active(self, request, pk=None):
+        user = self.get_object()
+        if user == request.user:
+            return Response({"detail": "You cannot deactivate your own account."}, status=400)
+        user.is_active = not user.is_active
+        user.save(update_fields=["is_active"])
+        AuditLog.objects.create(
+            event=AuditEvent.PERMISSION_CHANGED,
+            actor=request.user,
+            object_type="User", 
+            object_id=str(user.id), 
+            object_repr=user.email,
+            changes={"action": "activated" if user.is_active else "deactivated"},
+            ip_address=request.META.get("REMOTE_ADDR"),
+        )
+        return Response({"detail": f"User {'activated' if user.is_active else 'deactivated'}.", "is_active": user.is_active})
+
+    @action(detail=True, methods=["get"])
+    def groups(self, request, pk=None):
+        """List all group memberships for a specific user."""
+        user = self.get_object()
+        memberships = user.group_memberships.select_related("group").all()
+        return Response(UserGroupMembershipSerializer(memberships, many=True).data)
+
+
+# ── Department ────────────────────────────────────────────────────────────────
+
+class DepartmentViewSet(viewsets.ModelViewSet):
+    queryset = Department.objects.all().order_by("name")
+    serializer_class = DepartmentSerializer
+
+    def get_permissions(self):
+        if self.action in ("create", "update", "partial_update", "destroy"):
+            return [permissions.IsAuthenticated(), IsAdminRole()]
+        return [permissions.IsAuthenticated()]
+
+    def destroy(self, request, *args, **kwargs):
+        dept = self.get_object()
+        if dept.users.filter(is_active=True).exists():
+            return Response(
+                {"detail": "Cannot delete a department that has active users. Reassign them first."},
+                status=400,
+            )
+        return super().destroy(request, *args, **kwargs)
+
+
+# ── Group management ──────────────────────────────────────────────────────────
+
+class UserGroupViewSet(viewsets.ModelViewSet):
+    queryset         = UserGroup.objects.prefetch_related("permissions__document_type", "memberships__user").filter(is_active=True)
+    serializer_class = UserGroupSerializer
+
+    def get_permissions(self):
+        if self.action in ("create", "update", "partial_update", "destroy",
+                           "add_member", "remove_member", "set_permissions"):
+            return [permissions.IsAuthenticated(), IsAdminRole()]
+        return [permissions.IsAuthenticated()]
+
+    def perform_create(self, serializer):
+        serializer.save(created_by=self.request.user)
+
+    @action(detail=True, methods=["post"])
+    def add_member(self, request, pk=None):
+        group   = self.get_object()
+        user_id = request.data.get("user_id")
+        expires = request.data.get("expires_at")
+
+        try:
+            user = User.objects.get(id=user_id)
+        except User.DoesNotExist:
+            return Response({"detail": "User not found."}, status=404)
+
+        membership, created = UserGroupMembership.objects.update_or_create(
+            user=user, group=group,
+            defaults={
+                "added_by":  request.user,
+                "expires_at": expires,
+            },
+        )
+        return Response(
+            UserGroupMembershipSerializer(membership).data,
+            status=201 if created else 200,
+        )
+
+    @action(detail=True, methods=["post"])
+    def remove_member(self, request, pk=None):
+        group   = self.get_object()
+        user_id = request.data.get("user_id")
+        deleted, _ = UserGroupMembership.objects.filter(user_id=user_id, group=group).delete()
+        if not deleted:
+            return Response({"detail": "User is not a member of this group."}, status=404)
+        return Response({"detail": "Member removed."})
+
+    @action(detail=True, methods=["post"])
+    def set_permissions(self, request, pk=None):
+        group = self.get_object()
+        perms = request.data.get("permissions", [])
+
+        valid_actions = {c[0] for c in GroupPermission._meta.get_field("action").choices}
+        errors = []
+        for i, p in enumerate(perms):
+            if p.get("action") not in valid_actions:
+                errors.append(f"Item {i}: invalid action '{p.get('action')}'")
+        if errors:
+            return Response({"detail": errors}, status=400)
+
+        from django.db import transaction
+        with transaction.atomic():
+            GroupPermission.objects.filter(group=group).delete()
+            created = []
+            for p in perms:
+                dt_id = p.get("document_type_id") or None
+                obj = GroupPermission.objects.create(
+                    group=group,
+                    document_type_id=dt_id,
+                    action=p["action"],
+                )
+                created.append(obj)
+
+        return Response(GroupPermissionSerializer(created, many=True).data)
+
+    @action(detail=True, methods=["get"])
+    def members(self, request, pk=None):
+        group       = self.get_object()
+        memberships = group.memberships.select_related("user", "added_by").all()
+        return Response(UserGroupMembershipSerializer(memberships, many=True).data)

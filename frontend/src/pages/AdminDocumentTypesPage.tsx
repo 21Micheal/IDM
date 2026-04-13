@@ -6,8 +6,7 @@ import { useState } from "react";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { useForm, useFieldArray } from "react-hook-form";
 import { Plus, Trash2, GripVertical, Settings, ChevronRight, Save, Loader2, X } from "lucide-react";
-import { documentApi } from "../services/api";
-import { api } from "../services/api";
+import { documentApi, documentTypesAPI } from "../services/api";
 import { cn } from "../lib/utils";
 
 const FIELD_TYPES = [
@@ -74,9 +73,9 @@ export default function AdminDocumentTypesPage() {
         })),
       };
       if (editingId === "new") {
-        return api.post("/documents/types/", payload);
+        return documentTypesAPI.create(payload);
       }
-      return api.patch(`/documents/types/${editingId}/`, payload);
+      return documentTypesAPI.update(editingId as string, payload);
     },
     onSuccess: () => {
       qc.invalidateQueries({ queryKey: ["document-types"] });

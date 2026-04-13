@@ -11,6 +11,8 @@ cp .env.example .env
 docker compose up --build
 
 # 3. Run migrations and create a superuser
+docker compose exec backend python manage.py makemigrations
+docker compose exec backend python manage.py migrate accounts
 docker compose exec backend python manage.py migrate
 docker compose exec backend python manage.py createsuperuser
 
@@ -31,7 +33,7 @@ open http://localhost:8000/admin  # Django admin
 | API                | Django 5 + DRF      | REST endpoints, auth, RBAC, business logic |
 | Task queue         | Celery + Redis      | Text extraction, indexing, notifications   |
 | Search             | Elasticsearch 8     | Full-text + metadata search                |
-| Database           | PostgreSQL 16       | Metadata, users, workflows, audit log      |
+| Database           | MySQL 8.0           | Metadata, users, workflows, audit log      |
 | File storage       | Filesystem / S3     | Document binary storage                    |
 | Reverse proxy      | Nginx               | Routing, TLS termination, media serving    |
 | Containerisation   | Docker Compose      | Unified local + prod deployment            |

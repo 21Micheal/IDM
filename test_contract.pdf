@@ -1,0 +1,61 @@
+%PDF-1.4
+%‚„œ”
+1 0 obj
+<< /Type /Catalog /Pages 2 0 R >>
+endobj
+
+2 0 obj
+<< /Type /Pages /Kids [3 0 R] /Count 1 >>
+endobj
+
+3 0 obj
+<< /Type /Page /Parent 2 0 R /MediaBox [0 0 595 842] /Contents 4 0 R /Resources << /Font << /F1 5 0 R >> >> >>
+endobj
+
+4 0 obj
+<< /Length 568 >>
+stream
+BT
+/F1 14 Tf
+50 780 Td
+16 TL
+(SERVICE AGREEMENT) Tj T*
+() Tj T*
+(Reference:  CTR-00001) Tj T*
+(Date:       11 April 2026) Tj T*
+(Parties:) Tj T*
+(  Client:    DocVault Enterprises Ltd) Tj T*
+(  Supplier:  Acme Corp Ltd) Tj T*
+() Tj T*
+(Term: 12 months from the date of signing.) Tj T*
+() Tj T*
+(Scope of work:) Tj T*
+(  Provision of software development services) Tj T*
+(  as per Schedule A attached hereto.) Tj T*
+() Tj T*
+(Value: USD 54,000.00 per annum) Tj T*
+() Tj T*
+(Signatures:) Tj T*
+(  Client:   ________________) Tj T*
+(  Supplier: ________________) Tj T*
+ET
+endstream
+endobj
+
+5 0 obj
+<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>
+endobj
+
+xref
+0 6
+0000000000 65535 f 
+0000000015 00000 n 
+0000000065 00000 n 
+0000000123 00000 n 
+0000000250 00000 n 
+0000000870 00000 n 
+trailer
+<< /Size 6 /Root 1 0 R >>
+startxref
+941
+%%EOF

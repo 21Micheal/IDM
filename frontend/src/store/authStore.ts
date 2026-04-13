@@ -10,6 +10,7 @@ export interface AuthUser {
   last_name: string;
   role: UserRole;
   mfa_enabled: boolean;
+  must_change_password: boolean;          // ← new field
   department?: { id: string; name: string };
 }
 
