@@ -60,10 +60,8 @@ class WorkflowTemplateSerializer(serializers.ModelSerializer):
         read_only_fields = ["id", "step_count", "created_by", "created_at", "updated_at"]
 
     def get_step_count(self, obj):
-        # Use annotation if available (avoids extra query), fallback to property
-        if hasattr(obj, "step_count") and isinstance(obj.step_count, int):
-            return obj.step_count
-        return obj.steps.count()
+        # Use renamed annotation if available to avoid N+1, fallback to model property
+        return getattr(obj, "steps_count_annotated", obj.step_count)
 
 
 class WorkflowTemplateWriteSerializer(serializers.ModelSerializer):

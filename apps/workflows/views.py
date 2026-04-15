@@ -1,19 +1,3 @@
-"""
-apps/workflows/views.py
-
-Key fix (addresses "saved templates do not display in UI"):
-──────────────────────────────────────────────────────────
-DRF ModelViewSet.create/update call get_serializer() for the *response*,
-which returned WorkflowTemplateWriteSerializer (no `id` field).
-The React onSuccess handler read `data.id` → undefined → the PATCH that
-links the template to a DocumentType sent `workflow_template: undefined`
-→ the doctype's workflow_template field was never updated → left panel
-kept showing "No template."
-
-Fix: override create() and update() to validate with the write serializer
-but respond with the full read serializer (includes `id`, `steps`, `step_count`).
-Everything else is identical to the previously uploaded version.
-"""
 from django.db import transaction
 from django.db.models import Count
 from rest_framework import viewsets, permissions, status
@@ -53,8 +37,9 @@ class WorkflowTemplateViewSet(viewsets.ModelViewSet):
             WorkflowTemplate.objects
             .prefetch_related("steps__assignee_user")
             .filter(is_active=True)
-            .annotate(step_count=Count("steps"))
+            .annotate(steps_count_annotated=Count("steps"))
         )
+
 
     def get_serializer_class(self):
         if self.action in ("create", "update", "partial_update"):
