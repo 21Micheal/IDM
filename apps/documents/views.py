@@ -4,6 +4,7 @@ REST API endpoints for document management.
 """
 from rest_framework import viewsets, status, permissions
 from rest_framework.decorators import action
+from django.db.models import Q
 from rest_framework.response import Response
 from rest_framework.parsers import MultiPartParser, FormParser, JSONParser
 from django_filters.rest_framework import DjangoFilterBackend
@@ -19,7 +20,8 @@ from .serializers import (
     TagSerializer,
 )
 from .filters import DocumentFilter
-from .permissions import DocumentPermission
+from .permissions import HasDocumentPermission
+from apps.accounts.models import Role, GroupAction
 from apps.audit.mixins import AuditMixin
 
 
@@ -59,7 +61,7 @@ class DocumentViewSet(AuditMixin, viewsets.ModelViewSet):
     POST /documents/{id}/comments/       → add comment
     GET  /documents/{id}/audit_trail/    → audit events for this document
     """
-    permission_classes = [permissions.IsAuthenticated, DocumentPermission]
+    permission_classes = [permissions.IsAuthenticated, HasDocumentPermission]
     filter_backends = [DjangoFilterBackend, SearchFilter, OrderingFilter]
     filterset_class = DocumentFilter
     search_fields = ["title", "reference_number", "supplier", "extracted_text"]
@@ -74,12 +76,31 @@ class DocumentViewSet(AuditMixin, viewsets.ModelViewSet):
             .select_related("document_type", "uploaded_by", "department")
             .prefetch_related("tags", "versions")
         )
-        # Auditors see everything; finance sees their dept + their own uploads
-        if user.is_auditor:
+
+        if user.is_admin:
             return qs
-        if user.is_finance:
-            return qs
-        return qs.filter(uploaded_by=user)
+
+        # Optional optimization: only return documents where user has VIEW permission
+        # This is a soft filter — the permission class still does the hard enforcement
+        visible_types = self._get_user_visible_document_types(user)
+        if visible_types:
+            qs = qs.filter(document_type_id__in=visible_types)
+
+        return qs
+
+    def _get_user_visible_document_types(self, user):
+        """Helper to get document types the user can at least VIEW"""
+        from apps.accounts.models import GroupPermission
+        memberships = user.group_memberships.filter(
+            Q(expires_at__isnull=True) | Q(expires_at__gt=timezone.now()),
+            group__is_active=True
+        ).values_list("group_id", flat=True)
+
+        return GroupPermission.objects.filter(
+            group_id__in=memberships,
+            action=GroupAction.VIEW.value,
+            document_type_id__isnull=False
+        ).values_list("document_type_id", flat=True).distinct()
 
     def get_serializer_class(self):
         if self.action == "list":

@@ -162,9 +162,9 @@ function PermissionMatrix({
       </div>
 
       <div className="flex justify-end">
-        <button onClick={handleSave} disabled={isSaving} className="btn-primary">
+        <button onClick={handleSave} disabled={isSaving} className="btn-primary flex items-center gap-2">
           {isSaving && <Loader2 className="w-4 h-4 animate-spin" />}
-          Save permissions
+          {isSaving ? "Saving permissions..." : "Save permissions"}
         </button>
       </div>
     </div>
@@ -200,8 +200,9 @@ function GroupDetail({
     mutationFn: (perms: { document_type_id: string | null; action: string }[]) =>
       groupsAPI.setPermissions(group.id, perms),
     onSuccess: () => {
-      toast.success("Permissions saved");
+      toast.success("Permissions updated successfully");
       qc.invalidateQueries({ queryKey: ["groups"] });
+      qc.invalidateQueries({ queryKey: ["group-members", group.id] });
     },
     onError: () => toast.error("Failed to save permissions"),
   });

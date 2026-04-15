@@ -33,6 +33,7 @@ class Department(models.Model):
     name       = models.CharField(max_length=120, unique=True)
     code       = models.CharField(max_length=20,  unique=True)
     created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
 
     class Meta:
         ordering = ["name"]
@@ -117,9 +118,9 @@ class User(AbstractBaseUser, PermissionsMixin):
             models.Q(expires_at__isnull=True) | models.Q(expires_at__gt=timezone.now())
         ).values_list("group_id", flat=True)
 
+        # Get specific + wildcard permissions
         perms = GroupPermission.objects.filter(
-            group_id__in=memberships,
-            document_type_id=document_type_id,
+            models.Q(group_id__in=memberships) & (models.Q(document_type_id=document_type_id) | models.Q(document_type_id__isnull=True))
         ).values_list("action", flat=True)
 
         return set(perms)
@@ -144,6 +145,7 @@ class EmailOTP(models.Model):
     )
     is_used    = models.BooleanField(default=False)
     created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
     expires_at = models.DateTimeField()
 
     class Meta:
@@ -248,6 +250,7 @@ class UserGroupMembership(models.Model):
     )
     expires_at = models.DateTimeField(null=True, blank=True)
     created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
 
     class Meta:
         unique_together = [("user", "group")]

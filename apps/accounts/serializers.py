@@ -70,10 +70,27 @@ class UserCreateSerializer(serializers.ModelSerializer):
         model  = User
         fields = ["email", "first_name", "last_name", "role", "department", "is_active"]
 
+    COMMON_EMAIL_TYPO_DOMAINS = {
+        "gmai.com",
+        "gmial.com",
+        "gnail.com",
+        "hotmal.com",
+        "yaho.com",
+        "yahho.com",
+        "outlook.con",
+    }
+
     def validate_email(self, value):
         value = value.strip().lower()
         if User.objects.filter(email=value).exists():
             raise serializers.ValidationError("A user with this email already exists.")
+
+        domain = value.split("@")[-1]
+        if domain in self.COMMON_EMAIL_TYPO_DOMAINS:
+            raise serializers.ValidationError(
+                "The email domain looks mistyped. Please verify the address and try again."
+            )
+
         return value
 
     def create(self, validated_data):
@@ -91,6 +108,8 @@ class UserCreateSerializer(serializers.ModelSerializer):
             must_change_password=True,
             **validated_data,
         )
+        print(f"DEBUG: Created user {user.email} with password: {temp_password}")
+        print(f"DEBUG: User password hash: {user.password[:20]}...")
         return user
 
 

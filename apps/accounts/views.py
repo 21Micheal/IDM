@@ -7,7 +7,7 @@ from django.core.exceptions import ValidationError as DjangoValidationError
 from django.utils.crypto import get_random_string
 from django.utils import timezone
 
-from rest_framework import generics, status, permissions, viewsets, filters
+from rest_framework import generics, status, permissions, viewsets, filters, exceptions
 from rest_framework.decorators import action
 from rest_framework.response import Response
 from rest_framework.views import APIView
@@ -47,11 +47,28 @@ class LoginView(APIView):
 
     def post(self, request):
         email    = request.data.get("email", "").strip().lower()
-        password = request.data.get("password", "")
+        password = request.data.get("password", "").strip()
+
+        print(f"DEBUG: Attempting login for {email} with password length {len(password)}")
+
+        # Check if user exists
+        try:
+            user_obj = User.objects.get(email=email)
+            print(f"DEBUG: User found: {user_obj.email}, active: {user_obj.is_active}, has_password: {bool(user_obj.password)}")
+            print(f"DEBUG: Password hash starts with: {user_obj.password[:10] if user_obj.password else 'None'}")
+            # Manual password check
+            if user_obj.check_password(password):
+                print(f"DEBUG: Manual password check PASSED for {email}")
+            else:
+                print(f"DEBUG: Manual password check FAILED for {email}")
+        except User.DoesNotExist:
+            print(f"DEBUG: User {email} does not exist")
+            user_obj = None
 
         user = authenticate(request, username=email, password=password)
 
         if not user:
+            print(f"DEBUG: Authentication failed for {email}")
             AuditLog.objects.create(
                 event=AuditEvent.USER_LOGIN_FAILED,
                 object_type="User",
@@ -73,6 +90,7 @@ class LoginView(APIView):
         try:
             send_otp_email(user, purpose="login")
         except Exception:
+            print(f"ERROR: Failed to send OTP email to {user.email}")
             return Response(
                 {"detail": "Could not send OTP email. Contact your administrator."},
                 status=503,
@@ -93,6 +111,8 @@ class VerifyOTPView(APIView):
 
         try:
             user = User.objects.get(id=user_id, is_active=True)
+        except (User.DoesNotExist, DjangoValidationError):
+            return Response({"detail": "Invalid request parameters."}, status=400)
         except User.DoesNotExist:
             return Response({"detail": "Invalid request."}, status=400)
 
@@ -255,9 +275,11 @@ class UserViewSet(viewsets.ModelViewSet):
             return UserUpdateSerializer
         return UserSerializer
 
-    def perform_create(self, serializer):
+    def create(self, request, *args, **kwargs):
+        serializer = self.get_serializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        
         user = serializer.save()
-
         temp_password = serializer.context.get("temp_password")
 
         # Send welcome email
@@ -267,28 +289,20 @@ class UserViewSet(viewsets.ModelViewSet):
         # Log the creation
         AuditLog.objects.create(
             event=AuditEvent.PERMISSION_CHANGED,
-            actor=self.request.user,
+            actor=request.user,
             object_type="User",
             object_id=str(user.id),
             object_repr=user.email,
             changes={"action": "created", "role": user.role},
-            ip_address=self.request.META.get("REMOTE_ADDR"),
+            ip_address=request.META.get("REMOTE_ADDR"),
         )
 
-        # Return clear, admin-friendly response with temporary password prominently displayed
+        headers = self.get_success_headers(serializer.data)
         return Response({
-            "detail": "User created successfully. A welcome email has been sent with login instructions.",
             "user": UserSerializer(user).data,
             "temporary_password": temp_password,
-            "message": f"""
-                Important: Give this temporary password to the user:
-
-                {temp_password}
-
-                The user must change this password on their first login.
-                MFA (Email OTP) is enabled by default.
-            """.strip()
-        }, status=status.HTTP_201_CREATED)
+            "detail": "User created successfully. A welcome email has been sent."
+        }, status=status.HTTP_201_CREATED, headers=headers)
 
     def _send_welcome_email(self, user, temp_password):
         from django.core.mail import send_mail
@@ -298,16 +312,16 @@ class UserViewSet(viewsets.ModelViewSet):
 
         try:
             send_mail(
-                subject="Welcome to DocVault — Your Account Details",
+                subject="Access Granted: Your DocVault Account",
                 message=f"""Hello {user.first_name},
 
 Your DocVault account has been created by an administrator.
 
-Login Details:
-    Email:     {user.email}
-    Password:  {temp_password}
+Credentials:
+    Login ID:  {user.email}
+    Temporary: {temp_password}
 
-Important:
+Next Steps:
 • You will be required to set a new strong password on your first login.
 • Email OTP (MFA) is enabled by default for security.
 
@@ -322,21 +336,32 @@ If you did not expect this account, please contact your administrator immediatel
                 fail_silently=False,   # Changed to False so you notice if email fails
             )
         except Exception as e:
-            # Log the email failure but don't fail user creation
+            # Log the email failure to server console
             print(f"Failed to send welcome email to {user.email}: {e}")
 
     def perform_destroy(self, instance):
-        instance.is_active = False
-        instance.save(update_fields=["is_active"])
-        AuditLog.objects.create(
-            event=AuditEvent.PERMISSION_CHANGED,
-            actor=self.request.user,
-            object_type="User", 
-            object_id=str(instance.id), 
-            object_repr=instance.email,
-            changes={"action": "deactivated"},
-            ip_address=self.request.META.get("REMOTE_ADDR"),
-        )
+        if instance == self.request.user:
+            raise exceptions.ValidationError("You cannot delete your own account.")
+
+        email = instance.email
+        uid = str(instance.id)
+
+        try:
+            instance.delete()
+            AuditLog.objects.create(
+                event=AuditEvent.PERMISSION_CHANGED,
+                actor=self.request.user,
+                object_type="User",
+                object_id=uid,
+                object_repr=email,
+                changes={"action": "deleted"},
+                ip_address=self.request.META.get("REMOTE_ADDR"),
+            )
+        except Exception:
+            raise exceptions.ValidationError(
+                "This user cannot be deleted because they are referenced by existing documents or workflows. "
+                "Consider deactivating their account instead."
+            )
 
     @action(detail=True, methods=["post"])
     def reset_password(self, request, pk=None):
@@ -365,12 +390,12 @@ You will be required to set a new password when you next log in.
 
 — DocVault Administration
 """,
-                from_email=settings.DEFAULT_FROM_EMAIL,
+                from_email=getattr(settings, "DEFAULT_FROM_EMAIL", "noreply@docvault.local"),
                 recipient_list=[user.email],
-                fail_silently=True,
+                fail_silently=False,
             )
-        except Exception:
-            pass
+        except Exception as e:
+            print(f"Failed to send password reset email to {user.email}: {e}")
 
         AuditLog.objects.create(
             event=AuditEvent.PERMISSION_CHANGED,

@@ -85,13 +85,39 @@ export const searchAPI = {
 };
 
 export const workflowAPI = {
-  myTasks: () => api.get("/workflows/tasks/?status=in_progress"),
-  approveTask: (id: string, comment = "") =>
+  // Templates
+  listTemplates:     ()                          => api.get("/workflows/templates/"),
+  getTemplate:       (id: string)                => api.get(`/workflows/templates/${id}/`),
+  createTemplate:    (data: unknown)             => api.post("/workflows/templates/", data),
+  updateTemplate:    (id: string, data: unknown) => api.put(`/workflows/templates/${id}/`, data),
+  duplicateTemplate: (id: string, name?: string) =>
+    api.post(`/workflows/templates/${id}/duplicate/`, name ? { name } : {}),
+ 
+  /**
+   * Persist drag-and-drop step order.
+   * stepIds: ordered array of step UUIDs (position = new order index).
+   */
+  reorderSteps: (templateId: string, stepIds: string[]) =>
+    api.post(`/workflows/templates/${templateId}/reorder_steps/`, { step_ids: stepIds }),
+ 
+  // Rules
+  listRules: (params?: Record<string, unknown>) =>
+    api.get("/workflows/rules/", { params }),
+  createRule: (data: unknown) => api.post("/workflows/rules/", data),
+  updateRule: (id: string, data: unknown) => api.patch(`/workflows/rules/${id}/`, data),
+  deleteRule: (id: string) => api.delete(`/workflows/rules/${id}/`),
+ 
+  // Instances
+  listInstances:    ()          => api.get("/workflows/instances/"),
+  cancelInstance:   (id: string) => api.post(`/workflows/instances/${id}/cancel/`),
+ 
+  // Tasks
+  myTasks:      ()                                    => api.get("/workflows/tasks/my_tasks/"),
+  listTasks:    (params?: Record<string, unknown>)    => api.get("/workflows/tasks/", { params }),
+  approveTask:  (id: string, comment = "")            =>
     api.post(`/workflows/tasks/${id}/approve/`, { comment }),
-  rejectTask: (id: string, comment: string) =>
+  rejectTask:   (id: string, comment: string)         =>
     api.post(`/workflows/tasks/${id}/reject/`, { comment }),
-  templates: () => api.get("/workflows/templates/"),
-  createTemplate: (data: unknown) => api.post("/workflows/templates/", data),
 };
 
 export const notificationsAPI = {
@@ -134,6 +160,9 @@ export const usersAPI = {
     department: string | null;
     is_active: boolean;
   }>) => api.patch(`/users/${id}/`, data),
+
+  delete: (id: string) =>
+    api.delete(`/users/${id}/`),
 
   resetPassword: (id: string) =>
     api.post(`/users/${id}/reset-password/`),

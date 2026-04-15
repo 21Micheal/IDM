@@ -35,7 +35,7 @@ export default function DocumentListPage() {
   const { data: typesData } = useQuery({
     queryKey: ["document-types"],
     queryFn: () => documentApi.types(),
-    select: (r) => r.data as any[],
+    select: (r) => r.data.results ?? r.data as any[],
   });
 
   const params = {

@@ -1,8 +1,11 @@
 """
-workflows/models.py
-Approval workflow engine. Each DocumentType has a WorkflowTemplate
-composed of ordered WorkflowSteps. When a document is submitted,
-a WorkflowInstance is created with one WorkflowTask per step.
+apps/workflows/models.py
+
+WorkflowTemplate  — reusable blueprint
+WorkflowStep      — ordered steps, each with assignee config + status label
+WorkflowRule      — amount-based routing: ties DocumentType + threshold to template
+WorkflowInstance  — live run for a specific document
+WorkflowTask      — individual approval task per step per instance
 """
 from django.db import models
 from django.conf import settings
@@ -10,75 +13,124 @@ import uuid
 
 
 class WorkflowTemplate(models.Model):
-    """Reusable workflow blueprint assigned to document types."""
-    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
-    name = models.CharField(max_length=120, unique=True)
+    id          = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    name        = models.CharField(max_length=120, unique=True)
     description = models.TextField(blank=True)
-    is_active = models.BooleanField(default=True)
-    created_by = models.ForeignKey(
-        settings.AUTH_USER_MODEL, null=True, on_delete=models.SET_NULL
+    is_active   = models.BooleanField(default=True)
+    created_by  = models.ForeignKey(
+        settings.AUTH_USER_MODEL, null=True, on_delete=models.SET_NULL,
+        related_name="created_workflow_templates",
     )
     created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ["name"]
 
     def __str__(self):
         return self.name
 
+    @property
+    def step_count(self):
+        return self.steps.count()
+
 
 class WorkflowStep(models.Model):
-    """A single approval step within a workflow template."""
-
-    APPROVER_TYPE_CHOICES = [
-        ("user", "Specific User"),
-        ("role", "Any User with Role"),
-        ("department_head", "Department Head"),
+    ASSIGNEE_TYPES = [
+        ("any_role",      "Any user with role"),
+        ("specific_user", "Specific user"),
+    ]
+    ROLE_CHOICES = [
+        ("admin",   "Administrator"),
+        ("finance", "Finance Staff"),
+        ("auditor", "Auditor"),
+        ("viewer",  "Viewer"),
     ]
 
-    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
-    template = models.ForeignKey(
+    id            = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    template      = models.ForeignKey(
         WorkflowTemplate, on_delete=models.CASCADE, related_name="steps"
     )
-    name = models.CharField(max_length=120)
-    order = models.PositiveSmallIntegerField()
-    approver_type = models.CharField(max_length=30, choices=APPROVER_TYPE_CHOICES, default="role")
-    approver_role = models.CharField(max_length=20, blank=True)    # Role.FINANCE etc.
-    approver_user = models.ForeignKey(
+    order         = models.PositiveSmallIntegerField(db_index=True)
+    name          = models.CharField(max_length=120)
+    # Document status while waiting for this step
+    status_label  = models.CharField(max_length=80, default="Pending Approval")
+    assignee_type = models.CharField(max_length=20, choices=ASSIGNEE_TYPES, default="any_role")
+    assignee_role = models.CharField(max_length=20, blank=True)
+    assignee_user = models.ForeignKey(
         settings.AUTH_USER_MODEL, null=True, blank=True,
-        on_delete=models.SET_NULL, related_name="assigned_workflow_steps"
+        on_delete=models.SET_NULL, related_name="assigned_steps",
     )
-    # SLA hours until escalation
-    sla_hours = models.PositiveSmallIntegerField(default=48)
-    # If rejected at this step, can sender resubmit?
+    sla_hours      = models.PositiveSmallIntegerField(default=48)
     allow_resubmit = models.BooleanField(default=True)
+    instructions   = models.TextField(blank=True)
+    created_at     = models.DateTimeField(auto_now_add=True, null=True)
+    updated_at     = models.DateTimeField(auto_now=True)
 
     class Meta:
-        ordering = ["order"]
+        ordering        = ["order"]
         unique_together = [("template", "order")]
 
     def __str__(self):
-        return f"{self.template.name} → Step {self.order}: {self.name}"
+        return f"{self.template.name} → {self.order}. {self.name}"
+
+
+class WorkflowRule(models.Model):
+    """
+    Amount-based routing rule.
+    The engine selects the rule with the HIGHEST amount_threshold
+    that is <= the document's amount. threshold=0 is the catch-all.
+
+    Example — Supplier Invoice:
+      threshold=0     → Standard Approval (always matches)
+      threshold=10000 → Senior Approval   (matches when amount >= 10000)
+      threshold=50000 → Board Approval    (matches when amount >= 50000)
+    """
+    id               = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    document_type    = models.ForeignKey(
+        "documents.DocumentType", on_delete=models.CASCADE, related_name="workflow_rules",
+    )
+    template         = models.ForeignKey(
+        WorkflowTemplate, on_delete=models.PROTECT, related_name="rules"
+    )
+    amount_threshold = models.DecimalField(max_digits=18, decimal_places=2, default=0)
+    currency         = models.CharField(max_length=3, default="USD")
+    label            = models.CharField(max_length=120, blank=True)
+    is_active        = models.BooleanField(default=True)
+    created_at       = models.DateTimeField(auto_now_add=True, null=True)
+    updated_at       = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        # Highest threshold first so first match wins in the engine
+        ordering = ["document_type", "-amount_threshold"]
+
+    def __str__(self):
+        return f"{self.document_type.name} >= {self.amount_threshold} -> {self.template.name}"
 
 
 class WorkflowInstance(models.Model):
-    """A live workflow run tied to a specific document."""
-
     STATUS_CHOICES = [
         ("in_progress", "In Progress"),
-        ("approved", "Approved"),
-        ("rejected", "Rejected"),
-        ("cancelled", "Cancelled"),
+        ("approved",    "Approved"),
+        ("rejected",    "Rejected"),
+        ("cancelled",   "Cancelled"),
     ]
 
-    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
-    document = models.OneToOneField(
-        "documents.Document", on_delete=models.CASCADE, related_name="workflow_instance"
+    id                 = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    document           = models.OneToOneField(
+        "documents.Document", on_delete=models.CASCADE, related_name="workflow_instance",
     )
-    template = models.ForeignKey(WorkflowTemplate, on_delete=models.PROTECT)
-    status = models.CharField(max_length=20, choices=STATUS_CHOICES, default="in_progress")
+    template           = models.ForeignKey(WorkflowTemplate, on_delete=models.PROTECT)
+    rule               = models.ForeignKey(
+        WorkflowRule, null=True, on_delete=models.SET_NULL, related_name="instances"
+    )
+    status             = models.CharField(max_length=20, choices=STATUS_CHOICES, default="in_progress")
     current_step_order = models.PositiveSmallIntegerField(default=1)
-    started_by = models.ForeignKey(
-        settings.AUTH_USER_MODEL, on_delete=models.PROTECT, related_name="started_workflows"
+    started_by         = models.ForeignKey(
+        settings.AUTH_USER_MODEL, on_delete=models.PROTECT, related_name="started_workflows",
     )
-    started_at = models.DateTimeField(auto_now_add=True)
+    started_at   = models.DateTimeField(auto_now_add=True)
+    updated_at   = models.DateTimeField(auto_now=True)
     completed_at = models.DateTimeField(null=True, blank=True)
 
     def __str__(self):
@@ -86,29 +138,29 @@ class WorkflowInstance(models.Model):
 
 
 class WorkflowTask(models.Model):
-    """An individual approval task within a workflow run."""
-
     STATUS_CHOICES = [
-        ("pending", "Pending"),
+        ("pending",     "Pending"),
         ("in_progress", "In Progress"),
-        ("approved", "Approved"),
-        ("rejected", "Rejected"),
-        ("skipped", "Skipped"),
+        ("approved",    "Approved"),
+        ("rejected",    "Rejected"),
+        ("skipped",     "Skipped"),
     ]
 
-    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    id                = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
     workflow_instance = models.ForeignKey(
         WorkflowInstance, on_delete=models.CASCADE, related_name="tasks"
     )
-    step = models.ForeignKey(WorkflowStep, on_delete=models.PROTECT)
-    assigned_to = models.ForeignKey(
+    step         = models.ForeignKey(WorkflowStep, on_delete=models.PROTECT)
+    assigned_to  = models.ForeignKey(
         settings.AUTH_USER_MODEL, null=True, blank=True,
-        on_delete=models.SET_NULL, related_name="workflow_tasks"
+        on_delete=models.SET_NULL, related_name="workflow_tasks",
     )
-    status = models.CharField(max_length=20, choices=STATUS_CHOICES, default="pending")
-    comment = models.TextField(blank=True)
-    due_at = models.DateTimeField(null=True, blank=True)
+    status   = models.CharField(max_length=20, choices=STATUS_CHOICES, default="pending")
+    comment  = models.TextField(blank=True)
+    due_at   = models.DateTimeField(null=True, blank=True)
     acted_at = models.DateTimeField(null=True, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True, null=True)
+    updated_at = models.DateTimeField(auto_now=True)
 
     class Meta:
         ordering = ["step__order"]

@@ -23,6 +23,7 @@ const mainNav: NavItem[] = [
   { to: "/documents/upload", icon: Upload,          label: "Upload" },
   { to: "/search",           icon: Search,          label: "Search" },
   { to: "/workflow",         icon: GitBranch,        label: "Workflow" },
+  { to: "/workflow/builder", icon: GitBranch, label: "Workflow builder", roles: ["admin"] },
 ];
 
 const adminNav: NavItem[] = [
@@ -59,7 +60,7 @@ export default function Layout() {
           <div className="bg-indigo-600 p-1.5 rounded-lg mr-3">
             <FileText className="w-5 h-5 text-white flex-shrink-0" />
           </div>
-          <span className="text-white font-bold text-lg tracking-tight">DocVault</span>
+          <span className="text-white font-bold text-lg tracking-tight">FSE-DMS</span>
         </div>
 
         {/* Navigation */}

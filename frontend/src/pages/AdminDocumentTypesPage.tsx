@@ -45,7 +45,7 @@ export default function AdminDocumentTypesPage() {
   const { data: types, isLoading } = useQuery({
     queryKey: ["document-types"],
     queryFn: () => documentApi.types(),
-    select: (r) => r.data as any[],
+    select: (r) => r.data.results ?? r.data as any[],
   });
 
   const form = useForm<DocTypeForm>({

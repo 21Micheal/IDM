@@ -6,7 +6,7 @@ import { z } from "zod";
 import { usersAPI, departmentsAPI } from "@/services/api";
 import {
   Plus, Search, MoreVertical, UserCheck, UserX,
-  KeyRound, Edit2, Loader2, Shield, X,
+  KeyRound, Edit2, Loader2, Shield, X, Trash2,
 } from "lucide-react";
 import { toast } from "react-toastify";
 import { format } from "date-fns";
@@ -141,6 +141,7 @@ function CreateUserModal({
         setTempPassword(tempPassword);
       } else {
         toast.success("User created successfully");
+        onClose();
       }
 
       qc.invalidateQueries({ queryKey: ["users"] });
@@ -163,71 +164,73 @@ function CreateUserModal({
 
   return (
     <>
-      <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-4">
-        <div className="card w-full max-w-lg p-6">
-          <div className="flex items-center justify-between mb-5">
-            <h2 className="font-semibold text-gray-900 text-lg">Create new user</h2>
-            <button onClick={onClose} className="text-gray-400 hover:text-gray-600">
-              <X className="w-5 h-5" />
-            </button>
-          </div>
-
-          <form onSubmit={handleSubmit((v) => mutation.mutate(v))} className="space-y-4">
-            <div className="grid grid-cols-2 gap-3">
-              <div>
-                <label className="label">First name <span className="text-red-500">*</span></label>
-                <input {...register("first_name")} className="input" placeholder="John" autoFocus />
-                {errors.first_name && <p className="text-red-500 text-xs mt-1">{errors.first_name.message}</p>}
-              </div>
-              <div>
-                <label className="label">Last name <span className="text-red-500">*</span></label>
-                <input {...register("last_name")} className="input" placeholder="Doe" />
-                {errors.last_name && <p className="text-red-500 text-xs mt-1">{errors.last_name.message}</p>}
-              </div>
-            </div>
-
-            <div>
-              <label className="label">Email address <span className="text-red-500">*</span></label>
-              <input {...register("email")} type="email" className="input" placeholder="john@company.com" />
-              {errors.email && <p className="text-red-500 text-xs mt-1">{errors.email.message}</p>}
-            </div>
-
-            <div className="grid grid-cols-2 gap-3">
-              <div>
-                <label className="label">Role <span className="text-red-500">*</span></label>
-                <select {...register("role")} className="input">
-                  <option value="viewer">Viewer</option>
-                  <option value="finance">Finance staff</option>
-                  <option value="auditor">Auditor</option>
-                  <option value="admin">Administrator</option>
-                </select>
-              </div>
-              <div>
-                <label className="label">Department</label>
-                <select {...register("department")} className="input">
-                  <option value="">— None —</option>
-                  {departments.map((d) => (
-                    <option key={d.id} value={d.id}>{d.name}</option>
-                  ))}
-                </select>
-              </div>
-            </div>
-
-            <div className="bg-blue-50 border border-blue-200 rounded-lg p-4 text-sm text-blue-700">
-              A strong temporary password will be automatically generated and emailed to the user.<br />
-              You will also see it after creation.
-            </div>
-
-            <div className="flex gap-3 pt-2 justify-end">
-              <button type="button" onClick={onClose} className="btn-secondary">Cancel</button>
-              <button type="submit" disabled={mutation.isPending} className="btn-primary">
-                {mutation.isPending && <Loader2 className="w-4 h-4 animate-spin" />}
-                Create user
+      {!tempPassword && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-4">
+          <div className="card w-full max-w-lg p-6">
+            <div className="flex items-center justify-between mb-5">
+              <h2 className="font-semibold text-gray-900 text-lg">Create new user</h2>
+              <button onClick={onClose} className="text-gray-400 hover:text-gray-600">
+                <X className="w-5 h-5" />
               </button>
             </div>
-          </form>
+
+            <form onSubmit={handleSubmit((v) => mutation.mutate(v))} className="space-y-4">
+              <div className="grid grid-cols-2 gap-3">
+                <div>
+                  <label className="label">First name <span className="text-red-500">*</span></label>
+                  <input {...register("first_name")} className="input" placeholder="John" autoFocus />
+                  {errors.first_name && <p className="text-red-500 text-xs mt-1">{errors.first_name.message}</p>}
+                </div>
+                <div>
+                  <label className="label">Last name <span className="text-red-500">*</span></label>
+                  <input {...register("last_name")} className="input" placeholder="Doe" />
+                  {errors.last_name && <p className="text-red-500 text-xs mt-1">{errors.last_name.message}</p>}
+                </div>
+              </div>
+
+              <div>
+                <label className="label">Email address <span className="text-red-500">*</span></label>
+                <input {...register("email")} type="email" className="input" placeholder="john@company.com" />
+                {errors.email && <p className="text-red-500 text-xs mt-1">{errors.email.message}</p>}
+              </div>
+
+              <div className="grid grid-cols-2 gap-3">
+                <div>
+                  <label className="label">Role <span className="text-red-500">*</span></label>
+                  <select {...register("role")} className="input">
+                    <option value="viewer">Viewer</option>
+                    <option value="finance">Finance staff</option>
+                    <option value="auditor">Auditor</option>
+                    <option value="admin">Administrator</option>
+                  </select>
+                </div>
+                <div>
+                  <label className="label">Department</label>
+                  <select {...register("department")} className="input">
+                    <option value="">— None —</option>
+                    {departments.map((d) => (
+                      <option key={d.id} value={d.id}>{d.name}</option>
+                    ))}
+                  </select>
+                </div>
+              </div>
+
+              <div className="bg-blue-50 border border-blue-200 rounded-lg p-4 text-sm text-blue-700">
+                A strong temporary password will be automatically generated and emailed to the user.<br />
+                You will also see it after creation.
+              </div>
+
+              <div className="flex gap-3 pt-2 justify-end">
+                <button type="button" onClick={onClose} className="btn-secondary">Cancel</button>
+                <button type="submit" disabled={mutation.isPending} className="btn-primary">
+                  {mutation.isPending && <Loader2 className="w-4 h-4 animate-spin" />}
+                  Create user
+                </button>
+              </div>
+            </form>
+          </div>
         </div>
-      </div>
+      )}
 
       {/* Temporary Password Modal after creation */}
       {tempPassword && (
@@ -343,11 +346,13 @@ function UserActions({
   onEdit,
   onResetPassword,
   onToggleActive,
+  onDelete,
 }: {
   user: User;
   onEdit: () => void;
   onResetPassword: () => void;
   onToggleActive: () => void;
+  onDelete: () => void;
 }) {
   const [open, setOpen] = useState(false);
 
@@ -374,6 +379,12 @@ function UserActions({
               className="flex items-center gap-2 w-full px-3 py-2 text-sm text-gray-700 hover:bg-gray-50"
             >
               <KeyRound className="w-3.5 h-3.5" /> Reset password
+            </button>
+            <button
+              onClick={() => { onDelete(); setOpen(false); }}
+              className="flex items-center gap-2 w-full px-3 py-2 text-sm text-red-600 hover:bg-red-50"
+            >
+              <Trash2 className="w-3.5 h-3.5" /> Delete user
             </button>
             <button
               onClick={() => { onToggleActive(); setOpen(false); }}
@@ -430,6 +441,16 @@ export default function UsersPage() {
     onSuccess: (_, id) => {
       qc.invalidateQueries({ queryKey: ["users"] });
       toast.success("User status updated");
+    },
+    onError: (err: any) =>
+      toast.error(err?.response?.data?.detail || "Action failed"),
+  });
+
+  const deleteMutation = useMutation({
+    mutationFn: (id: string) => usersAPI.delete(id),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ["users"] });
+      toast.success("User deleted successfully");
     },
     onError: (err: any) =>
       toast.error(err?.response?.data?.detail || "Action failed"),
@@ -588,6 +609,11 @@ export default function UsersPage() {
                       onEdit={() => setEditUser(user)}
                       onResetPassword={() => resetPasswordMutation.mutate(user.id)}
                       onToggleActive={() => toggleActiveMutation.mutate(user.id)}
+                      onDelete={() => {
+                        if (confirm(`Are you sure you want to permanently delete ${user.full_name}?`)) {
+                          deleteMutation.mutate(user.id);
+                        }
+                      }}
                     />
                   </td>
                 </tr>

@@ -133,7 +133,7 @@ export default function AdminPage() {
 
   const { data: docTypes, isLoading } = useQuery<DocumentType[]>({
     queryKey: ["document-types"],
-    queryFn: () => documentTypesAPI.list().then((r) => r.data.results),
+    queryFn: () => documentTypesAPI.list().then((r) => r.data.results ?? r.data as DocumentType[]),
   });
 
   return (

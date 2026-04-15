@@ -15,6 +15,7 @@ import UsersPage from "@/pages/UsersPage";
 import DepartmentsPage from "@/pages/DepartmentsPage";
 import GroupsPage from "@/pages/GroupsPage";
 import ProfilePage from "@/pages/ProfilePage";
+import WorkflowBuilderPage from "@/pages/WorkflowBuilderPage";
 
 // ── Guards ────────────────────────────────────────────────────────────────────
 
@@ -83,6 +84,7 @@ export default function App() {
 
         {/* Workflow */}
         <Route path="workflow"  element={<WorkflowPage />} />
+        <Route path="workflow/builder" element={  <RequireAdmin> <WorkflowBuilderPage />  </RequireAdmin>  }/>
 
         {/* Audit */}
         <Route path="audit"     element={<AuditPage />} />

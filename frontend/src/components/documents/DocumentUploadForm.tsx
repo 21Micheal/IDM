@@ -65,7 +65,7 @@ export default function DocumentUploadForm() {
   const { data: typesData } = useQuery({
     queryKey: ["document-types"],
     queryFn: () => documentApi.types(),
-    select: (r) => r.data as DocumentType[],
+    select: (r) => r.data.results ?? r.data as DocumentType[],
   });
 
   const requiredMetaKeys = (selectedType?.metadata_fields ?? [])

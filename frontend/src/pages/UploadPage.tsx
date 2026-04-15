@@ -100,9 +100,7 @@ export default function UploadPage() {
 
   const { data: docTypes } = useQuery({
     queryKey: ["document-types"],
-    // DocumentTypeViewSet has no pagination_class, so it returns a plain array,
-    // NOT a paginated { count, results: [] } object. Use r.data directly.
-    queryFn: () => documentTypesAPI.list().then((r) => r.data as DocumentType[]),
+    queryFn: () => documentTypesAPI.list().then((r) => r.data.results ?? r.data as DocumentType[]),
   });
 
   const selectedType = docTypes?.find((t) => t.id === selectedTypeId);
