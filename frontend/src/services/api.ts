@@ -54,12 +54,15 @@ export const authAPI = {
 
 export const documentsAPI = {
   list: (params?: Record<string, unknown>) => api.get("/documents/", { params }),
-  get: (id: string) => api.get(`/documents/${id}/`),
+  get:  (id: string) => api.get(`/documents/${id}/`),
   upload: (formData: FormData) =>
     api.post("/documents/", formData, { headers: { "Content-Type": "multipart/form-data" } }),
-  update: (id: string, data: Record<string, unknown>) => api.patch(`/documents/${id}/`, data),
+  update: (id: string, data: Record<string, unknown>) =>
+    api.patch(`/documents/${id}/`, data),
+  editMetadata: (id: string, data: Record<string, unknown>) =>
+    api.patch(`/documents/${id}/edit_metadata/`, data),
   delete: (id: string) => api.delete(`/documents/${id}/`),
-  submit: (id: string) => api.post(`/documents/${id}/submit/`),
+  submit:  (id: string) => api.post(`/documents/${id}/submit/`),
   archive: (id: string) => api.post(`/documents/${id}/archive/`),
   previewUrl: (id: string) => api.get(`/documents/${id}/preview_url/`),
   uploadVersion: (id: string, formData: FormData) =>
@@ -68,10 +71,20 @@ export const documentsAPI = {
     }),
   restoreVersion: (id: string, versionId: string) =>
     api.post(`/documents/${id}/restore_version/`, { version_id: versionId }),
-  comments: (id: string) => api.get(`/documents/${id}/comments/`),
+  comments:   (id: string) => api.get(`/documents/${id}/comments/`),
   addComment: (id: string, content: string, isInternal = false) =>
     api.post(`/documents/${id}/comments/`, { content, is_internal: isInternal }),
   auditTrail: (id: string) => api.get(`/documents/${id}/audit_trail/`),
+  bulkAction: (
+    documentIds: string[],
+    action: "approve" | "reject" | "archive" | "void",
+    comment = ""
+  ) =>
+    api.post("/documents/bulk_action/", {
+      document_ids: documentIds,
+      action,
+      comment,
+    }),
 };
 
 export const documentTypesAPI = {
@@ -123,7 +136,7 @@ export const workflowAPI = {
 export const notificationsAPI = {
   list: () => api.get("/notifications/"),
   markRead: (id: string) => api.patch(`/notifications/${id}/`, { is_read: true }),
-  markAllRead: () => api.post("/notifications/mark-all-read/"),
+  markAllRead: () => api.post("/notifications/mark_all_read/"),
 };
 
 // Combined helper for compatibility with existing components

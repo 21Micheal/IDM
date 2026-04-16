@@ -12,6 +12,7 @@ Changes from previous version:
 from django.contrib.auth.models import AbstractBaseUser, BaseUserManager, PermissionsMixin
 from django.db import models
 from django.utils import timezone
+from django.db.models import Q
 from datetime import timedelta
 import uuid
 import random
@@ -109,21 +110,41 @@ class User(AbstractBaseUser, PermissionsMixin):
     @property
     def is_auditor(self): return self.role in (Role.ADMIN, Role.AUDITOR)
 
-    def get_all_permissions_for_doctype(self, document_type_id: str) -> set:
+    def get_all_permissions_for_doctype(self, document_type_id: str) -> set[str]:
         """
-        Return the union of all GroupPermission actions this user has
-        for a given document type across all their active groups.
+        Return the set of GroupAction values this user has for `document_type_id`.
+
+        Includes:
+          - Explicit permissions tied to this document type
+          - Wildcard permissions (document_type IS NULL) that apply to every type
+
+        Both require an active, non-expired group membership.
         """
-        memberships = self.group_memberships.filter(
-            models.Q(expires_at__isnull=True) | models.Q(expires_at__gt=timezone.now())
-        ).values_list("group_id", flat=True)
+        now = timezone.now()
 
-        # Get specific + wildcard permissions
-        perms = GroupPermission.objects.filter(
-            models.Q(group_id__in=memberships) & (models.Q(document_type_id=document_type_id) | models.Q(document_type_id__isnull=True))
-        ).values_list("action", flat=True)
+        active_membership_filter = Q(
+            group__memberships__user=self,
+            group__is_active=True,
+        ) & (
+            Q(group__memberships__expires_at__isnull=True)
+            | Q(group__memberships__expires_at__gt=now)
+        )
 
-        return set(perms)
+        from apps.accounts.models import GroupPermission
+
+        actions = (
+            GroupPermission.objects
+            .filter(active_membership_filter)
+            .filter(
+                # Explicit match for this document type OR wildcard
+                Q(document_type_id=document_type_id)
+                | Q(document_type__isnull=True)
+            )
+            .values_list("action", flat=True)
+            .distinct()
+        )
+
+        return set(actions)
 
 
 # ── Email OTP ─────────────────────────────────────────────────────────────────

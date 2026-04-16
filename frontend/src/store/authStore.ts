@@ -40,3 +40,7 @@ export const useAuthStore = create<AuthState>()(
     { name: "dms-auth" }
   )
 );
+
+export const isAdmin = (user: AuthUser | null): boolean => {
+  return user?.role === "admin";
+};

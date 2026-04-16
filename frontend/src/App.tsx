@@ -10,12 +10,14 @@ import UploadPage from "@/pages/UploadPage";
 import SearchPage from "@/pages/SearchPage";
 import WorkflowPage from "@/pages/WorkflowPage";
 import AdminPage from "@/pages/AdminPage";
+import AdminDocumentTypesPage from "@/pages/AdminDocumentTypesPage";
 import AuditPage from "@/pages/AuditPage";
 import UsersPage from "@/pages/UsersPage";
 import DepartmentsPage from "@/pages/DepartmentsPage";
 import GroupsPage from "@/pages/GroupsPage";
 import ProfilePage from "@/pages/ProfilePage";
 import WorkflowBuilderPage from "@/pages/WorkflowBuilderPage";
+import NotificationsPage from "@/pages/NotificationsPage";
 
 // ── Guards ────────────────────────────────────────────────────────────────────
 
@@ -86,6 +88,9 @@ export default function App() {
         <Route path="workflow"  element={<WorkflowPage />} />
         <Route path="workflow/builder" element={  <RequireAdmin> <WorkflowBuilderPage />  </RequireAdmin>  }/>
 
+        {/* Notifications */}
+        <Route path="notifications" element={<NotificationsPage />} />
+
         {/* Audit */}
         <Route path="audit"     element={<AuditPage />} />
 
@@ -93,10 +98,11 @@ export default function App() {
         <Route path="profile"   element={<ProfilePage />} />
 
         {/* Admin-only */}
-        <Route path="users"       element={<RequireAdmin><UsersPage /></RequireAdmin>} />
-        <Route path="departments" element={<RequireAdmin><DepartmentsPage /></RequireAdmin>} />
-        <Route path="groups"      element={<RequireAdmin><GroupsPage /></RequireAdmin>} />
-        <Route path="admin"       element={<RequireAdmin><AdminPage /></RequireAdmin>} />
+        <Route path="admin/users"           element={<RequireAdmin><UsersPage /></RequireAdmin>} />
+        <Route path="admin/settings"        element={<RequireAdmin><AdminPage /></RequireAdmin>} />
+        <Route path="admin/document-types"  element={<RequireAdmin><AdminDocumentTypesPage /></RequireAdmin>} />
+        <Route path="admin/departments"     element={<RequireAdmin><DepartmentsPage /></RequireAdmin>} />
+        <Route path="admin/groups"          element={<RequireAdmin><GroupsPage /></RequireAdmin>} />
       </Route>
 
       <Route path="*" element={<Navigate to="/" replace />} />

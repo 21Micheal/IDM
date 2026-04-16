@@ -1,176 +1,182 @@
 import { useQuery } from "@tanstack/react-query";
 import { documentsAPI, workflowAPI } from "@/services/api";
 import { useAuthStore } from "@/store/authStore";
-import { FileText, Clock, CheckCircle, AlertCircle, GitBranch, TrendingUp } from "lucide-react";
+import { FileText, Clock, CheckCircle, GitBranch, AlertCircle, ArrowRight, TrendingUp,UploadCloud } from "lucide-react";
 import { Link } from "react-router-dom";
 import StatusBadge from "@/components/documents/StatusBadge";
-import { formatDistanceToNow } from "date-fns";
+import { formatDistanceToNow, format } from "date-fns";
 import type { Document, WorkflowTask } from "@/types";
+import { StatCard } from "@/components/dashboard/StatCard";
 
-interface StatCardProps {
-  label: string;
-  value: number | string;
-  icon: React.ElementType;
-  color: string;
-  to?: string;
-}
-
-function StatCard({ label, value, icon: Icon, color, to }: StatCardProps) {
-  const inner = (
-    <div className={`card p-5 flex items-center gap-4 hover:shadow-md transition-shadow`}>
-      <div className={`w-12 h-12 rounded-xl flex items-center justify-center ${color}`}>
-        <Icon className="w-6 h-6" />
-      </div>
-      <div>
-        <p className="text-2xl font-bold text-gray-900">{value}</p>
-        <p className="text-sm text-gray-500">{label}</p>
-      </div>
-    </div>
-  );
-  return to ? <Link to={to}>{inner}</Link> : inner;
-}
 
 export default function DashboardPage() {
-  const user = useAuthStore((s) => s.user);
+  const { user } = useAuthStore();
 
-  const { data: allDocs } = useQuery({
-    queryKey: ["documents", "dashboard"],
+  const { data: recentDocs, isLoading: docsLoading } = useQuery({
+    queryKey: ["documents", "recent"],
     queryFn: () => documentsAPI.list({ page_size: 5 }).then((r) => r.data),
   });
 
-  const { data: pendingDocs } = useQuery({
-    queryKey: ["documents", "pending"],
-    queryFn: () =>
-      documentsAPI
-        .list({ status: "pending_approval", page_size: 100 })
-        .then((r) => r.data.count),
+  const { data: pendingCount = 0 } = useQuery({
+    queryKey: ["documents", "pending", "count"],
+    queryFn: () => documentsAPI.list({ status: "pending_approval", page_size: 1 }).then((r) => r.data.count),
   });
 
-  const { data: approvedDocs } = useQuery({
-    queryKey: ["documents", "approved"],
-    queryFn: () =>
-      documentsAPI.list({ status: "approved", page_size: 100 }).then((r) => r.data.count),
+  const { data: approvedCount = 0 } = useQuery({
+    queryKey: ["documents", "approved", "count"],
+    queryFn: () => documentsAPI.list({ status: "approved", page_size: 1 }).then((r) => r.data.count),
   });
 
-  const { data: myTasks } = useQuery({
+  const { data: myTasks = [] } = useQuery({
     queryKey: ["workflow", "my-tasks"],
-    queryFn: () => workflowAPI.myTasks().then((r) => r.data.results),
+    queryFn: () => workflowAPI.myTasks().then((r) => r.data.results ?? r.data),
   });
+
+  // Placeholder for dynamic trend data (to be replaced with real API data later)
+  const trendData = {
+    documents: { value: 12, isPositive: true },
+    pending: { value: 8, isPositive: false },
+    approved: { value: 23, isPositive: true },
+  };
 
   return (
-    <div className="space-y-6">
-      <div>
-        <h1 className="text-2xl font-bold text-gray-900">
-          Welcome back, {user?.first_name}
-        </h1>
-        <p className="text-gray-500 text-sm mt-1">
-          Here's what's happening with your documents today.
-        </p>
+    <div className="space-y-8">
+      {/* Welcome Section */}
+      <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-4">
+        <div>
+          <h1 className="text-2xl font-bold text-slate-900 tracking-tight">
+            Welcome back, {user?.first_name}
+          </h1>
+          <p className="text-slate-500 text-sm mt-1">
+            Here's what's happening with your documents today.
+          </p>
+        </div>
+        <Link to="/documents/upload" className="inline-flex items-center gap-2 px-4 py-2 bg-indigo-600 text-white text-sm font-medium rounded-lg shadow-sm hover:bg-indigo-700 transition-colors">
+          <UploadCloud className="w-4 h-4" />
+          Upload New Document
+        </Link>
       </div>
 
-      {/* Stats grid */}
-      <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
+      {/* Stats Grid */}
+      <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-6">
         <StatCard
-          label="Total documents"
-          value={allDocs?.count ?? "—"}
+          title="Total Documents"
+          value={recentDocs?.count ?? '—'}
           icon={FileText}
-          color="bg-brand-50 text-brand-600"
-          to="/documents"
+          trend={trendData.documents}
+          color="blue"
+          href="/documents"
         />
         <StatCard
-          label="Pending approval"
-          value={pendingDocs ?? "—"}
+          title="Pending Approval"
+          value={pendingCount}
           icon={Clock}
-          color="bg-amber-50 text-amber-600"
-          to="/documents?status=pending_approval"
+          trend={trendData.pending}
+          color="amber"
+          href="/documents?status=pending_approval"
         />
         <StatCard
-          label="Approved"
-          value={approvedDocs ?? "—"}
+          title="Approved"
+          value={approvedCount}
           icon={CheckCircle}
-          color="bg-green-50 text-green-600"
-          to="/documents?status=approved"
+          trend={trendData.approved}
+          color="green"
+          href="/documents?status=approved"
         />
         <StatCard
-          label="My pending tasks"
-          value={myTasks?.length ?? "—"}
+          title="My Tasks"
+          value={myTasks.length}
           icon={GitBranch}
-          color="bg-purple-50 text-purple-600"
-          to="/workflow"
+          color="amber"
+          href="/workflow"
         />
       </div>
 
-      <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
-        {/* Recent documents */}
-        <div className="card">
-          <div className="p-5 border-b border-gray-100 flex items-center justify-between">
-            <h2 className="font-semibold text-gray-900">Recent documents</h2>
-            <Link to="/documents" className="text-sm text-brand-600 hover:underline">
-              View all
+      {/* Recent Activity & Tasks Grid */}
+      <div className="grid grid-cols-1 lg:grid-cols-2 gap-8">
+        {/* Recent Documents */}
+        <div className="bg-white rounded-xl border border-slate-200 shadow-sm overflow-hidden">
+          <div className="px-6 py-4 border-b border-slate-100 flex items-center justify-between bg-slate-50/40">
+            <h2 className="font-semibold text-slate-900">Recent Documents</h2>
+            <Link to="/documents" className="text-sm font-medium text-indigo-600 hover:text-indigo-800 inline-flex items-center gap-1">
+              View all <ArrowRight className="w-3.5 h-3.5" />
             </Link>
           </div>
-          <ul className="divide-y divide-gray-100">
-            {allDocs?.results?.map((doc: Document) => (
+          <ul className="divide-y divide-slate-100">
+            {recentDocs?.results?.map((doc: Document) => (
               <li key={doc.id}>
-                <Link
-                  to={`/documents/${doc.id}`}
-                  className="flex items-start gap-3 px-5 py-3 hover:bg-gray-50 transition-colors"
-                >
-                  <FileText className="w-4 h-4 text-gray-400 mt-0.5 flex-shrink-0" />
+                <Link to={`/documents/${doc.id}`} className="flex items-center gap-4 px-6 py-4 hover:bg-slate-50 transition-colors">
+                  <div className="p-2 bg-slate-100 rounded-lg shrink-0">
+                    <FileText className="w-5 h-5 text-slate-500" />
+                  </div>
                   <div className="flex-1 min-w-0">
-                    <p className="text-sm font-medium text-gray-900 truncate">{doc.title}</p>
-                    <p className="text-xs text-gray-500">
-                      {doc.reference_number} ·{" "}
-                      {formatDistanceToNow(new Date(doc.created_at), { addSuffix: true })}
-                    </p>
+                    <p className="text-sm font-medium text-slate-900 truncate">{doc.title}</p>
+                    <div className="flex flex-wrap items-center gap-x-3 gap-y-1 mt-0.5">
+                      <p className="text-xs text-slate-500">{doc.reference_number}</p>
+                      <p className="text-xs text-slate-400">•</p>
+                      <p className="text-xs text-slate-500 capitalize">Updated {formatDistanceToNow(new Date(doc.updated_at), { addSuffix: true })}</p>
+                    </div>
                   </div>
                   <StatusBadge status={doc.status} />
                 </Link>
               </li>
             ))}
-            {!allDocs?.results?.length && (
-              <li className="px-5 py-8 text-center text-sm text-gray-400">
-                No documents yet. <Link to="/documents/upload" className="text-brand-600 hover:underline">Upload one.</Link>
+            {!recentDocs?.results?.length && (
+              <li className="px-6 py-8 text-center text-sm text-slate-400">
+                No documents yet. <Link to="/documents/upload" className="text-indigo-600 hover:underline">Upload your first document</Link>
               </li>
             )}
           </ul>
         </div>
 
-        {/* My workflow tasks */}
-        <div className="card">
-          <div className="p-5 border-b border-gray-100 flex items-center justify-between">
-            <h2 className="font-semibold text-gray-900">Pending approvals</h2>
-            <Link to="/workflow" className="text-sm text-brand-600 hover:underline">
-              View all
+        {/* Pending Approvals (Workflow Tasks) */}
+        <div className="bg-white rounded-xl border border-slate-200 shadow-sm overflow-hidden">
+          <div className="px-6 py-4 border-b border-slate-100 flex items-center justify-between bg-slate-50/40">
+            <h2 className="font-semibold text-slate-900">Pending Approvals</h2>
+            <Link to="/workflow" className="text-sm font-medium text-indigo-600 hover:text-indigo-800 inline-flex items-center gap-1">
+              View all <ArrowRight className="w-3.5 h-3.5" />
             </Link>
           </div>
-          <ul className="divide-y divide-gray-100">
-            {myTasks?.map((task: WorkflowTask) => (
+          <ul className="divide-y divide-slate-100">
+            {myTasks.map((task: WorkflowTask) => {
+              const documentId =
+                task.workflow_instance?.document?.id ?? task.document_id ?? "";
+              const documentTitle =
+                task.workflow_instance?.document?.title ?? task.document_title ?? "Untitled";
+              const documentRef =
+                task.workflow_instance?.document?.reference_number ?? task.document_ref ?? "";
+
+              return (
               <li key={task.id}>
-                <Link
-                  to={`/documents/${task.workflow_instance.document.id}`}
-                  className="flex items-start gap-3 px-5 py-3 hover:bg-gray-50 transition-colors"
-                >
-                  <AlertCircle className="w-4 h-4 text-amber-500 mt-0.5 flex-shrink-0" />
-                  <div className="flex-1 min-w-0">
-                    <p className="text-sm font-medium text-gray-900 truncate">
-                      {task.workflow_instance.document.title}
-                    </p>
-                    <p className="text-xs text-gray-500">
-                      {task.workflow_instance.document.reference_number} · Step: {task.step.name}
-                    </p>
+                <Link to={documentId ? `/documents/${documentId}` : "/workflow"} className="flex items-start gap-4 px-6 py-4 hover:bg-slate-50 transition-colors">
+                  <div className="p-2 bg-amber-50 rounded-lg shrink-0">
+                    <AlertCircle className="w-5 h-5 text-amber-600" />
                   </div>
-                  {task.due_at && (
-                    <span className="text-xs text-gray-400">
-                      Due {formatDistanceToNow(new Date(task.due_at), { addSuffix: true })}
-                    </span>
-                  )}
+                  <div className="flex-1 min-w-0">
+                    <p className="text-sm font-medium text-slate-900 truncate">{documentTitle}</p>
+                    <div className="flex flex-wrap items-center gap-x-3 gap-y-1 mt-1">
+                      <p className="text-xs text-slate-500">{documentRef}</p>
+                      <p className="text-xs text-slate-400">•</p>
+                      <p className="text-xs text-slate-500">Step: <span className="font-medium">{task.step.name}</span></p>
+                    </div>
+                    {task.due_at && (
+                      <p className="text-xs text-amber-600 mt-1.5">
+                        Due {formatDistanceToNow(new Date(task.due_at), { addSuffix: true })}
+                      </p>
+                    )}
+                  </div>
+                  <StatusBadge status="pending_approval" />
                 </Link>
               </li>
-            ))}
-            {!myTasks?.length && (
-              <li className="px-5 py-8 text-center text-sm text-gray-400">
-                No pending approvals. You're all caught up!
+              );
+            })}
+            {myTasks.length === 0 && (
+              <li className="px-6 py-12 text-center">
+                <div className="flex flex-col items-center gap-2">
+                  <CheckCircle className="w-10 h-10 text-emerald-500" />
+                  <p className="text-sm font-medium text-slate-700">All caught up!</p>
+                  <p className="text-xs text-slate-400">No pending approvals require your action.</p>
+                </div>
               </li>
             )}
           </ul>

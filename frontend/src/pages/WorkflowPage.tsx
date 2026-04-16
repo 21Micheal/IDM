@@ -19,6 +19,11 @@ function ApprovalModal({
   const [comment, setComment] = useState("");
   const qc = useQueryClient();
 
+  const documentTitle =
+    task.workflow_instance?.document?.title ?? task.document_title ?? "Document";
+  const documentRef =
+    task.workflow_instance?.document?.reference_number ?? task.document_ref ?? "";
+
   const mutation = useMutation({
     mutationFn: () =>
       action === "approve"
@@ -40,9 +45,9 @@ function ApprovalModal({
           {action === "approve" ? "Approve document" : "Reject document"}
         </h2>
         <p className="text-sm text-gray-600">
-          <span className="font-medium">{task.workflow_instance.document.title}</span>
+          <span className="font-medium">{documentTitle}</span>
           <span className="text-gray-400 ml-2 font-mono text-xs">
-            {task.workflow_instance.document.reference_number}
+            {documentRef}
           </span>
         </p>
         <div>
@@ -83,7 +88,7 @@ export default function WorkflowPage() {
 
   const { data: tasks, isLoading } = useQuery<WorkflowTask[]>({
     queryKey: ["workflow", "my-tasks"],
-    queryFn: () => workflowAPI.myTasks().then((r) => r.data.results),
+    queryFn: () => workflowAPI.myTasks().then((r) => r.data.results ?? r.data),
     refetchInterval: 30_000,
   });
 
@@ -109,7 +114,15 @@ export default function WorkflowPage() {
       )}
 
       <div className="space-y-3">
-        {tasks?.map((task) => (
+        {tasks?.map((task) => {
+          const documentId =
+            task.workflow_instance?.document?.id ?? task.document_id ?? "";
+          const documentTitle =
+            task.workflow_instance?.document?.title ?? task.document_title ?? "Untitled";
+          const documentRef =
+            task.workflow_instance?.document?.reference_number ?? task.document_ref ?? "";
+
+          return (
           <div key={task.id} className="card p-5 flex items-start gap-4">
             <div className="w-10 h-10 rounded-xl bg-amber-50 flex items-center justify-center flex-shrink-0">
               <Clock className="w-5 h-5 text-amber-500" />
@@ -118,13 +131,13 @@ export default function WorkflowPage() {
               <div className="flex items-start justify-between gap-2">
                 <div>
                   <Link
-                    to={`/documents/${task.workflow_instance.document.id}`}
+                    to={documentId ? `/documents/${documentId}` : "/workflow"}
                     className="font-medium text-gray-900 hover:text-brand-600 truncate block"
                   >
-                    {task.workflow_instance.document.title}
+                    {documentTitle}
                   </Link>
                   <p className="text-xs text-gray-500 font-mono mt-0.5">
-                    {task.workflow_instance.document.reference_number}
+                    {documentRef}
                   </p>
                 </div>
                 <div className="flex gap-2 flex-shrink-0">
@@ -158,7 +171,8 @@ export default function WorkflowPage() {
               </div>
             </div>
           </div>
-        ))}
+          );
+        })}
       </div>
 
       {modal && (

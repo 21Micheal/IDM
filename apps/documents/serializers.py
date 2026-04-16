@@ -1,10 +1,11 @@
 """
 apps/documents/serializers.py
 
-Key change: DocumentTypeSerializer now exposes `workflow_template` and
-`workflow_template_name` so the builder page can:
-  1. Read which template is already linked (GET /documents/types/)
-  2. Write the link after creating a template (PATCH /documents/types/{id}/)
+Key changes:
+  1. DocumentUploadSerializer.create() now creates a DocumentVersion(v1)
+     immediately after Document creation — so version history is never empty.
+  2. DocumentMetadataEditSerializer added for PATCH metadata editing post-upload.
+  3. DocumentBulkActionSerializer for bulk approve/reject.
 """
 from rest_framework import serializers
 from .models import Document, DocumentType, MetadataField, DocumentVersion, DocumentComment, Tag
@@ -28,7 +29,6 @@ class MetadataFieldSerializer(serializers.ModelSerializer):
 
 class DocumentTypeSerializer(serializers.ModelSerializer):
     metadata_fields        = MetadataFieldSerializer(many=True, read_only=True)
-    # Read: name of the linked template (null if none)
     workflow_template_name = serializers.CharField(
         source="workflow_template.name", read_only=True, default=None
     )
@@ -38,12 +38,9 @@ class DocumentTypeSerializer(serializers.ModelSerializer):
         fields = [
             "id", "name", "code", "reference_prefix", "reference_padding",
             "description", "icon", "is_active",
-            # workflow link — readable AND writable
-            "workflow_template",
-            "workflow_template_name",
+            "workflow_template", "workflow_template_name",
             "metadata_fields",
         ]
-        # workflow_template is a plain FK UUID on write — no extra config needed
 
 
 class DocumentVersionSerializer(serializers.ModelSerializer):
@@ -61,12 +58,13 @@ class DocumentCommentSerializer(serializers.ModelSerializer):
     author = UserSummarySerializer(read_only=True)
 
     class Meta:
-        model  = DocumentComment
-        fields = ["id", "author", "content", "is_internal", "created_at", "updated_at"]
+        model        = DocumentComment
+        fields       = ["id", "author", "content", "is_internal", "created_at", "updated_at"]
         read_only_fields = ["id", "author", "created_at", "updated_at"]
 
 
 class DocumentListSerializer(serializers.ModelSerializer):
+    """Lightweight — list views only."""
     document_type_name = serializers.CharField(source="document_type.name", read_only=True)
     uploaded_by        = UserSummarySerializer(read_only=True)
     tags               = TagSerializer(many=True, read_only=True)
@@ -83,6 +81,7 @@ class DocumentListSerializer(serializers.ModelSerializer):
 
 
 class DocumentDetailSerializer(serializers.ModelSerializer):
+    """Full detail — used for GET /documents/{id}/"""
     document_type    = DocumentTypeSerializer(read_only=True)
     document_type_id = serializers.PrimaryKeyRelatedField(
         queryset=DocumentType.objects.filter(is_active=True),
@@ -91,7 +90,8 @@ class DocumentDetailSerializer(serializers.ModelSerializer):
     uploaded_by = UserSummarySerializer(read_only=True)
     tags        = TagSerializer(many=True, read_only=True)
     tag_ids     = serializers.PrimaryKeyRelatedField(
-        queryset=Tag.objects.all(), many=True, source="tags", write_only=True, required=False
+        queryset=Tag.objects.all(), many=True, source="tags",
+        write_only=True, required=False,
     )
     versions = DocumentVersionSerializer(many=True, read_only=True)
     comments = serializers.SerializerMethodField()
@@ -131,8 +131,10 @@ class DocumentDetailSerializer(serializers.ModelSerializer):
             doc_type = DocumentType.objects.get(pk=doc_type_id)
         except DocumentType.DoesNotExist:
             return value
-        required_keys = [f.key for f in doc_type.metadata_fields.filter(is_required=True)]
-        missing = [k for k in required_keys if not value.get(k)]
+        missing = [
+            f.key for f in doc_type.metadata_fields.filter(is_required=True)
+            if not value.get(f.key)
+        ]
         if missing:
             raise serializers.ValidationError(
                 f"Required metadata fields missing: {', '.join(missing)}"
@@ -140,12 +142,44 @@ class DocumentDetailSerializer(serializers.ModelSerializer):
         return value
 
 
+class DocumentMetadataEditSerializer(serializers.ModelSerializer):
+    """
+    Used for PATCH /documents/{id}/edit_metadata/
+    Allows updating metadata, tags, supplier, amount, dates post-upload.
+    Does NOT allow changing file, type, or reference.
+    """
+    tag_ids = serializers.PrimaryKeyRelatedField(
+        queryset=Tag.objects.all(), many=True, source="tags",
+        write_only=True, required=False,
+    )
+
+    class Meta:
+        model  = Document
+        fields = [
+            "title", "supplier", "amount", "currency",
+            "document_date", "due_date", "metadata", "tag_ids",
+        ]
+
+    def update(self, instance, validated_data):
+        tags = validated_data.pop("tags", None)
+        for attr, value in validated_data.items():
+            setattr(instance, attr, value)
+        instance.save()
+        if tags is not None:
+            instance.tags.set(tags)
+        return instance
+
+
 class DocumentUploadSerializer(serializers.ModelSerializer):
+    """
+    Used for POST /documents/ (initial upload).
+    Creates both the Document and a DocumentVersion(v1) atomically.
+    """
     document_type_id = serializers.PrimaryKeyRelatedField(
         queryset=DocumentType.objects.filter(is_active=True),
         source="document_type",
     )
-    file   = serializers.FileField()
+    file    = serializers.FileField()
     tag_ids = serializers.PrimaryKeyRelatedField(
         queryset=Tag.objects.all(), many=True, source="tags", required=False
     )
@@ -160,34 +194,86 @@ class DocumentUploadSerializer(serializers.ModelSerializer):
         ]
 
     def create(self, validated_data):
+        import hashlib
+        import magic as python_magic
+
         tags     = validated_data.pop("tags", [])
         request  = self.context["request"]
         doc_type = validated_data["document_type"]
 
+        # Auto-generate reference number
         validated_data["reference_number"] = doc_type.next_reference()
 
+        # Capture file metadata
         upload = validated_data["file"]
-        validated_data["file_name"]      = upload.name
-        validated_data["file_size"]      = upload.size
-        validated_data["uploaded_by"]    = request.user
+        validated_data["file_name"]   = upload.name
+        validated_data["file_size"]   = upload.size
+        validated_data["uploaded_by"] = request.user
 
-        import magic
-        validated_data["file_mime_type"] = magic.from_buffer(upload.read(2048), mime=True)
-        upload.seek(0)
+        # MIME type detection
+        try:
+            validated_data["file_mime_type"] = python_magic.from_buffer(
+                upload.read(2048), mime=True
+            )
+            upload.seek(0)
+        except Exception:
+            validated_data["file_mime_type"] = "application/octet-stream"
 
-        import hashlib
+        # SHA-256 checksum
         sha256 = hashlib.sha256()
         for chunk in upload.chunks():
             sha256.update(chunk)
         upload.seek(0)
         validated_data["checksum"] = sha256.hexdigest()
 
+        # Create document
         doc = super().create(validated_data)
         doc.tags.set(tags)
 
-        from apps.search.tasks import index_document
-        from apps.documents.tasks import extract_text
-        extract_text.delay(str(doc.id))
-        index_document.delay(str(doc.id))
+        # ── Create initial version (v1) ───────────────────────────────────
+        # This ensures the versions tab is never empty immediately after upload.
+        DocumentVersion.objects.create(
+            document       = doc,
+            version_number = 1,
+            file           = doc.file,
+            file_name      = doc.file_name,
+            file_size      = doc.file_size,
+            checksum       = doc.checksum,
+            change_summary = "Initial upload",
+            created_by     = request.user,
+        )
+
+        # Queue background tasks
+        try:
+            from apps.documents.tasks import extract_text
+            extract_text.delay(str(doc.id))
+        except Exception:
+            pass
+        try:
+            from apps.search.tasks import index_document
+            index_document.delay(str(doc.id))
+        except Exception:
+            pass
 
         return doc
+
+
+class DocumentBulkActionSerializer(serializers.Serializer):
+    """
+    Used for POST /documents/bulk_action/
+    Approves or rejects multiple workflow tasks at once.
+    """
+    document_ids = serializers.ListField(
+        child=serializers.UUIDField(),
+        min_length=1,
+        max_length=100,
+    )
+    action  = serializers.ChoiceField(choices=["approve", "reject", "archive", "void"])
+    comment = serializers.CharField(required=False, allow_blank=True, default="")
+
+    def validate(self, attrs):
+        if attrs["action"] == "reject" and not attrs.get("comment", "").strip():
+            raise serializers.ValidationError(
+                {"comment": "A comment is required when rejecting documents."}
+            )
+        return attrs

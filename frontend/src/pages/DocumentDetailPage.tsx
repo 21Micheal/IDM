@@ -4,10 +4,11 @@ import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { documentsAPI } from "@/services/api";
 import DocumentViewer from "@/components/documents/DocumentViewer";
 import StatusBadge from "@/components/documents/StatusBadge";
+import MetadataEditPanel from "@/components/documents/MetadataEditPanel";
 import { format } from "date-fns";
 import {
   ArrowLeft, Send, Archive, History, MessageSquare,
-  ShieldCheck, Loader2, RotateCcw, ChevronDown, ChevronUp,
+  ShieldCheck, Loader2, RotateCcw, ChevronDown, ChevronUp, Edit2,
 } from "lucide-react";
 import { toast } from "react-toastify";
 import { useAuthStore } from "@/store/authStore";
@@ -26,6 +27,7 @@ export default function DocumentDetailPage() {
   const user = useAuthStore((s) => s.user);
   const [activeTab, setActiveTab] = useState<"preview" | "versions" | "comments" | "audit">("preview");
   const [comment, setComment] = useState("");
+  const [showEdit, setShowEdit] = useState(false);
 
   const { data: doc, isLoading } = useQuery<Document>({
     queryKey: ["document", id],
@@ -41,24 +43,36 @@ export default function DocumentDetailPage() {
 
   const submitMutation = useMutation({
     mutationFn: () => documentsAPI.submit(id!),
-    onSuccess: () => { toast.success("Submitted for approval"); qc.invalidateQueries({ queryKey: ["document", id] }); },
+    onSuccess: () => { 
+      toast.success("Submitted for approval"); 
+      qc.invalidateQueries({ queryKey: ["document", id] }); 
+    },
     onError: () => toast.error("Submission failed"),
   });
 
   const archiveMutation = useMutation({
     mutationFn: () => documentsAPI.archive(id!),
-    onSuccess: () => { toast.success("Archived"); qc.invalidateQueries({ queryKey: ["document", id] }); },
+    onSuccess: () => { 
+      toast.success("Archived"); 
+      qc.invalidateQueries({ queryKey: ["document", id] }); 
+    },
   });
 
   const commentMutation = useMutation({
     mutationFn: (content: string) => documentsAPI.addComment(id!, content),
-    onSuccess: () => { setComment(""); qc.invalidateQueries({ queryKey: ["document", id] }); },
+    onSuccess: () => { 
+      setComment(""); 
+      qc.invalidateQueries({ queryKey: ["document", id] }); 
+    },
     onError: () => toast.error("Failed to add comment"),
   });
 
   const restoreMutation = useMutation({
     mutationFn: (versionId: string) => documentsAPI.restoreVersion(id!, versionId),
-    onSuccess: () => { toast.success("Version restored"); qc.invalidateQueries({ queryKey: ["document", id] }); },
+    onSuccess: () => { 
+      toast.success("Version restored"); 
+      qc.invalidateQueries({ queryKey: ["document", id] }); 
+    },
   });
 
   if (isLoading) {
@@ -70,6 +84,16 @@ export default function DocumentDetailPage() {
   }
 
   if (!doc) return <p className="text-gray-500">Document not found.</p>;
+
+  // Permission checks
+  const canView = true; // We already reached here
+  const canEdit = user?.role === "admin" || (doc as any).permissions?.includes("edit") || false;
+
+  const canComment = user?.role === "admin" || (doc as any).permissions?.includes("comment") || false;
+
+  const canSubmit = (doc.status === "draft" || doc.status === "rejected") && canEdit;
+  const canArchive = doc.status === "approved" && 
+                     (user?.role === "admin" || (doc as any).permissions?.includes("archive"));
 
   const tabs = [
     { id: "preview", label: "Preview" },
@@ -97,18 +121,31 @@ export default function DocumentDetailPage() {
           </div>
           <p className="text-sm text-gray-500 mt-1 font-mono">{doc.reference_number}</p>
         </div>
-        <div className="flex gap-2 flex-shrink-0">
-          {doc.status === "draft" || doc.status === "rejected" ? (
+        
+        <div className="flex gap-2 flex-shrink-0 flex-wrap justify-end">
+          {(doc.status === "draft" || doc.status === "rejected") && (
+            <button
+              onClick={() => setShowEdit(!showEdit)}
+              className="btn-secondary"
+              disabled={!canEdit}
+            >
+              <Edit2 className="w-4 h-4" />
+              {showEdit ? "Cancel" : "Edit details"}
+            </button>
+          )}
+
+          {(doc.status === "draft" || doc.status === "rejected") && canSubmit && (
             <button
               onClick={() => submitMutation.mutate()}
-              disabled={submitMutation.isPending}
+              disabled={submitMutation.isPending || !canSubmit}
               className="btn-primary"
             >
               {submitMutation.isPending && <Loader2 className="w-4 h-4 animate-spin" />}
               <Send className="w-4 h-4" /> Submit for approval
             </button>
-          ) : null}
-          {doc.status === "approved" && (
+          )}
+
+          {doc.status === "approved" && canArchive && (
             <button
               onClick={() => archiveMutation.mutate()}
               disabled={archiveMutation.isPending}
@@ -172,6 +209,13 @@ export default function DocumentDetailPage() {
               ))}
             </dl>
           </div>
+
+          {showEdit && (
+            <MetadataEditPanel
+              document={doc}
+              onClose={() => setShowEdit(false)}
+            />
+          )}
 
           {/* Dynamic metadata */}
           {doc.metadata && Object.keys(doc.metadata).length > 0 && (
@@ -265,13 +309,7 @@ export default function DocumentDetailPage() {
 
           {activeTab === "comments" && (
             <div className="space-y-4">
-              {doc.comments?.map((c: {
-                id: string;
-                author: { first_name: string; last_name: string };
-                content: string;
-                is_internal: boolean;
-                created_at: string;
-              }) => (
+              {doc.comments?.map((c) => (
                 <div key={c.id} className={`card p-4 ${c.is_internal ? "border-l-4 border-amber-400" : ""}`}>
                   <div className="flex items-center gap-2 mb-2">
                     <span className="text-sm font-medium text-gray-900">
@@ -294,10 +332,11 @@ export default function DocumentDetailPage() {
                   rows={3}
                   className="input"
                   placeholder="Add a comment…"
+                  disabled={!canComment}
                 />
                 <button
                   onClick={() => comment.trim() && commentMutation.mutate(comment.trim())}
-                  disabled={!comment.trim() || commentMutation.isPending}
+                  disabled={!comment.trim() || commentMutation.isPending || !canComment}
                   className="btn-primary"
                 >
                   {commentMutation.isPending && <Loader2 className="w-4 h-4 animate-spin" />}
@@ -309,14 +348,7 @@ export default function DocumentDetailPage() {
 
           {activeTab === "audit" && (
             <div className="space-y-2">
-              {auditLogs?.map((log: {
-                id: string;
-                event: string;
-                actor_name: string;
-                timestamp: string;
-                ip_address: string;
-                changes: Record<string, unknown>;
-              }) => (
+              {auditLogs?.map((log: any) => (
                 <div key={log.id} className="card p-3 flex items-start gap-3">
                   <ShieldCheck className="w-4 h-4 text-brand-500 mt-0.5 flex-shrink-0" />
                   <div className="flex-1 min-w-0">

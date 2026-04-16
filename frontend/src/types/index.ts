@@ -81,9 +81,12 @@ export interface UserSummary {
 export interface WorkflowTask {
   id: string;
   step: { name: string; order: number };
-  workflow_instance: {
-    document: { id: string; title: string; reference_number: string };
+  workflow_instance?: {
+    document?: { id: string; title: string; reference_number: string };
   };
+  document_id?: string;
+  document_title?: string;
+  document_ref?: string;
   status: "pending" | "in_progress" | "approved" | "rejected";
   due_at: string | null;
 }

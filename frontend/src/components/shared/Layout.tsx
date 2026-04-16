@@ -4,9 +4,10 @@ import {
   GitBranch, ShieldCheck, Settings, LogOut,
   Bell, Users, Building2, UserCircle, Shield,
 } from "lucide-react";
-import { useAuthStore } from "@/store/authStore";
+import { useAuthStore } from "../../store/authStore";
 import { useQuery } from "@tanstack/react-query";
-import { notificationsAPI } from "@/services/api";
+import { notificationsAPI } from "../../services/api";
+import { FlaxemLogo } from "./FlaxemLogo";
 import clsx from "clsx";
 
 interface NavItem {
@@ -27,11 +28,11 @@ const mainNav: NavItem[] = [
 ];
 
 const adminNav: NavItem[] = [
-  { to: "/users",       icon: Users,      label: "Users",       roles: ["admin"] },
-  { to: "/departments", icon: Building2,  label: "Departments", roles: ["admin"] },
-  { to: "/groups",      icon: Shield,     label: "Groups",      roles: ["admin"] },
-  { to: "/audit",       icon: ShieldCheck, label: "Audit trail", roles: ["admin", "auditor"] },
-  { to: "/admin",       icon: Settings,   label: "Settings",    roles: ["admin"] },
+  { to: "/admin/users",       icon: Users,      label: "Users",       roles: ["admin"] },
+  { to: "/admin/departments", icon: Building2,  label: "Departments", roles: ["admin"] },
+  { to: "/admin/groups",      icon: Shield,     label: "Groups",      roles: ["admin"] },
+  { to: "/audit",             icon: ShieldCheck, label: "Audit trail", roles: ["admin", "auditor"] },
+  { to: "/admin/settings",    icon: Settings,   label: "Settings",    roles: ["admin"] },
 ];
 
 export default function Layout() {
@@ -53,41 +54,44 @@ export default function Layout() {
 
   return (
     <div className="flex h-screen bg-gray-50">
-      {/* Sidebar */}
-      <aside className="w-60 flex-shrink-0 bg-slate-900 flex flex-col shadow-xl">
+      {/* Sidebar - Flaxem Blue */}
+      <aside className="w-60 flex-shrink-0 bg-gradient-to-b from-blue-900 to-blue-800 flex flex-col shadow-xl">
         {/* Logo Section */}
-        <div className="h-16 flex items-center px-5 border-b border-slate-800">
-          <div className="bg-indigo-600 p-1.5 rounded-lg mr-3">
-            <FileText className="w-5 h-5 text-white flex-shrink-0" />
-          </div>
-          <span className="text-white font-bold text-lg tracking-tight">FSE-DMS</span>
+        <div className="h-16 flex items-center px-4 border-b border-blue-700">
+          <FlaxemLogo variant="light" />
         </div>
 
         {/* Navigation */}
         <nav className="flex-1 px-3 py-4 overflow-y-auto space-y-0.5">
-          {mainNav.map(({ to, icon: Icon, label, exact }) => (
-            <NavLink
-              key={to}
-              to={to}
-              end={exact}
-              className={({ isActive }) =>
-                clsx(
-                  "flex items-center gap-3 px-3 py-2 rounded-lg text-sm font-medium transition-colors",
-                  isActive
-                    ? "bg-indigo-600 text-white shadow-sm"
-                    : "text-slate-400 hover:bg-slate-800 hover:text-white"
-                )
-              }
-            >
-              <Icon className="w-4 h-4 flex-shrink-0" />
-              {label}
-            </NavLink>
-          ))}
+          {mainNav.map(({ to, icon: Icon, label, exact, roles }) => {
+            // Filter navigation by roles
+            if (roles && !user) return null;
+            if (roles && user && !roles.includes(user.role)) return null;
+
+            return (
+              <NavLink
+                key={to}
+                to={to}
+                end={exact}
+                className={({ isActive }) =>
+                  clsx(
+                    "flex items-center gap-3 px-3 py-2 rounded-lg text-sm font-medium transition-colors",
+                    isActive
+                      ? "bg-red-600 text-white shadow-md"
+                      : "text-blue-100 hover:bg-blue-700 hover:text-white"
+                  )
+                }
+              >
+                <Icon className="w-4 h-4 flex-shrink-0" />
+                {label}
+              </NavLink>
+            );
+          })}
 
           {visibleAdmin.length > 0 && (
             <>
               <div className="pt-4 pb-1 px-3">
-                <p className="text-[10px] font-semibold uppercase tracking-widest text-slate-500">
+                <p className="text-[10px] font-semibold uppercase tracking-widest text-blue-300">
                   Administration
                 </p>
               </div>
@@ -99,8 +103,8 @@ export default function Layout() {
                     clsx(
                       "flex items-center gap-3 px-3 py-2 rounded-lg text-sm font-medium transition-colors",
                       isActive
-                        ? "bg-indigo-600 text-white shadow-sm"
-                        : "text-slate-400 hover:bg-slate-800 hover:text-white"
+                        ? "bg-red-600 text-white shadow-md"
+                        : "text-blue-100 hover:bg-blue-700 hover:text-white"
                     )
                   }
                 >
@@ -113,15 +117,15 @@ export default function Layout() {
         </nav>
 
         {/* Footer / User Profile Section */}
-        <div className="p-3 border-t border-slate-800 space-y-1">
+        <div className="p-3 border-t border-blue-700 space-y-1">
           <NavLink
             to="/profile"
             className={({ isActive }) =>
               clsx(
                 "flex items-center gap-2 px-3 py-2 rounded-lg text-sm transition-colors w-full",
                 isActive
-                  ? "bg-slate-800 text-white"
-                  : "text-slate-400 hover:bg-slate-800 hover:text-white"
+                  ? "bg-blue-700 text-white"
+                  : "text-blue-100 hover:bg-blue-700 hover:text-white"
               )
             }
           >
@@ -130,18 +134,18 @@ export default function Layout() {
           </NavLink>
           
           <div className="flex items-center gap-3 px-3 py-1.5">
-            <div className="w-8 h-8 rounded-full bg-indigo-500 flex items-center justify-center text-white text-xs font-bold flex-shrink-0 border-2 border-slate-700">
+            <div className="w-8 h-8 rounded-full bg-red-600 flex items-center justify-center text-white text-xs font-bold flex-shrink-0 border-2 border-blue-600">
               {user?.first_name?.[0]}{user?.last_name?.[0]}
             </div>
             <div className="flex-1 min-w-0">
               <p className="text-white text-xs font-semibold truncate leading-tight">
                 {user?.first_name} {user?.last_name}
               </p>
-              <p className="text-slate-500 text-[10px] capitalize font-medium">{user?.role}</p>
+              <p className="text-blue-200 text-[10px] capitalize font-medium">{user?.role}</p>
             </div>
             <button
               onClick={() => { logout(); navigate("/login"); }}
-              className="text-slate-400 hover:text-white transition-colors"
+              className="text-blue-200 hover:text-white transition-colors"
               title="Sign out"
             >
               <LogOut className="w-4 h-4" />
@@ -152,15 +156,15 @@ export default function Layout() {
 
       {/* Main Content Area */}
       <div className="flex-1 flex flex-col min-w-0">
-        <header className="h-14 bg-white border-b border-gray-200 flex items-center justify-end px-6 gap-3 flex-shrink-0 shadow-sm">
+        <header className="h-14 bg-white border-b border-red-600 flex items-center justify-end px-6 gap-3 flex-shrink-0 shadow-sm">
           <button
             onClick={() => navigate("/notifications")}
-            className="relative text-gray-500 hover:text-gray-700 p-1"
+            className="relative text-gray-500 hover:text-blue-600 p-1 transition-colors"
             title="Notifications"
           >
             <Bell className="w-5 h-5" />
             {unread > 0 && (
-              <span className="absolute -top-0.5 -right-0.5 bg-red-500 text-white text-[9px] font-bold w-4 h-4 rounded-full flex items-center justify-center">
+              <span className="absolute -top-0.5 -right-0.5 bg-red-600 text-white text-[9px] font-bold w-4 h-4 rounded-full flex items-center justify-center">
                 {unread > 9 ? "9+" : unread}
               </span>
             )}
