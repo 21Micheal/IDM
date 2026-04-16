@@ -87,13 +87,14 @@ export default function DocumentDetailPage() {
 
   // Permission checks
   const canView = true; // We already reached here
-  const canEdit = user?.role === "admin" || (doc as any).permissions?.includes("edit") || false;
+  const permissions = doc.permissions ?? [];
+  const canEdit = user?.role === "admin" || permissions.includes("edit") || false;
+  const canComment = user?.role === "admin" || permissions.includes("comment") || false;
+  const canApprove = user?.role === "admin" || permissions.includes("approve") || false;
+  const canArchive = user?.role === "admin" || permissions.includes("archive") || false;
+  const canRestoreVersion = user?.role === "admin" || permissions.includes("upload") || false;
 
-  const canComment = user?.role === "admin" || (doc as any).permissions?.includes("comment") || false;
-
-  const canSubmit = (doc.status === "draft" || doc.status === "rejected") && canEdit;
-  const canArchive = doc.status === "approved" && 
-                     (user?.role === "admin" || (doc as any).permissions?.includes("archive"));
+  const canSubmit = (doc.status === "draft" || doc.status === "rejected") && canApprove;
 
   const tabs = [
     { id: "preview", label: "Preview" },
@@ -291,7 +292,7 @@ export default function DocumentDetailPage() {
                       <p className="text-xs text-gray-600 mt-1">{v.change_summary}</p>
                     )}
                   </div>
-                  {v.version_number !== doc.current_version && (
+                  {v.version_number !== doc.current_version && canRestoreVersion && (
                     <button
                       onClick={() => restoreMutation.mutate(v.id)}
                       className="btn-secondary text-xs px-2 py-1"

@@ -10,6 +10,7 @@ Key changes:
 from rest_framework import serializers
 from .models import Document, DocumentType, MetadataField, DocumentVersion, DocumentComment, Tag
 from apps.accounts.serializers import UserSummarySerializer
+from apps.accounts.models import GroupAction
 
 
 class TagSerializer(serializers.ModelSerializer):
@@ -68,6 +69,7 @@ class DocumentListSerializer(serializers.ModelSerializer):
     document_type_name = serializers.CharField(source="document_type.name", read_only=True)
     uploaded_by        = UserSummarySerializer(read_only=True)
     tags               = TagSerializer(many=True, read_only=True)
+    permissions        = serializers.SerializerMethodField()
 
     class Meta:
         model  = Document
@@ -76,8 +78,17 @@ class DocumentListSerializer(serializers.ModelSerializer):
             "document_type", "document_type_name",
             "status", "supplier", "amount", "currency", "document_date",
             "file_name", "file_size", "file_mime_type",
-            "uploaded_by", "tags", "current_version", "created_at", "updated_at",
+            "uploaded_by", "tags", "permissions", "current_version", "created_at", "updated_at",
         ]
+
+    def get_permissions(self, obj):
+        request = self.context.get("request")
+        user = getattr(request, "user", None)
+        if not user or not user.is_authenticated:
+            return []
+        if user.is_admin:
+            return [choice[0] for choice in GroupAction.choices]
+        return sorted(user.get_all_permissions_for_doctype(str(obj.document_type_id)))
 
 
 class DocumentDetailSerializer(serializers.ModelSerializer):
@@ -95,6 +106,7 @@ class DocumentDetailSerializer(serializers.ModelSerializer):
     )
     versions = DocumentVersionSerializer(many=True, read_only=True)
     comments = serializers.SerializerMethodField()
+    permissions = serializers.SerializerMethodField()
 
     class Meta:
         model  = Document
@@ -108,7 +120,7 @@ class DocumentDetailSerializer(serializers.ModelSerializer):
             "tags", "tag_ids",
             "department",
             "uploaded_by",
-            "current_version", "versions", "comments",
+            "current_version", "versions", "comments", "permissions",
             "created_at", "updated_at",
         ]
         read_only_fields = [
@@ -122,6 +134,15 @@ class DocumentDetailSerializer(serializers.ModelSerializer):
         if request and not (request.user.is_admin or request.user.is_auditor):
             qs = qs.filter(is_internal=False)
         return DocumentCommentSerializer(qs, many=True, context=self.context).data
+
+    def get_permissions(self, obj):
+        request = self.context.get("request")
+        user = getattr(request, "user", None)
+        if not user or not user.is_authenticated:
+            return []
+        if user.is_admin:
+            return [choice[0] for choice in GroupAction.choices]
+        return sorted(user.get_all_permissions_for_doctype(str(obj.document_type_id)))
 
     def validate_metadata(self, value):
         doc_type_id = self.initial_data.get("document_type_id")

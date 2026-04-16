@@ -48,8 +48,19 @@ export interface Document {
   metadata: Record<string, unknown>;
   tags: Tag[];
   uploaded_by: UserSummary;
+  permissions?: string[];
   current_version: number;
   versions: DocumentVersion[];
+  comments?: DocumentComment[];
+  created_at: string;
+  updated_at: string;
+}
+
+export interface DocumentComment {
+  id: string;
+  author: UserSummary;
+  content: string;
+  is_internal: boolean;
   created_at: string;
   updated_at: string;
 }
