@@ -1,16 +1,15 @@
 import { useState } from "react";
-import { useQuery, useMutation } from "@tanstack/react-query";
+import { useMutation } from "@tanstack/react-query";
 import { useForm } from "react-hook-form";
 import { zodResolver } from "@hookform/resolvers/zod";
 import { z } from "zod";
-import { authAPI, profileAPI } from "@/services/api";
+import { profileAPI } from "@/services/api";
 import { useAuthStore } from "@/store/authStore";
 import {
-  Shield, Key, Smartphone, CheckCircle,
+  Shield, Key, Smartphone,
   Loader2, Eye, EyeOff, AlertTriangle,
 } from "lucide-react";
 import { toast } from "react-toastify";
-import { format } from "date-fns";
 
 const pwSchema = z.object({
   old_password:     z.string().min(1, "Required"),
@@ -32,10 +31,6 @@ const ROLE_LABELS: Record<string, string> = {
 export default function ProfilePage() {
   const user = useAuthStore((s) => s.user);
   const [showPw, setShowPw] = useState(false);
-  const [mfaStep, setMfaStep] = useState<"idle" | "qr" | "confirm" | "done">("idle");
-  const [qrData, setQrData] = useState<{ qr_code: string; config_url: string } | null>(null);
-  const [otpInput, setOtpInput] = useState("");
-  const [disablePw, setDisablePw] = useState("");
 
   const { register, handleSubmit, reset, formState: { errors } } = useForm<PwForm>({
     resolver: zodResolver(pwSchema),
@@ -54,32 +49,18 @@ export default function ProfilePage() {
     },
   });
 
-  const setupMFAMutation = useMutation({
-    mutationFn: () => profileAPI.setupMFA(),
-    onSuccess: ({ data }) => {
-      setQrData(data);
-      setMfaStep("qr");
-    },
-    onError: () => toast.error("Could not start MFA setup"),
-  });
-
-  const confirmMFAMutation = useMutation({
-    mutationFn: () => profileAPI.confirmMFA(otpInput),
+  const toggleMFAMutation = useMutation({
+    mutationFn: (enable: boolean) => profileAPI.toggleMFA(enable),
     onSuccess: () => {
-      toast.success("MFA enabled successfully");
-      setMfaStep("done");
+      toast.success("MFA settings updated");
+      // Keep local auth user in sync with backend response expectation
+      useAuthStore.setState((state) =>
+        state.user
+          ? { user: { ...state.user, mfa_enabled: !state.user.mfa_enabled } }
+          : state
+      );
     },
-    onError: () => toast.error("Invalid code — try again"),
-  });
-
-  const disableMFAMutation = useMutation({
-    mutationFn: () => profileAPI.disableMFA(disablePw),
-    onSuccess: () => {
-      toast.success("MFA disabled");
-      setDisablePw("");
-    },
-    onError: (err: { response?: { data?: { detail?: string } } }) =>
-      toast.error(err?.response?.data?.detail || "Failed to disable MFA"),
+    onError: () => toast.error("Failed to update MFA"),
   });
 
   if (!user) return null;
@@ -197,67 +178,19 @@ export default function ProfilePage() {
           )}
         </div>
         <p className="text-sm text-gray-500 mb-5">
-          Use an authenticator app (Google Authenticator, Authy) to generate
-          one-time codes at login.
+          Email OTP is used as your second authentication factor during login.
         </p>
 
-        {/* Not enabled — setup flow */}
+        {/* Not enabled */}
         {!user.mfa_enabled && (
-          <>
-            {mfaStep === "idle" && (
-              <button
-                onClick={() => setupMFAMutation.mutate()}
-                disabled={setupMFAMutation.isPending}
-                className="btn-primary"
-              >
-                {setupMFAMutation.isPending && <Loader2 className="w-4 h-4 animate-spin" />}
-                <Shield className="w-4 h-4" /> Enable MFA
-              </button>
-            )}
-
-            {mfaStep === "qr" && qrData && (
-              <div className="space-y-4">
-                <p className="text-sm text-gray-700 font-medium">
-                  1. Scan this QR code with your authenticator app:
-                </p>
-                <img
-                  src={qrData.qr_code}
-                  alt="MFA QR code"
-                  className="w-48 h-48 border border-gray-200 rounded-lg"
-                />
-                <p className="text-sm text-gray-700 font-medium">
-                  2. Enter the 6-digit code from your app to confirm:
-                </p>
-                <div className="flex gap-3 items-start">
-                  <input
-                    value={otpInput}
-                    onChange={(e) => setOtpInput(e.target.value.replace(/\D/g, "").slice(0, 6))}
-                    className="input w-36 text-center text-xl tracking-widest font-mono"
-                    placeholder="000000"
-                    maxLength={6}
-                    autoFocus
-                  />
-                  <button
-                    onClick={() => confirmMFAMutation.mutate()}
-                    disabled={otpInput.length !== 6 || confirmMFAMutation.isPending}
-                    className="btn-primary"
-                  >
-                    {confirmMFAMutation.isPending && <Loader2 className="w-4 h-4 animate-spin" />}
-                    Verify & enable
-                  </button>
-                </div>
-              </div>
-            )}
-
-            {mfaStep === "done" && (
-              <div className="flex items-center gap-2 text-green-600">
-                <CheckCircle className="w-5 h-5" />
-                <span className="text-sm font-medium">
-                  MFA is now active. You'll be asked for a code at your next login.
-                </span>
-              </div>
-            )}
-          </>
+          <button
+            onClick={() => toggleMFAMutation.mutate(true)}
+            disabled={toggleMFAMutation.isPending}
+            className="btn-primary"
+          >
+            {toggleMFAMutation.isPending && <Loader2 className="w-4 h-4 animate-spin" />}
+            <Shield className="w-4 h-4" /> Enable MFA
+          </button>
         )}
 
         {/* Already enabled — show disable option */}
@@ -270,23 +203,14 @@ export default function ProfilePage() {
                 are switching authenticator apps.
               </p>
             </div>
-            <div className="flex gap-3 items-center">
-              <input
-                type="password"
-                value={disablePw}
-                onChange={(e) => setDisablePw(e.target.value)}
-                className="input w-64"
-                placeholder="Confirm with your password"
-              />
-              <button
-                onClick={() => disableMFAMutation.mutate()}
-                disabled={!disablePw || disableMFAMutation.isPending}
-                className="btn-danger"
-              >
-                {disableMFAMutation.isPending && <Loader2 className="w-4 h-4 animate-spin" />}
-                Disable MFA
-              </button>
-            </div>
+            <button
+              onClick={() => toggleMFAMutation.mutate(false)}
+              disabled={toggleMFAMutation.isPending}
+              className="btn-danger"
+            >
+              {toggleMFAMutation.isPending && <Loader2 className="w-4 h-4 animate-spin" />}
+              Disable MFA
+            </button>
           </div>
         )}
       </div>

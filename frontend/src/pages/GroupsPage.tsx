@@ -33,7 +33,7 @@ const ROLE_COLORS: Record<string, string> = {
   viewer:  "bg-gray-100 text-gray-600",
 };
 
-// ── Permission matrix ─────────────────────────────────────────────────────────
+// ── Permission Matrix ────────────────────────────────────────────────────────
 function PermissionMatrix({
   group,
   docTypes,
@@ -45,7 +45,6 @@ function PermissionMatrix({
   onSave: (perms: { document_type_id: string | null; action: string }[]) => void;
   isSaving: boolean;
 }) {
-  // Build initial state from current permissions
   const init: Record<string, Set<string>> = { "__all__": new Set() };
   docTypes.forEach((dt) => { init[dt.id] = new Set(); });
   group.permissions.forEach((p) => {
@@ -59,7 +58,7 @@ function PermissionMatrix({
   const toggle = (dtKey: string, action: string) => {
     setMatrix((prev) => {
       const next = { ...prev };
-      const set  = new Set(prev[dtKey] ?? []);
+      const set = new Set(prev[dtKey] ?? []);
       set.has(action) ? set.delete(action) : set.add(action);
       next[dtKey] = set;
       return next;
@@ -69,8 +68,8 @@ function PermissionMatrix({
   const toggleAll = (dtKey: string) => {
     setMatrix((prev) => {
       const current = prev[dtKey] ?? new Set();
-      const next    = { ...prev };
-      next[dtKey]   = current.size === ALL_ACTIONS.length
+      const next = { ...prev };
+      next[dtKey] = current.size === ALL_ACTIONS.length
         ? new Set()
         : new Set(ALL_ACTIONS.map((a) => a.value));
       return next;
@@ -96,63 +95,63 @@ function PermissionMatrix({
   ];
 
   return (
-    <div className="space-y-3">
-      <div className="flex items-center gap-2 text-sm text-gray-500 bg-gray-50 rounded-lg p-3">
-        <Info className="w-4 h-4 flex-shrink-0" />
+    <div className="space-y-6">
+      <div className="flex items-center gap-3 text-sm text-gray-600 bg-gray-50 rounded-2xl p-4">
+        <Info className="w-5 h-5 flex-shrink-0 text-brand-500" />
         <span>
-          Tick the actions each document type's members can perform.
-          "All document types" applies as a fallback when no specific row is set.
+          Select the actions members of this group can perform for each document type.
+          "All document types" acts as a fallback.
         </span>
       </div>
 
-      <div className="overflow-x-auto rounded-lg border border-gray-200">
-        <table className="w-full text-xs">
+      <div className="overflow-x-auto rounded-2xl border border-gray-200">
+        <table className="w-full text-sm min-w-[900px]">
           <thead>
             <tr className="bg-gray-50 border-b border-gray-200">
-              <th className="text-left px-4 py-3 font-medium text-gray-600 w-48">Document type</th>
+              <th className="text-left px-6 py-4 font-medium text-gray-600 w-56">Document Type</th>
               {ALL_ACTIONS.map((a) => (
-                <th key={a.value} className="px-2 py-3 font-medium text-gray-600 text-center w-20" title={a.description}>
+                <th key={a.value} className="px-4 py-4 font-medium text-gray-600 text-center w-24" title={a.description}>
                   {a.label}
                 </th>
               ))}
-              <th className="px-3 py-3 font-medium text-gray-500 text-center">All</th>
+              <th className="px-6 py-4 font-medium text-gray-500 text-center w-20">All</th>
             </tr>
           </thead>
           <tbody className="divide-y divide-gray-100">
             {rows.map(({ key, label, sublabel }, idx) => (
-              <tr key={key} className={clsx("hover:bg-gray-50", idx === 0 && "bg-brand-50/40")}>
-                <td className="px-4 py-2.5">
-                  <p className={clsx("font-medium", idx === 0 ? "text-brand-700" : "text-gray-800")}>
+              <tr key={key} className={clsx("hover:bg-gray-50", idx === 0 && "bg-brand-50/30")}>
+                <td className="px-6 py-4">
+                  <p className={clsx("font-medium", idx === 0 ? "text-brand-700" : "text-gray-900")}>
                     {label}
                   </p>
-                  <p className="text-gray-400 text-[10px] mt-0.5">{sublabel}</p>
+                  <p className="text-xs text-gray-400 mt-0.5">{sublabel}</p>
                 </td>
                 {ALL_ACTIONS.map((a) => {
                   const checked = matrix[key]?.has(a.value) ?? false;
                   return (
-                    <td key={a.value} className="px-2 py-2.5 text-center">
+                    <td key={a.value} className="px-4 py-4 text-center">
                       <button
                         type="button"
                         onClick={() => toggle(key, a.value)}
                         className={clsx(
-                          "w-5 h-5 rounded border-2 flex items-center justify-center mx-auto transition-colors",
+                          "w-6 h-6 rounded-lg border-2 flex items-center justify-center mx-auto transition-all",
                           checked
                             ? "bg-brand-600 border-brand-600"
                             : "border-gray-300 hover:border-brand-400"
                         )}
                       >
-                        {checked && <Check className="w-3 h-3 text-white" strokeWidth={3} />}
+                        {checked && <Check className="w-4 h-4 text-white" strokeWidth={3} />}
                       </button>
                     </td>
                   );
                 })}
-                <td className="px-3 py-2.5 text-center">
+                <td className="px-6 py-4 text-center">
                   <button
                     type="button"
                     onClick={() => toggleAll(key)}
-                    className="text-[10px] text-brand-600 hover:underline"
+                    className="text-xs font-medium text-brand-600 hover:text-brand-700 hover:underline"
                   >
-                    {(matrix[key]?.size ?? 0) === ALL_ACTIONS.length ? "None" : "All"}
+                    {(matrix[key]?.size ?? 0) === ALL_ACTIONS.length ? "Clear" : "Select All"}
                   </button>
                 </td>
               </tr>
@@ -162,16 +161,20 @@ function PermissionMatrix({
       </div>
 
       <div className="flex justify-end">
-        <button onClick={handleSave} disabled={isSaving} className="btn-primary flex items-center gap-2">
+        <button 
+          onClick={handleSave} 
+          disabled={isSaving} 
+          className="btn-primary flex items-center gap-2 px-8"
+        >
           {isSaving && <Loader2 className="w-4 h-4 animate-spin" />}
-          {isSaving ? "Saving permissions..." : "Save permissions"}
+          {isSaving ? "Saving..." : "Save Permissions"}
         </button>
       </div>
     </div>
   );
 }
 
-// ── Group detail panel ────────────────────────────────────────────────────────
+// ── Minimal Group Detail Panel ────────────────────────────────────────────────
 function GroupDetail({
   group,
   docTypes,
@@ -181,28 +184,30 @@ function GroupDetail({
   docTypes: DocType[];
   onClose: () => void;
 }) {
-  const qc  = useQueryClient();
+  const qc = useQueryClient();
   const [tab, setTab] = useState<"permissions" | "members">("permissions");
   const [userSearch, setUserSearch] = useState("");
 
-  const { data: members } = useQuery<Member[]>({
+  const { data: members = [] } = useQuery<Member[]>({
     queryKey: ["group-members", group.id],
-    queryFn:  () => groupsAPI.members(group.id).then((r) => r.data),
+    queryFn: () => groupsAPI.members(group.id).then((r) => r.data),
   });
 
-  const { data: allUsers } = useQuery<User[]>({
+  const { data: allUsers = [] } = useQuery<User[]>({
     queryKey: ["users-search", userSearch],
-    queryFn:  () => usersAPI.list({ search: userSearch || undefined, page_size: 20 }).then((r) => r.data.results ?? r.data),
-    enabled:  tab === "members",
+    queryFn: () => usersAPI.list({ 
+      search: userSearch || undefined, 
+      page_size: 20 
+    }).then((r) => r.data.results ?? r.data),
+    enabled: tab === "members",
   });
 
   const setPermsMutation = useMutation({
     mutationFn: (perms: { document_type_id: string | null; action: string }[]) =>
       groupsAPI.setPermissions(group.id, perms),
     onSuccess: () => {
-      toast.success("Permissions updated successfully");
+      toast.success("Permissions saved successfully");
       qc.invalidateQueries({ queryKey: ["groups"] });
-      qc.invalidateQueries({ queryKey: ["group-members", group.id] });
     },
     onError: () => toast.error("Failed to save permissions"),
   });
@@ -224,44 +229,49 @@ function GroupDetail({
       qc.invalidateQueries({ queryKey: ["group-members", group.id] });
       qc.invalidateQueries({ queryKey: ["groups"] });
     },
+    onError: () => toast.error("Failed to remove member"),
   });
 
   const memberIds = new Set(members?.map((m) => m.user.id) ?? []);
 
   return (
-    <div className="fixed inset-0 z-40 flex">
-      {/* Backdrop */}
-      <div className="flex-1 bg-black/40" onClick={onClose} />
-
-      {/* Panel */}
-      <div className="w-full max-w-3xl bg-white shadow-2xl flex flex-col overflow-hidden">
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 p-4">
+      {/* Minimal centered panel */}
+      <div className="w-full max-w-4xl bg-white shadow-2xl rounded-3xl overflow-hidden max-h-[92vh] flex flex-col">
+        
         {/* Header */}
-        <div className="flex items-center justify-between px-6 py-4 border-b border-gray-200">
-          <div>
-            <h2 className="font-semibold text-gray-900 text-lg">{group.name}</h2>
-            {group.description && (
-              <p className="text-sm text-gray-500 mt-0.5">{group.description}</p>
-            )}
+        <div className="flex items-center justify-between px-8 py-5 border-b border-gray-100">
+          <div className="flex items-center gap-4">
+            <div className="w-11 h-11 rounded-2xl bg-brand-100 flex items-center justify-center">
+              <Shield className="w-6 h-6 text-brand-600" />
+            </div>
+            <div>
+              <h2 className="font-semibold text-2xl text-gray-900">{group.name}</h2>
+              {group.description && <p className="text-sm text-gray-500">{group.description}</p>}
+            </div>
           </div>
-          <button onClick={onClose} className="text-gray-400 hover:text-gray-600">
-            <X className="w-5 h-5" />
+          <button 
+            onClick={onClose} 
+            className="p-2 text-gray-400 hover:text-gray-600 hover:bg-gray-100 rounded-xl transition-colors"
+          >
+            <X className="w-6 h-6" />
           </button>
         </div>
 
         {/* Tabs */}
-        <div className="border-b border-gray-200 px-6">
-          <nav className="-mb-px flex gap-0">
+        <div className="border-b border-gray-100 px-8">
+          <nav className="-mb-px flex gap-8">
             {[
               { id: "permissions", label: "Permissions", icon: Shield },
-              { id: "members",     label: `Members (${group.member_count})`, icon: Users },
+              { id: "members", label: `Members (${group.member_count})`, icon: Users },
             ].map(({ id, label, icon: Icon }) => (
               <button
                 key={id}
                 onClick={() => setTab(id as typeof tab)}
                 className={clsx(
-                  "flex items-center gap-2 px-4 py-3 text-sm font-medium border-b-2 transition-colors",
+                  "flex items-center gap-2 px-1 py-4 text-sm font-medium border-b-2 transition-colors -mb-px",
                   tab === id
-                    ? "border-brand-500 text-brand-600"
+                    ? "border-brand-600 text-brand-600"
                     : "border-transparent text-gray-500 hover:text-gray-700"
                 )}
               >
@@ -272,8 +282,8 @@ function GroupDetail({
           </nav>
         </div>
 
-        {/* Content */}
-        <div className="flex-1 overflow-y-auto p-6">
+        {/* Content Area */}
+        <div className="flex-1 overflow-y-auto p-8">
           {tab === "permissions" && (
             <PermissionMatrix
               group={group}
@@ -284,70 +294,70 @@ function GroupDetail({
           )}
 
           {tab === "members" && (
-            <div className="space-y-5">
-              {/* Current members */}
+            <div className="space-y-10">
+              {/* Current Members */}
               <div>
-                <h3 className="font-medium text-gray-900 text-sm mb-3">
-                  Current members ({members?.length ?? 0})
-                </h3>
-                <div className="space-y-2">
+                <h3 className="font-semibold text-lg text-gray-900 mb-5">Current Members</h3>
+                <div className="space-y-3">
                   {members?.map((m) => (
-                    <div key={m.id} className="flex items-center gap-3 p-3 rounded-lg border border-gray-100 hover:bg-gray-50">
-                      <div className="w-8 h-8 rounded-full bg-brand-100 flex items-center justify-center text-brand-700 text-xs font-semibold flex-shrink-0">
+                    <div key={m.id} className="flex items-center gap-4 p-5 bg-white border border-gray-100 rounded-2xl hover:border-gray-200 group">
+                      <div className="w-10 h-10 rounded-2xl bg-brand-100 flex items-center justify-center text-brand-700 text-sm font-semibold">
                         {m.user.full_name.split(" ").map((n) => n[0]).join("").slice(0, 2)}
                       </div>
                       <div className="flex-1 min-w-0">
-                        <p className="text-sm font-medium text-gray-900">{m.user.full_name}</p>
-                        <p className="text-xs text-gray-500">{m.user.email}</p>
+                        <p className="font-medium text-gray-900">{m.user.full_name}</p>
+                        <p className="text-sm text-gray-500">{m.user.email}</p>
                       </div>
-                      <span className={clsx("badge text-xs", ROLE_COLORS[m.user.role])}>
-                        {m.user.role}
-                      </span>
-                      {m.expires_at && (
-                        <span className="text-xs text-gray-400">
-                          Expires {new Date(m.expires_at).toLocaleDateString()}
+                      <div className="flex items-center gap-4">
+                        <span className={clsx("badge text-xs", ROLE_COLORS[m.user.role])}>
+                          {m.user.role}
                         </span>
-                      )}
-                      <button
-                        onClick={() => removeMemberMutation.mutate(m.user.id)}
-                        className="text-gray-400 hover:text-red-500 transition-colors ml-1"
-                        title="Remove from group"
-                      >
-                        <X className="w-4 h-4" />
-                      </button>
+                        {m.expires_at && (
+                          <span className="text-xs text-gray-400">
+                            Expires {new Date(m.expires_at).toLocaleDateString()}
+                          </span>
+                        )}
+                        <button
+                          onClick={() => removeMemberMutation.mutate(m.user.id)}
+                          className="opacity-0 group-hover:opacity-100 text-red-500 hover:text-red-600 p-2 rounded-xl hover:bg-red-50 transition-all"
+                        >
+                          <X className="w-5 h-5" />
+                        </button>
+                      </div>
                     </div>
                   ))}
                   {!members?.length && (
-                    <p className="text-sm text-gray-400 text-center py-4">
-                      No members yet. Add users from the list below.
-                    </p>
+                    <div className="text-center py-12 text-gray-400 border border-dashed border-gray-200 rounded-2xl">
+                      No members yet. Add some from below.
+                    </div>
                   )}
                 </div>
               </div>
 
-              {/* Add members */}
+              {/* Add Members */}
               <div>
-                <h3 className="font-medium text-gray-900 text-sm mb-3">Add members</h3>
+                <h3 className="font-semibold text-lg text-gray-900 mb-5">Add Members</h3>
                 <input
                   value={userSearch}
                   onChange={(e) => setUserSearch(e.target.value)}
-                  className="input mb-3"
-                  placeholder="Search users by name or email…"
+                  className="input mb-5"
+                  placeholder="Search users by name or email..."
                 />
-                <div className="space-y-2 max-h-64 overflow-y-auto">
+
+                <div className="max-h-96 overflow-y-auto border border-gray-100 rounded-2xl divide-y divide-gray-100">
                   {allUsers
                     ?.filter((u) => !memberIds.has(u.id))
                     .map((u) => (
                       <div
                         key={u.id}
-                        className="flex items-center gap-3 p-3 rounded-lg border border-gray-100 hover:bg-gray-50"
+                        className="flex items-center gap-4 p-5 hover:bg-gray-50 transition-colors"
                       >
-                        <div className="w-8 h-8 rounded-full bg-gray-100 flex items-center justify-center text-gray-600 text-xs font-semibold flex-shrink-0">
+                        <div className="w-10 h-10 rounded-2xl bg-gray-100 flex items-center justify-center text-gray-600 text-sm font-semibold">
                           {u.full_name.split(" ").map((n) => n[0]).join("").slice(0, 2)}
                         </div>
                         <div className="flex-1 min-w-0">
-                          <p className="text-sm font-medium text-gray-900">{u.full_name}</p>
-                          <p className="text-xs text-gray-500">{u.email}</p>
+                          <p className="font-medium text-gray-900">{u.full_name}</p>
+                          <p className="text-sm text-gray-500">{u.email}</p>
                         </div>
                         <span className={clsx("badge text-xs", ROLE_COLORS[u.role])}>
                           {u.role}
@@ -355,9 +365,9 @@ function GroupDetail({
                         <button
                           onClick={() => addMemberMutation.mutate(u.id)}
                           disabled={addMemberMutation.isPending}
-                          className="btn-primary text-xs px-2 py-1 ml-1"
+                          className="btn-primary text-sm px-6 py-2 flex items-center gap-2"
                         >
-                          <UserPlus className="w-3.5 h-3.5" /> Add
+                          <UserPlus className="w-4 h-4" /> Add
                         </button>
                       </div>
                     ))}
@@ -371,28 +381,28 @@ function GroupDetail({
   );
 }
 
-// ── Main page ─────────────────────────────────────────────────────────────────
+// ── Main GroupsPage ───────────────────────────────────────────────────────────
 export default function GroupsPage() {
   const qc = useQueryClient();
   const [selectedGroup, setSelected] = useState<Group | null>(null);
-  const [showCreate, setShowCreate]  = useState(false);
-  const [newName, setNewName]        = useState("");
-  const [newDesc, setNewDesc]        = useState("");
+  const [showCreate, setShowCreate] = useState(false);
+  const [newName, setNewName] = useState("");
+  const [newDesc, setNewDesc] = useState("");
 
-  const { data: groups, isLoading } = useQuery<Group[]>({
+  const { data: groups = [], isLoading } = useQuery<Group[]>({
     queryKey: ["groups"],
-    queryFn:  () => groupsAPI.list().then((r) => r.data.results ?? r.data),
+    queryFn: () => groupsAPI.list().then((r) => r.data.results ?? r.data),
   });
 
-  const { data: docTypes } = useQuery<DocType[]>({
+  const { data: docTypes = [] } = useQuery<DocType[]>({
     queryKey: ["document-types"],
-    queryFn:  () => documentTypesAPI.list().then((r) => r.data.results ?? r.data),
+    queryFn: () => documentTypesAPI.list().then((r) => r.data.results ?? r.data),
   });
 
   const createMutation = useMutation({
     mutationFn: () => groupsAPI.create({ name: newName.trim(), description: newDesc.trim() }),
     onSuccess: () => {
-      toast.success("Group created");
+      toast.success("Group created successfully");
       qc.invalidateQueries({ queryKey: ["groups"] });
       setShowCreate(false);
       setNewName("");
@@ -412,31 +422,34 @@ export default function GroupsPage() {
   });
 
   return (
-    <div className="space-y-5">
-      <div className="flex items-start justify-between">
+    <div className="max-w-6xl mx-auto py-10">
+      <div className="flex items-end justify-between mb-10">
         <div>
-          <h1 className="text-2xl font-bold text-gray-900">Permission groups</h1>
-          <p className="text-gray-500 text-sm mt-1">
-            Groups define fine-grained per-document-type access. Users can belong to multiple groups.
+          <h1 className="text-4xl font-bold text-gray-900">Permission Groups</h1>
+          <p className="text-gray-500 mt-2 text-lg">
+            Define fine-grained access control per document type
           </p>
         </div>
-        <button onClick={() => setShowCreate(true)} className="btn-primary">
-          <Plus className="w-4 h-4" /> New group
+        <button 
+          onClick={() => setShowCreate(true)} 
+          className="btn-primary flex items-center gap-2"
+        >
+          <Plus className="w-5 h-5" /> New Group
         </button>
       </div>
 
-      {/* Create form */}
+      {/* Create Form */}
       {showCreate && (
-        <div className="card p-5 space-y-3">
-          <h2 className="font-medium text-gray-900">New permission group</h2>
-          <div className="grid grid-cols-2 gap-3">
+        <div className="card p-8 max-w-lg mx-auto mb-12">
+          <h2 className="text-xl font-semibold mb-6">Create New Group</h2>
+          <div className="space-y-5">
             <div>
-              <label className="label">Group name <span className="text-red-500">*</span></label>
+              <label className="label">Group Name <span className="text-red-500">*</span></label>
               <input
                 value={newName}
                 onChange={(e) => setNewName(e.target.value)}
                 className="input"
-                placeholder="e.g. Accounts Payable"
+                placeholder="e.g. Finance Team"
                 autoFocus
               />
             </div>
@@ -446,32 +459,31 @@ export default function GroupsPage() {
                 value={newDesc}
                 onChange={(e) => setNewDesc(e.target.value)}
                 className="input"
-                placeholder="Optional — what this group is for"
+                placeholder="Optional description..."
               />
             </div>
-          </div>
-          <div className="flex gap-3">
-            <button
-              onClick={() => createMutation.mutate()}
-              disabled={!newName.trim() || createMutation.isPending}
-              className="btn-primary"
-            >
-              {createMutation.isPending && <Loader2 className="w-4 h-4 animate-spin" />}
-              Create group
-            </button>
-            <button onClick={() => setShowCreate(false)} className="btn-secondary">
-              Cancel
-            </button>
+            <div className="flex gap-3 pt-2">
+              <button
+                onClick={() => createMutation.mutate()}
+                disabled={!newName.trim() || createMutation.isPending}
+                className="btn-primary flex-1"
+              >
+                {createMutation.isPending && <Loader2 className="w-4 h-4 animate-spin" />}
+                Create Group
+              </button>
+              <button onClick={() => setShowCreate(false)} className="btn-secondary px-8">
+                Cancel
+              </button>
+            </div>
           </div>
         </div>
       )}
 
-      {/* Groups grid */}
-      <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-4">
-        {isLoading && Array.from({ length: 4 }).map((_, i) => (
-          <div key={i} className="card p-5 space-y-3 animate-pulse">
-            <div className="h-5 bg-gray-100 rounded w-2/3" />
-            <div className="h-4 bg-gray-100 rounded w-full" />
+      {/* Groups Grid */}
+      <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
+        {isLoading && Array.from({ length: 6 }).map((_, i) => (
+          <div key={i} className="card p-8 animate-pulse">
+            <div className="h-6 bg-gray-100 rounded w-3/4 mb-4" />
             <div className="h-4 bg-gray-100 rounded w-1/2" />
           </div>
         ))}
@@ -479,62 +491,57 @@ export default function GroupsPage() {
         {groups?.map((group) => (
           <div
             key={group.id}
-            className="card p-5 flex flex-col gap-3 hover:shadow-md transition-shadow cursor-pointer"
             onClick={() => setSelected(group)}
+            className="card p-8 hover:shadow-xl transition-all duration-300 cursor-pointer group border border-transparent hover:border-brand-100"
           >
-            <div className="flex items-start justify-between gap-2">
-              <div className="w-9 h-9 rounded-xl bg-brand-50 flex items-center justify-center flex-shrink-0">
-                <Shield className="w-4 h-4 text-brand-600" />
+            <div className="flex items-start justify-between">
+              <div className="flex items-center gap-4">
+                <div className="w-14 h-14 rounded-2xl bg-brand-100 flex items-center justify-center flex-shrink-0">
+                  <Shield className="w-7 h-7 text-brand-600" />
+                </div>
+                <div>
+                  <h3 className="font-semibold text-2xl text-gray-900 group-hover:text-brand-700 transition-colors">
+                    {group.name}
+                  </h3>
+                  {group.description && (
+                    <p className="text-sm text-gray-500 line-clamp-2 mt-1">{group.description}</p>
+                  )}
+                </div>
               </div>
-              <button
-                onClick={(e) => {
-                  e.stopPropagation();
-                  if (confirm(`Delete group "${group.name}"? This cannot be undone.`)) {
-                    deleteMutation.mutate(group.id);
-                  }
-                }}
-                className="text-gray-300 hover:text-red-400 transition-colors"
-              >
-                <Trash2 className="w-4 h-4" />
-              </button>
             </div>
 
-            <div>
-              <h3 className="font-semibold text-gray-900">{group.name}</h3>
-              {group.description && (
-                <p className="text-sm text-gray-500 mt-0.5 line-clamp-2">{group.description}</p>
-              )}
-            </div>
-
-            <div className="flex items-center justify-between pt-1">
-              <div className="flex gap-3 text-xs text-gray-500">
-                <span className="flex items-center gap-1">
-                  <Users className="w-3.5 h-3.5" /> {group.member_count} members
+            <div className="mt-8 flex items-center justify-between text-sm">
+              <div className="flex gap-6 text-gray-500">
+                <span className="flex items-center gap-1.5">
+                  <Users className="w-4 h-4" /> {group.member_count} members
                 </span>
-                <span className="flex items-center gap-1">
-                  <Settings2 className="w-3.5 h-3.5" /> {group.permissions.length} rules
+                <span className="flex items-center gap-1.5">
+                  <Settings2 className="w-4 h-4" /> {group.permissions.length} rules
                 </span>
               </div>
-              <ChevronRight className="w-4 h-4 text-gray-400" />
+              <ChevronRight className="w-5 h-5 text-gray-400 group-hover:text-brand-500 transition-colors" />
             </div>
           </div>
         ))}
 
         {!isLoading && !groups?.length && !showCreate && (
-          <div className="col-span-3 card p-12 text-center">
-            <Shield className="w-10 h-10 text-gray-200 mx-auto mb-3" />
-            <p className="font-medium text-gray-700">No groups yet</p>
-            <p className="text-sm text-gray-400 mt-1">
-              Create a group, set its permissions per document type, then add members.
+          <div className="col-span-full py-24 text-center">
+            <Shield className="w-16 h-16 text-gray-200 mx-auto mb-6" />
+            <p className="text-2xl font-medium text-gray-600">No groups yet</p>
+            <p className="text-gray-500 mt-3 max-w-md mx-auto">
+              Create permission groups to control who can view, edit, approve, or delete documents.
             </p>
-            <button onClick={() => setShowCreate(true)} className="btn-primary mt-4">
-              <Plus className="w-4 h-4" /> Create first group
+            <button 
+              onClick={() => setShowCreate(true)} 
+              className="btn-primary mt-8"
+            >
+              <Plus className="w-5 h-5 mr-2" /> Create First Group
             </button>
           </div>
         )}
       </div>
 
-      {/* Detail slide-over */}
+      {/* Minimal Group Detail Panel */}
       {selectedGroup && (
         <GroupDetail
           group={selectedGroup}

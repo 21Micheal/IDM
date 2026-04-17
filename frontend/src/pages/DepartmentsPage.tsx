@@ -5,7 +5,7 @@ import { zodResolver } from "@hookform/resolvers/zod";
 import { z } from "zod";
 import { departmentsAPI, usersAPI } from "@/services/api";
 import {
-  Plus, Edit2, Trash2, Loader2, Building2, X, UserPlus, Users, Check,
+  Plus, Trash2, Loader2, Building2, X, UserPlus, Users, Check,
 } from "lucide-react";
 import { toast } from "react-toastify";
 import clsx from "clsx";
@@ -103,14 +103,13 @@ function DepartmentDetail({
         page_size: 30,
         is_active: "true"
       }).then((r) => r.data.results ?? r.data),
-    enabled: !!userSearch || true,
   });
 
   const addMemberMutation = useMutation({
     mutationFn: (userId: string) =>
       usersAPI.update(userId, { department: department.id }),
     onSuccess: () => {
-      toast.success("User added to department");
+      toast.success("User added successfully");
       qc.invalidateQueries({ queryKey: ["department-members", department.id] });
       qc.invalidateQueries({ queryKey: ["departments"] });
     },
@@ -131,63 +130,72 @@ function DepartmentDetail({
   const memberIds = new Set(members.map((m) => m.id));
 
   return (
-    <div className="fixed inset-0 z-40 flex">
-      <div className="flex-1 bg-black/40" onClick={onClose} />
+    <div className="fixed inset-0 z-50 flex">
+      <div className="flex-1 bg-black/60" onClick={onClose} />
       
-      <div className="w-full max-w-2xl bg-white shadow-2xl flex flex-col overflow-hidden">
+      <div className="w-full max-w-2xl bg-white shadow-2xl flex flex-col overflow-hidden rounded-l-3xl">
         {/* Header */}
-        <div className="flex items-center justify-between px-6 py-4 border-b border-gray-200">
-          <div className="flex items-center gap-3">
-            <div className="w-10 h-10 rounded-xl bg-brand-50 flex items-center justify-center">
-              <Building2 className="w-5 h-5 text-brand-600" />
+        <div className="flex items-center justify-between px-8 py-6 border-b border-gray-100 bg-gray-50">
+          <div className="flex items-center gap-4">
+            <div className="w-12 h-12 rounded-2xl bg-brand-100 flex items-center justify-center">
+              <Building2 className="w-6 h-6 text-brand-600" />
             </div>
             <div>
-              <h2 className="font-semibold text-gray-900 text-lg">{department.name}</h2>
-              <p className="text-sm text-gray-500 font-mono">Code: {department.code}</p>
+              <h2 className="font-semibold text-2xl text-gray-900">{department.name}</h2>
+              <p className="text-sm text-gray-500 font-mono tracking-wider">CODE • {department.code}</p>
             </div>
           </div>
-          <button onClick={onClose} className="text-gray-400 hover:text-gray-600">
-            <X className="w-5 h-5" />
+          <button 
+            onClick={onClose} 
+            className="p-3 text-gray-400 hover:text-gray-600 hover:bg-gray-100 rounded-full transition-colors"
+          >
+            <X className="w-6 h-6" />
           </button>
         </div>
 
-        <div className="flex-1 overflow-y-auto p-6 space-y-8">
+        <div className="flex-1 overflow-y-auto p-8 space-y-12">
           {/* Members Section */}
           <div>
-            <div className="flex items-center justify-between mb-4">
-              <h3 className="font-medium text-gray-900 flex items-center gap-2">
-                <Users className="w-4 h-4" />
+            <div className="flex justify-between items-center mb-6">
+              <h3 className="font-semibold text-xl text-gray-900 flex items-center gap-3">
+                <Users className="w-5 h-5" />
                 Members ({members.length})
               </h3>
             </div>
 
-            <div className="space-y-2">
+            <div className="space-y-3">
               {membersLoading ? (
-                <div className="text-center py-8 text-gray-400">Loading members...</div>
+                <div className="text-center py-12 text-gray-400">Loading members...</div>
               ) : members.length === 0 ? (
-                <div className="text-center py-8 text-gray-400">
-                  No members in this department yet.
+                <div className="border border-dashed border-gray-200 rounded-2xl p-12 text-center">
+                  <Users className="w-12 h-12 text-gray-300 mx-auto mb-3" />
+                  <p className="text-gray-500">No members in this department yet.</p>
                 </div>
               ) : (
                 members.map((user) => (
                   <div
                     key={user.id}
-                    className="flex items-center gap-3 p-3 rounded-lg border border-gray-100 hover:bg-gray-50 group"
+                    className="flex items-center gap-4 p-5 bg-white border border-gray-100 rounded-2xl hover:border-gray-200 group"
                   >
-                    <div className="w-8 h-8 rounded-full bg-brand-100 flex items-center justify-center text-brand-700 text-xs font-semibold flex-shrink-0">
+                    <div className="w-11 h-11 rounded-2xl bg-brand-100 flex items-center justify-center text-brand-700 text-base font-semibold flex-shrink-0">
                       {user.full_name.split(" ").map((n) => n[0]).join("").slice(0, 2)}
                     </div>
                     <div className="flex-1 min-w-0">
                       <p className="font-medium text-gray-900">{user.full_name}</p>
-                      <p className="text-xs text-gray-500 truncate">{user.email}</p>
+                      <p className="text-sm text-gray-500 truncate">{user.email}</p>
                     </div>
-                    <button
-                      onClick={() => removeMemberMutation.mutate(user.id)}
-                      className="opacity-0 group-hover:opacity-100 text-red-500 hover:text-red-600 transition-all p-1"
-                      title="Remove from department"
-                    >
-                      <X className="w-4 h-4" />
-                    </button>
+                    <div className="flex items-center gap-3">
+                      <span className="badge text-xs px-3 py-1">
+                        {user.role_display || user.role}
+                      </span>
+                      <button
+                        onClick={() => removeMemberMutation.mutate(user.id)}
+                        className="opacity-0 group-hover:opacity-100 text-red-500 hover:text-red-600 p-2 rounded-xl hover:bg-red-50 transition-all"
+                        title="Remove from department"
+                      >
+                        <X className="w-5 h-5" />
+                      </button>
+                    </div>
                   </div>
                 ))
               )}
@@ -196,40 +204,42 @@ function DepartmentDetail({
 
           {/* Add Members Section */}
           <div>
-            <h3 className="font-medium text-gray-900 mb-3">Add members</h3>
+            <h3 className="font-semibold text-xl text-gray-900 mb-5">Add New Members</h3>
+            
             <input
               value={userSearch}
               onChange={(e) => setUserSearch(e.target.value)}
-              className="input mb-3"
+              className="input mb-5"
               placeholder="Search users by name or email..."
             />
 
-            <div className="max-h-80 overflow-y-auto border border-gray-100 rounded-lg divide-y divide-gray-100">
+            <div className="max-h-[420px] overflow-y-auto border border-gray-100 rounded-2xl divide-y divide-gray-100">
               {allUsers
                 .filter((u) => !memberIds.has(u.id))
                 .map((user) => (
                   <div
                     key={user.id}
-                    className="flex items-center gap-3 p-3 hover:bg-gray-50"
+                    className="flex items-center gap-4 p-5 hover:bg-gray-50 transition-colors"
                   >
-                    <div className="w-8 h-8 rounded-full bg-gray-100 flex items-center justify-center text-gray-600 text-xs font-semibold flex-shrink-0">
+                    <div className="w-11 h-11 rounded-2xl bg-gray-100 flex items-center justify-center text-gray-600 text-base font-semibold flex-shrink-0">
                       {user.full_name.split(" ").map((n) => n[0]).join("").slice(0, 2)}
                     </div>
                     <div className="flex-1 min-w-0">
-                      <p className="text-sm font-medium text-gray-900">{user.full_name}</p>
-                      <p className="text-xs text-gray-500 truncate">{user.email}</p>
+                      <p className="font-medium text-gray-900">{user.full_name}</p>
+                      <p className="text-sm text-gray-500 truncate">{user.email}</p>
                     </div>
                     <button
                       onClick={() => addMemberMutation.mutate(user.id)}
                       disabled={addMemberMutation.isPending}
-                      className="btn-primary text-xs px-3 py-1 flex items-center gap-1"
+                      className="btn-primary text-sm px-6 py-2.5 flex items-center gap-2"
                     >
-                      <UserPlus className="w-3.5 h-3.5" /> Add
+                      <UserPlus className="w-4 h-4" /> Add
                     </button>
                   </div>
                 ))}
+
               {allUsers.length === 0 && userSearch && (
-                <div className="p-6 text-center text-gray-400">No users found.</div>
+                <div className="p-12 text-center text-gray-400">No users found.</div>
               )}
             </div>
           </div>
@@ -243,7 +253,6 @@ function DepartmentDetail({
 export default function DepartmentsPage() {
   const qc = useQueryClient();
   const [showAdd, setShowAdd] = useState(false);
-  const [editId, setEditId] = useState<string | null>(null);
   const [selectedDept, setSelectedDept] = useState<Department | null>(null);
 
   const { data: departments = [], isLoading } = useQuery<Department[]>({
@@ -254,7 +263,7 @@ export default function DepartmentsPage() {
   const createMutation = useMutation({
     mutationFn: (data: FormData) => departmentsAPI.create(data),
     onSuccess: () => {
-      toast.success("Department created");
+      toast.success("Department created successfully");
       qc.invalidateQueries({ queryKey: ["departments"] });
       setShowAdd(false);
     },
@@ -262,17 +271,6 @@ export default function DepartmentsPage() {
       const msg = Object.values(err?.response?.data ?? {}).flat().join(" ");
       toast.error(msg || "Failed to create department");
     },
-  });
-
-  const updateMutation = useMutation({
-    mutationFn: ({ id, data }: { id: string; data: FormData }) =>
-      departmentsAPI.update(id, data),
-    onSuccess: () => {
-      toast.success("Department updated");
-      qc.invalidateQueries({ queryKey: ["departments"] });
-      setEditId(null);
-    },
-    onError: () => toast.error("Update failed"),
   });
 
   const deleteMutation = useMutation({
@@ -286,23 +284,26 @@ export default function DepartmentsPage() {
   });
 
   return (
-    <div className="space-y-5 max-w-4xl">
-      <div className="flex items-start justify-between">
+    <div className="max-w-6xl mx-auto py-10">
+      <div className="flex items-end justify-between mb-10">
         <div>
-          <h1 className="text-2xl font-bold text-gray-900">Departments</h1>
-          <p className="text-gray-500 text-sm mt-1">
-            Organise users into departments. Click a department to manage its members.
+          <h1 className="text-4xl font-bold text-gray-900">Departments</h1>
+          <p className="text-gray-500 mt-2 text-lg">
+            Manage departments and assign team members
           </p>
         </div>
-        <button onClick={() => setShowAdd(true)} className="btn-primary">
-          <Plus className="w-4 h-4" /> Add department
+        <button 
+          onClick={() => setShowAdd(true)} 
+          className="btn-primary flex items-center gap-2 px-6 py-3"
+        >
+          <Plus className="w-5 h-5" /> New Department
         </button>
       </div>
 
-      {/* Add New Form */}
+      {/* Add New Department Form */}
       {showAdd && (
-        <div className="card p-5">
-          <p className="text-sm font-medium text-gray-700 mb-3">New department</p>
+        <div className="card p-8 max-w-lg mx-auto mb-10">
+          <h2 className="text-xl font-semibold mb-6">Create New Department</h2>
           <DeptForm
             onSubmit={(data) => createMutation.mutate(data)}
             onCancel={() => setShowAdd(false)}
@@ -311,47 +312,42 @@ export default function DepartmentsPage() {
         </div>
       )}
 
-      {/* Departments List */}
-      <div className="card divide-y divide-gray-100">
-        {isLoading && Array.from({ length: 4 }).map((_, i) => (
-          <div key={i} className="px-6 py-5 flex items-center gap-4 animate-pulse">
-            <div className="w-9 h-9 bg-gray-100 rounded-lg" />
-            <div className="flex-1 space-y-2">
-              <div className="h-4 bg-gray-100 rounded w-2/3" />
-              <div className="h-3 bg-gray-100 rounded w-1/3" />
-            </div>
+      {/* Departments Grid */}
+      <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
+        {isLoading && Array.from({ length: 6 }).map((_, i) => (
+          <div key={i} className="card p-8 animate-pulse">
+            <div className="h-8 bg-gray-100 rounded-xl w-3/4 mb-4" />
+            <div className="h-4 bg-gray-100 rounded w-1/2" />
           </div>
         ))}
 
         {!isLoading && departments.map((dept) => (
           <div
             key={dept.id}
-            className="px-6 py-5 hover:bg-gray-50 transition-colors cursor-pointer group"
             onClick={() => setSelectedDept(dept)}
+            className="card p-8 hover:shadow-xl transition-all duration-300 cursor-pointer group border border-transparent hover:border-brand-100"
           >
-            <div className="flex items-center gap-4">
-              <div className="w-9 h-9 rounded-lg bg-brand-50 flex items-center justify-center flex-shrink-0">
-                <Building2 className="w-4 h-4 text-brand-600" />
+            <div className="flex items-start justify-between">
+              <div className="flex items-center gap-4">
+                <div className="w-14 h-14 rounded-2xl bg-brand-100 flex items-center justify-center flex-shrink-0">
+                  <Building2 className="w-7 h-7 text-brand-600" />
+                </div>
+                <div>
+                  <h3 className="font-semibold text-2xl text-gray-900 group-hover:text-brand-700 transition-colors">
+                    {dept.name}
+                  </h3>
+                  <p className="text-sm text-gray-500 font-mono mt-0.5">CODE • {dept.code}</p>
+                </div>
+              </div>
+            </div>
+
+            <div className="mt-8 flex items-center justify-between">
+              <div className="text-sm">
+                <span className="font-medium text-gray-900">{dept.user_count}</span>
+                <span className="text-gray-500"> active members</span>
               </div>
 
-              <div className="flex-1 min-w-0">
-                <p className="font-medium text-gray-900 group-hover:text-brand-700 transition-colors">
-                  {dept.name}
-                </p>
-                <p className="text-xs text-gray-500">
-                  Code: <span className="font-mono uppercase">{dept.code}</span>
-                  {" · "}
-                  {dept.user_count} active {dept.user_count === 1 ? "user" : "users"}
-                </p>
-              </div>
-
-              <div className="flex gap-1 opacity-0 group-hover:opacity-100 transition-all">
-                <button
-                  onClick={(e) => { e.stopPropagation(); setEditId(dept.id); }}
-                  className="btn-secondary text-xs px-2 py-1"
-                >
-                  <Edit2 className="w-3.5 h-3.5" />
-                </button>
+              <div className="opacity-0 group-hover:opacity-100 transition-all">
                 <button
                   onClick={(e) => {
                     e.stopPropagation();
@@ -363,33 +359,27 @@ export default function DepartmentsPage() {
                       deleteMutation.mutate(dept.id);
                     }
                   }}
-                  className="text-gray-400 hover:text-red-500 border border-gray-200 rounded-lg px-2 py-1 text-xs transition-colors"
+                  className="text-red-600 hover:bg-red-50 border border-red-200 px-5 py-2 rounded-xl text-sm transition-colors flex items-center gap-1"
                 >
-                  <Trash2 className="w-3.5 h-3.5" />
+                  <Trash2 className="w-4 h-4" /> Delete
                 </button>
               </div>
             </div>
-
-            {/* Inline Edit Form */}
-            {editId === dept.id && (
-              <div className="mt-4 pt-4 border-t border-gray-100">
-                <DeptForm
-                  defaultValues={{ name: dept.name, code: dept.code }}
-                  onSubmit={(data) => updateMutation.mutate({ id: dept.id, data })}
-                  onCancel={() => setEditId(null)}
-                  isPending={updateMutation.isPending}
-                />
-              </div>
-            )}
           </div>
         ))}
 
         {!isLoading && !departments.length && !showAdd && (
-          <div className="px-6 py-16 text-center">
-            <Building2 className="w-10 h-10 text-gray-200 mx-auto mb-3" />
-            <p className="text-gray-500">No departments created yet.</p>
-            <button onClick={() => setShowAdd(true)} className="btn-primary mt-4">
-              <Plus className="w-4 h-4" /> Create first department
+          <div className="col-span-full py-24 text-center">
+            <Building2 className="w-20 h-20 text-gray-200 mx-auto mb-6" />
+            <p className="text-2xl font-medium text-gray-600">No departments yet</p>
+            <p className="text-gray-500 mt-3 max-w-md mx-auto">
+              Create departments to better organize your team and control document access.
+            </p>
+            <button 
+              onClick={() => setShowAdd(true)} 
+              className="btn-primary mt-8"
+            >
+              <Plus className="w-5 h-5 mr-2" /> Create First Department
             </button>
           </div>
         )}

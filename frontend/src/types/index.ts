@@ -3,8 +3,10 @@ export interface DocumentType {
   name: string;
   code: string;
   reference_prefix: string;
+  reference_padding?: number;
   description: string;
   icon: string;
+  is_active?: boolean;
   metadata_fields: MetadataField[];
 }
 
@@ -35,6 +37,7 @@ export interface Document {
   title: string;
   reference_number: string;
   document_type: DocumentType;
+  document_type_name?: string;
   status: DocumentStatus;
   supplier: string;
   amount: number | null;

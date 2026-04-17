@@ -149,6 +149,7 @@ class DocumentViewSet(AuditMixin, viewsets.ModelViewSet):
 
         return base_qs.filter(
             Q(uploaded_by=user)
+            | Q(owned_by=user)
             | Q(document_type_id__in=permitted_type_ids)
         ).distinct()
 

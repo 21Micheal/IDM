@@ -1,11 +1,15 @@
 """
 apps/workflows/models.py
 
-WorkflowTemplate  — reusable blueprint
-WorkflowStep      — ordered steps, each with assignee config + status label
-WorkflowRule      — amount-based routing: ties DocumentType + threshold to template
-WorkflowInstance  — live run for a specific document
-WorkflowTask      — individual approval task per step per instance
+Additions to existing model file:
+  1. WorkflowTask gains:
+       status choices: "held", "returned"
+       held_until: DateTimeField (null) — auto-release timestamp
+  2. WorkflowTaskAction — immutable record of every action taken on a task
+     (approve, reject, hold, return). Replaces the single comment field for
+     a full audit trail of task actions.
+
+MIGRATION NOTE: run 0003_task_hold_return after applying this file.
 """
 from django.db import models
 from django.conf import settings
@@ -53,7 +57,6 @@ class WorkflowStep(models.Model):
     )
     order         = models.PositiveSmallIntegerField(db_index=True)
     name          = models.CharField(max_length=120)
-    # Document status while waiting for this step
     status_label  = models.CharField(max_length=80, default="Pending Approval")
     assignee_type = models.CharField(max_length=20, choices=ASSIGNEE_TYPES, default="any_role")
     assignee_role = models.CharField(max_length=20, blank=True)
@@ -76,16 +79,6 @@ class WorkflowStep(models.Model):
 
 
 class WorkflowRule(models.Model):
-    """
-    Amount-based routing rule.
-    The engine selects the rule with the HIGHEST amount_threshold
-    that is <= the document's amount. threshold=0 is the catch-all.
-
-    Example — Supplier Invoice:
-      threshold=0     → Standard Approval (always matches)
-      threshold=10000 → Senior Approval   (matches when amount >= 10000)
-      threshold=50000 → Board Approval    (matches when amount >= 50000)
-    """
     id               = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
     document_type    = models.ForeignKey(
         "documents.DocumentType", on_delete=models.CASCADE, related_name="workflow_rules",
@@ -101,7 +94,6 @@ class WorkflowRule(models.Model):
     updated_at       = models.DateTimeField(auto_now=True)
 
     class Meta:
-        # Highest threshold first so first match wins in the engine
         ordering = ["document_type", "-amount_threshold"]
 
     def __str__(self):
@@ -143,7 +135,15 @@ class WorkflowTask(models.Model):
         ("in_progress", "In Progress"),
         ("approved",    "Approved"),
         ("rejected",    "Rejected"),
+        ("returned",    "Returned for Review"),   # ← new
+        ("held",        "On Hold"),               # ← new
         ("skipped",     "Skipped"),
+    ]
+    
+    RETURN_TO_CHOICES = [
+        ("previous_step", "Previous Approver"),
+        ("uploader",      "Document Uploader"),
+        ("same_step",     "Same Approver"),
     ]
 
     id                = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
@@ -158,7 +158,17 @@ class WorkflowTask(models.Model):
     status   = models.CharField(max_length=20, choices=STATUS_CHOICES, default="pending")
     comment  = models.TextField(blank=True)
     due_at   = models.DateTimeField(null=True, blank=True)
-    acted_at = models.DateTimeField(null=True, blank=True)
+    # ── Hold support ──────────────────────────────────────────────────────────
+    held_until = models.DateTimeField(
+        null=True, blank=True,
+        help_text="Hold timestamp - when approver manually releases, this is cleared.",
+    )
+    # ── Return decision ──────────────────────────────────────────────────────
+    return_to = models.CharField(
+        max_length=20, choices=RETURN_TO_CHOICES, default="previous_step",
+        help_text="Where to return the document if rejected/returned",
+    )
+    acted_at   = models.DateTimeField(null=True, blank=True)
     created_at = models.DateTimeField(auto_now_add=True, null=True)
     updated_at = models.DateTimeField(auto_now=True)
 
@@ -167,3 +177,67 @@ class WorkflowTask(models.Model):
 
     def __str__(self):
         return f"Task: {self.step.name} [{self.status}]"
+
+
+class WorkflowTaskAction(models.Model):
+    """
+    Immutable audit log of every action taken on a WorkflowTask.
+    Separate from WorkflowTask.comment (which stores the latest comment only)
+    so the full action history is always preserved.
+    """
+    ACTION_CHOICES = [
+        ("approved",  "Approved"),
+        ("rejected",  "Rejected"),
+        ("returned",  "Returned for Review"),
+        ("held",      "Put on Hold"),
+        ("released",  "Hold Released"),
+        ("reassigned","Reassigned"),
+    ]
+    
+    RETURN_TO_CHOICES = [
+        ("previous_step", "Previous Approver"),
+        ("uploader",      "Document Uploader"),
+        ("same_step",     "Same Approver"),
+    ]
+
+    id         = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    task       = models.ForeignKey(WorkflowTask, on_delete=models.CASCADE, related_name="actions")
+    actor      = models.ForeignKey(
+        settings.AUTH_USER_MODEL, on_delete=models.PROTECT, related_name="task_actions"
+    )
+    action     = models.CharField(max_length=20, choices=ACTION_CHOICES)
+    comment    = models.TextField(blank=True)
+    # For hold: how many hours the hold was set for (removed auto-release)
+    hold_hours = models.PositiveSmallIntegerField(null=True, blank=True)
+    # Where the document was returned to (only populated for return actions)
+    return_to  = models.CharField(
+        max_length=20, choices=RETURN_TO_CHOICES, blank=True,
+        help_text="Where the document was returned to",
+    )
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        ordering = ["created_at"]
+
+    def __str__(self):
+        return f"{self.task} → {self.action} by {self.actor.email}"
+
+
+class WorkflowTaskActionNotification(models.Model):
+    """
+    Track which users were notified of a workflow action.
+    Enables notification history and prevents duplicate notifications.
+    """
+    action = models.ForeignKey(
+        WorkflowTaskAction, on_delete=models.CASCADE, related_name="notifications"
+    )
+    user   = models.ForeignKey(
+        settings.AUTH_USER_MODEL, on_delete=models.CASCADE,
+        related_name="workflow_action_notifications",
+    )
+
+    class Meta:
+        unique_together = [("action", "user")]
+
+    def __str__(self):
+        return f"{self.action.id} → {self.user.email}"

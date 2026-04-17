@@ -7,7 +7,7 @@
  */
 import { useState } from "react";
 import { useMutation, useQueryClient } from "@tanstack/react-query";
-import { useForm, Controller } from "react-hook-form";
+import { useForm, Controller, type Control, type UseFormRegister } from "react-hook-form";
 import { documentsAPI } from "@/services/api";
 import { Edit2, Save, X, Loader2 } from "lucide-react";
 import { toast } from "react-toastify";
@@ -18,14 +18,24 @@ interface Props {
   onClose: () => void;
 }
 
+type MetadataEditValues = {
+  title: string;
+  supplier: string;
+  amount: string | number;
+  currency: string;
+  document_date: string;
+  due_date: string;
+  metadata: Record<string, unknown>;
+};
+
 function DynamicField({
   field,
   register,
   control,
 }: {
   field: MetadataField;
-  register: ReturnType<typeof useForm>["register"];
-  control: ReturnType<typeof useForm>["control"];
+  register: UseFormRegister<any>;
+  control: Control<any>;
 }) {
   const rules = field.is_required ? { required: `${field.label} is required` } : {};
 
@@ -100,7 +110,7 @@ function DynamicField({
 export default function MetadataEditPanel({ document: doc, onClose }: Props) {
   const qc = useQueryClient();
 
-  const { register, handleSubmit, control, formState: { errors, isDirty } } = useForm({
+  const { register, handleSubmit, control, formState: { errors, isDirty } } = useForm<MetadataEditValues>({
     defaultValues: {
       title:         doc.title,
       supplier:      doc.supplier,
@@ -124,7 +134,7 @@ export default function MetadataEditPanel({ document: doc, onClose }: Props) {
       toast.error(err?.response?.data?.detail ?? "Update failed"),
   });
 
-  const onSubmit = (values: Record<string, unknown>) => {
+  const onSubmit = (values: MetadataEditValues) => {
     mutation.mutate(values);
   };
 
@@ -205,7 +215,7 @@ export default function MetadataEditPanel({ document: doc, onClose }: Props) {
                   key={field.id}
                   field={field}
                   register={register}
-                  control={control}
+                  control={control as unknown as Control<any>}
                 />
               ))}
           </div>

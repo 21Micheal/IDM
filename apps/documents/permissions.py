@@ -61,9 +61,11 @@ class HasDocumentPermission(permissions.BasePermission):
 
         action = getattr(view, "action", None)
 
-        # List: need VIEW permission on at least one document type
+        # List: allow for any authenticated user.
+        # Data visibility is constrained by DocumentViewSet.get_queryset(),
+        # which limits non-admins to own documents and permitted doctypes.
         if action == "list":
-            return self._user_has_any_view_permission(request.user)
+            return True
 
         # Create (upload): need UPLOAD on the declared document type
         if action == "create":
@@ -104,6 +106,15 @@ class HasDocumentPermission(permissions.BasePermission):
 
         # None means "let the view handle it" (e.g. bulk_action, audit_trail)
         if required_action is None:
+            return True
+
+        # Owners (uploader/owner) can always perform VIEW-level reads.
+        # Higher-risk actions (edit/approve/archive/delete/...) still require
+        # explicit group permissions.
+        if required_action == GroupAction.VIEW.value and (
+            getattr(obj, "uploaded_by_id", None) == request.user.id
+            or getattr(obj, "owned_by_id", None) == request.user.id
+        ):
             return True
 
         user_perms = request.user.get_all_permissions_for_doctype(document_type_id)

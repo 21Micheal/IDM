@@ -1,10 +1,11 @@
 import { useState } from "react";
 import { useParams, useNavigate } from "react-router-dom";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
-import { documentsAPI } from "@/services/api";
+import { documentsAPI, workflowAPI } from "@/services/api";
 import DocumentViewer from "@/components/documents/DocumentViewer";
 import StatusBadge from "@/components/documents/StatusBadge";
 import MetadataEditPanel from "@/components/documents/MetadataEditPanel";
+import WorkflowActionPanel from "@/components/workflow/WorkflowActionPanel";
 import { format } from "date-fns";
 import {
   ArrowLeft, Send, Archive, History, MessageSquare,
@@ -40,6 +41,17 @@ export default function DocumentDetailPage() {
     queryFn: () => documentsAPI.auditTrail(id!).then((r) => r.data),
     enabled: activeTab === "audit" && !!id,
   });
+
+  const { data: myTasks } = useQuery({
+    queryKey: ["workflow", "my-tasks"],
+    queryFn: () => workflowAPI.myTasks().then((r) => r.data),
+    enabled: !!id,
+  });
+
+  // Find the task for THIS document
+  const activeTask = myTasks?.find(
+    (t: { document_id: string }) => t.document_id === id
+  );
 
   const submitMutation = useMutation({
     mutationFn: () => documentsAPI.submit(id!),
@@ -215,6 +227,13 @@ export default function DocumentDetailPage() {
             <MetadataEditPanel
               document={doc}
               onClose={() => setShowEdit(false)}
+            />
+          )}
+
+          {activeTask && (
+            <WorkflowActionPanel
+              task={activeTask}
+              documentId={id!}
             />
           )}
 

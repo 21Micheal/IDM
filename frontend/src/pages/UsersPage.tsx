@@ -6,14 +6,19 @@ import { z } from "zod";
 import { usersAPI, departmentsAPI } from "@/services/api";
 import {
   Plus, Search, MoreVertical, UserCheck, UserX,
-  KeyRound, Edit2, Loader2, Shield, X, Trash2,
+  KeyRound, Edit2, Loader2, Shield, X,
 } from "lucide-react";
 import { toast } from "react-toastify";
 import { format } from "date-fns";
 import clsx from "clsx";
 
 // ── Types ─────────────────────────────────────────────────────────────────────
-interface Department { id: string; name: string; code: string; user_count: number }
+interface Department { 
+  id: string; 
+  name: string; 
+  code: string; 
+  user_count: number 
+}
 
 interface User {
   id: string; 
@@ -58,7 +63,7 @@ const ROLE_COLORS: Record<string, string> = {
   viewer:  "bg-gray-100 text-gray-600",
 };
 
-// ── Temporary Password Modal (used for both create and reset) ─────────────────
+// ── Temporary Password Modal ─────────────────────────────────────────────────
 function TemporaryPasswordModal({
   temporary_password,
   onClose,
@@ -137,7 +142,6 @@ function CreateUserModal({
       const tempPassword = response.data.temporary_password;
       
       if (tempPassword) {
-        // Show the temporary password modal
         setTempPassword(tempPassword);
       } else {
         toast.success("User created successfully");
@@ -145,7 +149,6 @@ function CreateUserModal({
       }
 
       qc.invalidateQueries({ queryKey: ["users"] });
-      // Do not close modal immediately if we show password modal
     },
     onError: (err: any) => {
       const detail = Object.values(err?.response?.data ?? {}).flat().join(" ") || 
@@ -232,7 +235,6 @@ function CreateUserModal({
         </div>
       )}
 
-      {/* Temporary Password Modal after creation */}
       {tempPassword && (
         <TemporaryPasswordModal
           temporary_password={tempPassword}
@@ -243,7 +245,7 @@ function CreateUserModal({
   );
 }
 
-// ── Edit user modal (unchanged) ───────────────────────────────────────────────
+// ── Edit user modal ───────────────────────────────────────────────────────────
 function EditUserModal({
   user,
   departments,
@@ -268,7 +270,7 @@ function EditUserModal({
   const mutation = useMutation({
     mutationFn: (data: EditForm) => usersAPI.update(user.id, data),
     onSuccess: () => {
-      toast.success("User updated");
+      toast.success("User updated successfully");
       qc.invalidateQueries({ queryKey: ["users"] });
       onClose();
     },
@@ -340,19 +342,17 @@ function EditUserModal({
   );
 }
 
-// ── Row action menu (unchanged) ───────────────────────────────────────────────
+// ── Row action menu ───────────────────────────────────────────────────────────
 function UserActions({
   user,
   onEdit,
   onResetPassword,
   onToggleActive,
-  onDelete,
 }: {
   user: User;
   onEdit: () => void;
   onResetPassword: () => void;
   onToggleActive: () => void;
-  onDelete: () => void;
 }) {
   const [open, setOpen] = useState(false);
 
@@ -360,42 +360,36 @@ function UserActions({
     <div className="relative">
       <button
         onClick={() => setOpen(!open)}
-        className="text-gray-400 hover:text-gray-600 p-1 rounded"
+        className="text-gray-400 hover:text-gray-600 p-1 rounded-lg hover:bg-gray-100 transition-colors"
       >
         <MoreVertical className="w-4 h-4" />
       </button>
       {open && (
         <>
           <div className="fixed inset-0 z-10" onClick={() => setOpen(false)} />
-          <div className="absolute right-0 top-6 z-20 w-44 card py-1 shadow-lg">
+          <div className="absolute right-0 top-8 z-20 w-48 card py-1 shadow-lg rounded-xl">
             <button
               onClick={() => { onEdit(); setOpen(false); }}
-              className="flex items-center gap-2 w-full px-3 py-2 text-sm text-gray-700 hover:bg-gray-50"
+              className="flex items-center gap-2 w-full px-4 py-2.5 text-sm text-gray-700 hover:bg-gray-50"
             >
-              <Edit2 className="w-3.5 h-3.5" /> Edit user
+              <Edit2 className="w-4 h-4" /> Edit user
             </button>
             <button
               onClick={() => { onResetPassword(); setOpen(false); }}
-              className="flex items-center gap-2 w-full px-3 py-2 text-sm text-gray-700 hover:bg-gray-50"
+              className="flex items-center gap-2 w-full px-4 py-2.5 text-sm text-gray-700 hover:bg-gray-50"
             >
-              <KeyRound className="w-3.5 h-3.5" /> Reset password
-            </button>
-            <button
-              onClick={() => { onDelete(); setOpen(false); }}
-              className="flex items-center gap-2 w-full px-3 py-2 text-sm text-red-600 hover:bg-red-50"
-            >
-              <Trash2 className="w-3.5 h-3.5" /> Delete user
+              <KeyRound className="w-4 h-4" /> Reset password
             </button>
             <button
               onClick={() => { onToggleActive(); setOpen(false); }}
               className={clsx(
-                "flex items-center gap-2 w-full px-3 py-2 text-sm hover:bg-gray-50",
+                "flex items-center gap-2 w-full px-4 py-2.5 text-sm hover:bg-gray-50",
                 user.is_active ? "text-red-600" : "text-green-600"
               )}
             >
               {user.is_active
-                ? <><UserX className="w-3.5 h-3.5" /> Deactivate</>
-                : <><UserCheck className="w-3.5 h-3.5" /> Activate</>
+                ? <><UserX className="w-4 h-4" /> Deactivate</>
+                : <><UserCheck className="w-4 h-4" /> Activate</>
               }
             </button>
           </div>
@@ -408,19 +402,19 @@ function UserActions({
 // ── Main UsersPage Component ──────────────────────────────────────────────────
 export default function UsersPage() {
   const qc = useQueryClient();
-  const [search, setSearch]       = useState("");
-  const [roleFilter, setRole]     = useState("");
-  const [deptFilter, setDept]     = useState("");
-  const [showCreate, setCreate]   = useState(false);
-  const [editUser, setEditUser]   = useState<User | null>(null);
-  const [pwResult, setPwResult]   = useState<{ temporary_password: string } | null>(null);
+  const [search, setSearch] = useState("");
+  const [roleFilter, setRole] = useState("");
+  const [deptFilter, setDept] = useState("");
+  const [showCreate, setCreate] = useState(false);
+  const [editUser, setEditUser] = useState<User | null>(null);
+  const [pwResult, setPwResult] = useState<{ temporary_password: string } | null>(null);
 
   const { data: users, isLoading } = useQuery<User[]>({
     queryKey: ["users", { search, role: roleFilter, department: deptFilter }],
     queryFn: () =>
       usersAPI.list({
-        search:     search || undefined,
-        role:       roleFilter || undefined,
+        search: search || undefined,
+        role: roleFilter || undefined,
         department: deptFilter || undefined,
       }).then((r) => r.data.results ?? r.data),
   });
@@ -438,19 +432,9 @@ export default function UsersPage() {
 
   const toggleActiveMutation = useMutation({
     mutationFn: (id: string) => usersAPI.toggleActive(id),
-    onSuccess: (_, id) => {
-      qc.invalidateQueries({ queryKey: ["users"] });
-      toast.success("User status updated");
-    },
-    onError: (err: any) =>
-      toast.error(err?.response?.data?.detail || "Action failed"),
-  });
-
-  const deleteMutation = useMutation({
-    mutationFn: (id: string) => usersAPI.delete(id),
     onSuccess: () => {
       qc.invalidateQueries({ queryKey: ["users"] });
-      toast.success("User deleted successfully");
+      toast.success("User status updated");
     },
     onError: (err: any) =>
       toast.error(err?.response?.data?.detail || "Action failed"),
@@ -461,50 +445,50 @@ export default function UsersPage() {
   const mfaCount    = users?.filter((u) => u.mfa_enabled).length ?? 0;
 
   return (
-    <div className="space-y-5">
+    <div className="max-w-6xl mx-auto py-8">
       {/* Header */}
-      <div className="flex items-start justify-between">
+      <div className="flex items-start justify-between mb-10">
         <div>
-          <h1 className="text-2xl font-bold text-gray-900">Users & roles</h1>
-          <p className="text-gray-500 text-sm mt-1">
+          <h1 className="text-3xl font-bold text-gray-900">Users & Roles</h1>
+          <p className="text-gray-500 mt-1">
             Manage staff accounts, roles, and department assignments.
           </p>
         </div>
-        <button onClick={() => setCreate(true)} className="btn-primary">
-          <Plus className="w-4 h-4" /> Add user
+        <button onClick={() => setCreate(true)} className="btn-primary flex items-center gap-2">
+          <Plus className="w-4 h-4" /> Add User
         </button>
       </div>
 
       {/* Stats */}
-      <div className="grid grid-cols-2 sm:grid-cols-4 gap-4">
+      <div className="grid grid-cols-2 md:grid-cols-4 gap-6 mb-10">
         {[
           { label: "Total users",    value: users?.length ?? "—" },
           { label: "Active",         value: activeCount },
           { label: "Administrators", value: adminCount },
           { label: "MFA enabled",    value: mfaCount },
         ].map(({ label, value }) => (
-          <div key={label} className="card p-4">
-            <p className="text-2xl font-bold text-gray-900">{value}</p>
-            <p className="text-sm text-gray-500 mt-0.5">{label}</p>
+          <div key={label} className="card p-6">
+            <p className="text-3xl font-semibold text-gray-900">{value}</p>
+            <p className="text-sm text-gray-500 mt-1">{label}</p>
           </div>
         ))}
       </div>
 
       {/* Filters */}
-      <div className="flex flex-wrap gap-3">
-        <div className="relative flex-1 min-w-48">
-          <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-gray-400" />
+      <div className="flex flex-wrap gap-3 mb-6">
+        <div className="relative flex-1 min-w-72">
+          <Search className="absolute left-4 top-1/2 -translate-y-1/2 w-4 h-4 text-gray-400" />
           <input
             value={search}
             onChange={(e) => setSearch(e.target.value)}
-            placeholder="Search by name or email…"
-            className="input pl-9"
+            placeholder="Search by name or email..."
+            className="input pl-11"
           />
         </div>
         <select
           value={roleFilter}
           onChange={(e) => setRole(e.target.value)}
-          className="input w-40"
+          className="input w-44"
         >
           <option value="">All roles</option>
           <option value="admin">Administrator</option>
@@ -515,7 +499,7 @@ export default function UsersPage() {
         <select
           value={deptFilter}
           onChange={(e) => setDept(e.target.value)}
-          className="input w-48"
+          className="input w-52"
         >
           <option value="">All departments</option>
           {departments?.map((d) => (
@@ -524,27 +508,27 @@ export default function UsersPage() {
         </select>
       </div>
 
-      {/* Table - unchanged */}
+      {/* Users Table */}
       <div className="card overflow-hidden">
         <div className="overflow-x-auto">
           <table className="w-full text-sm">
             <thead>
               <tr className="border-b border-gray-100 bg-gray-50">
-                <th className="text-left px-4 py-3 font-medium text-gray-500">User</th>
-                <th className="text-left px-4 py-3 font-medium text-gray-500">Role</th>
-                <th className="text-left px-4 py-3 font-medium text-gray-500">Department</th>
-                <th className="text-left px-4 py-3 font-medium text-gray-500">Status</th>
-                <th className="text-left px-4 py-3 font-medium text-gray-500">MFA</th>
-                <th className="text-left px-4 py-3 font-medium text-gray-500">Last login</th>
-                <th className="text-left px-4 py-3 font-medium text-gray-500">Joined</th>
-                <th className="px-4 py-3" />
+                <th className="text-left px-6 py-4 font-medium text-gray-500">User</th>
+                <th className="text-left px-6 py-4 font-medium text-gray-500">Role</th>
+                <th className="text-left px-6 py-4 font-medium text-gray-500">Department</th>
+                <th className="text-left px-6 py-4 font-medium text-gray-500">Status</th>
+                <th className="text-left px-6 py-4 font-medium text-gray-500">MFA</th>
+                <th className="text-left px-6 py-4 font-medium text-gray-500">Last login</th>
+                <th className="text-left px-6 py-4 font-medium text-gray-500">Joined</th>
+                <th className="w-12" />
               </tr>
             </thead>
             <tbody className="divide-y divide-gray-100">
-              {isLoading && Array.from({ length: 5 }).map((_, i) => (
+              {isLoading && Array.from({ length: 6 }).map((_, i) => (
                 <tr key={i}>
                   {Array.from({ length: 8 }).map((_, j) => (
-                    <td key={j} className="px-4 py-3">
+                    <td key={j} className="px-6 py-4">
                       <div className="h-4 bg-gray-100 rounded animate-pulse" />
                     </td>
                   ))}
@@ -556,12 +540,12 @@ export default function UsersPage() {
                   key={user.id}
                   className={clsx(
                     "hover:bg-gray-50 transition-colors",
-                    !user.is_active && "opacity-50"
+                    !user.is_active && "opacity-60"
                   )}
                 >
-                  <td className="px-4 py-3">
+                  <td className="px-6 py-4">
                     <div className="flex items-center gap-3">
-                      <div className="w-8 h-8 rounded-full bg-brand-100 flex items-center justify-center text-brand-700 text-xs font-semibold flex-shrink-0">
+                      <div className="w-9 h-9 rounded-full bg-brand-100 flex items-center justify-center text-brand-700 text-sm font-semibold flex-shrink-0">
                         {user.first_name[0]}{user.last_name[0]}
                       </div>
                       <div>
@@ -570,16 +554,16 @@ export default function UsersPage() {
                       </div>
                     </div>
                   </td>
-                  <td className="px-4 py-3">
+                  <td className="px-6 py-4">
                     <span className={clsx("badge text-xs", ROLE_COLORS[user.role] ?? "bg-gray-100 text-gray-600")}>
                       {user.role === "admin" && <Shield className="w-3 h-3 mr-1" />}
                       {user.role_display}
                     </span>
                   </td>
-                  <td className="px-4 py-3 text-gray-600">
+                  <td className="px-6 py-4 text-gray-600">
                     {user.department_name ?? <span className="text-gray-300">—</span>}
                   </td>
-                  <td className="px-4 py-3">
+                  <td className="px-6 py-4">
                     <span className={clsx(
                       "badge text-xs",
                       user.is_active ? "bg-green-100 text-green-700" : "bg-red-100 text-red-600"
@@ -587,7 +571,7 @@ export default function UsersPage() {
                       {user.is_active ? "Active" : "Inactive"}
                     </span>
                   </td>
-                  <td className="px-4 py-3">
+                  <td className="px-6 py-4">
                     <span className={clsx(
                       "badge text-xs",
                       user.mfa_enabled ? "bg-green-100 text-green-700" : "bg-gray-100 text-gray-500"
@@ -595,25 +579,20 @@ export default function UsersPage() {
                       {user.mfa_enabled ? "Enabled" : "Off"}
                     </span>
                   </td>
-                  <td className="px-4 py-3 text-gray-500 text-xs">
+                  <td className="px-6 py-4 text-gray-500 text-xs">
                     {user.last_login
                       ? format(new Date(user.last_login), "dd MMM yyyy HH:mm")
                       : "Never"}
                   </td>
-                  <td className="px-4 py-3 text-gray-400 text-xs">
+                  <td className="px-6 py-4 text-gray-400 text-xs">
                     {format(new Date(user.created_at), "dd MMM yyyy")}
                   </td>
-                  <td className="px-4 py-3 text-right">
+                  <td className="px-6 py-4 text-right">
                     <UserActions
                       user={user}
                       onEdit={() => setEditUser(user)}
                       onResetPassword={() => resetPasswordMutation.mutate(user.id)}
                       onToggleActive={() => toggleActiveMutation.mutate(user.id)}
-                      onDelete={() => {
-                        if (confirm(`Are you sure you want to permanently delete ${user.full_name}?`)) {
-                          deleteMutation.mutate(user.id);
-                        }
-                      }}
                     />
                   </td>
                 </tr>
@@ -621,7 +600,10 @@ export default function UsersPage() {
 
               {!isLoading && !users?.length && (
                 <tr>
-                  <td colSpan={8} className="px-4 py-12 text-center text-gray-400">
+                  <td colSpan={8} className="px-6 py-20 text-center text-gray-400">
+                    <div className="mx-auto w-12 h-12 rounded-full bg-gray-100 flex items-center justify-center mb-4">
+                      <Shield className="w-6 h-6 text-gray-300" />
+                    </div>
                     No users found. Try adjusting your filters.
                   </td>
                 </tr>

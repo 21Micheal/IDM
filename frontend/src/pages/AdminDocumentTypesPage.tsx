@@ -8,6 +8,7 @@ import { useForm, useFieldArray } from "react-hook-form";
 import { Plus, Trash2, GripVertical, Settings, ChevronRight, Save, Loader2, X } from "lucide-react";
 import { documentApi, documentTypesAPI } from "../services/api";
 import { cn } from "../lib/utils";
+import type { DocumentType } from "@/types";
 
 const FIELD_TYPES = [
   { value: "text", label: "Text" },
@@ -42,10 +43,9 @@ export default function AdminDocumentTypesPage() {
   const qc = useQueryClient();
   const [editingId, setEditingId] = useState<string | "new" | null>(null);
 
-  const { data: types, isLoading } = useQuery({
+  const { data: types, isLoading } = useQuery<DocumentType[]>({
     queryKey: ["document-types"],
-    queryFn: () => documentApi.types(),
-    select: (r) => r.data.results ?? r.data as any[],
+    queryFn: () => documentApi.types().then((r) => (r.data.results ?? r.data) as DocumentType[]),
   });
 
   const form = useForm<DocTypeForm>({
@@ -88,10 +88,10 @@ export default function AdminDocumentTypesPage() {
     setEditingId("new");
   };
 
-  const openEdit = (type: any) => {
+  const openEdit = (type: DocumentType) => {
     form.reset({
       ...type,
-      metadata_fields: (type.metadata_fields ?? []).map((f: any) => ({
+      metadata_fields: (type.metadata_fields ?? []).map((f) => ({
         ...f,
         select_options_raw: (f.select_options ?? []).join(", "),
       })),

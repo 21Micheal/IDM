@@ -55,26 +55,42 @@ export const authAPI = {
 export const documentsAPI = {
   list: (params?: Record<string, unknown>) => api.get("/documents/", { params }),
   get:  (id: string) => api.get(`/documents/${id}/`),
-  upload: (formData: FormData) =>
-    api.post("/documents/", formData, { headers: { "Content-Type": "multipart/form-data" } }),
+
+  // Updated upload with progress tracking
+  upload: (formData: FormData, config?: { onUploadProgress?: (progressEvent: any) => void }) =>
+    api.post("/documents/", formData, {
+      headers: { "Content-Type": "multipart/form-data" },
+      onUploadProgress: config?.onUploadProgress,
+    }),
+
   update: (id: string, data: Record<string, unknown>) =>
     api.patch(`/documents/${id}/`, data),
+
   editMetadata: (id: string, data: Record<string, unknown>) =>
     api.patch(`/documents/${id}/edit_metadata/`, data),
+
   delete: (id: string) => api.delete(`/documents/${id}/`),
   submit:  (id: string) => api.post(`/documents/${id}/submit/`),
   archive: (id: string) => api.post(`/documents/${id}/archive/`),
+
   previewUrl: (id: string) => api.get(`/documents/${id}/preview_url/`),
-  uploadVersion: (id: string, formData: FormData) =>
+
+  // Also updated uploadVersion with progress
+  uploadVersion: (id: string, formData: FormData, config?: { onUploadProgress?: (progressEvent: any) => void }) =>
     api.post(`/documents/${id}/upload_version/`, formData, {
       headers: { "Content-Type": "multipart/form-data" },
+      onUploadProgress: config?.onUploadProgress,
     }),
+
   restoreVersion: (id: string, versionId: string) =>
     api.post(`/documents/${id}/restore_version/`, { version_id: versionId }),
+
   comments:   (id: string) => api.get(`/documents/${id}/comments/`),
   addComment: (id: string, content: string, isInternal = false) =>
     api.post(`/documents/${id}/comments/`, { content, is_internal: isInternal }),
+
   auditTrail: (id: string) => api.get(`/documents/${id}/audit_trail/`),
+
   bulkAction: (
     documentIds: string[],
     action: "approve" | "reject" | "archive" | "void",
@@ -98,39 +114,76 @@ export const searchAPI = {
 };
 
 export const workflowAPI = {
+  // ─────────────────────────────────────────────────────────────
   // Templates
+  // ─────────────────────────────────────────────────────────────
   listTemplates:     ()                          => api.get("/workflows/templates/"),
   getTemplate:       (id: string)                => api.get(`/workflows/templates/${id}/`),
   createTemplate:    (data: unknown)             => api.post("/workflows/templates/", data),
   updateTemplate:    (id: string, data: unknown) => api.put(`/workflows/templates/${id}/`, data),
+
   duplicateTemplate: (id: string, name?: string) =>
     api.post(`/workflows/templates/${id}/duplicate/`, name ? { name } : {}),
- 
+
   /**
    * Persist drag-and-drop step order.
    * stepIds: ordered array of step UUIDs (position = new order index).
    */
   reorderSteps: (templateId: string, stepIds: string[]) =>
-    api.post(`/workflows/templates/${templateId}/reorder_steps/`, { step_ids: stepIds }),
- 
+    api.post(`/workflows/templates/${templateId}/reorder_steps/`, {
+      step_ids: stepIds,
+    }),
+
+  // ─────────────────────────────────────────────────────────────
   // Rules
+  // ─────────────────────────────────────────────────────────────
   listRules: (params?: Record<string, unknown>) =>
     api.get("/workflows/rules/", { params }),
-  createRule: (data: unknown) => api.post("/workflows/rules/", data),
-  updateRule: (id: string, data: unknown) => api.patch(`/workflows/rules/${id}/`, data),
-  deleteRule: (id: string) => api.delete(`/workflows/rules/${id}/`),
- 
+
+  createRule: (data: unknown) =>
+    api.post("/workflows/rules/", data),
+
+  updateRule: (id: string, data: unknown) =>
+    api.patch(`/workflows/rules/${id}/`, data),
+
+  deleteRule: (id: string) =>
+    api.delete(`/workflows/rules/${id}/`),
+
+  // ─────────────────────────────────────────────────────────────
   // Instances
-  listInstances:    ()          => api.get("/workflows/instances/"),
-  cancelInstance:   (id: string) => api.post(`/workflows/instances/${id}/cancel/`),
- 
+  // ─────────────────────────────────────────────────────────────
+  listInstances:  ()           => api.get("/workflows/instances/"),
+  cancelInstance: (id: string) => api.post(`/workflows/instances/${id}/cancel/`),
+
+  // ─────────────────────────────────────────────────────────────
   // Tasks
-  myTasks:      ()                                    => api.get("/workflows/tasks/my_tasks/"),
-  listTasks:    (params?: Record<string, unknown>)    => api.get("/workflows/tasks/", { params }),
-  approveTask:  (id: string, comment = "")            =>
+  // ─────────────────────────────────────────────────────────────
+  myTasks:   ()                                 => api.get("/workflows/tasks/my_tasks/"),
+
+  listTasks: (params?: Record<string, unknown>) =>
+    api.get("/workflows/tasks/", { params }),
+
+  approveTask: (id: string, comment = "") =>
     api.post(`/workflows/tasks/${id}/approve/`, { comment }),
-  rejectTask:   (id: string, comment: string)         =>
+
+  rejectTask: (id: string, comment: string) =>
     api.post(`/workflows/tasks/${id}/reject/`, { comment }),
+
+  // ── Extended task actions (from first API) ────────────────────
+  returnForReview: (id: string, comment: string) =>
+    api.post(`/workflows/tasks/${id}/return_for_review/`, { comment }),
+
+  holdTask: (id: string, comment: string, holdHours: number) =>
+    api.post(`/workflows/tasks/${id}/hold/`, {
+      comment,
+      hold_hours: holdHours,
+    }),
+
+  releaseHold: (id: string) =>
+    api.post(`/workflows/tasks/${id}/release_hold/`),
+
+  taskHistory: (id: string) =>
+    api.get(`/workflows/tasks/${id}/history/`),
 };
 
 export const notificationsAPI = {
