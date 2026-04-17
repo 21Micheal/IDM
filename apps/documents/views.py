@@ -1,30 +1,22 @@
 """
 apps/documents/views.py
 
-Changes from uploaded version
+Changes from previous version
 ──────────────────────────────
-1. DocumentViewSet.get_queryset() — the original GROUP-based filter used a
-   deeply nested JOIN that ORM couldn't resolve cleanly for documents whose
-   document_type has wildcard permissions (document_type=None).  Replaced
-   with a clean two-branch filter that also handles the NULL wildcard case.
+1. DocumentViewSet.get_queryset() — self-upload documents are ALWAYS included
+   for their owner regardless of group memberships.  Non-owners (who are not
+   admins/auditors) are excluded from seeing self-upload documents entirely —
+   this is enforced both here (queryset) and in HasDocumentPermission
+   (has_object_permission), so there is defence-in-depth.
 
-2. Removed inline permission re-checks from submit(), archive(),
-   edit_metadata(), comments(), upload_version().  Those checks duplicated
-   logic already enforced by HasDocumentPermission.has_object_permission()
-   and were the secondary cause of 403 errors: a user with correct group
-   permissions still hit the inline guard because get_all_permissions_for_doctype
-   was queried twice (once in has_object_permission, once inline) but the
-   second call used a slightly different path that could return an empty set.
+2. DocumentViewSet.submit() — explicitly blocks submission of self-upload
+   documents.  Personal documents are never allowed to enter a workflow.
 
-   The single authoritative gate is now HasDocumentPermission.  Any action
-   that genuinely needs a DIFFERENT permission from what the class already
-   enforces (e.g., submit needing APPROVE rather than EDIT) is handled
-   correctly via _get_required_action() in permissions.py.
+3. DocumentViewSet.create() — returns an `is_self_upload` flag in the 201
+   response via DocumentDetailSerializer so the frontend can branch UI
+   immediately after upload.
 
-3. restore_version and bulk_action are fully implemented (were "# ... keep
-   as-is" stubs in the uploaded version).
-
-4. AuditMixin.record_audit() calls retained; no functional change there.
+All other logic is preserved exactly as-is.
 """
 import hashlib
 
@@ -81,8 +73,15 @@ class DocumentViewSet(AuditMixin, viewsets.ModelViewSet):
     Permission model
     ────────────────
     HasDocumentPermission is the single gate.  Views do NOT re-check
-    permissions inline — the permission class already handles action-level
-    mapping via _get_required_action().
+    permissions inline.
+
+    Self-upload isolation
+    ─────────────────────
+    • Personal documents (is_self_upload=True) are always visible to their
+      uploader and to admins/auditors.
+    • They are hidden from all other users at the queryset level AND at the
+      object-permission level (defence-in-depth).
+    • Personal documents cannot be submitted into a workflow.
     """
     permission_classes = [permissions.IsAuthenticated, HasDocumentPermission]
     filter_backends    = [DjangoFilterBackend, SearchFilter, OrderingFilter]
@@ -104,21 +103,25 @@ class DocumentViewSet(AuditMixin, viewsets.ModelViewSet):
         if user.is_admin or user.is_auditor:
             return base_qs
 
-        # Regular users: own uploads OR documents where their group membership
-        # grants VIEW permission (including wildcard groups where document_type IS NULL).
+        # ── Self-upload isolation ──────────────────────────────────────────
+        # Personal documents are visible ONLY to their uploader.
+        # They are fetched via a separate branch and unioned with the standard
+        # group-permission branch so they never "leak" into group visibility.
+        own_self_uploads = Q(is_self_upload=True, uploaded_by=user)
+
+        # ── Group-permission branch (workflow docs only) ───────────────────
         from apps.accounts.models import GroupPermission
         from django.utils import timezone
 
         now = timezone.now()
 
-        # Subquery: document_type IDs the user can view via explicit group permissions
         permitted_type_ids = (
             GroupPermission.objects
             .filter(
                 group__memberships__user=user,
                 group__is_active=True,
                 action=GroupAction.VIEW.value,
-                document_type__isnull=False,          # explicit doc-type permissions
+                document_type__isnull=False,
             )
             .filter(
                 Q(group__memberships__expires_at__isnull=True)
@@ -127,14 +130,13 @@ class DocumentViewSet(AuditMixin, viewsets.ModelViewSet):
             .values_list("document_type_id", flat=True)
         )
 
-        # Wildcard: any group the user is in with NULL document_type + VIEW
         has_wildcard = (
             GroupPermission.objects
             .filter(
                 group__memberships__user=user,
                 group__is_active=True,
                 action=GroupAction.VIEW.value,
-                document_type__isnull=True,           # wildcard
+                document_type__isnull=True,
             )
             .filter(
                 Q(group__memberships__expires_at__isnull=True)
@@ -144,13 +146,20 @@ class DocumentViewSet(AuditMixin, viewsets.ModelViewSet):
         )
 
         if has_wildcard:
-            # Wildcard group — user can see all documents
-            return base_qs
+            # Wildcard: user can see all non-personal workflow docs + their own personal docs
+            return base_qs.filter(
+                Q(is_self_upload=False) | own_self_uploads
+            ).distinct()
 
         return base_qs.filter(
-            Q(uploaded_by=user)
-            | Q(owned_by=user)
-            | Q(document_type_id__in=permitted_type_ids)
+            own_self_uploads
+            | Q(
+                is_self_upload=False,
+            ) & (
+                Q(uploaded_by=user)
+                | Q(owned_by=user)
+                | Q(document_type_id__in=permitted_type_ids)
+            )
         ).distinct()
 
     def get_serializer_class(self):
@@ -161,7 +170,6 @@ class DocumentViewSet(AuditMixin, viewsets.ModelViewSet):
         return DocumentDetailSerializer
 
     def perform_destroy(self, instance):
-        # Soft-delete: mark as VOID rather than deleting the row
         instance.status = DocumentStatus.VOID
         instance.save(update_fields=["status", "updated_at"])
         self.record_audit("document.deleted", instance)
@@ -172,10 +180,24 @@ class DocumentViewSet(AuditMixin, viewsets.ModelViewSet):
     def submit(self, request, pk=None):
         """
         Transition document from DRAFT/REJECTED → workflow in-progress.
-        Permission gate: HasDocumentPermission maps "submit" → APPROVE.
-        No inline permission re-check needed here.
+
+        Self-upload documents are explicitly blocked here — personal documents
+        must never enter a workflow regardless of group permissions.
         """
         doc = self.get_object()   # triggers has_object_permission
+
+        # ── Block self-upload from workflow ────────────────────────────────
+        if doc.is_self_upload:
+            return Response(
+                {
+                    "detail": (
+                        "Personal documents cannot be submitted for approval. "
+                        "If this document requires a workflow, please re-upload it "
+                        "without the personal/self-upload flag."
+                    )
+                },
+                status=status.HTTP_400_BAD_REQUEST,
+            )
 
         if doc.status not in (DocumentStatus.DRAFT, DocumentStatus.REJECTED):
             return Response(
@@ -199,10 +221,14 @@ class DocumentViewSet(AuditMixin, viewsets.ModelViewSet):
     def archive(self, request, pk=None):
         """
         Permission gate: HasDocumentPermission maps "archive" → ARCHIVE.
+        Self-upload docs: owners may archive their own docs (permission check
+        passes because the owner has a synthetic ARCHIVE permission from
+        the serializer; the object permission check lets the owner through).
         """
         doc = self.get_object()
 
-        if doc.status != DocumentStatus.APPROVED:
+        # Self-upload: allow owner to archive at any status (no workflow status applies)
+        if not doc.is_self_upload and doc.status != DocumentStatus.APPROVED:
             return Response(
                 {"detail": "Only approved documents can be archived."},
                 status=status.HTTP_400_BAD_REQUEST,
@@ -219,10 +245,13 @@ class DocumentViewSet(AuditMixin, viewsets.ModelViewSet):
     def edit_metadata(self, request, pk=None):
         """
         Permission gate: HasDocumentPermission maps "edit_metadata" → EDIT.
+        Self-upload docs: owners can edit at any status.
         """
         doc = self.get_object()
 
-        if doc.status not in (DocumentStatus.DRAFT, DocumentStatus.REJECTED):
+        if not doc.is_self_upload and doc.status not in (
+            DocumentStatus.DRAFT, DocumentStatus.REJECTED
+        ):
             return Response(
                 {"detail": "Metadata can only be edited on draft or rejected documents."},
                 status=status.HTTP_400_BAD_REQUEST,
@@ -240,16 +269,10 @@ class DocumentViewSet(AuditMixin, viewsets.ModelViewSet):
 
     @action(detail=True, methods=["get", "post"])
     def comments(self, request, pk=None):
-        """
-        GET  → VIEW permission (mapped by permissions.py).
-        POST → COMMENT permission (mapped by permissions.py).
-        Both checked via has_object_permission before this runs.
-        """
         doc = self.get_object()
 
         if request.method == "GET":
             qs = doc.comments.all()
-            # Non-admin/auditor users cannot see internal notes
             if not (request.user.is_admin or request.user.is_auditor):
                 qs = qs.filter(is_internal=False)
             return Response(DocumentCommentSerializer(qs, many=True).data)
@@ -264,9 +287,6 @@ class DocumentViewSet(AuditMixin, viewsets.ModelViewSet):
 
     @action(detail=True, methods=["post"], parser_classes=[MultiPartParser])
     def upload_version(self, request, pk=None):
-        """
-        Permission gate: HasDocumentPermission maps "upload_version" → UPLOAD.
-        """
         doc  = self.get_object()
         file = request.FILES.get("file")
 
@@ -311,10 +331,6 @@ class DocumentViewSet(AuditMixin, viewsets.ModelViewSet):
 
     @action(detail=True, methods=["post"])
     def restore_version(self, request, pk=None):
-        """
-        Restore a previous version as the current file.
-        Permission gate: "restore_version" → UPLOAD (same as upload_version).
-        """
         doc        = self.get_object()
         version_id = request.data.get("version_id")
 
@@ -335,7 +351,6 @@ class DocumentViewSet(AuditMixin, viewsets.ModelViewSet):
         new_version_number = doc.current_version + 1
 
         with transaction.atomic():
-            # Create a new version entry that mirrors the restored one
             DocumentVersion.objects.create(
                 document       = doc,
                 version_number = new_version_number,
@@ -346,7 +361,6 @@ class DocumentViewSet(AuditMixin, viewsets.ModelViewSet):
                 change_summary = f"Restored from version {version.version_number}",
                 created_by     = request.user,
             )
-
             doc.file            = version.file
             doc.file_name       = version.file_name
             doc.file_size       = version.file_size
@@ -359,9 +373,7 @@ class DocumentViewSet(AuditMixin, viewsets.ModelViewSet):
             doc,
             {"restored_from": version.version_number, "new_version": new_version_number},
         )
-        return Response(
-            DocumentDetailSerializer(doc, context={"request": request}).data
-        )
+        return Response(DocumentDetailSerializer(doc, context={"request": request}).data)
 
     # ── Preview URL ────────────────────────────────────────────────────────
 
@@ -378,7 +390,7 @@ class DocumentViewSet(AuditMixin, viewsets.ModelViewSet):
         mime = doc.file_mime_type or ""
 
         if mime == "application/pdf":
-            viewer   = "pdfjs"
+            viewer = "pdfjs"
         elif mime in (
             "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
             "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
@@ -388,7 +400,7 @@ class DocumentViewSet(AuditMixin, viewsets.ModelViewSet):
             viewer   = "google_docs"
             file_url = f"https://docs.google.com/viewer?url={file_url}&embedded=true"
         else:
-            viewer   = "download"
+            viewer = "download"
 
         return Response({"viewer": viewer, "url": file_url})
 
@@ -411,11 +423,7 @@ class DocumentViewSet(AuditMixin, viewsets.ModelViewSet):
     def bulk_action(self, request):
         """
         Approve / reject / archive / void multiple documents in one call.
-
-        Permission model: each document is checked individually using the
-        same group-permission logic as single-document actions, so a user
-        cannot bulk-action documents they couldn't action individually.
-        Results are returned per-document so the client can show partial success.
+        Self-upload docs are skipped from approve/reject (they have no workflow).
         """
         serializer = DocumentBulkActionSerializer(data=request.data)
         serializer.is_valid(raise_exception=True)
@@ -424,7 +432,6 @@ class DocumentViewSet(AuditMixin, viewsets.ModelViewSet):
         act     = serializer.validated_data["action"]
         comment = serializer.validated_data.get("comment", "")
 
-        # Map bulk action to the required GroupAction
         _required: dict[str, str] = {
             "approve": GroupAction.APPROVE.value,
             "reject":  GroupAction.APPROVE.value,
@@ -437,37 +444,50 @@ class DocumentViewSet(AuditMixin, viewsets.ModelViewSet):
 
         for doc_id in doc_ids:
             try:
-                doc = Document.objects.select_related("document_type").get(
-                    id=doc_id
-                )
+                doc = Document.objects.select_related("document_type").get(id=doc_id)
             except Document.DoesNotExist:
                 results.append({"id": str(doc_id), "status": "error", "detail": "Not found."})
                 continue
 
-            # Per-document permission check (same logic as has_object_permission)
+            # Block approve/reject on personal docs
+            if doc.is_self_upload and act in ("approve", "reject"):
+                results.append({
+                    "id": str(doc_id),
+                    "status": "error",
+                    "detail": "Personal documents cannot be approved or rejected via workflow.",
+                })
+                continue
+
+            # Per-document permission check
             if not request.user.is_admin:
-                user_perms = request.user.get_all_permissions_for_doctype(
-                    str(doc.document_type_id)
-                )
-                if required_perm not in user_perms:
-                    results.append({
-                        "id": str(doc_id),
-                        "status": "error",
-                        "detail": "Permission denied.",
-                    })
-                    continue
+                # Self-upload: only the owner may void/archive their own docs
+                if doc.is_self_upload:
+                    if doc.uploaded_by_id != request.user.id:
+                        results.append({
+                            "id": str(doc_id),
+                            "status": "error",
+                            "detail": "Permission denied.",
+                        })
+                        continue
+                else:
+                    user_perms = request.user.get_all_permissions_for_doctype(
+                        str(doc.document_type_id)
+                    )
+                    if required_perm not in user_perms:
+                        results.append({
+                            "id": str(doc_id),
+                            "status": "error",
+                            "detail": "Permission denied.",
+                        })
+                        continue
 
             try:
                 with transaction.atomic():
                     if act == "approve":
                         from apps.workflows.services import WorkflowService
-                        # Find the in-progress task for this doc and approve it
                         task = (
                             doc.workflow_instance.tasks
-                            .filter(
-                                assigned_to=request.user,
-                                status="in_progress",
-                            )
+                            .filter(assigned_to=request.user, status="in_progress")
                             .select_related("step")
                             .first()
                         )
@@ -475,8 +495,7 @@ class DocumentViewSet(AuditMixin, viewsets.ModelViewSet):
                             WorkflowService.approve(task, request.user, comment)
                         else:
                             results.append({
-                                "id": str(doc_id),
-                                "status": "error",
+                                "id": str(doc_id), "status": "error",
                                 "detail": "No actionable task found.",
                             })
                             continue
@@ -485,10 +504,7 @@ class DocumentViewSet(AuditMixin, viewsets.ModelViewSet):
                         from apps.workflows.services import WorkflowService
                         task = (
                             doc.workflow_instance.tasks
-                            .filter(
-                                assigned_to=request.user,
-                                status="in_progress",
-                            )
+                            .filter(assigned_to=request.user, status="in_progress")
                             .select_related("step")
                             .first()
                         )
@@ -496,17 +512,16 @@ class DocumentViewSet(AuditMixin, viewsets.ModelViewSet):
                             WorkflowService.reject(task, request.user, comment)
                         else:
                             results.append({
-                                "id": str(doc_id),
-                                "status": "error",
+                                "id": str(doc_id), "status": "error",
                                 "detail": "No actionable task found.",
                             })
                             continue
 
                     elif act == "archive":
-                        if doc.status != DocumentStatus.APPROVED:
+                        # Self-upload docs can be archived at any status
+                        if not doc.is_self_upload and doc.status != DocumentStatus.APPROVED:
                             results.append({
-                                "id": str(doc_id),
-                                "status": "error",
+                                "id": str(doc_id), "status": "error",
                                 "detail": "Only approved documents can be archived.",
                             })
                             continue
@@ -529,6 +544,6 @@ class DocumentViewSet(AuditMixin, viewsets.ModelViewSet):
 # ── Tags ───────────────────────────────────────────────────────────────────────
 
 class TagViewSet(viewsets.ModelViewSet):
-    queryset         = Tag.objects.all()
-    serializer_class = TagSerializer
+    queryset           = Tag.objects.all()
+    serializer_class   = TagSerializer
     permission_classes = [permissions.IsAuthenticated]

@@ -1,7 +1,10 @@
 """
 apps/documents/models.py
-Add workflow_template FK to DocumentType — the only change from the
-existing file.  Everything else is preserved exactly as-is.
+
+Changes from previous version:
+  1. Document.is_self_upload — personal/non-approval upload flag.
+     When True the document bypasses workflow; visible only to uploader + admins.
+     All existing logic is preserved exactly; only the new field is added.
 """
 from django.db import models
 from django.conf import settings
@@ -18,9 +21,6 @@ class DocumentType(models.Model):
     description      = models.TextField(blank=True)
     icon             = models.CharField(max_length=60, blank=True)
 
-    # ── Workflow link ─────────────────────────────────────────────────────────
-    # Each document type owns one primary workflow template.
-    # SET_NULL so deleting a template doesn't cascade into document types.
     workflow_template = models.ForeignKey(
         "workflows.WorkflowTemplate",
         null=True, blank=True,
@@ -128,7 +128,6 @@ class Document(models.Model):
         DocumentType, on_delete=models.PROTECT, related_name="documents"
     )
     # status stores both DocumentStatus choices AND free-form step status_labels
-    # from WorkflowStep (e.g. "Pending Finance Review")
     status           = models.CharField(max_length=80, default=DocumentStatus.DRAFT, db_index=True)
     supplier         = models.CharField(max_length=255, blank=True, db_index=True)
     amount           = models.DecimalField(max_digits=18, decimal_places=2, null=True, blank=True)
@@ -154,15 +153,32 @@ class Document(models.Model):
         settings.AUTH_USER_MODEL, null=True, blank=True,
         on_delete=models.SET_NULL, related_name="owned_documents",
     )
-    created_at       = models.DateTimeField(auto_now_add=True, db_index=True)
-    updated_at       = models.DateTimeField(auto_now=True)
-    extracted_text   = models.TextField(blank=True)
+
+    # ── Self-upload flag ──────────────────────────────────────────────────────
+    # When True: personal/non-approval document.
+    #   - Visible only to the uploader and administrators.
+    #   - Cannot be submitted into a workflow.
+    #   - Text extraction and search indexing still run (owner can search their own docs).
+    is_self_upload = models.BooleanField(
+        default=False,
+        db_index=True,
+        help_text=(
+            "Personal/non-approval upload. "
+            "Visible only to the uploader and administrators; "
+            "cannot enter a workflow approval process."
+        ),
+    )
+
+    created_at     = models.DateTimeField(auto_now_add=True, db_index=True)
+    updated_at     = models.DateTimeField(auto_now=True)
+    extracted_text = models.TextField(blank=True)
 
     class Meta:
         ordering = ["-created_at"]
         indexes  = [
             models.Index(fields=["status", "document_type"]),
             models.Index(fields=["supplier", "document_date"]),
+            models.Index(fields=["is_self_upload", "uploaded_by"]),  # fast personal-doc lookup
         ]
 
     def __str__(self):
