@@ -114,8 +114,8 @@ function SidebarGroup({
         className={clsx(
           "w-full flex items-center gap-3 px-3 py-2 rounded-lg text-sm font-medium transition-colors",
           isGroupActive
-            ? "text-white bg-blue-700"
-            : "text-blue-100 hover:bg-blue-700 hover:text-white"
+            ? "text-white bg-slate-700"
+            : "text-blue-100 hover:bg-slate-700 hover:text-white"
         )}
       >
         <group.icon className="w-4 h-4 flex-shrink-0" />
@@ -140,7 +140,7 @@ function SidebarGroup({
                     "flex items-center gap-2.5 px-3 py-1.5 rounded-lg text-sm transition-colors",
                     isActive
                       ? "bg-red-600 text-white shadow-sm"
-                      : "text-blue-200 hover:bg-blue-700 hover:text-white"
+                      : "text-blue-200 hover:bg-slate-700 hover:text-white"
                   )
                 }
               >
@@ -290,7 +290,7 @@ export default function Layout() {
                     "flex items-center gap-3 px-3 py-2 rounded-lg text-sm font-medium transition-colors",
                     isActive
                       ? "bg-red-600 text-white shadow-md"
-                      : "text-blue-100 hover:bg-blue-700 hover:text-white"
+                      : "text-blue-100 hover:bg-slate-700 hover:text-white"
                   )
                 }
               >
@@ -322,7 +322,7 @@ export default function Layout() {
                       "flex items-center gap-3 px-3 py-2 rounded-lg text-sm font-medium transition-colors",
                       isActive
                         ? "bg-red-600 text-white shadow-md"
-                        : "text-blue-100 hover:bg-blue-700 hover:text-white"
+                        : "text-blue-100 hover:bg-slate-700 hover:text-white"
                     )
                   }
                 >

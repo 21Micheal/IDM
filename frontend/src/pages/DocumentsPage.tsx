@@ -1,21 +1,58 @@
+/**
+ * pages/DocumentsPage.tsx
+ *
+ * Consolidated version with 3 tabs + Bulk Toolbar only on All & Workflow tabs
+ */
+
 import { useState } from "react";
-import { Link, useSearchParams } from "react-router-dom";
+import { Link } from "react-router-dom";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { documentsAPI, documentTypesAPI } from "@/services/api";
-import StatusBadge from "@/components/documents/StatusBadge";
 import {
-  FileText, Upload, Filter, ChevronLeft, ChevronRight,
-  CheckCircle, XCircle, Archive, Trash2, Loader2,
-  CheckSquare, Square, X,
+  FileText, UploadCloud, Lock, Users, LayoutList,
+  Archive, Trash2, Loader2, CheckSquare, Square, X, CheckCircle, XCircle,
 } from "lucide-react";
 import { format } from "date-fns";
+import { cn } from "../lib/utils";
+import { useDebounce } from "../hooks/useDebounce";
 import { toast } from "react-toastify";
-import clsx from "clsx";
-import type { Document, DocumentType } from "@/types";
+import type { Document } from "@/types";
 
-const PAGE_SIZE = 20;
+const PAGE_SIZE = 25;
 type BulkAction = "approve" | "reject" | "archive" | "void";
+type Tab = "all" | "workflow" | "personal";
 
+const TABS: { id: Tab; label: string; icon: React.ReactNode; tip: string }[] = [
+  {
+    id: "all",
+    label: "All Documents",
+    icon: <LayoutList className="w-4 h-4" />,
+    tip: "Every document you have access to",
+  },
+  {
+    id: "workflow",
+    label: "Workflow",
+    icon: <Users className="w-4 h-4" />,
+    tip: "Documents going through an approval process",
+  },
+  {
+    id: "personal",
+    label: "My Documents",
+    icon: <Lock className="w-4 h-4" />,
+    tip: "Your personal uploads — visible only to you and admins",
+  },
+];
+
+const STATUS_STYLES: Record<string, string> = {
+  draft:            "bg-slate-100 text-slate-600",
+  pending_approval: "bg-blue-100 text-blue-700",
+  approved:         "bg-green-100 text-green-700",
+  rejected:         "bg-red-100 text-red-700",
+  archived:         "bg-slate-100 text-slate-400",
+  void:             "bg-red-50 text-red-400",
+};
+
+// ── Bulk Toolbar (shown only on All & Workflow tabs) ────────────────────────
 function BulkToolbar({
   selectedIds,
   onAction,
@@ -34,19 +71,16 @@ function BulkToolbar({
 
   return (
     <>
-      <div className="sticky top-0 z-10 bg-white border-b border-gray-200 px-6 py-4 flex items-center gap-4 shadow-sm">
-        <div className="flex items-center gap-3">
-          <div className="text-sm font-medium text-gray-700">
-            {selectedIds.length} selected
-          </div>
-          <div className="h-4 w-px bg-gray-300" />
+      <div className="sticky top-0 z-10 bg-white border-b border-slate-200 px-6 py-4 flex items-center gap-4 shadow-sm">
+        <div className="text-sm font-medium text-slate-700">
+          {selectedIds.length} selected
         </div>
 
         <div className="flex gap-2">
           <button
             onClick={() => onAction("approve")}
             disabled={isLoading}
-            className="flex items-center gap-2 px-5 py-2 text-sm font-medium bg-green-600 text-white rounded-2xl hover:bg-green-700 disabled:opacity-50 transition-all"
+            className="flex items-center gap-2 px-5 py-2 text-sm font-medium bg-green-600 text-white rounded-lg hover:bg-green-700 disabled:opacity-50 transition-colors"
           >
             {isLoading ? <Loader2 className="w-4 h-4 animate-spin" /> : <CheckCircle className="w-4 h-4" />}
             Approve
@@ -55,7 +89,7 @@ function BulkToolbar({
           <button
             onClick={() => setRejectModal(true)}
             disabled={isLoading}
-            className="flex items-center gap-2 px-5 py-2 text-sm font-medium bg-red-600 text-white rounded-2xl hover:bg-red-700 disabled:opacity-50 transition-all"
+            className="flex items-center gap-2 px-5 py-2 text-sm font-medium bg-red-600 text-white rounded-lg hover:bg-red-700 disabled:opacity-50 transition-colors"
           >
             <XCircle className="w-4 h-4" /> Reject
           </button>
@@ -63,19 +97,19 @@ function BulkToolbar({
           <button
             onClick={() => onAction("archive")}
             disabled={isLoading}
-            className="flex items-center gap-2 px-5 py-2 text-sm font-medium bg-blue-600 text-white rounded-2xl hover:bg-blue-700 disabled:opacity-50 transition-all"
+            className="flex items-center gap-2 px-5 py-2 text-sm font-medium bg-blue-600 text-white rounded-lg hover:bg-blue-700 disabled:opacity-50 transition-colors"
           >
             <Archive className="w-4 h-4" /> Archive
           </button>
 
           <button
             onClick={() => {
-              if (confirm(`Void ${selectedIds.length} documents? This action cannot be undone.`)) {
+              if (confirm(`Void ${selectedIds.length} documents? This cannot be undone.`)) {
                 onAction("void");
               }
             }}
             disabled={isLoading}
-            className="flex items-center gap-2 px-5 py-2 text-sm font-medium bg-gray-700 text-white rounded-2xl hover:bg-gray-800 disabled:opacity-50 transition-all"
+            className="flex items-center gap-2 px-5 py-2 text-sm font-medium bg-gray-700 text-white rounded-lg hover:bg-gray-800 disabled:opacity-50 transition-colors"
           >
             <Trash2 className="w-4 h-4" /> Void
           </button>
@@ -83,7 +117,7 @@ function BulkToolbar({
 
         <button 
           onClick={onClear} 
-          className="ml-auto text-gray-400 hover:text-gray-600 p-2 rounded-xl hover:bg-gray-100 transition-colors"
+          className="ml-auto text-slate-400 hover:text-slate-600 p-2 rounded-lg hover:bg-slate-100 transition-colors"
         >
           <X className="w-5 h-5" />
         </button>
@@ -93,8 +127,8 @@ function BulkToolbar({
       {rejectModal && (
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 p-4">
           <div className="card w-full max-w-md p-6 space-y-5">
-            <h2 className="font-semibold text-lg text-gray-900">Reject Selected Documents</h2>
-            <p className="text-sm text-gray-500">
+            <h2 className="font-semibold text-lg text-slate-900">Reject Selected Documents</h2>
+            <p className="text-sm text-slate-500">
               Please provide a reason for rejection. This will be visible to all involved parties.
             </p>
             <textarea
@@ -131,39 +165,101 @@ function BulkToolbar({
 }
 
 export default function DocumentsPage() {
-  const [searchParams, setSearchParams] = useSearchParams();
+  const queryClient = useQueryClient();
+
+  const [activeTab, setActiveTab] = useState<Tab>("workflow");
+  const [search, setSearch] = useState("");
+  const [statusFilter, setStatusFilter] = useState("");
+  const [typeFilter, setTypeFilter] = useState("");
+  const [sort, setSort] = useState<"created_at" | "document_date" | "amount" | "title" | "reference_number">("created_at");
+  const [sortDir, setSortDir] = useState<"asc" | "desc">("desc");
   const [page, setPage] = useState(1);
-  const [showFilters, setShowFilters] = useState(false);
   const [selectedIds, setSelectedIds] = useState<string[]>([]);
-  const qc = useQueryClient();
 
-  const statusFilter = searchParams.get("status") || "";
-  const typeId = searchParams.get("type") || "";
-  const supplier = searchParams.get("supplier") || "";
+  const debouncedSearch = useDebounce(search, 300);
 
-  const { data: docTypes } = useQuery<DocumentType[]>({
+  const { data: typesData } = useQuery({
     queryKey: ["document-types"],
-    queryFn: () => documentTypesAPI.list().then((r) => r.data.results ?? r.data),
+    queryFn: () => documentTypesAPI.list(),
+    select: (r) => (r.data.results ?? r.data) as any[],
   });
+
+  // Build params based on active tab
+  const params: Record<string, unknown> = {
+    search: debouncedSearch || undefined,
+    status: statusFilter || undefined,
+    document_type: typeFilter || undefined,
+    ordering: `${sortDir === "desc" ? "-" : ""}${sort}`,
+    page,
+    page_size: PAGE_SIZE,
+  };
+
+  if (activeTab === "workflow") params.is_self_upload = false;
+  if (activeTab === "personal") params.is_self_upload = true;
 
   const { data, isLoading } = useQuery({
-    queryKey: ["documents", { page, statusFilter, typeId, supplier }],
-    queryFn: () =>
-      documentsAPI.list({
-        page,
-        page_size: PAGE_SIZE,
-        ...(statusFilter && { status: statusFilter }),
-        ...(typeId && { document_type: typeId }),
-        ...(supplier && { supplier }),
-      }).then((r) => r.data),
+    queryKey: ["documents", activeTab, params],
+    queryFn: () => documentsAPI.list(params),
+    select: (r) => r.data,
+    placeholderData: (prev) => prev,
   });
 
-  const totalPages = Math.ceil((data?.count ?? 0) / PAGE_SIZE);
-  const pageIds = (data?.results ?? []).map((d: Document) => d.id);
-  const allChecked = pageIds.length > 0 && pageIds.every((id: string) => selectedIds.includes(id));
+  const docs = data?.results ?? [];
+
+  // Quick actions for My Documents tab
+  const archiveMutation = useMutation({
+    mutationFn: (id: string) => documentsAPI.archive(id),
+    onSuccess: () => {
+      toast.success("Document archived.");
+      queryClient.invalidateQueries({ queryKey: ["documents"] });
+    },
+    onError: () => toast.error("Could not archive document."),
+  });
+
+  const deleteMutation = useMutation({
+    mutationFn: (id: string) => documentsAPI.delete(id),
+    onSuccess: () => {
+      toast.success("Document deleted.");
+      queryClient.invalidateQueries({ queryKey: ["documents"] });
+    },
+    onError: () => toast.error("Could not delete document."),
+  });
+
+  // Bulk mutation (used only on All & Workflow tabs)
+  const bulkMutation = useMutation({
+    mutationFn: ({ action, comment }: { action: BulkAction; comment?: string }) =>
+      documentsAPI.bulkAction(selectedIds, action, comment),
+    onSuccess: () => {
+      toast.success("Bulk action completed successfully");
+      setSelectedIds([]);
+      queryClient.invalidateQueries({ queryKey: ["documents"] });
+    },
+    onError: () => toast.error("Bulk action failed"),
+  });
+
+  // Tab switch — reset filters & pagination
+  const switchTab = (tab: Tab) => {
+    setActiveTab(tab);
+    setSearch("");
+    setStatusFilter("");
+    setTypeFilter("");
+    setPage(1);
+    setSelectedIds([]);
+  };
+
+  const handleSort = (field: "created_at" | "document_date" | "amount" | "title" | "reference_number") => {
+    if (sort === field) {
+      setSortDir(sortDir === "asc" ? "desc" : "asc");
+    } else {
+      setSort(field);
+      setSortDir("desc");
+    }
+    setPage(1);
+  };
 
   const toggleAll = () => {
-    setSelectedIds(allChecked ? [] : pageIds);
+    const pageIds = docs.map((d: Document) => d.id);
+    setSelectedIds((prev) => (prev.length === pageIds.length ? [] : pageIds));
   };
 
   const toggleOne = (id: string) => {
@@ -172,258 +268,295 @@ export default function DocumentsPage() {
     );
   };
 
-  const bulkMutation = useMutation({
-    mutationFn: ({ action, comment }: { action: BulkAction; comment?: string }) =>
-      documentsAPI.bulkAction(selectedIds, action, comment),
-    onSuccess: ({ data: result }) => {
-      const rows = (result?.results ?? []) as Array<{ status: "ok" | "error"; detail?: string }>;
-      const succeeded = rows.filter((r) => r.status === "ok").length;
-      const failed = rows.length - succeeded;
+  const allChecked = docs.length > 0 && docs.every((d: Document) => selectedIds.includes(d.id));
 
-      toast.success(`${succeeded} documents processed successfully`);
-      if (failed > 0) toast.warn(`${failed} actions failed`);
-
-      setSelectedIds([]);
-      qc.invalidateQueries({ queryKey: ["documents"] });
-    },
-    onError: () => toast.error("Bulk action failed"),
-  });
+  // Show bulk toolbar only on All and Workflow tabs
+  const showBulkToolbar = activeTab !== "personal" && selectedIds.length > 0;
 
   return (
-    <div className="max-w-7xl mx-auto py-8 px-6">
+    <div className="p-6 max-w-7xl mx-auto space-y-6">
+
       {/* Header */}
-      <div className="flex items-center justify-between mb-8">
-        <div>
-          <h1 className="text-3xl font-bold text-gray-900">Documents</h1>
-          <p className="text-gray-500 mt-1">{data?.count ?? 0} total documents</p>
-        </div>
-        <div className="flex gap-3">
-          <button
-            onClick={() => setShowFilters(!showFilters)}
-            className="btn-secondary flex items-center gap-2"
-          >
-            <Filter className="w-4 h-4" /> Filters
-          </button>
-          <Link to="/documents/upload" className="btn-primary flex items-center gap-2">
-            <Upload className="w-4 h-4" /> Upload Document
-          </Link>
-        </div>
+      <div className="flex items-center justify-between">
+        <h1 className="text-2xl font-semibold text-slate-900">Documents</h1>
+        <Link
+          to="/documents/upload"
+          className="inline-flex items-center gap-2 px-4 py-2 bg-indigo-600 hover:bg-indigo-700 text-white text-sm font-medium rounded-lg transition-colors"
+        >
+          <UploadCloud className="w-4 h-4" /> Upload
+        </Link>
       </div>
 
-      {/* Filters */}
-      {showFilters && (
-        <div className="card p-6 grid grid-cols-1 md:grid-cols-3 gap-6 mb-8">
-          <div>
-            <label className="label">Status</label>
-            <select
-              value={statusFilter}
-              onChange={(e) => {
-                setSearchParams((p) => { p.set("status", e.target.value); return p; });
-                setPage(1);
-                setSelectedIds([]);
-              }}
-              className="input"
-            >
-              <option value="">All Statuses</option>
-              <option value="draft">Draft</option>
-              <option value="pending_approval">Pending Approval</option>
-              <option value="approved">Approved</option>
-              <option value="rejected">Rejected</option>
-              <option value="archived">Archived</option>
-            </select>
-          </div>
-          <div>
-            <label className="label">Document Type</label>
-            <select
-              value={typeId}
-              onChange={(e) => {
-                setSearchParams((p) => { p.set("type", e.target.value); return p; });
-                setPage(1);
-                setSelectedIds([]);
-              }}
-              className="input"
-            >
-              <option value="">All Types</option>
-              {docTypes?.map((t) => (
-                <option key={t.id} value={t.id}>{t.name}</option>
-              ))}
-            </select>
-          </div>
-          <div>
-            <label className="label">Supplier</label>
-            <input
-              value={supplier}
-              onChange={(e) => {
-                setSearchParams((p) => { p.set("supplier", e.target.value); return p; });
-                setPage(1);
-                setSelectedIds([]);
-              }}
-              className="input"
-              autoComplete="off"
-              placeholder="Filter by supplier..."
-            />
-          </div>
+      {/* Tabs */}
+      <div className="flex items-end gap-1 border-b border-slate-200">
+        {TABS.map((tab) => (
+          <button
+            key={tab.id}
+            title={tab.tip}
+            onClick={() => switchTab(tab.id)}
+            className={cn(
+              "inline-flex items-center gap-2 px-6 py-3 text-sm font-medium rounded-t-lg border border-transparent transition-colors -mb-px",
+              activeTab === tab.id
+                ? "border-slate-200 border-b-white bg-white text-indigo-600"
+                : "text-slate-500 hover:text-slate-700 hover:bg-slate-50"
+            )}
+          >
+            {tab.icon}
+            {tab.label}
+          </button>
+        ))}
+      </div>
+
+      {/* Personal tab explainer */}
+      {activeTab === "personal" && (
+        <div className="flex items-start gap-3 rounded-xl border border-indigo-100 bg-indigo-50 px-4 py-3 text-sm text-indigo-800">
+          <Lock className="w-4 h-4 mt-0.5 flex-shrink-0 text-indigo-500" />
+          <span>
+            These documents are private to you. They are not part of any approval workflow and are visible only to you and administrators.
+          </span>
         </div>
       )}
 
-      {/* Bulk Toolbar */}
-      <BulkToolbar
-        selectedIds={selectedIds}
-        onAction={(action, comment) => bulkMutation.mutate({ action, comment })}
-        onClear={() => setSelectedIds([])}
-        isLoading={bulkMutation.isPending}
-      />
+      {/* Filters */}
+      <div className="flex flex-wrap gap-3 items-center">
+        <input
+          value={search}
+          onChange={(e) => { setSearch(e.target.value); setPage(1); }}
+          placeholder="Search…"
+          className="w-60 text-sm border border-slate-200 rounded-lg px-3 py-2 focus:outline-none focus:ring-2 focus:ring-indigo-500"
+        />
 
-      {/* Documents Table */}
-      <div className="card overflow-hidden">
+        {activeTab !== "personal" && (
+          <select
+            value={statusFilter}
+            onChange={(e) => { setStatusFilter(e.target.value); setPage(1); }}
+            className="text-sm border border-slate-200 rounded-lg px-3 py-2 focus:outline-none focus:ring-2 focus:ring-indigo-500"
+          >
+            <option value="">All statuses</option>
+            {Object.keys(STATUS_STYLES).map((s) => (
+              <option key={s} value={s}>
+                {s.replace(/_/g, " ")}
+              </option>
+            ))}
+          </select>
+        )}
+
+        <select
+          value={typeFilter}
+          onChange={(e) => { setTypeFilter(e.target.value); setPage(1); }}
+          className="text-sm border border-slate-200 rounded-lg px-3 py-2 focus:outline-none focus:ring-2 focus:ring-indigo-500"
+        >
+          <option value="">All types</option>
+          {(typesData ?? []).map((t: any) => (
+            <option key={t.id} value={t.id}>{t.name}</option>
+          ))}
+        </select>
+
+        {data && (
+          <span className="ml-auto text-sm text-slate-500 self-center">
+            {data.count.toLocaleString()} document{data.count !== 1 ? "s" : ""}
+          </span>
+        )}
+      </div>
+
+      {/* Bulk Toolbar - Only show on All & Workflow tabs */}
+      {showBulkToolbar && (
+        <BulkToolbar
+          selectedIds={selectedIds}
+          onAction={(action, comment) => bulkMutation.mutate({ action, comment })}
+          onClear={() => setSelectedIds([])}
+          isLoading={bulkMutation.isPending}
+        />
+      )}
+
+      {/* Table */}
+      <div className="bg-white border border-slate-200 rounded-xl overflow-hidden">
         <div className="overflow-x-auto">
           <table className="w-full text-sm">
             <thead>
-              <tr className="border-b border-gray-100 bg-gray-50">
+              <tr className="border-b border-slate-100 bg-slate-50">
                 <th className="px-6 py-4 w-12">
-                  <button
-                    onClick={toggleAll}
-                    className="text-gray-400 hover:text-brand-600 transition-colors"
-                  >
-                    {allChecked ? (
-                      <CheckSquare className="w-5 h-5 text-brand-600" />
-                    ) : (
-                      <Square className="w-5 h-5" />
-                    )}
+                  <button onClick={toggleAll} className="text-slate-400 hover:text-indigo-600">
+                    {allChecked ? <CheckSquare className="w-5 h-5 text-indigo-600" /> : <Square className="w-5 h-5" />}
                   </button>
                 </th>
-                <th className="text-left px-6 py-4 font-medium text-gray-500">Reference</th>
-                <th className="text-left px-6 py-4 font-medium text-gray-500">Title</th>
-                <th className="text-left px-6 py-4 font-medium text-gray-500">Type</th>
-                <th className="text-left px-6 py-4 font-medium text-gray-500">Supplier</th>
-                <th className="text-right px-6 py-4 font-medium text-gray-500">Amount</th>
-                <th className="text-left px-6 py-4 font-medium text-gray-500">Date</th>
-                <th className="text-left px-6 py-4 font-medium text-gray-500">Status</th>
-                <th className="text-right px-6 py-4 font-medium text-gray-500">Size</th>
+                <th className="text-left px-6 py-4 font-medium text-slate-500">Reference</th>
+                <th className="text-left px-6 py-4 font-medium text-slate-500">Title</th>
+                <th className="text-left px-6 py-4 font-medium text-slate-500">Type</th>
+                <th className="text-left px-6 py-4 font-medium text-slate-500">Supplier</th>
+                <th className="text-right px-6 py-4 font-medium text-slate-500">Amount</th>
+                <th className="text-left px-6 py-4 font-medium text-slate-500">Date</th>
+
+                {activeTab !== "personal" && (
+                  <th className="text-left px-6 py-4 font-medium text-slate-500">Status</th>
+                )}
+
+                <th className="text-left px-6 py-4 font-medium text-slate-500">Uploaded</th>
+
+                {activeTab === "personal" && (
+                  <th className="text-right px-6 py-4 font-medium text-slate-500">Actions</th>
+                )}
               </tr>
             </thead>
-            <tbody className="divide-y divide-gray-100">
-              {isLoading && Array.from({ length: 8 }).map((_, i) => (
-                <tr key={i}>
-                  {Array.from({ length: 9 }).map((_, j) => (
-                    <td key={j} className="px-6 py-4">
-                      <div className="h-4 bg-gray-100 rounded animate-pulse" />
-                    </td>
-                  ))}
-                </tr>
-              ))}
 
-              {!isLoading && data?.results?.map((doc: Document) => {
-                const isSelected = selectedIds.includes(doc.id);
-                const formatBytes = (bytes: number): string => {
-                  if (bytes === 0) return "0 B";
-                  const k = 1024;
-                  const sizes = ["B", "KB", "MB", "GB"];
-                  const i = Math.floor(Math.log(bytes) / Math.log(k));
-                  return Math.round((bytes / Math.pow(k, i)) * 100) / 100 + " " + sizes[i];
-                };
-                return (
-                  <tr
-                    key={doc.id}
-                    className={clsx(
-                      "hover:bg-gray-50 transition-colors",
-                      isSelected && "bg-brand-50"
-                    )}
-                  >
-                    <td className="px-6 py-4">
-                      <button
-                        onClick={() => toggleOne(doc.id)}
-                        className="text-gray-400 hover:text-brand-600 transition-colors"
-                      >
-                        {isSelected ? (
-                          <CheckSquare className="w-5 h-5 text-brand-600" />
-                        ) : (
-                          <Square className="w-5 h-5" />
-                        )}
-                      </button>
-                    </td>
-                    <td className="px-6 py-4">
-                      <Link
-                        to={`/documents/${doc.id}`}
-                        className="font-mono text-xs text-brand-600 hover:underline"
-                      >
-                        {doc.reference_number}
-                      </Link>
-                    </td>
-                    <td className="px-6 py-4">
-                      <Link
-                        to={`/documents/${doc.id}`}
-                        className="font-medium text-gray-900 hover:text-brand-700 line-clamp-1"
-                      >
-                        {doc.title}
-                      </Link>
-                    </td>
-                    <td className="px-6 py-4 text-gray-600">{doc.document_type_name || "—"}</td>
-                    <td className="px-6 py-4 text-gray-700">{doc.supplier || "—"}</td>
-                    <td className="px-6 py-4 text-right font-medium text-gray-700">
-                      {doc.amount
-                        ? new Intl.NumberFormat("en-US", {
-                            style: "currency",
-                            currency: doc.currency || "USD",
-                          }).format(doc.amount)
-                        : "—"}
-                    </td>
-                    <td className="px-6 py-4 text-gray-600">
-                      {doc.document_date
-                        ? format(new Date(doc.document_date), "dd MMM yyyy")
-                        : "—"}
-                    </td>
-                    <td className="px-6 py-4">
-                      <StatusBadge status={doc.status} />
-                    </td>
-                    <td className="px-6 py-4 text-right text-xs text-gray-500">
-                      {formatBytes(doc.file_size)}
-                    </td>
+            <tbody className="divide-y divide-slate-100">
+              {isLoading ? (
+                Array.from({ length: 8 }).map((_, i) => (
+                  <tr key={i}>
+                    {Array.from({ length: activeTab === "personal" ? 8 : 9 }).map((_, j) => (
+                      <td key={j} className="px-6 py-4">
+                        <div className="h-4 bg-slate-100 rounded animate-pulse" />
+                      </td>
+                    ))}
                   </tr>
-                );
-              })}
-
-              {!isLoading && !data?.results?.length && (
+                ))
+              ) : docs.length === 0 ? (
                 <tr>
-                  <td colSpan={9} className="px-6 py-20 text-center">
-                    <FileText className="w-12 h-12 text-gray-200 mx-auto mb-4" />
-                    <p className="text-gray-500">No documents found.</p>
-                    <Link to="/documents/upload" className="text-brand-600 hover:underline mt-2 inline-block">
-                      Upload your first document →
-                    </Link>
+                  <td colSpan={activeTab === "personal" ? 8 : 9} className="text-center py-14 text-slate-400">
+                    <FileText className="w-8 h-8 mx-auto mb-2 text-slate-300" />
+                    <p className="font-medium text-slate-500">No documents found</p>
+                    <p className="text-xs mt-1">Try adjusting your search or filters.</p>
                   </td>
                 </tr>
+              ) : (
+                docs.map((doc: Document) => {
+                  const isSelected = selectedIds.includes(doc.id);
+                  const isPersonal = doc.is_self_upload === true;
+
+                  return (
+                    <tr
+                      key={doc.id}
+                      className={cn(
+                        "hover:bg-slate-50 transition-colors group",
+                        isSelected && "bg-indigo-50",
+                        isPersonal && activeTab === "all" && "bg-indigo-50/40"
+                      )}
+                    >
+                      <td className="px-6 py-4">
+                        <button
+                          onClick={() => toggleOne(doc.id)}
+                          className="text-slate-400 hover:text-indigo-600"
+                        >
+                          {isSelected ? <CheckSquare className="w-5 h-5 text-indigo-600" /> : <Square className="w-5 h-5" />}
+                        </button>
+                      </td>
+
+                      <td className="px-6 py-4">
+                        <div className="flex items-center gap-2">
+                          <Link
+                            to={`/documents/${doc.id}`}
+                            className="font-mono text-xs bg-slate-100 text-slate-600 px-1.5 py-0.5 rounded hover:bg-indigo-100 hover:text-indigo-700"
+                          >
+                            {doc.reference_number}
+                          </Link>
+                          {activeTab === "all" && isPersonal && (
+                            <span className="inline-flex items-center gap-0.5 px-1.5 py-0.5 rounded-full text-xs font-medium bg-indigo-100 text-indigo-600">
+                              <Lock className="w-2.5 h-2.5" />
+                              Personal
+                            </span>
+                          )}
+                        </div>
+                      </td>
+
+                      <td className="px-6 py-4">
+                        <Link
+                          to={`/documents/${doc.id}`}
+                          className="text-slate-800 group-hover:text-indigo-600 font-medium truncate block"
+                        >
+                          {doc.title}
+                        </Link>
+                      </td>
+
+                      <td className="px-6 py-4 text-slate-500 whitespace-nowrap">
+                        {doc.document_type_name || "—"}
+                      </td>
+
+                      <td className="px-6 py-4 text-slate-600 max-w-[8rem] truncate">
+                        {doc.supplier || "—"}
+                      </td>
+
+                      <td className="px-6 py-4 text-slate-700 whitespace-nowrap font-medium">
+                        {doc.amount
+                          ? `${Number(doc.amount).toLocaleString(undefined, { minimumFractionDigits: 2 })} ${doc.currency || "USD"}`
+                          : "—"}
+                      </td>
+
+                      <td className="px-6 py-4 text-slate-500 whitespace-nowrap">
+                        {doc.document_date ? format(new Date(doc.document_date), "dd MMM yyyy") : "—"}
+                      </td>
+
+                      {activeTab !== "personal" && (
+                        <td className="px-6 py-4">
+                          <span
+                            className={cn(
+                              "text-xs px-2 py-0.5 rounded-full font-medium whitespace-nowrap",
+                              STATUS_STYLES[doc.status] ?? "bg-slate-100 text-slate-500"
+                            )}
+                          >
+                            {doc.status.replace(/_/g, " ")}
+                          </span>
+                        </td>
+                      )}
+
+                      <td className="px-6 py-4 text-slate-400 whitespace-nowrap text-xs">
+                        {format(new Date(doc.created_at), "dd MMM yyyy")}
+                      </td>
+
+                      {activeTab === "personal" && (
+                        <td className="px-6 py-4">
+                          <div className="flex items-center gap-2 opacity-0 group-hover:opacity-100 transition-opacity">
+                            {!["archived", "void"].includes(doc.status) && (
+                              <button
+                                title="Archive"
+                                onClick={() => {
+                                  if (window.confirm("Archive this personal document?")) archiveMutation.mutate(doc.id);
+                                }}
+                                className="p-1.5 rounded hover:bg-amber-100 text-slate-400 hover:text-amber-600 transition-colors"
+                              >
+                                <Archive className="w-4 h-4" />
+                              </button>
+                            )}
+                            <button
+                              title="Delete"
+                              onClick={() => {
+                                if (window.confirm("Delete this personal document? This cannot be undone.")) deleteMutation.mutate(doc.id);
+                              }}
+                              className="p-1.5 rounded hover:bg-red-100 text-slate-400 hover:text-red-500 transition-colors"
+                            >
+                              <Trash2 className="w-4 h-4" />
+                            </button>
+                          </div>
+                        </td>
+                      )}
+                    </tr>
+                  );
+                })
               )}
             </tbody>
           </table>
         </div>
 
         {/* Pagination */}
-        {totalPages > 1 && (
-          <div className="flex items-center justify-between px-6 py-4 border-t border-gray-100 bg-gray-50">
-            <p className="text-sm text-gray-500">
-              Showing page {page} of {totalPages} • {data?.count} total documents
-            </p>
+        {data && data.count > PAGE_SIZE && (
+          <div className="flex items-center justify-between px-4 py-3 border-t border-slate-100">
+            <span className="text-xs text-slate-500">
+              Showing {Math.min((page - 1) * PAGE_SIZE + 1, data.count)}–
+              {Math.min(page * PAGE_SIZE, data.count)} of {data.count.toLocaleString()}
+            </span>
             <div className="flex gap-2">
               <button
-                onClick={() => {
-                  setPage((p) => Math.max(1, p - 1));
-                  setSelectedIds([]);
-                }}
+                onClick={() => setPage((p) => Math.max(1, p - 1))}
                 disabled={page === 1}
-                className="btn-secondary px-4 py-2 disabled:opacity-50"
+                className="px-3 py-1.5 text-xs border border-slate-200 rounded-lg hover:bg-slate-50 disabled:opacity-40 transition-colors"
               >
-                <ChevronLeft className="w-4 h-4" />
+                Previous
               </button>
               <button
-                onClick={() => {
-                  setPage((p) => Math.min(totalPages, p + 1));
-                  setSelectedIds([]);
-                }}
-                disabled={page === totalPages}
-                className="btn-secondary px-4 py-2 disabled:opacity-50"
+                onClick={() => setPage((p) => p + 1)}
+                disabled={page * PAGE_SIZE >= data.count}
+                className="px-3 py-1.5 text-xs border border-slate-200 rounded-lg hover:bg-slate-50 disabled:opacity-40 transition-colors"
               >
-                <ChevronRight className="w-4 h-4" />
+                Next
               </button>
             </div>
           </div>
