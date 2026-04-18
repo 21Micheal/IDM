@@ -23,11 +23,11 @@ export default function NotificationsPage() {
   });
 
   return (
-    <div className="space-y-5">
+    <div className="max-w-4xl mx-auto space-y-5">
       <div className="flex items-center justify-between">
         <div>
-          <h1 className="text-2xl font-bold text-gray-900">Notifications</h1>
-          <p className="text-sm text-gray-500 mt-1">Recent workflow and document updates.</p>
+          <h1 className="text-2xl font-semibold tracking-tight text-foreground">Notifications</h1>
+          <p className="text-sm text-muted-foreground mt-1">Recent workflow and document updates.</p>
         </div>
         <button
           onClick={() => markAllReadMutation.mutate()}
@@ -40,31 +40,31 @@ export default function NotificationsPage() {
 
       <div className="card p-0 overflow-hidden">
         {isLoading ? (
-          <div className="p-6 text-sm text-gray-500">Loading notifications...</div>
+          <div className="p-6 text-sm text-muted-foreground">Loading notifications...</div>
         ) : notifications.length === 0 ? (
           <div className="p-10 text-center">
-            <Bell className="w-10 h-10 text-gray-300 mx-auto mb-3" />
-            <p className="text-sm text-gray-500">You have no notifications yet.</p>
+            <Bell className="w-10 h-10 text-muted-foreground/50 mx-auto mb-3" />
+            <p className="text-sm text-muted-foreground">You have no notifications yet.</p>
           </div>
         ) : (
-          <ul className="divide-y divide-gray-100">
+          <ul className="divide-y divide-border">
             {notifications.map((n) => {
               const content = (
                 <>
-                  <p className="text-sm text-gray-800">{n.message}</p>
-                  <p className="text-xs text-gray-400 mt-1">{new Date(n.created_at).toLocaleString()}</p>
+                  <p className="text-sm text-foreground">{n.message}</p>
+                  <p className="text-xs text-muted-foreground mt-1">{new Date(n.created_at).toLocaleString()}</p>
                 </>
               );
 
               return (
-                <li key={n.id} className={n.is_read ? "bg-white" : "bg-blue-50/40"}>
+                <li key={n.id} className={n.is_read ? "bg-card" : "bg-accent/5"}>
                   {n.link ? (
                     <Link
                       to={n.link}
                       onClick={() => {
                         if (!n.is_read) markReadMutation.mutate(n.id);
                       }}
-                      className="block px-5 py-4 hover:bg-gray-50"
+                      className="block px-5 py-4 hover:bg-muted/40 transition-colors"
                     >
                       {content}
                     </Link>
@@ -73,7 +73,7 @@ export default function NotificationsPage() {
                       onClick={() => {
                         if (!n.is_read) markReadMutation.mutate(n.id);
                       }}
-                      className="w-full text-left px-5 py-4 hover:bg-gray-50"
+                      className="w-full text-left px-5 py-4 hover:bg-muted/40 transition-colors"
                     >
                       {content}
                     </button>

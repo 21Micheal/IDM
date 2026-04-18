@@ -5,6 +5,7 @@ import LoginPage from "@/pages/LoginPage";
 import ForceChangePasswordPage from "@/pages/ForceChangePasswordPage";
 import DashboardPage from "@/pages/DashboardPage";
 import DocumentsPage from "@/pages/DocumentsPage";
+import DocumentsListPage from "@/pages/DocumentListPage";
 import DocumentDetailPage from "@/pages/DocumentDetailPage";
 import UploadPage from "@/pages/UploadPage";
 import SearchPage from "@/pages/SearchPage";

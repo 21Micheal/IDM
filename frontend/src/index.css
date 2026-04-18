@@ -2,35 +2,164 @@
 @tailwind components;
 @tailwind utilities;
 
+/* Indigo Vault — Document Management design system. All colors HSL. */
+
 @layer base {
-  body { @apply bg-gray-50 text-gray-900 antialiased; }
+  :root {
+    --background: 40 25% 97%;
+    --foreground: 222 30% 15%;
+
+    --card: 0 0% 100%;
+    --card-foreground: 222 30% 15%;
+
+    --popover: 0 0% 100%;
+    --popover-foreground: 222 30% 15%;
+
+    --primary: 222 47% 13%;
+    --primary-foreground: 40 25% 97%;
+
+    --secondary: 222 20% 94%;
+    --secondary-foreground: 222 47% 13%;
+
+    --muted: 40 15% 93%;
+    --muted-foreground: 222 15% 45%;
+
+    --accent: 38 92% 55%;
+    --accent-foreground: 222 47% 13%;
+
+    --teal: 180 55% 42%;
+    --teal-foreground: 40 25% 97%;
+
+    --destructive: 0 70% 50%;
+    --destructive-foreground: 40 25% 97%;
+
+    --border: 222 15% 88%;
+    --input: 222 15% 88%;
+    --ring: 38 92% 55%;
+
+    --radius: 0.625rem;
+
+    --gradient-sidebar: linear-gradient(180deg, hsl(222 50% 15%) 0%, hsl(222 47% 11%) 100%);
+    --gradient-accent: linear-gradient(135deg, hsl(38 92% 55%), hsl(28 88% 50%));
+    --shadow-elegant: 0 4px 24px -8px hsl(222 47% 13% / 0.18);
+    --shadow-card: 0 1px 3px hsl(222 47% 13% / 0.06), 0 1px 2px hsl(222 47% 13% / 0.04);
+
+    --sidebar-background: 222 47% 13%;
+    --sidebar-foreground: 222 15% 75%;
+    --sidebar-primary: 38 92% 55%;
+    --sidebar-primary-foreground: 222 47% 13%;
+    --sidebar-accent: 222 40% 18%;
+    --sidebar-accent-foreground: 40 25% 97%;
+    --sidebar-border: 222 35% 22%;
+    --sidebar-ring: 38 92% 55%;
+  }
+
+  .dark {
+    --background: 222 30% 7%;
+    --foreground: 40 25% 95%;
+
+    --card: 222 30% 10%;
+    --card-foreground: 40 25% 95%;
+
+    --popover: 222 30% 10%;
+    --popover-foreground: 40 25% 95%;
+
+    --primary: 38 92% 55%;
+    --primary-foreground: 222 47% 13%;
+
+    --secondary: 222 25% 16%;
+    --secondary-foreground: 40 25% 95%;
+
+    --muted: 222 25% 14%;
+    --muted-foreground: 222 15% 65%;
+
+    --accent: 38 92% 55%;
+    --accent-foreground: 222 47% 13%;
+
+    --teal: 180 55% 50%;
+    --teal-foreground: 222 47% 13%;
+
+    --destructive: 0 65% 50%;
+    --destructive-foreground: 40 25% 95%;
+
+    --border: 222 25% 18%;
+    --input: 222 25% 18%;
+    --ring: 38 92% 55%;
+
+    --sidebar-background: 222 47% 9%;
+    --sidebar-foreground: 222 15% 75%;
+    --sidebar-primary: 38 92% 55%;
+    --sidebar-primary-foreground: 222 47% 13%;
+    --sidebar-accent: 222 40% 14%;
+    --sidebar-accent-foreground: 40 25% 95%;
+    --sidebar-border: 222 35% 18%;
+    --sidebar-ring: 38 92% 55%;
+  }
+}
+
+@layer base {
+  * {
+    border-color: hsl(var(--border));
+  }
+  body {
+    @apply antialiased;
+    background-color: hsl(var(--background));
+    color: hsl(var(--foreground));
+    font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  }
 }
 
 @layer components {
   .btn-primary {
-    @apply inline-flex items-center gap-2 rounded-lg bg-brand-600 px-4 py-2 text-sm font-medium text-white
-           hover:bg-brand-700 focus:outline-none focus:ring-2 focus:ring-brand-500 focus:ring-offset-2
+    @apply inline-flex items-center gap-2 rounded-lg px-4 py-2 text-sm font-medium
+           focus:outline-none focus:ring-2 focus:ring-offset-2
            disabled:opacity-50 disabled:cursor-not-allowed transition-colors;
+    background-color: hsl(var(--primary));
+    color: hsl(var(--primary-foreground));
+  }
+  .btn-primary:hover {
+    background-color: hsl(var(--primary) / 0.9);
   }
   .btn-secondary {
-    @apply inline-flex items-center gap-2 rounded-lg border border-gray-300 bg-white px-4 py-2 text-sm
-           font-medium text-gray-700 hover:bg-gray-50 focus:outline-none focus:ring-2 focus:ring-brand-500
+    @apply inline-flex items-center gap-2 rounded-lg border px-4 py-2 text-sm
+           font-medium focus:outline-none focus:ring-2
            focus:ring-offset-2 disabled:opacity-50 transition-colors;
+    border-color: hsl(var(--border));
+    background-color: hsl(var(--card));
+    color: hsl(var(--foreground));
+  }
+  .btn-secondary:hover {
+    background-color: hsl(var(--muted));
   }
   .btn-danger {
-    @apply inline-flex items-center gap-2 rounded-lg bg-red-600 px-4 py-2 text-sm font-medium text-white
-           hover:bg-red-700 focus:outline-none focus:ring-2 focus:ring-red-500 focus:ring-offset-2
+    @apply inline-flex items-center gap-2 rounded-lg px-4 py-2 text-sm font-medium
+           focus:outline-none focus:ring-2 focus:ring-offset-2
            disabled:opacity-50 transition-colors;
+    background-color: hsl(var(--destructive));
+    color: hsl(var(--destructive-foreground));
+  }
+  .btn-danger:hover {
+    background-color: hsl(var(--destructive) / 0.9);
   }
   .input {
-    @apply block w-full rounded-lg border border-gray-300 bg-white px-3 py-2 text-sm shadow-sm
-           placeholder-gray-400 focus:border-brand-500 focus:outline-none focus:ring-1 focus:ring-brand-500;
+    @apply block w-full rounded-lg border px-3 py-2 text-sm shadow-sm
+           focus:outline-none focus:ring-1;
+    border-color: hsl(var(--input));
+    background-color: hsl(var(--card));
+    color: hsl(var(--foreground));
+  }
+  .input::placeholder {
+    color: hsl(var(--muted-foreground));
   }
   .label {
-    @apply block text-sm font-medium text-gray-700 mb-1;
+    @apply block text-sm font-medium mb-1;
+    color: hsl(var(--foreground));
   }
   .card {
-    @apply rounded-xl bg-white shadow-sm border border-gray-200;
+    @apply rounded-xl border;
+    background-color: hsl(var(--card));
+    border-color: hsl(var(--border));
+    box-shadow: var(--shadow-card);
   }
   .badge {
     @apply inline-flex items-center rounded-full px-2.5 py-0.5 text-xs font-medium;

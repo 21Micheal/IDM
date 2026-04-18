@@ -259,6 +259,7 @@ export default function DocumentsPage() {
                 setSelectedIds([]);
               }}
               className="input"
+              autoComplete="off"
               placeholder="Filter by supplier..."
             />
           </div>

@@ -1,12 +1,12 @@
-import { useState } from "react";
+import { useState, useEffect } from "react";
 import { useQuery } from "@tanstack/react-query";
 import { api } from "@/services/api";
-import { ShieldCheck, Filter, Clock, User, Download, ChevronLeft, ChevronRight, Calendar, Search } from "lucide-react";
+import { ShieldCheck, Filter, Clock, User, Download, ChevronLeft, ChevronRight, Search } from "lucide-react";
 import { format, subDays } from "date-fns";
 import { toast } from "react-toastify";
 
 export default function AuditPage() {
-  const [searchTerm, setSearchTerm] = useState("");        // Advanced search (actor, object, event)
+  const [searchTerm, setSearchTerm] = useState("");
   const [eventFilter, setEventFilter] = useState("");
   const [dateFrom, setDateFrom] = useState(format(subDays(new Date(), 30), "yyyy-MM-dd"));
   const [dateTo, setDateTo] = useState(format(new Date(), "yyyy-MM-dd"));
@@ -14,30 +14,30 @@ export default function AuditPage() {
 
   const PAGE_SIZE = 50;
 
-  const { data, isLoading } = useQuery({
+  const { data, isLoading, refetch } = useQuery({
     queryKey: ["audit-logs", searchTerm, eventFilter, dateFrom, dateTo, page],
     queryFn: () =>
       api
-        .get("/audit/", { 
-          params: { 
-            search: searchTerm || undefined,           // Advanced search
+        .get("/audit/", {
+          params: {
+            search: searchTerm || undefined,        // Advanced search (actor + object + event)
             event: eventFilter || undefined,
             date_from: dateFrom || undefined,
             date_to: dateTo || undefined,
             page,
             page_size: PAGE_SIZE,
-            ordering: "-timestamp"
-          } 
+            ordering: "-timestamp",
+          },
         })
         .then((r) => r.data),
   });
 
   const eventColor = (event: string) => {
-    if (event.includes("deleted") || event.includes("rejected") || event.includes("failed")) 
+    if (event.includes("deleted") || event.includes("rejected") || event.includes("failed"))
       return "bg-red-100 text-red-700";
-    if (event.includes("approved") || event.includes("created") || event.includes("success")) 
+    if (event.includes("approved") || event.includes("created") || event.includes("success"))
       return "bg-green-100 text-green-700";
-    if (event.includes("login") || event.includes("viewed") || event.includes("downloaded")) 
+    if (event.includes("login") || event.includes("viewed") || event.includes("downloaded"))
       return "bg-blue-100 text-blue-700";
     return "bg-gray-100 text-gray-600";
   };
@@ -45,7 +45,7 @@ export default function AuditPage() {
   const exportAudit = async () => {
     try {
       const response = await api.get("/audit/export/", {
-        params: { 
+        params: {
           search: searchTerm || undefined,
           event: eventFilter || undefined,
           date_from: dateFrom || undefined,
@@ -79,6 +79,11 @@ export default function AuditPage() {
 
   const totalPages = Math.ceil((data?.count ?? 0) / PAGE_SIZE);
 
+  // Auto-refetch when filters change (for live feel)
+  useEffect(() => {
+    refetch();
+  }, [searchTerm, eventFilter, dateFrom, dateTo, refetch]);
+
   return (
     <div className="max-w-6xl mx-auto py-10 px-6">
       {/* Header */}
@@ -99,18 +104,18 @@ export default function AuditPage() {
         </button>
       </div>
 
-      {/* Advanced Filters */}
+      {/* Filters */}
       <div className="card p-6 mb-8">
         <div className="flex items-center justify-between mb-5">
           <div className="flex items-center gap-2 text-sm text-gray-500">
             <Filter className="w-4 h-4" />
-            <span>Advanced Filters</span>
+            <span>Filters</span>
           </div>
-          <button 
-            onClick={resetFilters} 
+          <button
+            onClick={resetFilters}
             className="text-xs text-gray-500 hover:text-gray-700 underline"
           >
-            Clear all filters
+            Clear all
           </button>
         </div>
 
@@ -118,19 +123,15 @@ export default function AuditPage() {
           {/* Advanced Search */}
           <div className="lg:col-span-2">
             <label className="label flex items-center gap-2">
-              <Search className="w-4 h-4" /> Advanced Search
+              <Search className="w-4 h-4" /> Search
             </label>
             <input
               type="text"
               value={searchTerm}
-              onChange={(e) => {
-                setSearchTerm(e.target.value);
-                setPage(1);
-              }}
-              placeholder="Search actor email, object, or event..."
+              onChange={(e) => setSearchTerm(e.target.value)}
+              placeholder="Actor email, object name, or event..."
               className="input"
             />
-            <p className="text-xs text-gray-400 mt-1">Searches across actor, object repr, and event name</p>
           </div>
 
           {/* Event Filter */}
@@ -138,10 +139,7 @@ export default function AuditPage() {
             <label className="label">Event Type</label>
             <select
               value={eventFilter}
-              onChange={(e) => {
-                setEventFilter(e.target.value);
-                setPage(1);
-              }}
+              onChange={(e) => setEventFilter(e.target.value)}
               className="input"
             >
               <option value="">All Events</option>
@@ -163,10 +161,7 @@ export default function AuditPage() {
             <input
               type="date"
               value={dateFrom}
-              onChange={(e) => {
-                setDateFrom(e.target.value);
-                setPage(1);
-              }}
+              onChange={(e) => setDateFrom(e.target.value)}
               className="input"
             />
           </div>
@@ -177,10 +172,7 @@ export default function AuditPage() {
             <input
               type="date"
               value={dateTo}
-              onChange={(e) => {
-                setDateTo(e.target.value);
-                setPage(1);
-              }}
+              onChange={(e) => setDateTo(e.target.value)}
               className="input"
             />
           </div>
@@ -211,15 +203,7 @@ export default function AuditPage() {
                 </tr>
               ))}
 
-              {data?.results?.map((log: {
-                id: string;
-                event: string;
-                actor_email: string;
-                object_type: string;
-                object_repr: string;
-                ip_address: string;
-                timestamp: string;
-              }) => (
+              {data?.results?.map((log: any) => (
                 <tr key={log.id} className="hover:bg-gray-50 transition-colors">
                   <td className="px-6 py-4">
                     <span className={`inline-flex items-center px-3 py-1 rounded-full text-xs font-medium ${eventColor(log.event)}`}>
@@ -238,9 +222,7 @@ export default function AuditPage() {
                         {log.object_type}
                       </span>
                     )}
-                    {log.object_repr && (
-                      <span className="ml-2 text-gray-500">· {log.object_repr}</span>
-                    )}
+                    {log.object_repr && <span className="ml-2 text-gray-500">· {log.object_repr}</span>}
                   </td>
                   <td className="px-6 py-4 font-mono text-xs text-gray-500">
                     {log.ip_address || "—"}
