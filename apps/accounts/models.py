@@ -27,6 +27,22 @@ class Role(models.TextChoices):
     VIEWER  = "viewer",  "Viewer"
 
 
+class RoleDefinition(models.Model):
+    id          = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    code        = models.CharField(max_length=50, unique=True)
+    name        = models.CharField(max_length=120)
+    description = models.TextField(blank=True)
+    is_active   = models.BooleanField(default=True)
+    created_at  = models.DateTimeField(auto_now_add=True)
+    updated_at  = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ["name"]
+
+    def __str__(self):
+        return self.name
+
+
 # ── Department ────────────────────────────────────────────────────────────────
 
 class Department(models.Model):
@@ -68,7 +84,7 @@ class User(AbstractBaseUser, PermissionsMixin):
     email      = models.EmailField(unique=True)
     first_name = models.CharField(max_length=100)
     last_name  = models.CharField(max_length=100)
-    role       = models.CharField(max_length=20, choices=Role.choices, default=Role.VIEWER)
+    role       = models.CharField(max_length=50, default=Role.VIEWER)
     department = models.ForeignKey(
         Department, null=True, blank=True,
         on_delete=models.SET_NULL, related_name="users",

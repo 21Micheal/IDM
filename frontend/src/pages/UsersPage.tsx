@@ -3,36 +3,44 @@ import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { useForm } from "react-hook-form";
 import { zodResolver } from "@hookform/resolvers/zod";
 import { z } from "zod";
-import { usersAPI, departmentsAPI } from "@/services/api";
+import { usersAPI, departmentsAPI, rolesAPI } from "@/services/api";
 import {
   Plus, Search, MoreVertical, UserCheck, UserX,
-  KeyRound, Edit2, Loader2, Shield, X,
+  KeyRound, Edit2, Loader2, Shield, X, Users as UsersIcon,
 } from "lucide-react";
 import { toast } from "react-toastify";
 import { format } from "date-fns";
 import clsx from "clsx";
 
 // ── Types ─────────────────────────────────────────────────────────────────────
-interface Department { 
-  id: string; 
-  name: string; 
-  code: string; 
-  user_count: number 
+interface Department {
+  id: string;
+  name: string;
+  code: string;
+  user_count: number;
+}
+
+interface Role {
+  id: string;
+  code: string;
+  name: string;
+  description?: string | null;
+  is_active: boolean;
 }
 
 interface User {
-  id: string; 
-  email: string; 
-  first_name: string; 
+  id: string;
+  email: string;
+  first_name: string;
   last_name: string;
-  full_name: string; 
-  role: string; 
+  full_name: string;
+  role: string;
   role_display: string;
-  department: string | null; 
+  department: string | null;
   department_name: string | null;
-  is_active: boolean; 
+  is_active: boolean;
   mfa_enabled: boolean;
-  last_login: string | null; 
+  last_login: string | null;
   created_at: string;
 }
 
@@ -41,14 +49,14 @@ const createSchema = z.object({
   email:      z.string().email("Invalid email"),
   first_name: z.string().min(1, "Required"),
   last_name:  z.string().min(1, "Required"),
-  role:       z.enum(["admin", "finance", "auditor", "viewer"]),
+  role:       z.string().min(1, "Role is required"),
   department: z.string().optional(),
 });
 
 const editSchema = z.object({
   first_name: z.string().min(1, "Required"),
   last_name:  z.string().min(1, "Required"),
-  role:       z.enum(["admin", "finance", "auditor", "viewer"]),
+  role:       z.string().min(1, "Role is required"),
   department: z.string().optional(),
   is_active:  z.boolean(),
 });
@@ -56,11 +64,12 @@ const editSchema = z.object({
 type CreateForm = z.infer<typeof createSchema>;
 type EditForm   = z.infer<typeof editSchema>;
 
+// Indigo Vault role tints (semantic tokens)
 const ROLE_COLORS: Record<string, string> = {
-  admin:   "bg-purple-100 text-purple-700",
-  finance: "bg-blue-100 text-blue-700",
-  auditor: "bg-amber-100 text-amber-700",
-  viewer:  "bg-gray-100 text-gray-600",
+  admin:   "bg-primary/10 text-primary",
+  finance: "bg-teal/15 text-teal",
+  auditor: "bg-accent/15 text-accent-foreground",
+  viewer:  "bg-muted text-muted-foreground",
 };
 
 // ── Temporary Password Modal ─────────────────────────────────────────────────
@@ -81,38 +90,38 @@ function TemporaryPasswordModal({
   };
 
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-4">
-      <div className="card w-full max-w-md p-6 space-y-5">
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-foreground/40 backdrop-blur-sm p-4">
+      <div className="card w-full max-w-md p-6 space-y-5" style={{ boxShadow: "var(--shadow-elegant)" }}>
         <div className="flex items-center gap-3">
-          <div className="w-10 h-10 bg-amber-100 rounded-xl flex items-center justify-center">
-            <KeyRound className="w-5 h-5 text-amber-600" />
+          <div className="w-10 h-10 bg-accent/15 rounded-xl flex items-center justify-center">
+            <KeyRound className="w-5 h-5 text-accent-foreground" />
           </div>
           <div>
-            <h2 className="font-semibold text-gray-900 text-lg">Temporary Password</h2>
-            <p className="text-sm text-gray-500">Share this with the new user</p>
+            <h2 className="font-semibold text-foreground text-lg">Temporary Password</h2>
+            <p className="text-sm text-muted-foreground">Share this with the new user</p>
           </div>
         </div>
 
-        <div className="bg-gray-50 border border-gray-200 rounded-lg p-4">
-          <p className="text-xs text-gray-500 mb-1">One-time password</p>
-          <div className="flex items-center justify-between bg-white border rounded-md px-4 py-3 font-mono text-lg tracking-wider">
+        <div className="bg-muted border border-border rounded-lg p-4">
+          <p className="text-xs text-muted-foreground mb-1">One-time password</p>
+          <div className="flex items-center justify-between bg-card border border-border rounded-md px-4 py-3 font-mono text-lg tracking-wider text-foreground">
             {temporary_password}
             <button
               onClick={copyToClipboard}
-              className="text-brand-600 hover:text-brand-700 text-sm font-medium"
+              className="text-accent-foreground hover:underline text-sm font-medium ml-3"
             >
               {copied ? "Copied ✓" : "Copy"}
             </button>
           </div>
         </div>
 
-        <div className="text-sm text-amber-700 bg-amber-50 border border-amber-200 rounded-lg p-3">
+        <div className="text-sm text-foreground bg-accent/10 border border-accent/30 rounded-lg p-3">
           The user will be prompted to set a new strong password on their first login.<br />
           MFA (Email OTP) is enabled by default.
         </div>
 
-        <button 
-          onClick={onClose} 
+        <button
+          onClick={onClose}
           className="btn-primary w-full justify-center"
         >
           I have saved this password
@@ -125,9 +134,11 @@ function TemporaryPasswordModal({
 // ── Create user modal ─────────────────────────────────────────────────────────
 function CreateUserModal({
   departments,
+  roles,
   onClose,
 }: {
   departments: Department[];
+  roles: Role[];
   onClose: () => void;
 }) {
   const qc = useQueryClient();
@@ -136,13 +147,15 @@ function CreateUserModal({
     defaultValues: { role: "viewer" },
   });
 
+  const [tempPassword, setTempPassword] = useState<string | null>(null);
+
   const mutation = useMutation({
     mutationFn: (data: CreateForm) => usersAPI.create(data),
     onSuccess: (response) => {
-      const tempPassword = response.data.temporary_password;
-      
-      if (tempPassword) {
-        setTempPassword(tempPassword);
+      const tempPasswordVal = response.data.temporary_password;
+
+      if (tempPasswordVal) {
+        setTempPassword(tempPasswordVal);
       } else {
         toast.success("User created successfully");
         onClose();
@@ -150,15 +163,14 @@ function CreateUserModal({
 
       qc.invalidateQueries({ queryKey: ["users"] });
     },
-    onError: (err: any) => {
-      const detail = Object.values(err?.response?.data ?? {}).flat().join(" ") || 
-                     err?.response?.data?.detail || 
+    onError: (err: { response?: { data?: Record<string, unknown> } }) => {
+      const data = err?.response?.data ?? {};
+      const detail = Object.values(data).flat().join(" ") ||
+                     (data as { detail?: string }).detail ||
                      "Failed to create user";
       toast.error(detail);
     },
   });
-
-  const [tempPassword, setTempPassword] = useState<string | null>(null);
 
   const handleClose = () => {
     setTempPassword(null);
@@ -168,11 +180,11 @@ function CreateUserModal({
   return (
     <>
       {!tempPassword && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-4">
-          <div className="card w-full max-w-lg p-6">
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-foreground/40 backdrop-blur-sm p-4">
+          <div className="card w-full max-w-lg p-6" style={{ boxShadow: "var(--shadow-elegant)" }}>
             <div className="flex items-center justify-between mb-5">
-              <h2 className="font-semibold text-gray-900 text-lg">Create new user</h2>
-              <button onClick={onClose} className="text-gray-400 hover:text-gray-600">
+              <h2 className="font-semibold text-foreground text-lg">Create new user</h2>
+              <button onClick={onClose} className="text-muted-foreground hover:text-foreground">
                 <X className="w-5 h-5" />
               </button>
             </div>
@@ -180,31 +192,35 @@ function CreateUserModal({
             <form onSubmit={handleSubmit((v) => mutation.mutate(v))} className="space-y-4">
               <div className="grid grid-cols-2 gap-3">
                 <div>
-                  <label className="label">First name <span className="text-red-500">*</span></label>
+                  <label className="label">First name <span className="text-destructive">*</span></label>
                   <input {...register("first_name")} className="input" placeholder="John" autoFocus />
-                  {errors.first_name && <p className="text-red-500 text-xs mt-1">{errors.first_name.message}</p>}
+                  {errors.first_name && <p className="text-destructive text-xs mt-1">{errors.first_name.message}</p>}
                 </div>
                 <div>
-                  <label className="label">Last name <span className="text-red-500">*</span></label>
+                  <label className="label">Last name <span className="text-destructive">*</span></label>
                   <input {...register("last_name")} className="input" placeholder="Doe" />
-                  {errors.last_name && <p className="text-red-500 text-xs mt-1">{errors.last_name.message}</p>}
+                  {errors.last_name && <p className="text-destructive text-xs mt-1">{errors.last_name.message}</p>}
                 </div>
               </div>
 
               <div>
-                <label className="label">Email address <span className="text-red-500">*</span></label>
+                <label className="label">Email address <span className="text-destructive">*</span></label>
                 <input {...register("email")} type="email" className="input" placeholder="john@company.com" />
-                {errors.email && <p className="text-red-500 text-xs mt-1">{errors.email.message}</p>}
+                {errors.email && <p className="text-destructive text-xs mt-1">{errors.email.message}</p>}
               </div>
 
               <div className="grid grid-cols-2 gap-3">
                 <div>
-                  <label className="label">Role <span className="text-red-500">*</span></label>
+                  <label className="label">Role <span className="text-destructive">*</span></label>
                   <select {...register("role")} className="input">
-                    <option value="viewer">Viewer</option>
-                    <option value="finance">Finance staff</option>
-                    <option value="auditor">Auditor</option>
-                    <option value="admin">Administrator</option>
+                    {(roles?.length ? roles : [
+                      { id: "viewer", code: "viewer", name: "Viewer", is_active: true },
+                      { id: "finance", code: "finance", name: "Finance staff", is_active: true },
+                      { id: "auditor", code: "auditor", name: "Auditor", is_active: true },
+                      { id: "admin", code: "admin", name: "Administrator", is_active: true },
+                    ]).map((role) => (
+                      <option key={role.code} value={role.code}>{role.name}</option>
+                    ))}
                   </select>
                 </div>
                 <div>
@@ -218,7 +234,7 @@ function CreateUserModal({
                 </div>
               </div>
 
-              <div className="bg-blue-50 border border-blue-200 rounded-lg p-4 text-sm text-blue-700">
+              <div className="bg-accent/10 border border-accent/30 rounded-lg p-4 text-sm text-foreground">
                 A strong temporary password will be automatically generated and emailed to the user.<br />
                 You will also see it after creation.
               </div>
@@ -245,14 +261,98 @@ function CreateUserModal({
   );
 }
 
+function CreateRoleModal({ onClose }: { onClose: () => void }) {
+  const qc = useQueryClient();
+  const { register, handleSubmit, formState: { errors } } = useForm<{
+    code: string;
+    name: string;
+    description?: string;
+  }>({
+    defaultValues: { code: "", name: "", description: "" },
+  });
+
+  const mutation = useMutation({
+    mutationFn: (data: { code: string; name: string; description?: string }) =>
+      rolesAPI.create(data),
+    onSuccess: () => {
+      toast.success("Role created successfully");
+      qc.invalidateQueries({ queryKey: ["roles"] });
+      onClose();
+    },
+    onError: (err: { response?: { data?: { detail?: string } } }) => {
+      const detail = err?.response?.data?.detail || "Failed to create role";
+      toast.error(detail);
+    },
+  });
+
+  return (
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-foreground/40 backdrop-blur-sm p-4">
+      <div className="card w-full max-w-md p-6" style={{ boxShadow: "var(--shadow-elegant)" }}>
+        <div className="flex items-center justify-between mb-5">
+          <div>
+            <h2 className="font-semibold text-foreground text-lg">Create new role</h2>
+            <p className="text-sm text-muted-foreground">Add a custom role code and display name for assignments.</p>
+          </div>
+          <button onClick={onClose} className="text-muted-foreground hover:text-foreground">
+            <X className="w-5 h-5" />
+          </button>
+        </div>
+
+        <form onSubmit={handleSubmit((v) => mutation.mutate(v))} className="space-y-4">
+          <div>
+            <label className="label">Role code <span className="text-destructive">*</span></label>
+            <input
+              {...register("code")}
+              className="input"
+              placeholder="e.g. procurement"
+              autoFocus
+            />
+            {errors.code && <p className="text-destructive text-xs mt-1">{errors.code.message}</p>}
+          </div>
+
+          <div>
+            <label className="label">Role name <span className="text-destructive">*</span></label>
+            <input
+              {...register("name")}
+              className="input"
+              placeholder="e.g. Procurement"
+            />
+            {errors.name && <p className="text-destructive text-xs mt-1">{errors.name.message}</p>}
+          </div>
+
+          <div>
+            <label className="label">Description</label>
+            <textarea
+              {...register("description")}
+              rows={3}
+              className="input"
+              placeholder="Optional role description"
+            />
+          </div>
+
+          <div className="flex gap-3 pt-2 justify-end">
+            <button type="button" onClick={onClose} className="btn-secondary">Cancel</button>
+            <button type="submit" disabled={mutation.isPending} className="btn-primary">
+              {mutation.isPending && <Loader2 className="w-4 h-4 animate-spin" />}
+              Create role
+            </button>
+          </div>
+        </form>
+      </div>
+    </div>
+  );
+}
+
 // ── Edit user modal ───────────────────────────────────────────────────────────
 function EditUserModal({
   user,
   departments,
+  roles,
   onClose,
 }: {
   user: User;
   departments: Department[];
+  roles: Role[];
   onClose: () => void;
 }) {
   const qc = useQueryClient();
@@ -278,14 +378,14 @@ function EditUserModal({
   });
 
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-4">
-      <div className="card w-full max-w-md p-6">
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-foreground/40 backdrop-blur-sm p-4">
+      <div className="card w-full max-w-md p-6" style={{ boxShadow: "var(--shadow-elegant)" }}>
         <div className="flex items-center justify-between mb-5">
           <div>
-            <h2 className="font-semibold text-gray-900 text-lg">Edit user</h2>
-            <p className="text-sm text-gray-500">{user.email}</p>
+            <h2 className="font-semibold text-foreground text-lg">Edit user</h2>
+            <p className="text-sm text-muted-foreground">{user.email}</p>
           </div>
-          <button onClick={onClose} className="text-gray-400 hover:text-gray-600">
+          <button onClick={onClose} className="text-muted-foreground hover:text-foreground">
             <X className="w-5 h-5" />
           </button>
         </div>
@@ -295,22 +395,26 @@ function EditUserModal({
             <div>
               <label className="label">First name</label>
               <input {...register("first_name")} className="input" />
-              {errors.first_name && <p className="text-red-500 text-xs mt-1">{errors.first_name.message}</p>}
+              {errors.first_name && <p className="text-destructive text-xs mt-1">{errors.first_name.message}</p>}
             </div>
             <div>
               <label className="label">Last name</label>
               <input {...register("last_name")} className="input" />
-              {errors.last_name && <p className="text-red-500 text-xs mt-1">{errors.last_name.message}</p>}
+              {errors.last_name && <p className="text-destructive text-xs mt-1">{errors.last_name.message}</p>}
             </div>
           </div>
 
           <div>
             <label className="label">Role</label>
             <select {...register("role")} className="input">
-              <option value="viewer">Viewer</option>
-              <option value="finance">Finance staff</option>
-              <option value="auditor">Auditor</option>
-              <option value="admin">Administrator</option>
+              {(roles?.length ? roles : [
+                { id: "viewer", code: "viewer", name: "Viewer", is_active: true },
+                { id: "finance", code: "finance", name: "Finance staff", is_active: true },
+                { id: "auditor", code: "auditor", name: "Auditor", is_active: true },
+                { id: "admin", code: "admin", name: "Administrator", is_active: true },
+              ]).map((role) => (
+                <option key={role.code} value={role.code}>{role.name}</option>
+              ))}
             </select>
           </div>
 
@@ -325,8 +429,8 @@ function EditUserModal({
           </div>
 
           <div className="flex items-center gap-2 pt-1">
-            <input {...register("is_active")} type="checkbox" id="is_active" className="w-4 h-4 rounded" />
-            <label htmlFor="is_active" className="text-sm text-gray-700">Account active</label>
+            <input {...register("is_active")} type="checkbox" id="is_active" className="w-4 h-4 rounded accent-primary" />
+            <label htmlFor="is_active" className="text-sm text-foreground">Account active</label>
           </div>
 
           <div className="flex gap-3 pt-2 justify-end">
@@ -360,31 +464,34 @@ function UserActions({
     <div className="relative">
       <button
         onClick={() => setOpen(!open)}
-        className="text-gray-400 hover:text-gray-600 p-1 rounded-lg hover:bg-gray-100 transition-colors"
+        className="text-muted-foreground hover:text-foreground p-1 rounded-lg hover:bg-muted transition-colors"
       >
         <MoreVertical className="w-4 h-4" />
       </button>
       {open && (
         <>
           <div className="fixed inset-0 z-10" onClick={() => setOpen(false)} />
-          <div className="absolute right-0 top-8 z-20 w-48 card py-1 shadow-lg rounded-xl">
+          <div
+            className="absolute right-0 top-8 z-20 w-48 bg-popover border border-border py-1 rounded-xl"
+            style={{ boxShadow: "var(--shadow-elegant)" }}
+          >
             <button
               onClick={() => { onEdit(); setOpen(false); }}
-              className="flex items-center gap-2 w-full px-4 py-2.5 text-sm text-gray-700 hover:bg-gray-50"
+              className="flex items-center gap-2 w-full px-4 py-2.5 text-sm text-popover-foreground hover:bg-muted"
             >
               <Edit2 className="w-4 h-4" /> Edit user
             </button>
             <button
               onClick={() => { onResetPassword(); setOpen(false); }}
-              className="flex items-center gap-2 w-full px-4 py-2.5 text-sm text-gray-700 hover:bg-gray-50"
+              className="flex items-center gap-2 w-full px-4 py-2.5 text-sm text-popover-foreground hover:bg-muted"
             >
               <KeyRound className="w-4 h-4" /> Reset password
             </button>
             <button
               onClick={() => { onToggleActive(); setOpen(false); }}
               className={clsx(
-                "flex items-center gap-2 w-full px-4 py-2.5 text-sm hover:bg-gray-50",
-                user.is_active ? "text-red-600" : "text-green-600"
+                "flex items-center gap-2 w-full px-4 py-2.5 text-sm hover:bg-muted",
+                user.is_active ? "text-destructive" : "text-teal"
               )}
             >
               {user.is_active
@@ -406,6 +513,7 @@ export default function UsersPage() {
   const [roleFilter, setRole] = useState("");
   const [deptFilter, setDept] = useState("");
   const [showCreate, setCreate] = useState(false);
+  const [showCreateRole, setShowCreateRole] = useState(false);
   const [editUser, setEditUser] = useState<User | null>(null);
   const [pwResult, setPwResult] = useState<{ temporary_password: string } | null>(null);
 
@@ -424,6 +532,11 @@ export default function UsersPage() {
     queryFn: () => departmentsAPI.list().then((r) => r.data.results ?? r.data),
   });
 
+  const { data: roles } = useQuery<Role[]>({
+    queryKey: ["roles"],
+    queryFn: () => rolesAPI.list().then((r) => r.data.results ?? r.data),
+  });
+
   const resetPasswordMutation = useMutation({
     mutationFn: (id: string) => usersAPI.resetPassword(id),
     onSuccess: ({ data }) => setPwResult(data),
@@ -436,7 +549,7 @@ export default function UsersPage() {
       qc.invalidateQueries({ queryKey: ["users"] });
       toast.success("User status updated");
     },
-    onError: (err: any) =>
+    onError: (err: { response?: { data?: { detail?: string } } }) =>
       toast.error(err?.response?.data?.detail || "Action failed"),
   });
 
@@ -449,14 +562,24 @@ export default function UsersPage() {
       {/* Header */}
       <div className="flex items-start justify-between mb-10">
         <div>
-          <h1 className="text-3xl font-bold text-gray-900">Users & Roles</h1>
-          <p className="text-gray-500 mt-1">
+          <div className="flex items-center gap-3 mb-2">
+            <div className="w-10 h-10 rounded-xl bg-primary/10 flex items-center justify-center">
+              <UsersIcon className="w-5 h-5 text-primary" />
+            </div>
+            <h1 className="text-3xl font-bold text-foreground tracking-tight">Users & Roles</h1>
+          </div>
+          <p className="text-muted-foreground text-sm">
             Manage staff accounts, roles, and department assignments.
           </p>
         </div>
-        <button onClick={() => setCreate(true)} className="btn-primary flex items-center gap-2">
-          <Plus className="w-4 h-4" /> Add User
-        </button>
+        <div className="flex items-center gap-3">
+          <button onClick={() => setShowCreateRole(true)} className="btn-secondary flex items-center gap-2">
+            <Shield className="w-4 h-4" /> New role
+          </button>
+          <button onClick={() => setCreate(true)} className="btn-primary flex items-center gap-2">
+            <Plus className="w-4 h-4" /> Add User
+          </button>
+        </div>
       </div>
 
       {/* Stats */}
@@ -468,8 +591,8 @@ export default function UsersPage() {
           { label: "MFA enabled",    value: mfaCount },
         ].map(({ label, value }) => (
           <div key={label} className="card p-6">
-            <p className="text-3xl font-semibold text-gray-900">{value}</p>
-            <p className="text-sm text-gray-500 mt-1">{label}</p>
+            <p className="text-3xl font-semibold text-foreground tracking-tight">{value}</p>
+            <p className="text-xs uppercase tracking-wider text-muted-foreground mt-1">{label}</p>
           </div>
         ))}
       </div>
@@ -477,7 +600,7 @@ export default function UsersPage() {
       {/* Filters */}
       <div className="flex flex-wrap gap-3 mb-6">
         <div className="relative flex-1 min-w-72">
-          <Search className="absolute left-4 top-1/2 -translate-y-1/2 w-4 h-4 text-gray-400" />
+          <Search className="absolute left-4 top-1/2 -translate-y-1/2 w-4 h-4 text-muted-foreground" />
           <input
             value={search}
             onChange={(e) => setSearch(e.target.value)}
@@ -491,10 +614,9 @@ export default function UsersPage() {
           className="input w-44"
         >
           <option value="">All roles</option>
-          <option value="admin">Administrator</option>
-          <option value="finance">Finance staff</option>
-          <option value="auditor">Auditor</option>
-          <option value="viewer">Viewer</option>
+          {roles?.map((role) => (
+            <option key={role.code} value={role.code}>{role.name}</option>
+          ))}
         </select>
         <select
           value={deptFilter}
@@ -513,23 +635,23 @@ export default function UsersPage() {
         <div className="overflow-x-auto">
           <table className="w-full text-sm">
             <thead>
-              <tr className="border-b border-gray-100 bg-gray-50">
-                <th className="text-left px-6 py-4 font-medium text-gray-500">User</th>
-                <th className="text-left px-6 py-4 font-medium text-gray-500">Role</th>
-                <th className="text-left px-6 py-4 font-medium text-gray-500">Department</th>
-                <th className="text-left px-6 py-4 font-medium text-gray-500">Status</th>
-                <th className="text-left px-6 py-4 font-medium text-gray-500">MFA</th>
-                <th className="text-left px-6 py-4 font-medium text-gray-500">Last login</th>
-                <th className="text-left px-6 py-4 font-medium text-gray-500">Joined</th>
+              <tr className="border-b border-border bg-muted/50">
+                <th className="text-left px-6 py-4 font-semibold text-xs uppercase tracking-wider text-muted-foreground">User</th>
+                <th className="text-left px-6 py-4 font-semibold text-xs uppercase tracking-wider text-muted-foreground">Role</th>
+                <th className="text-left px-6 py-4 font-semibold text-xs uppercase tracking-wider text-muted-foreground">Department</th>
+                <th className="text-left px-6 py-4 font-semibold text-xs uppercase tracking-wider text-muted-foreground">Status</th>
+                <th className="text-left px-6 py-4 font-semibold text-xs uppercase tracking-wider text-muted-foreground">MFA</th>
+                <th className="text-left px-6 py-4 font-semibold text-xs uppercase tracking-wider text-muted-foreground">Last login</th>
+                <th className="text-left px-6 py-4 font-semibold text-xs uppercase tracking-wider text-muted-foreground">Joined</th>
                 <th className="w-12" />
               </tr>
             </thead>
-            <tbody className="divide-y divide-gray-100">
+            <tbody className="divide-y divide-border">
               {isLoading && Array.from({ length: 6 }).map((_, i) => (
                 <tr key={i}>
                   {Array.from({ length: 8 }).map((_, j) => (
                     <td key={j} className="px-6 py-4">
-                      <div className="h-4 bg-gray-100 rounded animate-pulse" />
+                      <div className="h-4 bg-muted rounded animate-pulse" />
                     </td>
                   ))}
                 </tr>
@@ -539,52 +661,64 @@ export default function UsersPage() {
                 <tr
                   key={user.id}
                   className={clsx(
-                    "hover:bg-gray-50 transition-colors",
+                    "hover:bg-muted/40 transition-colors",
                     !user.is_active && "opacity-60"
                   )}
                 >
                   <td className="px-6 py-4">
                     <div className="flex items-center gap-3">
-                      <div className="w-9 h-9 rounded-full bg-brand-100 flex items-center justify-center text-brand-700 text-sm font-semibold flex-shrink-0">
+                      <div className="w-9 h-9 rounded-full bg-primary text-primary-foreground flex items-center justify-center text-sm font-semibold flex-shrink-0">
                         {user.first_name[0]}{user.last_name[0]}
                       </div>
                       <div>
-                        <p className="font-medium text-gray-900">{user.full_name}</p>
-                        <p className="text-xs text-gray-500">{user.email}</p>
+                        <p className="font-medium text-foreground">{user.full_name}</p>
+                        <p className="text-xs text-muted-foreground">{user.email}</p>
                       </div>
                     </div>
                   </td>
                   <td className="px-6 py-4">
-                    <span className={clsx("badge text-xs", ROLE_COLORS[user.role] ?? "bg-gray-100 text-gray-600")}>
+                    <span className={clsx("badge text-xs", ROLE_COLORS[user.role] ?? "bg-muted text-muted-foreground")}>
                       {user.role === "admin" && <Shield className="w-3 h-3 mr-1" />}
                       {user.role_display}
                     </span>
                   </td>
-                  <td className="px-6 py-4 text-gray-600">
-                    {user.department_name ?? <span className="text-gray-300">—</span>}
+                  <td className="px-6 py-4 text-muted-foreground">
+                    {user.department_name ?? <span className="text-muted">—</span>}
                   </td>
                   <td className="px-6 py-4">
                     <span className={clsx(
-                      "badge text-xs",
-                      user.is_active ? "bg-green-100 text-green-700" : "bg-red-100 text-red-600"
+                      "badge text-xs border",
+                      user.is_active
+                        ? "bg-teal/15 text-teal border-teal/30"
+                        : "bg-destructive/10 text-destructive border-destructive/30"
                     )}>
+                      <span className={clsx(
+                        "mr-1.5 h-1.5 w-1.5 rounded-full",
+                        user.is_active ? "bg-teal" : "bg-destructive"
+                      )} />
                       {user.is_active ? "Active" : "Inactive"}
                     </span>
                   </td>
                   <td className="px-6 py-4">
                     <span className={clsx(
-                      "badge text-xs",
-                      user.mfa_enabled ? "bg-green-100 text-green-700" : "bg-gray-100 text-gray-500"
+                      "badge text-xs border",
+                      user.mfa_enabled
+                        ? "bg-teal/15 text-teal border-teal/30"
+                        : "bg-muted text-muted-foreground border-border"
                     )}>
+                      <span className={clsx(
+                        "mr-1.5 h-1.5 w-1.5 rounded-full",
+                        user.mfa_enabled ? "bg-teal" : "bg-muted-foreground/50"
+                      )} />
                       {user.mfa_enabled ? "Enabled" : "Off"}
                     </span>
                   </td>
-                  <td className="px-6 py-4 text-gray-500 text-xs">
+                  <td className="px-6 py-4 text-muted-foreground text-xs">
                     {user.last_login
                       ? format(new Date(user.last_login), "dd MMM yyyy HH:mm")
                       : "Never"}
                   </td>
-                  <td className="px-6 py-4 text-gray-400 text-xs">
+                  <td className="px-6 py-4 text-muted-foreground text-xs">
                     {format(new Date(user.created_at), "dd MMM yyyy")}
                   </td>
                   <td className="px-6 py-4 text-right">
@@ -600,9 +734,9 @@ export default function UsersPage() {
 
               {!isLoading && !users?.length && (
                 <tr>
-                  <td colSpan={8} className="px-6 py-20 text-center text-gray-400">
-                    <div className="mx-auto w-12 h-12 rounded-full bg-gray-100 flex items-center justify-center mb-4">
-                      <Shield className="w-6 h-6 text-gray-300" />
+                  <td colSpan={8} className="px-6 py-20 text-center text-muted-foreground">
+                    <div className="mx-auto w-12 h-12 rounded-full bg-muted flex items-center justify-center mb-4">
+                      <Shield className="w-6 h-6 text-muted-foreground" />
                     </div>
                     No users found. Try adjusting your filters.
                   </td>
@@ -614,9 +748,14 @@ export default function UsersPage() {
       </div>
 
       {/* Modals */}
+      {showCreateRole && (
+        <CreateRoleModal onClose={() => setShowCreateRole(false)} />
+      )}
+
       {showCreate && (
         <CreateUserModal
           departments={departments ?? []}
+          roles={roles ?? []}
           onClose={() => setCreate(false)}
         />
       )}
@@ -625,6 +764,7 @@ export default function UsersPage() {
         <EditUserModal
           user={editUser}
           departments={departments ?? []}
+          roles={roles ?? []}
           onClose={() => setEditUser(null)}
         />
       )}

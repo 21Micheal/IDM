@@ -13,7 +13,7 @@ export interface DocumentType {
 export interface MetadataField {
   id: string;
   label: string;
-  key: string;
+  field_key: string;
   field_type: "text" | "number" | "date" | "currency" | "select" | "boolean" | "textarea";
   is_required: boolean;
   is_searchable: boolean;

@@ -56,7 +56,7 @@ services:
       - REDIS_URL=redis://:${REDIS_PASSWORD:-changeme}@redis:6379/0
       - ELASTICSEARCH_URL=http://elasticsearch:9200
       - MEDIA_ROOT=/app/media
-      - ALLOWED_HOSTS=${ALLOWED_HOSTS:-localhost,127.0.0.1}
+      - ALLOWED_HOSTS=${ALLOWED_HOSTS:-localhost,127.0.0.1,backend,frontend,nginx}
     volumes:
       - .:/app
       - media_files:/app/media

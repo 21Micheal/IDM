@@ -1,7 +1,7 @@
 import { create } from "zustand";
 import { persist } from "zustand/middleware";
 
-export type UserRole = "admin" | "finance" | "auditor" | "viewer";
+export type UserRole = string;
 
 export interface AuthUser {
   id: string;
@@ -9,6 +9,7 @@ export interface AuthUser {
   first_name: string;
   last_name: string;
   role: UserRole;
+  role_display?: string;
   mfa_enabled: boolean;
   must_change_password: boolean;          // ← new field
   department?: { id: string; name: string };

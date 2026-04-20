@@ -148,6 +148,15 @@ export const documentTypesAPI = {
     api.patch(`/documents/types/${id}/`, data),
 };
 
+export const rolesAPI = {
+  list: () => api.get("/roles/"),
+  create: (data: { code: string; name: string; description?: string }) =>
+    api.post("/roles/", data),
+  update: (id: string, data: { name?: string; description?: string; is_active?: boolean }) =>
+    api.patch(`/roles/${id}/`, data),
+  delete: (id: string) => api.delete(`/roles/${id}/`),
+};
+
 export const searchAPI = {
   search: (payload: unknown) => api.post("/search/", payload),
 };

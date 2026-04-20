@@ -14,7 +14,17 @@ environ.Env.read_env(BASE_DIR / ".env")
 
 SECRET_KEY = env("SECRET_KEY")
 DEBUG = env("DEBUG")
-ALLOWED_HOSTS = env.list("ALLOWED_HOSTS", default=["localhost", "127.0.0.1"])
+ALLOWED_HOSTS = env.list(
+    "ALLOWED_HOSTS",
+    default=[
+        "localhost",
+        "127.0.0.1",
+        # Docker internal service names (Vite proxy / nginx upstreams)
+        "backend",
+        "frontend",
+        "nginx",
+    ],
+)
 
 # ── Apps ────────────────────────────────────────────────────────────────────
 INSTALLED_APPS = [

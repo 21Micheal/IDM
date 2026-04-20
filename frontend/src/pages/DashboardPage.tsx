@@ -108,10 +108,10 @@ export default function DashboardPage() {
 
       {/* Key Metrics */}
       <div className="grid grid-cols-1 sm:grid-cols-2 xl:grid-cols-4 gap-4">
-        <StatCard title="Total Documents" value={totalDocuments} icon={FileText} color="blue"   href="/documents" />
-        <StatCard title="Pending Approval" value={pendingCount}   icon={Clock}    color="amber"  href="/documents?status=pending_approval" />
-        <StatCard title="My Tasks"         value={myTasks.length} icon={GitBranch} color="purple" href="/workflow" />
-        <StatCard title="Completed"        value="—"              icon={CheckCircle} color="green" />
+        <StatCard title="Total Documents" value={totalDocuments} icon={FileText}    color="primary"   href="/documents" />
+        <StatCard title="Pending Approval" value={pendingCount}   icon={Clock}       color="accent"    href="/documents?status=pending_approval" />
+        <StatCard title="My Tasks"         value={myTasks.length} icon={GitBranch}   color="secondary" href="/workflow" />
+        <StatCard title="Completed"        value="—"              icon={CheckCircle} color="teal" />
       </div>
 
       {/* Main Grid */}

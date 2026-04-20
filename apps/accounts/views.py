@@ -13,11 +13,12 @@ from rest_framework.response import Response
 from rest_framework.views import APIView
 from rest_framework_simplejwt.tokens import RefreshToken
 
-from .models import User, Department, Role, EmailOTP, UserGroup, GroupPermission, UserGroupMembership
+from .models import User, Department, Role, RoleDefinition, EmailOTP, UserGroup, GroupPermission, UserGroupMembership
 from .serializers import (
     UserSerializer, UserCreateSerializer, UserUpdateSerializer,
     DepartmentSerializer, UserSummarySerializer,
     UserGroupSerializer, GroupPermissionSerializer, UserGroupMembershipSerializer,
+    RoleDefinitionSerializer,
 )
 from .email_otp import send_otp_email
 from apps.audit.models import AuditLog, AuditEvent
@@ -456,6 +457,16 @@ class DepartmentViewSet(viewsets.ModelViewSet):
                 status=400,
             )
         return super().destroy(request, *args, **kwargs)
+
+
+class RoleDefinitionViewSet(viewsets.ModelViewSet):
+    queryset = RoleDefinition.objects.order_by("name")
+    serializer_class = RoleDefinitionSerializer
+
+    def get_permissions(self):
+        if self.action in ("create", "update", "partial_update", "destroy"):
+            return [permissions.IsAuthenticated(), IsAdminRole()]
+        return [permissions.IsAuthenticated()]
 
 
 # ── Group management ──────────────────────────────────────────────────────────

@@ -2,7 +2,7 @@ from django.contrib.auth.password_validation import validate_password
 from django.core.exceptions import ValidationError as DjangoValidationError
 from django.utils.crypto import get_random_string
 from rest_framework import serializers
-from .models import User, Department, Role, UserGroup, GroupPermission, UserGroupMembership
+from .models import User, Department, Role, RoleDefinition, UserGroup, GroupPermission, UserGroupMembership
 
 
 class DepartmentSerializer(serializers.ModelSerializer):
@@ -34,7 +34,7 @@ class UserSummarySerializer(serializers.ModelSerializer):
 class UserSerializer(serializers.ModelSerializer):
     department_name  = serializers.CharField(source="department.name", read_only=True, default=None)
     full_name        = serializers.SerializerMethodField()
-    role_display     = serializers.CharField(source="get_role_display", read_only=True)
+    role_display     = serializers.SerializerMethodField()
     group_names      = serializers.SerializerMethodField()
 
     class Meta:
@@ -56,6 +56,13 @@ class UserSerializer(serializers.ModelSerializer):
     def get_full_name(self, obj):
         return obj.get_full_name()
 
+    def get_role_display(self, obj):
+        try:
+            role = RoleDefinition.objects.get(code=obj.role)
+            return role.name
+        except RoleDefinition.DoesNotExist:
+            return obj.role
+
     def get_group_names(self, obj):
         return list(
             obj.group_memberships
@@ -69,6 +76,11 @@ class UserCreateSerializer(serializers.ModelSerializer):
     class Meta:
         model  = User
         fields = ["email", "first_name", "last_name", "role", "department", "is_active"]
+
+    def validate_role(self, value):
+        if not RoleDefinition.objects.filter(code=value, is_active=True).exists():
+            raise serializers.ValidationError("Selected role does not exist or is inactive.")
+        return value
 
     COMMON_EMAIL_TYPO_DOMAINS = {
         "gmai.com",
@@ -118,6 +130,11 @@ class UserUpdateSerializer(serializers.ModelSerializer):
         model  = User
         fields = ["first_name", "last_name", "role", "department", "is_active", "mfa_enabled"]
 
+    def validate_role(self, value):
+        if not RoleDefinition.objects.filter(code=value, is_active=True).exists():
+            raise serializers.ValidationError("Selected role does not exist or is inactive.")
+        return value
+
     def validate(self, attrs):
         request = self.context.get("request")
         if request and request.user.role != Role.ADMIN:
@@ -140,6 +157,13 @@ class GroupPermissionSerializer(serializers.ModelSerializer):
     class Meta:
         model  = GroupPermission
         fields = ["id", "document_type", "document_type_name", "action"]
+
+
+class RoleDefinitionSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = RoleDefinition
+        fields = ["id", "code", "name", "description", "is_active", "created_at"]
+        read_only_fields = ["id", "created_at"]
 
 
 class UserGroupMembershipSerializer(serializers.ModelSerializer):

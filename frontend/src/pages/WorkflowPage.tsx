@@ -2,8 +2,8 @@ import { useState } from "react";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { workflowAPI } from "@/services/api";
 import { Link } from "react-router-dom";
-import { CheckCircle, XCircle, Clock, FileText, Loader2 } from "lucide-react";
-import { formatDistanceToNow, format } from "date-fns";
+import { CheckCircle, XCircle, Clock, Loader2, GitBranch } from "lucide-react";
+import { formatDistanceToNow } from "date-fns";
 import { toast } from "react-toastify";
 import type { WorkflowTask } from "@/types";
 
@@ -39,20 +39,20 @@ function ApprovalModal({
   });
 
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-4">
-      <div className="card w-full max-w-md p-6 space-y-4">
-        <h2 className="font-semibold text-gray-900">
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-foreground/40 backdrop-blur-sm p-4">
+      <div className="card w-full max-w-md p-6 space-y-4" style={{ boxShadow: "var(--shadow-elegant)" }}>
+        <h2 className="font-semibold text-foreground text-lg">
           {action === "approve" ? "Approve document" : "Reject document"}
         </h2>
-        <p className="text-sm text-gray-600">
-          <span className="font-medium">{documentTitle}</span>
-          <span className="text-gray-400 ml-2 font-mono text-xs">
+        <p className="text-sm text-muted-foreground">
+          <span className="font-medium text-foreground">{documentTitle}</span>
+          <span className="text-muted-foreground ml-2 font-mono text-xs">
             {documentRef}
           </span>
         </p>
         <div>
           <label className="label">
-            Comment{action === "reject" && <span className="text-red-500 ml-1">*</span>}
+            Comment{action === "reject" && <span className="text-destructive ml-1">*</span>}
           </label>
           <textarea
             value={comment}
@@ -93,23 +93,30 @@ export default function WorkflowPage() {
   });
 
   return (
-    <div className="space-y-5">
+    <div className="max-w-4xl mx-auto py-10 px-6 space-y-8">
       <div>
-        <h1 className="text-2xl font-bold text-gray-900">Workflow tasks</h1>
-        <p className="text-gray-500 text-sm mt-1">Documents waiting for your approval action.</p>
+        <div className="flex items-center gap-3 mb-2">
+          <div className="w-10 h-10 rounded-xl bg-primary/10 flex items-center justify-center">
+            <GitBranch className="w-5 h-5 text-primary" />
+          </div>
+          <h1 className="text-2xl font-bold text-foreground tracking-tight">Workflow tasks</h1>
+        </div>
+        <p className="text-muted-foreground text-sm">Documents waiting for your approval action.</p>
       </div>
 
       {isLoading && (
         <div className="flex items-center justify-center h-40">
-          <Loader2 className="w-6 h-6 text-brand-500 animate-spin" />
+          <Loader2 className="w-6 h-6 text-accent animate-spin" />
         </div>
       )}
 
       {!isLoading && !tasks?.length && (
         <div className="card p-12 text-center">
-          <CheckCircle className="w-12 h-12 text-green-300 mx-auto mb-3" />
-          <p className="font-medium text-gray-700">All caught up!</p>
-          <p className="text-sm text-gray-400 mt-1">No pending approval tasks.</p>
+          <div className="w-14 h-14 rounded-full bg-teal/15 flex items-center justify-center mx-auto mb-4">
+            <CheckCircle className="w-7 h-7 text-teal" />
+          </div>
+          <p className="font-semibold text-foreground">All caught up!</p>
+          <p className="text-sm text-muted-foreground mt-1">No pending approval tasks.</p>
         </div>
       )}
 
@@ -122,55 +129,57 @@ export default function WorkflowPage() {
           const documentRef =
             task.workflow_instance?.document?.reference_number ?? task.document_ref ?? "";
 
+          const isOverdue = task.due_at && new Date(task.due_at) < new Date();
+
           return (
-          <div key={task.id} className="card p-5 flex items-start gap-4">
-            <div className="w-10 h-10 rounded-xl bg-amber-50 flex items-center justify-center flex-shrink-0">
-              <Clock className="w-5 h-5 text-amber-500" />
-            </div>
-            <div className="flex-1 min-w-0">
-              <div className="flex items-start justify-between gap-2">
-                <div>
-                  <Link
-                    to={documentId ? `/documents/${documentId}` : "/workflow"}
-                    className="font-medium text-gray-900 hover:text-brand-600 truncate block"
-                  >
-                    {documentTitle}
-                  </Link>
-                  <p className="text-xs text-gray-500 font-mono mt-0.5">
-                    {documentRef}
-                  </p>
+            <div key={task.id} className="card p-5 flex items-start gap-4 hover:-translate-y-0.5 transition-transform">
+              <div className="w-10 h-10 rounded-xl bg-accent/15 flex items-center justify-center flex-shrink-0">
+                <Clock className="w-5 h-5 text-accent-foreground" />
+              </div>
+              <div className="flex-1 min-w-0">
+                <div className="flex items-start justify-between gap-2">
+                  <div className="min-w-0">
+                    <Link
+                      to={documentId ? `/documents/${documentId}` : "/workflow"}
+                      className="font-medium text-foreground hover:text-accent-foreground hover:underline truncate block"
+                    >
+                      {documentTitle}
+                    </Link>
+                    <p className="text-xs text-muted-foreground font-mono mt-0.5">
+                      {documentRef}
+                    </p>
+                  </div>
+                  <div className="flex gap-2 flex-shrink-0">
+                    <button
+                      onClick={() => setModal({ task, action: "approve" })}
+                      className="inline-flex items-center gap-1.5 rounded-lg bg-teal px-3 py-1.5 text-xs font-medium text-teal-foreground hover:bg-teal/90 transition-colors"
+                    >
+                      <CheckCircle className="w-3.5 h-3.5" /> Approve
+                    </button>
+                    <button
+                      onClick={() => setModal({ task, action: "reject" })}
+                      className="btn-danger text-xs px-3 py-1.5"
+                    >
+                      <XCircle className="w-3.5 h-3.5" /> Reject
+                    </button>
+                  </div>
                 </div>
-                <div className="flex gap-2 flex-shrink-0">
-                  <button
-                    onClick={() => setModal({ task, action: "approve" })}
-                    className="btn-primary text-xs px-3 py-1.5"
-                  >
-                    <CheckCircle className="w-3.5 h-3.5" /> Approve
-                  </button>
-                  <button
-                    onClick={() => setModal({ task, action: "reject" })}
-                    className="btn-danger text-xs px-3 py-1.5"
-                  >
-                    <XCircle className="w-3.5 h-3.5" /> Reject
-                  </button>
+                <div className="flex items-center gap-3 mt-2 text-xs text-muted-foreground">
+                  <span>Step: <span className="font-medium text-foreground">{task.step.name}</span></span>
+                  {task.due_at && (
+                    <span
+                      className={
+                        isOverdue
+                          ? "text-destructive font-medium"
+                          : ""
+                      }
+                    >
+                      Due {formatDistanceToNow(new Date(task.due_at), { addSuffix: true })}
+                    </span>
+                  )}
                 </div>
               </div>
-              <div className="flex items-center gap-3 mt-2 text-xs text-gray-500">
-                <span>Step: <span className="font-medium">{task.step.name}</span></span>
-                {task.due_at && (
-                  <span
-                    className={
-                      new Date(task.due_at) < new Date()
-                        ? "text-red-500 font-medium"
-                        : ""
-                    }
-                  >
-                    Due {formatDistanceToNow(new Date(task.due_at), { addSuffix: true })}
-                  </span>
-                )}
-              </div>
             </div>
-          </div>
           );
         })}
       </div>

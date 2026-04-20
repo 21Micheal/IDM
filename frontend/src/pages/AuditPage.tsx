@@ -20,7 +20,7 @@ export default function AuditPage() {
       api
         .get("/audit/", {
           params: {
-            search: searchTerm || undefined,        // Advanced search (actor + object + event)
+            search: searchTerm || undefined,
             event: eventFilter || undefined,
             date_from: dateFrom || undefined,
             date_to: dateTo || undefined,
@@ -32,14 +32,15 @@ export default function AuditPage() {
         .then((r) => r.data),
   });
 
+  // Indigo Vault semantic event coloring
   const eventColor = (event: string) => {
     if (event.includes("deleted") || event.includes("rejected") || event.includes("failed"))
-      return "bg-red-100 text-red-700";
+      return "bg-destructive/10 text-destructive";
     if (event.includes("approved") || event.includes("created") || event.includes("success"))
-      return "bg-green-100 text-green-700";
+      return "bg-teal/15 text-teal";
     if (event.includes("login") || event.includes("viewed") || event.includes("downloaded"))
-      return "bg-blue-100 text-blue-700";
-    return "bg-gray-100 text-gray-600";
+      return "bg-accent/15 text-accent-foreground";
+    return "bg-muted text-muted-foreground";
   };
 
   const exportAudit = async () => {
@@ -79,7 +80,6 @@ export default function AuditPage() {
 
   const totalPages = Math.ceil((data?.count ?? 0) / PAGE_SIZE);
 
-  // Auto-refetch when filters change (for live feel)
   useEffect(() => {
     refetch();
   }, [searchTerm, eventFilter, dateFrom, dateTo, refetch]);
@@ -89,16 +89,18 @@ export default function AuditPage() {
       {/* Header */}
       <div className="flex items-end justify-between mb-10">
         <div>
-          <h1 className="text-4xl font-bold text-gray-900">Audit Trail</h1>
-          <p className="text-gray-500 mt-2 text-lg">
+          <div className="flex items-center gap-3 mb-2">
+            <div className="w-10 h-10 rounded-xl bg-primary/10 flex items-center justify-center">
+              <ShieldCheck className="w-5 h-5 text-primary" />
+            </div>
+            <h1 className="text-3xl font-bold text-foreground tracking-tight">Audit Trail</h1>
+          </div>
+          <p className="text-muted-foreground text-sm">
             Immutable record of all system activities and changes
           </p>
         </div>
 
-        <button
-          onClick={exportAudit}
-          className="btn-secondary flex items-center gap-2"
-        >
+        <button onClick={exportAudit} className="btn-secondary flex items-center gap-2">
           <Download className="w-4 h-4" />
           Export CSV
         </button>
@@ -107,20 +109,19 @@ export default function AuditPage() {
       {/* Filters */}
       <div className="card p-6 mb-8">
         <div className="flex items-center justify-between mb-5">
-          <div className="flex items-center gap-2 text-sm text-gray-500">
+          <div className="flex items-center gap-2 text-sm text-muted-foreground">
             <Filter className="w-4 h-4" />
-            <span>Filters</span>
+            <span className="font-medium">Filters</span>
           </div>
           <button
             onClick={resetFilters}
-            className="text-xs text-gray-500 hover:text-gray-700 underline"
+            className="text-xs text-muted-foreground hover:text-foreground underline"
           >
             Clear all
           </button>
         </div>
 
         <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-5">
-          {/* Advanced Search */}
           <div className="lg:col-span-2">
             <label className="label flex items-center gap-2">
               <Search className="w-4 h-4" /> Search
@@ -134,7 +135,6 @@ export default function AuditPage() {
             />
           </div>
 
-          {/* Event Filter */}
           <div>
             <label className="label">Event Type</label>
             <select
@@ -155,7 +155,6 @@ export default function AuditPage() {
             </select>
           </div>
 
-          {/* Date From */}
           <div>
             <label className="label">From Date</label>
             <input
@@ -166,7 +165,6 @@ export default function AuditPage() {
             />
           </div>
 
-          {/* Date To */}
           <div>
             <label className="label">To Date</label>
             <input
@@ -184,52 +182,52 @@ export default function AuditPage() {
         <div className="overflow-x-auto">
           <table className="w-full text-sm">
             <thead>
-              <tr className="border-b border-gray-100 bg-gray-50">
-                <th className="text-left px-6 py-4 font-medium text-gray-500">Event</th>
-                <th className="text-left px-6 py-4 font-medium text-gray-500">Actor</th>
-                <th className="text-left px-6 py-4 font-medium text-gray-500">Object</th>
-                <th className="text-left px-6 py-4 font-medium text-gray-500">IP Address</th>
-                <th className="text-left px-6 py-4 font-medium text-gray-500">Timestamp</th>
+              <tr className="border-b border-border bg-muted/50">
+                <th className="text-left px-6 py-4 font-semibold text-xs uppercase tracking-wider text-muted-foreground">Event</th>
+                <th className="text-left px-6 py-4 font-semibold text-xs uppercase tracking-wider text-muted-foreground">Actor</th>
+                <th className="text-left px-6 py-4 font-semibold text-xs uppercase tracking-wider text-muted-foreground">Object</th>
+                <th className="text-left px-6 py-4 font-semibold text-xs uppercase tracking-wider text-muted-foreground">IP Address</th>
+                <th className="text-left px-6 py-4 font-semibold text-xs uppercase tracking-wider text-muted-foreground">Timestamp</th>
               </tr>
             </thead>
-            <tbody className="divide-y divide-gray-100">
+            <tbody className="divide-y divide-border">
               {isLoading && Array.from({ length: 8 }).map((_, i) => (
                 <tr key={i}>
                   {Array.from({ length: 5 }).map((_, j) => (
                     <td key={j} className="px-6 py-4">
-                      <div className="h-4 bg-gray-100 rounded animate-pulse" />
+                      <div className="h-4 bg-muted rounded animate-pulse" />
                     </td>
                   ))}
                 </tr>
               ))}
 
-              {data?.results?.map((log: any) => (
-                <tr key={log.id} className="hover:bg-gray-50 transition-colors">
+              {data?.results?.map((log: { id: string; event: string; actor_email?: string; object_type?: string; object_repr?: string; ip_address?: string; timestamp: string }) => (
+                <tr key={log.id} className="hover:bg-muted/40 transition-colors">
                   <td className="px-6 py-4">
-                    <span className={`inline-flex items-center px-3 py-1 rounded-full text-xs font-medium ${eventColor(log.event)}`}>
+                    <span className={`inline-flex items-center px-2.5 py-1 rounded-full text-xs font-medium ${eventColor(log.event)}`}>
                       {log.event}
                     </span>
                   </td>
                   <td className="px-6 py-4">
                     <div className="flex items-center gap-2">
-                      <User className="w-4 h-4 text-gray-400" />
-                      <span className="text-gray-700 font-medium">{log.actor_email || "System"}</span>
+                      <User className="w-4 h-4 text-muted-foreground" />
+                      <span className="text-foreground font-medium">{log.actor_email || "System"}</span>
                     </div>
                   </td>
-                  <td className="px-6 py-4 text-gray-600">
+                  <td className="px-6 py-4 text-muted-foreground">
                     {log.object_type && (
-                      <span className="font-mono text-xs bg-gray-100 px-2 py-0.5 rounded">
+                      <span className="font-mono text-xs bg-muted px-2 py-0.5 rounded text-foreground">
                         {log.object_type}
                       </span>
                     )}
-                    {log.object_repr && <span className="ml-2 text-gray-500">· {log.object_repr}</span>}
+                    {log.object_repr && <span className="ml-2 text-muted-foreground">· {log.object_repr}</span>}
                   </td>
-                  <td className="px-6 py-4 font-mono text-xs text-gray-500">
+                  <td className="px-6 py-4 font-mono text-xs text-muted-foreground">
                     {log.ip_address || "—"}
                   </td>
-                  <td className="px-6 py-4 text-gray-500 text-xs whitespace-nowrap">
+                  <td className="px-6 py-4 text-muted-foreground text-xs whitespace-nowrap">
                     <div className="flex items-center gap-2">
-                      <Clock className="w-4 h-4 text-gray-400" />
+                      <Clock className="w-4 h-4 text-muted-foreground" />
                       {format(new Date(log.timestamp), "dd MMM yyyy • HH:mm:ss")}
                     </div>
                   </td>
@@ -239,8 +237,8 @@ export default function AuditPage() {
               {!isLoading && !data?.results?.length && (
                 <tr>
                   <td colSpan={5} className="py-20 text-center">
-                    <ShieldCheck className="w-12 h-12 text-gray-200 mx-auto mb-4" />
-                    <p className="text-gray-500">No audit events found for the selected filters.</p>
+                    <ShieldCheck className="w-12 h-12 text-muted mx-auto mb-4" />
+                    <p className="text-muted-foreground">No audit events found for the selected filters.</p>
                   </td>
                 </tr>
               )}
@@ -250,8 +248,8 @@ export default function AuditPage() {
 
         {/* Pagination */}
         {totalPages > 1 && (
-          <div className="flex items-center justify-between px-6 py-4 border-t border-gray-100 bg-gray-50">
-            <p className="text-sm text-gray-500">
+          <div className="flex items-center justify-between px-6 py-4 border-t border-border bg-muted/40">
+            <p className="text-sm text-muted-foreground">
               Showing page {page} of {totalPages} • {data?.count ?? 0} total events
             </p>
             <div className="flex gap-2">

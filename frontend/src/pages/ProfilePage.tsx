@@ -7,7 +7,7 @@ import { profileAPI } from "@/services/api";
 import { useAuthStore } from "@/store/authStore";
 import {
   Shield, Key, Smartphone,
-  Loader2, Eye, EyeOff, AlertTriangle,
+  Loader2, Eye, EyeOff, AlertTriangle, UserCircle,
 } from "lucide-react";
 import { toast } from "react-toastify";
 
@@ -53,7 +53,6 @@ export default function ProfilePage() {
     mutationFn: (enable: boolean) => profileAPI.toggleMFA(enable),
     onSuccess: () => {
       toast.success("MFA settings updated");
-      // Keep local auth user in sync with backend response expectation
       useAuthStore.setState((state) =>
         state.user
           ? { user: { ...state.user, mfa_enabled: !state.user.mfa_enabled } }
@@ -66,37 +65,42 @@ export default function ProfilePage() {
   if (!user) return null;
 
   return (
-    <div className="max-w-2xl space-y-6">
+    <div className="max-w-2xl mx-auto py-10 px-6 space-y-8">
       <div>
-        <h1 className="text-2xl font-bold text-gray-900">My profile</h1>
-        <p className="text-gray-500 text-sm mt-1">Manage your account settings and security.</p>
+        <div className="flex items-center gap-3 mb-2">
+          <div className="w-10 h-10 rounded-xl bg-primary/10 flex items-center justify-center">
+            <UserCircle className="w-5 h-5 text-primary" />
+          </div>
+          <h1 className="text-2xl font-bold text-foreground tracking-tight">My profile</h1>
+        </div>
+        <p className="text-muted-foreground text-sm">Manage your account settings and security.</p>
       </div>
 
       {/* Identity card */}
       <div className="card p-6">
         <div className="flex items-center gap-4 mb-5">
-          <div className="w-14 h-14 rounded-full bg-brand-100 flex items-center justify-center text-brand-700 text-xl font-bold">
+          <div className="w-14 h-14 rounded-full bg-primary text-primary-foreground flex items-center justify-center text-xl font-bold">
             {user.first_name[0]}{user.last_name[0]}
           </div>
           <div>
-            <h2 className="text-lg font-semibold text-gray-900">
+            <h2 className="text-lg font-semibold text-foreground">
               {user.first_name} {user.last_name}
             </h2>
-            <p className="text-sm text-gray-500">{user.email}</p>
-            <span className="badge bg-brand-50 text-brand-700 mt-1">
-              {ROLE_LABELS[user.role] ?? user.role}
+            <p className="text-sm text-muted-foreground">{user.email}</p>
+            <span className="badge bg-accent/15 text-accent-foreground mt-1">
+              {user.role_display ?? ROLE_LABELS[user.role] ?? user.role}
             </span>
           </div>
         </div>
-        <dl className="grid grid-cols-2 gap-3 text-sm">
+        <dl className="grid grid-cols-2 gap-3 text-sm pt-5 border-t border-border">
           {[
-            { label: "Role",       value: ROLE_LABELS[user.role] ?? user.role },
+            { label: "Role",       value: user.role_display ?? ROLE_LABELS[user.role] ?? user.role },
             { label: "Department", value: user.department?.name ?? "—" },
             { label: "MFA",        value: user.mfa_enabled ? "Enabled" : "Not enabled" },
           ].map(({ label, value }) => (
             <div key={label}>
-              <dt className="text-gray-500">{label}</dt>
-              <dd className="font-medium text-gray-900 mt-0.5">{value}</dd>
+              <dt className="text-xs uppercase tracking-wider text-muted-foreground">{label}</dt>
+              <dd className="font-medium text-foreground mt-1">{value}</dd>
             </div>
           ))}
         </dl>
@@ -105,8 +109,8 @@ export default function ProfilePage() {
       {/* Change password */}
       <div className="card p-6">
         <div className="flex items-center gap-2 mb-5">
-          <Key className="w-5 h-5 text-gray-500" />
-          <h2 className="font-semibold text-gray-900">Change password</h2>
+          <Key className="w-5 h-5 text-muted-foreground" />
+          <h2 className="font-semibold text-foreground">Change password</h2>
         </div>
         <form
           onSubmit={handleSubmit((v) => changePasswordMutation.mutate(v))}
@@ -124,13 +128,13 @@ export default function ProfilePage() {
               <button
                 type="button"
                 onClick={() => setShowPw(!showPw)}
-                className="absolute right-3 top-1/2 -translate-y-1/2 text-gray-400"
+                className="absolute right-3 top-1/2 -translate-y-1/2 text-muted-foreground hover:text-foreground"
               >
                 {showPw ? <EyeOff className="w-4 h-4" /> : <Eye className="w-4 h-4" />}
               </button>
             </div>
             {errors.old_password && (
-              <p className="text-red-500 text-xs mt-1">{errors.old_password.message}</p>
+              <p className="text-destructive text-xs mt-1">{errors.old_password.message}</p>
             )}
           </div>
           <div>
@@ -142,7 +146,7 @@ export default function ProfilePage() {
               placeholder="Min 8 characters"
             />
             {errors.new_password && (
-              <p className="text-red-500 text-xs mt-1">{errors.new_password.message}</p>
+              <p className="text-destructive text-xs mt-1">{errors.new_password.message}</p>
             )}
           </div>
           <div>
@@ -154,7 +158,7 @@ export default function ProfilePage() {
               placeholder="Repeat new password"
             />
             {errors.confirm_password && (
-              <p className="text-red-500 text-xs mt-1">{errors.confirm_password.message}</p>
+              <p className="text-destructive text-xs mt-1">{errors.confirm_password.message}</p>
             )}
           </div>
           <button
@@ -171,17 +175,16 @@ export default function ProfilePage() {
       {/* MFA */}
       <div className="card p-6">
         <div className="flex items-center gap-2 mb-2">
-          <Smartphone className="w-5 h-5 text-gray-500" />
-          <h2 className="font-semibold text-gray-900">Two-factor authentication</h2>
+          <Smartphone className="w-5 h-5 text-muted-foreground" />
+          <h2 className="font-semibold text-foreground">Two-factor authentication</h2>
           {user.mfa_enabled && (
-            <span className="badge bg-green-100 text-green-700 ml-auto">Enabled</span>
+            <span className="badge bg-teal/15 text-teal ml-auto">Enabled</span>
           )}
         </div>
-        <p className="text-sm text-gray-500 mb-5">
+        <p className="text-sm text-muted-foreground mb-5">
           Email OTP is used as your second authentication factor during login.
         </p>
 
-        {/* Not enabled */}
         {!user.mfa_enabled && (
           <button
             onClick={() => toggleMFAMutation.mutate(true)}
@@ -193,12 +196,11 @@ export default function ProfilePage() {
           </button>
         )}
 
-        {/* Already enabled — show disable option */}
         {user.mfa_enabled && (
           <div className="space-y-3">
-            <div className="flex items-start gap-2 bg-amber-50 border border-amber-200 rounded-lg p-3">
-              <AlertTriangle className="w-4 h-4 text-amber-500 mt-0.5 flex-shrink-0" />
-              <p className="text-sm text-amber-700">
+            <div className="flex items-start gap-2 bg-accent/10 border border-accent/30 rounded-lg p-3">
+              <AlertTriangle className="w-4 h-4 text-accent-foreground mt-0.5 flex-shrink-0" />
+              <p className="text-sm text-foreground">
                 Disabling MFA reduces your account security. Only do this if you
                 are switching authenticator apps.
               </p>

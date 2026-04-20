@@ -1,21 +1,31 @@
 """
 apps/documents/serializers.py
 
-Changes from previous version
-──────────────────────────────
-1. DocumentListSerializer  — exposes `is_self_upload` flag.
-2. DocumentDetailSerializer — exposes `is_self_upload` flag.
-3. DocumentUploadSerializer — accepts `is_self_upload` on POST;
-   relaxes required-metadata validation for self-upload docs
-   (the uploader may not know the formal metadata schema).
-4. DocumentMetadataEditSerializer — no change.
-5. DocumentBulkActionSerializer  — no change.
-"""
-from rest_framework import serializers
-from .models import Document, DocumentType, MetadataField, DocumentVersion, DocumentComment, Tag
-from apps.accounts.serializers import UserSummarySerializer
-from apps.accounts.models import GroupAction
+Key fix: DocumentTypeSerializer now handles metadata_fields as a
+writable nested list via MetadataFieldWriteSerializer.
 
+On create  → creates all MetadataField rows linked to the new DocumentType.
+On update  → replaces all metadata fields atomically:
+               deletes existing rows, creates fresh ones from payload.
+             This avoids partial-update complexity while keeping the
+             API surface simple (the frontend always sends the full list).
+
+The select_options_raw field exists only on the frontend form — it is
+never sent to the API (stripped by the frontend before POST/PATCH).
+The backend stores options in the JSONField `select_options` as a list.
+"""
+from django.db import IntegrityError, transaction
+from django.utils.text import slugify
+from rest_framework import serializers
+
+from .models import (
+    Document, DocumentType, MetadataField,
+    DocumentVersion, DocumentComment, Tag,
+)
+from apps.accounts.serializers import UserSummarySerializer
+
+
+# ── Tags ──────────────────────────────────────────────────────────────────────
 
 class TagSerializer(serializers.ModelSerializer):
     class Meta:
@@ -23,16 +33,50 @@ class TagSerializer(serializers.ModelSerializer):
         fields = ["id", "name", "color"]
 
 
+# ── Metadata fields ───────────────────────────────────────────────────────────
+
 class MetadataFieldSerializer(serializers.ModelSerializer):
+    """Read serializer — returned in GET responses."""
+    field_key = serializers.CharField(source="key", read_only=True)
+
     class Meta:
         model  = MetadataField
         fields = [
-            "id", "label", "key", "field_type", "is_required",
-            "is_searchable", "select_options", "default_value", "help_text", "order",
+            "id", "label", "field_key", "field_type",
+            "is_required", "is_searchable",
+            "select_options", "default_value", "help_text", "order",
         ]
 
 
+class MetadataFieldWriteSerializer(serializers.Serializer):
+    """
+    Write-only serializer for nested metadata fields.
+    Does NOT include `id` — we always delete-and-recreate on update.
+    Does NOT include `select_options_raw` — that is a frontend-only
+    convenience field that must be stripped before calling the API.
+    """
+    label          = serializers.CharField(max_length=100)
+    field_key      = serializers.SlugField(max_length=100)
+    field_type     = serializers.ChoiceField(choices=[
+        "text", "number", "date", "currency", "select", "boolean", "textarea"
+    ])
+    is_required    = serializers.BooleanField(default=False)
+    is_searchable  = serializers.BooleanField(default=True)
+    select_options = serializers.ListField(
+        child=serializers.CharField(), default=list, required=False
+    )
+    default_value  = serializers.CharField(max_length=255, allow_blank=True, default="")
+    help_text      = serializers.CharField(max_length=255, allow_blank=True, default="")
+    order          = serializers.IntegerField(default=0)
+
+
+# ── Document type ─────────────────────────────────────────────────────────────
+
 class DocumentTypeSerializer(serializers.ModelSerializer):
+    """
+    Read serializer — used for GET /documents/types/ and GET /documents/types/{id}/
+    Includes full metadata_fields list and workflow link.
+    """
     metadata_fields        = MetadataFieldSerializer(many=True, read_only=True)
     workflow_template_name = serializers.CharField(
         source="workflow_template.name", read_only=True, default=None
@@ -47,6 +91,105 @@ class DocumentTypeSerializer(serializers.ModelSerializer):
             "metadata_fields",
         ]
 
+
+class DocumentTypeWriteSerializer(serializers.ModelSerializer):
+    """
+    Write serializer — used for POST /documents/types/ and PATCH /documents/types/{id}/
+    Accepts nested metadata_fields and replaces them atomically.
+    """
+    metadata_fields = MetadataFieldWriteSerializer(many=True, required=False, default=list)
+
+    class Meta:
+        model  = DocumentType
+        fields = [
+            "name", "code", "reference_prefix", "reference_padding",
+            "description", "icon", "is_active",
+            "workflow_template",
+            "metadata_fields",
+        ]
+        extra_kwargs = {
+            "icon":              {"required": False, "allow_blank": True},
+            "description":       {"required": False, "allow_blank": True},
+            "workflow_template": {"required": False, "allow_null": True},
+        }
+
+    def validate_metadata_fields(self, value):
+        """
+        Normalize and auto-heal field keys before hitting DB unique constraints.
+        - If key is empty, derive it from label.
+        - If still empty, generate metadata_field_<n>.
+        - If duplicate, add numeric suffix (_2, _3, ...).
+
+        This keeps PATCH resilient for legacy/bad payloads while preserving DB
+        uniqueness requirements.
+        """
+        used_keys = set()
+
+        for idx, field in enumerate(value):
+            raw_key = str(field.get("field_key", "")).strip().lower()
+            base_key = slugify(raw_key).replace("-", "_")
+
+            if not base_key:
+                label_key = slugify(str(field.get("label", "")).strip().lower()).replace("-", "_")
+                base_key = label_key or f"metadata_field_{idx + 1}"
+
+            key = base_key
+            suffix = 2
+            while key in used_keys:
+                key = f"{base_key}_{suffix}"
+                suffix += 1
+
+            used_keys.add(key)
+            field["field_key"] = key
+
+        return value
+
+    def _save_metadata_fields(self, doc_type: DocumentType, fields_data: list) -> None:
+        """Delete existing fields and recreate from payload."""
+        doc_type.metadata_fields.all().delete()
+        try:
+            for i, field_data in enumerate(fields_data):
+                field_data = dict(field_data)
+                # Rename field_key → key to match the model field name
+                if "field_key" in field_data:
+                    field_data["key"] = field_data.pop("field_key")
+                # Ensure order matches position in list if not explicitly set
+                if "order" not in field_data or field_data["order"] == 0:
+                    field_data["order"] = i
+                MetadataField.objects.create(document_type=doc_type, **field_data)
+        except IntegrityError:
+            raise serializers.ValidationError(
+                {
+                    "metadata_fields": (
+                        "Duplicate metadata field keys are not allowed for a "
+                        "document type."
+                    )
+                }
+            )
+
+    @transaction.atomic
+    def create(self, validated_data: dict) -> DocumentType:
+        fields_data = validated_data.pop("metadata_fields", [])
+        doc_type    = DocumentType.objects.create(**validated_data)
+        self._save_metadata_fields(doc_type, fields_data)
+        return doc_type
+
+    @transaction.atomic
+    def update(self, instance: DocumentType, validated_data: dict) -> DocumentType:
+        fields_data = validated_data.pop("metadata_fields", None)
+
+        for attr, value in validated_data.items():
+            setattr(instance, attr, value)
+        instance.save()
+
+        # Only replace fields if the key was present in the request
+        if fields_data is not None:
+            self._save_metadata_fields(instance, fields_data)
+
+        return instance
+
+
+# ── Document version / comment ─────────────────────────────────────────────────
 
 class DocumentVersionSerializer(serializers.ModelSerializer):
     created_by = UserSummarySerializer(read_only=True)
@@ -68,12 +211,12 @@ class DocumentCommentSerializer(serializers.ModelSerializer):
         read_only_fields = ["id", "author", "created_at", "updated_at"]
 
 
+# ── Document list / detail ────────────────────────────────────────────────────
+
 class DocumentListSerializer(serializers.ModelSerializer):
-    """Lightweight — list views only."""
     document_type_name = serializers.CharField(source="document_type.name", read_only=True)
     uploaded_by        = UserSummarySerializer(read_only=True)
     tags               = TagSerializer(many=True, read_only=True)
-    permissions        = serializers.SerializerMethodField()
 
     class Meta:
         model  = Document
@@ -82,34 +225,11 @@ class DocumentListSerializer(serializers.ModelSerializer):
             "document_type", "document_type_name",
             "status", "supplier", "amount", "currency", "document_date",
             "file_name", "file_size", "file_mime_type",
-            "uploaded_by", "tags", "permissions",
-            "is_self_upload",                           # ← new
-            "current_version", "created_at", "updated_at",
+            "uploaded_by", "tags", "current_version", "created_at", "updated_at",
         ]
-
-    def get_permissions(self, obj):
-        request = self.context.get("request")
-        user = getattr(request, "user", None)
-        if not user or not user.is_authenticated:
-            return []
-        if user.is_admin:
-            return [choice[0] for choice in GroupAction.choices]
-        # Self-upload docs: owner gets a fixed permission set
-        if obj.is_self_upload and obj.uploaded_by_id == user.id:
-            return [
-                GroupAction.VIEW.value,
-                GroupAction.EDIT.value,
-                GroupAction.UPLOAD.value,
-                GroupAction.DELETE.value,
-                GroupAction.DOWNLOAD.value,
-                GroupAction.COMMENT.value,
-                GroupAction.ARCHIVE.value,
-            ]
-        return sorted(user.get_all_permissions_for_doctype(str(obj.document_type_id)))
 
 
 class DocumentDetailSerializer(serializers.ModelSerializer):
-    """Full detail — used for GET /documents/{id}/"""
     document_type    = DocumentTypeSerializer(read_only=True)
     document_type_id = serializers.PrimaryKeyRelatedField(
         queryset=DocumentType.objects.filter(is_active=True),
@@ -121,9 +241,8 @@ class DocumentDetailSerializer(serializers.ModelSerializer):
         queryset=Tag.objects.all(), many=True, source="tags",
         write_only=True, required=False,
     )
-    versions    = DocumentVersionSerializer(many=True, read_only=True)
-    comments    = serializers.SerializerMethodField()
-    permissions = serializers.SerializerMethodField()
+    versions = DocumentVersionSerializer(many=True, read_only=True)
+    comments = serializers.SerializerMethodField()
 
     class Meta:
         model  = Document
@@ -137,13 +256,12 @@ class DocumentDetailSerializer(serializers.ModelSerializer):
             "tags", "tag_ids",
             "department",
             "uploaded_by",
-            "is_self_upload",                           # ← new
-            "current_version", "versions", "comments", "permissions",
+            "current_version", "versions", "comments",
             "created_at", "updated_at",
         ]
         read_only_fields = [
-            "id", "reference_number", "file_name", "file_size", "file_mime_type",
-            "checksum", "uploaded_by", "is_self_upload",
+            "id", "reference_number", "file_name", "file_size",
+            "file_mime_type", "checksum", "uploaded_by",
             "current_version", "created_at", "updated_at",
         ]
 
@@ -154,57 +272,8 @@ class DocumentDetailSerializer(serializers.ModelSerializer):
             qs = qs.filter(is_internal=False)
         return DocumentCommentSerializer(qs, many=True, context=self.context).data
 
-    def get_permissions(self, obj):
-        request = self.context.get("request")
-        user = getattr(request, "user", None)
-        if not user or not user.is_authenticated:
-            return []
-        if user.is_admin:
-            return [choice[0] for choice in GroupAction.choices]
-        if obj.is_self_upload and obj.uploaded_by_id == user.id:
-            return [
-                GroupAction.VIEW.value,
-                GroupAction.EDIT.value,
-                GroupAction.UPLOAD.value,
-                GroupAction.DELETE.value,
-                GroupAction.DOWNLOAD.value,
-                GroupAction.COMMENT.value,
-                GroupAction.ARCHIVE.value,
-            ]
-        return sorted(user.get_all_permissions_for_doctype(str(obj.document_type_id)))
-
-    def validate_metadata(self, value):
-        # Self-upload docs bypass required-metadata enforcement.
-        # The is_self_upload flag arrives in initial_data (it's part of the
-        # upload form), not in validated_data yet at this point.
-        is_self_upload = (
-            str(self.initial_data.get("is_self_upload", "")).lower() in ("true", "1", "yes")
-        )
-        if is_self_upload:
-            return value
-
-        doc_type_id = self.initial_data.get("document_type_id")
-        if not doc_type_id:
-            return value
-        try:
-            doc_type = DocumentType.objects.get(pk=doc_type_id)
-        except DocumentType.DoesNotExist:
-            return value
-        missing = [
-            f.key for f in doc_type.metadata_fields.filter(is_required=True)
-            if not value.get(f.key)
-        ]
-        if missing:
-            raise serializers.ValidationError(
-                f"Required metadata fields missing: {', '.join(missing)}"
-            )
-        return value
-
 
 class DocumentMetadataEditSerializer(serializers.ModelSerializer):
-    """
-    Used for PATCH /documents/{id}/edit_metadata/
-    """
     tag_ids = serializers.PrimaryKeyRelatedField(
         queryset=Tag.objects.all(), many=True, source="tags",
         write_only=True, required=False,
@@ -228,15 +297,6 @@ class DocumentMetadataEditSerializer(serializers.ModelSerializer):
 
 
 class DocumentUploadSerializer(serializers.ModelSerializer):
-    """
-    Used for POST /documents/ (initial upload).
-    Creates both the Document and a DocumentVersion(v1) atomically.
-
-    Self-upload:
-      • Pass is_self_upload=true in the form data.
-      • Required metadata fields are NOT enforced (personal docs have no schema).
-      • Workflow is never triggered for self-upload docs (enforced in the view).
-    """
     document_type_id = serializers.PrimaryKeyRelatedField(
         queryset=DocumentType.objects.filter(is_active=True),
         source="document_type",
@@ -245,7 +305,6 @@ class DocumentUploadSerializer(serializers.ModelSerializer):
     tag_ids = serializers.PrimaryKeyRelatedField(
         queryset=Tag.objects.all(), many=True, source="tags", required=False
     )
-    is_self_upload = serializers.BooleanField(default=False)   # ← new
 
     class Meta:
         model  = Document
@@ -254,34 +313,14 @@ class DocumentUploadSerializer(serializers.ModelSerializer):
             "supplier", "amount", "currency",
             "document_date", "due_date",
             "metadata", "tag_ids", "department",
-            "is_self_upload",                               # ← new
         ]
-
-    def validate_metadata(self, value):
-        # Bypass required-metadata validation for personal uploads.
-        if self.initial_data.get("is_self_upload") in (True, "true", "1", "yes"):
-            return value
-
-        doc_type_id = self.initial_data.get("document_type_id")
-        if not doc_type_id:
-            return value
-        try:
-            doc_type = DocumentType.objects.get(pk=doc_type_id)
-        except DocumentType.DoesNotExist:
-            return value
-        missing = [
-            f.key for f in doc_type.metadata_fields.filter(is_required=True)
-            if not value.get(f.key)
-        ]
-        if missing:
-            raise serializers.ValidationError(
-                f"Required metadata fields missing: {', '.join(missing)}"
-            )
-        return value
 
     def create(self, validated_data):
         import hashlib
-        import magic as python_magic
+        try:
+            import magic as python_magic
+        except ImportError:
+            python_magic = None
 
         tags     = validated_data.pop("tags", [])
         request  = self.context["request"]
@@ -294,16 +333,17 @@ class DocumentUploadSerializer(serializers.ModelSerializer):
         validated_data["file_size"]   = upload.size
         validated_data["uploaded_by"] = request.user
 
-        # MIME type detection
         try:
-            validated_data["file_mime_type"] = python_magic.from_buffer(
-                upload.read(2048), mime=True
-            )
-            upload.seek(0)
+            if python_magic:
+                validated_data["file_mime_type"] = python_magic.from_buffer(
+                    upload.read(2048), mime=True
+                )
+                upload.seek(0)
+            else:
+                validated_data["file_mime_type"] = "application/octet-stream"
         except Exception:
             validated_data["file_mime_type"] = "application/octet-stream"
 
-        # SHA-256 checksum
         sha256 = hashlib.sha256()
         for chunk in upload.chunks():
             sha256.update(chunk)
@@ -313,7 +353,8 @@ class DocumentUploadSerializer(serializers.ModelSerializer):
         doc = super().create(validated_data)
         doc.tags.set(tags)
 
-        # Initial version (v1) — always created regardless of upload type
+        # Create v1 version record
+        from .models import DocumentVersion
         DocumentVersion.objects.create(
             document       = doc,
             version_number = 1,
@@ -325,7 +366,6 @@ class DocumentUploadSerializer(serializers.ModelSerializer):
             created_by     = request.user,
         )
 
-        # Background tasks — run for all uploads (owner can search their own docs)
         try:
             from apps.documents.tasks import extract_text
             extract_text.delay(str(doc.id))
@@ -341,13 +381,8 @@ class DocumentUploadSerializer(serializers.ModelSerializer):
 
 
 class DocumentBulkActionSerializer(serializers.Serializer):
-    """
-    Used for POST /documents/bulk_action/
-    """
     document_ids = serializers.ListField(
-        child=serializers.UUIDField(),
-        min_length=1,
-        max_length=100,
+        child=serializers.UUIDField(), min_length=1, max_length=100,
     )
     action  = serializers.ChoiceField(choices=["approve", "reject", "archive", "void"])
     comment = serializers.CharField(required=False, allow_blank=True, default="")
