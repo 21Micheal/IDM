@@ -138,6 +138,9 @@ export const documentsAPI = {
       action,
       comment,
     }),
+
+  reOcr: (id: string) =>
+  api.post(`/documents/${id}/re_ocr/`),
 };
 
 export const documentTypesAPI = {

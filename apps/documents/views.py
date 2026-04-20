@@ -323,6 +323,58 @@ class DocumentViewSet(AuditMixin, viewsets.ModelViewSet):
             status=status.HTTP_200_OK if succeeded else status.HTTP_400_BAD_REQUEST,
         )
 
+    """ Returns:
+    200  { "detail": "OCR queued.", "ocr_status": "pending" }
+    400  if OCR is already in progress
+    400  if the document type doesn't support OCR (Office docs, etc.)
+    """ 
+    @action(detail=True, methods=["post"])
+    def re_ocr(self, request, pk=None):
+        """
+        Re-trigger OCR on a scanned document.
+ 
+        Blocked when ocr_status is "pending" or "processing" (already in-flight).
+        Sets status to PENDING atomically before queuing so the task's
+        atomic claim (filter ocr_status=PENDING) succeeds.
+        """
+        from .models import OCRStatus
+        from .tasks import ocr_document
+ 
+        doc = self.get_object()
+ 
+        is_ocr_candidate = (
+            doc.is_scanned
+            or (doc.file_mime_type and doc.file_mime_type.startswith("image/"))
+            or doc.file_mime_type == "application/pdf"
+        )
+        if not is_ocr_candidate:
+            return Response(
+                {"detail": "OCR is only supported for scanned documents, images, and PDFs."},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+ 
+        # Block if already in-flight (pending OR processing)
+        if doc.ocr_status in (OCRStatus.PENDING, OCRStatus.PROCESSING):
+            return Response(
+                {"detail": f"OCR is already in progress (status: {doc.ocr_status})."},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+ 
+        # Set PENDING atomically so the task's atomic claim works
+        from .models import Document
+        Document.objects.filter(id=doc.id).update(
+            ocr_status=OCRStatus.PENDING,
+            is_scanned=True,
+        )
+ 
+        ocr_document.delay(str(doc.id))
+        self.record_audit("document.ocr_queued", doc)
+ 
+        return Response({
+            "detail": "OCR queued. Text will be updated shortly.",
+            "ocr_status": OCRStatus.PENDING,
+        })
+
 
 class TagViewSet(viewsets.ModelViewSet):
     queryset           = Tag.objects.all()

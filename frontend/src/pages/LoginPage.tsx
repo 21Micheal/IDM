@@ -119,7 +119,7 @@ export default function LoginPage() {
                     <input
                       {...credForm.register("email")}
                       type="email"
-                      className="w-full pl-9 pr-3 py-2.5 border border-slate-300 rounded-lg focus:ring-2 focus:ring-indigo-500 focus:border-indigo-500 transition-colors"
+                      className="w-full pl-9 pr-3 py-2.5 border border-slate-300 rounded-lg focus:ring-2 focus:ring-primary focus:border-primary transition-colors"
                       placeholder="you@company.com"
                       autoComplete="email"
                       autoFocus
@@ -134,14 +134,14 @@ export default function LoginPage() {
                     <input
                       {...credForm.register("password")}
                       type="password"
-                      className="w-full pl-9 pr-3 py-2.5 border border-slate-300 rounded-lg focus:ring-2 focus:ring-indigo-500 focus:border-indigo-500 transition-colors"
+                      className="w-full pl-9 pr-3 py-2.5 border border-slate-300 rounded-lg focus:ring-2 focus:ring-primary focus:border-primary transition-colors"
                       placeholder="••••••••"
                       autoComplete="current-password"
                     />
                   </div>
                   {credForm.formState.errors.password && <p className="text-red-500 text-xs mt-1">{credForm.formState.errors.password.message}</p>}
                 </div>
-                <button type="submit" disabled={loading} className="w-full flex items-center justify-center gap-2 py-2.5 px-4 bg-indigo-600 hover:bg-indigo-700 text-white font-medium rounded-lg shadow-sm transition-colors disabled:opacity-70">
+                <button type="submit" disabled={loading} className="w-full flex items-center justify-center gap-2 py-2.5 px-4 bg-primary hover:bg-primary/90 text-white font-medium rounded-lg shadow-sm transition-colors disabled:opacity-70">
                   {loading && <Loader2 className="w-4 h-4 animate-spin" />}
                   Sign in <ArrowRight className="w-4 h-4" />
                 </button>
@@ -150,8 +150,8 @@ export default function LoginPage() {
           ) : (
             <>
               <div className="flex items-center gap-4 mb-6">
-                <div className="w-12 h-12 bg-indigo-50 rounded-xl flex items-center justify-center">
-                  <Mail className="w-6 h-6 text-indigo-600" />
+                <div className="w-12 h-12 bg-primary/10 rounded-xl flex items-center justify-center">
+                  <Mail className="w-6 h-6 text-primary" />
                 </div>
                 <div>
                   <h2 className="font-semibold text-slate-900">Two-Factor Authentication</h2>
@@ -163,7 +163,7 @@ export default function LoginPage() {
                   <label className="block text-sm font-medium text-slate-700 mb-1">Verification Code</label>
                   <input
                     {...otpForm.register("otp")}
-                    className="w-full text-center text-2xl tracking-[0.5em] font-mono py-3 border border-slate-300 rounded-lg focus:ring-2 focus:ring-indigo-500 focus:border-indigo-500"
+                    className="w-full text-center text-2xl tracking-[0.5em] font-mono py-3 border border-slate-300 rounded-lg focus:ring-2 focus:ring-primary focus:border-primary"
                     placeholder="000000"
                     maxLength={6}
                     autoFocus
@@ -175,14 +175,14 @@ export default function LoginPage() {
                   />
                   {otpForm.formState.errors.otp && <p className="text-red-500 text-xs mt-1">{otpForm.formState.errors.otp.message}</p>}
                 </div>
-                <button type="submit" disabled={loading} className="w-full flex items-center justify-center gap-2 py-2.5 px-4 bg-indigo-600 hover:bg-indigo-700 text-white font-medium rounded-lg shadow-sm transition-colors">
+                <button type="submit" disabled={loading} className="w-full flex items-center justify-center gap-2 py-2.5 px-4 bg-primary hover:bg-primary/90 text-white font-medium rounded-lg shadow-sm transition-colors">
                   {loading && <Loader2 className="w-4 h-4 animate-spin" />}
                   Verify & Sign In
                 </button>
               </form>
               <div className="flex items-center justify-between mt-6 pt-4 border-t border-slate-100">
                 <button onClick={() => setStep("credentials")} className="text-sm text-slate-500 hover:text-slate-700 transition-colors">← Use a different account</button>
-                <button onClick={resendOTP} disabled={resending || resendCooldown > 0} className="flex items-center gap-1.5 text-sm font-medium text-indigo-600 hover:text-indigo-800 disabled:opacity-50">
+                <button onClick={resendOTP} disabled={resending || resendCooldown > 0} className="flex items-center gap-1.5 text-sm font-medium text-primary hover:text-primary/80 disabled:opacity-50">
                   <RefreshCw className={`w-3.5 h-3.5 ${resending ? "animate-spin" : ""}`} />
                   {resendCooldown > 0 ? `Resend in ${resendCooldown}s` : "Resend Code"}
                 </button>

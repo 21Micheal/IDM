@@ -92,6 +92,26 @@ services:
       elasticsearch:
         condition: service_started
 
+  celery_ocr:
+    build:
+      context: .
+    restart: unless-stopped
+    command: celery -A IDM worker -Q ocr -c 2 --loglevel=info
+    environment:
+      - DJANGO_SETTINGS_MODULE=IDM.settings
+      - OCR_ENGINE=tesseract
+      - OCR_LANGUAGES=eng
+      - OCR_DPI=300
+    volumes:
+      - ./media:/app/media
+    depends_on:
+      db:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      elasticsearch:
+        condition: service_started
+
   frontend:
     build:
       context: ./frontend

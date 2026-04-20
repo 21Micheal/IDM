@@ -8,6 +8,8 @@ export interface DocumentType {
   icon: string;
   is_active?: boolean;
   metadata_fields: MetadataField[];
+  is_scanned?: boolean;
+  ocr_status?: "pending" | "processing" | "done" | "failed" | "";
 }
 
 export interface MetadataField {

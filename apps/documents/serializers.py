@@ -1,31 +1,32 @@
 """
 apps/documents/serializers.py
 
-Key fix: DocumentTypeSerializer now handles metadata_fields as a
-writable nested list via MetadataFieldWriteSerializer.
+Bug fix in this revision
+─────────────────────────
+DocumentUploadSerializer.create() previously pre-set ocr_status="pending"
+before any Celery task ran. Combined with the attempted fix in tasks.py
+(bail on "pending"), this caused OCR to never start.
 
-On create  → creates all MetadataField rows linked to the new DocumentType.
-On update  → replaces all metadata fields atomically:
-               deletes existing rows, creates fresh ones from payload.
-             This avoids partial-update complexity while keeping the
-             API surface simple (the frontend always sends the full list).
+Correct pattern:
+  is_scanned=True OR image/* MIME  →  call ocr_document.delay() directly.
+                                       Do NOT pre-set ocr_status here;
+                                       the task sets it atomically.
+  everything else                  →  call extract_text.delay() as before.
+                                       That task auto-detects scanned PDFs
+                                       and routes to ocr_document itself.
 
-The select_options_raw field exists only on the frontend form — it is
-never sent to the API (stripped by the frontend before POST/PATCH).
-The backend stores options in the JSONField `select_options` as a list.
+No other changes to this file.
 """
-from django.db import IntegrityError, transaction
-from django.utils.text import slugify
 from rest_framework import serializers
-
 from .models import (
     Document, DocumentType, MetadataField,
-    DocumentVersion, DocumentComment, Tag,
+    DocumentVersion, DocumentComment, Tag, OCRStatus,
 )
 from apps.accounts.serializers import UserSummarySerializer
+from apps.accounts.models import GroupAction
+from django.db import transaction, IntegrityError
+from django.utils.text import slugify
 
-
-# ── Tags ──────────────────────────────────────────────────────────────────────
 
 class TagSerializer(serializers.ModelSerializer):
     class Meta:
@@ -33,50 +34,26 @@ class TagSerializer(serializers.ModelSerializer):
         fields = ["id", "name", "color"]
 
 
-# ── Metadata fields ───────────────────────────────────────────────────────────
-
 class MetadataFieldSerializer(serializers.ModelSerializer):
-    """Read serializer — returned in GET responses."""
-    field_key = serializers.CharField(source="key", read_only=True)
+    class Meta:
+        model  = MetadataField
+        fields = [
+            "id", "label", "key", "field_type", "is_required",
+            "is_searchable", "select_options", "default_value", "help_text", "order",
+        ]
+
+class MetadataFieldWriteSerializer(serializers.ModelSerializer):
+    field_key = serializers.CharField(source="key", required=False, allow_blank=True)
 
     class Meta:
         model  = MetadataField
         fields = [
-            "id", "label", "field_key", "field_type",
-            "is_required", "is_searchable",
-            "select_options", "default_value", "help_text", "order",
+            "label", "field_key", "field_type", "is_required",
+            "is_searchable", "select_options", "default_value", "help_text", "order",
         ]
 
 
-class MetadataFieldWriteSerializer(serializers.Serializer):
-    """
-    Write-only serializer for nested metadata fields.
-    Does NOT include `id` — we always delete-and-recreate on update.
-    Does NOT include `select_options_raw` — that is a frontend-only
-    convenience field that must be stripped before calling the API.
-    """
-    label          = serializers.CharField(max_length=100)
-    field_key      = serializers.SlugField(max_length=100)
-    field_type     = serializers.ChoiceField(choices=[
-        "text", "number", "date", "currency", "select", "boolean", "textarea"
-    ])
-    is_required    = serializers.BooleanField(default=False)
-    is_searchable  = serializers.BooleanField(default=True)
-    select_options = serializers.ListField(
-        child=serializers.CharField(), default=list, required=False
-    )
-    default_value  = serializers.CharField(max_length=255, allow_blank=True, default="")
-    help_text      = serializers.CharField(max_length=255, allow_blank=True, default="")
-    order          = serializers.IntegerField(default=0)
-
-
-# ── Document type ─────────────────────────────────────────────────────────────
-
 class DocumentTypeSerializer(serializers.ModelSerializer):
-    """
-    Read serializer — used for GET /documents/types/ and GET /documents/types/{id}/
-    Includes full metadata_fields list and workflow link.
-    """
     metadata_fields        = MetadataFieldSerializer(many=True, read_only=True)
     workflow_template_name = serializers.CharField(
         source="workflow_template.name", read_only=True, default=None
@@ -91,6 +68,349 @@ class DocumentTypeSerializer(serializers.ModelSerializer):
             "metadata_fields",
         ]
 
+
+class DocumentVersionSerializer(serializers.ModelSerializer):
+    created_by = UserSummarySerializer(read_only=True)
+
+    class Meta:
+        model  = DocumentVersion
+        fields = [
+            "id", "version_number", "file_name", "file_size",
+            "change_summary", "created_by", "created_at",
+        ]
+
+
+class DocumentCommentSerializer(serializers.ModelSerializer):
+    author = UserSummarySerializer(read_only=True)
+
+    class Meta:
+        model        = DocumentComment
+        fields       = ["id", "author", "content", "is_internal", "created_at", "updated_at"]
+        read_only_fields = ["id", "author", "created_at", "updated_at"]
+
+
+class DocumentListSerializer(serializers.ModelSerializer):
+    document_type_name = serializers.CharField(source="document_type.name", read_only=True)
+    uploaded_by        = UserSummarySerializer(read_only=True)
+    tags               = TagSerializer(many=True, read_only=True)
+    permissions        = serializers.SerializerMethodField()
+
+    class Meta:
+        model  = Document
+        fields = [
+            "id", "title", "reference_number",
+            "document_type", "document_type_name",
+            "status", "supplier", "amount", "currency", "document_date",
+            "file_name", "file_size", "file_mime_type",
+            "uploaded_by", "tags", "permissions",
+            "is_self_upload",
+            "is_scanned", "ocr_status",
+            "current_version", "created_at", "updated_at",
+        ]
+
+    def get_permissions(self, obj):
+        request = self.context.get("request")
+        user = getattr(request, "user", None)
+        if not user or not user.is_authenticated:
+            return []
+        if user.is_admin:
+            return [choice[0] for choice in GroupAction.choices]
+        if obj.is_self_upload and obj.uploaded_by_id == user.id:
+            return [
+                GroupAction.VIEW.value, GroupAction.EDIT.value,
+                GroupAction.UPLOAD.value, GroupAction.DELETE.value,
+                GroupAction.DOWNLOAD.value, GroupAction.COMMENT.value,
+                GroupAction.ARCHIVE.value,
+            ]
+        return sorted(user.get_all_permissions_for_doctype(str(obj.document_type_id)))
+
+
+class DocumentDetailSerializer(serializers.ModelSerializer):
+    document_type    = DocumentTypeSerializer(read_only=True)
+    document_type_id = serializers.PrimaryKeyRelatedField(
+        queryset=DocumentType.objects.filter(is_active=True),
+        source="document_type", write_only=True,
+    )
+    uploaded_by = UserSummarySerializer(read_only=True)
+    tags        = TagSerializer(many=True, read_only=True)
+    tag_ids     = serializers.PrimaryKeyRelatedField(
+        queryset=Tag.objects.all(), many=True, source="tags",
+        write_only=True, required=False,
+    )
+    versions    = DocumentVersionSerializer(many=True, read_only=True)
+    comments    = serializers.SerializerMethodField()
+    permissions = serializers.SerializerMethodField()
+
+    class Meta:
+        model  = Document
+        fields = [
+            "id", "title", "reference_number",
+            "document_type", "document_type_id",
+            "status", "supplier", "amount", "currency",
+            "document_date", "due_date",
+            "file", "file_name", "file_size", "file_mime_type", "checksum",
+            "metadata",
+            "tags", "tag_ids",
+            "department",
+            "uploaded_by",
+            "is_self_upload",
+            "is_scanned", "ocr_status",
+            "current_version", "versions", "comments", "permissions",
+            "created_at", "updated_at",
+        ]
+        read_only_fields = [
+            "id", "reference_number", "file_name", "file_size", "file_mime_type",
+            "checksum", "uploaded_by", "is_self_upload",
+            "is_scanned", "ocr_status",
+            "current_version", "created_at", "updated_at",
+        ]
+
+    def get_comments(self, obj):
+        request = self.context.get("request")
+        qs = obj.comments.all()
+        if request and not (request.user.is_admin or request.user.is_auditor):
+            qs = qs.filter(is_internal=False)
+        return DocumentCommentSerializer(qs, many=True, context=self.context).data
+
+    def get_permissions(self, obj):
+        request = self.context.get("request")
+        user = getattr(request, "user", None)
+        if not user or not user.is_authenticated:
+            return []
+        if user.is_admin:
+            return [choice[0] for choice in GroupAction.choices]
+        if obj.is_self_upload and obj.uploaded_by_id == user.id:
+            return [
+                GroupAction.VIEW.value, GroupAction.EDIT.value,
+                GroupAction.UPLOAD.value, GroupAction.DELETE.value,
+                GroupAction.DOWNLOAD.value, GroupAction.COMMENT.value,
+                GroupAction.ARCHIVE.value,
+            ]
+        return sorted(user.get_all_permissions_for_doctype(str(obj.document_type_id)))
+
+    def validate_metadata(self, value):
+        is_self_upload = (
+            str(self.initial_data.get("is_self_upload", "")).lower()
+            in ("true", "1", "yes")
+        )
+        is_scanned = (
+            str(self.initial_data.get("is_scanned", "")).lower()
+            in ("true", "1", "yes")
+        )
+        if is_self_upload or is_scanned:
+            return value
+
+        doc_type_id = self.initial_data.get("document_type_id")
+        if not doc_type_id:
+            return value
+        try:
+            doc_type = DocumentType.objects.get(pk=doc_type_id)
+        except DocumentType.DoesNotExist:
+            return value
+        missing = [
+            f.key for f in doc_type.metadata_fields.filter(is_required=True)
+            if not value.get(f.key)
+        ]
+        if missing:
+            raise serializers.ValidationError(
+                f"Required metadata fields missing: {', '.join(missing)}"
+            )
+        return value
+
+
+class DocumentMetadataEditSerializer(serializers.ModelSerializer):
+    tag_ids = serializers.PrimaryKeyRelatedField(
+        queryset=Tag.objects.all(), many=True, source="tags",
+        write_only=True, required=False,
+    )
+
+    class Meta:
+        model  = Document
+        fields = [
+            "title", "supplier", "amount", "currency",
+            "document_date", "due_date", "metadata", "tag_ids",
+        ]
+
+    def update(self, instance, validated_data):
+        tags = validated_data.pop("tags", None)
+        for attr, value in validated_data.items():
+            setattr(instance, attr, value)
+        instance.save()
+        if tags is not None:
+            instance.tags.set(tags)
+        return instance
+
+
+class DocumentUploadSerializer(serializers.ModelSerializer):
+    """
+    POST /documents/ — initial upload.
+
+    Task routing after save
+    ────────────────────────
+    is_scanned=True OR image/* MIME:
+        → ocr_document.delay() directly  [queue="ocr"]
+          ocr_status is NOT pre-set here; the task claims atomically.
+
+    Everything else:
+        → extract_text.delay()  [queue="indexing"]
+          That task auto-detects scanned PDFs and routes to ocr_document.
+    """
+    document_type_id = serializers.PrimaryKeyRelatedField(
+        queryset=DocumentType.objects.filter(is_active=True),
+        source="document_type",
+    )
+    file           = serializers.FileField()
+    tag_ids        = serializers.PrimaryKeyRelatedField(
+        queryset=Tag.objects.all(), many=True, source="tags", required=False
+    )
+    is_self_upload = serializers.BooleanField(default=False)
+    is_scanned     = serializers.BooleanField(default=False)
+
+    class Meta:
+        model  = Document
+        fields = [
+            "title", "document_type_id", "file",
+            "supplier", "amount", "currency",
+            "document_date", "due_date",
+            "metadata", "tag_ids", "department",
+            "is_self_upload",
+            "is_scanned",
+        ]
+
+    def validate_metadata(self, value):
+        if self.initial_data.get("is_self_upload") in (True, "true", "1", "yes"):
+            return value
+        if self.initial_data.get("is_scanned") in (True, "true", "1", "yes"):
+            return value
+        doc_type_id = self.initial_data.get("document_type_id")
+        if not doc_type_id:
+            return value
+        try:
+            doc_type = DocumentType.objects.get(pk=doc_type_id)
+        except DocumentType.DoesNotExist:
+            return value
+        missing = [
+            f.key for f in doc_type.metadata_fields.filter(is_required=True)
+            if not value.get(f.key)
+        ]
+        if missing:
+            raise serializers.ValidationError(
+                f"Required metadata fields missing: {', '.join(missing)}"
+            )
+        return value
+
+    def create(self, validated_data):
+        import hashlib
+        import magic as python_magic
+
+        tags       = validated_data.pop("tags", [])
+        request    = self.context["request"]
+        doc_type   = validated_data["document_type"]
+        is_scanned = validated_data.get("is_scanned", False)
+
+        validated_data["reference_number"] = doc_type.next_reference()
+
+        upload = validated_data["file"]
+        validated_data["file_name"]   = upload.name
+        validated_data["file_size"]   = upload.size
+        validated_data["uploaded_by"] = request.user
+
+        # MIME detection
+        try:
+            validated_data["file_mime_type"] = python_magic.from_buffer(
+                upload.read(2048), mime=True
+            )
+            upload.seek(0)
+        except Exception:
+            validated_data["file_mime_type"] = "application/octet-stream"
+
+        # Images are always scanned regardless of the toggle
+        if validated_data["file_mime_type"].startswith("image/"):
+            validated_data["is_scanned"] = True
+            is_scanned = True
+
+        # ── DO NOT pre-set ocr_status here ───────────────────────────────────
+        # The ocr_document task sets it atomically (PENDING → PROCESSING).
+        # Pre-setting "pending" here caused extract_text to bail out early
+        # (when the bail-on-pending guard was added as a "fix"), resulting in
+        # the status being frozen at "pending" forever.
+
+        # SHA-256
+        sha256 = hashlib.sha256()
+        for chunk in upload.chunks():
+            sha256.update(chunk)
+        upload.seek(0)
+        validated_data["checksum"] = sha256.hexdigest()
+
+        doc = super().create(validated_data)
+        doc.tags.set(tags)
+
+        # Version 1
+        DocumentVersion.objects.create(
+            document       = doc,
+            version_number = 1,
+            file           = doc.file,
+            file_name      = doc.file_name,
+            file_size      = doc.file_size,
+            checksum       = doc.checksum,
+            change_summary = "Initial upload",
+            created_by     = request.user,
+        )
+
+        # ── Task routing ─────────────────────────────────────────────────────
+        if is_scanned:
+            # Confirmed scan: go straight to OCR, skip extract_text hop
+            try:
+                from apps.documents.tasks import ocr_document
+                # Mark pending before queuing so the UI shows the badge instantly.
+                # Use update() directly (not _mark_pending()) to avoid the
+                # filter-on-status guard that _mark_pending() applies.
+                Document.objects.filter(id=doc.id).update(
+                    ocr_status=OCRStatus.PENDING
+                )
+                ocr_document.delay(str(doc.id))
+            except Exception as exc:
+                import logging
+                logging.getLogger(__name__).error(
+                    "Failed to queue OCR for %s: %s", doc.id, exc
+                )
+        else:
+            # Normal document: extract_text handles everything including
+            # auto-detection of scanned PDFs
+            try:
+                from apps.documents.tasks import extract_text
+                extract_text.delay(str(doc.id))
+            except Exception as exc:
+                import logging
+                logging.getLogger(__name__).error(
+                    "Failed to queue extract_text for %s: %s", doc.id, exc
+                )
+
+        # Always queue an initial index pass so the document appears in
+        # search results immediately (with empty extracted_text if OCR hasn't
+        # finished yet; the OCR task will re-index when done)
+        try:
+            from apps.search.tasks import index_document
+            index_document.delay(str(doc.id))
+        except Exception:
+            pass
+
+        return doc
+
+
+class DocumentBulkActionSerializer(serializers.Serializer):
+    document_ids = serializers.ListField(
+        child=serializers.UUIDField(), min_length=1, max_length=100,
+    )
+    action  = serializers.ChoiceField(choices=["approve", "reject", "archive", "void"])
+    comment = serializers.CharField(required=False, allow_blank=True, default="")
+
+    def validate(self, attrs):
+        if attrs["action"] == "reject" and not attrs.get("comment", "").strip():
+            raise serializers.ValidationError(
+                {"comment": "A comment is required when rejecting documents."}
+            )
+        return attrs
 
 class DocumentTypeWriteSerializer(serializers.ModelSerializer):
     """
@@ -187,209 +507,3 @@ class DocumentTypeWriteSerializer(serializers.ModelSerializer):
             self._save_metadata_fields(instance, fields_data)
 
         return instance
-
-
-# ── Document version / comment ─────────────────────────────────────────────────
-
-class DocumentVersionSerializer(serializers.ModelSerializer):
-    created_by = UserSummarySerializer(read_only=True)
-
-    class Meta:
-        model  = DocumentVersion
-        fields = [
-            "id", "version_number", "file_name", "file_size",
-            "change_summary", "created_by", "created_at",
-        ]
-
-
-class DocumentCommentSerializer(serializers.ModelSerializer):
-    author = UserSummarySerializer(read_only=True)
-
-    class Meta:
-        model        = DocumentComment
-        fields       = ["id", "author", "content", "is_internal", "created_at", "updated_at"]
-        read_only_fields = ["id", "author", "created_at", "updated_at"]
-
-
-# ── Document list / detail ────────────────────────────────────────────────────
-
-class DocumentListSerializer(serializers.ModelSerializer):
-    document_type_name = serializers.CharField(source="document_type.name", read_only=True)
-    uploaded_by        = UserSummarySerializer(read_only=True)
-    tags               = TagSerializer(many=True, read_only=True)
-
-    class Meta:
-        model  = Document
-        fields = [
-            "id", "title", "reference_number",
-            "document_type", "document_type_name",
-            "status", "supplier", "amount", "currency", "document_date",
-            "file_name", "file_size", "file_mime_type",
-            "uploaded_by", "tags", "current_version", "created_at", "updated_at",
-        ]
-
-
-class DocumentDetailSerializer(serializers.ModelSerializer):
-    document_type    = DocumentTypeSerializer(read_only=True)
-    document_type_id = serializers.PrimaryKeyRelatedField(
-        queryset=DocumentType.objects.filter(is_active=True),
-        source="document_type", write_only=True,
-    )
-    uploaded_by = UserSummarySerializer(read_only=True)
-    tags        = TagSerializer(many=True, read_only=True)
-    tag_ids     = serializers.PrimaryKeyRelatedField(
-        queryset=Tag.objects.all(), many=True, source="tags",
-        write_only=True, required=False,
-    )
-    versions = DocumentVersionSerializer(many=True, read_only=True)
-    comments = serializers.SerializerMethodField()
-
-    class Meta:
-        model  = Document
-        fields = [
-            "id", "title", "reference_number",
-            "document_type", "document_type_id",
-            "status", "supplier", "amount", "currency",
-            "document_date", "due_date",
-            "file", "file_name", "file_size", "file_mime_type", "checksum",
-            "metadata",
-            "tags", "tag_ids",
-            "department",
-            "uploaded_by",
-            "current_version", "versions", "comments",
-            "created_at", "updated_at",
-        ]
-        read_only_fields = [
-            "id", "reference_number", "file_name", "file_size",
-            "file_mime_type", "checksum", "uploaded_by",
-            "current_version", "created_at", "updated_at",
-        ]
-
-    def get_comments(self, obj):
-        request = self.context.get("request")
-        qs      = obj.comments.all()
-        if request and not (request.user.is_admin or request.user.is_auditor):
-            qs = qs.filter(is_internal=False)
-        return DocumentCommentSerializer(qs, many=True, context=self.context).data
-
-
-class DocumentMetadataEditSerializer(serializers.ModelSerializer):
-    tag_ids = serializers.PrimaryKeyRelatedField(
-        queryset=Tag.objects.all(), many=True, source="tags",
-        write_only=True, required=False,
-    )
-
-    class Meta:
-        model  = Document
-        fields = [
-            "title", "supplier", "amount", "currency",
-            "document_date", "due_date", "metadata", "tag_ids",
-        ]
-
-    def update(self, instance, validated_data):
-        tags = validated_data.pop("tags", None)
-        for attr, value in validated_data.items():
-            setattr(instance, attr, value)
-        instance.save()
-        if tags is not None:
-            instance.tags.set(tags)
-        return instance
-
-
-class DocumentUploadSerializer(serializers.ModelSerializer):
-    document_type_id = serializers.PrimaryKeyRelatedField(
-        queryset=DocumentType.objects.filter(is_active=True),
-        source="document_type",
-    )
-    file    = serializers.FileField()
-    tag_ids = serializers.PrimaryKeyRelatedField(
-        queryset=Tag.objects.all(), many=True, source="tags", required=False
-    )
-
-    class Meta:
-        model  = Document
-        fields = [
-            "title", "document_type_id", "file",
-            "supplier", "amount", "currency",
-            "document_date", "due_date",
-            "metadata", "tag_ids", "department",
-        ]
-
-    def create(self, validated_data):
-        import hashlib
-        try:
-            import magic as python_magic
-        except ImportError:
-            python_magic = None
-
-        tags     = validated_data.pop("tags", [])
-        request  = self.context["request"]
-        doc_type = validated_data["document_type"]
-
-        validated_data["reference_number"] = doc_type.next_reference()
-
-        upload = validated_data["file"]
-        validated_data["file_name"]   = upload.name
-        validated_data["file_size"]   = upload.size
-        validated_data["uploaded_by"] = request.user
-
-        try:
-            if python_magic:
-                validated_data["file_mime_type"] = python_magic.from_buffer(
-                    upload.read(2048), mime=True
-                )
-                upload.seek(0)
-            else:
-                validated_data["file_mime_type"] = "application/octet-stream"
-        except Exception:
-            validated_data["file_mime_type"] = "application/octet-stream"
-
-        sha256 = hashlib.sha256()
-        for chunk in upload.chunks():
-            sha256.update(chunk)
-        upload.seek(0)
-        validated_data["checksum"] = sha256.hexdigest()
-
-        doc = super().create(validated_data)
-        doc.tags.set(tags)
-
-        # Create v1 version record
-        from .models import DocumentVersion
-        DocumentVersion.objects.create(
-            document       = doc,
-            version_number = 1,
-            file           = doc.file,
-            file_name      = doc.file_name,
-            file_size      = doc.file_size,
-            checksum       = doc.checksum,
-            change_summary = "Initial upload",
-            created_by     = request.user,
-        )
-
-        try:
-            from apps.documents.tasks import extract_text
-            extract_text.delay(str(doc.id))
-        except Exception:
-            pass
-        try:
-            from apps.search.tasks import index_document
-            index_document.delay(str(doc.id))
-        except Exception:
-            pass
-
-        return doc
-
-
-class DocumentBulkActionSerializer(serializers.Serializer):
-    document_ids = serializers.ListField(
-        child=serializers.UUIDField(), min_length=1, max_length=100,
-    )
-    action  = serializers.ChoiceField(choices=["approve", "reject", "archive", "void"])
-    comment = serializers.CharField(required=False, allow_blank=True, default="")
-
-    def validate(self, attrs):
-        if attrs["action"] == "reject" and not attrs.get("comment", "").strip():
-            raise serializers.ValidationError(
-                {"comment": "A comment is required when rejecting documents."}
-            )
-        return attrs

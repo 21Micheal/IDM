@@ -20,6 +20,12 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     pkg-config \
     # Dependency for python-magic:
     libmagic1 \
+        # Dependencies for OCR:
+    tesseract-ocr \
+    tesseract-ocr-eng \
+    poppler-utils \
+    # for additional languages eg swahili, add tesseract-ocr-swa
+    && apt-get clean \
     && rm -rf /var/lib/apt/lists/*
 
 # Install Python dependencies

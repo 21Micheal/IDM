@@ -148,12 +148,35 @@ CELERY_BEAT_SCHEDULER = "django_celery_beat.schedulers:DatabaseScheduler"
 CELERY_TASK_ROUTES = {
     "apps.search.tasks.*": {"queue": "indexing"},
     "apps.notifications.tasks.*": {"queue": "notifications"},
+    "apps.documents.tasks.*":  {"queue": "ocr"}, 
 }
 
 # ── Elasticsearch ─────────────────────────────────────────────────────────────
 ELASTICSEARCH_DSL = {
     "default": {"hosts": env("ELASTICSEARCH_URL", default="http://localhost:9200")},
 }
+
+# ── OCR ───────────────────────────────────────────────────────────────────────
+# Engine: "tesseract" (local, default) or "textract" (AWS cloud-scale)
+OCR_ENGINE = env("OCR_ENGINE", default="tesseract")
+ 
+# Path to the tesseract binary — leave blank to use system PATH
+# e.g. TESSERACT_CMD=/usr/bin/tesseract
+TESSERACT_CMD = env("TESSERACT_CMD", default="")
+ 
+# Tesseract language pack codes, space-separated
+# Install additional packs: apt-get install tesseract-ocr-swa   (Swahili)
+# Full list: https://tesseract-ocr.github.io/tessdoc/Data-Files.html
+OCR_LANGUAGES = env("OCR_LANGUAGES", default="eng")
+ 
+# DPI used when rasterising PDF pages for OCR.
+# 300 is the standard minimum for acceptable quality; 400 for fine print.
+OCR_DPI = env.int("OCR_DPI", default=300)
+ 
+# AWS Textract (only used when OCR_ENGINE=textract)
+AWS_TEXTRACT_REGION    = env("AWS_TEXTRACT_REGION", default="us-east-1")
+AWS_TEXTRACT_S3_BUCKET = env("AWS_TEXTRACT_S3_BUCKET", default="")
+
 
 # ── Channels (WebSocket) ──────────────────────────────────────────────────────
 CHANNEL_LAYERS = {

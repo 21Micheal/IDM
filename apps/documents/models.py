@@ -1,10 +1,13 @@
 """
 apps/documents/models.py
 
-Changes from previous version:
-  1. Document.is_self_upload — personal/non-approval upload flag.
-     When True the document bypasses workflow; visible only to uploader + admins.
-     All existing logic is preserved exactly; only the new field is added.
+Changes from previous version
+──────────────────────────────
+1. OCRStatus TextChoices — pending / processing / done / failed
+2. Document.is_scanned   — user-declared or auto-detected scan flag
+3. Document.ocr_status   — pipeline state updated by Celery tasks
+4. Composite index on (is_scanned, ocr_status) for admin OCR queue views
+5. is_image() helper method
 """
 from django.db import models
 from django.conf import settings
@@ -58,8 +61,7 @@ class DocumentType(models.Model):
                 seq = int(last.split("-")[-1]) + 1
             except (ValueError, IndexError):
                 seq = Document.objects.filter(document_type=self).count() + 1
-        pad = str(seq).zfill(self.reference_padding)
-        return f"{self.reference_prefix}-{pad}"
+        return f"{self.reference_prefix}-{str(seq).zfill(self.reference_padding)}"
 
 
 class MetadataField(models.Model):
@@ -120,6 +122,13 @@ class DocumentStatus(models.TextChoices):
     VOID             = "void",             "Void"
 
 
+class OCRStatus(models.TextChoices):
+    PENDING    = "pending",    "Pending"
+    PROCESSING = "processing", "Processing"
+    DONE       = "done",       "Done"
+    FAILED     = "failed",     "Failed"
+
+
 class Document(models.Model):
     id               = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
     title            = models.CharField(max_length=255)
@@ -127,7 +136,6 @@ class Document(models.Model):
     document_type    = models.ForeignKey(
         DocumentType, on_delete=models.PROTECT, related_name="documents"
     )
-    # status stores both DocumentStatus choices AND free-form step status_labels
     status           = models.CharField(max_length=80, default=DocumentStatus.DRAFT, db_index=True)
     supplier         = models.CharField(max_length=255, blank=True, db_index=True)
     amount           = models.DecimalField(max_digits=18, decimal_places=2, null=True, blank=True)
@@ -155,18 +163,27 @@ class Document(models.Model):
     )
 
     # ── Self-upload flag ──────────────────────────────────────────────────────
-    # When True: personal/non-approval document.
-    #   - Visible only to the uploader and administrators.
-    #   - Cannot be submitted into a workflow.
-    #   - Text extraction and search indexing still run (owner can search their own docs).
     is_self_upload = models.BooleanField(
+        default=False, db_index=True,
+        help_text="Personal/non-approval upload. Visible only to uploader and admins.",
+    )
+
+    # ── OCR fields ────────────────────────────────────────────────────────────
+    is_scanned = models.BooleanField(
         default=False,
         db_index=True,
         help_text=(
-            "Personal/non-approval upload. "
-            "Visible only to the uploader and administrators; "
-            "cannot enter a workflow approval process."
+            "True when the document is a scanned image or image-based PDF. "
+            "The OCR pipeline runs automatically."
         ),
+    )
+    ocr_status = models.CharField(
+        max_length=20,
+        choices=OCRStatus.choices,
+        blank=True,
+        default="",
+        db_index=True,
+        help_text="Current state of the OCR text-extraction pipeline.",
     )
 
     created_at     = models.DateTimeField(auto_now_add=True, db_index=True)
@@ -178,7 +195,8 @@ class Document(models.Model):
         indexes  = [
             models.Index(fields=["status", "document_type"]),
             models.Index(fields=["supplier", "document_date"]),
-            models.Index(fields=["is_self_upload", "uploaded_by"]),  # fast personal-doc lookup
+            models.Index(fields=["is_self_upload", "uploaded_by"]),
+            models.Index(fields=["is_scanned", "ocr_status"]),
         ]
 
     def __str__(self):
@@ -189,6 +207,9 @@ class Document(models.Model):
 
     def is_pdf(self):
         return self.file_mime_type == "application/pdf"
+
+    def is_image(self):
+        return bool(self.file_mime_type) and self.file_mime_type.startswith("image/")
 
     def is_office_doc(self):
         return self.file_mime_type in (
