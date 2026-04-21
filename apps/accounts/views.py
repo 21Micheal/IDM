@@ -150,6 +150,7 @@ class VerifyOTPView(APIView):
             "access":               str(refresh.access_token),
             "refresh":              str(refresh),
             "must_change_password": user.must_change_password,
+            "user":                 UserSerializer(user).data,
         })
 
 

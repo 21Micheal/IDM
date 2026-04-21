@@ -36,7 +36,7 @@ export const FlaxemLogo: React.FC<FlaxemLogoProps> = ({ className = "h-10 w-auto
           Flaxem
         </span>
         <span className="text-xs font-semibold tracking-wide text-red-600">
-          | IDM
+          | DMS
         </span>
       </div>
     </div>

@@ -3,15 +3,17 @@ apps/documents/urls.py
 
 Changes from previous version
 ──────────────────────────────
-Added WebDAV route at /documents/webdav/<document_id>/<filename>
+1. Added a second WebDAV route for the bare /<id>/ path (no filename).
 
-The <filename> segment is included in the URL so Microsoft Office can
-determine the file format from the path (it uses the extension).  The
-actual file served is always the current version for that document_id
-regardless of what name is passed.
+   LibreOffice (and some Windows Office builds) probe the *collection* URL
+   before touching the file URL:
+       HEAD /webdav/<id>/         <- no filename
+       GET  /webdav/<id>/
+   The old single-pattern required a filename, so these returned 404 —
+   causing LibreOffice to abort with "cannot create in directory".
 
-The WebDAV path is registered BEFORE the DefaultRouter entries so it is
-matched before the '' catch-all router prefix.
+2. Changed <str:filename> to <path:filename> so filenames with spaces
+   (%20) are captured correctly. <str:filename> stops at slashes.
 """
 from django.urls import path
 from rest_framework.routers import DefaultRouter
@@ -19,18 +21,21 @@ from .views import DocumentViewSet, DocumentTypeViewSet
 from .webdav import DocumentWebDAVView
 
 router = DefaultRouter()
-# 'types' MUST be registered before the empty-prefix catch-all.
 router.register(r"types", DocumentTypeViewSet, basename="document-type")
 router.register(r"",      DocumentViewSet,     basename="document")
 
 urlpatterns = [
-    # ── WebDAV endpoint for native Office editing ──────────────────────────
-    # Must appear before router.urls so it isn't swallowed by the catch-all.
+    # Bare collection URL — LibreOffice probes this before the file URL
     path(
-        "webdav/<uuid:document_id>/<str:filename>",
+        "webdav/<uuid:document_id>/",
+        DocumentWebDAVView.as_view(),
+        name="document-webdav-bare",
+    ),
+    # Full URL with filename — <path:> captures spaces and encoded chars
+    path(
+        "webdav/<uuid:document_id>/<path:filename>",
         DocumentWebDAVView.as_view(),
         name="document-webdav",
     ),
-
     *router.urls,
 ]

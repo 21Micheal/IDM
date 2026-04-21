@@ -1,32 +1,40 @@
 /**
  * components/documents/DocumentViewer.tsx
  *
- * Versioning additions (this revision)
- * ─────────────────────────────────────
- * Interface change
- *   • Accepts `document: Document` (full object) instead of `documentId +
- *     mimeType`.  The parent passes doc so we get permissions, version count,
- *     filename and mime type without extra fetches.
+ * Bug fixes in this revision
+ * ──────────────────────────
  *
- * PDF versioning
- *   • "Upload new version" collapsible drawer below the PDF canvas.
- *   • Drag-and-drop PDF onto the drawer or click to browse.
- *   • Optional change-summary field.
- *   • Calls POST /documents/{id}/upload_version/.
- *   • On success: invalidates the document query + fires a toast.
+ * 1. Office Online "ran into a problem" (Microsoft viewer)
+ *    Root cause: the iframe was pointed at the raw /media/ URL which
+ *    requires a JWT Authorization header. Office Online fetches it server-
+ *    side and cannot pass custom headers, so it gets 403/401 and gives up.
+ *    Fix: views.py now returns a second field `webdav_url` — the WebDAV
+ *    endpoint with ?token= in the query string. Office Online can fetch
+ *    this without any custom headers. The iframe uses webdav_url; the
+ *    download button and desktop URI still use file_url (raw media URL).
  *
- * Office-document versioning (Word / Excel / PowerPoint)
- *   • "Open in [App]" button launches the ms-word / ms-excel / ms-powerpoint
- *     URI scheme pointing at the WebDAV endpoint with the JWT token in the
- *     query string so Office can authenticate without custom headers.
- *   • After launch a 5-second polling loop watches doc.current_version.
- *     When it increments the loop stops and a success toast fires.
- *   • "Upload version manually" drawer is always available as a fallback
- *     for users without Office installed or on Linux.
+ * 2. LibreOffice "cannot create in directory" on save
+ *    Root cause: LibreOffice sends HEAD/GET/PROPFIND to the bare collection
+ *    URL (/webdav/<id>/) with no filename. The URL pattern required
+ *    <filename>, so Django returned 404. LibreOffice sees 404 on the
+ *    parent collection and refuses to save.
+ *    Fix: urls.py now has a second pattern for /webdav/<id>/ and webdav.py
+ *    handles filename="" gracefully for all methods.
  *
- * Image viewer        — unchanged from previous version.
- * Google Docs Viewer  — unchanged (dev-URL warning, loading state, retry).
- * PdfViewer canvas    — unchanged.
+ * 3. Windows Word "password" dialog on open
+ *    Root cause: 401 response had only `WWW-Authenticate: Bearer` which
+ *    Windows Office interprets as "needs Basic credentials" and shows a
+ *    username/password dialog.
+ *    Fix: webdav.py now returns both Basic and Bearer challenge types, and
+ *    _authenticate() also decodes the token from Authorization: Basic
+ *    (LibreOffice encodes it as base64("token:") ).
+ *
+ * 4. PreviewData interface updated to include file_url + webdav_url fields
+ *    returned by the updated views.py.
+ *
+ * 5. OfficeEditPanel now builds the desktop URI from file_url (the raw
+ *    absolute media URL with JWT in the query) rather than constructing
+ *    its own WebDAV URL. The server is the single source of truth for URLs.
  */
 
 import { useCallback, useEffect, useRef, useState } from "react";
@@ -35,11 +43,12 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { documentsAPI } from "../../services/api";
 import { useAuthStore } from "@/store/authStore";
 import { toast } from "react-toastify";
+import { apiBaseUrl } from "@/services/api";
 import {
   AlertCircle, ChevronDown, ChevronLeft, ChevronRight, ChevronUp,
   CheckCircle2, Clock, Download, ExternalLink, File as FileIcon,
   ImageOff, Loader2, MonitorPlay, RefreshCw, RotateCw, Upload,
-  ZoomIn, ZoomOut,
+  ZoomIn, ZoomOut, Globe,
 } from "lucide-react";
 import type { Document } from "@/types";
 
@@ -54,15 +63,18 @@ pdfjsLib.GlobalWorkerOptions.workerSrc = new URL(
 
 // ── Types ─────────────────────────────────────────────────────────────────────
 interface PreviewData {
-  viewer: "pdfjs" | "google_docs" | "download";
-  url: string;
+  viewer:      "pdfjs" | "google_docs" | "image" | "download";
+  /** For Office files: the WebDAV URL with ?token= (for iframe viewers).
+   *  For PDF/image: the absolute media URL. */
+  url:         string;
+  /** Always the absolute raw media URL — used for download + desktop URI. */
+  file_url:    string;
+  /** Alias for url when viewer=google_docs (convenience). */
+  webdav_url?: string;
 }
 
-// ── Office MIME → app metadata ────────────────────────────────────────────────
-const OFFICE_META: Record<
-  string,
-  { scheme: string; label: string; bgClass: string }
-> = {
+// ── Office MIME → desktop app metadata ───────────────────────────────────────
+const OFFICE_META: Record<string, { scheme: string; label: string; bgClass: string }> = {
   "application/vnd.openxmlformats-officedocument.wordprocessingml.document": {
     scheme: "ms-word", label: "Word", bgClass: "bg-blue-600 hover:bg-blue-700",
   },
@@ -81,23 +93,31 @@ const OFFICE_META: Record<
 };
 
 // ── URL helpers ───────────────────────────────────────────────────────────────
-function extractRawUrl(gdocUrl: string): string {
+function isLocalOrPrivateUrl(url: string): boolean {
   try {
-    return new URL(gdocUrl).searchParams.get("url") ?? gdocUrl;
-  } catch { return gdocUrl; }
-}
-
-function isLocalUrl(gdocUrl: string): boolean {
-  const raw = extractRawUrl(gdocUrl);
-  try {
-    const { hostname } = new URL(raw);
+    const { hostname } = new URL(url);
     return (
       hostname === "localhost" ||
       hostname === "127.0.0.1" ||
       hostname === "::1" ||
-      hostname.endsWith(".local")
+      hostname.endsWith(".local") ||
+      /^10\./.test(hostname) ||
+      /^192\.168\./.test(hostname) ||
+      /^172\.(1[6-9]|2\d|3[01])\./.test(hostname)
     );
   } catch { return false; }
+}
+
+function buildMicrosoftViewerUrl(absoluteUrl: string): string {
+  return `https://view.officeapps.live.com/op/embed.aspx?src=${encodeURIComponent(absoluteUrl)}`;
+}
+
+function buildGoogleViewerUrl(absoluteUrl: string): string {
+  return `https://docs.google.com/gview?embedded=1&url=${encodeURIComponent(absoluteUrl)}`;
+}
+
+function preferredEngine(fileUrl: string): "microsoft" | "google" {
+  return /\.(docx?|xlsx?|pptx?)(\?|$)/i.test(fileUrl) ? "microsoft" : "google";
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -113,9 +133,9 @@ interface UploadVersionDrawerProps {
 function UploadVersionDrawer({
   documentId, currentVersion, accept, onVersionUploaded,
 }: UploadVersionDrawerProps) {
-  const [open, setOpen]       = useState(false);
-  const [file, setFile]       = useState<File | null>(null);
-  const [summary, setSummary] = useState("");
+  const [open, setOpen]         = useState(false);
+  const [file, setFile]         = useState<File | null>(null);
+  const [summary, setSummary]   = useState("");
   const [progress, setProgress] = useState(0);
 
   const onDrop = useCallback((accepted: File[]) => {
@@ -161,31 +181,24 @@ function UploadVersionDrawer({
 
   return (
     <div className="border border-gray-200 rounded-xl overflow-hidden mt-3">
-      <button
-        type="button"
-        onClick={() => setOpen((o) => !o)}
-        className="w-full flex items-center justify-between px-4 py-3 bg-gray-50 hover:bg-gray-100 transition-colors text-sm font-medium text-gray-700"
-      >
+      <button type="button" onClick={() => setOpen((o) => !o)}
+        className="w-full flex items-center justify-between px-4 py-3 bg-gray-50 hover:bg-gray-100 transition-colors text-sm font-medium text-gray-700">
         <span className="flex items-center gap-2">
           <Upload className="w-4 h-4 text-brand-500" />
           Upload new version
-          <span className="text-xs font-normal text-gray-400">
-            (saves as v{currentVersion + 1})
-          </span>
+          <span className="text-xs font-normal text-gray-400">(saves as v{currentVersion + 1})</span>
         </span>
         {open ? <ChevronUp className="w-4 h-4" /> : <ChevronDown className="w-4 h-4" />}
       </button>
 
       {open && (
         <div className="p-4 space-y-4 bg-white">
-          <div
-            {...getRootProps()}
+          <div {...getRootProps()}
             className={`border-2 border-dashed rounded-xl p-8 text-center cursor-pointer transition-all ${
               isDragActive ? "border-brand-500 bg-brand-50"
               : file ? "border-green-400 bg-green-50"
               : "border-gray-200 hover:border-brand-400 hover:bg-gray-50"
-            }`}
-          >
+            }`}>
             <input {...getInputProps()} />
             {file ? (
               <div className="flex flex-col items-center gap-2">
@@ -226,12 +239,9 @@ function UploadVersionDrawer({
             </div>
           )}
 
-          <button type="button" onClick={submit}
-            disabled={!file || mutation.isPending}
+          <button type="button" onClick={submit} disabled={!file || mutation.isPending}
             className="btn-primary w-full justify-center disabled:opacity-50">
-            {mutation.isPending
-              ? <Loader2 className="w-4 h-4 animate-spin" />
-              : <Upload className="w-4 h-4" />}
+            {mutation.isPending ? <Loader2 className="w-4 h-4 animate-spin" /> : <Upload className="w-4 h-4" />}
             Save as version {currentVersion + 1}
           </button>
         </div>
@@ -249,22 +259,23 @@ function PdfViewer({
   url: string; doc: Document;
   canUploadVersion: boolean; onVersionUploaded: () => void;
 }) {
-  const containerRef = useRef<HTMLDivElement>(null);
-  const [pdfDoc, setPdfDoc]           = useState<PDFDocumentProxy | null>(null);
-  const [currentPage, setCurrentPage] = useState(1);
-  const [totalPages, setTotalPages]   = useState(0);
-  const [scale, setScale]             = useState(1.3);
-  const [rotation, setRotation]       = useState(0);
-  const [loading, setLoading]         = useState(true);
-  const [error, setError]             = useState("");
-  const renderRef                     = useRef<any>(null);
-  const token                         = useAuthStore((s) => s.accessToken);
+  const containerRef                    = useRef<HTMLDivElement>(null);
+  const [pdfDoc, setPdfDoc]             = useState<PDFDocumentProxy | null>(null);
+  const [currentPage, setCurrentPage]   = useState(1);
+  const [totalPages, setTotalPages]     = useState(0);
+  const [scale, setScale]               = useState(1.3);
+  const [rotation, setRotation]         = useState(0);
+  const [loading, setLoading]           = useState(true);
+  const [error, setError]               = useState("");
+  const renderRef                       = useRef<any>(null);
+  const token                           = useAuthStore((s) => s.accessToken);
 
   useEffect(() => {
     let cancelled = false;
     setLoading(true); setError("");
     const task = pdfjsLib.getDocument({
-      url, withCredentials: true,
+      url,
+      withCredentials: true,
       httpHeaders: { Authorization: `Bearer ${token ?? ""}` },
     });
     task.promise.then((d) => {
@@ -329,7 +340,6 @@ function PdfViewer({
 
   return (
     <div>
-      {/* Toolbar */}
       <div className="flex items-center justify-between gap-2 bg-gray-100 border border-gray-200 rounded-t-lg px-3 py-2">
         <div className="flex items-center gap-1">
           <button onClick={() => goTo(currentPage - 1)} disabled={currentPage <= 1}
@@ -360,17 +370,13 @@ function PdfViewer({
           <Download className="w-3.5 h-3.5" /> Download
         </a>
       </div>
-
-      {/* Canvas */}
       <div className="overflow-auto bg-gray-200 border border-t-0 border-gray-200 rounded-b-lg p-4"
         style={{ maxHeight: "70vh" }}>
         <div ref={containerRef} className="mx-auto" />
       </div>
-
       {canUploadVersion && (
         <UploadVersionDrawer
-          documentId={doc.id}
-          currentVersion={doc.current_version}
+          documentId={doc.id} currentVersion={doc.current_version}
           accept={{ "application/pdf": [".pdf"] }}
           onVersionUploaded={onVersionUploaded}
         />
@@ -380,36 +386,158 @@ function PdfViewer({
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// OfficeEditPanel — native desktop editing via WebDAV URI scheme
+// GoogleDocsViewer — uses WebDAV URL with ?token= so Office Online can auth
+// ─────────────────────────────────────────────────────────────────────────────
+function GoogleDocsViewer({ viewerUrl: externalUrl, fileUrl }: { viewerUrl: string; fileUrl: string }) {
+  const isLocal = isLocalOrPrivateUrl(externalUrl);
+  const initEngine = preferredEngine(fileUrl);
+  const [engine, setEngine]                   = useState<"microsoft" | "google">(initEngine);
+  const [iframeKey, setIframeKey]             = useState(0);
+  const [loading, setLoading]                 = useState(true);
+  const [showFallbackBar, setShowFallbackBar] = useState(false);
+  const fallbackTimer                         = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  // The iframe src — uses the WebDAV URL (which has ?token=) as the src param
+  // so the external viewer service can fetch the authenticated content.
+  const iframeSrc = engine === "microsoft"
+    ? buildMicrosoftViewerUrl(externalUrl)
+    : buildGoogleViewerUrl(externalUrl);
+
+  useEffect(() => {
+    setLoading(true);
+    setShowFallbackBar(false);
+    if (fallbackTimer.current) clearTimeout(fallbackTimer.current);
+  }, [externalUrl, engine, iframeKey]);
+
+  useEffect(() => () => {
+    if (fallbackTimer.current) clearTimeout(fallbackTimer.current);
+  }, []);
+
+  const handleLoad = () => {
+    setLoading(false);
+    fallbackTimer.current = setTimeout(() => setShowFallbackBar(true), 10_000);
+  };
+
+  const reload       = () => setIframeKey((k) => k + 1);
+  const switchEngine = () => {
+    setEngine((e) => e === "microsoft" ? "google" : "microsoft");
+    setIframeKey((k) => k + 1);
+  };
+
+  if (isLocal) {
+    return (
+      <div className="rounded-xl border-2 border-dashed border-amber-200 bg-amber-50 p-8 text-center">
+        <AlertCircle className="w-10 h-10 text-amber-400 mx-auto mb-3" />
+        <p className="font-semibold text-amber-800 mb-1">Office preview requires a public URL</p>
+        <p className="text-sm text-amber-700 max-w-md mx-auto mb-5">
+          The file is on a private network. Use ngrok or deploy to a public server.
+        </p>
+        <a href={fileUrl} download className="btn-primary inline-flex items-center gap-2">
+          <Download className="w-4 h-4" /> Download file
+        </a>
+      </div>
+    );
+  }
+
+  return (
+    <div>
+      <div className="flex items-center justify-between flex-wrap gap-2 bg-gray-100 border border-gray-200 rounded-t-lg px-3 py-2">
+        <div className="flex items-center gap-1.5 text-xs text-gray-500">
+          <Globe className="w-3.5 h-3.5" />
+          <span>{engine === "microsoft" ? "Microsoft Office Online" : "Google Docs"} preview</span>
+          <button onClick={switchEngine}
+            className="ml-2 px-2 py-0.5 rounded-full border border-gray-300 text-xs text-gray-600 hover:bg-white transition-colors">
+            Try {engine === "microsoft" ? "Google" : "Microsoft"} viewer
+          </button>
+        </div>
+        <div className="flex gap-1.5">
+          <button onClick={reload}
+            className="btn-secondary text-xs px-2 py-1 flex items-center gap-1">
+            <RefreshCw className="w-3.5 h-3.5" /> Reload
+          </button>
+          <a href={fileUrl} target="_blank" rel="noopener noreferrer"
+            className="btn-secondary text-xs px-2 py-1 flex items-center gap-1">
+            <ExternalLink className="w-3.5 h-3.5" /> Open
+          </a>
+          <a href={fileUrl} download
+            className="btn-secondary text-xs px-2 py-1 flex items-center gap-1">
+            <Download className="w-3.5 h-3.5" /> Download
+          </a>
+        </div>
+      </div>
+
+      <div className="relative border border-t-0 border-gray-200 rounded-b-lg overflow-hidden bg-gray-50"
+        style={{ height: "75vh" }}>
+        {loading && (
+          <div className="absolute inset-0 flex flex-col items-center justify-center gap-3 bg-gray-50 z-10">
+            <Loader2 className="w-8 h-8 text-brand-500 animate-spin" />
+            <p className="text-sm text-gray-500">
+              Loading {engine === "microsoft" ? "Office Online" : "Google Docs"} preview…
+            </p>
+            <p className="text-xs text-gray-400 max-w-xs text-center">
+              The preview service fetches the file from your server. This may take a few seconds.
+            </p>
+          </div>
+        )}
+        <iframe
+          key={`${engine}-${iframeKey}`}
+          src={iframeSrc}
+          className="w-full h-full border-0"
+          title="Document preview"
+          onLoad={handleLoad}
+          sandbox="allow-scripts allow-same-origin allow-popups allow-forms allow-popups-to-escape-sandbox"
+        />
+      </div>
+
+      {!loading && showFallbackBar && (
+        <div className="mt-2 flex flex-wrap items-center gap-3 rounded-lg border border-gray-200 bg-gray-50 px-4 py-2.5 text-sm text-gray-600">
+          <AlertCircle className="w-4 h-4 text-amber-500 flex-shrink-0" />
+          <span>Preview not showing?</span>
+          <button onClick={switchEngine}
+            className="flex items-center gap-1 text-brand-600 hover:text-brand-700 font-medium">
+            <Globe className="w-3.5 h-3.5" />
+            Try {engine === "microsoft" ? "Google Docs" : "Microsoft Office"} viewer
+          </button>
+          <button onClick={reload}
+            className="flex items-center gap-1 text-brand-600 hover:text-brand-700 font-medium">
+            <RefreshCw className="w-3.5 h-3.5" /> Reload
+          </button>
+          <a href={fileUrl} download
+            className="ml-auto flex items-center gap-1 text-brand-600 hover:text-brand-700 font-medium">
+            <Download className="w-3.5 h-3.5" /> Download
+          </a>
+        </div>
+      )}
+    </div>
+  );
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// OfficeEditPanel
 // ─────────────────────────────────────────────────────────────────────────────
 function OfficeEditPanel({
-  doc, previewUrl, canUploadVersion, onVersionUploaded,
+  doc, preview, canUploadVersion, onVersionUploaded,
 }: {
-  doc: Document; previewUrl: string;
+  doc: Document; preview: PreviewData;
   canUploadVersion: boolean; onVersionUploaded: () => void;
 }) {
-  const qc          = useQueryClient();
-  const token       = useAuthStore((s) => s.accessToken);
-  const [editing, setEditing]         = useState(false);
-  const [versionAtLaunch, setVersionAtLaunch] = useState(0);
-  const [reloadKey, setReloadKey]     = useState(0);
-  const [iframeLoading, setIframeLoading] = useState(true);
-  const [showFallback, setShowFallback]   = useState(false);
-  const fallbackTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
-  const pollRef       = useRef<ReturnType<typeof setInterval> | null>(null);
+  const qc         = useQueryClient();
+  const [editing, setEditing] = useState(false);
+  const pollRef               = useRef<ReturnType<typeof setInterval> | null>(null);
 
   const officeInfo = OFFICE_META[doc.file_mime_type] ?? null;
 
-  // Build WebDAV URL: /api/v1/documents/webdav/<id>/<filename>?token=<jwt>
-  const apiBase   = (import.meta.env.VITE_API_URL ?? "/api/v1").replace(/\/$/, "");
-  const webdavUrl = `${window.location.origin}${apiBase}/documents/webdav/${doc.id}/${encodeURIComponent(doc.file_name)}?token=${token ?? ""}`;
-  const officeUri = officeInfo ? `${officeInfo.scheme}:ofe|u|${webdavUrl}` : null;
-  const rawUrl    = extractRawUrl(previewUrl);
-  const isDev     = isLocalUrl(previewUrl);
+  // Desktop URI: use the WebDAV URL (which has ?token= for auth).
+  // The server returns this as preview.url for office files.
+  const desktopUri = officeInfo
+    ? `${officeInfo.scheme}:ofe|u|${preview.url}`
+    : null;
 
-  // Poll for version bump after editor launch
+  // Raw file URL for download button and "Open original" link
+  const fileUrl = preview.file_url;
+  const isDev   = isLocalOrPrivateUrl(fileUrl);
+
   const startPolling = (baseVersion: number) => {
-    setVersionAtLaunch(baseVersion);
     setEditing(true);
     pollRef.current = setInterval(async () => {
       try {
@@ -430,43 +558,28 @@ function OfficeEditPanel({
     if (pollRef.current) clearInterval(pollRef.current);
   };
 
-  useEffect(() => () => {
-    if (pollRef.current) clearInterval(pollRef.current);
-    if (fallbackTimer.current) clearTimeout(fallbackTimer.current);
-  }, []);
-
-  const handleIframeLoad = () => {
-    setIframeLoading(false);
-    if (fallbackTimer.current) clearTimeout(fallbackTimer.current);
-    fallbackTimer.current = setTimeout(() => setShowFallback(true), 6_000);
-  };
+  useEffect(() => () => { if (pollRef.current) clearInterval(pollRef.current); }, []);
 
   return (
     <div className="space-y-3">
-      {/* Action bar */}
       <div className="rounded-xl border border-gray-200 bg-gray-50 p-4 space-y-3">
         <div className="flex flex-wrap items-center gap-3">
-          {/* Open in desktop Office */}
-          {officeUri && canUploadVersion && (
-            <a
-              href={officeUri}
-              onClick={() => startPolling(doc.current_version)}
-              className={`inline-flex items-center gap-2 px-4 py-2 rounded-lg text-sm font-semibold text-white transition-colors ${officeInfo?.bgClass}`}
-            >
+          {desktopUri && canUploadVersion && (
+            <a href={desktopUri} onClick={() => startPolling(doc.current_version)}
+              className={`inline-flex items-center gap-2 px-4 py-2 rounded-lg text-sm font-semibold text-white transition-colors ${officeInfo?.bgClass}`}>
               <MonitorPlay className="w-4 h-4" />
               Open &amp; Edit in {officeInfo?.label}
             </a>
           )}
-          <a href={rawUrl} target="_blank" rel="noopener noreferrer"
+          <a href={fileUrl} target="_blank" rel="noopener noreferrer"
             className="btn-secondary text-sm flex items-center gap-2">
             <ExternalLink className="w-4 h-4" /> Open original
           </a>
-          <a href={rawUrl} download className="btn-secondary text-sm flex items-center gap-2">
+          <a href={fileUrl} download className="btn-secondary text-sm flex items-center gap-2">
             <Download className="w-4 h-4" /> Download
           </a>
         </div>
 
-        {/* Editing / polling status */}
         {editing && (
           <div className="flex items-center justify-between gap-3 rounded-lg border border-amber-200 bg-amber-50 px-3 py-2 text-sm">
             <div className="flex items-center gap-2 text-amber-800">
@@ -481,66 +594,24 @@ function OfficeEditPanel({
           </div>
         )}
 
-        {/* Dev-mode notice */}
         {isDev && canUploadVersion && (
           <div className="flex items-start gap-2 rounded-lg border border-amber-200 bg-amber-50 px-3 py-2.5 text-xs text-amber-800">
             <AlertCircle className="w-4 h-4 flex-shrink-0 mt-0.5 text-amber-600" />
             <span>
-              <strong>Development note:</strong> WebDAV URL targets{" "}
-              <code className="bg-amber-100 px-1 rounded">localhost</code>. Desktop
-              Office on this machine can still reach it; the read-only preview below
-              will be blank (Google cannot reach localhost). Both will work correctly
-              in production.
+              <strong>Development note:</strong> File is on a private network address.
+              Desktop Office on this machine can reach it directly.
+              Deploy to a public server or use ngrok for end-to-end testing.
             </span>
           </div>
         )}
       </div>
 
-      {/* Read-only in-browser preview (Google Docs) */}
-      {!isDev && (
-        <div className="rounded-xl border border-gray-200 overflow-hidden">
-          <div className="flex items-center justify-between bg-gray-100 px-3 py-2">
-            <span className="text-xs text-gray-500 font-medium">
-              Read-only preview — use "Open &amp; Edit in {officeInfo?.label}" to make changes
-            </span>
-            <button onClick={() => { setReloadKey((k) => k + 1); setIframeLoading(true); setShowFallback(false); }}
-              className="flex items-center gap-1 text-xs text-gray-500 hover:text-gray-700">
-              <RefreshCw className="w-3.5 h-3.5" /> Reload
-            </button>
-          </div>
-          <div className="relative bg-gray-50" style={{ height: "65vh" }}>
-            {iframeLoading && (
-              <div className="absolute inset-0 flex flex-col items-center justify-center gap-3 bg-gray-50 z-10">
-                <Loader2 className="w-8 h-8 text-brand-500 animate-spin" />
-                <p className="text-sm text-gray-500">Loading document preview…</p>
-              </div>
-            )}
-            <iframe key={reloadKey} src={previewUrl} className="w-full h-full border-0"
-              title="Read-only document preview" onLoad={handleIframeLoad}
-              sandbox="allow-scripts allow-same-origin allow-popups allow-forms allow-popups-to-escape-sandbox" />
-          </div>
-          {!iframeLoading && showFallback && (
-            <div className="flex items-center gap-3 border-t border-gray-200 bg-gray-50 px-4 py-2.5 text-sm text-gray-600">
-              <AlertCircle className="w-4 h-4 text-amber-500 flex-shrink-0" />
-              <span>Having trouble with the preview?</span>
-              <button onClick={() => { setReloadKey((k) => k + 1); setIframeLoading(true); setShowFallback(false); }}
-                className="ml-auto flex items-center gap-1 text-brand-600 hover:text-brand-700 font-medium text-sm">
-                <RefreshCw className="w-3.5 h-3.5" /> Retry
-              </button>
-              <a href={rawUrl} download
-                className="flex items-center gap-1 text-brand-600 hover:text-brand-700 font-medium text-sm">
-                <Download className="w-3.5 h-3.5" /> Download
-              </a>
-            </div>
-          )}
-        </div>
-      )}
+      {/* In-browser preview */}
+      <GoogleDocsViewer viewerUrl={preview.url} fileUrl={fileUrl} />
 
-      {/* Manual upload fallback */}
       {canUploadVersion && (
         <UploadVersionDrawer
-          documentId={doc.id}
-          currentVersion={doc.current_version}
+          documentId={doc.id} currentVersion={doc.current_version}
           onVersionUploaded={onVersionUploaded}
         />
       )}
@@ -552,7 +623,7 @@ function OfficeEditPanel({
 // ImageViewer
 // ─────────────────────────────────────────────────────────────────────────────
 function ImageViewer({ url }: { url: string }) {
-  const [scale, setScale]     = useState(1);
+  const [scale, setScale]       = useState(1);
   const [imgError, setImgError] = useState(false);
   return (
     <div>
@@ -593,77 +664,6 @@ function ImageViewer({ url }: { url: string }) {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Standalone GoogleDocsViewer (for non-Office google_docs fallback)
-// ─────────────────────────────────────────────────────────────────────────────
-function GoogleDocsViewer({ url }: { url: string }) {
-  const [loading, setLoading]         = useState(true);
-  const [showFallback, setShowFallback] = useState(false);
-  const [key, setKey]                 = useState(0);
-  const timer = useRef<ReturnType<typeof setTimeout> | null>(null);
-  const rawUrl = extractRawUrl(url);
-  const isDev  = isLocalUrl(url);
-
-  useEffect(() => { setLoading(true); setShowFallback(false); }, [url, key]);
-  useEffect(() => () => { if (timer.current) clearTimeout(timer.current); }, []);
-
-  if (isDev) return (
-    <div className="rounded-xl border-2 border-dashed border-amber-200 bg-amber-50 p-8 text-center">
-      <AlertCircle className="w-10 h-10 text-amber-400 mx-auto mb-3" />
-      <p className="font-semibold text-amber-800 mb-1">Office preview unavailable in development</p>
-      <p className="text-sm text-amber-700 max-w-md mx-auto mb-5">
-        Google Docs Viewer requires a public URL. This works correctly in production.
-      </p>
-      <a href={rawUrl} download className="btn-primary inline-flex items-center gap-2">
-        <Download className="w-4 h-4" /> Download File
-      </a>
-    </div>
-  );
-
-  return (
-    <div>
-      <div className="flex items-center justify-between bg-gray-100 border border-gray-200 rounded-t-lg px-3 py-2">
-        <span className="text-xs text-gray-500">Read-only preview via Google Docs Viewer</span>
-        <div className="flex gap-2">
-          <button onClick={() => setKey((k) => k + 1)} className="btn-secondary text-xs px-2 py-1 flex items-center gap-1">
-            <RefreshCw className="w-3.5 h-3.5" /> Reload
-          </button>
-          <a href={rawUrl} target="_blank" rel="noopener noreferrer" className="btn-secondary text-xs px-2 py-1 flex items-center gap-1">
-            <ExternalLink className="w-3.5 h-3.5" /> Open
-          </a>
-          <a href={rawUrl} download className="btn-secondary text-xs px-2 py-1 flex items-center gap-1">
-            <Download className="w-3.5 h-3.5" /> Download
-          </a>
-        </div>
-      </div>
-      <div className="relative border border-t-0 border-gray-200 rounded-b-lg overflow-hidden bg-gray-50" style={{ height: "75vh" }}>
-        {loading && (
-          <div className="absolute inset-0 flex flex-col items-center justify-center gap-3 bg-gray-50 z-10">
-            <Loader2 className="w-8 h-8 text-brand-500 animate-spin" />
-            <p className="text-sm text-gray-500">Loading document preview…</p>
-          </div>
-        )}
-        <iframe key={key} src={url} className="w-full h-full border-0" title="Document viewer"
-          onLoad={() => { setLoading(false); timer.current = setTimeout(() => setShowFallback(true), 6_000); }}
-          sandbox="allow-scripts allow-same-origin allow-popups allow-forms allow-popups-to-escape-sandbox" />
-      </div>
-      {!loading && showFallback && (
-        <div className="mt-2 flex items-center gap-3 rounded-lg border border-gray-200 bg-gray-50 px-4 py-2.5 text-sm text-gray-600">
-          <AlertCircle className="w-4 h-4 text-amber-500 flex-shrink-0" />
-          <span>Having trouble viewing?</span>
-          <button onClick={() => setKey((k) => k + 1)}
-            className="ml-auto flex items-center gap-1 text-brand-600 hover:text-brand-700 font-medium">
-            <RefreshCw className="w-3.5 h-3.5" /> Try again
-          </button>
-          <a href={rawUrl} download className="flex items-center gap-1 text-brand-600 hover:text-brand-700 font-medium">
-            <Download className="w-3.5 h-3.5" /> Download
-          </a>
-        </div>
-      )}
-    </div>
-  );
-}
-
-// ─────────────────────────────────────────────────────────────────────────────
 // Main DocumentViewer
 // ─────────────────────────────────────────────────────────────────────────────
 interface Props {
@@ -686,8 +686,6 @@ export default function DocumentViewer({ document: doc }: Props) {
 
   const canUploadVersion = Boolean((doc as any).permissions?.includes("upload"));
   const isOfficeDoc      = Boolean(OFFICE_META[doc.file_mime_type]);
-  const isImage          = doc.file_mime_type?.startsWith("image/") ||
-    /\.(png|jpe?g|gif|webp|svg|bmp)$/i.test(doc.file_name ?? "");
 
   if (isLoading) return (
     <div className="flex items-center justify-center h-64">
@@ -702,13 +700,10 @@ export default function DocumentViewer({ document: doc }: Props) {
     </div>
   );
 
-  const rawFileUrl = preview.viewer === "google_docs"
-    ? extractRawUrl(preview.url)
-    : preview.url;
+  const fileUrl = preview.file_url || preview.url;
 
   return (
     <div className="space-y-3">
-      {/* Header row */}
       <div className="flex items-center justify-between">
         <h3 className="font-medium text-gray-900 text-sm">Document Preview</h3>
         <div className="flex items-center gap-2">
@@ -718,42 +713,37 @@ export default function DocumentViewer({ document: doc }: Props) {
               Version {doc.current_version}
             </span>
           )}
-          <a href={rawFileUrl} target="_blank" rel="noopener noreferrer"
+          <a href={fileUrl} target="_blank" rel="noopener noreferrer"
             className="btn-secondary text-xs px-3 py-1.5 flex items-center gap-1.5">
             <ExternalLink className="w-3.5 h-3.5" /> Open in new tab
           </a>
         </div>
       </div>
 
-      {/* PDF */}
       {preview.viewer === "pdfjs" && (
         <PdfViewer url={preview.url} doc={doc}
           canUploadVersion={canUploadVersion} onVersionUploaded={onVersionUploaded} />
       )}
 
-      {/* Office documents — native edit panel */}
       {preview.viewer === "google_docs" && isOfficeDoc && (
-        <OfficeEditPanel doc={doc} previewUrl={preview.url}
+        <OfficeEditPanel doc={doc} preview={preview}
           canUploadVersion={canUploadVersion} onVersionUploaded={onVersionUploaded} />
       )}
 
-      {/* Non-Office google_docs (rare fallback) */}
       {preview.viewer === "google_docs" && !isOfficeDoc && (
-        <GoogleDocsViewer url={preview.url} />
+        <GoogleDocsViewer viewerUrl={preview.url} fileUrl={fileUrl} />
       )}
 
-      {/* Images */}
-      {isImage && preview.viewer !== "pdfjs" && (
+      {preview.viewer === "image" && (
         <ImageViewer url={preview.url} />
       )}
 
-      {/* Unsupported format */}
-      {preview.viewer === "download" && !isImage && (
+      {preview.viewer === "download" && (
         <div className="space-y-3">
           <div className="rounded-lg border-2 border-dashed border-gray-200 p-10 text-center">
             <Download className="w-12 h-12 text-gray-300 mx-auto mb-4" />
             <p className="text-gray-600 mb-4">Preview not available for this file type.</p>
-            <a href={preview.url} download className="btn-primary inline-flex items-center gap-2">
+            <a href={fileUrl} download className="btn-primary inline-flex items-center gap-2">
               <Download className="w-4 h-4" /> Download File
             </a>
           </div>

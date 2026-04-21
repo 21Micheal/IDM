@@ -2,14 +2,16 @@
 // Centered, modern card design with better spacing and Flaxem branding.
 import { useState } from "react";
 import { useNavigate } from "react-router-dom";
+import { useQueryClient } from "@tanstack/react-query";
 import { useForm } from "react-hook-form";
 import { zodResolver } from "@hookform/resolvers/zod";
 import { z } from "zod";
 import { Loader2, Mail, RefreshCw, Lock, ArrowRight } from "lucide-react";
-import { authAPI } from "@/services/api";
+import { api, authAPI, documentsAPI, notificationsAPI, workflowAPI } from "@/services/api";
 import { useAuthStore } from "@/store/authStore";
 import { toast } from "react-toastify";
 import { FlaxemLogo } from "@/components/shared/FlaxemLogo";
+import type { AuthUser } from "@/store/authStore";
 
 const credSchema = z.object({
   email: z.string().email("Please enter a valid email address."),
@@ -24,6 +26,7 @@ type OTPForm = z.infer<typeof otpSchema>;
 
 export default function LoginPage() {
   const navigate = useNavigate();
+  const qc = useQueryClient();
   const { setTokens, setUser } = useAuthStore();
   const [step, setStep] = useState<"credentials" | "otp">("credentials");
   const [pendingUserId, setPendingUserId] = useState("");
@@ -35,6 +38,56 @@ export default function LoginPage() {
   const credForm = useForm<CredForm>({ resolver: zodResolver(credSchema) });
   const otpForm = useForm<OTPForm>({ resolver: zodResolver(otpSchema) });
 
+  const completeLogin = async (tokenData: {
+    access: string;
+    refresh: string;
+    must_change_password?: boolean;
+    user?: AuthUser;
+  }) => {
+    setTokens(tokenData.access, tokenData.refresh);
+
+    if (tokenData.user) {
+      setUser(tokenData.user);
+    } else {
+      try {
+        const { data: me } = await authAPI.me(tokenData.access);
+        setUser(me);
+      } catch {
+        toast.warn("Signed in, but your profile could not be loaded yet.");
+      }
+    }
+
+    // Warm the dashboard caches so the first protected screen has data immediately.
+    await Promise.allSettled([
+      qc.prefetchQuery({
+        queryKey: ["documents", "recent"],
+        queryFn: () => documentsAPI.list({ page_size: 5, ordering: "-created_at" }).then((r) => r.data),
+      }),
+      qc.prefetchQuery({
+        queryKey: ["documents", "pending", "count"],
+        queryFn: () => documentsAPI.list({ status: "pending_approval", page_size: 1 }).then((r) => r.data.count ?? 0),
+      }),
+      qc.prefetchQuery({
+        queryKey: ["workflow", "my-tasks"],
+        queryFn: () => workflowAPI.myTasks().then((r) => r.data.results ?? r.data),
+      }),
+      qc.prefetchQuery({
+        queryKey: ["audit", "recent"],
+        queryFn: () => api.get("/audit/", { params: { ordering: "-timestamp", page_size: 5 } }).then((r) => r.data.results ?? r.data),
+      }),
+      qc.prefetchQuery({
+        queryKey: ["notifications"],
+        queryFn: () => notificationsAPI.list().then((r) => r.data.results ?? r.data),
+      }),
+    ]);
+
+    if (tokenData.must_change_password) {
+      navigate("/change-password", { replace: true });
+    } else {
+      navigate("/", { replace: true });
+    }
+  };
+
   const onCredentials = async (values: CredForm) => {
     setLoading(true);
     try {
@@ -45,7 +98,7 @@ export default function LoginPage() {
         setStep("otp");
         toast.info("A 6-digit verification code has been sent to your email.");
       } else {
-        await finishLogin(data);
+        await completeLogin(data);
       }
     } catch (err: any) {
       toast.error(err?.response?.data?.detail || "Invalid email or password.");
@@ -58,22 +111,11 @@ export default function LoginPage() {
     setLoading(true);
     try {
       const { data } = await authAPI.verifyOTP(pendingUserId, values.otp);
-      await finishLogin(data);
+      await completeLogin(data);
     } catch (err: any) {
       toast.error(err?.response?.data?.detail || "Invalid or expired verification code.");
     } finally {
       setLoading(false);
-    }
-  };
-
-  const finishLogin = async (tokenData: { access: string; refresh: string; must_change_password?: boolean }) => {
-    setTokens(tokenData.access, tokenData.refresh);
-    const { data: me } = await authAPI.me();
-    setUser(me);
-    if (tokenData.must_change_password) {
-      navigate("/change-password", { replace: true });
-    } else {
-      navigate("/", { replace: true });
     }
   };
 

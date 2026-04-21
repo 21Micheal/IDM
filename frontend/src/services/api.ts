@@ -1,8 +1,24 @@
 import axios, { AxiosError, InternalAxiosRequestConfig } from "axios";
 import { useAuthStore } from "@/store/authStore";
 
+function normalizeApiBase(rawBase: string): string {
+  const trimmed = rawBase.replace(/\/+$/, "");
+  if (trimmed.endsWith("/api/v1")) return trimmed;
+  return `${trimmed}/api/v1`;
+}
+
+function resolveApiBaseUrl(): string {
+  const currentHost = typeof window !== "undefined" ? window.location.hostname : "";
+  if (currentHost === "localhost" || currentHost === "127.0.0.1" || currentHost === "::1") {
+    return "/api/v1";
+  }
+  return normalizeApiBase(import.meta.env.VITE_API_URL ?? "/api/v1");
+}
+
+export const apiBaseUrl = resolveApiBaseUrl();
+
 export const api = axios.create({
-  baseURL: import.meta.env.VITE_API_URL ?? "/api/v1",
+  baseURL: apiBaseUrl,
   headers: { "Content-Type": "application/json" },
 });
 
@@ -51,7 +67,10 @@ export const authAPI = {
   resendOTP: (userId: string) =>
     api.post("/auth/resend-otp/", { user_id: userId }),
 
-  me: () => api.get("/auth/me/"),
+  me: (token?: string) =>
+    api.get("/auth/me/", token
+      ? { headers: { Authorization: `Bearer ${token}` } }
+      : undefined),
 };
 
 export const documentsAPI = {

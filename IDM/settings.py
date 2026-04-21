@@ -4,6 +4,7 @@ Reads environment via django-environ. Copy .env.example → .env and adjust.
 """
 from pathlib import Path
 from datetime import timedelta
+from urllib.parse import urlparse
 import environ
 import dj_database_url
 
@@ -14,6 +15,9 @@ environ.Env.read_env(BASE_DIR / ".env")
 
 SECRET_KEY = env("SECRET_KEY")
 DEBUG = env("DEBUG")
+NGROK_URL = env("NGROK_URL", default="")
+NGROK_HOST = urlparse(NGROK_URL).hostname if NGROK_URL else ""
+
 ALLOWED_HOSTS = env.list(
     "ALLOWED_HOSTS",
     default=[
@@ -23,8 +27,28 @@ ALLOWED_HOSTS = env.list(
         "backend",
         "frontend",
         "nginx",
+        ".ngrok-free.dev",
     ],
 )
+if NGROK_HOST and NGROK_HOST not in ALLOWED_HOSTS:
+    ALLOWED_HOSTS.append(NGROK_HOST)
+
+# Required for ngrok/production: Allows Django to trust the CSRF header sent over HTTPS
+CSRF_TRUSTED_ORIGINS = env.list(
+    "CSRF_TRUSTED_ORIGINS",
+    default=[
+        "https://*.ngrok-free.dev",
+        "http://localhost:3000",
+    ]
+)
+if NGROK_URL and NGROK_URL not in CSRF_TRUSTED_ORIGINS:
+    CSRF_TRUSTED_ORIGINS.append(NGROK_URL)
+
+# ── Proxy / Forwarded Headers (Critical for ngrok + Google Docs / Office previews) ──
+# Without these, request.build_absolute_uri() returns http://localhost/... instead
+# of the public ngrok URL, breaking external document viewers.
+USE_X_FORWARDED_HOST = True
+SECURE_PROXY_SSL_HEADER = ("HTTP_X_FORWARDED_PROTO", "https")
 
 # ── Apps ────────────────────────────────────────────────────────────────────
 INSTALLED_APPS = [
@@ -121,6 +145,8 @@ CORS_ALLOWED_ORIGINS = env.list(
     "CORS_ALLOWED_ORIGINS",
     default=["http://localhost:3000", "http://127.0.0.1:3000"],
 )
+if NGROK_URL and NGROK_URL not in CORS_ALLOWED_ORIGINS:
+    CORS_ALLOWED_ORIGINS.append(NGROK_URL)
 CORS_ALLOW_CREDENTIALS = True
 
 # ── Storage ──────────────────────────────────────────────────────────────────
@@ -157,26 +183,13 @@ ELASTICSEARCH_DSL = {
 }
 
 # ── OCR ───────────────────────────────────────────────────────────────────────
-# Engine: "tesseract" (local, default) or "textract" (AWS cloud-scale)
 OCR_ENGINE = env("OCR_ENGINE", default="tesseract")
- 
-# Path to the tesseract binary — leave blank to use system PATH
-# e.g. TESSERACT_CMD=/usr/bin/tesseract
 TESSERACT_CMD = env("TESSERACT_CMD", default="")
- 
-# Tesseract language pack codes, space-separated
-# Install additional packs: apt-get install tesseract-ocr-swa   (Swahili)
-# Full list: https://tesseract-ocr.github.io/tessdoc/Data-Files.html
 OCR_LANGUAGES = env("OCR_LANGUAGES", default="eng")
- 
-# DPI used when rasterising PDF pages for OCR.
-# 300 is the standard minimum for acceptable quality; 400 for fine print.
 OCR_DPI = env.int("OCR_DPI", default=300)
- 
-# AWS Textract (only used when OCR_ENGINE=textract)
+
 AWS_TEXTRACT_REGION    = env("AWS_TEXTRACT_REGION", default="us-east-1")
 AWS_TEXTRACT_S3_BUCKET = env("AWS_TEXTRACT_S3_BUCKET", default="")
-
 
 # ── Channels (WebSocket) ──────────────────────────────────────────────────────
 CHANNEL_LAYERS = {

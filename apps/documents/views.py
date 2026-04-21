@@ -230,24 +230,82 @@ class DocumentViewSet(AuditMixin, viewsets.ModelViewSet):
 
     @action(detail=True, methods=["get"])
     def preview_url(self, request, pk=None):
+        """
+        Returns viewer type + URLs for the document.
+
+        For Office files (docx/xlsx/pptx) we return TWO urls:
+          - url        : the WebDAV endpoint with ?token= (for the iframe
+                         viewer — Microsoft/Google Online can GET it without
+                         custom headers since the token is in the query string)
+          - file_url   : the absolute media URL (for the download button,
+                         and for the LibreOffice/Word desktop URI)
+
+        For PDF and images:
+          - url        : absolute media URL (PDF.js and <img> pass the JWT
+                         as a header via the httpHeaders option / fetch)
+
+        Using request.build_absolute_uri() ensures the ngrok / production
+        hostname is reflected instead of the internal container address.
+        Requires USE_X_FORWARDED_HOST = True in settings.py.
+        """
         doc = self.get_object()
         self.record_audit("document.viewed", doc)
+
         try:
             relative_url = doc.file.url
         except ValueError:
             return Response({"detail": "No file attached."}, status=400)
+
+        absolute_file_url = request.build_absolute_uri(relative_url)
+
+        # Build the WebDAV URL with the JWT embedded as ?token= so
+        # Office Online viewers can fetch the file without custom headers.
+        from urllib.parse import quote as urlquote
+        from rest_framework_simplejwt.tokens import AccessToken as AT
+        token = str(AT.for_user(request.user))
+        api_base = request.build_absolute_uri("/api/v1")
+        webdav_url = (
+            f"{api_base}/documents/webdav/{doc.id}"
+            f"/{urlquote(doc.file_name)}?token={token}"
+        )
+
         mime = doc.file_mime_type or ""
+
         if mime == "application/pdf":
-            viewer = "pdfjs"
-        elif mime in (
+            return Response({
+                "viewer":   "pdfjs",
+                "url":      absolute_file_url,
+                "file_url": absolute_file_url,
+            })
+
+        if mime.startswith("image/"):
+            return Response({
+                "viewer":   "image",
+                "url":      absolute_file_url,
+                "file_url": absolute_file_url,
+            })
+
+        if mime in (
             "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
             "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-            "application/msword", "application/vnd.ms-excel",
+            "application/vnd.openxmlformats-officedocument.presentationml.presentation",
+            "application/msword",
+            "application/vnd.ms-excel",
         ):
-            viewer = "google_docs"
-        else:
-            viewer = "download"
-        return Response({"viewer": viewer, "url": relative_url})
+            return Response({
+                "viewer":    "google_docs",
+                # Office Online viewers use this URL — it carries the JWT
+                "url":       webdav_url,
+                # Raw file URL for download button and desktop Office URI
+                "file_url":  absolute_file_url,
+                "webdav_url": webdav_url,
+            })
+
+        return Response({
+            "viewer":   "download",
+            "url":      absolute_file_url,
+            "file_url": absolute_file_url,
+        })
 
     @action(detail=True, methods=["get", "post"])
     def comments(self, request, pk=None):
