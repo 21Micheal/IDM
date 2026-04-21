@@ -2,7 +2,7 @@ import {
   useState, useCallback, useRef, useMemo, type DragEvent,
 } from "react";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
-import { workflowAPI, documentTypesAPI, usersAPI } from "@/services/api";
+import { workflowAPI, documentTypesAPI, usersAPI, groupsAPI } from "@/services/api";
 import {
   Plus, GripVertical, Trash2, ChevronDown, ChevronUp,
   Save, GitBranch, Loader2, X, ArrowDown,
@@ -11,19 +11,22 @@ import {
   Search, MoreVertical, Shield,
   Users, Calendar, RefreshCw,
   FolderTree, LayoutTemplate, Check,
-  ChevronRight, Building2, Award, List, User,
+  ChevronRight, Building2, Award, List, User, UsersRound,
 } from "lucide-react";
 import { toast } from "react-toastify";
 import clsx from "clsx";
 
 // ── Types ─────────────────────────────────────────────────────────────────────
+type AssigneeType = "group_any" | "group_all" | "group_specific" | "specific_user";
+
 interface WorkflowStep {
   id?: string;
   order: number;
   name: string;
   status_label: string;
-  assignee_type: "any_role" | "specific_user";
-  assignee_role: string;
+  assignee_type: AssigneeType;
+  assignee_group: string | null;
+  assignee_group_name?: string;
   assignee_user: string | null;
   assignee_user_name?: string;
   sla_hours: number;
@@ -64,19 +67,32 @@ interface WorkflowRule {
   is_active: boolean;
 }
 interface AppUser { id: string; full_name: string; email: string; role: string; }
+interface Group { id: string; name: string; description?: string; member_count?: number; }
+interface GroupMembershipApiItem {
+  user?: AppUser;
+  id?: string;
+  full_name?: string;
+  email?: string;
+  role?: string;
+}
 
 // ── Constants ─────────────────────────────────────────────────────────────────
-// Role swatches use semantic HSL tokens via inline `hsl(var(--…))`.
-const ROLES = [
-  { value: "admin",   label: "Administrator", token: "var(--primary)",     icon: Shield,    description: "Full system access" },
-  { value: "finance", label: "Finance Staff",  token: "var(--teal)",        icon: Building2, description: "Financial approvals" },
-  { value: "auditor", label: "Auditor",        token: "var(--accent)",      icon: Award,     description: "Compliance review" },
-  { value: "viewer",  label: "Viewer",         token: "var(--muted-foreground)", icon: Eye,  description: "Read-only access" },
+const ASSIGNEE_MODES: { value: AssigneeType; label: string; description: string; Icon: typeof Users }[] = [
+  { value: "group_any",      label: "Any member of a group",      description: "Any one member can approve",       Icon: Users },
+  { value: "group_all",      label: "All members of a group",     description: "Every member must approve",        Icon: UsersRound },
+  { value: "group_specific", label: "Specific member of a group", description: "Pick one member from a group",     Icon: User },
+  { value: "specific_user",  label: "Specific user",              description: "Direct assignment to a user",      Icon: User },
 ];
-const ROLE_TOKEN: Record<string, string> = {
-  admin: "var(--primary)", finance: "var(--teal)", auditor: "var(--accent)", viewer: "var(--muted-foreground)",
+
+// Stable color tokens for groups (cycled via hash of group id)
+const GROUP_TOKENS = ["var(--primary)", "var(--teal)", "var(--accent)", "var(--muted-foreground)"];
+const tokenForGroup = (id: string | null | undefined) => {
+  if (!id) return "var(--muted-foreground)";
+  let h = 0;
+  for (let i = 0; i < id.length; i++) h = (h * 31 + id.charCodeAt(i)) >>> 0;
+  return GROUP_TOKENS[h % GROUP_TOKENS.length];
 };
-const roleHsl = (role: string) => `hsl(${ROLE_TOKEN[role] ?? "var(--primary)"})`;
+const groupHsl = (id: string | null | undefined) => `hsl(${tokenForGroup(id)})`;
 
 const CURRENCIES = ["USD", "EUR", "GBP", "KES", "ZAR", "NGN", "GHS", "AED", "INR", "JPY", "CAD", "AUD", "CHF", "CNY"];
 const STATUS_PRESETS = [
@@ -88,12 +104,12 @@ const STATUS_PRESETS = [
 function blankStep(): WorkflowStep {
   return {
     order: 0, name: "", status_label: "Pending Approval",
-    assignee_type: "any_role", assignee_role: "finance", assignee_user: null,
+    assignee_type: "group_any", assignee_group: null, assignee_user: null,
     sla_hours: 48, allow_resubmit: true, instructions: "",
   };
 }
 function stepToPayload(step: WorkflowStep): Partial<WorkflowStep> {
-  const { assignee_user_name, ...rest } = step as any;
+  const { assignee_user_name, assignee_group_name, ...rest } = step as any;
   return rest;
 }
 
@@ -192,11 +208,19 @@ function FlowPreview({ steps, name }: { steps: WorkflowStep[]; name: string }) {
         {/* STEPS */}
         {steps.map((step, i) => {
           const y = ny(i + 1);
-          const rc = roleHsl(step.assignee_role);
+          const rc = groupHsl(step.assignee_group);
           const isLast = i === steps.length - 1;
-          const assigneeLabel = step.assignee_type === "any_role"
-            ? (ROLES.find(r => r.value === step.assignee_role)?.label ?? step.assignee_role)
-            : (step.assignee_user_name ?? "Specific user");
+          const mode = ASSIGNEE_MODES.find(m => m.value === step.assignee_type);
+          let assigneeLabel = "Unassigned";
+          if (step.assignee_type === "specific_user") {
+            assigneeLabel = step.assignee_user_name ?? "Specific user";
+          } else if (step.assignee_group_name) {
+            const suffix =
+              step.assignee_type === "group_any" ? " · any member"
+              : step.assignee_type === "group_all" ? " · all members"
+              : ` · ${step.assignee_user_name ?? "specific member"}`;
+            assigneeLabel = `${step.assignee_group_name}${suffix}`;
+          }
           const stepName = step.name.length > 28 ? step.name.slice(0, 26) + "…" : step.name;
           const statusLbl = step.status_label.length > 22 ? step.status_label.slice(0, 20) + "…" : step.status_label;
 
@@ -214,7 +238,7 @@ function FlowPreview({ steps, name }: { steps: WorkflowStep[]; name: string }) {
                 <circle cx="0" cy="0" r="6" fill={rc} opacity="0.2" />
                 <circle cx="0" cy="0" r="3" fill={rc} />
                 <text x="12" y="3" fontSize={10.5} fill={`hsl(var(--muted-foreground))`}>
-                  {step.assignee_type === "any_role" ? `Role: ${assigneeLabel}` : `User: ${assigneeLabel}`}
+                  {mode?.label.split(" ")[0]}: {assigneeLabel.length > 28 ? assigneeLabel.slice(0, 26) + "…" : assigneeLabel}
                 </text>
               </g>
               <rect x={PAD + NW - 72} y={y + 14} width="64" height="20" rx="10" fill={`hsl(var(--muted))`} stroke={`hsl(var(--border))`} strokeWidth="0.5" />
@@ -254,12 +278,13 @@ function FlowPreview({ steps, name }: { steps: WorkflowStep[]; name: string }) {
 
 // ── StepCard ──────────────────────────────────────────────────────────────────
 function StepCard({
-  step, index, users, isDragOver, onChange, onRemove,
+  step, index, users, groups, isDragOver, onChange, onRemove,
   onDragStart, onDragOver, onDragEnd, onDrop,
 }: {
   step: WorkflowStep;
   index: number;
   users: AppUser[];
+  groups: Group[];
   isDragOver: boolean;
   onChange: (patch: Partial<WorkflowStep>) => void;
   onRemove: () => void;
@@ -270,7 +295,36 @@ function StepCard({
 }) {
   const [expanded, setExpanded] = useState(true);
   const [showAdvanced, setShowAdvanced] = useState(false);
-  const rc = roleHsl(step.assignee_role);
+  const rc = groupHsl(step.assignee_group);
+  const isGroupMode = step.assignee_type !== "specific_user";
+  const needsGroupMember = step.assignee_type === "group_specific";
+
+  const { data: groupMembers = [], isLoading: membersLoading } = useQuery<AppUser[]>({
+    queryKey: ["group-members", step.assignee_group],
+    queryFn: async () => {
+      const r = await groupsAPI.members(step.assignee_group!);
+      const raw: GroupMembershipApiItem[] = r.data?.results ?? r.data ?? [];
+
+      // API returns group memberships (with nested `user`) while this dropdown
+      // needs plain users. Normalize both shapes for safety.
+      return raw
+        .map((item) => item?.user ?? item)
+        .filter((u): u is AppUser => Boolean(u?.id && u?.email));
+    },
+    enabled: !!step.assignee_group && needsGroupMember,
+  });
+
+  const handleModeChange = (next: AssigneeType) => {
+    if (next === "specific_user") {
+      onChange({ assignee_type: next, assignee_group: null, assignee_group_name: undefined, assignee_user: null, assignee_user_name: undefined });
+    } else {
+      onChange({
+        assignee_type: next,
+        assignee_user: next === "group_specific" ? step.assignee_user : null,
+        assignee_user_name: next === "group_specific" ? step.assignee_user_name : undefined,
+      });
+    }
+  };
 
   return (
     <div
@@ -332,69 +386,84 @@ function StepCard({
               </datalist>
             </div>
 
-            <div>
-              <Label required tooltip="Who is responsible for this approval step?">Assignment type</Label>
-              <div className="flex gap-2">
-                <button
-                  onClick={() => onChange({ assignee_type: "any_role", assignee_user: null })}
-                  className={clsx("flex-1 px-3 py-2 text-sm rounded-lg border transition-all flex items-center justify-center gap-2",
-                    step.assignee_type === "any_role"
-                      ? "border-accent/40 bg-accent/10 text-foreground"
-                      : "border-border bg-card text-muted-foreground hover:bg-muted"
-                  )}
-                >
-                  <Users className="w-3.5 h-3.5" /> Role-based
-                </button>
-                <button
-                  onClick={() => onChange({ assignee_type: "specific_user", assignee_role: "", assignee_user: null })}
-                  className={clsx("flex-1 px-3 py-2 text-sm rounded-lg border transition-all flex items-center justify-center gap-2",
-                    step.assignee_type === "specific_user"
-                      ? "border-accent/40 bg-accent/10 text-foreground"
-                      : "border-border bg-card text-muted-foreground hover:bg-muted"
-                  )}
-                >
-                  <User className="w-3.5 h-3.5" /> Specific user
-                </button>
-              </div>
+            <div className="lg:col-span-2">
+              <Label required tooltip="Choose how this step is assigned">Assignment mode</Label>
+              <select
+                value={step.assignee_type}
+                onChange={e => handleModeChange(e.target.value as AssigneeType)}
+                className={inp}
+              >
+                {ASSIGNEE_MODES.map(m => (
+                  <option key={m.value} value={m.value}>{m.label} — {m.description}</option>
+                ))}
+              </select>
             </div>
 
-            {step.assignee_type === "any_role" ? (
-              <div>
-                <Label required>Select role</Label>
-                <div className="grid grid-cols-2 gap-2">
-                  {ROLES.map(r => {
-                    const active = step.assignee_role === r.value;
-                    return (
-                      <button
-                        key={r.value}
-                        onClick={() => onChange({ assignee_role: r.value })}
-                        className={clsx("flex items-center gap-2 px-3 py-2 rounded-lg border text-sm transition-all",
-                          active
-                            ? "border-foreground/20 bg-card text-foreground shadow-sm"
-                            : "border-border bg-card text-muted-foreground hover:bg-muted"
-                        )}
-                        style={active ? { boxShadow: `inset 3px 0 0 hsl(${r.token})` } : undefined}
-                      >
-                        <r.icon className="w-3.5 h-3.5" style={{ color: `hsl(${r.token})` }} />
-                        {r.label}
-                      </button>
-                    );
-                  })}
+            {isGroupMode ? (
+              <>
+                <div className={needsGroupMember ? "" : "lg:col-span-2"}>
+                  <Label required tooltip="Permission group responsible for this step">Group</Label>
+                  <select
+                    value={step.assignee_group ?? ""}
+                    onChange={e => {
+                      const id = e.target.value || null;
+                      const g = groups.find(x => x.id === id);
+                      onChange({
+                        assignee_group: id,
+                        assignee_group_name: g?.name,
+                        assignee_user: needsGroupMember ? null : step.assignee_user,
+                        assignee_user_name: needsGroupMember ? undefined : step.assignee_user_name,
+                      });
+                    }}
+                    className={inp}
+                  >
+                    <option value="">— Select group —</option>
+                    {groups.map(g => (
+                      <option key={g.id} value={g.id}>
+                        {g.name}{typeof g.member_count === "number" ? ` · ${g.member_count} member${g.member_count === 1 ? "" : "s"}` : ""}
+                      </option>
+                    ))}
+                  </select>
                 </div>
-              </div>
+
+                {needsGroupMember && (
+                  <div>
+                    <Label required tooltip="Specific member of the selected group">Member</Label>
+                    <select
+                      value={step.assignee_user ?? ""}
+                      onChange={e => {
+                        const id = e.target.value || null;
+                        const u = groupMembers.find(x => x.id === id);
+                        onChange({ assignee_user: id, assignee_user_name: u?.full_name });
+                      }}
+                      disabled={!step.assignee_group || membersLoading}
+                      className={inp}
+                    >
+                      <option value="">
+                        {!step.assignee_group ? "— Select a group first —" : membersLoading ? "Loading members…" : "— Select member —"}
+                      </option>
+                      {groupMembers.map(u => (
+                        <option key={u.id} value={u.id}>{u.full_name} · {u.email}</option>
+                      ))}
+                    </select>
+                  </div>
+                )}
+              </>
             ) : (
-              <div>
-                <Label required>Select user</Label>
+              <div className="lg:col-span-2">
+                <Label required>User</Label>
                 <select
                   value={step.assignee_user ?? ""}
-                  onChange={e => onChange({ assignee_user: e.target.value || null })}
+                  onChange={e => {
+                    const id = e.target.value || null;
+                    const u = users.find(x => x.id === id);
+                    onChange({ assignee_user: id, assignee_user_name: u?.full_name });
+                  }}
                   className={inp}
                 >
                   <option value="">— Select user —</option>
                   {users.map(u => (
-                    <option key={u.id} value={u.id}>
-                      {u.full_name} · {ROLES.find(r => r.value === u.role)?.label || u.role}
-                    </option>
+                    <option key={u.id} value={u.id}>{u.full_name} · {u.email}</option>
                   ))}
                 </select>
               </div>
@@ -739,6 +808,11 @@ function TemplateEditor({
     queryFn: () => usersAPI.list({ page_size: 200 }).then(r => r.data.results ?? r.data),
   });
 
+  const { data: groups } = useQuery<Group[]>({
+    queryKey: ["groups-all"],
+    queryFn: () => groupsAPI.list().then((r: any) => r.data.results ?? r.data),
+  });
+
   const saveMutation = useMutation({
     mutationFn: (payload: { name: string; description: string; steps: Partial<WorkflowStep>[] }) =>
       template
@@ -852,8 +926,15 @@ function TemplateEditor({
     if (steps.length === 0) { toast.error("Add at least one approval step"); return; }
     for (const s of steps) {
       if (!s.name.trim()) { toast.error(`Step ${s.order} needs a name`); return; }
-      if (s.assignee_type === "any_role" && !s.assignee_role) { toast.error(`"${s.name}" needs a role`); return; }
-      if (s.assignee_type === "specific_user" && !s.assignee_user) { toast.error(`"${s.name}" needs a user`); return; }
+      if (s.assignee_type !== "specific_user" && !s.assignee_group) {
+        toast.error(`"${s.name}" needs a group`); return;
+      }
+      if (s.assignee_type === "group_specific" && !s.assignee_user) {
+        toast.error(`"${s.name}" needs a specific group member`); return;
+      }
+      if (s.assignee_type === "specific_user" && !s.assignee_user) {
+        toast.error(`"${s.name}" needs a user`); return;
+      }
     }
 
     saveMutation.mutate({
@@ -1002,6 +1083,7 @@ function TemplateEditor({
                 step={step}
                 index={i}
                 users={users ?? []}
+                groups={groups ?? []}
                 isDragOver={dragOver === i}
                 onChange={p => patchStep(i, p)}
                 onRemove={() => removeStep(i)}
@@ -1044,10 +1126,10 @@ function TemplateEditor({
                 </div>
               </div>
               <div className="flex items-center gap-3 flex-wrap">
-                {ROLES.map(r => (
-                  <span key={r.value} className="flex items-center gap-1.5 text-xs text-muted-foreground">
-                    <span className="w-2.5 h-2.5 rounded-full" style={{ background: `hsl(${r.token})` }} />
-                    {r.label}
+                {ASSIGNEE_MODES.map(m => (
+                  <span key={m.value} className="flex items-center gap-1.5 text-xs text-muted-foreground">
+                    <m.Icon className="w-3 h-3 text-accent-foreground" />
+                    {m.label}
                   </span>
                 ))}
               </div>
