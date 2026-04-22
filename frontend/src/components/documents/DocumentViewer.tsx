@@ -484,6 +484,7 @@ function ImageViewer({ url: rawUrl }: { url: string }) {
 
 const POLL_INTERVAL_MS = 2_000;   // poll every 2 s
 const POLL_TIMEOUT_MS  = 240_000;  // give up after 4 minutes
+const FAILED_CONFIRM_DELAY_MS = 1_500; // guard against transient stale "failed"
 
 function OfficeEditPanel({
   doc,
@@ -503,8 +504,10 @@ function OfficeEditPanel({
   const [versionPolling, setVersionPolling]   = useState(false);
   const [previewProgress, setPreviewProgress] = useState(0);
   const [timedOut, setTimedOut]               = useState(false);
+  const [isConfirmingFailed, setIsConfirmingFailed] = useState(false);
   const previewPollRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const versionPollRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  const failedConfirmTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const startTimeRef = useRef<number | null>(null);
   // Tracks whether we are actively polling so the interval callback can
   // self-cancel without a stale-closure problem.
@@ -553,6 +556,14 @@ function OfficeEditPanel({
     }
   }, []);
 
+  const clearFailedConfirmation = useCallback(() => {
+    if (failedConfirmTimeoutRef.current) {
+      clearTimeout(failedConfirmTimeoutRef.current);
+      failedConfirmTimeoutRef.current = null;
+    }
+    setIsConfirmingFailed(false);
+  }, []);
+
   const startPolling = useCallback(() => {
     stopPolling();
     startTimeRef.current = Date.now();
@@ -596,24 +607,53 @@ function OfficeEditPanel({
   useEffect(() => {
     const s = preview?.preview_status;
     if (s === "pending" || s === "processing") {
+      clearFailedConfirmation();
       if (!pollingRef.current) {
         startPolling();
+      }
+    } else if (s === "failed") {
+      stopPolling();
+      if (!failedConfirmTimeoutRef.current && !timedOut) {
+        setIsConfirmingFailed(true);
+        failedConfirmTimeoutRef.current = setTimeout(async () => {
+          failedConfirmTimeoutRef.current = null;
+          try {
+            const result = await refetchPreview();
+            const nextStatus = result.data?.preview_status;
+            if (nextStatus !== "failed") {
+              setIsConfirmingFailed(false);
+              return;
+            }
+          } catch {
+            // If recheck fails, keep the current failed state visible.
+          }
+          setIsConfirmingFailed(false);
+        }, FAILED_CONFIRM_DELAY_MS);
       }
     } else {
       // Terminal state — ensure polling is stopped.
       stopPolling();
+      clearFailedConfirmation();
       if (s === "done") setPreviewProgress(100);
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [preview?.preview_status]);
+  }, [preview?.preview_status, timedOut, clearFailedConfirmation, refetchPreview, startPolling, stopPolling]);
 
   // Cleanup on unmount.
-  useEffect(() => () => stopPolling(), [stopPolling]);
+  useEffect(
+    () => () => {
+      stopPolling();
+      if (failedConfirmTimeoutRef.current) {
+        clearTimeout(failedConfirmTimeoutRef.current);
+      }
+    },
+    [stopPolling]
+  );
 
   const isConverting  =
     !timedOut && ["pending", "processing"].includes(preview?.preview_status ?? "");
   const hasPdf        = preview?.viewer === "pdfjs" && !!preview.url;
-  const previewFailed = preview?.preview_status === "failed" || timedOut;
+  const previewFailed = (preview?.preview_status === "failed" && !isConfirmingFailed) || timedOut;
   const webViewerUrl = useMemo(() => {
     const rawUrl = normalizeUrl(preview?.raw_url);
     if (!rawUrl) return "";
