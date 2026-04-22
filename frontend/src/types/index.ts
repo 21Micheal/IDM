@@ -147,6 +147,7 @@ export interface DocumentPreviewResponse {
   url: string;
   raw_url?: string;
   preview_status?: "pending" | "processing" | "done" | "failed" | "";
+  preview_error?: string;
 }
 
 export interface DocumentEditTokenResponse {

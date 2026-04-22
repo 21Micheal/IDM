@@ -113,6 +113,38 @@ function stepToPayload(step: WorkflowStep): Partial<WorkflowStep> {
   return rest;
 }
 
+function normalizeStep(step: WorkflowStep): WorkflowStep {
+  return {
+    ...step,
+    assignee_type: step.assignee_type === "any_role" ? "group_any" : step.assignee_type,
+  };
+}
+
+function formatApiError(value: unknown): string | null {
+  if (typeof value === "string") return value;
+  if (Array.isArray(value)) {
+    for (const item of value) {
+      const message = formatApiError(item);
+      if (message) return message;
+    }
+    return null;
+  }
+  if (value && typeof value === "object") {
+    const record = value as Record<string, unknown>;
+    for (const key of ["detail", "non_field_errors", "steps", "name"]) {
+      if (key in record) {
+        const message = formatApiError(record[key]);
+        if (message) return message;
+      }
+    }
+    for (const nested of Object.values(record)) {
+      const message = formatApiError(nested);
+      if (message) return message;
+    }
+  }
+  return null;
+}
+
 // ── Atoms ─────────────────────────────────────────────────────────────────────
 const inp = "input"; // global class from index.css
 
@@ -793,7 +825,7 @@ function TemplateEditor({
   const [name, setName] = useState(template?.name ?? (docType ? `${docType.name} Workflow` : "New Workflow Template"));
   const [description, setDescription] = useState(template?.description ?? "");
   const [steps, setSteps] = useState<WorkflowStep[]>(() =>
-    template?.steps?.slice().sort((a, b) => a.order - b.order).map(s => ({ ...s })) ?? []
+    template?.steps?.slice().sort((a, b) => a.order - b.order).map(s => normalizeStep({ ...s })) ?? []
   );
   const [activeTab, setTab] = useState<"steps" | "preview" | "rules">("steps");
   const [isDirty, setIsDirty] = useState(!template);
@@ -836,7 +868,7 @@ function TemplateEditor({
       onSaved(data, !template);
     },
     onError: (err: any) => {
-      const message = err?.response?.data?.detail || err?.response?.data?.name?.[0] || "Save failed";
+      const message = formatApiError(err?.response?.data) || "Save failed";
       toast.error(message);
     },
   });

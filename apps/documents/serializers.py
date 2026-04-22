@@ -26,6 +26,7 @@ from apps.accounts.serializers import UserSummarySerializer
 from apps.accounts.models import GroupAction
 from django.db import transaction, IntegrityError
 from django.utils.text import slugify
+import mimetypes
 
 
 class TagSerializer(serializers.ModelSerializer):
@@ -355,12 +356,18 @@ class DocumentUploadSerializer(serializers.ModelSerializer):
 
         # MIME detection
         try:
-            validated_data["file_mime_type"] = python_magic.from_buffer(
+            detected_mime = python_magic.from_buffer(
                 upload.read(2048), mime=True
             )
+            validated_data["file_mime_type"] = detected_mime
             upload.seek(0)
         except Exception:
             validated_data["file_mime_type"] = "application/octet-stream"
+
+        if validated_data["file_mime_type"] in ("", "application/octet-stream"):
+            fallback_mime, _ = mimetypes.guess_type(upload.name)
+            if fallback_mime:
+                validated_data["file_mime_type"] = fallback_mime
 
         # Images are always scanned regardless of the toggle
         if validated_data["file_mime_type"].startswith("image/"):

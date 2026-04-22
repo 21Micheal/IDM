@@ -41,14 +41,10 @@ class WorkflowTemplate(models.Model):
 
 class WorkflowStep(models.Model):
     ASSIGNEE_TYPES = [
-        ("any_role",      "Any user with role"),
+        ("group_any",     "Any member of group"),
+        ("group_all",     "All members of group"),
+        ("group_specific", "Specific member of group"),
         ("specific_user", "Specific user"),
-    ]
-    ROLE_CHOICES = [
-        ("admin",   "Administrator"),
-        ("finance", "Finance Staff"),
-        ("auditor", "Auditor"),
-        ("viewer",  "Viewer"),
     ]
 
     id            = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
@@ -58,8 +54,14 @@ class WorkflowStep(models.Model):
     order         = models.PositiveSmallIntegerField(db_index=True)
     name          = models.CharField(max_length=120)
     status_label  = models.CharField(max_length=80, default="Pending Approval")
-    assignee_type = models.CharField(max_length=20, choices=ASSIGNEE_TYPES, default="any_role")
-    assignee_role = models.CharField(max_length=20, blank=True)
+    assignee_type = models.CharField(max_length=20, choices=ASSIGNEE_TYPES, default="group_any")
+    assignee_group = models.ForeignKey(
+        "accounts.UserGroup",
+        null=True,
+        blank=True,
+        on_delete=models.SET_NULL,
+        related_name="workflow_steps",
+    )
     assignee_user = models.ForeignKey(
         settings.AUTH_USER_MODEL, null=True, blank=True,
         on_delete=models.SET_NULL, related_name="assigned_steps",

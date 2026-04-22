@@ -50,7 +50,7 @@ class WorkflowTemplateViewSet(viewsets.ModelViewSet):
     def get_queryset(self):
         return (
             WorkflowTemplate.objects
-            .prefetch_related("steps__assignee_user")
+            .prefetch_related("steps__assignee_user", "steps__assignee_group")
             .filter(is_active=True)
             .annotate(step_count_annotation=Count("steps"))
         )
@@ -88,7 +88,7 @@ class WorkflowTemplateViewSet(viewsets.ModelViewSet):
                 WorkflowStep.objects.create(
                     template=clone, order=step.order, name=step.name,
                     status_label=step.status_label, assignee_type=step.assignee_type,
-                    assignee_role=step.assignee_role, assignee_user=step.assignee_user,
+                    assignee_group=step.assignee_group, assignee_user=step.assignee_user,
                     sla_hours=step.sla_hours, allow_resubmit=step.allow_resubmit,
                     instructions=step.instructions,
                 )

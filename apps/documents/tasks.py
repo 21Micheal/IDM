@@ -42,12 +42,17 @@ from pathlib import Path
 from tempfile import TemporaryDirectory
 
 from celery import shared_task
+from django.core.cache import cache
 from django.db import transaction  # ← FIX: was missing, caused NameError
 
 logger = logging.getLogger(__name__)
 
 # Minimum average characters per PDF page before treating it as image-based
 _MIN_CHARS_PER_PAGE = 50
+
+
+def _preview_error_cache_key(document_id: str) -> str:
+    return f"document_preview_error:{document_id}"
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -388,18 +393,40 @@ def generate_document_preview(self, document_id: str):
         logger.warning("generate_document_preview: document %s not found", document_id)
         return
 
+    logger.info(
+        "generate_document_preview: start doc=%s mime=%s file=%s",
+        document_id,
+        doc.file_mime_type,
+        getattr(doc.file, "name", ""),
+    )
+
     if not doc.is_office_doc():
         Document.objects.filter(id=document_id).update(preview_status="")
         return
 
-    soffice_bin = (
+    configured_bin = (
         getattr(django_settings, "LIBREOFFICE_BIN", "").strip()
+        or getattr(django_settings, "LIBREOFFICE_CMD", "").strip()
+    )
+    if configured_bin and not Path(configured_bin).exists():
+        logger.warning(
+            "generate_document_preview: configured LibreOffice path %s does not exist; falling back to PATH lookup",
+            configured_bin,
+        )
+        configured_bin = ""
+    soffice_bin = (
+        configured_bin
         or shutil.which("libreoffice")
         or shutil.which("soffice")
     )
     timeout = int(getattr(django_settings, "LIBREOFFICE_TIMEOUT", 120))
 
     if not soffice_bin:
+        cache.set(
+            _preview_error_cache_key(document_id),
+            "LibreOffice binary not found in container PATH.",
+            timeout=60 * 60,
+        )
         Document.objects.filter(id=document_id).update(
             preview_status=PreviewStatus.FAILED
         )
@@ -408,6 +435,13 @@ def generate_document_preview(self, document_id: str):
             document_id,
         )
         return
+
+    logger.info(
+        "generate_document_preview: doc=%s using soffice=%s timeout=%ss",
+        document_id,
+        soffice_bin,
+        timeout,
+    )
 
     try:
         source_path = Path(doc.file.path)
@@ -428,6 +462,14 @@ def generate_document_preview(self, document_id: str):
                 check=False,
             )
 
+            logger.info(
+                "generate_document_preview: doc=%s cmd_done returncode=%s stdout=%r stderr=%r",
+                document_id,
+                result.returncode,
+                (result.stdout or "")[:1000],
+                (result.stderr or "")[:1000],
+            )
+
             preview_path = output_dir / f"{source_path.stem}.pdf"
             if not preview_path.exists():
                 pdfs = sorted(output_dir.glob("*.pdf"))
@@ -435,9 +477,11 @@ def generate_document_preview(self, document_id: str):
                     preview_path = pdfs[0]
 
             if result.returncode != 0 or not preview_path.exists():
+                produced = [p.name for p in output_dir.glob("*")]
                 raise RuntimeError(
                     f"LibreOffice conversion failed"
-                    f" (code={result.returncode}, stderr={result.stderr!r})"
+                    f" (code={result.returncode}, stdout={(result.stdout or '')[:500]!r},"
+                    f" stderr={(result.stderr or '')[:500]!r}, outdir={produced!r})"
                 )
 
             pdf_bytes = preview_path.read_bytes()
@@ -452,6 +496,7 @@ def generate_document_preview(self, document_id: str):
             )
             doc.preview_status = PreviewStatus.DONE
             doc.save(update_fields=["preview_pdf", "preview_status", "updated_at"])
+        cache.delete(_preview_error_cache_key(document_id))
 
         logger.info(
             "generate_document_preview: completed for %s (%d bytes)",
@@ -459,6 +504,7 @@ def generate_document_preview(self, document_id: str):
         )
 
     except (RuntimeError, subprocess.SubprocessError) as exc:
+        cache.set(_preview_error_cache_key(document_id), str(exc)[:2000], timeout=60 * 60)
         logger.error(
             "generate_document_preview: fatal error for %s: %s", document_id, exc
         )
@@ -467,6 +513,7 @@ def generate_document_preview(self, document_id: str):
         )
 
     except Exception as exc:
+        cache.set(_preview_error_cache_key(document_id), str(exc)[:2000], timeout=60 * 60)
         logger.error("generate_document_preview failed for %s: %s", document_id, exc)
         try:
             Document.objects.filter(id=document_id).update(

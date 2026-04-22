@@ -163,6 +163,14 @@ export const documentsAPI = {
   reOcr: (id: string) =>
     api.post(`/documents/${id}/re_ocr/`),
 
+  /**
+   * Explicitly (re-)trigger Office→PDF preview conversion.
+   * Use for retries after failure or when preview was never queued.
+   * POST — blocked when status is PROCESSING.
+   */
+  triggerPreview: (id: string) =>
+    api.post<{ detail: string; preview_status: string }>(`/documents/${id}/trigger_preview/`),
+
   /** Acquire edit lock + get launcher credentials. POST. */
   editToken: (id: string) =>
     api.post<DocumentEditTokenResponse>(`/documents/${id}/edit_token/`),

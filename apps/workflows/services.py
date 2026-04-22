@@ -21,14 +21,17 @@ New methods:
     - Fires notify_hold_released (unless auto=True, which is silent)
 """
 from django.db import transaction
+from django.db.models import Q
 from django.utils import timezone
 from datetime import timedelta
+from random import choice
 
 from .models import (
     WorkflowInstance, WorkflowTask, WorkflowTaskAction,
     WorkflowTemplate, WorkflowStep, WorkflowRule,
 )
 from apps.documents.models import DocumentStatus
+from apps.accounts.models import User
 
 
 class WorkflowError(Exception):
@@ -112,12 +115,12 @@ class WorkflowService:
         WorkflowTaskAction.objects.create(task=task, actor=actor, action="approved", comment=comment)
 
         instance   = task.workflow_instance
-        next_order = task.step.order + 1
+        step       = task.step
 
-        if instance.template.steps.filter(order=next_order).exists():
-            WorkflowService._activate_step(instance, order=next_order)
-        else:
-            WorkflowService._complete(instance, "approved")
+        if step.assignee_type == "group_all" and WorkflowService._has_active_step_tasks(instance, step.order):
+            return
+
+        WorkflowService._advance_step(instance, step.order)
 
     # ── Reject ─────────────────────────────────────────────────────────────
 
@@ -172,6 +175,7 @@ class WorkflowService:
         instance       = task.workflow_instance
         current_order  = task.step.order
         doc            = instance.document
+        WorkflowService._skip_active_tasks(instance, step_order=current_order)
 
         if return_to == "previous_step" and current_order > 1:
             # Step back to previous approver
@@ -267,9 +271,7 @@ class WorkflowService:
         if instance.status != "in_progress":
             raise WorkflowError("Only in-progress workflows can be cancelled.")
 
-        instance.tasks.filter(status__in=["in_progress", "held"]).update(
-            status="skipped", acted_at=timezone.now()
-        )
+        WorkflowService._skip_active_tasks(instance)
         instance.status       = "cancelled"
         instance.completed_at = timezone.now()
         instance.save(update_fields=["status", "completed_at"])
@@ -288,19 +290,23 @@ class WorkflowService:
             WorkflowService._complete(instance, "approved")
             return
 
-        assigned = WorkflowService._resolve_assignee(step)
         due      = (
             timezone.now() + timedelta(hours=step.sla_hours)
             if step.sla_hours else None
         )
 
-        task = WorkflowTask.objects.create(
-            workflow_instance=instance,
-            step=step,
-            assigned_to=assigned,
-            status="in_progress",
-            due_at=due,
-        )
+        assignees = WorkflowService._resolve_assignees(step)
+        tasks = []
+        for assigned in assignees:
+            tasks.append(
+                WorkflowTask.objects.create(
+                    workflow_instance=instance,
+                    step=step,
+                    assigned_to=assigned,
+                    status="in_progress",
+                    due_at=due,
+                )
+            )
 
         doc        = instance.document
         doc.status = step.status_label
@@ -311,23 +317,44 @@ class WorkflowService:
 
         try:
             from apps.notifications.tasks import notify_task_assigned
-            notify_task_assigned.delay(str(task.id))
+            for task in tasks:
+                notify_task_assigned.delay(str(task.id))
         except Exception:
             pass
 
     @staticmethod
-    def _resolve_assignee(step: WorkflowStep):
-        if step.assignee_type == "specific_user" and step.assignee_user_id:
-            return step.assignee_user
-        if step.assignee_type == "any_role" and step.assignee_role:
-            from apps.accounts.models import User
-            return (
-                User.objects
-                .filter(role=step.assignee_role, is_active=True)
-                .order_by("?")
-                .first()
-            )
-        return None
+    def _resolve_assignees(step: WorkflowStep):
+        if step.assignee_type == "specific_user":
+            if not step.assignee_user_id:
+                raise WorkflowError(f"Step '{step.name}' is missing its assigned user.")
+            return [step.assignee_user]
+
+        if step.assignee_type == "group_specific":
+            if not step.assignee_group_id or not step.assignee_user_id:
+                raise WorkflowError(f"Step '{step.name}' is missing its assigned group member.")
+            if not WorkflowService._is_active_group_member(step.assignee_group, step.assignee_user):
+                raise WorkflowError(
+                    f"Selected user is not an active member of group '{step.assignee_group.name}'."
+                )
+            return [step.assignee_user]
+
+        if step.assignee_type == "group_any":
+            members = WorkflowService._active_group_members(step.assignee_group)
+            if not members:
+                raise WorkflowError(
+                    f"Group '{step.assignee_group.name if step.assignee_group else step.name}' has no active members."
+                )
+            return [choice(members)]
+
+        if step.assignee_type == "group_all":
+            members = WorkflowService._active_group_members(step.assignee_group)
+            if not members:
+                raise WorkflowError(
+                    f"Group '{step.assignee_group.name if step.assignee_group else step.name}' has no active members."
+                )
+            return members
+
+        raise WorkflowError(f"Unsupported assignee type: {step.assignee_type}")
 
     @staticmethod
     def _assert_actionable(task: WorkflowTask) -> None:
@@ -337,7 +364,61 @@ class WorkflowService:
             )
 
     @staticmethod
+    def _has_active_step_tasks(instance: WorkflowInstance, order: int) -> bool:
+        return instance.tasks.filter(
+            step__order=order,
+            status__in=["in_progress", "held"],
+        ).exists()
+
+    @staticmethod
+    def _skip_active_tasks(instance: WorkflowInstance, step_order: int | None = None) -> None:
+        qs = instance.tasks.filter(status__in=["in_progress", "held"])
+        if step_order is not None:
+            qs = qs.filter(step__order=step_order)
+        qs.update(status="skipped", acted_at=timezone.now())
+
+    @staticmethod
+    def _advance_step(instance: WorkflowInstance, order: int) -> None:
+        WorkflowService._skip_active_tasks(instance, step_order=order)
+        next_order = order + 1
+        if instance.template.steps.filter(order=next_order).exists():
+            WorkflowService._activate_step(instance, order=next_order)
+        else:
+            WorkflowService._complete(instance, "approved")
+
+    @staticmethod
+    def _active_group_members(group):
+        if not group:
+            return []
+
+        now = timezone.now()
+        return list(
+            User.objects.filter(
+                is_active=True,
+                group_memberships__group=group,
+            ).filter(
+                Q(group_memberships__expires_at__isnull=True)
+                | Q(group_memberships__expires_at__gt=now)
+            ).distinct().order_by("email")
+        )
+
+    @staticmethod
+    def _is_active_group_member(group, user):
+        if not group or not user:
+            return False
+        now = timezone.now()
+        return User.objects.filter(
+            id=user.id,
+            is_active=True,
+            group_memberships__group=group,
+        ).filter(
+            Q(group_memberships__expires_at__isnull=True) |
+            Q(group_memberships__expires_at__gt=now)
+        ).exists()
+
+    @staticmethod
     def _complete(instance: WorkflowInstance, outcome: str) -> None:
+        WorkflowService._skip_active_tasks(instance)
         instance.status       = outcome
         instance.completed_at = timezone.now()
         instance.save(update_fields=["status", "completed_at"])

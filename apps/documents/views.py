@@ -7,10 +7,14 @@ DocumentTypeViewSet fix:
   input/output pattern.  Metadata fields are now saved correctly.
 """
 import hashlib
+import logging
+import mimetypes
 from urllib.parse import quote as urlquote
 
 from django.core.files.base import ContentFile
+from django.utils import timezone
 from django.db import transaction
+from django.conf import settings
 
 from django.core.cache import cache
 from django.shortcuts import get_object_or_404
@@ -40,6 +44,11 @@ from .serializers import (
 from .filters import DocumentFilter
 from .permissions import HasDocumentPermission
 from apps.audit.mixins import AuditMixin
+
+logger = logging.getLogger(__name__)
+
+def _preview_error_cache_key(document_id: str) -> str:
+    return f"document_preview_error:{document_id}"
 
 
 # ── Document Type ViewSet ─────────────────────────────────────────────────────
@@ -116,8 +125,10 @@ class DocumentViewSet(AuditMixin, viewsets.ModelViewSet):
             .select_related("document_type", "uploaded_by", "department", "edit_locked_by")
             .prefetch_related("tags", "versions")
         )
-        if user.is_auditor or user.is_finance:
+        # Admins, auditors, and finance roles see all documents.
+        if user.is_admin or user.is_auditor or user.is_finance:
             return qs
+        # Regular users see only documents they uploaded.
         return qs.filter(uploaded_by=user)
 
     def get_serializer_class(self):
@@ -128,18 +139,50 @@ class DocumentViewSet(AuditMixin, viewsets.ModelViewSet):
         return DocumentDetailSerializer
 
     def _queue_office_preview(self, doc: Document) -> None:
+        """
+        Queue a LibreOffice → PDF conversion task if one is not already running.
+
+        Eligible states for (re-)queuing:
+          ""       — never queued (fresh upload or version replacement)
+          FAILED   — previous attempt failed; allow retry
+          PENDING  — intentionally NOT re-queued here to avoid duplicate task
+                     deliveries from poll endpoints.
+
+        PROCESSING is intentionally excluded — a worker is actively converting.
+        DONE is excluded — preview already exists.
+        """
         if not doc.is_office_doc():
             return
         try:
             from .tasks import generate_document_preview
+            before_status = doc.preview_status or ""
+            # Move to PENDING only for brand-new or previously failed previews.
             updated = Document.objects.filter(
                 id=doc.id,
                 preview_status__in=["", PreviewStatus.FAILED],
+            ).exclude(
+                preview_status=PreviewStatus.PROCESSING,
             ).update(preview_status=PreviewStatus.PENDING)
-            if updated:
+
+            # Always queue the task for eligible states; the task's atomic claim
+            # (PENDING → PROCESSING) ensures only one worker proceeds.
+            current = Document.objects.values_list(
+                "preview_status", flat=True
+            ).get(id=doc.id)
+
+            logger.info(
+                "_queue_office_preview: doc=%s before=%s updated=%s after=%s",
+                doc.id,
+                before_status,
+                updated,
+                current,
+            )
+
+            if current == PreviewStatus.PENDING:
+                logger.info("_queue_office_preview: enqueue task for doc=%s", doc.id)
                 generate_document_preview.delay(str(doc.id))
         except Exception:
-            pass
+            logger.exception("_queue_office_preview: failed for doc=%s", doc.id)
 
     def create(self, request, *args, **kwargs):
         """Return DocumentDetailSerializer after upload (not the write shape)."""
@@ -235,7 +278,10 @@ class DocumentViewSet(AuditMixin, viewsets.ModelViewSet):
         doc.file = file
         doc.file_name = file.name
         doc.file_size = file.size
-        doc.file_mime_type = getattr(file, "content_type", "") or doc.file_mime_type
+        guessed_mime, _ = mimetypes.guess_type(file.name)
+        incoming_mime = getattr(file, "content_type", "") or guessed_mime or ""
+        if incoming_mime and incoming_mime != "application/octet-stream":
+            doc.file_mime_type = incoming_mime
         doc.checksum = checksum
         doc.current_version = new_version
         if doc.file_mime_type in (
@@ -336,8 +382,24 @@ class DocumentViewSet(AuditMixin, viewsets.ModelViewSet):
 
     @action(detail=True, methods=["get"])
     def preview_url(self, request, pk=None):
+        """
+        Poll endpoint for preview status.
+
+        IMPORTANT: This endpoint is polled every 2 seconds by the frontend
+        while an Office document is converting.  It must NOT:
+          - Re-queue the conversion task (that causes duplicate deliveries)
+          - Record an audit log entry (that floods the audit trail)
+
+        Queuing only happens in:
+          - create()          — fresh upload
+          - upload_version()  — new file version
+          - restore_version() — restored version
+          - trigger_preview() — explicit user retry
+        """
         doc = self.get_object()
-        self.record_audit("document.viewed", doc)
+        # NOTE: record_audit intentionally omitted — this endpoint is polled
+        # every 2 s during Office→PDF conversion; logging every poll floods
+        # the audit trail with hundreds of "document.viewed" entries.
 
         try:
             absolute_file_url = request.build_absolute_uri(doc.file.url)
@@ -363,27 +425,102 @@ class DocumentViewSet(AuditMixin, viewsets.ModelViewSet):
             })
 
         if doc.is_office_doc():
-            self._queue_office_preview(doc)
+            # Queue exactly once when status is blank (never queued).
+            # Do NOT queue for pending/processing polls.
+            if not doc.preview_status:
+                logger.info("preview_url: doc=%s blank status -> queue once", doc.id)
+                self._queue_office_preview(doc)
+
             doc.refresh_from_db()
 
-            preview_url = (
-                request.build_absolute_uri(doc.preview_pdf.url)
-                if doc.preview_pdf
-                else ""
+            preview_status = doc.preview_status or ""
+
+            # If status is blank (never queued), report as pending so the
+            # frontend shows the converting state.  The actual queuing was
+            # done at upload/version time; if it somehow wasn't, the user
+            # can use trigger_preview to kick it off explicitly.
+            if not preview_status:
+                preview_status = PreviewStatus.PENDING
+
+            logger.info(
+                "preview_url: doc=%s status=%s has_preview_pdf=%s",
+                doc.id,
+                preview_status,
+                bool(doc.preview_pdf),
             )
-            preview_status = doc.preview_status or PreviewStatus.PENDING
+            preview_error = cache.get(_preview_error_cache_key(str(doc.id)))
+
+            if preview_status == PreviewStatus.DONE and doc.preview_pdf:
+                preview_url = request.build_absolute_uri(doc.preview_pdf.url)
+                viewer = "pdfjs"
+            else:
+                preview_url = ""
+                viewer = "processing"
 
             return Response({
-                "viewer": "pdfjs" if preview_url and preview_status == PreviewStatus.DONE else "processing",
-                "url": preview_url or absolute_file_url,
+                "viewer": viewer,
+                "url": preview_url if preview_url else absolute_file_url,
                 "raw_url": absolute_file_url,
                 "preview_status": preview_status,
+                "preview_error": preview_error,
             })
 
         return Response({
             "viewer": "download",
             "url": absolute_file_url,
             "raw_url": absolute_file_url,
+        })
+
+    @action(detail=True, methods=["post"])
+    def trigger_preview(self, request, pk=None):
+        """
+        Explicitly (re-)trigger the Office→PDF preview conversion.
+
+        Use cases:
+          - User clicks "Retry" after a failed conversion.
+          - Admin wants to force regeneration.
+
+        Blocked when preview_status is PROCESSING (already in-flight).
+        Resets status to "" so _queue_office_preview will re-queue.
+        """
+        doc = self.get_object()
+
+        if not doc.is_office_doc():
+            return Response(
+                {"detail": "Preview generation is only supported for Office documents."},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        if doc.preview_status == PreviewStatus.PROCESSING:
+            stale_after = int(getattr(settings, "PREVIEW_PROCESSING_STALE_SECONDS", 300))
+            processing_age_s = max(
+                0,
+                int((timezone.now() - doc.updated_at).total_seconds()),
+            )
+            if processing_age_s < stale_after:
+                return Response(
+                    {"detail": "Preview generation is already in progress."},
+                    status=status.HTTP_400_BAD_REQUEST,
+                )
+            logger.warning(
+                "trigger_preview: doc=%s had stale processing state (%ss); resetting",
+                doc.id,
+                processing_age_s,
+            )
+
+        # Reset to blank so _queue_office_preview will pick it up.
+        Document.objects.filter(id=doc.id).update(
+            preview_status="",
+            preview_pdf=None,
+        )
+        cache.delete(_preview_error_cache_key(str(doc.id)))
+        doc.refresh_from_db()
+        self._queue_office_preview(doc)
+        self.record_audit("document.preview_triggered", doc)
+
+        return Response({
+            "detail": "Preview generation queued.",
+            "preview_status": PreviewStatus.PENDING,
         })
 
     @action(detail=True, methods=["post"])

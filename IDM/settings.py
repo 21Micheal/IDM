@@ -174,7 +174,10 @@ CELERY_BEAT_SCHEDULER = "django_celery_beat.schedulers:DatabaseScheduler"
 CELERY_TASK_ROUTES = {
     "apps.search.tasks.*": {"queue": "indexing"},
     "apps.notifications.tasks.*": {"queue": "notifications"},
-    "apps.documents.tasks.*":  {"queue": "ocr"}, 
+    # Route document tasks explicitly by workload type.
+    "apps.documents.tasks.ocr_document": {"queue": "ocr"},
+    "apps.documents.tasks.extract_text": {"queue": "indexing"},
+    "apps.documents.tasks.generate_document_preview": {"queue": "indexing"},
 }
 
 # ── Elasticsearch ─────────────────────────────────────────────────────────────
@@ -189,6 +192,11 @@ OCR_LANGUAGES = env("OCR_LANGUAGES", default="eng")
 OCR_DPI = env.int("OCR_DPI", default=300)
 
 LIBREOFFICE_CMD = env("LIBREOFFICE_CMD", default="libreoffice")
+# Backward-compatible alias used by tasks.py
+LIBREOFFICE_BIN = env("LIBREOFFICE_BIN", default=LIBREOFFICE_CMD)
+LIBREOFFICE_TIMEOUT = env.int("LIBREOFFICE_TIMEOUT", default=120)
+# If a preview stays in "processing" beyond this age, allow retry to reset it.
+PREVIEW_PROCESSING_STALE_SECONDS = env.int("PREVIEW_PROCESSING_STALE_SECONDS", default=300)
 
 AWS_TEXTRACT_REGION    = env("AWS_TEXTRACT_REGION", default="us-east-1")
 AWS_TEXTRACT_S3_BUCKET = env("AWS_TEXTRACT_S3_BUCKET", default="")

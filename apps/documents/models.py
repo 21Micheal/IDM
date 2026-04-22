@@ -17,6 +17,24 @@ from django.conf import settings
 from django.db import models
 from django.utils import timezone
 
+OFFICE_MIME_TYPES = {
+    "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+    "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+    "application/vnd.openxmlformats-officedocument.presentationml.presentation",
+    "application/msword",
+    "application/vnd.ms-excel",
+    "application/vnd.ms-powerpoint",
+}
+
+OFFICE_EXTENSIONS = {
+    ".doc", ".docx", ".docm", ".dot", ".dotx", ".dotm", ".rtf",
+    ".xls", ".xlsx", ".xlsm", ".xlsb", ".xlt", ".xltx", ".xltm",
+    ".ppt", ".pptx", ".pptm", ".pps", ".ppsx", ".pot", ".potx", ".potm",
+    ".odt", ".ods", ".odp",
+}
+
+IMAGE_EXTENSIONS = {".png", ".jpg", ".jpeg", ".gif", ".webp", ".svg", ".bmp", ".tif", ".tiff"}
+
 
 class DocumentType(models.Model):
     id               = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
@@ -247,19 +265,17 @@ class Document(models.Model):
         return os.path.splitext(self.file_name)[1].lower()
 
     def is_pdf(self):
-        return self.file_mime_type == "application/pdf"
+        return self.file_mime_type == "application/pdf" or self.get_file_extension() == ".pdf"
 
     def is_image(self):
-        return bool(self.file_mime_type) and self.file_mime_type.startswith("image/")
+        return (
+            bool(self.file_mime_type) and self.file_mime_type.startswith("image/")
+        ) or self.get_file_extension() in IMAGE_EXTENSIONS
 
     def is_office_doc(self):
-        return self.file_mime_type in (
-            "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
-            "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-            "application/vnd.openxmlformats-officedocument.presentationml.presentation",
-            "application/msword",
-            "application/vnd.ms-excel",
-            "application/vnd.ms-powerpoint",
+        return (
+            self.file_mime_type in OFFICE_MIME_TYPES
+            or self.get_file_extension() in OFFICE_EXTENSIONS
         )
 
     @property
