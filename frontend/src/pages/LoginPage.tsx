@@ -58,6 +58,10 @@ export default function LoginPage() {
     }
 
     // Warm the dashboard caches so the first protected screen has data immediately.
+    // Small artificial delay ensures the authStore update has propagated to Axios interceptors.
+    await new Promise((resolve) => setTimeout(resolve, 100));
+
+    // Warm the dashboard caches so the first protected screen has data immediately.
     await Promise.allSettled([
       qc.prefetchQuery({
         queryKey: ["documents", "recent"],

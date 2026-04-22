@@ -1,5 +1,9 @@
 import axios, { AxiosError, InternalAxiosRequestConfig } from "axios";
 import { useAuthStore } from "@/store/authStore";
+import type {
+  DocumentEditTokenResponse,
+  DocumentPreviewResponse,
+} from "@/types";
 
 function normalizeApiBase(rawBase: string): string {
   const trimmed = rawBase.replace(/\/+$/, "");
@@ -123,8 +127,6 @@ export const documentsAPI = {
   submit: (id: string) => api.post(`/documents/${id}/submit/`),
   archive: (id: string) => api.post(`/documents/${id}/archive/`),
 
-  previewUrl: (id: string) => api.get(`/documents/${id}/preview_url/`),
-
   uploadVersion: (
     id: string,
     formData: FormData,
@@ -159,7 +161,19 @@ export const documentsAPI = {
     }),
 
   reOcr: (id: string) =>
-  api.post(`/documents/${id}/re_ocr/`),
+    api.post(`/documents/${id}/re_ocr/`),
+
+  /** Acquire edit lock + get launcher credentials. POST. */
+  editToken: (id: string) =>
+    api.post<DocumentEditTokenResponse>(`/documents/${id}/edit_token/`),
+
+  /** Release the edit lock. POST. Called by launcher on exit, or manually. */
+  releaseLock: (id: string, force = false) =>
+    api.post<{ detail: string }>(`/documents/${id}/release_lock/`, { force }),
+
+  /** Get current preview URL. GET. Used for polling during Office→PDF conversion. */
+  previewUrl: (id: string) =>
+    api.get<DocumentPreviewResponse>(`/documents/${id}/preview_url/`),
 };
 
 export const documentTypesAPI = {

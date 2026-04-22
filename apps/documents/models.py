@@ -9,10 +9,13 @@ Changes from previous version
 4. Composite index on (is_scanned, ocr_status) for admin OCR queue views
 5. is_image() helper method
 """
-from django.db import models
-from django.conf import settings
-import uuid
+from datetime import timedelta
 import os
+import uuid
+
+from django.conf import settings
+from django.db import models
+from django.utils import timezone
 
 
 class DocumentType(models.Model):
@@ -129,6 +132,13 @@ class OCRStatus(models.TextChoices):
     FAILED     = "failed",     "Failed"
 
 
+class PreviewStatus(models.TextChoices):
+    PENDING    = "pending",    "Pending"
+    PROCESSING = "processing", "Processing"
+    DONE       = "done",       "Done"
+    FAILED     = "failed",     "Failed"
+
+
 class Document(models.Model):
     id               = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
     title            = models.CharField(max_length=255)
@@ -186,6 +196,37 @@ class Document(models.Model):
         help_text="Current state of the OCR text-extraction pipeline.",
     )
 
+    # ── Office preview fields ────────────────────────────────────────────────
+    preview_pdf = models.FileField(
+        upload_to="previews/",
+        blank=True,
+        null=True,
+        help_text="LibreOffice-converted PDF for in-browser preview of Office documents.",
+    )
+    preview_status = models.CharField(
+        max_length=20,
+        choices=PreviewStatus.choices,
+        blank=True,
+        default="",
+        db_index=True,
+        help_text="Conversion state for Office → PDF preview pipeline.",
+    )
+
+    # ── Application-level edit lock fields ───────────────────────────────────
+    edit_locked_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        null=True,
+        blank=True,
+        on_delete=models.SET_NULL,
+        related_name="document_locks",
+        help_text="User currently editing this document. Null when unlocked.",
+    )
+    edit_locked_at = models.DateTimeField(
+        null=True,
+        blank=True,
+        help_text="When the edit lock was last refreshed.",
+    )
+
     created_at     = models.DateTimeField(auto_now_add=True, db_index=True)
     updated_at     = models.DateTimeField(auto_now=True)
     extracted_text = models.TextField(blank=True)
@@ -215,9 +256,46 @@ class Document(models.Model):
         return self.file_mime_type in (
             "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
             "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            "application/vnd.openxmlformats-officedocument.presentationml.presentation",
             "application/msword",
             "application/vnd.ms-excel",
+            "application/vnd.ms-powerpoint",
         )
+
+    @property
+    def is_edit_locked(self) -> bool:
+        if not self.edit_locked_by_id or not self.edit_locked_at:
+            return False
+        return self.edit_locked_at >= timezone.now() - timedelta(hours=1)
+
+    @property
+    def edit_lock_holder(self):
+        if self.is_edit_locked:
+            return self.edit_locked_by
+        return None
+
+    def acquire_lock(self, user):
+        if self.is_edit_locked and self.edit_locked_by_id != user.id:
+            return False
+        self.edit_locked_by = user
+        self.edit_locked_at = timezone.now()
+        self.save(update_fields=["edit_locked_by", "edit_locked_at", "updated_at"])
+        return True
+
+    def refresh_lock(self, user):
+        if self.edit_locked_by_id != user.id:
+            return False
+        self.edit_locked_at = timezone.now()
+        self.save(update_fields=["edit_locked_at", "updated_at"])
+        return True
+
+    def release_lock(self, user=None, force: bool = False):
+        if not force and user and self.edit_locked_by_id and self.edit_locked_by_id != user.id:
+            return False
+        self.edit_locked_by = None
+        self.edit_locked_at = None
+        self.save(update_fields=["edit_locked_by", "edit_locked_at", "updated_at"])
+        return True
 
 
 class DocumentVersion(models.Model):

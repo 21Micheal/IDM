@@ -94,6 +94,9 @@ class DocumentListSerializer(serializers.ModelSerializer):
     uploaded_by        = UserSummarySerializer(read_only=True)
     tags               = TagSerializer(many=True, read_only=True)
     permissions        = serializers.SerializerMethodField()
+    preview_pdf        = serializers.SerializerMethodField()
+    is_edit_locked     = serializers.SerializerMethodField()
+    edit_locked_by_name = serializers.SerializerMethodField()
 
     class Meta:
         model  = Document
@@ -105,6 +108,8 @@ class DocumentListSerializer(serializers.ModelSerializer):
             "uploaded_by", "tags", "permissions",
             "is_self_upload",
             "is_scanned", "ocr_status",
+            "preview_pdf", "preview_status",
+            "edit_locked_by", "edit_locked_by_name", "edit_locked_at", "is_edit_locked",
             "current_version", "created_at", "updated_at",
         ]
 
@@ -124,6 +129,19 @@ class DocumentListSerializer(serializers.ModelSerializer):
             ]
         return sorted(user.get_all_permissions_for_doctype(str(obj.document_type_id)))
 
+    def get_preview_pdf(self, obj):
+        request = self.context.get("request")
+        if not obj.preview_pdf:
+            return None
+        return request.build_absolute_uri(obj.preview_pdf.url) if request else obj.preview_pdf.url
+
+    def get_is_edit_locked(self, obj):
+        return obj.is_edit_locked
+
+    def get_edit_locked_by_name(self, obj):
+        holder = obj.edit_lock_holder
+        return holder.get_full_name().strip() if holder else None
+
 
 class DocumentDetailSerializer(serializers.ModelSerializer):
     document_type    = DocumentTypeSerializer(read_only=True)
@@ -140,6 +158,9 @@ class DocumentDetailSerializer(serializers.ModelSerializer):
     versions    = DocumentVersionSerializer(many=True, read_only=True)
     comments    = serializers.SerializerMethodField()
     permissions = serializers.SerializerMethodField()
+    preview_pdf = serializers.SerializerMethodField()
+    is_edit_locked = serializers.SerializerMethodField()
+    edit_locked_by_name = serializers.SerializerMethodField()
 
     class Meta:
         model  = Document
@@ -155,6 +176,8 @@ class DocumentDetailSerializer(serializers.ModelSerializer):
             "uploaded_by",
             "is_self_upload",
             "is_scanned", "ocr_status",
+            "preview_pdf", "preview_status",
+            "edit_locked_by", "edit_locked_by_name", "edit_locked_at", "is_edit_locked",
             "current_version", "versions", "comments", "permissions",
             "created_at", "updated_at",
         ]
@@ -162,6 +185,8 @@ class DocumentDetailSerializer(serializers.ModelSerializer):
             "id", "reference_number", "file_name", "file_size", "file_mime_type",
             "checksum", "uploaded_by", "is_self_upload",
             "is_scanned", "ocr_status",
+            "preview_pdf", "preview_status",
+            "edit_locked_by", "edit_locked_by_name", "edit_locked_at", "is_edit_locked",
             "current_version", "created_at", "updated_at",
         ]
 
@@ -187,6 +212,19 @@ class DocumentDetailSerializer(serializers.ModelSerializer):
                 GroupAction.ARCHIVE.value,
             ]
         return sorted(user.get_all_permissions_for_doctype(str(obj.document_type_id)))
+
+    def get_preview_pdf(self, obj):
+        request = self.context.get("request")
+        if not obj.preview_pdf:
+            return None
+        return request.build_absolute_uri(obj.preview_pdf.url) if request else obj.preview_pdf.url
+
+    def get_is_edit_locked(self, obj):
+        return obj.is_edit_locked
+
+    def get_edit_locked_by_name(self, obj):
+        holder = obj.edit_lock_holder
+        return holder.get_full_name().strip() if holder else None
 
     def validate_metadata(self, value):
         is_self_upload = (

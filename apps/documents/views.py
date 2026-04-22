@@ -7,16 +7,29 @@ DocumentTypeViewSet fix:
   input/output pattern.  Metadata fields are now saved correctly.
 """
 import hashlib
+from urllib.parse import quote as urlquote
 
+from django.core.files.base import ContentFile
+from django.db import transaction
+
+from django.core.cache import cache
+from django.shortcuts import get_object_or_404
+from django_filters.rest_framework import DjangoFilterBackend
 from rest_framework import viewsets, status, permissions
 from rest_framework.decorators import action
-from rest_framework.response import Response
-from rest_framework.parsers import MultiPartParser, FormParser, JSONParser
-from django_filters.rest_framework import DjangoFilterBackend
 from rest_framework.filters import SearchFilter, OrderingFilter
-from django.shortcuts import get_object_or_404
+from rest_framework.parsers import MultiPartParser, FormParser, JSONParser
+from rest_framework.response import Response
+from rest_framework_simplejwt.tokens import AccessToken
 
-from .models import Document, DocumentType, DocumentVersion, Tag, DocumentStatus
+from .models import (
+    Document,
+    DocumentType,
+    DocumentVersion,
+    Tag,
+    DocumentStatus,
+    PreviewStatus,
+)
 from .serializers import (
     DocumentListSerializer, DocumentDetailSerializer,
     DocumentUploadSerializer, DocumentTypeSerializer, DocumentTypeWriteSerializer,
@@ -100,7 +113,7 @@ class DocumentViewSet(AuditMixin, viewsets.ModelViewSet):
         user = self.request.user
         qs   = (
             Document.objects
-            .select_related("document_type", "uploaded_by", "department")
+            .select_related("document_type", "uploaded_by", "department", "edit_locked_by")
             .prefetch_related("tags", "versions")
         )
         if user.is_auditor or user.is_finance:
@@ -114,11 +127,27 @@ class DocumentViewSet(AuditMixin, viewsets.ModelViewSet):
             return DocumentUploadSerializer
         return DocumentDetailSerializer
 
+    def _queue_office_preview(self, doc: Document) -> None:
+        if not doc.is_office_doc():
+            return
+        try:
+            from .tasks import generate_document_preview
+            updated = Document.objects.filter(
+                id=doc.id,
+                preview_status__in=["", PreviewStatus.FAILED],
+            ).update(preview_status=PreviewStatus.PENDING)
+            if updated:
+                generate_document_preview.delay(str(doc.id))
+        except Exception:
+            pass
+
     def create(self, request, *args, **kwargs):
         """Return DocumentDetailSerializer after upload (not the write shape)."""
         serializer = self.get_serializer(data=request.data)
         serializer.is_valid(raise_exception=True)
         doc = serializer.save()
+        self._queue_office_preview(doc)
+        doc.refresh_from_db()
         return Response(
             DocumentDetailSerializer(doc, context=self.get_serializer_context()).data,
             status=status.HTTP_201_CREATED,
@@ -203,109 +232,217 @@ class DocumentViewSet(AuditMixin, viewsets.ModelViewSet):
             created_by=request.user,
         )
         file.seek(0)
-        doc.file            = file
-        doc.file_name       = file.name
-        doc.file_size       = file.size
-        doc.checksum        = checksum
+        doc.file = file
+        doc.file_name = file.name
+        doc.file_size = file.size
+        doc.file_mime_type = getattr(file, "content_type", "") or doc.file_mime_type
+        doc.checksum = checksum
         doc.current_version = new_version
-        doc.save()
-        self.record_audit("document.version_uploaded", doc, {"version": new_version})
-        return Response(DocumentVersionSerializer(version).data, status=201)
-
-    @action(detail=True, methods=["post"])
-    def restore_version(self, request, pk=None):
-        doc        = self.get_object()
-        version_id = request.data.get("version_id")
-        version    = get_object_or_404(DocumentVersion, id=version_id, document=doc)
-        if version.version_number == doc.current_version:
-            return Response({"detail": "Already the current version."}, status=400)
-        doc.file            = version.file
-        doc.file_name       = version.file_name
-        doc.file_size       = version.file_size
-        doc.checksum        = version.checksum
-        doc.current_version = version.version_number
-        doc.save()
-        self.record_audit("document.version_restored", doc, {"version": version.version_number})
-        return Response({"detail": f"Restored to version {version.version_number}"})
-
-    @action(detail=True, methods=["get"])
-    def preview_url(self, request, pk=None):
-        """
-        Returns viewer type + URLs for the document.
-
-        For Office files (docx/xlsx/pptx) we return TWO urls:
-          - url        : the WebDAV endpoint with ?token= (for the iframe
-                         viewer — Microsoft/Google Online can GET it without
-                         custom headers since the token is in the query string)
-          - file_url   : the absolute media URL (for the download button,
-                         and for the LibreOffice/Word desktop URI)
-
-        For PDF and images:
-          - url        : absolute media URL (PDF.js and <img> pass the JWT
-                         as a header via the httpHeaders option / fetch)
-
-        Using request.build_absolute_uri() ensures the ngrok / production
-        hostname is reflected instead of the internal container address.
-        Requires USE_X_FORWARDED_HOST = True in settings.py.
-        """
-        doc = self.get_object()
-        self.record_audit("document.viewed", doc)
-
-        try:
-            relative_url = doc.file.url
-        except ValueError:
-            return Response({"detail": "No file attached."}, status=400)
-
-        absolute_file_url = request.build_absolute_uri(relative_url)
-
-        # Build the WebDAV URL with the JWT embedded as ?token= so
-        # Office Online viewers can fetch the file without custom headers.
-        from urllib.parse import quote as urlquote
-        from rest_framework_simplejwt.tokens import AccessToken as AT
-        token = str(AT.for_user(request.user))
-        api_base = request.build_absolute_uri("/api/v1")
-        webdav_url = (
-            f"{api_base}/documents/webdav/{doc.id}"
-            f"/{urlquote(doc.file_name)}?token={token}"
-        )
-
-        mime = doc.file_mime_type or ""
-
-        if mime == "application/pdf":
-            return Response({
-                "viewer":   "pdfjs",
-                "url":      absolute_file_url,
-                "file_url": absolute_file_url,
-            })
-
-        if mime.startswith("image/"):
-            return Response({
-                "viewer":   "image",
-                "url":      absolute_file_url,
-                "file_url": absolute_file_url,
-            })
-
-        if mime in (
+        if doc.file_mime_type in (
             "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
             "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
             "application/vnd.openxmlformats-officedocument.presentationml.presentation",
             "application/msword",
             "application/vnd.ms-excel",
+            "application/vnd.ms-powerpoint",
         ):
+            if doc.preview_pdf:
+                doc.preview_pdf.delete(save=False)
+            doc.preview_pdf = None
+            doc.preview_status = ""
+        else:
+            if doc.preview_pdf:
+                doc.preview_pdf.delete(save=False)
+            doc.preview_pdf = None
+            doc.preview_status = ""
+        doc.save()
+        self._queue_office_preview(doc)
+        self.record_audit("document.version_uploaded", doc, {"version": new_version})
+        return Response(DocumentVersionSerializer(version).data, status=201)
+
+    @action(detail=True, methods=["post"])
+    def restore_version(self, request, pk=None):
+        doc = self.get_object()
+        version_id = request.data.get("version_id")
+        version = get_object_or_404(DocumentVersion, id=version_id, document=doc)
+
+        if version.version_number == doc.current_version:
+            return Response({"detail": "Already the current version."}, status=400)
+
+        try:
+            version.file.open("rb")
+            content = version.file.read()
+        except Exception:
+            return Response({"detail": "Version file could not be read."}, status=400)
+        finally:
+            try:
+                version.file.close()
+            except Exception:
+                pass
+
+        new_version = doc.current_version + 1
+
+        with transaction.atomic():
+            restored_version = DocumentVersion(
+                document=doc,
+                version_number=new_version,
+                file_name=version.file_name,
+                file_size=version.file_size,
+                checksum=version.checksum,
+                change_summary=f"Restored from v{version.version_number}",
+                created_by=request.user,
+            )
+            restored_version.file.save(
+                version.file_name,
+                ContentFile(content, name=version.file_name),
+                save=False,
+            )
+            restored_version.save()
+
+            if doc.preview_pdf:
+                doc.preview_pdf.delete(save=False)
+
+            doc.file.save(
+                version.file_name,
+                ContentFile(content, name=version.file_name),
+                save=False,
+            )
+            doc.file_name = version.file_name
+            doc.file_size = version.file_size
+            doc.file_mime_type = doc.file_mime_type
+            doc.checksum = version.checksum
+            doc.current_version = new_version
+            doc.preview_pdf = None
+            doc.preview_status = ""
+            doc.save(update_fields=[
+                "file",
+                "file_name",
+                "file_size",
+                "checksum",
+                "current_version",
+                "preview_pdf",
+                "preview_status",
+                "updated_at",
+            ])
+
+        self._queue_office_preview(doc)
+
+        self.record_audit(
+            "document.version_restored",
+            doc,
+            {"restored_from": version.version_number, "version": new_version},
+        )
+        return Response(DocumentVersionSerializer(restored_version).data, status=201)
+
+    @action(detail=True, methods=["get"])
+    def preview_url(self, request, pk=None):
+        doc = self.get_object()
+        self.record_audit("document.viewed", doc)
+
+        try:
+            absolute_file_url = request.build_absolute_uri(doc.file.url)
+        except ValueError:
+            return Response({"detail": "No file attached."}, status=400)
+
+        mime = doc.file_mime_type or ""
+
+        if mime == "application/pdf":
             return Response({
-                "viewer":    "google_docs",
-                # Office Online viewers use this URL — it carries the JWT
-                "url":       webdav_url,
-                # Raw file URL for download button and desktop Office URI
-                "file_url":  absolute_file_url,
-                "webdav_url": webdav_url,
+                "viewer": "pdfjs",
+                "url": absolute_file_url,
+                "raw_url": absolute_file_url,
+                "preview_status": "done",
+            })
+
+        if mime.startswith("image/"):
+            return Response({
+                "viewer": "image",
+                "url": absolute_file_url,
+                "raw_url": absolute_file_url,
+                "preview_status": "done",
+            })
+
+        if doc.is_office_doc():
+            self._queue_office_preview(doc)
+            doc.refresh_from_db()
+
+            preview_url = (
+                request.build_absolute_uri(doc.preview_pdf.url)
+                if doc.preview_pdf
+                else ""
+            )
+            preview_status = doc.preview_status or PreviewStatus.PENDING
+
+            return Response({
+                "viewer": "pdfjs" if preview_url and preview_status == PreviewStatus.DONE else "processing",
+                "url": preview_url or absolute_file_url,
+                "raw_url": absolute_file_url,
+                "preview_status": preview_status,
             })
 
         return Response({
-            "viewer":   "download",
-            "url":      absolute_file_url,
-            "file_url": absolute_file_url,
+            "viewer": "download",
+            "url": absolute_file_url,
+            "raw_url": absolute_file_url,
         })
+
+    @action(detail=True, methods=["post"])
+    def edit_token(self, request, pk=None):
+        doc = self.get_object()
+
+        if not doc.acquire_lock(request.user):
+            holder = doc.edit_lock_holder
+            holder_name = holder.get_full_name().strip() if holder else "another user"
+            return Response(
+                {"detail": f"Locked by {holder_name}", "locked_by": holder_name},
+                status=423,
+            )
+
+        jwt_token = str(AccessToken.for_user(request.user))
+        api_base = request.build_absolute_uri("/api/v1").rstrip("/")
+        file_url = request.build_absolute_uri(doc.file.url)
+        webdav_url = (
+            f"{api_base}/documents/webdav/{doc.id}/{urlquote(doc.file_name)}"
+            f"?token={jwt_token}"
+        )
+        release_url = f"{api_base}/documents/{doc.id}/release_lock/"
+
+        cache.set(
+            f"webdav_edit_token:{jwt_token}",
+            {"user_id": str(request.user.id), "document_id": str(doc.id)},
+            timeout=3600,
+        )
+
+        self.record_audit("document.edit_lock_acquired", doc)
+
+        return Response({
+            "token": jwt_token,
+            "username": request.user.email,
+            "webdav_url": webdav_url,
+            "file_url": file_url,
+            "release_url": release_url,
+            "jwt_token": jwt_token,
+            "expires_in": 3600,
+            "doc_id": str(doc.id),
+            "file_name": doc.file_name,
+            "mime_type": doc.file_mime_type,
+        })
+
+    @action(detail=True, methods=["post"])
+    def release_lock(self, request, pk=None):
+        doc = self.get_object()
+        raw_force = request.data.get("force")
+        force = (
+            str(raw_force).lower() in {"1", "true", "yes", "on"}
+            if raw_force is not None
+            else False
+        ) and request.user.is_admin
+
+        if not doc.release_lock(user=request.user, force=force):
+            return Response({"detail": "Lock held by another user."}, status=423)
+
+        self.record_audit("document.edit_lock_released", doc)
+        return Response({"detail": "Lock released."})
 
     @action(detail=True, methods=["get", "post"])
     def comments(self, request, pk=None):

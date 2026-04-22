@@ -36,7 +36,7 @@ function DynamicField({ field, register, control, errors, enforceRequired }: {
           render={({ field: f }) => (
             <select {...f} className="input">
               <option value="">Select…</option>
-              {field.select_options.map((opt) => <option key={opt} value={opt}>{opt}</option>)}
+              {(field.select_options ?? []).map((opt) => <option key={opt} value={opt}>{opt}</option>)}
             </select>
           )} />
         {errMsg && <p className="text-destructive text-xs mt-1">{errMsg}</p>}

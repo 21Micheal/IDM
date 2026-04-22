@@ -188,6 +188,8 @@ TESSERACT_CMD = env("TESSERACT_CMD", default="")
 OCR_LANGUAGES = env("OCR_LANGUAGES", default="eng")
 OCR_DPI = env.int("OCR_DPI", default=300)
 
+LIBREOFFICE_CMD = env("LIBREOFFICE_CMD", default="libreoffice")
+
 AWS_TEXTRACT_REGION    = env("AWS_TEXTRACT_REGION", default="us-east-1")
 AWS_TEXTRACT_S3_BUCKET = env("AWS_TEXTRACT_S3_BUCKET", default="")
 

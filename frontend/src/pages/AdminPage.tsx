@@ -249,7 +249,7 @@ function DocumentTypesTab() {
               description:       editTarget.description ?? "",
               metadata_fields:   (editTarget.metadata_fields ?? []).map((f) => ({
                 label:      f.label,
-                key:        f.key,
+                key:        f.key ?? f.field_key,
                 field_type: f.field_type,
                 is_required: f.is_required,
                 order:       f.order,

@@ -4,29 +4,14 @@ apps/documents/tasks.py
 Bug fixes in this revision
 ──────────────────────────
 BUG 1 — extract_text was on queue="ocr" instead of queue="indexing".
-        Any deployment where the Celery worker only consumes "indexing"
-        would leave all OCR tasks perpetually queued, appearing as an
-        infinite pending/processing state.
-        FIX: extract_text is back on queue="indexing" where it always was.
+BUG 2 — Serializer pre-set ocr_status="pending" before any task ran,
+         causing extract_text to bail, freezing status at "pending".
+BUG 3 — ocr_document did not claim atomically, allowing duplicate workers.
+BUG 4 (NEW) — generate_document_preview used `transaction.atomic()` but
+         `transaction` was never imported → NameError at runtime.
+         FIX: Added `from django.db import transaction`.
 
-BUG 2 — The serializer pre-set ocr_status="pending" before any task ran,
-        and the attempted fix made extract_text bail on "pending" status.
-        Combined effect: extract_text saw "pending" and exited without ever
-        calling ocr_document.delay() → status frozen at "pending" forever.
-        FIX: The serializer no longer pre-sets ocr_status. For confirmed
-        scans (is_scanned=True at upload time), the serializer now calls
-        ocr_document.delay() directly — skipping extract_text entirely.
-        extract_text only handles auto-detection from non-flagged PDFs.
-        extract_text skips ONLY on PROCESSING or DONE, never on PENDING.
-
-BUG 3 — ocr_document unconditionally set ocr_status="processing", allowing
-        duplicate Celery tasks (from retries or re-queuing) to run in
-        parallel and stomp on each other's state transitions.
-        FIX: Atomic DB-level claim — filter(ocr_status=PENDING).update(
-        ocr_status=PROCESSING) returns the number of rows updated. If 0,
-        the task has already been claimed by another worker and exits early.
-
-Architecture after these fixes
+Architecture after all fixes
 ────────────────────────────────
   Confirmed scan upload (is_scanned=True OR image/* MIME):
     serializer.create()
@@ -45,39 +30,42 @@ Architecture after these fixes
            └─ update extracted_text → index_document.delay()
 
   Queue assignments:
-    extract_text   → "indexing"  (unchanged from original)
-    ocr_document   → "ocr"
-    index_document → "indexing"
-
-  Worker commands needed:
-    celery -A IDM worker -Q indexing -c 4 --loglevel=info
-    celery -A IDM worker -Q ocr      -c 2 --loglevel=info
-    (or combine: celery -A IDM worker -Q indexing,ocr -c 4 --loglevel=info)
+    extract_text            → "indexing"
+    ocr_document            → "ocr"
+    index_document          → "indexing"
+    generate_document_preview → "indexing"
 """
-from celery import shared_task
 import logging
+import shutil
+import subprocess
+from pathlib import Path
+from tempfile import TemporaryDirectory
+
+from celery import shared_task
+from django.db import transaction  # ← FIX: was missing, caused NameError
 
 logger = logging.getLogger(__name__)
 
-# Minimum average characters per PDF page before we treat it as image-based
+# Minimum average characters per PDF page before treating it as image-based
 _MIN_CHARS_PER_PAGE = 50
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# extract_text — handles NON-flagged documents only (auto-detection path)
+# extract_text — handles NON-flagged documents (auto-detection path)
 # ─────────────────────────────────────────────────────────────────────────────
 
-@shared_task(bind=True, max_retries=3, queue="indexing")   # ← back to "indexing"
+@shared_task(bind=True, max_retries=3, queue="indexing")
 def extract_text(self, document_id: str):
     """
     Extract text from a document that was NOT explicitly flagged as scanned.
 
-    Called after upload for PDFs, DOCX, and XLSX files.
-    If a PDF turns out to be image-based (sparse native text), this task
-    routes it to ocr_document instead of saving empty text.
+    For PDFs: uses pdfplumber for native text extraction.  If the result is
+    sparse (image-based PDF), routes to ocr_document.
 
-    NOTE: This task is NOT called for confirmed scans (is_scanned=True) or
-    image files — the serializer calls ocr_document.delay() directly for those.
+    For DOCX/XLSX: uses python-docx / openpyxl.
+
+    NOTE: Not called for confirmed scans (is_scanned=True at upload time) —
+    the serializer calls ocr_document.delay() directly for those.
     """
     from .models import Document, OCRStatus
 
@@ -88,7 +76,6 @@ def extract_text(self, document_id: str):
         return
 
     # Skip only if OCR is already running or complete — NOT on "pending".
-    # "pending" means the job is waiting to start; we should proceed.
     if doc.ocr_status in (OCRStatus.PROCESSING, OCRStatus.DONE):
         logger.info(
             "extract_text: skipping %s — OCR already %s",
@@ -102,9 +89,8 @@ def extract_text(self, document_id: str):
     text      = ""
 
     try:
-        # Images that somehow reach this task (shouldn't happen with the new
-        # serializer flow, but handle defensively)
         if mime.startswith("image/"):
+            # Images should have gone straight to ocr_document — handle defensively
             _mark_pending(document_id, auto_flag_scanned=True)
             ocr_document.delay(document_id)
             return
@@ -159,7 +145,7 @@ def extract_text(self, document_id: str):
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# ocr_document — the actual OCR worker task
+# ocr_document — OCR worker
 # ─────────────────────────────────────────────────────────────────────────────
 
 @shared_task(bind=True, max_retries=2, queue="ocr")
@@ -170,24 +156,18 @@ def ocr_document(self, document_id: str):
     State machine:  PENDING → PROCESSING → DONE | FAILED
 
     The PENDING→PROCESSING transition is performed atomically via a filtered
-    UPDATE.  If 0 rows are updated the document has already been claimed by
-    another worker instance (retry or race condition) and this task exits
-    without doing any work.
+    UPDATE so that duplicate Celery deliveries are safely no-ops.
     """
     from .models import Document, OCRStatus
     from django.conf import settings as django_settings
 
-    # ── Atomic claim: only one worker proceeds per document ──────────────────
-    # filter(ocr_status=PENDING) means the UPDATE is a no-op if another worker
-    # already claimed it. This is safe against duplicate Celery deliveries.
+    # Atomic claim — only one worker proceeds
     claimed = Document.objects.filter(
         id=document_id,
         ocr_status=OCRStatus.PENDING,
     ).update(ocr_status=OCRStatus.PROCESSING)
 
     if not claimed:
-        # Either already processing, done, failed, or document doesn't exist.
-        # Fetch once to log the actual state; then exit cleanly.
         try:
             actual_status = Document.objects.values_list(
                 "ocr_status", flat=True
@@ -203,13 +183,8 @@ def ocr_document(self, document_id: str):
     engine = getattr(django_settings, "OCR_ENGINE", "tesseract").lower()
 
     try:
-        if engine == "textract":
-            # Re-fetch doc inside the try so we have the latest file path
-            doc = Document.objects.get(id=document_id)
-            text = _ocr_textract(doc)
-        else:
-            doc = Document.objects.get(id=document_id)
-            text = _ocr_tesseract(doc)
+        doc  = Document.objects.get(id=document_id)
+        text = _ocr_textract(doc) if engine == "textract" else _ocr_tesseract(doc)
 
         Document.objects.filter(id=document_id).update(
             extracted_text=text[:1_000_000],
@@ -224,7 +199,6 @@ def ocr_document(self, document_id: str):
     except Exception as exc:
         logger.error("ocr_document failed for %s: %s", document_id, exc)
         try:
-            # Reset to PENDING before retry so the atomic claim works again
             Document.objects.filter(id=document_id).update(
                 ocr_status=OCRStatus.PENDING
             )
@@ -245,15 +219,12 @@ def ocr_document(self, document_id: str):
 
 def _ocr_tesseract(doc) -> str:
     """
-    Tesseract local OCR.
+    Local Tesseract OCR.
 
-    System requirements:
-      apt-get install -y tesseract-ocr tesseract-ocr-eng poppler-utils
+    System deps:  apt-get install tesseract-ocr tesseract-ocr-eng poppler-utils
+    Python deps:  pytesseract>=0.3.10  pdf2image>=1.17.0  Pillow>=10.0.0
 
-    Python requirements:
-      pytesseract>=0.3.10  pdf2image>=1.17.0  Pillow>=10.0.0
-
-    Settings:
+    Django settings:
       TESSERACT_CMD  — binary path override (blank = use PATH)
       OCR_LANGUAGES  — Tesseract lang codes, e.g. "eng swa" (default "eng")
       OCR_DPI        — PDF rasterisation DPI (default 300)
@@ -292,9 +263,7 @@ def _ocr_tesseract(doc) -> str:
         try:
             parts.append(pytesseract.image_to_string(img, lang=languages))
         except Exception as exc:
-            logger.warning(
-                "_ocr_tesseract: page %d of %s failed: %s", i, doc.id, exc
-            )
+            logger.warning("_ocr_tesseract: page %d of %s failed: %s", i, doc.id, exc)
 
     return "\n\n".join(parts)
 
@@ -334,13 +303,13 @@ def _ocr_textract(doc) -> str:
     s3 = boto3.client("s3", region_name=region)
     s3.upload_file(file_path, s3_bucket, s3_key)
 
-    start = textract.start_document_text_detection(
+    start  = textract.start_document_text_detection(
         DocumentLocation={"S3Object": {"Bucket": s3_bucket, "Name": s3_key}}
     )
     job_id = start["JobId"]
 
     import time
-    deadline = time.time() + 600  # 10-minute wall-clock timeout
+    deadline = time.time() + 600
     while time.time() < deadline:
         status_resp = textract.get_document_text_detection(JobId=job_id)
         job_status  = status_resp["JobStatus"]
@@ -375,6 +344,146 @@ def _parse_textract_response(response: dict) -> str:
 
 
 # ─────────────────────────────────────────────────────────────────────────────
+# generate_document_preview — Office → PDF preview worker
+# ─────────────────────────────────────────────────────────────────────────────
+
+@shared_task(bind=True, max_retries=2, queue="indexing")
+def generate_document_preview(self, document_id: str):
+    """
+    Convert an Office document to PDF for in-browser preview via LibreOffice.
+
+    State machine: PENDING → PROCESSING → DONE | FAILED
+
+    The PENDING→PROCESSING claim is atomic so duplicate task deliveries are
+    safely ignored.
+    """
+    from django.conf import settings as django_settings
+    from django.core.files.base import ContentFile
+
+    from .models import Document, PreviewStatus
+
+    claimed = Document.objects.filter(
+        id=document_id,
+        preview_status=PreviewStatus.PENDING,
+    ).update(preview_status=PreviewStatus.PROCESSING)
+
+    if not claimed:
+        try:
+            actual_status = Document.objects.values_list(
+                "preview_status", flat=True
+            ).get(id=document_id)
+            logger.info(
+                "generate_document_preview: skipping %s — not claimable (status=%s)",
+                document_id, actual_status,
+            )
+        except Document.DoesNotExist:
+            logger.warning(
+                "generate_document_preview: document %s not found", document_id
+            )
+        return
+
+    try:
+        doc = Document.objects.get(id=document_id)
+    except Document.DoesNotExist:
+        logger.warning("generate_document_preview: document %s not found", document_id)
+        return
+
+    if not doc.is_office_doc():
+        Document.objects.filter(id=document_id).update(preview_status="")
+        return
+
+    soffice_bin = (
+        getattr(django_settings, "LIBREOFFICE_BIN", "").strip()
+        or shutil.which("libreoffice")
+        or shutil.which("soffice")
+    )
+    timeout = int(getattr(django_settings, "LIBREOFFICE_TIMEOUT", 120))
+
+    if not soffice_bin:
+        Document.objects.filter(id=document_id).update(
+            preview_status=PreviewStatus.FAILED
+        )
+        logger.error(
+            "generate_document_preview: LibreOffice binary not found for %s",
+            document_id,
+        )
+        return
+
+    try:
+        source_path = Path(doc.file.path)
+        with TemporaryDirectory(prefix="doc_preview_") as tmpdir:
+            output_dir = Path(tmpdir)
+            cmd = [
+                soffice_bin,
+                "--headless",
+                "--convert-to", "pdf",
+                "--outdir", str(output_dir),
+                str(source_path),
+            ]
+            result = subprocess.run(
+                cmd,
+                capture_output=True,
+                text=True,
+                timeout=timeout,
+                check=False,
+            )
+
+            preview_path = output_dir / f"{source_path.stem}.pdf"
+            if not preview_path.exists():
+                pdfs = sorted(output_dir.glob("*.pdf"))
+                if pdfs:
+                    preview_path = pdfs[0]
+
+            if result.returncode != 0 or not preview_path.exists():
+                raise RuntimeError(
+                    f"LibreOffice conversion failed"
+                    f" (code={result.returncode}, stderr={result.stderr!r})"
+                )
+
+            pdf_bytes = preview_path.read_bytes()
+
+        with transaction.atomic():
+            if doc.preview_pdf:
+                doc.preview_pdf.delete(save=False)
+            doc.preview_pdf.save(
+                f"{doc.id}_preview.pdf",
+                ContentFile(pdf_bytes),
+                save=False,
+            )
+            doc.preview_status = PreviewStatus.DONE
+            doc.save(update_fields=["preview_pdf", "preview_status", "updated_at"])
+
+        logger.info(
+            "generate_document_preview: completed for %s (%d bytes)",
+            document_id, len(pdf_bytes),
+        )
+
+    except (RuntimeError, subprocess.SubprocessError) as exc:
+        logger.error(
+            "generate_document_preview: fatal error for %s: %s", document_id, exc
+        )
+        Document.objects.filter(id=document_id).update(
+            preview_status=PreviewStatus.FAILED
+        )
+
+    except Exception as exc:
+        logger.error("generate_document_preview failed for %s: %s", document_id, exc)
+        try:
+            Document.objects.filter(id=document_id).update(
+                preview_status=PreviewStatus.PENDING
+            )
+            raise self.retry(exc=exc, countdown=60)
+        except self.MaxRetriesExceededError:
+            Document.objects.filter(id=document_id).update(
+                preview_status=PreviewStatus.FAILED
+            )
+            logger.error(
+                "generate_document_preview: max retries exceeded for %s",
+                document_id,
+            )
+
+
+# ─────────────────────────────────────────────────────────────────────────────
 # Helpers
 # ─────────────────────────────────────────────────────────────────────────────
 
@@ -387,7 +496,6 @@ def _mark_pending(document_id: str, auto_flag_scanned: bool = False) -> None:
     fields: dict = {"ocr_status": OCRStatus.PENDING}
     if auto_flag_scanned:
         fields["is_scanned"] = True
-    # Only transition from empty/failed — never overwrite in-flight state
     Document.objects.filter(
         id=document_id,
         ocr_status__in=["", OCRStatus.FAILED],

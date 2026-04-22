@@ -7,21 +7,31 @@ export interface DocumentType {
   description: string;
   icon: string;
   is_active?: boolean;
+  workflow_template?: string | null;
+  workflow_template_name?: string | null;
   metadata_fields: MetadataField[];
   is_scanned?: boolean;
   ocr_status?: "pending" | "processing" | "done" | "failed" | "";
+  preview_pdf?: string | null;
+  preview_status?: "pending" | "processing" | "done" | "failed" | "";
+  // Edit lock
+  is_edit_locked?: boolean;
+  edit_locked_by?: string | null; // user ID
+  edit_locked_by_name?: string | null; // "First Last"
+  edit_locked_at?: string | null; // ISO datetime
 }
 
 export interface MetadataField {
   id: string;
   label: string;
   field_key: string;
+  key?: string; // Alias for field_key (used in some contexts)
   field_type: "text" | "number" | "date" | "currency" | "select" | "boolean" | "textarea";
   is_required: boolean;
-  is_searchable: boolean;
-  select_options: string[];
-  default_value: string;
-  help_text: string;
+  is_searchable?: boolean;
+  select_options?: string[] | null;
+  default_value?: string;
+  help_text?: string;
   order: number;
 }
 
@@ -53,7 +63,17 @@ export interface Document {
   metadata: Record<string, unknown>;
   tags: Tag[];
   uploaded_by: UserSummary;
+  department?: string | null;
   permissions?: string[];
+  is_self_upload?: boolean;
+  is_scanned?: boolean;
+  ocr_status?: "pending" | "processing" | "done" | "failed" | "";
+  preview_pdf?: string | null;
+  preview_status?: "pending" | "processing" | "done" | "failed" | "";
+  edit_locked_by?: string | null;
+  edit_locked_by_name?: string | null;
+  edit_locked_at?: string | null;
+  is_edit_locked?: boolean;
   current_version: number;
   versions: DocumentVersion[];
   comments?: DocumentComment[];
@@ -120,4 +140,24 @@ export interface PaginatedResponse<T> {
   next: string | null;
   previous: string | null;
   results: T[];
+}
+
+export interface DocumentPreviewResponse {
+  viewer: "pdfjs" | "image" | "processing" | "download";
+  url: string;
+  raw_url?: string;
+  preview_status?: "pending" | "processing" | "done" | "failed" | "";
+}
+
+export interface DocumentEditTokenResponse {
+  token: string;
+  username: string;
+  webdav_url: string;
+  file_url: string;
+  release_url: string;
+  jwt_token: string;
+  expires_in: number;
+  doc_id: string;
+  file_name: string;
+  mime_type: string;
 }

@@ -52,7 +52,7 @@ function DynamicField({
           render={({ field: f }) => (
             <select {...f} className="input">
               <option value="">Select…</option>
-              {field.select_options.map((opt) => (
+              {(field.select_options || []).map((opt) => (
                 <option key={opt} value={opt}>{opt}</option>
               ))}
             </select>
