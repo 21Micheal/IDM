@@ -2,28 +2,37 @@
  * components/documents/DocumentViewer.tsx
  *
  * Architecture
- * \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500
+ * ────────────
  * PREVIEW
- *   PDF              \u2192 PDF.js renderer
- *   Image            \u2192 <img> with zoom
+ *   PDF              → PDF.js renderer
+ *   Image            → <img> with zoom
  *   Office (docx/xlsx/pptx)
- *                    \u2192 Show download option + manual upload
- *                       (LibreOffice preview conversion is complex and often fails)
+ *                    → LibreOffice-converted PDF preview (polled until done)
  *
- * EDITING \u2014 Windows + MS Office only
- *   "Open in Word/Excel/PowerPoint" button uses the ms-word:ofe|u|URL URI scheme
- *   to open the file directly in the installed Office app via WebDAV endpoint.
- *   Saves with Ctrl+S are automatically uploaded as new versions.
+ * EDITING — cross-platform via WebDAV + URI schemes
  *
- *   All other platforms or environments
- *     \u2192 Manual upload via UploadVersionDrawer
+ *   The ms-word:ofe|u|<url>, ms-excel:, ms-powerpoint: URI schemes are
+ *   handled by MS Office on Windows AND by LibreOffice on Linux / macOS
+ *   (LibreOffice registers itself as the handler for these schemes at
+ *   install time on all platforms).
+ *
+ *   Flow:
+ *     1. User clicks "Acquire edit lock" → POST /edit_token/
+ *     2. Backend returns a webdav_url with Basic Auth credentials embedded
+ *        in the netloc: https://user:token@host/api/v1/documents/webdav/<id>/<file>
+ *     3. Frontend navigates to ms-word:ofe|u|<webdav_url> (or ms-excel: etc.)
+ *     4. The OS hands the URI to the registered handler (MS Office or LibreOffice).
+ *     5. The editor opens the file via WebDAV, sending the embedded credentials
+ *        as HTTP Basic Auth on every request — no credential dialog appears.
+ *     6. Every Ctrl+S issues a WebDAV PUT → backend creates a new version.
+ *     7. Frontend polls /documents/<id>/ every 5 s and toasts on version bump.
+ *
+ *   Fallback (file types with no URI scheme, e.g. .odt):
+ *     → Download + UploadVersionDrawer (manual re-upload)
  *
  * LOCK MANAGEMENT
- *   Acquiring the edit lock (POST /edit_token/) is a prerequisite for editing.
- *   Lock is released when:
- *     \u2013 The user clicks "Release lock" manually
- *     \u2013 The lock expires naturally after 1 hour
- *   While locked, frontend polls for version changes every 5 s.
+ *   Lock auto-expires after 1 hour.  User can release manually at any time.
+ *   While locked, the frontend polls for version bumps every 5 s.
  */
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
@@ -68,14 +77,9 @@ pdfjsLib.GlobalWorkerOptions.workerSrc = new URL(
   import.meta.url
 ).toString();
 
-// \u2500\u2500 Types \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500
+// ── Constants ──────────────────────────────────────────────────────────────────
 
-// \u2500\u2500 Constants \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500
-
-const OFFICE_MIME_INFO: Record<
-  string,
-  { app: string; msScheme: string }
-> = {
+const OFFICE_MIME_INFO: Record<string, { app: string; msScheme: string }> = {
   "application/vnd.openxmlformats-officedocument.wordprocessingml.document": {
     app: "Word",
     msScheme: "ms-word",
@@ -110,31 +114,36 @@ const OFFICE_EXTENSIONS = new Set([
   ".odt", ".ods", ".odp",
 ]);
 const OFFICE_APP_BY_EXTENSION: Record<string, { app: string; msScheme: string }> = {
-  ".doc": { app: "Word", msScheme: "ms-word" },
-  ".docx": { app: "Word", msScheme: "ms-word" },
-  ".docm": { app: "Word", msScheme: "ms-word" },
-  ".dot": { app: "Word", msScheme: "ms-word" },
-  ".dotx": { app: "Word", msScheme: "ms-word" },
-  ".dotm": { app: "Word", msScheme: "ms-word" },
-  ".rtf": { app: "Word", msScheme: "ms-word" },
-  ".xls": { app: "Excel", msScheme: "ms-excel" },
-  ".xlsx": { app: "Excel", msScheme: "ms-excel" },
-  ".xlsm": { app: "Excel", msScheme: "ms-excel" },
-  ".xlsb": { app: "Excel", msScheme: "ms-excel" },
-  ".xlt": { app: "Excel", msScheme: "ms-excel" },
-  ".xltx": { app: "Excel", msScheme: "ms-excel" },
-  ".xltm": { app: "Excel", msScheme: "ms-excel" },
-  ".ppt": { app: "PowerPoint", msScheme: "ms-powerpoint" },
-  ".pptx": { app: "PowerPoint", msScheme: "ms-powerpoint" },
-  ".pptm": { app: "PowerPoint", msScheme: "ms-powerpoint" },
-  ".pps": { app: "PowerPoint", msScheme: "ms-powerpoint" },
-  ".ppsx": { app: "PowerPoint", msScheme: "ms-powerpoint" },
-  ".pot": { app: "PowerPoint", msScheme: "ms-powerpoint" },
-  ".potx": { app: "PowerPoint", msScheme: "ms-powerpoint" },
-  ".potm": { app: "PowerPoint", msScheme: "ms-powerpoint" },
+  ".doc":  { app: "Word",        msScheme: "ms-word"       },
+  ".docx": { app: "Word",        msScheme: "ms-word"       },
+  ".docm": { app: "Word",        msScheme: "ms-word"       },
+  ".dot":  { app: "Word",        msScheme: "ms-word"       },
+  ".dotx": { app: "Word",        msScheme: "ms-word"       },
+  ".dotm": { app: "Word",        msScheme: "ms-word"       },
+  ".rtf":  { app: "Word",        msScheme: "ms-word"       },
+  ".xls":  { app: "Excel",       msScheme: "ms-excel"      },
+  ".xlsx": { app: "Excel",       msScheme: "ms-excel"      },
+  ".xlsm": { app: "Excel",       msScheme: "ms-excel"      },
+  ".xlsb": { app: "Excel",       msScheme: "ms-excel"      },
+  ".xlt":  { app: "Excel",       msScheme: "ms-excel"      },
+  ".xltx": { app: "Excel",       msScheme: "ms-excel"      },
+  ".xltm": { app: "Excel",       msScheme: "ms-excel"      },
+  ".ppt":  { app: "PowerPoint",  msScheme: "ms-powerpoint" },
+  ".pptx": { app: "PowerPoint",  msScheme: "ms-powerpoint" },
+  ".pptm": { app: "PowerPoint",  msScheme: "ms-powerpoint" },
+  ".pps":  { app: "PowerPoint",  msScheme: "ms-powerpoint" },
+  ".ppsx": { app: "PowerPoint",  msScheme: "ms-powerpoint" },
+  ".pot":  { app: "PowerPoint",  msScheme: "ms-powerpoint" },
+  ".potx": { app: "PowerPoint",  msScheme: "ms-powerpoint" },
+  ".potm": { app: "PowerPoint",  msScheme: "ms-powerpoint" },
 };
 
-// \u2500\u2500 Utilities \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500
+// Preview polling timings
+const POLL_INTERVAL_MS        = 2_000;
+const POLL_TIMEOUT_MS         = 240_000; // 4 minutes
+const FAILED_CONFIRM_DELAY_MS = 1_500;
+
+// ── Utilities ──────────────────────────────────────────────────────────────────
 
 function normalizeUrl(url: string | undefined): string | undefined {
   if (!url) return url;
@@ -150,7 +159,8 @@ function getFileExtension(name?: string): string {
   return idx >= 0 ? name.slice(idx).toLowerCase() : "";
 }
 
-// \u2500\u2500 EditLockBanner \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500
+
+
 
 function EditLockBanner({
   doc,
@@ -161,7 +171,7 @@ function EditLockBanner({
   currentUserId: string | undefined;
   onRelease: () => void;
 }) {
-  const isLocked    = Boolean(doc.is_edit_locked);
+  const isLocked     = Boolean(doc.is_edit_locked);
   const isLockedByMe = isLocked && doc.edit_locked_by === currentUserId;
 
   if (!isLocked) return null;
@@ -197,7 +207,7 @@ function EditLockBanner({
   );
 }
 
-// \u2500\u2500 PdfViewer \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500
+// ── PdfViewer ──────────────────────────────────────────────────────────────────
 
 function PdfViewer({
   url,
@@ -277,9 +287,7 @@ function PdfViewer({
         if (e?.name !== "RenderingCancelledException") console.error(e);
       });
     });
-    return () => {
-      cancelled = true;
-    };
+    return () => { cancelled = true; };
   }, [pdfDoc, currentPage, scale, rotation]);
 
   const goTo = useCallback(
@@ -291,7 +299,7 @@ function PdfViewer({
     return (
       <div className="flex flex-col items-center justify-center h-64 gap-3">
         <Loader2 className="w-8 h-8 text-brand-500 animate-spin" />
-        <p className="text-sm text-gray-500">Loading PDF\u2026</p>
+        <p className="text-sm text-gray-500">Loading PDF…</p>
       </div>
     );
 
@@ -339,9 +347,7 @@ function PdfViewer({
         </div>
         <div className="flex items-center gap-1">
           <button
-            onClick={() =>
-              setScale((s) => Math.max(0.5, parseFloat((s - 0.2).toFixed(1))))
-            }
+            onClick={() => setScale((s) => Math.max(0.5, parseFloat((s - 0.2).toFixed(1))))}
             className="btn-secondary px-2 py-1"
           >
             <ZoomOut className="w-4 h-4" />
@@ -350,9 +356,7 @@ function PdfViewer({
             {Math.round(scale * 100)}%
           </span>
           <button
-            onClick={() =>
-              setScale((s) => Math.min(3, parseFloat((s + 0.2).toFixed(1))))
-            }
+            onClick={() => setScale((s) => Math.min(3, parseFloat((s + 0.2).toFixed(1))))}
             className="btn-secondary px-2 py-1"
           >
             <ZoomIn className="w-4 h-4" />
@@ -393,12 +397,12 @@ function PdfViewer({
   );
 }
 
-// \u2500\u2500 ImageViewer \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500
+// ── ImageViewer ────────────────────────────────────────────────────────────────
 
 function ImageViewer({ url: rawUrl }: { url: string }) {
-  const url           = normalizeUrl(rawUrl) || "";
+  const url               = normalizeUrl(rawUrl) || "";
   const [scale, setScale] = useState(1);
-  const [err, setErr] = useState(false);
+  const [err, setErr]     = useState(false);
 
   return (
     <div>
@@ -467,24 +471,7 @@ function ImageViewer({ url: rawUrl }: { url: string }) {
   );
 }
 
-// \u2500\u2500 OfficeEditPanel \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500
-
-/**
- * Office document preview polling:
- *
- * - Polls every 2 s (POLL_INTERVAL_MS) while status is pending/processing.
- * - Stops immediately when status becomes "done" or "failed" — no waiting
- *   for the next tick.
- * - Hard timeout at 90 s (POLL_TIMEOUT_MS); shows a timeout error after that.
- * - Progress bar is driven by wall-clock elapsed time vs the 90 s budget,
- *   capped at 95 % until the backend confirms "done" (then snaps to 100 %).
- * - Retry calls POST /trigger_preview/ (not just a cache invalidation) so
- *   the backend actually re-queues the Celery task.
- */
-
-const POLL_INTERVAL_MS = 2_000;   // poll every 2 s
-const POLL_TIMEOUT_MS  = 240_000;  // give up after 4 minutes
-const FAILED_CONFIRM_DELAY_MS = 1_500; // guard against transient stale "failed"
+// ── OfficeEditPanel ────────────────────────────────────────────────────────────
 
 function OfficeEditPanel({
   doc,
@@ -505,30 +492,20 @@ function OfficeEditPanel({
   const [previewProgress, setPreviewProgress] = useState(0);
   const [timedOut, setTimedOut]               = useState(false);
   const [isConfirmingFailed, setIsConfirmingFailed] = useState(false);
-  const previewPollRef = useRef<ReturnType<typeof setInterval> | null>(null);
-  const versionPollRef = useRef<ReturnType<typeof setInterval> | null>(null);
-  const failedConfirmTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
-  const startTimeRef = useRef<number | null>(null);
-  // Tracks whether we are actively polling so the interval callback can
-  // self-cancel without a stale-closure problem.
-  const pollingRef   = useRef(false);
-  const extension = getFileExtension(doc.file_name);
+  const previewPollRef        = useRef<ReturnType<typeof setInterval> | null>(null);
+  const versionPollRef        = useRef<ReturnType<typeof setInterval> | null>(null);
+  const failedConfirmRef      = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const startTimeRef          = useRef<number | null>(null);
+  const pollingRef            = useRef(false);
 
-  const info          = OFFICE_MIME_INFO[doc.file_mime_type] ?? OFFICE_APP_BY_EXTENSION[extension] ?? { app: "Office" };
+  const extension = getFileExtension(doc.file_name);
+  const info      = OFFICE_MIME_INFO[doc.file_mime_type] ?? OFFICE_APP_BY_EXTENSION[extension] ?? { app: "Office", msScheme: "" };
+
   const isLocked      = Boolean(doc.is_edit_locked);
   const lockedByMe    = isLocked && doc.edit_locked_by === user?.id;
   const lockedByOther = isLocked && !lockedByMe;
-  const isWindows     = typeof navigator !== "undefined" && navigator.userAgent.includes("Windows");
 
-  // ── Preview state (managed manually, not via React Query refetchInterval) ──
-  //
-  // We manage polling ourselves with setInterval so we can:
-  //   1. Stop *immediately* when done arrives (not at the next tick).
-  //   2. Drive the progress bar from wall-clock time.
-  //   3. Enforce a hard 90 s timeout.
-  //
-  // React Query is still used for the initial fetch and cache sharing with
-  // the parent DocumentViewer, but refetchInterval is disabled here.
+  // ── Preview query ─────────────────────────────────────────────────────────
 
   const { data: preview, refetch: refetchPreview } = useQuery<DocumentPreviewResponse>({
     queryKey: ["document-preview", doc.id],
@@ -540,13 +517,11 @@ function OfficeEditPanel({
       })),
     placeholderData: initialPreview,
     staleTime: 0,
-    // Disable React Query's built-in refetch interval — we drive polling
-    // ourselves so we can stop immediately on completion.
     refetchInterval: false,
     retry: false,
   });
 
-  // ── Start / stop polling ───────────────────────────────────────────────────
+  // ── Preview polling ───────────────────────────────────────────────────────
 
   const stopPolling = useCallback(() => {
     pollingRef.current = false;
@@ -557,110 +532,92 @@ function OfficeEditPanel({
   }, []);
 
   const clearFailedConfirmation = useCallback(() => {
-    if (failedConfirmTimeoutRef.current) {
-      clearTimeout(failedConfirmTimeoutRef.current);
-      failedConfirmTimeoutRef.current = null;
+    if (failedConfirmRef.current) {
+      clearTimeout(failedConfirmRef.current);
+      failedConfirmRef.current = null;
     }
     setIsConfirmingFailed(false);
   }, []);
 
   const startPolling = useCallback(() => {
     stopPolling();
-    startTimeRef.current = Date.now();
+    startTimeRef.current  = Date.now();
     setTimedOut(false);
-    pollingRef.current = true;
+    pollingRef.current    = true;
 
     previewPollRef.current = setInterval(async () => {
       if (!pollingRef.current) return;
 
-      // Update progress bar from elapsed time.
       const elapsed = Date.now() - (startTimeRef.current ?? Date.now());
       setPreviewProgress(Math.min(95, (elapsed / POLL_TIMEOUT_MS) * 100));
 
-      // Hard timeout.
       if (elapsed >= POLL_TIMEOUT_MS) {
         stopPolling();
         setTimedOut(true);
         return;
       }
 
-      // Fetch latest status.
       try {
         const result = await refetchPreview();
         const s = result.data?.preview_status;
-
         if (s === "done") {
           stopPolling();
           setPreviewProgress(100);
         } else if (s === "failed") {
           stopPolling();
         }
-        // pending / processing → keep polling
       } catch {
         // transient network error — keep polling
       }
     }, POLL_INTERVAL_MS);
   }, [stopPolling, refetchPreview]);
 
-  // ── Kick off polling when status is pending/processing ────────────────────
-
   useEffect(() => {
     const s = preview?.preview_status;
     if (s === "pending" || s === "processing") {
       clearFailedConfirmation();
-      if (!pollingRef.current) {
-        startPolling();
-      }
+      if (!pollingRef.current) startPolling();
     } else if (s === "failed") {
       stopPolling();
-      if (!failedConfirmTimeoutRef.current && !timedOut) {
+      if (!failedConfirmRef.current && !timedOut) {
         setIsConfirmingFailed(true);
-        failedConfirmTimeoutRef.current = setTimeout(async () => {
-          failedConfirmTimeoutRef.current = null;
+        failedConfirmRef.current = setTimeout(async () => {
+          failedConfirmRef.current = null;
           try {
             const result = await refetchPreview();
-            const nextStatus = result.data?.preview_status;
-            if (nextStatus !== "failed") {
+            if (result.data?.preview_status !== "failed") {
               setIsConfirmingFailed(false);
               return;
             }
-          } catch {
-            // If recheck fails, keep the current failed state visible.
-          }
+          } catch { /* keep current state */ }
           setIsConfirmingFailed(false);
         }, FAILED_CONFIRM_DELAY_MS);
       }
     } else {
-      // Terminal state — ensure polling is stopped.
       stopPolling();
       clearFailedConfirmation();
       if (s === "done") setPreviewProgress(100);
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [preview?.preview_status, timedOut, clearFailedConfirmation, refetchPreview, startPolling, stopPolling]);
+  }, [preview?.preview_status, timedOut]);
 
-  // Cleanup on unmount.
-  useEffect(
-    () => () => {
-      stopPolling();
-      if (failedConfirmTimeoutRef.current) {
-        clearTimeout(failedConfirmTimeoutRef.current);
-      }
-    },
-    [stopPolling]
-  );
+  useEffect(() => () => {
+    stopPolling();
+    if (failedConfirmRef.current) clearTimeout(failedConfirmRef.current);
+  }, [stopPolling]);
 
-  const isConverting  =
-    !timedOut && ["pending", "processing"].includes(preview?.preview_status ?? "");
+  const isConverting  = !timedOut && ["pending", "processing"].includes(preview?.preview_status ?? "");
   const hasPdf        = preview?.viewer === "pdfjs" && !!preview.url;
   const previewFailed = (preview?.preview_status === "failed" && !isConfirmingFailed) || timedOut;
+
   const webViewerUrl = useMemo(() => {
     const rawUrl = normalizeUrl(preview?.raw_url);
     if (!rawUrl) return "";
     return `https://view.officeapps.live.com/op/embed.aspx?src=${encodeURIComponent(rawUrl)}`;
   }, [preview?.raw_url]);
 
-  // ── Acquire lock ───────────────────────────────────────────────────────────
+  // ── Lock mutations ────────────────────────────────────────────────────────
+
   const acquireLock = useMutation({
     mutationFn: () =>
       documentsAPI.editToken(doc.id).then((r) => ({
@@ -673,20 +630,17 @@ function OfficeEditPanel({
       startVersionPolling(doc.current_version);
       qc.invalidateQueries({ queryKey: ["document", doc.id] });
       qc.invalidateQueries({ queryKey: ["document-preview", doc.id] });
-      toast.success("Edit lock acquired. MS Office editing is ready.");
+      toast.success("Edit lock acquired. Open the document in your editor.");
     },
     onError: (err: any) => {
       if (err?.response?.status === 423) {
-        toast.error(
-          err.response.data?.detail ?? "Document is currently locked by another user."
-        );
+        toast.error(err.response.data?.detail ?? "Document is currently locked by another user.");
       } else {
         toast.error("Could not acquire edit lock. Please try again.");
       }
     },
   });
 
-  // ── Release lock ───────────────────────────────────────────────────────────
   const releaseLock = useMutation({
     mutationFn: () => documentsAPI.releaseLock(doc.id),
     onSuccess: () => {
@@ -697,23 +651,22 @@ function OfficeEditPanel({
     },
   });
 
-  // ── Retry preview — calls trigger_preview on the backend ──────────────────
+  // ── Retry preview ─────────────────────────────────────────────────────────
+
   const retryPreviewMutation = useMutation({
     mutationFn: () => documentsAPI.triggerPreview(doc.id),
     onSuccess: () => {
       setTimedOut(false);
       setPreviewProgress(0);
-      // Invalidate cache so the query re-fetches the new "pending" status,
-      // then our useEffect will kick off polling again.
       qc.invalidateQueries({ queryKey: ["document-preview", doc.id] });
     },
     onError: (err: any) => {
-      const msg = err?.response?.data?.detail ?? "Could not queue preview. Please try again.";
-      toast.error(msg);
+      toast.error(err?.response?.data?.detail ?? "Could not queue preview. Please try again.");
     },
   });
 
-  // ── Version polling ────────────────────────────────────────────────────────
+  // ── Version polling ───────────────────────────────────────────────────────
+
   const startVersionPolling = (baseVersion: number) => {
     setVersionPolling(true);
     if (versionPollRef.current) clearInterval(versionPollRef.current);
@@ -722,13 +675,11 @@ function OfficeEditPanel({
         const { data: latest } = await documentsAPI.get(doc.id);
         if (latest.current_version > baseVersion) {
           baseVersion = latest.current_version;
-          toast.success(`Version ${latest.current_version} received from editor.`);
+          toast.success(`Version ${latest.current_version} saved from editor.`);
           qc.invalidateQueries({ queryKey: ["document", doc.id] });
           onVersionUploaded();
         }
-      } catch {
-        /* ignore transient errors */
-      }
+      } catch { /* ignore transient errors */ }
     }, 5_000);
   };
 
@@ -740,18 +691,95 @@ function OfficeEditPanel({
     }
   };
 
-  // Cleanup version polling on unmount.
   useEffect(() => () => stopVersionPolling(), []);
 
-  // \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500
+  // ── Platform detection ────────────────────────────────────────────────────
+  const isWindows = typeof navigator !== "undefined" && /Windows/i.test(navigator.userAgent);
+  const isLinux   = typeof navigator !== "undefined"
+                    && /Linux/i.test(navigator.userAgent)
+                    && !/Android/i.test(navigator.userAgent);
+
+  // Persisted flag: user has run the one-time install script.
+  // After install the URI scheme works and we can fire it directly.
+  const [handlerInstalled, setHandlerInstalled] = useState<boolean>(() => {
+    try { return localStorage.getItem("docvault_handler_installed") === "1"; }
+    catch { return false; }
+  });
+  const markHandlerInstalled = () => {
+    try { localStorage.setItem("docvault_handler_installed", "1"); } catch {}
+    setHandlerInstalled(true);
+  };
+
+  // ── Download helpers ──────────────────────────────────────────────────────
+  const triggerBlobDownload = (blob: Blob, filename: string) => {
+    const url = URL.createObjectURL(blob);
+    const a   = document.createElement("a");
+    a.href = url; a.download = filename;
+    document.body.appendChild(a); a.click(); a.remove();
+    URL.revokeObjectURL(url);
+  };
+
+  // One-time install script — no lock, no document-specific data.
+  const downloadInstallScript = async () => {
+    try {
+      const res = await documentsAPI.installScript();
+      triggerBlobDownload(new Blob([res.data], { type: "text/x-shellscript" }),
+        "docvault-install-opener.sh");
+    } catch {
+      toast.error("Could not download install script. Please try again.");
+    }
+  };
+
+  // Per-session open script — acquires lock + embeds token.
+  const downloadOpenScript = async () => {
+    try {
+      const res     = await documentsAPI.openScript(doc.id);
+      const safeName = doc.file_name.replace(/[^a-zA-Z0-9._-]/g, "_");
+      triggerBlobDownload(new Blob([res.data], { type: "text/x-shellscript" }),
+        `open-${safeName}.sh`);
+      qc.invalidateQueries({ queryKey: ["document", doc.id] });
+      startVersionPolling(doc.current_version);
+    } catch (err: any) {
+      if (err?.response?.status === 423)
+        toast.error(err.response.data?.detail ?? "Document is locked by another user.");
+      else
+        toast.error("Could not generate open script. Please try again.");
+    }
+  };
+
+  // Main open action — strategy is chosen by platform + install state.
+  const openInEditor = () => {
+    if (!lockData) return;
+    const { msScheme } = info as { msScheme?: string };
+
+    if (isWindows) {
+      // Windows: MS Office / LibreOffice URI scheme — works natively.
+      if (!msScheme) { toast.error("No URI scheme available for this file type."); return; }
+      window.location.href = `${msScheme}:ofe|u|${lockData.webdav_url}`;
+
+    } else if (isLinux && handlerInstalled) {
+      // Linux + handler installed: fire docvault-open:// URI scheme.
+      // The installed handler decodes the payload and calls soffice directly.
+      const davsUrl  = lockData.webdav_url.replace(/^https?:\/\//, (m) =>
+        m === "https://" ? "vnd.sun.star.webdavs://" : "vnd.sun.star.webdav://");
+      const encoded  = btoa(davsUrl).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
+      window.location.href = `docvault-open://${encoded}`;
+
+    } else {
+      // Linux without handler / macOS: fall back to per-session script download.
+      downloadOpenScript();
+    }
+  };
+
+  // ─────────────────────────────────────────────────────────────────────────
   // Render
-  // \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500
+  // ─────────────────────────────────────────────────────────────────────────
 
   return (
     <div className="space-y-3">
-      {/* Preview section with intelligent UI */}
+      {/* ── Preview card ─────────────────────────────────────────────────── */}
       <div className="border border-gray-200 rounded-xl overflow-hidden">
-        {/* Header bar */}
+        {/* Header */}
         <div className="rounded-t-xl border-b border-gray-200 bg-gray-50 px-4 py-3 flex items-center justify-between">
           <div className="flex items-center gap-2">
             <span className="text-sm font-medium text-gray-700">
@@ -792,9 +820,9 @@ function OfficeEditPanel({
           </div>
         </div>
 
-        {/* Preview content */}
+        {/* Preview body */}
         <div className="bg-white p-4">
-          {/* Converting state with progress */}
+          {/* Converting */}
           {isConverting && (
             <div className="flex flex-col items-center justify-center gap-4 py-24">
               <div className="w-32 h-1.5 bg-gray-100 rounded-full overflow-hidden">
@@ -806,7 +834,7 @@ function OfficeEditPanel({
               <div className="text-center">
                 <p className="font-medium text-gray-800">Generating preview</p>
                 <p className="text-xs text-gray-500 mt-1">
-                  Converting {info.app} to PDF \u2014 {Math.round(previewProgress)}%
+                  Converting {info.app} to PDF — {Math.round(previewProgress)}%
                 </p>
               </div>
             </div>
@@ -848,11 +876,9 @@ function OfficeEditPanel({
                     disabled={retryPreviewMutation.isPending}
                     className="btn-secondary text-sm flex items-center gap-2 disabled:opacity-50"
                   >
-                    {retryPreviewMutation.isPending ? (
-                      <Loader2 className="w-4 h-4 animate-spin" />
-                    ) : (
-                      <RefreshCw className="w-4 h-4" />
-                    )}
+                    {retryPreviewMutation.isPending
+                      ? <Loader2 className="w-4 h-4 animate-spin" />
+                      : <RefreshCw className="w-4 h-4" />}
                     Retry
                   </button>
                   <a
@@ -881,32 +907,32 @@ function OfficeEditPanel({
             </div>
           )}
 
-          {/* No preview status yet */}
+          {/* Initialising */}
           {!isConverting && !hasPdf && !previewFailed && (
             <div className="flex flex-col items-center gap-4 py-16 text-center">
               <Loader2 className="w-10 h-10 text-gray-400 animate-spin" />
-              <p className="text-sm text-gray-600">Initializing preview\u2026</p>
+              <p className="text-sm text-gray-600">Initializing preview…</p>
             </div>
           )}
         </div>
       </div>
 
-      {/* \u2500\u2500 Edit section \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500 */}
+      {/* ── Edit section ─────────────────────────────────────────────────── */}
       {canUploadVersion && (
         <div className="border border-gray-200 rounded-xl overflow-hidden">
-          {/* Panel header */}
+          {/* Section header */}
           <div className="px-4 py-3 bg-gray-50 border-b border-gray-200 flex items-center justify-between">
             <span className="text-sm font-medium text-gray-700 flex items-center gap-2">
               <Monitor className="w-4 h-4 text-brand-500" />
-              Edit in Microsoft {info.app}
+              Edit in {info.app}
             </span>
             <div className="flex items-center gap-2">
               {versionPolling && (
                 <span className="flex items-center gap-1.5 text-xs text-amber-700 bg-amber-50 border border-amber-200 px-2.5 py-1 rounded-full">
-                  <Clock className="w-3 h-3 animate-pulse" /> Watching for saves\u2026
+                  <Clock className="w-3 h-3 animate-pulse" /> Watching for saves…
                 </span>
               )}
-              {lockedByMe && lockData && (
+              {(lockedByMe || lockData) && (
                 <button
                   onClick={() => releaseLock.mutate()}
                   disabled={releaseLock.isPending}
@@ -918,93 +944,155 @@ function OfficeEditPanel({
             </div>
           </div>
 
-          <div className="p-4 bg-white">
-            {/* Not locked \u2014 show acquire button */}
+          <div className="p-4 bg-white space-y-4">
+            {/* ── Locked by someone else ── */}
+            {lockedByOther && (
+              <div className="flex items-center gap-3 rounded-lg border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-800">
+                <Lock className="w-4 h-4 text-red-500 flex-shrink-0" />
+                <span>
+                  Editing is disabled — this document is currently locked by{" "}
+                  <strong>{doc.edit_locked_by_name ?? "another user"}</strong>.
+                </span>
+              </div>
+            )}
+
+            {/* ── Not locked — show acquire button ── */}
             {!isLocked && !lockData && (
               <div className="space-y-3">
                 <p className="text-sm text-gray-500">
-                  Acquire an edit lock to prevent concurrent changes, then open
-                  the document in Microsoft {info.app}. Each Ctrl+S save creates
-                  a new version automatically.
+                  Acquire an edit lock to prevent concurrent edits, then open
+                  the document in your office editor (MS Office or LibreOffice).
+                  Every Ctrl+S save is automatically uploaded as a new version.
                 </p>
                 <button
                   onClick={() => acquireLock.mutate()}
-                  disabled={acquireLock.isPending || !isWindows}
+                  disabled={acquireLock.isPending}
                   className="btn-primary w-full justify-center gap-2 disabled:opacity-50"
-                  title={!isWindows ? "MS Office editing is only available on Windows" : ""}
                 >
-                  {acquireLock.isPending ? (
-                    <Loader2 className="w-4 h-4 animate-spin" />
-                  ) : (
-                    <Lock className="w-4 h-4" />
-                  )}
-                  Acquire edit lock &amp; open options
+                  {acquireLock.isPending
+                    ? <Loader2 className="w-4 h-4 animate-spin" />
+                    : <Lock className="w-4 h-4" />}
+                  Acquire edit lock
                 </button>
               </div>
             )}
 
-            {/* Locked by other user */}
-            {lockedByOther && (
-              <p className="text-sm text-gray-500 text-center py-2">
-                Editing is disabled \u2014 this document is currently locked by{" "}
-                <strong>{doc.edit_locked_by_name ?? "another user"}</strong>.
-              </p>
-            )}
-
-            {/* Lock acquired \u2014 show MS Office option */}
-            {(lockedByMe || lockData) && !lockedByOther && (
+            {/* ── Lock acquired — show MS Office open button ── */}
+            {(lockedByMe || lockData) && !lockedByOther && lockData && (
               <div className="space-y-4">
-                {isWindows && (
-                  <div className="rounded-lg border border-blue-200 bg-blue-50 p-4 space-y-3">
-                    <div className="flex items-center gap-2">
-                      <Monitor className="w-4 h-4 text-blue-600" />
-                      <span className="text-sm font-semibold text-blue-900">
-                        Open in Microsoft {info.app}
-                      </span>
-                      <span className="text-xs text-blue-600 bg-blue-100 px-2 py-0.5 rounded-full">
-                        Windows
-                      </span>
-                    </div>
-                    <p className="text-xs text-blue-700">
-                      Clicking the button opens the file directly in {info.app}. 
-                      Save with Ctrl+S \u2014 each save is automatically uploaded as a new version.
-                    </p>
-                    <button
-                      onClick={() => {
-                        if (!lockData) return;
-                        const { msScheme } = info as { msScheme?: string };
-                        if (!msScheme) {
-                          toast.error("MS Office URI scheme not available for this file type.");
-                          return;
-                        }
-                        window.location.href = `${msScheme}:ofe|u|${lockData.webdav_url}`;
-                      }}
-                      className="btn-primary w-full justify-center gap-2"
-                    >
-                      <ExternalLink className="w-4 h-4" />
-                      Open in Microsoft {info.app}
-                    </button>
-                  </div>
-                )}
-
-                {!isWindows && (
-                  <div className="rounded-lg border border-gray-200 bg-gray-50 p-4 text-center space-y-3">
-                    <p className="text-sm text-gray-600">
-                      Microsoft Office editing is only available on Windows.
-                    </p>
-                    <p className="text-xs text-gray-500">
-                      Use the manual upload option below to save a new version.
-                    </p>
-                  </div>
-                )}
-
-                {/* Version polling indicator */}
+                {/* Save-watcher indicator */}
                 {versionPolling && (
                   <div className="flex items-center gap-2 rounded-lg bg-amber-50 border border-amber-200 px-3 py-2.5 text-xs text-amber-800">
                     <RefreshCw className="w-3.5 h-3.5 animate-spin text-amber-600" />
                     <span>
-                      Watching for saves\u2026 each Ctrl+S in your editor creates a new version here.
+                      Watching for saves… each Ctrl+S in your editor creates a new version here.
                     </span>
+                  </div>
+                )}
+
+                {/* ── Editor open UI ── */}
+                {info.msScheme ? (
+                  <div className="space-y-3">
+                    {/* Linux: one-time install banner */}
+                    {isLinux && !handlerInstalled && (
+                      <div className="rounded-lg border border-amber-200 bg-amber-50 p-3 space-y-2">
+                        <p className="text-xs font-medium text-amber-800">
+                          One-time setup for one-click editing on Linux
+                        </p>
+                        <p className="text-xs text-amber-700">
+                          Chrome on Linux can't launch LibreOffice directly via a URI scheme.
+                          Run the install script once to register a handler — after that,
+                          opening documents is a single click with no terminal required.
+                        </p>
+                        <div className="flex items-center gap-2">
+                          <button
+                            onClick={downloadInstallScript}
+                            className="btn-secondary text-xs flex items-center gap-1.5"
+                          >
+                            <Download className="w-3.5 h-3.5" />
+                            Download install script
+                          </button>
+                          <div className="flex-1 rounded bg-amber-900/10 border border-amber-200 px-2 py-1 font-mono text-[10px] text-amber-900">
+                            chmod +x docvault-install-opener.sh && ./docvault-install-opener.sh
+                          </div>
+                        </div>
+                        <button
+                          onClick={markHandlerInstalled}
+                          className="text-[11px] text-amber-600 hover:text-amber-800 underline"
+                        >
+                          I've already run the install script →
+                        </button>
+                      </div>
+                    )}
+
+                    {/* Main open button */}
+                    <div className="rounded-lg border border-blue-200 bg-blue-50 p-4 space-y-3">
+                      <div className="flex items-center gap-2">
+                        <Monitor className="w-4 h-4 text-blue-600" />
+                        <span className="text-sm font-semibold text-blue-900">
+                          Open in {info.app}
+                        </span>
+                        <span className="text-xs text-blue-500 bg-blue-100 px-2 py-0.5 rounded-full">
+                          {isWindows ? "MS Office / LibreOffice" : "LibreOffice"}
+                        </span>
+                      </div>
+
+                      {isWindows ? (
+                        <>
+                          <p className="text-xs text-blue-700">
+                            Opens directly in your installed editor. Save with{" "}
+                            <kbd className="px-1 py-0.5 rounded bg-blue-100 font-mono text-[10px]">Ctrl+S</kbd>{" "}
+                            — each save is uploaded as a new version here.
+                          </p>
+                          <button onClick={openInEditor} className="btn-primary w-full justify-center gap-2">
+                            <ExternalLink className="w-4 h-4" /> Open in {info.app}
+                          </button>
+                        </>
+                      ) : isLinux && handlerInstalled ? (
+                        <>
+                          <p className="text-xs text-blue-700">
+                            One-click open via the installed DocVault handler. Save with{" "}
+                            <kbd className="px-1 py-0.5 rounded bg-blue-100 font-mono text-[10px]">Ctrl+S</kbd>{" "}
+                            — each save is uploaded as a new version here.
+                          </p>
+                          <button onClick={openInEditor} className="btn-primary w-full justify-center gap-2">
+                            <ExternalLink className="w-4 h-4" /> Open in {info.app}
+                          </button>
+                          <button
+                            onClick={() => setHandlerInstalled(false)}
+                            className="text-[11px] text-blue-400 hover:text-blue-600 underline w-full text-center"
+                          >
+                            Handler not working? Re-install
+                          </button>
+                        </>
+                      ) : (
+                        <>
+                          <p className="text-xs text-blue-700">
+                            Downloads a script that opens this document in LibreOffice.
+                            Run it in a terminal — each Ctrl+S save uploads a new version here.
+                          </p>
+                          <button onClick={openInEditor} className="btn-primary w-full justify-center gap-2">
+                            <Download className="w-4 h-4" /> Download &amp; open in {info.app}
+                          </button>
+                          <div className="rounded bg-blue-900/10 border border-blue-200 px-2 py-1.5 font-mono text-[10px] text-blue-900 space-y-0.5">
+                            <p className="text-blue-500 font-sans text-[10px] mb-1">After downloading, run in terminal:</p>
+                            <p>chmod +x open-{doc.file_name.replace(/[^a-zA-Z0-9._-]/g, "_")}.sh</p>
+                            <p>./open-{doc.file_name.replace(/[^a-zA-Z0-9._-]/g, "_")}.sh</p>
+                          </div>
+                        </>
+                      )}
+                    </div>
+                  </div>
+                ) : (
+                  /* File type has no registered URI scheme (e.g. .odt, .ods) */
+                  <div className="rounded-lg border border-gray-200 bg-gray-50 p-4 text-center space-y-2">
+                    <p className="text-sm text-gray-600">
+                      One-click editing is not available for this file type.
+                    </p>
+                    <p className="text-xs text-gray-500">
+                      Download the file, edit it, then use{" "}
+                      <strong>Upload new version</strong> below.
+                    </p>
                   </div>
                 )}
               </div>
@@ -1013,7 +1101,7 @@ function OfficeEditPanel({
         </div>
       )}
 
-      {/* Manual upload fallback */}
+      {/* ── Manual upload fallback ────────────────────────────────────────── */}
       {canUploadVersion && !lockedByOther && (
         <UploadVersionDrawer
           documentId={doc.id}
@@ -1025,7 +1113,7 @@ function OfficeEditPanel({
   );
 }
 
-// \u2500\u2500 UploadVersionDrawer \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500
+// ── UploadVersionDrawer ────────────────────────────────────────────────────────
 
 function UploadVersionDrawer({
   documentId,
@@ -1104,11 +1192,7 @@ function UploadVersionDrawer({
             (saves as v{currentVersion + 1})
           </span>
         </span>
-        {open ? (
-          <ChevronUp className="w-4 h-4" />
-        ) : (
-          <ChevronDown className="w-4 h-4" />
-        )}
+        {open ? <ChevronUp className="w-4 h-4" /> : <ChevronDown className="w-4 h-4" />}
       </button>
 
       {open && (
@@ -1130,10 +1214,7 @@ function UploadVersionDrawer({
                 <p className="font-medium text-sm text-gray-900">{file.name}</p>
                 <button
                   type="button"
-                  onClick={(e) => {
-                    e.stopPropagation();
-                    setFile(null);
-                  }}
+                  onClick={(e) => { e.stopPropagation(); setFile(null); }}
                   className="text-xs text-red-500 hover:underline"
                 >
                   Remove
@@ -1142,9 +1223,7 @@ function UploadVersionDrawer({
             ) : (
               <>
                 <Upload className="w-8 h-8 text-gray-300 mx-auto mb-2" />
-                <p className="text-sm text-gray-600">
-                  Drag file here or click to browse
-                </p>
+                <p className="text-sm text-gray-600">Drag file here or click to browse</p>
               </>
             )}
           </div>
@@ -1171,11 +1250,9 @@ function UploadVersionDrawer({
             disabled={!file || mutation.isPending}
             className="btn-primary w-full justify-center disabled:opacity-50"
           >
-            {mutation.isPending ? (
-              <Loader2 className="w-4 h-4 animate-spin" />
-            ) : (
-              <Upload className="w-4 h-4" />
-            )}
+            {mutation.isPending
+              ? <Loader2 className="w-4 h-4 animate-spin" />
+              : <Upload className="w-4 h-4" />}
             Save as version {currentVersion + 1}
           </button>
         </div>
@@ -1184,7 +1261,7 @@ function UploadVersionDrawer({
   );
 }
 
-// \u2500\u2500 Main DocumentViewer \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500
+// ── Main DocumentViewer ────────────────────────────────────────────────────────
 
 interface Props {
   document: Document;
@@ -1204,12 +1281,6 @@ export default function DocumentViewer({ document: doc }: Props) {
         raw_url: normalizeUrl(r.data.raw_url),
       };
     },
-    // Keep the preview URL fresh.  10-minute staleTime means re-opening a
-    // document after a conversion completes still shows the old "processing"
-    // state from cache.  PDFs / images are stable once done, but Office docs
-    // go through pending \u2192 processing \u2192 done transitions that must be visible
-    // immediately on mount.  staleTime: 0 ensures a fresh fetch on every mount
-    // while still using cached data for instant render.
     staleTime: 0,
   });
 
@@ -1307,14 +1378,12 @@ export default function DocumentViewer({ document: doc }: Props) {
         <ImageViewer url={preview.url!} />
       )}
 
-      {/* Unsupported / download */}
+      {/* Unsupported / download only */}
       {preview.viewer === "download" && !isImage && !isOffice && (
         <div className="space-y-3">
           <div className="rounded-lg border-2 border-dashed border-gray-200 p-10 text-center">
             <Download className="w-12 h-12 text-gray-300 mx-auto mb-4" />
-            <p className="text-gray-600 mb-4">
-              Preview not available for this file type.
-            </p>
+            <p className="text-gray-600 mb-4">Preview not available for this file type.</p>
             <a
               href={preview.url!}
               download

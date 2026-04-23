@@ -16,10 +16,13 @@ Fixes in this revision
 """
 import base64
 import hashlib
+import logging
 import uuid
 from datetime import timedelta
 from email.utils import formatdate
+from urllib.parse import unquote, quote
 
+from django.core.cache import cache
 from django.core.files.base import ContentFile
 from django.db import transaction
 from django.http import HttpResponse
@@ -34,6 +37,11 @@ from rest_framework_simplejwt.tokens import AccessToken
 from .models import Document, DocumentVersion
 from apps.accounts.models import User
 
+logger = logging.getLogger(__name__)
+
+from .models import Document, DocumentVersion
+from apps.accounts.models import User
+
 # In-process WebDAV protocol-level lock store (per-session, not application lock)
 _PROTOCOL_LOCKS: dict[str, dict] = {}
 
@@ -41,7 +49,7 @@ _PROTOCOL_LOCKS: dict[str, dict] = {}
 def _xml_response(body: str, status: int = 200) -> HttpResponse:
     return HttpResponse(
         body.strip(), content_type="application/xml; charset=utf-8", status=status
-    )
+    )   
 
 
 @method_decorator(csrf_exempt, name="dispatch")
@@ -50,67 +58,101 @@ class DocumentWebDAVView(View):
 
     # ── Authentication ─────────────────────────────────────────────────────────
 
-    def _authenticate(self, request) -> "User | None":
-        """
-        Accept three credential forms (in priority order):
-
-        A) JWT in ?token= query param       — used by launcher scripts & MS Office
-        B) Authorization: Bearer <jwt>      — standard header
-        C) Authorization: Basic <b64>       — LibreOffice native WebDAV prompt
-           (email : one-time-token stored in Django cache)
-
-        The cache token is NOT consumed on first use because LibreOffice makes
-        4–5 sequential requests per editing session.  It expires after 1 hour.
-        """
-        from django.core.cache import cache
-
-        auth_header = request.headers.get("Authorization", "")
-
-        # ── A: JWT in query string ─────────────────────────────────────────
+    def _authenticate(self, request):
+        auth_header = (
+            request.META.get("HTTP_AUTHORIZATION", "")
+            or request.META.get("REDIRECT_HTTP_AUTHORIZATION", "")
+            or request.META.get("Authorization", "")
+        )
         qs_token = request.GET.get("token", "").strip()
+
+        # 1. Query-string token — PRIMARY path for LibreOffice/MS Office.
+        #    The token is appended to the WebDAV URL as ?token=<hex> and is
+        #    forwarded on every request, including after 401 retries, so no
+        #    password dialog ever appears.
         if qs_token:
+            user = self._try_cache_token(qs_token, getattr(request, "dav_doc_id", None), cache)
+            if user:
+                logger.debug("WebDAV auth OK via qs token: user=%s path=%s", user.email, request.path)
+                return user
+            # Also try as a raw JWT (fallback for direct API callers)
             user = self._try_jwt(qs_token)
             if user:
+                logger.debug("WebDAV auth OK via qs JWT: user=%s path=%s", user.email, request.path)
                 return user
-            doc_id = getattr(request, "dav_doc_id", None)
-            user = self._try_cache_token(qs_token, doc_id, cache)
-            if user:
-                return user
+            logger.warning(
+                "WebDAV qs token auth failed: token_len=%d path=%s",
+                len(qs_token), request.path,
+            )
 
-        # ── B: Bearer header ───────────────────────────────────────────────
+        # 2. Bearer header (JWT only)
         if auth_header.startswith("Bearer "):
             user = self._try_jwt(auth_header[7:].strip())
             if user:
                 return user
 
-        # ── C: Basic Auth ──────────────────────────────────────────────────
+        # 3. Basic auth — password is the short opaque hex token stored in cache.
+        #    We deliberately do NOT try JWT here: JWTs are 500+ chars with dots
+        #    and LibreOffice/MS Office WebDAV clients mangle them when embedded
+        #    in the URL netloc, causing truncation or encoding errors.
         if auth_header.startswith("Basic "):
             try:
-                decoded   = base64.b64decode(auth_header[6:]).decode("utf-8", errors="replace")
-                colon_pos = decoded.find(":")
-                if colon_pos == -1:
+                encoded_creds = auth_header[6:].strip()
+                # Handle missing base64 padding gracefully
+                padding = 4 - len(encoded_creds) % 4
+                if padding != 4:
+                    encoded_creds += "=" * padding
+                decoded = base64.b64decode(encoded_creds).decode("utf-8", errors="replace")
+                if ":" not in decoded:
+                    logger.warning("WebDAV Basic auth: no colon in decoded credentials")
                     return None
-                email    = decoded[:colon_pos]
-                ot_token = decoded[colon_pos + 1:]
+                email, password = decoded.split(":", 1)
+                email = unquote(email).strip()
+                password = password.strip()
 
-                cache_key = f"webdav_edit_token:{ot_token}"
-                cached    = cache.get(cache_key)
-                if not cached:
+                logger.debug(
+                    "WebDAV Basic auth attempt: email=%r token_len=%d path=%s",
+                    email, len(password), request.path,
+                )
+
+                # Primary path: opaque hex token lookup in cache
+                cache_key = f"webdav_edit_token:{password}"
+                cached_data = cache.get(cache_key)
+                if cached_data:
+                    user = User.objects.filter(id=cached_data["user_id"]).first()
+                    if user and user.email.lower() == email.lower():
+                        # Slide the TTL forward on every successful request so
+                        # long editing sessions don't lose auth mid-save.
+                        cache.set(cache_key, cached_data, timeout=3600)
+                        logger.debug("WebDAV auth OK via cache token: user=%s", user.email)
+                        return user
+                    logger.warning(
+                        "WebDAV cache token found but email mismatch: "
+                        "cached_user=%s presented_email=%r",
+                        cached_data.get("user_id"), email,
+                    )
                     return None
 
-                try:
-                    user = User.objects.get(id=cached["user_id"])
-                except User.DoesNotExist:
-                    return None
+                # Fallback: direct password auth (for clients that don't use the token flow)
+                user = User.objects.filter(email__iexact=email).first()
+                if user and user.check_password(password):
+                    logger.debug("WebDAV auth OK via password: user=%s", user.email)
+                    return user
 
-                if user.email.lower() != email.lower():
-                    return None
-
-                return user if user.is_active else None
-
+                logger.warning(
+                    "WebDAV Basic auth failed: email=%r cache_miss=True password_ok=False token_len=%d",
+                    email, len(password),
+                )
             except Exception:
+                logger.warning("WebDAV auth parse failed", exc_info=True)
                 return None
 
+        logger.debug(
+            "WebDAV auth failed — no matching method: auth_header_prefix=%r qs_token_len=%d path=%s",
+            (auth_header[:30] + "...") if len(auth_header) > 30 else auth_header,
+            len(qs_token),
+            request.path,
+        )
         return None
 
     @staticmethod
@@ -150,33 +192,73 @@ class DocumentWebDAVView(View):
         Check if the user may perform `action` on `doc`.
         Uploader of a self-upload doc has full access regardless of group permissions.
         """
+        if not user:
+            return False
         if user.is_admin:
             return True
-        if doc.is_self_upload and doc.uploaded_by_id == user.id:
+        if doc.uploaded_by_id == user.id:
             return True
-        return action in user.get_all_permissions_for_doctype(str(doc.document_type_id))
+
+        permissions = user.get_all_permissions_for_doctype(str(doc.document_type_id))
+        if action == "view":
+            return bool(permissions)
+        return action in permissions
 
     # ── Dispatch ───────────────────────────────────────────────────────────────
 
-    def dispatch(self, request, document_id, filename="", *args, **kwargs):
-        """
-        `filename` is optional so that the bare collection URL
-        (webdav/<id>/) does not raise a TypeError.
-        LibreOffice probes the collection URL with HEAD / PROPFIND before
-        issuing requests against the actual file URL.
-        """
-        method  = request.method.lower()
-        handler = getattr(self, method, self.http_method_not_allowed)
+    _DAV_REALM = "DocVault"
+
+    def dispatch(self, request, document_id, token="", filename="", *args, **kwargs):
+        method = request.method.lower()
+
+        # OPTIONS is always credential-free (pre-flight / capability probe).
+        if method == "options":
+            return self.options(request, document_id, filename)
 
         request.dav_doc_id = str(document_id)
 
-        user = self._authenticate(request)
+        # ── Token-in-path authentication ──────────────────────────────────────
+        # The token is a path segment: /webdav/<doc_id>/<token>/<filename>
+        # Path segments are forwarded verbatim by every layer (ms-word:ofe|u|,
+        # vnd.sun.star.webdav://, curl, nginx) unlike netloc credentials and
+        # query strings, which LibreOffice strips or discards after a 401.
+        # Authenticating here means we never issue a 401 that triggers the
+        # LibreOffice credential dialog.
+        user = None
+        if token:
+            cached = cache.get(f"webdav_edit_token:{token}")
+            if cached and str(cached.get("document_id")) == str(document_id):
+                try:
+                    from apps.accounts.models import User as _User
+                    candidate = _User.objects.get(id=cached["user_id"])
+                    if candidate.is_active:
+                        user = candidate
+                        # Slide TTL forward on every request so long editing
+                        # sessions don't lose auth after an hour.
+                        cache.set(f"webdav_edit_token:{token}", cached, timeout=3600)
+                        logger.debug(
+                            "WebDAV path-token auth OK: user=%s doc=%s",
+                            user.email, document_id,
+                        )
+                except Exception:
+                    logger.warning(
+                        "WebDAV path-token lookup failed for doc=%s", document_id,
+                        exc_info=True,
+                    )
+
+        # ── Fallback: header-based auth (Basic / Bearer) ──────────────────────
+        # Handles direct API callers, curl, and browser-based WebDAV clients.
+        if user is None:
+            user = self._authenticate(request)
+
         if not user:
-            resp = HttpResponse("Unauthorized", status=401)
-            resp["WWW-Authenticate"] = (
-                'Basic realm="DocVault WebDAV", '
-                'Bearer realm="DocVault"'
+            resp = HttpResponse(
+                '<?xml version="1.0" encoding="UTF-8"?>'
+                '<D:error xmlns:D="DAV:"><D:need-privileges/></D:error>',
+                content_type="application/xml; charset=utf-8",
+                status=401,
             )
+            resp["WWW-Authenticate"] = f'Basic realm="{self._DAV_REALM}", charset="UTF-8"'
             return resp
 
         doc = self._get_doc(document_id)
@@ -186,7 +268,9 @@ class DocumentWebDAVView(View):
         request.dav_user = user
         request.dav_doc  = doc
         request.dav_href = request.build_absolute_uri(request.path)
-        return handler(request, document_id, filename, *args, **kwargs)
+        return getattr(self, method, self.http_method_not_allowed)(
+            request, document_id, filename, *args, **kwargs
+        )
 
     # ── OPTIONS ────────────────────────────────────────────────────────────────
 
@@ -195,6 +279,7 @@ class DocumentWebDAVView(View):
         resp["Allow"]         = "OPTIONS, HEAD, GET, PUT, PROPFIND, LOCK, UNLOCK"
         resp["DAV"]           = "1, 2"
         resp["MS-Author-Via"] = "DAV"
+        resp["WWW-Authenticate"] = f'Basic realm="{self._DAV_REALM}", charset="UTF-8"'
         return resp
 
     # ── HEAD ───────────────────────────────────────────────────────────────────
@@ -224,7 +309,6 @@ class DocumentWebDAVView(View):
             content,
             content_type=doc.file_mime_type or "application/octet-stream",
         )
-        resp["Content-Disposition"] = f'attachment; filename="{doc.file_name}"'
         resp["Content-Length"]      = str(len(content))
         resp["Last-Modified"]       = formatdate(timeval=doc.updated_at.timestamp(), usegmt=True)
         resp["ETag"]                = f'"{doc.checksum[:16]}"'
@@ -237,6 +321,54 @@ class DocumentWebDAVView(View):
         user = request.dav_user
         if not self._can(user, doc, "view"):
             return HttpResponse("Forbidden", status=403)
+
+        depth = request.headers.get("Depth", "infinity")
+        if not filename:
+            # Collection probe for the tokenized directory root. LibreOffice
+            # expects a collection resource and a child listing for the file.
+            file_href = f"{request.dav_href}{quote(doc.file_name, safe='')}"
+            xml = f"""<?xml version="1.0" encoding="UTF-8"?>
+<D:multistatus xmlns:D="DAV:">
+  <D:response>
+    <D:href>{request.dav_href}</D:href>
+    <D:propstat>
+      <D:prop>
+        <D:displayname>{doc.file_name}</D:displayname>
+        <D:resourcetype><D:collection/></D:resourcetype>
+        <D:supportedlock>
+          <D:lockentry>
+            <D:lockscope><D:exclusive/></D:lockscope>
+            <D:locktype><D:write/></D:locktype>
+          </D:lockentry>
+        </D:supportedlock>
+      </D:prop>
+      <D:status>HTTP/1.1 200 OK</D:status>
+    </D:propstat>
+  </D:response>"""
+            if depth != "0":
+                xml += f"""
+  <D:response>
+    <D:href>{file_href}</D:href>
+    <D:propstat>
+      <D:prop>
+        <D:displayname>{doc.file_name}</D:displayname>
+        <D:getcontentlength>{doc.file_size}</D:getcontentlength>
+        <D:getcontenttype>{doc.file_mime_type or "application/octet-stream"}</D:getcontenttype>
+        <D:getlastmodified>{formatdate(timeval=doc.updated_at.timestamp(), usegmt=True)}</D:getlastmodified>
+        <D:getetag>"{doc.checksum[:16]}"</D:getetag>
+        <D:resourcetype/>
+        <D:supportedlock>
+          <D:lockentry>
+            <D:lockscope><D:exclusive/></D:lockscope>
+            <D:locktype><D:write/></D:locktype>
+          </D:lockentry>
+        </D:supportedlock>
+      </D:prop>
+      <D:status>HTTP/1.1 200 OK</D:status>
+    </D:propstat>
+  </D:response>"""
+            xml += "\n</D:multistatus>"
+            return _xml_response(xml, status=207)
 
         last_modified = formatdate(timeval=doc.updated_at.timestamp(), usegmt=True)
         lock_entry    = _PROTOCOL_LOCKS.get(str(document_id))
@@ -412,12 +544,17 @@ class DocumentWebDAVView(View):
 
                 doc_file = ContentFile(content, name=doc.file_name)
                 doc.file.save(doc.file_name, doc_file, save=False)
-                doc.file_size       = len(content)
-                doc.checksum        = checksum
-                doc.current_version = new_version
-                doc.save(update_fields=[
-                    "file", "file_size", "checksum", "current_version", "updated_at"
-                ])
+                # Use update() to avoid triggering save signals that queue ES indexing.
+                # Indexing will happen via the scheduled task below.
+                Document.objects.filter(id=doc.id).update(
+                    file=doc.file.name,
+                    file_size=len(content),
+                    checksum=checksum,
+                    current_version=new_version,
+                    updated_at=timezone.now(),
+                )
+                # Refresh local instance to reflect DB state
+                doc.refresh_from_db()
 
         except Exception as exc:
             import logging

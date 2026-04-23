@@ -295,14 +295,21 @@ class Document(models.Model):
             return False
         self.edit_locked_by = user
         self.edit_locked_at = timezone.now()
-        self.save(update_fields=["edit_locked_by", "edit_locked_at", "updated_at"])
+        Document.objects.filter(id=self.id).update(
+            edit_locked_by=user,
+            edit_locked_at=self.edit_locked_at,
+            updated_at=self.edit_locked_at,
+        )
         return True
 
     def refresh_lock(self, user):
         if self.edit_locked_by_id != user.id:
             return False
         self.edit_locked_at = timezone.now()
-        self.save(update_fields=["edit_locked_at", "updated_at"])
+        Document.objects.filter(id=self.id).update(
+            edit_locked_at=self.edit_locked_at,
+            updated_at=self.edit_locked_at,
+        )
         return True
 
     def release_lock(self, user=None, force: bool = False):
@@ -310,7 +317,11 @@ class Document(models.Model):
             return False
         self.edit_locked_by = None
         self.edit_locked_at = None
-        self.save(update_fields=["edit_locked_by", "edit_locked_at", "updated_at"])
+        Document.objects.filter(id=self.id).update(
+            edit_locked_by=None,
+            edit_locked_at=None,
+            updated_at=timezone.now(),
+        )
         return True
 
 
