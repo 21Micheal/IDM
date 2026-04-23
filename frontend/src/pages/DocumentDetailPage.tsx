@@ -56,12 +56,61 @@ export default function DocumentDetailPage() {
   const [confirmRestoreId, setConfirmRestoreId] = useState<string | null>(null);
 
   const pollRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  const editLockTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+
 
   const { data: doc, isLoading } = useQuery<Document>({
     queryKey: ["document", id],
     queryFn: () => documentsAPI.get(id!).then((r) => r.data),
     enabled: !!id,
   });
+
+  const releaseLockMutation = useMutation({
+    mutationFn: () => documentsAPI.releaseLock(id!),
+    onSuccess: () => {
+      if (id) {
+        qc.invalidateQueries({ queryKey: ["document", id] });
+      }
+    },
+    onError: () => {
+      // ignore auto-release failures
+    },
+  });
+
+  // Auto-release lock if the document is still locked after 10 minutes (editor likely closed)
+  useEffect(() => {
+    if (doc?.is_edit_locked && doc.edit_locked_by === user?.id) {
+      if (editLockTimeoutRef.current) clearTimeout(editLockTimeoutRef.current);
+      editLockTimeoutRef.current = setTimeout(() => {
+        // Editor has been locked for 10 min — likely closed. Release.
+        releaseLockMutation.mutate();
+      }, 10 * 60 * 1000);
+    }
+    return () => {
+      if (editLockTimeoutRef.current) clearTimeout(editLockTimeoutRef.current);
+    };
+  }, [doc?.is_edit_locked, doc?.edit_locked_by, user?.id, id, releaseLockMutation]);
+
+  // Cleanup: release lock on unmount if document is locked by current user
+  useEffect(() => {
+    const handleUnload = () => {
+      if (doc?.is_edit_locked && doc.edit_locked_by === user?.id && id) {
+        if (navigator.sendBeacon) {
+          navigator.sendBeacon(`/api/v1/documents/${id}/release_lock/`);
+        } else {
+          releaseLockMutation.mutate();
+        }
+      }
+    };
+
+    window.addEventListener("beforeunload", handleUnload);
+    return () => {
+      window.removeEventListener("beforeunload", handleUnload);
+      if (doc?.is_edit_locked && doc.edit_locked_by === user?.id && id) {
+        releaseLockMutation.mutate();
+      }
+    };
+  }, [id, user?.id, doc?.is_edit_locked, doc?.edit_locked_by, releaseLockMutation]);
 
   // ── OCR status polling ─────────────────────────────────────────────────────
   const ocrStatus = (doc as any)?.ocr_status as string | undefined;
