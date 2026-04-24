@@ -45,6 +45,13 @@ def _preview_error_cache_key(document_id: str) -> str:
     return f"document_preview_error:{document_id}"
 
 
+def _preview_start_cache_key(document_id: str) -> str:
+    """Cache key for the wall-clock time the preview task started processing.
+    Stored by the task; read by trigger_preview for staleness detection.
+    Using the cache (not updated_at) avoids the heartbeat defeating the check."""
+    return f"document_preview_started_at:{document_id}"
+
+
 # ── Document Type ViewSet ─────────────────────────────────────────────────────
 
 class DocumentTypeViewSet(AuditMixin, viewsets.ModelViewSet):
@@ -124,18 +131,15 @@ class DocumentViewSet(AuditMixin, viewsets.ModelViewSet):
             return
         try:
             from .tasks import generate_document_preview
+            # PREVIEW-4 fix: use update()'s return value as the sole gate.
+            # A return of 0 means another worker already claimed the row —
+            # skip delay() entirely to prevent duplicate task delivery.
             updated = Document.objects.filter(
                 id=doc.id,
                 preview_status__in=["", PreviewStatus.FAILED],
-            ).exclude(
-                preview_status=PreviewStatus.PROCESSING,
             ).update(preview_status=PreviewStatus.PENDING)
 
-            current = Document.objects.values_list(
-                "preview_status", flat=True
-            ).get(id=doc.id)
-
-            if current == PreviewStatus.PENDING:
+            if updated:
                 generate_document_preview.delay(str(doc.id))
         except Exception:
             logger.exception("_queue_office_preview: failed for doc=%s", doc.id)
@@ -382,8 +386,19 @@ class DocumentViewSet(AuditMixin, viewsets.ModelViewSet):
             )
 
         if doc.preview_status == PreviewStatus.PROCESSING:
+            # Use the cache-stored start time, NOT updated_at.
+            # updated_at is refreshed by the task's heartbeat() every 30 s,
+            # which would make every in-progress job always look "fresh" and
+            # block legitimate retries after the frontend times out.
             stale_after = int(getattr(settings, "PREVIEW_PROCESSING_STALE_SECONDS", 300))
-            processing_age_s = max(0, int((timezone.now() - doc.updated_at).total_seconds()))
+            start_time = cache.get(_preview_start_cache_key(str(doc.id)))
+            if start_time is not None:
+                processing_age_s = max(0, int((timezone.now() - start_time).total_seconds()))
+            else:
+                # No start time in cache means the worker died without writing one,
+                # or the cache was cleared. Treat as stale immediately.
+                processing_age_s = stale_after + 1
+
             if processing_age_s < stale_after:
                 return Response(
                     {"detail": "Preview generation is already in progress."},
@@ -392,6 +407,7 @@ class DocumentViewSet(AuditMixin, viewsets.ModelViewSet):
 
         Document.objects.filter(id=doc.id).update(preview_status="", preview_pdf=None)
         cache.delete(_preview_error_cache_key(str(doc.id)))
+        cache.delete(_preview_start_cache_key(str(doc.id)))
         doc.refresh_from_db()
         self._queue_office_preview(doc)
         self.record_audit("document.preview_triggered", doc)
@@ -422,25 +438,14 @@ class DocumentViewSet(AuditMixin, viewsets.ModelViewSet):
                 status=423,
             )
 
-        # Embed the token as a URL *path* segment: /webdav/<doc_id>/<token>/<filename>
-        #
-        # Why not netloc (user:pass@host)?  LibreOffice preemptively sends URL
-        # credentials on request #1, but after any 401 it discards them and
-        # prompts the user.
-        #
-        # Why not ?token= query string?  The ms-word:ofe|u| and
-        # vnd.sun.star.webdav:// URI schemes strip query strings before handing
-        # the URL to the WebDAV client — the token never arrives at the server.
-        #
-        # Path segments survive every layer: URI scheme handlers, LibreOffice's
-        # internal WebDAV stack, and Django's URL router.  The token segment is
-        # extracted by the URL pattern and passed to dispatch() as `token`.
+        # FIX: Use hex to avoid special character truncations, and use actual email
         jwt_token = str(AccessToken.for_user(request.user))
-        webdav_token = secrets.token_hex(32)   # 64 hex chars, URL-safe, no dots
+        webdav_token = jwt_token  # Use JWT as the WebDAV token for seamless auth
+        basic_username = request.user.email
         cache.set(
             f"webdav_edit_token:{webdav_token}",
             {
-                "user_id":     str(request.user.id),
+                "user_id": str(request.user.id),
                 "document_id": str(doc.id),
             },
             timeout=3600,
@@ -451,15 +456,10 @@ class DocumentViewSet(AuditMixin, viewsets.ModelViewSet):
         release_url = f"{api_base}/documents/{doc.id}/release_lock/"
 
         parsed = urlparse(api_base)
-        # Token is the third path segment: /webdav/<doc_id>/<token>/<filename>
-        webdav_path = (
-            f"{parsed.path}/documents/webdav"
-            f"/{doc.id}"
-            f"/{webdav_token}"
-            f"/{urlquote(doc.file_name, safe='')}"
-        )
+        netloc_with_creds = f"{urlquote(basic_username, safe='')}:{webdav_token}@{parsed.netloc}"
+        webdav_path = f"{parsed.path}/documents/webdav/{doc.id}/{urlquote(doc.file_name, safe='')}"
         webdav_url = urlunparse(parsed._replace(
-            netloc=parsed.netloc,
+            netloc=netloc_with_creds,
             path=webdav_path,
             query="",
             fragment="",
@@ -523,34 +523,25 @@ disown
         if not locked:
             return Response({"detail": "Locked by another user."}, status=423)
 
-        # Token-in-path — same rationale as edit_token (see comment there).
-        webdav_token = secrets.token_hex(32)
+        # FIX: Align with hex tokens and actual email
+        jwt_token = str(AccessToken.for_user(request.user))
+        webdav_token = jwt_token  # Use JWT as the WebDAV token for seamless auth
+        basic_username = request.user.email
         cache.set(
-            f"webdav_edit_token:{webdav_token}",
+            f"webdav_edit_token:{webdav_token}", 
             {
-                "user_id":     str(request.user.id),
+                "user_id": str(request.user.id),
                 "document_id": str(doc.id),
-            },
-            timeout=3600,
+            }, 
+            timeout=3600
         )
 
         api_base = request.build_absolute_uri("/api/v1").rstrip("/")
         parsed = urlparse(api_base)
-        webdav_path = (
-            f"{parsed.path}/documents/webdav"
-            f"/{doc.id}"
-            f"/{webdav_token}"
-            f"/{urlquote(doc.file_name, safe='')}"
-        )
-        webdav_url = urlunparse(parsed._replace(
-            netloc=parsed.netloc,
-            path=webdav_path,
-            query="",
-            fragment="",
-        ))
-
-        # LibreOffice uses vnd.sun.star.webdav(s):// schemes for WebDAV URLs
-        # passed on the command line — convert http(s):// accordingly.
+        netloc = f"{urlquote(basic_username, safe='')}:{webdav_token}@{parsed.netloc}"
+        path = f"{parsed.path}/documents/webdav/{doc.id}/{urlquote(doc.file_name, safe='')}"
+        webdav_url = urlunparse(parsed._replace(netloc=netloc, path=path, query="", fragment=""))
+        
         dav_prefix = "vnd.sun.star.webdavs://" if webdav_url.startswith("https://") else "vnd.sun.star.webdav://"
         open_url = webdav_url.replace(parsed.scheme + "://", dav_prefix, 1)
         

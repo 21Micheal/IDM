@@ -119,6 +119,29 @@ services:
       elasticsearch:
         condition: service_started
 
+  celery_preview:
+    build:
+      context: .
+    restart: unless-stopped
+    command: celery -A IDM worker -Q preview -c 1 --loglevel=info
+    environment:
+      - DATABASE_URL=mysql://idm_user:${DB_PASSWORD:-idm_password}@db:3306/idm_db
+      - REDIS_URL=redis://:${REDIS_PASSWORD:-redis_password}@redis:6379/0
+      - ELASTICSEARCH_URL=http://elasticsearch:9200
+      - MEDIA_ROOT=/app/media
+      - DJANGO_SETTINGS_MODULE=IDM.settings
+      - LIBREOFFICE_TIMEOUT=120
+    volumes:
+      - .:/app
+      - media_files:/app/media
+    depends_on:
+      db:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      elasticsearch:
+        condition: service_started
+
   frontend:
     build:
       context: ./frontend

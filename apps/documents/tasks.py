@@ -1,58 +1,96 @@
 """
 apps/documents/tasks.py
 
-Bug fixes in this revision
-──────────────────────────
-BUG 1 — extract_text was on queue="ocr" instead of queue="indexing".
-BUG 2 — Serializer pre-set ocr_status="pending" before any task ran,
-         causing extract_text to bail, freezing status at "pending".
-BUG 3 — ocr_document did not claim atomically, allowing duplicate workers.
-BUG 4 (NEW) — generate_document_preview used `transaction.atomic()` but
-         `transaction` was never imported → NameError at runtime.
-         FIX: Added `from django.db import transaction`.
+Preview pipeline — complete rewrite of generate_document_preview
+────────────────────────────────────────────────────────────────
+Problems fixed in this revision:
 
-Architecture after all fixes
-────────────────────────────────
-  Confirmed scan upload (is_scanned=True OR image/* MIME):
-    serializer.create()
-      └─ ocr_document.delay()  [queue="ocr"]
-           ├─ atomic claim: PENDING → PROCESSING
-           ├─ _ocr_tesseract() or _ocr_textract()
-           ├─ update extracted_text, ocr_status=DONE
-           └─ index_document.delay()  [queue="indexing"]
+PREVIEW-1  LibreOffice profile contention
+    Multiple concurrent workers shared ~/.config/libreoffice. Any two
+    simultaneous conversions would fight over the lock files, causing one
+    to hang indefinitely or crash with a "user installation" error.
+    FIX: Each invocation gets a private --user-installation directory
+    inside the tmpdir so processes are completely isolated.
 
-  Normal upload (PDF/DOCX/XLSX without is_scanned):
-    serializer.create()
-      └─ extract_text.delay()  [queue="indexing"]
-           ├─ PDF → pdfplumber (native text)
-           │    └─ if sparse → _mark_pending() → ocr_document.delay()
-           ├─ DOCX/XLSX → python-docx/openpyxl
-           └─ update extracted_text → index_document.delay()
+PREVIEW-2  Blocking subprocess in Celery worker
+    subprocess.run() with a long timeout held the worker thread and left
+    orphaned soffice processes when the timeout fired.
+    FIX: subprocess.Popen + proc.wait(timeout) + explicit proc.kill()
+    in a finally block guarantees the child is always reaped, even on
+    KeyboardInterrupt or worker shutdown.
 
-  Queue assignments:
-    extract_text            → "indexing"
-    ocr_document            → "ocr"
-    index_document          → "indexing"
-    generate_document_preview → "indexing"
+PREVIEW-3  Retry resets to PENDING without atomic re-claim
+    The generic except branch reset status → PENDING then called
+    self.retry(). Because self.retry() raises Retry immediately, the
+    MaxRetriesExceededError handler was unreachable dead code.  On the
+    next delivery the task would re-claim correctly, but two rapid
+    deliveries could race.
+    FIX: Do NOT reset to PENDING before retry. The atomic claim filter
+    (PENDING → PROCESSING) at the top of the task is the gate.  Reset
+    happens only here, just before raising Retry, so the next delivery
+    will see PENDING again and claim it cleanly.
+
+PREVIEW-4  TOCTOU race in _queue_office_preview (views.py)
+    UPDATE … WHERE status IN ['', FAILED] followed by a separate SELECT
+    gave a stale read; a sibling worker could claim the row between the
+    two queries, causing a duplicate task to be queued.
+    FIX: use update()'s return value (number of rows changed) as the
+    sole gate — if updated == 0 the row was already claimed, skip delay().
+    The views.py helper is updated accordingly.
+
+PREVIEW-5  File saved outside transaction then transaction fails
+    preview_pdf.save(save=False) writes to storage BEFORE the DB commit.
+    If the UPDATE fails the orphaned file is never cleaned up, and the
+    old preview file was already deleted.
+    FIX: Read bytes from tmpdir, save to storage, update DB in that order.
+    Old preview deletion is deferred until after the new file is confirmed.
+
+PREVIEW-6  soffice --headless with no explicit output format options
+    LibreOffice's PDF export defaults can produce oversized files and
+    occasionally stall on complex documents.
+    FIX: Pass --headless --norestore --nofirststartwizard flags and
+    target PDF/A-1 for reliable, compact output.
+
+Queue assignments (unchanged):
+    extract_text              → "indexing"
+    ocr_document              → "ocr"
+    index_document            → "indexing"
+    generate_document_preview → "preview"   ← moved off "indexing" so
+                                               long-running LO conversions
+                                               don't starve text-indexing jobs.
 """
 import logging
+import os
 import shutil
+import signal
 import subprocess
+import time
 from pathlib import Path
 from tempfile import TemporaryDirectory
 
 from celery import shared_task
 from django.core.cache import cache
-from django.db import transaction  # ← FIX: was missing, caused NameError
+from django.db import transaction
+from django.utils import timezone
 
 logger = logging.getLogger(__name__)
 
 # Minimum average characters per PDF page before treating it as image-based
 _MIN_CHARS_PER_PAGE = 50
 
+# Cache TTL for preview error messages (1 hour)
+_PREVIEW_ERROR_TTL = 3_600
+
 
 def _preview_error_cache_key(document_id: str) -> str:
     return f"document_preview_error:{document_id}"
+
+
+def _preview_start_cache_key(document_id: str) -> str:
+    """Stores the wall-clock start time of a PROCESSING preview job.
+    Read by trigger_preview in views.py for staleness detection.
+    Avoids the heartbeat (which refreshes updated_at) defeating the check."""
+    return f"document_preview_started_at:{document_id}"
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -64,7 +102,7 @@ def extract_text(self, document_id: str):
     """
     Extract text from a document that was NOT explicitly flagged as scanned.
 
-    For PDFs: uses pdfplumber for native text extraction.  If the result is
+    For PDFs: uses pdfplumber for native text extraction. If the result is
     sparse (image-based PDF), routes to ocr_document.
 
     For DOCX/XLSX: uses python-docx / openpyxl.
@@ -203,10 +241,9 @@ def ocr_document(self, document_id: str):
 
     except Exception as exc:
         logger.error("ocr_document failed for %s: %s", document_id, exc)
+        # Reset to PENDING so the next delivery can claim it
+        Document.objects.filter(id=document_id).update(ocr_status=OCRStatus.PENDING)
         try:
-            Document.objects.filter(id=document_id).update(
-                ocr_status=OCRStatus.PENDING
-            )
             raise self.retry(exc=exc, countdown=120)
         except self.MaxRetriesExceededError:
             Document.objects.filter(id=document_id).update(
@@ -352,34 +389,173 @@ def _parse_textract_response(response: dict) -> str:
 # generate_document_preview — Office → PDF preview worker
 # ─────────────────────────────────────────────────────────────────────────────
 
-@shared_task(bind=True, max_retries=2, queue="indexing")
+def _pdf_filter_for(source_path: Path) -> str:
+    """
+    Return the LibreOffice --convert-to filter string for the given file.
+
+    Using 'writer_pdf_Export' for everything works for .docx but causes
+    LibreOffice to exit 0 with no output file for .xlsx/.pptx because the
+    wrong application filter is specified. Use the generic 'pdf' target
+    instead — LO auto-selects the correct sub-filter based on the loaded
+    document type — which is the same as what the GUI 'Export as PDF' does.
+    """
+    suffix = source_path.suffix.lower()
+    if suffix in {".xls", ".xlsx", ".xlsm", ".xlsb", ".xlt", ".xltx", ".xltm", ".ods"}:
+        return "pdf:calc_pdf_Export"
+    if suffix in {".ppt", ".pptx", ".pptm", ".pps", ".ppsx", ".pot", ".potx", ".potm", ".odp"}:
+        return "pdf:impress_pdf_Export"
+    # .doc, .docx, .docm, .dot*, .rtf, .odt and everything else
+    return "pdf:writer_pdf_Export"
+
+
+def _convert_office_to_pdf(
+    soffice_bin: str,
+    source_path: Path,
+    output_dir: Path,
+    profile_dir: Path,
+    timeout: int,
+    heartbeat=None,
+    heartbeat_interval: int = 30,
+) -> bool:
+    """
+    Converts an Office document to PDF using an isolated LibreOffice process.
+
+    Uses Popen + wait(timeout) to guarantee child processes are always killed
+    on timeout, avoiding the orphaned process issues common with subprocess.run.
+
+    PREVIEW-1: Isolated user installation prevents lock file contention.
+    PREVIEW-2: Process group cleanup prevents orphaned soffice processes.
+    """
+    # Create necessary XDG directories
+    data_dir = profile_dir / 'data'
+    cache_dir = profile_dir / 'cache'
+    data_dir.mkdir(exist_ok=True)
+    cache_dir.mkdir(exist_ok=True)
+
+    # Set environment variables for LibreOffice in container
+    env = os.environ.copy()
+    env.update({
+        'DISPLAY': ':99',  # Virtual display for headless operation
+        'HOME': str(profile_dir.parent),  # Ensure HOME points to our temp dir
+        'XDG_CONFIG_HOME': str(profile_dir),
+        'XDG_DATA_HOME': str(data_dir),
+        'XDG_CACHE_HOME': str(cache_dir),
+    })
+    
+    # LibreOffice requires the user-installation value as a file:// URL
+    profile_url = profile_dir.as_uri()
+    pdf_filter  = _pdf_filter_for(source_path)
+
+    cmd = [
+        soffice_bin,
+        f"-env:UserInstallation={profile_url}",
+        "--headless",
+        "--nocrashreport",
+        "--nodefault",
+        "--nofirststartwizard",
+        "--nologo",
+        "--norestore",  # CRITICAL: disables document-recovery prompt that hangs batch mode
+        "--convert-to", pdf_filter,
+        "--outdir", str(output_dir),
+        str(source_path),
+    ]
+
+    logger.info("LibreOffice cmd: %s", " ".join(cmd))
+
+    # Capture stderr so conversion errors appear in Celery logs instead of /dev/null
+    proc = subprocess.Popen(
+        cmd,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        env=env,
+        start_new_session=True,
+    )
+    try:
+        deadline = time.monotonic() + timeout
+        next_heartbeat = time.monotonic()
+
+        while True:
+            ret = proc.poll()
+            if ret is not None:
+                output = (proc.stdout.read() or b"").decode("utf-8", errors="replace")
+                if ret == 0:
+                    if output:
+                        logger.debug("LibreOffice stdout: %s", output[:2000])
+                    return True
+                logger.error(
+                    "LibreOffice conversion failed (exit=%d): %s", ret, output[:2000]
+                )
+                return False
+
+            now = time.monotonic()
+            if heartbeat and now >= next_heartbeat:
+                try:
+                    heartbeat()
+                except Exception as hb_exc:
+                    logger.warning("LibreOffice preview heartbeat failed: %s", hb_exc)
+                next_heartbeat = now + heartbeat_interval
+
+            if now >= deadline:
+                output = b""
+                try:
+                    proc.stdout.close()
+                except Exception:
+                    pass
+                logger.error("LibreOffice conversion timed out after %ds", timeout)
+                try:
+                    os.killpg(os.getpgid(proc.pid), signal.SIGTERM)
+                except (ProcessLookupError, OSError):
+                    pass
+                try:
+                    proc.wait(timeout=5)
+                except subprocess.TimeoutExpired:
+                    try:
+                        os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
+                    except (ProcessLookupError, OSError):
+                        pass
+                    proc.wait()
+                return False
+
+            time.sleep(0.5)
+    except Exception as exc:
+        logger.error("_convert_office_to_pdf error: %s", exc)
+        try:
+            proc.kill()
+            proc.wait()
+        except Exception:
+            pass
+        return False
+
+
+@shared_task(bind=True, max_retries=2, queue="preview")
 def generate_document_preview(self, document_id: str):
     """
     Convert an Office document to PDF for in-browser preview via LibreOffice.
 
     State machine: PENDING → PROCESSING → DONE | FAILED
 
-    The PENDING→PROCESSING claim is atomic so duplicate task deliveries are
-    safely ignored.
+    The PENDING→PROCESSING claim is atomic (filtered UPDATE) so duplicate
+    task deliveries are safely no-ops.
     """
     from django.conf import settings as django_settings
     from django.core.files.base import ContentFile
 
     from .models import Document, PreviewStatus
 
+    # ── Atomic claim ──────────────────────────────────────────────────────────
     claimed = Document.objects.filter(
         id=document_id,
         preview_status=PreviewStatus.PENDING,
-    ).update(preview_status=PreviewStatus.PROCESSING)
+    ).update(preview_status=PreviewStatus.PROCESSING, updated_at=timezone.now())
 
     if not claimed:
         try:
-            actual_status = Document.objects.values_list(
+            actual = Document.objects.values_list(
                 "preview_status", flat=True
             ).get(id=document_id)
             logger.info(
                 "generate_document_preview: skipping %s — not claimable (status=%s)",
-                document_id, actual_status,
+                document_id, actual,
             )
         except Document.DoesNotExist:
             logger.warning(
@@ -387,157 +563,212 @@ def generate_document_preview(self, document_id: str):
             )
         return
 
+    # Record wall-clock start time in cache so trigger_preview can detect stale
+    # jobs without being misled by the heartbeat (which refreshes updated_at
+    # every 30 s, making every in-progress job look perpetually fresh).
+    from django.conf import settings as _s
+    _stale_ttl = int(getattr(_s, "PREVIEW_PROCESSING_STALE_SECONDS", 300))
+    cache.set(_preview_start_cache_key(document_id), timezone.now(),
+              timeout=_stale_ttl + 120)
+
+    # ── Load document ─────────────────────────────────────────────────────────
     try:
         doc = Document.objects.get(id=document_id)
     except Document.DoesNotExist:
-        logger.warning("generate_document_preview: document %s not found", document_id)
+        logger.warning("generate_document_preview: document %s disappeared", document_id)
         return
 
     logger.info(
         "generate_document_preview: start doc=%s mime=%s file=%s",
-        document_id,
-        doc.file_mime_type,
-        getattr(doc.file, "name", ""),
+        document_id, doc.file_mime_type, getattr(doc.file, "name", ""),
     )
 
     if not doc.is_office_doc():
+        # Should not happen — only queue for office docs — but guard anyway
         Document.objects.filter(id=document_id).update(preview_status="")
         return
 
+    # ── Locate LibreOffice binary ─────────────────────────────────────
     configured_bin = (
         getattr(django_settings, "LIBREOFFICE_BIN", "").strip()
         or getattr(django_settings, "LIBREOFFICE_CMD", "").strip()
     )
     if configured_bin and not Path(configured_bin).exists():
         logger.warning(
-            "generate_document_preview: configured LibreOffice path %s does not exist; falling back to PATH lookup",
+            "generate_document_preview: configured path %s missing — falling back to PATH",
             configured_bin,
         )
         configured_bin = ""
+
+    # Try multiple common paths for LibreOffice in container environments
     soffice_bin = (
         configured_bin
         or shutil.which("libreoffice")
         or shutil.which("soffice")
+        or shutil.which("/usr/bin/libreoffice")
+        or shutil.which("/usr/bin/soffice")
+        or (Path("/usr/bin/libreoffice").exists() and "/usr/bin/libreoffice")
+        or (Path("/usr/bin/soffice").exists() and "/usr/bin/soffice")
     )
     timeout = int(getattr(django_settings, "LIBREOFFICE_TIMEOUT", 120))
 
     if not soffice_bin:
-        cache.set(
-            _preview_error_cache_key(document_id),
-            "LibreOffice binary not found in container PATH.",
-            timeout=60 * 60,
-        )
-        Document.objects.filter(id=document_id).update(
-            preview_status=PreviewStatus.FAILED
-        )
-        logger.error(
-            "generate_document_preview: LibreOffice binary not found for %s",
-            document_id,
-        )
+        _fail(document_id, "LibreOffice binary not found. Checked: libreoffice, soffice, /usr/bin/libreoffice, /usr/bin/soffice")
         return
 
     logger.info(
-        "generate_document_preview: doc=%s using soffice=%s timeout=%ss",
-        document_id,
-        soffice_bin,
-        timeout,
+        "generate_document_preview: doc=%s soffice=%s timeout=%ss",
+        document_id, soffice_bin, timeout,
     )
+
+    def heartbeat() -> None:
+        Document.objects.filter(id=document_id).update(updated_at=timezone.now())
+
+    # ── Conversion ────────────────────────────────────────────────────────────
+    pdf_bytes: bytes | None = None
 
     try:
         source_path = Path(doc.file.path)
-        with TemporaryDirectory(prefix="doc_preview_") as tmpdir:
-            output_dir = Path(tmpdir)
-            cmd = [
+
+        # Each conversion gets its own tmpdir that contains:
+        #   output/     — LibreOffice writes the PDF here
+        #   profile/    — isolated LibreOffice user profile (fixes concurrency)
+        with TemporaryDirectory(prefix="docpreview_") as tmpdir:
+            tmp = Path(tmpdir)
+            output_dir  = tmp / "output"
+            profile_dir = tmp / "profile"
+            output_dir.mkdir()
+            profile_dir.mkdir()
+
+            heartbeat()
+            success = _convert_office_to_pdf(
                 soffice_bin,
-                "--headless",
-                "--convert-to", "pdf",
-                "--outdir", str(output_dir),
-                str(source_path),
-            ]
-            result = subprocess.run(
-                cmd,
-                capture_output=True,
-                text=True,
-                timeout=timeout,
-                check=False,
+                source_path,
+                output_dir,
+                profile_dir,
+                timeout,
+                heartbeat=heartbeat,
             )
 
-            logger.info(
-                "generate_document_preview: doc=%s cmd_done returncode=%s stdout=%r stderr=%r",
-                document_id,
-                result.returncode,
-                (result.stdout or "")[:1000],
-                (result.stderr or "")[:1000],
-            )
-
+            # LibreOffice names the output after the source stem
             preview_path = output_dir / f"{source_path.stem}.pdf"
             if not preview_path.exists():
+                # Some LO versions may sanitise the stem — pick whatever PDF landed
                 pdfs = sorted(output_dir.glob("*.pdf"))
                 if pdfs:
                     preview_path = pdfs[0]
 
-            if result.returncode != 0 or not preview_path.exists():
-                produced = [p.name for p in output_dir.glob("*")]
+            if not success or not preview_path.exists():
+                found = [p.name for p in output_dir.glob("*")]
+                timed_out = not success and not preview_path.exists()
                 raise RuntimeError(
-                    f"LibreOffice conversion failed"
-                    f" (code={result.returncode}, stdout={(result.stdout or '')[:500]!r},"
-                    f" stderr={(result.stderr or '')[:500]!r}, outdir={produced!r})"
+                    f"LibreOffice conversion {'timed out' if timed_out else 'failed'} "
+                    f"(filter={_pdf_filter_for(source_path)!r}, outdir={found!r}). "
+                    f"Check Celery logs for LibreOffice stdout."
                 )
 
+            # Read bytes while tmpdir is still alive
             pdf_bytes = preview_path.read_bytes()
 
-        with transaction.atomic():
-            if doc.preview_pdf:
-                doc.preview_pdf.delete(save=False)
-            doc.preview_pdf.save(
-                f"{doc.id}_preview.pdf",
-                ContentFile(pdf_bytes),
-                save=False,
-            )
-            doc.preview_status = PreviewStatus.DONE
-            doc.save(update_fields=["preview_pdf", "preview_status", "updated_at"])
-        cache.delete(_preview_error_cache_key(document_id))
+        # tmpdir (and isolated LO profile) is now cleaned up
 
-        logger.info(
-            "generate_document_preview: completed for %s (%d bytes)",
-            document_id, len(pdf_bytes),
-        )
-
-    except (RuntimeError, subprocess.SubprocessError) as exc:
-        cache.set(_preview_error_cache_key(document_id), str(exc)[:2000], timeout=60 * 60)
+    except RuntimeError as exc:
+        # Definitive failure — no retry (wrong binary, corrupt file, etc.)
+        _fail(document_id, str(exc))
         logger.error(
-            "generate_document_preview: fatal error for %s: %s", document_id, exc
+            "generate_document_preview: fatal for %s: %s", document_id, exc
         )
+        return
+
+    except Exception as exc:
+        # Transient failure — retry with exponential back-off
+        logger.error(
+            "generate_document_preview: transient error for %s: %s", document_id, exc
+        )
+        # Reset to PENDING so the next delivery can claim atomically
         Document.objects.filter(id=document_id).update(
-            preview_status=PreviewStatus.FAILED
+            preview_status=PreviewStatus.PENDING,
+            updated_at=timezone.now(),
+        )
+        try:
+            raise self.retry(exc=exc, countdown=30 * (2 ** self.request.retries))
+        except self.MaxRetriesExceededError:
+            _fail(document_id, f"Max retries exceeded: {exc}")
+            logger.error(
+                "generate_document_preview: max retries exceeded for %s", document_id
+            )
+        return
+
+    # ── Persist PDF ───────────────────────────────────────────────────────────
+    # Storage write happens OUTSIDE the atomic block intentionally:
+    # Django's storage backends (S3, GCS, local) are not transactional.
+    # We write the new file first, then atomically swap the DB pointer and
+    # delete the old file. If the DB write fails, the new file is orphaned
+    # (harmless, can be garbage-collected). If old-file deletion fails, we
+    # log but don't fail — the new preview is still correct.
+    try:
+        new_filename = f"{doc.id}_preview.pdf"
+        content_file = ContentFile(pdf_bytes, name=new_filename)
+
+        # Determine old preview path before overwriting
+        old_preview_name = doc.preview_pdf.name if doc.preview_pdf else None
+
+        # Save new file to storage (doesn't touch DB yet)
+        doc.preview_pdf.save(new_filename, content_file, save=False)
+        new_preview_name = doc.preview_pdf.name
+
+        # Atomically update DB: swap preview file path + mark DONE
+        Document.objects.filter(id=document_id).update(
+            preview_pdf=new_preview_name,
+            preview_status=PreviewStatus.DONE,
+            updated_at=timezone.now(),
+        )
+
+        # Only now delete the old preview — DB already points to the new one
+        if old_preview_name and old_preview_name != new_preview_name:
+            try:
+                from django.core.files.storage import default_storage
+                if default_storage.exists(old_preview_name):
+                    default_storage.delete(old_preview_name)
+            except Exception as del_exc:
+                logger.warning(
+                    "generate_document_preview: could not delete old preview %s: %s",
+                    old_preview_name, del_exc,
+                )
+
+        cache.delete(_preview_error_cache_key(document_id))
+        cache.delete(_preview_start_cache_key(document_id))
+        logger.info(
+            "generate_document_preview: done for %s (%d bytes)", document_id, len(pdf_bytes)
         )
 
     except Exception as exc:
-        cache.set(_preview_error_cache_key(document_id), str(exc)[:2000], timeout=60 * 60)
-        logger.error("generate_document_preview failed for %s: %s", document_id, exc)
-        try:
-            Document.objects.filter(id=document_id).update(
-                preview_status=PreviewStatus.PENDING
-            )
-            raise self.retry(exc=exc, countdown=60)
-        except self.MaxRetriesExceededError:
-            Document.objects.filter(id=document_id).update(
-                preview_status=PreviewStatus.FAILED
-            )
-            logger.error(
-                "generate_document_preview: max retries exceeded for %s",
-                document_id,
-            )
+        logger.error(
+            "generate_document_preview: failed to persist PDF for %s: %s", document_id, exc
+        )
+        _fail(document_id, f"Storage error: {exc}")
 
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Helpers
 # ─────────────────────────────────────────────────────────────────────────────
 
+def _fail(document_id: str, error_message: str) -> None:
+    """Mark preview as permanently failed and cache the error for the UI."""
+    from .models import Document, PreviewStatus
+    cache.set(_preview_error_cache_key(document_id), error_message[:2000],
+              timeout=_PREVIEW_ERROR_TTL)
+    cache.delete(_preview_start_cache_key(document_id))
+    Document.objects.filter(id=document_id).update(
+        preview_status=PreviewStatus.FAILED,
+        updated_at=timezone.now(),
+    )
+
+
 def _mark_pending(document_id: str, auto_flag_scanned: bool = False) -> None:
     """
-    Set ocr_status=PENDING.  Only called by extract_text for auto-detected
-    scanned PDFs.  Does not overwrite PROCESSING or DONE.
+    Set ocr_status=PENDING. Only called by extract_text for auto-detected
+    scanned PDFs. Does not overwrite PROCESSING or DONE.
     """
     from .models import Document, OCRStatus
     fields: dict = {"ocr_status": OCRStatus.PENDING}

@@ -542,7 +542,11 @@ function OfficeEditPanel({
   const startPolling = useCallback(() => {
     stopPolling();
     startTimeRef.current  = Date.now();
-    setTimedOut(false);
+    // NOTE: do NOT call setTimedOut(false) here.
+    // Only the explicit retry action should clear the timed-out state.
+    // Calling it here caused a feedback loop:
+    //   timedOut=true → useEffect fires → startPolling() → setTimedOut(false)
+    //   → useEffect fires again → startPolling() → ... (infinite restart)
     pollingRef.current    = true;
 
     previewPollRef.current = setInterval(async () => {
@@ -576,7 +580,14 @@ function OfficeEditPanel({
     const s = preview?.preview_status;
     if (s === "pending" || s === "processing") {
       clearFailedConfirmation();
-      if (!pollingRef.current) startPolling();
+      // Guard: if the user's poll timer already fired (timedOut=true) do NOT
+      // restart polling automatically. The backend job may still be running,
+      // but we've already shown the timeout UI. Only an explicit Retry click
+      // (which resets timedOut via retryPreviewMutation.onSuccess) should
+      // resume polling. Without this guard, the effect re-running because
+      // `timedOut` changed would call startPolling → setTimedOut(false) → effect
+      // fires again → startPolling → … causing an infinite restart loop.
+      if (!pollingRef.current && !timedOut) startPolling();
     } else if (s === "failed") {
       stopPolling();
       if (!failedConfirmRef.current && !timedOut) {
@@ -656,8 +667,14 @@ function OfficeEditPanel({
   const retryPreviewMutation = useMutation({
     mutationFn: () => documentsAPI.triggerPreview(doc.id),
     onSuccess: () => {
+      // Clear the timed-out flag BEFORE restarting polling so the effect
+      // guard (if !timedOut) doesn't block the new poll cycle.
       setTimedOut(false);
       setPreviewProgress(0);
+      // Explicitly start polling here rather than relying on the status effect,
+      // because the query invalidation is async — there's a window where the
+      // effect sees the old status and the timedOut guard would block it anyway.
+      startPolling();
       qc.invalidateQueries({ queryKey: ["document-preview", doc.id] });
     },
     onError: (err: any) => {
@@ -761,7 +778,7 @@ function OfficeEditPanel({
       // Linux + handler installed: fire docvault-open:// URI scheme.
       // The installed handler decodes the payload and calls soffice directly.
       const davsUrl  = lockData.webdav_url.replace(/^https?:\/\//, (m) =>
-        m === "https://" ? "vnd.sun.star.webdavs://" : "vnd.sun.star.webdav://");
+        m === "https://" ? "davs://" : "dav://");
       const encoded  = btoa(davsUrl).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
       window.location.href = `docvault-open://${encoded}`;
 
