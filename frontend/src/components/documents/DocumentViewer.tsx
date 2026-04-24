@@ -18,12 +18,12 @@
  *
  *   Flow:
  *     1. User clicks "Acquire edit lock" → POST /edit_token/
- *     2. Backend returns a webdav_url with Basic Auth credentials embedded
- *        in the netloc: https://user:token@host/api/v1/documents/webdav/<id>/<file>
+ *     2. Backend returns a webdav_url with the token in the path:
+ *        https://host/api/v1/documents/webdav/<id>/<token>/<file>
  *     3. Frontend navigates to ms-word:ofe|u|<webdav_url> (or ms-excel: etc.)
  *     4. The OS hands the URI to the registered handler (MS Office or LibreOffice).
- *     5. The editor opens the file via WebDAV, sending the embedded credentials
- *        as HTTP Basic Auth on every request — no credential dialog appears.
+ *     5. The editor opens the file via WebDAV, carrying the token on every
+ *        request — no credential dialog appears.
  *     6. Every Ctrl+S issues a WebDAV PUT → backend creates a new version.
  *     7. Frontend polls /documents/<id>/ every 5 s and toasts on version bump.
  *
@@ -35,7 +35,7 @@
  *   While locked, the frontend polls for version bumps every 5 s.
  */
 
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { useDropzone } from "react-dropzone";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { documentsAPI } from "../../services/api";
@@ -68,6 +68,8 @@ import type {
   DocumentEditTokenResponse,
   DocumentPreviewResponse,
 } from "@/types";
+
+import { getCachedVersionPreview, setCachedVersionPreview } from "@/utils/versionPreviewCache";
 
 import * as pdfjsLib from "pdfjs-dist";
 import type { PDFDocumentProxy } from "pdfjs-dist";
@@ -476,11 +478,13 @@ function ImageViewer({ url: rawUrl }: { url: string }) {
 function OfficeEditPanel({
   doc,
   initialPreview,
+  selectedVersionId,
   canUploadVersion,
   onVersionUploaded,
 }: {
   doc: Document;
   initialPreview: DocumentPreviewResponse;
+  selectedVersionId?: string | null;
   canUploadVersion: boolean;
   onVersionUploaded: () => void;
 }) {
@@ -508,17 +512,38 @@ function OfficeEditPanel({
   // ── Preview query ─────────────────────────────────────────────────────────
 
   const { data: preview, refetch: refetchPreview } = useQuery<DocumentPreviewResponse>({
-    queryKey: ["document-preview", doc.id],
-    queryFn: () =>
-      documentsAPI.previewUrl(doc.id).then((r) => ({
-        ...r.data,
-        url:     normalizeUrl(r.data.url)     || r.data.url,
-        raw_url: r.data.raw_url ? normalizeUrl(r.data.raw_url) || r.data.raw_url : undefined,
-      })),
+    queryKey: ["document-preview", doc.id, selectedVersionId ?? "current"],
+    queryFn: async () => {
+      const cacheKey = `${doc.id}-${selectedVersionId ?? "current"}`;
+      const cached = getCachedVersionPreview(cacheKey);
+      
+      if (cached && !selectedVersionId) {
+        // For current version, serve from cache if available and fresh
+        return cached;
+      }
+      
+      try {
+        const result = await documentsAPI.previewUrl(doc.id, selectedVersionId ?? undefined);
+        const normalizedResult = {
+          ...result.data,
+          url: normalizeUrl(result.data.url) || result.data.url,
+          raw_url: result.data.raw_url ? normalizeUrl(result.data.raw_url) || result.data.raw_url : undefined,
+        };
+        
+        // Cache the result for future use
+        setCachedVersionPreview(cacheKey, normalizedResult);
+        return normalizedResult;
+      } catch (error) {
+        // If API call fails, try to serve from cache as fallback
+        const fallback = getCachedVersionPreview(cacheKey);
+        if (fallback) return fallback;
+        throw error;
+      }
+    },
     placeholderData: initialPreview,
-    staleTime: 0,
+    staleTime: selectedVersionId ? 30_000 : 0, // Version previews stale after 30s, current always fresh
     refetchInterval: false,
-    retry: false,
+    retry: 2,
   });
 
   // ── Preview polling ───────────────────────────────────────────────────────
@@ -620,12 +645,7 @@ function OfficeEditPanel({
   const isConverting  = !timedOut && ["pending", "processing"].includes(preview?.preview_status ?? "");
   const hasPdf        = preview?.viewer === "pdfjs" && !!preview.url;
   const previewFailed = (preview?.preview_status === "failed" && !isConfirmingFailed) || timedOut;
-
-  const webViewerUrl = useMemo(() => {
-    const rawUrl = normalizeUrl(preview?.raw_url);
-    if (!rawUrl) return "";
-    return `https://view.officeapps.live.com/op/embed.aspx?src=${encodeURIComponent(rawUrl)}`;
-  }, [preview?.raw_url]);
+  const activeDownloadUrl = normalizeUrl(preview?.raw_url ?? preview?.url ?? initialPreview.raw_url ?? initialPreview.url) ?? "";
 
   // ── Lock mutations ────────────────────────────────────────────────────────
 
@@ -665,7 +685,10 @@ function OfficeEditPanel({
   // ── Retry preview ─────────────────────────────────────────────────────────
 
   const retryPreviewMutation = useMutation({
-    mutationFn: () => documentsAPI.triggerPreview(doc.id),
+    mutationFn: () =>
+      selectedVersionId
+        ? documentsAPI.triggerVersionPreview(doc.id, selectedVersionId)
+        : documentsAPI.triggerPreview(doc.id),
     onSuccess: () => {
       // Clear the timed-out flag BEFORE restarting polling so the effect
       // guard (if !timedOut) doesn't block the new poll cycle.
@@ -675,7 +698,9 @@ function OfficeEditPanel({
       // because the query invalidation is async — there's a window where the
       // effect sees the old status and the timedOut guard would block it anyway.
       startPolling();
-      qc.invalidateQueries({ queryKey: ["document-preview", doc.id] });
+      qc.invalidateQueries({
+        queryKey: ["document-preview", doc.id, selectedVersionId ?? "current"],
+      });
     },
     onError: (err: any) => {
       toast.error(err?.response?.data?.detail ?? "Could not queue preview. Please try again.");
@@ -777,9 +802,9 @@ function OfficeEditPanel({
     } else if (isLinux && handlerInstalled) {
       // Linux + handler installed: fire docvault-open:// URI scheme.
       // The installed handler decodes the payload and calls soffice directly.
-      const davsUrl  = lockData.webdav_url.replace(/^https?:\/\//, (m) =>
-        m === "https://" ? "davs://" : "dav://");
-      const encoded  = btoa(davsUrl).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
+      const webdavUrl = lockData.webdav_url.replace(/^https?:\/\//, (m) =>
+        m === "https://" ? "vnd.sun.star.webdavs://" : "vnd.sun.star.webdav://");
+      const encoded = btoa(webdavUrl).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
       window.location.href = `docvault-open://${encoded}`;
 
     } else {
@@ -820,7 +845,7 @@ function OfficeEditPanel({
           </div>
           <div className="flex items-center gap-2">
             <a
-              href={normalizeUrl(initialPreview.raw_url ?? initialPreview.url) ?? ""}
+              href={activeDownloadUrl}
               target="_blank"
               rel="noopener noreferrer"
               className="btn-secondary text-xs px-3 py-1.5 flex items-center gap-1.5"
@@ -828,7 +853,7 @@ function OfficeEditPanel({
               <ExternalLink className="w-3.5 h-3.5" /> Open original
             </a>
             <a
-              href={normalizeUrl(initialPreview.raw_url ?? initialPreview.url) ?? ""}
+              href={activeDownloadUrl}
               download
               className="btn-secondary text-xs px-3 py-1.5 flex items-center gap-1.5"
             >
@@ -899,7 +924,7 @@ function OfficeEditPanel({
                     Retry
                   </button>
                   <a
-                    href={normalizeUrl(initialPreview.raw_url ?? initialPreview.url) ?? ""}
+                    href={activeDownloadUrl}
                     download
                     className="btn-primary text-sm flex items-center gap-2"
                   >
@@ -908,19 +933,6 @@ function OfficeEditPanel({
                 </div>
               </div>
 
-              {webViewerUrl && (
-                <div className="border border-gray-200 rounded-lg overflow-hidden">
-                  <div className="px-3 py-2 border-b bg-gray-50 text-xs text-gray-600">
-                    Web Office Viewer fallback
-                  </div>
-                  <iframe
-                    src={webViewerUrl}
-                    title="Office Web Preview"
-                    className="w-full"
-                    style={{ height: "70vh", border: 0 }}
-                  />
-                </div>
-              )}
             </div>
           )}
 
@@ -1287,18 +1299,49 @@ interface Props {
 export default function DocumentViewer({ document: doc }: Props) {
   const qc   = useQueryClient();
   const user = useAuthStore((s) => s.user);
+  const [selectedVersionId, setSelectedVersionId] = useState<string | null>(null);
+
+  useEffect(() => {
+    setSelectedVersionId(null);
+  }, [doc.id]);
+
+  useEffect(() => {
+    if (selectedVersionId && !doc.versions?.some((version) => version.id === selectedVersionId)) {
+      setSelectedVersionId(null);
+    }
+  }, [doc.versions, selectedVersionId]);
 
   const { data: preview, isLoading, isError } = useQuery<DocumentPreviewResponse>({
-    queryKey: ["document-preview", doc.id],
+    queryKey: ["document-preview", doc.id, selectedVersionId ?? "current"],
     queryFn: async () => {
-      const r = await documentsAPI.previewUrl(doc.id);
-      return {
-        ...r.data,
-        url:     normalizeUrl(r.data.url)!,
-        raw_url: normalizeUrl(r.data.raw_url),
-      };
+      const cacheKey = `${doc.id}-${selectedVersionId ?? "current"}`;
+      const cached = getCachedVersionPreview(cacheKey);
+      
+      // Serve from cache if available and fresh (for both current and version previews)
+      if (cached) {
+        return cached;
+      }
+      
+      try {
+        const r = await documentsAPI.previewUrl(doc.id, selectedVersionId ?? undefined);
+        const normalizedResult = {
+          ...r.data,
+          url: normalizeUrl(r.data.url)!,
+          raw_url: r.data.raw_url ? normalizeUrl(r.data.raw_url) : undefined,
+        };
+        
+        // Cache the result for future use
+        setCachedVersionPreview(cacheKey, normalizedResult);
+        return normalizedResult;
+      } catch (error) {
+        // If API call fails, try to serve from cache as fallback
+        const fallback = getCachedVersionPreview(cacheKey);
+        if (fallback) return fallback;
+        throw error;
+      }
     },
-    staleTime: 0,
+    staleTime: selectedVersionId ? 30_000 : 0, // Version previews stale after 30s, current always fresh
+    retry: 2,
   });
 
   const releaseLock = useMutation({
@@ -1324,6 +1367,37 @@ export default function DocumentViewer({ document: doc }: Props) {
     doc.file_mime_type?.startsWith("image/") ||
     /\.(png|jpe?g|gif|webp|svg|bmp)$/i.test(doc.file_name ?? "");
 
+  // Preload next and previous versions for smoother navigation
+  // This hook must be called before any early returns to satisfy React rules
+  useEffect(() => {
+    if (!doc.versions || !selectedVersionId) return;
+    
+    const currentIndex = doc.versions.findIndex(v => v.id === selectedVersionId);
+    if (currentIndex === -1) return;
+    
+    // Preload adjacent versions in background
+    const preloadVersions = [];
+    if (currentIndex > 0) preloadVersions.push(doc.versions[currentIndex - 1].id);
+    if (currentIndex < doc.versions.length - 1) preloadVersions.push(doc.versions[currentIndex + 1].id);
+    
+    preloadVersions.forEach(versionId => {
+      const cacheKey = `${doc.id}-${versionId}`;
+      if (!getCachedVersionPreview(cacheKey)) {
+        // Trigger background fetch without blocking UI
+        documentsAPI.previewUrl(doc.id, versionId).then(result => {
+          const normalizedResult = {
+            ...result.data,
+            url: normalizeUrl(result.data.url) || result.data.url,
+            raw_url: result.data.raw_url ? normalizeUrl(result.data.raw_url) || result.data.raw_url : undefined,
+          };
+          setCachedVersionPreview(cacheKey, normalizedResult);
+        }).catch(() => {
+          // Ignore background preload errors
+        });
+      }
+    });
+  }, [doc.id, doc.versions, selectedVersionId]);
+
   if (isLoading)
     return (
       <div className="flex items-center justify-center h-64">
@@ -1340,6 +1414,9 @@ export default function DocumentViewer({ document: doc }: Props) {
     );
 
   const rawFileUrl = normalizeUrl(preview.raw_url ?? preview.url) ?? "";
+  const selectedVersion = selectedVersionId
+    ? doc.versions?.find((version) => version.id === selectedVersionId) ?? null
+    : null;
 
   return (
     <div className="space-y-2">
@@ -1354,9 +1431,13 @@ export default function DocumentViewer({ document: doc }: Props) {
       <div className="flex items-center justify-between">
         <h3 className="font-medium text-gray-900 text-sm">Document Preview</h3>
         <div className="flex items-center gap-2">
-          {doc.current_version > 1 && (
+          {selectedVersion ? (
+            <span className="inline-flex items-center gap-1 text-xs text-sky-600 font-medium bg-sky-50 px-2 py-0.5 rounded-full">
+              <CheckCircle2 className="w-3 h-3" /> Previewing v{selectedVersion.version_number}
+            </span>
+          ) : (
             <span className="inline-flex items-center gap-1 text-xs text-brand-600 font-medium bg-brand-50 px-2 py-0.5 rounded-full">
-              <CheckCircle2 className="w-3 h-3" /> v{doc.current_version}
+              <CheckCircle2 className="w-3 h-3" /> Current v{doc.current_version}
             </span>
           )}
           <a
@@ -1369,6 +1450,50 @@ export default function DocumentViewer({ document: doc }: Props) {
           </a>
         </div>
       </div>
+
+      {doc.versions?.length > 0 && (
+        <div className="flex flex-wrap items-center gap-2">
+          {/* Current button - only show if it's different from all version buttons */}
+          {(!doc.versions.some(v => v.version_number === doc.current_version)) && (
+            <button
+              type="button"
+              onClick={() => setSelectedVersionId(null)}
+              className={`text-xs px-2.5 py-1 rounded-full border transition-colors ${
+                selectedVersionId === null
+                  ? "border-primary bg-primary/10 text-primary"
+                  : "border-gray-200 text-gray-600 hover:bg-gray-50"
+              }`}
+            >
+              Current
+            </button>
+          )}
+          {doc.versions.map((version) => {
+            const isCurrentVersion = version.version_number === doc.current_version;
+            const active = isCurrentVersion ? selectedVersionId === null : selectedVersionId === version.id;
+            
+            return (
+              <button
+                key={version.id}
+                type="button"
+                onClick={() => isCurrentVersion ? setSelectedVersionId(null) : setSelectedVersionId(version.id)}
+                className={`text-xs px-2.5 py-1 rounded-full border transition-colors ${
+                  active
+                    ? isCurrentVersion
+                      ? "border-primary bg-primary/10 text-primary"
+                      : "border-sky-300 bg-sky-50 text-sky-700"
+                    : "border-gray-200 text-gray-600 hover:bg-gray-50"
+                }`}
+                title={version.file_name}
+              >
+                v{version.version_number}
+                {isCurrentVersion && (
+                  <span className="ml-1 text-primary">★</span>
+                )}
+              </button>
+            );
+          })}
+        </div>
+      )}
 
       {/* PDF (non-office) */}
       {preview.viewer === "pdfjs" && !isOffice && (
@@ -1385,6 +1510,7 @@ export default function DocumentViewer({ document: doc }: Props) {
         <OfficeEditPanel
           doc={doc}
           initialPreview={preview}
+          selectedVersionId={selectedVersionId}
           canUploadVersion={canUploadVersion}
           onVersionUploaded={onVersionUploaded}
         />

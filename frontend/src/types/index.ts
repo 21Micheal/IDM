@@ -99,6 +99,7 @@ export interface DocumentVersion {
   change_summary: string;
   created_by: UserSummary;
   created_at: string;
+  file_url?: string;
 }
 
 export interface Tag {

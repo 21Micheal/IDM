@@ -122,13 +122,20 @@ class DocumentTypeSerializer(serializers.ModelSerializer):
 
 class DocumentVersionSerializer(serializers.ModelSerializer):
     created_by = UserSummarySerializer(read_only=True)
+    file_url = serializers.SerializerMethodField()
 
     class Meta:
         model  = DocumentVersion
         fields = [
             "id", "version_number", "file_name", "file_size",
-            "change_summary", "created_by", "created_at",
+            "change_summary", "created_by", "created_at", "file_url",
         ]
+
+    def get_file_url(self, obj):
+        request = self.context.get("request")
+        if not obj.file:
+            return None
+        return request.build_absolute_uri(obj.file.url) if request else obj.file.url
 
 
 class DocumentCommentSerializer(serializers.ModelSerializer):

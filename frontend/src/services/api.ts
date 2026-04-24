@@ -179,6 +179,12 @@ export const documentsAPI = {
   triggerPreview: (id: string) =>
     api.post<{ detail: string; preview_status: string }>(`/documents/${id}/trigger_preview/`),
 
+  /** Explicitly (re-)queue a historical version preview conversion. */
+  triggerVersionPreview: (id: string, versionId: string) =>
+    api.post<{ detail: string; preview_status: string }>(`/documents/${id}/trigger_version_preview/`, {
+      version_id: versionId,
+    }),
+
   /** Acquire edit lock + get launcher credentials. POST. */
   editToken: (id: string) =>
     api.post<DocumentEditTokenResponse>(`/documents/${id}/edit_token/`),
@@ -205,8 +211,10 @@ export const documentsAPI = {
     api.post<{ detail: string }>(`/documents/${id}/release_lock/`, { force }),
 
   /** Get current preview URL. GET. Used for polling during Office→PDF conversion. */
-  previewUrl: (id: string) =>
-    api.get<DocumentPreviewResponse>(`/documents/${id}/preview_url/`),
+  previewUrl: (id: string, versionId?: string) =>
+    api.get<DocumentPreviewResponse>(`/documents/${id}/preview_url/`, {
+      params: versionId ? { version_id: versionId } : undefined,
+    }),
 };
 
 export const documentTypesAPI = {

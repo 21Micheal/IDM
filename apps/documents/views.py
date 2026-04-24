@@ -52,6 +52,37 @@ def _preview_start_cache_key(document_id: str) -> str:
     return f"document_preview_started_at:{document_id}"
 
 
+def _version_preview_error_cache_key(version_id: str) -> str:
+    return f"document_version_preview_error:{version_id}"
+
+
+def _version_preview_start_cache_key(version_id: str) -> str:
+    return f"document_version_preview_started_at:{version_id}"
+
+
+def _version_preview_status_cache_key(version_id: str) -> str:
+    return f"document_version_preview_status:{version_id}"
+
+
+def _version_preview_processing_cache_key(version_id: str) -> str:
+    return f"document_version_preview_processing:{version_id}"
+
+
+def _version_preview_storage_name(version_id: str) -> str:
+    return f"previews/versions/{version_id}_preview.pdf"
+
+
+def _delete_storage_file(name: str) -> None:
+    if not name:
+        return
+    try:
+        from django.core.files.storage import default_storage
+        if default_storage.exists(name):
+            default_storage.delete(name)
+    except Exception:
+        logger.exception("_delete_storage_file: could not delete %s", name)
+
+
 # ── Document Type ViewSet ─────────────────────────────────────────────────────
 
 class DocumentTypeViewSet(AuditMixin, viewsets.ModelViewSet):
@@ -143,6 +174,25 @@ class DocumentViewSet(AuditMixin, viewsets.ModelViewSet):
                 generate_document_preview.delay(str(doc.id))
         except Exception:
             logger.exception("_queue_office_preview: failed for doc=%s", doc.id)
+
+    def _queue_office_version_preview(self, version: DocumentVersion) -> None:
+        if not version.is_office_doc():
+            return
+        try:
+            from .tasks import generate_document_version_preview
+            status_key = _version_preview_status_cache_key(str(version.id))
+            current_status = cache.get(status_key)
+
+            if current_status in (PreviewStatus.PENDING, PreviewStatus.PROCESSING):
+                return
+
+            cache.set(status_key, PreviewStatus.PENDING, timeout=3600)
+            generate_document_version_preview.delay(str(version.id))
+        except Exception:
+            logger.exception(
+                "_queue_office_version_preview: failed for version=%s",
+                version.id,
+            )
 
     def create(self, request, *args, **kwargs):
         serializer = self.get_serializer(data=request.data)
@@ -244,11 +294,17 @@ class DocumentViewSet(AuditMixin, viewsets.ModelViewSet):
         doc.checksum = checksum
         doc.current_version = new_version
         
-        if doc.preview_pdf:
-            doc.preview_pdf.delete(save=False)
-        doc.preview_pdf = None
         doc.preview_status = ""
-        doc.save()
+        Document.objects.filter(id=doc.id).update(
+            file=doc.file.name,
+            file_name=doc.file_name,
+            file_size=doc.file_size,
+            file_mime_type=doc.file_mime_type,
+            checksum=doc.checksum,
+            current_version=doc.current_version,
+            preview_status="",
+            updated_at=timezone.now(),
+        )
         
         self._queue_office_preview(doc)
         self.record_audit("document.version_uploaded", doc, {"version": new_version})
@@ -274,56 +330,158 @@ class DocumentViewSet(AuditMixin, viewsets.ModelViewSet):
             except Exception:
                 pass
 
-        new_version = doc.current_version + 1
-
         with transaction.atomic():
-            restored_version = DocumentVersion(
-                document=doc,
-                version_number=new_version,
-                file_name=version.file_name,
-                file_size=version.file_size,
-                checksum=version.checksum,
-                change_summary=f"Restored from v{version.version_number}",
-                created_by=request.user,
+            later_versions = list(
+                DocumentVersion.objects.filter(
+                    document=doc,
+                    version_number__gt=version.version_number,
+                ).order_by("version_number")
             )
-            restored_version.file.save(
-                version.file_name,
-                ContentFile(content, name=version.file_name),
-                save=False,
-            )
-            restored_version.save()
 
-            if doc.preview_pdf:
-                doc.preview_pdf.delete(save=False)
+            restored_name = version.file_name or doc.file_name
+            restored_size = version.file_size or len(content)
 
             doc.file.save(
-                version.file_name,
-                ContentFile(content, name=version.file_name),
+                restored_name,
+                ContentFile(content, name=restored_name),
                 save=False,
             )
-            doc.file_name = version.file_name
-            doc.file_size = version.file_size
-            doc.file_mime_type = doc.file_mime_type
+            doc.file_name = restored_name
+            doc.file_size = restored_size
+            guessed_mime, _ = mimetypes.guess_type(restored_name)
+            restored_mime = getattr(version.file, "content_type", "") or guessed_mime or doc.file_mime_type
+            if restored_mime and restored_mime != "application/octet-stream":
+                doc.file_mime_type = restored_mime
             doc.checksum = version.checksum
-            doc.current_version = new_version
-            doc.preview_pdf = None
+            doc.current_version = version.version_number
             doc.preview_status = ""
-            doc.save(update_fields=[
-                "file", "file_name", "file_size", "checksum",
-                "current_version", "preview_pdf", "preview_status", "updated_at",
-            ])
+            Document.objects.filter(id=doc.id).update(
+                file=doc.file.name,
+                file_name=doc.file_name,
+                file_size=doc.file_size,
+                file_mime_type=doc.file_mime_type,
+                checksum=doc.checksum,
+                current_version=doc.current_version,
+                preview_status="",
+                updated_at=timezone.now(),
+            )
+
+            DocumentVersion.objects.filter(
+                document=doc,
+                version_number__gt=version.version_number,
+            ).delete()
+
+            for removed_version in later_versions:
+                removed_name = removed_version.file.name
+                if removed_name:
+                    transaction.on_commit(
+                        lambda name=removed_name: _delete_storage_file(name)
+                    )
+                removed_preview_name = _version_preview_storage_name(str(removed_version.id))
+                transaction.on_commit(
+                    lambda name=removed_preview_name: _delete_storage_file(name)
+                )
+                cache.delete(_version_preview_status_cache_key(str(removed_version.id)))
+                cache.delete(_version_preview_processing_cache_key(str(removed_version.id)))
+                cache.delete(_version_preview_error_cache_key(str(removed_version.id)))
+                cache.delete(_version_preview_start_cache_key(str(removed_version.id)))
 
         self._queue_office_preview(doc)
         self.record_audit(
             "document.version_restored",
             doc,
-            {"restored_from": version.version_number, "version": new_version},
+            {
+                "restored_from": version.version_number,
+                "version": version.version_number,
+                "deleted_versions": [v.version_number for v in later_versions],
+            },
         )
-        return Response(DocumentVersionSerializer(restored_version).data, status=201)
+        doc.refresh_from_db()
+        return Response(DocumentVersionSerializer(version, context=self.get_serializer_context()).data, status=200)
 
     @action(detail=True, methods=["get"])
     def preview_url(self, request, pk=None):
         doc = self.get_object()
+        version_id = request.query_params.get("version_id")
+        version = None
+        if version_id:
+            version = get_object_or_404(DocumentVersion, id=version_id, document=doc)
+
+        if version:
+            try:
+                absolute_file_url = request.build_absolute_uri(version.file.url)
+            except ValueError:
+                return Response({"detail": "Version file is missing."}, status=400)
+
+            mime = mimetypes.guess_type(version.file_name or "")[0] or ""
+            if mime == "application/pdf":
+                return Response({
+                    "viewer": "pdfjs",
+                    "url": absolute_file_url,
+                    "raw_url": absolute_file_url,
+                    "preview_status": "done",
+                })
+            if mime.startswith("image/"):
+                return Response({
+                    "viewer": "image",
+                    "url": absolute_file_url,
+                    "raw_url": absolute_file_url,
+                    "preview_status": "done",
+                })
+            if mime in (
+                "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+                "application/msword",
+                "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                "application/vnd.ms-excel",
+                "application/vnd.openxmlformats-officedocument.presentationml.presentation",
+                "application/vnd.ms-powerpoint",
+            ) or version.is_office_doc():
+                status_key = _version_preview_status_cache_key(str(version.id))
+                preview_name = _version_preview_storage_name(str(version.id))
+                preview_exists = False
+                try:
+                    from django.core.files.storage import default_storage
+                    preview_exists = default_storage.exists(preview_name)
+                except Exception:
+                    preview_exists = False
+
+                current_status = cache.get(status_key)
+                if current_status == PreviewStatus.DONE and not preview_exists:
+                    cache.delete(status_key)
+                    current_status = None
+
+                if current_status in (PreviewStatus.PENDING, PreviewStatus.PROCESSING):
+                    preview_status = current_status
+                elif preview_exists:
+                    preview_status = PreviewStatus.DONE
+                else:
+                    self._queue_office_version_preview(version)
+                    current_status = cache.get(status_key) or PreviewStatus.PENDING
+                    preview_status = current_status
+                preview_error = cache.get(_version_preview_error_cache_key(str(version.id)))
+
+                if preview_status == PreviewStatus.DONE and preview_exists:
+                    from django.core.files.storage import default_storage
+                    preview_url = request.build_absolute_uri(default_storage.url(preview_name))
+                    viewer = "pdfjs"
+                else:
+                    preview_url = absolute_file_url
+                    viewer = "processing"
+
+                return Response({
+                    "viewer": viewer,
+                    "url": preview_url,
+                    "raw_url": absolute_file_url,
+                    "preview_status": preview_status,
+                    "preview_error": preview_error,
+                })
+
+            return Response({
+                "viewer": "download",
+                "url": absolute_file_url,
+                "raw_url": absolute_file_url,
+            })
+
         try:
             absolute_file_url = request.build_absolute_uri(doc.file.url)
         except ValueError:
@@ -358,12 +516,12 @@ class DocumentViewSet(AuditMixin, viewsets.ModelViewSet):
                 preview_url = request.build_absolute_uri(doc.preview_pdf.url)
                 viewer = "pdfjs"
             else:
-                preview_url = ""
+                preview_url = absolute_file_url
                 viewer = "processing"
 
             return Response({
                 "viewer": viewer,
-                "url": preview_url if preview_url else absolute_file_url,
+                "url": preview_url,
                 "raw_url": absolute_file_url,
                 "preview_status": preview_status,
                 "preview_error": preview_error,
@@ -414,6 +572,56 @@ class DocumentViewSet(AuditMixin, viewsets.ModelViewSet):
 
         return Response({
             "detail": "Preview generation queued.",
+            "preview_status": PreviewStatus.PENDING,
+        })
+
+    @action(detail=True, methods=["post"])
+    def trigger_version_preview(self, request, pk=None):
+        doc = self.get_object()
+        version_id = request.data.get("version_id")
+        version = get_object_or_404(DocumentVersion, id=version_id, document=doc)
+
+        if not version.is_office_doc():
+            return Response(
+                {"detail": "Preview generation is only supported for Office versions."},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        status_key = _version_preview_status_cache_key(str(version.id))
+        processing_key = _version_preview_processing_cache_key(str(version.id))
+        preview_name = _version_preview_storage_name(str(version.id))
+        current_status = cache.get(status_key)
+
+        if current_status == PreviewStatus.PROCESSING:
+            stale_after = int(getattr(settings, "PREVIEW_PROCESSING_STALE_SECONDS", 300))
+            start_time = cache.get(_version_preview_start_cache_key(str(version.id)))
+            if start_time is not None:
+                processing_age_s = max(0, int((timezone.now() - start_time).total_seconds()))
+            else:
+                processing_age_s = stale_after + 1
+
+            if processing_age_s < stale_after:
+                return Response(
+                    {"detail": "Version preview generation is already in progress."},
+                    status=status.HTTP_400_BAD_REQUEST,
+                )
+
+        try:
+            from django.core.files.storage import default_storage
+            if default_storage.exists(preview_name):
+                default_storage.delete(preview_name)
+        except Exception:
+            logger.exception("trigger_version_preview: could not remove preview %s", preview_name)
+
+        cache.delete(processing_key)
+        cache.delete(status_key)
+        cache.delete(_version_preview_error_cache_key(str(version.id)))
+        cache.delete(_version_preview_start_cache_key(str(version.id)))
+        self._queue_office_version_preview(version)
+        self.record_audit("document.version_preview_triggered", doc, {"version_id": str(version.id)})
+
+        return Response({
+            "detail": "Version preview generation queued.",
             "preview_status": PreviewStatus.PENDING,
         })
 
@@ -476,7 +684,7 @@ class DocumentViewSet(AuditMixin, viewsets.ModelViewSet):
         self.record_audit("document.edit_lock_acquired", doc)
 
         return Response({
-            "token":       webdav_token,
+            "token":       jwt_token,   # JWT is what DocumentViewer.tsx reads
             "jwt_token":   jwt_token,
             "username":    request.user.email,
             "webdav_url":  webdav_url,
@@ -491,12 +699,11 @@ class DocumentViewSet(AuditMixin, viewsets.ModelViewSet):
     def _get_open_script_content(self, filename, open_url):
         safe_filename = filename.replace("'", "\\'")
         return f"""#!/usr/bin/env bash
-# DocVault — open "{filename}" in LibreOffice via WebDAV
-# Log file: /tmp/docvault-open.log
+# DocVault — open "{filename}" in LibreOffice
+set -euo pipefail
 
 OPEN_URL='{open_url}'
 FILE_NAME='{safe_filename}'
-LOG="/tmp/docvault-open-$(date +%s).log"
 
 find_soffice() {{
   for cmd in soffice libreoffice /usr/bin/soffice /usr/lib/libreoffice/program/soffice \
@@ -509,31 +716,12 @@ find_soffice() {{
 
 SOFFICE=$(find_soffice)
 if [ -z "$SOFFICE" ]; then
-  echo "ERROR: LibreOffice not found. Install it with: sudo apt install libreoffice" | tee "$LOG"
+  echo "ERROR: LibreOffice not found. Install it with: sudo apt install libreoffice"
   exit 1
 fi
 
-echo "DocVault: opening $FILE_NAME" | tee "$LOG"
-echo "Command: $SOFFICE $OPEN_URL" >> "$LOG"
-echo "Log: $LOG"
-
-# Run LibreOffice in the background, detached from this terminal.
-# Output goes to the log file so failures are diagnosable.
-"$SOFFICE" "$OPEN_URL" >>"$LOG" 2>&1 &
-LO_PID=$!
-disown $LO_PID
-
-# Give LO 3 seconds to start and contact the server.
-# If it exits immediately, something went wrong — show the log.
-sleep 3
-if ! kill -0 $LO_PID 2>/dev/null; then
-  echo ""
-  echo "ERROR: LibreOffice exited immediately. Log output:"
-  cat "$LOG"
-  exit 1
-fi
-
-echo "LibreOffice started (PID $LO_PID). Save with Ctrl+S — each save creates a new version."
+echo "Opening: $FILE_NAME"
+nohup "$SOFFICE" "$OPEN_URL" >/dev/null 2>&1 &
 """
 
     @action(detail=True, methods=["get"])
@@ -616,7 +804,6 @@ find_soffice() {{
 SOFFICE=$(find_soffice)
 if [ -n "$SOFFICE" ] && [ -n "$DAVS_URL" ]; then
   nohup "$SOFFICE" "$DAVS_URL" >/dev/null 2>&1 &
-  disown
 fi
 HANDLER_EOF
 

@@ -69,6 +69,8 @@ from pathlib import Path
 from tempfile import TemporaryDirectory
 
 from celery import shared_task
+from django.core.files.base import ContentFile
+from django.core.files.storage import default_storage
 from django.core.cache import cache
 from django.db import transaction
 from django.utils import timezone
@@ -91,6 +93,26 @@ def _preview_start_cache_key(document_id: str) -> str:
     Read by trigger_preview in views.py for staleness detection.
     Avoids the heartbeat (which refreshes updated_at) defeating the check."""
     return f"document_preview_started_at:{document_id}"
+
+
+def _version_preview_error_cache_key(version_id: str) -> str:
+    return f"document_version_preview_error:{version_id}"
+
+
+def _version_preview_start_cache_key(version_id: str) -> str:
+    return f"document_version_preview_started_at:{version_id}"
+
+
+def _version_preview_status_cache_key(version_id: str) -> str:
+    return f"document_version_preview_status:{version_id}"
+
+
+def _version_preview_processing_cache_key(version_id: str) -> str:
+    return f"document_version_preview_processing:{version_id}"
+
+
+def _version_preview_storage_name(version_id: str) -> str:
+    return f"previews/versions/{version_id}_preview.pdf"
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -527,6 +549,143 @@ def _convert_office_to_pdf(
         return False
 
 
+def _convert_office_source_to_pdf_bytes(
+    source_path: Path,
+    soffice_bin: str,
+    timeout: int,
+    heartbeat=None,
+) -> bytes:
+    """
+    Convert an Office source file to PDF bytes using an isolated temporary
+    LibreOffice profile and output directory.
+    """
+    pdf_bytes: bytes | None = None
+
+    with TemporaryDirectory(prefix="docpreview_") as tmpdir:
+        tmp = Path(tmpdir)
+        output_dir = tmp / "output"
+        profile_dir = tmp / "profile"
+        output_dir.mkdir()
+        profile_dir.mkdir()
+
+        if heartbeat:
+            heartbeat()
+        success = _convert_office_to_pdf(
+            soffice_bin,
+            source_path,
+            output_dir,
+            profile_dir,
+            timeout,
+            heartbeat=heartbeat,
+        )
+
+        preview_path = output_dir / f"{source_path.stem}.pdf"
+        if not preview_path.exists():
+            pdfs = sorted(output_dir.glob("*.pdf"))
+            if pdfs:
+                preview_path = pdfs[0]
+
+        if not success or not preview_path.exists():
+            found = [p.name for p in output_dir.glob("*")]
+            timed_out = not success and not preview_path.exists()
+            raise RuntimeError(
+                f"LibreOffice conversion {'timed out' if timed_out else 'failed'} "
+                f"(filter={_pdf_filter_for(source_path)!r}, outdir={found!r}). "
+                f"Check Celery logs for LibreOffice stdout."
+            )
+
+        pdf_bytes = preview_path.read_bytes()
+
+    return pdf_bytes
+
+
+def _persist_preview_file(
+    instance,
+    pdf_bytes: bytes,
+    preview_filename: str,
+    touch_updated_at: bool = True,
+) -> None:
+    """
+    Persist preview bytes onto a model instance that has preview_pdf and
+    preview_status fields.
+    """
+    from .models import PreviewStatus
+
+    old_preview_name = instance.preview_pdf.name if instance.preview_pdf else None
+    content_file = ContentFile(pdf_bytes, name=preview_filename)
+    instance.preview_pdf.save(preview_filename, content_file, save=False)
+    new_preview_name = instance.preview_pdf.name
+
+    update_fields = {
+        "preview_pdf": new_preview_name,
+        "preview_status": PreviewStatus.DONE,
+    }
+    if touch_updated_at and hasattr(instance, "updated_at"):
+        update_fields["updated_at"] = timezone.now()
+
+    instance.__class__.objects.filter(id=instance.id).update(**update_fields)
+
+    if old_preview_name and old_preview_name != new_preview_name:
+        try:
+            if default_storage.exists(old_preview_name):
+                default_storage.delete(old_preview_name)
+        except Exception as del_exc:
+            logger.warning(
+                "_persist_preview_file: could not delete old preview %s: %s",
+                old_preview_name, del_exc,
+            )
+
+
+def _persist_version_preview_file(version_id: str, pdf_bytes: bytes) -> str:
+    """
+    Persist a historical version preview to deterministic storage.
+    """
+    preview_name = _version_preview_storage_name(version_id)
+    content_file = ContentFile(pdf_bytes, name=preview_name)
+
+    try:
+        if default_storage.exists(preview_name):
+            default_storage.delete(preview_name)
+    except Exception as del_exc:
+        logger.warning(
+            "_persist_version_preview_file: could not clear old preview %s: %s",
+            preview_name, del_exc,
+        )
+
+    stored_name = default_storage.save(preview_name, content_file)
+    return stored_name
+
+
+def _delete_version_preview_file(version_id: str) -> None:
+    preview_name = _version_preview_storage_name(version_id)
+    try:
+        if default_storage.exists(preview_name):
+            default_storage.delete(preview_name)
+    except Exception as del_exc:
+        logger.warning(
+            "_delete_version_preview_file: could not delete %s: %s",
+            preview_name, del_exc,
+        )
+
+
+def _fail_preview(
+    model,
+    object_id: str,
+    error_message: str,
+    error_cache_key: str,
+    start_cache_key: str,
+    touch_updated_at: bool = True,
+) -> None:
+    from .models import PreviewStatus
+
+    cache.set(error_cache_key, error_message[:2000], timeout=_PREVIEW_ERROR_TTL)
+    cache.delete(start_cache_key)
+    update_fields = {"preview_status": PreviewStatus.FAILED}
+    if touch_updated_at:
+        update_fields["updated_at"] = timezone.now()
+    model.objects.filter(id=object_id).update(**update_fields)
+
+
 @shared_task(bind=True, max_retries=2, queue="preview")
 def generate_document_preview(self, document_id: str):
     """
@@ -624,57 +783,24 @@ def generate_document_preview(self, document_id: str):
     def heartbeat() -> None:
         Document.objects.filter(id=document_id).update(updated_at=timezone.now())
 
-    # ── Conversion ────────────────────────────────────────────────────────────
-    pdf_bytes: bytes | None = None
-
     try:
         source_path = Path(doc.file.path)
-
-        # Each conversion gets its own tmpdir that contains:
-        #   output/     — LibreOffice writes the PDF here
-        #   profile/    — isolated LibreOffice user profile (fixes concurrency)
-        with TemporaryDirectory(prefix="docpreview_") as tmpdir:
-            tmp = Path(tmpdir)
-            output_dir  = tmp / "output"
-            profile_dir = tmp / "profile"
-            output_dir.mkdir()
-            profile_dir.mkdir()
-
-            heartbeat()
-            success = _convert_office_to_pdf(
-                soffice_bin,
-                source_path,
-                output_dir,
-                profile_dir,
-                timeout,
-                heartbeat=heartbeat,
-            )
-
-            # LibreOffice names the output after the source stem
-            preview_path = output_dir / f"{source_path.stem}.pdf"
-            if not preview_path.exists():
-                # Some LO versions may sanitise the stem — pick whatever PDF landed
-                pdfs = sorted(output_dir.glob("*.pdf"))
-                if pdfs:
-                    preview_path = pdfs[0]
-
-            if not success or not preview_path.exists():
-                found = [p.name for p in output_dir.glob("*")]
-                timed_out = not success and not preview_path.exists()
-                raise RuntimeError(
-                    f"LibreOffice conversion {'timed out' if timed_out else 'failed'} "
-                    f"(filter={_pdf_filter_for(source_path)!r}, outdir={found!r}). "
-                    f"Check Celery logs for LibreOffice stdout."
-                )
-
-            # Read bytes while tmpdir is still alive
-            pdf_bytes = preview_path.read_bytes()
-
-        # tmpdir (and isolated LO profile) is now cleaned up
+        pdf_bytes = _convert_office_source_to_pdf_bytes(
+            source_path,
+            soffice_bin,
+            timeout,
+            heartbeat=heartbeat,
+        )
 
     except RuntimeError as exc:
         # Definitive failure — no retry (wrong binary, corrupt file, etc.)
-        _fail(document_id, str(exc))
+        _fail_preview(
+            Document,
+            document_id,
+            str(exc),
+            _preview_error_cache_key(document_id),
+            _preview_start_cache_key(document_id),
+        )
         logger.error(
             "generate_document_preview: fatal for %s: %s", document_id, exc
         )
@@ -693,7 +819,13 @@ def generate_document_preview(self, document_id: str):
         try:
             raise self.retry(exc=exc, countdown=30 * (2 ** self.request.retries))
         except self.MaxRetriesExceededError:
-            _fail(document_id, f"Max retries exceeded: {exc}")
+            _fail_preview(
+                Document,
+                document_id,
+                f"Max retries exceeded: {exc}",
+                _preview_error_cache_key(document_id),
+                _preview_start_cache_key(document_id),
+            )
             logger.error(
                 "generate_document_preview: max retries exceeded for %s", document_id
             )
@@ -708,34 +840,7 @@ def generate_document_preview(self, document_id: str):
     # log but don't fail — the new preview is still correct.
     try:
         new_filename = f"{doc.id}_preview.pdf"
-        content_file = ContentFile(pdf_bytes, name=new_filename)
-
-        # Determine old preview path before overwriting
-        old_preview_name = doc.preview_pdf.name if doc.preview_pdf else None
-
-        # Save new file to storage (doesn't touch DB yet)
-        doc.preview_pdf.save(new_filename, content_file, save=False)
-        new_preview_name = doc.preview_pdf.name
-
-        # Atomically update DB: swap preview file path + mark DONE
-        Document.objects.filter(id=document_id).update(
-            preview_pdf=new_preview_name,
-            preview_status=PreviewStatus.DONE,
-            updated_at=timezone.now(),
-        )
-
-        # Only now delete the old preview — DB already points to the new one
-        if old_preview_name and old_preview_name != new_preview_name:
-            try:
-                from django.core.files.storage import default_storage
-                if default_storage.exists(old_preview_name):
-                    default_storage.delete(old_preview_name)
-            except Exception as del_exc:
-                logger.warning(
-                    "generate_document_preview: could not delete old preview %s: %s",
-                    old_preview_name, del_exc,
-                )
-
+        _persist_preview_file(doc, pdf_bytes, new_filename)
         cache.delete(_preview_error_cache_key(document_id))
         cache.delete(_preview_start_cache_key(document_id))
         logger.info(
@@ -746,7 +851,160 @@ def generate_document_preview(self, document_id: str):
         logger.error(
             "generate_document_preview: failed to persist PDF for %s: %s", document_id, exc
         )
-        _fail(document_id, f"Storage error: {exc}")
+        _fail_preview(
+            Document,
+            document_id,
+            f"Storage error: {exc}",
+            _preview_error_cache_key(document_id),
+            _preview_start_cache_key(document_id),
+        )
+
+
+@shared_task(bind=True, max_retries=2, queue="preview")
+def generate_document_version_preview(self, version_id: str):
+    """
+    Convert a historical Office version to a cached PDF preview.
+    """
+    from django.conf import settings as django_settings
+
+    from .models import DocumentVersion, PreviewStatus
+
+    stale_ttl = int(getattr(django_settings, "PREVIEW_PROCESSING_STALE_SECONDS", 300))
+    status_key = _version_preview_status_cache_key(version_id)
+    processing_key = _version_preview_processing_cache_key(version_id)
+
+    current_status = cache.get(status_key)
+    if current_status not in (PreviewStatus.PENDING, PreviewStatus.PROCESSING):
+        logger.info(
+            "generate_document_version_preview: skipping %s — not claimable (status=%s)",
+            version_id, current_status,
+        )
+        return
+
+    if not cache.add(processing_key, timezone.now(), timeout=stale_ttl + 120):
+        logger.info(
+            "generate_document_version_preview: skipping %s — already processing",
+            version_id,
+        )
+        return
+
+    cache.set(status_key, PreviewStatus.PROCESSING, timeout=stale_ttl + 120)
+    cache.set(_version_preview_start_cache_key(version_id), timezone.now(), timeout=stale_ttl + 120)
+
+    try:
+        version = DocumentVersion.objects.get(id=version_id)
+    except DocumentVersion.DoesNotExist:
+        cache.delete(processing_key)
+        cache.delete(status_key)
+        cache.delete(_version_preview_start_cache_key(version_id))
+        logger.warning("generate_document_version_preview: version %s disappeared", version_id)
+        return
+
+    logger.info(
+        "generate_document_version_preview: start version=%s file=%s",
+        version_id, getattr(version.file, "name", ""),
+    )
+
+    if not version.is_office_doc():
+        cache.delete(processing_key)
+        cache.delete(status_key)
+        return
+
+    configured_bin = (
+        getattr(django_settings, "LIBREOFFICE_BIN", "").strip()
+        or getattr(django_settings, "LIBREOFFICE_CMD", "").strip()
+    )
+    if configured_bin and not Path(configured_bin).exists():
+        logger.warning(
+            "generate_document_version_preview: configured path %s missing — falling back to PATH",
+            configured_bin,
+        )
+        configured_bin = ""
+
+    soffice_bin = (
+        configured_bin
+        or shutil.which("libreoffice")
+        or shutil.which("soffice")
+        or shutil.which("/usr/bin/libreoffice")
+        or shutil.which("/usr/bin/soffice")
+        or (Path("/usr/bin/libreoffice").exists() and "/usr/bin/libreoffice")
+        or (Path("/usr/bin/soffice").exists() and "/usr/bin/soffice")
+    )
+    timeout = int(getattr(django_settings, "LIBREOFFICE_TIMEOUT", 120))
+
+    if not soffice_bin:
+        cache.set(
+            _version_preview_error_cache_key(version_id),
+            "LibreOffice binary not found. Checked: libreoffice, soffice, /usr/bin/libreoffice, /usr/bin/soffice",
+            timeout=_PREVIEW_ERROR_TTL,
+        )
+        cache.delete(processing_key)
+        cache.set(status_key, PreviewStatus.FAILED, timeout=_PREVIEW_ERROR_TTL)
+        return
+
+    try:
+        source_path = Path(version.file.path)
+        pdf_bytes = _convert_office_source_to_pdf_bytes(
+            source_path,
+            soffice_bin,
+            timeout,
+        )
+    except RuntimeError as exc:
+        cache.set(_version_preview_error_cache_key(version_id), str(exc)[:2000], timeout=_PREVIEW_ERROR_TTL)
+        cache.delete(_version_preview_start_cache_key(version_id))
+        cache.delete(processing_key)
+        cache.set(status_key, PreviewStatus.FAILED, timeout=_PREVIEW_ERROR_TTL)
+        logger.error(
+            "generate_document_version_preview: fatal for %s: %s", version_id, exc
+        )
+        return
+    except Exception as exc:
+        logger.error(
+            "generate_document_version_preview: transient error for %s: %s",
+            version_id, exc,
+        )
+        cache.set(status_key, PreviewStatus.PENDING, timeout=stale_ttl + 120)
+        cache.delete(processing_key)
+        try:
+            raise self.retry(exc=exc, countdown=30 * (2 ** self.request.retries))
+        except self.MaxRetriesExceededError:
+            cache.set(
+                _version_preview_error_cache_key(version_id),
+                f"Max retries exceeded: {exc}"[:2000],
+                timeout=_PREVIEW_ERROR_TTL,
+            )
+            cache.delete(_version_preview_start_cache_key(version_id))
+            cache.delete(processing_key)
+            cache.set(status_key, PreviewStatus.FAILED, timeout=_PREVIEW_ERROR_TTL)
+            logger.error(
+                "generate_document_version_preview: max retries exceeded for %s",
+                version_id,
+            )
+        return
+
+    try:
+        _persist_version_preview_file(version_id, pdf_bytes)
+        cache.set(status_key, PreviewStatus.DONE, timeout=_PREVIEW_ERROR_TTL)
+        cache.delete(_version_preview_error_cache_key(version_id))
+        cache.delete(_version_preview_start_cache_key(version_id))
+        cache.delete(processing_key)
+        logger.info(
+            "generate_document_version_preview: done for %s (%d bytes)",
+            version_id, len(pdf_bytes),
+        )
+    except Exception as exc:
+        logger.error(
+            "generate_document_version_preview: failed to persist PDF for %s: %s",
+            version_id, exc,
+        )
+        cache.set(
+            _version_preview_error_cache_key(version_id),
+            f"Storage error: {exc}"[:2000],
+            timeout=_PREVIEW_ERROR_TTL,
+        )
+        cache.delete(_version_preview_start_cache_key(version_id))
+        cache.delete(processing_key)
+        cache.set(status_key, PreviewStatus.FAILED, timeout=_PREVIEW_ERROR_TTL)
 
 
 # ─────────────────────────────────────────────────────────────────────────────

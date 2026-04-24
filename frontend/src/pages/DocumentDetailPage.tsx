@@ -38,6 +38,8 @@ import { toast } from "react-toastify";
 import { useAuthStore } from "@/store/authStore";
 import type { Document } from "@/types";
 
+import { clearDocumentVersionCache } from "@/utils/versionPreviewCache";
+
 function formatBytes(b: number) {
   if (b < 1024) return `${b} B`;
   if (b < 1024 * 1024) return `${(b / 1024).toFixed(1)} KB`;
@@ -168,10 +170,14 @@ export default function DocumentDetailPage() {
   const restoreMutation = useMutation({
     mutationFn: (versionId: string) => documentsAPI.restoreVersion(id!, versionId),
     onSuccess: () => {
-      toast.success("Version restored.");
+      toast.success("Version restored. All trailing versions have been discarded.");
       setConfirmRestoreId(null);
+      // Invalidate document data to refresh version list
       qc.invalidateQueries({ queryKey: ["document", id] });
+      // Clear all version preview caches for this document
       qc.invalidateQueries({ queryKey: ["document-preview", id] });
+      // Clear the global version preview cache entries for this document
+      clearDocumentVersionCache(id!);
     },
     onError: () => { toast.error("Restore failed."); setConfirmRestoreId(null); },
   });
@@ -449,7 +455,7 @@ export default function DocumentDetailPage() {
                       {v.change_summary && <p className="text-xs text-gray-600 mt-1 italic">"{v.change_summary}"</p>}
                     </div>
                     <div className="flex items-center gap-2 flex-shrink-0">
-                      <a href={`/api/v1/documents/webdav/${doc.id}/${encodeURIComponent(v.file_name)}?version=${v.version_number}`}
+                      <a href={v.file_url ?? `/api/v1/documents/webdav/${doc.id}/${encodeURIComponent(v.file_name)}?version=${v.version_number}`}
                         download={v.file_name} title="Download this version"
                         className="btn-secondary text-xs px-2 py-1 flex items-center gap-1">
                         <Download className="w-3.5 h-3.5" />
