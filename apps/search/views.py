@@ -66,6 +66,7 @@ class DocumentSearchView(APIView):
                                 "reference_number^3",
                                 "supplier^2",
                                 "extracted_text",
+                                "metadata.personal_tags^2",
                                 "metadata.*",
                             ],
                             fuzziness="AUTO",

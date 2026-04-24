@@ -194,7 +194,7 @@ class DocumentWebDAVView(View):
         """
         if not user:
             return False
-        if user.is_admin:
+        if user.has_admin_access:
             return True
         if doc.uploaded_by_id == user.id:
             return True

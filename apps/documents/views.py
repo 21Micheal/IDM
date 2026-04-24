@@ -57,7 +57,7 @@ def _preview_start_cache_key(document_id: str) -> str:
 class DocumentTypeViewSet(AuditMixin, viewsets.ModelViewSet):
     queryset = DocumentType.objects.prefetch_related(
         "metadata_fields"
-    ).filter(is_active=True)
+    ).filter(is_active=True).exclude(code="PERSONAL")
 
     def get_serializer_class(self):
         if self.action in ("create", "update", "partial_update"):
@@ -115,7 +115,7 @@ class DocumentViewSet(AuditMixin, viewsets.ModelViewSet):
             .select_related("document_type", "uploaded_by", "department", "edit_locked_by")
             .prefetch_related("tags", "versions")
         )
-        if user.is_admin or user.is_auditor or user.is_finance:
+        if user.has_admin_access:
             return qs
         return qs.filter(uploaded_by=user)
 
@@ -623,7 +623,7 @@ echo "✓ DocVault LibreOffice integration installed."
             str(raw_force).lower() in {"1", "true", "yes", "on"}
             if raw_force is not None
             else False
-        ) and request.user.is_admin
+        ) and request.user.has_admin_access
 
         if not doc.release_lock(user=request.user, force=force):
             return Response({"detail": "Lock held by another user."}, status=423)
@@ -656,7 +656,7 @@ echo "✓ DocVault LibreOffice integration installed."
         doc = self.get_object()
         if request.method == "GET":
             qs = doc.comments.all()
-            if not (request.user.is_admin or request.user.is_auditor):
+            if not request.user.has_admin_access:
                 qs = qs.filter(is_internal=False)
             return Response(DocumentCommentSerializer(qs, many=True).data)
         serializer = DocumentCommentSerializer(data=request.data)
@@ -669,7 +669,11 @@ echo "✓ DocVault LibreOffice integration installed."
         from apps.audit.serializers import AuditLogSerializer
         from apps.audit.models import AuditLog
         doc = self.get_object()
-        logs = AuditLog.objects.filter(object_type="Document", object_id=str(doc.id))
+        logs = (
+            AuditLog.objects
+            .filter(object_type="Document", object_id=str(doc.id))
+            .select_related("actor")
+        )
         return Response(AuditLogSerializer(logs, many=True).data)
         
     @action(detail=False, methods=["post"])
@@ -701,7 +705,7 @@ echo "✓ DocVault LibreOffice integration installed."
                     )
                     if not task:
                         raise WorkflowError("No active approval task.")
-                    if task.assigned_to != request.user and request.user.role != "admin":
+                    if task.assigned_to != request.user and not request.user.has_admin_access:
                         raise WorkflowError("Not authorised.")
                     if act == "approve":
                         WorkflowService.approve(task, request.user, comment)

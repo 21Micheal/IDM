@@ -21,8 +21,7 @@ interface User {
   id: string;
   full_name: string;
   email: string;
-  role: string;
-  role_display?: string;
+  job_description?: string;
 }
 
 const schema = z.object({
@@ -189,7 +188,7 @@ function DepartmentDetail({
                     </div>
                     <div className="flex items-center gap-3">
                       <span className="badge bg-secondary text-secondary-foreground text-xs">
-                        {user.role_display || user.role}
+                        {user.job_description || "Staff"}
                       </span>
                       <button
                         onClick={() => removeMemberMutation.mutate(user.id)}

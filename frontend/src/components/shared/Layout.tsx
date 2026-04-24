@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { Outlet, NavLink, useNavigate, useLocation } from "react-router-dom";
 import {
   LayoutDashboard, FileText, Upload, Search,
@@ -19,14 +19,14 @@ interface NavLeaf {
   icon: React.ElementType;
   label: string;
   exact?: boolean;
-  roles?: string[];
+  allowedRoles?: string[];
 }
 
 interface NavGroup {
   icon: React.ElementType;
   label: string;
   prefix: string;          // any route starting with this is "active"
-  roles?: string[];
+  allowedRoles?: string[];
   children: NavLeaf[];
 }
 
@@ -70,7 +70,7 @@ const mainNav: NavEntry[] = [
     prefix: "/workflow",
     children: [
       { to: "/workflow",         icon: GitBranch, label: "My tasks" },
-      { to: "/workflow/builder", icon: Settings,  label: "Builder", roles: ["admin"] },
+      { to: "/workflow/builder", icon: Settings,  label: "Builder", allowedRoles: ["admin"] },
     ],
   } as NavGroup,
 
@@ -78,30 +78,30 @@ const mainNav: NavEntry[] = [
 ];
 
 const adminNav: NavLeaf[] = [
-  { to: "/admin/users",       icon: Users,       label: "Users",       roles: ["admin"] },
-  { to: "/admin/departments", icon: Building2,   label: "Departments", roles: ["admin"] },
-  { to: "/admin/groups",      icon: Shield,      label: "Groups",      roles: ["admin"] },
-  { to: "/admin/settings",             icon: Settings,    label: "Settings",    roles: ["admin"] },
+  { to: "/admin/users",       icon: Users,       label: "Users",       allowedRoles: ["admin"] },
+  { to: "/admin/departments", icon: Building2,   label: "Departments", allowedRoles: ["admin"] },
+  { to: "/admin/groups",      icon: Shield,      label: "Groups",      allowedRoles: ["admin"] },
+  { to: "/admin/settings",             icon: Settings,    label: "Settings",    allowedRoles: ["admin"] },
 ];
 
 // ── NavGroup component ────────────────────────────────────────────────────────
 
 function SidebarGroup({
   group,
-  userRole,
+  userAccess,
   taskCount,
 }: {
   group: NavGroup;
-  userRole?: string;
+  userAccess?: string;
   taskCount?: number;
 }) {
   const location = useLocation();
   const isGroupActive = location.pathname.startsWith(group.prefix);
   const [open, setOpen] = useState(isGroupActive);
 
-  // Filter children by role
+  // Filter children by admin access
   const visibleChildren = group.children.filter(
-    (child) => !child.roles || (userRole && child.roles.includes(userRole))
+    (child) => !child.allowedRoles || (userAccess && child.allowedRoles.includes(userAccess))
   );
 
   if (visibleChildren.length === 0) return null;
@@ -180,7 +180,7 @@ function ProfileMenu() {
           <p className="text-xs font-semibold text-foreground leading-tight">
             {user?.first_name} {user?.last_name}
           </p>
-          <p className="text-[10px] text-muted-foreground capitalize">{user?.role}</p>
+          <p className="text-[10px] text-muted-foreground capitalize">{user?.job_description || "Staff"}</p>
         </div>
         <ChevronDown className={clsx("w-3.5 h-3.5 text-muted-foreground transition-transform", open && "rotate-180")} />
       </button>
@@ -223,6 +223,9 @@ function ProfileMenu() {
 export default function Layout() {
   const { user } = useAuthStore();
   const navigate = useNavigate();
+  const location = useLocation();
+  const mainRef = useRef<HTMLElement | null>(null);
+  const hasAdminAccess = Boolean(user?.has_admin_access);
 
   const { data: notifications } = useQuery({
     queryKey: ["notifications"],
@@ -241,8 +244,12 @@ export default function Layout() {
 
   const pendingTasksCount = (myTasks as unknown[]).length;
 
+  useEffect(() => {
+    mainRef.current?.scrollTo({ top: 0, behavior: "auto" });
+  }, [location.pathname]);
+
   const visibleAdmin = adminNav.filter(
-    (item) => !item.roles || (user && item.roles.includes(user.role))
+    (item) => !item.allowedRoles || hasAdminAccess
   );
 
   return (
@@ -262,21 +269,21 @@ export default function Layout() {
           {/* Main nav — flat items and groups */}
           {mainNav.map((entry) => {
             if (isGroup(entry)) {
-              // Check if the whole group should be hidden by role
-              if (entry.roles && (!user || !entry.roles.includes(user.role))) return null;
+              // Check if the whole group should be hidden by admin access
+              if (entry.allowedRoles && !hasAdminAccess) return null;
               return (
                 <SidebarGroup
                   key={entry.prefix}
                   group={entry}
-                  userRole={user?.role}
+                  userAccess={hasAdminAccess ? "admin" : undefined}
                   taskCount={pendingTasksCount}
                 />
               );
             }
 
             // Flat NavLeaf
-            const { to, icon: Icon, label, exact, roles } = entry;
-            if (roles && (!user || !roles.includes(user.role))) return null;
+            const { to, icon: Icon, label, exact, allowedRoles } = entry;
+            if (allowedRoles && !hasAdminAccess) return null;
 
             const badgeValue = to === "/notifications" ? unread : undefined;
 
@@ -364,7 +371,7 @@ export default function Layout() {
         </header>
 
         {/* Page content */}
-        <main className="flex-1 overflow-y-auto p-6 bg-background">
+        <main ref={mainRef} className="flex-1 overflow-y-auto p-6 bg-background">
           <Outlet />
         </main>
       </div>

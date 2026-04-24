@@ -1,15 +1,15 @@
 import { create } from "zustand";
 import { persist } from "zustand/middleware";
 
-export type UserRole = string;
-
 export interface AuthUser {
   id: string;
   email: string;
   first_name: string;
   last_name: string;
-  role: UserRole;
-  role_display?: string;
+  job_description?: string;
+  is_staff?: boolean;
+  has_admin_access?: boolean;
+  group_names?: string[];
   mfa_enabled: boolean;
   must_change_password: boolean;          // ← new field
   department?: { id: string; name: string };
@@ -43,5 +43,5 @@ export const useAuthStore = create<AuthState>()(
 );
 
 export const isAdmin = (user: AuthUser | null): boolean => {
-  return user?.role === "admin";
+  return Boolean(user?.has_admin_access);
 };

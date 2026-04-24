@@ -4,13 +4,42 @@ import { api, documentsAPI, workflowAPI } from "@/services/api";
 import { useAuthStore } from "@/store/authStore";
 import {
   FileText, Clock, CheckCircle, GitBranch, ArrowRight,
+  ChevronLeft, ChevronRight,
   Calendar, Loader2, Search, ShieldCheck,
 } from "lucide-react";
 import { Link } from "react-router-dom";
 import StatusBadge from "@/components/documents/StatusBadge";
-import { formatDistanceToNow } from "date-fns";
+import { format, formatDistanceToNow } from "date-fns";
+import { useState } from "react";
 import type { Document, WorkflowTask } from "@/types";
 import { StatCard } from "@/components/dashboard/StatCard";
+
+const RECENT_DOCS_PAGE_SIZE = 5;
+const RECENT_ACTIVITY_PAGE_SIZE = 10;
+type PaginatedResponse<T> = {
+  count: number;
+  results: T[];
+};
+
+function getAuditPresentation(event: any) {
+  const name = String(event?.event ?? "");
+  if (name.startsWith("user.login")) {
+    return { icon: Clock, label: "Login", tone: "bg-accent/15 text-accent-foreground border-accent/30" };
+  }
+  if (name.startsWith("workflow.")) {
+    return { icon: GitBranch, label: "Workflow", tone: "bg-secondary text-secondary-foreground border-border" };
+  }
+  if (name.includes("download")) {
+    return { icon: ArrowRight, label: "Access", tone: "bg-teal/15 text-teal border-teal/30" };
+  }
+  if (name.includes("edit") || name.includes("update") || name.includes("version")) {
+    return { icon: FileText, label: "Document", tone: "bg-primary/10 text-primary border-primary/20" };
+  }
+  if (name.includes("delete") || name.includes("reject") || name.includes("fail")) {
+    return { icon: ShieldCheck, label: "Alert", tone: "bg-destructive/10 text-destructive border-destructive/30" };
+  }
+  return { icon: ShieldCheck, label: "Activity", tone: "bg-muted text-muted-foreground border-border" };
+}
 
 function TaskMetaInfo({ dueAt }: { dueAt: string | null }) {
   if (!dueAt) return null;
@@ -42,10 +71,17 @@ function TaskMetaInfo({ dueAt }: { dueAt: string | null }) {
 
 export default function DashboardPage() {
   const { user } = useAuthStore();
+  const [recentDocsPage, setRecentDocsPage] = useState(1);
+  const [recentAuditPage, setRecentAuditPage] = useState(1);
 
   const { data: recentDocs, isLoading: docsLoading } = useQuery({
-    queryKey: ["documents", "recent"],
-    queryFn: () => documentsAPI.list({ page_size: 5, ordering: "-created_at" }).then((r) => r.data),
+    queryKey: ["documents", "recent", recentDocsPage],
+    queryFn: () =>
+      documentsAPI.list({
+        page: recentDocsPage,
+        page_size: RECENT_DOCS_PAGE_SIZE,
+        ordering: "-updated_at",
+      }).then((r) => r.data as PaginatedResponse<Document>),
   });
 
   const { data: pendingCount = 0 } = useQuery({
@@ -58,15 +94,29 @@ export default function DashboardPage() {
     queryFn: () => workflowAPI.myTasks().then((r) => r.data.results ?? r.data),
   });
 
-  const { data: recentAudit = [], isLoading: auditLoading } = useQuery({
-    queryKey: ["audit", "recent"],
+  const { data: recentAudit, isLoading: auditLoading } = useQuery({
+    queryKey: ["audit", user?.has_admin_access ? "all" : "mine", recentAuditPage],
     queryFn: () =>
       api
-        .get("/audit/", { params: { ordering: "-timestamp", page_size: 5 } })
-        .then((r) => r.data.results ?? r.data),
+        .get(user?.has_admin_access ? "/audit/" : "/audit/my-activity/", {
+          params: {
+            ordering: "-timestamp",
+            page: recentAuditPage,
+            page_size: RECENT_ACTIVITY_PAGE_SIZE,
+          },
+        })
+        .then((r) => r.data as PaginatedResponse<Record<string, unknown>>),
   });
 
-  const totalDocuments = recentDocs?.count ?? 0;
+  const recentDocsCount = recentDocs?.count ?? 0;
+  const recentAuditCount = recentAudit?.count ?? 0;
+  const recentDocsPages = Math.max(1, Math.ceil(recentDocsCount / RECENT_DOCS_PAGE_SIZE));
+  const recentAuditPages = Math.max(1, Math.ceil(recentAuditCount / RECENT_ACTIVITY_PAGE_SIZE));
+  const totalDocuments = recentDocsCount;
+  const auditTitle = user?.has_admin_access ? "Audit trail" : "My activity";
+  const auditSubtitle = user?.has_admin_access
+    ? "Recent activity on your document records."
+    : "Recent activity on documents you own.";
 
   return (
     <div className="max-w-7xl mx-auto space-y-8">
@@ -176,6 +226,32 @@ export default function DashboardPage() {
                 </div>
               )}
             </div>
+
+            {recentDocsCount > RECENT_DOCS_PAGE_SIZE && (
+              <div className="flex items-center justify-between border-t border-border bg-muted/20 px-6 py-3">
+                <span className="text-xs text-muted-foreground">
+                  Page {recentDocsPage} of {recentDocsPages}
+                </span>
+                <div className="flex items-center gap-2">
+                  <button
+                    type="button"
+                    onClick={() => setRecentDocsPage((p) => Math.max(1, p - 1))}
+                    disabled={recentDocsPage === 1}
+                    className="inline-flex items-center gap-1 rounded-lg border border-border bg-card px-3 py-1.5 text-xs font-medium text-foreground hover:bg-muted disabled:opacity-40 disabled:cursor-not-allowed"
+                  >
+                    <ChevronLeft className="w-3.5 h-3.5" /> Prev
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setRecentDocsPage((p) => p + 1)}
+                    disabled={recentDocsPage * RECENT_DOCS_PAGE_SIZE >= recentDocsCount}
+                    className="inline-flex items-center gap-1 rounded-lg border border-border bg-card px-3 py-1.5 text-xs font-medium text-foreground hover:bg-muted disabled:opacity-40 disabled:cursor-not-allowed"
+                  >
+                    Next <ChevronRight className="w-3.5 h-3.5" />
+                  </button>
+                </div>
+              </div>
+            )}
           </div>
 
           {/* Audit trail */}
@@ -189,8 +265,8 @@ export default function DashboardPage() {
                   <ShieldCheck className="w-5 h-5" />
                 </div>
                 <div>
-                  <p className="text-sm font-semibold text-foreground">Audit trail</p>
-                  <p className="text-sm text-muted-foreground">Recent activity on your document records.</p>
+                  <p className="text-sm font-semibold text-foreground">{auditTitle}</p>
+                  <p className="text-sm text-muted-foreground">{auditSubtitle}</p>
                 </div>
               </div>
               <Link
@@ -206,33 +282,76 @@ export default function DashboardPage() {
                 <div className="rounded-lg bg-muted/40 p-6 text-center text-sm text-muted-foreground">
                   Loading activity…
                 </div>
-              ) : recentAudit.length ? (
-                recentAudit.map((event: any) => (
+              ) : recentAudit?.results?.length ? (
+                recentAudit.results.map((event: any) => {
+                  const auditMeta = getAuditPresentation(event);
+                  const AuditIcon = auditMeta.icon;
+
+                  return (
                   <div key={event.id} className="rounded-lg border border-border bg-muted/30 p-4">
                     <div className="flex items-start justify-between gap-4">
-                      <div className="min-w-0">
-                        <p className="text-sm font-semibold text-foreground truncate">{event.event}</p>
+                      <div className="min-w-0 flex-1">
+                        <div className="flex items-center gap-2">
+                          <span className={`inline-flex items-center gap-1.5 rounded-full border px-2 py-0.5 text-[10px] font-semibold ${auditMeta.tone}`}>
+                            <AuditIcon className="w-3 h-3" />
+                            {auditMeta.label}
+                          </span>
+                          <p className="text-sm font-semibold text-foreground truncate">
+                            {event.summary || event.event}
+                          </p>
+                        </div>
                         <p className="text-xs text-muted-foreground mt-1">
-                          {event.object_repr || event.object_type || "Document activity"}
+                          {event.actor_email || "System"} · {format(new Date(event.timestamp), "dd MMM yyyy")}
                         </p>
                       </div>
                       <span className="text-[11px] font-semibold uppercase tracking-[0.24em] text-muted-foreground">
-                        {new Date(event.timestamp).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}
+                        {format(new Date(event.timestamp), "hh:mm a")}
                       </span>
                     </div>
                     <div className="mt-3 flex items-center gap-2 text-xs text-muted-foreground">
-                      <span>{event.actor_email || "System"}</span>
-                      <span>•</span>
                       <span>{formatDistanceToNow(new Date(event.timestamp), { addSuffix: true })}</span>
+                      {event.object_repr && (
+                        <>
+                          <span>•</span>
+                          <span className="truncate">{event.object_repr}</span>
+                        </>
+                      )}
                     </div>
                   </div>
-                ))
+                  );
+                })
               ) : (
                 <div className="rounded-lg bg-muted/40 p-6 text-center text-sm text-muted-foreground">
                   No recent audit events found.
                 </div>
               )}
             </div>
+
+            {recentAuditCount > RECENT_ACTIVITY_PAGE_SIZE && (
+              <div className="mt-5 flex items-center justify-between border-t border-border pt-4">
+                <span className="text-xs text-muted-foreground">
+                  Page {recentAuditPage} of {recentAuditPages}
+                </span>
+                <div className="flex items-center gap-2">
+                  <button
+                    type="button"
+                    onClick={() => setRecentAuditPage((p) => Math.max(1, p - 1))}
+                    disabled={recentAuditPage === 1}
+                    className="inline-flex items-center gap-1 rounded-lg border border-border bg-card px-3 py-1.5 text-xs font-medium text-foreground hover:bg-muted disabled:opacity-40 disabled:cursor-not-allowed"
+                  >
+                    <ChevronLeft className="w-3.5 h-3.5" /> Prev
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setRecentAuditPage((p) => p + 1)}
+                    disabled={recentAuditPage * RECENT_ACTIVITY_PAGE_SIZE >= recentAuditCount}
+                    className="inline-flex items-center gap-1 rounded-lg border border-border bg-card px-3 py-1.5 text-xs font-medium text-foreground hover:bg-muted disabled:opacity-40 disabled:cursor-not-allowed"
+                  >
+                    Next <ChevronRight className="w-3.5 h-3.5" />
+                  </button>
+                </div>
+              </div>
+            )}
           </div>
         </div>
 

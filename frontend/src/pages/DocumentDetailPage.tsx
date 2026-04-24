@@ -196,13 +196,19 @@ export default function DocumentDetailPage() {
 
   const isPersonal = Boolean((doc as any).is_self_upload);
   const isScanned  = Boolean((doc as any).is_scanned);
+  const personalTags = doc.personal_tags ?? [];
+  const extraMetadataEntries = Object.entries(doc.metadata ?? {}).filter(
+    ([key]) => key !== "personal_tags",
+  );
   const permissions = doc.permissions ?? [];
-  const canEdit    = user?.role === "admin" || permissions.includes("edit");
-  const canComment = user?.role === "admin" || permissions.includes("comment");
-  const canApprove = user?.role === "admin" || permissions.includes("approve");
-  const canArchive = user?.role === "admin" || permissions.includes("archive");
-  const canRestoreVersion = user?.role === "admin" || permissions.includes("upload");
-  const canReOcr = user?.role === "admin" || (isScanned && permissions.includes("upload"));
+  const hasAdminAccess = Boolean(user?.has_admin_access);
+  const canViewDocument = hasAdminAccess || permissions.includes("view");
+  const canEdit    = hasAdminAccess || permissions.includes("edit");
+  const canComment = hasAdminAccess || permissions.includes("comment");
+  const canApprove = hasAdminAccess || permissions.includes("approve");
+  const canArchive = hasAdminAccess || permissions.includes("archive");
+  const canRestoreVersion = hasAdminAccess || permissions.includes("upload");
+  const canReOcr = hasAdminAccess || (isScanned && permissions.includes("upload"));
 
   const canSubmit =
     !isPersonal &&
@@ -220,7 +226,7 @@ export default function DocumentDetailPage() {
     { id: "preview",  label: "Preview" },
     { id: "versions", label: `Versions (${doc.versions?.length ?? 0})` },
     { id: "comments", label: "Comments" },
-    ...(user?.role === "admin" || user?.role === "auditor"
+    ...(canViewDocument
       ? [{ id: "audit", label: "Audit trail" }] : []),
   ];
 
@@ -351,11 +357,11 @@ export default function DocumentDetailPage() {
           {showEdit && <MetadataEditPanel document={doc} onClose={() => setShowEdit(false)} />}
           {!isPersonal && activeTask && <WorkflowActionPanel task={activeTask} documentId={id!} />}
 
-          {doc.metadata && Object.keys(doc.metadata).length > 0 && (
+          {extraMetadataEntries.length > 0 && (
             <div className="card p-5 space-y-2">
               <h2 className="font-semibold text-gray-900 text-sm">Additional metadata</h2>
               <dl className="space-y-2 text-sm">
-                {Object.entries(doc.metadata).map(([key, val]) => (
+                {extraMetadataEntries.map(([key, val]) => (
                   <div key={key} className="flex justify-between gap-2">
                     <dt className="text-gray-500 capitalize">{key.replace(/_/g, " ")}</dt>
                     <dd className="text-gray-900 font-medium">{String(val)}</dd>
@@ -365,9 +371,27 @@ export default function DocumentDetailPage() {
             </div>
           )}
 
+          {isPersonal && personalTags.length > 0 && (
+            <div className="card p-5">
+              <h2 className="font-semibold text-gray-900 text-sm mb-3">Personal tags</h2>
+              <div className="flex flex-wrap gap-2">
+                {personalTags.map((tag) => (
+                  <span
+                    key={tag}
+                    className="badge text-xs bg-primary/10 text-primary border border-primary/20"
+                  >
+                    {tag}
+                  </span>
+                ))}
+              </div>
+            </div>
+          )}
+
           {doc.tags?.length > 0 && (
             <div className="card p-5">
-              <h2 className="font-semibold text-gray-900 text-sm mb-3">Tags</h2>
+              <h2 className="font-semibold text-gray-900 text-sm mb-3">
+                {isPersonal ? "Shared tags" : "Tags"}
+              </h2>
               <div className="flex flex-wrap gap-2">
                 {doc.tags.map((tag) => (
                   <span key={tag.id} className="badge text-xs"
@@ -485,7 +509,7 @@ export default function DocumentDetailPage() {
                 <div key={log.id} className="card p-3 flex items-start gap-3">
                   <ShieldCheck className="w-4 h-4 text-primary mt-0.5 flex-shrink-0" />
                   <div className="flex-1 min-w-0">
-                    <p className="text-sm text-gray-900">{log.event}</p>
+                    <p className="text-sm text-gray-900">{log.summary || log.event}</p>
                     <p className="text-xs text-gray-500">{log.actor_name} · {log.ip_address} · {format(new Date(log.timestamp), "dd MMM yyyy HH:mm:ss")}</p>
                   </div>
                 </div>

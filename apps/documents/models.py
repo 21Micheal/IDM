@@ -88,6 +88,7 @@ class DocumentType(models.Model):
 class MetadataField(models.Model):
     FIELD_TYPES = [
         ("text",     "Text"),
+        ("varchar",  "VARCHAR"),
         ("number",   "Number"),
         ("date",     "Date"),
         ("currency", "Currency"),

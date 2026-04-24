@@ -3,7 +3,7 @@ import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { useForm } from "react-hook-form";
 import { zodResolver } from "@hookform/resolvers/zod";
 import { z } from "zod";
-import { usersAPI, departmentsAPI, rolesAPI } from "@/services/api";
+import { usersAPI, departmentsAPI } from "@/services/api";
 import {
   Plus, Search, MoreVertical, UserCheck, UserX,
   KeyRound, Edit2, Loader2, Shield, X, Users as UsersIcon,
@@ -20,22 +20,13 @@ interface Department {
   user_count: number;
 }
 
-interface Role {
-  id: string;
-  code: string;
-  name: string;
-  description?: string | null;
-  is_active: boolean;
-}
-
 interface User {
   id: string;
   email: string;
   first_name: string;
   last_name: string;
   full_name: string;
-  role: string;
-  role_display: string;
+  job_description: string;
   department: string | null;
   department_name: string | null;
   is_active: boolean;
@@ -49,28 +40,20 @@ const createSchema = z.object({
   email:      z.string().email("Invalid email"),
   first_name: z.string().min(1, "Required"),
   last_name:  z.string().min(1, "Required"),
-  role:       z.string().min(1, "Role is required"),
+  job_description: z.string().min(1, "Job description is required").max(255, "Job description must be 255 characters or fewer"),
   department: z.string().optional(),
 });
 
 const editSchema = z.object({
   first_name: z.string().min(1, "Required"),
   last_name:  z.string().min(1, "Required"),
-  role:       z.string().min(1, "Role is required"),
+  job_description: z.string().min(1, "Job description is required").max(255, "Job description must be 255 characters or fewer"),
   department: z.string().optional(),
   is_active:  z.boolean(),
 });
 
 type CreateForm = z.infer<typeof createSchema>;
 type EditForm   = z.infer<typeof editSchema>;
-
-// Indigo Vault role tints (semantic tokens)
-const ROLE_COLORS: Record<string, string> = {
-  admin:   "bg-primary/10 text-primary",
-  finance: "bg-teal/15 text-teal",
-  auditor: "bg-accent/15 text-accent-foreground",
-  viewer:  "bg-muted text-muted-foreground",
-};
 
 // ── Temporary Password Modal ─────────────────────────────────────────────────
 function TemporaryPasswordModal({
@@ -134,17 +117,15 @@ function TemporaryPasswordModal({
 // ── Create user modal ─────────────────────────────────────────────────────────
 function CreateUserModal({
   departments,
-  roles,
   onClose,
 }: {
   departments: Department[];
-  roles: Role[];
   onClose: () => void;
 }) {
   const qc = useQueryClient();
   const { register, handleSubmit, formState: { errors } } = useForm<CreateForm>({
     resolver: zodResolver(createSchema),
-    defaultValues: { role: "viewer" },
+    defaultValues: { job_description: "" },
   });
 
   const [tempPassword, setTempPassword] = useState<string | null>(null);
@@ -209,29 +190,25 @@ function CreateUserModal({
                 {errors.email && <p className="text-destructive text-xs mt-1">{errors.email.message}</p>}
               </div>
 
-              <div className="grid grid-cols-2 gap-3">
-                <div>
-                  <label className="label">Role <span className="text-destructive">*</span></label>
-                  <select {...register("role")} className="input">
-                    {(roles?.length ? roles : [
-                      { id: "viewer", code: "viewer", name: "Viewer", is_active: true },
-                      { id: "finance", code: "finance", name: "Finance staff", is_active: true },
-                      { id: "auditor", code: "auditor", name: "Auditor", is_active: true },
-                      { id: "admin", code: "admin", name: "Administrator", is_active: true },
-                    ]).map((role) => (
-                      <option key={role.code} value={role.code}>{role.name}</option>
-                    ))}
-                  </select>
-                </div>
-                <div>
-                  <label className="label">Department</label>
-                  <select {...register("department")} className="input">
-                    <option value="">— None —</option>
-                    {departments.map((d) => (
-                      <option key={d.id} value={d.id}>{d.name}</option>
-                    ))}
-                  </select>
-                </div>
+              <div>
+                <label className="label">Job description <span className="text-destructive">*</span></label>
+                <textarea
+                  {...register("job_description")}
+                  rows={3}
+                  className="input"
+                  placeholder="e.g. Accounts payable officer"
+                />
+                {errors.job_description && <p className="text-destructive text-xs mt-1">{errors.job_description.message}</p>}
+              </div>
+
+              <div>
+                <label className="label">Department</label>
+                <select {...register("department")} className="input">
+                  <option value="">— None —</option>
+                  {departments.map((d) => (
+                    <option key={d.id} value={d.id}>{d.name}</option>
+                  ))}
+                </select>
               </div>
 
               <div className="bg-accent/10 border border-accent/30 rounded-lg p-4 text-sm text-foreground">
@@ -261,98 +238,14 @@ function CreateUserModal({
   );
 }
 
-function CreateRoleModal({ onClose }: { onClose: () => void }) {
-  const qc = useQueryClient();
-  const { register, handleSubmit, formState: { errors } } = useForm<{
-    code: string;
-    name: string;
-    description?: string;
-  }>({
-    defaultValues: { code: "", name: "", description: "" },
-  });
-
-  const mutation = useMutation({
-    mutationFn: (data: { code: string; name: string; description?: string }) =>
-      rolesAPI.create(data),
-    onSuccess: () => {
-      toast.success("Role created successfully");
-      qc.invalidateQueries({ queryKey: ["roles"] });
-      onClose();
-    },
-    onError: (err: { response?: { data?: { detail?: string } } }) => {
-      const detail = err?.response?.data?.detail || "Failed to create role";
-      toast.error(detail);
-    },
-  });
-
-  return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center bg-foreground/40 backdrop-blur-sm p-4">
-      <div className="card w-full max-w-md p-6" style={{ boxShadow: "var(--shadow-elegant)" }}>
-        <div className="flex items-center justify-between mb-5">
-          <div>
-            <h2 className="font-semibold text-foreground text-lg">Create new role</h2>
-            <p className="text-sm text-muted-foreground">Add a custom role code and display name for assignments.</p>
-          </div>
-          <button onClick={onClose} className="text-muted-foreground hover:text-foreground">
-            <X className="w-5 h-5" />
-          </button>
-        </div>
-
-        <form onSubmit={handleSubmit((v) => mutation.mutate(v))} className="space-y-4">
-          <div>
-            <label className="label">Role code <span className="text-destructive">*</span></label>
-            <input
-              {...register("code")}
-              className="input"
-              placeholder="e.g. procurement"
-              autoFocus
-            />
-            {errors.code && <p className="text-destructive text-xs mt-1">{errors.code.message}</p>}
-          </div>
-
-          <div>
-            <label className="label">Role name <span className="text-destructive">*</span></label>
-            <input
-              {...register("name")}
-              className="input"
-              placeholder="e.g. Procurement"
-            />
-            {errors.name && <p className="text-destructive text-xs mt-1">{errors.name.message}</p>}
-          </div>
-
-          <div>
-            <label className="label">Description</label>
-            <textarea
-              {...register("description")}
-              rows={3}
-              className="input"
-              placeholder="Optional role description"
-            />
-          </div>
-
-          <div className="flex gap-3 pt-2 justify-end">
-            <button type="button" onClick={onClose} className="btn-secondary">Cancel</button>
-            <button type="submit" disabled={mutation.isPending} className="btn-primary">
-              {mutation.isPending && <Loader2 className="w-4 h-4 animate-spin" />}
-              Create role
-            </button>
-          </div>
-        </form>
-      </div>
-    </div>
-  );
-}
-
 // ── Edit user modal ───────────────────────────────────────────────────────────
 function EditUserModal({
   user,
   departments,
-  roles,
   onClose,
 }: {
   user: User;
   departments: Department[];
-  roles: Role[];
   onClose: () => void;
 }) {
   const qc = useQueryClient();
@@ -361,7 +254,7 @@ function EditUserModal({
     defaultValues: {
       first_name: user.first_name,
       last_name:  user.last_name,
-      role:       user.role as EditForm["role"],
+      job_description: user.job_description,
       department: user.department ?? undefined,
       is_active:  user.is_active,
     },
@@ -405,17 +298,9 @@ function EditUserModal({
           </div>
 
           <div>
-            <label className="label">Role</label>
-            <select {...register("role")} className="input">
-              {(roles?.length ? roles : [
-                { id: "viewer", code: "viewer", name: "Viewer", is_active: true },
-                { id: "finance", code: "finance", name: "Finance staff", is_active: true },
-                { id: "auditor", code: "auditor", name: "Auditor", is_active: true },
-                { id: "admin", code: "admin", name: "Administrator", is_active: true },
-              ]).map((role) => (
-                <option key={role.code} value={role.code}>{role.name}</option>
-              ))}
-            </select>
+            <label className="label">Job description</label>
+            <textarea {...register("job_description")} rows={3} className="input" />
+            {errors.job_description && <p className="text-destructive text-xs mt-1">{errors.job_description.message}</p>}
           </div>
 
           <div>
@@ -510,19 +395,16 @@ function UserActions({
 export default function UsersPage() {
   const qc = useQueryClient();
   const [search, setSearch] = useState("");
-  const [roleFilter, setRole] = useState("");
   const [deptFilter, setDept] = useState("");
   const [showCreate, setCreate] = useState(false);
-  const [showCreateRole, setShowCreateRole] = useState(false);
   const [editUser, setEditUser] = useState<User | null>(null);
   const [pwResult, setPwResult] = useState<{ temporary_password: string } | null>(null);
 
   const { data: users, isLoading } = useQuery<User[]>({
-    queryKey: ["users", { search, role: roleFilter, department: deptFilter }],
+    queryKey: ["users", { search, department: deptFilter }],
     queryFn: () =>
       usersAPI.list({
         search: search || undefined,
-        role: roleFilter || undefined,
         department: deptFilter || undefined,
       }).then((r) => r.data.results ?? r.data),
   });
@@ -530,11 +412,6 @@ export default function UsersPage() {
   const { data: departments } = useQuery<Department[]>({
     queryKey: ["departments"],
     queryFn: () => departmentsAPI.list().then((r) => r.data.results ?? r.data),
-  });
-
-  const { data: roles } = useQuery<Role[]>({
-    queryKey: ["roles"],
-    queryFn: () => rolesAPI.list().then((r) => r.data.results ?? r.data),
   });
 
   const resetPasswordMutation = useMutation({
@@ -554,7 +431,6 @@ export default function UsersPage() {
   });
 
   const activeCount = users?.filter((u) => u.is_active).length ?? 0;
-  const adminCount  = users?.filter((u) => u.role === "admin").length ?? 0;
   const mfaCount    = users?.filter((u) => u.mfa_enabled).length ?? 0;
 
   return (
@@ -566,16 +442,13 @@ export default function UsersPage() {
             <div className="w-10 h-10 rounded-xl bg-primary/10 flex items-center justify-center">
               <UsersIcon className="w-5 h-5 text-primary" />
             </div>
-            <h1 className="text-3xl font-bold text-foreground tracking-tight">Users & Roles</h1>
+            <h1 className="text-3xl font-bold text-foreground tracking-tight">Users</h1>
           </div>
           <p className="text-muted-foreground text-sm">
-            Manage staff accounts, roles, and department assignments.
+            Manage staff accounts, job descriptions, and department assignments.
           </p>
         </div>
         <div className="flex items-center gap-3">
-          <button onClick={() => setShowCreateRole(true)} className="btn-secondary flex items-center gap-2">
-            <Shield className="w-4 h-4" /> New role
-          </button>
           <button onClick={() => setCreate(true)} className="btn-primary flex items-center gap-2">
             <Plus className="w-4 h-4" /> Add User
           </button>
@@ -587,7 +460,7 @@ export default function UsersPage() {
         {[
           { label: "Total users",    value: users?.length ?? "—" },
           { label: "Active",         value: activeCount },
-          { label: "Administrators", value: adminCount },
+          { label: "Descriptions set", value: users?.filter((u) => u.job_description).length ?? "—" },
           { label: "MFA enabled",    value: mfaCount },
         ].map(({ label, value }) => (
           <div key={label} className="card p-6">
@@ -609,16 +482,6 @@ export default function UsersPage() {
           />
         </div>
         <select
-          value={roleFilter}
-          onChange={(e) => setRole(e.target.value)}
-          className="input w-44"
-        >
-          <option value="">All roles</option>
-          {roles?.map((role) => (
-            <option key={role.code} value={role.code}>{role.name}</option>
-          ))}
-        </select>
-        <select
           value={deptFilter}
           onChange={(e) => setDept(e.target.value)}
           className="input w-52"
@@ -637,7 +500,7 @@ export default function UsersPage() {
             <thead>
               <tr className="border-b border-border bg-muted/50">
                 <th className="text-left px-6 py-4 font-semibold text-xs uppercase tracking-wider text-muted-foreground">User</th>
-                <th className="text-left px-6 py-4 font-semibold text-xs uppercase tracking-wider text-muted-foreground">Role</th>
+                <th className="text-left px-6 py-4 font-semibold text-xs uppercase tracking-wider text-muted-foreground">Job description</th>
                 <th className="text-left px-6 py-4 font-semibold text-xs uppercase tracking-wider text-muted-foreground">Department</th>
                 <th className="text-left px-6 py-4 font-semibold text-xs uppercase tracking-wider text-muted-foreground">Status</th>
                 <th className="text-left px-6 py-4 font-semibold text-xs uppercase tracking-wider text-muted-foreground">MFA</th>
@@ -677,10 +540,9 @@ export default function UsersPage() {
                     </div>
                   </td>
                   <td className="px-6 py-4">
-                    <span className={clsx("badge text-xs", ROLE_COLORS[user.role] ?? "bg-muted text-muted-foreground")}>
-                      {user.role === "admin" && <Shield className="w-3 h-3 mr-1" />}
-                      {user.role_display}
-                    </span>
+                    <p className="text-sm text-foreground max-w-xs truncate">
+                      {user.job_description || <span className="text-muted-foreground">—</span>}
+                    </p>
                   </td>
                   <td className="px-6 py-4 text-muted-foreground">
                     {user.department_name ?? <span className="text-muted">—</span>}
@@ -748,14 +610,9 @@ export default function UsersPage() {
       </div>
 
       {/* Modals */}
-      {showCreateRole && (
-        <CreateRoleModal onClose={() => setShowCreateRole(false)} />
-      )}
-
       {showCreate && (
         <CreateUserModal
           departments={departments ?? []}
-          roles={roles ?? []}
           onClose={() => setCreate(false)}
         />
       )}
@@ -764,7 +621,6 @@ export default function UsersPage() {
         <EditUserModal
           user={editUser}
           departments={departments ?? []}
-          roles={roles ?? []}
           onClose={() => setEditUser(null)}
         />
       )}

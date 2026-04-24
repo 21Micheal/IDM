@@ -21,13 +21,6 @@ const pwSchema = z.object({
 });
 type PwForm = z.infer<typeof pwSchema>;
 
-const ROLE_LABELS: Record<string, string> = {
-  admin:   "Administrator",
-  finance: "Finance staff",
-  auditor: "Auditor",
-  viewer:  "Viewer",
-};
-
 export default function ProfilePage() {
   const user = useAuthStore((s) => s.user);
   const [showPw, setShowPw] = useState(false);
@@ -88,13 +81,13 @@ export default function ProfilePage() {
             </h2>
             <p className="text-sm text-muted-foreground">{user.email}</p>
             <span className="badge bg-accent/15 text-accent-foreground mt-1">
-              {user.role_display ?? ROLE_LABELS[user.role] ?? user.role}
+              {user.job_description || "Staff"}
             </span>
           </div>
         </div>
         <dl className="grid grid-cols-2 gap-3 text-sm pt-5 border-t border-border">
           {[
-            { label: "Role",       value: user.role_display ?? ROLE_LABELS[user.role] ?? user.role },
+            { label: "Job description", value: user.job_description || "—" },
             { label: "Department", value: user.department?.name ?? "—" },
             { label: "MFA",        value: user.mfa_enabled ? "Enabled" : "Not enabled" },
           ].map(({ label, value }) => (

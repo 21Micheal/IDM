@@ -28,6 +28,56 @@ from django.db import transaction, IntegrityError
 from django.utils.text import slugify
 import mimetypes
 
+PERSONAL_DOCUMENT_TYPE_CODE = "PERSONAL"
+
+
+def _normalize_personal_tags(value) -> list[str]:
+    if value in (None, ""):
+        return []
+    if isinstance(value, list):
+        raw_items = value
+    else:
+        raw_items = str(value).split(",")
+    tags = []
+    for item in raw_items:
+        tag = str(item).strip()
+        if tag and tag not in tags:
+            tags.append(tag)
+    return tags
+
+
+def _extract_personal_tag_values(source) -> list[str]:
+    if source is None:
+        return []
+    if hasattr(source, "getlist"):
+        values = source.getlist("personal_tags")
+        if values:
+            return values
+    value = source.get("personal_tags") if hasattr(source, "get") else None
+    if isinstance(value, list):
+        return value
+    if value in (None, ""):
+        return []
+    return [value]
+
+
+def _get_personal_document_type() -> DocumentType:
+    doc_type, created = DocumentType.objects.get_or_create(
+        code=PERSONAL_DOCUMENT_TYPE_CODE,
+        defaults={
+            "name": "Personal",
+            "reference_prefix": "PERS",
+            "reference_padding": 5,
+            "description": "System-generated document type for personal uploads.",
+            "icon": "lock",
+            "is_active": True,
+        },
+    )
+    if not created and not doc_type.is_active:
+        doc_type.is_active = True
+        doc_type.save(update_fields=["is_active", "updated_at"])
+    return doc_type
+
 
 class TagSerializer(serializers.ModelSerializer):
     class Meta:
@@ -94,6 +144,7 @@ class DocumentListSerializer(serializers.ModelSerializer):
     document_type_name = serializers.CharField(source="document_type.name", read_only=True)
     uploaded_by        = UserSummarySerializer(read_only=True)
     tags               = TagSerializer(many=True, read_only=True)
+    personal_tags      = serializers.SerializerMethodField()
     permissions        = serializers.SerializerMethodField()
     preview_pdf        = serializers.SerializerMethodField()
     is_edit_locked     = serializers.SerializerMethodField()
@@ -106,7 +157,7 @@ class DocumentListSerializer(serializers.ModelSerializer):
             "document_type", "document_type_name",
             "status", "supplier", "amount", "currency", "document_date",
             "file_name", "file_size", "file_mime_type",
-            "uploaded_by", "tags", "permissions",
+            "uploaded_by", "tags", "personal_tags", "permissions",
             "is_self_upload",
             "is_scanned", "ocr_status",
             "preview_pdf", "preview_status",
@@ -114,13 +165,17 @@ class DocumentListSerializer(serializers.ModelSerializer):
             "current_version", "created_at", "updated_at",
         ]
 
+    def get_personal_tags(self, obj):
+        tags = obj.metadata.get("personal_tags", []) if isinstance(obj.metadata, dict) else []
+        return _normalize_personal_tags(tags)
+
     def get_permissions(self, obj):
         request = self.context.get("request")
         user = getattr(request, "user", None)
         if not user or not user.is_authenticated:
             return []
-        if user.is_admin:
-            return [choice[0] for choice in GroupAction.choices]
+        if user.has_admin_access:
+            return [choice[0] for choice in GroupAction.choices if choice[0] != GroupAction.ADMIN.value]
         if obj.is_self_upload and obj.uploaded_by_id == user.id:
             return [
                 GroupAction.VIEW.value, GroupAction.EDIT.value,
@@ -152,6 +207,7 @@ class DocumentDetailSerializer(serializers.ModelSerializer):
     )
     uploaded_by = UserSummarySerializer(read_only=True)
     tags        = TagSerializer(many=True, read_only=True)
+    personal_tags = serializers.SerializerMethodField()
     tag_ids     = serializers.PrimaryKeyRelatedField(
         queryset=Tag.objects.all(), many=True, source="tags",
         write_only=True, required=False,
@@ -172,7 +228,7 @@ class DocumentDetailSerializer(serializers.ModelSerializer):
             "document_date", "due_date",
             "file", "file_name", "file_size", "file_mime_type", "checksum",
             "metadata",
-            "tags", "tag_ids",
+            "tags", "personal_tags", "tag_ids",
             "department",
             "uploaded_by",
             "is_self_upload",
@@ -194,17 +250,21 @@ class DocumentDetailSerializer(serializers.ModelSerializer):
     def get_comments(self, obj):
         request = self.context.get("request")
         qs = obj.comments.all()
-        if request and not (request.user.is_admin or request.user.is_auditor):
+        if request and not request.user.has_admin_access:
             qs = qs.filter(is_internal=False)
         return DocumentCommentSerializer(qs, many=True, context=self.context).data
+
+    def get_personal_tags(self, obj):
+        tags = obj.metadata.get("personal_tags", []) if isinstance(obj.metadata, dict) else []
+        return _normalize_personal_tags(tags)
 
     def get_permissions(self, obj):
         request = self.context.get("request")
         user = getattr(request, "user", None)
         if not user or not user.is_authenticated:
             return []
-        if user.is_admin:
-            return [choice[0] for choice in GroupAction.choices]
+        if user.has_admin_access:
+            return [choice[0] for choice in GroupAction.choices if choice[0] != GroupAction.ADMIN.value]
         if obj.is_self_upload and obj.uploaded_by_id == user.id:
             return [
                 GroupAction.VIEW.value, GroupAction.EDIT.value,
@@ -262,16 +322,30 @@ class DocumentMetadataEditSerializer(serializers.ModelSerializer):
         queryset=Tag.objects.all(), many=True, source="tags",
         write_only=True, required=False,
     )
+    personal_tags = serializers.ListField(
+        child=serializers.CharField(allow_blank=False, trim_whitespace=True),
+        required=False,
+    )
 
     class Meta:
         model  = Document
         fields = [
             "title", "supplier", "amount", "currency",
-            "document_date", "due_date", "metadata", "tag_ids",
+            "document_date", "due_date", "metadata", "tag_ids", "personal_tags",
         ]
 
     def update(self, instance, validated_data):
         tags = validated_data.pop("tags", None)
+        personal_tags = validated_data.pop("personal_tags", None)
+        if personal_tags is not None:
+            normalized_tags = _normalize_personal_tags(personal_tags)
+            if instance.is_self_upload and not normalized_tags:
+                raise serializers.ValidationError(
+                    {"personal_tags": "Please add at least one personal tag."}
+                )
+            metadata = dict(validated_data.get("metadata") or instance.metadata or {})
+            metadata["personal_tags"] = normalized_tags
+            validated_data["metadata"] = metadata
         for attr, value in validated_data.items():
             setattr(instance, attr, value)
         instance.save()
@@ -295,12 +369,17 @@ class DocumentUploadSerializer(serializers.ModelSerializer):
           That task auto-detects scanned PDFs and routes to ocr_document.
     """
     document_type_id = serializers.PrimaryKeyRelatedField(
-        queryset=DocumentType.objects.filter(is_active=True),
+        queryset=DocumentType.objects.filter(is_active=True).exclude(code=PERSONAL_DOCUMENT_TYPE_CODE),
         source="document_type",
+        required=False,
     )
     file           = serializers.FileField()
     tag_ids        = serializers.PrimaryKeyRelatedField(
         queryset=Tag.objects.all(), many=True, source="tags", required=False
+    )
+    personal_tags  = serializers.ListField(
+        child=serializers.CharField(allow_blank=False, trim_whitespace=True),
+        required=False,
     )
     is_self_upload = serializers.BooleanField(default=False)
     is_scanned     = serializers.BooleanField(default=False)
@@ -311,15 +390,25 @@ class DocumentUploadSerializer(serializers.ModelSerializer):
             "title", "document_type_id", "file",
             "supplier", "amount", "currency",
             "document_date", "due_date",
-            "metadata", "tag_ids", "department",
+            "metadata", "tag_ids", "personal_tags", "department",
             "is_self_upload",
             "is_scanned",
         ]
 
     def validate_metadata(self, value):
-        if self.initial_data.get("is_self_upload") in (True, "true", "1", "yes"):
+        is_self_upload = str(self.initial_data.get("is_self_upload", "")).lower() in ("true", "1", "yes")
+        is_scanned = str(self.initial_data.get("is_scanned", "")).lower() in ("true", "1", "yes")
+        if is_self_upload:
+            personal_tags = _normalize_personal_tags(
+                _extract_personal_tag_values(self.initial_data)
+                or (value.get("personal_tags") if isinstance(value, dict) else None)
+            )
+            if not personal_tags:
+                raise serializers.ValidationError("Please add at least one personal tag.")
+            value = dict(value)
+            value["personal_tags"] = personal_tags
             return value
-        if self.initial_data.get("is_scanned") in (True, "true", "1", "yes"):
+        if is_scanned:
             return value
         doc_type_id = self.initial_data.get("document_type_id")
         if not doc_type_id:
@@ -338,12 +427,23 @@ class DocumentUploadSerializer(serializers.ModelSerializer):
             )
         return value
 
+    def validate(self, attrs):
+        if not attrs.get("is_self_upload") and not attrs.get("document_type"):
+            raise serializers.ValidationError(
+                {"document_type_id": "Document type is required for workflow documents."}
+            )
+        return attrs
+
     def create(self, validated_data):
         import hashlib
         import magic as python_magic
 
         tags       = validated_data.pop("tags", [])
+        validated_data.pop("personal_tags", None)
         request    = self.context["request"]
+        if validated_data.get("is_self_upload"):
+            validated_data["document_type"] = _get_personal_document_type()
+            tags = []
         doc_type   = validated_data["document_type"]
         is_scanned = validated_data.get("is_scanned", False)
 

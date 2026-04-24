@@ -5,6 +5,14 @@ import type {
   DocumentPreviewResponse,
 } from "@/types";
 
+export function normalizeListResponse<T>(payload: unknown): T[] {
+  if (Array.isArray(payload)) return payload as T[];
+  if (payload && typeof payload === "object" && Array.isArray((payload as { results?: unknown[] }).results)) {
+    return (payload as { results: T[] }).results;
+  }
+  return [];
+}
+
 function normalizeApiBase(rawBase: string): string {
   const trimmed = rawBase.replace(/\/+$/, "");
   if (trimmed.endsWith("/api/v1")) return trimmed;
@@ -209,15 +217,6 @@ export const documentTypesAPI = {
     api.patch(`/documents/types/${id}/`, data),
 };
 
-export const rolesAPI = {
-  list: () => api.get("/roles/"),
-  create: (data: { code: string; name: string; description?: string }) =>
-    api.post("/roles/", data),
-  update: (id: string, data: { name?: string; description?: string; is_active?: boolean }) =>
-    api.patch(`/roles/${id}/`, data),
-  delete: (id: string) => api.delete(`/roles/${id}/`),
-};
-
 export const searchAPI = {
   search: (payload: unknown) => api.post("/search/", payload),
 };
@@ -294,7 +293,7 @@ export const usersAPI = {
     email: string;
     first_name: string;
     last_name: string;
-    role: string;
+    job_description: string;
     department?: string;
     password?: string;
     confirm_password?: string;
@@ -304,7 +303,7 @@ export const usersAPI = {
     data: Partial<{
       first_name: string;
       last_name: string;
-      role: string;
+      job_description: string;
       department: string | null;
       is_active: boolean;
     }>
@@ -343,6 +342,8 @@ export const groupsAPI = {
     id: string,
     permissions: { document_type_id: string | null; action: string }[]
   ) => api.post(`/groups/${id}/set_permissions/`, { permissions }),
+  setAdminAccess: (id: string, enabled: boolean) =>
+    api.post(`/groups/${id}/set_admin_access/`, { enabled }),
   members: (id: string) => api.get(`/groups/${id}/members/`),
   addMember: (id: string, userId: string, expiresAt?: string) =>
     api.post(`/groups/${id}/add_member/`, {

@@ -13,12 +13,11 @@ from rest_framework.response import Response
 from rest_framework.views import APIView
 from rest_framework_simplejwt.tokens import RefreshToken
 
-from .models import User, Department, Role, RoleDefinition, EmailOTP, UserGroup, GroupPermission, UserGroupMembership
+from .models import User, Department, EmailOTP, UserGroup, GroupAction, GroupPermission, UserGroupMembership
 from .serializers import (
     UserSerializer, UserCreateSerializer, UserUpdateSerializer,
     DepartmentSerializer, UserSummarySerializer,
     UserGroupSerializer, GroupPermissionSerializer, UserGroupMembershipSerializer,
-    RoleDefinitionSerializer,
 )
 from .email_otp import send_otp_email
 from apps.audit.models import AuditLog, AuditEvent
@@ -26,12 +25,12 @@ from apps.audit.models import AuditLog, AuditEvent
 
 # ── Permission helpers ────────────────────────────────────────────────────────
 
-class IsAdminRole(permissions.BasePermission):
+class IsGroupAdmin(permissions.BasePermission):
     def has_permission(self, request, view):
         return (
             request.user
             and request.user.is_authenticated
-            and request.user.role == Role.ADMIN
+            and request.user.has_admin_access
         )
 
 
@@ -243,8 +242,8 @@ class EnableMFAView(APIView):
 
 class UserViewSet(viewsets.ModelViewSet):
     filter_backends = [filters.SearchFilter, filters.OrderingFilter]
-    search_fields   = ["email", "first_name", "last_name", "department__name"]
-    ordering_fields = ["email", "first_name", "created_at", "role"]
+    search_fields   = ["email", "first_name", "last_name", "job_description", "department__name"]
+    ordering_fields = ["email", "first_name", "created_at"]
     ordering        = ["first_name"]
 
     def get_permissions(self):
@@ -252,19 +251,17 @@ class UserViewSet(viewsets.ModelViewSet):
             "create", "destroy", "reset_password",
             "toggle_active", "partial_update", "update",
         ):
-            return [permissions.IsAuthenticated(), IsAdminRole()]
+            return [permissions.IsAuthenticated(), IsGroupAdmin()]
         return [permissions.IsAuthenticated()]
 
     def get_queryset(self):
         user = self.request.user
         qs   = User.objects.select_related("department").prefetch_related("group_memberships__group")
-        if user.role != Role.ADMIN:
+        if not user.has_admin_access:
             return qs.filter(id=user.id)
 
-        role       = self.request.query_params.get("role")
         department = self.request.query_params.get("department")
         is_active  = self.request.query_params.get("is_active")
-        if role:       qs = qs.filter(role=role)
         if department: qs = qs.filter(department__id=department)
         if is_active is not None:
             qs = qs.filter(is_active=is_active.lower() == "true")
@@ -295,7 +292,7 @@ class UserViewSet(viewsets.ModelViewSet):
             object_type="User",
             object_id=str(user.id),
             object_repr=user.email,
-            changes={"action": "created", "role": user.role},
+            changes={"action": "created", "job_description": user.job_description},
             ip_address=request.META.get("REMOTE_ADDR"),
         )
 
@@ -447,7 +444,7 @@ class DepartmentViewSet(viewsets.ModelViewSet):
 
     def get_permissions(self):
         if self.action in ("create", "update", "partial_update", "destroy"):
-            return [permissions.IsAuthenticated(), IsAdminRole()]
+            return [permissions.IsAuthenticated(), IsGroupAdmin()]
         return [permissions.IsAuthenticated()]
 
     def destroy(self, request, *args, **kwargs):
@@ -460,30 +457,30 @@ class DepartmentViewSet(viewsets.ModelViewSet):
         return super().destroy(request, *args, **kwargs)
 
 
-class RoleDefinitionViewSet(viewsets.ModelViewSet):
-    queryset = RoleDefinition.objects.order_by("name")
-    serializer_class = RoleDefinitionSerializer
-
-    def get_permissions(self):
-        if self.action in ("create", "update", "partial_update", "destroy"):
-            return [permissions.IsAuthenticated(), IsAdminRole()]
-        return [permissions.IsAuthenticated()]
-
-
 # ── Group management ──────────────────────────────────────────────────────────
 
 class UserGroupViewSet(viewsets.ModelViewSet):
     queryset         = UserGroup.objects.prefetch_related("permissions__document_type", "memberships__user").filter(is_active=True)
     serializer_class = UserGroupSerializer
 
+    def get_queryset(self):
+        UserGroup.ensure_administrators_group(created_by=getattr(self.request, "user", None))
+        return super().get_queryset()
+
     def get_permissions(self):
         if self.action in ("create", "update", "partial_update", "destroy",
                            "add_member", "remove_member", "set_permissions"):
-            return [permissions.IsAuthenticated(), IsAdminRole()]
+            return [permissions.IsAuthenticated(), IsGroupAdmin()]
         return [permissions.IsAuthenticated()]
 
     def perform_create(self, serializer):
         serializer.save(created_by=self.request.user)
+
+    def destroy(self, request, *args, **kwargs):
+        group = self.get_object()
+        if group.name == UserGroup.ADMIN_GROUP_NAME:
+            return Response({"detail": "The Administrators group cannot be deleted."}, status=400)
+        return super().destroy(request, *args, **kwargs)
 
     @action(detail=True, methods=["post"])
     def add_member(self, request, pk=None):
@@ -532,10 +529,12 @@ class UserGroupViewSet(viewsets.ModelViewSet):
 
         from django.db import transaction
         with transaction.atomic():
-            GroupPermission.objects.filter(group=group).delete()
+            GroupPermission.objects.filter(group=group).exclude(action=GroupAction.ADMIN.value).delete()
             created = []
             for p in perms:
                 dt_id = p.get("document_type_id") or None
+                if p["action"] == GroupAction.ADMIN.value:
+                    continue
                 obj = GroupPermission.objects.create(
                     group=group,
                     document_type_id=dt_id,
@@ -544,6 +543,34 @@ class UserGroupViewSet(viewsets.ModelViewSet):
                 created.append(obj)
 
         return Response(GroupPermissionSerializer(created, many=True).data)
+
+    @action(detail=True, methods=["post"])
+    def set_admin_access(self, request, pk=None):
+        group = self.get_object()
+        enabled = bool(request.data.get("enabled"))
+
+        if group.name == UserGroup.ADMIN_GROUP_NAME and not enabled:
+            return Response({"detail": "The Administrators group must keep administrator access."}, status=400)
+
+        from django.db import transaction
+        with transaction.atomic():
+            GroupPermission.objects.filter(
+                group=group,
+                document_type__isnull=True,
+                action=GroupAction.ADMIN.value,
+            ).delete()
+            if enabled:
+                GroupPermission.objects.create(
+                    group=group,
+                    document_type=None,
+                    action=GroupAction.ADMIN.value,
+                )
+
+        group.refresh_from_db()
+        return Response({
+            "id": str(group.id),
+            "has_admin_access": group.has_admin_access,
+        })
 
     @action(detail=True, methods=["get"])
     def members(self, request, pk=None):

@@ -26,7 +26,7 @@ export interface MetadataField {
   label: string;
   field_key: string;
   key?: string; // Alias for field_key (used in some contexts)
-  field_type: "text" | "number" | "date" | "currency" | "select" | "boolean" | "textarea";
+  field_type: "text" | "varchar" | "number" | "date" | "currency" | "select" | "boolean" | "textarea";
   is_required: boolean;
   is_searchable?: boolean;
   select_options?: string[] | null;
@@ -62,6 +62,7 @@ export interface Document {
   file_mime_type: string;
   metadata: Record<string, unknown>;
   tags: Tag[];
+  personal_tags?: string[];
   uploaded_by: UserSummary;
   department?: string | null;
   permissions?: string[];
@@ -111,7 +112,10 @@ export interface UserSummary {
   email: string;
   first_name: string;
   last_name: string;
-  role: string;
+  job_description?: string;
+  is_staff?: boolean;
+  has_admin_access?: boolean;
+  group_names?: string[];
 }
 
 export interface WorkflowTask {

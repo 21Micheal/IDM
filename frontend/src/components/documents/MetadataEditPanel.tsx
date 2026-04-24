@@ -5,11 +5,10 @@
  * Allows editing title, supplier, amount, dates, and dynamic metadata fields
  * without touching the file, reference, or document type.
  */
-import { useState } from "react";
 import { useMutation, useQueryClient } from "@tanstack/react-query";
-import { useForm, Controller, type Control, type UseFormRegister } from "react-hook-form";
+import { useForm, useFieldArray, Controller, type Control, type UseFormRegister } from "react-hook-form";
 import { documentsAPI } from "@/services/api";
-import { Edit2, Save, X, Loader2 } from "lucide-react";
+import { Edit2, Save, X, Loader2, Plus } from "lucide-react";
 import { toast } from "react-toastify";
 import type { Document, MetadataField } from "@/types";
 
@@ -26,6 +25,7 @@ type MetadataEditValues = {
   document_date: string;
   due_date: string;
   metadata: Record<string, unknown>;
+  personal_tags: { value: string }[];
 };
 
 function DynamicField({
@@ -119,8 +119,16 @@ export default function MetadataEditPanel({ document: doc, onClose }: Props) {
       document_date: doc.document_date ?? "",
       due_date:      doc.due_date ?? "",
       metadata:      doc.metadata ?? {},
+      personal_tags: (doc.personal_tags ?? []).length > 0
+        ? (doc.personal_tags ?? []).map((tag) => ({ value: tag }))
+        : [{ value: "" }],
     },
   });
+  const {
+    fields: personalTagFields,
+    append: appendPersonalTag,
+    remove: removePersonalTag,
+  } = useFieldArray({ control, name: "personal_tags" });
 
   const mutation = useMutation({
     mutationFn: (data: Record<string, unknown>) =>
@@ -135,7 +143,20 @@ export default function MetadataEditPanel({ document: doc, onClose }: Props) {
   });
 
   const onSubmit = (values: MetadataEditValues) => {
-    mutation.mutate(values);
+    const personalTags = (values.personal_tags ?? [])
+      .map((tag) => tag.value.trim())
+      .filter(Boolean);
+    if (doc.is_self_upload && personalTags.length === 0) {
+      toast.error("Please add at least one personal tag.");
+      return;
+    }
+    const payload: Record<string, unknown> = { ...values };
+    if (!doc.is_self_upload) {
+      delete payload.personal_tags;
+    } else {
+      payload.personal_tags = personalTags;
+    }
+    mutation.mutate(payload);
   };
 
   const metadataFields = doc.document_type?.metadata_fields ?? [];
@@ -175,6 +196,46 @@ export default function MetadataEditPanel({ document: doc, onClose }: Props) {
             <input {...register("document_date")} type="date" className="input" />
           </div>
         </div>
+
+        {doc.is_self_upload && (
+          <div>
+            <label className="label">
+              Personal tags <span className="text-red-500">*</span>
+            </label>
+            <div className="space-y-2">
+              {personalTagFields.map((field, index) => (
+                <div key={field.id} className="flex items-center gap-2">
+                  <input
+                    {...register(`personal_tags.${index}.value` as const, {
+                      required: index === 0 ? "Personal tags are required" : false,
+                    })}
+                    className="input flex-1"
+                    placeholder={`Tag ${index + 1}`}
+                  />
+                  <button
+                    type="button"
+                    onClick={() => removePersonalTag(index)}
+                    disabled={personalTagFields.length === 1}
+                    className="p-2 rounded-lg border border-gray-200 text-gray-500 hover:text-red-600 hover:bg-red-50 disabled:opacity-40 disabled:cursor-not-allowed"
+                    title="Remove tag"
+                  >
+                    <X className="w-4 h-4" />
+                  </button>
+                </div>
+              ))}
+            </div>
+            <button
+              type="button"
+              onClick={() => appendPersonalTag({ value: "" })}
+              className="mt-3 inline-flex items-center gap-2 text-sm font-medium text-brand-600 hover:text-brand-700"
+            >
+              <Plus className="w-4 h-4" /> Add another tag
+            </button>
+            <p className="text-xs text-gray-500 mt-1">
+              Add as many tags as you need for this personal document.
+            </p>
+          </div>
+        )}
 
         <div className="grid grid-cols-3 gap-3">
           <div className="col-span-2">

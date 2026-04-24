@@ -1,7 +1,7 @@
 import { useState } from "react";
 import { useNavigate } from "react-router-dom";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
-import { documentTypesAPI } from "@/services/api";
+import { documentTypesAPI, normalizeListResponse } from "@/services/api";
 import {
   Plus, GitBranch, Trash2, Edit2, Loader2, X, Save,
   Users, Building2, Shield, Settings, ChevronRight,
@@ -16,10 +16,11 @@ import type { DocumentType } from "@/types";
 
 const FIELD_TYPES = [
   { value: "text",     label: "Text" },
+  { value: "varchar",  label: "VARCHAR" },
   { value: "number",   label: "Number" },
   { value: "date",     label: "Date" },
   { value: "currency", label: "Currency" },
-  { value: "select",   label: "Dropdown" },
+  { value: "select",   label: "Select" },
   { value: "boolean",  label: "Yes / No" },
   { value: "textarea", label: "Long text" },
 ];
@@ -170,9 +171,10 @@ function DocumentTypesTab() {
   const [showCreate, setShowCreate] = useState(false);
   const [editId, setEditId]         = useState<string | null>(null);
 
-  const { data: docTypes, isLoading } = useQuery<DocumentType[]>({
+  const { data: docTypes, isLoading } = useQuery<unknown, Error, DocumentType[]>({
     queryKey: ["document-types"],
-    queryFn:  () => documentTypesAPI.list().then((r) => r.data.results ?? r.data),
+    queryFn:  () => documentTypesAPI.list().then((r) => r.data as unknown),
+    select: (data) => normalizeListResponse<DocumentType>(data),
   });
 
   const createMutation = useMutation({
@@ -335,7 +337,7 @@ function DocumentTypesTab() {
   );
 }
 
-// ── Users & Roles tab ─────────────────────────────────────────────────────────
+// ── Users tab ────────────────────────────────────────────────────────────────
 
 function UsersTab() {
   const navigate = useNavigate();
@@ -344,7 +346,7 @@ function UsersTab() {
     {
       icon: Users,
       title: "Users",
-      description: "Create and manage staff accounts, reset passwords, and assign roles.",
+      description: "Create and manage staff accounts, reset passwords, and capture job descriptions.",
       action: "Manage users",
       to: "/admin/users",
     },
@@ -536,7 +538,7 @@ function SettingsTab() {
 const TABS = [
   { id: "types",    label: "Document types",    icon: FileText   },
   { id: "workflow", label: "Workflow templates", icon: GitBranch  },
-  { id: "users",    label: "Users & roles",      icon: Users      },
+  { id: "users",    label: "Users",              icon: Users      },
   { id: "settings", label: "Settings",           icon: Settings   },
 ] as const;
 
