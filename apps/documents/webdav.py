@@ -59,31 +59,21 @@ class DocumentWebDAVView(View):
     # ── Authentication ─────────────────────────────────────────────────────────
 
     def _authenticate(self, request):
+        """
+        Fallback authenticator — only reached if the path-token in dispatch()
+        didn't match (e.g. direct curl calls, browser-based WebDAV clients,
+        or the bare collection URL with no token segment).
+
+        LibreOffice / MS Office use the path-token in dispatch() exclusively.
+        They must NOT reach this method, because they strip query strings and
+        may drop Authorization headers after redirects — both would produce a
+        401 that triggers the credential dialog.
+        """
         auth_header = (
             request.META.get("HTTP_AUTHORIZATION", "")
             or request.META.get("REDIRECT_HTTP_AUTHORIZATION", "")
             or request.META.get("Authorization", "")
         )
-        qs_token = request.GET.get("token", "").strip()
-
-        # 1. Query-string token — PRIMARY path for LibreOffice/MS Office.
-        #    The token is appended to the WebDAV URL as ?token=<hex> and is
-        #    forwarded on every request, including after 401 retries, so no
-        #    password dialog ever appears.
-        if qs_token:
-            user = self._try_cache_token(qs_token, getattr(request, "dav_doc_id", None), cache)
-            if user:
-                logger.debug("WebDAV auth OK via qs token: user=%s path=%s", user.email, request.path)
-                return user
-            # Also try as a raw JWT (fallback for direct API callers)
-            user = self._try_jwt(qs_token)
-            if user:
-                logger.debug("WebDAV auth OK via qs JWT: user=%s path=%s", user.email, request.path)
-                return user
-            logger.warning(
-                "WebDAV qs token auth failed: token_len=%d path=%s",
-                len(qs_token), request.path,
-            )
 
         # 2. Bearer header (JWT only)
         if auth_header.startswith("Bearer "):
@@ -148,9 +138,8 @@ class DocumentWebDAVView(View):
                 return None
 
         logger.debug(
-            "WebDAV auth failed — no matching method: auth_header_prefix=%r qs_token_len=%d path=%s",
+            "WebDAV auth failed — no matching method: auth_header_prefix=%r path=%s",
             (auth_header[:30] + "...") if len(auth_header) > 30 else auth_header,
-            len(qs_token),
             request.path,
         )
         return None
@@ -216,6 +205,22 @@ class DocumentWebDAVView(View):
             return self.options(request, document_id, filename)
 
         request.dav_doc_id = str(document_id)
+
+        # ── Token-in-path authentication ──────────────────────────────────────
+        # URL shape: /api/v1/documents/webdav/<doc_id>/<token>/<filename>
+        #
+        # The token is an opaque hex path segment, NOT a query string param.
+        # LibreOffice (and MS Office) strip query strings from WebDAV URLs
+        # after the initial request — ?token=... disappears on PROPFIND/LOCK/PUT,
+        # causing a 401 → credential dialog. Path segments are forwarded
+        # verbatim by every layer (ms-word:ofe|u|, vnd.sun.star.webdavs://,
+        # nginx, Django) so the token survives all subsequent requests.
+        #
+        # Django URL pattern required (in documents/urls.py):
+        #   path("webdav/<uuid:document_id>/<str:token>/<str:filename>",
+        #        DocumentWebDAVView.as_view()),
+        #   path("webdav/<uuid:document_id>/",          # bare collection probe
+        #        DocumentWebDAVView.as_view()),
 
         # ── Token-in-path authentication ──────────────────────────────────────
         # The token is a path segment: /webdav/<doc_id>/<token>/<filename>

@@ -9,7 +9,7 @@ import {
 } from "lucide-react";
 import { Link } from "react-router-dom";
 import StatusBadge from "@/components/documents/StatusBadge";
-import { format, formatDistanceToNow } from "date-fns";
+import { format, formatDistanceToNow, isSameDay } from "date-fns";
 import { useState } from "react";
 import type { Document, WorkflowTask } from "@/types";
 import { StatCard } from "@/components/dashboard/StatCard";
@@ -19,6 +19,15 @@ const RECENT_ACTIVITY_PAGE_SIZE = 10;
 type PaginatedResponse<T> = {
   count: number;
   results: T[];
+};
+
+type DashboardAuditEvent = {
+  id: string;
+  event: string;
+  summary?: string;
+  actor_email?: string;
+  timestamp: string;
+  object_repr?: string;
 };
 
 function getAuditPresentation(event: any) {
@@ -39,6 +48,14 @@ function getAuditPresentation(event: any) {
     return { icon: ShieldCheck, label: "Alert", tone: "bg-destructive/10 text-destructive border-destructive/30" };
   }
   return { icon: ShieldCheck, label: "Activity", tone: "bg-muted text-muted-foreground border-border" };
+}
+
+function getAuditDayLabel(timestamp: string, previousTimestamp?: string) {
+  const currentDate = new Date(timestamp);
+  if (!previousTimestamp) return format(currentDate, "EEEE, dd MMM yyyy");
+  const previousDate = new Date(previousTimestamp);
+  if (!isSameDay(currentDate, previousDate)) return format(currentDate, "EEEE, dd MMM yyyy");
+  return null;
 }
 
 function TaskMetaInfo({ dueAt }: { dueAt: string | null }) {
@@ -105,7 +122,7 @@ export default function DashboardPage() {
             page_size: RECENT_ACTIVITY_PAGE_SIZE,
           },
         })
-        .then((r) => r.data as PaginatedResponse<Record<string, unknown>>),
+        .then((r) => r.data as PaginatedResponse<DashboardAuditEvent>),
   });
 
   const recentDocsCount = recentDocs?.count ?? 0;
@@ -283,41 +300,52 @@ export default function DashboardPage() {
                   Loading activity…
                 </div>
               ) : recentAudit?.results?.length ? (
-                recentAudit.results.map((event: any) => {
+                recentAudit.results.map((event: DashboardAuditEvent, index: number) => {
+                  const previousEvent = recentAudit.results[index - 1];
                   const auditMeta = getAuditPresentation(event);
                   const AuditIcon = auditMeta.icon;
+                  const dayLabel = getAuditDayLabel(event.timestamp, previousEvent?.timestamp);
 
                   return (
-                  <div key={event.id} className="rounded-lg border border-border bg-muted/30 p-4">
-                    <div className="flex items-start justify-between gap-4">
-                      <div className="min-w-0 flex-1">
-                        <div className="flex items-center gap-2">
-                          <span className={`inline-flex items-center gap-1.5 rounded-full border px-2 py-0.5 text-[10px] font-semibold ${auditMeta.tone}`}>
-                            <AuditIcon className="w-3 h-3" />
-                            {auditMeta.label}
-                          </span>
-                          <p className="text-sm font-semibold text-foreground truncate">
-                            {event.summary || event.event}
+                    <div key={event.id} className="space-y-2">
+                      {dayLabel && (
+                        <div className="pt-1">
+                          <p className="text-[11px] font-semibold uppercase tracking-[0.28em] text-muted-foreground">
+                            {dayLabel}
                           </p>
                         </div>
-                        <p className="text-xs text-muted-foreground mt-1">
-                          {event.actor_email || "System"} · {format(new Date(event.timestamp), "dd MMM yyyy")}
-                        </p>
-                      </div>
-                      <span className="text-[11px] font-semibold uppercase tracking-[0.24em] text-muted-foreground">
-                        {format(new Date(event.timestamp), "hh:mm a")}
-                      </span>
-                    </div>
-                    <div className="mt-3 flex items-center gap-2 text-xs text-muted-foreground">
-                      <span>{formatDistanceToNow(new Date(event.timestamp), { addSuffix: true })}</span>
-                      {event.object_repr && (
-                        <>
-                          <span>•</span>
-                          <span className="truncate">{event.object_repr}</span>
-                        </>
                       )}
+                      <div className="rounded-lg border border-border bg-muted/30 p-4">
+                        <div className="flex items-start justify-between gap-4">
+                          <div className="min-w-0 flex-1">
+                            <div className="flex items-center gap-2">
+                              <span className={`inline-flex items-center gap-1.5 rounded-full border px-2 py-0.5 text-[10px] font-semibold ${auditMeta.tone}`}>
+                                <AuditIcon className="w-3 h-3" />
+                                {auditMeta.label}
+                              </span>
+                              <p className="text-sm font-semibold text-foreground truncate">
+                                {event.summary || event.event}
+                              </p>
+                            </div>
+                            <p className="text-xs text-muted-foreground mt-1">
+                              {event.actor_email || "System"} · {format(new Date(event.timestamp), "dd MMM yyyy")}
+                            </p>
+                          </div>
+                          <span className="text-[11px] font-semibold uppercase tracking-[0.24em] text-muted-foreground">
+                            {format(new Date(event.timestamp), "hh:mm a")}
+                          </span>
+                        </div>
+                        <div className="mt-3 flex items-center gap-2 text-xs text-muted-foreground">
+                          <span>{formatDistanceToNow(new Date(event.timestamp), { addSuffix: true })}</span>
+                          {event.object_repr && (
+                            <>
+                              <span>•</span>
+                              <span className="truncate">{event.object_repr}</span>
+                            </>
+                          )}
+                        </div>
+                      </div>
                     </div>
-                  </div>
                   );
                 })
               ) : (

@@ -2,7 +2,7 @@ import hashlib
 import logging
 import mimetypes
 import secrets
-from urllib.parse import quote as urlquote, urlencode, urlparse, urlunparse
+from urllib.parse import quote as urlquote, urlparse, urlunparse
 
 from django.core.files.base import ContentFile
 from django.http import HttpResponse
@@ -438,10 +438,10 @@ class DocumentViewSet(AuditMixin, viewsets.ModelViewSet):
                 status=423,
             )
 
-        # FIX: Use hex to avoid special character truncations, and use actual email
+        # Generate a short, opaque hex token to avoid URL mangling.
+        # JWTs (500+ chars with dots) cannot be reliably embedded in URLs.
         jwt_token = str(AccessToken.for_user(request.user))
-        webdav_token = jwt_token  # Use JWT as the WebDAV token for seamless auth
-        basic_username = request.user.email
+        webdav_token = secrets.token_hex(32)  # 64 hex chars = 256 bits
         cache.set(
             f"webdav_edit_token:{webdav_token}",
             {
@@ -455,11 +455,19 @@ class DocumentViewSet(AuditMixin, viewsets.ModelViewSet):
         file_url = request.build_absolute_uri(doc.file.url)
         release_url = f"{api_base}/documents/{doc.id}/release_lock/"
 
+        # Token MUST be a path segment — NOT a query string.
+        # LibreOffice and MS Office strip ?token=... after the first request.
+        # Every subsequent PROPFIND / LOCK / PUT arrives with no query string
+        # → token="" in dispatch() → 401 → credential dialog appears.
+        # Path segments survive verbatim through every layer of the stack.
+        # URL: /api/v1/documents/webdav/<doc_id>/<token>/<filename>
         parsed = urlparse(api_base)
-        netloc_with_creds = f"{urlquote(basic_username, safe='')}:{webdav_token}@{parsed.netloc}"
-        webdav_path = f"{parsed.path}/documents/webdav/{doc.id}/{urlquote(doc.file_name, safe='')}"
+        webdav_path = (
+            f"{parsed.path}/documents/webdav/{doc.id}"
+            f"/{webdav_token}"
+            f"/{urlquote(doc.file_name, safe='')}"
+        )
         webdav_url = urlunparse(parsed._replace(
-            netloc=netloc_with_creds,
             path=webdav_path,
             query="",
             fragment="",
@@ -468,7 +476,7 @@ class DocumentViewSet(AuditMixin, viewsets.ModelViewSet):
         self.record_audit("document.edit_lock_acquired", doc)
 
         return Response({
-            "token":       jwt_token,
+            "token":       webdav_token,
             "jwt_token":   jwt_token,
             "username":    request.user.email,
             "webdav_url":  webdav_url,
@@ -483,15 +491,17 @@ class DocumentViewSet(AuditMixin, viewsets.ModelViewSet):
     def _get_open_script_content(self, filename, open_url):
         safe_filename = filename.replace("'", "\\'")
         return f"""#!/usr/bin/env bash
-# DocVault — open "{filename}" in LibreOffice
-set -euo pipefail
+# DocVault — open "{filename}" in LibreOffice via WebDAV
+# Log file: /tmp/docvault-open.log
 
 OPEN_URL='{open_url}'
 FILE_NAME='{safe_filename}'
+LOG="/tmp/docvault-open-$(date +%s).log"
 
 find_soffice() {{
-  for cmd in soffice libreoffice /usr/bin/soffice /usr/lib/libreoffice/program/soffice; do
-    if command -v "$cmd" &>/dev/null; then
+  for cmd in soffice libreoffice /usr/bin/soffice /usr/lib/libreoffice/program/soffice \
+             /usr/lib64/libreoffice/program/soffice /snap/bin/libreoffice; do
+    if command -v "$cmd" &>/dev/null 2>&1 || [ -x "$cmd" ]; then
       echo "$cmd"; return 0
     fi
   done
@@ -499,13 +509,31 @@ find_soffice() {{
 
 SOFFICE=$(find_soffice)
 if [ -z "$SOFFICE" ]; then
-  echo "ERROR: LibreOffice not found."
+  echo "ERROR: LibreOffice not found. Install it with: sudo apt install libreoffice" | tee "$LOG"
   exit 1
 fi
 
-echo "Opening: $FILE_NAME"
-nohup "$SOFFICE" "$OPEN_URL" >/dev/null 2>&1 &
-disown
+echo "DocVault: opening $FILE_NAME" | tee "$LOG"
+echo "Command: $SOFFICE $OPEN_URL" >> "$LOG"
+echo "Log: $LOG"
+
+# Run LibreOffice in the background, detached from this terminal.
+# Output goes to the log file so failures are diagnosable.
+"$SOFFICE" "$OPEN_URL" >>"$LOG" 2>&1 &
+LO_PID=$!
+disown $LO_PID
+
+# Give LO 3 seconds to start and contact the server.
+# If it exits immediately, something went wrong — show the log.
+sleep 3
+if ! kill -0 $LO_PID 2>/dev/null; then
+  echo ""
+  echo "ERROR: LibreOffice exited immediately. Log output:"
+  cat "$LOG"
+  exit 1
+fi
+
+echo "LibreOffice started (PID $LO_PID). Save with Ctrl+S — each save creates a new version."
 """
 
     @action(detail=True, methods=["get"])
@@ -523,10 +551,8 @@ disown
         if not locked:
             return Response({"detail": "Locked by another user."}, status=423)
 
-        # FIX: Align with hex tokens and actual email
-        jwt_token = str(AccessToken.for_user(request.user))
-        webdav_token = jwt_token  # Use JWT as the WebDAV token for seamless auth
-        basic_username = request.user.email
+        # Generate a short, opaque hex token (not JWT) to avoid URL mangling.
+        webdav_token = secrets.token_hex(32)  # 64 hex chars = 256 bits
         cache.set(
             f"webdav_edit_token:{webdav_token}", 
             {
@@ -538,9 +564,17 @@ disown
 
         api_base = request.build_absolute_uri("/api/v1").rstrip("/")
         parsed = urlparse(api_base)
-        netloc = f"{urlquote(basic_username, safe='')}:{webdav_token}@{parsed.netloc}"
-        path = f"{parsed.path}/documents/webdav/{doc.id}/{urlquote(doc.file_name, safe='')}"
-        webdav_url = urlunparse(parsed._replace(netloc=netloc, path=path, query="", fragment=""))
+        # Token in path — same reason as edit_token above.
+        path = (
+            f"{parsed.path}/documents/webdav/{doc.id}"
+            f"/{webdav_token}"
+            f"/{urlquote(doc.file_name, safe='')}"
+        )
+        webdav_url = urlunparse(parsed._replace(
+            path=path,
+            query="",
+            fragment="",
+        ))
         
         dav_prefix = "vnd.sun.star.webdavs://" if webdav_url.startswith("https://") else "vnd.sun.star.webdav://"
         open_url = webdav_url.replace(parsed.scheme + "://", dav_prefix, 1)
