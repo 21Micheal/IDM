@@ -155,7 +155,8 @@ export const documentsAPI = {
       is_internal: isInternal,
     }),
 
-  auditTrail: (id: string) => api.get(`/documents/${id}/audit_trail/`),
+  auditTrail: (id: string, params?: Record<string, unknown>) =>
+    api.get(`/documents/${id}/audit_trail/`, { params }),
 
   bulkAction: (
     documentIds: string[],

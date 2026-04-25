@@ -7,8 +7,8 @@
  *  - Selection checkboxes hidden on "My Documents" tab (actions live in row)
  */
 
-import { useState } from "react";
-import { Link } from "react-router-dom";
+import { useEffect, useState } from "react";
+import { Link, useSearchParams } from "react-router-dom";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { documentsAPI, documentTypesAPI, normalizeListResponse } from "@/services/api";
 import {
@@ -198,10 +198,13 @@ function PersonalTagChips({
 
 export default function DocumentsPage() {
   const queryClient = useQueryClient();
+  const [searchParams] = useSearchParams();
+  const statusFromUrl = searchParams.get("status");
+  const normalizedStatusFromUrl = STATUS_OPTIONS.includes(statusFromUrl ?? "") ? (statusFromUrl ?? "") : "";
 
   const [activeTab, setActiveTab] = useState<Tab>("workflow");
   const [search, setSearch] = useState("");
-  const [statusFilter, setStatusFilter] = useState("");
+  const [statusFilter, setStatusFilter] = useState(normalizedStatusFromUrl);
   const [typeFilter, setTypeFilter] = useState("");
   const [personalTagFilter, setPersonalTagFilter] = useState("");
   const [sort, setSort] = useState<"created_at" | "document_date" | "amount" | "title" | "reference_number">("created_at");
@@ -210,6 +213,15 @@ export default function DocumentsPage() {
   const [selectedIds, setSelectedIds] = useState<string[]>([]);
 
   const debouncedSearch = useDebounce(search, 300);
+
+  useEffect(() => {
+    setStatusFilter(normalizedStatusFromUrl);
+    if (normalizedStatusFromUrl) {
+      setActiveTab("workflow");
+    }
+    setPage(1);
+    setSelectedIds([]);
+  }, [normalizedStatusFromUrl]);
 
   const { data: typesData } = useQuery<unknown, Error, unknown[]>({
     queryKey: ["document-types"],

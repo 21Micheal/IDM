@@ -3,6 +3,7 @@ from django.urls import path, include
 from django.conf import settings
 from django.conf.urls.static import static
 from rest_framework_simplejwt.views import TokenRefreshView
+from apps.documents.storage_views import StorageStatsView
 
 urlpatterns = [
     path("admin/",              admin.site.urls),
@@ -24,6 +25,9 @@ urlpatterns = [
 
     # In-app notifications
     path("api/v1/notifications/", include("apps.notifications.urls")),
+
+    # Storage stats
+    path("api/v1/storage/stats/", StorageStatsView.as_view(), name="storage-stats"),
 
     # JWT refresh
     path("api/v1/token/refresh/", TokenRefreshView.as_view(), name="token_refresh"),
