@@ -1,4 +1,4 @@
-// DashboardPage.tsx — Indigo Vault themed
+// DashboardPage.tsx — Production Enterprise DMS
 import { useQuery } from "@tanstack/react-query";
 import { api, documentsAPI, searchAPI, workflowAPI } from "@/services/api";
 import { useAuthStore } from "@/store/authStore";
@@ -10,14 +10,15 @@ import {
 import { Link, useNavigate } from "react-router-dom";
 import StatusBadge from "@/components/documents/StatusBadge";
 import { format, formatDistanceToNow, isSameDay } from "date-fns";
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useRef, useState, useMemo } from "react";
 import type { Document, DocumentSearchResponse, SearchHit, WorkflowTask } from "@/types";
 import { StatCard } from "@/components/dashboard/StatCard";
 import { useDebounce } from "@/hooks/useDebounce";
 import { getQuickSearchSnippet, highlightSearchText } from "@/lib/search";
 
 const RECENT_DOCS_PAGE_SIZE = 5;
-const RECENT_ACTIVITY_PAGE_SIZE = 10;
+const RECENT_AUDIT_PAGE_SIZE = 5;
+
 type PaginatedResponse<T> = {
   count: number;
   results: T[];
@@ -30,6 +31,14 @@ type DashboardAuditEvent = {
   actor_email?: string;
   timestamp: string;
   object_repr?: string;
+};
+
+type StorageStats = {
+  used_bytes: number;
+  total_bytes: number;
+  used_gb: number;
+  total_gb: number;
+  percentage: number;
 };
 
 function getAuditPresentation(event: any) {
@@ -91,13 +100,17 @@ function TaskMetaInfo({ dueAt }: { dueAt: string | null }) {
 export default function DashboardPage() {
   const { user } = useAuthStore();
   const navigate = useNavigate();
+
   const [recentDocsPage, setRecentDocsPage] = useState(1);
   const [recentAuditPage, setRecentAuditPage] = useState(1);
   const [dashboardSearch, setDashboardSearch] = useState("");
   const [isDashboardSearchFocused, setIsDashboardSearchFocused] = useState(false);
   const [activeDashboardResultIndex, setActiveDashboardResultIndex] = useState(-1);
+
   const dashboardSearchRef = useRef<HTMLDivElement | null>(null);
   const debouncedDashboardSearch = useDebounce(dashboardSearch.trim(), 300);
+
+  // ── Queries ───────────────────────────────────────────────────────────────
 
   const { data: recentDocs, isLoading: docsLoading } = useQuery({
     queryKey: ["documents", "recent", recentDocsPage],
@@ -109,9 +122,31 @@ export default function DashboardPage() {
       }).then((r) => r.data as PaginatedResponse<Document>),
   });
 
+  const { data: totalDocuments = 0 } = useQuery({
+    queryKey: ["documents", "count", "all"],
+    queryFn: () => documentsAPI.list({ page: 1, page_size: 1 }).then((r) => r.data.count ?? 0),
+  });
+
   const { data: pendingCount = 0 } = useQuery({
     queryKey: ["documents", "pending", "count"],
-    queryFn: () => documentsAPI.list({ status: "pending_approval", page_size: 1 }).then((r) => r.data.count ?? 0),
+    queryFn: () =>
+      documentsAPI.list({
+        status: "pending_approval",
+        is_self_upload: false,
+        page: 1,
+        page_size: 1,
+      }).then((r) => r.data.count ?? 0),
+  });
+
+  const { data: completedCount = 0 } = useQuery({
+    queryKey: ["documents", "completed", "count"],
+    queryFn: () =>
+      documentsAPI.list({
+        status: "approved",
+        is_self_upload: false,
+        page: 1,
+        page_size: 1,
+      }).then((r) => r.data.count ?? 0),
   });
 
   const { data: myTasks = [], isLoading: tasksLoading } = useQuery({
@@ -127,10 +162,16 @@ export default function DashboardPage() {
           params: {
             ordering: "-timestamp",
             page: recentAuditPage,
-            page_size: RECENT_ACTIVITY_PAGE_SIZE,
+            page_size: RECENT_AUDIT_PAGE_SIZE,
           },
         })
         .then((r) => r.data as PaginatedResponse<DashboardAuditEvent>),
+  });
+
+  const { data: storageStats } = useQuery<StorageStats>({
+    queryKey: ["storage", "stats"],
+    queryFn: () => api.get("/storage/stats/").then((res) => res.data),
+    staleTime: 5 * 60 * 1000,
   });
 
   const { data: dashboardSearchResults, isFetching: isDashboardSearchLoading } = useQuery({
@@ -144,21 +185,26 @@ export default function DashboardPage() {
     enabled: debouncedDashboardSearch.length >= 2,
   });
 
+  // ── Computed Values ───────────────────────────────────────────────────────
+
   const recentDocsCount = recentDocs?.count ?? 0;
   const recentAuditCount = recentAudit?.count ?? 0;
   const recentDocsPages = Math.max(1, Math.ceil(recentDocsCount / RECENT_DOCS_PAGE_SIZE));
-  const recentAuditPages = Math.max(1, Math.ceil(recentAuditCount / RECENT_ACTIVITY_PAGE_SIZE));
-  const totalDocuments = recentDocsCount;
-  const auditTitle = user?.has_admin_access ? "Audit trail" : "My activity";
-  const auditSubtitle = user?.has_admin_access
-    ? "Recent activity on your document records."
-    : "Recent activity on documents you own.";
+  const recentAuditPages = Math.max(1, Math.ceil(recentAuditCount / RECENT_AUDIT_PAGE_SIZE));
+
+  const storage = useMemo(() => {
+    if (storageStats) return storageStats;
+    return { used_bytes: 0, total_bytes: 0, used_gb: 0, total_gb: 0, percentage: 0 };
+  }, [storageStats]);
+
   const dashboardResults = dashboardSearchResults?.results ?? [];
   const dashboardResultsTotal = dashboardSearchResults?.total ?? 0;
   const showDashboardSearchPanel = isDashboardSearchFocused && dashboardSearch.trim().length > 0;
   const dashboardSearchTerm = dashboardSearch.trim();
   const hasActiveDashboardSelection =
     activeDashboardResultIndex >= 0 && activeDashboardResultIndex < dashboardResults.length;
+
+  // ── Handlers ──────────────────────────────────────────────────────────────
 
   const handleDashboardSearch = () => {
     const term = dashboardSearchTerm;
@@ -177,7 +223,6 @@ export default function DashboardPage() {
         setIsDashboardSearchFocused(false);
       }
     };
-
     document.addEventListener("mousedown", handleClickOutside);
     return () => document.removeEventListener("mousedown", handleClickOutside);
   }, []);
@@ -185,6 +230,8 @@ export default function DashboardPage() {
   useEffect(() => {
     setActiveDashboardResultIndex(-1);
   }, [debouncedDashboardSearch]);
+
+  // ── Render ────────────────────────────────────────────────────────────────
 
   return (
     <div className="max-w-7xl mx-auto space-y-8">
@@ -278,62 +325,56 @@ export default function DashboardPage() {
                 ) : dashboardResults.length > 0 ? (
                   <>
                     <div className="divide-y divide-border">
-                      {dashboardResults.map((hit: SearchHit, index) => (
-                        (() => {
-                          const snippetData = getQuickSearchSnippet(hit, dashboardSearchTerm);
-
-                          return (
-                        <button
-                          key={hit.id}
-                          type="button"
-                          className={`block w-full px-4 py-3 text-left transition-colors hover:bg-muted/40 ${
-                            activeDashboardResultIndex === index ? "bg-muted/50" : ""
-                          }`}
-                          onMouseEnter={() => setActiveDashboardResultIndex(index)}
-                          onClick={() => handleDashboardResultOpen(hit)}
-                        >
-                          <div className="flex items-start justify-between gap-3">
-                            <div className="min-w-0 flex-1">
-                              <div className="mb-1 flex flex-wrap items-center gap-2 text-xs text-muted-foreground">
-                                <span
-                                  className="font-mono text-brand-600"
-                                  dangerouslySetInnerHTML={{
-                                    __html: highlightSearchText(hit.reference_number, dashboardSearchTerm),
-                                  }}
-                                />
-                                <span>•</span>
-                                <span>{hit.document_type}</span>
-                              </div>
-                              <p
-                                className="truncate text-sm font-semibold text-foreground"
-                                dangerouslySetInnerHTML={{
-                                  __html: highlightSearchText(hit.title, dashboardSearchTerm),
-                                }}
-                              />
-                              {hit.supplier && (
+                      {dashboardResults.map((hit: SearchHit, index) => {
+                        const snippetData = getQuickSearchSnippet(hit, dashboardSearchTerm);
+                        return (
+                          <button
+                            key={hit.id}
+                            type="button"
+                            className={`block w-full px-4 py-3 text-left transition-colors hover:bg-muted/40 ${
+                              activeDashboardResultIndex === index ? "bg-muted/50" : ""
+                            }`}
+                            onMouseEnter={() => setActiveDashboardResultIndex(index)}
+                            onClick={() => handleDashboardResultOpen(hit)}
+                          >
+                            <div className="flex items-start justify-between gap-3">
+                              <div className="min-w-0 flex-1">
+                                <div className="mb-1 flex flex-wrap items-center gap-2 text-xs text-muted-foreground">
+                                  <span
+                                    className="font-mono text-brand-600"
+                                    dangerouslySetInnerHTML={{
+                                      __html: highlightSearchText(hit.reference_number, dashboardSearchTerm),
+                                    }}
+                                  />
+                                  <span>•</span>
+                                  <span>{hit.document_type}</span>
+                                </div>
                                 <p
-                                  className="mt-1 truncate text-xs text-muted-foreground"
+                                  className="truncate text-sm font-semibold text-foreground"
                                   dangerouslySetInnerHTML={{
-                                    __html: highlightSearchText(hit.supplier, dashboardSearchTerm),
+                                    __html: highlightSearchText(hit.title, dashboardSearchTerm),
                                   }}
                                 />
-                              )}
-                              <div className="mt-2 rounded-md bg-muted/40 px-2.5 py-2">
-                                {!snippetData.isFallback && (
-                                  <p className="sr-only">Search match context</p>
+                                {hit.supplier && (
+                                  <p
+                                    className="mt-1 truncate text-xs text-muted-foreground"
+                                    dangerouslySetInnerHTML={{
+                                      __html: highlightSearchText(hit.supplier, dashboardSearchTerm),
+                                    }}
+                                  />
                                 )}
-                                <p
-                                  className="line-clamp-3 text-xs leading-5 text-foreground"
-                                  dangerouslySetInnerHTML={{ __html: snippetData.snippet }}
-                                />
+                                <div className="mt-2 rounded-md bg-muted/40 px-2.5 py-2">
+                                  <p
+                                    className="line-clamp-3 text-xs leading-5 text-foreground"
+                                    dangerouslySetInnerHTML={{ __html: snippetData.snippet }}
+                                  />
+                                </div>
                               </div>
+                              <StatusBadge status={hit.status} />
                             </div>
-                            <StatusBadge status={hit.status} />
-                          </div>
-                        </button>
-                          );
-                        })()
-                      ))}
+                          </button>
+                        );
+                      })}
                     </div>
 
                     <div className="flex items-center justify-between gap-3 border-t border-border bg-muted/30 px-4 py-3">
@@ -372,6 +413,7 @@ export default function DashboardPage() {
               </div>
             )}
           </div>
+
           <button
             type="button"
             onClick={handleDashboardSearch}
@@ -380,32 +422,24 @@ export default function DashboardPage() {
             <Search className="w-4 h-4" />
             Search
           </button>
-          <Link
-            to="/workflow"
-            className="inline-flex items-center justify-center gap-2 rounded-lg bg-primary px-5 py-2.5 text-sm font-semibold text-primary-foreground transition-colors hover:bg-primary/90"
-          >
-            Workflow
-          </Link>
+          {/* Workflow button removed as requested */}
         </div>
       </div>
 
       {/* Key Metrics */}
       <div className="grid grid-cols-1 sm:grid-cols-2 xl:grid-cols-4 gap-4">
-        <StatCard title="Total Documents" value={totalDocuments} icon={FileText}    color="primary"   href="/documents" />
-        <StatCard title="Pending Approval" value={pendingCount}   icon={Clock}       color="accent"    href="/documents?status=pending_approval" />
-        <StatCard title="My Tasks"         value={myTasks.length} icon={GitBranch}   color="secondary" href="/workflow" />
-        <StatCard title="Completed"        value="—"              icon={CheckCircle} color="teal" />
+        <StatCard title="Total Documents" value={totalDocuments} icon={FileText} color="primary" href="/documents" />
+        <StatCard title="Pending Approval" value={pendingCount} icon={Clock} color="accent" href="/documents?status=pending_approval" />
+        <StatCard title="My Tasks" value={myTasks.length} icon={GitBranch} color="secondary" href="/workflow" />
+        <StatCard title="Completed" value={completedCount} icon={CheckCircle} color="teal" href="/documents?status=approved" />
       </div>
 
       {/* Main Grid */}
       <div className="grid grid-cols-1 lg:grid-cols-2 xl:grid-cols-[minmax(0,1.75fr)_minmax(0,1fr)] gap-6">
         {/* Left column */}
         <div className="space-y-6">
-          {/* Recent Documents */}
-          <div
-            className="bg-card rounded-xl border border-border overflow-hidden"
-            style={{ boxShadow: "var(--shadow-card)" }}
-          >
+          {/* Recent Documents - 5 per page */}
+          <div className="bg-card rounded-xl border border-border overflow-hidden" style={{ boxShadow: "var(--shadow-card)" }}>
             <div className="px-6 py-5 flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between bg-muted/40 border-b border-border">
               <div>
                 <p className="text-sm font-semibold text-foreground">Recent Documents</p>
@@ -436,9 +470,7 @@ export default function DashboardPage() {
                         <FileText className="w-5 h-5" />
                       </div>
                       <div className="min-w-0 flex-1">
-                        <p className="text-sm font-semibold text-foreground truncate">
-                          {doc.title}
-                        </p>
+                        <p className="text-sm font-semibold text-foreground truncate">{doc.title}</p>
                         <div className="flex flex-wrap items-center gap-2 text-xs text-muted-foreground mt-1">
                           <span>{doc.reference_number}</span>
                           <span>•</span>
@@ -487,25 +519,25 @@ export default function DashboardPage() {
             )}
           </div>
 
-          {/* Audit trail */}
-          <div
-            className="bg-card rounded-xl border border-border p-6"
-            style={{ boxShadow: "var(--shadow-card)" }}
-          >
+          {/* Audit trail - 5 per page */}
+          <div className="bg-card rounded-xl border border-border p-6" style={{ boxShadow: "var(--shadow-card)" }}>
             <div className="flex items-center justify-between gap-3">
               <div className="flex items-center gap-3">
                 <div className="rounded-lg bg-primary/5 p-3 text-primary">
                   <ShieldCheck className="w-5 h-5" />
                 </div>
                 <div>
-                  <p className="text-sm font-semibold text-foreground">{auditTitle}</p>
-                  <p className="text-sm text-muted-foreground">{auditSubtitle}</p>
+                  <p className="text-sm font-semibold text-foreground">
+                    {user?.has_admin_access ? "Audit trail" : "My activity"}
+                  </p>
+                  <p className="text-sm text-muted-foreground">
+                    {user?.has_admin_access
+                      ? "Recent activity on your document records."
+                      : "Recent activity on documents you own."}
+                  </p>
                 </div>
               </div>
-              <Link
-                to="/audit"
-                className="text-sm font-semibold text-foreground hover:text-accent transition-colors"
-              >
+              <Link to="/audit" className="text-sm font-semibold text-foreground hover:text-accent transition-colors">
                 View full log
               </Link>
             </div>
@@ -571,7 +603,7 @@ export default function DashboardPage() {
               )}
             </div>
 
-            {recentAuditCount > RECENT_ACTIVITY_PAGE_SIZE && (
+            {recentAuditCount > RECENT_AUDIT_PAGE_SIZE && (
               <div className="mt-5 flex items-center justify-between border-t border-border pt-4">
                 <span className="text-xs text-muted-foreground">
                   Page {recentAuditPage} of {recentAuditPages}
@@ -588,7 +620,7 @@ export default function DashboardPage() {
                   <button
                     type="button"
                     onClick={() => setRecentAuditPage((p) => p + 1)}
-                    disabled={recentAuditPage * RECENT_ACTIVITY_PAGE_SIZE >= recentAuditCount}
+                    disabled={recentAuditPage * RECENT_AUDIT_PAGE_SIZE >= recentAuditCount}
                     className="inline-flex items-center gap-1 rounded-lg border border-border bg-card px-3 py-1.5 text-xs font-medium text-foreground hover:bg-muted disabled:opacity-40 disabled:cursor-not-allowed"
                   >
                     Next <ChevronRight className="w-3.5 h-3.5" />
@@ -601,10 +633,8 @@ export default function DashboardPage() {
 
         {/* Right column */}
         <div className="space-y-6">
-          <div
-            className="bg-card rounded-xl border border-border p-6"
-            style={{ boxShadow: "var(--shadow-card)" }}
-          >
+          {/* Pending tasks */}
+          <div className="bg-card rounded-xl border border-border p-6" style={{ boxShadow: "var(--shadow-card)" }}>
             <div className="flex items-center justify-between gap-3">
               <div className="space-y-1">
                 <p className="text-sm font-semibold text-foreground">Pending tasks</p>
@@ -655,17 +685,39 @@ export default function DashboardPage() {
             </div>
           </div>
 
-          {/* Storage card to match Indigo Vault aesthetic */}
-          <div
-            className="bg-card rounded-xl border border-border p-6"
-            style={{ boxShadow: "var(--shadow-card)" }}
-          >
+          {/* Realistic Storage Card */}
+          <div className="bg-card rounded-xl border border-border p-6" style={{ boxShadow: "var(--shadow-card)" }}>
             <p className="text-sm font-semibold text-foreground">Storage Used</p>
             <p className="text-xs text-muted-foreground mt-1">Across all repositories</p>
-            <div className="mt-4 h-2 overflow-hidden rounded-full bg-muted">
-              <div className="h-full rounded-full" style={{ width: "62%", background: "var(--gradient-accent)" }} />
+            
+            <div className="mt-4 flex items-end justify-between">
+              <div>
+                <p className="text-3xl font-semibold text-foreground tabular-nums">
+                  {storage.used_gb}
+                </p>
+                <p className="text-sm text-muted-foreground">GB used</p>
+              </div>
+              <div className="text-right">
+                <p className="text-sm text-muted-foreground">of {storage.total_gb} GB</p>
+                <p className="text-xs text-muted-foreground mt-0.5">{storage.percentage}%</p>
+              </div>
             </div>
-            <p className="mt-2 text-[11px] text-muted-foreground">312 GB of 500 GB · 62%</p>
+
+            <div className="mt-4 h-2.5 overflow-hidden rounded-full bg-muted">
+              <div
+                className="h-full rounded-full transition-all duration-500"
+                style={{
+                  width: `${storage.percentage}%`,
+                  background: storage.percentage > 85 ? "var(--destructive)" : "var(--gradient-accent)",
+                }}
+              />
+            </div>
+
+            {storage.percentage > 80 && (
+              <p className="mt-3 text-xs text-destructive font-medium">
+                Approaching storage limit — consider archiving old documents.
+              </p>
+            )}
           </div>
         </div>
       </div>

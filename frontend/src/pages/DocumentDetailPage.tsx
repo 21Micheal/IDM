@@ -33,6 +33,8 @@ import { clsx as cn } from "clsx";
 
 import { clearDocumentVersionCache } from "@/utils/versionPreviewCache";
 
+const AUDIT_PAGE_SIZE = 5;
+
 function formatBytes(b: number) {
   if (b < 1024) return `${b} B`;
   if (b < 1024 * 1024) return `${(b / 1024).toFixed(1)} KB`;
@@ -40,6 +42,20 @@ function formatBytes(b: number) {
 }
 
 type TabId = "preview" | "versions" | "comments" | "audit" | "edit";
+
+type PaginatedResponse<T> = {
+  count: number;
+  results: T[];
+};
+
+type DocumentAuditLog = {
+  id: string;
+  event: string;
+  summary?: string;
+  actor_name?: string;
+  ip_address?: string;
+  timestamp: string;
+};
 
 export default function DocumentDetailPage() {
   const { id } = useParams<{ id: string }>();
@@ -50,6 +66,7 @@ export default function DocumentDetailPage() {
   const [activeTab, setActiveTab] = useState<TabId>("preview");
   const [comment, setComment] = useState("");
   const [confirmRestoreId, setConfirmRestoreId] = useState<string | null>(null);
+  const [auditPage, setAuditPage] = useState(1);
 
   const pollRef = useRef<ReturnType<typeof setInterval> | null>(null);
 
@@ -84,9 +101,19 @@ export default function DocumentDetailPage() {
     prevOcrRef.current = ocrStatus;
   }, [ocrStatus]);
 
+  useEffect(() => {
+    if (activeTab === "audit") {
+      setAuditPage(1);
+    }
+  }, [activeTab, id]);
+
   const { data: auditLogs } = useQuery({
-    queryKey: ["document-audit", id],
-    queryFn: () => documentsAPI.auditTrail(id!).then((r) => r.data),
+    queryKey: ["document-audit", id, auditPage],
+    queryFn: () =>
+      documentsAPI.auditTrail(id!, {
+        page: auditPage,
+        page_size: AUDIT_PAGE_SIZE,
+      }).then((r) => r.data as PaginatedResponse<DocumentAuditLog>),
     enabled: activeTab === "audit" && !!id,
   });
 
@@ -171,6 +198,8 @@ export default function DocumentDetailPage() {
     (isPersonal || doc.status === "approved");
 
   const isDraftOrRejected = doc.status === "draft" || doc.status === "rejected";
+  const auditCount = auditLogs?.count ?? 0;
+  const auditPages = Math.max(1, Math.ceil(auditCount / AUDIT_PAGE_SIZE));
 
   // Build the tab list. "Edit details" sits next to "Audit trail" but instead
   // of switching the panel it opens the MetadataEditPanel as a modal dialog.
@@ -535,20 +564,52 @@ export default function DocumentDetailPage() {
 
           {activeTab === "audit" && (
             <div className="space-y-2 max-w-2xl">
-              {auditLogs?.map((log: any) => (
-                <div
-                  key={log.id}
-                  className="inline-flex w-full max-w-2xl items-start gap-3 rounded-lg border border-border bg-card px-3 py-2"
-                >
-                  <ShieldCheck className="w-4 h-4 text-primary mt-0.5 flex-shrink-0" />
-                  <div className="flex-1 min-w-0">
-                    <p className="text-sm text-foreground">{log.summary || log.event}</p>
-                    <p className="text-xs text-muted-foreground">
-                      {log.actor_name} · {log.ip_address} · {format(new Date(log.timestamp), "dd MMM yyyy HH:mm:ss")}
-                    </p>
+              {auditLogs?.results?.length ? (
+                auditLogs.results.map((log) => (
+                  <div
+                    key={log.id}
+                    className="inline-flex w-full max-w-2xl items-start gap-3 rounded-lg border border-border bg-card px-3 py-2"
+                  >
+                    <ShieldCheck className="w-4 h-4 text-primary mt-0.5 flex-shrink-0" />
+                    <div className="flex-1 min-w-0">
+                      <p className="text-sm text-foreground">{log.summary || log.event}</p>
+                      <p className="text-xs text-muted-foreground">
+                        {log.actor_name || "System"} · {log.ip_address || "Unknown IP"} · {format(new Date(log.timestamp), "dd MMM yyyy HH:mm:ss")}
+                      </p>
+                    </div>
+                  </div>
+                ))
+              ) : (
+                <div className="rounded-lg border border-border bg-card px-4 py-6 text-sm text-muted-foreground">
+                  No audit history found for this document yet.
+                </div>
+              )}
+
+              {auditCount > AUDIT_PAGE_SIZE && (
+                <div className="flex items-center justify-between border-t border-border pt-4">
+                  <span className="text-xs text-muted-foreground">
+                    Page {auditPage} of {auditPages}
+                  </span>
+                  <div className="flex items-center gap-2">
+                    <button
+                      type="button"
+                      onClick={() => setAuditPage((current) => Math.max(1, current - 1))}
+                      disabled={auditPage === 1}
+                      className="btn-secondary text-xs px-3 py-1.5 disabled:opacity-40 disabled:cursor-not-allowed"
+                    >
+                      Previous
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => setAuditPage((current) => Math.min(auditPages, current + 1))}
+                      disabled={auditPage >= auditPages}
+                      className="btn-secondary text-xs px-3 py-1.5 disabled:opacity-40 disabled:cursor-not-allowed"
+                    >
+                      Next
+                    </button>
                   </div>
                 </div>
-              ))}
+              )}
             </div>
           )}
         </div>

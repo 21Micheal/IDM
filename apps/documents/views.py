@@ -16,6 +16,7 @@ from django_filters.rest_framework import DjangoFilterBackend
 from rest_framework import viewsets, status, permissions
 from rest_framework.decorators import action
 from rest_framework.filters import SearchFilter, OrderingFilter
+from rest_framework.pagination import PageNumberPagination
 from rest_framework.parsers import MultiPartParser, FormParser, JSONParser
 from rest_framework.response import Response
 from rest_framework_simplejwt.tokens import AccessToken
@@ -894,7 +895,20 @@ echo "✓ DocVault LibreOffice integration installed."
             AuditLog.objects
             .filter(object_type="Document", object_id=str(doc.id))
             .select_related("actor")
+            .order_by("-timestamp")
         )
+        if request.query_params.get("page") or request.query_params.get("page_size"):
+            paginator = PageNumberPagination()
+            page_size = request.query_params.get("page_size")
+            if page_size:
+                try:
+                    paginator.page_size = int(page_size)
+                except (TypeError, ValueError):
+                    paginator.page_size = settings.REST_FRAMEWORK.get("PAGE_SIZE", 20)
+            page = paginator.paginate_queryset(logs, request, view=self)
+            serializer = AuditLogSerializer(page, many=True)
+            return paginator.get_paginated_response(serializer.data)
+
         return Response(AuditLogSerializer(logs, many=True).data)
         
     @action(detail=False, methods=["post"])
