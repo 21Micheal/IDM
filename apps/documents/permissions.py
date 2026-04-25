@@ -45,7 +45,7 @@ class HasDocumentPermission(permissions.BasePermission):
         if not request.user or not request.user.is_authenticated:
             return False
 
-        if request.user.is_admin:
+        if request.user.has_admin_access:
             return True
 
         action = getattr(view, "action", None)
@@ -82,7 +82,7 @@ class HasDocumentPermission(permissions.BasePermission):
         if not request.user or not request.user.is_authenticated:
             return False
 
-        if request.user.is_admin:
+        if request.user.has_admin_access:
             return True
 
         # ── Self-upload isolation ──────────────────────────────────────────

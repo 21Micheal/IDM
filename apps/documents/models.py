@@ -88,6 +88,7 @@ class DocumentType(models.Model):
 class MetadataField(models.Model):
     FIELD_TYPES = [
         ("text",     "Text"),
+        ("varchar",  "VARCHAR"),
         ("number",   "Number"),
         ("date",     "Date"),
         ("currency", "Currency"),
@@ -345,6 +346,18 @@ class DocumentVersion(models.Model):
 
     def __str__(self):
         return f"{self.document.reference_number} v{self.version_number}"
+
+    def get_file_extension(self):
+        return os.path.splitext(self.file_name or getattr(self.file, "name", ""))[1].lower()
+
+    def is_pdf(self):
+        return self.get_file_extension() == ".pdf"
+
+    def is_image(self):
+        return self.get_file_extension() in IMAGE_EXTENSIONS
+
+    def is_office_doc(self):
+        return self.get_file_extension() in OFFICE_EXTENSIONS
 
 
 class DocumentComment(models.Model):

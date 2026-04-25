@@ -1,6 +1,5 @@
 from django.urls import path, include
 from rest_framework.routers import DefaultRouter
-from .views import RoleDefinitionViewSet
 from .views import (
     LoginView, VerifyOTPView, ResendOTPView,
     MeView, ChangePasswordView, EnableMFAView,
@@ -11,7 +10,6 @@ router = DefaultRouter()
 router.register(r"users",       UserViewSet,          basename="user")
 router.register(r"departments", DepartmentViewSet,    basename="department")
 router.register(r"groups",      UserGroupViewSet,     basename="group")
-router.register(r"roles",       RoleDefinitionViewSet, basename="role")
 
 urlpatterns = [
     # Auth

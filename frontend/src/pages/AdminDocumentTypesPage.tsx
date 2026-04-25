@@ -1,19 +1,19 @@
 /**
  * pages/AdminDocumentTypesPage.tsx
  *
- * Updated: Field Key now auto-fills intelligently as user types the Label
+ * Updated: Field Key auto-fills intelligently as user types the Label
  * - lowercase
  * - spaces → single underscore
  * - removes special characters
  */
 
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
-import { useForm, useFieldArray, useWatch } from "react-hook-form";
+import { useForm, useFieldArray } from "react-hook-form";
 import {
   Plus, Trash2, GripVertical, ChevronRight, Save, Loader2, X, AlertCircle,
 } from "lucide-react";
-import { documentApi, documentTypesAPI } from "../services/api";
+import { documentApi, documentTypesAPI, normalizeListResponse } from "../services/api";
 import { toast } from "react-toastify";
 import { cn } from "../lib/utils";
 import type { DocumentType } from "@/types";
@@ -22,10 +22,11 @@ import type { DocumentType } from "@/types";
 
 const FIELD_TYPES = [
   { value: "text",     label: "Text" },
+  { value: "varchar",  label: "VARCHAR" },
   { value: "number",   label: "Number" },
   { value: "date",     label: "Date" },
   { value: "currency", label: "Currency" },
-  { value: "select",   label: "Select / Dropdown" },
+  { value: "select",   label: "Select" },
   { value: "boolean",  label: "Yes / No" },
   { value: "textarea", label: "Long text" },
 ];
@@ -100,10 +101,12 @@ function toFieldKey(label: string): string {
 export default function AdminDocumentTypesPage() {
   const qc = useQueryClient();
   const [editingId, setEditingId] = useState<string | "new" | null>(null);
+  const generatedFieldKeysRef = useRef<Record<string, string>>({});
 
-  const { data: types, isLoading } = useQuery<DocumentType[]>({
+  const { data: types, isLoading } = useQuery<unknown, Error, DocumentType[]>({
     queryKey: ["document-types"],
-    queryFn: () => documentApi.types().then((r) => (r.data.results ?? r.data) as DocumentType[]),
+    queryFn: () => documentApi.types().then((r) => r.data as unknown),
+    select: (data) => normalizeListResponse<DocumentType>(data),
   });
 
   const form = useForm<DocTypeForm>({
@@ -118,29 +121,41 @@ export default function AdminDocumentTypesPage() {
     name: "metadata_fields",
   });
 
-  // Watch metadata fields for live updates
-  const watchedMetadataFields = useWatch({
-    control: form.control,
-    name: "metadata_fields",
-  });
-
-  // Auto-update field_key as user types the label
   useEffect(() => {
-    (watchedMetadataFields ?? []).forEach((field, idx) => {
-      if (!field) return;
+    const activeFieldIds = new Set(fields.map((field) => field.id));
 
-      const generatedKey = toFieldKey(field.label || "");
-      const currentKey = field.field_key || "";
-
-      // Only update if the generated key is different and user hasn't manually edited it
-      if (generatedKey && generatedKey !== currentKey) {
-        form.setValue(`metadata_fields.${idx}.field_key`, generatedKey, {
-          shouldDirty: true,
-          shouldTouch: true,
-        });
+    fields.forEach((field, idx) => {
+      if (!(field.id in generatedFieldKeysRef.current)) {
+        generatedFieldKeysRef.current[field.id] = String(
+          form.getValues(`metadata_fields.${idx}.field_key`) ?? "",
+        );
       }
     });
-  }, [watchedMetadataFields, form]);
+
+    Object.keys(generatedFieldKeysRef.current).forEach((fieldId) => {
+      if (!activeFieldIds.has(fieldId)) {
+        delete generatedFieldKeysRef.current[fieldId];
+      }
+    });
+  }, [fields, form]);
+
+  const syncFieldKeyFromLabel = (fieldId: string, idx: number, label: string) => {
+    const generatedKey = toFieldKey(label);
+    const keyPath = `metadata_fields.${idx}.field_key` as const;
+    const currentKey = String(form.getValues(keyPath) ?? "");
+    const lastGeneratedKey = generatedFieldKeysRef.current[fieldId] ?? "";
+    const shouldSync = !currentKey || currentKey === lastGeneratedKey;
+
+    generatedFieldKeysRef.current[fieldId] = generatedKey;
+
+    if (generatedKey && shouldSync && currentKey !== generatedKey) {
+      form.setValue(keyPath, generatedKey, {
+        shouldDirty: true,
+        shouldTouch: true,
+        shouldValidate: true,
+      });
+    }
+  };
 
   // ── Save mutation ───────────────────────────────────────────────────────────
 
@@ -179,6 +194,7 @@ export default function AdminDocumentTypesPage() {
   // ── Open helpers ────────────────────────────────────────────────────────────
 
   const openNew = () => {
+    generatedFieldKeysRef.current = {};
     form.reset({
       name: "", code: "", reference_prefix: "",
       reference_padding: 5, description: "", metadata_fields: [],
@@ -187,6 +203,7 @@ export default function AdminDocumentTypesPage() {
   };
 
   const openEdit = (type: DocumentType) => {
+    generatedFieldKeysRef.current = {};
     form.reset({
       name:              type.name,
       code:              type.code,
@@ -406,21 +423,29 @@ export default function AdminDocumentTypesPage() {
                               Label <span className="text-red-500">*</span>
                             </label>
                             <input
-                              {...form.register(`metadata_fields.${idx}.label`, { required: true })}
+                              {...form.register(`metadata_fields.${idx}.label`, {
+                                required: true,
+                                onChange: (e) => syncFieldKeyFromLabel(field.id, idx, e.target.value),
+                              })}
                               placeholder="e.g. Invoice Number"
                               className={iCls}
                             />
                           </div>
                           <div>
                             <label className="block text-xs text-muted-foreground mb-1">
-                              Field Key (auto-generated)
+                              Field Key
                             </label>
                             <input
                               {...form.register(`metadata_fields.${idx}.field_key`, { required: true })}
                               placeholder="invoice_number"
                               className={cn(iCls, "font-mono text-xs bg-muted/20")}
-                              readOnly
+                              spellCheck={false}
+                              autoComplete="off"
+                              autoCapitalize="none"
                             />
+                            <p className="mt-1 text-[11px] text-muted-foreground">
+                              Auto-generated from the label. Edit manually if you need a custom key.
+                            </p>
                           </div>
                           <div>
                             <label className="block text-xs text-muted-foreground mb-1">

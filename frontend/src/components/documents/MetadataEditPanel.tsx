@@ -5,11 +5,10 @@
  * Allows editing title, supplier, amount, dates, and dynamic metadata fields
  * without touching the file, reference, or document type.
  */
-import { useState } from "react";
 import { useMutation, useQueryClient } from "@tanstack/react-query";
-import { useForm, Controller, type Control, type UseFormRegister } from "react-hook-form";
+import { useForm, useFieldArray, Controller, type Control, type UseFormRegister } from "react-hook-form";
 import { documentsAPI } from "@/services/api";
-import { Edit2, Save, X, Loader2 } from "lucide-react";
+import { Edit2, Save, X, Loader2, Plus } from "lucide-react";
 import { toast } from "react-toastify";
 import type { Document, MetadataField } from "@/types";
 
@@ -26,6 +25,7 @@ type MetadataEditValues = {
   document_date: string;
   due_date: string;
   metadata: Record<string, unknown>;
+  personal_tags: { value: string }[];
 };
 
 function DynamicField({
@@ -69,9 +69,9 @@ function DynamicField({
           {...register(`metadata.${field.key}`)}
           type="checkbox"
           id={`meta-${field.key}`}
-          className="w-4 h-4 rounded border-gray-300 text-brand-600"
+          className="w-4 h-4 rounded border-border text-primary"
         />
-        <label htmlFor={`meta-${field.key}`} className="text-sm text-gray-700">
+        <label htmlFor={`meta-${field.key}`} className="text-sm text-foreground">
           {field.label}
         </label>
       </div>
@@ -119,8 +119,16 @@ export default function MetadataEditPanel({ document: doc, onClose }: Props) {
       document_date: doc.document_date ?? "",
       due_date:      doc.due_date ?? "",
       metadata:      doc.metadata ?? {},
+      personal_tags: (doc.personal_tags ?? []).length > 0
+        ? (doc.personal_tags ?? []).map((tag) => ({ value: tag }))
+        : [{ value: "" }],
     },
   });
+  const {
+    fields: personalTagFields,
+    append: appendPersonalTag,
+    remove: removePersonalTag,
+  } = useFieldArray({ control, name: "personal_tags" });
 
   const mutation = useMutation({
     mutationFn: (data: Record<string, unknown>) =>
@@ -128,6 +136,7 @@ export default function MetadataEditPanel({ document: doc, onClose }: Props) {
     onSuccess: () => {
       toast.success("Metadata updated");
       qc.invalidateQueries({ queryKey: ["document", doc.id] });
+      qc.invalidateQueries({ queryKey: ["document-preview", doc.id] });
       onClose();
     },
     onError: (err: { response?: { data?: { detail?: string } } }) =>
@@ -135,19 +144,41 @@ export default function MetadataEditPanel({ document: doc, onClose }: Props) {
   });
 
   const onSubmit = (values: MetadataEditValues) => {
-    mutation.mutate(values);
+    const personalTags = (values.personal_tags ?? [])
+      .map((tag) => tag.value.trim())
+      .filter(Boolean);
+    if (doc.is_self_upload && personalTags.length === 0) {
+      toast.error("Please add at least one personal tag.");
+      return;
+    }
+    const payload: Record<string, unknown> = { ...values };
+    if (!doc.is_self_upload) {
+      delete payload.personal_tags;
+    } else {
+      payload.personal_tags = personalTags;
+    }
+    if (payload.amount === "" || payload.amount === null || payload.amount === undefined) {
+      delete payload.amount;
+    }
+    if (payload.document_date === "") {
+      delete payload.document_date;
+    }
+    if (payload.due_date === "") {
+      delete payload.due_date;
+    }
+    mutation.mutate(payload);
   };
 
   const metadataFields = doc.document_type?.metadata_fields ?? [];
 
   return (
-    <div className="card p-5 border-l-4 border-brand-400 space-y-5">
+    <div className="h-full overflow-y-auto p-4 space-y-5">
       <div className="flex items-center justify-between">
         <div className="flex items-center gap-2">
-          <Edit2 className="w-4 h-4 text-brand-500" />
-          <h3 className="font-semibold text-gray-900 text-sm">Edit document details</h3>
+          <Edit2 className="w-4 h-4 text-primary" />
+          <h3 className="font-semibold text-foreground text-sm">Edit document details</h3>
         </div>
-        <button onClick={onClose} className="text-gray-400 hover:text-gray-600">
+        <button type="button" onClick={onClose} className="text-muted-foreground hover:text-foreground">
           <X className="w-4 h-4" />
         </button>
       </div>
@@ -175,6 +206,46 @@ export default function MetadataEditPanel({ document: doc, onClose }: Props) {
             <input {...register("document_date")} type="date" className="input" />
           </div>
         </div>
+
+        {doc.is_self_upload && (
+          <div>
+            <label className="label">
+              Personal tags <span className="text-red-500">*</span>
+            </label>
+            <div className="space-y-2">
+              {personalTagFields.map((field, index) => (
+                <div key={field.id} className="flex items-center gap-2">
+                  <input
+                    {...register(`personal_tags.${index}.value` as const, {
+                      required: index === 0 ? "Personal tags are required" : false,
+                    })}
+                    className="input flex-1"
+                    placeholder={`Tag ${index + 1}`}
+                  />
+                  <button
+                    type="button"
+                    onClick={() => removePersonalTag(index)}
+                    disabled={personalTagFields.length === 1}
+                    className="p-2 rounded-lg border border-border text-muted-foreground hover:text-destructive hover:bg-destructive/5 disabled:opacity-40 disabled:cursor-not-allowed"
+                    title="Remove tag"
+                  >
+                    <X className="w-4 h-4" />
+                  </button>
+                </div>
+              ))}
+            </div>
+            <button
+              type="button"
+              onClick={() => appendPersonalTag({ value: "" })}
+              className="mt-3 inline-flex items-center gap-2 text-sm font-medium text-primary hover:text-primary/80"
+            >
+              <Plus className="w-4 h-4" /> Add another tag
+            </button>
+            <p className="text-xs text-muted-foreground mt-1">
+              Add as many tags as you need for this personal document.
+            </p>
+          </div>
+        )}
 
         <div className="grid grid-cols-3 gap-3">
           <div className="col-span-2">
@@ -204,8 +275,8 @@ export default function MetadataEditPanel({ document: doc, onClose }: Props) {
 
         {/* Dynamic metadata fields */}
         {metadataFields.length > 0 && (
-          <div className="border-t border-gray-100 pt-4 space-y-4">
-            <p className="text-xs font-semibold text-gray-500 uppercase tracking-wide">
+          <div className="border-t border-border pt-4 space-y-4">
+            <p className="text-xs font-semibold text-muted-foreground uppercase tracking-wide">
               {doc.document_type.name} fields
             </p>
             {[...metadataFields]

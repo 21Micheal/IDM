@@ -41,7 +41,6 @@ class WorkflowStepWriteSerializer(serializers.ModelSerializer):
             ("group_all", "All members of group"),
             ("group_specific", "Specific member of group"),
             ("specific_user", "Specific user"),
-            ("any_role", "Any user with role"),  # legacy alias
         ]
     )
     assignee_group = serializers.PrimaryKeyRelatedField(
@@ -64,9 +63,6 @@ class WorkflowStepWriteSerializer(serializers.ModelSerializer):
 
     def validate(self, attrs):
         assignee_type = attrs.get("assignee_type", getattr(self.instance, "assignee_type", None))
-        if assignee_type == "any_role":
-            assignee_type = "group_any"
-            attrs["assignee_type"] = assignee_type
         assignee_group = attrs.get("assignee_group", getattr(self.instance, "assignee_group", None))
         assignee_user = attrs.get("assignee_user", getattr(self.instance, "assignee_user", None))
 

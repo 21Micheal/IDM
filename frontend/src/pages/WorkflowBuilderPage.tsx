@@ -2,7 +2,7 @@ import {
   useState, useCallback, useRef, useMemo, type DragEvent,
 } from "react";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
-import { workflowAPI, documentTypesAPI, usersAPI, groupsAPI } from "@/services/api";
+import { workflowAPI, documentTypesAPI, usersAPI, groupsAPI, normalizeListResponse } from "@/services/api";
 import {
   Plus, GripVertical, Trash2, ChevronDown, ChevronUp,
   Save, GitBranch, Loader2, X, ArrowDown,
@@ -66,14 +66,14 @@ interface WorkflowRule {
   label: string;
   is_active: boolean;
 }
-interface AppUser { id: string; full_name: string; email: string; role: string; }
+interface AppUser { id: string; full_name: string; email: string; job_description?: string; }
 interface Group { id: string; name: string; description?: string; member_count?: number; }
 interface GroupMembershipApiItem {
   user?: AppUser;
   id?: string;
   full_name?: string;
   email?: string;
-  role?: string;
+  job_description?: string;
 }
 
 // ── Constants ─────────────────────────────────────────────────────────────────
@@ -111,13 +111,6 @@ function blankStep(): WorkflowStep {
 function stepToPayload(step: WorkflowStep): Partial<WorkflowStep> {
   const { assignee_user_name, assignee_group_name, ...rest } = step as any;
   return rest;
-}
-
-function normalizeStep(step: WorkflowStep): WorkflowStep {
-  return {
-    ...step,
-    assignee_type: step.assignee_type === "any_role" ? "group_any" : step.assignee_type,
-  };
 }
 
 function formatApiError(value: unknown): string | null {
@@ -825,7 +818,7 @@ function TemplateEditor({
   const [name, setName] = useState(template?.name ?? (docType ? `${docType.name} Workflow` : "New Workflow Template"));
   const [description, setDescription] = useState(template?.description ?? "");
   const [steps, setSteps] = useState<WorkflowStep[]>(() =>
-    template?.steps?.slice().sort((a, b) => a.order - b.order).map(s => normalizeStep({ ...s })) ?? []
+    template?.steps?.slice().sort((a, b) => a.order - b.order).map((s) => ({ ...s })) ?? []
   );
   const [activeTab, setTab] = useState<"steps" | "preview" | "rules">("steps");
   const [isDirty, setIsDirty] = useState(!template);
@@ -1403,9 +1396,10 @@ export default function WorkflowBuilderPage() {
   const [viewMode, setViewMode] = useState<"list" | "grid">("list");
   const [savedConfirmation, setSavedConfirmation] = useState<{ docTypeName: string; templateName: string } | null>(null);
 
-  const { data: docTypes, isLoading: dtLoading } = useQuery<DocumentType[]>({
+  const { data: docTypes, isLoading: dtLoading } = useQuery<unknown, Error, DocumentType[]>({
     queryKey: ["document-types"],
-    queryFn: () => documentTypesAPI.list().then(r => r.data.results ?? r.data as DocumentType[]),
+    queryFn: () => documentTypesAPI.list().then((r) => r.data as unknown),
+    select: (data) => normalizeListResponse<DocumentType>(data),
   });
 
   const { data: allTemplates, isLoading: templatesLoading } = useQuery<WorkflowTemplate[]>({

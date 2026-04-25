@@ -184,10 +184,12 @@ CELERY_BEAT_SCHEDULER = "django_celery_beat.schedulers:DatabaseScheduler"
 CELERY_TASK_ROUTES = {
     "apps.search.tasks.*": {"queue": "indexing"},
     "apps.notifications.tasks.*": {"queue": "notifications"},
-    # Route document tasks explicitly by workload type.
+    # Document tasks — queue assignments must match the @shared_task(queue=...) decorators.
+    # generate_document_preview moved to "preview" so long LibreOffice conversions
+    # don't starve text-indexing jobs on the "indexing" queue.
     "apps.documents.tasks.ocr_document": {"queue": "ocr"},
     "apps.documents.tasks.extract_text": {"queue": "indexing"},
-    "apps.documents.tasks.generate_document_preview": {"queue": "indexing"},
+    "apps.documents.tasks.generate_document_preview": {"queue": "preview"},
 }
 
 # ── Elasticsearch ─────────────────────────────────────────────────────────────

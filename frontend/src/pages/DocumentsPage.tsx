@@ -10,7 +10,7 @@
 import { useState } from "react";
 import { Link } from "react-router-dom";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
-import { documentsAPI, documentTypesAPI } from "@/services/api";
+import { documentsAPI, documentTypesAPI, normalizeListResponse } from "@/services/api";
 import {
   FileText, UploadCloud, Lock, Users, LayoutList,
   Archive, Trash2, Loader2, CheckSquare, Square, X, CheckCircle, XCircle,
@@ -153,6 +153,49 @@ function BulkToolbar({
   );
 }
 
+function PersonalTagChips({
+  tags,
+  onTagClick,
+}: {
+  tags: string[];
+  onTagClick?: (tag: string) => void;
+}) {
+  if (tags.length === 0) return null;
+
+  return (
+    <div className="flex flex-wrap gap-1.5">
+      {tags.map((tag) => {
+        const chipClassName = cn(
+          "inline-flex items-center rounded-full border px-2 py-0.5 text-[10px] font-semibold transition-colors",
+          onTagClick
+            ? "border-primary/20 bg-primary/10 text-primary hover:border-primary/30 hover:bg-primary/15"
+            : "border-primary/20 bg-primary/10 text-primary",
+        );
+
+        if (onTagClick) {
+          return (
+            <button
+              key={tag}
+              type="button"
+              onClick={() => onTagClick(tag)}
+              className={chipClassName}
+              aria-label={`Filter by personal tag ${tag}`}
+            >
+              {tag}
+            </button>
+          );
+        }
+
+        return (
+          <span key={tag} className={chipClassName}>
+            {tag}
+          </span>
+        );
+      })}
+    </div>
+  );
+}
+
 export default function DocumentsPage() {
   const queryClient = useQueryClient();
 
@@ -160,6 +203,7 @@ export default function DocumentsPage() {
   const [search, setSearch] = useState("");
   const [statusFilter, setStatusFilter] = useState("");
   const [typeFilter, setTypeFilter] = useState("");
+  const [personalTagFilter, setPersonalTagFilter] = useState("");
   const [sort, setSort] = useState<"created_at" | "document_date" | "amount" | "title" | "reference_number">("created_at");
   const [sortDir, setSortDir] = useState<"asc" | "desc">("desc");
   const [page, setPage] = useState(1);
@@ -167,10 +211,10 @@ export default function DocumentsPage() {
 
   const debouncedSearch = useDebounce(search, 300);
 
-  const { data: typesData } = useQuery({
+  const { data: typesData } = useQuery<unknown, Error, unknown[]>({
     queryKey: ["document-types"],
-    queryFn: () => documentTypesAPI.list(),
-    select: (r) => (r.data.results ?? r.data) as any[],
+    queryFn: () => documentTypesAPI.list().then((r) => r.data as unknown),
+    select: (data) => normalizeListResponse(data),
   });
 
   const params: Record<string, unknown> = {
@@ -184,6 +228,7 @@ export default function DocumentsPage() {
 
   if (activeTab === "workflow") params.is_self_upload = false;
   if (activeTab === "personal") params.is_self_upload = true;
+  if (activeTab === "personal" && personalTagFilter) params.personal_tag = personalTagFilter;
 
   const { data, isLoading } = useQuery({
     queryKey: ["documents", activeTab, params],
@@ -228,6 +273,7 @@ export default function DocumentsPage() {
     setSearch("");
     setStatusFilter("");
     setTypeFilter("");
+    setPersonalTagFilter("");
     setPage(1);
     setSelectedIds([]);
   };
@@ -243,7 +289,20 @@ export default function DocumentsPage() {
     );
   };
 
+  const handlePersonalTagClick = (tag: string) => {
+    setActiveTab("personal");
+    setSearch("");
+    setStatusFilter("");
+    setTypeFilter("");
+    setPersonalTagFilter((prev) => (prev === tag ? "" : tag));
+    setPage(1);
+    setSelectedIds([]);
+  };
+
   const allChecked = docs.length > 0 && docs.every((d: Document) => selectedIds.includes(d.id));
+  const personalTagOptions = Array.from(new Set(
+    [...docs.flatMap((doc: Document) => doc.personal_tags ?? []), personalTagFilter].filter(Boolean)
+  )).sort((a, b) => a.localeCompare(b));
 
   // Selection only on All & Workflow tabs (Personal has inline row actions)
   const selectionEnabled = activeTab !== "personal";
@@ -304,6 +363,39 @@ export default function DocumentsPage() {
           <span>
             These documents are private to you. They are not part of any approval workflow and are visible only to you and administrators.
           </span>
+        </div>
+      )}
+
+      {activeTab === "personal" && personalTagOptions.length > 0 && (
+        <div className="flex flex-wrap items-center gap-2">
+          <span className="text-xs font-semibold uppercase tracking-wide text-muted-foreground mr-2">Filter by tag</span>
+          <button
+            type="button"
+            onClick={() => setPersonalTagFilter("")}
+            className={cn(
+              "px-3 py-1.5 rounded-full text-xs font-medium border transition-colors",
+              !personalTagFilter
+                ? "bg-primary text-primary-foreground border-primary"
+                : "bg-card text-muted-foreground border-border hover:text-foreground hover:border-primary/40",
+            )}
+          >
+            All
+          </button>
+          {personalTagOptions.map((tag) => (
+            <button
+              key={tag}
+              type="button"
+              onClick={() => setPersonalTagFilter(tag === personalTagFilter ? "" : tag)}
+              className={cn(
+                "px-3 py-1.5 rounded-full text-xs font-medium border transition-colors",
+                personalTagFilter === tag
+                  ? "bg-primary text-primary-foreground border-primary"
+                  : "bg-card text-muted-foreground border-border hover:text-foreground hover:border-primary/40",
+              )}
+            >
+              {tag}
+            </button>
+          ))}
         </div>
       )}
 
@@ -461,12 +553,20 @@ export default function DocumentsPage() {
                       </td>
 
                       <td className="px-6 py-4">
-                        <Link
-                          to={`/documents/${doc.id}`}
-                          className="text-foreground group-hover:text-primary font-medium truncate block transition-colors"
-                        >
-                          {doc.title}
-                        </Link>
+                        <div className="space-y-1">
+                          <Link
+                            to={`/documents/${doc.id}`}
+                            className="text-foreground group-hover:text-primary font-medium truncate block transition-colors"
+                          >
+                            {doc.title}
+                          </Link>
+                          {isPersonal && doc.personal_tags?.length ? (
+                            <PersonalTagChips
+                              tags={doc.personal_tags}
+                              onTagClick={handlePersonalTagClick}
+                            />
+                          ) : null}
+                        </div>
                       </td>
 
                       <td className="px-6 py-4 text-muted-foreground whitespace-nowrap">

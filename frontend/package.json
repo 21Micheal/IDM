@@ -7,10 +7,12 @@
     "dev": "vite",
     "build": "tsc && vite build",
     "preview": "vite preview",
-    "lint": "eslint src --ext ts,tsx --report-unused-disable-directives --max-warnings 0"
+    "lint": "eslint src --ext ts,tsx --report-unused-disable-directives --max-warnings 0",
+    "test:search": "mkdir -p node_modules/.cache && esbuild src/lib/search.test.ts --bundle --platform=node --format=esm --outfile=node_modules/.cache/search.test.mjs && node --test node_modules/.cache/search.test.mjs"
   },
   "dependencies": {
     "@hookform/resolvers": "^3.3.4",
+    "@radix-ui/react-dialog": "^1.1.15",
     "@tanstack/react-query": "^5.28.0",
     "@tanstack/react-table": "^8.15.0",
     "axios": "^1.6.7",
@@ -29,6 +31,7 @@
     "zustand": "^4.5.2"
   },
   "devDependencies": {
+    "@radix-ui/react-dialog": "^1.1.15",
     "@types/react": "^18.2.66",
     "@types/react-dom": "^18.2.22",
     "@typescript-eslint/eslint-plugin": "^7.2.0",
@@ -41,6 +44,7 @@
     "postcss": "^8.4.38",
     "tailwindcss": "^3.4.3",
     "typescript": "^5.4.2",
-    "vite": "^5.2.0"
+    "vite": "^5.2.0",
+    "vitest": "^4.1.5"
   }
 }

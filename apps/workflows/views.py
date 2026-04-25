@@ -25,17 +25,14 @@ from .serializers import (
     WorkflowTaskActionSerializer,
 )
 from .services import WorkflowService, WorkflowError
-from apps.accounts.models import Role
-
-
-class IsAdminRole(permissions.BasePermission):
+class IsGroupAdmin(permissions.BasePermission):
     message = "Only administrators can perform this action."
 
     def has_permission(self, request, view):
         return (
             request.user
             and request.user.is_authenticated
-            and request.user.role == Role.ADMIN
+            and request.user.has_admin_access
         )
 
 
@@ -63,7 +60,7 @@ class WorkflowTemplateViewSet(viewsets.ModelViewSet):
     def get_permissions(self):
         if self.action in ("create", "update", "partial_update", "destroy",
                            "duplicate", "reorder_steps"):
-            return [permissions.IsAuthenticated(), IsAdminRole()]
+            return [permissions.IsAuthenticated(), IsGroupAdmin()]
         return [permissions.IsAuthenticated()]
 
     def perform_create(self, serializer):
@@ -133,7 +130,7 @@ class WorkflowRuleViewSet(viewsets.ModelViewSet):
 
     def get_permissions(self):
         if self.action in ("create", "update", "partial_update", "destroy"):
-            return [permissions.IsAuthenticated(), IsAdminRole()]
+            return [permissions.IsAuthenticated(), IsGroupAdmin()]
         return [permissions.IsAuthenticated()]
 
 
@@ -173,7 +170,7 @@ class WorkflowTaskViewSet(viewsets.ReadOnlyModelViewSet):
         qs   = WorkflowTask.objects.select_related(
             "step", "assigned_to", "workflow_instance__document"
         )
-        if user.role in (Role.ADMIN, Role.AUDITOR):
+        if user.has_admin_access:
             if s := self.request.query_params.get("status"):
                 qs = qs.filter(status=s)
             return qs
@@ -307,6 +304,6 @@ class WorkflowTaskViewSet(viewsets.ReadOnlyModelViewSet):
     # ── Helper ─────────────────────────────────────────────────────────────
 
     def _check_permission(self, task, user):
-        if task.assigned_to != user and user.role != Role.ADMIN:
+        if task.assigned_to != user and not user.has_admin_access:
             from rest_framework.exceptions import PermissionDenied
             raise PermissionDenied("You are not authorised to action this task.")

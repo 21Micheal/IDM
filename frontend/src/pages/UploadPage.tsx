@@ -2,22 +2,34 @@ import { useState, useCallback, useEffect } from "react";
 import { useNavigate } from "react-router-dom";
 import { useDropzone } from "react-dropzone";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
-import { useForm, Controller } from "react-hook-form";
-import { documentsAPI, documentTypesAPI } from "@/services/api";
+import { useForm, useFieldArray, Controller, type Control, type UseFormRegister } from "react-hook-form";
+import { documentsAPI, documentTypesAPI, normalizeListResponse } from "@/services/api";
 import {
-  Upload, File, X, Loader2, ArrowRight, CheckCircle,
+  Upload, File, X, Loader2, ArrowRight, CheckCircle, Plus,
   Lock, Users, Info, ScanLine,
 } from "lucide-react";
 import { toast } from "react-toastify";
 import type { DocumentType, MetadataField } from "@/types";
 import clsx from "clsx";
 
+type PersonalTagField = { value: string };
+
+type UploadFormValues = {
+  title: string;
+  supplier?: string;
+  amount?: string;
+  currency?: string;
+  document_date?: string;
+  metadata: Record<string, unknown>;
+  personal_tags: PersonalTagField[];
+};
+
 // ── Dynamic metadata field ────────────────────────────────────────────────────
 
 function DynamicField({ field, register, control, errors, enforceRequired }: {
   field: MetadataField;
-  register: ReturnType<typeof useForm>["register"];
-  control: ReturnType<typeof useForm>["control"];
+  register: UseFormRegister<UploadFormValues>;
+  control: Control<UploadFormValues>;
   errors: Record<string, { message?: string }>;
   enforceRequired: boolean;
 }) {
@@ -34,7 +46,7 @@ function DynamicField({ field, register, control, errors, enforceRequired }: {
         <label className="label">{field.label}{requiredMark}{optionalHint}</label>
         <Controller name={`metadata.${field.key}`} control={control} rules={rules}
           render={({ field: f }) => (
-            <select {...f} className="input">
+            <select {...f} value={String(f.value ?? "")} className="input">
               <option value="">Select…</option>
               {(field.select_options ?? []).map((opt) => <option key={opt} value={opt}>{opt}</option>)}
             </select>
@@ -119,6 +131,42 @@ function ToggleSwitch({ checked, onChange, id, disabled = false, tone = "primary
   );
 }
 
+function PersonalTagRow({
+  index,
+  total,
+  register,
+  onRemove,
+}: {
+  index: number;
+  total: number;
+  register: UseFormRegister<UploadFormValues>;
+  onRemove: () => void;
+}) {
+  return (
+    <div className="flex items-center gap-2 rounded-full border border-primary/20 bg-primary/5 px-3 py-2 shadow-sm">
+      <span className="inline-flex h-7 w-7 flex-shrink-0 items-center justify-center rounded-full bg-primary/10 text-primary">
+        <Lock className="w-3.5 h-3.5" />
+      </span>
+      <input
+        {...register(`personal_tags.${index}.value` as const)}
+        className="min-w-0 flex-1 border-0 bg-transparent p-0 text-sm text-foreground placeholder:text-muted-foreground focus:outline-none focus:ring-0"
+        placeholder={`Tag ${index + 1}`}
+        aria-label={`Personal tag ${index + 1}`}
+      />
+      <button
+        type="button"
+        onClick={onRemove}
+        disabled={total === 1}
+        className="inline-flex h-8 w-8 flex-shrink-0 items-center justify-center rounded-full border border-border bg-card text-muted-foreground hover:text-destructive hover:border-destructive/30 hover:bg-destructive/5 disabled:opacity-40 disabled:cursor-not-allowed"
+        title="Remove tag"
+        aria-label={`Remove personal tag ${index + 1}`}
+      >
+        <X className="w-4 h-4" />
+      </button>
+    </div>
+  );
+}
+
 // ── Page ──────────────────────────────────────────────────────────────────────
 
 export default function UploadPage() {
@@ -131,12 +179,20 @@ export default function UploadPage() {
   const [isScanned, setIsScanned]               = useState(false);
   const [imageAutoScanned, setImageAutoScanned] = useState(false);
 
-  const { data: docTypes = [] } = useQuery<DocumentType[]>({
+  const { data: docTypes = [] } = useQuery<unknown, Error, DocumentType[]>({
     queryKey: ["document-types"],
-    queryFn: () => documentTypesAPI.list().then((r) => r.data.results ?? r.data),
+    queryFn: () => documentTypesAPI.list().then((r) => r.data as unknown),
+    select: (data) => normalizeListResponse<DocumentType>(data),
   });
-  const selectedType = docTypes?.find((t) => t.id === selectedTypeId);
-  const { register, handleSubmit, control, reset, clearErrors, formState: { errors } } = useForm();
+  const selectedType = docTypes.find((t) => t.id === selectedTypeId);
+  const { register, handleSubmit, control, reset, clearErrors, formState: { errors } } = useForm<UploadFormValues>({
+    defaultValues: {
+      metadata: {},
+      personal_tags: [{ value: "" }],
+    },
+  });
+  const { fields: personalTagFields, append: appendPersonalTag, remove: removePersonalTag, replace: replacePersonalTags } =
+    useFieldArray({ control, name: "personal_tags" });
 
   // Reset metadata + file only when document type actually changes.
   useEffect(() => {
@@ -153,6 +209,13 @@ export default function UploadPage() {
   useEffect(() => {
     clearErrors();
   }, [isSelfUpload, isScanned, clearErrors]);
+
+  useEffect(() => {
+    if (isSelfUpload) {
+      setSelectedTypeId("");
+      replacePersonalTags([{ value: "" }]);
+    }
+  }, [isSelfUpload, replacePersonalTags]);
 
   const onDrop = useCallback((accepted: File[]) => {
     const file = accepted[0];
@@ -192,24 +255,36 @@ export default function UploadPage() {
 
   const onSubmit = (values: Record<string, unknown>) => {
     if (!droppedFile) { toast.error("Please select a file"); return; }
-    if (!selectedTypeId) { toast.error("Please select a document type"); return; }
+    if (!isSelfUpload && !selectedTypeId) { toast.error("Please select a document type"); return; }
+    const personalTags = (Array.isArray(values.personal_tags) ? values.personal_tags : [])
+      .map((tag) => {
+        if (typeof tag === "string") return tag.trim();
+        if (tag && typeof tag === "object" && "value" in tag) return String((tag as { value?: unknown }).value ?? "").trim();
+        return "";
+      })
+      .filter(Boolean);
+    if (isSelfUpload && personalTags.length === 0) {
+      toast.error("Please add at least one personal tag.");
+      return;
+    }
     const fd = new FormData();
     fd.append("file", droppedFile);
     fd.append("title", values.title as string);
-    fd.append("document_type_id", selectedTypeId);
+    if (!isSelfUpload) fd.append("document_type_id", selectedTypeId);
     fd.append("is_self_upload", isSelfUpload ? "true" : "false");
     fd.append("is_scanned", isScanned ? "true" : "false");
     if (values.supplier) fd.append("supplier", values.supplier as string);
     if (values.amount) fd.append("amount", values.amount as string);
     if (values.currency) fd.append("currency", values.currency as string);
     if (values.document_date) fd.append("document_date", values.document_date as string);
-    if (values.metadata && Object.keys(values.metadata as object).length > 0)
+    personalTags.forEach((tag) => fd.append("personal_tags", tag));
+    if (!isSelfUpload && values.metadata && Object.keys(values.metadata as object).length > 0)
       fd.append("metadata", JSON.stringify(values.metadata));
     uploadMutation.mutate(fd);
   };
 
-  const showForm    = Boolean(selectedTypeId);
-  const hasMetadata = !!selectedType && selectedType.metadata_fields.length > 0;
+  const showForm    = isSelfUpload || Boolean(selectedTypeId);
+  const hasMetadata = !isSelfUpload && !!selectedType && selectedType.metadata_fields.length > 0;
   const relaxReq    = isSelfUpload || isScanned;
 
   return (
@@ -344,22 +419,37 @@ export default function UploadPage() {
               <div className="w-7 h-7 rounded-full bg-primary text-primary-foreground flex items-center justify-center text-sm font-bold">
                 1
               </div>
-              <h2 className="text-lg font-semibold text-foreground">Select Document Type</h2>
+              <h2 className="text-lg font-semibold text-foreground">
+                {isSelfUpload ? "Personal Tags" : "Select Document Type"}
+              </h2>
             </div>
-            <select
-              value={selectedTypeId}
-              onChange={(e) => setSelectedTypeId(e.target.value)}
-              className="input w-full"
-              required
-            >
-              <option value="">— Choose document type —</option>
-              {docTypes.map((t) => <option key={t.id} value={t.id}>{t.name}</option>)}
-            </select>
-            {selectedType && (
-              <div className="mt-6 p-4 bg-muted/50 border border-border rounded-lg text-sm">
-                <p className="font-semibold text-foreground mb-1">About this type</p>
-                <p className="text-muted-foreground">{selectedType.description || "No description available."}</p>
+            {isSelfUpload ? (
+              <div className="space-y-3">
+                <p className="text-sm text-muted-foreground">
+                  Personal documents do not need a document type. Add one or more tags so you can find them later.
+                </p>
+                <div className="rounded-lg border border-dashed border-primary/30 bg-primary/5 px-4 py-3 text-sm text-primary">
+                  Tags are searchable and private to your personal documents.
+                </div>
               </div>
+            ) : (
+              <>
+                <select
+                  value={selectedTypeId}
+                  onChange={(e) => setSelectedTypeId(e.target.value)}
+                  className="input w-full"
+                  required
+                >
+                  <option value="">— Choose document type —</option>
+                  {docTypes.map((t) => <option key={t.id} value={t.id}>{t.name}</option>)}
+                </select>
+                {selectedType && (
+                  <div className="mt-6 p-4 bg-muted/50 border border-border rounded-lg text-sm">
+                    <p className="font-semibold text-foreground mb-1">About this type</p>
+                    <p className="text-muted-foreground">{selectedType.description || "No description available."}</p>
+                  </div>
+                )}
+              </>
             )}
           </div>
         </div>
@@ -439,6 +529,34 @@ export default function UploadPage() {
                       <input {...register("document_date")} type="date" className="input" />
                     </div>
                   </div>
+                  {isSelfUpload && (
+                    <div>
+                      <label className="label">
+                        Personal tags <span className="text-destructive">*</span>
+                      </label>
+                      <div className="space-y-2">
+                        {personalTagFields.map((field, index) => (
+                          <PersonalTagRow
+                            key={field.id}
+                            index={index}
+                            total={personalTagFields.length}
+                            register={register}
+                            onRemove={() => removePersonalTag(index)}
+                          />
+                        ))}
+                      </div>
+                      <button
+                        type="button"
+                        onClick={() => appendPersonalTag({ value: "" })}
+                        className="mt-3 inline-flex items-center gap-2 text-sm font-medium text-primary hover:text-primary/80"
+                      >
+                        <Plus className="w-4 h-4" /> Add another tag
+                      </button>
+                      <p className="text-xs text-muted-foreground mt-1">
+                        Add as many tags as you need to make the document easier to search.
+                      </p>
+                    </div>
+                  )}
                   <div className="grid grid-cols-1 md:grid-cols-3 gap-6">
                     <div className="md:col-span-2">
                       <label className="label">Amount</label>

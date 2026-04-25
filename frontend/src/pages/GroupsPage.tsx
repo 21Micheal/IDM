@@ -1,9 +1,9 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
-import { groupsAPI, documentTypesAPI, usersAPI } from "@/services/api";
+import { groupsAPI, documentTypesAPI, usersAPI, normalizeListResponse } from "@/services/api";
 import {
   Plus, Users, Shield, ChevronRight, X, Loader2,
-  Check, UserPlus, Settings2, Info,
+  Check, UserPlus, Settings2, Info, Trash2,
 } from "lucide-react";
 import { toast } from "react-toastify";
 import clsx from "clsx";
@@ -11,9 +11,9 @@ import clsx from "clsx";
 // ── Types ─────────────────────────────────────────────────────────────────────
 interface DocType   { id: string; name: string; code: string }
 interface GroupPerm { id: string; document_type: string | null; document_type_name: string | null; action: string }
-interface Member    { id: string; user: { id: string; full_name: string; email: string; role: string }; expires_at: string | null; is_active: boolean }
-interface Group     { id: string; name: string; description: string; permissions: GroupPerm[]; member_count: number }
-interface User      { id: string; full_name: string; email: string; role: string }
+interface Member    { id: string; user: { id: string; full_name: string; email: string; job_description?: string }; expires_at: string | null; is_active: boolean }
+interface Group     { id: string; name: string; description: string; permissions: GroupPerm[]; member_count: number; has_admin_access: boolean }
+interface User      { id: string; full_name: string; email: string; job_description?: string }
 
 const ALL_ACTIONS = [
   { value: "view",     label: "View",     description: "Open and read documents" },
@@ -25,14 +25,6 @@ const ALL_ACTIONS = [
   { value: "archive",  label: "Archive",  description: "Move to archive" },
   { value: "delete",   label: "Delete",   description: "Void / delete documents" },
 ];
-
-// Themed role pills using semantic tokens
-const ROLE_TONE: Record<string, string> = {
-  admin:   "bg-accent/15 text-accent",
-  finance: "bg-[hsl(var(--teal))]/15 text-[hsl(var(--teal))]",
-  auditor: "bg-accent/10 text-accent",
-  viewer:  "bg-muted text-muted-foreground",
-};
 
 // ── Permission Matrix ────────────────────────────────────────────────────────
 function PermissionMatrix({
@@ -49,6 +41,7 @@ function PermissionMatrix({
   const init: Record<string, Set<string>> = { "__all__": new Set() };
   docTypes.forEach((dt) => { init[dt.id] = new Set(); });
   group.permissions.forEach((p) => {
+    if (p.action === "admin") return;
     const key = p.document_type ?? "__all__";
     if (!init[key]) init[key] = new Set();
     init[key].add(p.action);
@@ -188,6 +181,11 @@ function GroupDetail({
   const qc = useQueryClient();
   const [tab, setTab] = useState<"permissions" | "members">("permissions");
   const [userSearch, setUserSearch] = useState("");
+  const [adminAccess, setAdminAccess] = useState(group.has_admin_access);
+
+  useEffect(() => {
+    setAdminAccess(group.has_admin_access);
+  }, [group.id, group.has_admin_access]);
 
   const { data: members = [] } = useQuery<Member[]>({
     queryKey: ["group-members", group.id],
@@ -211,6 +209,31 @@ function GroupDetail({
       qc.invalidateQueries({ queryKey: ["groups"] });
     },
     onError: () => toast.error("Failed to save permissions"),
+  });
+
+  const adminAccessMutation = useMutation({
+    mutationFn: (enabled: boolean) => groupsAPI.setAdminAccess(group.id, enabled),
+    onMutate: (enabled) => {
+      setAdminAccess(enabled);
+    },
+    onSuccess: () => {
+      toast.success("Administrator access updated");
+      qc.invalidateQueries({ queryKey: ["groups"] });
+    },
+    onError: () => {
+      setAdminAccess(group.has_admin_access);
+      toast.error("Failed to update administrator access");
+    },
+  });
+
+  const deleteMutation = useMutation({
+    mutationFn: () => groupsAPI.delete(group.id),
+    onSuccess: () => {
+      toast.success("Group deleted");
+      qc.invalidateQueries({ queryKey: ["groups"] });
+      onClose();
+    },
+    onError: () => toast.error("Failed to delete group"),
   });
 
   const addMemberMutation = useMutation({
@@ -249,15 +272,35 @@ function GroupDetail({
             </div>
             <div>
               <h2 className="font-semibold text-xl text-foreground tracking-tight">{group.name}</h2>
+              {group.has_admin_access && (
+                <p className="text-xs font-semibold uppercase tracking-widest text-accent mt-1">
+                  System administrator group
+                </p>
+              )}
               {group.description && <p className="text-sm text-muted-foreground">{group.description}</p>}
             </div>
           </div>
-          <button
-            onClick={onClose}
-            className="p-2 text-muted-foreground hover:text-foreground hover:bg-muted rounded-lg transition-colors"
-          >
-            <X className="w-5 h-5" />
-          </button>
+          <div className="flex items-center gap-2">
+            {!group.has_admin_access && (
+              <button
+                onClick={() => {
+                  if (window.confirm(`Delete group "${group.name}"? This will remove its members and permissions.`)) {
+                    deleteMutation.mutate();
+                  }
+                }}
+                disabled={deleteMutation.isPending}
+                className="px-3 py-2 rounded-lg text-sm font-semibold text-destructive hover:bg-destructive/10 transition-colors disabled:opacity-50"
+              >
+                {deleteMutation.isPending ? "Deleting..." : "Delete"}
+              </button>
+            )}
+            <button
+              onClick={onClose}
+              className="p-2 text-muted-foreground hover:text-foreground hover:bg-muted rounded-lg transition-colors"
+            >
+              <X className="w-5 h-5" />
+            </button>
+          </div>
         </div>
 
         {/* Tabs */}
@@ -287,12 +330,46 @@ function GroupDetail({
         {/* Content Area */}
         <div className="flex-1 overflow-y-auto p-8 bg-background">
           {tab === "permissions" && (
-            <PermissionMatrix
-              group={group}
-              docTypes={docTypes}
-              onSave={(perms) => setPermsMutation.mutate(perms)}
-              isSaving={setPermsMutation.isPending}
-            />
+            <div className="space-y-6">
+              <div className="rounded-2xl border border-border bg-card p-5 flex items-center justify-between gap-4">
+                <div>
+                  <p className="font-semibold text-foreground">Administrator access</p>
+                  <p className="text-sm text-muted-foreground mt-1">
+                    Give this group full admin privileges for the application.
+                  </p>
+                </div>
+                <button
+                  type="button"
+                  onClick={() => adminAccessMutation.mutate(!adminAccess)}
+                  disabled={adminAccessMutation.isPending}
+                  className={clsx(
+                    "inline-flex items-center gap-3 rounded-full border px-4 py-2 text-sm font-semibold transition-colors",
+                    adminAccess
+                      ? "bg-accent/15 border-accent text-accent"
+                      : "bg-muted border-border text-muted-foreground hover:text-foreground"
+                  )}
+                  aria-pressed={adminAccess}
+                >
+                  <span className={clsx(
+                    "relative inline-flex h-5 w-9 rounded-full transition-colors",
+                    adminAccess ? "bg-accent" : "bg-border"
+                  )}>
+                    <span className={clsx(
+                      "absolute top-0.5 h-4 w-4 rounded-full bg-white shadow transition-transform",
+                      adminAccess ? "translate-x-4" : "translate-x-0.5"
+                    )} />
+                  </span>
+                  {adminAccess ? "Enabled" : "Disabled"}
+                </button>
+              </div>
+
+              <PermissionMatrix
+                group={group}
+                docTypes={docTypes}
+                onSave={(perms) => setPermsMutation.mutate(perms)}
+                isSaving={setPermsMutation.isPending}
+              />
+            </div>
           )}
 
           {tab === "members" && (
@@ -311,9 +388,9 @@ function GroupDetail({
                         <p className="text-xs text-muted-foreground">{m.user.email}</p>
                       </div>
                       <div className="flex items-center gap-3">
-                        <span className={clsx("badge text-xs", ROLE_TONE[m.user.role] ?? "bg-muted text-muted-foreground")}>
-                          {m.user.role}
-                        </span>
+                      <span className="badge text-xs bg-muted text-muted-foreground">
+                          {m.user.job_description || "Staff"}
+                      </span>
                         {m.expires_at && (
                           <span className="text-xs text-muted-foreground">
                             Expires {new Date(m.expires_at).toLocaleDateString()}
@@ -361,8 +438,8 @@ function GroupDetail({
                           <p className="font-medium text-foreground text-sm">{u.full_name}</p>
                           <p className="text-xs text-muted-foreground">{u.email}</p>
                         </div>
-                        <span className={clsx("badge text-xs", ROLE_TONE[u.role] ?? "bg-muted text-muted-foreground")}>
-                          {u.role}
+                        <span className="badge text-xs bg-muted text-muted-foreground">
+                          {u.job_description || "Staff"}
                         </span>
                         <button
                           onClick={() => addMemberMutation.mutate(u.id)}
@@ -395,10 +472,16 @@ export default function GroupsPage() {
     queryKey: ["groups"],
     queryFn: () => groupsAPI.list().then((r) => r.data.results ?? r.data),
   });
+  const orderedGroups = [...groups].sort((a, b) => {
+    if (a.has_admin_access && !b.has_admin_access) return -1;
+    if (!a.has_admin_access && b.has_admin_access) return 1;
+    return a.name.localeCompare(b.name);
+  });
 
-  const { data: docTypes = [] } = useQuery<DocType[]>({
+  const { data: docTypes = [] } = useQuery<unknown, Error, DocType[]>({
     queryKey: ["document-types"],
-    queryFn: () => documentTypesAPI.list().then((r) => r.data.results ?? r.data),
+    queryFn: () => documentTypesAPI.list().then((r) => r.data as unknown),
+    select: (data) => normalizeListResponse<DocType>(data),
   });
 
   const createMutation = useMutation({
@@ -411,6 +494,18 @@ export default function GroupsPage() {
       setNewDesc("");
     },
     onError: () => toast.error("Failed to create group"),
+  });
+
+  const deleteGroupMutation = useMutation({
+    mutationFn: (groupId: string) => groupsAPI.delete(groupId),
+    onSuccess: (_data, groupId) => {
+      toast.success("Group deleted");
+      qc.invalidateQueries({ queryKey: ["groups"] });
+      if (selectedGroup?.id === groupId) {
+        setSelected(null);
+      }
+    },
+    onError: () => toast.error("Failed to delete group"),
   });
 
   return (
@@ -480,42 +575,70 @@ export default function GroupsPage() {
           </div>
         ))}
 
-        {groups?.map((group) => (
-          <div
-            key={group.id}
-            onClick={() => setSelected(group)}
-            className="card p-6 hover:border-accent/40 transition-all duration-200 cursor-pointer group"
-            style={{ boxShadow: "var(--shadow-card)" }}
-          >
-            <div className="flex items-start justify-between">
-              <div className="flex items-center gap-3">
-                <div className="w-12 h-12 rounded-xl bg-accent/15 flex items-center justify-center flex-shrink-0">
-                  <Shield className="w-6 h-6 text-accent" />
-                </div>
-                <div>
-                  <h3 className="font-semibold text-lg text-foreground group-hover:text-accent transition-colors">
-                    {group.name}
-                  </h3>
-                  {group.description && (
-                    <p className="text-sm text-muted-foreground line-clamp-2 mt-0.5">{group.description}</p>
-                  )}
-                </div>
-              </div>
-            </div>
+        {orderedGroups?.map((group) => {
+          const ruleCount = group.permissions.filter((p) => p.action !== "admin").length;
+          const isSystemGroup = group.has_admin_access;
 
-            <div className="mt-6 flex items-center justify-between text-sm">
-              <div className="flex gap-5 text-muted-foreground">
-                <span className="flex items-center gap-1.5">
-                  <Users className="w-4 h-4" /> {group.member_count} members
-                </span>
-                <span className="flex items-center gap-1.5">
-                  <Settings2 className="w-4 h-4" /> {group.permissions.length} rules
-                </span>
+          return (
+            <div
+              key={group.id}
+              onClick={() => setSelected(group)}
+              className="card p-6 hover:border-accent/40 transition-all duration-200 cursor-pointer group"
+              style={{ boxShadow: "var(--shadow-card)" }}
+            >
+              <div className="flex items-start justify-between">
+                <div className="flex items-center gap-3">
+                  <div className="w-12 h-12 rounded-xl bg-accent/15 flex items-center justify-center flex-shrink-0">
+                    <Shield className="w-6 h-6 text-accent" />
+                  </div>
+                  <div>
+                    <h3 className="font-semibold text-lg text-foreground group-hover:text-accent transition-colors">
+                      {group.name}
+                    </h3>
+                    {isSystemGroup && (
+                      <span className="inline-flex items-center rounded-full bg-accent/15 px-2.5 py-1 text-[11px] font-semibold text-accent mt-2">
+                        System administrator group
+                      </span>
+                    )}
+                    {group.description && (
+                      <p className="text-sm text-muted-foreground line-clamp-2 mt-0.5">{group.description}</p>
+                    )}
+                  </div>
+                </div>
               </div>
-              <ChevronRight className="w-5 h-5 text-muted-foreground group-hover:text-accent transition-colors" />
+
+              <div className="mt-6 flex items-center justify-between text-sm">
+                <div className="flex gap-5 text-muted-foreground">
+                  <span className="flex items-center gap-1.5">
+                    <Users className="w-4 h-4" /> {group.member_count} members
+                  </span>
+                  <span className="flex items-center gap-1.5">
+                    <Settings2 className="w-4 h-4" /> {ruleCount} rules
+                  </span>
+                </div>
+                <div className="flex items-center gap-2">
+                  {!isSystemGroup && (
+                    <button
+                      type="button"
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        if (window.confirm(`Delete group "${group.name}"? This removes members and permissions.`)) {
+                          deleteGroupMutation.mutate(group.id);
+                        }
+                      }}
+                      disabled={deleteGroupMutation.isPending}
+                      className="p-2 rounded-lg text-muted-foreground hover:text-destructive hover:bg-destructive/10 transition-colors"
+                      title="Delete group"
+                    >
+                      <Trash2 className="w-4 h-4" />
+                    </button>
+                  )}
+                  <ChevronRight className="w-5 h-5 text-muted-foreground group-hover:text-accent transition-colors" />
+                </div>
+              </div>
             </div>
-          </div>
-        ))}
+          );
+        })}
 
         {!isLoading && !groups?.length && !showCreate && (
           <div className="col-span-full py-20 text-center">

@@ -5,6 +5,14 @@ import type {
   DocumentPreviewResponse,
 } from "@/types";
 
+export function normalizeListResponse<T>(payload: unknown): T[] {
+  if (Array.isArray(payload)) return payload as T[];
+  if (payload && typeof payload === "object" && Array.isArray((payload as { results?: unknown[] }).results)) {
+    return (payload as { results: T[] }).results;
+  }
+  return [];
+}
+
 function normalizeApiBase(rawBase: string): string {
   const trimmed = rawBase.replace(/\/+$/, "");
   if (trimmed.endsWith("/api/v1")) return trimmed;
@@ -171,18 +179,15 @@ export const documentsAPI = {
   triggerPreview: (id: string) =>
     api.post<{ detail: string; preview_status: string }>(`/documents/${id}/trigger_preview/`),
 
+  /** Explicitly (re-)queue a historical version preview conversion. */
+  triggerVersionPreview: (id: string, versionId: string) =>
+    api.post<{ detail: string; preview_status: string }>(`/documents/${id}/trigger_version_preview/`, {
+      version_id: versionId,
+    }),
+
   /** Acquire edit lock + get launcher credentials. POST. */
   editToken: (id: string) =>
     api.post<DocumentEditTokenResponse>(`/documents/${id}/edit_token/`),
-
-  /**
-   * Download a personalised shell script that opens the document directly
-   * in LibreOffice via WebDAV — bypasses browser protocol-handler issues
-   * on Linux / Chrome.  GET — also acquires the edit lock.
-   * Returns a Blob (the .sh script file).
-   */
-  openScript: (id: string) =>
-    api.get(`/documents/${id}/open_script/`, { responseType: "blob" }),
 
   /**
    * Download the one-time install script that registers the docvault-open://
@@ -197,8 +202,10 @@ export const documentsAPI = {
     api.post<{ detail: string }>(`/documents/${id}/release_lock/`, { force }),
 
   /** Get current preview URL. GET. Used for polling during Office→PDF conversion. */
-  previewUrl: (id: string) =>
-    api.get<DocumentPreviewResponse>(`/documents/${id}/preview_url/`),
+  previewUrl: (id: string, versionId?: string) =>
+    api.get<DocumentPreviewResponse>(`/documents/${id}/preview_url/`, {
+      params: versionId ? { version_id: versionId } : undefined,
+    }),
 };
 
 export const documentTypesAPI = {
@@ -207,15 +214,6 @@ export const documentTypesAPI = {
   create: (data: unknown) => api.post("/documents/types/", data),
   update: (id: string, data: unknown) =>
     api.patch(`/documents/types/${id}/`, data),
-};
-
-export const rolesAPI = {
-  list: () => api.get("/roles/"),
-  create: (data: { code: string; name: string; description?: string }) =>
-    api.post("/roles/", data),
-  update: (id: string, data: { name?: string; description?: string; is_active?: boolean }) =>
-    api.patch(`/roles/${id}/`, data),
-  delete: (id: string) => api.delete(`/roles/${id}/`),
 };
 
 export const searchAPI = {
@@ -294,7 +292,7 @@ export const usersAPI = {
     email: string;
     first_name: string;
     last_name: string;
-    role: string;
+    job_description: string;
     department?: string;
     password?: string;
     confirm_password?: string;
@@ -304,7 +302,7 @@ export const usersAPI = {
     data: Partial<{
       first_name: string;
       last_name: string;
-      role: string;
+      job_description: string;
       department: string | null;
       is_active: boolean;
     }>
@@ -343,6 +341,8 @@ export const groupsAPI = {
     id: string,
     permissions: { document_type_id: string | null; action: string }[]
   ) => api.post(`/groups/${id}/set_permissions/`, { permissions }),
+  setAdminAccess: (id: string, enabled: boolean) =>
+    api.post(`/groups/${id}/set_admin_access/`, { enabled }),
   members: (id: string) => api.get(`/groups/${id}/members/`),
   addMember: (id: string, userId: string, expiresAt?: string) =>
     api.post(`/groups/${id}/add_member/`, {

@@ -1,5 +1,7 @@
+import { useEffect, useState } from "react";
 import { Routes, Route, Navigate } from "react-router-dom";
 import { useAuthStore } from "@/store/authStore";
+import { authAPI } from "@/services/api";
 import Layout from "@/components/shared/Layout";
 import LoginPage from "@/pages/LoginPage";
 import ForceChangePasswordPage from "@/pages/ForceChangePasswordPage";
@@ -26,6 +28,54 @@ function RequireAuth({ children }: { children: React.ReactNode }) {
   return isAuthenticated ? <>{children}</> : <Navigate to="/login" replace />;
 }
 
+function AuthBootstrap({ children }: { children: React.ReactNode }) {
+  const accessToken = useAuthStore((s) => s.accessToken);
+  const user = useAuthStore((s) => s.user);
+  const setUser = useAuthStore((s) => s.setUser);
+  const [ready, setReady] = useState(!accessToken || user?.has_admin_access !== undefined);
+
+  useEffect(() => {
+    let cancelled = false;
+
+    if (!accessToken) {
+      setReady(true);
+      return () => {
+        cancelled = true;
+      };
+    }
+
+    if (user?.has_admin_access !== undefined) {
+      setReady(true);
+      return () => {
+        cancelled = true;
+      };
+    }
+
+    setReady(false);
+    authAPI.me(accessToken)
+      .then(({ data }) => {
+        if (!cancelled) {
+          setUser(data);
+        }
+      })
+      .catch(() => {
+        // If the token is stale, the response interceptor will log the user out.
+      })
+      .finally(() => {
+        if (!cancelled) {
+          setReady(true);
+        }
+      });
+
+    return () => {
+      cancelled = true;
+    };
+  }, [accessToken, setUser, user?.has_admin_access]);
+
+  if (!ready) return null;
+  return <>{children}</>;
+}
+
 /**
  * If the user has logged in but must change their password,
  * redirect them to the change-password page and block everything else.
@@ -41,7 +91,7 @@ function RequirePasswordChanged({ children }: { children: React.ReactNode }) {
 function RequireAdmin({ children }: { children: React.ReactNode }) {
   const user = useAuthStore((s) => s.user);
   if (!user) return <Navigate to="/login" replace />;
-  if (user.role !== "admin") return <Navigate to="/" replace />;
+  if (!user.has_admin_access) return <Navigate to="/" replace />;
   return <>{children}</>;
 }
 
@@ -49,63 +99,65 @@ function RequireAdmin({ children }: { children: React.ReactNode }) {
 
 export default function App() {
   return (
-    <Routes>
-      {/* Public */}
-      <Route path="/login" element={<LoginPage />} />
+    <AuthBootstrap>
+      <Routes>
+        {/* Public */}
+        <Route path="/login" element={<LoginPage />} />
 
-      {/* First-login password wall — requires auth but bypasses the layout */}
-      <Route
-        path="/change-password"
-        element={
-          <RequireAuth>
-            <ForceChangePasswordPage />
-          </RequireAuth>
-        }
-      />
+        {/* First-login password wall — requires auth but bypasses the layout */}
+        <Route
+          path="/change-password"
+          element={
+            <RequireAuth>
+              <ForceChangePasswordPage />
+            </RequireAuth>
+          }
+        />
 
-      {/* Protected — all regular pages */}
-      <Route
-        path="/"
-        element={
-          <RequireAuth>
-            <RequirePasswordChanged>
-              <Layout />
-            </RequirePasswordChanged>
-          </RequireAuth>
-        }
-      >
-        <Route index element={<DashboardPage />} />
+        {/* Protected — all regular pages */}
+        <Route
+          path="/"
+          element={
+            <RequireAuth>
+              <RequirePasswordChanged>
+                <Layout />
+              </RequirePasswordChanged>
+            </RequireAuth>
+          }
+        >
+          <Route index element={<DashboardPage />} />
 
-        {/* Documents */}
-        <Route path="documents"        element={<DocumentsPage />} />
-        <Route path="documents/upload" element={<UploadPage />} />
-        <Route path="documents/:id"    element={<DocumentDetailPage />} />
+          {/* Documents */}
+          <Route path="documents"        element={<DocumentsPage />} />
+          <Route path="documents/upload" element={<UploadPage />} />
+          <Route path="documents/:id"    element={<DocumentDetailPage />} />
 
-        {/* Search */}
-        <Route path="search"    element={<SearchPage />} />
+          {/* Search */}
+          <Route path="search"    element={<SearchPage />} />
 
-        {/* Workflow */}
-        <Route path="workflow"  element={<WorkflowPage />} />
-        <Route path="workflow/builder" element={  <RequireAdmin> <WorkflowBuilderPage />  </RequireAdmin>  }/>
+          {/* Workflow */}
+          <Route path="workflow"  element={<WorkflowPage />} />
+          <Route path="workflow/builder" element={  <RequireAdmin> <WorkflowBuilderPage />  </RequireAdmin>  }/>
 
-        {/* Notifications */}
-        <Route path="notifications" element={<NotificationsPage />} />
+          {/* Notifications */}
+          <Route path="notifications" element={<NotificationsPage />} />
 
-        {/* Audit */}
-        <Route path="audit"     element={<AuditPage />} />
+          {/* Audit */}
+          <Route path="audit"     element={<AuditPage />} />
 
-        {/* Profile — every user */}
-        <Route path="profile"   element={<ProfilePage />} />
+          {/* Profile — every user */}
+          <Route path="profile"   element={<ProfilePage />} />
 
-        {/* Admin-only */}
-        <Route path="admin/users"           element={<RequireAdmin><UsersPage /></RequireAdmin>} />
-        <Route path="admin/settings"        element={<RequireAdmin><AdminPage /></RequireAdmin>} />
-        <Route path="admin/document-types"  element={<RequireAdmin><AdminDocumentTypesPage /></RequireAdmin>} />
-        <Route path="admin/departments"     element={<RequireAdmin><DepartmentsPage /></RequireAdmin>} />
-        <Route path="admin/groups"          element={<RequireAdmin><GroupsPage /></RequireAdmin>} />
-      </Route>
+          {/* Admin-only */}
+          <Route path="admin/users"           element={<RequireAdmin><UsersPage /></RequireAdmin>} />
+          <Route path="admin/settings"        element={<RequireAdmin><AdminPage /></RequireAdmin>} />
+          <Route path="admin/document-types"  element={<RequireAdmin><AdminDocumentTypesPage /></RequireAdmin>} />
+          <Route path="admin/departments"     element={<RequireAdmin><DepartmentsPage /></RequireAdmin>} />
+          <Route path="admin/groups"          element={<RequireAdmin><GroupsPage /></RequireAdmin>} />
+        </Route>
 
-      <Route path="*" element={<Navigate to="/" replace />} />
-    </Routes>
+        <Route path="*" element={<Navigate to="/" replace />} />
+      </Routes>
+    </AuthBootstrap>
   );
 }

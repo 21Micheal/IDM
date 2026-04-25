@@ -1,6 +1,7 @@
 """Search tasks and API views."""
 from celery import shared_task
 import logging
+from elasticsearch.helpers import BulkIndexError
 
 logger = logging.getLogger(__name__)
 
@@ -12,6 +13,13 @@ def index_document(self, document_id: str):
     try:
         doc = Document.objects.get(id=document_id)
         DocumentIndex().update(doc)
+    except BulkIndexError as exc:
+        logger.error(
+            "Indexing failed for %s: %s",
+            document_id,
+            getattr(exc, "errors", exc),
+        )
+        return
     except Exception as exc:
         logger.error("Indexing failed for %s: %s", document_id, exc)
         raise self.retry(exc=exc, countdown=30)
@@ -26,6 +34,12 @@ def reindex_all():
     for doc in qs:
         try:
             idx.update(doc)
+        except BulkIndexError as exc:
+            logger.warning(
+                "Reindex error for %s: %s",
+                doc.id,
+                getattr(exc, "errors", exc),
+            )
         except Exception as exc:
             logger.warning("Reindex error for %s: %s", doc.id, exc)
 
@@ -66,6 +80,7 @@ class DocumentSearchView(APIView):
                                 "reference_number^3",
                                 "supplier^2",
                                 "extracted_text",
+                                "metadata.personal_tags^2",
                                 "metadata.*",
                             ],
                             fuzziness="AUTO",
