@@ -873,6 +873,39 @@ echo "✓ DocVault LibreOffice integration installed."
         self.record_audit("document.ocr_queued", doc)
         return Response({"detail": "OCR queued.", "ocr_status": OCRStatus.PENDING})
 
+    @action(detail=True, methods=["get"])
+    def ocr_suggestions(self, request, pk=None):
+        """
+        Return the structured field suggestions extracted by the OCR pipeline.
+
+        Response shape:
+          {
+            "ocr_status": "done" | "pending" | "processing" | "failed" | "",
+            "suggestions": {
+              "title": "...",
+              "supplier": "...",
+              "amount": "123.45",
+              "currency": "USD",
+              "document_date": "2024-03-15",
+              "due_date": "2024-04-15",
+              "invoice_number": "INV-001",
+              "raw_lines": ["...", ...]
+            } | null
+          }
+
+        Suggestions are null until ocr_status == "done".
+        The frontend polls this endpoint after upload until done, then
+        pre-fills the details form for user review.
+        """
+        from .models import OCRStatus
+        doc = self.get_object()
+        meta = doc.metadata or {}
+        suggestions = meta.get("ocr_suggestions") if doc.ocr_status == OCRStatus.DONE else None
+        return Response({
+            "ocr_status": doc.ocr_status,
+            "suggestions": suggestions,
+        })
+
     @action(detail=True, methods=["get", "post"])
     def comments(self, request, pk=None):
         doc = self.get_object()

@@ -172,6 +172,12 @@ export const documentsAPI = {
   reOcr: (id: string) =>
     api.post(`/documents/${id}/re_ocr/`),
 
+  /** Poll after upload to get OCR-extracted field suggestions. */
+  ocrSuggestions: (id: string) =>
+    api.get<{ ocr_status: string; suggestions: Record<string, unknown> | null }>(
+      `/documents/${id}/ocr_suggestions/`
+    ),
+
   /**
    * Explicitly (re-)trigger Office→PDF preview conversion.
    * Use for retries after failure or when preview was never queued.

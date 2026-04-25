@@ -251,13 +251,21 @@ def ocr_document(self, document_id: str):
         doc  = Document.objects.get(id=document_id)
         text = _ocr_textract(doc) if engine == "textract" else _ocr_tesseract(doc)
 
+        # Parse the raw text and surface structured suggestions for the UI.
+        suggestions = _extract_ocr_suggestions(text)
+
+        # Merge suggestions into metadata without clobbering existing keys.
+        current_metadata = doc.metadata or {}
+        updated_metadata = {**current_metadata, "ocr_suggestions": suggestions}
+
         Document.objects.filter(id=document_id).update(
             extracted_text=text[:1_000_000],
             ocr_status=OCRStatus.DONE,
+            metadata=updated_metadata,
         )
         logger.info(
-            "ocr_document: completed for %s (%d chars extracted)",
-            document_id, len(text),
+            "ocr_document: completed for %s (%d chars extracted, suggestions=%s)",
+            document_id, len(text), list(suggestions.keys()),
         )
         _trigger_index(document_id)
 
@@ -1010,6 +1018,162 @@ def generate_document_version_preview(self, version_id: str):
 # ─────────────────────────────────────────────────────────────────────────────
 # Helpers
 # ─────────────────────────────────────────────────────────────────────────────
+
+def _extract_ocr_suggestions(text: str) -> dict:
+    """
+    Parse raw OCR text and return a dict of field suggestions.
+
+    Keys returned (all optional, absent when not found):
+        title        — first non-trivial line (≤ 120 chars)
+        supplier     — company/vendor name heuristic
+        amount       — largest monetary value found
+        currency     — ISO-4217 code adjacent to an amount
+        document_date — first ISO-8601 or common date found
+        due_date      — date following a "due" / "pay by" label
+        invoice_number — reference number heuristic
+        raw_lines    — first 20 lines for UI display
+
+    The caller stores this under metadata["ocr_suggestions"]; the UI
+    presents the values as pre-filled fields the user can confirm or edit.
+    """
+    import re
+
+    if not text or not text.strip():
+        return {}
+
+    lines = [ln.strip() for ln in text.splitlines() if ln.strip()]
+    suggestions: dict = {}
+
+    # ── raw_lines for the UI preview ──────────────────────────────────────
+    suggestions["raw_lines"] = lines[:20]
+
+    # ── title: first non-trivial line, capped at 120 chars ────────────────
+    for line in lines[:8]:
+        if len(line) >= 4 and not re.match(r"^[\d\W]+$", line):
+            suggestions["title"] = line[:120]
+            break
+
+    # ── currency + amounts ────────────────────────────────────────────────
+    # Capture patterns like: USD 1,234.56 / $1,234.56 / 1 234,56 EUR
+    _ISO = r"(?:USD|EUR|GBP|KES|JPY|CAD|AUD|CHF|CNY|INR|ZAR|NGN|GHS|UGX|TZS)"
+    _AMOUNT_RE = re.compile(
+        rf"(?:({_ISO})\s*[\$€£]?\s*|[\$€£]\s*)([0-9]{{1,3}}(?:[,\s][0-9]{{3}})*(?:[.,][0-9]{{1,2}})?)"
+        rf"|([0-9]{{1,3}}(?:[,\s][0-9]{{3}})*(?:[.,][0-9]{{1,2}})?)\s*({_ISO})",
+        re.IGNORECASE,
+    )
+    amounts: list[tuple[float, str]] = []  # (value, currency)
+    for m in _AMOUNT_RE.finditer(text):
+        raw_val = m.group(2) or m.group(3) or ""
+        raw_cur = m.group(1) or m.group(4) or ""
+        raw_val = re.sub(r"[\s,]", "", raw_val).replace(",", ".")
+        # Handle European comma-decimal: 1.234,56 → 1234.56
+        if raw_val.count(".") > 1:
+            raw_val = raw_val.replace(".", "", raw_val.count(".") - 1)
+        try:
+            amounts.append((float(raw_val), raw_cur.upper()))
+        except ValueError:
+            pass
+
+    if amounts:
+        # Pick the largest amount — likely the invoice total
+        best_val, best_cur = max(amounts, key=lambda x: x[0])
+        suggestions["amount"] = str(round(best_val, 2))
+        if best_cur:
+            suggestions["currency"] = best_cur
+
+    # ── dates ─────────────────────────────────────────────────────────────
+    # Order of preference: ISO → day-month-year → month-day-year
+    _DATE_PATTERNS = [
+        # ISO 8601: 2024-03-15
+        (r"\b(\d{4}[-/]\d{1,2}[-/]\d{1,2})\b", "%Y-%m-%d"),
+        # 15 March 2024 / 15 Mar 2024
+        (r"\b(\d{1,2}\s+(?:Jan(?:uary)?|Feb(?:ruary)?|Mar(?:ch)?|Apr(?:il)?|"
+         r"May|Jun(?:e)?|Jul(?:y)?|Aug(?:ust)?|Sep(?:tember)?|Oct(?:ober)?|"
+         r"Nov(?:ember)?|Dec(?:ember)?)\s+\d{4})\b", None),
+        # 15/03/2024 or 03/15/2024
+        (r"\b(\d{1,2}[/.-]\d{1,2}[/.-]\d{4})\b", None),
+        # March 15, 2024
+        (r"\b((?:Jan(?:uary)?|Feb(?:ruary)?|Mar(?:ch)?|Apr(?:il)?|"
+         r"May|Jun(?:e)?|Jul(?:y)?|Aug(?:ust)?|Sep(?:tember)?|Oct(?:ober)?|"
+         r"Nov(?:ember)?|Dec(?:ember)?)\s+\d{1,2},?\s+\d{4})\b", None),
+    ]
+
+    def _parse_date_str(s: str) -> "str | None":
+        """Normalise a fuzzy date string to YYYY-MM-DD or None."""
+        from datetime import datetime
+        s = s.strip()
+        for fmt in (
+            "%Y-%m-%d", "%Y/%m/%d",
+            "%d %B %Y", "%d %b %Y",
+            "%B %d %Y", "%b %d %Y",
+            "%B %d, %Y", "%b %d, %Y",
+            "%d/%m/%Y", "%m/%d/%Y",
+            "%d-%m-%Y", "%m-%d-%Y",
+            "%d.%m.%Y",
+        ):
+            try:
+                return datetime.strptime(s, fmt).strftime("%Y-%m-%d")
+            except ValueError:
+                pass
+        return None
+
+    found_dates: list[str] = []
+    for pattern, _ in _DATE_PATTERNS:
+        for m in re.finditer(pattern, text, re.IGNORECASE):
+            parsed = _parse_date_str(m.group(1))
+            if parsed and parsed not in found_dates:
+                found_dates.append(parsed)
+
+    if found_dates:
+        suggestions["document_date"] = found_dates[0]
+
+    # ── due date — look for "due", "pay by", "payment due" labels ─────────
+    _DUE_RE = re.compile(
+        r"(?:due\s*(?:date|on|by)?|pay(?:ment)?\s+(?:due|by))\s*[:\-]?\s*"
+        r"(\d{1,2}[/.\- ]\d{1,2}[/.\- ]\d{2,4}"
+        r"|\d{4}[-/]\d{1,2}[-/]\d{1,2}"
+        r"|\d{1,2}\s+\w+\s+\d{4})",
+        re.IGNORECASE,
+    )
+    due_m = _DUE_RE.search(text)
+    if due_m:
+        parsed_due = _parse_date_str(due_m.group(1))
+        if parsed_due:
+            suggestions["due_date"] = parsed_due
+
+    # ── supplier / vendor name ────────────────────────────────────────────
+    # Look for lines preceded by "from:", "vendor:", "supplier:", "bill to:" etc.
+    _SUPPLIER_LABEL_RE = re.compile(
+        r"(?:from|vendor|supplier|billed?\s+(?:to|from)|sold\s+by|"
+        r"company|business|firm)\s*[:\-]\s*(.+)",
+        re.IGNORECASE,
+    )
+    for line in lines:
+        m = _SUPPLIER_LABEL_RE.search(line)
+        if m:
+            candidate = m.group(1).strip()[:120]
+            if len(candidate) > 2:
+                suggestions["supplier"] = candidate
+                break
+
+    # Fallback: second non-trivial line (often letterhead / company name)
+    if "supplier" not in suggestions:
+        candidates = [ln for ln in lines[:6] if len(ln) > 3 and not re.match(r"^[\d\W]+$", ln)]
+        if len(candidates) >= 2:
+            suggestions["supplier"] = candidates[1][:120]
+
+    # ── invoice / reference number ────────────────────────────────────────
+    _INV_RE = re.compile(
+        r"(?:invoice\s*(?:no|num|number|#)?|inv\s*[#:]?|ref(?:erence)?\s*[#:]?|"
+        r"receipt\s*(?:no|#)?|order\s*(?:no|#)?)\s*[:\-]?\s*([A-Z0-9][-A-Z0-9/]{2,30})",
+        re.IGNORECASE,
+    )
+    inv_m = _INV_RE.search(text)
+    if inv_m:
+        suggestions["invoice_number"] = inv_m.group(1).strip()
+
+    return suggestions
+
 
 def _fail(document_id: str, error_message: str) -> None:
     """Mark preview as permanently failed and cache the error for the UI."""

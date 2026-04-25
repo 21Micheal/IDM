@@ -28,6 +28,7 @@ from apps.accounts.models import GroupAction
 from django.db import transaction, IntegrityError
 from django.utils.text import slugify
 import mimetypes
+from apps.search.utils import summarize_bulk_index_error
 
 PERSONAL_DOCUMENT_TYPE_CODE = "PERSONAL"
 logger = logging.getLogger(__name__)
@@ -227,6 +228,7 @@ class DocumentDetailSerializer(serializers.ModelSerializer):
     preview_pdf = serializers.SerializerMethodField()
     is_edit_locked = serializers.SerializerMethodField()
     edit_locked_by_name = serializers.SerializerMethodField()
+    ocr_suggestions = serializers.SerializerMethodField()
 
     class Meta:
         model  = Document
@@ -241,7 +243,7 @@ class DocumentDetailSerializer(serializers.ModelSerializer):
             "department",
             "uploaded_by",
             "is_self_upload",
-            "is_scanned", "ocr_status",
+            "is_scanned", "ocr_status", "ocr_suggestions",
             "preview_pdf", "preview_status",
             "edit_locked_by", "edit_locked_by_name", "edit_locked_at", "is_edit_locked",
             "current_version", "versions", "comments", "permissions",
@@ -250,7 +252,7 @@ class DocumentDetailSerializer(serializers.ModelSerializer):
         read_only_fields = [
             "id", "reference_number", "file_name", "file_size", "file_mime_type",
             "checksum", "uploaded_by", "is_self_upload",
-            "is_scanned", "ocr_status",
+            "is_scanned", "ocr_status", "ocr_suggestions",
             "preview_pdf", "preview_status",
             "edit_locked_by", "edit_locked_by_name", "edit_locked_at", "is_edit_locked",
             "current_version", "created_at", "updated_at",
@@ -296,34 +298,12 @@ class DocumentDetailSerializer(serializers.ModelSerializer):
         holder = obj.edit_lock_holder
         return holder.get_full_name().strip() if holder else None
 
-    def validate_metadata(self, value):
-        is_self_upload = (
-            str(self.initial_data.get("is_self_upload", "")).lower()
-            in ("true", "1", "yes")
-        )
-        is_scanned = (
-            str(self.initial_data.get("is_scanned", "")).lower()
-            in ("true", "1", "yes")
-        )
-        if is_self_upload or is_scanned:
-            return value
-
-        doc_type_id = self.initial_data.get("document_type_id")
-        if not doc_type_id:
-            return value
-        try:
-            doc_type = DocumentType.objects.get(pk=doc_type_id)
-        except DocumentType.DoesNotExist:
-            return value
-        missing = [
-            f.key for f in doc_type.metadata_fields.filter(is_required=True)
-            if not value.get(f.key)
-        ]
-        if missing:
-            raise serializers.ValidationError(
-                f"Required metadata fields missing: {', '.join(missing)}"
-            )
-        return value
+    def get_ocr_suggestions(self, obj):
+        from .models import OCRStatus
+        if obj.ocr_status != OCRStatus.DONE:
+            return None
+        meta = obj.metadata or {}
+        return meta.get("ocr_suggestions")
 
 
 class DocumentMetadataEditSerializer(serializers.ModelSerializer):
@@ -369,7 +349,7 @@ class DocumentMetadataEditSerializer(serializers.ModelSerializer):
             logger.warning(
                 "Metadata edit saved for %s but realtime indexing failed: %s",
                 instance.id,
-                getattr(exc, "errors", exc),
+                summarize_bulk_index_error(exc),
             )
 
         if tags is not None:
@@ -379,7 +359,7 @@ class DocumentMetadataEditSerializer(serializers.ModelSerializer):
                 logger.warning(
                     "Metadata tags saved for %s but realtime indexing failed: %s",
                     instance.id,
-                    getattr(exc, "errors", exc),
+                    summarize_bulk_index_error(exc),
                 )
 
         try:
@@ -474,6 +454,7 @@ class DocumentUploadSerializer(serializers.ModelSerializer):
     def create(self, validated_data):
         import hashlib
         import magic as python_magic
+        from elasticsearch.helpers import BulkIndexError
 
         tags       = validated_data.pop("tags", [])
         validated_data.pop("personal_tags", None)
@@ -524,8 +505,26 @@ class DocumentUploadSerializer(serializers.ModelSerializer):
         upload.seek(0)
         validated_data["checksum"] = sha256.hexdigest()
 
-        doc = super().create(validated_data)
-        doc.tags.set(tags)
+        try:
+            doc = super().create(validated_data)
+        except BulkIndexError as exc:
+            logger.warning(
+                "Document saved for reference %s but realtime indexing failed: %s",
+                validated_data["reference_number"],
+                summarize_bulk_index_error(exc),
+            )
+            doc = Document.objects.get(
+                reference_number=validated_data["reference_number"]
+            )
+
+        try:
+            doc.tags.set(tags)
+        except BulkIndexError as exc:
+            logger.warning(
+                "Document tags saved for %s but realtime indexing failed: %s",
+                doc.id,
+                summarize_bulk_index_error(exc),
+            )
 
         # Version 1
         DocumentVersion.objects.create(

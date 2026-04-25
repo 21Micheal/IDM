@@ -45,6 +45,24 @@ def _normalize_es_value(value):
     return str(value)
 
 
+def _prepare_metadata_for_index(metadata):
+    """
+    Normalize document metadata for Elasticsearch.
+
+    OCR suggestions are kept in the database for the UI, but they are not
+    needed for search and can be large/nested enough to trip index mapping
+    conflicts. Excluding them here keeps document uploads resilient while the
+    OCR endpoint still reads the full payload from the database.
+    """
+    if not isinstance(metadata, dict):
+        return {}
+
+    normalized = _normalize_es_value(metadata)
+    if isinstance(normalized, dict):
+        normalized.pop("ocr_suggestions", None)
+    return normalized
+
+
 @document_index.doc_type
 class DocumentIndex(ESDocument):
     title = fields.TextField(analyzer="english")
@@ -76,5 +94,4 @@ class DocumentIndex(ESDocument):
         return instance.uploaded_by.get_full_name()
 
     def prepare_metadata(self, instance):
-        metadata = instance.metadata if isinstance(instance.metadata, dict) else {}
-        return _normalize_es_value(metadata)
+        return _prepare_metadata_for_index(instance.metadata)
