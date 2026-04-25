@@ -1,6 +1,7 @@
 from celery import shared_task
 import logging
 from elasticsearch.helpers import BulkIndexError
+from .utils import summarize_bulk_index_error
 logger = logging.getLogger(__name__)
 
 @shared_task(bind=True, max_retries=3, queue="indexing")
@@ -14,7 +15,7 @@ def index_document(self, document_id: str):
         logger.error(
             "Indexing failed for %s: %s",
             document_id,
-            getattr(exc, "errors", exc),
+            summarize_bulk_index_error(exc),
         )
         return
     except Exception as exc:
@@ -33,7 +34,7 @@ def reindex_all():
             logger.warning(
                 "Reindex error %s: %s",
                 doc.id,
-                getattr(exc, "errors", exc),
+                summarize_bulk_index_error(exc),
             )
         except Exception as exc:
             logger.warning("Reindex error %s: %s", doc.id, exc)
