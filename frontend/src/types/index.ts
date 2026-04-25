@@ -147,6 +147,24 @@ export interface PaginatedResponse<T> {
   results: T[];
 }
 
+export interface SearchHit {
+  id: string;
+  score: number;
+  title: string;
+  reference_number: string;
+  document_type: string;
+  supplier: string;
+  amount: number | null;
+  status: DocumentStatus;
+  document_date: string | null;
+  highlights: Record<string, string>;
+}
+
+export interface DocumentSearchResponse {
+  total: number;
+  results: SearchHit[];
+}
+
 export interface DocumentPreviewResponse {
   viewer: "pdfjs" | "image" | "processing" | "download";
   url: string;

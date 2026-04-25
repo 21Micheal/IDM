@@ -1,18 +1,20 @@
 // DashboardPage.tsx — Indigo Vault themed
 import { useQuery } from "@tanstack/react-query";
-import { api, documentsAPI, workflowAPI } from "@/services/api";
+import { api, documentsAPI, searchAPI, workflowAPI } from "@/services/api";
 import { useAuthStore } from "@/store/authStore";
 import {
   FileText, Clock, CheckCircle, GitBranch, ArrowRight,
   ChevronLeft, ChevronRight,
-  Calendar, Loader2, Search, ShieldCheck,
+  Calendar, Loader2, Search, ShieldCheck, Sparkles,
 } from "lucide-react";
 import { Link, useNavigate } from "react-router-dom";
 import StatusBadge from "@/components/documents/StatusBadge";
 import { format, formatDistanceToNow, isSameDay } from "date-fns";
-import { useState } from "react";
-import type { Document, WorkflowTask } from "@/types";
+import { useEffect, useRef, useState } from "react";
+import type { Document, DocumentSearchResponse, SearchHit, WorkflowTask } from "@/types";
 import { StatCard } from "@/components/dashboard/StatCard";
+import { useDebounce } from "@/hooks/useDebounce";
+import { getQuickSearchSnippet, highlightSearchText } from "@/lib/search";
 
 const RECENT_DOCS_PAGE_SIZE = 5;
 const RECENT_ACTIVITY_PAGE_SIZE = 10;
@@ -92,6 +94,10 @@ export default function DashboardPage() {
   const [recentDocsPage, setRecentDocsPage] = useState(1);
   const [recentAuditPage, setRecentAuditPage] = useState(1);
   const [dashboardSearch, setDashboardSearch] = useState("");
+  const [isDashboardSearchFocused, setIsDashboardSearchFocused] = useState(false);
+  const [activeDashboardResultIndex, setActiveDashboardResultIndex] = useState(-1);
+  const dashboardSearchRef = useRef<HTMLDivElement | null>(null);
+  const debouncedDashboardSearch = useDebounce(dashboardSearch.trim(), 300);
 
   const { data: recentDocs, isLoading: docsLoading } = useQuery({
     queryKey: ["documents", "recent", recentDocsPage],
@@ -127,6 +133,17 @@ export default function DashboardPage() {
         .then((r) => r.data as PaginatedResponse<DashboardAuditEvent>),
   });
 
+  const { data: dashboardSearchResults, isFetching: isDashboardSearchLoading } = useQuery({
+    queryKey: ["dashboard", "search", debouncedDashboardSearch],
+    queryFn: () =>
+      searchAPI.search({
+        search: debouncedDashboardSearch,
+        page: 1,
+        page_size: 5,
+      }).then((r) => r.data as DocumentSearchResponse),
+    enabled: debouncedDashboardSearch.length >= 2,
+  });
+
   const recentDocsCount = recentDocs?.count ?? 0;
   const recentAuditCount = recentAudit?.count ?? 0;
   const recentDocsPages = Math.max(1, Math.ceil(recentDocsCount / RECENT_DOCS_PAGE_SIZE));
@@ -136,11 +153,38 @@ export default function DashboardPage() {
   const auditSubtitle = user?.has_admin_access
     ? "Recent activity on your document records."
     : "Recent activity on documents you own.";
+  const dashboardResults = dashboardSearchResults?.results ?? [];
+  const dashboardResultsTotal = dashboardSearchResults?.total ?? 0;
+  const showDashboardSearchPanel = isDashboardSearchFocused && dashboardSearch.trim().length > 0;
+  const dashboardSearchTerm = dashboardSearch.trim();
+  const hasActiveDashboardSelection =
+    activeDashboardResultIndex >= 0 && activeDashboardResultIndex < dashboardResults.length;
 
   const handleDashboardSearch = () => {
-    const term = dashboardSearch.trim();
+    const term = dashboardSearchTerm;
     navigate(term ? `/search?q=${encodeURIComponent(term)}` : "/search");
   };
+
+  const handleDashboardResultOpen = (hit: SearchHit) => {
+    setIsDashboardSearchFocused(false);
+    setActiveDashboardResultIndex(-1);
+    navigate(`/documents/${hit.id}`);
+  };
+
+  useEffect(() => {
+    const handleClickOutside = (event: MouseEvent) => {
+      if (!dashboardSearchRef.current?.contains(event.target as Node)) {
+        setIsDashboardSearchFocused(false);
+      }
+    };
+
+    document.addEventListener("mousedown", handleClickOutside);
+    return () => document.removeEventListener("mousedown", handleClickOutside);
+  }, []);
+
+  useEffect(() => {
+    setActiveDashboardResultIndex(-1);
+  }, [debouncedDashboardSearch]);
 
   return (
     <div className="max-w-7xl mx-auto space-y-8">
@@ -160,24 +204,173 @@ export default function DashboardPage() {
           </div>
         </div>
 
-        <div className="flex flex-col gap-3 sm:flex-row sm:items-center">
-          <div className="relative w-full sm:w-96">
-            <span className="pointer-events-none absolute left-4 top-1/2 -translate-y-1/2 text-muted-foreground">
-              <Search className="w-4 h-4" />
-            </span>
-            <input
-              type="search"
-              placeholder="Search documents, metadata, content..."
-              className="input w-full pl-11 pr-4"
-              value={dashboardSearch}
-              onChange={(e) => setDashboardSearch(e.target.value)}
-              onKeyDown={(e) => {
-                if (e.key === "Enter") {
-                  e.preventDefault();
-                  handleDashboardSearch();
-                }
-              }}
-            />
+        <div className="flex flex-col gap-3 sm:flex-row sm:items-start">
+          <div ref={dashboardSearchRef} className="relative w-full sm:w-96">
+            <div className="relative">
+              <span className="pointer-events-none absolute left-4 top-1/2 -translate-y-1/2 text-muted-foreground">
+                <Search className="w-4 h-4" />
+              </span>
+              <input
+                type="search"
+                placeholder="Search documents, metadata, content..."
+                className="input w-full pl-11 pr-4"
+                value={dashboardSearch}
+                onChange={(e) => setDashboardSearch(e.target.value)}
+                onFocus={() => setIsDashboardSearchFocused(true)}
+                onKeyDown={(e) => {
+                  if (e.key === "ArrowDown" && dashboardResults.length > 0) {
+                    e.preventDefault();
+                    setIsDashboardSearchFocused(true);
+                    setActiveDashboardResultIndex((current) =>
+                      current < dashboardResults.length - 1 ? current + 1 : 0,
+                    );
+                  }
+                  if (e.key === "ArrowUp" && dashboardResults.length > 0) {
+                    e.preventDefault();
+                    setIsDashboardSearchFocused(true);
+                    setActiveDashboardResultIndex((current) =>
+                      current <= 0 ? dashboardResults.length - 1 : current - 1,
+                    );
+                  }
+                  if (e.key === "Enter") {
+                    e.preventDefault();
+                    if (activeDashboardResultIndex >= 0 && dashboardResults[activeDashboardResultIndex]) {
+                      handleDashboardResultOpen(dashboardResults[activeDashboardResultIndex]);
+                      return;
+                    }
+                    handleDashboardSearch();
+                  }
+                  if (e.key === "Escape") {
+                    setIsDashboardSearchFocused(false);
+                    setActiveDashboardResultIndex(-1);
+                  }
+                }}
+              />
+            </div>
+
+            {showDashboardSearchPanel && (
+              <div
+                className="absolute left-0 right-0 top-[calc(100%+0.5rem)] z-30 overflow-hidden rounded-xl border border-border bg-card"
+                style={{ boxShadow: "var(--shadow-card)" }}
+              >
+                <div className="border-b border-border bg-muted/40 px-4 py-3">
+                  <div className="flex items-center justify-between gap-3">
+                    <div>
+                      <p className="text-sm font-semibold text-foreground">Quick search</p>
+                      <p className="text-xs text-muted-foreground">
+                        {dashboardSearch.trim().length < 2
+                          ? "Type at least 2 characters to search across document text and metadata."
+                          : "Open a document directly, or continue to advanced search for filters."}
+                      </p>
+                    </div>
+                    <Sparkles className="h-4 w-4 text-accent" />
+                  </div>
+                </div>
+
+                {dashboardSearch.trim().length < 2 ? (
+                  <div className="px-4 py-5 text-sm text-muted-foreground">
+                    Keep typing to see live matches from Elasticsearch.
+                  </div>
+                ) : isDashboardSearchLoading ? (
+                  <div className="flex items-center justify-center px-4 py-6">
+                    <Loader2 className="h-5 w-5 animate-spin text-muted-foreground" />
+                  </div>
+                ) : dashboardResults.length > 0 ? (
+                  <>
+                    <div className="divide-y divide-border">
+                      {dashboardResults.map((hit: SearchHit, index) => (
+                        (() => {
+                          const snippetData = getQuickSearchSnippet(hit, dashboardSearchTerm);
+
+                          return (
+                        <button
+                          key={hit.id}
+                          type="button"
+                          className={`block w-full px-4 py-3 text-left transition-colors hover:bg-muted/40 ${
+                            activeDashboardResultIndex === index ? "bg-muted/50" : ""
+                          }`}
+                          onMouseEnter={() => setActiveDashboardResultIndex(index)}
+                          onClick={() => handleDashboardResultOpen(hit)}
+                        >
+                          <div className="flex items-start justify-between gap-3">
+                            <div className="min-w-0 flex-1">
+                              <div className="mb-1 flex flex-wrap items-center gap-2 text-xs text-muted-foreground">
+                                <span
+                                  className="font-mono text-brand-600"
+                                  dangerouslySetInnerHTML={{
+                                    __html: highlightSearchText(hit.reference_number, dashboardSearchTerm),
+                                  }}
+                                />
+                                <span>•</span>
+                                <span>{hit.document_type}</span>
+                              </div>
+                              <p
+                                className="truncate text-sm font-semibold text-foreground"
+                                dangerouslySetInnerHTML={{
+                                  __html: highlightSearchText(hit.title, dashboardSearchTerm),
+                                }}
+                              />
+                              {hit.supplier && (
+                                <p
+                                  className="mt-1 truncate text-xs text-muted-foreground"
+                                  dangerouslySetInnerHTML={{
+                                    __html: highlightSearchText(hit.supplier, dashboardSearchTerm),
+                                  }}
+                                />
+                              )}
+                              <div className="mt-2 rounded-md bg-muted/40 px-2.5 py-2">
+                                {!snippetData.isFallback && (
+                                  <p className="sr-only">Search match context</p>
+                                )}
+                                <p
+                                  className="line-clamp-3 text-xs leading-5 text-foreground"
+                                  dangerouslySetInnerHTML={{ __html: snippetData.snippet }}
+                                />
+                              </div>
+                            </div>
+                            <StatusBadge status={hit.status} />
+                          </div>
+                        </button>
+                          );
+                        })()
+                      ))}
+                    </div>
+
+                    <div className="flex items-center justify-between gap-3 border-t border-border bg-muted/30 px-4 py-3">
+                      <div className="space-y-1">
+                        <p className="text-xs text-muted-foreground">
+                          {dashboardResultsTotal} result{dashboardResultsTotal !== 1 ? "s" : ""} for "{dashboardSearchTerm}"
+                        </p>
+                        <p className="text-[11px] text-muted-foreground">
+                          {hasActiveDashboardSelection ? "Enter to open selected result" : "Arrow keys to browse"} • Esc to close
+                        </p>
+                      </div>
+                      <button
+                        type="button"
+                        onClick={handleDashboardSearch}
+                        className="inline-flex items-center gap-2 text-sm font-semibold text-foreground transition-colors hover:text-accent"
+                      >
+                        Advanced search <ArrowRight className="h-4 w-4" />
+                      </button>
+                    </div>
+                  </>
+                ) : (
+                  <div className="px-4 py-5">
+                    <p className="text-sm font-medium text-foreground">No direct matches yet</p>
+                    <p className="mt-1 text-xs text-muted-foreground">
+                      Try a different keyword, or open advanced search to apply filters.
+                    </p>
+                    <button
+                      type="button"
+                      onClick={handleDashboardSearch}
+                      className="mt-3 inline-flex items-center gap-2 text-sm font-semibold text-foreground transition-colors hover:text-accent"
+                    >
+                      Search everything <ArrowRight className="h-4 w-4" />
+                    </button>
+                  </div>
+                )}
+              </div>
+            )}
           </div>
           <button
             type="button"

@@ -5,21 +5,9 @@ import { Search, Loader2, FileText, X } from "lucide-react";
 import { Link, useSearchParams } from "react-router-dom";
 import StatusBadge from "@/components/documents/StatusBadge";
 import { format } from "date-fns";
-import type { DocumentStatus } from "@/types";
+import type { DocumentSearchResponse, SearchHit } from "@/types";
 import { useDebounce } from "@/hooks/useDebounce";
-
-interface SearchHit {
-  id: string;
-  score: number;
-  title: string;
-  reference_number: string;
-  document_type: string;
-  supplier: string;
-  amount: number | null;
-  status: DocumentStatus;
-  document_date: string | null;
-  highlights: Record<string, string>;
-}
+import { escapeSearchRegex, getPreferredHighlights } from "@/lib/search";
 
 export default function SearchPage() {
   const [searchParams, setSearchParams] = useSearchParams();
@@ -32,7 +20,8 @@ export default function SearchPage() {
   const debouncedSearchTerm = useDebounce(searchTerm, 350);
 
   const searchMutation = useMutation({
-    mutationFn: (payload: any) => searchAPI.search(payload).then((r) => r.data),
+    mutationFn: (payload: Record<string, unknown>) =>
+      searchAPI.search(payload).then((r) => r.data as DocumentSearchResponse),
   });
 
   useEffect(() => {
@@ -93,7 +82,8 @@ export default function SearchPage() {
   // Highlight only the searched term in the snippet
   const highlightTerm = (text: string, term: string) => {
     if (!term || !text) return text;
-    const regex = new RegExp(`(${term})`, "gi");
+    const escapedTerm = escapeSearchRegex(term);
+    const regex = new RegExp(`(${escapedTerm})`, "gi");
     return text.replace(regex, '<span class="bg-yellow-200 text-yellow-800 font-medium px-0.5 rounded">$1</span>');
   };
 
@@ -210,11 +200,8 @@ export default function SearchPage() {
                     {/* Only highlight the searched term - modern style */}
                     {hit.highlights && Object.keys(hit.highlights).length > 0 && (
                       <div className="mt-4 text-sm text-gray-600 border-l-2 border-brand-200 pl-4 space-y-3">
-                        {Object.entries(hit.highlights).map(([field, snippet]) => (
+                        {getPreferredHighlights(hit, searchTerm).map(([field, snippet]) => (
                           <div key={field} className="italic">
-                            <span className="text-xs uppercase tracking-widest text-gray-400 mr-2">
-                              {field}
-                            </span>
                             <span
                               dangerouslySetInnerHTML={{
                                 __html: highlightTerm(snippet, searchTerm),
