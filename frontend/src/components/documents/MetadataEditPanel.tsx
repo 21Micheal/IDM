@@ -69,9 +69,9 @@ function DynamicField({
           {...register(`metadata.${field.key}`)}
           type="checkbox"
           id={`meta-${field.key}`}
-          className="w-4 h-4 rounded border-gray-300 text-brand-600"
+          className="w-4 h-4 rounded border-border text-primary"
         />
-        <label htmlFor={`meta-${field.key}`} className="text-sm text-gray-700">
+        <label htmlFor={`meta-${field.key}`} className="text-sm text-foreground">
           {field.label}
         </label>
       </div>
@@ -136,6 +136,7 @@ export default function MetadataEditPanel({ document: doc, onClose }: Props) {
     onSuccess: () => {
       toast.success("Metadata updated");
       qc.invalidateQueries({ queryKey: ["document", doc.id] });
+      qc.invalidateQueries({ queryKey: ["document-preview", doc.id] });
       onClose();
     },
     onError: (err: { response?: { data?: { detail?: string } } }) =>
@@ -156,19 +157,28 @@ export default function MetadataEditPanel({ document: doc, onClose }: Props) {
     } else {
       payload.personal_tags = personalTags;
     }
+    if (payload.amount === "" || payload.amount === null || payload.amount === undefined) {
+      delete payload.amount;
+    }
+    if (payload.document_date === "") {
+      delete payload.document_date;
+    }
+    if (payload.due_date === "") {
+      delete payload.due_date;
+    }
     mutation.mutate(payload);
   };
 
   const metadataFields = doc.document_type?.metadata_fields ?? [];
 
   return (
-    <div className="card p-5 border-l-4 border-brand-400 space-y-5">
+    <div className="h-full overflow-y-auto p-4 space-y-5">
       <div className="flex items-center justify-between">
         <div className="flex items-center gap-2">
-          <Edit2 className="w-4 h-4 text-brand-500" />
-          <h3 className="font-semibold text-gray-900 text-sm">Edit document details</h3>
+          <Edit2 className="w-4 h-4 text-primary" />
+          <h3 className="font-semibold text-foreground text-sm">Edit document details</h3>
         </div>
-        <button onClick={onClose} className="text-gray-400 hover:text-gray-600">
+        <button type="button" onClick={onClose} className="text-muted-foreground hover:text-foreground">
           <X className="w-4 h-4" />
         </button>
       </div>
@@ -216,7 +226,7 @@ export default function MetadataEditPanel({ document: doc, onClose }: Props) {
                     type="button"
                     onClick={() => removePersonalTag(index)}
                     disabled={personalTagFields.length === 1}
-                    className="p-2 rounded-lg border border-gray-200 text-gray-500 hover:text-red-600 hover:bg-red-50 disabled:opacity-40 disabled:cursor-not-allowed"
+                    className="p-2 rounded-lg border border-border text-muted-foreground hover:text-destructive hover:bg-destructive/5 disabled:opacity-40 disabled:cursor-not-allowed"
                     title="Remove tag"
                   >
                     <X className="w-4 h-4" />
@@ -227,11 +237,11 @@ export default function MetadataEditPanel({ document: doc, onClose }: Props) {
             <button
               type="button"
               onClick={() => appendPersonalTag({ value: "" })}
-              className="mt-3 inline-flex items-center gap-2 text-sm font-medium text-brand-600 hover:text-brand-700"
+              className="mt-3 inline-flex items-center gap-2 text-sm font-medium text-primary hover:text-primary/80"
             >
               <Plus className="w-4 h-4" /> Add another tag
             </button>
-            <p className="text-xs text-gray-500 mt-1">
+            <p className="text-xs text-muted-foreground mt-1">
               Add as many tags as you need for this personal document.
             </p>
           </div>
@@ -265,8 +275,8 @@ export default function MetadataEditPanel({ document: doc, onClose }: Props) {
 
         {/* Dynamic metadata fields */}
         {metadataFields.length > 0 && (
-          <div className="border-t border-gray-100 pt-4 space-y-4">
-            <p className="text-xs font-semibold text-gray-500 uppercase tracking-wide">
+          <div className="border-t border-border pt-4 space-y-4">
+            <p className="text-xs font-semibold text-muted-foreground uppercase tracking-wide">
               {doc.document_type.name} fields
             </p>
             {[...metadataFields]

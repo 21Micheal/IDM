@@ -2,7 +2,7 @@ import { useState, useEffect } from "react";
 import { useMutation } from "@tanstack/react-query";
 import { searchAPI } from "@/services/api";
 import { Search, Loader2, FileText, X } from "lucide-react";
-import { Link } from "react-router-dom";
+import { Link, useSearchParams } from "react-router-dom";
 import StatusBadge from "@/components/documents/StatusBadge";
 import { format } from "date-fns";
 import type { DocumentStatus } from "@/types";
@@ -22,6 +22,7 @@ interface SearchHit {
 }
 
 export default function SearchPage() {
+  const [searchParams, setSearchParams] = useSearchParams();
   const [searchTerm, setSearchTerm] = useState("");
   const [dateFrom, setDateFrom] = useState("");
   const [dateTo, setDateTo] = useState("");
@@ -33,6 +34,19 @@ export default function SearchPage() {
   const searchMutation = useMutation({
     mutationFn: (payload: any) => searchAPI.search(payload).then((r) => r.data),
   });
+
+  useEffect(() => {
+    const query = searchParams.get("q") ?? "";
+    const nextDateFrom = searchParams.get("date_from") ?? "";
+    const nextDateTo = searchParams.get("date_to") ?? "";
+    const nextStatus = searchParams.get("status") ?? "";
+
+    setSearchTerm(query);
+    setDateFrom(nextDateFrom);
+    setDateTo(nextDateTo);
+    setStatusFilter(nextStatus);
+    setPage(1);
+  }, [searchParams]);
 
   const handleSearch = (newPage = 1) => {
     setPage(newPage);
@@ -49,12 +63,24 @@ export default function SearchPage() {
   };
 
   useEffect(() => {
+    const nextParams = new URLSearchParams();
+    if (debouncedSearchTerm) nextParams.set("q", debouncedSearchTerm);
+    if (statusFilter) nextParams.set("status", statusFilter);
+    if (dateFrom) nextParams.set("date_from", dateFrom);
+    if (dateTo) nextParams.set("date_to", dateTo);
+
+    const currentParams = searchParams.toString();
+    const updatedParams = nextParams.toString();
+    if (currentParams !== updatedParams) {
+      setSearchParams(nextParams, { replace: true });
+    }
+
     if (debouncedSearchTerm || statusFilter || dateFrom || dateTo) {
       handleSearch(1);
     } else {
       searchMutation.reset();
     }
-  }, [debouncedSearchTerm, statusFilter, dateFrom, dateTo]);
+  }, [debouncedSearchTerm, statusFilter, dateFrom, dateTo, searchParams, setSearchParams]);
 
   const clearFilters = () => {
     setSearchTerm("");
@@ -125,6 +151,18 @@ export default function SearchPage() {
             <input type="date" value={dateTo} onChange={(e) => setDateTo(e.target.value)} className="input" />
           </div>
         </div>
+        {(searchTerm || statusFilter || dateFrom || dateTo) && (
+          <div className="mt-4 flex justify-end">
+            <button
+              type="button"
+              onClick={clearFilters}
+              className="inline-flex items-center gap-2 text-sm text-muted-foreground hover:text-foreground"
+            >
+              <X className="w-4 h-4" />
+              Clear filters
+            </button>
+          </div>
+        )}
       </div>
 
       {searchMutation.data && (

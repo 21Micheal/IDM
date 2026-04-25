@@ -7,7 +7,7 @@ import {
   ChevronLeft, ChevronRight,
   Calendar, Loader2, Search, ShieldCheck,
 } from "lucide-react";
-import { Link } from "react-router-dom";
+import { Link, useNavigate } from "react-router-dom";
 import StatusBadge from "@/components/documents/StatusBadge";
 import { format, formatDistanceToNow, isSameDay } from "date-fns";
 import { useState } from "react";
@@ -88,8 +88,10 @@ function TaskMetaInfo({ dueAt }: { dueAt: string | null }) {
 
 export default function DashboardPage() {
   const { user } = useAuthStore();
+  const navigate = useNavigate();
   const [recentDocsPage, setRecentDocsPage] = useState(1);
   const [recentAuditPage, setRecentAuditPage] = useState(1);
+  const [dashboardSearch, setDashboardSearch] = useState("");
 
   const { data: recentDocs, isLoading: docsLoading } = useQuery({
     queryKey: ["documents", "recent", recentDocsPage],
@@ -135,6 +137,11 @@ export default function DashboardPage() {
     ? "Recent activity on your document records."
     : "Recent activity on documents you own.";
 
+  const handleDashboardSearch = () => {
+    const term = dashboardSearch.trim();
+    navigate(term ? `/search?q=${encodeURIComponent(term)}` : "/search");
+  };
+
   return (
     <div className="max-w-7xl mx-auto space-y-8">
       {/* Header */}
@@ -162,8 +169,24 @@ export default function DashboardPage() {
               type="search"
               placeholder="Search documents, metadata, content..."
               className="input w-full pl-11 pr-4"
+              value={dashboardSearch}
+              onChange={(e) => setDashboardSearch(e.target.value)}
+              onKeyDown={(e) => {
+                if (e.key === "Enter") {
+                  e.preventDefault();
+                  handleDashboardSearch();
+                }
+              }}
             />
           </div>
+          <button
+            type="button"
+            onClick={handleDashboardSearch}
+            className="inline-flex items-center justify-center gap-2 rounded-lg border border-border bg-card px-4 py-2.5 text-sm font-semibold text-foreground transition-colors hover:bg-muted"
+          >
+            <Search className="w-4 h-4" />
+            Search
+          </button>
           <Link
             to="/workflow"
             className="inline-flex items-center justify-center gap-2 rounded-lg bg-primary px-5 py-2.5 text-sm font-semibold text-primary-foreground transition-colors hover:bg-primary/90"

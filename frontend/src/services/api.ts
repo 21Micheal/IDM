@@ -190,15 +190,6 @@ export const documentsAPI = {
     api.post<DocumentEditTokenResponse>(`/documents/${id}/edit_token/`),
 
   /**
-   * Download a personalised shell script that opens the document directly
-   * in LibreOffice via WebDAV — bypasses browser protocol-handler issues
-   * on Linux / Chrome.  GET — also acquires the edit lock.
-   * Returns a Blob (the .sh script file).
-   */
-  openScript: (id: string) =>
-    api.get(`/documents/${id}/open_script/`, { responseType: "blob" }),
-
-  /**
    * Download the one-time install script that registers the docvault-open://
    * protocol handler with xdg-open and Chrome on Linux.
    * Run once per machine — no token, no document-specific data.

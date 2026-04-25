@@ -18,6 +18,7 @@ Correct pattern:
 No other changes to this file.
 """
 from rest_framework import serializers
+import logging
 from .models import (
     Document, DocumentType, MetadataField,
     DocumentVersion, DocumentComment, Tag, OCRStatus,
@@ -29,6 +30,7 @@ from django.utils.text import slugify
 import mimetypes
 
 PERSONAL_DOCUMENT_TYPE_CODE = "PERSONAL"
+logger = logging.getLogger(__name__)
 
 
 def _normalize_personal_tags(value) -> list[str]:
@@ -342,6 +344,8 @@ class DocumentMetadataEditSerializer(serializers.ModelSerializer):
         ]
 
     def update(self, instance, validated_data):
+        from elasticsearch.helpers import BulkIndexError
+
         tags = validated_data.pop("tags", None)
         personal_tags = validated_data.pop("personal_tags", None)
         if personal_tags is not None:
@@ -353,11 +357,37 @@ class DocumentMetadataEditSerializer(serializers.ModelSerializer):
             metadata = dict(validated_data.get("metadata") or instance.metadata or {})
             metadata["personal_tags"] = normalized_tags
             validated_data["metadata"] = metadata
+
         for attr, value in validated_data.items():
             setattr(instance, attr, value)
-        instance.save()
+
+        try:
+            instance.save()
+        except BulkIndexError as exc:
+            # The DB save has already succeeded at this point; django-elasticsearch-dsl
+            # raised while trying to mirror the row into Elasticsearch in post_save.
+            logger.warning(
+                "Metadata edit saved for %s but realtime indexing failed: %s",
+                instance.id,
+                getattr(exc, "errors", exc),
+            )
+
         if tags is not None:
-            instance.tags.set(tags)
+            try:
+                instance.tags.set(tags)
+            except BulkIndexError as exc:
+                logger.warning(
+                    "Metadata tags saved for %s but realtime indexing failed: %s",
+                    instance.id,
+                    getattr(exc, "errors", exc),
+                )
+
+        try:
+            from apps.search.tasks import index_document
+            index_document.delay(str(instance.id))
+        except Exception:
+            logger.exception("Failed to queue async reindex for document %s", instance.id)
+
         return instance
 
 
