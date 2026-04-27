@@ -20,9 +20,9 @@ def send_otp_email(user: User, purpose: str = "login") -> EmailOTP:
     otp = EmailOTP.generate(user, purpose=purpose)
 
     subject = {
-        "login":    "Your DocVault login code",
-        "mfa_setup": "Confirm your DocVault email verification",
-    }.get(purpose, "Your DocVault verification code")
+        "login":    "Your DMS login code",
+        "mfa_setup": "Confirm your DMS email verification",
+    }.get(purpose, "Your DMS verification code")
 
     # Plain-text body — no template required
     body = f"""Hello {user.first_name},
@@ -36,7 +36,7 @@ Do not share it with anyone.
 
 If you did not request this code, please contact your system administrator immediately.
 
-— DocVault Security
+— DMS Security
 """
 
     send_mail(

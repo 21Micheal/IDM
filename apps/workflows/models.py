@@ -41,10 +41,9 @@ class WorkflowTemplate(models.Model):
 
 class WorkflowStep(models.Model):
     ASSIGNEE_TYPES = [
-        ("group_any",     "Any member of group"),
-        ("group_all",     "All members of group"),
+        ("group_any",      "Any member of group"),
+        ("group_all",      "All members of group"),
         ("group_specific", "Specific member of group"),
-        ("specific_user", "Specific user"),
     ]
 
     id            = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
@@ -68,6 +67,9 @@ class WorkflowStep(models.Model):
     )
     sla_hours      = models.PositiveSmallIntegerField(default=48)
     allow_resubmit = models.BooleanField(default=True)
+    allow_approve  = models.BooleanField(default=True, help_text="Approver can approve at this step")
+    allow_reject   = models.BooleanField(default=True, help_text="Approver can reject at this step")
+    allow_return   = models.BooleanField(default=True, help_text="Approver can send back for review at this step")
     instructions   = models.TextField(blank=True)
     created_at     = models.DateTimeField(auto_now_add=True, null=True)
     updated_at     = models.DateTimeField(auto_now=True)

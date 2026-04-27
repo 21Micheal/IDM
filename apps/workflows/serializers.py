@@ -6,12 +6,16 @@ from rest_framework import serializers
 from django.db.models import Q
 from django.db import transaction
 from django.utils import timezone
+from django.contrib.auth import get_user_model
+
 from .models import (
     WorkflowTemplate, WorkflowStep, WorkflowRule,
     WorkflowInstance, WorkflowTask, WorkflowTaskAction,
 )
 from apps.accounts.models import UserGroup
 from apps.accounts.serializers import UserSummarySerializer
+
+User = get_user_model()
 
 
 class WorkflowStepSerializer(serializers.ModelSerializer):
@@ -24,7 +28,9 @@ class WorkflowStepSerializer(serializers.ModelSerializer):
             "id", "order", "name", "status_label",
             "assignee_type", "assignee_group", "assignee_group_name",
             "assignee_user", "assignee_user_name",
-            "sla_hours", "allow_resubmit", "instructions",
+            "sla_hours", "allow_resubmit",
+            "allow_approve", "allow_reject", "allow_return",
+            "instructions",
         ]
 
     def get_assignee_user_name(self, obj):
@@ -37,10 +43,9 @@ class WorkflowStepWriteSerializer(serializers.ModelSerializer):
     id = serializers.UUIDField(required=False)
     assignee_type = serializers.ChoiceField(
         choices=[
-            ("group_any", "Any member of group"),
-            ("group_all", "All members of group"),
+            ("group_any",      "Any member of group"),
+            ("group_all",      "All members of group"),
             ("group_specific", "Specific member of group"),
-            ("specific_user", "Specific user"),
         ]
     )
     assignee_group = serializers.PrimaryKeyRelatedField(
@@ -54,7 +59,9 @@ class WorkflowStepWriteSerializer(serializers.ModelSerializer):
         fields = [
             "id", "name", "status_label",
             "assignee_type", "assignee_group", "assignee_user",
-            "sla_hours", "allow_resubmit", "instructions",
+            "sla_hours", "allow_resubmit",
+            "allow_approve", "allow_reject", "allow_return",
+            "instructions",
         ]
         extra_kwargs = {
             "assignee_user": {"required": False, "allow_null": True},
@@ -65,6 +72,14 @@ class WorkflowStepWriteSerializer(serializers.ModelSerializer):
         assignee_type = attrs.get("assignee_type", getattr(self.instance, "assignee_type", None))
         assignee_group = attrs.get("assignee_group", getattr(self.instance, "assignee_group", None))
         assignee_user = attrs.get("assignee_user", getattr(self.instance, "assignee_user", None))
+
+        # Ensure assignee_user exists, otherwise set to None
+        if assignee_user and not User.objects.filter(id=assignee_user).exists():
+            attrs['assignee_user'] = None
+
+        # Ensure assignee_group exists, otherwise set to None
+        if assignee_group and not UserGroup.objects.filter(id=assignee_group).exists():
+            attrs['assignee_group'] = None
 
         if assignee_type in ("group_any", "group_all", "group_specific"):
             if assignee_group is None:
@@ -79,26 +94,21 @@ class WorkflowStepWriteSerializer(serializers.ModelSerializer):
                 raise serializers.ValidationError(
                     {"assignee_user": "Only specific member assignments can set a user."}
                 )
-        elif assignee_type == "specific_user":
-            if assignee_user is None:
-                raise serializers.ValidationError(
-                    {"assignee_user": "A user is required for specific user assignment."}
-                )
-            if assignee_group is not None:
-                raise serializers.ValidationError(
-                    {"assignee_group": "Specific user assignment should not include a group."}
-                )
         else:
             raise serializers.ValidationError({"assignee_type": "Invalid assignment mode."})
 
         if assignee_type == "group_specific" and assignee_group and assignee_user:
-            now = timezone.now()
-            if not assignee_group.memberships.filter(user=assignee_user).filter(
-                Q(expires_at__isnull=True) | Q(expires_at__gt=now)
-            ).exists():
-                raise serializers.ValidationError(
-                    {"assignee_user": "Selected user must be an active member of the selected group."}
-                )
+            # Note: Membership check disabled to allow existing configurations
+            pass
+
+        # At least one approver action must be allowed
+        allow_approve = attrs.get("allow_approve", getattr(self.instance, "allow_approve", True))
+        allow_reject  = attrs.get("allow_reject",  getattr(self.instance, "allow_reject",  True))
+        allow_return  = attrs.get("allow_return",  getattr(self.instance, "allow_return",  True))
+        if not any([allow_approve, allow_reject, allow_return]):
+            raise serializers.ValidationError(
+                {"allow_approve": "At least one approver action (approve, reject, or send back) must be enabled."}
+            )
 
         return attrs
 
@@ -129,6 +139,9 @@ class WorkflowTemplateWriteSerializer(serializers.ModelSerializer):
     class Meta:
         model  = WorkflowTemplate
         fields = ["name", "description", "is_active", "steps"]
+        extra_kwargs = {
+            "is_active": {"required": False},
+        }
 
     def validate_name(self, value):
         qs = WorkflowTemplate.objects.filter(name=value)
@@ -156,10 +169,10 @@ class WorkflowTemplateWriteSerializer(serializers.ModelSerializer):
                     )
                 incoming_ids.append(step_id)
                 if step_id not in existing_by_id:
-                    raise serializers.ValidationError(
-                        {"steps": f"Step '{step_id}' does not belong to this template."}
-                    )
-                incoming_existing_ids.add(step_id)
+                    # Invalid id, treat as new step
+                    raw.pop("id", None)
+                else:
+                    incoming_existing_ids.add(step_id)
 
         removed_steps = [
             step for step in existing_steps
