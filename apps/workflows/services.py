@@ -128,10 +128,14 @@ class WorkflowService:
         task.acted_at = timezone.now()
         task.save(update_fields=["status", "comment", "acted_at"])
 
-        WorkflowTaskAction.objects.create(task=task, actor=actor, action="approved", comment=comment)
+        action = WorkflowTaskAction.objects.create(task=task, actor=actor, action="approved", comment=comment)
 
         instance   = task.workflow_instance
         step       = task.step
+        doc        = instance.document
+
+        # Notify stakeholders of approval
+        WorkflowService._notify_action(action, doc)
 
         if step.assignee_type == "group_all" and WorkflowService._has_active_step_tasks(instance, step.order):
             return
@@ -150,8 +154,15 @@ class WorkflowService:
         task.acted_at = timezone.now()
         task.save(update_fields=["status", "comment", "acted_at"])
 
-        WorkflowTaskAction.objects.create(task=task, actor=actor, action="rejected", comment=comment)
-        WorkflowService._complete(task.workflow_instance, "rejected")
+        action = WorkflowTaskAction.objects.create(task=task, actor=actor, action="rejected", comment=comment)
+        
+        instance = task.workflow_instance
+        doc      = instance.document
+
+        # Notify stakeholders of rejection
+        WorkflowService._notify_action(action, doc)
+        
+        WorkflowService._complete(instance, "rejected")
 
     # ── Return for review ──────────────────────────────────────────────────
 

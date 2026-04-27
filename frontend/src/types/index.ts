@@ -78,6 +78,7 @@ export interface Document {
   current_version: number;
   versions: DocumentVersion[];
   comments?: DocumentComment[];
+  available_bulk_actions?: string[];
   created_at: string;
   updated_at: string;
 }
@@ -121,15 +122,24 @@ export interface UserSummary {
 
 export interface WorkflowTask {
   id: string;
-  step: { name: string; order: number };
+  step: {
+    name: string;
+    order: number;
+    instructions?: string;
+    allow_approve?: boolean;
+    allow_reject?: boolean;
+    allow_return?: boolean;
+  };
   workflow_instance?: {
     document?: { id: string; title: string; reference_number: string };
   };
   document_id?: string;
   document_title?: string;
   document_ref?: string;
-  status: "pending" | "in_progress" | "approved" | "rejected";
+  status: "pending" | "in_progress" | "approved" | "rejected" | "returned" | "held" | "skipped";
   due_at: string | null;
+  held_until?: string | null;
+  status_display?: string;
 }
 
 export interface Notification {

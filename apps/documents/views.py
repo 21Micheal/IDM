@@ -145,7 +145,7 @@ class DocumentViewSet(AuditMixin, viewsets.ModelViewSet):
         qs   = (
             Document.objects
             .select_related("document_type", "uploaded_by", "department", "edit_locked_by")
-            .prefetch_related("tags", "versions")
+            .prefetch_related("tags", "versions", "workflow_instance__tasks__step")
         )
         if user.has_admin_access:
             return qs
@@ -968,13 +968,20 @@ echo "✓ DocVault LibreOffice integration installed."
                 if act in ("approve", "reject"):
                     task = (
                         doc.workflow_instance.tasks
-                        .filter(status="in_progress")
+                        .filter(status__in=["in_progress", "held"])
                         .select_related("step").first()
                     )
                     if not task:
                         raise WorkflowError("No active approval task.")
                     if task.assigned_to != request.user and not request.user.has_admin_access:
                         raise WorkflowError("Not authorised.")
+                    
+                    # Check step permissions
+                    if act == "approve" and not task.step.allow_approve:
+                        raise WorkflowError("Approve is not permitted for this step.")
+                    if act == "reject" and not task.step.allow_reject:
+                        raise WorkflowError("Reject is not permitted for this step.")
+                    
                     if act == "approve":
                         WorkflowService.approve(task, request.user, comment)
                     else:

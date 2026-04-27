@@ -237,26 +237,29 @@ export default function WorkflowActionPanel({ task, documentId }: Props) {
       {/* Action buttons — shown when task is active */}
       {isActive && !activeAction && (
         <div className="grid grid-cols-2 gap-2">
-          {task.step.allow_approve && (
+          {task.step?.allow_approve !== false && (
             <button
               onClick={() => setActiveAction("approve")}
               className="flex items-center justify-center gap-1.5 px-3 py-2.5 bg-green-600 text-white text-sm font-medium rounded-lg hover:bg-green-700 transition-colors"
+              title="Approve this document"
             >
               <CheckCircle className="w-4 h-4" /> Approve
             </button>
           )}
-          {task.step.allow_reject && (
+          {task.step?.allow_reject !== false && (
             <button
               onClick={() => setActiveAction("reject")}
               className="flex items-center justify-center gap-1.5 px-3 py-2.5 bg-red-600 text-white text-sm font-medium rounded-lg hover:bg-red-700 transition-colors"
+              title="Reject this document — requires comment"
             >
               <XCircle className="w-4 h-4" /> Reject
             </button>
           )}
-          {task.step.allow_return && (
+          {task.step?.allow_return !== false && (
             <button
               onClick={() => setActiveAction("return")}
               className="flex items-center justify-center gap-1.5 px-3 py-2.5 bg-amber-500 text-white text-sm font-medium rounded-lg hover:bg-amber-600 transition-colors"
+              title="Return for review — sends back for rework"
             >
               <RotateCcw className="w-4 h-4" /> Return for review
             </button>
@@ -264,6 +267,7 @@ export default function WorkflowActionPanel({ task, documentId }: Props) {
           <button
             onClick={() => setActiveAction("hold")}
             className="flex items-center justify-center gap-1.5 px-3 py-2.5 bg-blue-600 text-white text-sm font-medium rounded-lg hover:bg-blue-700 transition-colors"
+            title="Pause processing and place on hold"
           >
             <PauseCircle className="w-4 h-4" /> Place on hold
           </button>

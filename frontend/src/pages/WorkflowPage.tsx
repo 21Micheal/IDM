@@ -2,7 +2,7 @@ import { useState } from "react";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { workflowAPI } from "@/services/api";
 import { Link } from "react-router-dom";
-import { CheckCircle, XCircle, Clock, Loader2, GitBranch } from "lucide-react";
+import { CheckCircle, XCircle, Clock, Loader2, GitBranch, RotateCcw } from "lucide-react";
 import { formatDistanceToNow } from "date-fns";
 import { toast } from "react-toastify";
 import type { WorkflowTask } from "@/types";
@@ -13,7 +13,7 @@ function ApprovalModal({
   onClose,
 }: {
   task: WorkflowTask;
-  action: "approve" | "reject";
+  action: "approve" | "reject" | "return";
   onClose: () => void;
 }) {
   const [comment, setComment] = useState("");
@@ -28,9 +28,17 @@ function ApprovalModal({
     mutationFn: () =>
       action === "approve"
         ? workflowAPI.approveTask(task.id, comment)
-        : workflowAPI.rejectTask(task.id, comment),
+        : action === "reject"
+          ? workflowAPI.rejectTask(task.id, comment)
+          : workflowAPI.returnForReview(task.id, comment),
     onSuccess: () => {
-      toast.success(action === "approve" ? "Document approved" : "Document rejected");
+      toast.success(
+        action === "approve"
+          ? "Document approved"
+          : action === "reject"
+            ? "Document rejected"
+            : "Document returned for review"
+      );
       qc.invalidateQueries({ queryKey: ["workflow"] });
       onClose();
     },
@@ -42,7 +50,11 @@ function ApprovalModal({
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-foreground/40 backdrop-blur-sm p-4">
       <div className="card w-full max-w-md p-6 space-y-4" style={{ boxShadow: "var(--shadow-elegant)" }}>
         <h2 className="font-semibold text-foreground text-lg">
-          {action === "approve" ? "Approve document" : "Reject document"}
+          {action === "approve"
+            ? "Approve document"
+            : action === "reject"
+              ? "Reject document"
+              : "Return for review"}
         </h2>
         <p className="text-sm text-muted-foreground">
           <span className="font-medium text-foreground">{documentTitle}</span>
@@ -52,7 +64,7 @@ function ApprovalModal({
         </p>
         <div>
           <label className="label">
-            Comment{action === "reject" && <span className="text-destructive ml-1">*</span>}
+            Comment{action !== "approve" && <span className="text-destructive ml-1">*</span>}
           </label>
           <textarea
             value={comment}
@@ -62,7 +74,9 @@ function ApprovalModal({
             placeholder={
               action === "approve"
                 ? "Optional: add a note…"
-                : "Reason for rejection (required)"
+                : action === "reject"
+                  ? "Reason for rejection (required)"
+                  : "Explain what needs to be fixed (required)"
             }
             autoFocus
           />
@@ -71,11 +85,17 @@ function ApprovalModal({
           <button onClick={onClose} className="btn-secondary">Cancel</button>
           <button
             onClick={() => mutation.mutate()}
-            disabled={mutation.isPending || (action === "reject" && !comment.trim())}
-            className={action === "approve" ? "btn-primary" : "btn-danger"}
+            disabled={mutation.isPending || (action !== "approve" && !comment.trim())}
+            className={
+              action === "approve"
+                ? "btn-primary"
+                : action === "reject"
+                  ? "btn-danger"
+                  : "inline-flex items-center gap-2 rounded-lg bg-amber-500 px-4 py-2 text-sm font-medium text-white hover:bg-amber-600 disabled:opacity-50"
+            }
           >
             {mutation.isPending && <Loader2 className="w-4 h-4 animate-spin" />}
-            {action === "approve" ? "Approve" : "Reject"}
+            {action === "approve" ? "Approve" : action === "reject" ? "Reject" : "Return for review"}
           </button>
         </div>
       </div>
@@ -84,7 +104,7 @@ function ApprovalModal({
 }
 
 export default function WorkflowPage() {
-  const [modal, setModal] = useState<{ task: WorkflowTask; action: "approve" | "reject" } | null>(null);
+  const [modal, setModal] = useState<{ task: WorkflowTask; action: "approve" | "reject" | "return" } | null>(null);
 
   const { data: tasks, isLoading } = useQuery<WorkflowTask[]>({
     queryKey: ["workflow", "my-tasks"],
@@ -130,6 +150,10 @@ export default function WorkflowPage() {
             task.workflow_instance?.document?.reference_number ?? task.document_ref ?? "";
 
           const isOverdue = task.due_at && new Date(task.due_at) < new Date();
+          const canApprove = task.step?.allow_approve !== false;
+          const canReject = task.step?.allow_reject !== false;
+          const canReturn = task.step?.allow_return !== false;
+          const hasTaskActions = canApprove || canReject || canReturn;
 
           return (
             <div key={task.id} className="card p-5 flex items-start gap-4 hover:-translate-y-0.5 transition-transform">
@@ -149,20 +173,38 @@ export default function WorkflowPage() {
                       {documentRef}
                     </p>
                   </div>
-                  <div className="flex gap-2 flex-shrink-0">
-                    <button
-                      onClick={() => setModal({ task, action: "approve" })}
-                      className="inline-flex items-center gap-1.5 rounded-lg bg-teal px-3 py-1.5 text-xs font-medium text-teal-foreground hover:bg-teal/90 transition-colors"
-                    >
-                      <CheckCircle className="w-3.5 h-3.5" /> Approve
-                    </button>
-                    <button
-                      onClick={() => setModal({ task, action: "reject" })}
-                      className="btn-danger text-xs px-3 py-1.5"
-                    >
-                      <XCircle className="w-3.5 h-3.5" /> Reject
-                    </button>
-                  </div>
+                  {hasTaskActions ? (
+                    <div className="flex gap-2 flex-shrink-0 flex-wrap justify-end">
+                      {canApprove && (
+                        <button
+                          onClick={() => setModal({ task, action: "approve" })}
+                          className="inline-flex items-center gap-1.5 rounded-lg bg-teal px-3 py-1.5 text-xs font-medium text-teal-foreground hover:bg-teal/90 transition-colors"
+                        >
+                          <CheckCircle className="w-3.5 h-3.5" /> Approve
+                        </button>
+                      )}
+                      {canReject && (
+                        <button
+                          onClick={() => setModal({ task, action: "reject" })}
+                          className="btn-danger text-xs px-3 py-1.5"
+                        >
+                          <XCircle className="w-3.5 h-3.5" /> Reject
+                        </button>
+                      )}
+                      {canReturn && (
+                        <button
+                          onClick={() => setModal({ task, action: "return" })}
+                          className="inline-flex items-center gap-1.5 rounded-lg bg-amber-500 px-3 py-1.5 text-xs font-medium text-white hover:bg-amber-600 transition-colors"
+                        >
+                          <RotateCcw className="w-3.5 h-3.5" /> Return
+                        </button>
+                      )}
+                    </div>
+                  ) : (
+                    <span className="text-xs text-muted-foreground flex-shrink-0">
+                      No task actions enabled
+                    </span>
+                  )}
                 </div>
                 <div className="flex items-center gap-3 mt-2 text-xs text-muted-foreground">
                   <span>Step: <span className="font-medium text-foreground">{task.step.name}</span></span>

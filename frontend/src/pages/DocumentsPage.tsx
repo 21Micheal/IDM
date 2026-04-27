@@ -37,9 +37,10 @@ const STATUS_OPTIONS = ["draft", "pending_approval", "approved", "rejected", "ar
 
 // ── Bulk Toolbar ────────────────────────────────────────────────────────────
 function BulkToolbar({
-  selectedIds, onAction, onClear, isLoading,
+  selectedIds, availableActions, onAction, onClear, isLoading,
 }: {
   selectedIds: string[];
+  availableActions: BulkAction[];
   onAction: (action: BulkAction, comment?: string) => void;
   onClear: () => void;
   isLoading: boolean;
@@ -61,42 +62,50 @@ function BulkToolbar({
         </div>
 
         <div className="flex flex-wrap gap-2">
-          <button
-            onClick={() => onAction("approve")}
-            disabled={isLoading}
-            className="inline-flex items-center gap-2 px-4 py-1.5 text-sm font-medium bg-teal text-teal-foreground rounded-lg hover:opacity-90 disabled:opacity-50 transition-opacity"
-          >
-            {isLoading ? <Loader2 className="w-4 h-4 animate-spin" /> : <CheckCircle className="w-4 h-4" />}
-            Approve
-          </button>
+          {availableActions.includes("approve") && (
+            <button
+              onClick={() => onAction("approve")}
+              disabled={isLoading}
+              className="inline-flex items-center gap-2 px-4 py-1.5 text-sm font-medium bg-teal text-teal-foreground rounded-lg hover:opacity-90 disabled:opacity-50 transition-opacity"
+            >
+              {isLoading ? <Loader2 className="w-4 h-4 animate-spin" /> : <CheckCircle className="w-4 h-4" />}
+              Approve
+            </button>
+          )}
 
-          <button
-            onClick={() => setRejectModal(true)}
-            disabled={isLoading}
-            className="inline-flex items-center gap-2 px-4 py-1.5 text-sm font-medium bg-destructive text-destructive-foreground rounded-lg hover:opacity-90 disabled:opacity-50 transition-opacity"
-          >
-            <XCircle className="w-4 h-4" /> Reject
-          </button>
+          {availableActions.includes("reject") && (
+            <button
+              onClick={() => setRejectModal(true)}
+              disabled={isLoading}
+              className="inline-flex items-center gap-2 px-4 py-1.5 text-sm font-medium bg-destructive text-destructive-foreground rounded-lg hover:opacity-90 disabled:opacity-50 transition-opacity"
+            >
+              <XCircle className="w-4 h-4" /> Reject
+            </button>
+          )}
 
-          <button
-            onClick={() => onAction("archive")}
-            disabled={isLoading}
-            className="inline-flex items-center gap-2 px-4 py-1.5 text-sm font-medium bg-primary text-primary-foreground rounded-lg hover:opacity-90 disabled:opacity-50 transition-opacity"
-          >
-            <Archive className="w-4 h-4" /> Archive
-          </button>
+          {availableActions.includes("archive") && (
+            <button
+              onClick={() => onAction("archive")}
+              disabled={isLoading}
+              className="inline-flex items-center gap-2 px-4 py-1.5 text-sm font-medium bg-primary text-primary-foreground rounded-lg hover:opacity-90 disabled:opacity-50 transition-opacity"
+            >
+              <Archive className="w-4 h-4" /> Archive
+            </button>
+          )}
 
-          <button
-            onClick={() => {
-              if (confirm(`Void ${selectedIds.length} documents? This cannot be undone.`)) {
-                onAction("void");
-              }
-            }}
-            disabled={isLoading}
-            className="inline-flex items-center gap-2 px-4 py-1.5 text-sm font-medium bg-foreground text-background rounded-lg hover:opacity-90 disabled:opacity-50 transition-opacity"
-          >
-            <Trash2 className="w-4 h-4" /> Void
-          </button>
+          {availableActions.includes("void") && (
+            <button
+              onClick={() => {
+                if (confirm(`Void ${selectedIds.length} documents? This cannot be undone.`)) {
+                  onAction("void");
+                }
+              }}
+              disabled={isLoading}
+              className="inline-flex items-center gap-2 px-4 py-1.5 text-sm font-medium bg-foreground text-background rounded-lg hover:opacity-90 disabled:opacity-50 transition-opacity"
+            >
+              <Trash2 className="w-4 h-4" /> Void
+            </button>
+          )}
         </div>
 
         <button
@@ -320,6 +329,16 @@ export default function DocumentsPage() {
   const selectionEnabled = activeTab !== "personal";
   const showBulkToolbar = selectionEnabled && selectedIds.length > 0;
 
+  // Calculate available bulk actions (intersection of all selected documents' actions)
+  const availableBulkActions: BulkAction[] = showBulkToolbar
+    ? docs
+        .filter((doc: Document) => selectedIds.includes(doc.id))
+        .reduce((commonActions: BulkAction[], doc: Document) => {
+          const docActions = doc.available_bulk_actions || [];
+          return commonActions.filter(action => docActions.includes(action));
+        }, ["approve", "reject", "archive", "void"] as BulkAction[])
+    : [];
+
   // Column count helpers — keeps colSpan correct
   const baseCols = 7; // ref, title, type, supplier, amount, date, uploaded
   const totalCols =
@@ -458,6 +477,7 @@ export default function DocumentsPage() {
       {showBulkToolbar && (
         <BulkToolbar
           selectedIds={selectedIds}
+          availableActions={availableBulkActions}
           onAction={(action, comment) => bulkMutation.mutate({ action, comment })}
           onClear={() => setSelectedIds([])}
           isLoading={bulkMutation.isPending}

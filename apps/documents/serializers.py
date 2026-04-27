@@ -25,7 +25,7 @@ from .models import (
 )
 from apps.accounts.serializers import UserSummarySerializer
 from apps.accounts.models import GroupAction
-from apps.workflows.models import WorkflowTemplate
+from apps.workflows.models import WorkflowTemplate, WorkflowTask
 from django.db import transaction, IntegrityError
 from django.utils.text import slugify
 import mimetypes
@@ -160,6 +160,7 @@ class DocumentListSerializer(serializers.ModelSerializer):
     preview_pdf        = serializers.SerializerMethodField()
     is_edit_locked     = serializers.SerializerMethodField()
     edit_locked_by_name = serializers.SerializerMethodField()
+    available_bulk_actions = serializers.SerializerMethodField()
 
     class Meta:
         model  = Document
@@ -174,6 +175,7 @@ class DocumentListSerializer(serializers.ModelSerializer):
             "preview_pdf", "preview_status",
             "edit_locked_by", "edit_locked_by_name", "edit_locked_at", "is_edit_locked",
             "current_version", "created_at", "updated_at",
+            "available_bulk_actions",
         ]
 
     def get_personal_tags(self, obj):
@@ -208,6 +210,40 @@ class DocumentListSerializer(serializers.ModelSerializer):
     def get_edit_locked_by_name(self, obj):
         holder = obj.edit_lock_holder
         return holder.get_full_name().strip() if holder else None
+
+    def get_available_bulk_actions(self, obj):
+        """Return list of available bulk actions for this document."""
+        request = self.context.get("request")
+        user = getattr(request, "user", None)
+        if not user or not user.is_authenticated:
+            return []
+
+        actions = []
+
+        # Check for workflow actions (approve/reject)
+        if hasattr(obj, 'workflow_instance') and obj.workflow_instance:
+            active_task = (
+                obj.workflow_instance.tasks
+                .filter(status__in=["in_progress", "held"])
+                .select_related("step")
+                .first()
+            )
+            if active_task and (active_task.assigned_to == user or user.has_admin_access):
+                step = active_task.step
+                if step.allow_approve:
+                    actions.append("approve")
+                if step.allow_reject:
+                    actions.append("reject")
+
+        # Archive action - only for approved documents
+        if obj.status == "approved":
+            actions.append("archive")
+
+        # Void action - for most statuses except archived/void
+        if obj.status not in ["archived", "void"]:
+            actions.append("void")
+
+        return actions
 
 
 class DocumentDetailSerializer(serializers.ModelSerializer):
