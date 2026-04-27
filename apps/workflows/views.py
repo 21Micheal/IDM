@@ -195,6 +195,8 @@ class WorkflowTaskViewSet(viewsets.ReadOnlyModelViewSet):
     @action(detail=True, methods=["post"])
     def approve(self, request, pk=None):
         task = self.get_object()
+        if not task.step.allow_approve:
+            return Response({"detail": "Approve is not permitted for this step."}, status=403)
         self._check_permission(task, request.user)
         try:
             WorkflowService.approve(task, request.user, request.data.get("comment", ""))
@@ -207,6 +209,8 @@ class WorkflowTaskViewSet(viewsets.ReadOnlyModelViewSet):
     @action(detail=True, methods=["post"])
     def reject(self, request, pk=None):
         task    = self.get_object()
+        if not task.step.allow_reject:
+            return Response({"detail": "Reject is not permitted for this step."}, status=403)
         comment = request.data.get("comment", "").strip()
         if not comment:
             return Response({"detail": "A rejection comment is required."}, status=400)
@@ -241,6 +245,8 @@ class WorkflowTaskViewSet(viewsets.ReadOnlyModelViewSet):
                 {"detail": "A comment explaining what needs to be fixed is required."},
                 status=400,
             )
+        if not task.step.allow_return:
+            return Response({"detail": "Send back is not permitted for this step."}, status=403)
         self._check_permission(task, request.user)
         try:
             WorkflowService.return_for_review(task, request.user, comment, return_to)

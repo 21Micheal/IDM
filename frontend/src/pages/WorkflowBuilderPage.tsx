@@ -1,23 +1,23 @@
 import {
-  useState, useCallback, useRef, useMemo, type DragEvent,
+  useState, useCallback, useRef, useMemo, useEffect,
 } from "react";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
-import { workflowAPI, documentTypesAPI, usersAPI, groupsAPI, normalizeListResponse } from "@/services/api";
+import { workflowAPI, documentTypesAPI, groupsAPI, normalizeListResponse } from "@/services/api";
 import {
-  Plus, GripVertical, Trash2, ChevronDown, ChevronUp,
-  Save, GitBranch, Loader2, X, ArrowDown,
-  Settings2, Eye, AlertCircle, Info, TriangleAlert,
-  Clock, FileText, CheckCircle2, Copy, Layers,
-  Search, MoreVertical, Shield,
-  Users, Calendar, RefreshCw,
+  Plus, Trash2, Save, GitBranch, Loader2, X,
+  Settings2, AlertCircle,
+  Clock, CheckCircle2,
+  Search, MoreVertical,
   FolderTree, LayoutTemplate, Check,
-  ChevronRight, Building2, Award, List, User, UsersRound,
+  User, UsersRound, Users,
+  Edit3, Play, Flag,
+  ZoomIn, ZoomOut, Maximize2, Move,
 } from "lucide-react";
 import { toast } from "react-toastify";
 import clsx from "clsx";
 
 // ── Types ─────────────────────────────────────────────────────────────────────
-type AssigneeType = "group_any" | "group_all" | "group_specific" | "specific_user";
+type AssigneeType = "group_any" | "group_all" | "group_specific";
 
 interface WorkflowStep {
   id?: string;
@@ -31,8 +31,12 @@ interface WorkflowStep {
   assignee_user_name?: string;
   sla_hours: number;
   allow_resubmit: boolean;
+  allow_approve: boolean;
+  allow_reject: boolean;
+  allow_return: boolean;
   instructions: string;
 }
+
 interface WorkflowTemplate {
   id: string;
   name: string;
@@ -45,6 +49,7 @@ interface WorkflowTemplate {
   created_at?: string;
   updated_at?: string;
 }
+
 interface DocumentType {
   id: string;
   name: string;
@@ -55,6 +60,7 @@ interface DocumentType {
   is_active: boolean;
   description?: string;
 }
+
 interface WorkflowRule {
   id: string;
   document_type: string;
@@ -66,6 +72,7 @@ interface WorkflowRule {
   label: string;
   is_active: boolean;
 }
+
 interface AppUser { id: string; full_name: string; email: string; job_description?: string; }
 interface Group { id: string; name: string; description?: string; member_count?: number; }
 interface GroupMembershipApiItem {
@@ -78,21 +85,22 @@ interface GroupMembershipApiItem {
 
 // ── Constants ─────────────────────────────────────────────────────────────────
 const ASSIGNEE_MODES: { value: AssigneeType; label: string; description: string; Icon: typeof Users }[] = [
-  { value: "group_any",      label: "Any member of a group",      description: "Any one member can approve",       Icon: Users },
-  { value: "group_all",      label: "All members of a group",     description: "Every member must approve",        Icon: UsersRound },
-  { value: "group_specific", label: "Specific member of a group", description: "Pick one member from a group",     Icon: User },
-  { value: "specific_user",  label: "Specific user",              description: "Direct assignment to a user",      Icon: User },
+  { value: "group_any", label: "Any member", description: "Single approver from group", Icon: Users },
+  { value: "group_all", label: "All members", description: "Consensus required", Icon: UsersRound },
+  { value: "group_specific", label: "Specific member", description: "Designated approver", Icon: User },
 ];
 
-// Stable color tokens for groups (cycled via hash of group id)
-const GROUP_TOKENS = ["var(--primary)", "var(--teal)", "var(--accent)", "var(--muted-foreground)"];
-const tokenForGroup = (id: string | null | undefined) => {
-  if (!id) return "var(--muted-foreground)";
-  let h = 0;
-  for (let i = 0; i < id.length; i++) h = (h * 31 + id.charCodeAt(i)) >>> 0;
-  return GROUP_TOKENS[h % GROUP_TOKENS.length];
+const GROUP_COLORS = [
+  "#3b82f6", "#10b981", "#8b5cf6", "#f59e0b",
+  "#ef4444", "#06b6d4", "#6366f1", "#14b8a6"
+];
+
+const getGroupColor = (id: string | null | undefined) => {
+  if (!id) return "#94a3b8";
+  let hash = 0;
+  for (let i = 0; i < id.length; i++) hash = (hash * 31 + id.charCodeAt(i)) >>> 0;
+  return GROUP_COLORS[hash % GROUP_COLORS.length];
 };
-const groupHsl = (id: string | null | undefined) => `hsl(${tokenForGroup(id)})`;
 
 const CURRENCIES = ["USD", "EUR", "GBP", "KES", "ZAR", "NGN", "GHS", "AED", "INR", "JPY", "CAD", "AUD", "CHF", "CNY"];
 const STATUS_PRESETS = [
@@ -105,11 +113,16 @@ function blankStep(): WorkflowStep {
   return {
     order: 0, name: "", status_label: "Pending Approval",
     assignee_type: "group_any", assignee_group: null, assignee_user: null,
-    sla_hours: 48, allow_resubmit: true, instructions: "",
+    sla_hours: 48, allow_resubmit: true, allow_approve: true, allow_reject: true, allow_return: true, instructions: "",
   };
 }
+
 function stepToPayload(step: WorkflowStep): Partial<WorkflowStep> {
   const { assignee_user_name, assignee_group_name, ...rest } = step as any;
+  // Ensure assignee_user is only sent for types that allow it
+  if (rest.assignee_type !== "group_specific") {
+    rest.assignee_user = null;
+  }
   return rest;
 }
 
@@ -139,189 +152,34 @@ function formatApiError(value: unknown): string | null {
 }
 
 // ── Atoms ─────────────────────────────────────────────────────────────────────
-const inp = "input"; // global class from index.css
+const inp = "input";
 
-function Label({ children, required, tooltip }: { children: React.ReactNode; required?: boolean; tooltip?: string }) {
+function Label({ children, required }: { children: React.ReactNode; required?: boolean }) {
   return (
-    <div className="flex items-center gap-1.5 mb-1.5">
-      <label className="text-xs font-semibold text-muted-foreground uppercase tracking-wide">
-        {children}{required && <span className="text-destructive ml-0.5">*</span>}
-      </label>
-      {tooltip && (
-        <div className="group relative">
-          <Info className="w-3 h-3 text-muted-foreground cursor-help" />
-          <div className="absolute left-0 bottom-full mb-2 hidden group-hover:block bg-primary text-primary-foreground text-xs rounded px-2 py-1 whitespace-nowrap z-10">
-            {tooltip}
-          </div>
-        </div>
-      )}
-    </div>
+    <label className="block text-xs font-medium text-foreground mb-1.5">
+      {children}{required && <span className="text-destructive ml-0.5">*</span>}
+    </label>
   );
 }
 
-function SlaBadge({ hours }: { hours: number }) {
-  const tone = hours <= 24
-    ? "bg-destructive/10 text-destructive border-destructive/30"
-    : hours <= 72
-      ? "bg-accent/15 text-accent-foreground border-accent/30"
-      : "bg-muted text-muted-foreground border-border";
-  const label = hours < 24 ? `${hours}h` : hours % 24 === 0 ? `${hours / 24}d` : `${Math.floor(hours / 24)}d ${hours % 24}h`;
-  return (
-    <span className={clsx("inline-flex items-center gap-1 text-xs font-medium px-2 py-0.5 rounded-full border", tone)}>
-      <Clock className="w-3 h-3" />{label}
-    </span>
-  );
-}
-
-// ── SVG Flow Preview ──────────────────────────────────────────────────────────
-function FlowPreview({ steps, name }: { steps: WorkflowStep[]; name: string }) {
-  const NW = 240, NH = 85, GAP = 55, PAD = 28;
-  const total = steps.length + 2;
-  const svgH = PAD * 2 + total * NH + (total - 1) * GAP;
-  const svgW = NW + PAD * 2;
-  const cx = PAD + NW / 2;
-  const ny = (i: number) => PAD + i * (NH + GAP);
-
-  if (steps.length === 0) {
-    return (
-      <div className="flex flex-col items-center justify-center h-80 text-muted-foreground gap-4 bg-muted/40 rounded-xl">
-        <div className="w-20 h-20 rounded-full bg-muted flex items-center justify-center">
-          <GitBranch className="w-10 h-10 opacity-40" />
-        </div>
-        <p className="text-sm font-medium">No steps configured</p>
-        <p className="text-xs">Add steps to visualize the approval flow</p>
-      </div>
-    );
-  }
-
-  return (
-    <div className="overflow-auto flex justify-center py-8 bg-muted/30 rounded-xl">
-      <svg width={svgW} height={svgH} viewBox={`0 0 ${svgW} ${svgH}`} style={{ fontFamily: "Inter,system-ui,sans-serif" }}>
-        <defs>
-          <marker id="arr" markerWidth="8" markerHeight="8" refX="6" refY="3" orient="auto">
-            <path d="M0,0 L0,6 L8,3 z" fill={`hsl(var(--muted-foreground))`} />
-          </marker>
-          <marker id="arr-blue" markerWidth="8" markerHeight="8" refX="6" refY="3" orient="auto">
-            <path d="M0,0 L0,6 L8,3 z" fill={`hsl(var(--primary))`} />
-          </marker>
-          <filter id="sh"><feDropShadow dx="0" dy="3" stdDeviation="4" floodColor="#00000020" /></filter>
-          <filter id="glow">
-            <feGaussianBlur stdDeviation="3" result="b" />
-            <feMerge><feMergeNode in="b" /><feMergeNode in="SourceGraphic" /></feMerge>
-          </filter>
-        </defs>
-
-        {/* START */}
-        {(() => {
-          const y = ny(0);
-          const startFill = `hsl(var(--teal) / 0.12)`;
-          const startStroke = `hsl(var(--teal) / 0.5)`;
-          const startDot = `hsl(var(--teal))`;
-          return (
-            <g>
-              <rect x={PAD} y={y} width={NW} height={NH} rx={42}
-                fill={startFill} stroke={startStroke} strokeWidth={2} filter="url(#sh)" />
-              <circle cx={cx} cy={y + 26} r="14" fill={startDot} opacity="0.18" />
-              <circle cx={cx} cy={y + 26} r="7" fill={startDot} filter="url(#glow)" />
-              <text x={cx} y={y + 55} textAnchor="middle" fontSize={13} fill={startDot} fontWeight={700}>Document Submitted</text>
-              <text x={cx} y={y + 73} textAnchor="middle" fontSize={9} fill={startDot} opacity="0.7" fontWeight={600} letterSpacing={2}>START</text>
-              <line x1={cx} y1={y + NH} x2={cx} y2={y + NH + GAP} stroke={`hsl(var(--muted-foreground))`} strokeWidth={1.5} strokeDasharray="6 5" markerEnd="url(#arr)" />
-            </g>
-          );
-        })()}
-
-        {/* STEPS */}
-        {steps.map((step, i) => {
-          const y = ny(i + 1);
-          const rc = groupHsl(step.assignee_group);
-          const isLast = i === steps.length - 1;
-          const mode = ASSIGNEE_MODES.find(m => m.value === step.assignee_type);
-          let assigneeLabel = "Unassigned";
-          if (step.assignee_type === "specific_user") {
-            assigneeLabel = step.assignee_user_name ?? "Specific user";
-          } else if (step.assignee_group_name) {
-            const suffix =
-              step.assignee_type === "group_any" ? " · any member"
-              : step.assignee_type === "group_all" ? " · all members"
-              : ` · ${step.assignee_user_name ?? "specific member"}`;
-            assigneeLabel = `${step.assignee_group_name}${suffix}`;
-          }
-          const stepName = step.name.length > 28 ? step.name.slice(0, 26) + "…" : step.name;
-          const statusLbl = step.status_label.length > 22 ? step.status_label.slice(0, 20) + "…" : step.status_label;
-
-          return (
-            <g key={step.id || step.order}>
-              <rect x={PAD} y={y} width={NW} height={NH} rx={14}
-                fill="white" stroke={rc} strokeWidth={2} filter="url(#sh)" />
-              <rect x={PAD + 4} y={y + 12} width={4} height={NH - 24} rx={2} fill={rc} />
-              <circle cx={PAD + 28} cy={y + NH / 2} r={15} fill={rc} filter="url(#glow)" />
-              <text x={PAD + 28} y={y + NH / 2 + 5} textAnchor="middle" fontSize={12} fill="white" fontWeight={800}>{i + 1}</text>
-              {step.name
-                ? <text x={PAD + 52} y={y + 32} fontSize={13} fill={`hsl(var(--foreground))`} fontWeight={700}>{stepName}</text>
-                : <text x={PAD + 52} y={y + 32} fontSize={12} fill={`hsl(var(--muted-foreground))`} fontStyle="italic">Unnamed step</text>}
-              <g transform={`translate(${PAD + 52}, ${y + 52})`}>
-                <circle cx="0" cy="0" r="6" fill={rc} opacity="0.2" />
-                <circle cx="0" cy="0" r="3" fill={rc} />
-                <text x="12" y="3" fontSize={10.5} fill={`hsl(var(--muted-foreground))`}>
-                  {mode?.label.split(" ")[0]}: {assigneeLabel.length > 28 ? assigneeLabel.slice(0, 26) + "…" : assigneeLabel}
-                </text>
-              </g>
-              <rect x={PAD + NW - 72} y={y + 14} width="64" height="20" rx="10" fill={`hsl(var(--muted))`} stroke={`hsl(var(--border))`} strokeWidth="0.5" />
-              <text x={PAD + NW - 40} y={y + 27.5} textAnchor="middle" fontSize={9} fill={`hsl(var(--muted-foreground))`}>⏱ SLA {step.sla_hours}h</text>
-              <text x={PAD + NW - 12} y={y + 65} textAnchor="end" fontSize={9} fill={`hsl(var(--muted-foreground))`} fontStyle="italic">→ {statusLbl}</text>
-              {!isLast && (
-                <line x1={cx} y1={y + NH} x2={cx} y2={y + NH + GAP - 10}
-                  stroke={`hsl(var(--muted-foreground))`} strokeWidth={1.5} strokeDasharray="6 5" markerEnd="url(#arr)" />
-              )}
-            </g>
-          );
-        })}
-
-        {/* END */}
-        {(() => {
-          const y = ny(steps.length + 1);
-          const endFill = `hsl(var(--primary) / 0.08)`;
-          const endStroke = `hsl(var(--primary) / 0.4)`;
-          const endDot = `hsl(var(--primary))`;
-          return (
-            <g>
-              <line x1={cx} y1={ny(steps.length) + NH} x2={cx} y2={y}
-                stroke={endDot} strokeWidth={1.5} strokeDasharray="6 5" markerEnd="url(#arr-blue)" />
-              <rect x={PAD} y={y} width={NW} height={NH} rx={42}
-                fill={endFill} stroke={endStroke} strokeWidth={2} filter="url(#sh)" />
-              <circle cx={cx} cy={y + 26} r="14" fill={endDot} opacity="0.15" />
-              <circle cx={cx} cy={y + 26} r="7" fill={endDot} filter="url(#glow)" />
-              <text x={cx} y={y + 55} textAnchor="middle" fontSize={13} fill={endDot} fontWeight={700}>Document Approved</text>
-              <text x={cx} y={y + 73} textAnchor="middle" fontSize={9} fill={endDot} opacity="0.6" fontWeight={600} letterSpacing={2}>END</text>
-            </g>
-          );
-        })()}
-      </svg>
-    </div>
-  );
-}
-
-// ── StepCard ──────────────────────────────────────────────────────────────────
-function StepCard({
-  step, index, users, groups, isDragOver, onChange, onRemove,
-  onDragStart, onDragOver, onDragEnd, onDrop,
+// ── Step Edit Side Panel ──────────────────────────────────────────────────────
+function StepEditPanel({
+  step,
+  index,
+  total,
+  groups,
+  onChange,
+  onClose,
+  onDelete,
 }: {
   step: WorkflowStep;
   index: number;
-  users: AppUser[];
+  total: number;
   groups: Group[];
-  isDragOver: boolean;
   onChange: (patch: Partial<WorkflowStep>) => void;
-  onRemove: () => void;
-  onDragStart: (e: DragEvent) => void;
-  onDragOver: (e: DragEvent) => void;
-  onDragEnd: (e: DragEvent) => void;
-  onDrop: (e: DragEvent) => void;
+  onClose: () => void;
+  onDelete: () => void;
 }) {
-  const [expanded, setExpanded] = useState(true);
-  const [showAdvanced, setShowAdvanced] = useState(false);
-  const rc = groupHsl(step.assignee_group);
-  const isGroupMode = step.assignee_type !== "specific_user";
   const needsGroupMember = step.assignee_type === "group_specific";
 
   const { data: groupMembers = [], isLoading: membersLoading } = useQuery<AppUser[]>({
@@ -329,278 +187,677 @@ function StepCard({
     queryFn: async () => {
       const r = await groupsAPI.members(step.assignee_group!);
       const raw: GroupMembershipApiItem[] = r.data?.results ?? r.data ?? [];
-
-      // API returns group memberships (with nested `user`) while this dropdown
-      // needs plain users. Normalize both shapes for safety.
-      return raw
-        .map((item) => item?.user ?? item)
-        .filter((u): u is AppUser => Boolean(u?.id && u?.email));
+      return raw.map((item) => item?.user ?? item).filter((u): u is AppUser => Boolean(u?.id && u?.email));
     },
     enabled: !!step.assignee_group && needsGroupMember,
   });
 
-  const handleModeChange = (next: AssigneeType) => {
-    if (next === "specific_user") {
-      onChange({ assignee_type: next, assignee_group: null, assignee_group_name: undefined, assignee_user: null, assignee_user_name: undefined });
-    } else {
-      onChange({
-        assignee_type: next,
-        assignee_user: next === "group_specific" ? step.assignee_user : null,
-        assignee_user_name: next === "group_specific" ? step.assignee_user_name : undefined,
-      });
-    }
-  };
+  const color = getGroupColor(step.assignee_group);
 
   return (
-    <div
-      draggable
-      onDragStart={onDragStart}
-      onDragOver={onDragOver}
-      onDragEnd={onDragEnd}
-      onDrop={onDrop}
-      className={clsx(
-        "rounded-xl border transition-all bg-card overflow-hidden select-none group",
-        isDragOver ? "border-accent ring-2 ring-accent/30 shadow-lg scale-[1.01]" : "border-border hover:border-muted-foreground/40 shadow-sm hover:shadow-md"
-      )}
-    >
-      <div className="flex items-center gap-2.5 px-4 py-3 bg-muted/40 border-b border-border">
-        <span className="cursor-grab text-muted-foreground/60 hover:text-foreground transition-colors active:cursor-grabbing">
-          <GripVertical className="w-4 h-4" />
-        </span>
-        <div className="w-7 h-7 rounded-full text-white text-xs font-bold flex items-center justify-center shadow-sm" style={{ background: rc }}>
-          {index + 1}
-        </div>
-        <input
-          value={step.name}
-          onChange={e => onChange({ name: e.target.value })}
-          className="flex-1 bg-transparent text-sm font-semibold text-foreground outline-none placeholder:text-muted-foreground/60 py-1"
-          placeholder="Step name, e.g. Finance Manager Review"
-        />
-        <SlaBadge hours={step.sla_hours} />
-        <div className="flex items-center gap-0.5 ml-1">
-          <button
-            onClick={() => setShowAdvanced(!showAdvanced)}
-            className={clsx("p-1.5 rounded transition-colors",
-              showAdvanced ? "text-accent-foreground bg-accent/15" : "text-muted-foreground hover:text-foreground hover:bg-muted")}
+    <aside className="w-[420px] flex-shrink-0 flex flex-col bg-card border border-border rounded-xl shadow-elegant overflow-hidden">
+      {/* Header */}
+      <div className="flex items-center justify-between p-4 border-b border-border bg-muted/40">
+        <div className="flex items-center gap-3">
+          <div
+            className="w-9 h-9 rounded-lg flex items-center justify-center text-white text-sm font-bold shadow-sm"
+            style={{ backgroundColor: color }}
           >
-            <Settings2 className="w-3.5 h-3.5" />
+            {index + 1}
+          </div>
+          <div>
+            <h3 className="text-sm font-semibold text-foreground">Edit step {index + 1}</h3>
+            <p className="text-xs text-muted-foreground">Step {index + 1} of {total}</p>
+          </div>
+        </div>
+        <div className="flex items-center gap-1">
+          <button
+            onClick={onDelete}
+            title="Delete step"
+            className="p-2 rounded-lg text-muted-foreground hover:bg-destructive/10 hover:text-destructive transition-colors"
+          >
+            <Trash2 className="w-4 h-4" />
           </button>
-          <button onClick={() => setExpanded(!expanded)} className="p-1.5 text-muted-foreground hover:text-foreground rounded hover:bg-muted">
-            {expanded ? <ChevronUp className="w-3.5 h-3.5" /> : <ChevronDown className="w-3.5 h-3.5" />}
-          </button>
-          <button onClick={onRemove} className="p-1.5 text-muted-foreground hover:text-destructive rounded hover:bg-destructive/10 transition-colors">
-            <Trash2 className="w-3.5 h-3.5" />
+          <button
+            onClick={onClose}
+            title="Close"
+            className="p-2 rounded-lg text-muted-foreground hover:bg-muted transition-colors"
+          >
+            <X className="w-4 h-4" />
           </button>
         </div>
       </div>
 
-      {expanded && (
-        <div className="p-4 space-y-4">
-          <div className="grid grid-cols-1 lg:grid-cols-2 gap-x-6 gap-y-4">
-            <div className="lg:col-span-2">
-              <Label tooltip="Status shown on the document while pending this step">Document status</Label>
-              <input
-                list={`sp-${step.id || index}`}
-                value={step.status_label}
-                onChange={e => onChange({ status_label: e.target.value })}
-                className={inp}
-                placeholder="e.g. Pending Finance Review"
-              />
-              <datalist id={`sp-${step.id || index}`}>
-                {STATUS_PRESETS.map(p => <option key={p} value={p} />)}
-              </datalist>
-            </div>
+      {/* Content */}
+      <div className="flex-1 overflow-y-auto p-5 space-y-5">
+        <div>
+          <Label required>Step name</Label>
+          <input
+            value={step.name}
+            onChange={e => onChange({ name: e.target.value })}
+            className={inp}
+            placeholder="e.g. Finance Manager Review"
+          />
+        </div>
 
-            <div className="lg:col-span-2">
-              <Label required tooltip="Choose how this step is assigned">Assignment mode</Label>
-              <select
-                value={step.assignee_type}
-                onChange={e => handleModeChange(e.target.value as AssigneeType)}
-                className={inp}
-              >
-                {ASSIGNEE_MODES.map(m => (
-                  <option key={m.value} value={m.value}>{m.label} — {m.description}</option>
-                ))}
-              </select>
-            </div>
+        <div>
+          <Label>Document status while pending</Label>
+          <input
+            list={`status-${index}`}
+            value={step.status_label}
+            onChange={e => onChange({ status_label: e.target.value })}
+            className={inp}
+            placeholder="Status label"
+          />
+          <datalist id={`status-${index}`}>
+            {STATUS_PRESETS.map(p => <option key={p} value={p} />)}
+          </datalist>
+        </div>
 
-            {isGroupMode ? (
-              <>
-                <div className={needsGroupMember ? "" : "lg:col-span-2"}>
-                  <Label required tooltip="Permission group responsible for this step">Group</Label>
-                  <select
-                    value={step.assignee_group ?? ""}
-                    onChange={e => {
-                      const id = e.target.value || null;
-                      const g = groups.find(x => x.id === id);
-                      onChange({
-                        assignee_group: id,
-                        assignee_group_name: g?.name,
-                        assignee_user: needsGroupMember ? null : step.assignee_user,
-                        assignee_user_name: needsGroupMember ? undefined : step.assignee_user_name,
-                      });
-                    }}
-                    className={inp}
-                  >
-                    <option value="">— Select group —</option>
-                    {groups.map(g => (
-                      <option key={g.id} value={g.id}>
-                        {g.name}{typeof g.member_count === "number" ? ` · ${g.member_count} member${g.member_count === 1 ? "" : "s"}` : ""}
-                      </option>
-                    ))}
-                  </select>
-                </div>
-
-                {needsGroupMember && (
-                  <div>
-                    <Label required tooltip="Specific member of the selected group">Member</Label>
-                    <select
-                      value={step.assignee_user ?? ""}
-                      onChange={e => {
-                        const id = e.target.value || null;
-                        const u = groupMembers.find(x => x.id === id);
-                        onChange({ assignee_user: id, assignee_user_name: u?.full_name });
-                      }}
-                      disabled={!step.assignee_group || membersLoading}
-                      className={inp}
-                    >
-                      <option value="">
-                        {!step.assignee_group ? "— Select a group first —" : membersLoading ? "Loading members…" : "— Select member —"}
-                      </option>
-                      {groupMembers.map(u => (
-                        <option key={u.id} value={u.id}>{u.full_name} · {u.email}</option>
-                      ))}
-                    </select>
-                  </div>
-                )}
-              </>
-            ) : (
-              <div className="lg:col-span-2">
-                <Label required>User</Label>
-                <select
-                  value={step.assignee_user ?? ""}
-                  onChange={e => {
-                    const id = e.target.value || null;
-                    const u = users.find(x => x.id === id);
-                    onChange({ assignee_user: id, assignee_user_name: u?.full_name });
-                  }}
-                  className={inp}
-                >
-                  <option value="">— Select user —</option>
-                  {users.map(u => (
-                    <option key={u.id} value={u.id}>{u.full_name} · {u.email}</option>
-                  ))}
-                </select>
-              </div>
-            )}
-
-            <div>
-              <Label tooltip="Maximum hours allowed for this approval step before escalation">SLA (hours)</Label>
-              <div className="flex items-center gap-3">
-                <div className="flex-1">
-                  <input
-                    type="range"
-                    min={1}
-                    max={168}
-                    step={1}
-                    value={step.sla_hours}
-                    onChange={e => onChange({ sla_hours: Number(e.target.value) })}
-                    className="w-full h-1.5 bg-muted rounded-lg appearance-none cursor-pointer accent-accent"
-                  />
-                </div>
-                <input
-                  type="number"
-                  min={1}
-                  max={720}
-                  value={step.sla_hours}
-                  onChange={e => onChange({ sla_hours: Math.max(1, Number(e.target.value)) })}
-                  className={clsx(inp, "w-20 text-center")}
-                />
-                <span className="text-xs text-muted-foreground w-16">
-                  {Math.floor(step.sla_hours / 24)}d {step.sla_hours % 24}h
-                </span>
-              </div>
-            </div>
+        <div className="grid grid-cols-1 gap-4 p-4 rounded-lg bg-muted/40 border border-border">
+          <div>
+            <Label required>Approver group</Label>
+            <select
+              value={step.assignee_group ?? ""}
+              onChange={e => {
+                const id = e.target.value || null;
+                const g = groups.find(x => x.id === id);
+                onChange({
+                  assignee_group: id,
+                  assignee_group_name: g?.name,
+                  assignee_user: null,
+                  assignee_user_name: undefined,
+                });
+              }}
+              className={inp}
+            >
+              <option value="">Select group</option>
+              {groups.map(g => (
+                <option key={g.id} value={g.id}>{g.name}</option>
+              ))}
+            </select>
           </div>
-
-          {showAdvanced && (
-            <div className="pt-3 border-t border-border">
-              <p className="text-xs font-medium text-muted-foreground mb-3 uppercase tracking-wider flex items-center gap-2">
-                <Settings2 className="w-3 h-3" /> Advanced settings
-              </p>
-              <div className="flex items-start gap-3">
-                <input
-                  type="checkbox"
-                  id={`rs-${step.id || index}`}
-                  checked={step.allow_resubmit}
-                  onChange={e => onChange({ allow_resubmit: e.target.checked })}
-                  className="mt-0.5 w-4 h-4 rounded border-border text-accent focus:ring-accent"
-                />
-                <label htmlFor={`rs-${step.id || index}`} className="text-sm text-foreground leading-snug cursor-pointer">
-                  Allow resubmission after rejection
-                </label>
-              </div>
-            </div>
-          )}
 
           <div>
-            <Label>Approver instructions</Label>
-            <textarea
-              value={step.instructions}
-              rows={2}
-              onChange={e => onChange({ instructions: e.target.value })}
-              className={clsx(inp, "resize-none")}
-              placeholder="What should the approver verify? Any specific guidelines or documents to check?"
+            <Label required>Assignment mode</Label>
+            <select
+              value={step.assignee_type}
+              onChange={e => {
+                const next = e.target.value as AssigneeType;
+                onChange({
+                  assignee_type: next,
+                  assignee_user: next === "group_specific" ? step.assignee_user : null,
+                  assignee_user_name: next === "group_specific" ? step.assignee_user_name : undefined,
+                });
+              }}
+              className={inp}
+            >
+              {ASSIGNEE_MODES.map(m => (
+                <option key={m.value} value={m.value}>{m.label} — {m.description}</option>
+              ))}
+            </select>
+          </div>
+
+          {needsGroupMember && (
+            <div>
+              <Label required>Specific member</Label>
+              <select
+                value={step.assignee_user ?? ""}
+                onChange={e => {
+                  const id = e.target.value || null;
+                  const u = groupMembers.find(x => x.id === id);
+                  onChange({ assignee_user: id, assignee_user_name: u?.full_name });
+                }}
+                disabled={!step.assignee_group || membersLoading}
+                className={inp}
+              >
+                <option value="">{membersLoading ? "Loading members..." : "Select member"}</option>
+                {groupMembers.map(u => (
+                  <option key={u.id} value={u.id}>{u.full_name}</option>
+                ))}
+              </select>
+              {!step.assignee_group && (
+                <p className="text-[11px] text-muted-foreground mt-1">Pick a group first</p>
+              )}
+            </div>
+          )}
+        </div>
+
+        <div>
+          <Label>SLA (hours)</Label>
+          <div className="flex items-center gap-3">
+            <input
+              type="range"
+              min={1}
+              max={168}
+              value={step.sla_hours}
+              onChange={e => onChange({ sla_hours: Number(e.target.value) })}
+              className="flex-1 accent-primary"
+            />
+            <input
+              type="number"
+              min={1}
+              max={720}
+              value={step.sla_hours}
+              onChange={e => onChange({ sla_hours: Math.max(1, Number(e.target.value)) })}
+              className={clsx(inp, "w-20 text-center")}
             />
           </div>
+          <p className="text-[11px] text-muted-foreground mt-1">
+            ≈ {Math.floor(step.sla_hours / 24)}d {step.sla_hours % 24}h
+          </p>
         </div>
-      )}
+
+        <div>
+          <Label>Approver actions</Label>
+          <div className="grid grid-cols-3 gap-2">
+            <button
+              type="button"
+              onClick={() => onChange({ allow_approve: !step.allow_approve })}
+              className={clsx(
+                "px-3 py-2 rounded-lg text-xs font-medium transition-colors border",
+                step.allow_approve
+                  ? "bg-teal/15 text-teal border-teal/40"
+                  : "bg-muted text-muted-foreground border-border"
+              )}
+            >
+              ✓ Approve
+            </button>
+            <button
+              type="button"
+              onClick={() => onChange({ allow_reject: !step.allow_reject })}
+              className={clsx(
+                "px-3 py-2 rounded-lg text-xs font-medium transition-colors border",
+                step.allow_reject
+                  ? "bg-destructive/15 text-destructive border-destructive/40"
+                  : "bg-muted text-muted-foreground border-border"
+              )}
+            >
+              ✗ Reject
+            </button>
+            <button
+              type="button"
+              onClick={() => onChange({ allow_return: !step.allow_return })}
+              className={clsx(
+                "px-3 py-2 rounded-lg text-xs font-medium transition-colors border",
+                step.allow_return
+                  ? "bg-accent/20 text-accent-foreground border-accent/50"
+                  : "bg-muted text-muted-foreground border-border"
+              )}
+            >
+              ↩ Return
+            </button>
+          </div>
+        </div>
+
+        <div>
+          <Label>Instructions for approver</Label>
+          <textarea
+            value={step.instructions}
+            onChange={e => onChange({ instructions: e.target.value })}
+            rows={4}
+            className={clsx(inp, "resize-none")}
+            placeholder="Guidelines for the approver..."
+          />
+        </div>
+      </div>
+    </aside>
+  );
+}
+
+// ── Flowchart Editor (pan / zoom / drag) ─────────────────────────────────────
+interface NodePos { x: number; y: number; }
+
+const NODE_W = 260;
+const NODE_H = 138;
+const ANCHOR_W = 180;
+const ANCHOR_H = 64;
+
+function defaultPositions(stepCount: number): NodePos[] {
+  const positions: NodePos[] = [];
+  // start at (0,0); steps below
+  for (let i = 0; i < stepCount; i++) {
+    positions.push({ x: 0, y: (i + 1) * (NODE_H + 80) });
+  }
+  return positions;
+}
+
+function FlowchartEditor({
+  steps,
+  groups,
+  selectedIndex,
+  onSelectIndex,
+  onStepsChange,
+  onAddStep,
+}: {
+  steps: WorkflowStep[];
+  groups: Group[];
+  selectedIndex: number | null;
+  onSelectIndex: (i: number | null) => void;
+  onStepsChange: (steps: WorkflowStep[]) => void;
+  onAddStep: () => void;
+}) {
+  const wrapperRef = useRef<HTMLDivElement>(null);
+
+  // Pan / zoom transform
+  const [transform, setTransform] = useState({ x: 80, y: 40, k: 1 });
+  // Per-step node positions, keyed by index
+  const [positions, setPositions] = useState<NodePos[]>(() => defaultPositions(steps.length));
+
+  // Keep positions array in sync with step count (preserves existing layout)
+  useEffect(() => {
+    setPositions(prev => {
+      if (prev.length === steps.length) return prev;
+      if (steps.length > prev.length) {
+        const next = [...prev];
+        for (let i = prev.length; i < steps.length; i++) {
+          const last = next[next.length - 1];
+          next.push(last
+            ? { x: last.x, y: last.y + NODE_H + 80 }
+            : { x: 0, y: NODE_H + 80 });
+        }
+        return next;
+      }
+      return prev.slice(0, steps.length);
+    });
+  }, [steps.length]);
+
+  // Drag state for nodes
+  const dragRef = useRef<{ kind: "node" | "pan" | null; index?: number; startX: number; startY: number; orig: NodePos | { x: number; y: number } }>({
+    kind: null, startX: 0, startY: 0, orig: { x: 0, y: 0 },
+  });
+
+  const onPointerDownNode = (i: number, e: React.PointerEvent) => {
+    e.stopPropagation();
+    (e.target as HTMLElement).setPointerCapture?.(e.pointerId);
+    dragRef.current = {
+      kind: "node",
+      index: i,
+      startX: e.clientX,
+      startY: e.clientY,
+      orig: { ...positions[i] },
+    };
+  };
+
+  const onPointerDownCanvas = (e: React.PointerEvent) => {
+    if (e.button !== 0) return;
+    onSelectIndex(null);
+    dragRef.current = {
+      kind: "pan",
+      startX: e.clientX,
+      startY: e.clientY,
+      orig: { x: transform.x, y: transform.y },
+    };
+  };
+
+  const onPointerMove = (e: React.PointerEvent) => {
+    const d = dragRef.current;
+    if (!d.kind) return;
+    const dx = e.clientX - d.startX;
+    const dy = e.clientY - d.startY;
+    if (d.kind === "node" && d.index !== undefined) {
+      const next = [...positions];
+      next[d.index] = {
+        x: (d.orig as NodePos).x + dx / transform.k,
+        y: (d.orig as NodePos).y + dy / transform.k,
+      };
+      setPositions(next);
+    } else if (d.kind === "pan") {
+      setTransform(t => ({ ...t, x: (d.orig as NodePos).x + dx, y: (d.orig as NodePos).y + dy }));
+    }
+  };
+
+  const onPointerUp = () => {
+    dragRef.current = { kind: null, startX: 0, startY: 0, orig: { x: 0, y: 0 } };
+  };
+
+  const onWheel = (e: React.WheelEvent) => {
+    if (!e.ctrlKey && !e.metaKey) return;
+    e.preventDefault();
+    const rect = wrapperRef.current?.getBoundingClientRect();
+    if (!rect) return;
+    const mx = e.clientX - rect.left;
+    const my = e.clientY - rect.top;
+    const delta = -e.deltaY * 0.0015;
+    setTransform(t => {
+      const newK = Math.min(2, Math.max(0.4, t.k * (1 + delta)));
+      const ratio = newK / t.k;
+      return {
+        k: newK,
+        x: mx - (mx - t.x) * ratio,
+        y: my - (my - t.y) * ratio,
+      };
+    });
+  };
+
+  const zoomBy = (factor: number) => {
+    setTransform(t => {
+      const newK = Math.min(2, Math.max(0.4, t.k * factor));
+      return { ...t, k: newK };
+    });
+  };
+
+  const fitView = () => {
+    if (!wrapperRef.current || steps.length === 0) {
+      setTransform({ x: 80, y: 40, k: 1 });
+      return;
+    }
+    const rect = wrapperRef.current.getBoundingClientRect();
+    const xs = positions.map(p => p.x);
+    const ys = positions.map(p => p.y);
+    const minX = Math.min(0, ...xs) - NODE_W / 2 - 40;
+    const maxX = Math.max(0, ...xs) + NODE_W / 2 + 40;
+    const minY = -ANCHOR_H - 40;
+    const maxY = Math.max(...ys, 0) + NODE_H + ANCHOR_H + 40;
+    const w = maxX - minX;
+    const h = maxY - minY;
+    const k = Math.min(rect.width / w, rect.height / h, 1.2);
+    setTransform({
+      x: rect.width / 2 - ((minX + maxX) / 2) * k,
+      y: rect.height / 2 - ((minY + maxY) / 2) * k,
+      k,
+    });
+  };
+
+  // Compute connection lines (straight orthogonal-ish curve)
+  const connections = useMemo(() => {
+    const lines: { id: string; d: string }[] = [];
+    // Anchors
+    const startCenter = { x: 0, y: 0 };
+    const startBottom = { x: startCenter.x, y: startCenter.y + ANCHOR_H / 2 };
+
+    const stepTop = (p: NodePos) => ({ x: p.x, y: p.y - NODE_H / 2 });
+    const stepBottom = (p: NodePos) => ({ x: p.x, y: p.y + NODE_H / 2 });
+
+    if (steps.length > 0) {
+      const t = stepTop(positions[0]);
+      lines.push({ id: "start", d: bezierPath(startBottom, t) });
+      for (let i = 0; i < steps.length - 1; i++) {
+        lines.push({
+          id: `s-${i}`,
+          d: bezierPath(stepBottom(positions[i]), stepTop(positions[i + 1])),
+        });
+      }
+      const last = positions[positions.length - 1];
+      const lastY = positions.reduce((m, p) => Math.max(m, p.y), 0);
+      const endTop = { x: last.x, y: lastY + NODE_H + 80 };
+      lines.push({ id: "end", d: bezierPath(stepBottom(last), { x: endTop.x, y: endTop.y - ANCHOR_H / 2 }) });
+    }
+    return lines;
+  }, [positions, steps.length]);
+
+  // Compute SVG viewbox-ish bounds for the inner content
+  const bounds = useMemo(() => {
+    const xs = positions.map(p => p.x);
+    const ys = positions.map(p => p.y);
+    const minX = Math.min(-ANCHOR_W, ...xs.map(x => x - NODE_W / 2)) - 200;
+    const maxX = Math.max(ANCHOR_W, ...xs.map(x => x + NODE_W / 2)) + 200;
+    const minY = -ANCHOR_H - 200;
+    const lastY = positions.reduce((m, p) => Math.max(m, p.y), 0);
+    const maxY = lastY + NODE_H + ANCHOR_H + 200;
+    return { minX, maxX, minY, maxY, w: maxX - minX, h: maxY - minY };
+  }, [positions]);
+
+  const lastY = positions.reduce((m, p) => Math.max(m, p.y), 0);
+  const endX = positions.length ? positions[positions.length - 1].x : 0;
+  const endY = positions.length ? lastY + NODE_H + 80 : NODE_H + 80;
+
+  return (
+    <div className="relative flex-1 overflow-hidden bg-muted/30 rounded-xl border border-border">
+      {/* Toolbar */}
+      <div className="absolute top-3 right-3 z-10 flex items-center gap-1 bg-card border border-border rounded-lg shadow-sm p-1">
+        <button onClick={() => zoomBy(1.2)} title="Zoom in" className="p-1.5 rounded hover:bg-muted">
+          <ZoomIn className="w-4 h-4 text-muted-foreground" />
+        </button>
+        <button onClick={() => zoomBy(0.83)} title="Zoom out" className="p-1.5 rounded hover:bg-muted">
+          <ZoomOut className="w-4 h-4 text-muted-foreground" />
+        </button>
+        <span className="px-2 text-xs text-muted-foreground tabular-nums w-12 text-center">
+          {Math.round(transform.k * 100)}%
+        </span>
+        <button onClick={fitView} title="Fit to view" className="p-1.5 rounded hover:bg-muted">
+          <Maximize2 className="w-4 h-4 text-muted-foreground" />
+        </button>
+      </div>
+
+      <div className="absolute top-3 left-3 z-10 flex items-center gap-2 bg-card border border-border rounded-lg shadow-sm px-3 py-1.5">
+        <Move className="w-3.5 h-3.5 text-muted-foreground" />
+        <span className="text-[11px] text-muted-foreground">Drag canvas to pan • Drag nodes to rearrange • ⌘/Ctrl + scroll to zoom</span>
+      </div>
+
+      <div
+        ref={wrapperRef}
+        className="absolute inset-0 cursor-grab active:cursor-grabbing select-none"
+        style={{
+          backgroundImage:
+            "radial-gradient(hsl(var(--border)) 1px, transparent 1px)",
+          backgroundSize: `${24 * transform.k}px ${24 * transform.k}px`,
+          backgroundPosition: `${transform.x}px ${transform.y}px`,
+        }}
+        onPointerDown={onPointerDownCanvas}
+        onPointerMove={onPointerMove}
+        onPointerUp={onPointerUp}
+        onPointerLeave={onPointerUp}
+        onWheel={onWheel}
+      >
+        <div
+          className="absolute top-0 left-0"
+          style={{
+            transform: `translate(${transform.x}px, ${transform.y}px) scale(${transform.k})`,
+            transformOrigin: "0 0",
+          }}
+        >
+          {/* SVG layer (sized to bounds) */}
+          <svg
+            style={{
+              position: "absolute",
+              left: bounds.minX,
+              top: bounds.minY,
+              width: bounds.w,
+              height: bounds.h,
+              pointerEvents: "none",
+              overflow: "visible",
+            }}
+          >
+            <defs>
+              <marker id="wf-arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+                <path d="M0,0 L10,5 L0,10 z" fill="hsl(var(--muted-foreground))" />
+              </marker>
+            </defs>
+            <g transform={`translate(${-bounds.minX} ${-bounds.minY})`}>
+              {connections.map(c => (
+                <path
+                  key={c.id}
+                  d={c.d}
+                  fill="none"
+                  stroke="hsl(var(--muted-foreground))"
+                  strokeWidth={1.8}
+                  strokeOpacity={0.7}
+                  markerEnd="url(#wf-arrow)"
+                />
+              ))}
+            </g>
+          </svg>
+
+          {/* Start anchor */}
+          <div
+            className="absolute"
+            style={{
+              left: -ANCHOR_W / 2,
+              top: -ANCHOR_H / 2,
+              width: ANCHOR_W,
+              height: ANCHOR_H,
+            }}
+          >
+            <div className="w-full h-full bg-card border-2 border-teal/50 rounded-2xl flex items-center gap-2 px-4 shadow-sm">
+              <div className="w-8 h-8 rounded-lg bg-teal/15 flex items-center justify-center">
+                <Play className="w-4 h-4 text-teal" />
+              </div>
+              <div>
+                <p className="text-[10px] font-semibold text-muted-foreground uppercase tracking-wider">Start</p>
+                <p className="text-xs font-semibold text-foreground">Submitted</p>
+              </div>
+            </div>
+          </div>
+
+          {/* Step nodes */}
+          {steps.map((step, i) => {
+            const pos = positions[i] ?? { x: 0, y: (i + 1) * (NODE_H + 80) };
+            const color = getGroupColor(step.assignee_group);
+            const mode = ASSIGNEE_MODES.find(m => m.value === step.assignee_type);
+            const isSelected = selectedIndex === i;
+            const ModeIcon = mode?.Icon ?? Users;
+            return (
+              <div
+                key={step.id || `n-${i}`}
+                className={clsx(
+                  "absolute group",
+                  isSelected && "z-20"
+                )}
+                style={{
+                  left: pos.x - NODE_W / 2,
+                  top: pos.y - NODE_H / 2,
+                  width: NODE_W,
+                  height: NODE_H,
+                }}
+                onPointerDown={(e) => onPointerDownNode(i, e)}
+                onClick={(e) => { e.stopPropagation(); onSelectIndex(i); }}
+              >
+                <div
+                  className={clsx(
+                    "w-full h-full rounded-2xl bg-card border-2 p-3 cursor-grab active:cursor-grabbing transition-all",
+                    isSelected
+                      ? "border-accent shadow-elegant ring-4 ring-accent/15"
+                      : "border-border shadow-sm hover:shadow-md hover:border-foreground/20"
+                  )}
+                >
+                  <div className="flex items-center justify-between mb-2">
+                    <div className="flex items-center gap-2">
+                      <div
+                        className="w-7 h-7 rounded-lg flex items-center justify-center text-white text-xs font-bold"
+                        style={{ backgroundColor: color }}
+                      >
+                        {i + 1}
+                      </div>
+                      <span className="text-[10px] font-medium text-muted-foreground uppercase tracking-wider">
+                        Step {i + 1}
+                      </span>
+                    </div>
+                    <Edit3 className="w-3.5 h-3.5 text-muted-foreground opacity-0 group-hover:opacity-100" />
+                  </div>
+
+                  <p className={clsx(
+                    "text-sm font-semibold truncate mb-2",
+                    step.name ? "text-foreground" : "text-muted-foreground italic"
+                  )}>
+                    {step.name || "Click to configure"}
+                  </p>
+
+                  <div className="flex items-center gap-1.5 mb-2">
+                    <div
+                      className="w-5 h-5 rounded flex items-center justify-center"
+                      style={{ backgroundColor: `${color}22` }}
+                    >
+                      <ModeIcon className="w-3 h-3" style={{ color }} />
+                    </div>
+                    <p className="text-[11px] text-muted-foreground truncate flex-1">
+                      {step.assignee_group_name || "No group"}
+                      {step.assignee_user_name && ` · ${step.assignee_user_name}`}
+                    </p>
+                  </div>
+
+                  <div className="flex items-center justify-between">
+                    <div className="flex items-center gap-1">
+                      <Clock className="w-3 h-3 text-muted-foreground" />
+                      <span className="text-[10px] text-muted-foreground">
+                        {step.sla_hours < 24 ? `${step.sla_hours}h` : `${Math.floor(step.sla_hours / 24)}d`}
+                      </span>
+                    </div>
+                    <div className="flex items-center gap-1">
+                      {step.allow_approve && <span className="w-1.5 h-1.5 rounded-full bg-teal" title="Approve" />}
+                      {step.allow_reject && <span className="w-1.5 h-1.5 rounded-full bg-destructive" title="Reject" />}
+                      {step.allow_return && <span className="w-1.5 h-1.5 rounded-full bg-accent" title="Return" />}
+                    </div>
+                  </div>
+                </div>
+              </div>
+            );
+          })}
+
+          {/* End anchor */}
+          <div
+            className="absolute"
+            style={{
+              left: endX - ANCHOR_W / 2,
+              top: endY - ANCHOR_H / 2,
+              width: ANCHOR_W,
+              height: ANCHOR_H,
+            }}
+          >
+            <div className="w-full h-full bg-card border-2 border-primary/40 rounded-2xl flex items-center gap-2 px-4 shadow-sm">
+              <div className="w-8 h-8 rounded-lg bg-primary/10 flex items-center justify-center">
+                <Flag className="w-4 h-4 text-primary" />
+              </div>
+              <div>
+                <p className="text-[10px] font-semibold text-muted-foreground uppercase tracking-wider">End</p>
+                <p className="text-xs font-semibold text-foreground">Approved</p>
+              </div>
+            </div>
+          </div>
+
+          {/* Add-step floating button — placed near end */}
+          <div
+            className="absolute"
+            style={{
+              left: endX + ANCHOR_W / 2 + 20,
+              top: endY - 18,
+            }}
+          >
+            <button
+              onClick={(e) => { e.stopPropagation(); onAddStep(); }}
+              className="flex items-center gap-2 px-3 py-2 bg-card border-2 border-dashed border-border rounded-xl text-xs font-medium text-muted-foreground hover:border-accent hover:text-accent-foreground hover:bg-accent/10 transition-all shadow-sm"
+            >
+              <Plus className="w-3.5 h-3.5" /> Add step
+            </button>
+          </div>
+
+          {/* Empty state */}
+          {steps.length === 0 && (
+            <div
+              className="absolute"
+              style={{ left: -120, top: NODE_H }}
+            >
+              <button
+                onClick={(e) => { e.stopPropagation(); onAddStep(); }}
+                className="flex flex-col items-center gap-3 px-8 py-6 bg-card border-2 border-dashed border-border rounded-2xl hover:border-accent hover:bg-accent/5 transition-all group"
+              >
+                <div className="w-12 h-12 rounded-xl bg-muted flex items-center justify-center group-hover:bg-accent/15">
+                  <Plus className="w-6 h-6 text-muted-foreground group-hover:text-accent" />
+                </div>
+                <div className="text-center">
+                  <p className="text-sm font-medium text-foreground">Add first approval step</p>
+                  <p className="text-xs text-muted-foreground mt-1">Click to start building your workflow</p>
+                </div>
+              </button>
+            </div>
+          )}
+        </div>
+      </div>
     </div>
   );
 }
 
-// ── Template Card ─────────────────────────────────────────────────────────────
-function TemplateCard({ template, onSelect, onClone, isSelected }: {
-  template: WorkflowTemplate;
-  onSelect: () => void;
-  onClone: () => void;
-  isSelected: boolean;
-}) {
-  return (
-    <div
-      onClick={onSelect}
-      className={clsx(
-        "rounded-xl border-2 p-4 cursor-pointer transition-all group",
-        isSelected
-          ? "border-accent bg-accent/5 shadow-md"
-          : "border-border bg-card hover:border-accent/40 hover:shadow-md"
-      )}
-    >
-      <div className="flex items-start justify-between mb-2">
-        <div className="flex items-center gap-2">
-          <div className="w-8 h-8 rounded-lg bg-primary text-primary-foreground flex items-center justify-center shadow-sm">
-            <LayoutTemplate className="w-4 h-4" />
-          </div>
-          <div>
-            <p className="font-semibold text-foreground text-sm">{template.name}</p>
-          </div>
-        </div>
-        <button
-          onClick={(e) => { e.stopPropagation(); onClone(); }}
-          className="opacity-0 group-hover:opacity-100 p-1.5 text-muted-foreground hover:text-accent-foreground hover:bg-accent/15 rounded-lg transition-all"
-        >
-          <Copy className="w-3.5 h-3.5" />
-        </button>
-      </div>
-      {template.description && (
-        <p className="text-xs text-muted-foreground line-clamp-2 mb-3">{template.description}</p>
-      )}
-      <div className="flex items-center gap-2 text-xs text-muted-foreground">
-        <GitBranch className="w-3 h-3" />
-        <span>{template.step_count} step{template.step_count !== 1 ? 's' : ''}</span>
-      </div>
-    </div>
-  );
+// Cubic bezier between two points (mostly vertical or horizontal flow).
+function bezierPath(a: { x: number; y: number }, b: { x: number; y: number }) {
+  const dy = b.y - a.y;
+  const dx = b.x - a.x;
+  // Vertical-ish flow: control points pulled vertically
+  if (Math.abs(dy) >= Math.abs(dx)) {
+    const cy = Math.max(40, Math.abs(dy) * 0.4);
+    return `M ${a.x} ${a.y} C ${a.x} ${a.y + cy}, ${b.x} ${b.y - cy}, ${b.x} ${b.y}`;
+  }
+  const cx = Math.max(40, Math.abs(dx) * 0.4);
+  return `M ${a.x} ${a.y} C ${a.x + cx} ${a.y}, ${b.x - cx} ${b.y}, ${b.x} ${b.y}`;
 }
 
 // ── Routing Rules Panel ───────────────────────────────────────────────────────
@@ -610,7 +867,12 @@ function RoutingRulesPanel({ templateId, docTypes }: {
 }) {
   const qc = useQueryClient();
   const [showAdd, setShowAdd] = useState(false);
-  const [form, setForm] = useState({ document_type: "", amount_threshold: "0", currency: "USD", label: "" });
+  const [form, setForm] = useState({
+    document_type: "",
+    amount_threshold: "0",
+    currency: "USD",
+    label: "",
+  });
 
   const { data: rules, isLoading } = useQuery<WorkflowRule[]>({
     queryKey: ["workflow-rules", templateId],
@@ -618,14 +880,22 @@ function RoutingRulesPanel({ templateId, docTypes }: {
   });
 
   const createRule = useMutation({
-    mutationFn: () => workflowAPI.createRule({ ...form, template: templateId }),
+    mutationFn: () => workflowAPI.createRule({
+      ...form,
+      template: templateId,
+      // ensure numeric threshold sent
+      amount_threshold: form.amount_threshold || "0",
+    }),
     onSuccess: () => {
       toast.success("Routing rule created");
       qc.invalidateQueries({ queryKey: ["workflow-rules", templateId] });
       setShowAdd(false);
       setForm({ document_type: "", amount_threshold: "0", currency: "USD", label: "" });
     },
-    onError: () => toast.error("Failed to create rule"),
+    onError: (err: any) => {
+      const message = formatApiError(err?.response?.data) || "Failed to create rule";
+      toast.error(message);
+    },
   });
 
   const deleteRule = useMutation({
@@ -634,40 +904,57 @@ function RoutingRulesPanel({ templateId, docTypes }: {
       toast.success("Rule removed");
       qc.invalidateQueries({ queryKey: ["workflow-rules", templateId] });
     },
+    onError: () => toast.error("Failed to remove rule"),
   });
 
-  const sortedRules = [...(rules ?? [])].sort((a, b) => Number(a.amount_threshold) - Number(b.amount_threshold));
+  const sortedRules = useMemo(
+    () => [...(rules ?? [])].sort((a, b) => Number(a.amount_threshold) - Number(b.amount_threshold)),
+    [rules]
+  );
+
+  // Group rules by document type for clearer reading
+  const grouped = useMemo(() => {
+    const map = new Map<string, { name: string; rules: WorkflowRule[] }>();
+    for (const rule of sortedRules) {
+      const key = rule.document_type;
+      if (!map.has(key)) map.set(key, { name: rule.document_type_name, rules: [] });
+      map.get(key)!.rules.push(rule);
+    }
+    return Array.from(map.entries());
+  }, [sortedRules]);
+
+  // All active doc types are eligible — routing rules can override the
+  // primary template assignment for amount thresholds.
+  const eligibleDocTypes = docTypes.filter(dt => dt.is_active);
 
   return (
-    <div className="space-y-4">
+    <div className="max-w-3xl mx-auto space-y-5">
       <div className="flex items-start justify-between gap-4">
-        <div>
-          <h3 className="font-semibold text-foreground text-sm flex items-center gap-2">
-            <Settings2 className="w-4 h-4 text-accent-foreground" />
+        <div className="flex-1">
+          <h3 className="font-semibold text-foreground text-base flex items-center gap-2">
+            <Settings2 className="w-4 h-4 text-muted-foreground" />
             Amount-based routing rules
           </h3>
-          <p className="text-xs text-muted-foreground mt-0.5 max-w-md">
-            Route high-value documents to different approval workflows based on amount thresholds.
-            Rules are evaluated in order of threshold (lowest first). Threshold 0 = catch-all.
+          <p className="text-xs text-muted-foreground mt-1">
+            When a document is submitted, the highest matching threshold wins.
+            Use <span className="font-mono">0</span> for a catch-all (default) rule.
           </p>
         </div>
-        <button onClick={() => setShowAdd(true)} className="btn-primary text-xs px-3 py-1.5">
-          <Plus className="w-3.5 h-3.5" /> Add rule
-        </button>
-      </div>
-
-      <div className="p-3 bg-teal/10 border border-teal/30 rounded-lg">
-        <div className="flex items-start gap-2 text-xs text-teal">
-          <Info className="w-3.5 h-3.5 mt-0.5 flex-shrink-0" />
-          <span>When a document is submitted, the workflow engine selects the rule with the highest threshold ≤ document amount. This template will be used for documents matching this rule.</span>
-        </div>
+        {!showAdd && (
+          <button onClick={() => setShowAdd(true)} className="btn-primary text-xs px-3 py-1.5">
+            <Plus className="w-3.5 h-3.5" /> Add rule
+          </button>
+        )}
       </div>
 
       {showAdd && (
         <div className="rounded-xl border-2 border-accent/40 bg-accent/5 p-4 space-y-3">
-          <h4 className="text-sm font-semibold text-foreground flex items-center gap-2">
-            <Plus className="w-3.5 h-3.5 text-accent-foreground" /> New routing rule
-          </h4>
+          <div className="flex items-center justify-between">
+            <h4 className="text-sm font-semibold text-foreground">New routing rule</h4>
+            <button onClick={() => setShowAdd(false)} className="p-1 rounded hover:bg-muted">
+              <X className="w-4 h-4 text-muted-foreground" />
+            </button>
+          </div>
           <div className="grid grid-cols-2 gap-3">
             <div className="col-span-2">
               <Label required>Document type</Label>
@@ -676,29 +963,31 @@ function RoutingRulesPanel({ templateId, docTypes }: {
                 onChange={e => setForm(f => ({ ...f, document_type: e.target.value }))}
                 className={inp}
               >
-                <option value="">— Select document type —</option>
-                {docTypes.filter(dt => dt.workflow_template !== templateId).map(dt => (
-                  <option key={dt.id} value={dt.id}>{dt.name}</option>
+                <option value="">Select document type</option>
+                {eligibleDocTypes.map(dt => (
+                  <option key={dt.id} value={dt.id}>
+                    {dt.name}{dt.workflow_template === templateId ? " (primary)" : ""}
+                  </option>
                 ))}
               </select>
-              <p className="text-xs text-muted-foreground mt-1">
-                Documents of this type will use this template when the amount threshold is met.
+              <p className="text-[11px] text-muted-foreground mt-1">
+                Routing rules take precedence over the primary template when their threshold matches.
               </p>
             </div>
             <div>
-              <Label>Minimum amount (≥)</Label>
-              <div className="relative">
-                <span className="absolute left-3 top-1/2 -translate-y-1/2 text-muted-foreground">$</span>
-                <input
-                  type="number"
-                  min={0}
-                  step="0.01"
-                  value={form.amount_threshold}
-                  onChange={e => setForm(f => ({ ...f, amount_threshold: e.target.value }))}
-                  className={clsx(inp, "pl-7")}
-                  placeholder="0 = catch-all"
-                />
-              </div>
+              <Label required>Minimum amount</Label>
+              <input
+                type="number"
+                min={0}
+                step="0.01"
+                value={form.amount_threshold}
+                onChange={e => setForm(f => ({ ...f, amount_threshold: e.target.value }))}
+                className={inp}
+                placeholder="0"
+              />
+              <p className="text-[11px] text-muted-foreground mt-1">
+                {Number(form.amount_threshold) === 0 ? "Catch-all (default)" : `Triggers at ≥ ${Number(form.amount_threshold).toLocaleString()} ${form.currency}`}
+              </p>
             </div>
             <div>
               <Label>Currency</Label>
@@ -741,59 +1030,72 @@ function RoutingRulesPanel({ templateId, docTypes }: {
         </div>
       )}
 
-      {!isLoading && sortedRules.length === 0 && !showAdd && (
-        <div className="text-center py-12 bg-muted/40 rounded-xl">
-          <div className="w-12 h-12 rounded-full bg-muted flex items-center justify-center mx-auto mb-3">
-            <GitBranch className="w-6 h-6 text-muted-foreground/60" />
-          </div>
-          <p className="text-sm font-medium text-muted-foreground">No routing rules</p>
-          <p className="text-xs text-muted-foreground/80 mt-1">
-            Add rules to route documents from other document types to this template based on amount thresholds.
+      {!isLoading && grouped.length === 0 && !showAdd && (
+        <div className="text-center py-12 bg-muted/40 rounded-xl border border-dashed border-border">
+          <Settings2 className="w-12 h-12 mx-auto mb-3 text-muted-foreground/60" />
+          <p className="text-sm font-medium text-foreground">No routing rules yet</p>
+          <p className="text-xs text-muted-foreground mt-1 max-w-md mx-auto">
+            Add rules to route documents of a given type to this template once they cross an amount threshold.
           </p>
+          <button onClick={() => setShowAdd(true)} className="btn-secondary text-xs mt-4">
+            <Plus className="w-3.5 h-3.5" /> Add your first rule
+          </button>
         </div>
       )}
 
-      {sortedRules.length > 0 && (
-        <div className="space-y-2">
-          <p className="text-xs font-semibold text-muted-foreground uppercase tracking-wider px-1">
-            Rules pointing to this template ({sortedRules.length})
-          </p>
-          {sortedRules.map((rule, idx) => {
-            const threshold = Number(rule.amount_threshold);
-            const isCatchAll = threshold === 0;
-            return (
-              <div key={rule.id} className="flex items-center gap-3 p-3 rounded-xl bg-card border border-border hover:border-accent/40 transition-all group">
-                <div className={clsx(
-                  "w-8 h-8 rounded-full flex items-center justify-center text-xs font-bold",
-                  isCatchAll ? "bg-muted text-muted-foreground" : "bg-accent/15 text-accent-foreground border border-accent/30"
-                )}>
-                  {idx + 1}
+      {grouped.length > 0 && (
+        <div className="space-y-4">
+          {grouped.map(([docTypeId, { name, rules: docRules }]) => (
+            <div key={docTypeId} className="rounded-xl border border-border bg-card overflow-hidden">
+              <div className="flex items-center justify-between px-4 py-2.5 bg-muted/40 border-b border-border">
+                <div className="flex items-center gap-2">
+                  <FolderTree className="w-3.5 h-3.5 text-muted-foreground" />
+                  <p className="text-sm font-semibold text-foreground">{name}</p>
                 </div>
-                <div className="flex-1 min-w-0">
-                  <div className="flex items-center gap-2 flex-wrap">
-                    <p className="text-sm font-medium text-foreground">
-                      {rule.label || (isCatchAll ? "Default (catch-all)" : `≥ ${threshold.toLocaleString()} ${rule.currency}`)}
-                    </p>
-                    <span className="text-xs px-2 py-0.5 rounded-full bg-muted text-muted-foreground">
-                      {rule.document_type_name}
-                    </span>
-                  </div>
-                  <p className="text-xs text-muted-foreground mt-0.5">
-                    {isCatchAll
-                      ? "Applies when no higher threshold matches"
-                      : `Documents from ${rule.document_type_name} with amount ≥ ${threshold.toLocaleString()} ${rule.currency} use this template`}
-                  </p>
-                </div>
-                <button
-                  onClick={() => deleteRule.mutate(rule.id)}
-                  disabled={deleteRule.isPending}
-                  className="opacity-0 group-hover:opacity-100 p-1.5 text-muted-foreground hover:text-destructive rounded-lg hover:bg-destructive/10 transition-all"
-                >
-                  <Trash2 className="w-4 h-4" />
-                </button>
+                <span className="text-[11px] text-muted-foreground">
+                  {docRules.length} rule{docRules.length !== 1 ? "s" : ""}
+                </span>
               </div>
-            );
-          })}
+              <div className="divide-y divide-border">
+                {docRules.map((rule, idx) => {
+                  const threshold = Number(rule.amount_threshold);
+                  const isCatchAll = threshold === 0;
+                  return (
+                    <div key={rule.id} className="flex items-center gap-3 px-4 py-3 group hover:bg-muted/30">
+                      <div className={clsx(
+                        "w-7 h-7 rounded-full flex items-center justify-center text-[11px] font-bold shrink-0",
+                        isCatchAll ? "bg-muted text-muted-foreground" : "bg-accent/20 text-accent-foreground"
+                      )}>
+                        {idx + 1}
+                      </div>
+                      <div className="flex-1 min-w-0">
+                        <div className="flex items-center gap-2 flex-wrap">
+                          <p className="text-sm font-medium text-foreground">
+                            {isCatchAll
+                              ? "Default (catch-all)"
+                              : `≥ ${threshold.toLocaleString()} ${rule.currency}`}
+                          </p>
+                          {rule.label && (
+                            <span className="text-[11px] px-2 py-0.5 rounded-full bg-muted text-muted-foreground">
+                              {rule.label}
+                            </span>
+                          )}
+                        </div>
+                      </div>
+                      <button
+                        onClick={() => deleteRule.mutate(rule.id)}
+                        disabled={deleteRule.isPending}
+                        title="Remove rule"
+                        className="opacity-0 group-hover:opacity-100 p-1.5 text-muted-foreground hover:text-destructive rounded-lg hover:bg-destructive/10 transition-colors"
+                      >
+                        <Trash2 className="w-4 h-4" />
+                      </button>
+                    </div>
+                  );
+                })}
+              </div>
+            </div>
+          ))}
         </div>
       )}
     </div>
@@ -815,23 +1117,13 @@ function TemplateEditor({
   docTypes?: DocumentType[];
 }) {
   const qc = useQueryClient();
-  const [name, setName] = useState(template?.name ?? (docType ? `${docType.name} Workflow` : "New Workflow Template"));
+  const [name, setName] = useState(template?.name ?? (docType ? `${docType.name} Workflow` : "New Template"));
   const [description, setDescription] = useState(template?.description ?? "");
   const [steps, setSteps] = useState<WorkflowStep[]>(() =>
     template?.steps?.slice().sort((a, b) => a.order - b.order).map((s) => ({ ...s })) ?? []
   );
-  const [activeTab, setTab] = useState<"steps" | "preview" | "rules">("steps");
   const [isDirty, setIsDirty] = useState(!template);
-  const [showTemplateLibrary, setShowTemplateLibrary] = useState(false);
-
-  const dragIdx = useRef<number | null>(null);
-  const overIdx = useRef<number | null>(null);
-  const [dragOver, setDragOver] = useState<number | null>(null);
-
-  const { data: users } = useQuery<AppUser[]>({
-    queryKey: ["users-all"],
-    queryFn: () => usersAPI.list({ page_size: 200 }).then(r => r.data.results ?? r.data),
-  });
+  const [activeTab, setActiveTab] = useState<"flow" | "rules">("flow");
 
   const { data: groups } = useQuery<Group[]>({
     queryKey: ["groups-all"],
@@ -866,307 +1158,141 @@ function TemplateEditor({
     },
   });
 
-  const duplicateMutation = useMutation({
-    mutationFn: (payload: { id: string; name?: string }) =>
-      workflowAPI.duplicateTemplate(payload.id, payload.name),
-    onSuccess: ({ data }) => {
-      toast.success(`Template duplicated as "${data.name}"`);
-      qc.invalidateQueries({ queryKey: ["workflow-templates"] });
-      setShowTemplateLibrary(false);
-    },
-    onError: () => toast.error("Failed to duplicate template"),
-  });
-
-  const reorderMutation = useMutation({
-    mutationFn: (stepIds: string[]) => workflowAPI.reorderSteps(template!.id, stepIds),
-    onError: () => toast.error("Could not persist step order — please re-save."),
-  });
-
-  const patchStep = useCallback((i: number, patch: Partial<WorkflowStep>) => {
-    setSteps(prev => {
-      const next = [...prev];
-      next[i] = { ...next[i], ...patch };
-      return next;
-    });
+  const handleStepsChange = useCallback((newSteps: WorkflowStep[]) => {
+    setSteps(newSteps.map((s, i) => ({ ...s, order: i + 1 })));
     setIsDirty(true);
   }, []);
-
-  const addStep = () => {
-    setSteps(prev => [...prev, { ...blankStep(), order: prev.length + 1 }]);
-    setIsDirty(true);
-  };
-
-  const removeStep = (i: number) => {
-    setSteps(prev => prev.filter((_, j) => j !== i).map((s, idx) => ({ ...s, order: idx + 1 })));
-    setIsDirty(true);
-  };
-
-  const handleDragStart = (i: number) => (e: DragEvent) => {
-    dragIdx.current = i;
-    e.dataTransfer.effectAllowed = "move";
-    setTimeout(() => setDragOver(i), 0);
-  };
-
-  const handleDragOver = (i: number) => (e: DragEvent) => {
-    e.preventDefault();
-    e.dataTransfer.dropEffect = "move";
-    if (overIdx.current !== i) {
-      overIdx.current = i;
-      setDragOver(i);
-    }
-  };
-
-  const handleDragEnd = () => {
-    dragIdx.current = null;
-    overIdx.current = null;
-    setDragOver(null);
-  };
-
-  const handleDrop = (targetIdx: number) => (e: DragEvent) => {
-    e.preventDefault();
-    const from = dragIdx.current;
-    if (from === null || from === targetIdx) {
-      handleDragEnd();
-      return;
-    }
-
-    setSteps(prev => {
-      const next = [...prev];
-      const [item] = next.splice(from, 1);
-      next.splice(targetIdx, 0, item);
-      const reordered = next.map((s, idx) => ({ ...s, order: idx + 1 }));
-
-      if (template && reordered.every(s => s.id)) {
-        const stepIds = reordered.map(s => s.id!);
-        reorderMutation.mutate(stepIds);
-      }
-      return reordered;
-    });
-    setIsDirty(true);
-    handleDragEnd();
-  };
 
   const handleSave = () => {
     if (!name.trim()) { toast.error("Template name is required"); return; }
     if (steps.length === 0) { toast.error("Add at least one approval step"); return; }
     for (const s of steps) {
       if (!s.name.trim()) { toast.error(`Step ${s.order} needs a name`); return; }
-      if (s.assignee_type !== "specific_user" && !s.assignee_group) {
-        toast.error(`"${s.name}" needs a group`); return;
-      }
+      if (!s.assignee_group) { toast.error(`"${s.name}" needs a group`); return; }
       if (s.assignee_type === "group_specific" && !s.assignee_user) {
         toast.error(`"${s.name}" needs a specific group member`); return;
       }
-      if (s.assignee_type === "specific_user" && !s.assignee_user) {
-        toast.error(`"${s.name}" needs a user`); return;
+      if (!s.allow_approve && !s.allow_reject && !s.allow_return) {
+        toast.error(`"${s.name}" must have at least one approver action enabled`); return;
       }
     }
 
     saveMutation.mutate({
       name: name.trim(),
       description: description.trim(),
+      is_active: template ? template.is_active : true,
       steps: steps.map(stepToPayload),
     });
   };
 
-  const handleCloneFromLibrary = (sourceTemplate: WorkflowTemplate) => {
-    duplicateMutation.mutate({ id: sourceTemplate.id, name: `${sourceTemplate.name} (Copy)` });
-  };
+  const [selectedStepIndex, setSelectedStepIndex] = useState<number | null>(null);
 
-  const tabs = [
-    { id: "steps" as const, label: `Steps (${steps.length})`, Icon: GitBranch },
-    { id: "preview" as const, label: "Flow preview", Icon: Eye },
-    ...(template ? [{ id: "rules" as const, label: "Routing Rules", Icon: Settings2 }] : []),
-  ];
+  const handleAddStep = useCallback(() => {
+    const newStep = { ...blankStep(), order: steps.length + 1 };
+    const next = [...steps, newStep];
+    setSteps(next);
+    setIsDirty(true);
+    setSelectedStepIndex(next.length - 1);
+  }, [steps]);
+
+  const handleDeleteStep = useCallback((index: number) => {
+    const next = steps.filter((_, i) => i !== index).map((s, i) => ({ ...s, order: i + 1 }));
+    setSteps(next);
+    setIsDirty(true);
+    setSelectedStepIndex(null);
+  }, [steps]);
+
+  const handlePatchStep = useCallback((index: number, patch: Partial<WorkflowStep>) => {
+    const next = [...steps];
+    next[index] = { ...next[index], ...patch };
+    setSteps(next);
+    setIsDirty(true);
+  }, [steps]);
 
   return (
-    <div className="flex flex-col h-full min-h-0">
-      {isDirty && (
-        <div className="flex items-center gap-2 px-3 py-2 mb-3 bg-accent/15 border border-accent/40 rounded-lg text-xs text-accent-foreground flex-shrink-0">
-          <TriangleAlert className="w-3.5 h-3.5" /> Unsaved changes
-        </div>
-      )}
-
+    <div className="flex flex-col h-full">
       {/* Header */}
-      <div className="flex items-start justify-between gap-4 pb-4 border-b border-border mb-4 flex-shrink-0">
-        <div className="flex items-start gap-3 flex-1 min-w-0">
-          <div className="mt-1 w-10 h-10 rounded-xl bg-primary text-primary-foreground shadow-md flex items-center justify-center flex-shrink-0">
-            <FileText className="w-5 h-5" />
-          </div>
-          <div className="flex-1 min-w-0">
-            {docType && (
-              <p className="text-xs font-medium text-accent-foreground bg-accent/15 border border-accent/30 px-2 py-0.5 rounded-full inline-block mb-1">
-                {docType.name}
-              </p>
-            )}
-            <input
-              value={name}
-              onChange={e => { setName(e.target.value); setIsDirty(true); }}
-              className="w-full text-lg font-bold text-foreground bg-transparent border-0 outline-none placeholder:text-muted-foreground/60 p-0"
-              placeholder="Template name…"
-            />
-            <input
-              value={description}
-              onChange={e => { setDescription(e.target.value); setIsDirty(true); }}
-              className="w-full text-sm text-muted-foreground bg-transparent border-0 outline-none placeholder:text-muted-foreground/60 p-0 mt-1"
-              placeholder="Short description (optional)"
-            />
-          </div>
-        </div>
-        <div className="flex items-center gap-2">
-          {!template && (
-            <button
-              onClick={() => setShowTemplateLibrary(!showTemplateLibrary)}
-              className="btn-secondary text-sm"
-            >
-              <Layers className="w-4 h-4" /> Browse templates
-            </button>
+      <div className="flex items-center justify-between mb-4 flex-shrink-0 gap-4">
+        <div className="flex-1 min-w-0">
+          <input
+            value={name}
+            onChange={e => { setName(e.target.value); setIsDirty(true); }}
+            className="text-lg font-bold text-foreground bg-transparent border-0 outline-none w-full p-0 focus:ring-0"
+            placeholder="Template name..."
+          />
+          <input
+            value={description}
+            onChange={e => { setDescription(e.target.value); setIsDirty(true); }}
+            className="text-sm text-muted-foreground bg-transparent border-0 outline-none w-full p-0 mt-1 focus:ring-0"
+            placeholder="Description (optional)"
+          />
+          {docType && (
+            <span className="inline-flex items-center gap-1 mt-2 text-xs font-medium text-accent-foreground bg-accent/20 px-2 py-1 rounded-md">
+              {docType.name}
+            </span>
           )}
-          <button
-            onClick={handleSave}
-            disabled={saveMutation.isPending || (!isDirty && !!template)}
-            className="btn-primary text-sm"
-          >
+        </div>
+        <div className="flex items-center gap-2 flex-shrink-0">
+          {template && (
+            <div className="flex bg-muted rounded-lg p-1">
+              <button
+                onClick={() => setActiveTab("flow")}
+                className={clsx(
+                  "px-3 py-1.5 text-xs font-medium rounded-md transition-all",
+                  activeTab === "flow" ? "bg-card shadow-sm text-foreground" : "text-muted-foreground hover:text-foreground"
+                )}
+              >
+                Workflow
+              </button>
+              <button
+                onClick={() => setActiveTab("rules")}
+                className={clsx(
+                  "px-3 py-1.5 text-xs font-medium rounded-md transition-all",
+                  activeTab === "rules" ? "bg-card shadow-sm text-foreground" : "text-muted-foreground hover:text-foreground"
+                )}
+              >
+                Routing rules
+              </button>
+            </div>
+          )}
+          {isDirty && (
+            <span className="text-[11px] text-accent-foreground bg-accent/20 px-2 py-1 rounded-md">Unsaved</span>
+          )}
+          <button onClick={handleSave} disabled={saveMutation.isPending} className="btn-primary text-sm">
             {saveMutation.isPending ? <Loader2 className="w-4 h-4 animate-spin" /> : <Save className="w-4 h-4" />}
-            {template ? "Save Changes" : "Create Template"}
+            Save
           </button>
         </div>
       </div>
 
-      {/* Template Library Browser */}
-      {showTemplateLibrary && (
-        <div className="mb-4 p-4 bg-muted/40 rounded-xl border border-border">
-          <div className="flex items-center justify-between mb-3">
-            <h3 className="text-sm font-semibold text-foreground flex items-center gap-2">
-              <Layers className="w-4 h-4 text-accent-foreground" />
-              Template Library
-            </h3>
-            <button onClick={() => setShowTemplateLibrary(false)} className="p-1 text-muted-foreground hover:text-foreground">
-              <X className="w-4 h-4" />
-            </button>
-          </div>
-          {allTemplates === undefined ? (
-            <div className="flex items-center justify-center py-10">
-              <Loader2 className="w-6 h-6 text-accent animate-spin" />
-            </div>
-          ) : allTemplates.length === 0 ? (
-            <div className="text-center py-10 text-muted-foreground">
-              <p className="text-sm">No templates available to clone</p>
-            </div>
-          ) : (
-            <div className="grid grid-cols-2 gap-3 max-h-64 overflow-y-auto">
-              {allTemplates.filter(t => t.is_active && t.id !== template?.id).map(t => (
-                <TemplateCard
-                  key={t.id}
-                  template={t}
-                  onSelect={() => handleCloneFromLibrary(t)}
-                  onClone={() => handleCloneFromLibrary(t)}
-                  isSelected={false}
-                />
-              ))}
-            </div>
+      {/* Content */}
+      {activeTab === "flow" || !template ? (
+        <div className="flex-1 min-h-0 flex gap-4">
+          <FlowchartEditor
+            steps={steps}
+            groups={groups ?? []}
+            selectedIndex={selectedStepIndex}
+            onSelectIndex={setSelectedStepIndex}
+            onStepsChange={handleStepsChange}
+            onAddStep={handleAddStep}
+          />
+          {selectedStepIndex !== null && steps[selectedStepIndex] && (
+            <StepEditPanel
+              step={steps[selectedStepIndex]}
+              index={selectedStepIndex}
+              total={steps.length}
+              groups={groups ?? []}
+              onChange={(patch) => handlePatchStep(selectedStepIndex, patch)}
+              onClose={() => setSelectedStepIndex(null)}
+              onDelete={() => handleDeleteStep(selectedStepIndex)}
+            />
           )}
         </div>
-      )}
-
-      {/* Tabs */}
-      <div className="border-b border-border mb-4 flex gap-1 flex-shrink-0">
-        {tabs.map(({ id, label, Icon }) => (
-          <button
-            key={id}
-            onClick={() => setTab(id)}
-            className={clsx(
-              "flex items-center gap-2 px-4 py-2.5 text-sm font-medium rounded-t-lg transition-all",
-              activeTab === id
-                ? "bg-card text-foreground border-b-2 border-accent shadow-sm"
-                : "text-muted-foreground hover:text-foreground hover:bg-muted"
-            )}
-          >
-            <Icon className="w-3.5 h-3.5" />
-            {label}
-          </button>
-        ))}
-      </div>
-
-      {/* Tab Content */}
-      {activeTab === "steps" && (
-        <div className="flex-1 overflow-y-auto pr-1 space-y-2.5 min-h-0">
-          {steps.length === 0 && (
-            <div className="flex flex-col items-center justify-center py-20 text-muted-foreground gap-4 bg-muted/30 rounded-xl border-2 border-dashed border-border">
-              <div className="w-20 h-20 rounded-full bg-muted flex items-center justify-center">
-                <GitBranch className="w-10 h-10 text-muted-foreground/40" />
-              </div>
-              <div className="text-center">
-                <p className="text-sm font-medium text-foreground">No approval steps yet</p>
-                <p className="text-xs text-muted-foreground mt-1">Define the approval chain for {docType?.name || "this"} workflow</p>
-              </div>
-            </div>
+      ) : (
+        <div className="flex-1 overflow-y-auto min-h-0">
+          {template && docTypes && (
+            <RoutingRulesPanel templateId={template.id} docTypes={docTypes} />
           )}
-          {steps.map((step, i) => (
-            <div key={step.id || i}>
-              <StepCard
-                step={step}
-                index={i}
-                users={users ?? []}
-                groups={groups ?? []}
-                isDragOver={dragOver === i}
-                onChange={p => patchStep(i, p)}
-                onRemove={() => removeStep(i)}
-                onDragStart={handleDragStart(i)}
-                onDragOver={handleDragOver(i)}
-                onDragEnd={handleDragEnd}
-                onDrop={handleDrop(i)}
-              />
-              {i < steps.length - 1 && (
-                <div className="flex justify-center py-1">
-                  <ArrowDown className="w-4 h-4 text-muted-foreground/40" />
-                </div>
-              )}
-            </div>
-          ))}
-          <button
-            onClick={addStep}
-            className="w-full mt-2 border-2 border-dashed border-border rounded-xl py-4 text-sm text-muted-foreground hover:border-accent hover:text-accent-foreground hover:bg-accent/5 flex items-center justify-center gap-2 transition-all group"
-          >
-            <Plus className="w-4 h-4 group-hover:scale-110 transition-transform" /> Add approval step
-          </button>
-          {steps.length > 0 && (
-            <p className="text-center text-xs text-muted-foreground pb-3 flex items-center justify-center gap-1">
-              <GripVertical className="w-3 h-3" /> Drag steps to reorder the approval chain
-            </p>
-          )}
-        </div>
-      )}
-
-      {activeTab === "preview" && (
-        <div className="flex-1 overflow-y-auto min-h-0 bg-muted/30 rounded-xl border border-border">
-          <div className="p-4 border-b border-border bg-card rounded-t-xl sticky top-0 z-10">
-            <div className="flex items-center justify-between flex-wrap gap-3">
-              <div>
-                <p className="text-sm font-semibold text-foreground">{name || "Untitled template"}</p>
-                <div className="flex items-center gap-2 mt-1">
-                  <span className="text-xs text-muted-foreground">{docType?.name || "Global Template"}</span>
-                  <span className="text-xs text-muted-foreground/60">•</span>
-                  <span className="text-xs text-muted-foreground">{steps.length} step{steps.length !== 1 ? 's' : ''}</span>
-                </div>
-              </div>
-              <div className="flex items-center gap-3 flex-wrap">
-                {ASSIGNEE_MODES.map(m => (
-                  <span key={m.value} className="flex items-center gap-1.5 text-xs text-muted-foreground">
-                    <m.Icon className="w-3 h-3 text-accent-foreground" />
-                    {m.label}
-                  </span>
-                ))}
-              </div>
-            </div>
-          </div>
-          <FlowPreview steps={steps} name={name} />
-        </div>
-      )}
-
-      {activeTab === "rules" && template && docTypes && (
-        <div className="flex-1 overflow-y-auto min-h-0 pr-1">
-          <RoutingRulesPanel templateId={template.id} docTypes={docTypes} />
         </div>
       )}
     </div>
@@ -1195,20 +1321,15 @@ function DocTypeDetailModal({
   };
 
   return (
-    <div className="fixed inset-0 bg-primary/40 backdrop-blur-sm flex items-center justify-center z-50 p-4" onClick={onClose}>
-      <div className="bg-card rounded-2xl max-w-2xl w-full max-h-[85vh] overflow-hidden border border-border" style={{ boxShadow: "var(--shadow-elegant)" }} onClick={e => e.stopPropagation()}>
-        <div className="flex items-center justify-between p-5 border-b border-border bg-muted/40 sticky top-0 z-10">
+    <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50 p-4" onClick={onClose}>
+      <div className="bg-card rounded-2xl max-w-2xl w-full max-h-[85vh] overflow-hidden" onClick={e => e.stopPropagation()}>
+        <div className="flex items-center justify-between p-5 border-b">
           <div>
-            <h2 className="text-lg font-bold text-foreground flex items-center gap-2">
-              <FileText className="w-5 h-5 text-accent-foreground" />
-              {docType.name}
-            </h2>
-            <p className="text-xs text-muted-foreground mt-0.5">
-              Code: {docType.code} · Prefix: {docType.reference_prefix}
-            </p>
+            <h2 className="text-lg font-bold text-foreground">{docType.name}</h2>
+            <p className="text-xs text-muted-foreground mt-0.5">Code: {docType.code} · Prefix: {docType.reference_prefix}</p>
           </div>
-          <button onClick={onClose} className="p-1.5 text-muted-foreground hover:text-foreground rounded-lg hover:bg-muted">
-            <X className="w-5 h-5" />
+          <button onClick={onClose} className="p-1.5 hover:bg-muted rounded-lg">
+            <X className="w-5 h-5 text-muted-foreground" />
           </button>
         </div>
 
@@ -1219,52 +1340,35 @@ function DocTypeDetailModal({
           )}>
             <div className="flex items-start gap-3">
               {docType.workflow_template ? (
-                <CheckCircle2 className="w-5 h-5 text-teal mt-0.5 flex-shrink-0" />
+                <CheckCircle2 className="w-5 h-5 text-teal mt-0.5" />
               ) : (
-                <AlertCircle className="w-5 h-5 text-accent-foreground mt-0.5 flex-shrink-0" />
+                <AlertCircle className="w-5 h-5 text-accent-foreground mt-0.5" />
               )}
-              <div className="flex-1">
+              <div>
                 <p className="text-sm font-medium text-foreground">
-                  {docType.workflow_template ? "Primary Template Assigned" : "No Primary Template Assigned"}
+                  {docType.workflow_template ? "Primary Template Assigned" : "No Primary Template"}
                 </p>
                 {currentPrimaryTemplate && (
-                  <div className="mt-2 p-2 bg-card rounded-lg border border-teal/30">
-                    <p className="text-sm font-medium text-foreground">{currentPrimaryTemplate.name}</p>
-                    {currentPrimaryTemplate.description && (
-                      <p className="text-xs text-muted-foreground mt-0.5">{currentPrimaryTemplate.description}</p>
-                    )}
-                    <p className="text-xs text-muted-foreground mt-1">
-                      {currentPrimaryTemplate.step_count} step{currentPrimaryTemplate.step_count !== 1 ? 's' : ''}
-                    </p>
-                  </div>
+                  <p className="text-xs text-muted-foreground mt-1">{currentPrimaryTemplate.name}</p>
                 )}
-                <p className="text-xs text-muted-foreground mt-1">
-                  The primary template is used for documents that don't match any amount-based routing rules.
-                </p>
               </div>
             </div>
           </div>
 
           <div className="mb-4">
             <div className="flex items-center justify-between mb-3">
-              <h3 className="text-sm font-semibold text-foreground flex items-center gap-2">
-                <LayoutTemplate className="w-4 h-4 text-accent-foreground" />
-                Available Templates
-                <span className="text-xs font-normal text-muted-foreground">
-                  ({activeTemplates.length} total)
-                </span>
-              </h3>
-              <button onClick={onCreateTemplate} className="flex items-center gap-1.5 px-2.5 py-1.5 text-xs font-medium text-accent-foreground bg-accent/15 border border-accent/30 rounded-lg hover:bg-accent/25 transition-colors">
-                <Plus className="w-3.5 h-3.5" /> Create New
+              <h3 className="text-sm font-semibold text-foreground">Available Templates</h3>
+              <button onClick={onCreateTemplate} className="text-xs font-medium text-accent-foreground hover:text-accent-foreground">
+                + Create New
               </button>
             </div>
 
             {isLoading ? (
               <div className="space-y-2">
-                {[1, 2, 3].map(i => <div key={i} className="h-24 bg-muted rounded-xl animate-pulse" />)}
+                {[1, 2, 3].map(i => <div key={i} className="h-20 bg-muted rounded-xl animate-pulse" />)}
               </div>
             ) : activeTemplates.length > 0 ? (
-              <div className="space-y-2 max-h-[40vh] overflow-y-auto pr-1">
+              <div className="space-y-2 max-h-[40vh] overflow-y-auto">
                 {activeTemplates.map(template => {
                   const isCurrentPrimary = template.id === docType.workflow_template;
                   const isSelected = selectedTemplateId === template.id;
@@ -1273,62 +1377,27 @@ function DocTypeDetailModal({
                       key={template.id}
                       onClick={() => setSelectedTemplateId(template.id)}
                       className={clsx(
-                        "relative p-4 rounded-xl border-2 transition-all cursor-pointer group",
-                        isSelected
-                          ? "border-accent bg-accent/5 shadow-sm"
-                          : "border-border hover:border-accent/40 hover:bg-muted/40",
-                        isCurrentPrimary && !isSelected && "border-teal/40 bg-teal/5"
+                        "p-4 rounded-xl border-2 cursor-pointer transition-all",
+                        isSelected ? "border-accent/50 bg-accent/10" : "border-border hover:border-foreground/20",
+                        isCurrentPrimary && !isSelected && "border-teal/50 bg-teal/10"
                       )}
                     >
-                      {isSelected && (
-                        <div className="absolute top-3 right-3">
-                          <div className="w-5 h-5 rounded-full bg-accent flex items-center justify-center">
-                            <Check className="w-3 h-3 text-accent-foreground" />
-                          </div>
-                        </div>
-                      )}
-
-                      <div className="flex items-start gap-3 pr-8">
-                        <div className={clsx(
-                          "w-10 h-10 rounded-xl flex items-center justify-center flex-shrink-0 text-white",
-                          isCurrentPrimary ? "bg-teal" : "bg-primary"
-                        )}>
-                          <LayoutTemplate className="w-5 h-5" />
-                        </div>
-
-                        <div className="flex-1 min-w-0">
-                          <div className="flex items-center gap-2 flex-wrap">
-                            <span className="font-semibold text-foreground text-sm">
-                              {template.name}
-                            </span>
-                            {isCurrentPrimary && (
-                              <span className="text-xs px-2 py-0.5 rounded-full bg-teal/15 text-teal border border-teal/30">
-                                Current Primary
-                              </span>
-                            )}
-                            {template.category && (
-                              <span className="text-xs px-1.5 py-0.5 rounded bg-muted text-muted-foreground">
-                                {template.category}
-                              </span>
-                            )}
-                          </div>
-
+                      <div className="flex items-center justify-between">
+                        <div>
+                          <p className="font-semibold text-sm text-foreground">{template.name}</p>
                           {template.description && (
-                            <p className="text-xs text-muted-foreground mt-1 line-clamp-2">
-                              {template.description}
-                            </p>
+                            <p className="text-xs text-muted-foreground mt-0.5">{template.description}</p>
                           )}
-
-                          <div className="flex items-center gap-3 mt-2">
-                            <span className="text-xs text-muted-foreground flex items-center gap-1">
-                              <GitBranch className="w-3 h-3" /> {template.step_count} steps
-                            </span>
-                            {template.updated_at && (
-                              <span className="text-xs text-muted-foreground flex items-center gap-1">
-                                <Calendar className="w-3 h-3" /> Updated {new Date(template.updated_at).toLocaleDateString()}
-                              </span>
-                            )}
-                          </div>
+                        </div>
+                        <div className="flex items-center gap-2">
+                          {isCurrentPrimary && (
+                            <span className="text-xs text-teal bg-teal/15 px-2 py-0.5 rounded-full">Primary</span>
+                          )}
+                          {isSelected && (
+                            <div className="w-5 h-5 rounded-full bg-accent flex items-center justify-center">
+                              <Check className="w-3 h-3 text-white" />
+                            </div>
+                          )}
                         </div>
                       </div>
                     </div>
@@ -1337,43 +1406,28 @@ function DocTypeDetailModal({
               </div>
             ) : (
               <div className="text-center py-12 bg-muted/40 rounded-xl">
-                <LayoutTemplate className="w-12 h-12 mx-auto mb-3 text-muted-foreground/40" />
-                <p className="text-sm font-medium text-muted-foreground">No templates available</p>
-                <p className="text-xs text-muted-foreground/80 mt-1">
-                  Create a template to assign as the primary workflow
-                </p>
-                <button onClick={onCreateTemplate} className="mt-3 text-sm text-accent-foreground hover:underline font-medium">
+                <LayoutTemplate className="w-12 h-12 mx-auto mb-3 text-muted-foreground/60" />
+                <p className="text-sm text-muted-foreground">No templates available</p>
+                <button onClick={onCreateTemplate} className="mt-3 text-sm text-accent-foreground hover:underline">
                   + Create your first template
                 </button>
               </div>
             )}
           </div>
-
-          <div className="p-3 bg-teal/10 border border-teal/30 rounded-xl mb-4">
-            <p className="text-xs text-teal flex items-start gap-2">
-              <Info className="w-3.5 h-3.5 mt-0.5 flex-shrink-0" />
-              <span>
-                You can also create <strong>amount-based routing rules</strong> that send documents
-                from this type to different templates based on the document amount.
-              </span>
-            </p>
-          </div>
         </div>
 
-        <div className="flex gap-3 p-5 border-t border-border bg-muted/40">
+        <div className="flex gap-3 p-5 border-t bg-muted/40">
           <button
             onClick={handleAssign}
             disabled={!selectedTemplateId || selectedTemplateId === docType.workflow_template}
             className={clsx(
-              "flex-1 px-4 py-2.5 rounded-xl font-medium transition-all shadow-sm",
+              "flex-1 px-4 py-2.5 rounded-xl font-medium transition-colors",
               !selectedTemplateId || selectedTemplateId === docType.workflow_template
                 ? "bg-muted text-muted-foreground cursor-not-allowed"
-                : "bg-primary text-primary-foreground hover:bg-primary/90"
+                : "bg-primary text-white hover:bg-primary/90"
             )}
           >
-            {selectedTemplateId === docType.workflow_template
-              ? "✓ Already Primary"
-              : "Set as Primary Template"}
+            Set as Primary Template
           </button>
           <button onClick={onClose} className="btn-secondary">
             Cancel
@@ -1393,8 +1447,6 @@ export default function WorkflowBuilderPage() {
   const [search, setSearch] = useState("");
   const [showDetailModal, setShowDetailModal] = useState<DocumentType | null>(null);
   const [creatingForDocType, setCreatingForDocType] = useState<DocumentType | null>(null);
-  const [viewMode, setViewMode] = useState<"list" | "grid">("list");
-  const [savedConfirmation, setSavedConfirmation] = useState<{ docTypeName: string; templateName: string } | null>(null);
 
   const { data: docTypes, isLoading: dtLoading } = useQuery<unknown, Error, DocumentType[]>({
     queryKey: ["document-types"],
@@ -1409,15 +1461,10 @@ export default function WorkflowBuilderPage() {
 
   const effectiveTemplateId = editingTemplateId || selectedDocType?.workflow_template || null;
 
-  // 🔧 Bug fix: drive editor directly from query result; do NOT mirror via useState/useEffect.
-  // The previous `activeTemplate` mirror was stale on first render after id changed,
-  // because effects run AFTER paint — so the editor mounted with `template={null}` (or
-  // the previous template's data) on the first selection, leaving the panel blank.
   const {
     data: fetchedTemplate,
     isFetching: templateFetching,
     isLoading: templateLoading,
-    isError: templateError,
   } = useQuery<WorkflowTemplate | null>({
     queryKey: ["workflow-template", effectiveTemplateId],
     queryFn: async () => {
@@ -1433,20 +1480,18 @@ export default function WorkflowBuilderPage() {
     setSelectedDocType(dt);
     setEditingTemplateId(null);
     setCreatingForDocType(null);
-    setSavedConfirmation(null);
   };
 
   const handleTemplateClick = (t: WorkflowTemplate) => {
     setEditingTemplateId(t.id);
     setSelectedDocType(null);
     setCreatingForDocType(null);
-    setSavedConfirmation(null);
   };
 
   const handleAssignTemplate = useCallback(async (docTypeId: string, templateId: string) => {
     try {
       await documentTypesAPI.update(docTypeId, { workflow_template: templateId });
-      toast.success("Primary template assigned successfully");
+      toast.success("Primary template assigned");
       qc.invalidateQueries({ queryKey: ["document-types"] });
       setShowDetailModal(null);
       if (selectedDocType?.id === docTypeId) {
@@ -1462,28 +1507,25 @@ export default function WorkflowBuilderPage() {
     setSelectedDocType(null);
     setEditingTemplateId(null);
     setShowDetailModal(null);
-    setSavedConfirmation(null);
   };
 
   const handleSaved = (t: WorkflowTemplate, isNew: boolean) => {
     if (isNew && creatingForDocType) {
       documentTypesAPI.update(creatingForDocType.id, { workflow_template: t.id })
         .then(() => {
-          toast.success(`Template "${t.name}" created and assigned to ${creatingForDocType.name}`);
+          toast.success(`Template "${t.name}" created and assigned`);
           qc.invalidateQueries({ queryKey: ["document-types"] });
-          setSavedConfirmation({ docTypeName: creatingForDocType.name, templateName: t.name });
           setCreatingForDocType(null);
           setSelectedDocType(null);
           setEditingTemplateId(null);
         })
         .catch(() => {
-          toast.warning(`Template "${t.name}" created but failed to assign to document type`);
+          toast.warning(`Template created but failed to assign`);
           setCreatingForDocType(null);
           setSelectedDocType(null);
           setEditingTemplateId(null);
         });
     } else if (isNew && !creatingForDocType) {
-      setSavedConfirmation(null);
       setEditingTemplateId(t.id);
       toast.success(`Template "${t.name}" created`);
     } else {
@@ -1511,70 +1553,39 @@ export default function WorkflowBuilderPage() {
   const withoutTemplate = docTypesArray.length - withTemplate;
 
   const showEditor = selectedDocType || editingTemplateId || creatingForDocType;
-  // 🔧 Editor source = fetched template (no mirror state). For new templates, pass null.
   const currentTemplate = creatingForDocType ? null : (fetchedTemplate ?? null);
-  // Show loader whenever we need a template but haven't received it yet.
   const isLoadingTemplate =
     !creatingForDocType &&
     !!effectiveTemplateId &&
     (templateLoading || templateFetching || fetchedTemplate === undefined);
 
-  if (templateError && effectiveTemplateId) {
-    toast.error("Failed to load template");
-  }
-
   const editorDocType = selectedDocType || creatingForDocType || null;
 
   return (
-    <div className="flex gap-6 h-[calc(100vh-7rem)] min-h-0 bg-background rounded-2xl p-1">
-      {/* Left Panel */}
-      <aside className="w-80 flex-shrink-0 flex flex-col gap-4 bg-card rounded-2xl border border-border overflow-hidden" style={{ boxShadow: "var(--shadow-card)" }}>
+    <div className="flex gap-6 h-[calc(100vh-7rem)] bg-muted/40 p-6">
+      {/* Left Sidebar */}
+      <aside className="w-80 flex-shrink-0 flex flex-col bg-card rounded-2xl border border-border overflow-hidden">
         <div className="p-4 border-b border-border">
-          <div className="flex items-center justify-between mb-3 gap-2">
-            <div className="min-w-0">
-              <h1 className="text-lg font-bold text-foreground flex items-center gap-2">
-                {sidebarTab === "doctypes" ? (
-                  <FolderTree className="w-5 h-5 text-accent-foreground" />
-                ) : (
-                  <LayoutTemplate className="w-5 h-5 text-accent-foreground" />
-                )}
-                {sidebarTab === "doctypes" ? "Document Types" : "Templates"}
-              </h1>
-              {sidebarTab === "doctypes" ? (
-                <p className="text-xs text-muted-foreground mt-0.5">
-                  {withTemplate} / {docTypesArray.length} have primary templates
-                </p>
-              ) : (
-                <p className="text-xs text-muted-foreground mt-0.5">
-                  {allTemplatesArray.length} saved template{allTemplatesArray.length !== 1 ? 's' : ''}
-                </p>
-              )}
-            </div>
-            <div className="flex items-center gap-1">
-              {sidebarTab === "templates" && (
-                <button
-                  onClick={() => handleStartCreateForDocType(null)}
-                  className="flex items-center gap-1 px-2 py-1 text-xs bg-accent/15 text-accent-foreground border border-accent/30 rounded-lg hover:bg-accent/25"
-                >
-                  <Plus className="w-3 h-3" /> New
-                </button>
-              )}
+          <div className="flex items-center justify-between mb-4">
+            <h1 className="text-lg font-bold text-foreground">
+              {sidebarTab === "doctypes" ? "Document Types" : "Templates"}
+            </h1>
+            {sidebarTab === "templates" && (
               <button
-                onClick={() => setViewMode(viewMode === "list" ? "grid" : "list")}
-                className="p-1.5 text-muted-foreground hover:text-foreground rounded-lg hover:bg-muted"
+                onClick={() => handleStartCreateForDocType(null)}
+                className="flex items-center gap-1 px-3 py-1.5 text-xs font-medium bg-primary text-white rounded-lg hover:bg-primary/90"
               >
-                {viewMode === "list" ? <LayoutTemplate className="w-4 h-4" /> : <List className="w-4 h-4" />}
+                <Plus className="w-3 h-3" /> New
               </button>
-            </div>
+            )}
           </div>
 
-          {/* Tab Switcher */}
           <div className="flex bg-muted p-1 rounded-lg mb-4">
             <button
               onClick={() => { setSidebarTab("doctypes"); setSearch(""); }}
               className={clsx(
-                "flex-1 flex items-center justify-center gap-2 py-1.5 text-xs font-medium rounded-md transition-all",
-                sidebarTab === "doctypes" ? "bg-card text-foreground shadow-sm" : "text-muted-foreground hover:text-foreground"
+                "flex-1 flex items-center justify-center gap-2 py-2 text-xs font-medium rounded-md transition-all",
+                sidebarTab === "doctypes" ? "bg-card text-foreground shadow-sm" : "text-muted-foreground"
               )}
             >
               <FolderTree className="w-3.5 h-3.5" /> Types
@@ -1582,8 +1593,8 @@ export default function WorkflowBuilderPage() {
             <button
               onClick={() => { setSidebarTab("templates"); setSearch(""); }}
               className={clsx(
-                "flex-1 flex items-center justify-center gap-2 py-1.5 text-xs font-medium rounded-md transition-all",
-                sidebarTab === "templates" ? "bg-card text-foreground shadow-sm" : "text-muted-foreground hover:text-foreground"
+                "flex-1 flex items-center justify-center gap-2 py-2 text-xs font-medium rounded-md transition-all",
+                sidebarTab === "templates" ? "bg-card text-foreground shadow-sm" : "text-muted-foreground"
               )}
             >
               <LayoutTemplate className="w-3.5 h-3.5" /> Templates
@@ -1608,179 +1619,88 @@ export default function WorkflowBuilderPage() {
             <input
               value={search}
               onChange={e => setSearch(e.target.value)}
-              placeholder={sidebarTab === "doctypes" ? "Search document types..." : "Search templates..."}
+              placeholder={`Search ${sidebarTab === "doctypes" ? "document types" : "templates"}...`}
               className={clsx(inp, "pl-9")}
             />
           </div>
         </div>
 
-        <div className={clsx(
-          "flex-1 overflow-y-auto pb-4 gap-2",
-          viewMode === "grid" ? "px-3 grid grid-cols-1" : "px-2 space-y-1"
-        )}>
-          {(dtLoading || (sidebarTab === "templates" && templatesLoading)) && Array.from({ length: 5 }).map((_, i) => (
-            <div key={i} className="h-20 bg-muted rounded-xl animate-pulse" />
-          ))}
-
+        <div className="flex-1 overflow-y-auto p-2 space-y-1">
           {sidebarTab === "doctypes" ? (
-            filteredDocTypes.length === 0 && !dtLoading ? (
-              <div className="text-center py-12 text-muted-foreground">
-                <FileText className="w-10 h-10 mx-auto mb-3 opacity-30" />
-                <p className="text-sm font-medium text-foreground">No document types found</p>
-                <p className="text-xs mt-1">{search ? "Try a different search term" : "Create a document type first"}</p>
-              </div>
-            ) : (
-              filteredDocTypes.map(dt => {
-                const hasTemplate = !!dt.workflow_template;
-                const isSelected = selectedDocType?.id === dt.id;
-                return (
-                  <div key={dt.id} className="relative group">
-                    <button
-                      onClick={() => handleDocTypeClick(dt)}
-                      className={clsx(
-                        "w-full text-left rounded-xl p-3 transition-all border",
-                        isSelected
-                          ? "bg-accent/10 border-accent/40 shadow-sm ring-1 ring-accent/30"
-                          : "bg-card border-border hover:border-muted-foreground/30 hover:bg-muted/40"
-                      )}
-                    >
-                      <div className="flex items-start gap-2.5">
-                        <div className={clsx(
-                          "w-2 h-2 rounded-full flex-shrink-0 mt-1.5 ring-2",
-                          hasTemplate ? "bg-teal ring-teal/20" : "bg-accent ring-accent/20"
-                        )} />
-                        <div className="flex-1 min-w-0">
-                          <p className={clsx("font-semibold text-sm truncate", isSelected ? "text-foreground" : "text-foreground")}>
-                            {dt.name}
-                          </p>
-                          <p className="text-xs text-muted-foreground mt-0.5 font-mono">
-                            {dt.reference_prefix}-XXXXX
-                          </p>
-                        </div>
-                        {!hasTemplate && (
-                          <span className="text-[10px] text-accent-foreground font-medium flex-shrink-0 bg-accent/15 border border-accent/30 px-2 py-0.5 rounded-full">
-                            Setup
-                          </span>
-                        )}
-                      </div>
-                    </button>
-                    <button
-                      onClick={(e) => { e.stopPropagation(); setShowDetailModal(dt); }}
-                      className="absolute right-2 top-1/2 -translate-y-1/2 opacity-0 group-hover:opacity-100 p-1.5 text-muted-foreground hover:text-accent-foreground rounded-lg bg-card border border-border shadow-sm transition-all"
-                    >
-                      <MoreVertical className="w-3.5 h-3.5" />
-                    </button>
-                  </div>
-                );
-              })
-            )
-          ) : (
-            filteredTemplates.length === 0 && !templatesLoading ? (
-              <div className="text-center py-12 text-muted-foreground">
-                <LayoutTemplate className="w-10 h-10 mx-auto mb-3 opacity-30" />
-                <p className="text-sm font-medium text-foreground">No templates found</p>
-                <p className="text-xs mt-1">
-                  {search ? "Try a different search term" : (
-                    <button
-                      onClick={() => handleStartCreateForDocType(null)}
-                      className="text-accent-foreground hover:underline"
-                    >
-                      Create your first template
-                    </button>
-                  )}
-                </p>
-              </div>
-            ) : (
-              filteredTemplates.map(t => {
-                const isSelected = editingTemplateId === t.id;
-                return (
+            filteredDocTypes.map(dt => {
+              const hasTemplate = !!dt.workflow_template;
+              const isSelected = selectedDocType?.id === dt.id;
+              return (
+                <div key={dt.id} className="relative group">
                   <button
-                    key={t.id}
-                    onClick={() => handleTemplateClick(t)}
+                    onClick={() => handleDocTypeClick(dt)}
                     className={clsx(
                       "w-full text-left rounded-xl p-3 transition-all border",
-                      isSelected
-                        ? "bg-accent/10 border-accent/40 shadow-sm ring-1 ring-accent/30"
-                        : "bg-card border-border hover:border-muted-foreground/30 hover:bg-muted/40"
+                      isSelected ? "bg-accent/10 border-accent/40" : "bg-card border-border hover:border-foreground/20"
                     )}
                   >
                     <div className="flex items-start gap-2.5">
-                      <div className="w-8 h-8 rounded-lg bg-primary text-primary-foreground flex items-center justify-center flex-shrink-0">
-                        <LayoutTemplate className="w-4 h-4" />
-                      </div>
+                      <div className={clsx(
+                        "w-2 h-2 rounded-full mt-1.5",
+                        hasTemplate ? "bg-teal" : "bg-accent"
+                      )} />
                       <div className="flex-1 min-w-0">
-                        <p className="font-semibold text-sm truncate text-foreground">
-                          {t.name}
-                        </p>
-                        <p className="text-xs text-muted-foreground mt-0.5">
-                          {t.step_count} step{t.step_count !== 1 ? 's' : ''}
-                          {t.description && ` · ${t.description.slice(0, 40)}${t.description.length > 40 ? '…' : ''}`}
-                        </p>
+                        <p className="font-semibold text-sm text-foreground truncate">{dt.name}</p>
+                        <p className="text-xs text-muted-foreground font-mono mt-0.5">{dt.reference_prefix}-XXXXX</p>
                       </div>
+                      {!hasTemplate && (
+                        <span className="text-[10px] text-accent-foreground font-medium bg-accent/20 px-2 py-0.5 rounded-full">
+                          Setup
+                        </span>
+                      )}
                     </div>
                   </button>
-                );
-              })
-            )
+                  <button
+                    onClick={(e) => { e.stopPropagation(); setShowDetailModal(dt); }}
+                    className="absolute right-2 top-1/2 -translate-y-1/2 opacity-0 group-hover:opacity-100 p-1.5 bg-card border border-border rounded-lg hover:bg-muted/40"
+                  >
+                    <MoreVertical className="w-3.5 h-3.5 text-muted-foreground" />
+                  </button>
+                </div>
+              );
+            })
+          ) : (
+            filteredTemplates.map(t => {
+              const isSelected = editingTemplateId === t.id;
+              return (
+                <button
+                  key={t.id}
+                  onClick={() => handleTemplateClick(t)}
+                  className={clsx(
+                    "w-full text-left rounded-xl p-3 transition-all border",
+                    isSelected ? "bg-accent/10 border-accent/40" : "bg-card border-border hover:border-foreground/20"
+                  )}
+                >
+                  <div className="flex items-start gap-2.5">
+                    <LayoutTemplate className="w-5 h-5 text-muted-foreground mt-0.5" />
+                    <div className="flex-1 min-w-0">
+                      <p className="font-semibold text-sm text-foreground truncate">{t.name}</p>
+                      <p className="text-xs text-muted-foreground mt-0.5">{t.step_count} step{t.step_count !== 1 ? 's' : ''}</p>
+                    </div>
+                  </div>
+                </button>
+              );
+            })
           )}
         </div>
       </aside>
 
-      {/* Right Panel - Editor */}
-      <main className="flex-1 min-w-0 bg-card rounded-2xl border border-border p-5 overflow-hidden flex flex-col" style={{ boxShadow: "var(--shadow-card)" }}>
-        {!showEditor && savedConfirmation && (
-          <div className="flex-1 flex flex-col items-center justify-center text-center gap-5">
-            <div className="w-20 h-20 rounded-2xl bg-teal text-white flex items-center justify-center" style={{ boxShadow: "var(--shadow-elegant)" }}>
-              <CheckCircle2 className="w-10 h-10" />
+      {/* Right Editor */}
+      <main className="flex-1 bg-card rounded-2xl border border-border p-6 overflow-hidden flex flex-col">
+        {!showEditor && (
+          <div className="flex-1 flex flex-col items-center justify-center text-center">
+            <div className="w-16 h-16 rounded-2xl bg-muted flex items-center justify-center mb-4">
+              <GitBranch className="w-8 h-8 text-muted-foreground" />
             </div>
-            <div>
-              <p className="text-xl font-semibold text-foreground">Workflow Created!</p>
-              <p className="text-sm text-muted-foreground mt-2 max-w-md">
-                <span className="font-medium text-accent-foreground">{savedConfirmation.templateName}</span> is now the primary template for
-                <span className="font-medium text-foreground"> {savedConfirmation.docTypeName}</span>
-              </p>
-              <p className="text-xs text-muted-foreground mt-2">
-                You can now add amount-based routing rules to use different templates for high-value documents.
-              </p>
-            </div>
-            <button
-              onClick={() => setSavedConfirmation(null)}
-              className="btn-primary"
-            >
-              Continue <ChevronRight className="w-4 h-4" />
-            </button>
-          </div>
-        )}
-
-        {!showEditor && !savedConfirmation && (
-          <div className="flex-1 flex flex-col items-center justify-center text-center gap-5">
-            <div className="w-24 h-24 rounded-2xl bg-muted flex items-center justify-center">
-              <GitBranch className="w-10 h-10 text-muted-foreground/40" />
-            </div>
-            <div>
-              <p className="text-lg font-semibold text-foreground">
-                {sidebarTab === "doctypes" ? "Select a document type" : "Select or create a template"}
-              </p>
-              <p className="text-sm text-muted-foreground mt-1 max-w-sm">
-                {sidebarTab === "doctypes"
-                  ? "Each document type has a primary workflow template. Select one from the left panel to edit its workflow."
-                  : "Templates define approval steps. Select an existing template or click 'New' to create one."}
-              </p>
-            </div>
-            {sidebarTab === "doctypes" && withoutTemplate > 0 && (
-              <div className="flex items-center gap-2 px-4 py-2.5 bg-accent/10 border border-accent/30 rounded-xl text-sm text-accent-foreground">
-                <TriangleAlert className="w-4 h-4" />
-                {withoutTemplate} document type{withoutTemplate !== 1 ? 's' : ''} need{withoutTemplate === 1 ? 's' : ''} a primary workflow template
-              </div>
-            )}
-            {sidebarTab === "templates" && (
-              <button
-                onClick={() => handleStartCreateForDocType(null)}
-                className="btn-primary"
-              >
-                <Plus className="w-4 h-4" /> Create New Template
-              </button>
-            )}
+            <p className="text-lg font-semibold text-foreground">Select a document type or template</p>
+            <p className="text-sm text-muted-foreground mt-1 max-w-sm">
+              Configure approval workflows by selecting an item from the sidebar
+            </p>
           </div>
         )}
 
@@ -1788,14 +1708,10 @@ export default function WorkflowBuilderPage() {
           <>
             {isLoadingTemplate ? (
               <div className="flex-1 flex items-center justify-center">
-                <div className="text-center">
-                  <Loader2 className="w-8 h-8 text-accent animate-spin mx-auto mb-3" />
-                  <p className="text-sm text-muted-foreground">Loading template...</p>
-                </div>
+                <Loader2 className="w-8 h-8 text-accent animate-spin" />
               </div>
             ) : (
               <TemplateEditor
-                // Remount when target id changes so internal state syncs to new template.
                 key={creatingForDocType?.id || editingTemplateId || selectedDocType?.workflow_template || selectedDocType?.id || "new-template"}
                 docType={editorDocType}
                 template={currentTemplate}

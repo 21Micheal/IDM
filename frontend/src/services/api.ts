@@ -5,6 +5,50 @@ import type {
   DocumentPreviewResponse,
 } from "@/types";
 
+// ── OCR suggestion types (exported for use in components) ─────────────────────
+
+export type OcrFieldSuggestions = {
+  title?: string;
+  supplier?: string;
+  amount?: string;
+  currency?: string;
+  document_date?: string;
+  due_date?: string;
+  reference_number?: string;
+  document_type?: string;
+  account_code?: string;
+  cost_centre?: string;
+  vendor_code?: string;
+  approved_by?: string;
+  payment_terms?: string;
+  tax_amount?: string;
+  subtotal?: string;
+  payment_method?: string;
+  transaction_ref?: string;
+  kra_pin?: string;
+  vat_number?: string;
+  po_reference?: string;
+  signed_by?: string;
+  contract_value?: string;
+  raw_lines?: string[];
+};
+
+export type OcrQualityMetrics = {
+  mean_confidence?: number;
+  overall_quality_ratio?: number;
+  low_quality_warning?: boolean;
+  total_pages?: number;
+  low_quality_pages?: number;
+};
+
+export type OcrSuggestionsResponse = {
+  ocr_status: "pending" | "processing" | "done" | "failed" | "";
+  suggestions: {
+    fields?: OcrFieldSuggestions | null;
+    quality?: OcrQualityMetrics | null;
+  } | null;
+};
+
 export function normalizeListResponse<T>(payload: unknown): T[] {
   if (Array.isArray(payload)) return payload as T[];
   if (payload && typeof payload === "object" && Array.isArray((payload as { results?: unknown[] }).results)) {
@@ -172,11 +216,38 @@ export const documentsAPI = {
   reOcr: (id: string) =>
     api.post(`/documents/${id}/re_ocr/`),
 
-  /** Poll after upload to get OCR-extracted field suggestions. */
+  /**
+   * Poll after upload to get OCR-extracted field suggestions.
+   *
+   * Response shape (new backend):
+   *   {
+   *     ocr_status: "pending" | "processing" | "done" | "failed" | "",
+   *     suggestions: {
+   *       fields: {
+   *         title?, supplier?, amount?, currency?,
+   *         document_date?, due_date?, reference_number?,
+   *         document_type?, account_code?, cost_centre?,
+   *         vendor_code?, approved_by?, payment_terms?,
+   *         tax_amount?, subtotal?, payment_method?,
+   *         transaction_ref?, kra_pin?, vat_number?,
+   *         po_reference?, signed_by?, contract_value?,
+   *         raw_lines?: string[]
+   *       } | null,
+   *       quality: {
+   *         mean_confidence?: number,
+   *         overall_quality_ratio?: number,
+   *         low_quality_warning?: boolean,
+   *         total_pages?: number,
+   *         low_quality_pages?: number,
+   *       } | null,
+   *     } | null
+   *   }
+   *
+   * The poller in UploadPage handles both the new nested shape and the
+   * legacy flat shape gracefully, so no migration is required on existing data.
+   */
   ocrSuggestions: (id: string) =>
-    api.get<{ ocr_status: string; suggestions: Record<string, unknown> | null }>(
-      `/documents/${id}/ocr_suggestions/`
-    ),
+    api.get<OcrSuggestionsResponse>(`/documents/${id}/ocr_suggestions/`),
 
   /**
    * Explicitly (re-)trigger Office→PDF preview conversion.

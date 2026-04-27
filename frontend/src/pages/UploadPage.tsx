@@ -28,6 +28,7 @@ import {
   AlertCircle,
   ChevronRight,
   RotateCcw,
+  ShieldAlert,
 } from "lucide-react";
 import { toast } from "react-toastify";
 import type { DocumentType, MetadataField } from "@/types";
@@ -48,30 +49,67 @@ type UploadFormValues = {
   personal_tags: PersonalTagField[];
 };
 
-type OcrSuggestions = {
+/**
+ * OCR suggestions shape — mirrors the new backend response.
+ *
+ * The backend now returns:
+ *   { ocr_status, suggestions: { fields: {...}, quality: {...} } }
+ *
+ * `fields` carries every extracted key (reference_number, account_code, etc.)
+ * `quality` carries { mean_confidence, overall_quality_ratio, low_quality_warning, … }
+ */
+type OcrFields = {
   title?: string;
   supplier?: string;
   amount?: string;
   currency?: string;
   document_date?: string;
   due_date?: string;
-  invoice_number?: string;
+  reference_number?: string;
+  document_type?: string;
+  account_code?: string;
+  cost_centre?: string;
+  vendor_code?: string;
+  approved_by?: string;
+  payment_terms?: string;
+  tax_amount?: string;
+  subtotal?: string;
+  payment_method?: string;
+  transaction_ref?: string;
+  kra_pin?: string;
+  vat_number?: string;
+  po_reference?: string;
+  signed_by?: string;
+  contract_value?: string;
   raw_lines?: string[];
+};
+
+type OcrQuality = {
+  mean_confidence?: number;
+  overall_quality_ratio?: number;
+  low_quality_warning?: boolean;
+  total_pages?: number;
+  low_quality_pages?: number;
+};
+
+type OcrSuggestions = {
+  fields?: OcrFields;
+  quality?: OcrQuality;
 };
 
 // Stage of the scanned-upload flow
 type ScanStage =
-  | "idle"           // nothing uploaded yet
-  | "uploading"      // axios progress
-  | "ocr_pending"    // uploaded, OCR not started
-  | "ocr_processing" // OCR in progress
-  | "ocr_done"       // suggestions ready → show review form
-  | "ocr_failed"     // OCR failed → let user fill manually
-  | "submitting";    // saving final metadata
+  | "idle"            // nothing uploaded yet
+  | "uploading"       // axios progress
+  | "ocr_pending"     // uploaded, OCR not started
+  | "ocr_processing"  // OCR in progress
+  | "ocr_done"        // suggestions ready → show review form
+  | "ocr_failed"      // OCR failed → let user fill manually
+  | "submitting";     // saving final metadata
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
 
-const CURRENCY_OPTIONS = ["USD", "EUR", "GBP", "KES", "UGX", "TZS", "NGN", "ZAR"];
+const CURRENCY_OPTIONS = ["KES", "USD", "EUR", "GBP", "UGX", "TZS", "NGN", "ZAR"];
 
 function SuggestionPill({ label }: { label: string }) {
   return (
@@ -79,6 +117,21 @@ function SuggestionPill({ label }: { label: string }) {
       <Sparkles className="w-2.5 h-2.5" />
       {label}
     </span>
+  );
+}
+
+function LowQualityBanner({ quality }: { quality: OcrQuality }) {
+  const pct = Math.round((quality.overall_quality_ratio ?? 0) * 100);
+  return (
+    <div className="flex items-start gap-3 rounded-xl border border-amber-200 bg-amber-50 px-4 py-3 mb-6">
+      <ShieldAlert className="w-5 h-5 text-amber-500 flex-shrink-0 mt-0.5" />
+      <div>
+        <p className="text-sm font-semibold text-amber-800">Low scan quality ({pct}% confident)</p>
+        <p className="text-xs text-amber-700 mt-0.5">
+          The scan may be blurry, skewed, or low-resolution. Please verify all pre-filled fields carefully before saving.
+        </p>
+      </div>
+    </div>
   );
 }
 
@@ -233,17 +286,30 @@ function useOcrPoller(
         const { data } = await documentsAPI.ocrSuggestions(documentId);
         if (data.ocr_status === "done") {
           if (intervalRef.current) clearInterval(intervalRef.current);
-          onDone((data.suggestions as OcrSuggestions) ?? {});
+          // Handle both the old flat shape and the new nested shape gracefully.
+          // New shape: data.suggestions = { fields: {...}, quality: {...} }
+          // Old/flat shape: data.suggestions = { title, supplier, ... }
+          const raw = data.suggestions as Record<string, unknown> | null;
+          let parsed: OcrSuggestions = {};
+          if (raw && typeof raw === "object") {
+            if ("fields" in raw || "quality" in raw) {
+              // New nested shape
+              parsed = raw as OcrSuggestions;
+            } else {
+              // Legacy flat shape — wrap it
+              parsed = { fields: raw as OcrFields };
+            }
+          }
+          onDone(parsed);
         } else if (data.ocr_status === "failed") {
           if (intervalRef.current) clearInterval(intervalRef.current);
           onFailed();
         }
       } catch {
-        // transient error — keep polling
+        // transient network error — keep polling
       }
     };
 
-    // Poll immediately, then every 3 s
     poll();
     intervalRef.current = setInterval(poll, 3000);
     return () => {
@@ -315,29 +381,56 @@ function OcrWaitScreen({
   );
 }
 
+// ── Step indicator ────────────────────────────────────────────────────────────
+
+function StepBadge({
+  n,
+  active,
+  done,
+}: {
+  n: number;
+  active?: boolean;
+  done?: boolean;
+}) {
+  return (
+    <div
+      className={clsx(
+        "w-6 h-6 rounded-full flex items-center justify-center text-xs font-bold flex-shrink-0 transition-colors",
+        done
+          ? "bg-teal text-white"
+          : active
+          ? "bg-primary text-primary-foreground"
+          : "bg-muted text-muted-foreground"
+      )}
+    >
+      {done ? <CheckCircle className="w-3.5 h-3.5" /> : n}
+    </div>
+  );
+}
+
 // ── Main component ────────────────────────────────────────────────────────────
 
 export default function UploadPage() {
   const navigate = useNavigate();
   const queryClient = useQueryClient();
 
-  // ── File & type ────────────────────────────────────────────────────────────
+  // ── File & type ─────────────────────────────────────────────────────────────
   const [droppedFile, setDroppedFile] = useState<File | null>(null);
   const [selectedTypeId, setSelectedTypeId] = useState("");
   const [uploadProgress, setUploadProgress] = useState(0);
 
-  // ── Mode flags ─────────────────────────────────────────────────────────────
+  // ── Mode flags ──────────────────────────────────────────────────────────────
   const [isSelfUpload, setIsSelfUpload] = useState(false);
   const [isScanned, setIsScanned] = useState(false);
   const [imageAutoScanned, setImageAutoScanned] = useState(false);
 
-  // ── OCR scan flow state ────────────────────────────────────────────────────
+  // ── OCR scan flow state ─────────────────────────────────────────────────────
   const [scanStage, setScanStage] = useState<ScanStage>("idle");
   const [uploadedDocId, setUploadedDocId] = useState<string | null>(null);
   const [ocrSuggestions, setOcrSuggestions] = useState<OcrSuggestions | null>(null);
   const [suggestedFields, setSuggestedFields] = useState<Set<string>>(new Set());
 
-  // ── Form ───────────────────────────────────────────────────────────────────
+  // ── Form ────────────────────────────────────────────────────────────────────
   const {
     register,
     handleSubmit,
@@ -347,7 +440,7 @@ export default function UploadPage() {
     clearErrors,
     formState: { errors },
   } = useForm<UploadFormValues>({
-    defaultValues: { metadata: {}, personal_tags: [{ value: "" }] },
+    defaultValues: { metadata: {}, personal_tags: [{ value: "" }], currency: "KES" },
   });
 
   const {
@@ -357,7 +450,7 @@ export default function UploadPage() {
     replace: replacePersonalTags,
   } = useFieldArray({ control, name: "personal_tags" });
 
-  // ── Document types ─────────────────────────────────────────────────────────
+  // ── Document types ──────────────────────────────────────────────────────────
   const { data: docTypes = [] } = useQuery<unknown, Error, DocumentType[]>({
     queryKey: ["document-types"],
     queryFn: () => documentTypesAPI.list().then((r) => r.data as unknown),
@@ -365,27 +458,46 @@ export default function UploadPage() {
   });
   const selectedType = docTypes.find((t) => t.id === selectedTypeId);
 
-  // ── Derived state ──────────────────────────────────────────────────────────
+  // ── Derived state ───────────────────────────────────────────────────────────
   const isOcrFlow = isScanned && !isSelfUpload;
+
+  // The right panel details form is visible when:
+  // - NOT in OCR flow (manual mode) AND
+  // - a type is selected (or it's a personal upload) AND
+  // - we're in the idle stage (not mid-upload)
   const showManualForm =
     !isOcrFlow &&
     (isSelfUpload || Boolean(selectedTypeId)) &&
     scanStage === "idle";
+
+  // The OCR right-panel info box is visible when in OCR flow and idle
+  const showOcrIdlePanel = isOcrFlow && scanStage === "idle";
+
   const showOcrWait =
-    isOcrFlow &&
-    (scanStage === "ocr_pending" || scanStage === "ocr_processing");
+    isOcrFlow && (scanStage === "ocr_pending" || scanStage === "ocr_processing");
   const showOcrReview = isOcrFlow && scanStage === "ocr_done";
   const showOcrFailed = isOcrFlow && scanStage === "ocr_failed";
+
   const hasMetadata =
     !isSelfUpload && !!selectedType && selectedType.metadata_fields.length > 0;
   const relaxReq = isSelfUpload || isScanned;
 
-  // ── Side-effects ───────────────────────────────────────────────────────────
+  // ── Side-effects ────────────────────────────────────────────────────────────
 
+  // When type changes, reset form fields but NOT the dropped file.
+  // The file should persist across type changes (user selects type first, then drops file).
   useEffect(() => {
     if (selectedTypeId) {
-      reset({ metadata: {}, personal_tags: [{ value: "" }] });
-      setDroppedFile(null);
+      reset({
+        metadata: {},
+        personal_tags: [{ value: "" }],
+        currency: "KES",
+        title: "",
+        supplier: "",
+        amount: "",
+        document_date: "",
+        due_date: "",
+      });
       setUploadProgress(0);
     }
   }, [selectedTypeId, reset]);
@@ -402,7 +514,7 @@ export default function UploadPage() {
     }
   }, [isSelfUpload, replacePersonalTags]);
 
-  // ── OCR poller ─────────────────────────────────────────────────────────────
+  // ── OCR poller ──────────────────────────────────────────────────────────────
 
   useOcrPoller(
     uploadedDocId,
@@ -410,22 +522,33 @@ export default function UploadPage() {
     (suggestions) => {
       setOcrSuggestions(suggestions);
       setScanStage("ocr_done");
-      // Pre-fill the form with OCR suggestions
+
+      // Pre-fill form with extracted fields
+      const fields = suggestions.fields ?? {};
       const fieldsSet = new Set<string>();
-      if (suggestions.title) { setValue("title", suggestions.title); fieldsSet.add("title"); }
-      if (suggestions.supplier) { setValue("supplier", suggestions.supplier); fieldsSet.add("supplier"); }
-      if (suggestions.amount) { setValue("amount", suggestions.amount); fieldsSet.add("amount"); }
-      if (suggestions.currency) { setValue("currency", suggestions.currency); fieldsSet.add("currency"); }
-      if (suggestions.document_date) {
-        setValue("document_date", suggestions.document_date);
-        fieldsSet.add("document_date");
-      }
-      if (suggestions.due_date) {
-        setValue("due_date", suggestions.due_date);
-        fieldsSet.add("due_date");
-      }
+
+      const fill = (key: keyof UploadFormValues, value: string | undefined) => {
+        if (value) {
+          setValue(key, value);
+          fieldsSet.add(key);
+        }
+      };
+
+      fill("title", fields.title);
+      fill("supplier", fields.supplier);
+      fill("amount", fields.amount);
+      fill("currency", fields.currency);
+      fill("document_date", fields.document_date);
+      fill("due_date", fields.due_date);
+
       setSuggestedFields(fieldsSet);
-      toast.success("OCR complete! Review the extracted details below.");
+
+      const warn = suggestions.quality?.low_quality_warning;
+      if (warn) {
+        toast.warning("OCR complete — low scan quality detected. Please verify all fields carefully.");
+      } else {
+        toast.success("OCR complete! Review the extracted details below.");
+      }
     },
     () => {
       setScanStage("ocr_failed");
@@ -433,23 +556,20 @@ export default function UploadPage() {
     }
   );
 
-  // ── Dropzone ───────────────────────────────────────────────────────────────
+  // ── Dropzone ────────────────────────────────────────────────────────────────
 
-  const onDrop = useCallback(
-    (accepted: File[]) => {
-      const file = accepted[0];
-      if (!file) return;
-      setDroppedFile(file);
-      const isImage = file.type.startsWith("image/");
-      if (isImage) {
-        setIsScanned(true);
-        setImageAutoScanned(true);
-      } else {
-        setImageAutoScanned(false);
-      }
-    },
-    []
-  );
+  const onDrop = useCallback((accepted: File[]) => {
+    const file = accepted[0];
+    if (!file) return;
+    setDroppedFile(file);
+    const isImage = file.type.startsWith("image/");
+    if (isImage) {
+      setIsScanned(true);
+      setImageAutoScanned(true);
+    } else {
+      setImageAutoScanned(false);
+    }
+  }, []);
 
   const { getRootProps, getInputProps, isDragActive } = useDropzone({
     onDrop,
@@ -463,7 +583,7 @@ export default function UploadPage() {
     },
   });
 
-  // ── Upload mutation (initial upload) ──────────────────────────────────────
+  // ── Upload mutation ─────────────────────────────────────────────────────────
 
   const uploadMutation = useMutation({
     mutationFn: (fd: FormData) =>
@@ -480,9 +600,7 @@ export default function UploadPage() {
           data.ocr_status === "processing" ? "ocr_processing" : "ocr_pending"
         );
       } else {
-        const msg = isSelfUpload
-          ? "Personal document saved"
-          : "Document uploaded";
+        const msg = isSelfUpload ? "Personal document saved" : "Document uploaded";
         toast.success(`${msg}: ${data.reference_number}`);
         queryClient.invalidateQueries({ queryKey: ["documents"] });
         navigate(`/documents/${data.id}`);
@@ -495,16 +613,11 @@ export default function UploadPage() {
     },
   });
 
-  // ── Metadata-save mutation (OCR review → confirm) ─────────────────────────
+  // ── Metadata-save mutation ──────────────────────────────────────────────────
 
   const saveMutation = useMutation({
-    mutationFn: ({
-      id,
-      payload,
-    }: {
-      id: string;
-      payload: Record<string, unknown>;
-    }) => documentsAPI.editMetadata(id, payload),
+    mutationFn: ({ id, payload }: { id: string; payload: Record<string, unknown> }) =>
+      documentsAPI.editMetadata(id, payload),
     onSuccess: (_, { id }) => {
       queryClient.invalidateQueries({ queryKey: ["documents"] });
       toast.success("Details confirmed and saved.");
@@ -516,19 +629,16 @@ export default function UploadPage() {
     },
   });
 
-  // ── Submit handlers ────────────────────────────────────────────────────────
+  // ── Submit handlers ─────────────────────────────────────────────────────────
 
-  /** Initial upload — for both manual and scanned flows */
   const onUpload = (values: Record<string, unknown>) => {
     if (!droppedFile) { toast.error("Please select a file"); return; }
     if (!isSelfUpload && !selectedTypeId) {
       toast.error("Please select a document type");
       return;
     }
-    const personalTags = (Array.isArray(values.personal_tags)
-      ? values.personal_tags
-      : []
-    )
+
+    const personalTags = (Array.isArray(values.personal_tags) ? values.personal_tags : [])
       .map((tag) => {
         if (typeof tag === "string") return tag.trim();
         if (tag && typeof tag === "object" && "value" in tag)
@@ -544,7 +654,6 @@ export default function UploadPage() {
 
     const fd = new FormData();
     fd.append("file", droppedFile);
-    // For OCR flow: use a placeholder title; user will fill in after OCR
     fd.append(
       "title",
       isOcrFlow
@@ -557,50 +666,44 @@ export default function UploadPage() {
     if (!isOcrFlow && values.supplier) fd.append("supplier", values.supplier as string);
     if (!isOcrFlow && values.amount) fd.append("amount", values.amount as string);
     if (!isOcrFlow && values.currency) fd.append("currency", values.currency as string);
-    if (!isOcrFlow && values.document_date)
-      fd.append("document_date", values.document_date as string);
+    if (!isOcrFlow && values.document_date) fd.append("document_date", values.document_date as string);
     personalTags.forEach((tag) => fd.append("personal_tags", tag));
-    if (
-      !isSelfUpload &&
-      !isOcrFlow &&
-      values.metadata &&
-      Object.keys(values.metadata as object).length > 0
-    )
+    if (!isSelfUpload && !isOcrFlow && values.metadata && Object.keys(values.metadata as object).length > 0)
       fd.append("metadata", JSON.stringify(values.metadata));
 
     setScanStage(isOcrFlow ? "uploading" : "idle");
     uploadMutation.mutate(fd);
   };
 
-  /** Confirm/save after OCR review */
   const onConfirmOcr = handleSubmit((values) => {
     if (!uploadedDocId) return;
     setScanStage("submitting");
 
-    const payload: Record<string, unknown> = {
-      title: values.title,
-    };
+    const payload: Record<string, unknown> = { title: values.title };
     if (values.supplier) payload.supplier = values.supplier;
     if (values.amount) payload.amount = values.amount;
     if (values.currency) payload.currency = values.currency;
     if (values.document_date) payload.document_date = values.document_date;
     if (values.due_date) payload.due_date = values.due_date;
-
-    // Include dynamic metadata if present
     if (values.metadata && Object.keys(values.metadata).length > 0)
       payload.metadata = values.metadata;
 
     saveMutation.mutate({ id: uploadedDocId, payload });
   });
 
-  /** Skip OCR review and go straight to the document */
   const onSkipToDocument = () => {
     if (!uploadedDocId) return;
     queryClient.invalidateQueries({ queryKey: ["documents"] });
     navigate(`/documents/${uploadedDocId}`);
   };
 
-  // ── Render ─────────────────────────────────────────────────────────────────
+  // ── Convenience ─────────────────────────────────────────────────────────────
+
+  const ocrFields = ocrSuggestions?.fields ?? {};
+  const ocrQuality = ocrSuggestions?.quality;
+  const isLowQuality = ocrQuality?.low_quality_warning === true;
+
+  // ── Render ──────────────────────────────────────────────────────────────────
 
   return (
     <div className="max-w-5xl mx-auto py-8">
@@ -610,11 +713,11 @@ export default function UploadPage() {
           Upload Document
         </h1>
         <p className="text-muted-foreground mt-1">
-          Drop a file, choose type and mode, then fill in the details.
+          Select a document type, attach your file, then fill in the details.
         </p>
       </div>
 
-      {/* ── OCR wait / review screens ──────────────────────────────────────── */}
+      {/* ── OCR wait / review / submitting screens ─────────────────────────── */}
       {isOcrFlow && scanStage !== "idle" && scanStage !== "uploading" && (
         <div
           className="bg-card rounded-2xl border border-border"
@@ -624,7 +727,7 @@ export default function UploadPage() {
             <OcrWaitScreen
               stage={scanStage as "ocr_pending" | "ocr_processing"}
               fileName={droppedFile?.name ?? ""}
-              rawLines={ocrSuggestions?.raw_lines}
+              rawLines={ocrFields.raw_lines}
               onSkip={() => {
                 setScanStage("ocr_done");
                 toast.info("Fill in the details manually and confirm.");
@@ -647,9 +750,7 @@ export default function UploadPage() {
                 )}
                 <div>
                   <h2 className="text-xl font-bold text-foreground">
-                    {showOcrFailed
-                      ? "OCR could not extract text"
-                      : "Review extracted details"}
+                    {showOcrFailed ? "OCR could not extract text" : "Review extracted details"}
                   </h2>
                   <p className="text-sm text-muted-foreground">
                     {showOcrFailed
@@ -657,25 +758,30 @@ export default function UploadPage() {
                       : "Fields marked with the OCR badge were auto-filled. Check them before saving."}
                   </p>
                 </div>
-                {ocrSuggestions?.invoice_number && (
+
+                {/* Reference number chip — uses reference_number (new) */}
+                {ocrFields.reference_number && (
                   <div className="ml-auto text-right hidden sm:block">
                     <p className="text-xs text-muted-foreground">Detected reference</p>
                     <p className="text-sm font-mono font-semibold text-foreground">
-                      {ocrSuggestions.invoice_number}
+                      {ocrFields.reference_number}
                     </p>
                   </div>
                 )}
               </div>
 
+              {/* Low-quality warning banner */}
+              {isLowQuality && ocrQuality && <LowQualityBanner quality={ocrQuality} />}
+
               {/* OCR raw text preview */}
-              {ocrSuggestions?.raw_lines && ocrSuggestions.raw_lines.length > 0 && (
+              {ocrFields.raw_lines && ocrFields.raw_lines.length > 0 && (
                 <details className="mb-6 group">
                   <summary className="cursor-pointer list-none flex items-center gap-2 text-sm font-medium text-muted-foreground hover:text-foreground select-none">
                     <ChevronRight className="w-4 h-4 transition-transform group-open:rotate-90" />
-                    Show extracted text ({ocrSuggestions.raw_lines.length} lines)
+                    Show extracted text ({ocrFields.raw_lines.length} lines)
                   </summary>
                   <div className="mt-2 rounded-xl border border-border bg-muted/40 p-4 max-h-48 overflow-y-auto">
-                    {ocrSuggestions.raw_lines.map((line, i) => (
+                    {ocrFields.raw_lines.map((line, i) => (
                       <p key={i} className="text-xs font-mono text-foreground leading-relaxed">
                         {line}
                       </p>
@@ -694,20 +800,15 @@ export default function UploadPage() {
                   </label>
                   <input
                     {...register("title", { required: "Title is required" })}
-                    className={clsx(
-                      "input",
-                      suggestedFields.has("title") && "ring-1 ring-teal/40"
-                    )}
+                    className={clsx("input", suggestedFields.has("title") && "ring-1 ring-teal/40")}
                     placeholder="e.g. Acme Corp Invoice March 2026"
                   />
                   {errors.title && (
-                    <p className="text-destructive text-xs mt-1">
-                      {String(errors.title.message)}
-                    </p>
+                    <p className="text-destructive text-xs mt-1">{String(errors.title.message)}</p>
                   )}
                 </div>
 
-                {/* Supplier + Date */}
+                {/* Supplier + Document Date */}
                 <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
                   <div>
                     <label className="label flex items-center gap-1.5">
@@ -716,34 +817,26 @@ export default function UploadPage() {
                     </label>
                     <input
                       {...register("supplier")}
-                      className={clsx(
-                        "input",
-                        suggestedFields.has("supplier") && "ring-1 ring-teal/40"
-                      )}
+                      className={clsx("input", suggestedFields.has("supplier") && "ring-1 ring-teal/40")}
                       placeholder="Supplier name"
                     />
                   </div>
                   <div>
                     <label className="label flex items-center gap-1.5">
                       Document Date
-                      {suggestedFields.has("document_date") && (
-                        <SuggestionPill label="OCR" />
-                      )}
+                      {suggestedFields.has("document_date") && <SuggestionPill label="OCR" />}
                     </label>
                     <input
                       {...register("document_date")}
                       type="date"
-                      className={clsx(
-                        "input",
-                        suggestedFields.has("document_date") && "ring-1 ring-teal/40"
-                      )}
+                      className={clsx("input", suggestedFields.has("document_date") && "ring-1 ring-teal/40")}
                     />
                   </div>
                 </div>
 
-                {/* Amount + Currency + Due date */}
+                {/* Amount + Currency + Due Date */}
                 <div className="grid grid-cols-1 md:grid-cols-3 gap-6">
-                  <div className="md:col-span-1">
+                  <div>
                     <label className="label flex items-center gap-1.5">
                       Amount
                       {suggestedFields.has("amount") && <SuggestionPill label="OCR" />}
@@ -752,10 +845,7 @@ export default function UploadPage() {
                       {...register("amount")}
                       type="number"
                       step="0.01"
-                      className={clsx(
-                        "input",
-                        suggestedFields.has("amount") && "ring-1 ring-teal/40"
-                      )}
+                      className={clsx("input", suggestedFields.has("amount") && "ring-1 ring-teal/40")}
                       placeholder="0.00"
                     />
                   </div>
@@ -766,15 +856,10 @@ export default function UploadPage() {
                     </label>
                     <select
                       {...register("currency")}
-                      className={clsx(
-                        "input",
-                        suggestedFields.has("currency") && "ring-1 ring-teal/40"
-                      )}
+                      className={clsx("input", suggestedFields.has("currency") && "ring-1 ring-teal/40")}
                     >
                       {CURRENCY_OPTIONS.map((c) => (
-                        <option key={c} value={c}>
-                          {c}
-                        </option>
+                        <option key={c} value={c}>{c}</option>
                       ))}
                     </select>
                   </div>
@@ -786,13 +871,45 @@ export default function UploadPage() {
                     <input
                       {...register("due_date")}
                       type="date"
-                      className={clsx(
-                        "input",
-                        suggestedFields.has("due_date") && "ring-1 ring-teal/40"
-                      )}
+                      className={clsx("input", suggestedFields.has("due_date") && "ring-1 ring-teal/40")}
                     />
                   </div>
                 </div>
+
+                {/* Extra OCR-detected fields shown as read-only info chips */}
+                {(ocrFields.reference_number || ocrFields.account_code || ocrFields.document_type) && (
+                  <div>
+                    <p className="text-xs font-semibold text-muted-foreground uppercase tracking-wide mb-2">
+                      Additional detected information
+                    </p>
+                    <div className="flex flex-wrap gap-2">
+                      {ocrFields.reference_number && (
+                        <span className="inline-flex items-center gap-1.5 text-xs bg-muted border border-border rounded-full px-3 py-1">
+                          <span className="text-muted-foreground">Ref:</span>
+                          <span className="font-mono font-medium text-foreground">{ocrFields.reference_number}</span>
+                        </span>
+                      )}
+                      {ocrFields.document_type && (
+                        <span className="inline-flex items-center gap-1.5 text-xs bg-muted border border-border rounded-full px-3 py-1">
+                          <span className="text-muted-foreground">Type:</span>
+                          <span className="font-medium text-foreground">{ocrFields.document_type}</span>
+                        </span>
+                      )}
+                      {ocrFields.account_code && (
+                        <span className="inline-flex items-center gap-1.5 text-xs bg-muted border border-border rounded-full px-3 py-1">
+                          <span className="text-muted-foreground">Account:</span>
+                          <span className="font-mono font-medium text-foreground">{ocrFields.account_code}</span>
+                        </span>
+                      )}
+                      {ocrFields.kra_pin && (
+                        <span className="inline-flex items-center gap-1.5 text-xs bg-muted border border-border rounded-full px-3 py-1">
+                          <span className="text-muted-foreground">KRA PIN:</span>
+                          <span className="font-mono font-medium text-foreground">{ocrFields.kra_pin}</span>
+                        </span>
+                      )}
+                    </div>
+                  </div>
+                )}
 
                 {/* Dynamic metadata for the selected document type */}
                 {hasMetadata && (
@@ -811,7 +928,7 @@ export default function UploadPage() {
                             register={register}
                             control={control}
                             errors={errors as Record<string, { message?: string }>}
-                            enforceRequired={false} // relaxed for scanned
+                            enforceRequired={false}
                             suggested={false}
                           />
                         ))}
@@ -859,20 +976,57 @@ export default function UploadPage() {
         </div>
       )}
 
-      {/* ── Main upload form (manual flow OR initial upload for OCR) ──────── */}
+      {/* ── Main upload layout (idle / uploading) ─────────────────────────── */}
       {(scanStage === "idle" || scanStage === "uploading") && (
         <div className="grid grid-cols-1 lg:grid-cols-12 gap-8">
-          {/* Left column: file + type */}
+
+          {/* ── Left column ────────────────────────────────────────────────── */}
           <div className="lg:col-span-5 space-y-6">
-            {/* File drop */}
+
+            {/* Step 1 — Document Type (FIRST now) */}
             <div
               className="bg-card rounded-2xl border border-border p-6"
               style={{ boxShadow: "var(--shadow-card)" }}
             >
               <h2 className="font-semibold text-foreground mb-4 flex items-center gap-2">
-                <div className="w-6 h-6 rounded-full bg-primary text-primary-foreground flex items-center justify-center text-xs font-bold">
-                  1
-                </div>
+                <StepBadge n={1} active={!isSelfUpload && !selectedTypeId} done={isSelfUpload || Boolean(selectedTypeId)} />
+                {isSelfUpload ? "Personal Document" : "Document Type"}
+              </h2>
+
+              {isSelfUpload ? (
+                <p className="text-sm text-muted-foreground">
+                  Personal documents don't need a type. Add tags in the next step.
+                </p>
+              ) : (
+                <>
+                  <select
+                    value={selectedTypeId}
+                    onChange={(e) => setSelectedTypeId(e.target.value)}
+                    className="input w-full"
+                  >
+                    <option value="">— Choose document type —</option>
+                    {docTypes.map((t) => (
+                      <option key={t.id} value={t.id}>
+                        {t.name}
+                      </option>
+                    ))}
+                  </select>
+                  {selectedType?.description && (
+                    <p className="mt-3 text-xs text-muted-foreground">
+                      {selectedType.description}
+                    </p>
+                  )}
+                </>
+              )}
+            </div>
+
+            {/* Step 2 — Attach File */}
+            <div
+              className="bg-card rounded-2xl border border-border p-6"
+              style={{ boxShadow: "var(--shadow-card)" }}
+            >
+              <h2 className="font-semibold text-foreground mb-4 flex items-center gap-2">
+                <StepBadge n={2} active={Boolean(isSelfUpload || selectedTypeId) && !droppedFile} done={Boolean(droppedFile)} />
                 Attach File
               </h2>
               <div
@@ -943,54 +1097,13 @@ export default function UploadPage() {
               </div>
             </div>
 
-            {/* Document type */}
-            <div
-              className="bg-card rounded-2xl border border-border p-6"
-              style={{ boxShadow: "var(--shadow-card)" }}
-            >
-              <h2 className="font-semibold text-foreground mb-4 flex items-center gap-2">
-                <div className="w-6 h-6 rounded-full bg-primary text-primary-foreground flex items-center justify-center text-xs font-bold">
-                  2
-                </div>
-                {isSelfUpload ? "Personal Document" : "Document Type"}
-              </h2>
-
-              {isSelfUpload ? (
-                <p className="text-sm text-muted-foreground">
-                  Personal documents don't need a type. Add tags in the next step.
-                </p>
-              ) : (
-                <>
-                  <select
-                    value={selectedTypeId}
-                    onChange={(e) => setSelectedTypeId(e.target.value)}
-                    className="input w-full"
-                  >
-                    <option value="">— Choose document type —</option>
-                    {docTypes.map((t) => (
-                      <option key={t.id} value={t.id}>
-                        {t.name}
-                      </option>
-                    ))}
-                  </select>
-                  {selectedType?.description && (
-                    <p className="mt-3 text-xs text-muted-foreground">
-                      {selectedType.description}
-                    </p>
-                  )}
-                </>
-              )}
-            </div>
-
-            {/* Mode buttons */}
+            {/* Step 3 — Document Mode */}
             <div
               className="bg-card rounded-2xl border border-border p-6 space-y-4"
               style={{ boxShadow: "var(--shadow-card)" }}
             >
               <h2 className="font-semibold text-foreground mb-2 flex items-center gap-2">
-                <div className="w-6 h-6 rounded-full bg-primary text-primary-foreground flex items-center justify-center text-xs font-bold">
-                  3
-                </div>
+                <StepBadge n={3} active={Boolean(droppedFile)} />
                 Document Mode
               </h2>
 
@@ -1024,7 +1137,7 @@ export default function UploadPage() {
                 </button>
               </div>
 
-              {/* Digital vs Scanned */}
+              {/* Digital vs Scanned — only visible when not personal */}
               {!isSelfUpload && (
                 <div className="grid grid-cols-2 gap-2">
                   <button
@@ -1076,22 +1189,20 @@ export default function UploadPage() {
             </div>
           </div>
 
-          {/* Right column: details form (manual only) */}
+          {/* ── Right column ────────────────────────────────────────────────── */}
           <div className="lg:col-span-7">
-            {(showManualForm) ? (
+
+            {/* Manual details form — only when type is chosen and not OCR mode */}
+            {showManualForm && (
               <div
                 className={clsx(
                   "bg-card rounded-2xl border p-8",
-                  isSelfUpload
-                    ? "border-primary/30"
-                    : "border-border"
+                  isSelfUpload ? "border-primary/30" : "border-border"
                 )}
                 style={{ boxShadow: "var(--shadow-card)" }}
               >
                 <div className="flex items-center gap-2.5 mb-6">
-                  <div className="w-7 h-7 rounded-full bg-primary text-primary-foreground flex items-center justify-center text-sm font-bold">
-                    4
-                  </div>
+                  <StepBadge n={4} active />
                   <h2 className="text-xl font-semibold text-foreground">
                     {isSelfUpload ? "Personal Details" : "Document Details"}
                   </h2>
@@ -1138,9 +1249,7 @@ export default function UploadPage() {
                       placeholder="e.g. Acme Corp Invoice March 2026"
                     />
                     {errors.title && (
-                      <p className="text-destructive text-xs mt-1">
-                        {String(errors.title.message)}
-                      </p>
+                      <p className="text-destructive text-xs mt-1">{String(errors.title.message)}</p>
                     )}
                   </div>
 
@@ -1148,11 +1257,7 @@ export default function UploadPage() {
                   <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
                     <div>
                       <label className="label">Supplier</label>
-                      <input
-                        {...register("supplier")}
-                        className="input"
-                        placeholder="Supplier name"
-                      />
+                      <input {...register("supplier")} className="input" placeholder="Supplier name" />
                     </div>
                     <div>
                       <label className="label">Document Date</label>
@@ -1203,9 +1308,7 @@ export default function UploadPage() {
                       <label className="label">Currency</label>
                       <select {...register("currency")} className="input">
                         {CURRENCY_OPTIONS.map((c) => (
-                          <option key={c} value={c}>
-                            {c}
-                          </option>
+                          <option key={c} value={c}>{c}</option>
                         ))}
                       </select>
                     </div>
@@ -1216,9 +1319,7 @@ export default function UploadPage() {
                 {uploadMutation.isPending && uploadProgress > 0 && (
                   <div className="mt-6">
                     <div className="flex justify-between text-xs text-muted-foreground mb-1.5">
-                      <span>
-                        {isSelfUpload ? "Saving personal document…" : "Uploading…"}
-                      </span>
+                      <span>{isSelfUpload ? "Saving personal document…" : "Uploading…"}</span>
                       <span className="font-semibold text-foreground">{uploadProgress}%</span>
                     </div>
                     <div className="h-2.5 bg-muted rounded-full overflow-hidden">
@@ -1258,8 +1359,10 @@ export default function UploadPage() {
                   </button>
                 </div>
               </div>
-            ) : isOcrFlow && scanStage === "idle" ? (
-              /* Scanned-mode: no details form yet, just the upload button */
+            )}
+
+            {/* OCR idle info panel — visible when OCR mode is selected but not yet uploaded */}
+            {showOcrIdlePanel && (
               <div
                 className="bg-card rounded-2xl border border-teal/30 p-8 flex flex-col items-center text-center"
                 style={{ boxShadow: "var(--shadow-card)" }}
@@ -1267,17 +1370,14 @@ export default function UploadPage() {
                 <div className="w-16 h-16 rounded-2xl bg-teal/10 flex items-center justify-center mb-4">
                   <ScanLine className="w-8 h-8 text-teal" />
                 </div>
-                <h3 className="text-lg font-semibold text-foreground mb-2">
-                  OCR Scan Mode
-                </h3>
+                <h3 className="text-lg font-semibold text-foreground mb-2">OCR Scan Mode</h3>
                 <p className="text-sm text-muted-foreground max-w-sm mb-6">
-                  Upload the file and the OCR pipeline will extract the text
-                  automatically. You'll then review and confirm the extracted details
-                  before saving.
+                  Upload the file and the OCR pipeline will extract the text automatically.
+                  You'll then review and confirm the extracted details before saving.
                 </p>
                 <div className="w-full space-y-2 text-left rounded-xl bg-muted/40 border border-border p-4 mb-6 text-sm">
                   {[
-                    "Drop your file and choose document type",
+                    "Select document type and drop your file",
                     "Click Upload — OCR runs in the background",
                     "Review pre-filled details and confirm",
                   ].map((step, i) => (
@@ -1310,11 +1410,7 @@ export default function UploadPage() {
                   <button
                     type="button"
                     onClick={handleSubmit(onUpload)}
-                    disabled={
-                      uploadMutation.isPending ||
-                      !droppedFile ||
-                      (!isSelfUpload && !selectedTypeId)
-                    }
+                    disabled={uploadMutation.isPending || !droppedFile || !selectedTypeId}
                     className="flex-1 flex items-center justify-center gap-2 py-3 rounded-xl font-semibold bg-teal text-teal-foreground hover:bg-teal/90 transition-all disabled:opacity-50 disabled:cursor-not-allowed"
                     style={{ boxShadow: "var(--shadow-elegant)" }}
                   >
@@ -1337,23 +1433,10 @@ export default function UploadPage() {
                   </button>
                 </div>
               </div>
-            ) : (
-              /* No mode selected yet */
-              <div
-                className="bg-card rounded-2xl border border-border p-12 flex flex-col items-center justify-center text-center h-full"
-                style={{ boxShadow: "var(--shadow-card)" }}
-              >
-                <div className="w-16 h-16 rounded-2xl bg-muted text-muted-foreground flex items-center justify-center mb-4">
-                  <FileText className="w-8 h-8" />
-                </div>
-                <h3 className="text-lg font-semibold text-foreground mb-2">
-                  Ready to upload
-                </h3>
-                <p className="text-sm text-muted-foreground max-w-xs">
-                  Drop a file and select a document type on the left to continue.
-                </p>
-              </div>
             )}
+
+            {/* Nothing selected yet — right panel intentionally empty */}
+            {/* No placeholder shown; the left column's step badges guide the user */}
           </div>
         </div>
       )}

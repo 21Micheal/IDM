@@ -299,11 +299,15 @@ class DocumentDetailSerializer(serializers.ModelSerializer):
         return holder.get_full_name().strip() if holder else None
 
     def get_ocr_suggestions(self, obj):
-        from .models import OCRStatus
         if obj.ocr_status != OCRStatus.DONE:
             return None
         meta = obj.metadata or {}
-        return meta.get("ocr_suggestions")
+        result = {}
+        if suggestions := meta.get("ocr_suggestions"):
+            result["fields"] = suggestions
+        if quality := meta.get("ocr_quality"):
+            result["quality"] = quality   # includes low_quality_warning bool
+        return result or None
 
 
 class DocumentMetadataEditSerializer(serializers.ModelSerializer):
