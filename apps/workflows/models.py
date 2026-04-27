@@ -11,6 +11,7 @@ Additions to existing model file:
 
 MIGRATION NOTE: run 0003_task_hold_return after applying this file.
 """
+from django.core.exceptions import ValidationError
 from django.db import models
 from django.conf import settings
 import uuid
@@ -20,6 +21,14 @@ class WorkflowTemplate(models.Model):
     id          = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
     name        = models.CharField(max_length=120, unique=True)
     description = models.TextField(blank=True)
+    document_type = models.ForeignKey(
+        "documents.DocumentType",
+        null=True,
+        blank=True,
+        on_delete=models.SET_NULL,
+        related_name="workflow_templates",
+        help_text="Document type this template belongs to.",
+    )
     is_active   = models.BooleanField(default=True)
     created_by  = models.ForeignKey(
         settings.AUTH_USER_MODEL, null=True, on_delete=models.SET_NULL,
@@ -37,6 +46,31 @@ class WorkflowTemplate(models.Model):
     @property
     def step_count(self):
         return self.steps.count()
+
+    def clean(self):
+        super().clean()
+        if self.document_type_id is None and self.pk and self.rules.exists():
+            raise ValidationError(
+                {"document_type": "Templates with routing rules must remain assigned to a document type."}
+            )
+
+    def save(self, *args, **kwargs):
+        previous_document_type_id = None
+        if self.pk:
+            previous_document_type_id = (
+                WorkflowTemplate.objects
+                .filter(pk=self.pk)
+                .values_list("document_type_id", flat=True)
+                .first()
+            )
+
+        self.full_clean()
+        super().save(*args, **kwargs)
+
+        if self.document_type_id and previous_document_type_id != self.document_type_id:
+            self.rules.exclude(document_type_id=self.document_type_id).update(
+                document_type_id=self.document_type_id
+            )
 
 
 class WorkflowStep(models.Model):
@@ -90,7 +124,8 @@ class WorkflowRule(models.Model):
     template         = models.ForeignKey(
         WorkflowTemplate, on_delete=models.PROTECT, related_name="rules"
     )
-    amount_threshold = models.DecimalField(max_digits=18, decimal_places=2, default=0)
+    amount_min       = models.DecimalField(max_digits=18, decimal_places=2, default=0)
+    amount_max       = models.DecimalField(max_digits=18, decimal_places=2, null=True, blank=True)
     currency         = models.CharField(max_length=3, default="USD")
     label            = models.CharField(max_length=120, blank=True)
     is_active        = models.BooleanField(default=True)
@@ -98,10 +133,33 @@ class WorkflowRule(models.Model):
     updated_at       = models.DateTimeField(auto_now=True)
 
     class Meta:
-        ordering = ["document_type", "-amount_threshold"]
+        ordering = ["document_type", "amount_min", "amount_max"]
 
     def __str__(self):
-        return f"{self.document_type.name} >= {self.amount_threshold} -> {self.template.name}"
+        upper = self.amount_max if self.amount_max is not None else "∞"
+        return f"{self.document_type.name} [{self.amount_min} - {upper}] -> {self.template.name}"
+
+    def clean(self):
+        super().clean()
+        if self.template_id and self.template.document_type_id is None:
+            raise ValidationError(
+                {"template": "Assign this template to a document type before adding routing rules."}
+            )
+        if (
+            self.template_id
+            and self.template.document_type_id
+            and self.document_type_id
+            and self.template.document_type_id != self.document_type_id
+        ):
+            raise ValidationError(
+                {"document_type": "Routing rules must use the same document type as their template."}
+            )
+
+    def save(self, *args, **kwargs):
+        if self.template_id and self.template.document_type_id:
+            self.document_type_id = self.template.document_type_id
+        self.full_clean()
+        super().save(*args, **kwargs)
 
 
 class WorkflowInstance(models.Model):

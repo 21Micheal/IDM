@@ -64,7 +64,7 @@ def notify_task_assigned(task_id: str) -> None:
     _create_notification(task.assigned_to, message, link)
     _send_email(
         task.assigned_to,
-        subject=f"DocVault — Approval required: {doc.reference_number}",
+        subject=f"DMS — Approval required: {doc.reference_number}",
         body=(
             f"Hello {task.assigned_to.first_name},\n\n"
             f"A document requires your approval.\n\n"
@@ -73,7 +73,7 @@ def notify_task_assigned(task_id: str) -> None:
             f"  Step: {task.step.name}\n"
             f"  Instructions: {task.step.instructions or 'None'}\n"
             + (f"  Due by: {task.due_at.strftime('%d %b %Y %H:%M UTC')}\n" if task.due_at else "")
-            + f"\nPlease log in to DocVault to action this request.\n"
+            + f"\nPlease log in to DMS to action this request.\n"
         ),
     )
 
@@ -98,14 +98,14 @@ def notify_workflow_complete(instance_id: str, outcome: str) -> None:
     _create_notification(instance.started_by, msg, link)
     _send_email(
         instance.started_by,
-        subject=f"DocVault — Document {verb}: {doc.reference_number}",
+        subject=f"DMS — Document {verb}: {doc.reference_number}",
         body=(
             f"Hello {instance.started_by.first_name},\n\n"
             f"Your document has been {verb}.\n\n"
             f"  Document: {doc.title}\n"
             f"  Reference: {doc.reference_number}\n"
             f"  Status: {verb.capitalize()}\n\n"
-            f"Log in to DocVault to view the document.\n"
+            f"Log in to DMS to view the document.\n"
         ),
     )
 
@@ -142,7 +142,7 @@ def notify_document_returned(task_id: str, comment: str) -> None:
     _create_notification(uploader, message, link)
     _send_email(
         uploader,
-        subject=f"DocVault — Document returned for review: {doc.reference_number}",
+        subject=f"DMS — Document returned for review: {doc.reference_number}",
         body=(
             f"Hello {uploader.first_name},\n\n"
             f"Your document has been returned and requires your attention.\n\n"
@@ -151,7 +151,7 @@ def notify_document_returned(task_id: str, comment: str) -> None:
             f"  Returned by: {approver.get_full_name() if approver else 'Approver'}\n"
             f"  Reason: {comment}\n\n"
             f"Please update the document and resubmit for approval.\n\n"
-            f"Log in to DocVault to view and resubmit.\n"
+            f"Log in to DMS to view and resubmit.\n"
         ),
     )
 
@@ -197,7 +197,7 @@ def notify_document_held(task_id: str, comment: str, hold_hours: int) -> None:
     _create_notification(uploader, message, link)
     _send_email(
         uploader,
-        subject=f"DocVault — Document on hold: {doc.reference_number}",
+        subject=f"DMS — Document on hold: {doc.reference_number}",
         body=(
             f"Hello {uploader.first_name},\n\n"
             f"Your document has been placed on hold.\n\n"
@@ -208,7 +208,7 @@ def notify_document_held(task_id: str, comment: str, hold_hours: int) -> None:
             f"  Reason: {comment}\n\n"
             f"The document will resume the approval process automatically "
             f"after the hold period ends, or when manually released.\n\n"
-            f"Log in to DocVault to view the document status.\n"
+            f"Log in to DMS to view the document status.\n"
         ),
     )
 
@@ -240,7 +240,7 @@ def notify_hold_released(task_id: str) -> None:
     _create_notification(uploader, msg_uploader, link)
     _send_email(
         uploader,
-        subject=f"DocVault — Hold released: {doc.reference_number}",
+        subject=f"DMS — Hold released: {doc.reference_number}",
         body=(
             f"Hello {uploader.first_name},\n\n"
             f"The hold on your document has been released.\n\n"
@@ -259,14 +259,14 @@ def notify_hold_released(task_id: str) -> None:
         _create_notification(approver, msg_approver, link)
         _send_email(
             approver,
-            subject=f"DocVault — Hold released, action required: {doc.reference_number}",
+            subject=f"DMS — Hold released, action required: {doc.reference_number}",
             body=(
                 f"Hello {approver.first_name},\n\n"
                 f"The hold you placed on the following document has been released.\n\n"
                 f"  Document: {doc.title}\n"
                 f"  Reference: {doc.reference_number}\n"
                 f"  Step: {task.step.name}\n\n"
-                f"Please log in to DocVault to continue the approval.\n"
+                f"Please log in to DMS to continue the approval.\n"
             ),
         )
 
@@ -299,14 +299,14 @@ def notify_hold_auto_released(task_id: str) -> None:
     _create_notification(approver, msg, link)
     _send_email(
         approver,
-        subject=f"DocVault — Hold expired, action required: {doc.reference_number}",
+        subject=f"DMS — Hold expired, action required: {doc.reference_number}",
         body=(
             f"Hello {approver.first_name},\n\n"
             f"The hold period you set on a document has expired.\n\n"
             f"  Document: {doc.title}\n"
             f"  Reference: {doc.reference_number}\n"
             f"  Step: {task.step.name}\n\n"
-            f"Please log in to DocVault to action this approval.\n"
+            f"Please log in to DMS to action this approval.\n"
         ),
     )
 
@@ -337,7 +337,7 @@ def notify_task_overdue(task_id: str) -> None:
     _create_notification(task.assigned_to, msg, link)
     _send_email(
         task.assigned_to,
-        subject=f"DocVault — SLA overdue: {doc.reference_number}",
+        subject=f"DMS — SLA overdue: {doc.reference_number}",
         body=(
             f"Hello {task.assigned_to.first_name},\n\n"
             f"An approval task has passed its SLA deadline and requires urgent action.\n\n"
@@ -345,6 +345,6 @@ def notify_task_overdue(task_id: str) -> None:
             f"  Reference: {doc.reference_number}\n"
             f"  Step: {task.step.name}\n"
             f"  Was due: {task.due_at.strftime('%d %b %Y %H:%M UTC') if task.due_at else 'N/A'}\n\n"
-            f"Please log in to DocVault immediately.\n"
+            f"Please log in to DMS immediately.\n"
         ),
     )

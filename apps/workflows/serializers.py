@@ -7,6 +7,8 @@ from django.db.models import Q
 from django.db import transaction
 from django.utils import timezone
 from django.contrib.auth import get_user_model
+from django.core.exceptions import ObjectDoesNotExist
+import uuid
 
 from .models import (
     WorkflowTemplate, WorkflowStep, WorkflowRule,
@@ -17,9 +19,65 @@ from apps.accounts.serializers import UserSummarySerializer
 
 User = get_user_model()
 
+LEGACY_ASSIGNEE_TYPE_MAP = {
+    "any_role": "group_any",
+    "group_member": "group_any",
+    "group_hod": "group_all",
+    "specific_user": "group_specific",
+}
+
+
+def normalize_assignee_type(value):
+    if value in LEGACY_ASSIGNEE_TYPE_MAP:
+        return LEGACY_ASSIGNEE_TYPE_MAP[value]
+    return value
+
+
+def is_uuid_like(value):
+    if not isinstance(value, str):
+        return False
+    try:
+        uuid.UUID(value)
+    except (TypeError, ValueError, AttributeError):
+        return False
+    return True
+
+
+class FlexibleGroupField(serializers.PrimaryKeyRelatedField):
+    """
+    Accept a UUID, a UserGroup instance, or a legacy group name string.
+    """
+    def to_internal_value(self, data):
+        if data in (None, ""):
+            return None
+        if isinstance(data, UserGroup):
+            return data
+        if isinstance(data, str) and not is_uuid_like(data):
+            match = self.get_queryset().filter(name__iexact=data.strip()).first()
+            if match:
+                return match
+        return super().to_internal_value(data)
+
+
+class FlexibleUserField(serializers.PrimaryKeyRelatedField):
+    """
+    Accept a UUID, a User instance, or blank-ish legacy values.
+    """
+    def to_internal_value(self, data):
+        if data in (None, ""):
+            return None
+        if isinstance(data, User):
+            return data
+        if isinstance(data, str) and not is_uuid_like(data):
+            return None
+        return super().to_internal_value(data)
+
 
 class WorkflowStepSerializer(serializers.ModelSerializer):
-    assignee_group_name = serializers.CharField(source="assignee_group.name", read_only=True)
+    assignee_type = serializers.SerializerMethodField()
+    assignee_group = serializers.SerializerMethodField()
+    assignee_group_name = serializers.SerializerMethodField()
+    assignee_user = serializers.SerializerMethodField()
     assignee_user_name = serializers.SerializerMethodField()
 
     class Meta:
@@ -33,27 +91,49 @@ class WorkflowStepSerializer(serializers.ModelSerializer):
             "instructions",
         ]
 
+    def get_assignee_type(self, obj):
+        return normalize_assignee_type(obj.assignee_type)
+
+    def get_assignee_group(self, obj):
+        try:
+            return str(obj.assignee_group_id) if obj.assignee_group_id else None
+        except ObjectDoesNotExist:
+            return None
+
+    def get_assignee_group_name(self, obj):
+        try:
+            return obj.assignee_group.name if obj.assignee_group_id and obj.assignee_group else None
+        except ObjectDoesNotExist:
+            return None
+
+    def get_assignee_user(self, obj):
+        try:
+            return str(obj.assignee_user_id) if obj.assignee_user_id else None
+        except ObjectDoesNotExist:
+            return None
+
     def get_assignee_user_name(self, obj):
-        if obj.assignee_user:
-            return obj.assignee_user.get_full_name() or obj.assignee_user.email
+        try:
+            if obj.assignee_user_id and obj.assignee_user:
+                return obj.assignee_user.get_full_name() or obj.assignee_user.email
+        except ObjectDoesNotExist:
+            return None
         return None
 
 
 class WorkflowStepWriteSerializer(serializers.ModelSerializer):
     id = serializers.UUIDField(required=False)
-    assignee_type = serializers.ChoiceField(
-        choices=[
-            ("group_any",      "Any member of group"),
-            ("group_all",      "All members of group"),
-            ("group_specific", "Specific member of group"),
-        ]
-    )
-    assignee_group = serializers.PrimaryKeyRelatedField(
+    assignee_type = serializers.CharField()
+    assignee_group = FlexibleGroupField(
         queryset=UserGroup.objects.filter(is_active=True),
         required=False,
         allow_null=True,
     )
-
+    assignee_user = FlexibleUserField(
+        queryset=User.objects.filter(is_active=True),
+        required=False,
+        allow_null=True,
+    )
     class Meta:
         model  = WorkflowStep
         fields = [
@@ -64,22 +144,18 @@ class WorkflowStepWriteSerializer(serializers.ModelSerializer):
             "instructions",
         ]
         extra_kwargs = {
-            "assignee_user": {"required": False, "allow_null": True},
             "instructions":  {"required": False, "allow_blank": True},
         }
+
+    def to_internal_value(self, data):
+        mutable = dict(data)
+        mutable["assignee_type"] = normalize_assignee_type(mutable.get("assignee_type"))
+        return super().to_internal_value(mutable)
 
     def validate(self, attrs):
         assignee_type = attrs.get("assignee_type", getattr(self.instance, "assignee_type", None))
         assignee_group = attrs.get("assignee_group", getattr(self.instance, "assignee_group", None))
         assignee_user = attrs.get("assignee_user", getattr(self.instance, "assignee_user", None))
-
-        # Ensure assignee_user exists, otherwise set to None
-        if assignee_user and not User.objects.filter(id=assignee_user).exists():
-            attrs['assignee_user'] = None
-
-        # Ensure assignee_group exists, otherwise set to None
-        if assignee_group and not UserGroup.objects.filter(id=assignee_group).exists():
-            attrs['assignee_group'] = None
 
         if assignee_type in ("group_any", "group_all", "group_specific"):
             if assignee_group is None:
@@ -98,8 +174,17 @@ class WorkflowStepWriteSerializer(serializers.ModelSerializer):
             raise serializers.ValidationError({"assignee_type": "Invalid assignment mode."})
 
         if assignee_type == "group_specific" and assignee_group and assignee_user:
-            # Note: Membership check disabled to allow existing configurations
-            pass
+            if not UserGroup.objects.filter(
+                id=assignee_group.id,
+                memberships__user__id=assignee_user.id,
+                is_active=True,
+            ).filter(
+                Q(memberships__expires_at__isnull=True) |
+                Q(memberships__expires_at__gt=timezone.now())
+            ).exists():
+                raise serializers.ValidationError(
+                    {"assignee_user": "The selected user is not an active member of the selected group."}
+                )
 
         # At least one approver action must be allowed
         allow_approve = attrs.get("allow_approve", getattr(self.instance, "allow_approve", True))
@@ -117,11 +202,12 @@ class WorkflowTemplateSerializer(serializers.ModelSerializer):
     steps      = WorkflowStepSerializer(many=True, read_only=True)
     step_count = serializers.SerializerMethodField()
     created_by = UserSummarySerializer(read_only=True)
+    document_type_name = serializers.CharField(source="document_type.name", read_only=True, default=None)
 
     class Meta:
         model  = WorkflowTemplate
         fields = [
-            "id", "name", "description", "is_active",
+            "id", "name", "description", "document_type", "document_type_name", "is_active",
             "steps", "step_count", "created_by", "created_at", "updated_at",
         ]
         read_only_fields = ["id", "step_count", "created_by", "created_at", "updated_at"]
@@ -138,9 +224,10 @@ class WorkflowTemplateWriteSerializer(serializers.ModelSerializer):
 
     class Meta:
         model  = WorkflowTemplate
-        fields = ["name", "description", "is_active", "steps"]
+        fields = ["name", "description", "document_type", "is_active", "steps"]
         extra_kwargs = {
             "is_active": {"required": False},
+            "document_type": {"required": False, "allow_null": True},
         }
 
     def validate_name(self, value):
@@ -152,6 +239,17 @@ class WorkflowTemplateWriteSerializer(serializers.ModelSerializer):
                 f"A workflow template named '{value}' already exists."
             )
         return value
+
+    def validate(self, attrs):
+        attrs = super().validate(attrs)
+        document_type = attrs.get("document_type", getattr(self.instance, "document_type", None))
+
+        if document_type is None and self.instance and self.instance.rules.exists():
+            raise serializers.ValidationError(
+                {"document_type": "Templates with routing rules must remain assigned to a document type."}
+            )
+
+        return attrs
 
     def _upsert_steps(self, template, steps_data):
         existing_steps = list(template.steps.all())
@@ -241,17 +339,68 @@ class WorkflowTemplateWriteSerializer(serializers.ModelSerializer):
 
 
 class WorkflowRuleSerializer(serializers.ModelSerializer):
+    document_type = serializers.PrimaryKeyRelatedField(read_only=True)
+    template = serializers.PrimaryKeyRelatedField(queryset=WorkflowTemplate.objects.filter(is_active=True))
     template_name      = serializers.CharField(source="template.name", read_only=True)
     document_type_name = serializers.CharField(source="document_type.name", read_only=True)
+    template_document_type = serializers.UUIDField(source="template.document_type_id", read_only=True)
+    amount_min = serializers.DecimalField(max_digits=18, decimal_places=2)
+    amount_max = serializers.DecimalField(max_digits=18, decimal_places=2, allow_null=True, required=False)
 
     class Meta:
         model  = WorkflowRule
         fields = [
             "id", "document_type", "document_type_name",
             "template", "template_name",
-            "amount_threshold", "currency", "label", "is_active",
+            "template_document_type",
+            "amount_min", "amount_max", "currency", "label", "is_active",
         ]
-        read_only_fields = ["id", "template_name", "document_type_name"]
+        read_only_fields = ["id", "document_type", "template_name", "document_type_name", "template_document_type"]
+        extra_kwargs = {
+            "label": {"required": False, "allow_blank": True},
+            "is_active": {"required": False},
+        }
+
+    def validate(self, attrs):
+        template = attrs.get("template", getattr(self.instance, "template", None))
+        amount_min = attrs.get("amount_min", getattr(self.instance, "amount_min", 0))
+        amount_max = attrs.get("amount_max", getattr(self.instance, "amount_max", None))
+        currency = (attrs.get("currency", getattr(self.instance, "currency", "USD")) or "USD").upper()
+
+        if template is None:
+            raise serializers.ValidationError({"template": "A template is required."})
+
+        document_type = template.document_type
+        if document_type is None:
+            raise serializers.ValidationError(
+                {"template": "Assign this template to a document type before adding routing rules."}
+            )
+
+        if amount_max is not None and amount_max < amount_min:
+            raise serializers.ValidationError({"amount_max": "Maximum amount must be greater than or equal to minimum amount."})
+
+        overlaps = (
+            WorkflowRule.objects
+            .filter(
+                document_type=document_type,
+                template__document_type=document_type,
+                currency=currency,
+                is_active=True,
+            )
+            .exclude(pk=getattr(self.instance, "pk", None))
+        )
+        for rule in overlaps:
+            other_max = rule.amount_max
+            overlaps_lower = amount_max is None or other_max is None or amount_max >= rule.amount_min
+            overlaps_upper = other_max is None or other_max >= amount_min
+            if overlaps_lower and overlaps_upper:
+                raise serializers.ValidationError(
+                    {"amount_min": f"This amount range overlaps with rule '{rule.label or rule.template.name}'."}
+                )
+
+        attrs["document_type"] = document_type
+        attrs["currency"] = currency
+        return attrs
 
 
 class WorkflowTaskActionSerializer(serializers.ModelSerializer):

@@ -25,6 +25,7 @@ from .models import (
 )
 from apps.accounts.serializers import UserSummarySerializer
 from apps.accounts.models import GroupAction
+from apps.workflows.models import WorkflowTemplate
 from django.db import transaction, IntegrityError
 from django.utils.text import slugify
 import mimetypes
@@ -649,6 +650,17 @@ class DocumentTypeWriteSerializer(serializers.ModelSerializer):
 
         return value
 
+    def validate_workflow_template(self, value):
+        if value is None:
+            return value
+
+        current_doc_type_id = getattr(self.instance, "id", None)
+        if value.document_type_id and value.document_type_id != current_doc_type_id:
+            raise serializers.ValidationError(
+                "This workflow template is already attached to another document type."
+            )
+        return value
+
     def _save_metadata_fields(self, doc_type: DocumentType, fields_data: list) -> None:
         """Delete existing fields and recreate from payload."""
         doc_type.metadata_fields.all().delete()
@@ -672,11 +684,19 @@ class DocumentTypeWriteSerializer(serializers.ModelSerializer):
                 }
             )
 
+    def _sync_workflow_template(self, doc_type: DocumentType) -> None:
+        if not doc_type.workflow_template_id:
+            return
+        WorkflowTemplate.objects.filter(pk=doc_type.workflow_template_id).update(
+            document_type=doc_type
+        )
+
     @transaction.atomic
     def create(self, validated_data: dict) -> DocumentType:
         fields_data = validated_data.pop("metadata_fields", [])
         doc_type    = DocumentType.objects.create(**validated_data)
         self._save_metadata_fields(doc_type, fields_data)
+        self._sync_workflow_template(doc_type)
         return doc_type
 
     @transaction.atomic
@@ -686,6 +706,7 @@ class DocumentTypeWriteSerializer(serializers.ModelSerializer):
         for attr, value in validated_data.items():
             setattr(instance, attr, value)
         instance.save()
+        self._sync_workflow_template(instance)
 
         # Only replace fields if the key was present in the request
         if fields_data is not None:
