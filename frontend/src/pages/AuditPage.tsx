@@ -3,7 +3,7 @@ import { useQuery } from "@tanstack/react-query";
 import { api } from "@/services/api";
 import { ShieldCheck, Filter, Clock, User, Download, ChevronLeft, ChevronRight, Search } from "lucide-react";
 import { format, subDays } from "date-fns";
-import { toast } from "react-toastify";
+import { toast } from "@/components/ui/vault-toast";
 
 export default function AuditPage() {
   const [searchTerm, setSearchTerm] = useState("");

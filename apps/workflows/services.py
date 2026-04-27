@@ -46,21 +46,31 @@ class WorkflowService:
     def resolve_template(document) -> WorkflowTemplate:
         doc_type = document.document_type
         amount   = document.amount or 0
+        currency = (document.currency or "USD").upper()
 
-        rules = (
+        matching_rule = (
             WorkflowRule.objects
-            .filter(document_type=doc_type, is_active=True)
-            .order_by("-amount_threshold")
+            .filter(
+                document_type=doc_type,
+                template__document_type=doc_type,
+                currency=currency,
+                is_active=True,
+            )
+            .filter(amount_min__lte=amount)
+            .filter(Q(amount_max__isnull=True) | Q(amount_max__gte=amount))
+            .order_by("-amount_min", "amount_max")
             .select_related("template")
+            .first()
         )
 
-        if rules.exists():
-            for rule in rules:
-                if amount >= rule.amount_threshold:
-                    return rule.template
-            return rules.last().template
+        if matching_rule:
+            return matching_rule.template
 
-        if doc_type.workflow_template and doc_type.workflow_template.is_active:
+        if (
+            doc_type.workflow_template
+            and doc_type.workflow_template.is_active
+            and doc_type.workflow_template.document_type_id == doc_type.id
+        ):
             return doc_type.workflow_template
 
         raise WorkflowError(
@@ -83,9 +93,15 @@ class WorkflowService:
         template = WorkflowService.resolve_template(document)
         rule     = (
             WorkflowRule.objects
-            .filter(document_type=document.document_type, is_active=True)
-            .order_by("-amount_threshold")
-            .filter(amount_threshold__lte=document.amount or 0)
+            .filter(
+                document_type=document.document_type,
+                template__document_type=document.document_type,
+                currency=(document.currency or "USD").upper(),
+                is_active=True,
+                amount_min__lte=document.amount or 0,
+            )
+            .filter(Q(amount_max__isnull=True) | Q(amount_max__gte=document.amount or 0))
+            .order_by("-amount_min", "amount_max")
             .first()
         )
 
@@ -112,10 +128,14 @@ class WorkflowService:
         task.acted_at = timezone.now()
         task.save(update_fields=["status", "comment", "acted_at"])
 
-        WorkflowTaskAction.objects.create(task=task, actor=actor, action="approved", comment=comment)
+        action = WorkflowTaskAction.objects.create(task=task, actor=actor, action="approved", comment=comment)
 
         instance   = task.workflow_instance
         step       = task.step
+        doc        = instance.document
+
+        # Notify stakeholders of approval
+        WorkflowService._notify_action(action, doc)
 
         if step.assignee_type == "group_all" and WorkflowService._has_active_step_tasks(instance, step.order):
             return
@@ -134,8 +154,15 @@ class WorkflowService:
         task.acted_at = timezone.now()
         task.save(update_fields=["status", "comment", "acted_at"])
 
-        WorkflowTaskAction.objects.create(task=task, actor=actor, action="rejected", comment=comment)
-        WorkflowService._complete(task.workflow_instance, "rejected")
+        action = WorkflowTaskAction.objects.create(task=task, actor=actor, action="rejected", comment=comment)
+        
+        instance = task.workflow_instance
+        doc      = instance.document
+
+        # Notify stakeholders of rejection
+        WorkflowService._notify_action(action, doc)
+        
+        WorkflowService._complete(instance, "rejected")
 
     # ── Return for review ──────────────────────────────────────────────────
 

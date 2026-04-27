@@ -8,7 +8,7 @@ import {
   Plus, Search, MoreVertical, UserCheck, UserX,
   KeyRound, Edit2, Loader2, Shield, X, Users as UsersIcon,
 } from "lucide-react";
-import { toast } from "react-toastify";
+import { toast } from "@/components/ui/vault-toast";
 import { format } from "date-fns";
 import clsx from "clsx";
 

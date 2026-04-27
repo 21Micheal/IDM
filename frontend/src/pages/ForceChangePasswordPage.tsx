@@ -10,10 +10,10 @@ import { useNavigate } from "react-router-dom";
 import { useForm } from "react-hook-form";
 import { zodResolver } from "@hookform/resolvers/zod";
 import { z } from "zod";
-import { profileAPI } from "@/services/api";
+import { authAPI, profileAPI } from "@/services/api";
 import { useAuthStore } from "@/store/authStore";
 import { Lock, Eye, EyeOff, Loader2, ShieldCheck } from "lucide-react";
-import { toast } from "react-toastify";
+import { toast } from "@/components/ui/vault-toast";
 
 const schema = z.object({
   old_password:     z.string().min(1, "Current (temporary) password required"),
@@ -55,7 +55,7 @@ export default function ForceChangePasswordPage() {
     try {
       await profileAPI.changePassword(values.old_password, values.new_password);
       // Refresh user object so must_change_password is false in store
-      const { data: me } = await import("@/services/api").then(m => m.authAPI.me());
+      const { data: me } = await authAPI.me();
       setUser(me);
       toast.success("Password updated. Welcome to DocVault!");
       navigate("/", { replace: true });

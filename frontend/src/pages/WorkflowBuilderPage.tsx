@@ -13,7 +13,7 @@ import {
   Edit3, Play, Flag,
   ZoomIn, ZoomOut, Maximize2, Move,
 } from "lucide-react";
-import { toast } from "react-toastify";
+import { toast } from "@/components/ui/vault-toast";
 import clsx from "clsx";
 
 // ── Types ─────────────────────────────────────────────────────────────────────
@@ -41,6 +41,8 @@ interface WorkflowTemplate {
   id: string;
   name: string;
   description: string;
+  document_type: string | null;
+  document_type_name?: string | null;
   category?: string;
   is_active: boolean;
   steps: WorkflowStep[];
@@ -67,7 +69,9 @@ interface WorkflowRule {
   document_type_name: string;
   template: string;
   template_name: string;
-  amount_threshold: string;
+  template_document_type?: string | null;
+  amount_min: string;
+  amount_max: string | null;
   currency: string;
   label: string;
   is_active: boolean;
@@ -109,6 +113,82 @@ const STATUS_PRESETS = [
   "Under Review", "Conditional Approval", "Rejected", "Approved", "Archived",
 ];
 
+const LEGACY_ASSIGNEE_TYPE_MAP: Record<string, AssigneeType> = {
+  any_role: "group_any",
+  group_member: "group_any",
+  group_hod: "group_all",
+  specific_user: "group_specific",
+};
+
+function isUuidLike(value: unknown): value is string {
+  return typeof value === "string"
+    && /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(value);
+}
+
+function normalizeAssigneeType(value: unknown): AssigneeType {
+  if (typeof value === "string" && value in LEGACY_ASSIGNEE_TYPE_MAP) {
+    return LEGACY_ASSIGNEE_TYPE_MAP[value];
+  }
+  if (value === "group_any" || value === "group_all" || value === "group_specific") {
+    return value;
+  }
+  return "group_any";
+}
+
+function normalizeStep(step: WorkflowStep): WorkflowStep {
+  return {
+    ...step,
+    assignee_type: normalizeAssigneeType(step.assignee_type),
+    assignee_group: isUuidLike(step.assignee_group) ? step.assignee_group : null,
+    assignee_user: isUuidLike(step.assignee_user) ? step.assignee_user : null,
+  };
+}
+
+function normalizeTemplate(template: WorkflowTemplate): WorkflowTemplate {
+  return {
+    ...template,
+    document_type: isUuidLike(template.document_type) ? template.document_type : null,
+    steps: (template.steps ?? []).map(normalizeStep),
+  };
+}
+
+function resolveTemplateDocumentType(
+  template: WorkflowTemplate,
+  docTypes: DocumentType[],
+): { id: string | null; name: string | null } {
+  if (template.document_type) {
+    const matched = docTypes.find((item) => item.id === template.document_type);
+    return { id: template.document_type, name: matched?.name ?? template.document_type_name ?? null };
+  }
+  const inferred = docTypes.find((item) => item.workflow_template === template.id);
+  if (inferred) return { id: inferred.id, name: inferred.name };
+  return { id: null, name: template.document_type_name ?? null };
+}
+
+function attachResolvedTemplateDocumentType(
+  template: WorkflowTemplate,
+  docTypes: DocumentType[],
+): WorkflowTemplate {
+  const resolved = resolveTemplateDocumentType(template, docTypes);
+  return {
+    ...template,
+    document_type: resolved.id,
+    document_type_name: resolved.name,
+  };
+}
+
+function formatMoney(value: number, currency: string) {
+  return `${currency} ${value.toLocaleString(undefined, { minimumFractionDigits: 0, maximumFractionDigits: 2 })}`;
+}
+
+function formatRuleRange(rule: WorkflowRule) {
+  const min = Number(rule.amount_min || 0);
+  const max = rule.amount_max === null || rule.amount_max === "" ? null : Number(rule.amount_max);
+  if (max === null) return `${formatMoney(min, rule.currency)} and above`;
+  if (min === 0) return `Up to ${formatMoney(max, rule.currency)}`;
+  return `${formatMoney(min, rule.currency)} to ${formatMoney(max, rule.currency)}`;
+}
+
 function blankStep(): WorkflowStep {
   return {
     order: 0, name: "", status_label: "Pending Approval",
@@ -118,7 +198,7 @@ function blankStep(): WorkflowStep {
 }
 
 function stepToPayload(step: WorkflowStep): Partial<WorkflowStep> {
-  const { assignee_user_name, assignee_group_name, ...rest } = step as any;
+  const { assignee_user_name, assignee_group_name, ...rest } = normalizeStep(step) as any;
   // Ensure assignee_user is only sent for types that allow it
   if (rest.assignee_type !== "group_specific") {
     rest.assignee_user = null;
@@ -543,8 +623,10 @@ function FlowchartEditor({
       return;
     }
     const rect = wrapperRef.current.getBoundingClientRect();
-    const xs = positions.map(p => p.x);
-    const ys = positions.map(p => p.y);
+    const validNodes = positions.slice(0, steps.length).filter(Boolean) as NodePos[];
+    if (validNodes.length === 0) return;
+    const xs = validNodes.map(p => p.x);
+    const ys = validNodes.map(p => p.y);
     const minX = Math.min(0, ...xs) - NODE_W / 2 - 40;
     const maxX = Math.max(0, ...xs) + NODE_W / 2 + 40;
     const minY = -ANCHOR_H - 40;
@@ -566,41 +648,55 @@ function FlowchartEditor({
     const startCenter = { x: 0, y: 0 };
     const startBottom = { x: startCenter.x, y: startCenter.y + ANCHOR_H / 2 };
 
-    const stepTop = (p: NodePos) => ({ x: p.x, y: p.y - NODE_H / 2 });
-    const stepBottom = (p: NodePos) => ({ x: p.x, y: p.y + NODE_H / 2 });
+    const stepTop = (p: NodePos) => ({ x: p?.x ?? 0, y: (p?.y ?? 0) - NODE_H / 2 });
+    const stepBottom = (p: NodePos) => ({ x: p?.x ?? 0, y: (p?.y ?? 0) + NODE_H / 2 });
 
     if (steps.length > 0) {
-      const t = stepTop(positions[0]);
-      lines.push({ id: "start", d: bezierPath(startBottom, t) });
-      for (let i = 0; i < steps.length - 1; i++) {
-        lines.push({
-          id: `s-${i}`,
-          d: bezierPath(stepBottom(positions[i]), stepTop(positions[i + 1])),
-        });
+      const p0 = positions[0];
+      if (p0) {
+        const t = stepTop(p0);
+        lines.push({ id: "start", d: bezierPath(startBottom, t) });
       }
-      const last = positions[positions.length - 1];
-      const lastY = positions.reduce((m, p) => Math.max(m, p.y), 0);
-      const endTop = { x: last.x, y: lastY + NODE_H + 80 };
-      lines.push({ id: "end", d: bezierPath(stepBottom(last), { x: endTop.x, y: endTop.y - ANCHOR_H / 2 }) });
+
+      for (let i = 0; i < steps.length - 1; i++) {
+        const pA = positions[i];
+        const pB = positions[i + 1];
+        if (pA && pB) {
+          lines.push({
+            id: `s-${i}`,
+            d: bezierPath(stepBottom(pA), stepTop(pB)),
+          });
+        }
+      }
+
+      const last = positions[steps.length - 1];
+      if (last) {
+        const currentValidY = positions.slice(0, steps.length).reduce((m, p) => (p ? Math.max(m, p.y) : m), 0);
+        const endTop = { x: last.x, y: currentValidY + NODE_H + 80 };
+        lines.push({ id: "end", d: bezierPath(stepBottom(last), { x: endTop.x, y: endTop.y - ANCHOR_H / 2 }) });
+      }
     }
     return lines;
   }, [positions, steps.length]);
 
   // Compute SVG viewbox-ish bounds for the inner content
   const bounds = useMemo(() => {
-    const xs = positions.map(p => p.x);
-    const ys = positions.map(p => p.y);
+    const validNodes = positions.slice(0, steps.length).filter(Boolean) as NodePos[];
+    const xs = validNodes.map(p => p.x);
+    const ys = validNodes.map(p => p.y);
     const minX = Math.min(-ANCHOR_W, ...xs.map(x => x - NODE_W / 2)) - 200;
     const maxX = Math.max(ANCHOR_W, ...xs.map(x => x + NODE_W / 2)) + 200;
     const minY = -ANCHOR_H - 200;
-    const lastY = positions.reduce((m, p) => Math.max(m, p.y), 0);
-    const maxY = lastY + NODE_H + ANCHOR_H + 200;
+    const lastY_bound = validNodes.reduce((m, p) => Math.max(m, p.y), 0);
+    const maxY = lastY_bound + NODE_H + ANCHOR_H + 200;
     return { minX, maxX, minY, maxY, w: maxX - minX, h: maxY - minY };
-  }, [positions]);
+  }, [positions, steps.length]);
 
-  const lastY = positions.reduce((m, p) => Math.max(m, p.y), 0);
-  const endX = positions.length ? positions[positions.length - 1].x : 0;
-  const endY = positions.length ? lastY + NODE_H + 80 : NODE_H + 80;
+  const currentValidNodes = positions.slice(0, steps.length).filter(Boolean) as NodePos[];
+  const lastY = currentValidNodes.reduce((m, p) => Math.max(m, p.y), 0);
+  const lastNodeMain = steps.length > 0 ? positions[steps.length - 1] : null;
+  const endX = lastNodeMain ? lastNodeMain.x : 0;
+  const endY = lastNodeMain ? lastY + NODE_H + 80 : NODE_H + 80;
 
   return (
     <div className="relative flex-1 overflow-hidden bg-muted/30 rounded-xl border border-border">
@@ -861,36 +957,38 @@ function bezierPath(a: { x: number; y: number }, b: { x: number; y: number }) {
 }
 
 // ── Routing Rules Panel ───────────────────────────────────────────────────────
-function RoutingRulesPanel({ templateId, docTypes }: {
-  templateId: string;
-  docTypes: DocumentType[];
+function RoutingRulesPanel({ template }: {
+  template: WorkflowTemplate;
 }) {
   const qc = useQueryClient();
   const [showAdd, setShowAdd] = useState(false);
   const [form, setForm] = useState({
-    document_type: "",
-    amount_threshold: "0",
+    amount_min: "0",
+    amount_max: "",
     currency: "USD",
     label: "",
   });
+  const templateId = template.id;
+  const hasDocumentType = Boolean(template.document_type);
 
   const { data: rules, isLoading } = useQuery<WorkflowRule[]>({
     queryKey: ["workflow-rules", templateId],
     queryFn: () => workflowAPI.listRules({ template: templateId }).then(r => r.data.results ?? r.data),
+    enabled: hasDocumentType,
   });
 
   const createRule = useMutation({
     mutationFn: () => workflowAPI.createRule({
       ...form,
       template: templateId,
-      // ensure numeric threshold sent
-      amount_threshold: form.amount_threshold || "0",
+      amount_min: form.amount_min || "0",
+      amount_max: form.amount_max || null,
     }),
     onSuccess: () => {
       toast.success("Routing rule created");
       qc.invalidateQueries({ queryKey: ["workflow-rules", templateId] });
       setShowAdd(false);
-      setForm({ document_type: "", amount_threshold: "0", currency: "USD", label: "" });
+      setForm({ amount_min: "0", amount_max: "", currency: "USD", label: "" });
     },
     onError: (err: any) => {
       const message = formatApiError(err?.response?.data) || "Failed to create rule";
@@ -908,24 +1006,25 @@ function RoutingRulesPanel({ templateId, docTypes }: {
   });
 
   const sortedRules = useMemo(
-    () => [...(rules ?? [])].sort((a, b) => Number(a.amount_threshold) - Number(b.amount_threshold)),
+    () => [...(rules ?? [])].sort((a, b) => Number(a.amount_min) - Number(b.amount_min)),
     [rules]
   );
 
-  // Group rules by document type for clearer reading
-  const grouped = useMemo(() => {
-    const map = new Map<string, { name: string; rules: WorkflowRule[] }>();
-    for (const rule of sortedRules) {
-      const key = rule.document_type;
-      if (!map.has(key)) map.set(key, { name: rule.document_type_name, rules: [] });
-      map.get(key)!.rules.push(rule);
+  const handleCreateRule = () => {
+    if (!templateId) {
+      toast.error("Save the template before adding routing rules");
+      return;
     }
-    return Array.from(map.entries());
-  }, [sortedRules]);
-
-  // All active doc types are eligible — routing rules can override the
-  // primary template assignment for amount thresholds.
-  const eligibleDocTypes = docTypes.filter(dt => dt.is_active);
+    if (!hasDocumentType) {
+      toast.error("Assign a document type to this template before adding routing rules");
+      return;
+    }
+    if (form.amount_min.trim() === "") {
+      toast.error("Minimum amount is required");
+      return;
+    }
+    createRule.mutate();
+  };
 
   return (
     <div className="max-w-3xl mx-auto space-y-5">
@@ -936,18 +1035,27 @@ function RoutingRulesPanel({ templateId, docTypes }: {
             Amount-based routing rules
           </h3>
           <p className="text-xs text-muted-foreground mt-1">
-            When a document is submitted, the highest matching threshold wins.
-            Use <span className="font-mono">0</span> for a catch-all (default) rule.
+            Rules for this template are automatically scoped to <span className="font-medium text-foreground">{template.document_type_name ?? "its document type"}</span>.
+            Add non-overlapping amount ranges to route matching documents here.
           </p>
         </div>
-        {!showAdd && (
+        {!showAdd && hasDocumentType && (
           <button onClick={() => setShowAdd(true)} className="btn-primary text-xs px-3 py-1.5">
             <Plus className="w-3.5 h-3.5" /> Add rule
           </button>
         )}
       </div>
 
-      {showAdd && (
+      {!hasDocumentType && (
+        <div className="rounded-xl border border-amber-300 bg-amber-50 p-4">
+          <p className="text-sm font-medium text-amber-900">Assign a document type to this template first</p>
+          <p className="text-xs text-amber-800/80 mt-1">
+            Routing rules are linked to the template&apos;s document type, so this template needs a document type before ranges can be added.
+          </p>
+        </div>
+      )}
+
+      {showAdd && hasDocumentType && (
         <div className="rounded-xl border-2 border-accent/40 bg-accent/5 p-4 space-y-3">
           <div className="flex items-center justify-between">
             <h4 className="text-sm font-semibold text-foreground">New routing rule</h4>
@@ -955,38 +1063,40 @@ function RoutingRulesPanel({ templateId, docTypes }: {
               <X className="w-4 h-4 text-muted-foreground" />
             </button>
           </div>
+          <p className="text-xs text-muted-foreground">
+            Applies to <span className="font-medium text-foreground">{template.document_type_name}</span> documents only.
+          </p>
           <div className="grid grid-cols-2 gap-3">
-            <div className="col-span-2">
-              <Label required>Document type</Label>
-              <select
-                value={form.document_type}
-                onChange={e => setForm(f => ({ ...f, document_type: e.target.value }))}
-                className={inp}
-              >
-                <option value="">Select document type</option>
-                {eligibleDocTypes.map(dt => (
-                  <option key={dt.id} value={dt.id}>
-                    {dt.name}{dt.workflow_template === templateId ? " (primary)" : ""}
-                  </option>
-                ))}
-              </select>
-              <p className="text-[11px] text-muted-foreground mt-1">
-                Routing rules take precedence over the primary template when their threshold matches.
-              </p>
-            </div>
             <div>
               <Label required>Minimum amount</Label>
               <input
                 type="number"
                 min={0}
                 step="0.01"
-                value={form.amount_threshold}
-                onChange={e => setForm(f => ({ ...f, amount_threshold: e.target.value }))}
+                value={form.amount_min}
+                onChange={e => setForm(f => ({ ...f, amount_min: e.target.value }))}
                 className={inp}
                 placeholder="0"
               />
               <p className="text-[11px] text-muted-foreground mt-1">
-                {Number(form.amount_threshold) === 0 ? "Catch-all (default)" : `Triggers at ≥ ${Number(form.amount_threshold).toLocaleString()} ${form.currency}`}
+                Starts matching from {formatMoney(Number(form.amount_min || 0), form.currency)}
+              </p>
+            </div>
+            <div>
+              <Label>Maximum amount</Label>
+              <input
+                type="number"
+                min={0}
+                step="0.01"
+                value={form.amount_max}
+                onChange={e => setForm(f => ({ ...f, amount_max: e.target.value }))}
+                className={inp}
+                placeholder="Leave blank for no upper limit"
+              />
+              <p className="text-[11px] text-muted-foreground mt-1">
+                {form.amount_max
+                  ? `Stops at ${formatMoney(Number(form.amount_max), form.currency)}`
+                  : "Leave blank to cover everything above the minimum"}
               </p>
             </div>
             <div>
@@ -1011,8 +1121,8 @@ function RoutingRulesPanel({ templateId, docTypes }: {
           </div>
           <div className="flex gap-2 pt-2">
             <button
-              onClick={() => createRule.mutate()}
-              disabled={!form.document_type || createRule.isPending}
+              onClick={handleCreateRule}
+              disabled={createRule.isPending}
               className="btn-primary text-xs"
             >
               {createRule.isPending && <Loader2 className="w-3 h-3 animate-spin" />} Create rule
@@ -1030,12 +1140,12 @@ function RoutingRulesPanel({ templateId, docTypes }: {
         </div>
       )}
 
-      {!isLoading && grouped.length === 0 && !showAdd && (
+      {!isLoading && hasDocumentType && sortedRules.length === 0 && !showAdd && (
         <div className="text-center py-12 bg-muted/40 rounded-xl border border-dashed border-border">
           <Settings2 className="w-12 h-12 mx-auto mb-3 text-muted-foreground/60" />
           <p className="text-sm font-medium text-foreground">No routing rules yet</p>
           <p className="text-xs text-muted-foreground mt-1 max-w-md mx-auto">
-            Add rules to route documents of a given type to this template once they cross an amount threshold.
+            Add amount ranges to send matching {template.document_type_name?.toLowerCase() ?? "documents"} to this template.
           </p>
           <button onClick={() => setShowAdd(true)} className="btn-secondary text-xs mt-4">
             <Plus className="w-3.5 h-3.5" /> Add your first rule
@@ -1043,59 +1153,40 @@ function RoutingRulesPanel({ templateId, docTypes }: {
         </div>
       )}
 
-      {grouped.length > 0 && (
-        <div className="space-y-4">
-          {grouped.map(([docTypeId, { name, rules: docRules }]) => (
-            <div key={docTypeId} className="rounded-xl border border-border bg-card overflow-hidden">
-              <div className="flex items-center justify-between px-4 py-2.5 bg-muted/40 border-b border-border">
-                <div className="flex items-center gap-2">
-                  <FolderTree className="w-3.5 h-3.5 text-muted-foreground" />
-                  <p className="text-sm font-semibold text-foreground">{name}</p>
-                </div>
-                <span className="text-[11px] text-muted-foreground">
-                  {docRules.length} rule{docRules.length !== 1 ? "s" : ""}
-                </span>
-              </div>
-              <div className="divide-y divide-border">
-                {docRules.map((rule, idx) => {
-                  const threshold = Number(rule.amount_threshold);
-                  const isCatchAll = threshold === 0;
-                  return (
-                    <div key={rule.id} className="flex items-center gap-3 px-4 py-3 group hover:bg-muted/30">
-                      <div className={clsx(
-                        "w-7 h-7 rounded-full flex items-center justify-center text-[11px] font-bold shrink-0",
-                        isCatchAll ? "bg-muted text-muted-foreground" : "bg-accent/20 text-accent-foreground"
-                      )}>
-                        {idx + 1}
-                      </div>
-                      <div className="flex-1 min-w-0">
-                        <div className="flex items-center gap-2 flex-wrap">
-                          <p className="text-sm font-medium text-foreground">
-                            {isCatchAll
-                              ? "Default (catch-all)"
-                              : `≥ ${threshold.toLocaleString()} ${rule.currency}`}
-                          </p>
-                          {rule.label && (
-                            <span className="text-[11px] px-2 py-0.5 rounded-full bg-muted text-muted-foreground">
-                              {rule.label}
-                            </span>
-                          )}
-                        </div>
-                      </div>
-                      <button
-                        onClick={() => deleteRule.mutate(rule.id)}
-                        disabled={deleteRule.isPending}
-                        title="Remove rule"
-                        className="opacity-0 group-hover:opacity-100 p-1.5 text-muted-foreground hover:text-destructive rounded-lg hover:bg-destructive/10 transition-colors"
-                      >
-                        <Trash2 className="w-4 h-4" />
-                      </button>
+      {sortedRules.length > 0 && (
+        <div className="space-y-3">
+          {sortedRules.map((rule, idx) => {
+            return (
+              <div key={rule.id} className="rounded-xl border border-border bg-card px-4 py-3 group hover:border-foreground/20 transition-colors">
+                <div className="flex items-start gap-3">
+                  <div className="w-8 h-8 rounded-lg bg-accent/15 text-accent-foreground flex items-center justify-center text-xs font-semibold shrink-0">
+                    {idx + 1}
+                  </div>
+                  <div className="flex-1 min-w-0">
+                    <div className="flex items-center gap-2 flex-wrap">
+                      <p className="text-sm font-semibold text-foreground">{formatRuleRange(rule)}</p>
+                      {rule.label && (
+                        <span className="text-[11px] px-2 py-0.5 rounded-full bg-muted text-muted-foreground">
+                          {rule.label}
+                        </span>
+                      )}
                     </div>
-                  );
-                })}
+                    <p className="text-[11px] text-muted-foreground mt-1">
+                      Matching {rule.document_type_name.toLowerCase()} documents will use this template.
+                    </p>
+                  </div>
+                  <button
+                    onClick={() => deleteRule.mutate(rule.id)}
+                    disabled={deleteRule.isPending}
+                    title="Remove rule"
+                    className="opacity-0 group-hover:opacity-100 p-1.5 text-muted-foreground hover:text-destructive rounded-lg hover:bg-destructive/10 transition-colors"
+                  >
+                    <Trash2 className="w-4 h-4" />
+                  </button>
+                </div>
               </div>
-            </div>
-          ))}
+            );
+          })}
         </div>
       )}
     </div>
@@ -1117,40 +1208,61 @@ function TemplateEditor({
   docTypes?: DocumentType[];
 }) {
   const qc = useQueryClient();
-  const [name, setName] = useState(template?.name ?? (docType ? `${docType.name} Workflow` : "New Template"));
-  const [description, setDescription] = useState(template?.description ?? "");
-  const [steps, setSteps] = useState<WorkflowStep[]>(() =>
-    template?.steps?.slice().sort((a, b) => a.order - b.order).map((s) => ({ ...s })) ?? []
-  );
+  const [name, setName] = useState("");
+  const [description, setDescription] = useState("");
+  const [steps, setSteps] = useState<WorkflowStep[]>([]);
+  const [selectedDocumentTypeId, setSelectedDocumentTypeId] = useState<string | null>(null);
   const [isDirty, setIsDirty] = useState(!template);
   const [activeTab, setActiveTab] = useState<"flow" | "rules">("flow");
+
+  useEffect(() => {
+    setName(template?.name ?? (docType ? `${docType.name} Workflow` : "New Template"));
+    setDescription(template?.description ?? "");
+    setSteps(
+      template?.steps?.slice().sort((a, b) => a.order - b.order).map((s) => ({ ...s })) ?? []
+    );
+    setSelectedDocumentTypeId(template?.document_type ?? docType?.id ?? null);
+    setIsDirty(!template);
+    setActiveTab("flow");
+    setSelectedStepIndex(null);
+  }, [template?.id, docType?.id]);
 
   const { data: groups } = useQuery<Group[]>({
     queryKey: ["groups-all"],
     queryFn: () => groupsAPI.list().then((r: any) => r.data.results ?? r.data),
   });
 
+  const availableDocTypes = useMemo(
+    () => (docTypes ?? []).filter((item) => item.is_active),
+    [docTypes]
+  );
+  const selectedDocumentTypeName = useMemo(
+    () => availableDocTypes.find((item) => item.id === selectedDocumentTypeId)?.name
+      ?? template?.document_type_name
+      ?? docType?.name
+      ?? null,
+    [availableDocTypes, selectedDocumentTypeId, template?.document_type_name, docType?.name]
+  );
+  const canEditDocumentType = !template;
+
   const saveMutation = useMutation({
-    mutationFn: (payload: { name: string; description: string; steps: Partial<WorkflowStep>[] }) =>
+    mutationFn: (payload: {
+      name: string;
+      description: string;
+      document_type: string | null;
+      is_active: boolean;
+      steps: Partial<WorkflowStep>[];
+    }) =>
       template
         ? workflowAPI.updateTemplate(template.id, payload)
         : workflowAPI.createTemplate(payload),
     onSuccess: async ({ data }) => {
-      toast.success(template ? "Template saved" : "Template created");
+      const normalized = normalizeTemplate(data);
       setIsDirty(false);
-
-      if (!template && docType) {
-        try {
-          await documentTypesAPI.update(docType.id, { workflow_template: data.id });
-          toast.success(`Template assigned to ${docType.name}`);
-        } catch {
-          toast.warning("Template created but could not link to document type");
-        }
-      }
 
       qc.invalidateQueries({ queryKey: ["workflow-templates"] });
       qc.invalidateQueries({ queryKey: ["document-types"] });
-      onSaved(data, !template);
+      onSaved(normalized, !template);
     },
     onError: (err: any) => {
       const message = formatApiError(err?.response?.data) || "Save failed";
@@ -1165,6 +1277,7 @@ function TemplateEditor({
 
   const handleSave = () => {
     if (!name.trim()) { toast.error("Template name is required"); return; }
+    if (!selectedDocumentTypeId) { toast.error("Choose the document type this template belongs to"); return; }
     if (steps.length === 0) { toast.error("Add at least one approval step"); return; }
     for (const s of steps) {
       if (!s.name.trim()) { toast.error(`Step ${s.order} needs a name`); return; }
@@ -1180,6 +1293,7 @@ function TemplateEditor({
     saveMutation.mutate({
       name: name.trim(),
       description: description.trim(),
+      document_type: selectedDocumentTypeId,
       is_active: template ? template.is_active : true,
       steps: steps.map(stepToPayload),
     });
@@ -1214,6 +1328,17 @@ function TemplateEditor({
       {/* Header */}
       <div className="flex items-center justify-between mb-4 flex-shrink-0 gap-4">
         <div className="flex-1 min-w-0">
+          <div className="flex items-center gap-2 mb-3 flex-wrap">
+            <span className="inline-flex items-center gap-1 text-[11px] font-medium text-muted-foreground bg-muted px-2.5 py-1 rounded-full">
+              <FolderTree className="w-3 h-3" />
+              Template scope
+            </span>
+            {selectedDocumentTypeName && (
+              <span className="inline-flex items-center gap-1 text-xs font-medium text-accent-foreground bg-accent/20 px-2.5 py-1 rounded-full">
+                {selectedDocumentTypeName}
+              </span>
+            )}
+          </div>
           <input
             value={name}
             onChange={e => { setName(e.target.value); setIsDirty(true); }}
@@ -1226,11 +1351,32 @@ function TemplateEditor({
             className="text-sm text-muted-foreground bg-transparent border-0 outline-none w-full p-0 mt-1 focus:ring-0"
             placeholder="Description (optional)"
           />
-          {docType && (
-            <span className="inline-flex items-center gap-1 mt-2 text-xs font-medium text-accent-foreground bg-accent/20 px-2 py-1 rounded-md">
-              {docType.name}
-            </span>
-          )}
+          <div className="mt-3 max-w-sm">
+            <Label required>Document type</Label>
+            {!canEditDocumentType ? (
+              <div className="rounded-lg border border-border bg-muted/40 px-3 py-2 text-sm font-medium text-foreground">
+                {selectedDocumentTypeName ?? "No document type assigned"}
+              </div>
+            ) : docType ? (
+              <div className="rounded-lg border border-border bg-muted/40 px-3 py-2 text-sm font-medium text-foreground">
+                {docType.name}
+              </div>
+            ) : (
+              <select
+                value={selectedDocumentTypeId ?? ""}
+                onChange={(e) => {
+                  setSelectedDocumentTypeId(e.target.value || null);
+                  setIsDirty(true);
+                }}
+                className={inp}
+              >
+                <option value="">Select document type</option>
+                {availableDocTypes.map((item) => (
+                  <option key={item.id} value={item.id}>{item.name}</option>
+                ))}
+              </select>
+            )}
+          </div>
         </div>
         <div className="flex items-center gap-2 flex-shrink-0">
           {template && (
@@ -1290,8 +1436,12 @@ function TemplateEditor({
         </div>
       ) : (
         <div className="flex-1 overflow-y-auto min-h-0">
-          {template && docTypes && (
-            <RoutingRulesPanel templateId={template.id} docTypes={docTypes} />
+          {template && (
+            <RoutingRulesPanel template={normalizeTemplate({
+              ...template,
+              document_type: selectedDocumentTypeId,
+              document_type_name: availableDocTypes.find((item) => item.id === selectedDocumentTypeId)?.name ?? template.document_type_name ?? null,
+            })} />
           )}
         </div>
       )}
@@ -1311,7 +1461,7 @@ function DocTypeDetailModal({
   isLoading?: boolean;
 }) {
   const [selectedTemplateId, setSelectedTemplateId] = useState<string>(docType.workflow_template || "");
-  const activeTemplates = templates?.filter(t => t.is_active) ?? [];
+  const activeTemplates = templates?.filter(t => t.is_active && t.document_type === docType.id) ?? [];
   const currentPrimaryTemplate = activeTemplates.find(t => t.id === docType.workflow_template);
 
   const handleAssign = () => {
@@ -1456,7 +1606,9 @@ export default function WorkflowBuilderPage() {
 
   const { data: allTemplates, isLoading: templatesLoading } = useQuery<WorkflowTemplate[]>({
     queryKey: ["workflow-templates"],
-    queryFn: () => workflowAPI.listTemplates().then(r => r.data.results ?? r.data as WorkflowTemplate[]),
+    queryFn: () => workflowAPI.listTemplates().then(r =>
+      (r.data.results ?? r.data as WorkflowTemplate[]).map(normalizeTemplate)
+    ),
   });
 
   const effectiveTemplateId = editingTemplateId || selectedDocType?.workflow_template || null;
@@ -1470,7 +1622,7 @@ export default function WorkflowBuilderPage() {
     queryFn: async () => {
       if (!effectiveTemplateId) return null;
       const response = await workflowAPI.getTemplate(effectiveTemplateId);
-      return response.data;
+      return normalizeTemplate(response.data);
     },
     enabled: !!effectiveTemplateId,
     staleTime: 1000 * 60 * 5,
@@ -1515,15 +1667,15 @@ export default function WorkflowBuilderPage() {
         .then(() => {
           toast.success(`Template "${t.name}" created and assigned`);
           qc.invalidateQueries({ queryKey: ["document-types"] });
+          setEditingTemplateId(t.id);
+          setSelectedDocType({ ...creatingForDocType, workflow_template: t.id });
           setCreatingForDocType(null);
-          setSelectedDocType(null);
-          setEditingTemplateId(null);
         })
         .catch(() => {
           toast.warning(`Template created but failed to assign`);
+          setEditingTemplateId(t.id);
+          setSelectedDocType(creatingForDocType);
           setCreatingForDocType(null);
-          setSelectedDocType(null);
-          setEditingTemplateId(null);
         });
     } else if (isNew && !creatingForDocType) {
       setEditingTemplateId(t.id);
@@ -1544,10 +1696,31 @@ export default function WorkflowBuilderPage() {
     [docTypesArray, search]
   );
   const allTemplatesArray = useMemo(() => Array.isArray(allTemplates) ? allTemplates : [], [allTemplates]);
-  const filteredTemplates = useMemo(
-    () => allTemplatesArray.filter(t => t.name.toLowerCase().includes(search.toLowerCase())),
-    [allTemplatesArray, search]
+  const resolvedTemplates = useMemo(
+    () => allTemplatesArray.map((template) => attachResolvedTemplateDocumentType(template, docTypesArray)),
+    [allTemplatesArray, docTypesArray]
   );
+  const filteredTemplates = useMemo(
+    () => resolvedTemplates.filter(t =>
+      [t.name, t.document_type_name ?? ""].some(value => value.toLowerCase().includes(search.toLowerCase()))
+    ),
+    [resolvedTemplates, search]
+  );
+  const groupedTemplates = useMemo(() => {
+    const groups = new Map<string, { label: string; templates: WorkflowTemplate[] }>();
+    for (const template of filteredTemplates) {
+      const key = template.document_type ?? "unassigned";
+      const label = template.document_type_name ?? "Unassigned";
+      if (!groups.has(key)) groups.set(key, { label, templates: [] });
+      groups.get(key)!.templates.push(template);
+    }
+    return Array.from(groups.entries())
+      .map(([key, group]) => [
+        key,
+        { ...group, templates: [...group.templates].sort((a, b) => a.name.localeCompare(b.name)) },
+      ] as const)
+      .sort((a, b) => a[1].label.localeCompare(b[1].label));
+  }, [filteredTemplates]);
 
   const withTemplate = docTypesArray.filter(d => d.workflow_template).length;
   const withoutTemplate = docTypesArray.length - withTemplate;
@@ -1664,28 +1837,50 @@ export default function WorkflowBuilderPage() {
                 </div>
               );
             })
+          ) : groupedTemplates.length > 0 ? (
+            groupedTemplates.map(([groupKey, group]) => (
+              <div key={groupKey} className="rounded-xl border border-border overflow-hidden bg-muted/20">
+                <div className="px-3 py-2 bg-muted/60 border-b border-border">
+                  <p className="text-[11px] font-semibold uppercase tracking-wide text-muted-foreground">
+                    {group.label}
+                  </p>
+                </div>
+                <div className="p-1 space-y-1">
+                  {group.templates.map((t) => {
+                    const isSelected = editingTemplateId === t.id;
+                    return (
+                      <button
+                        key={t.id}
+                        onClick={() => handleTemplateClick(t)}
+                        className={clsx(
+                          "w-full text-left rounded-xl p-3 transition-all border",
+                          isSelected ? "bg-accent/10 border-accent/40" : "bg-card border-border hover:border-foreground/20"
+                        )}
+                      >
+                        <div className="flex items-start gap-2.5">
+                          <LayoutTemplate className="w-5 h-5 text-muted-foreground mt-0.5" />
+                          <div className="flex-1 min-w-0">
+                            <p className="font-semibold text-sm text-foreground truncate">{t.name}</p>
+                            <p className="text-xs text-muted-foreground mt-0.5">
+                              {t.step_count} step{t.step_count !== 1 ? 's' : ''}
+                              {t.description ? ` · ${t.description}` : ""}
+                            </p>
+                          </div>
+                        </div>
+                      </button>
+                    );
+                  })}
+                </div>
+              </div>
+            ))
           ) : (
-            filteredTemplates.map(t => {
-              const isSelected = editingTemplateId === t.id;
-              return (
-                <button
-                  key={t.id}
-                  onClick={() => handleTemplateClick(t)}
-                  className={clsx(
-                    "w-full text-left rounded-xl p-3 transition-all border",
-                    isSelected ? "bg-accent/10 border-accent/40" : "bg-card border-border hover:border-foreground/20"
-                  )}
-                >
-                  <div className="flex items-start gap-2.5">
-                    <LayoutTemplate className="w-5 h-5 text-muted-foreground mt-0.5" />
-                    <div className="flex-1 min-w-0">
-                      <p className="font-semibold text-sm text-foreground truncate">{t.name}</p>
-                      <p className="text-xs text-muted-foreground mt-0.5">{t.step_count} step{t.step_count !== 1 ? 's' : ''}</p>
-                    </div>
-                  </div>
-                </button>
-              );
-            })
+            <div className="text-center py-10 px-4 text-muted-foreground">
+              <LayoutTemplate className="w-10 h-10 mx-auto mb-3 text-muted-foreground/50" />
+              <p className="text-sm font-medium text-foreground">No templates found</p>
+              <p className="text-xs mt-1">
+                {search ? "Try a different search term" : "Create a template to get started"}
+              </p>
+            </div>
           )}
         </div>
       </aside>
@@ -1712,11 +1907,10 @@ export default function WorkflowBuilderPage() {
               </div>
             ) : (
               <TemplateEditor
-                key={creatingForDocType?.id || editingTemplateId || selectedDocType?.workflow_template || selectedDocType?.id || "new-template"}
                 docType={editorDocType}
                 template={currentTemplate}
                 onSaved={handleSaved}
-                allTemplates={allTemplatesArray}
+                allTemplates={resolvedTemplates}
                 docTypes={docTypesArray}
               />
             )}
@@ -1733,7 +1927,7 @@ export default function WorkflowBuilderPage() {
             setShowDetailModal(null);
             handleStartCreateForDocType(showDetailModal);
           }}
-          templates={allTemplatesArray}
+          templates={resolvedTemplates}
           isLoading={templatesLoading}
         />
       )}

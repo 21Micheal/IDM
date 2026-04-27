@@ -9,7 +9,7 @@ import { z } from "zod";
 import { Loader2, Mail, RefreshCw, Lock, ArrowRight } from "lucide-react";
 import { api, authAPI, documentsAPI, notificationsAPI, workflowAPI } from "@/services/api";
 import { useAuthStore } from "@/store/authStore";
-import { toast } from "react-toastify";
+import { toast } from "@/components/ui/vault-toast";
 import { FlaxemLogo } from "@/components/shared/FlaxemLogo";
 import type { AuthUser } from "@/store/authStore";
 

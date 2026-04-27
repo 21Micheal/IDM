@@ -25,6 +25,7 @@ from .models import (
 )
 from apps.accounts.serializers import UserSummarySerializer
 from apps.accounts.models import GroupAction
+from apps.workflows.models import WorkflowTemplate, WorkflowTask
 from django.db import transaction, IntegrityError
 from django.utils.text import slugify
 import mimetypes
@@ -159,6 +160,7 @@ class DocumentListSerializer(serializers.ModelSerializer):
     preview_pdf        = serializers.SerializerMethodField()
     is_edit_locked     = serializers.SerializerMethodField()
     edit_locked_by_name = serializers.SerializerMethodField()
+    available_bulk_actions = serializers.SerializerMethodField()
 
     class Meta:
         model  = Document
@@ -173,6 +175,7 @@ class DocumentListSerializer(serializers.ModelSerializer):
             "preview_pdf", "preview_status",
             "edit_locked_by", "edit_locked_by_name", "edit_locked_at", "is_edit_locked",
             "current_version", "created_at", "updated_at",
+            "available_bulk_actions",
         ]
 
     def get_personal_tags(self, obj):
@@ -207,6 +210,40 @@ class DocumentListSerializer(serializers.ModelSerializer):
     def get_edit_locked_by_name(self, obj):
         holder = obj.edit_lock_holder
         return holder.get_full_name().strip() if holder else None
+
+    def get_available_bulk_actions(self, obj):
+        """Return list of available bulk actions for this document."""
+        request = self.context.get("request")
+        user = getattr(request, "user", None)
+        if not user or not user.is_authenticated:
+            return []
+
+        actions = []
+
+        # Check for workflow actions (approve/reject)
+        if hasattr(obj, 'workflow_instance') and obj.workflow_instance:
+            active_task = (
+                obj.workflow_instance.tasks
+                .filter(status__in=["in_progress", "held"])
+                .select_related("step")
+                .first()
+            )
+            if active_task and (active_task.assigned_to == user or user.has_admin_access):
+                step = active_task.step
+                if step.allow_approve:
+                    actions.append("approve")
+                if step.allow_reject:
+                    actions.append("reject")
+
+        # Archive action - only for approved documents
+        if obj.status == "approved":
+            actions.append("archive")
+
+        # Void action - for most statuses except archived/void
+        if obj.status not in ["archived", "void"]:
+            actions.append("void")
+
+        return actions
 
 
 class DocumentDetailSerializer(serializers.ModelSerializer):
@@ -649,6 +686,17 @@ class DocumentTypeWriteSerializer(serializers.ModelSerializer):
 
         return value
 
+    def validate_workflow_template(self, value):
+        if value is None:
+            return value
+
+        current_doc_type_id = getattr(self.instance, "id", None)
+        if value.document_type_id and value.document_type_id != current_doc_type_id:
+            raise serializers.ValidationError(
+                "This workflow template is already attached to another document type."
+            )
+        return value
+
     def _save_metadata_fields(self, doc_type: DocumentType, fields_data: list) -> None:
         """Delete existing fields and recreate from payload."""
         doc_type.metadata_fields.all().delete()
@@ -672,11 +720,19 @@ class DocumentTypeWriteSerializer(serializers.ModelSerializer):
                 }
             )
 
+    def _sync_workflow_template(self, doc_type: DocumentType) -> None:
+        if not doc_type.workflow_template_id:
+            return
+        WorkflowTemplate.objects.filter(pk=doc_type.workflow_template_id).update(
+            document_type=doc_type
+        )
+
     @transaction.atomic
     def create(self, validated_data: dict) -> DocumentType:
         fields_data = validated_data.pop("metadata_fields", [])
         doc_type    = DocumentType.objects.create(**validated_data)
         self._save_metadata_fields(doc_type, fields_data)
+        self._sync_workflow_template(doc_type)
         return doc_type
 
     @transaction.atomic
@@ -686,6 +742,7 @@ class DocumentTypeWriteSerializer(serializers.ModelSerializer):
         for attr, value in validated_data.items():
             setattr(instance, attr, value)
         instance.save()
+        self._sync_workflow_template(instance)
 
         # Only replace fields if the key was present in the request
         if fields_data is not None:

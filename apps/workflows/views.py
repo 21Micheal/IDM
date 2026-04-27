@@ -7,7 +7,7 @@ Added actions on WorkflowTaskViewSet:
   POST .../tasks/{id}/release_hold/       — manually release a hold
   GET  .../tasks/{id}/history/            — full action history for a task
 """
-from django.db import transaction
+from django.db import models, transaction
 from django.db.models import Count
 from rest_framework import viewsets, permissions, status
 from rest_framework.decorators import action
@@ -47,6 +47,7 @@ class WorkflowTemplateViewSet(viewsets.ModelViewSet):
     def get_queryset(self):
         return (
             WorkflowTemplate.objects
+            .select_related("document_type")
             .prefetch_related("steps__assignee_user", "steps__assignee_group")
             .filter(is_active=True)
             .annotate(step_count_annotation=Count("steps"))
@@ -79,6 +80,7 @@ class WorkflowTemplateViewSet(viewsets.ModelViewSet):
         with transaction.atomic():
             clone = WorkflowTemplate.objects.create(
                 name=new_name, description=source.description,
+                document_type=source.document_type,
                 is_active=True, created_by=request.user,
             )
             for step in source.steps.order_by("order"):
@@ -87,6 +89,8 @@ class WorkflowTemplateViewSet(viewsets.ModelViewSet):
                     status_label=step.status_label, assignee_type=step.assignee_type,
                     assignee_group=step.assignee_group, assignee_user=step.assignee_user,
                     sla_hours=step.sla_hours, allow_resubmit=step.allow_resubmit,
+                    allow_approve=step.allow_approve, allow_reject=step.allow_reject,
+                    allow_return=step.allow_return,
                     instructions=step.instructions,
                 )
         return Response(
@@ -118,10 +122,14 @@ class WorkflowTemplateViewSet(viewsets.ModelViewSet):
 class WorkflowRuleViewSet(viewsets.ModelViewSet):
     serializer_class = WorkflowRuleSerializer
     filter_backends  = [OrderingFilter]
-    ordering         = ["document_type", "-amount_threshold"]
+    ordering         = ["document_type", "amount_min", "amount_max"]
 
     def get_queryset(self):
-        qs = WorkflowRule.objects.select_related("template", "document_type")
+        qs = (
+            WorkflowRule.objects
+            .select_related("template", "template__document_type", "document_type")
+            .filter(template__document_type=models.F("document_type"))
+        )
         if dt := self.request.query_params.get("document_type"):
             qs = qs.filter(document_type__id=dt)
         if tmpl := self.request.query_params.get("template"):

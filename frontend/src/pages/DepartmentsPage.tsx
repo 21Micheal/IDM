@@ -7,7 +7,7 @@ import { departmentsAPI, usersAPI } from "@/services/api";
 import {
   Plus, Trash2, Loader2, Building2, X, UserPlus, Users, Check,
 } from "lucide-react";
-import { toast } from "react-toastify";
+import { toast } from "@/components/ui/vault-toast";
 import clsx from "clsx";
 
 interface Department {

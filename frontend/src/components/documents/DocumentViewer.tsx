@@ -20,7 +20,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { documentsAPI } from "../../services/api";
 import { useAuthStore } from "@/store/authStore";
-import { toast } from "react-toastify";
+import { toast } from "@/components/ui/vault-toast";
 import {
   AlertCircle,
   CheckCircle2,

@@ -1,25 +1,28 @@
-import { useEffect, useState } from "react";
-import { Routes, Route, Navigate } from "react-router-dom";
+import { Suspense, lazy, useEffect, useState } from "react";
+import { Routes, Route, Navigate, useLocation } from "react-router-dom";
 import { useAuthStore } from "@/store/authStore";
 import { authAPI } from "@/services/api";
-import Layout from "@/components/shared/Layout";
-import LoginPage from "@/pages/LoginPage";
-import ForceChangePasswordPage from "@/pages/ForceChangePasswordPage";
-import DashboardPage from "@/pages/DashboardPage";
-import DocumentsPage from "@/pages/DocumentsPage";
-import DocumentDetailPage from "@/pages/DocumentDetailPage";
-import UploadPage from "@/pages/UploadPage";
-import SearchPage from "@/pages/SearchPage";
-import WorkflowPage from "@/pages/WorkflowPage";
-import AdminPage from "@/pages/AdminPage";
-import AdminDocumentTypesPage from "@/pages/AdminDocumentTypesPage";
-import AuditPage from "@/pages/AuditPage";
-import UsersPage from "@/pages/UsersPage";
-import DepartmentsPage from "@/pages/DepartmentsPage";
-import GroupsPage from "@/pages/GroupsPage";
-import ProfilePage from "@/pages/ProfilePage";
-import WorkflowBuilderPage from "@/pages/WorkflowBuilderPage";
-import NotificationsPage from "@/pages/NotificationsPage";
+import { VaultToaster } from "@/components/ui/vault-toast";
+import { FlaxemLogo } from "@/components/shared/FlaxemLogo";
+
+const Layout = lazy(() => import("@/components/shared/Layout"));
+const LoginPage = lazy(() => import("@/pages/LoginPage"));
+const ForceChangePasswordPage = lazy(() => import("@/pages/ForceChangePasswordPage"));
+const DashboardPage = lazy(() => import("@/pages/DashboardPage"));
+const DocumentsPage = lazy(() => import("@/pages/DocumentsPage"));
+const DocumentDetailPage = lazy(() => import("@/pages/DocumentDetailPage"));
+const UploadPage = lazy(() => import("@/pages/UploadPage"));
+const SearchPage = lazy(() => import("@/pages/SearchPage"));
+const WorkflowPage = lazy(() => import("@/pages/WorkflowPage"));
+const AdminPage = lazy(() => import("@/pages/AdminPage"));
+const AdminDocumentTypesPage = lazy(() => import("@/pages/AdminDocumentTypesPage"));
+const AuditPage = lazy(() => import("@/pages/AuditPage"));
+const UsersPage = lazy(() => import("@/pages/UsersPage"));
+const DepartmentsPage = lazy(() => import("@/pages/DepartmentsPage"));
+const GroupsPage = lazy(() => import("@/pages/GroupsPage"));
+const ProfilePage = lazy(() => import("@/pages/ProfilePage"));
+const WorkflowBuilderPage = lazy(() => import("@/pages/WorkflowBuilderPage"));
+const NotificationsPage = lazy(() => import("@/pages/NotificationsPage"));
 
 // ── Guards ────────────────────────────────────────────────────────────────────
 
@@ -95,69 +98,155 @@ function RequireAdmin({ children }: { children: React.ReactNode }) {
   return <>{children}</>;
 }
 
+const ROUTE_FALLBACK_CONTENT = [
+  {
+    match: (pathname: string) => pathname === "/login",
+    title: "Preparing sign-in",
+    description: "Loading authentication checks and secure access controls.",
+  },
+  {
+    match: (pathname: string) => pathname === "/change-password",
+    title: "Preparing password update",
+    description: "Loading your account safeguards for this required step.",
+  },
+  {
+    match: (pathname: string) => pathname.startsWith("/documents/upload"),
+    title: "Preparing upload workspace",
+    description: "Loading document intake, metadata capture, and OCR tools.",
+  },
+  {
+    match: (pathname: string) => pathname.startsWith("/documents/"),
+    title: "Preparing document workspace",
+    description: "Loading the selected file, version history, and review actions.",
+  },
+  {
+    match: (pathname: string) => pathname === "/documents",
+    title: "Preparing document library",
+    description: "Loading folders, filters, and the latest document records.",
+  },
+  {
+    match: (pathname: string) => pathname.startsWith("/workflow/builder"),
+    title: "Preparing workflow builder",
+    description: "Loading routing rules, approval steps, and template settings.",
+  },
+  {
+    match: (pathname: string) => pathname.startsWith("/workflow"),
+    title: "Preparing workflow queue",
+    description: "Loading approval tasks, handoffs, and current workflow status.",
+  },
+  {
+    match: (pathname: string) => pathname.startsWith("/search"),
+    title: "Preparing search workspace",
+    description: "Loading indexed records, filters, and retrieval tools.",
+  },
+  {
+    match: (pathname: string) => pathname.startsWith("/notifications"),
+    title: "Preparing notifications",
+    description: "Loading alerts, reminders, and recent workflow updates.",
+  },
+  {
+    match: (pathname: string) => pathname.startsWith("/audit"),
+    title: "Preparing audit trail",
+    description: "Loading activity history, controls, and trace records.",
+  },
+  {
+    match: (pathname: string) => pathname.startsWith("/profile"),
+    title: "Preparing profile settings",
+    description: "Loading account preferences, security options, and personal details.",
+  },
+  {
+    match: (pathname: string) => pathname.startsWith("/admin"),
+    title: "Preparing administration",
+    description: "Loading configuration, user controls, and system management tools.",
+  },
+];
+
+function RouteFallback() {
+  const location = useLocation();
+  const content = ROUTE_FALLBACK_CONTENT.find((item) => item.match(location.pathname)) ?? {
+    title: "Preparing your workspace",
+    description: "Loading documents, workflow tools, and permissions for this view.",
+  };
+
+  return (
+    <div className="min-h-screen bg-background px-6 py-10">
+      <div className="mx-auto flex min-h-[calc(100vh-5rem)] max-w-md flex-col items-center justify-center text-center">
+        <FlaxemLogo className="h-12 w-auto" variant="dark" />
+        <p className="mt-6 text-sm font-semibold text-foreground">{content.title}</p>
+        <p className="mt-2 text-sm leading-6 text-muted-foreground">{content.description}</p>
+      </div>
+    </div>
+  );
+}
+
 // ── App ───────────────────────────────────────────────────────────────────────
 
 export default function App() {
   return (
     <AuthBootstrap>
-      <Routes>
-        {/* Public */}
-        <Route path="/login" element={<LoginPage />} />
+      <>
+        <Suspense fallback={<RouteFallback />}>
+          <Routes>
+            {/* Public */}
+            <Route path="/login" element={<LoginPage />} />
 
-        {/* First-login password wall — requires auth but bypasses the layout */}
-        <Route
-          path="/change-password"
-          element={
-            <RequireAuth>
-              <ForceChangePasswordPage />
-            </RequireAuth>
-          }
-        />
+            {/* First-login password wall — requires auth but bypasses the layout */}
+            <Route
+              path="/change-password"
+              element={
+                <RequireAuth>
+                  <ForceChangePasswordPage />
+                </RequireAuth>
+              }
+            />
 
-        {/* Protected — all regular pages */}
-        <Route
-          path="/"
-          element={
-            <RequireAuth>
-              <RequirePasswordChanged>
-                <Layout />
-              </RequirePasswordChanged>
-            </RequireAuth>
-          }
-        >
-          <Route index element={<DashboardPage />} />
+            {/* Protected — all regular pages */}
+            <Route
+              path="/"
+              element={
+                <RequireAuth>
+                  <RequirePasswordChanged>
+                    <Layout />
+                  </RequirePasswordChanged>
+                </RequireAuth>
+              }
+            >
+              <Route index element={<DashboardPage />} />
 
-          {/* Documents */}
-          <Route path="documents"        element={<DocumentsPage />} />
-          <Route path="documents/upload" element={<UploadPage />} />
-          <Route path="documents/:id"    element={<DocumentDetailPage />} />
+              {/* Documents */}
+              <Route path="documents"        element={<DocumentsPage />} />
+              <Route path="documents/upload" element={<UploadPage />} />
+              <Route path="documents/:id"    element={<DocumentDetailPage />} />
 
-          {/* Search */}
-          <Route path="search"    element={<SearchPage />} />
+              {/* Search */}
+              <Route path="search"    element={<SearchPage />} />
 
-          {/* Workflow */}
-          <Route path="workflow"  element={<WorkflowPage />} />
-          <Route path="workflow/builder" element={  <RequireAdmin> <WorkflowBuilderPage />  </RequireAdmin>  }/>
+              {/* Workflow */}
+              <Route path="workflow"  element={<WorkflowPage />} />
+              <Route path="workflow/builder" element={  <RequireAdmin> <WorkflowBuilderPage />  </RequireAdmin>  }/>
 
-          {/* Notifications */}
-          <Route path="notifications" element={<NotificationsPage />} />
+              {/* Notifications */}
+              <Route path="notifications" element={<NotificationsPage />} />
 
-          {/* Audit */}
-          <Route path="audit"     element={<AuditPage />} />
+              {/* Audit */}
+              <Route path="audit"     element={<AuditPage />} />
 
-          {/* Profile — every user */}
-          <Route path="profile"   element={<ProfilePage />} />
+              {/* Profile — every user */}
+              <Route path="profile"   element={<ProfilePage />} />
 
-          {/* Admin-only */}
-          <Route path="admin/users"           element={<RequireAdmin><UsersPage /></RequireAdmin>} />
-          <Route path="admin/settings"        element={<RequireAdmin><AdminPage /></RequireAdmin>} />
-          <Route path="admin/document-types"  element={<RequireAdmin><AdminDocumentTypesPage /></RequireAdmin>} />
-          <Route path="admin/departments"     element={<RequireAdmin><DepartmentsPage /></RequireAdmin>} />
-          <Route path="admin/groups"          element={<RequireAdmin><GroupsPage /></RequireAdmin>} />
-        </Route>
+              {/* Admin-only */}
+              <Route path="admin/users"           element={<RequireAdmin><UsersPage /></RequireAdmin>} />
+              <Route path="admin/settings"        element={<RequireAdmin><AdminPage /></RequireAdmin>} />
+              <Route path="admin/document-types"  element={<RequireAdmin><AdminDocumentTypesPage /></RequireAdmin>} />
+              <Route path="admin/departments"     element={<RequireAdmin><DepartmentsPage /></RequireAdmin>} />
+              <Route path="admin/groups"          element={<RequireAdmin><GroupsPage /></RequireAdmin>} />
+            </Route>
 
-        <Route path="*" element={<Navigate to="/" replace />} />
-      </Routes>
+            <Route path="*" element={<Navigate to="/" replace />} />
+          </Routes>
+        </Suspense>
+        <VaultToaster />
+      </>
     </AuthBootstrap>
   );
 }

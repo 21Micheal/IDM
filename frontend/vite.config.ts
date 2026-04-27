@@ -22,6 +22,43 @@ export default defineConfig({
           if (id.includes("pdfjs-dist")) {
             return "pdfjs";
           }
+          if (id.includes("node_modules")) {
+            if (
+              id.includes("/react/") ||
+              id.includes("/react-dom/") ||
+              id.includes("/react-router") ||
+              id.includes("/scheduler/") ||
+              id.includes("@remix-run/router") ||
+              id.includes("/loose-envify/") ||
+              id.includes("/js-tokens/")
+            ) {
+              return "framework-vendor";
+            }
+            if (id.includes("@tanstack/react-query")) {
+              return "query-vendor";
+            }
+            if (
+              id.includes("react-hook-form") ||
+              id.includes("@hookform/resolvers") ||
+              id.includes("/zod/")
+            ) {
+              return "forms-vendor";
+            }
+            if (id.includes("/axios/")) {
+              return "network-vendor";
+            }
+            if (id.includes("/lucide-react/")) {
+              return "icons-vendor";
+            }
+            if (
+              id.includes("/clsx/") ||
+              id.includes("/tailwind-merge/") ||
+              id.includes("/date-fns/")
+            ) {
+              return "ui-vendor";
+            }
+            return "vendor";
+          }
         },
       },
     },

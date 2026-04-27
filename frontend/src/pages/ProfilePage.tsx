@@ -9,7 +9,7 @@ import {
   Shield, Key, Smartphone,
   Loader2, Eye, EyeOff, AlertTriangle, UserCircle,
 } from "lucide-react";
-import { toast } from "react-toastify";
+import { toast } from "@/components/ui/vault-toast";
 
 const pwSchema = z.object({
   old_password:     z.string().min(1, "Required"),
