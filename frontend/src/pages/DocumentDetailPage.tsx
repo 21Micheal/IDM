@@ -26,7 +26,7 @@ import {
   Loader2, RotateCcw, Edit2, Lock, Info, Download,
   CheckCircle, AlertTriangle, ScanLine, RefreshCw,
 } from "lucide-react";
-import { toast } from "react-toastify";
+import { toast } from "@/components/ui/vault-toast";
 import { useAuthStore } from "@/store/authStore";
 import type { Document } from "@/types";
 import { clsx as cn } from "clsx";

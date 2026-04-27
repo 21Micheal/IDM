@@ -1,7 +1,7 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useMutation } from "@tanstack/react-query";
 import { Upload, File as FileIcon, Loader2, X } from "lucide-react";
-import { toast } from "react-toastify";
+import { toast } from "@/components/ui/vault-toast";
 
 import { documentsAPI } from "@/services/api";
 import {

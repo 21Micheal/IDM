@@ -38,8 +38,35 @@ type StorageStats = {
   total_bytes: number;
   used_gb: number;
   total_gb: number;
+  used_mb: number;
+  total_mb: number;
   percentage: number;
 };
+
+function formatStorageAmount(bytes: number) {
+  if (bytes >= 1024 ** 3) {
+    return {
+      value: (bytes / (1024 ** 3)).toFixed(1),
+      unit: "GB used",
+    };
+  }
+  if (bytes >= 1024 ** 2) {
+    return {
+      value: (bytes / (1024 ** 2)).toFixed(1),
+      unit: "MB used",
+    };
+  }
+  if (bytes >= 1024) {
+    return {
+      value: (bytes / 1024).toFixed(1),
+      unit: "KB used",
+    };
+  }
+  return {
+    value: `${bytes}`,
+    unit: "B used",
+  };
+}
 
 function getAuditPresentation(event: any) {
   const name = String(event?.event ?? "");
@@ -194,8 +221,20 @@ export default function DashboardPage() {
 
   const storage = useMemo(() => {
     if (storageStats) return storageStats;
-    return { used_bytes: 0, total_bytes: 0, used_gb: 0, total_gb: 0, percentage: 0 };
+    return {
+      used_bytes: 0,
+      total_bytes: 0,
+      used_gb: 0,
+      total_gb: 0,
+      used_mb: 0,
+      total_mb: 0,
+      percentage: 0,
+    };
   }, [storageStats]);
+  const storageDisplay = useMemo(
+    () => formatStorageAmount(storage.used_bytes),
+    [storage.used_bytes],
+  );
 
   const dashboardResults = dashboardSearchResults?.results ?? [];
   const dashboardResultsTotal = dashboardSearchResults?.total ?? 0;
@@ -693,9 +732,9 @@ export default function DashboardPage() {
             <div className="mt-4 flex items-end justify-between">
               <div>
                 <p className="text-3xl font-semibold text-foreground tabular-nums">
-                  {storage.used_gb}
+                  {storageDisplay.value}
                 </p>
-                <p className="text-sm text-muted-foreground">GB used</p>
+                <p className="text-sm text-muted-foreground">{storageDisplay.unit}</p>
               </div>
               <div className="text-right">
                 <p className="text-sm text-muted-foreground">of {storage.total_gb} GB</p>

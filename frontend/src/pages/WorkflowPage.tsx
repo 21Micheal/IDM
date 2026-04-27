@@ -4,7 +4,7 @@ import { workflowAPI } from "@/services/api";
 import { Link } from "react-router-dom";
 import { CheckCircle, XCircle, Clock, Loader2, GitBranch, RotateCcw } from "lucide-react";
 import { formatDistanceToNow } from "date-fns";
-import { toast } from "react-toastify";
+import { toast } from "@/components/ui/vault-toast";
 import type { WorkflowTask } from "@/types";
 
 function ApprovalModal({

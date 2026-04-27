@@ -18,7 +18,7 @@ import {
   CheckCircle, XCircle, RotateCcw, PauseCircle,
   PlayCircle, Loader2, Clock, ChevronDown, History,
 } from "lucide-react";
-import { toast } from "react-toastify";
+import { toast } from "@/components/ui/vault-toast";
 import { formatDistanceToNow, format } from "date-fns";
 import clsx from "clsx";
 

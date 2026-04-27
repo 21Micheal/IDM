@@ -13,7 +13,7 @@ import {
   Edit3, Play, Flag,
   ZoomIn, ZoomOut, Maximize2, Move,
 } from "lucide-react";
-import { toast } from "react-toastify";
+import { toast } from "@/components/ui/vault-toast";
 import clsx from "clsx";
 
 // ── Types ─────────────────────────────────────────────────────────────────────
@@ -1258,7 +1258,6 @@ function TemplateEditor({
         : workflowAPI.createTemplate(payload),
     onSuccess: async ({ data }) => {
       const normalized = normalizeTemplate(data);
-      toast.success(template ? "Template saved" : "Template created");
       setIsDirty(false);
 
       qc.invalidateQueries({ queryKey: ["workflow-templates"] });

@@ -40,7 +40,9 @@ class StorageStatsView(APIView):
         return Response({
             "used_bytes": used_bytes,
             "total_bytes": total_bytes,
-            "used_gb": round(used_bytes / (1024 ** 3), 1),
+            "used_gb": round(used_bytes / (1024 ** 3), 3),
             "total_gb": round(total_bytes / (1024 ** 3), 1) if total_bytes else 0,
+            "used_mb": round(used_bytes / (1024 ** 2), 1),
+            "total_mb": round(total_bytes / (1024 ** 2), 1) if total_bytes else 0,
             "percentage": percentage,
         })

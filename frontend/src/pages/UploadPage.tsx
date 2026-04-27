@@ -30,7 +30,7 @@ import {
   RotateCcw,
   ShieldAlert,
 } from "lucide-react";
-import { toast } from "react-toastify";
+import { toast } from "@/components/ui/vault-toast";
 import type { DocumentType, MetadataField } from "@/types";
 import clsx from "clsx";
 
@@ -523,10 +523,10 @@ export default function UploadPage() {
       setOcrSuggestions(suggestions);
       setScanStage("ocr_done");
 
-      // Pre-fill form with extracted fields
       const fields = suggestions.fields ?? {};
       const fieldsSet = new Set<string>();
 
+      // ── Fill top-level form fields ─────────────────────────────────────
       const fill = (key: keyof UploadFormValues, value: string | undefined) => {
         if (value) {
           setValue(key, value);
@@ -540,6 +540,77 @@ export default function UploadPage() {
       fill("currency", fields.currency);
       fill("document_date", fields.document_date);
       fill("due_date", fields.due_date);
+
+      // ── Fill metadata fields from the selected document type ───────────
+      // Strategy: for each metadata field on the document type, look for a
+      // matching OCR suggestion by:
+      //   1. Exact key match          (field.key === "account_code")
+      //   2. Common alias mappings    (field.key === "invoice_number" → fields.reference_number)
+      // This allows the admin to name metadata fields using standard conventions
+      // and get auto-fill without any per-type configuration.
+      const OCR_KEY_ALIASES: Record<string, keyof OcrFields> = {
+        // metadata field key → OCR suggestion key
+        invoice_number:    "reference_number",
+        invoice_no:        "reference_number",
+        inv_number:        "reference_number",
+        po_number:         "reference_number",
+        po_no:             "reference_number",
+        lpo_number:        "reference_number",
+        receipt_number:    "reference_number",
+        contract_number:   "reference_number",
+        ref_number:        "reference_number",
+        reference_no:      "reference_number",
+        doc_reference:     "reference_number",
+        account_code:      "account_code",
+        account_no:        "account_code",
+        gl_code:           "account_code",
+        cost_centre:       "cost_centre",
+        cost_center:       "cost_centre",
+        department_code:   "cost_centre",
+        vendor_code:       "vendor_code",
+        supplier_code:     "vendor_code",
+        approved_by:       "approved_by",
+        authorised_by:     "approved_by",
+        authorized_by:     "approved_by",
+        payment_terms:     "payment_terms",
+        payment_method:    "payment_method",
+        mode_of_payment:   "payment_method",
+        transaction_ref:   "transaction_ref",
+        mpesa_ref:         "transaction_ref",
+        cheque_number:     "transaction_ref",
+        kra_pin:           "kra_pin",
+        vat_number:        "vat_number",
+        tax_number:        "vat_number",
+        po_reference:      "po_reference",
+        purchase_order_ref:"po_reference",
+        tax_amount:        "tax_amount",
+        vat_amount:        "tax_amount",
+        subtotal:          "subtotal",
+        net_amount:        "subtotal",
+        contract_value:    "contract_value",
+        signed_by:         "signed_by",
+        signatory:         "signed_by",
+      };
+
+      if (selectedType?.metadata_fields) {
+        for (const metaField of selectedType.metadata_fields) {
+          const metadataKey = metaField.key ?? metaField.field_key;
+          if (!metadataKey) continue;
+
+          const key = metadataKey.toLowerCase().replace(/[\s-]/g, "_");
+          // Direct key match first
+          const directValue = (fields as Record<string, string | undefined>)[key];
+          // Alias match second
+          const aliasKey = OCR_KEY_ALIASES[key];
+          const aliasValue = aliasKey ? (fields as Record<string, string | undefined>)[aliasKey] : undefined;
+          const value = directValue || aliasValue;
+
+          if (value) {
+            setValue(`metadata.${metadataKey}`, value);
+            fieldsSet.add(`metadata.${metadataKey}`);
+          }
+        }
+      }
 
       setSuggestedFields(fieldsSet);
 
@@ -929,7 +1000,7 @@ export default function UploadPage() {
                             control={control}
                             errors={errors as Record<string, { message?: string }>}
                             enforceRequired={false}
-                            suggested={false}
+                            suggested={suggestedFields.has(`metadata.${field.key}`)}
                           />
                         ))}
                     </div>

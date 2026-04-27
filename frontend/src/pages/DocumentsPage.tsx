@@ -19,7 +19,7 @@ import {
 import { format } from "date-fns";
 import { cn } from "../lib/utils";
 import { useDebounce } from "../hooks/useDebounce";
-import { toast } from "react-toastify";
+import { toast } from "@/components/ui/vault-toast";
 import type { Document } from "@/types";
 import StatusBadge from "@/components/documents/StatusBadge";
 

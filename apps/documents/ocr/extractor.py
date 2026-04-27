@@ -303,8 +303,8 @@ def _extract_reference(text: str, doc_type: str) -> Optional[str]:
 # ── Supplier extraction ────────────────────────────────────────────────────────
 
 _SUPPLIER_INLINE_RE = re.compile(
-    r"(?:from|vendor|supplier|service\s*provider|sold\s*by|issued\s*by"
-    r"|billed?\s*(?:from|by)|company|firm|business\s*name)"
+    r"(?:vendor|supplier|service\s*provider|sold\s*by|issued\s*by"
+    r"|billed?\s*(?:from|by)|business\s*name)"   # "from", "company", "firm" removed — too generic
     r"\s*[:\-]\s*(.+)",
     re.I,
 )
@@ -312,32 +312,78 @@ _SUPPLIER_HEADER_RE = re.compile(
     r"^(?:supplier|vendor|service\s*provider)\s*(?:details?|info(?:rmation)?|address)?$",
     re.I,
 )
+
+# Lines to reject as supplier candidates regardless of which strategy matched them
+_SUPPLIER_REJECT_RE = re.compile(
+    r"@"                                      # email address
+    r"|\b(?:lpo|p\.?o\.?\s*(?:box|no))\b"   # P.O. Box or LPO reference in same line
+    r"|\b(?:tel|phone|fax|mobile|cell)\b"    # contact numbers
+    r"|\bwww\."                              # website URL
+    r"|\d{6,}"                              # long numeric strings (account/ref numbers)
+    r"|\bno\.?\s*[:\-]"                     # "No:" labels (invoice no, LPO no, etc.)
+    ,
+    re.I,
+)
+
 _ENTITY_SUFFIX_RE = re.compile(
-    r"\b(?:LLC|Ltd\.?|Limited|Inc\.?|Corp\.?|GmbH|PLC|LLP|S\.A\.?|Pty\.?|Co\.)\b",
+    # Match legal entity suffixes. Require that "Co." is NOT followed by a
+    # lowercase TLD segment (stops ".co.ke" domain names from matching).
+    r"\b(?:LLC|Ltd\.?|Limited|Inc\.?|Corp\.?|GmbH|PLC|LLP|S\.A\.?|Pty\.?)"
+    r"(?:\.|,|\s|$)"
+    r"|\bCo\.(?!\s*[a-z]{2,6}\b)",
     re.I,
 )
 
 
 def _extract_supplier(lines: list[str]) -> Optional[str]:
-    # Priority 1: explicit label on the same line
+    def _is_valid(candidate: str) -> bool:
+        if len(candidate) < 3:
+            return False
+        if _SUPPLIER_REJECT_RE.search(candidate):
+            return False
+        # Reject if it looks like a "Label: Value" line (another field bled through)
+        if re.match(r"^[A-Za-z ]{1,30}:\s", candidate):
+            return False
+        return True
+
+    # Priority 1: explicit supplier/vendor label on the same line
     for line in lines:
         m = _SUPPLIER_INLINE_RE.search(line)
         if m:
             candidate = m.group(1).strip()[:120]
-            # Avoid extracting another label as the value
-            if len(candidate) > 2 and ":" not in candidate[:20]:
+            if _is_valid(candidate):
                 return candidate
 
     # Priority 2: section header, name on the next line
     for i, line in enumerate(lines):
         if _SUPPLIER_HEADER_RE.match(line) and i + 1 < len(lines):
             candidate = lines[i + 1].strip()[:120]
-            if len(candidate) > 2:
+            if _is_valid(candidate):
                 return candidate
 
-    # Priority 3: first line with a legal entity suffix
+    # Priority 3: positional — first valid line at the top of the document,
+    # before the "Bill To / Billed To" boundary and before the document-type heading.
+    # On most invoices/receipts the issuer's name is the very first line.
+    _DOCTYPE_HEADING_RE = re.compile(
+        r"\b(?:invoice|receipt|purchase\s*order|lpo|delivery\s*note|contract"
+        r"|agreement|quotation|expense|imprest|voucher|statement)\b",
+        re.I,
+    )
+    _BILL_TO_RE = re.compile(r"\bbill(?:ed)?\s*to\b|\bship(?:ped)?\s*to\b", re.I)
+
+    for line in lines[:8]:  # only consider the first 8 lines as "header zone"
+        if _DOCTYPE_HEADING_RE.search(line):
+            break  # stop at the document-type heading (e.g. "TAX INVOICE")
+        if _BILL_TO_RE.search(line):
+            break  # stop at "Bill To"
+        if _is_valid(line) and len(line) >= 5:
+            # Prefer lines that look like company names: not pure address lines
+            if not re.match(r"^(?:p\.?\s*o\.?\s*box|po\s+box|\d+\s+\w)", line, re.I):
+                return line.strip()[:120]
+
+    # Priority 4: first line with a legal entity suffix that passes rejection checks
     for line in lines:
-        if _ENTITY_SUFFIX_RE.search(line):
+        if _ENTITY_SUFFIX_RE.search(line) and _is_valid(line):
             return line.strip()[:120]
 
     return None
@@ -449,15 +495,48 @@ class DocumentFieldExtractor:
     # ── Document type classification ───────────────────────────────────────
 
     def _classify_document(self) -> None:
-        """Identify document type from the first occurrence of a type keyword."""
+        """
+        Identify document type with position + specificity scoring.
+
+        Problem: a reference number like "LPO No: LPO-7732" embedded in an
+        address or email footer will match 'l.p.o.' at a very early position,
+        beating "TAX INVOICE" which appears later in the heading.
+
+        Fix: patterns are ordered from most-specific to least-specific in
+        _DOCTYPE_PATTERNS (LPO before PO before invoice). When two matches
+        are within the first 30 % of the document, prefer the one whose
+        keyword is longer (more specific). Beyond the 30 % threshold, position
+        wins as before so we don't accidentally ignore headings on long docs.
+        """
         best_match = None
         best_pos = len(self.text) + 1
+        best_kw_len = 0
+        threshold = max(200, int(len(self.text) * 0.30))
 
         for pat, dtype, label in _DOCTYPE_PATTERNS:
             m = pat.search(self.text)
-            if m and m.start() < best_pos:
-                best_pos = m.start()
+            if not m:
+                continue
+            pos = m.start()
+            kw_len = len(m.group(0))
+
+            if best_match is None:
                 best_match = (dtype, label)
+                best_pos = pos
+                best_kw_len = kw_len
+                continue
+
+            # Both matches are in the "heading zone" — prefer the longer keyword
+            if pos <= threshold and best_pos <= threshold:
+                if kw_len > best_kw_len:
+                    best_match = (dtype, label)
+                    best_pos = pos
+                    best_kw_len = kw_len
+            # New match is clearly earlier than the best so far
+            elif pos < best_pos:
+                best_match = (dtype, label)
+                best_pos = pos
+                best_kw_len = kw_len
 
         if best_match:
             self.doc_type, self.doc_type_label = best_match
@@ -514,17 +593,35 @@ class DocumentFieldExtractor:
     def _extract_dates(self, out: dict) -> None:
         text = self.text
 
-        # Document / issue date
+        # ── Document / issue date ──────────────────────────────────────────
+        # Try explicit labelled patterns first — most specific to least.
+        # The bare "date" fallback is intentionally excluded here because it
+        # fires on "Due Date" too, making both fields the same value.
         doc_date = _find_first_date(
             text,
             r"(?:invoice\s*date|bill\s*date|document\s*date|issue(?:d)?\s*date"
             r"|date\s*of\s*issue|p\.?o\.?\s*date|order\s*date|receipt\s*date"
-            r"|request\s*date|voucher\s*date|date)",
+            r"|request\s*date|voucher\s*date)",   # "date" alone removed here
         )
+        # Fallback: bare "Date:" only if it appears BEFORE any "Due Date:" label
+        if not doc_date:
+            bare_m = re.search(
+                r"(?<!\w)date\s*[:\-]\s*" + _DATE_VALUE_PAT,
+                text, re.IGNORECASE,
+            )
+            due_m = re.search(
+                r"(?:due\s*date|payment\s*(?:due\s*)?date|pay(?:ment)?\s*by)",
+                text, re.IGNORECASE,
+            )
+            # Accept the bare "Date:" hit only if it comes before the due-date label
+            # (avoids grabbing "Due Date" value as the document date)
+            if bare_m and (due_m is None or bare_m.start() < due_m.start()):
+                doc_date = _parse_date(bare_m.group(1))
+
         if doc_date:
             out["document_date"] = doc_date
 
-        # Due / payment date
+        # ── Due / payment date ─────────────────────────────────────────────
         due_date = _find_first_date(
             text,
             r"(?:due\s*date|payment\s*(?:due\s*)?date|pay(?:ment)?\s*by"
@@ -533,7 +630,7 @@ class DocumentFieldExtractor:
         if due_date:
             out["due_date"] = due_date
 
-        # Effective / start date (contracts)
+        # ── Effective / start date (contracts) ────────────────────────────
         eff = _find_first_date(
             text,
             r"(?:effective\s*date|start\s*date|commencement\s*date|from\s*date)",
@@ -543,7 +640,7 @@ class DocumentFieldExtractor:
             if "document_date" not in out:
                 out["document_date"] = eff
 
-        # Expiry / end date
+        # ── Expiry / end date ─────────────────────────────────────────────
         exp = _find_first_date(
             text,
             r"(?:expir(?:y|ation)\s*date|end\s*date|termination\s*date"
@@ -554,7 +651,7 @@ class DocumentFieldExtractor:
             if "due_date" not in out and self.doc_type == "contract":
                 out["due_date"] = exp
 
-        # Signed date
+        # ── Signed date ───────────────────────────────────────────────────
         signed = _find_first_date(
             text,
             r"(?:date\s*signed|signed\s*(?:on|date)|execution\s*date|date\s*of\s*signing)",
@@ -562,7 +659,7 @@ class DocumentFieldExtractor:
         if signed:
             out["signed_date"] = signed
 
-        # Delivery date
+        # ── Delivery date ─────────────────────────────────────────────────
         delivery = _find_first_date(
             text,
             r"(?:delivery\s*date|required\s*(?:by|date)|dispatch\s*date"
@@ -571,14 +668,20 @@ class DocumentFieldExtractor:
         if delivery:
             out["delivery_date"] = delivery
 
-        # Fallback: first plausible date in document
+        # ── Absolute fallback: first plausible date if still nothing found ─
+        # Use a priority order: ISO first (unambiguous), then D/M/Y, then spelled-out.
         if "document_date" not in out:
-            for pat in [
-                r"\b(\d{4}[-/]\d{1,2}[-/]\d{1,2})\b",
-                r"\b(\d{1,2}\s+(?:Jan(?:uary)?|Feb(?:ruary)?|Mar(?:ch)?|Apr(?:il)?|May|Jun(?:e)?|Jul(?:y)?|Aug(?:ust)?|Sep(?:tember)?|Oct(?:ober)?|Nov(?:ember)?|Dec(?:ember)?)\s+\d{4})\b",
-                r"\b(\d{1,2}[/.-]\d{1,2}[/.-]\d{4})\b",
-                r"\b((?:Jan(?:uary)?|Feb(?:ruary)?|Mar(?:ch)?|Apr(?:il)?|May|Jun(?:e)?|Jul(?:y)?|Aug(?:ust)?|Sep(?:tember)?|Oct(?:ober)?|Nov(?:ember)?|Dec(?:ember)?)\s+\d{1,2},?\s+\d{4})\b",
-            ]:
+            fallback_patterns = [
+                r"\b(\d{4}[-/]\d{1,2}[-/]\d{1,2})\b",              # ISO: 2024-07-06
+                r"\b(\d{1,2}\s+(?:Jan(?:uary)?|Feb(?:ruary)?|Mar(?:ch)?|Apr(?:il)?|May"
+                r"|Jun(?:e)?|Jul(?:y)?|Aug(?:ust)?|Sep(?:tember)?|Oct(?:ober)?"
+                r"|Nov(?:ember)?|Dec(?:ember)?)\s+\d{4})\b",        # 06 July 2024
+                r"\b((?:Jan(?:uary)?|Feb(?:ruary)?|Mar(?:ch)?|Apr(?:il)?|May"
+                r"|Jun(?:e)?|Jul(?:y)?|Aug(?:ust)?|Sep(?:tember)?|Oct(?:ober)?"
+                r"|Nov(?:ember)?|Dec(?:ember)?)\s+\d{1,2},?\s+\d{4})\b",  # July 6, 2024
+                r"\b(\d{1,2}/\d{1,2}/\d{4})\b",                    # 06/07/2024 (ambiguous, last resort)
+            ]
+            for pat in fallback_patterns:
                 for m in re.finditer(pat, text, re.I):
                     parsed = _parse_date(m.group(1))
                     if parsed:

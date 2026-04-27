@@ -9,7 +9,7 @@ import { useMutation, useQueryClient } from "@tanstack/react-query";
 import { useForm, useFieldArray, Controller, type Control, type UseFormRegister } from "react-hook-form";
 import { documentsAPI } from "@/services/api";
 import { Edit2, Save, X, Loader2, Plus } from "lucide-react";
-import { toast } from "react-toastify";
+import { toast } from "@/components/ui/vault-toast";
 import type { Document, MetadataField } from "@/types";
 
 interface Props {

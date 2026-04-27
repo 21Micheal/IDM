@@ -14,7 +14,7 @@ import {
   Plus, Trash2, GripVertical, ChevronRight, Save, Loader2, X, AlertCircle,
 } from "lucide-react";
 import { documentApi, documentTypesAPI, normalizeListResponse } from "../services/api";
-import { toast } from "react-toastify";
+import { toast } from "@/components/ui/vault-toast";
 import { cn } from "../lib/utils";
 import type { DocumentType } from "@/types";
 

@@ -1,14 +1,14 @@
 import { useState } from "react";
 import { useNavigate } from "react-router-dom";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
-import { documentTypesAPI, normalizeListResponse } from "@/services/api";
+import { documentTypesAPI, normalizeListResponse, workflowAPI } from "@/services/api";
 import {
   Plus, GitBranch, Trash2, Edit2, Loader2, X, Save,
   Users, Building2, Shield, Settings, ChevronRight,
   FileText, Database, Mail, Lock, Globe,
 } from "lucide-react";
 import { useForm, useFieldArray } from "react-hook-form";
-import { toast } from "react-toastify";
+import { toast } from "@/components/ui/vault-toast";
 import clsx from "clsx";
 import type { DocumentType } from "@/types";
 
@@ -399,10 +399,7 @@ function WorkflowTab() {
   const navigate = useNavigate();
   const { data: templates } = useQuery({
     queryKey: ["workflow-templates"],
-    queryFn:  () =>
-      import("@/services/api").then(({ workflowAPI }) =>
-        workflowAPI.listTemplates().then((r) => r.data.results ?? r.data)
-      ),
+    queryFn:  () => workflowAPI.listTemplates().then((r) => r.data.results ?? r.data),
   });
 
   return (

@@ -5,7 +5,7 @@ import {
   Plus, Users, Shield, ChevronRight, X, Loader2,
   Check, UserPlus, Settings2, Info, Trash2,
 } from "lucide-react";
-import { toast } from "react-toastify";
+import { toast } from "@/components/ui/vault-toast";
 import clsx from "clsx";
 
 // ── Types ─────────────────────────────────────────────────────────────────────
