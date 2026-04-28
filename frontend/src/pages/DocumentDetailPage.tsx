@@ -11,15 +11,15 @@
  * All business logic (locking, OCR polling, version restore, comments,
  * workflow tasks, mutations) is unchanged.
  */
-import { useState, useEffect, useRef } from "react";
+import { Suspense, lazy, useState, useEffect, useRef } from "react";
 import { useParams, useNavigate } from "react-router-dom";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { documentsAPI, workflowAPI } from "@/services/api";
-import DocumentViewer from "@/components/documents/DocumentViewer";
+const DocumentViewer = lazy(() => import("@/components/documents/DocumentViewer"));
 import StatusBadge from "@/components/documents/StatusBadge";
 import OcrStatusBadge from "@/components/documents/OcrStatusBadge";
-import MetadataEditPanel from "@/components/documents/MetadataEditPanel";
-import WorkflowActionPanel from "@/components/workflow/WorkflowActionPanel";
+const MetadataEditPanel = lazy(() => import("@/components/documents/MetadataEditPanel"));
+const WorkflowActionPanel = lazy(() => import("@/components/workflow/WorkflowActionPanel"));
 import { format } from "date-fns";
 import {
   ArrowLeft, Send, Archive, MessageSquare, ShieldCheck,
@@ -333,7 +333,11 @@ export default function DocumentDetailPage() {
             </dl>
           </div>
 
-          {!isPersonal && activeTask && <WorkflowActionPanel task={activeTask} documentId={id!} />}
+          {!isPersonal && activeTask && (
+            <Suspense fallback={<div className="card p-5 text-sm text-muted-foreground">Loading workflow actions…</div>}>
+              <WorkflowActionPanel task={activeTask} documentId={id!} />
+            </Suspense>
+          )}
 
           {extraMetadataEntries.length > 0 && (
             <div className="card p-5 space-y-2">
@@ -414,29 +418,33 @@ export default function DocumentDetailPage() {
           {(activeTab === "preview" || activeTab === "edit") && (
             <div className="flex w-full h-full gap-4">
               <div className={`${activeTab === "edit" ? "w-2/3" : "w-full"} transition-all`}>
-                <DocumentViewer
-                  document={doc}
-                  submitSlot={
-                    !isPersonal && isDraftOrRejected && canSubmit ? (
-                      <button
-                        onClick={() => submitMutation.mutate()}
-                        disabled={submitMutation.isPending}
-                        className="btn-primary"
-                      >
-                        {submitMutation.isPending ? (
-                          <Loader2 className="w-4 h-4 animate-spin" />
-                        ) : (
-                          <Send className="w-4 h-4" />
-                        )}
-                        Submit for approval
-                      </button>
-                    ) : null
-                  }
-                />
+                <Suspense fallback={<div className="flex min-h-[24rem] items-center justify-center rounded-xl border border-border bg-card"><Loader2 className="w-8 h-8 text-primary animate-spin" /></div>}>
+                  <DocumentViewer
+                    document={doc}
+                    submitSlot={
+                      !isPersonal && isDraftOrRejected && canSubmit ? (
+                        <button
+                          onClick={() => submitMutation.mutate()}
+                          disabled={submitMutation.isPending}
+                          className="btn-primary"
+                        >
+                          {submitMutation.isPending ? (
+                            <Loader2 className="w-4 h-4 animate-spin" />
+                          ) : (
+                            <Send className="w-4 h-4" />
+                          )}
+                          Submit for approval
+                        </button>
+                      ) : null
+                    }
+                  />
+                </Suspense>
               </div>
               {activeTab === "edit" && (
                 <div className="w-1/3 border-l border-border bg-muted/20 backdrop-blur-sm rounded-xl shadow-sm">
-                  <MetadataEditPanel document={doc} onClose={() => setActiveTab("preview")} />
+                  <Suspense fallback={<div className="p-6 text-sm text-muted-foreground">Loading editor…</div>}>
+                    <MetadataEditPanel document={doc} onClose={() => setActiveTab("preview")} />
+                  </Suspense>
                 </div>
               )}
             </div>

@@ -14,7 +14,7 @@ import { useEffect, useRef, useState, useMemo } from "react";
 import type { Document, DocumentSearchResponse, SearchHit, WorkflowTask } from "@/types";
 import { StatCard } from "@/components/dashboard/StatCard";
 import { useDebounce } from "@/hooks/useDebounce";
-import { getQuickSearchSnippet, highlightSearchText } from "@/lib/search";
+import { highlightSearchText, getPreferredHighlights } from "@/lib/search";
 
 const RECENT_DOCS_PAGE_SIZE = 5;
 const RECENT_AUDIT_PAGE_SIZE = 5;
@@ -243,6 +243,16 @@ export default function DashboardPage() {
   const hasActiveDashboardSelection =
     activeDashboardResultIndex >= 0 && activeDashboardResultIndex < dashboardResults.length;
 
+  // ── Helper Functions ───────────────────────────────────────────────────────
+
+  // Highlight only the searched term in the snippet (same as SearchPage)
+  const highlightTerm = (text: string, term: string) => {
+    if (!term || !text) return text;
+    const escapedTerm = term.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+    const regex = new RegExp(`(${escapedTerm})`, "gi");
+    return text.replace(regex, '<span class="bg-yellow-200 text-yellow-800 font-medium px-0.5 rounded">$1</span>');
+  };
+
   // ── Handlers ──────────────────────────────────────────────────────────────
 
   const handleDashboardSearch = () => {
@@ -365,7 +375,6 @@ export default function DashboardPage() {
                   <>
                     <div className="divide-y divide-border">
                       {dashboardResults.map((hit: SearchHit, index) => {
-                        const snippetData = getQuickSearchSnippet(hit, dashboardSearchTerm);
                         return (
                           <button
                             key={hit.id}
@@ -402,12 +411,36 @@ export default function DashboardPage() {
                                     }}
                                   />
                                 )}
-                                <div className="mt-2 rounded-md bg-muted/40 px-2.5 py-2">
-                                  <p
-                                    className="line-clamp-3 text-xs leading-5 text-foreground"
-                                    dangerouslySetInnerHTML={{ __html: snippetData.snippet }}
-                                  />
-                                </div>
+                                {/* Show highlighted snippets like SearchPage */}
+                                {hit.highlights && Object.keys(hit.highlights).length > 0 ? (
+                                  <div className="mt-2 rounded-md bg-muted/40 px-2.5 py-2">
+                                    <div className="line-clamp-3 text-xs leading-5 text-foreground space-y-2">
+                                      {getPreferredHighlights(hit, dashboardSearchTerm).slice(0, 2).map(([field, snippet]) => (
+                                        <div key={field} className="italic">
+                                          <span
+                                            dangerouslySetInnerHTML={{
+                                              __html: highlightTerm(snippet, dashboardSearchTerm),
+                                            }}
+                                          />
+                                        </div>
+                                      ))}
+                                    </div>
+                                  </div>
+                                ) : (
+                                  // Fallback: show highlighted metadata when no content highlights available
+                                  <div className="mt-2 rounded-md bg-muted/40 px-2.5 py-2">
+                                    <div className="line-clamp-3 text-xs leading-5 text-foreground italic">
+                                      <span
+                                        dangerouslySetInnerHTML={{
+                                          __html: highlightTerm(
+                                            hit.supplier || hit.title || hit.reference_number,
+                                            dashboardSearchTerm
+                                          ),
+                                        }}
+                                      />
+                                    </div>
+                                  </div>
+                                )}
                               </div>
                               <StatusBadge status={hit.status} />
                             </div>

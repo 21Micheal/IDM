@@ -10,6 +10,7 @@ import { useAuthStore } from "../../store/authStore";
 import { useQuery } from "@tanstack/react-query";
 import { notificationsAPI, workflowAPI } from "../../services/api";
 import { FlaxemLogo } from "./FlaxemLogo";
+import { ChatLauncher } from "@/components/chat";
 import clsx from "clsx";
 
 // ── Types ─────────────────────────────────────────────────────────────────────
@@ -345,14 +346,13 @@ export default function Layout() {
 
       {/* ── Main area ──────────────────────────────────────────────────── */}
       <div className="flex-1 flex flex-col min-w-0">
-
-        {/* Topbar */}
-        <header className="h-14 bg-card border-b border-border flex items-center justify-end px-6 gap-3 flex-shrink-0 shadow-sm">
-
-          {/* Notification bell */}
+        <header
+          className="h-14 bg-card border-b border-border flex items-center justify-end px-6 gap-3 flex-shrink-0"
+          style={{ boxShadow: "var(--shadow-card)" }}
+        >
           <button
             onClick={() => navigate("/notifications")}
-            className="relative text-muted-foreground hover:text-foreground p-1.5 rounded-lg hover:bg-muted transition-colors"
+            className="relative text-muted-foreground hover:text-foreground p-1.5 rounded-md hover:bg-muted transition-colors"
             title="Notifications"
           >
             <Bell className="w-5 h-5" />
@@ -363,18 +363,18 @@ export default function Layout() {
             )}
           </button>
 
-          {/* Divider */}
           <div className="w-px h-6 bg-border" />
 
-          {/* Profile dropdown */}
           <ProfileMenu />
         </header>
 
-        {/* Page content */}
-        <main ref={mainRef} className="flex-1 overflow-y-auto p-6 bg-background">
+        <main className="flex-1 overflow-y-auto p-6 bg-background">
           <Outlet />
         </main>
       </div>
+
+      {/* Floating chat — bottom-right on every page */}
+      <ChatLauncher />
     </div>
   );
 }
