@@ -45,6 +45,7 @@ import type {
 } from "@/types";
 
 import {
+  clearDocumentVersionCache,
   getCachedVersionPreview,
   setCachedVersionPreview,
 } from "@/utils/versionPreviewCache";
@@ -494,7 +495,9 @@ function OfficeEditPanel({
       const cacheKey = getPreviewCacheKey(doc.id, doc.current_version, selectedVersionId);
       const cached = getCachedVersionPreview(cacheKey);
 
-      if (cached && !selectedVersionId) {
+      // For current-version preview, always hit API so new uploads/version bumps
+      // are reflected immediately. Use cache only for historical version browsing.
+      if (cached && selectedVersionId && cached.preview_status !== "failed") {
         return cached;
       }
 
@@ -541,6 +544,7 @@ function OfficeEditPanel({
   const startPolling = useCallback(() => {
     stopPolling();
     startTimeRef.current  = Date.now();
+    setTimedOut(false);
     pollingRef.current    = true;
 
     previewPollRef.current = setInterval(async () => {
@@ -550,9 +554,7 @@ function OfficeEditPanel({
       setPreviewProgress(Math.min(95, (elapsed / POLL_TIMEOUT_MS) * 100));
 
       if (elapsed >= POLL_TIMEOUT_MS) {
-        stopPolling();
         setTimedOut(true);
-        return;
       }
 
       try {
@@ -604,9 +606,9 @@ function OfficeEditPanel({
     if (failedConfirmRef.current) clearTimeout(failedConfirmRef.current);
   }, [stopPolling]);
 
-  const isConverting  = !timedOut && ["pending", "processing"].includes(preview?.preview_status ?? "");
+  const isConverting  = ["pending", "processing"].includes(preview?.preview_status ?? "");
   const hasPdf        = preview?.viewer === "pdfjs" && !!preview.url;
-  const previewFailed = (preview?.preview_status === "failed" && !isConfirmingFailed) || timedOut;
+  const previewFailed = preview?.preview_status === "failed" && !isConfirmingFailed;
   const activeDownloadUrl = normalizeUrl(preview?.raw_url ?? preview?.url ?? initialPreview.raw_url ?? initialPreview.url) ?? "";
 
   // ── Lock mutations ────────────────────────────────────────────────────────
@@ -787,6 +789,11 @@ function OfficeEditPanel({
               <Loader2 className="w-3 h-3 animate-spin" /> Generating
             </span>
           )}
+          {timedOut && isConverting && (
+            <span className="inline-flex items-center gap-1 text-xs text-amber-700 font-medium bg-amber-500/10 px-2 py-0.5 rounded-full border border-amber-500/20">
+              <Clock className="w-3 h-3" /> Taking longer
+            </span>
+          )}
           {previewFailed && (
             <span className="inline-flex items-center gap-1 text-xs text-destructive font-medium bg-destructive/10 px-2 py-0.5 rounded-full border border-destructive/20">
               <AlertCircle className="w-3 h-3" /> Failed
@@ -896,7 +903,9 @@ function OfficeEditPanel({
               <div className="text-center">
                 <p className="font-medium text-foreground">Generating preview</p>
                 <p className="text-xs text-muted-foreground mt-1">
-                  Converting {info.app} to PDF — {Math.round(previewProgress)}%
+                  {timedOut
+                    ? `Converting ${info.app} to PDF is taking longer than usual, but it is still running.`
+                    : `Converting ${info.app} to PDF — ${Math.round(previewProgress)}%`}
                 </p>
               </div>
             </div>
@@ -1003,16 +1012,15 @@ export default function DocumentViewer({ document: doc, submitSlot }: Props) {
       const cacheKey = getPreviewCacheKey(doc.id, doc.current_version, selectedVersionId);
       const cached = getCachedVersionPreview(cacheKey);
       
-      // For current version, serve from cache if available and fresh
-      // For version previews, only serve from cache if it's a successful preview
+      // For current version, always verify with API to avoid stale preview state
+      // after uploads or restores. For historical version browsing, cache is fine.
       if (cached) {
         const isSuccessfulPreview = cached.preview_status !== "failed";
-        const isCurrentVersion = !selectedVersionId;
-        
-        if (isCurrentVersion || isSuccessfulPreview) {
+
+        if (selectedVersionId && isSuccessfulPreview) {
           return cached;
         }
-        // If it's a failed version preview, don't serve from cache - allow retry
+        // If it's current version or a failed version preview, bypass cache.
       }
       
       try {
@@ -1048,6 +1056,8 @@ export default function DocumentViewer({ document: doc, submitSlot }: Props) {
 
   const onVersionUploaded = useCallback(() => {
     setSelectedVersionId(null);
+    clearDocumentVersionCache(doc.id);
+    qc.removeQueries({ queryKey: ["document-preview", doc.id] });
     qc.invalidateQueries({ queryKey: ["document", doc.id] });
     qc.invalidateQueries({ queryKey: ["document-preview", doc.id] });
   }, [qc, doc.id]);

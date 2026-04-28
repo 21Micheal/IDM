@@ -76,22 +76,24 @@ export default function DocumentDetailPage() {
     enabled: !!id,
   });
 
-  // ── OCR status polling ─────────────────────────────────────────────────────
+  // ── Document status polling ────────────────────────────────────────────────
   const ocrStatus = (doc as any)?.ocr_status as string | undefined;
   const ocrActive = ocrStatus === "pending" || ocrStatus === "processing";
+  const previewStatus = doc?.preview_status;
+  const previewActive = previewStatus === "pending" || previewStatus === "processing";
 
   useEffect(() => {
-    if (!ocrActive || !id) {
+    if ((!ocrActive && !previewActive) || !id) {
       if (pollRef.current) clearInterval(pollRef.current);
       return;
     }
     pollRef.current = setInterval(() => {
       qc.invalidateQueries({ queryKey: ["document", id] });
-    }, 5_000);
+    }, previewActive ? 2_000 : 5_000);
     return () => {
       if (pollRef.current) clearInterval(pollRef.current);
     };
-  }, [ocrActive, id, qc]);
+  }, [ocrActive, previewActive, id, qc]);
 
   const prevOcrRef = useRef(ocrStatus);
   useEffect(() => {
