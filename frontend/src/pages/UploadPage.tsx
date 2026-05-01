@@ -20,10 +20,8 @@ import {
   CheckCircle,
   Plus,
   Lock,
-  Users,
   Info,
   ScanLine,
-  FileText,
   Sparkles,
   AlertCircle,
   ChevronRight,
@@ -33,10 +31,12 @@ import {
 import { toast } from "@/components/ui/vault-toast";
 import type { DocumentType, MetadataField } from "@/types";
 import clsx from "clsx";
+import { QUERY_FIVE_MIN_STALE } from "@/lib/reactQueryDefaults";
 
 // ── Types ─────────────────────────────────────────────────────────────────────
 
 type PersonalTagField = { value: string };
+type PersonalMetadataField = { key: string; value: string };
 
 type UploadFormValues = {
   title: string;
@@ -47,6 +47,7 @@ type UploadFormValues = {
   due_date?: string;
   metadata: Record<string, unknown>;
   personal_tags: PersonalTagField[];
+  personal_metadata_fields: PersonalMetadataField[];
 };
 
 /**
@@ -268,6 +269,43 @@ function PersonalTagRow({
   );
 }
 
+function PersonalMetadataRow({
+  index,
+  total,
+  register,
+  onRemove,
+}: {
+  index: number;
+  total: number;
+  register: UseFormRegister<UploadFormValues>;
+  onRemove: () => void;
+}) {
+  return (
+    <div className="grid grid-cols-[1fr_1fr_auto] items-center gap-2 rounded-lg border border-border bg-card px-3 py-2">
+      <input
+        {...register(`personal_metadata_fields.${index}.key` as const)}
+        className="input h-9"
+        placeholder="Field name (e.g. project)"
+      />
+      <input
+        {...register(`personal_metadata_fields.${index}.value` as const)}
+        className="input h-9"
+        placeholder="Field value"
+      />
+      <button
+        type="button"
+        onClick={onRemove}
+        disabled={total === 1}
+        className="inline-flex h-8 w-8 items-center justify-center rounded-md border border-border bg-card text-muted-foreground hover:text-destructive hover:border-destructive/30 hover:bg-destructive/5 disabled:opacity-40 disabled:cursor-not-allowed"
+        title="Remove custom field"
+        aria-label={`Remove custom field ${index + 1}`}
+      >
+        <X className="w-4 h-4" />
+      </button>
+    </div>
+  );
+}
+
 // ── OCR polling hook ──────────────────────────────────────────────────────────
 
 function useOcrPoller(
@@ -410,7 +448,11 @@ function StepBadge({
 
 // ── Main component ────────────────────────────────────────────────────────────
 
-export default function UploadPage() {
+interface UploadPageProps {
+  scanOnly?: boolean;
+}
+
+export default function UploadPage({ scanOnly = false }: UploadPageProps) {
   const navigate = useNavigate();
   const queryClient = useQueryClient();
 
@@ -420,9 +462,7 @@ export default function UploadPage() {
   const [uploadProgress, setUploadProgress] = useState(0);
 
   // ── Mode flags ──────────────────────────────────────────────────────────────
-  const [isSelfUpload, setIsSelfUpload] = useState(false);
-  const [isScanned, setIsScanned] = useState(false);
-  const [imageAutoScanned, setImageAutoScanned] = useState(false);
+  const [isScanned, setIsScanned] = useState(scanOnly);
 
   // ── OCR scan flow state ─────────────────────────────────────────────────────
   const [scanStage, setScanStage] = useState<ScanStage>("idle");
@@ -440,7 +480,12 @@ export default function UploadPage() {
     clearErrors,
     formState: { errors },
   } = useForm<UploadFormValues>({
-    defaultValues: { metadata: {}, personal_tags: [{ value: "" }], currency: "KES" },
+    defaultValues: {
+      metadata: {},
+      personal_tags: [{ value: "" }],
+      personal_metadata_fields: [{ key: "", value: "" }],
+      currency: "KES",
+    },
   });
 
   const {
@@ -449,25 +494,37 @@ export default function UploadPage() {
     remove: removePersonalTag,
     replace: replacePersonalTags,
   } = useFieldArray({ control, name: "personal_tags" });
+  const {
+    fields: personalMetadataFields,
+    append: appendPersonalMetadata,
+    remove: removePersonalMetadata,
+    replace: replacePersonalMetadata,
+  } = useFieldArray({ control, name: "personal_metadata_fields" });
 
   // ── Document types ──────────────────────────────────────────────────────────
   const { data: docTypes = [] } = useQuery<unknown, Error, DocumentType[]>({
     queryKey: ["document-types"],
     queryFn: () => documentTypesAPI.list().then((r) => r.data as unknown),
     select: (data) => normalizeListResponse<DocumentType>(data),
+    ...QUERY_FIVE_MIN_STALE,
   });
   const selectedType = docTypes.find((t) => t.id === selectedTypeId);
+  const hasExplicitPersonalType = typeof selectedType?.is_personal_type === "boolean";
+  const isSelfUpload = hasExplicitPersonalType
+    ? Boolean(selectedType?.is_personal_type)
+    : /personal/i.test(selectedType?.name ?? "");
+  const metadataMode = selectedType?.metadata_mode ?? (isSelfUpload ? "user_defined" : "admin_defined");
 
   // ── Derived state ───────────────────────────────────────────────────────────
   const isOcrFlow = isScanned && !isSelfUpload;
 
   // The right panel details form is visible when:
   // - NOT in OCR flow (manual mode) AND
-  // - a type is selected (or it's a personal upload) AND
+  // - a type is selected AND
   // - we're in the idle stage (not mid-upload)
   const showManualForm =
     !isOcrFlow &&
-    (isSelfUpload || Boolean(selectedTypeId)) &&
+    Boolean(selectedTypeId) &&
     scanStage === "idle";
 
   // The OCR right-panel info box is visible when in OCR flow and idle
@@ -479,7 +536,7 @@ export default function UploadPage() {
   const showOcrFailed = isOcrFlow && scanStage === "ocr_failed";
 
   const hasMetadata =
-    !isSelfUpload && !!selectedType && selectedType.metadata_fields.length > 0;
+    !isSelfUpload && metadataMode === "admin_defined" && !!selectedType && selectedType.metadata_fields.length > 0;
   const relaxReq = isSelfUpload || isScanned;
 
   // ── Side-effects ────────────────────────────────────────────────────────────
@@ -491,6 +548,7 @@ export default function UploadPage() {
       reset({
         metadata: {},
         personal_tags: [{ value: "" }],
+        personal_metadata_fields: [{ key: "", value: "" }],
         currency: "KES",
         title: "",
         supplier: "",
@@ -507,12 +565,16 @@ export default function UploadPage() {
   }, [isSelfUpload, isScanned, clearErrors]);
 
   useEffect(() => {
-    if (isSelfUpload) {
-      setSelectedTypeId("");
-      replacePersonalTags([{ value: "" }]);
-      setIsScanned(false);
+    setIsScanned(scanOnly);
+    if (!scanOnly) {
+      setScanStage("idle");
+      setUploadedDocId(null);
+      setOcrSuggestions(null);
+      setSuggestedFields(new Set());
     }
-  }, [isSelfUpload, replacePersonalTags]);
+    replacePersonalTags([{ value: "" }]);
+    replacePersonalMetadata([{ key: "", value: "" }]);
+  }, [scanOnly, replacePersonalTags, replacePersonalMetadata]);
 
   // ── OCR poller ──────────────────────────────────────────────────────────────
 
@@ -633,13 +695,6 @@ export default function UploadPage() {
     const file = accepted[0];
     if (!file) return;
     setDroppedFile(file);
-    const isImage = file.type.startsWith("image/");
-    if (isImage) {
-      setIsScanned(true);
-      setImageAutoScanned(true);
-    } else {
-      setImageAutoScanned(false);
-    }
   }, []);
 
   const { getRootProps, getInputProps, isDragActive } = useDropzone({
@@ -704,7 +759,7 @@ export default function UploadPage() {
 
   const onUpload = (values: Record<string, unknown>) => {
     if (!droppedFile) { toast.error("Please select a file"); return; }
-    if (!isSelfUpload && !selectedTypeId) {
+    if (!selectedTypeId) {
       toast.error("Please select a document type");
       return;
     }
@@ -717,6 +772,16 @@ export default function UploadPage() {
         return "";
       })
       .filter(Boolean);
+    const personalMetadataEntries = (Array.isArray(values.personal_metadata_fields) ? values.personal_metadata_fields : [])
+      .map((entry) => ({
+        key: String(entry?.key ?? "").trim(),
+        value: String(entry?.value ?? "").trim(),
+      }))
+      .filter((entry) => entry.key.length > 0 && entry.value.length > 0);
+    const personalMetadata = personalMetadataEntries.reduce<Record<string, string>>((acc, entry) => {
+      acc[entry.key] = entry.value;
+      return acc;
+    }, {});
 
     if (isSelfUpload && personalTags.length === 0) {
       toast.error("Please add at least one personal tag.");
@@ -731,7 +796,7 @@ export default function UploadPage() {
         ? (droppedFile.name.replace(/\.[^.]+$/, "") || "Scanned document")
         : (values.title as string)
     );
-    if (!isSelfUpload) fd.append("document_type_id", selectedTypeId);
+    fd.append("document_type_id", selectedTypeId);
     fd.append("is_self_upload", isSelfUpload ? "true" : "false");
     fd.append("is_scanned", isScanned ? "true" : "false");
     if (!isOcrFlow && values.supplier) fd.append("supplier", values.supplier as string);
@@ -739,8 +804,16 @@ export default function UploadPage() {
     if (!isOcrFlow && values.currency) fd.append("currency", values.currency as string);
     if (!isOcrFlow && values.document_date) fd.append("document_date", values.document_date as string);
     personalTags.forEach((tag) => fd.append("personal_tags", tag));
-    if (!isSelfUpload && !isOcrFlow && values.metadata && Object.keys(values.metadata as object).length > 0)
-      fd.append("metadata", JSON.stringify(values.metadata));
+    const adminMetadata = !isSelfUpload && !isOcrFlow && values.metadata && Object.keys(values.metadata as object).length > 0
+      ? (values.metadata as Record<string, unknown>)
+      : {};
+    const mergedMetadata =
+      isSelfUpload
+        ? Object.keys(personalMetadata).length > 0 ? personalMetadata : {}
+        : adminMetadata;
+    if (Object.keys(mergedMetadata).length > 0) {
+      fd.append("metadata", JSON.stringify(mergedMetadata));
+    }
 
     setScanStage(isOcrFlow ? "uploading" : "idle");
     uploadMutation.mutate(fd);
@@ -781,10 +854,12 @@ export default function UploadPage() {
       {/* Header */}
       <div className="mb-8">
         <h1 className="text-3xl font-bold text-foreground tracking-tight">
-          Upload Document
+          {scanOnly ? "Scan Document" : "Upload Document"}
         </h1>
         <p className="text-muted-foreground mt-1">
-          Select a document type, attach your file, then fill in the details.
+          {scanOnly
+            ? "Select a document type, attach your scanned file, and review OCR suggestions."
+            : "Select a document type, attach your file, then fill in the details."}
         </p>
       </div>
 
@@ -1060,34 +1135,35 @@ export default function UploadPage() {
               style={{ boxShadow: "var(--shadow-card)" }}
             >
               <h2 className="font-semibold text-foreground mb-4 flex items-center gap-2">
-                <StepBadge n={1} active={!isSelfUpload && !selectedTypeId} done={isSelfUpload || Boolean(selectedTypeId)} />
-                {isSelfUpload ? "Personal Document" : "Document Type"}
+                <StepBadge n={1} active={!selectedTypeId} done={Boolean(selectedTypeId)} />
+                Document Type
               </h2>
-
-              {isSelfUpload ? (
-                <p className="text-sm text-muted-foreground">
-                  Personal documents don't need a type. Add tags in the next step.
+              <select
+                value={selectedTypeId}
+                onChange={(e) => setSelectedTypeId(e.target.value)}
+                className="input w-full"
+              >
+                <option value="">— Choose document type —</option>
+                {docTypes.map((t) => (
+                  <option key={t.id} value={t.id}>
+                    {t.name}
+                  </option>
+                ))}
+              </select>
+              {selectedType?.description && (
+                <p className="mt-3 text-xs text-muted-foreground">
+                  {selectedType.description}
                 </p>
-              ) : (
-                <>
-                  <select
-                    value={selectedTypeId}
-                    onChange={(e) => setSelectedTypeId(e.target.value)}
-                    className="input w-full"
-                  >
-                    <option value="">— Choose document type —</option>
-                    {docTypes.map((t) => (
-                      <option key={t.id} value={t.id}>
-                        {t.name}
-                      </option>
-                    ))}
-                  </select>
-                  {selectedType?.description && (
-                    <p className="mt-3 text-xs text-muted-foreground">
-                      {selectedType.description}
-                    </p>
-                  )}
-                </>
+              )}
+              {selectedType && (
+                <div className="mt-4 flex items-start gap-2 text-xs text-primary bg-primary/10 border border-primary/20 rounded-lg px-3 py-2">
+                  <Info className="w-4 h-4 flex-shrink-0 mt-0.5" />
+                  <span>
+                    {isSelfUpload
+                      ? "This type uploads as personal (visible to you and admins, no approval workflow)."
+                      : "This type follows the workflow approval process."}
+                  </span>
+                </div>
               )}
             </div>
 
@@ -1097,7 +1173,7 @@ export default function UploadPage() {
               style={{ boxShadow: "var(--shadow-card)" }}
             >
               <h2 className="font-semibold text-foreground mb-4 flex items-center gap-2">
-                <StepBadge n={2} active={Boolean(isSelfUpload || selectedTypeId) && !droppedFile} done={Boolean(droppedFile)} />
+                <StepBadge n={2} active={Boolean(selectedTypeId) && !droppedFile} done={Boolean(droppedFile)} />
                 Attach File
               </h2>
               <div
@@ -1132,19 +1208,11 @@ export default function UploadPage() {
                     <p className="text-xs text-muted-foreground mt-1">
                       {(droppedFile.size / (1024 * 1024)).toFixed(2)} MB
                     </p>
-                    {imageAutoScanned && (
-                      <span className="mt-2 inline-flex items-center gap-1.5 text-xs text-teal bg-teal/10 border border-teal/30 px-2 py-0.5 rounded-full">
-                        <span className="w-1.5 h-1.5 rounded-full bg-teal" />
-                        Image — OCR automatic
-                      </span>
-                    )}
                     <button
                       type="button"
                       onClick={(e) => {
                         e.stopPropagation();
                         setDroppedFile(null);
-                        setImageAutoScanned(false);
-                        if (!isScanned || imageAutoScanned) setIsScanned(false);
                       }}
                       className="mt-3 text-destructive hover:text-destructive/80 text-xs flex items-center gap-1"
                     >
@@ -1168,96 +1236,23 @@ export default function UploadPage() {
               </div>
             </div>
 
-            {/* Step 3 — Document Mode */}
-            <div
-              className="bg-card rounded-2xl border border-border p-6 space-y-4"
-              style={{ boxShadow: "var(--shadow-card)" }}
-            >
-              <h2 className="font-semibold text-foreground mb-2 flex items-center gap-2">
-                <StepBadge n={3} active={Boolean(droppedFile)} />
-                Document Mode
-              </h2>
-
-              {/* Workflow vs Personal */}
-              <div className="grid grid-cols-2 gap-2">
-                <button
-                  type="button"
-                  onClick={() => setIsSelfUpload(false)}
-                  className={clsx(
-                    "flex flex-col items-center gap-1.5 py-3 px-2 rounded-xl border text-sm font-medium transition-all",
-                    !isSelfUpload
-                      ? "border-primary bg-primary/10 text-primary"
-                      : "border-border bg-card text-muted-foreground hover:bg-muted"
-                  )}
-                >
-                  <Users className="w-5 h-5" />
-                  <span>Workflow</span>
-                </button>
-                <button
-                  type="button"
-                  onClick={() => setIsSelfUpload(true)}
-                  className={clsx(
-                    "flex flex-col items-center gap-1.5 py-3 px-2 rounded-xl border text-sm font-medium transition-all",
-                    isSelfUpload
-                      ? "border-primary bg-primary/10 text-primary"
-                      : "border-border bg-card text-muted-foreground hover:bg-muted"
-                  )}
-                >
-                  <Lock className="w-5 h-5" />
-                  <span>Personal</span>
-                </button>
-              </div>
-
-              {/* Digital vs Scanned — only visible when not personal */}
-              {!isSelfUpload && (
-                <div className="grid grid-cols-2 gap-2">
-                  <button
-                    type="button"
-                    disabled={imageAutoScanned}
-                    onClick={() => setIsScanned(false)}
-                    className={clsx(
-                      "flex flex-col items-center gap-1.5 py-3 px-2 rounded-xl border text-sm font-medium transition-all disabled:opacity-60",
-                      !isScanned
-                        ? "border-primary bg-primary/10 text-primary"
-                        : "border-border bg-card text-muted-foreground hover:bg-muted"
-                    )}
-                  >
-                    <FileText className="w-5 h-5" />
-                    <span>Digital</span>
-                  </button>
-                  <button
-                    type="button"
-                    disabled={imageAutoScanned}
-                    onClick={() => setIsScanned(true)}
-                    className={clsx(
-                      "flex flex-col items-center gap-1.5 py-3 px-2 rounded-xl border text-sm font-medium transition-all disabled:opacity-60",
-                      isScanned
-                        ? "border-teal bg-teal/10 text-teal"
-                        : "border-border bg-card text-muted-foreground hover:bg-muted"
-                    )}
-                  >
-                    <ScanLine className="w-5 h-5" />
-                    <span>Scanned / OCR</span>
-                  </button>
-                </div>
-              )}
-
-              {/* Context hints */}
-              {isSelfUpload && (
-                <div className="flex items-start gap-2 text-xs text-primary bg-primary/10 border border-primary/20 rounded-lg px-3 py-2">
-                  <Info className="w-4 h-4 flex-shrink-0 mt-0.5" />
-                  <span>Visible only to you and admins. Not submitted for approval.</span>
-                </div>
-              )}
-              {isScanned && !isSelfUpload && (
+            {scanOnly && (
+              <div
+                className="bg-card rounded-2xl border border-teal/30 p-6 space-y-2"
+                style={{ boxShadow: "var(--shadow-card)" }}
+              >
+                <h2 className="font-semibold text-foreground mb-2 flex items-center gap-2">
+                  <StepBadge n={3} active={Boolean(droppedFile)} />
+                  Scan Mode (OCR)
+                </h2>
                 <div className="flex items-start gap-2 text-xs text-teal bg-teal/10 border border-teal/20 rounded-lg px-3 py-2">
                   <Sparkles className="w-4 h-4 flex-shrink-0 mt-0.5" />
                   <span>
-                    After upload, OCR runs in the background and pre-fills the details form for you to review.
+                    After upload, OCR runs in the background and pre-fills details for review.
                   </span>
                 </div>
-              )}
-            </div>
+              </div>
+            )}
           </div>
 
           {/* ── Right column ────────────────────────────────────────────────── */}
@@ -1363,6 +1358,33 @@ export default function UploadPage() {
                     </div>
                   )}
 
+                  {isSelfUpload && (
+                    <div>
+                      <label className="label">Custom personal fields</label>
+                      <p className="text-xs text-muted-foreground mb-2">
+                        Add your own searchable key/value fields for this personal document.
+                      </p>
+                      <div className="space-y-2">
+                        {personalMetadataFields.map((field, index) => (
+                          <PersonalMetadataRow
+                            key={field.id}
+                            index={index}
+                            total={personalMetadataFields.length}
+                            register={register}
+                            onRemove={() => removePersonalMetadata(index)}
+                          />
+                        ))}
+                      </div>
+                      <button
+                        type="button"
+                        onClick={() => appendPersonalMetadata({ key: "", value: "" })}
+                        className="mt-3 inline-flex items-center gap-2 text-sm font-medium text-primary hover:text-primary/80"
+                      >
+                        <Plus className="w-4 h-4" /> Add custom field
+                      </button>
+                    </div>
+                  )}
+
                   {/* Amount + Currency */}
                   <div className="grid grid-cols-1 md:grid-cols-3 gap-6">
                     <div className="md:col-span-2">
@@ -1433,7 +1455,7 @@ export default function UploadPage() {
             )}
 
             {/* OCR idle info panel — visible when OCR mode is selected but not yet uploaded */}
-            {showOcrIdlePanel && (
+            {scanOnly && showOcrIdlePanel && (
               <div
                 className="bg-card rounded-2xl border border-teal/30 p-8 flex flex-col items-center text-center"
                 style={{ boxShadow: "var(--shadow-card)" }}

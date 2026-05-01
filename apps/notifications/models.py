@@ -3,8 +3,20 @@ from django.conf import settings
 import uuid
 
 class Notification(models.Model):
+    NOTIFICATION_TYPES = [
+        ("task_assigned", "Task Assigned"),
+        ("workflow_complete", "Workflow Complete"),
+        ("document_returned", "Document Returned"),
+        ("document_held", "Document Held"),
+        ("hold_released", "Hold Released"),
+        ("hold_expired", "Hold Expired"),
+        ("task_overdue", "Task Overdue"),
+        ("workflow_action", "Workflow Action"),
+    ]
+
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
     recipient = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.CASCADE, related_name="notifications")
+    type = models.CharField(max_length=20, choices=NOTIFICATION_TYPES, default="task_assigned")
     message = models.TextField()
     link = models.CharField(max_length=255, blank=True)
     is_read = models.BooleanField(default=False)

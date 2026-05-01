@@ -68,6 +68,8 @@ class DocumentIndex(ESDocument):
     title = fields.TextField(analyzer="english")
     reference_number = fields.KeywordField()
     document_type = fields.KeywordField()
+    file_name = fields.KeywordField()
+    file_mime_type = fields.KeywordField()
     supplier = fields.TextField(fields={"keyword": fields.KeywordField()})
     amount = fields.FloatField()
     currency = fields.KeywordField()
@@ -86,6 +88,12 @@ class DocumentIndex(ESDocument):
 
     def prepare_document_type(self, instance):
         return instance.document_type.name
+
+    def prepare_file_name(self, instance):
+        return instance.file_name
+
+    def prepare_file_mime_type(self, instance):
+        return instance.file_mime_type
 
     def prepare_tags(self, instance):
         return [t.name for t in instance.tags.all()]

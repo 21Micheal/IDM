@@ -154,12 +154,6 @@ def extract_text(self, document_id: str):
     text      = ""
 
     try:
-        if mime.startswith("image/"):
-            # Images should have gone straight to ocr_document — handle defensively
-            _mark_pending(document_id, auto_flag_scanned=True)
-            ocr_document.delay(document_id)
-            return
-
         if mime == "application/pdf":
             import pdfplumber
             pages_text = []
@@ -168,7 +162,7 @@ def extract_text(self, document_id: str):
                 for page in pdf.pages:
                     pages_text.append(page.extract_text() or "")
             text = "\n".join(pages_text)
-
+ 
             chars_per_page = len(text.strip()) / max(num_pages, 1)
             if chars_per_page < _MIN_CHARS_PER_PAGE:
                 logger.info(
@@ -178,6 +172,24 @@ def extract_text(self, document_id: str):
                 _mark_pending(document_id, auto_flag_scanned=True)
                 ocr_document.delay(document_id)
                 return
+ 
+            # Augment the extracted text with table-derived "Label: Value" lines.
+            # Many supplier invoices use a header grid (SUPPLIER | ACCOUNT CODE |
+            # INVOICE DATE | DUE DATE) whose cells are collapsed to a single line
+            # by extract_text(), losing all column context. extract_tables() gives
+            # us the header→value mapping which we serialize as explicit labels so
+            # the field extractor's labelled-field patterns can match them.
+            try:
+                from apps.documents.ocr.tasks_ocr import _extract_pdf_tables_as_text
+                table_text = _extract_pdf_tables_as_text(file_path)
+                if table_text:
+                    text = text + "\n\n" + table_text
+            except Exception as _tbl_exc:
+                logger.debug(
+                    "extract_text: table augmentation skipped for %s: %s",
+                    document_id, _tbl_exc,
+                )
+
 
         elif mime in (
             "application/vnd.openxmlformats-officedocument.wordprocessingml.document",

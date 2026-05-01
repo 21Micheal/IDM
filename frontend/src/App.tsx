@@ -3,7 +3,7 @@ import { Routes, Route, Navigate, useLocation } from "react-router-dom";
 import { useAuthStore } from "@/store/authStore";
 import { authAPI } from "@/services/api";
 import { VaultToaster } from "@/components/ui/vault-toast";
-import { FlaxemLogo } from "@/components/shared/FlaxemLogo";
+import { Loader2 } from "lucide-react";
 
 const Layout = lazy(() => import("@/components/shared/Layout"));
 const LoginPage = lazy(() => import("@/pages/LoginPage"));
@@ -112,7 +112,12 @@ const ROUTE_FALLBACK_CONTENT = [
   {
     match: (pathname: string) => pathname.startsWith("/documents/upload"),
     title: "Preparing upload workspace",
-    description: "Loading document intake, metadata capture, and OCR tools.",
+    description: "Loading document intake and metadata capture tools.",
+  },
+  {
+    match: (pathname: string) => pathname.startsWith("/documents/scan"),
+    title: "Preparing scan workspace",
+    description: "Loading OCR intake, extraction pipeline, and scan review tools.",
   },
   {
     match: (pathname: string) => pathname.startsWith("/documents/"),
@@ -171,7 +176,9 @@ function RouteFallback() {
   return (
     <div className="min-h-screen bg-background px-6 py-10">
       <div className="mx-auto flex min-h-[calc(100vh-5rem)] max-w-md flex-col items-center justify-center text-center">
-        <FlaxemLogo className="h-12 w-auto" variant="dark" />
+        <div className="inline-flex h-12 w-12 items-center justify-center rounded-full border border-border bg-card">
+          <Loader2 className="h-5 w-5 animate-spin text-muted-foreground" />
+        </div>
         <p className="mt-6 text-sm font-semibold text-foreground">{content.title}</p>
         <p className="mt-2 text-sm leading-6 text-muted-foreground">{content.description}</p>
       </div>
@@ -216,6 +223,7 @@ export default function App() {
               {/* Documents */}
               <Route path="documents"        element={<DocumentsPage />} />
               <Route path="documents/upload" element={<UploadPage />} />
+              <Route path="documents/scan"   element={<UploadPage scanOnly />} />
               <Route path="documents/:id"    element={<DocumentDetailPage />} />
 
               {/* Search */}

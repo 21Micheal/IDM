@@ -7,7 +7,7 @@ from urllib.parse import quote as urlquote, urlparse, urlunparse
 from django.core.files.base import ContentFile
 from django.http import HttpResponse
 from django.utils import timezone
-from django.db import transaction
+from django.db import transaction, models
 from django.conf import settings
 
 from django.core.cache import cache
@@ -149,7 +149,15 @@ class DocumentViewSet(AuditMixin, viewsets.ModelViewSet):
         )
         if user.has_admin_access:
             return qs
-        return qs.filter(uploaded_by=user)
+        
+        # Include documents uploaded by the user OR documents with active workflow tasks assigned to them
+        return qs.filter(
+            models.Q(uploaded_by=user) | 
+            models.Q(
+                workflow_instance__tasks__assigned_to=user,
+                workflow_instance__tasks__status__in=["pending", "in_progress", "held", "returned"],
+            )
+        ).distinct()
 
     def get_serializer_class(self):
         if self.action == "list":
@@ -172,6 +180,8 @@ class DocumentViewSet(AuditMixin, viewsets.ModelViewSet):
             ).update(preview_status=PreviewStatus.PENDING)
 
             if updated:
+                cache.delete(_preview_error_cache_key(str(doc.id)))
+                cache.delete(_preview_start_cache_key(str(doc.id)))
                 generate_document_preview.delay(str(doc.id))
         except Exception:
             logger.exception("_queue_office_preview: failed for doc=%s", doc.id)
@@ -181,14 +191,44 @@ class DocumentViewSet(AuditMixin, viewsets.ModelViewSet):
             return
         try:
             from .tasks import generate_document_version_preview
-            status_key = _version_preview_status_cache_key(str(version.id))
+            version_id = str(version.id)
+            status_key = _version_preview_status_cache_key(version_id)
+            processing_key = _version_preview_processing_cache_key(version_id)
+            start_key = _version_preview_start_cache_key(version_id)
+            error_key = _version_preview_error_cache_key(version_id)
+            preview_name = _version_preview_storage_name(version_id)
             current_status = cache.get(status_key)
+            stale_after = int(getattr(settings, "PREVIEW_PROCESSING_STALE_SECONDS", 300))
 
-            if current_status in (PreviewStatus.PENDING, PreviewStatus.PROCESSING):
+            try:
+                from django.core.files.storage import default_storage
+                preview_exists = default_storage.exists(preview_name)
+            except Exception:
+                preview_exists = False
+
+            if current_status == PreviewStatus.DONE and preview_exists:
                 return
 
+            if current_status == PreviewStatus.DONE and not preview_exists:
+                cache.delete(status_key)
+                current_status = None
+
+            if current_status in (PreviewStatus.PENDING, PreviewStatus.PROCESSING):
+                start_time = cache.get(start_key)
+                if start_time is not None:
+                    processing_age_s = max(0, int((timezone.now() - start_time).total_seconds()))
+                else:
+                    processing_age_s = stale_after + 1
+
+                if processing_age_s < stale_after:
+                    return
+
+                cache.delete(processing_key)
+                cache.delete(start_key)
+                cache.delete(error_key)
+
             cache.set(status_key, PreviewStatus.PENDING, timeout=3600)
-            generate_document_version_preview.delay(str(version.id))
+            generate_document_version_preview.delay(version_id)
         except Exception:
             logger.exception(
                 "_queue_office_version_preview: failed for version=%s",
@@ -303,9 +343,12 @@ class DocumentViewSet(AuditMixin, viewsets.ModelViewSet):
             file_mime_type=doc.file_mime_type,
             checksum=doc.checksum,
             current_version=doc.current_version,
+            preview_pdf="",
             preview_status="",
             updated_at=timezone.now(),
         )
+        cache.delete(_preview_error_cache_key(str(doc.id)))
+        cache.delete(_preview_start_cache_key(str(doc.id)))
         
         self._queue_office_preview(doc)
         self.record_audit("document.version_uploaded", doc, {"version": new_version})
@@ -363,6 +406,7 @@ class DocumentViewSet(AuditMixin, viewsets.ModelViewSet):
                 file_mime_type=doc.file_mime_type,
                 checksum=doc.checksum,
                 current_version=doc.current_version,
+                preview_pdf="",
                 preview_status="",
                 updated_at=timezone.now(),
             )
@@ -387,6 +431,8 @@ class DocumentViewSet(AuditMixin, viewsets.ModelViewSet):
                 cache.delete(_version_preview_error_cache_key(str(removed_version.id)))
                 cache.delete(_version_preview_start_cache_key(str(removed_version.id)))
 
+        cache.delete(_preview_error_cache_key(str(doc.id)))
+        cache.delete(_preview_start_cache_key(str(doc.id)))
         self._queue_office_preview(doc)
         self.record_audit(
             "document.version_restored",

@@ -26,6 +26,9 @@ urlpatterns = [
     # In-app notifications
     path("api/v1/notifications/", include("apps.notifications.urls")),
 
+    # Chat system
+    path("api/v1/chat/", include("apps.chat.urls")),
+
     # Storage stats
     path("api/v1/storage/stats/", StorageStatsView.as_view(), name="storage-stats"),
 

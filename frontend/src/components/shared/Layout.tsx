@@ -1,16 +1,22 @@
-import { useEffect, useRef, useState } from "react";
+import { Suspense, lazy, useEffect, useRef, useState } from "react";
 import { Outlet, NavLink, useNavigate, useLocation } from "react-router-dom";
 import {
   LayoutDashboard, FileText, Upload, Search,
   GitBranch, ShieldCheck, Settings, LogOut,
   Bell, Users, Building2, UserCircle, Shield,
-  ChevronDown, ChevronRight,
+  ChevronDown, ChevronRight, Archive, ScanLine, Loader2,
 } from "lucide-react";
 import { useAuthStore } from "../../store/authStore";
 import { useQuery } from "@tanstack/react-query";
 import { notificationsAPI, workflowAPI } from "../../services/api";
 import { FlaxemLogo } from "./FlaxemLogo";
+import { QUERY_SHORT_STALE } from "@/lib/reactQueryDefaults";
+import { preloadCommonRoutes, preloadRouteForPath } from "@/lib/routePreload";
 import clsx from "clsx";
+
+const ChatLauncher = lazy(() =>
+  import("@/components/chat/ChatLauncher").then((module) => ({ default: module.ChatLauncher })),
+);
 
 // ── Types ─────────────────────────────────────────────────────────────────────
 
@@ -36,6 +42,14 @@ function isGroup(entry: NavEntry): entry is NavGroup {
   return "children" in entry;
 }
 
+function navTarget(to: string) {
+  const [pathname, rawSearch] = to.split("?");
+  return {
+    pathname,
+    search: rawSearch ? `?${rawSearch}` : "",
+  };
+}
+
 // ── Navigation structure ──────────────────────────────────────────────────────
 
 const mainNav: NavEntry[] = [
@@ -58,7 +72,9 @@ const mainNav: NavEntry[] = [
     prefix: "/documents",
     children: [
       { to: "/documents",        icon: FileText, label: "All documents" },
+      { to: "/documents?status=archived", icon: Archive, label: "Archived" },
       { to: "/documents/upload", icon: Upload,   label: "Upload" },
+      { to: "/documents/scan",   icon: ScanLine, label: "Scan" },
       { to: "/search",           icon: Search,   label: "Search" },
     ],
   } as NavGroup,
@@ -90,10 +106,12 @@ function SidebarGroup({
   group,
   userAccess,
   taskCount,
+  onWarmRoute,
 }: {
   group: NavGroup;
   userAccess?: string;
   taskCount?: number;
+  onWarmRoute?: (to: string) => void;
 }) {
   const location = useLocation();
   const isGroupActive = location.pathname.startsWith(group.prefix);
@@ -130,15 +148,22 @@ function SidebarGroup({
         <div className="mt-0.5 ml-4 pl-3 border-l border-sidebar-border space-y-0.5">
           {visibleChildren.map(({ to, icon: Icon, label, exact }) => {
             const badgeValue = to === "/workflow" ? taskCount : undefined;
+            const target = navTarget(to);
+            const isChildActive =
+              location.pathname === target.pathname &&
+              (target.search ? location.search === target.search : !location.search);
+
             return (
               <NavLink
                 key={to}
                 to={to}
                 end={exact}
-                className={({ isActive }) =>
+                onMouseEnter={() => onWarmRoute?.(to)}
+                onFocus={() => onWarmRoute?.(to)}
+                className={() =>
                   clsx(
                     "flex items-center gap-2.5 px-3 py-1.5 rounded-lg text-sm transition-all duration-200",
-                    isActive
+                    isChildActive
                       ? "bg-sidebar-primary text-sidebar-primary-foreground shadow-sm"
                       : "text-sidebar-foreground hover:bg-sidebar-accent/50"
                   )
@@ -218,6 +243,26 @@ function ProfileMenu() {
   );
 }
 
+function ContentFallback() {
+  const [visible, setVisible] = useState(false);
+
+  useEffect(() => {
+    const timer = setTimeout(() => setVisible(true), 180);
+    return () => clearTimeout(timer);
+  }, []);
+
+  if (!visible) return null;
+
+  return (
+    <div className="flex min-h-[18rem] items-center justify-center rounded-xl border border-border bg-card">
+      <div className="flex items-center gap-2 text-sm text-muted-foreground">
+        <Loader2 className="h-4 w-4 animate-spin" />
+        <span>Loading page...</span>
+      </div>
+    </div>
+  );
+}
+
 // ── Layout ────────────────────────────────────────────────────────────────────
 
 export default function Layout() {
@@ -226,17 +271,44 @@ export default function Layout() {
   const location = useLocation();
   const mainRef = useRef<HTMLElement | null>(null);
   const hasAdminAccess = Boolean(user?.has_admin_access);
+  const [idleReady, setIdleReady] = useState(false);
+
+  useEffect(() => {
+    let fallbackTimer: ReturnType<typeof setTimeout> | null = null;
+    let idleHandle: number | null = null;
+    const markReady = () => setIdleReady(true);
+
+    if (typeof window !== "undefined" && "requestIdleCallback" in window) {
+      idleHandle = (window as any).requestIdleCallback(markReady, { timeout: 1500 });
+      fallbackTimer = setTimeout(markReady, 1600);
+      return () => {
+        if (idleHandle !== null) {
+          (window as any).cancelIdleCallback(idleHandle);
+        }
+        if (fallbackTimer) clearTimeout(fallbackTimer);
+      };
+    }
+
+    fallbackTimer = setTimeout(markReady, 500);
+    return () => {
+      if (fallbackTimer) clearTimeout(fallbackTimer);
+    };
+  }, []);
 
   const { data: notifications } = useQuery({
     queryKey: ["notifications"],
     queryFn: () => notificationsAPI.list().then((r) => r.data.results ?? r.data),
     refetchInterval: 30_000,
+    enabled: idleReady,
+    ...QUERY_SHORT_STALE,
   });
 
   const { data: myTasks = [] } = useQuery({
     queryKey: ["workflow", "my-tasks"],
     queryFn: () => workflowAPI.myTasks().then((r) => r.data.results ?? r.data),
     refetchInterval: 30_000,
+    enabled: idleReady,
+    ...QUERY_SHORT_STALE,
   });
 
   const unread = (notifications as { is_read: boolean }[] | undefined)
@@ -251,6 +323,12 @@ export default function Layout() {
   const visibleAdmin = adminNav.filter(
     (item) => !item.allowedRoles || hasAdminAccess
   );
+  const warmRoute = (to: string) => preloadRouteForPath(navTarget(to).pathname);
+
+  useEffect(() => {
+    if (!idleReady) return;
+    preloadCommonRoutes();
+  }, [idleReady]);
 
   return (
     <div className="flex h-screen bg-background text-foreground">
@@ -277,6 +355,7 @@ export default function Layout() {
                   group={entry}
                   userAccess={hasAdminAccess ? "admin" : undefined}
                   taskCount={pendingTasksCount}
+                  onWarmRoute={warmRoute}
                 />
               );
             }
@@ -292,6 +371,8 @@ export default function Layout() {
                 key={to}
                 to={to}
                 end={exact}
+                onMouseEnter={() => warmRoute(to)}
+                onFocus={() => warmRoute(to)}
                 className={({ isActive }) =>
                   clsx(
                     "flex items-center gap-3 px-3 py-2 rounded-lg text-sm font-medium transition-all duration-200",
@@ -324,6 +405,8 @@ export default function Layout() {
                 <NavLink
                   key={to}
                   to={to}
+                  onMouseEnter={() => warmRoute(to)}
+                  onFocus={() => warmRoute(to)}
                   className={({ isActive }) =>
                     clsx(
                       "flex items-center gap-3 px-3 py-2 rounded-lg text-sm font-medium transition-colors",
@@ -345,14 +428,13 @@ export default function Layout() {
 
       {/* ── Main area ──────────────────────────────────────────────────── */}
       <div className="flex-1 flex flex-col min-w-0">
-
-        {/* Topbar */}
-        <header className="h-14 bg-card border-b border-border flex items-center justify-end px-6 gap-3 flex-shrink-0 shadow-sm">
-
-          {/* Notification bell */}
+        <header
+          className="h-14 bg-card border-b border-border flex items-center justify-end px-6 gap-3 flex-shrink-0"
+          style={{ boxShadow: "var(--shadow-card)" }}
+        >
           <button
             onClick={() => navigate("/notifications")}
-            className="relative text-muted-foreground hover:text-foreground p-1.5 rounded-lg hover:bg-muted transition-colors"
+            className="relative text-muted-foreground hover:text-foreground p-1.5 rounded-md hover:bg-muted transition-colors"
             title="Notifications"
           >
             <Bell className="w-5 h-5" />
@@ -363,18 +445,24 @@ export default function Layout() {
             )}
           </button>
 
-          {/* Divider */}
           <div className="w-px h-6 bg-border" />
 
-          {/* Profile dropdown */}
           <ProfileMenu />
         </header>
 
-        {/* Page content */}
-        <main ref={mainRef} className="flex-1 overflow-y-auto p-6 bg-background">
-          <Outlet />
+        <main className="flex-1 overflow-y-auto p-6 bg-background">
+          <Suspense fallback={<ContentFallback />}>
+            <Outlet />
+          </Suspense>
         </main>
       </div>
+
+      {/* Floating chat — mounted after initial page settles */}
+      {idleReady ? (
+        <Suspense fallback={null}>
+          <ChatLauncher />
+        </Suspense>
+      ) : null}
     </div>
   );
 }

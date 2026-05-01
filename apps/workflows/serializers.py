@@ -422,6 +422,9 @@ class WorkflowTaskSerializer(serializers.ModelSerializer):
     document_id    = serializers.CharField(source="workflow_instance.document.id",               read_only=True)
     document_ref   = serializers.CharField(source="workflow_instance.document.reference_number", read_only=True)
     document_title = serializers.CharField(source="workflow_instance.document.title",            read_only=True)
+    document_type_name = serializers.CharField(source="workflow_instance.document.document_type.name", read_only=True)
+    file_name = serializers.CharField(source="workflow_instance.document.file_name", read_only=True)
+    file_mime_type = serializers.CharField(source="workflow_instance.document.file_mime_type", read_only=True)
     status_display = serializers.CharField(source="get_status_display", read_only=True)
 
     class Meta:
@@ -431,7 +434,8 @@ class WorkflowTaskSerializer(serializers.ModelSerializer):
             "status", "status_display",
             "comment", "held_until",
             "due_at", "acted_at",
-            "document_id", "document_ref", "document_title",
+            "document_id", "document_ref", "document_title", "document_type_name",
+            "file_name", "file_mime_type",
         ]
 
 

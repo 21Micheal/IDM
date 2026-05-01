@@ -49,6 +49,8 @@ interface DocTypeForm {
   reference_prefix:   string;
   reference_padding:  number;
   description:        string;
+  is_personal_type:   boolean;
+  metadata_mode:      "admin_defined" | "user_defined";
   metadata_fields:    MetadataFieldForm[];
 }
 
@@ -60,23 +62,29 @@ const iCls =
 // ── Payload builder ───────────────────────────────────────────────────────────
 
 function buildPayload(values: DocTypeForm) {
+  const isPersonal = values.is_personal_type;
+  const metadataMode = isPersonal ? "user_defined" : values.metadata_mode;
   return {
     name:              values.name,
     code:              values.code,
     reference_prefix:  values.reference_prefix,
     reference_padding: values.reference_padding,
     description:       values.description,
-    metadata_fields:   values.metadata_fields.map((f, i) => ({
-      label:         f.label,
-      field_key:     f.field_key,
-      field_type:    f.field_type,
-      is_required:   f.is_required,
-      help_text:     f.help_text,
-      order:         i,
-      select_options: f.field_type === "select" && f.select_options_raw
-        ? f.select_options_raw.split(",").map((s) => s.trim()).filter(Boolean)
-        : [],
-    })),
+    is_personal_type:  isPersonal,
+    metadata_mode:     metadataMode,
+    metadata_fields:   metadataMode === "admin_defined"
+      ? values.metadata_fields.map((f, i) => ({
+          label:         f.label,
+          field_key:     f.field_key,
+          field_type:    f.field_type,
+          is_required:   f.is_required,
+          help_text:     f.help_text,
+          order:         i,
+          select_options: f.field_type === "select" && f.select_options_raw
+            ? f.select_options_raw.split(",").map((s) => s.trim()).filter(Boolean)
+            : [],
+        }))
+      : [],
   };
 }
 
@@ -108,11 +116,17 @@ export default function AdminDocumentTypesPage() {
     queryFn: () => documentApi.types().then((r) => r.data as unknown),
     select: (data) => normalizeListResponse<DocumentType>(data),
   });
+  const missingTypeFlags = (types ?? []).length > 0
+    && (types ?? []).every(
+      (t) => typeof t.is_personal_type !== "boolean" && typeof t.metadata_mode !== "string",
+    );
 
   const form = useForm<DocTypeForm>({
     defaultValues: {
       name: "", code: "", reference_prefix: "",
-      reference_padding: 5, description: "", metadata_fields: [],
+      reference_padding: 5, description: "",
+      is_personal_type: false, metadata_mode: "admin_defined",
+      metadata_fields: [],
     },
   });
 
@@ -120,6 +134,15 @@ export default function AdminDocumentTypesPage() {
     control: form.control,
     name: "metadata_fields",
   });
+  const isPersonalType = form.watch("is_personal_type");
+  const metadataMode = form.watch("metadata_mode");
+  const useAdminMetadata = !isPersonalType && metadataMode === "admin_defined";
+
+  useEffect(() => {
+    if (isPersonalType && form.getValues("metadata_mode") !== "user_defined") {
+      form.setValue("metadata_mode", "user_defined", { shouldDirty: true });
+    }
+  }, [isPersonalType, form]);
 
   useEffect(() => {
     const activeFieldIds = new Set(fields.map((field) => field.id));
@@ -197,7 +220,9 @@ export default function AdminDocumentTypesPage() {
     generatedFieldKeysRef.current = {};
     form.reset({
       name: "", code: "", reference_prefix: "",
-      reference_padding: 5, description: "", metadata_fields: [],
+      reference_padding: 5, description: "",
+      is_personal_type: false, metadata_mode: "admin_defined",
+      metadata_fields: [],
     });
     setEditingId("new");
   };
@@ -210,6 +235,8 @@ export default function AdminDocumentTypesPage() {
       reference_prefix:  type.reference_prefix,
       reference_padding: type.reference_padding ?? 5,
       description:       type.description ?? "",
+      is_personal_type:  type.is_personal_type ?? false,
+      metadata_mode:     type.metadata_mode ?? ((type.is_personal_type ?? false) ? "user_defined" : "admin_defined"),
       metadata_fields:   (type.metadata_fields ?? []).map((f) => ({
         label:              f.label,
         field_key:          f.field_key,
@@ -246,6 +273,12 @@ export default function AdminDocumentTypesPage() {
           <p className="text-sm text-muted-foreground mt-1">
             Configure types, metadata fields, and reference numbering.
           </p>
+          {missingTypeFlags && (
+            <p className="text-xs text-amber-600 mt-2">
+              Personal type settings are enabled in UI, but your API responses do not yet include these fields.
+              Changes may not persist until backend support is deployed.
+            </p>
+          )}
         </div>
         <button onClick={openNew} className="btn-primary">
           <Plus className="w-4 h-4" /> New document type
@@ -281,8 +314,15 @@ export default function AdminDocumentTypesPage() {
                     <p className="text-xs text-muted-foreground mt-0.5">
                       <span className="font-mono">{t.reference_prefix}</span>-{"0".repeat(t.reference_padding ?? 5)}
                       {" · "}
-                      {t.metadata_fields?.length ?? 0} custom field{(t.metadata_fields?.length ?? 0) !== 1 ? "s" : ""}
+                      {t.metadata_mode === "user_defined"
+                        ? "user-defined metadata"
+                        : `${t.metadata_fields?.length ?? 0} custom field${(t.metadata_fields?.length ?? 0) !== 1 ? "s" : ""}`}
                     </p>
+                    {(t.is_personal_type || t.metadata_mode === "user_defined") && (
+                      <p className="text-[11px] text-accent mt-1 font-medium">
+                        {t.is_personal_type ? "Personal type" : "User-defined metadata"}
+                      </p>
+                    )}
                   </div>
                   <ChevronRight className="w-4 h-4 text-muted-foreground" />
                 </div>
@@ -365,6 +405,34 @@ export default function AdminDocumentTypesPage() {
                   </label>
                   <textarea {...form.register("description")} rows={2} className={iCls} />
                 </div>
+                <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                  <label className="flex items-center gap-2 text-sm text-foreground">
+                    <input
+                      type="checkbox"
+                      {...form.register("is_personal_type")}
+                      className="w-4 h-4 rounded border-border text-accent focus:ring-ring"
+                    />
+                    This is a personal document type
+                  </label>
+                  <div>
+                    <label className="block text-xs font-medium text-foreground mb-1.5">
+                      Metadata mode
+                    </label>
+                    <select
+                      {...form.register("metadata_mode")}
+                      disabled={isPersonalType}
+                      className={cn(iCls, isPersonalType && "opacity-60 cursor-not-allowed")}
+                    >
+                      <option value="admin_defined">Admin-defined metadata fields</option>
+                      <option value="user_defined">User-defined metadata fields</option>
+                    </select>
+                    <p className="mt-1 text-[11px] text-muted-foreground">
+                      {isPersonalType
+                        ? "Personal types always use user-defined metadata."
+                        : "Choose whether metadata comes from admin field definitions or user-defined key/value fields."}
+                    </p>
+                  </div>
+                </div>
               </section>
 
               {/* Metadata fields */}
@@ -375,25 +443,34 @@ export default function AdminDocumentTypesPage() {
                       Custom metadata fields
                     </h3>
                     <p className="text-xs text-muted-foreground mt-0.5">
-                      Core fields (supplier, amount, date) are always present.
+                      {useAdminMetadata
+                        ? "Core fields (supplier, amount, date) are always present."
+                        : "Disabled: users will define their own searchable fields at upload time."}
                     </p>
                   </div>
-                  <button
-                    type="button"
-                    onClick={addField}
-                    className="inline-flex items-center gap-1 text-xs text-accent hover:text-accent/80 font-semibold"
-                  >
-                    <Plus className="w-3.5 h-3.5" /> Add field
-                  </button>
+                  {useAdminMetadata && (
+                    <button
+                      type="button"
+                      onClick={addField}
+                      className="inline-flex items-center gap-1 text-xs text-accent hover:text-accent/80 font-semibold"
+                    >
+                      <Plus className="w-3.5 h-3.5" /> Add field
+                    </button>
+                  )}
                 </div>
 
-                {fields.length === 0 && (
+                {useAdminMetadata && fields.length === 0 && (
                   <p className="text-xs text-muted-foreground text-center py-6 border border-dashed border-border rounded-lg">
                     No custom fields yet. Click "Add field" to start.
                   </p>
                 )}
+                {!useAdminMetadata && (
+                  <p className="text-xs text-muted-foreground text-center py-6 border border-dashed border-border rounded-lg">
+                    Admin-defined metadata is disabled for this type.
+                  </p>
+                )}
 
-                <div className="space-y-3">
+                <div className={cn("space-y-3", !useAdminMetadata && "opacity-50 pointer-events-none select-none")}>
                   {fields.map((field, idx) => {
                     const fieldType = form.watch(`metadata_fields.${idx}.field_type`);
                     return (

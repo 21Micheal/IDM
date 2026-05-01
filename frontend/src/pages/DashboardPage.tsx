@@ -14,7 +14,10 @@ import { useEffect, useRef, useState, useMemo } from "react";
 import type { Document, DocumentSearchResponse, SearchHit, WorkflowTask } from "@/types";
 import { StatCard } from "@/components/dashboard/StatCard";
 import { useDebounce } from "@/hooks/useDebounce";
-import { getQuickSearchSnippet, highlightSearchText } from "@/lib/search";
+import { highlightSearchText, getPreferredHighlights } from "@/lib/search";
+import { QUERY_FIVE_MIN_STALE, QUERY_SHORT_STALE, QUERY_FOCUS_OFF } from "@/lib/reactQueryDefaults";
+import { formatDocumentFileType } from "@/lib/documentFormat";
+import { preloadDocumentWorkspace } from "@/lib/routePreload";
 
 const RECENT_DOCS_PAGE_SIZE = 5;
 const RECENT_AUDIT_PAGE_SIZE = 5;
@@ -147,11 +150,13 @@ export default function DashboardPage() {
         page_size: RECENT_DOCS_PAGE_SIZE,
         ordering: "-updated_at",
       }).then((r) => r.data as PaginatedResponse<Document>),
+    ...QUERY_SHORT_STALE,
   });
 
   const { data: totalDocuments = 0 } = useQuery({
     queryKey: ["documents", "count", "all"],
     queryFn: () => documentsAPI.list({ page: 1, page_size: 1 }).then((r) => r.data.count ?? 0),
+    ...QUERY_SHORT_STALE,
   });
 
   const { data: pendingCount = 0 } = useQuery({
@@ -163,6 +168,7 @@ export default function DashboardPage() {
         page: 1,
         page_size: 1,
       }).then((r) => r.data.count ?? 0),
+    ...QUERY_SHORT_STALE,
   });
 
   const { data: completedCount = 0 } = useQuery({
@@ -174,11 +180,13 @@ export default function DashboardPage() {
         page: 1,
         page_size: 1,
       }).then((r) => r.data.count ?? 0),
+    ...QUERY_SHORT_STALE,
   });
 
   const { data: myTasks = [], isLoading: tasksLoading } = useQuery({
     queryKey: ["workflow", "my-tasks"],
     queryFn: () => workflowAPI.myTasks().then((r) => r.data.results ?? r.data),
+    ...QUERY_SHORT_STALE,
   });
 
   const { data: recentAudit, isLoading: auditLoading } = useQuery({
@@ -193,12 +201,13 @@ export default function DashboardPage() {
           },
         })
         .then((r) => r.data as PaginatedResponse<DashboardAuditEvent>),
+    ...QUERY_SHORT_STALE,
   });
 
   const { data: storageStats } = useQuery<StorageStats>({
     queryKey: ["storage", "stats"],
     queryFn: () => api.get("/storage/stats/").then((res) => res.data),
-    staleTime: 5 * 60 * 1000,
+    ...QUERY_FIVE_MIN_STALE,
   });
 
   const { data: dashboardSearchResults, isFetching: isDashboardSearchLoading } = useQuery({
@@ -210,6 +219,7 @@ export default function DashboardPage() {
         page_size: 5,
       }).then((r) => r.data as DocumentSearchResponse),
     enabled: debouncedDashboardSearch.length >= 2,
+    ...QUERY_FOCUS_OFF,
   });
 
   // ── Computed Values ───────────────────────────────────────────────────────
@@ -243,6 +253,16 @@ export default function DashboardPage() {
   const hasActiveDashboardSelection =
     activeDashboardResultIndex >= 0 && activeDashboardResultIndex < dashboardResults.length;
 
+  // ── Helper Functions ───────────────────────────────────────────────────────
+
+  // Highlight only the searched term in the snippet (same as SearchPage)
+  const highlightTerm = (text: string, term: string) => {
+    if (!term || !text) return text;
+    const escapedTerm = term.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+    const regex = new RegExp(`(${escapedTerm})`, "gi");
+    return text.replace(regex, '<span class="bg-yellow-200 text-yellow-800 font-medium px-0.5 rounded">$1</span>');
+  };
+
   // ── Handlers ──────────────────────────────────────────────────────────────
 
   const handleDashboardSearch = () => {
@@ -251,6 +271,7 @@ export default function DashboardPage() {
   };
 
   const handleDashboardResultOpen = (hit: SearchHit) => {
+    preloadDocumentWorkspace();
     setIsDashboardSearchFocused(false);
     setActiveDashboardResultIndex(-1);
     navigate(`/documents/${hit.id}`);
@@ -365,7 +386,6 @@ export default function DashboardPage() {
                   <>
                     <div className="divide-y divide-border">
                       {dashboardResults.map((hit: SearchHit, index) => {
-                        const snippetData = getQuickSearchSnippet(hit, dashboardSearchTerm);
                         return (
                           <button
                             key={hit.id}
@@ -387,6 +407,8 @@ export default function DashboardPage() {
                                   />
                                   <span>•</span>
                                   <span>{hit.document_type}</span>
+                                  <span>•</span>
+                                  <span>{formatDocumentFileType(hit.file_name, hit.file_mime_type)}</span>
                                 </div>
                                 <p
                                   className="truncate text-sm font-semibold text-foreground"
@@ -402,12 +424,36 @@ export default function DashboardPage() {
                                     }}
                                   />
                                 )}
-                                <div className="mt-2 rounded-md bg-muted/40 px-2.5 py-2">
-                                  <p
-                                    className="line-clamp-3 text-xs leading-5 text-foreground"
-                                    dangerouslySetInnerHTML={{ __html: snippetData.snippet }}
-                                  />
-                                </div>
+                                {/* Show highlighted snippets like SearchPage */}
+                                {hit.highlights && Object.keys(hit.highlights).length > 0 ? (
+                                  <div className="mt-2 rounded-md bg-muted/40 px-2.5 py-2">
+                                    <div className="line-clamp-3 text-xs leading-5 text-foreground space-y-2">
+                                      {getPreferredHighlights(hit, dashboardSearchTerm).slice(0, 2).map(([field, snippet]) => (
+                                        <div key={field} className="italic">
+                                          <span
+                                            dangerouslySetInnerHTML={{
+                                              __html: highlightTerm(snippet, dashboardSearchTerm),
+                                            }}
+                                          />
+                                        </div>
+                                      ))}
+                                    </div>
+                                  </div>
+                                ) : (
+                                  // Fallback: show highlighted metadata when no content highlights available
+                                  <div className="mt-2 rounded-md bg-muted/40 px-2.5 py-2">
+                                    <div className="line-clamp-3 text-xs leading-5 text-foreground italic">
+                                      <span
+                                        dangerouslySetInnerHTML={{
+                                          __html: highlightTerm(
+                                            hit.supplier || hit.title || hit.reference_number,
+                                            dashboardSearchTerm
+                                          ),
+                                        }}
+                                      />
+                                    </div>
+                                  </div>
+                                )}
                               </div>
                               <StatusBadge status={hit.status} />
                             </div>
@@ -502,6 +548,8 @@ export default function DashboardPage() {
                   <Link
                     key={doc.id}
                     to={`/documents/${doc.id}`}
+                    onMouseEnter={preloadDocumentWorkspace}
+                    onFocus={preloadDocumentWorkspace}
                     className="block px-6 py-4 hover:bg-muted/40 transition-colors"
                   >
                     <div className="flex items-center gap-4">
@@ -512,6 +560,10 @@ export default function DashboardPage() {
                         <p className="text-sm font-semibold text-foreground truncate">{doc.title}</p>
                         <div className="flex flex-wrap items-center gap-2 text-xs text-muted-foreground mt-1">
                           <span>{doc.reference_number}</span>
+                          <span>•</span>
+                          <span>{doc.document_type_name || doc.document_type?.name || "Unclassified"}</span>
+                          <span>•</span>
+                          <span>{formatDocumentFileType(doc.file_name, doc.file_mime_type)}</span>
                           <span>•</span>
                           <span>{formatDistanceToNow(new Date(doc.updated_at), { addSuffix: true })}</span>
                         </div>
@@ -692,6 +744,9 @@ export default function DashboardPage() {
               ) : myTasks.length ? (
                 myTasks.slice(0, 5).map((task: WorkflowTask) => {
                   const doc = task.workflow_instance?.document;
+                  const documentType =
+                    doc?.document_type_name ?? doc?.document_type?.name ?? task.document_type_name ?? "Unclassified";
+                  const documentFormat = formatDocumentFileType(task.file_name, task.file_mime_type);
                   return (
                     <Link
                       key={task.id}
@@ -706,7 +761,11 @@ export default function DashboardPage() {
                           <p className="text-sm font-semibold text-foreground truncate">
                             {doc?.title || task.document_title || "Untitled document"}
                           </p>
-                          <div className="mt-1 flex items-center gap-2 text-xs text-muted-foreground">
+                          <div className="mt-1 flex flex-wrap items-center gap-2 text-xs text-muted-foreground">
+                            <span>{documentType}</span>
+                            <span>•</span>
+                            <span>{documentFormat}</span>
+                            <span>•</span>
                             <span>{task.step?.name}</span>
                             <span>•</span>
                             <TaskMetaInfo dueAt={task.due_at} />

@@ -8,22 +8,18 @@ import "./index.css";
 const queryClient = new QueryClient({
   defaultOptions: {
     queries: {
-      staleTime: 1000 * 60 * 5, // 5 minutes default
-      gcTime: 1000 * 60 * 10,   // 10 minutes garbage collection
-      retry: 1,
-    },
-  },
-});
-
-// Set shorter stale times for dynamic data to ensure consistency
-queryClient.setDefaultOptions({
-  queries: {
-    retry: (failureCount, error: any) => {
-      // Don't retry on 401/403 auth errors
-      if (error?.response?.status === 401 || error?.response?.status === 403) {
-        return false;
-      }
-      return failureCount < 1;
+      staleTime: 1000 * 60 * 2,
+      gcTime: 1000 * 60 * 15,
+      refetchOnWindowFocus: false,
+      refetchOnReconnect: false,
+      refetchOnMount: false,
+      retry: (failureCount, error: any) => {
+        // Do not retry auth failures; retry transient failures once.
+        if (error?.response?.status === 401 || error?.response?.status === 403) {
+          return false;
+        }
+        return failureCount < 1;
+      },
     },
   },
 });

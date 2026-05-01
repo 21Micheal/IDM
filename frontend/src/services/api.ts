@@ -64,11 +64,30 @@ function normalizeApiBase(rawBase: string): string {
 }
 
 function resolveApiBaseUrl(): string {
-  const currentHost = typeof window !== "undefined" ? window.location.hostname : "";
-  if (currentHost === "localhost" || currentHost === "127.0.0.1" || currentHost === "::1") {
+  const rawApiUrl = import.meta.env.VITE_API_URL?.trim();
+  if (!rawApiUrl) {
     return "/api/v1";
   }
-  return normalizeApiBase(import.meta.env.VITE_API_URL ?? "/api/v1");
+
+  const normalized = normalizeApiBase(rawApiUrl);
+
+  if (typeof window !== "undefined") {
+    const currentHost = window.location.hostname;
+    if (currentHost === "localhost" || currentHost === "127.0.0.1" || currentHost === "::1") {
+      return "/api/v1";
+    }
+
+    try {
+      const parsed = new URL(normalized, window.location.origin);
+      if (parsed.protocol === "http:" || parsed.protocol === "https:") {
+        return parsed.href.replace(/\/+$|\/$/, "");
+      }
+    } catch {
+      // fall back to proxy-friendly relative API path
+    }
+  }
+
+  return "/api/v1";
 }
 
 export const apiBaseUrl = resolveApiBaseUrl();
@@ -429,4 +448,48 @@ export const groupsAPI = {
     }),
   removeMember: (id: string, userId: string) =>
     api.post(`/groups/${id}/remove_member/`, { user_id: userId }),
+};
+
+// ── Chat API ─────────────────────────────────────────────────────────────────────
+
+export const chatAPI = {
+  // Chat Rooms
+  rooms: {
+    list: () => api.get("/chat/rooms/"),
+    get: (id: string) => api.get(`/chat/rooms/${id}/`),
+    create: (data: { name?: string; room_type: string; participant_ids?: string[] }) =>
+      api.post("/chat/rooms/", data),
+    getDirectMessage: (userId: string) =>
+      api.get(`/chat/rooms/direct_message/?user_id=${userId}`),
+    markRead: (id: string) => api.post(`/chat/rooms/${id}/mark_read/`),
+    getMessages: (id: string, params?: any) =>
+      api.get(`/chat/rooms/${id}/messages/`, { params }),
+    leave: (id: string) => api.post(`/chat/rooms/${id}/leave/`),
+  },
+  
+  // Messages
+  messages: {
+    list: (roomId?: string) => api.get("/chat/messages/", { params: { room_id: roomId } }),
+    create: (data: { content: string; room_id: string; message_type?: string; reply_to?: string }) =>
+      api.post("/chat/messages/", data),
+    markRead: (messageIds: string[]) =>
+      api.post("/chat/messages/mark_read/", { message_ids: messageIds }),
+  },
+  
+  // Users
+  users: {
+    list: () => api.get("/chat/users/"),
+  },
+  
+  // Unread Messages
+  unread: {
+    list: () => api.get("/chat/unread/"),
+    count: () => api.get("/chat/unread/count/"),
+  },
+  
+  // Notifications
+  notifications: {
+    list: () => api.get("/chat/notifications/"),
+    markAllRead: () => api.post("/chat/notifications/mark_all_read/"),
+  },
 };

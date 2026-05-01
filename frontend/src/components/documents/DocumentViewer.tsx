@@ -16,7 +16,7 @@
  * version polling, install/open script flow, fallbacks) is unchanged.
  */
 
-import { useCallback, useEffect, useRef, useState } from "react";
+import { lazy, Suspense, useCallback, useEffect, useRef, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { documentsAPI } from "../../services/api";
 import { useAuthStore } from "@/store/authStore";
@@ -45,17 +45,18 @@ import type {
 } from "@/types";
 
 import {
+  clearDocumentVersionCache,
   getCachedVersionPreview,
   setCachedVersionPreview,
 } from "@/utils/versionPreviewCache";
 
-import { UploadVersionDrawer } from "@/components/documents/UploadVersionDrawer";
+const UploadVersionDrawer = lazy(() =>
+  import("@/components/documents/UploadVersionDrawer").then((module) => ({ default: module.UploadVersionDrawer }))
+);
 import type { ReactNode } from "react";
-
-import * as pdfjsLib from "pdfjs-dist";
 import type { PDFDocumentProxy } from "pdfjs-dist";
 
-pdfjsLib.GlobalWorkerOptions.workerSrc = new URL(
+const pdfWorkerPath = new URL(
   "pdfjs-dist/build/pdf.worker.min.mjs",
   import.meta.url
 ).toString();
@@ -206,16 +207,26 @@ function PdfViewer({
 
   useEffect(() => {
     let cancelled = false;
+    let task: { promise: Promise<PDFDocumentProxy>; destroy?: () => void } | null = null;
+
     setLoading(true);
     setError("");
 
     const normalizedUrl = normalizeUrl(url) || "";
-    const task = pdfjsLib.getDocument({
-      url: normalizedUrl,
-      withCredentials: true,
-      httpHeaders: { Authorization: `Bearer ${token ?? ""}` },
-    });
-    task.promise
+
+    const documentPromise = import("pdfjs-dist")
+      .then((pdfjsLib) => {
+        if (cancelled) return Promise.reject("cancelled");
+        pdfjsLib.GlobalWorkerOptions.workerSrc = pdfWorkerPath;
+        task = pdfjsLib.getDocument({
+          url: normalizedUrl,
+          withCredentials: true,
+          httpHeaders: { Authorization: `Bearer ${token ?? ""}` },
+        });
+        return task.promise;
+      });
+
+    documentPromise
       .then((d) => {
         if (cancelled) return;
         setPdfDoc(d);
@@ -228,9 +239,10 @@ function PdfViewer({
         setError(err?.status === 403 ? "Permission denied." : "Failed to load PDF.");
         setLoading(false);
       });
+
     return () => {
       cancelled = true;
-      task.destroy();
+      task?.destroy?.();
     };
   }, [url, token]);
 
@@ -483,7 +495,9 @@ function OfficeEditPanel({
       const cacheKey = getPreviewCacheKey(doc.id, doc.current_version, selectedVersionId);
       const cached = getCachedVersionPreview(cacheKey);
 
-      if (cached && !selectedVersionId) {
+      // For current-version preview, always hit API so new uploads/version bumps
+      // are reflected immediately. Use cache only for historical version browsing.
+      if (cached && selectedVersionId && cached.preview_status !== "failed") {
         return cached;
       }
 
@@ -530,18 +544,18 @@ function OfficeEditPanel({
   const startPolling = useCallback(() => {
     stopPolling();
     startTimeRef.current  = Date.now();
+    setTimedOut(false);
     pollingRef.current    = true;
 
     previewPollRef.current = setInterval(async () => {
       if (!pollingRef.current) return;
+      if (typeof document !== "undefined" && document.hidden) return;
 
       const elapsed = Date.now() - (startTimeRef.current ?? Date.now());
       setPreviewProgress(Math.min(95, (elapsed / POLL_TIMEOUT_MS) * 100));
 
       if (elapsed >= POLL_TIMEOUT_MS) {
-        stopPolling();
         setTimedOut(true);
-        return;
       }
 
       try {
@@ -593,9 +607,9 @@ function OfficeEditPanel({
     if (failedConfirmRef.current) clearTimeout(failedConfirmRef.current);
   }, [stopPolling]);
 
-  const isConverting  = !timedOut && ["pending", "processing"].includes(preview?.preview_status ?? "");
+  const isConverting  = ["pending", "processing"].includes(preview?.preview_status ?? "");
   const hasPdf        = preview?.viewer === "pdfjs" && !!preview.url;
-  const previewFailed = (preview?.preview_status === "failed" && !isConfirmingFailed) || timedOut;
+  const previewFailed = preview?.preview_status === "failed" && !isConfirmingFailed;
   const activeDownloadUrl = normalizeUrl(preview?.raw_url ?? preview?.url ?? initialPreview.raw_url ?? initialPreview.url) ?? "";
 
   // ── Lock mutations ────────────────────────────────────────────────────────
@@ -657,6 +671,7 @@ function OfficeEditPanel({
     setVersionPolling(true);
     if (versionPollRef.current) clearInterval(versionPollRef.current);
     versionPollRef.current = setInterval(async () => {
+      if (typeof document !== "undefined" && document.hidden) return;
       try {
         const { data: latest } = await documentsAPI.get(doc.id);
         if (latest.current_version > baseVersion) {
@@ -776,6 +791,11 @@ function OfficeEditPanel({
               <Loader2 className="w-3 h-3 animate-spin" /> Generating
             </span>
           )}
+          {timedOut && isConverting && (
+            <span className="inline-flex items-center gap-1 text-xs text-amber-700 font-medium bg-amber-500/10 px-2 py-0.5 rounded-full border border-amber-500/20">
+              <Clock className="w-3 h-3" /> Taking longer
+            </span>
+          )}
           {previewFailed && (
             <span className="inline-flex items-center gap-1 text-xs text-destructive font-medium bg-destructive/10 px-2 py-0.5 rounded-full border border-destructive/20">
               <AlertCircle className="w-3 h-3" /> Failed
@@ -885,7 +905,9 @@ function OfficeEditPanel({
               <div className="text-center">
                 <p className="font-medium text-foreground">Generating preview</p>
                 <p className="text-xs text-muted-foreground mt-1">
-                  Converting {info.app} to PDF — {Math.round(previewProgress)}%
+                  {timedOut
+                    ? `Converting ${info.app} to PDF is taking longer than usual, but it is still running.`
+                    : `Converting ${info.app} to PDF — ${Math.round(previewProgress)}%`}
                 </p>
               </div>
             </div>
@@ -992,16 +1014,15 @@ export default function DocumentViewer({ document: doc, submitSlot }: Props) {
       const cacheKey = getPreviewCacheKey(doc.id, doc.current_version, selectedVersionId);
       const cached = getCachedVersionPreview(cacheKey);
       
-      // For current version, serve from cache if available and fresh
-      // For version previews, only serve from cache if it's a successful preview
+      // For current version, always verify with API to avoid stale preview state
+      // after uploads or restores. For historical version browsing, cache is fine.
       if (cached) {
         const isSuccessfulPreview = cached.preview_status !== "failed";
-        const isCurrentVersion = !selectedVersionId;
-        
-        if (isCurrentVersion || isSuccessfulPreview) {
+
+        if (selectedVersionId && isSuccessfulPreview) {
           return cached;
         }
-        // If it's a failed version preview, don't serve from cache - allow retry
+        // If it's current version or a failed version preview, bypass cache.
       }
       
       try {
@@ -1037,6 +1058,8 @@ export default function DocumentViewer({ document: doc, submitSlot }: Props) {
 
   const onVersionUploaded = useCallback(() => {
     setSelectedVersionId(null);
+    clearDocumentVersionCache(doc.id);
+    qc.removeQueries({ queryKey: ["document-preview", doc.id] });
     qc.invalidateQueries({ queryKey: ["document", doc.id] });
     qc.invalidateQueries({ queryKey: ["document-preview", doc.id] });
   }, [qc, doc.id]);
@@ -1057,23 +1080,41 @@ export default function DocumentViewer({ document: doc, submitSlot }: Props) {
     const currentIndex = doc.versions.findIndex(v => v.id === selectedVersionId);
     if (currentIndex === -1) return;
 
-    const preloadVersions = [];
+    const preloadVersions: string[] = [];
     if (currentIndex > 0) preloadVersions.push(doc.versions[currentIndex - 1].id);
     if (currentIndex < doc.versions.length - 1) preloadVersions.push(doc.versions[currentIndex + 1].id);
 
-    preloadVersions.forEach(versionId => {
-      const cacheKey = `${doc.id}-${versionId}`;
-      if (!getCachedVersionPreview(cacheKey)) {
-        documentsAPI.previewUrl(doc.id, versionId).then(result => {
-          const normalizedResult = {
-            ...result.data,
-            url: normalizeUrl(result.data.url) || result.data.url,
-            raw_url: result.data.raw_url ? normalizeUrl(result.data.raw_url) || result.data.raw_url : undefined,
-          };
-          setCachedVersionPreview(cacheKey, normalizedResult);
-        }).catch(() => { /* ignore preload errors */ });
-      }
-    });
+    let cancelled = false;
+    const preload = () => {
+      preloadVersions.forEach(versionId => {
+        const cacheKey = `${doc.id}-${versionId}`;
+        if (!getCachedVersionPreview(cacheKey)) {
+          documentsAPI.previewUrl(doc.id, versionId).then(result => {
+            if (cancelled) return;
+            const normalizedResult = {
+              ...result.data,
+              url: normalizeUrl(result.data.url) || result.data.url,
+              raw_url: result.data.raw_url ? normalizeUrl(result.data.raw_url) || result.data.raw_url : undefined,
+            };
+            setCachedVersionPreview(cacheKey, normalizedResult);
+          }).catch(() => { /* ignore preload errors */ });
+        }
+      });
+    };
+
+    if (typeof window !== "undefined" && "requestIdleCallback" in window) {
+      const idleHandle = (window as any).requestIdleCallback(preload, { timeout: 1200 });
+      return () => {
+        cancelled = true;
+        (window as any).cancelIdleCallback(idleHandle);
+      };
+    }
+
+    const timeoutHandle = setTimeout(preload, 250);
+    return () => {
+      cancelled = true;
+      clearTimeout(timeoutHandle);
+    };
   }, [doc.id, doc.versions, selectedVersionId]);
 
   if (isLoading)
@@ -1222,11 +1263,13 @@ export default function DocumentViewer({ document: doc, submitSlot }: Props) {
       {((canUploadVersion && !isLockedByOther) || submitSlot) && (
         <div className="flex flex-wrap items-center justify-end gap-2 pt-2 border-t border-border">
           {canUploadVersion && !isLockedByOther && (
-            <UploadVersionDrawer
-              documentId={doc.id}
-              currentVersion={doc.current_version}
-              onVersionUploaded={onVersionUploaded}
-            />
+            <Suspense fallback={<div className="inline-flex h-11 items-center justify-center rounded-lg border border-border bg-card px-4 text-sm text-muted-foreground">Loading upload tools…</div>}>
+              <UploadVersionDrawer
+                documentId={doc.id}
+                currentVersion={doc.current_version}
+                onVersionUploaded={onVersionUploaded}
+              />
+            </Suspense>
           )}
           {submitSlot}
         </div>

@@ -15,6 +15,7 @@ import {
 } from "lucide-react";
 import { toast } from "@/components/ui/vault-toast";
 import clsx from "clsx";
+import { QUERY_FIVE_MIN_STALE, QUERY_ONE_MINUTE_STALE, QUERY_SHORT_STALE } from "@/lib/reactQueryDefaults";
 
 // ── Types ─────────────────────────────────────────────────────────────────────
 type AssigneeType = "group_any" | "group_all" | "group_specific";
@@ -270,6 +271,7 @@ function StepEditPanel({
       return raw.map((item) => item?.user ?? item).filter((u): u is AppUser => Boolean(u?.id && u?.email));
     },
     enabled: !!step.assignee_group && needsGroupMember,
+    ...QUERY_ONE_MINUTE_STALE,
   });
 
   const color = getGroupColor(step.assignee_group);
@@ -975,6 +977,7 @@ function RoutingRulesPanel({ template }: {
     queryKey: ["workflow-rules", templateId],
     queryFn: () => workflowAPI.listRules({ template: templateId }).then(r => r.data.results ?? r.data),
     enabled: hasDocumentType,
+    ...QUERY_SHORT_STALE,
   });
 
   const createRule = useMutation({
@@ -1230,6 +1233,7 @@ function TemplateEditor({
   const { data: groups } = useQuery<Group[]>({
     queryKey: ["groups-all"],
     queryFn: () => groupsAPI.list().then((r: any) => r.data.results ?? r.data),
+    ...QUERY_FIVE_MIN_STALE,
   });
 
   const availableDocTypes = useMemo(
@@ -1602,6 +1606,7 @@ export default function WorkflowBuilderPage() {
     queryKey: ["document-types"],
     queryFn: () => documentTypesAPI.list().then((r) => r.data as unknown),
     select: (data) => normalizeListResponse<DocumentType>(data),
+    ...QUERY_FIVE_MIN_STALE,
   });
 
   const { data: allTemplates, isLoading: templatesLoading } = useQuery<WorkflowTemplate[]>({
@@ -1609,6 +1614,7 @@ export default function WorkflowBuilderPage() {
     queryFn: () => workflowAPI.listTemplates().then(r =>
       (r.data.results ?? r.data as WorkflowTemplate[]).map(normalizeTemplate)
     ),
+    ...QUERY_SHORT_STALE,
   });
 
   const effectiveTemplateId = editingTemplateId || selectedDocType?.workflow_template || null;
@@ -1625,7 +1631,7 @@ export default function WorkflowBuilderPage() {
       return normalizeTemplate(response.data);
     },
     enabled: !!effectiveTemplateId,
-    staleTime: 1000 * 60 * 5,
+    ...QUERY_FIVE_MIN_STALE,
   });
 
   const handleDocTypeClick = (dt: DocumentType) => {

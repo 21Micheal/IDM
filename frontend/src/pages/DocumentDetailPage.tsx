@@ -11,15 +11,15 @@
  * All business logic (locking, OCR polling, version restore, comments,
  * workflow tasks, mutations) is unchanged.
  */
-import { useState, useEffect, useRef } from "react";
+import { Suspense, lazy, useState, useEffect, useRef } from "react";
 import { useParams, useNavigate } from "react-router-dom";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { documentsAPI, workflowAPI } from "@/services/api";
-import DocumentViewer from "@/components/documents/DocumentViewer";
+const DocumentViewer = lazy(() => import("@/components/documents/DocumentViewer"));
 import StatusBadge from "@/components/documents/StatusBadge";
 import OcrStatusBadge from "@/components/documents/OcrStatusBadge";
-import MetadataEditPanel from "@/components/documents/MetadataEditPanel";
-import WorkflowActionPanel from "@/components/workflow/WorkflowActionPanel";
+const MetadataEditPanel = lazy(() => import("@/components/documents/MetadataEditPanel"));
+const WorkflowActionPanel = lazy(() => import("@/components/workflow/WorkflowActionPanel"));
 import { format } from "date-fns";
 import {
   ArrowLeft, Send, Archive, MessageSquare, ShieldCheck,
@@ -30,6 +30,8 @@ import { toast } from "@/components/ui/vault-toast";
 import { useAuthStore } from "@/store/authStore";
 import type { Document } from "@/types";
 import { clsx as cn } from "clsx";
+import { QUERY_SHORT_STALE } from "@/lib/reactQueryDefaults";
+import { formatDocumentFileType } from "@/lib/documentFormat";
 
 import { clearDocumentVersionCache } from "@/utils/versionPreviewCache";
 
@@ -74,24 +76,28 @@ export default function DocumentDetailPage() {
     queryKey: ["document", id],
     queryFn: () => documentsAPI.get(id!).then((r) => r.data),
     enabled: !!id,
+    ...QUERY_SHORT_STALE,
   });
 
-  // ── OCR status polling ─────────────────────────────────────────────────────
+  // ── Document status polling ────────────────────────────────────────────────
   const ocrStatus = (doc as any)?.ocr_status as string | undefined;
   const ocrActive = ocrStatus === "pending" || ocrStatus === "processing";
+  const previewStatus = doc?.preview_status;
+  const previewActive = previewStatus === "pending" || previewStatus === "processing";
 
   useEffect(() => {
-    if (!ocrActive || !id) {
+    if ((!ocrActive && !previewActive) || !id) {
       if (pollRef.current) clearInterval(pollRef.current);
       return;
     }
     pollRef.current = setInterval(() => {
+      if (typeof document !== "undefined" && document.hidden) return;
       qc.invalidateQueries({ queryKey: ["document", id] });
-    }, 5_000);
+    }, previewActive ? 2_000 : 5_000);
     return () => {
       if (pollRef.current) clearInterval(pollRef.current);
     };
-  }, [ocrActive, id, qc]);
+  }, [ocrActive, previewActive, id, qc]);
 
   const prevOcrRef = useRef(ocrStatus);
   useEffect(() => {
@@ -115,12 +121,46 @@ export default function DocumentDetailPage() {
         page_size: AUDIT_PAGE_SIZE,
       }).then((r) => r.data as PaginatedResponse<DocumentAuditLog>),
     enabled: activeTab === "audit" && !!id,
+    ...QUERY_SHORT_STALE,
   });
+
+  useEffect(() => {
+    if (activeTab !== "audit" || !id || !auditLogs?.count) return;
+
+    const totalPages = Math.max(1, Math.ceil(auditLogs.count / AUDIT_PAGE_SIZE));
+
+    if (auditPage < totalPages) {
+      const nextPage = auditPage + 1;
+      qc.prefetchQuery({
+        queryKey: ["document-audit", id, nextPage],
+        queryFn: () =>
+          documentsAPI.auditTrail(id, {
+            page: nextPage,
+            page_size: AUDIT_PAGE_SIZE,
+          }).then((r) => r.data as PaginatedResponse<DocumentAuditLog>),
+        staleTime: 30_000,
+      });
+    }
+
+    if (auditPage > 1) {
+      const prevPage = auditPage - 1;
+      qc.prefetchQuery({
+        queryKey: ["document-audit", id, prevPage],
+        queryFn: () =>
+          documentsAPI.auditTrail(id, {
+            page: prevPage,
+            page_size: AUDIT_PAGE_SIZE,
+          }).then((r) => r.data as PaginatedResponse<DocumentAuditLog>),
+        staleTime: 30_000,
+      });
+    }
+  }, [activeTab, id, auditLogs?.count, auditPage, qc]);
 
   const { data: myTasks } = useQuery({
     queryKey: ["workflow", "my-tasks"],
     queryFn: () => workflowAPI.myTasks().then((r) => r.data),
     enabled: !!id,
+    ...QUERY_SHORT_STALE,
   });
   const activeTask = myTasks?.find((t: { document_id: string }) => t.document_id === id);
 
@@ -310,6 +350,7 @@ export default function DocumentDetailPage() {
                 { label: "Date",    value: doc.document_date ? format(new Date(doc.document_date), "dd MMM yyyy") : "—" },
                 { label: "Due date", value: doc.due_date ? format(new Date(doc.due_date), "dd MMM yyyy") : "—" },
                 { label: "Version", value: `v${doc.current_version}` },
+                { label: "Format",  value: formatDocumentFileType(doc.file_name, doc.file_mime_type) },
                 { label: "File",    value: doc.file_name },
                 { label: "Size",    value: formatBytes(doc.file_size) },
                 { label: "Uploaded by", value: `${doc.uploaded_by?.first_name} ${doc.uploaded_by?.last_name}` },
@@ -333,7 +374,11 @@ export default function DocumentDetailPage() {
             </dl>
           </div>
 
-          {!isPersonal && activeTask && <WorkflowActionPanel task={activeTask} documentId={id!} />}
+          {!isPersonal && activeTask && (
+            <Suspense fallback={<div className="card p-5 text-sm text-muted-foreground">Loading workflow actions…</div>}>
+              <WorkflowActionPanel task={activeTask} documentId={id!} />
+            </Suspense>
+          )}
 
           {extraMetadataEntries.length > 0 && (
             <div className="card p-5 space-y-2">
@@ -414,29 +459,33 @@ export default function DocumentDetailPage() {
           {(activeTab === "preview" || activeTab === "edit") && (
             <div className="flex w-full h-full gap-4">
               <div className={`${activeTab === "edit" ? "w-2/3" : "w-full"} transition-all`}>
-                <DocumentViewer
-                  document={doc}
-                  submitSlot={
-                    !isPersonal && isDraftOrRejected && canSubmit ? (
-                      <button
-                        onClick={() => submitMutation.mutate()}
-                        disabled={submitMutation.isPending}
-                        className="btn-primary"
-                      >
-                        {submitMutation.isPending ? (
-                          <Loader2 className="w-4 h-4 animate-spin" />
-                        ) : (
-                          <Send className="w-4 h-4" />
-                        )}
-                        Submit for approval
-                      </button>
-                    ) : null
-                  }
-                />
+                <Suspense fallback={<div className="flex min-h-[24rem] items-center justify-center rounded-xl border border-border bg-card"><Loader2 className="w-8 h-8 text-primary animate-spin" /></div>}>
+                  <DocumentViewer
+                    document={doc}
+                    submitSlot={
+                      !isPersonal && isDraftOrRejected && canSubmit ? (
+                        <button
+                          onClick={() => submitMutation.mutate()}
+                          disabled={submitMutation.isPending}
+                          className="btn-primary"
+                        >
+                          {submitMutation.isPending ? (
+                            <Loader2 className="w-4 h-4 animate-spin" />
+                          ) : (
+                            <Send className="w-4 h-4" />
+                          )}
+                          Submit for approval
+                        </button>
+                      ) : null
+                    }
+                  />
+                </Suspense>
               </div>
               {activeTab === "edit" && (
                 <div className="w-1/3 border-l border-border bg-muted/20 backdrop-blur-sm rounded-xl shadow-sm">
-                  <MetadataEditPanel document={doc} onClose={() => setActiveTab("preview")} />
+                  <Suspense fallback={<div className="p-6 text-sm text-muted-foreground">Loading editor…</div>}>
+                    <MetadataEditPanel document={doc} onClose={() => setActiveTab("preview")} />
+                  </Suspense>
                 </div>
               )}
             </div>
