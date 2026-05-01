@@ -549,6 +549,7 @@ function OfficeEditPanel({
 
     previewPollRef.current = setInterval(async () => {
       if (!pollingRef.current) return;
+      if (typeof document !== "undefined" && document.hidden) return;
 
       const elapsed = Date.now() - (startTimeRef.current ?? Date.now());
       setPreviewProgress(Math.min(95, (elapsed / POLL_TIMEOUT_MS) * 100));
@@ -670,6 +671,7 @@ function OfficeEditPanel({
     setVersionPolling(true);
     if (versionPollRef.current) clearInterval(versionPollRef.current);
     versionPollRef.current = setInterval(async () => {
+      if (typeof document !== "undefined" && document.hidden) return;
       try {
         const { data: latest } = await documentsAPI.get(doc.id);
         if (latest.current_version > baseVersion) {
@@ -1078,23 +1080,41 @@ export default function DocumentViewer({ document: doc, submitSlot }: Props) {
     const currentIndex = doc.versions.findIndex(v => v.id === selectedVersionId);
     if (currentIndex === -1) return;
 
-    const preloadVersions = [];
+    const preloadVersions: string[] = [];
     if (currentIndex > 0) preloadVersions.push(doc.versions[currentIndex - 1].id);
     if (currentIndex < doc.versions.length - 1) preloadVersions.push(doc.versions[currentIndex + 1].id);
 
-    preloadVersions.forEach(versionId => {
-      const cacheKey = `${doc.id}-${versionId}`;
-      if (!getCachedVersionPreview(cacheKey)) {
-        documentsAPI.previewUrl(doc.id, versionId).then(result => {
-          const normalizedResult = {
-            ...result.data,
-            url: normalizeUrl(result.data.url) || result.data.url,
-            raw_url: result.data.raw_url ? normalizeUrl(result.data.raw_url) || result.data.raw_url : undefined,
-          };
-          setCachedVersionPreview(cacheKey, normalizedResult);
-        }).catch(() => { /* ignore preload errors */ });
-      }
-    });
+    let cancelled = false;
+    const preload = () => {
+      preloadVersions.forEach(versionId => {
+        const cacheKey = `${doc.id}-${versionId}`;
+        if (!getCachedVersionPreview(cacheKey)) {
+          documentsAPI.previewUrl(doc.id, versionId).then(result => {
+            if (cancelled) return;
+            const normalizedResult = {
+              ...result.data,
+              url: normalizeUrl(result.data.url) || result.data.url,
+              raw_url: result.data.raw_url ? normalizeUrl(result.data.raw_url) || result.data.raw_url : undefined,
+            };
+            setCachedVersionPreview(cacheKey, normalizedResult);
+          }).catch(() => { /* ignore preload errors */ });
+        }
+      });
+    };
+
+    if (typeof window !== "undefined" && "requestIdleCallback" in window) {
+      const idleHandle = (window as any).requestIdleCallback(preload, { timeout: 1200 });
+      return () => {
+        cancelled = true;
+        (window as any).cancelIdleCallback(idleHandle);
+      };
+    }
+
+    const timeoutHandle = setTimeout(preload, 250);
+    return () => {
+      cancelled = true;
+      clearTimeout(timeoutHandle);
+    };
   }, [doc.id, doc.versions, selectedVersionId]);
 
   if (isLoading)

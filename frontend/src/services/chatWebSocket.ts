@@ -1,5 +1,5 @@
-import { chatAPI } from './api';
 import type { WebSocketMessage, TypingIndicator } from '@/types/chat';
+import { useAuthStore } from '@/store/authStore';
 
 export class ChatWebSocketService {
   private chatSocket: WebSocket | null = null;
@@ -11,9 +11,17 @@ export class ChatWebSocketService {
   private maxReconnectAttempts = 5;
   private reconnectDelay = 1000;
   private currentRoomId: string | null = null;
+  private notificationReconnectAttempts = 0;
+  private maxNotificationReconnectAttempts = 3;
 
-  constructor() {
-    this.connectNotifications();
+  constructor() {}
+
+  private buildWebSocketUrl(path: string): string {
+    const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+    const host = window.location.host;
+    const token = useAuthStore.getState().accessToken;
+    const query = token ? `?token=${encodeURIComponent(token)}` : '';
+    return `${protocol}//${host}${path}${query}`;
   }
 
   // Message callbacks
@@ -37,10 +45,14 @@ export class ChatWebSocketService {
   // Notification callbacks
   onNotification(callback: (notification: WebSocketMessage) => void) {
     this.notificationCallbacks.push(callback);
+    this.connectNotifications();
   }
 
   offNotification(callback: (notification: WebSocketMessage) => void) {
     this.notificationCallbacks = this.notificationCallbacks.filter(cb => cb !== callback);
+    if (this.notificationCallbacks.length === 0) {
+      this.disconnectNotifications();
+    }
   }
 
   // Connect to chat room
@@ -52,9 +64,7 @@ export class ChatWebSocketService {
     // Disconnect from current room if connected
     this.disconnectChat();
 
-    const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
-    const host = window.location.host;
-    const wsUrl = `${protocol}//${host}/ws/chat/${roomId}/`;
+    const wsUrl = this.buildWebSocketUrl(`/ws/chat/${roomId}/`);
 
     this.chatSocket = new WebSocket(wsUrl);
     this.currentRoomId = roomId;
@@ -71,9 +81,14 @@ export class ChatWebSocketService {
         if (data.type === 'new_message' && data.message) {
           this.messageCallbacks.forEach(cb => cb(data));
         } else if (data.type === 'typing') {
-          this.typingCallbacks.forEach(cb => cb(data as unknown as TypingIndicator));
+          const typing: TypingIndicator = {
+            user_id: data.user?.id ?? '',
+            username: data.user?.name ?? '',
+            is_typing: Boolean(data.is_typing),
+          };
+          this.typingCallbacks.forEach(cb => cb(typing));
         } else if (data.type === 'error') {
-          console.error('Chat WebSocket error:', data.error);
+          console.error('Chat WebSocket error:', data.error ?? data.detail);
         }
       } catch (error) {
         console.error('Error parsing chat message:', error);
@@ -100,18 +115,17 @@ export class ChatWebSocketService {
 
   // Connect to notifications
   connectNotifications() {
-    if (this.notificationSocket) {
+    if (this.notificationSocket || this.notificationCallbacks.length === 0) {
       return; // Already connected
     }
 
-    const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
-    const host = window.location.host;
-    const wsUrl = `${protocol}//${host}/ws/notifications/`;
+    const wsUrl = this.buildWebSocketUrl('/ws/notifications/');
 
     this.notificationSocket = new WebSocket(wsUrl);
 
     this.notificationSocket.onopen = () => {
       console.log('Connected to chat notifications');
+      this.notificationReconnectAttempts = 0;
     };
 
     this.notificationSocket.onmessage = (event) => {
@@ -130,11 +144,16 @@ export class ChatWebSocketService {
       console.log('Notification connection closed');
       this.notificationSocket = null;
       
-      // Attempt to reconnect if not intentionally closed
-      if (!event.wasClean) {
+      // Attempt to reconnect only when consumers exist and within cap.
+      if (
+        !event.wasClean &&
+        this.notificationCallbacks.length > 0 &&
+        this.notificationReconnectAttempts < this.maxNotificationReconnectAttempts
+      ) {
         setTimeout(() => {
+          this.notificationReconnectAttempts++;
           this.connectNotifications();
-        }, this.reconnectDelay);
+        }, this.reconnectDelay * this.notificationReconnectAttempts);
       }
     };
 

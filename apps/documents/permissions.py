@@ -113,6 +113,16 @@ class HasDocumentPermission(permissions.BasePermission):
         ):
             return True
 
+        if required_action == GroupAction.VIEW.value:
+            from apps.workflows.models import WorkflowTask
+
+            if WorkflowTask.objects.filter(
+                assigned_to=request.user,
+                workflow_instance__document_id=getattr(obj, "id", None),
+                status__in=["pending", "in_progress", "held", "returned"],
+            ).exists():
+                return True
+
         user_perms = request.user.get_all_permissions_for_doctype(document_type_id)
         return required_action in user_perms
 

@@ -1,8 +1,8 @@
 export interface User {
   id: string;
   email: string;
-  first_name: string;
-  last_name: string;
+  first_name?: string;
+  last_name?: string;
   name: string;
 }
 
@@ -62,6 +62,7 @@ export interface ChatNotification {
 export interface WebSocketMessage {
   type: 'new_message' | 'typing' | 'chat_notification' | 'error';
   message?: ChatMessage;
+  room_id?: string;
   user?: {
     id: string;
     name: string;
@@ -76,6 +77,7 @@ export interface WebSocketMessage {
     created_at: string;
   };
   error?: string;
+  detail?: string;
 }
 
 export interface TypingIndicator {

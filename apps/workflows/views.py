@@ -176,7 +176,8 @@ class WorkflowTaskViewSet(viewsets.ReadOnlyModelViewSet):
     def get_queryset(self):
         user = self.request.user
         qs   = WorkflowTask.objects.select_related(
-            "step", "assigned_to", "workflow_instance__document"
+            "step", "assigned_to", "workflow_instance__document",
+            "workflow_instance__document__document_type",
         )
         if user.has_admin_access:
             if s := self.request.query_params.get("status"):
@@ -193,7 +194,7 @@ class WorkflowTaskViewSet(viewsets.ReadOnlyModelViewSet):
         tasks = (
             WorkflowTask.objects
             .filter(assigned_to=request.user, status__in=["in_progress", "held"])
-            .select_related("step", "workflow_instance__document")
+            .select_related("step", "workflow_instance__document", "workflow_instance__document__document_type")
             .order_by("due_at")
         )
         return Response(WorkflowTaskSerializer(tasks, many=True).data)

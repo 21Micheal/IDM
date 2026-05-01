@@ -4,6 +4,7 @@ import { api } from "@/services/api";
 import { ShieldCheck, Filter, Clock, User, Download, ChevronLeft, ChevronRight, Search } from "lucide-react";
 import { format, subDays } from "date-fns";
 import { toast } from "@/components/ui/vault-toast";
+import { QUERY_SHORT_STALE } from "@/lib/reactQueryDefaults";
 
 export default function AuditPage() {
   const [searchTerm, setSearchTerm] = useState("");
@@ -14,7 +15,7 @@ export default function AuditPage() {
 
   const PAGE_SIZE = 50;
 
-  const { data, isLoading, refetch } = useQuery({
+  const { data, isLoading } = useQuery({
     queryKey: ["audit-logs", searchTerm, eventFilter, dateFrom, dateTo, page],
     queryFn: () =>
       api
@@ -30,6 +31,7 @@ export default function AuditPage() {
           },
         })
         .then((r) => r.data),
+    ...QUERY_SHORT_STALE,
   });
 
   // Indigo Vault semantic event coloring
@@ -79,10 +81,6 @@ export default function AuditPage() {
   };
 
   const totalPages = Math.ceil((data?.count ?? 0) / PAGE_SIZE);
-
-  useEffect(() => {
-    refetch();
-  }, [searchTerm, eventFilter, dateFrom, dateTo, refetch]);
 
   return (
     <div className="max-w-6xl mx-auto py-10 px-6">

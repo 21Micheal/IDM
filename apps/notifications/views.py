@@ -7,7 +7,7 @@ from rest_framework import serializers
 class NotificationSerializer(serializers.ModelSerializer):
     class Meta:
         model = Notification
-        fields = ["id", "message", "link", "is_read", "created_at"]
+        fields = ["id", "type", "message", "link", "is_read", "created_at"]
 
 class NotificationViewSet(viewsets.ModelViewSet):
     serializer_class = NotificationSerializer

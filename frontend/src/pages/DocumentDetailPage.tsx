@@ -30,6 +30,8 @@ import { toast } from "@/components/ui/vault-toast";
 import { useAuthStore } from "@/store/authStore";
 import type { Document } from "@/types";
 import { clsx as cn } from "clsx";
+import { QUERY_SHORT_STALE } from "@/lib/reactQueryDefaults";
+import { formatDocumentFileType } from "@/lib/documentFormat";
 
 import { clearDocumentVersionCache } from "@/utils/versionPreviewCache";
 
@@ -74,6 +76,7 @@ export default function DocumentDetailPage() {
     queryKey: ["document", id],
     queryFn: () => documentsAPI.get(id!).then((r) => r.data),
     enabled: !!id,
+    ...QUERY_SHORT_STALE,
   });
 
   // ── Document status polling ────────────────────────────────────────────────
@@ -88,6 +91,7 @@ export default function DocumentDetailPage() {
       return;
     }
     pollRef.current = setInterval(() => {
+      if (typeof document !== "undefined" && document.hidden) return;
       qc.invalidateQueries({ queryKey: ["document", id] });
     }, previewActive ? 2_000 : 5_000);
     return () => {
@@ -117,12 +121,46 @@ export default function DocumentDetailPage() {
         page_size: AUDIT_PAGE_SIZE,
       }).then((r) => r.data as PaginatedResponse<DocumentAuditLog>),
     enabled: activeTab === "audit" && !!id,
+    ...QUERY_SHORT_STALE,
   });
+
+  useEffect(() => {
+    if (activeTab !== "audit" || !id || !auditLogs?.count) return;
+
+    const totalPages = Math.max(1, Math.ceil(auditLogs.count / AUDIT_PAGE_SIZE));
+
+    if (auditPage < totalPages) {
+      const nextPage = auditPage + 1;
+      qc.prefetchQuery({
+        queryKey: ["document-audit", id, nextPage],
+        queryFn: () =>
+          documentsAPI.auditTrail(id, {
+            page: nextPage,
+            page_size: AUDIT_PAGE_SIZE,
+          }).then((r) => r.data as PaginatedResponse<DocumentAuditLog>),
+        staleTime: 30_000,
+      });
+    }
+
+    if (auditPage > 1) {
+      const prevPage = auditPage - 1;
+      qc.prefetchQuery({
+        queryKey: ["document-audit", id, prevPage],
+        queryFn: () =>
+          documentsAPI.auditTrail(id, {
+            page: prevPage,
+            page_size: AUDIT_PAGE_SIZE,
+          }).then((r) => r.data as PaginatedResponse<DocumentAuditLog>),
+        staleTime: 30_000,
+      });
+    }
+  }, [activeTab, id, auditLogs?.count, auditPage, qc]);
 
   const { data: myTasks } = useQuery({
     queryKey: ["workflow", "my-tasks"],
     queryFn: () => workflowAPI.myTasks().then((r) => r.data),
     enabled: !!id,
+    ...QUERY_SHORT_STALE,
   });
   const activeTask = myTasks?.find((t: { document_id: string }) => t.document_id === id);
 
@@ -312,6 +350,7 @@ export default function DocumentDetailPage() {
                 { label: "Date",    value: doc.document_date ? format(new Date(doc.document_date), "dd MMM yyyy") : "—" },
                 { label: "Due date", value: doc.due_date ? format(new Date(doc.due_date), "dd MMM yyyy") : "—" },
                 { label: "Version", value: `v${doc.current_version}` },
+                { label: "Format",  value: formatDocumentFileType(doc.file_name, doc.file_mime_type) },
                 { label: "File",    value: doc.file_name },
                 { label: "Size",    value: formatBytes(doc.file_size) },
                 { label: "Uploaded by", value: `${doc.uploaded_by?.first_name} ${doc.uploaded_by?.last_name}` },

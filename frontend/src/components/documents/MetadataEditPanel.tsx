@@ -26,6 +26,7 @@ type MetadataEditValues = {
   due_date: string;
   metadata: Record<string, unknown>;
   personal_tags: { value: string }[];
+  personal_metadata_fields: { key: string; value: string }[];
 };
 
 function DynamicField({
@@ -109,6 +110,10 @@ function DynamicField({
 
 export default function MetadataEditPanel({ document: doc, onClose }: Props) {
   const qc = useQueryClient();
+  const initialPersonalMetadataEntries = Object.entries(doc.metadata ?? {}).map(([key, value]) => ({
+    key,
+    value: String(value ?? ""),
+  }));
 
   const { register, handleSubmit, control, formState: { errors, isDirty } } = useForm<MetadataEditValues>({
     defaultValues: {
@@ -122,6 +127,9 @@ export default function MetadataEditPanel({ document: doc, onClose }: Props) {
       personal_tags: (doc.personal_tags ?? []).length > 0
         ? (doc.personal_tags ?? []).map((tag) => ({ value: tag }))
         : [{ value: "" }],
+      personal_metadata_fields: initialPersonalMetadataEntries.length > 0
+        ? initialPersonalMetadataEntries
+        : [{ key: "", value: "" }],
     },
   });
   const {
@@ -129,6 +137,11 @@ export default function MetadataEditPanel({ document: doc, onClose }: Props) {
     append: appendPersonalTag,
     remove: removePersonalTag,
   } = useFieldArray({ control, name: "personal_tags" });
+  const {
+    fields: personalMetadataFields,
+    append: appendPersonalMetadataField,
+    remove: removePersonalMetadataField,
+  } = useFieldArray({ control, name: "personal_metadata_fields" });
 
   const mutation = useMutation({
     mutationFn: (data: Record<string, unknown>) =>
@@ -151,11 +164,21 @@ export default function MetadataEditPanel({ document: doc, onClose }: Props) {
       toast.error("Please add at least one personal tag.");
       return;
     }
+    const personalMetadata = (values.personal_metadata_fields ?? [])
+      .map((item) => ({ key: item.key.trim(), value: item.value.trim() }))
+      .filter((item) => item.key.length > 0 && item.value.length > 0)
+      .reduce<Record<string, string>>((acc, item) => {
+        acc[item.key] = item.value;
+        return acc;
+      }, {});
     const payload: Record<string, unknown> = { ...values };
     if (!doc.is_self_upload) {
       delete payload.personal_tags;
+      delete payload.personal_metadata_fields;
     } else {
       payload.personal_tags = personalTags;
+      payload.metadata = personalMetadata;
+      delete payload.personal_metadata_fields;
     }
     if (payload.amount === "" || payload.amount === null || payload.amount === undefined) {
       delete payload.amount;
@@ -169,7 +192,7 @@ export default function MetadataEditPanel({ document: doc, onClose }: Props) {
     mutation.mutate(payload);
   };
 
-  const metadataFields = doc.document_type?.metadata_fields ?? [];
+  const metadataFields = doc.is_self_upload ? [] : (doc.document_type?.metadata_fields ?? []);
 
   return (
     <div className="h-full overflow-y-auto p-4 space-y-5">
@@ -244,6 +267,47 @@ export default function MetadataEditPanel({ document: doc, onClose }: Props) {
             <p className="text-xs text-muted-foreground mt-1">
               Add as many tags as you need for this personal document.
             </p>
+          </div>
+        )}
+
+        {doc.is_self_upload && (
+          <div>
+            <label className="label">Custom personal fields</label>
+            <p className="text-xs text-muted-foreground mb-2">
+              Add your own searchable key/value metadata fields.
+            </p>
+            <div className="space-y-2">
+              {personalMetadataFields.map((field, index) => (
+                <div key={field.id} className="grid grid-cols-[1fr_1fr_auto] items-center gap-2">
+                  <input
+                    {...register(`personal_metadata_fields.${index}.key` as const)}
+                    className="input"
+                    placeholder="Field name (e.g. project)"
+                  />
+                  <input
+                    {...register(`personal_metadata_fields.${index}.value` as const)}
+                    className="input"
+                    placeholder="Field value"
+                  />
+                  <button
+                    type="button"
+                    onClick={() => removePersonalMetadataField(index)}
+                    disabled={personalMetadataFields.length === 1}
+                    className="p-2 rounded-lg border border-border text-muted-foreground hover:text-destructive hover:bg-destructive/5 disabled:opacity-40 disabled:cursor-not-allowed"
+                    title="Remove custom field"
+                  >
+                    <X className="w-4 h-4" />
+                  </button>
+                </div>
+              ))}
+            </div>
+            <button
+              type="button"
+              onClick={() => appendPersonalMetadataField({ key: "", value: "" })}
+              className="mt-3 inline-flex items-center gap-2 text-sm font-medium text-primary hover:text-primary/80"
+            >
+              <Plus className="w-4 h-4" /> Add custom field
+            </button>
           </div>
         )}
 

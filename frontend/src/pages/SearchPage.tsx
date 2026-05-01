@@ -8,6 +8,7 @@ import { format } from "date-fns";
 import type { DocumentSearchResponse, SearchHit } from "@/types";
 import { useDebounce } from "@/hooks/useDebounce";
 import { escapeSearchRegex, getPreferredHighlights } from "@/lib/search";
+import { formatDocumentFileType } from "@/lib/documentFormat";
 
 export default function SearchPage() {
   const [searchParams, setSearchParams] = useSearchParams();
@@ -187,6 +188,10 @@ export default function SearchPage() {
                       </span>
                       <span className="text-xs text-gray-400">•</span>
                       <span className="text-xs text-gray-500">{hit.document_type}</span>
+                      <span className="text-xs text-gray-400">•</span>
+                      <span className="rounded-md border border-gray-200 bg-gray-50 px-2 py-0.5 text-[11px] font-semibold text-gray-500">
+                        {formatDocumentFileType(hit.file_name, hit.file_mime_type)}
+                      </span>
                     </div>
 
                     <h3 className="font-semibold text-lg text-gray-900 group-hover:text-brand-700 transition-colors line-clamp-2">

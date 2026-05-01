@@ -1,4 +1,4 @@
-from rest_framework import viewsets, status, permissions
+from rest_framework import serializers, viewsets, status, permissions
 from rest_framework.decorators import action
 from rest_framework.response import Response
 from django.contrib.auth import get_user_model
@@ -20,7 +20,8 @@ class ChatRoomViewSet(viewsets.ModelViewSet):
     
     def get_queryset(self):
         return ChatRoom.objects.filter(
-            participants=self.request.user,
+            chatroomparticipant__user=self.request.user,
+            chatroomparticipant__is_active=True,
             is_active=True
         ).select_related('created_by').prefetch_related('participants', 'messages')
     
@@ -30,7 +31,14 @@ class ChatRoomViewSet(viewsets.ModelViewSet):
         return ChatRoomSerializer
     
     def perform_create(self, serializer):
-        serializer.save(created_by=self.request.user)
+        serializer.save()
+
+    def create(self, request, *args, **kwargs):
+        serializer = self.get_serializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        room = serializer.save()
+        response_serializer = ChatRoomSerializer(room, context={'request': request})
+        return Response(response_serializer.data, status=status.HTTP_201_CREATED)
     
     @action(detail=False, methods=['get'])
     def direct_message(self, request):
@@ -53,8 +61,15 @@ class ChatRoomViewSet(viewsets.ModelViewSet):
         # Look for existing direct message room
         room = ChatRoom.objects.filter(
             room_type='direct',
-            participants=request.user
-        ).filter(participants=other_user).first()
+            chatroomparticipant__user=request.user,
+            chatroomparticipant__is_active=True,
+            is_active=True,
+        ).filter(
+            chatroomparticipant__user=other_user,
+            chatroomparticipant__is_active=True,
+        ).annotate(participant_count=Count('participants', distinct=True)).filter(
+            participant_count=2
+        ).first()
         
         if not room:
             # Create new direct message room

@@ -1,45 +1,97 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Link } from "react-router-dom";
-import { Bell, CheckCheck, ClipboardCheck, AlertTriangle, CheckCircle, XCircle, Info, Clock, Loader2 } from "lucide-react";
+import { Bell, CheckCheck, ClipboardCheck, AlertTriangle, CheckCircle, XCircle, Info, Clock, Loader2, PauseCircle, PlayCircle, RotateCcw } from "lucide-react";
 import { notificationsAPI } from "@/services/api";
 import type { Notification } from "@/types";
 import clsx from "clsx";
 
-const getNotificationConfig = (message: string) => {
-  const msg = message.toLowerCase();
-  if (msg.includes("action required") || msg.includes("approval required")) {
-    return {
-      icon: ClipboardCheck,
-      color: "text-blue-600 bg-blue-50 border-blue-100",
-      label: "Action Required",
-    };
+const getNotificationConfig = (type: string, message: string) => {
+  switch (type) {
+    case "task_assigned":
+      return {
+        icon: ClipboardCheck,
+        color: "text-blue-600 bg-blue-50 border-blue-100",
+        label: "Approval Request",
+      };
+    case "workflow_complete":
+      return {
+        icon: CheckCircle,
+        color: "text-teal bg-teal/10 border-teal/20",
+        label: "Workflow Complete",
+      };
+    case "document_returned":
+      return {
+        icon: RotateCcw,
+        color: "text-amber-600 bg-amber-50 border-amber-100",
+        label: "Returned for Review",
+      };
+    case "document_held":
+      return {
+        icon: PauseCircle,
+        color: "text-orange-600 bg-orange-50 border-orange-100",
+        label: "Document on Hold",
+      };
+    case "hold_released":
+      return {
+        icon: PlayCircle,
+        color: "text-green-600 bg-green-50 border-green-100",
+        label: "Hold Released",
+      };
+    case "hold_expired":
+      return {
+        icon: Clock,
+        color: "text-purple-600 bg-purple-50 border-purple-100",
+        label: "Hold Expired",
+      };
+    case "task_overdue":
+      return {
+        icon: AlertTriangle,
+        color: "text-destructive bg-destructive/10 border-destructive/20",
+        label: "Overdue",
+      };
+    case "workflow_action":
+      return {
+        icon: CheckCheck,
+        color: "text-muted-foreground bg-muted border-border",
+        label: "Workflow Update",
+      };
+    default:
+      // Fallback to message parsing for backward compatibility
+      const msg = message.toLowerCase();
+      if (msg.includes("action required") || msg.includes("approval required")) {
+        return {
+          icon: ClipboardCheck,
+          color: "text-blue-600 bg-blue-50 border-blue-100",
+          label: "Action Required",
+        };
+      }
+      if (msg.includes("overdue") || msg.includes("expired") || msg.includes("urgent")) {
+        return {
+          icon: AlertTriangle,
+          color: "text-destructive bg-destructive/10 border-destructive/20",
+          label: "Urgent",
+        };
+      }
+      if (msg.includes("approved") || msg.includes("complete") || msg.includes("released")) {
+        return {
+          icon: CheckCircle,
+          color: "text-teal bg-teal/10 border-teal/20",
+          label: "Update",
+        };
+      }
+      if (msg.includes("rejected") || msg.includes("returned") || msg.includes("hold")) {
+        return {
+          icon: XCircle,
+          color: "text-amber-600 bg-amber-50 border-amber-100",
+          label: "Alert",
+        };
+      }
+      return {
+        icon: Info,
+        color: "text-muted-foreground bg-muted border-border",
+        label: "Info",
+      };
   }
-  if (msg.includes("overdue") || msg.includes("expired") || msg.includes("urgent")) {
-    return {
-      icon: AlertTriangle,
-      color: "text-destructive bg-destructive/10 border-destructive/20",
-      label: "Urgent",
-    };
-  }
-  if (msg.includes("approved") || msg.includes("complete") || msg.includes("released")) {
-    return {
-      icon: CheckCircle,
-      color: "text-teal bg-teal/10 border-teal/20",
-      label: "Update",
-    };
-  }
-  if (msg.includes("rejected") || msg.includes("returned") || msg.includes("hold")) {
-    return {
-      icon: XCircle,
-      color: "text-amber-600 bg-amber-50 border-amber-100",
-      label: "Alert",
-    };
-  }
-  return {
-    icon: Info,
-    color: "text-muted-foreground bg-muted border-border",
-    label: "Info",
-  };
 };
 
 export default function NotificationsPage() {
@@ -99,7 +151,7 @@ export default function NotificationsPage() {
       ) : (
         <div className="space-y-3">
           {unreadNotifications.map((n) => {
-            const config = getNotificationConfig(n.message);
+            const config = getNotificationConfig(n.type, n.message);
             const Icon = config.icon;
 
             const content = (

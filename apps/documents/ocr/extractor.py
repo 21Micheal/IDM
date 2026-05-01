@@ -152,11 +152,12 @@ def _parse_date(s: str) -> Optional[str]:
 
 def _find_first_date(text: str, label_pattern: str) -> Optional[str]:
     """Search for a labelled date field and parse it."""
-    # The separator between a label and its value is typically ": " or "-  " or
-    # just whitespace. We must consume the colon (and surrounding whitespace)
-    # explicitly, otherwise "Due Date:   15 Nov 2024" won't match because
-    # \s* does not consume ':'.
-    m = re.search(label_pattern + r"\s*[:\-]?\s*" + _DATE_VALUE_PAT, text, re.IGNORECASE)
+    # Separators between a label and its value: ":", "-", "(", or whitespace.
+    # "Due Date (May 12, 2026)" uses a paren — must be consumed here.
+    m = re.search(
+        label_pattern + r"\s*[:\-\(]?\s*" + _DATE_VALUE_PAT,
+        text, re.IGNORECASE,
+    )
     return _parse_date(m.group(1)) if m else None
 
 
@@ -280,7 +281,8 @@ _REF_LABELS: dict[str, re.Pattern] = {
         re.I | re.M,
     ),
     "general":        re.compile(
-        r"(?:ref(?:erence)?\s*(?:no\.?|#)?|order\s*(?:no\.?|#)?)" + _SEP + _REF_VALUE_PAT,
+        r"(?:ref(?:erence)?\s*(?:no\.?|#)?|order\s*(?:no\.?|#)?)" + _SEP + r"#?"
+        + _REF_VALUE_PAT,
         re.I | re.M,
     ),
 }
@@ -381,10 +383,20 @@ def _extract_supplier(lines: list[str]) -> Optional[str]:
             if not re.match(r"^(?:p\.?\s*o\.?\s*box|po\s+box|\d+\s+\w)", line, re.I):
                 return line.strip()[:120]
 
-    # Priority 4: first line with a legal entity suffix that passes rejection checks
+    # Priority 4: first line with a legal entity suffix that passes rejection checks.
+    # IMPORTANT: extract only the portion up to and including the suffix — the same
+    # line may contain other data (codes, dates) after the company name.
+    _ENTITY_TRUNCATE_RE = re.compile(
+        r"^(.{0,80}?\b(?:LLC|Ltd\.?|Limited|Inc\.?|Corp\.?|GmbH|PLC|LLP|S\.A\.?|Pty\.?))"
+        r"(?:[\s,.]|$)",
+        re.I,
+    )
     for line in lines:
-        if _ENTITY_SUFFIX_RE.search(line) and _is_valid(line):
-            return line.strip()[:120]
+        m = _ENTITY_TRUNCATE_RE.match(line)
+        if m:
+            candidate = m.group(1).strip()
+            if _is_valid(candidate):
+                return candidate[:120]
 
     return None
 

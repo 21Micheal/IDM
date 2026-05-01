@@ -155,6 +155,8 @@ class DocumentSearchView(APIView):
                 "title": getattr(hit, "title", ""),
                 "reference_number": getattr(hit, "reference_number", ""),
                 "document_type": getattr(hit, "document_type", ""),
+                "file_name": getattr(hit, "file_name", ""),
+                "file_mime_type": getattr(hit, "file_mime_type", ""),
                 "supplier": getattr(hit, "supplier", ""),
                 "amount": getattr(hit, "amount", None),
                 "status": getattr(hit, "status", ""),

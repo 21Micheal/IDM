@@ -54,7 +54,7 @@ class ChatConsumer(AsyncWebsocketConsumer):
                     self.room_group_name,
                     {
                         'type': 'typing_indicator',
-                        'user_id': self.user.id,
+                        'user_id': str(self.user.id),
                         'username': self.user.get_full_name() or self.user.email,
                         'is_typing': data.get('is_typing', False)
                     }
@@ -78,7 +78,7 @@ class ChatConsumer(AsyncWebsocketConsumer):
                         'id': str(message.id),
                         'content': message.content,
                         'sender': {
-                            'id': message.sender.id,
+                            'id': str(message.sender.id),
                             'name': message.sender.get_full_name() or message.sender.email,
                             'email': message.sender.email
                         },
@@ -86,6 +86,7 @@ class ChatConsumer(AsyncWebsocketConsumer):
                         'reply_to': str(message.reply_to.id) if message.reply_to else None,
                         'is_edited': message.is_edited,
                         'created_at': message.created_at.isoformat(),
+                        'room': str(message.room.id),
                         'room_id': str(message.room.id)
                     }
                 }
@@ -125,7 +126,7 @@ class ChatConsumer(AsyncWebsocketConsumer):
     async def typing_indicator(self, event):
         """Send typing indicator to WebSocket"""
         # Don't send typing indicator back to the same user
-        if event['user_id'] == self.user.id:
+        if event['user_id'] == str(self.user.id):
             return
 
         await self.send(text_data=json.dumps({
@@ -177,7 +178,7 @@ class ChatConsumer(AsyncWebsocketConsumer):
         participants = ChatRoomParticipant.objects.filter(
             room=message.room,
             is_active=True
-        ).exclude(user=message.sender)
+        ).exclude(user=message.sender).select_related('user')
         
         unread_messages = []
         for participant in participants:
@@ -197,7 +198,7 @@ class ChatConsumer(AsyncWebsocketConsumer):
         participants = ChatRoomParticipant.objects.filter(
             room=message.room,
             is_active=True
-        ).exclude(user=message.sender)
+        ).exclude(user=message.sender).select_related('user')
         
         notifications = []
         for participant in participants:
@@ -224,7 +225,7 @@ class ChatConsumer(AsyncWebsocketConsumer):
                         'id': str(message.id),
                         'message': message.content,
                         'sender': {
-                            'id': message.sender.id,
+                            'id': str(message.sender.id),
                             'name': message.sender.get_full_name() or message.sender.email,
                             'email': message.sender.email
                         },

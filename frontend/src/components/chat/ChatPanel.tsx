@@ -11,6 +11,7 @@ import {
 import clsx from "clsx";
 import { chatAPI, groupsAPI } from "@/services/api";
 import { chatWebSocket } from "@/services/chatWebSocket";
+import { useAuthStore } from "@/store/authStore";
 import type {
   ChatMessage,
   ChatRoom,
@@ -29,14 +30,35 @@ interface Group {
 interface ChatPanelProps {
   onClose: () => void;
   initialRoomId?: string;
+  onActiveRoomChange?: (roomId?: string) => void;
 }
 
-const getCurrentUserId = () => localStorage.getItem("user_id") || "";
+interface GroupMembership {
+  user?: User;
+}
 
 function initials(name?: string) {
   if (!name) return "?";
   const parts = name.trim().split(/\s+/);
   return ((parts[0]?.[0] ?? "") + (parts[1]?.[0] ?? "")).toUpperCase() || "?";
+}
+
+function userLabel(user?: Partial<User> | null) {
+  if (!user) return "Unknown";
+  const fullName = [user.first_name, user.last_name].filter(Boolean).join(" ").trim();
+  return user.name || fullName || user.email || "Unknown";
+}
+
+function firstName(user?: Partial<User> | null) {
+  return userLabel(user).split(/\s+/)[0] || "Someone";
+}
+
+function otherParticipants(room: ChatRoom, currentUserId: string) {
+  return room.participants.filter((participant) => participant.id !== currentUserId);
+}
+
+function messageRoomId(message: ChatMessage) {
+  return message.room || (message as ChatMessage & { room_id?: string }).room_id;
 }
 
 function formatTime(iso?: string) {
@@ -47,7 +69,8 @@ function formatTime(iso?: string) {
   });
 }
 
-export function ChatPanel({ onClose, initialRoomId }: ChatPanelProps) {
+export function ChatPanel({ onClose, initialRoomId, onActiveRoomChange }: ChatPanelProps) {
+  const currentUser = useAuthStore((state) => state.user);
   const [rooms, setRooms] = useState<ChatRoom[]>([]);
   const [selectedRoom, setSelectedRoom] = useState<ChatRoom | null>(null);
   const [messages, setMessages] = useState<ChatMessage[]>([]);
@@ -63,7 +86,8 @@ export function ChatPanel({ onClose, initialRoomId }: ChatPanelProps) {
   const inputRef = useRef<HTMLInputElement>(null);
   const typingTimeoutRef = useRef<number | null>(null);
 
-  const me = getCurrentUserId();
+  const me = currentUser?.id ?? "";
+  const currentUserName = [currentUser?.first_name, currentUser?.last_name].filter(Boolean).join(" ").trim() || "You";
 
   // ── Load rooms + users + groups on open ────────────────────────────────────────
   useEffect(() => {
@@ -103,12 +127,19 @@ export function ChatPanel({ onClose, initialRoomId }: ChatPanelProps) {
   useEffect(() => {
     const onMessage = (data: WebSocketMessage) => {
       if (!data.message || !selectedRoom) return;
-      if (data.message.room !== selectedRoom.id) return;
+      if (messageRoomId(data.message) !== selectedRoom.id) return;
 
       setMessages((prev) =>
         prev.find((m) => m.id === data.message!.id)
           ? prev
           : [...prev, data.message!],
+      );
+      setRooms((prev) =>
+        prev.map((room) =>
+          room.id === selectedRoom.id
+            ? { ...room, last_message: data.message!, unread_count: 0 }
+            : room,
+        ),
       );
 
       if (data.message.sender.id !== me) {
@@ -134,6 +165,13 @@ export function ChatPanel({ onClose, initialRoomId }: ChatPanelProps) {
     };
   }, [selectedRoom, me]);
 
+  useEffect(() => {
+    return () => {
+      chatWebSocket.disconnectChat();
+      onActiveRoomChange?.(undefined);
+    };
+  }, [onActiveRoomChange]);
+
   // ── Deep-link via initialRoomId ───────────────────────────────────────────
   useEffect(() => {
     if (initialRoomId) loadRoom(initialRoomId);
@@ -153,6 +191,7 @@ export function ChatPanel({ onClose, initialRoomId }: ChatPanelProps) {
       ]);
       setSelectedRoom(roomRes.data);
       setMessages(msgRes.data.results || msgRes.data);
+      onActiveRoomChange?.(roomId);
       chatWebSocket.connectToRoom(roomId);
       chatAPI.rooms.markRead(roomId).catch(() => undefined);
       setRooms((prev) =>
@@ -180,11 +219,30 @@ export function ChatPanel({ onClose, initialRoomId }: ChatPanelProps) {
 
   const startGroupChat = async (group: Group) => {
     try {
+      const existingRoom = rooms.find(
+        (room) => room.room_type === "group" && room.name === group.name,
+      );
+      if (existingRoom) {
+        await loadRoom(existingRoom.id);
+        setShowUserList(false);
+        return;
+      }
+
+      const membersRes = await groupsAPI.members(group.id);
+      const memberships = (membersRes.data.results || membersRes.data) as GroupMembership[];
+      const participantIds = memberships
+        .map((membership) => membership.user?.id)
+        .filter((id): id is string => Boolean(id && id !== me));
+
+      if (participantIds.length === 0) {
+        console.warn("Group chat requires at least one other active member");
+        return;
+      }
+
       const res = await chatAPI.rooms.create({
         name: group.name,
         room_type: 'group',
-        // Note: You might want to get group members and add them as participants
-        // This would require an additional API call to get group members
+        participant_ids: participantIds,
       });
       const room = res.data as ChatRoom;
       setRooms((prev) => [room, ...prev]);
@@ -205,10 +263,10 @@ export function ChatPanel({ onClose, initialRoomId }: ChatPanelProps) {
       room: selectedRoom.id,
       sender: {
         id: me,
-        email: "",
-        first_name: "",
-        last_name: "",
-        name: "You",
+        email: currentUser?.email ?? "",
+        first_name: currentUser?.first_name ?? "",
+        last_name: currentUser?.last_name ?? "",
+        name: currentUserName,
       },
       content,
       message_type: "text",
@@ -221,15 +279,35 @@ export function ChatPanel({ onClose, initialRoomId }: ChatPanelProps) {
     setNewMessage("");
 
     try {
+      setRooms((prev) =>
+        prev.map((room) =>
+          room.id === selectedRoom.id
+            ? {
+                ...room,
+                last_message: {
+                  id: optimistic.id,
+                  content,
+                  sender: optimistic.sender,
+                  created_at: optimistic.created_at,
+                  message_type: optimistic.message_type,
+                },
+                updated_at: optimistic.created_at,
+              }
+            : room,
+        ),
+      );
+
       // Prefer WS for lowest latency; REST as fallback
       if (chatWebSocket.isConnectedToRoom()) {
         chatWebSocket.sendMessage({ content, message_type: "text" });
       } else {
-        await chatAPI.messages.create({
+        const res = await chatAPI.messages.create({
           content,
           room_id: selectedRoom.id,
           message_type: "text",
         });
+        const saved = res.data as ChatMessage;
+        setMessages((prev) => prev.map((m) => (m.id === optimistic.id ? saved : m)));
       }
     } catch (e) {
       console.error("Send failed", e);
@@ -253,17 +331,19 @@ export function ChatPanel({ onClose, initialRoomId }: ChatPanelProps) {
     if (!q) return rooms;
     return rooms.filter(
       (r) =>
-        r.name?.toLowerCase().includes(q) ||
-        r.participants.some((p) => p.name.toLowerCase().includes(q)),
+        roomTitle(r).toLowerCase().includes(q) ||
+        roomSubtitle(r).toLowerCase().includes(q) ||
+        lastMessagePreview(r).toLowerCase().includes(q) ||
+        r.participants.some((p) => userLabel(p).toLowerCase().includes(q)),
     );
-  }, [rooms, searchQuery]);
+  }, [rooms, searchQuery, me]);
 
   const filteredUsers = useMemo(() => {
     const q = searchQuery.toLowerCase();
     if (!q) return users;
     return users.filter(
       (u) =>
-        u.name.toLowerCase().includes(q) || u.email.toLowerCase().includes(q),
+        userLabel(u).toLowerCase().includes(q) || u.email.toLowerCase().includes(q),
     );
   }, [users, searchQuery]);
 
@@ -277,10 +357,37 @@ export function ChatPanel({ onClose, initialRoomId }: ChatPanelProps) {
     );
   }, [groups, searchQuery]);
 
-  const roomTitle = (room: ChatRoom) =>
-    room.room_type === "direct"
-      ? room.participants.find((p) => p.id !== me)?.name ?? room.name
-      : room.name;
+  function roomTitle(room: ChatRoom) {
+    const others = otherParticipants(room, me);
+    if (room.room_type === "direct") {
+      return userLabel(others[0]) || room.name || "Direct message";
+    }
+
+    return room.name || others.map(userLabel).join(", ") || "Group chat";
+  }
+
+  function roomSubtitle(room: ChatRoom) {
+    const others = otherParticipants(room, me);
+    if (room.room_type === "direct") {
+      return others[0]?.email || "Direct message";
+    }
+
+    const count = room.participants.length;
+    return `${count} participant${count === 1 ? "" : "s"}`;
+  }
+
+  function lastMessagePreview(room: ChatRoom) {
+    if (!room.last_message) return "No messages yet";
+
+    const senderIsMe = room.last_message.sender.id === me;
+    const prefix = senderIsMe
+      ? "You: "
+      : room.room_type === "group"
+        ? `${firstName(room.last_message.sender)}: `
+        : "";
+
+    return `${prefix}${room.last_message.content}`;
+  }
 
   // ── Render ────────────────────────────────────────────────────────────────
   return (
@@ -392,10 +499,10 @@ export function ChatPanel({ onClose, initialRoomId }: ChatPanelProps) {
                     onClick={() => startDirectMessage(u)}
                     className="flex w-full items-center gap-3 rounded-md px-2.5 py-2 text-left transition-colors hover:bg-muted"
                   >
-                    <Avatar label={initials(u.name)} />
+                    <Avatar label={initials(userLabel(u))} />
                     <div className="min-w-0 flex-1">
                       <p className="truncate text-xs font-medium text-foreground">
-                        {u.name}
+                        {userLabel(u)}
                       </p>
                       <p className="truncate text-[11px] text-muted-foreground">
                         {u.email}
@@ -452,9 +559,7 @@ export function ChatPanel({ onClose, initialRoomId }: ChatPanelProps) {
                     </div>
                     <div className="flex items-center justify-between gap-2">
                       <p className="truncate text-[11px] text-muted-foreground">
-                        {room.last_message
-                          ? `${room.last_message.sender.name === title ? "" : `${room.last_message.sender.name.split(" ")[0]}: `}${room.last_message.content}`
-                          : "No messages yet"}
+                        {lastMessagePreview(room)}
                       </p>
                       {room.unread_count > 0 && (
                         <span className="ml-auto inline-flex h-4 min-w-[16px] items-center justify-center rounded-full bg-accent px-1 text-[10px] font-bold text-accent-foreground">
@@ -483,9 +588,7 @@ export function ChatPanel({ onClose, initialRoomId }: ChatPanelProps) {
                     {roomTitle(selectedRoom)}
                   </h3>
                   <p className="text-[11px] text-muted-foreground">
-                    {selectedRoom.room_type === "direct"
-                      ? "Direct message"
-                      : `${selectedRoom.participants.length} participants`}
+                    {roomSubtitle(selectedRoom)}
                   </p>
                 </div>
               </div>
@@ -512,7 +615,7 @@ export function ChatPanel({ onClose, initialRoomId }: ChatPanelProps) {
                     {!mine && (
                       <div className="w-7">
                         {showAvatar && (
-                          <Avatar size="sm" label={initials(msg.sender.name)} />
+                          <Avatar size="sm" label={initials(userLabel(msg.sender))} />
                         )}
                       </div>
                     )}
@@ -524,6 +627,11 @@ export function ChatPanel({ onClose, initialRoomId }: ChatPanelProps) {
                           : "rounded-bl-sm bg-card text-foreground border border-border",
                       )}
                     >
+                      {!mine && selectedRoom.room_type === "group" && showAvatar && (
+                        <p className="mb-1 text-[10px] font-semibold text-muted-foreground">
+                          {userLabel(msg.sender)}
+                        </p>
+                      )}
                       <p className="whitespace-pre-wrap break-words leading-relaxed">
                         {msg.content}
                       </p>

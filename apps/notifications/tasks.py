@@ -26,12 +26,13 @@ def _send_email(recipient, subject: str, body: str) -> None:
         logger.warning("Email send failed to %s: %s", recipient.email, exc)
 
 
-def _create_notification(recipient, message: str, link: str = "") -> None:
+def _create_notification(recipient, message: str, link: str = "", notification_type: str = "task_assigned") -> None:
     """Create an in-app Notification row."""
     try:
         from .models import Notification
         Notification.objects.create(
             recipient=recipient,
+            type=notification_type,
             message=message,
             link=link,
         )
@@ -61,7 +62,7 @@ def notify_task_assigned(task_id: str) -> None:
         f"{doc.title} ({doc.reference_number})"
     )
 
-    _create_notification(task.assigned_to, message, link)
+    _create_notification(task.assigned_to, message, link, "task_assigned")
     _send_email(
         task.assigned_to,
         subject=f"DMS — Approval required: {doc.reference_number}",
@@ -95,7 +96,7 @@ def notify_workflow_complete(instance_id: str, outcome: str) -> None:
     link   = f"/documents/{doc.id}"
     msg    = f"Your document '{doc.title}' ({doc.reference_number}) has been {verb}."
 
-    _create_notification(instance.started_by, msg, link)
+    _create_notification(instance.started_by, msg, link, "workflow_complete")
     _send_email(
         instance.started_by,
         subject=f"DMS — Document {verb}: {doc.reference_number}",
@@ -139,7 +140,7 @@ def notify_document_returned(task_id: str, comment: str) -> None:
         f"Reason: {comment}"
     )
 
-    _create_notification(uploader, message, link)
+    _create_notification(uploader, message, link, "document_returned")
     _send_email(
         uploader,
         subject=f"DMS — Document returned for review: {doc.reference_number}",
@@ -157,7 +158,7 @@ def notify_document_returned(task_id: str, comment: str) -> None:
 
     # Also notify the owner if different from uploader
     if doc.owned_by and doc.owned_by != uploader:
-        _create_notification(doc.owned_by, message, link)
+        _create_notification(doc.owned_by, message, link, "document_returned")
 
 
 # ── Document placed on hold ───────────────────────────────────────────────────
@@ -194,7 +195,7 @@ def notify_document_held(task_id: str, comment: str, hold_hours: int) -> None:
         f"Reason: {comment}"
     )
 
-    _create_notification(uploader, message, link)
+    _create_notification(uploader, message, link, "document_held")
     _send_email(
         uploader,
         subject=f"DMS — Document on hold: {doc.reference_number}",
@@ -237,7 +238,7 @@ def notify_hold_released(task_id: str) -> None:
         f"The hold on '{doc.title}' ({doc.reference_number}) "
         f"has been released. It is back in the approval queue."
     )
-    _create_notification(uploader, msg_uploader, link)
+    _create_notification(uploader, msg_uploader, link, "hold_released")
     _send_email(
         uploader,
         subject=f"DMS — Hold released: {doc.reference_number}",
@@ -256,7 +257,7 @@ def notify_hold_released(task_id: str) -> None:
             f"The hold on '{doc.title}' ({doc.reference_number}) "
             f"has been released. Your approval task is now active."
         )
-        _create_notification(approver, msg_approver, link)
+        _create_notification(approver, msg_approver, link, "hold_released")
         _send_email(
             approver,
             subject=f"DMS — Hold released, action required: {doc.reference_number}",
@@ -296,7 +297,7 @@ def notify_hold_auto_released(task_id: str) -> None:
         f"Your hold on '{doc.title}' ({doc.reference_number}) "
         f"has expired. The document is awaiting your approval."
     )
-    _create_notification(approver, msg, link)
+    _create_notification(approver, msg, link, "hold_expired")
     _send_email(
         approver,
         subject=f"DMS — Hold expired, action required: {doc.reference_number}",
@@ -334,7 +335,7 @@ def notify_task_overdue(task_id: str) -> None:
         f"OVERDUE: Your approval task for '{doc.title}' "
         f"({doc.reference_number}) has passed its SLA deadline."
     )
-    _create_notification(task.assigned_to, msg, link)
+    _create_notification(task.assigned_to, msg, link, "task_overdue")
     _send_email(
         task.assigned_to,
         subject=f"DMS — SLA overdue: {doc.reference_number}",
@@ -474,12 +475,12 @@ def notify_workflow_action(action_id: str, user_ids: list[str] = None) -> None:
         )
     
     # Notify the uploader
-    _create_notification(uploader, msg_uploader, link)
+    _create_notification(uploader, msg_uploader, link, "workflow_action")
     _send_email(uploader, subject_uploader, body_uploader)
     
     # Also notify other specified users if provided
     if user_ids:
         other_users = User.objects.filter(id__in=user_ids).exclude(id=uploader.id)
         for user in other_users:
-            _create_notification(user, msg_uploader, link)
+            _create_notification(user, msg_uploader, link, "workflow_action")
             _send_email(user, subject_uploader, body_uploader)

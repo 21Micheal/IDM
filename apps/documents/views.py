@@ -7,7 +7,7 @@ from urllib.parse import quote as urlquote, urlparse, urlunparse
 from django.core.files.base import ContentFile
 from django.http import HttpResponse
 from django.utils import timezone
-from django.db import transaction
+from django.db import transaction, models
 from django.conf import settings
 
 from django.core.cache import cache
@@ -149,7 +149,15 @@ class DocumentViewSet(AuditMixin, viewsets.ModelViewSet):
         )
         if user.has_admin_access:
             return qs
-        return qs.filter(uploaded_by=user)
+        
+        # Include documents uploaded by the user OR documents with active workflow tasks assigned to them
+        return qs.filter(
+            models.Q(uploaded_by=user) | 
+            models.Q(
+                workflow_instance__tasks__assigned_to=user,
+                workflow_instance__tasks__status__in=["pending", "in_progress", "held", "returned"],
+            )
+        ).distinct()
 
     def get_serializer_class(self):
         if self.action == "list":

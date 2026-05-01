@@ -5,25 +5,29 @@
  *  - Semantic HSL tokens throughout
  *  - StatusBadge with dot+pill color coding
  *  - Selection checkboxes hidden on "My Documents" tab (actions live in row)
+ *  - Supplier filter dropdown
  */
 
-import { useEffect, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { Link, useSearchParams } from "react-router-dom";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { documentsAPI, documentTypesAPI, normalizeListResponse } from "@/services/api";
 import {
   FileText, UploadCloud, Lock, Users, LayoutList,
   Archive, Trash2, Loader2, CheckSquare, Square, X, CheckCircle, XCircle,
-  Search as SearchIcon,
+  Search as SearchIcon, SlidersHorizontal,
 } from "lucide-react";
 import { format } from "date-fns";
 import { cn } from "../lib/utils";
 import { useDebounce } from "../hooks/useDebounce";
-import { toast } from "@/components/ui/vault-toast";
+import { vaultToast as toast } from "@/components/ui/vault-toast";
 import type { Document } from "@/types";
 import StatusBadge from "@/components/documents/StatusBadge";
+import { QUERY_FIVE_MIN_STALE, QUERY_SHORT_STALE } from "@/lib/reactQueryDefaults";
+import { formatDocumentFileType } from "@/lib/documentFormat";
+import { preloadDocumentWorkspace } from "@/lib/routePreload";
 
-const PAGE_SIZE = 25;
+const PAGE_SIZE = 10;
 type BulkAction = "approve" | "reject" | "archive" | "void";
 type Tab = "all" | "workflow" | "personal";
 
@@ -53,11 +57,11 @@ function BulkToolbar({
   return (
     <>
       <div
-        className="sticky top-0 z-10 rounded-xl border border-border bg-card px-5 py-3 flex items-center gap-3 flex-wrap"
-        style={{ boxShadow: "var(--shadow-card)" }}
+        className="sticky top-0 z-10 rounded-xl border border-accent/30 bg-card px-5 py-3 flex items-center gap-3 flex-wrap"
+        style={{ boxShadow: "var(--shadow-elegant)" }}
       >
-        <div className="inline-flex items-center gap-2 px-3 py-1.5 rounded-full bg-primary/10 text-primary text-sm font-semibold">
-          <span className="w-1.5 h-1.5 rounded-full bg-primary" />
+        <div className="inline-flex items-center gap-2 px-3 py-1.5 rounded-full bg-accent/15 text-accent text-sm font-semibold">
+          <span className="w-1.5 h-1.5 rounded-full bg-accent" />
           {selectedIds.length} selected
         </div>
 
@@ -177,8 +181,8 @@ function PersonalTagChips({
         const chipClassName = cn(
           "inline-flex items-center rounded-full border px-2 py-0.5 text-[10px] font-semibold transition-colors",
           onTagClick
-            ? "border-primary/20 bg-primary/10 text-primary hover:border-primary/30 hover:bg-primary/15"
-            : "border-primary/20 bg-primary/10 text-primary",
+            ? "border-accent/20 bg-accent/10 text-accent hover:border-accent/30 hover:bg-accent/15 cursor-pointer"
+            : "border-accent/20 bg-accent/10 text-accent",
         );
 
         if (onTagClick) {
@@ -188,7 +192,6 @@ function PersonalTagChips({
               type="button"
               onClick={() => onTagClick(tag)}
               className={chipClassName}
-              aria-label={`Filter by personal tag ${tag}`}
             >
               {tag}
             </button>
@@ -207,58 +210,117 @@ function PersonalTagChips({
 
 export default function DocumentsPage() {
   const queryClient = useQueryClient();
-  const [searchParams] = useSearchParams();
+  const [searchParams, setSearchParams] = useSearchParams();
   const statusFromUrl = searchParams.get("status");
   const normalizedStatusFromUrl = STATUS_OPTIONS.includes(statusFromUrl ?? "") ? (statusFromUrl ?? "") : "";
+  const isArchiveView = normalizedStatusFromUrl === "archived";
 
   const [activeTab, setActiveTab] = useState<Tab>("workflow");
   const [search, setSearch] = useState("");
   const [statusFilter, setStatusFilter] = useState(normalizedStatusFromUrl);
   const [typeFilter, setTypeFilter] = useState("");
+  const [supplierFilter, setSupplierFilter] = useState("");
   const [personalTagFilter, setPersonalTagFilter] = useState("");
   const [sort, setSort] = useState<"created_at" | "document_date" | "amount" | "title" | "reference_number">("created_at");
   const [sortDir, setSortDir] = useState<"asc" | "desc">("desc");
   const [page, setPage] = useState(1);
   const [selectedIds, setSelectedIds] = useState<string[]>([]);
+  const [showFilters, setShowFilters] = useState(false);
 
   const debouncedSearch = useDebounce(search, 300);
 
   useEffect(() => {
     setStatusFilter(normalizedStatusFromUrl);
     if (normalizedStatusFromUrl) {
-      setActiveTab("workflow");
+      setActiveTab(normalizedStatusFromUrl === "archived" ? "all" : "workflow");
+    }
+    if (normalizedStatusFromUrl === "archived") {
+      setSearch("");
+      setTypeFilter("");
+      setSupplierFilter("");
+      setPersonalTagFilter("");
     }
     setPage(1);
     setSelectedIds([]);
   }, [normalizedStatusFromUrl]);
 
+  const clearUrlStatusFilter = () => {
+    if (!searchParams.has("status")) return;
+    const nextParams = new URLSearchParams(searchParams);
+    nextParams.delete("status");
+    setSearchParams(nextParams, { replace: true });
+  };
+
   const { data: typesData } = useQuery<unknown, Error, unknown[]>({
     queryKey: ["document-types"],
     queryFn: () => documentTypesAPI.list().then((r) => r.data as unknown),
     select: (data) => normalizeListResponse(data),
+    enabled: !isArchiveView,
+    ...QUERY_FIVE_MIN_STALE,
   });
 
   const params: Record<string, unknown> = {
-    search: debouncedSearch || undefined,
-    status: statusFilter || undefined,
-    document_type: typeFilter || undefined,
+    search: isArchiveView ? undefined : debouncedSearch || undefined,
+    status: isArchiveView ? "archived" : statusFilter || undefined,
+    document_type: isArchiveView ? undefined : typeFilter || undefined,
+    supplier: isArchiveView ? undefined : supplierFilter || undefined,
     ordering: `${sortDir === "desc" ? "-" : ""}${sort}`,
     page,
     page_size: PAGE_SIZE,
   };
 
-  if (activeTab === "workflow") params.is_self_upload = false;
-  if (activeTab === "personal") params.is_self_upload = true;
-  if (activeTab === "personal" && personalTagFilter) params.personal_tag = personalTagFilter;
+  if (!isArchiveView && activeTab === "workflow") params.is_self_upload = false;
+  if (!isArchiveView && activeTab === "personal") params.is_self_upload = true;
+  if (!isArchiveView && activeTab === "personal" && personalTagFilter) params.personal_tag = personalTagFilter;
 
   const { data, isLoading } = useQuery({
     queryKey: ["documents", activeTab, params],
     queryFn: () => documentsAPI.list(params),
     select: (r) => r.data,
     placeholderData: (prev) => prev,
+    ...QUERY_SHORT_STALE,
   });
 
   const docs = data?.results ?? [];
+  const supplierOptions = useMemo<string[]>(() => {
+    const currentPageSuppliers = docs
+      .map((doc: Document) => doc.supplier as string | null | undefined)
+      .filter((value: string | null | undefined): value is string => typeof value === "string" && value.length > 0);
+    return Array.from(new Set(currentPageSuppliers));
+  }, [docs]);
+
+  // Prefetch adjacent pages
+  useEffect(() => {
+    const totalCount = data?.count ?? 0;
+    if (!totalCount) return;
+    const totalPages = Math.ceil(totalCount / PAGE_SIZE);
+    const baseParams: Record<string, unknown> = {
+      search: isArchiveView ? undefined : debouncedSearch || undefined,
+      status: isArchiveView ? "archived" : statusFilter || undefined,
+      document_type: isArchiveView ? undefined : typeFilter || undefined,
+      supplier: isArchiveView ? undefined : supplierFilter || undefined,
+      ordering: `${sortDir === "desc" ? "-" : ""}${sort}`,
+      page_size: PAGE_SIZE,
+    };
+    if (!isArchiveView && activeTab === "workflow") baseParams.is_self_upload = false;
+    if (!isArchiveView && activeTab === "personal") baseParams.is_self_upload = true;
+    if (!isArchiveView && activeTab === "personal" && personalTagFilter) baseParams.personal_tag = personalTagFilter;
+
+    if (page < totalPages) {
+      queryClient.prefetchQuery({
+        queryKey: ["documents", activeTab, { ...baseParams, page: page + 1 }],
+        queryFn: () => documentsAPI.list({ ...baseParams, page: page + 1 }),
+        staleTime: 30_000,
+      });
+    }
+    if (page > 1) {
+      queryClient.prefetchQuery({
+        queryKey: ["documents", activeTab, { ...baseParams, page: page - 1 }],
+        queryFn: () => documentsAPI.list({ ...baseParams, page: page - 1 }),
+        staleTime: 30_000,
+      });
+    }
+  }, [data?.count, queryClient, activeTab, debouncedSearch, statusFilter, typeFilter, supplierFilter, sort, sortDir, page, personalTagFilter, isArchiveView]);
 
   const archiveMutation = useMutation({
     mutationFn: (id: string) => documentsAPI.archive(id),
@@ -290,10 +352,12 @@ export default function DocumentsPage() {
   });
 
   const switchTab = (tab: Tab) => {
+    clearUrlStatusFilter();
     setActiveTab(tab);
     setSearch("");
     setStatusFilter("");
     setTypeFilter("");
+    setSupplierFilter("");
     setPersonalTagFilter("");
     setPage(1);
     setSelectedIds([]);
@@ -311,10 +375,12 @@ export default function DocumentsPage() {
   };
 
   const handlePersonalTagClick = (tag: string) => {
+    clearUrlStatusFilter();
     setActiveTab("personal");
     setSearch("");
     setStatusFilter("");
     setTypeFilter("");
+    setSupplierFilter("");
     setPersonalTagFilter((prev) => (prev === tag ? "" : tag));
     setPage(1);
     setSelectedIds([]);
@@ -325,11 +391,9 @@ export default function DocumentsPage() {
     [...docs.flatMap((doc: Document) => doc.personal_tags ?? []), personalTagFilter].filter(Boolean)
   )).sort((a, b) => a.localeCompare(b));
 
-  // Selection only on All & Workflow tabs (Personal has inline row actions)
-  const selectionEnabled = activeTab !== "personal";
+  const selectionEnabled = !isArchiveView && activeTab !== "personal";
   const showBulkToolbar = selectionEnabled && selectedIds.length > 0;
 
-  // Calculate available bulk actions (intersection of all selected documents' actions)
   const availableBulkActions: BulkAction[] = showBulkToolbar
     ? docs
         .filter((doc: Document) => selectedIds.includes(doc.id))
@@ -339,56 +403,88 @@ export default function DocumentsPage() {
         }, ["approve", "reject", "archive", "void"] as BulkAction[])
     : [];
 
-  // Column count helpers — keeps colSpan correct
-  const baseCols = 7; // ref, title, type, supplier, amount, date, uploaded
+  const baseCols = 8;
   const totalCols =
     baseCols +
-    (selectionEnabled ? 1 : 0) +     // checkbox column
-    (activeTab !== "personal" ? 1 : 0) + // status column
-    (activeTab === "personal" ? 1 : 0);  // actions column
+    (selectionEnabled ? 1 : 0) +
+    (activeTab !== "personal" && !isArchiveView ? 1 : 0) +
+    (activeTab === "personal" ? 1 : 0);
+
+  const activeFilterCount = [statusFilter, typeFilter, supplierFilter].filter(Boolean).length;
 
   return (
-    <div className="p-6 max-w-7xl mx-auto space-y-6">
+    <div className={cn("p-6 max-w-7xl mx-auto space-y-6", isArchiveView && "max-w-6xl")}>
 
       {/* Header */}
-      <div className="flex items-center justify-between">
-        <div>
-          <h1 className="text-2xl font-semibold text-foreground tracking-tight">Documents</h1>
-          <p className="text-sm text-muted-foreground mt-0.5">
-            Browse, filter, and act on every document in your vault.
-          </p>
-        </div>
-        <Link
-          to="/documents/upload"
-          className="inline-flex items-center gap-2 px-4 py-2 bg-primary hover:opacity-90 text-primary-foreground text-sm font-medium rounded-lg transition-opacity"
+      {isArchiveView ? (
+        <div
+          className="overflow-hidden rounded-xl border border-border bg-card"
           style={{ boxShadow: "var(--shadow-card)" }}
         >
-          <UploadCloud className="w-4 h-4" /> Upload
-        </Link>
-      </div>
+          <div className="flex items-center justify-between gap-4 border-b border-border bg-muted/40 px-5 py-4">
+            <div className="flex items-center gap-3">
+              <div className="flex h-11 w-11 flex-shrink-0 items-center justify-center rounded-lg border border-border bg-background text-muted-foreground">
+                <Archive className="h-5 w-5" />
+              </div>
+              <div>
+                <h1 className="text-2xl font-semibold tracking-tight text-foreground">Archived documents</h1>
+                <p className="mt-0.5 text-sm text-muted-foreground">
+                  Stored records that are no longer active in document workflows.
+                </p>
+              </div>
+            </div>
+            {data && (
+              <div className="rounded-lg border border-border bg-background px-4 py-2 text-right">
+                <p className="text-[10px] font-semibold uppercase tracking-widest text-muted-foreground">Archive count</p>
+                <p className="text-xl font-semibold tabular-nums text-foreground">{data.count.toLocaleString()}</p>
+              </div>
+            )}
+          </div>
+        </div>
+      ) : (
+        <div className="flex items-center justify-between">
+          <div>
+            <h1 className="text-2xl font-bold text-foreground tracking-tight">Documents</h1>
+            <p className="text-sm text-muted-foreground mt-1">
+              Browse, filter, and act on every document in your vault.
+            </p>
+          </div>
+          <Link
+            to="/documents/upload"
+            className="inline-flex items-center gap-2 px-5 py-2.5 text-sm font-medium rounded-lg transition-all bg-primary text-primary-foreground hover:bg-primary/90"
+            style={{
+              boxShadow: "var(--shadow-elegant)",
+            }}
+          >
+            <UploadCloud className="w-4 h-4" /> Upload Document
+          </Link>
+        </div>
+      )}
 
       {/* Tabs */}
-      <div className="flex items-end gap-1 border-b border-border">
-        {TABS.map((tab) => (
-          <button
-            key={tab.id}
-            title={tab.tip}
-            onClick={() => switchTab(tab.id)}
-            className={cn(
-              "inline-flex items-center gap-2 px-5 py-2.5 text-sm font-medium rounded-t-lg border border-transparent transition-colors -mb-px",
-              activeTab === tab.id
-                ? "border-border border-b-card bg-card text-primary"
-                : "text-muted-foreground hover:text-foreground hover:bg-muted/50"
-            )}
-          >
-            {tab.icon}
-            {tab.label}
-          </button>
-        ))}
-      </div>
+      {!isArchiveView && (
+        <div className="flex items-end gap-0.5 border-b border-border">
+          {TABS.map((tab) => (
+            <button
+              key={tab.id}
+              title={tab.tip}
+              onClick={() => switchTab(tab.id)}
+              className={cn(
+                "inline-flex items-center gap-2 px-5 py-2.5 text-sm font-medium rounded-t-lg border border-transparent transition-all -mb-px",
+                activeTab === tab.id
+                  ? "border-border border-b-card bg-card text-foreground shadow-sm"
+                  : "text-muted-foreground hover:text-foreground hover:bg-muted/50"
+              )}
+            >
+              {tab.icon}
+              {tab.label}
+            </button>
+          ))}
+        </div>
+      )}
 
       {/* Personal tab explainer */}
-      {activeTab === "personal" && (
+      {!isArchiveView && activeTab === "personal" && (
         <div className="flex items-start gap-3 rounded-xl border border-primary/20 bg-primary/5 px-4 py-3 text-sm text-foreground">
           <Lock className="w-4 h-4 mt-0.5 flex-shrink-0 text-primary" />
           <span>
@@ -397,7 +493,8 @@ export default function DocumentsPage() {
         </div>
       )}
 
-      {activeTab === "personal" && personalTagOptions.length > 0 && (
+      {/* Personal tag chips */}
+      {!isArchiveView && activeTab === "personal" && personalTagOptions.length > 0 && (
         <div className="flex flex-wrap items-center gap-2">
           <span className="text-xs font-semibold uppercase tracking-wide text-muted-foreground mr-2">Filter by tag</span>
           <button
@@ -406,8 +503,8 @@ export default function DocumentsPage() {
             className={cn(
               "px-3 py-1.5 rounded-full text-xs font-medium border transition-colors",
               !personalTagFilter
-                ? "bg-primary text-primary-foreground border-primary"
-                : "bg-card text-muted-foreground border-border hover:text-foreground hover:border-primary/40",
+                ? "bg-accent text-accent-foreground border-accent"
+                : "bg-card text-muted-foreground border-border hover:text-foreground hover:border-accent/40",
             )}
           >
             All
@@ -420,8 +517,8 @@ export default function DocumentsPage() {
               className={cn(
                 "px-3 py-1.5 rounded-full text-xs font-medium border transition-colors",
                 personalTagFilter === tag
-                  ? "bg-primary text-primary-foreground border-primary"
-                  : "bg-card text-muted-foreground border-border hover:text-foreground hover:border-primary/40",
+                  ? "bg-accent text-accent-foreground border-accent"
+                  : "bg-card text-muted-foreground border-border hover:text-foreground hover:border-accent/40",
               )}
             >
               {tag}
@@ -431,47 +528,113 @@ export default function DocumentsPage() {
       )}
 
       {/* Filters */}
-      <div className="flex flex-wrap gap-3 items-center">
-        <div className="relative">
-          <SearchIcon className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-muted-foreground pointer-events-none" />
-          <input
-            value={search}
-            onChange={(e) => { setSearch(e.target.value); setPage(1); }}
-            placeholder="Search…"
-            className="w-64 text-sm bg-card border border-border rounded-lg pl-9 pr-3 py-2 focus:outline-none focus:ring-2 focus:ring-primary/40 focus:border-primary transition-colors"
-          />
+      {!isArchiveView && (
+        <div className="space-y-3">
+          <div className="flex flex-wrap gap-3 items-center">
+            <div className="relative flex-1 max-w-xs">
+              <SearchIcon className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-muted-foreground pointer-events-none" />
+              <input
+                value={search}
+                onChange={(e) => { setSearch(e.target.value); setPage(1); }}
+                placeholder="Search documents…"
+                className="w-full text-sm bg-card border border-border rounded-lg pl-9 pr-3 py-2.5 focus:outline-none focus:ring-2 focus:ring-accent/40 focus:border-accent transition-colors"
+              />
+            </div>
+
+            <button
+              onClick={() => setShowFilters(!showFilters)}
+              className={cn(
+                "inline-flex items-center gap-2 px-4 py-2.5 text-sm font-medium rounded-lg border transition-colors",
+                showFilters || activeFilterCount > 0
+                  ? "border-accent/40 bg-accent/10 text-accent"
+                  : "border-border bg-card text-muted-foreground hover:text-foreground hover:border-border"
+              )}
+            >
+              <SlidersHorizontal className="w-4 h-4" />
+              Filters
+              {activeFilterCount > 0 && (
+                <span className="ml-1 inline-flex items-center justify-center w-5 h-5 rounded-full bg-accent text-accent-foreground text-[10px] font-bold">
+                  {activeFilterCount}
+                </span>
+              )}
+            </button>
+
+            {data && (
+              <span className="ml-auto text-sm text-muted-foreground self-center">
+                <span className="font-semibold text-foreground">{data.count.toLocaleString()}</span> document{data.count !== 1 ? "s" : ""}
+              </span>
+            )}
+          </div>
+
+          {/* Expanded filter row */}
+          {showFilters && (
+            <div
+              className="flex flex-wrap gap-3 items-center rounded-xl border border-border bg-muted/30 px-4 py-3"
+              style={{ boxShadow: "var(--shadow-card)" }}
+            >
+              {activeTab !== "personal" && (
+                <div className="space-y-1">
+                  <label className="text-[10px] font-semibold uppercase tracking-widest text-muted-foreground">Status</label>
+                  <select
+                    value={statusFilter}
+                    onChange={(e) => { clearUrlStatusFilter(); setStatusFilter(e.target.value); setPage(1); }}
+                    className="block text-sm bg-card border border-border rounded-lg px-3 py-2 focus:outline-none focus:ring-2 focus:ring-accent/40 focus:border-accent transition-colors min-w-[140px]"
+                  >
+                    <option value="">All statuses</option>
+                    {STATUS_OPTIONS.map((s) => (
+                      <option key={s} value={s}>{s.replace(/_/g, " ")}</option>
+                    ))}
+                  </select>
+                </div>
+              )}
+
+              <div className="space-y-1">
+                <label className="text-[10px] font-semibold uppercase tracking-widest text-muted-foreground">Type</label>
+                <select
+                  value={typeFilter}
+                  onChange={(e) => { setTypeFilter(e.target.value); setPage(1); }}
+                  className="block text-sm bg-card border border-border rounded-lg px-3 py-2 focus:outline-none focus:ring-2 focus:ring-accent/40 focus:border-accent transition-colors min-w-[140px]"
+                >
+                  <option value="">All types</option>
+                  {(typesData ?? []).map((t: any) => (
+                    <option key={t.id} value={t.id}>{t.name}</option>
+                  ))}
+                </select>
+              </div>
+
+              <div className="space-y-1">
+                <label className="text-[10px] font-semibold uppercase tracking-widest text-muted-foreground">Supplier</label>
+                <select
+                  value={supplierFilter}
+                  onChange={(e) => { setSupplierFilter(e.target.value); setPage(1); }}
+                  className="block text-sm bg-card border border-border rounded-lg px-3 py-2 focus:outline-none focus:ring-2 focus:ring-accent/40 focus:border-accent transition-colors min-w-[160px]"
+                >
+                  <option value="">All suppliers</option>
+                  {supplierOptions.map((s) => (
+                    <option key={s} value={s}>{s}</option>
+                  ))}
+                </select>
+              </div>
+
+              {activeFilterCount > 0 && (
+                <button
+                  onClick={() => {
+                    clearUrlStatusFilter();
+                    setStatusFilter("");
+                    setTypeFilter("");
+                    setSupplierFilter("");
+                    setPage(1);
+                  }}
+                  className="self-end inline-flex items-center gap-1.5 px-3 py-2 text-xs font-medium text-destructive hover:bg-destructive/10 rounded-lg transition-colors"
+                >
+                  <X className="w-3.5 h-3.5" />
+                  Clear all
+                </button>
+              )}
+            </div>
+          )}
         </div>
-
-        {activeTab !== "personal" && (
-          <select
-            value={statusFilter}
-            onChange={(e) => { setStatusFilter(e.target.value); setPage(1); }}
-            className="text-sm bg-card border border-border rounded-lg px-3 py-2 focus:outline-none focus:ring-2 focus:ring-primary/40 focus:border-primary transition-colors"
-          >
-            <option value="">All statuses</option>
-            {STATUS_OPTIONS.map((s) => (
-              <option key={s} value={s}>{s.replace(/_/g, " ")}</option>
-            ))}
-          </select>
-        )}
-
-        <select
-          value={typeFilter}
-          onChange={(e) => { setTypeFilter(e.target.value); setPage(1); }}
-          className="text-sm bg-card border border-border rounded-lg px-3 py-2 focus:outline-none focus:ring-2 focus:ring-primary/40 focus:border-primary transition-colors"
-        >
-          <option value="">All types</option>
-          {(typesData ?? []).map((t: any) => (
-            <option key={t.id} value={t.id}>{t.name}</option>
-          ))}
-        </select>
-
-        {data && (
-          <span className="ml-auto text-sm text-muted-foreground self-center">
-            <span className="font-semibold text-foreground">{data.count.toLocaleString()}</span> document{data.count !== 1 ? "s" : ""}
-          </span>
-        )}
-      </div>
+      )}
 
       {/* Bulk Toolbar */}
       {showBulkToolbar && (
@@ -486,58 +649,70 @@ export default function DocumentsPage() {
 
       {/* Table */}
       <div
-        className="bg-card border border-border rounded-xl overflow-hidden"
+        className={cn(
+          "bg-card border border-border rounded-xl overflow-hidden",
+          isArchiveView && "border-muted-foreground/20 bg-muted/10"
+        )}
         style={{ boxShadow: "var(--shadow-card)" }}
       >
         <div className="overflow-x-auto">
           <table className="w-full text-sm">
             <thead>
-              <tr className="border-b border-border bg-muted/40">
+              <tr className="border-b border-border bg-muted/30">
                 {selectionEnabled && (
-                  <th className="px-6 py-3.5 w-12">
-                    <button onClick={toggleAll} className="text-muted-foreground hover:text-primary transition-colors">
+                  <th className="px-4 py-3 w-12">
+                    <button onClick={toggleAll} className="text-muted-foreground hover:text-accent transition-colors">
                       {allChecked
-                        ? <CheckSquare className="w-5 h-5 text-primary" />
-                        : <Square className="w-5 h-5" />}
+                        ? <CheckSquare className="w-4.5 h-4.5 text-accent" />
+                        : <Square className="w-4.5 h-4.5" />}
                     </button>
                   </th>
                 )}
-                <th className="text-left px-6 py-3.5 font-semibold text-xs uppercase tracking-wider text-muted-foreground">Reference</th>
-                <th className="text-left px-6 py-3.5 font-semibold text-xs uppercase tracking-wider text-muted-foreground">Title</th>
-                <th className="text-left px-6 py-3.5 font-semibold text-xs uppercase tracking-wider text-muted-foreground">Type</th>
-                <th className="text-left px-6 py-3.5 font-semibold text-xs uppercase tracking-wider text-muted-foreground">Supplier</th>
-                <th className="text-right px-6 py-3.5 font-semibold text-xs uppercase tracking-wider text-muted-foreground">Amount</th>
-                <th className="text-left px-6 py-3.5 font-semibold text-xs uppercase tracking-wider text-muted-foreground">Date</th>
+                <th className="text-left px-4 py-3 font-semibold text-[11px] uppercase tracking-wider text-muted-foreground">Reference</th>
+                <th className="text-left px-4 py-3 font-semibold text-[11px] uppercase tracking-wider text-muted-foreground">Title</th>
+                <th className="text-left px-4 py-3 font-semibold text-[11px] uppercase tracking-wider text-muted-foreground">Type</th>
+                <th className="text-left px-4 py-3 font-semibold text-[11px] uppercase tracking-wider text-muted-foreground">Format</th>
+                <th className="text-left px-4 py-3 font-semibold text-[11px] uppercase tracking-wider text-muted-foreground">Supplier</th>
+                <th className="text-right px-4 py-3 font-semibold text-[11px] uppercase tracking-wider text-muted-foreground">Amount</th>
+                <th className="text-left px-4 py-3 font-semibold text-[11px] uppercase tracking-wider text-muted-foreground">Date</th>
 
-                {activeTab !== "personal" && (
-                  <th className="text-left px-6 py-3.5 font-semibold text-xs uppercase tracking-wider text-muted-foreground">Status</th>
+                {activeTab !== "personal" && !isArchiveView && (
+                  <th className="text-left px-4 py-3 font-semibold text-[11px] uppercase tracking-wider text-muted-foreground">Status</th>
                 )}
 
-                <th className="text-left px-6 py-3.5 font-semibold text-xs uppercase tracking-wider text-muted-foreground">Uploaded</th>
+                <th className="text-left px-4 py-3 font-semibold text-[11px] uppercase tracking-wider text-muted-foreground">Uploaded</th>
 
                 {activeTab === "personal" && (
-                  <th className="text-right px-6 py-3.5 font-semibold text-xs uppercase tracking-wider text-muted-foreground">Actions</th>
+                  <th className="text-right px-4 py-3 font-semibold text-[11px] uppercase tracking-wider text-muted-foreground">Actions</th>
                 )}
               </tr>
             </thead>
 
             <tbody className="divide-y divide-border">
               {isLoading ? (
-                Array.from({ length: 8 }).map((_, i) => (
+                Array.from({ length: 6 }).map((_, i) => (
                   <tr key={i}>
                     {Array.from({ length: totalCols }).map((_, j) => (
-                      <td key={j} className="px-6 py-4">
-                        <div className="h-4 bg-muted rounded animate-pulse" />
+                      <td key={j} className="px-4 py-3.5">
+                        <div className="h-4 bg-muted rounded-md animate-pulse" />
                       </td>
                     ))}
                   </tr>
                 ))
               ) : docs.length === 0 ? (
                 <tr>
-                  <td colSpan={totalCols} className="text-center py-16 text-muted-foreground">
-                    <FileText className="w-10 h-10 mx-auto mb-3 text-muted-foreground/50" />
-                    <p className="font-medium text-foreground">No documents found</p>
-                    <p className="text-xs mt-1">Try adjusting your search or filters.</p>
+                  <td colSpan={totalCols} className="text-center py-20 text-muted-foreground">
+                    {isArchiveView ? (
+                      <Archive className="w-12 h-12 mx-auto mb-4 text-muted-foreground/30" />
+                    ) : (
+                      <FileText className="w-12 h-12 mx-auto mb-4 text-muted-foreground/30" />
+                    )}
+                    <p className="font-semibold text-foreground text-base">
+                      {isArchiveView ? "No archived documents" : "No documents found"}
+                    </p>
+                    <p className="text-sm mt-1.5 text-muted-foreground max-w-sm mx-auto">
+                      {isArchiveView ? "Archived documents will appear here once records are moved out of active use." : "Try adjusting your search or filters to find what you're looking for."}
+                    </p>
                   </td>
                 </tr>
               ) : (
@@ -550,28 +725,31 @@ export default function DocumentsPage() {
                       key={doc.id}
                       className={cn(
                         "hover:bg-muted/40 transition-colors group",
-                        isSelected && "bg-primary/5",
-                        isPersonal && activeTab === "all" && !isSelected && "bg-primary/[0.03]"
+                        isSelected && "bg-accent/5",
+                        isPersonal && activeTab === "all" && !isSelected && "bg-primary/[0.02]",
+                        isArchiveView && "bg-muted/[0.18] hover:bg-muted/40"
                       )}
                     >
                       {selectionEnabled && (
-                        <td className="px-6 py-4">
+                        <td className="px-4 py-3.5">
                           <button
                             onClick={() => toggleOne(doc.id)}
-                            className="text-muted-foreground hover:text-primary transition-colors"
+                            className="text-muted-foreground hover:text-accent transition-colors"
                           >
                             {isSelected
-                              ? <CheckSquare className="w-5 h-5 text-primary" />
-                              : <Square className="w-5 h-5" />}
+                              ? <CheckSquare className="w-4.5 h-4.5 text-accent" />
+                              : <Square className="w-4.5 h-4.5" />}
                           </button>
                         </td>
                       )}
 
-                      <td className="px-6 py-4">
+                      <td className="px-4 py-3.5">
                         <div className="flex items-center gap-2">
                           <Link
                             to={`/documents/${doc.id}`}
-                            className="font-mono text-xs bg-muted text-foreground px-2 py-0.5 rounded hover:bg-primary/10 hover:text-primary transition-colors"
+                            onMouseEnter={preloadDocumentWorkspace}
+                            onFocus={preloadDocumentWorkspace}
+                            className="font-mono text-xs bg-muted/60 text-foreground px-2 py-0.5 rounded-md hover:bg-accent/10 hover:text-accent transition-colors"
                           >
                             {doc.reference_number}
                           </Link>
@@ -581,57 +759,71 @@ export default function DocumentsPage() {
                               Personal
                             </span>
                           )}
+                          {isArchiveView && (
+                            <span className="inline-flex items-center gap-1 rounded-full border border-border bg-background px-1.5 py-0.5 text-[10px] font-semibold text-muted-foreground">
+                              <Archive className="h-2.5 w-2.5" />
+                              Archived
+                            </span>
+                          )}
                         </div>
                       </td>
 
-                      <td className="px-6 py-4">
+                      <td className="px-4 py-3.5">
                         <div className="space-y-1">
                           <Link
                             to={`/documents/${doc.id}`}
-                            className="text-foreground group-hover:text-primary font-medium truncate block transition-colors"
+                            onMouseEnter={preloadDocumentWorkspace}
+                            onFocus={preloadDocumentWorkspace}
+                            className="text-foreground group-hover:text-accent font-medium truncate block transition-colors max-w-[200px]"
                           >
                             {doc.title}
                           </Link>
                           {isPersonal && doc.personal_tags?.length ? (
                             <PersonalTagChips
                               tags={doc.personal_tags}
-                              onTagClick={handlePersonalTagClick}
+                              onTagClick={isArchiveView ? undefined : handlePersonalTagClick}
                             />
                           ) : null}
                         </div>
                       </td>
 
-                      <td className="px-6 py-4 text-muted-foreground whitespace-nowrap">
+                      <td className="px-4 py-3.5 text-muted-foreground whitespace-nowrap text-xs">
                         {doc.document_type_name || "—"}
                       </td>
 
-                      <td className="px-6 py-4 text-foreground/80 max-w-[8rem] truncate">
+                      <td className="px-4 py-3.5">
+                        <span className="inline-flex items-center rounded-md border border-border bg-muted/40 px-2 py-0.5 text-[10px] font-semibold uppercase text-muted-foreground tracking-wide">
+                          {formatDocumentFileType(doc.file_name, doc.file_mime_type)}
+                        </span>
+                      </td>
+
+                      <td className="px-4 py-3.5 text-foreground/80 max-w-[8rem] truncate text-xs">
                         {doc.supplier || "—"}
                       </td>
 
-                      <td className="px-6 py-4 text-foreground whitespace-nowrap font-semibold tabular-nums">
+                      <td className="px-4 py-3.5 text-right text-foreground whitespace-nowrap font-semibold tabular-nums text-xs">
                         {doc.amount
                           ? `${Number(doc.amount).toLocaleString(undefined, { minimumFractionDigits: 2 })} ${doc.currency || "USD"}`
                           : "—"}
                       </td>
 
-                      <td className="px-6 py-4 text-muted-foreground whitespace-nowrap">
+                      <td className="px-4 py-3.5 text-muted-foreground whitespace-nowrap text-xs">
                         {doc.document_date ? format(new Date(doc.document_date), "dd MMM yyyy") : "—"}
                       </td>
 
-                      {activeTab !== "personal" && (
-                        <td className="px-6 py-4">
+                      {activeTab !== "personal" && !isArchiveView && (
+                        <td className="px-4 py-3.5">
                           <StatusBadge status={doc.status} />
                         </td>
                       )}
 
-                      <td className="px-6 py-4 text-muted-foreground whitespace-nowrap text-xs">
+                      <td className="px-4 py-3.5 text-muted-foreground whitespace-nowrap text-xs">
                         {format(new Date(doc.created_at), "dd MMM yyyy")}
                       </td>
 
                       {activeTab === "personal" && (
-                        <td className="px-6 py-4">
-                          <div className="flex items-center justify-end gap-1.5 opacity-0 group-hover:opacity-100 transition-opacity">
+                        <td className="px-4 py-3.5">
+                          <div className="flex items-center justify-end gap-1 opacity-0 group-hover:opacity-100 transition-opacity">
                             {!["archived", "void"].includes(doc.status) && (
                               <button
                                 title="Archive"
@@ -674,14 +866,14 @@ export default function DocumentsPage() {
               <button
                 onClick={() => setPage((p) => Math.max(1, p - 1))}
                 disabled={page === 1}
-                className="px-3 py-1.5 text-xs bg-card border border-border rounded-lg hover:bg-muted disabled:opacity-40 disabled:cursor-not-allowed transition-colors"
+                className="px-4 py-1.5 text-xs font-medium bg-card border border-border rounded-lg hover:bg-muted disabled:opacity-40 disabled:cursor-not-allowed transition-colors"
               >
                 Previous
               </button>
               <button
                 onClick={() => setPage((p) => p + 1)}
                 disabled={page * PAGE_SIZE >= data.count}
-                className="px-3 py-1.5 text-xs bg-card border border-border rounded-lg hover:bg-muted disabled:opacity-40 disabled:cursor-not-allowed transition-colors"
+                className="px-4 py-1.5 text-xs font-medium bg-card border border-border rounded-lg hover:bg-muted disabled:opacity-40 disabled:cursor-not-allowed transition-colors"
               >
                 Next
               </button>

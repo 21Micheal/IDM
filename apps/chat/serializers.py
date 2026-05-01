@@ -1,5 +1,6 @@
 from rest_framework import serializers
 from django.contrib.auth import get_user_model
+from django.db import transaction
 from .models import ChatRoom, ChatMessage, ChatRoomParticipant, UnreadMessage, ChatNotification
 
 User = get_user_model()
@@ -113,8 +114,14 @@ class ChatRoomCreateSerializer(serializers.ModelSerializer):
         fields = ['name', 'room_type', 'participant_ids']
     
     def validate_participant_ids(self, value):
-        if self.initial_data.get('room_type') == 'direct' and len(value) != 1:
+        value = list(dict.fromkeys(value))
+        room_type = self.initial_data.get('room_type') or 'direct'
+
+        if room_type == 'direct' and len(value) != 1:
             raise serializers.ValidationError("Direct message rooms must have exactly one other participant")
+
+        if room_type == 'group' and not value:
+            raise serializers.ValidationError("Group chat rooms must include at least one other participant")
         
         # Validate all user IDs exist
         users = User.objects.filter(id__in=value)
@@ -126,20 +133,24 @@ class ChatRoomCreateSerializer(serializers.ModelSerializer):
     def create(self, validated_data):
         participant_ids = validated_data.pop('participant_ids', [])
         request = self.context.get('request')
-        
-        # Create room
-        room = ChatRoom.objects.create(
-            created_by=request.user if request else None,
-            **validated_data
-        )
-        
-        # Add participants (including creator)
-        participants = [request.user] if request else []
-        for user_id in participant_ids:
-            participants.append(User.objects.get(id=user_id))
-        
-        room.participants.set(participants)
-        
+        creator = request.user if request else None
+        participant_ids = list(dict.fromkeys(participant_ids))
+
+        if creator:
+            participant_ids = [user_id for user_id in participant_ids if user_id != creator.id]
+
+        with transaction.atomic():
+            room = ChatRoom.objects.create(
+                created_by=creator,
+                **validated_data
+            )
+
+            participants = list(User.objects.filter(id__in=participant_ids))
+            if creator:
+                participants.insert(0, creator)
+
+            room.participants.set(participants)
+
         return room
 
 

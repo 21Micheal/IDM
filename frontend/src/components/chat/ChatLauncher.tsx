@@ -18,6 +18,7 @@ const ChatPanel = lazy(() =>
 export function ChatLauncher() {
   const [open, setOpen] = useState(false);
   const [initialRoomId, setInitialRoomId] = useState<string | undefined>();
+  const [activeRoomId, setActiveRoomId] = useState<string | undefined>();
   const [unread, setUnread] = useState(0);
   const [pulse, setPulse] = useState(false);
 
@@ -51,7 +52,7 @@ export function ChatLauncher() {
       window.setTimeout(() => setPulse(false), 1200);
 
       // Don't toast if the panel is already open on that room
-      if (open && initialRoomId === data.notification.room_id) return;
+      if (open && activeRoomId === data.notification.room_id) return;
 
       const n = data.notification;
       vaultToast.info(`${n.sender.name} · ${n.room_name}`, {
@@ -68,7 +69,7 @@ export function ChatLauncher() {
 
     chatWebSocket.onNotification(handler);
     return () => chatWebSocket.offNotification(handler);
-  }, [open, initialRoomId]);
+  }, [open, activeRoomId]);
 
   const handleOpen = () => {
     setOpen(true);
@@ -79,6 +80,7 @@ export function ChatLauncher() {
   const handleClose = () => {
     setOpen(false);
     setInitialRoomId(undefined);
+    setActiveRoomId(undefined);
   };
 
   return (
@@ -117,7 +119,11 @@ export function ChatLauncher() {
       {/* ── Slide-up panel ─────────────────────────────────────────────── */}
       {open && (
         <Suspense fallback={null}>
-          <ChatPanel onClose={handleClose} initialRoomId={initialRoomId} />
+          <ChatPanel
+            onClose={handleClose}
+            initialRoomId={initialRoomId}
+            onActiveRoomChange={setActiveRoomId}
+          />
         </Suspense>
       )}
     </>

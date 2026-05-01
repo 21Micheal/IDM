@@ -7,6 +7,8 @@ export interface DocumentType {
   description: string;
   icon: string;
   is_active?: boolean;
+  is_personal_type?: boolean;
+  metadata_mode?: "admin_defined" | "user_defined";
   workflow_template?: string | null;
   workflow_template_name?: string | null;
   metadata_fields: MetadataField[];
@@ -131,11 +133,20 @@ export interface WorkflowTask {
     allow_return?: boolean;
   };
   workflow_instance?: {
-    document?: { id: string; title: string; reference_number: string };
+    document?: {
+      id: string;
+      title: string;
+      reference_number: string;
+      document_type_name?: string;
+      document_type?: DocumentType;
+    };
   };
   document_id?: string;
   document_title?: string;
   document_ref?: string;
+  document_type_name?: string;
+  file_name?: string;
+  file_mime_type?: string;
   status: "pending" | "in_progress" | "approved" | "rejected" | "returned" | "held" | "skipped";
   due_at: string | null;
   held_until?: string | null;
@@ -144,6 +155,7 @@ export interface WorkflowTask {
 
 export interface Notification {
   id: string;
+  type: "task_assigned" | "workflow_complete" | "document_returned" | "document_held" | "hold_released" | "hold_expired" | "task_overdue" | "workflow_action";
   message: string;
   link: string;
   is_read: boolean;
@@ -163,6 +175,8 @@ export interface SearchHit {
   title: string;
   reference_number: string;
   document_type: string;
+  file_name?: string;
+  file_mime_type?: string;
   supplier: string;
   amount: number | null;
   status: DocumentStatus;
