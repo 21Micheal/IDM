@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { useNavigate } from "react-router-dom";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { documentTypesAPI, normalizeListResponse, workflowAPI } from "@/services/api";
@@ -11,6 +11,11 @@ import { useForm, useFieldArray } from "react-hook-form";
 import { toast } from "@/components/ui/vault-toast";
 import clsx from "clsx";
 import type { DocumentType } from "@/types";
+import {
+  applyDocumentTypeConfigToDescription,
+  deriveDocumentTypeConfig,
+  stripTypeConfigMarkers,
+} from "@/lib/documentTypeConfig";
 
 // ── Constants ─────────────────────────────────────────────────────────────────
 
@@ -31,9 +36,11 @@ type DocTypeFormData = {
   reference_prefix: string;
   reference_padding: number;
   description: string;
+  is_personal_type: boolean;
+  metadata_mode: "admin_defined" | "user_defined";
   metadata_fields: Array<{
     label: string;
-    key: string;
+    field_key: string;
     field_type: string;
     is_required: boolean;
     order: number;
@@ -55,11 +62,35 @@ function DocumentTypeForm({
   isPending:     boolean;
   submitLabel:   string;
 }) {
-  const { register, control, handleSubmit } = useForm<DocTypeFormData>({ defaultValues });
+  const { register, control, handleSubmit, watch, setValue } = useForm<DocTypeFormData>({ defaultValues });
   const { fields, append, remove } = useFieldArray({ control, name: "metadata_fields" });
+  const isPersonalType = watch("is_personal_type");
+  const metadataMode = watch("metadata_mode");
+  const useAdminMetadata = !isPersonalType && metadataMode === "admin_defined";
+
+  useEffect(() => {
+    if (isPersonalType && metadataMode !== "user_defined") {
+      setValue("metadata_mode", "user_defined", { shouldDirty: true });
+    }
+  }, [isPersonalType, metadataMode, setValue]);
+
+  const handleSubmitWithPayload = (values: DocTypeFormData) => {
+    const finalMetadataMode = values.is_personal_type ? "user_defined" : values.metadata_mode;
+    const payload = {
+      ...values,
+      metadata_mode: finalMetadataMode,
+      workflow_template: values.is_personal_type ? null : undefined,
+      description: applyDocumentTypeConfigToDescription(values.description, {
+        isPersonalType: values.is_personal_type,
+        metadataMode: finalMetadataMode,
+      }),
+      metadata_fields: finalMetadataMode === "admin_defined" ? values.metadata_fields : [],
+    };
+    onSubmit(payload as unknown as DocTypeFormData);
+  };
 
   return (
-    <form onSubmit={handleSubmit(onSubmit)} className="space-y-5">
+    <form onSubmit={handleSubmit(handleSubmitWithPayload)} className="space-y-5">
       <div className="grid grid-cols-2 gap-4">
         <div>
           <label className="label">Type name <span className="text-destructive">*</span></label>
@@ -87,22 +118,53 @@ function DocumentTypeForm({
         <textarea {...register("description")} rows={2} className="input" placeholder="Brief description…" />
       </div>
 
+      <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+        <label className="flex items-center gap-2 text-sm text-foreground">
+          <input
+            type="checkbox"
+            {...register("is_personal_type")}
+            className="w-4 h-4 rounded border-border text-accent focus:ring-ring"
+          />
+          This is a personal document type
+        </label>
+        <div>
+          <label className="label">Metadata mode</label>
+          <select
+            {...register("metadata_mode")}
+            disabled={isPersonalType}
+            className={clsx("input", isPersonalType && "opacity-60 cursor-not-allowed")}
+          >
+            <option value="admin_defined">Admin-defined metadata fields</option>
+            <option value="user_defined">User-defined metadata fields</option>
+          </select>
+          <p className="text-xs text-muted-foreground mt-1">
+            {isPersonalType
+              ? "Personal types always use user-defined metadata."
+              : "Choose whether metadata is admin-defined or user-defined at upload."}
+          </p>
+        </div>
+      </div>
+
       {/* Custom metadata fields */}
       <div className="border border-border rounded-xl p-4 space-y-3 bg-muted/30">
         <div className="flex items-center justify-between">
           <div>
             <h3 className="font-semibold text-foreground text-sm">Custom metadata fields</h3>
             <p className="text-xs text-muted-foreground mt-0.5">
-              Core fields (supplier, amount, date) are always present.
+              {useAdminMetadata
+                ? "Core fields (supplier, amount, date) are always present."
+                : "Disabled: users will define their own searchable fields at upload time."}
             </p>
           </div>
-          <button
-            type="button"
-            onClick={() => append({ label: "", key: "", field_type: "text", is_required: false, order: fields.length })}
-            className="btn-secondary text-xs px-2.5 py-1.5"
-          >
-            <Plus className="w-3.5 h-3.5" /> Add field
-          </button>
+          {useAdminMetadata && (
+            <button
+              type="button"
+              onClick={() => append({ label: "", field_key: "", field_type: "text", is_required: false, order: fields.length })}
+              className="btn-secondary text-xs px-2.5 py-1.5"
+            >
+              <Plus className="w-3.5 h-3.5" /> Add field
+            </button>
+          )}
         </div>
 
         {fields.map((field, index) => (
@@ -116,7 +178,7 @@ function DocumentTypeForm({
             </div>
             <div className="col-span-3">
               <input
-                {...register(`metadata_fields.${index}.key`)}
+                {...register(`metadata_fields.${index}.field_key`)}
                 className="input text-sm font-mono"
                 placeholder="field_key"
               />
@@ -144,7 +206,12 @@ function DocumentTypeForm({
           </div>
         ))}
 
-        {!fields.length && (
+        {!useAdminMetadata && (
+          <p className="text-xs text-muted-foreground text-center py-2">
+            Admin-defined metadata is disabled for this type.
+          </p>
+        )}
+        {useAdminMetadata && !fields.length && (
           <p className="text-xs text-muted-foreground text-center py-2">
             No custom fields configured yet.
           </p>
@@ -202,7 +269,9 @@ function DocumentTypesTab() {
 
   const blankForm: DocTypeFormData = {
     name: "", code: "", reference_prefix: "",
-    reference_padding: 5, description: "", metadata_fields: [],
+    reference_padding: 5, description: "",
+    is_personal_type: false, metadata_mode: "admin_defined",
+    metadata_fields: [],
   };
 
   return (
@@ -248,10 +317,12 @@ function DocumentTypesTab() {
               code:              editTarget.code,
               reference_prefix:  editTarget.reference_prefix,
               reference_padding: editTarget.reference_padding ?? 5,
-              description:       editTarget.description ?? "",
+              description:       stripTypeConfigMarkers(editTarget.description ?? ""),
+              is_personal_type:  deriveDocumentTypeConfig(editTarget).isPersonalType,
+              metadata_mode:     deriveDocumentTypeConfig(editTarget).metadataMode,
               metadata_fields:   (editTarget.metadata_fields ?? []).map((f) => ({
                 label:      f.label,
-                key:        f.key ?? f.field_key,
+                field_key:  f.key ?? f.field_key,
                 field_type: f.field_type,
                 is_required: f.is_required,
                 order:       f.order,
@@ -276,6 +347,9 @@ function DocumentTypesTab() {
         ))}
 
         {docTypes?.map((type) => (
+          (() => {
+            const config = deriveDocumentTypeConfig(type);
+            return (
           <div
             key={type.id}
             className={clsx(
@@ -295,20 +369,26 @@ function DocumentTypesTab() {
             </div>
 
             {type.description && (
-              <p className="text-sm text-muted-foreground line-clamp-2">{type.description}</p>
+              <p className="text-sm text-muted-foreground line-clamp-2">{stripTypeConfigMarkers(type.description)}</p>
             )}
 
             <div className="flex items-center justify-between text-xs">
-              <span className="text-muted-foreground">{type.metadata_fields?.length ?? 0} custom field{type.metadata_fields?.length !== 1 ? "s" : ""}</span>
+              <span className="text-muted-foreground">
+                {config.metadataMode === "user_defined"
+                  ? "user-defined metadata"
+                  : `${type.metadata_fields?.length ?? 0} custom field${type.metadata_fields?.length !== 1 ? "s" : ""}`}
+              </span>
               <span
                 className={clsx(
                   "badge",
-                  type.workflow_template
+                  config.isPersonalType
+                    ? "bg-primary/15 text-primary"
+                    : type.workflow_template
                     ? "bg-[hsl(var(--teal))]/15 text-[hsl(var(--teal))]"
                     : "bg-muted text-muted-foreground"
                 )}
               >
-                {type.workflow_template ? "Workflow ✓" : "No workflow"}
+                {config.isPersonalType ? "Personal" : type.workflow_template ? "Workflow ✓" : "No workflow"}
               </span>
             </div>
 
@@ -321,6 +401,8 @@ function DocumentTypesTab() {
               </button>
             </div>
           </div>
+            );
+          })()
         ))}
 
         {!isLoading && !docTypes?.length && (

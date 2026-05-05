@@ -11,6 +11,7 @@ User = get_user_model()
 class ChatConsumer(AsyncWebsocketConsumer):
     async def connect(self):
         self.user = self.scope["user"]
+        self.room_group_name = None
         if not self.user.is_authenticated:
             await self.close()
             return
@@ -35,11 +36,12 @@ class ChatConsumer(AsyncWebsocketConsumer):
         await self.update_last_read()
 
     async def disconnect(self, close_code):
-        # Leave room group
-        await self.channel_layer.group_discard(
-            self.room_group_name,
-            self.channel_name
-        )
+        # Leave room group if connect() joined one.
+        if self.room_group_name:
+            await self.channel_layer.group_discard(
+                self.room_group_name,
+                self.channel_name
+            )
 
     async def receive(self, text_data):
         try:
@@ -277,6 +279,7 @@ class UserNotificationConsumer(AsyncWebsocketConsumer):
     
     async def connect(self):
         self.user = self.scope["user"]
+        self.user_group_name = None
         if not self.user.is_authenticated:
             await self.close()
             return
@@ -292,11 +295,12 @@ class UserNotificationConsumer(AsyncWebsocketConsumer):
         await self.accept()
 
     async def disconnect(self, close_code):
-        # Leave user group
-        await self.channel_layer.group_discard(
-            self.user_group_name,
-            self.channel_name
-        )
+        # Leave user group if connect() joined one.
+        if self.user_group_name:
+            await self.channel_layer.group_discard(
+                self.user_group_name,
+                self.channel_name
+            )
 
     async def chat_notification(self, event):
         """Send chat notification to WebSocket"""

@@ -35,12 +35,15 @@ function AuthBootstrap({ children }: { children: React.ReactNode }) {
   const accessToken = useAuthStore((s) => s.accessToken);
   const user = useAuthStore((s) => s.user);
   const setUser = useAuthStore((s) => s.setUser);
+  const logout = useAuthStore((s) => s.logout);
+  const isSessionExpired = useAuthStore((s) => s.isSessionExpired);
   const [ready, setReady] = useState(!accessToken || user?.has_admin_access !== undefined);
 
   useEffect(() => {
     let cancelled = false;
 
-    if (!accessToken) {
+    if (!accessToken || isSessionExpired()) {
+      if (accessToken) logout();
       setReady(true);
       return () => {
         cancelled = true;
@@ -62,7 +65,9 @@ function AuthBootstrap({ children }: { children: React.ReactNode }) {
         }
       })
       .catch(() => {
-        // If the token is stale, the response interceptor will log the user out.
+        if (!cancelled) {
+          logout();
+        }
       })
       .finally(() => {
         if (!cancelled) {
@@ -73,7 +78,7 @@ function AuthBootstrap({ children }: { children: React.ReactNode }) {
     return () => {
       cancelled = true;
     };
-  }, [accessToken, setUser, user?.has_admin_access]);
+  }, [accessToken, isSessionExpired, logout, setUser, user?.has_admin_access]);
 
   if (!ready) return null;
   return <>{children}</>;

@@ -1,6 +1,6 @@
 import React from 'react';
 import { Link } from 'react-router-dom';
-import { TrendingUp, TrendingDown } from 'lucide-react';
+import { ArrowDownRight, ArrowUpRight } from 'lucide-react';
 import { cn } from "../../lib/utils";
 
 interface StatCardProps {
@@ -10,6 +10,7 @@ interface StatCardProps {
   trend?: {
     value: number;
     isPositive: boolean;
+    suffix?: string;
   };
   /** Indigo Vault semantic variants */
   color?: 'primary' | 'accent' | 'teal' | 'secondary';
@@ -17,10 +18,10 @@ interface StatCardProps {
 }
 
 const iconWrapVariants: Record<NonNullable<StatCardProps['color']>, string> = {
-  primary: 'bg-primary/7 text-primary ring-1 ring-primary/10',
-  accent: 'bg-accent/12 text-accent-foreground ring-1 ring-accent/15',
-  teal: 'bg-teal/10 text-teal ring-1 ring-teal/12',
-  secondary: 'bg-muted text-foreground ring-1 ring-border',
+  primary: 'bg-primary/7 text-primary',
+  accent: 'bg-accent/10 text-accent',
+  teal: 'bg-teal/10 text-teal',
+  secondary: 'bg-primary/7 text-primary',
 };
 
 export const StatCard: React.FC<StatCardProps> = ({
@@ -33,51 +34,52 @@ export const StatCard: React.FC<StatCardProps> = ({
 }) => {
   const cardContent = (
     <div
-      className="bg-card rounded-xl border border-border p-5 transition-all duration-300 group cursor-pointer hover:-translate-y-0.5"
+      className="group h-full rounded-xl border border-border bg-card p-5 transition-all duration-300 hover:-translate-y-0.5"
       style={{ boxShadow: 'var(--shadow-card)' }}
       onMouseEnter={(e) => (e.currentTarget.style.boxShadow = 'var(--shadow-elegant)')}
       onMouseLeave={(e) => (e.currentTarget.style.boxShadow = 'var(--shadow-card)')}
     >
-      <div className="flex items-start justify-between">
-        <div className="space-y-0.5">
-          <p className="text-[11px] font-medium uppercase tracking-[0.18em] text-muted-foreground">
-            {title}
-          </p>
-          <p className="mt-3 text-3xl font-semibold tracking-tight text-foreground sm:text-[2rem]">
-            {value}
-          </p>
-        </div>
-
-        <div
-          className={cn(
-            "flex h-10 w-10 items-center justify-center rounded-xl transition-colors",
-            iconWrapVariants[color],
-          )}
-        >
-          <Icon className="h-[18px] w-[18px] stroke-[1.85]" />
-        </div>
-      </div>
-
-      {trend && (
-        <div className="mt-5 flex items-center gap-2">
+      <div className="flex min-h-[5.75rem] flex-col justify-between">
+        <div className="flex items-start justify-between gap-4">
           <div
             className={cn(
-              "flex items-center gap-1 rounded-full px-2.5 py-1 text-[11px] font-semibold",
-              trend.isPositive
-                ? "bg-teal/15 text-teal"
-                : "bg-destructive/10 text-destructive"
+              "flex h-10 w-10 shrink-0 items-center justify-center rounded-lg transition-colors",
+              iconWrapVariants[color],
             )}
           >
-            {trend.isPositive ? (
-              <TrendingUp className="w-3.5 h-3.5" />
-            ) : (
-              <TrendingDown className="w-3.5 h-3.5" />
-            )}
-            {trend.isPositive ? '+' : ''}{trend.value}%
+            <Icon className="h-[18px] w-[18px] stroke-[2]" />
           </div>
-          <span className="text-xs text-muted-foreground">from last month</span>
+
+          {trend && (
+            <div
+              className={cn(
+                "flex items-center gap-1 text-xs font-semibold",
+                trend.isPositive ? "text-teal" : "text-destructive"
+              )}
+            >
+              {trend.isPositive ? (
+                <ArrowUpRight className="h-3.5 w-3.5" />
+              ) : (
+                <ArrowDownRight className="h-3.5 w-3.5" />
+              )}
+              <span>
+                {trend.isPositive ? '+' : ''}
+                {trend.value}
+                {trend.suffix ?? '%'}
+              </span>
+            </div>
+          )}
         </div>
-      )}
+
+        <div>
+          <p className="text-3xl font-semibold leading-none tracking-tight text-foreground">
+            {value}
+          </p>
+          <p className="mt-2 text-sm font-medium text-muted-foreground">
+            {title}
+          </p>
+        </div>
+      </div>
     </div>
   );
 

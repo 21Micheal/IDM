@@ -119,6 +119,7 @@ class DocumentTypeSerializer(serializers.ModelSerializer):
         fields = [
             "id", "name", "code", "reference_prefix", "reference_padding",
             "description", "icon", "is_active",
+            "is_personal_type", "metadata_mode",
             "workflow_template", "workflow_template_name",
             "metadata_fields",
         ]
@@ -646,14 +647,34 @@ class DocumentTypeWriteSerializer(serializers.ModelSerializer):
         fields = [
             "name", "code", "reference_prefix", "reference_padding",
             "description", "icon", "is_active",
+            "is_personal_type", "metadata_mode",
             "workflow_template",
             "metadata_fields",
         ]
         extra_kwargs = {
             "icon":              {"required": False, "allow_blank": True},
             "description":       {"required": False, "allow_blank": True},
+            "is_personal_type":  {"required": False},
+            "metadata_mode":     {"required": False},
             "workflow_template": {"required": False, "allow_null": True},
         }
+
+    def validate(self, attrs):
+        attrs = super().validate(attrs)
+        is_personal_type = attrs.get(
+            "is_personal_type",
+            getattr(self.instance, "is_personal_type", False),
+        )
+        if is_personal_type:
+            attrs["metadata_mode"] = DocumentType.MetadataMode.USER_DEFINED
+            attrs["workflow_template"] = None
+        elif "metadata_mode" not in attrs:
+            attrs["metadata_mode"] = getattr(
+                self.instance,
+                "metadata_mode",
+                DocumentType.MetadataMode.ADMIN_DEFINED,
+            )
+        return attrs
 
     def validate_metadata_fields(self, value):
         """
@@ -730,6 +751,8 @@ class DocumentTypeWriteSerializer(serializers.ModelSerializer):
     @transaction.atomic
     def create(self, validated_data: dict) -> DocumentType:
         fields_data = validated_data.pop("metadata_fields", [])
+        if validated_data.get("metadata_mode") == DocumentType.MetadataMode.USER_DEFINED:
+            fields_data = []
         doc_type    = DocumentType.objects.create(**validated_data)
         self._save_metadata_fields(doc_type, fields_data)
         self._sync_workflow_template(doc_type)
@@ -738,6 +761,7 @@ class DocumentTypeWriteSerializer(serializers.ModelSerializer):
     @transaction.atomic
     def update(self, instance: DocumentType, validated_data: dict) -> DocumentType:
         fields_data = validated_data.pop("metadata_fields", None)
+        next_metadata_mode = validated_data.get("metadata_mode", instance.metadata_mode)
 
         for attr, value in validated_data.items():
             setattr(instance, attr, value)
@@ -746,6 +770,11 @@ class DocumentTypeWriteSerializer(serializers.ModelSerializer):
 
         # Only replace fields if the key was present in the request
         if fields_data is not None:
-            self._save_metadata_fields(instance, fields_data)
+            if next_metadata_mode == DocumentType.MetadataMode.USER_DEFINED:
+                self._save_metadata_fields(instance, [])
+            else:
+                self._save_metadata_fields(instance, fields_data)
+        elif next_metadata_mode == DocumentType.MetadataMode.USER_DEFINED:
+            self._save_metadata_fields(instance, [])
 
         return instance

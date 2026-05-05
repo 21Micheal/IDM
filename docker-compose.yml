@@ -46,9 +46,10 @@ services:
     build:
       context: .
       dockerfile: Dockerfile 
+      network: host
     restart: unless-stopped
-    # Changed 'config' to 'IDM'
-    command: python manage.py runserver 0.0.0.0:8000
+    # Changed 'config' to 'IDM' and use Daphne for WebSocket support
+    command: sh -c "python manage.py migrate --noinput && daphne IDM.asgi:application -b 0.0.0.0 -p 8000"
     environment:
       - DEBUG=True
       - SECRET_KEY=${SECRET_KEY:-insecure-dev-secret-change-me}
@@ -74,6 +75,7 @@ services:
   celery_worker:
     build:
       context: .
+      network: host
     restart: unless-stopped
     # Changed 'config' to 'IDM'
     command: celery -A IDM worker -l info -Q default,indexing,notifications
@@ -97,6 +99,7 @@ services:
   celery_ocr:
     build:
       context: .
+      network: host
     restart: unless-stopped
     command: celery -A IDM worker -Q ocr -c 2 --loglevel=info
     environment:
@@ -122,6 +125,7 @@ services:
   celery_preview:
     build:
       context: .
+      network: host
     restart: unless-stopped
     command: celery -A IDM worker -Q preview -c 1 --loglevel=info
     environment:
@@ -146,11 +150,10 @@ services:
     build:
       context: ./frontend
       dockerfile: Dockerfile
+      network: host
       target: development
     env_file:
       - .env  # Points to the root .env file
-    environment:
-      - VITE_API_URL=${NGROK_URL}
     volumes:
       - ./frontend:/app
       - /app/node_modules

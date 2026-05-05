@@ -65,11 +65,11 @@ export default function WorkflowPage() {
               className="card p-5 flex items-start gap-4 hover:-translate-y-0.5 transition-transform hover:shadow-md"
             >
               <div className="w-10 h-10 rounded-xl bg-accent/15 flex items-center justify-center flex-shrink-0">
-                <Clock className="w-5 h-5 text-accent-foreground" />
+                <Clock className="w-5 h-5 text-accent" />
               </div>
               <div className="flex-1 min-w-0">
                 <div className="min-w-0">
-                  <h3 className="font-medium text-foreground hover:text-accent-foreground truncate">
+                  <h3 className="font-medium text-foreground hover:text-accent truncate">
                     {documentTitle}
                   </h3>
                   <p className="text-xs text-muted-foreground font-mono mt-0.5">

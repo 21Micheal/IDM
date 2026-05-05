@@ -37,6 +37,10 @@ IMAGE_EXTENSIONS = {".png", ".jpg", ".jpeg", ".gif", ".webp", ".svg", ".bmp", ".
 
 
 class DocumentType(models.Model):
+    class MetadataMode(models.TextChoices):
+        ADMIN_DEFINED = "admin_defined", "Admin-defined"
+        USER_DEFINED = "user_defined", "User-defined"
+
     id               = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
     name             = models.CharField(max_length=120, unique=True)
     code             = models.CharField(max_length=20, unique=True)
@@ -51,6 +55,12 @@ class DocumentType(models.Model):
         on_delete=models.SET_NULL,
         related_name="document_types",
         help_text="Primary approval workflow for this document type.",
+    )
+    is_personal_type = models.BooleanField(default=False)
+    metadata_mode    = models.CharField(
+        max_length=32,
+        choices=MetadataMode.choices,
+        default=MetadataMode.ADMIN_DEFINED,
     )
 
     is_active  = models.BooleanField(default=True)

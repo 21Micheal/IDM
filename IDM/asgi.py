@@ -1,13 +1,18 @@
 import os
 from django.core.asgi import get_asgi_application
 from channels.routing import ProtocolTypeRouter, URLRouter
-from apps.chat.routing import websocket_urlpatterns
-from apps.chat.middleware import JwtAuthMiddlewareStack
 
 os.environ.setdefault("DJANGO_SETTINGS_MODULE", "IDM.settings")
 
+# Initialize Django
+django_asgi_app = get_asgi_application()
+
+# Import chat components after Django is initialized
+from apps.chat.routing import websocket_urlpatterns
+from apps.chat.middleware import JwtAuthMiddlewareStack
+
 application = ProtocolTypeRouter({
-    "http": get_asgi_application(),
+    "http": django_asgi_app,
     "websocket": JwtAuthMiddlewareStack(
         URLRouter(
             websocket_urlpatterns

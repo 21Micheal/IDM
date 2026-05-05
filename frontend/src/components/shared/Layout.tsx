@@ -196,18 +196,11 @@ function ProfileMenu() {
     <div className="relative">
       <button
         onClick={() => setOpen(!open)}
-        className="flex items-center gap-2 px-2 py-1.5 rounded-lg hover:bg-muted transition-colors"
+        className="flex h-9 w-9 items-center justify-center rounded-lg text-muted-foreground transition-colors hover:bg-muted hover:text-foreground"
+        title="Profile"
+        aria-label="Open profile menu"
       >
-        <div className="w-7 h-7 rounded-full bg-primary flex items-center justify-center text-primary-foreground text-xs font-bold flex-shrink-0">
-          {user?.first_name?.[0]}{user?.last_name?.[0]}
-        </div>
-        <div className="text-left hidden sm:block">
-          <p className="text-xs font-semibold text-foreground leading-tight">
-            {user?.first_name} {user?.last_name}
-          </p>
-          <p className="text-[10px] text-muted-foreground capitalize">{user?.job_description || "Staff"}</p>
-        </div>
-        <ChevronDown className={clsx("w-3.5 h-3.5 text-muted-foreground transition-transform", open && "rotate-180")} />
+        <UserCircle className="h-5 w-5" />
       </button>
 
       {open && (
@@ -215,7 +208,7 @@ function ProfileMenu() {
           {/* Backdrop */}
           <div className="fixed inset-0 z-10" onClick={() => setOpen(false)} />
           {/* Dropdown */}
-          <div className="absolute right-0 top-10 z-20 w-48 bg-card rounded-xl shadow-lg border border-border py-1 overflow-hidden">
+          <div className="absolute right-0 top-11 z-20 w-56 bg-card rounded-xl shadow-lg border border-border py-1 overflow-hidden">
             <div className="px-4 py-2.5 border-b border-border">
               <p className="text-xs font-semibold text-foreground">
                 {user?.first_name} {user?.last_name}
@@ -258,6 +251,29 @@ function ContentFallback() {
       <div className="flex items-center gap-2 text-sm text-muted-foreground">
         <Loader2 className="h-4 w-4 animate-spin" />
         <span>Loading page...</span>
+      </div>
+    </div>
+  );
+}
+
+function SidebarProfile() {
+  const { user } = useAuthStore();
+  const initials = `${user?.first_name?.[0] ?? ""}${user?.last_name?.[0] ?? ""}` || "U";
+
+  return (
+    <div className="border-t border-sidebar-border/70 bg-black/10 p-3">
+      <div className="flex items-center gap-3 rounded-lg px-2 py-2">
+        <div className="flex h-9 w-9 shrink-0 items-center justify-center rounded-full bg-white/12 text-xs font-bold text-white ring-1 ring-white/15">
+          {initials}
+        </div>
+        <div className="min-w-0">
+          <p className="truncate text-sm font-semibold text-white">
+            {user?.first_name} {user?.last_name}
+          </p>
+          <p className="truncate text-[11px] capitalize text-sidebar-foreground/70">
+            {user?.job_description || "Staff"}
+          </p>
+        </div>
       </div>
     </div>
   );
@@ -334,10 +350,10 @@ export default function Layout() {
     <div className="flex h-screen bg-background text-foreground">
 
       {/* ── Sidebar ────────────────────────────────────────────────────── */}
-      <aside className="w-64 flex-shrink-0 bg-sidebar text-sidebar-foreground flex flex-col shadow-2xl">
+      <aside className="w-64 flex-shrink-0 text-sidebar-foreground flex flex-col shadow-2xl" style={{ background: "var(--gradient-sidebar)" }}>
 
         {/* Logo */}
-        <div className="h-16 flex items-center px-4 border-b border-sidebar-border">
+        <div className="h-16 flex items-center px-4 border-b border-sidebar-border/60 bg-black/10">
           <FlaxemLogo variant="light" />
         </div>
 
@@ -423,7 +439,7 @@ export default function Layout() {
             </>
           )}
         </nav>
-        {/* No footer — profile is in the topbar */}
+        <SidebarProfile />
       </aside>
 
       {/* ── Main area ──────────────────────────────────────────────────── */}

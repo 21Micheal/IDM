@@ -1,5 +1,6 @@
 import type { WebSocketMessage, TypingIndicator } from '@/types/chat';
 import { useAuthStore } from '@/store/authStore';
+import { apiBaseUrl } from './api';
 
 export class ChatWebSocketService {
   private chatSocket: WebSocket | null = null;
@@ -16,12 +17,28 @@ export class ChatWebSocketService {
 
   constructor() {}
 
+  private getWebSocketBaseUrl(): string {
+    if (apiBaseUrl.startsWith('/')) {
+      // Relative URL, use current location
+      const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+      return `${protocol}//${window.location.host}`;
+    } else {
+      // Absolute URL, convert to WebSocket
+      const url = new URL(apiBaseUrl);
+      url.protocol = url.protocol === 'https:' ? 'wss:' : 'ws:';
+      url.pathname = '';
+      return url.href;
+    }
+  }
+
   private buildWebSocketUrl(path: string): string {
-    const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
-    const host = window.location.host;
+    const baseUrl = this.getWebSocketBaseUrl();
     const token = useAuthStore.getState().accessToken;
     const query = token ? `?token=${encodeURIComponent(token)}` : '';
-    return `${protocol}//${host}${path}${query}`;
+    // Ensure no double slashes by removing trailing slash from baseUrl and leading slash from path
+    const cleanBaseUrl = baseUrl.replace(/\/$/, '');
+    const cleanPath = path.startsWith('/') ? path : `/${path}`;
+    return `${cleanBaseUrl}${cleanPath}${query}`;
   }
 
   // Message callbacks

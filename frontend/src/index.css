@@ -2,11 +2,11 @@
 @tailwind components;
 @tailwind utilities;
 
-/* Indigo Vault — Document Management design system. All colors HSL. */
+/* Flaxem IDM — Document Management design system. All colors HSL. */
 
 @layer base {
   :root {
-    --background: 220 24% 92%;
+    --background: 220 20% 94%;
     --foreground: 222 30% 15%;
 
     --card: 0 0% 100%;
@@ -15,43 +15,47 @@
     --popover: 0 0% 100%;
     --popover-foreground: 222 30% 15%;
 
-    --primary: 210 100% 40%;
+    /* Flaxem brand: Corporate Blue (Primary) */
+    --primary: 203 80% 42%;
     --primary-foreground: 0 0% 100%;
 
-    --secondary: 222 20% 94%;
-    --secondary-foreground: 222 47% 13%;
+    --secondary: 210 30% 95%;
+    --secondary-foreground: 210 50% 15%;
 
-    --muted: 220 18% 88%;
-    --muted-foreground: 222 15% 45%;
+    --muted: 210 20% 94%;
+    --muted-foreground: 210 12% 42%;
 
-    --accent: 38 92% 55%;
-    --accent-foreground: 222 47% 13%;
+    /* Flaxem Muted Indigo — Used for Pending/Warning; Blends with blue/red theme; AAA contrast */
+    --accent: 240 40% 35%;
+    --accent-foreground: 0 0% 100%;
 
-    --teal: 180 55% 42%;
-    --teal-foreground: 40 25% 97%;
+    --teal: 195 75% 45%;
+    --teal-foreground: 0 0% 100%;
 
-    --destructive: 0 70% 50%;
-    --destructive-foreground: 40 25% 97%;
+    --destructive: 0 84% 38%;
+    --destructive-foreground: 0 0% 100%;
 
-    --border: 222 15% 88%;
-    --input: 222 15% 88%;
-    --ring: 210 100% 40%;
+    --border: 210 20% 88%;
+    --input: 210 20% 88%;
+    --ring: 203 80% 42%;
 
     --radius: 0.625rem;
 
-    --gradient-sidebar: linear-gradient(180deg, hsl(222 50% 15%) 0%, hsl(222 47% 11%) 100%);
-    --gradient-accent: linear-gradient(135deg, hsl(38 92% 55%), hsl(28 88% 50%));
-    --shadow-elegant: 0 4px 24px -8px hsl(222 47% 13% / 0.18);
-    --shadow-card: 0 1px 3px hsl(222 47% 13% / 0.06), 0 1px 2px hsl(222 47% 13% / 0.04);
+    --gradient-sidebar: linear-gradient(180deg, hsl(206 85% 28%) 0%, hsl(210 90% 18%) 100%);
+    --gradient-accent: linear-gradient(135deg, hsl(4 78% 49%), hsl(8 80% 44%));
+    --gradient-brand: linear-gradient(135deg, hsl(203 80% 42%) 0%, hsl(195 80% 38%) 100%);
+    --shadow-elegant: 0 4px 24px -8px hsl(203 80% 25% / 0.22);
+    --shadow-card: 0 1px 3px hsl(210 30% 15% / 0.06), 0 1px 2px hsl(210 30% 15% / 0.04);
 
-    --sidebar-background: 222 47% 11%;
-    --sidebar-foreground: 213 27% 84%;
-    --sidebar-primary: 210 100% 40%;
+    /* Sidebar: uses red for active indicators */
+    --sidebar-background: 210 90% 18%;
+    --sidebar-foreground: 210 20% 80%;
+    --sidebar-primary: 4 78% 49%;
     --sidebar-primary-foreground: 0 0% 100%;
-    --sidebar-accent: 217 33% 17%;
+    --sidebar-accent: 206 70% 25%;
     --sidebar-accent-foreground: 0 0% 100%;
-    --sidebar-border: 217 33% 17%;
-    --sidebar-ring: 0 84% 59%;
+    --sidebar-border: 206 60% 28%;
+    --sidebar-ring: 4 78% 49%;
   }
 
   .dark {
@@ -64,36 +68,37 @@
     --popover: 222 30% 10%;
     --popover-foreground: 40 25% 95%;
 
-    --primary: 210 100% 45%;
+    --primary: 203 80% 52%;
     --primary-foreground: 0 0% 100%;
 
-    --secondary: 222 25% 16%;
-    --secondary-foreground: 40 25% 95%;
+    --secondary: 210 25% 16%;
+    --secondary-foreground: 0 0% 95%;
 
-    --muted: 222 25% 14%;
-    --muted-foreground: 222 15% 65%;
+    --muted: 210 25% 14%;
+    --muted-foreground: 210 15% 65%;
 
-    --accent: 38 92% 55%;
-    --accent-foreground: 222 47% 13%;
+    --accent: 240 35% 50%;
+    --accent-foreground: 0 0% 100%;
 
-    --teal: 180 55% 50%;
-    --teal-foreground: 222 47% 13%;
+    --teal: 195 75% 50%;
+    --teal-foreground: 0 0% 100%;
 
-    --destructive: 0 65% 50%;
-    --destructive-foreground: 40 25% 95%;
+    --destructive: 0 84% 60%;
+    --destructive-foreground: 0 0% 100%;
 
-    --border: 222 25% 18%;
-    --input: 222 25% 18%;
-    --ring: 210 100% 45%;
+    --border: 210 25% 18%;
+    --input: 210 25% 18%;
+    --ring: 203 80% 52%;
 
-    --sidebar-background: 222 47% 8%;
-    --sidebar-foreground: 213 27% 84%;
-    --sidebar-primary: 210 100% 40%;
+    /* Sidebar: uses red for active indicators */
+    --sidebar-background: 210 60% 10%;
+    --sidebar-foreground: 210 15% 78%;
+    --sidebar-primary: 4 78% 55%;
     --sidebar-primary-foreground: 0 0% 100%;
-    --sidebar-accent: 217 33% 14%;
+    --sidebar-accent: 206 50% 18%;
     --sidebar-accent-foreground: 0 0% 100%;
-    --sidebar-border: 217 33% 14%;
-    --sidebar-ring: 0 84% 59%;
+    --sidebar-border: 206 40% 22%;
+    --sidebar-ring: 4 78% 55%;
   }
 }
 
@@ -150,6 +155,10 @@
   }
   .input::placeholder {
     color: hsl(var(--muted-foreground));
+  }
+  .input:focus {
+    border-color: hsl(var(--ring));
+    --tw-ring-color: hsl(var(--ring));
   }
   .label {
     @apply block text-sm font-medium mb-1;

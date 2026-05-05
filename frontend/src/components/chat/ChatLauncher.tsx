@@ -3,6 +3,7 @@ import { MessageSquare, X } from "lucide-react";
 import { chatAPI } from "@/services/api";
 import { chatWebSocket } from "@/services/chatWebSocket";
 import { vaultToast } from "@/components/ui/vault-toast";
+import { useAuthStore } from "@/store/authStore";
 import type { WebSocketMessage } from "@/types/chat";
 
 const ChatPanel = lazy(() =>
@@ -16,6 +17,7 @@ const ChatPanel = lazy(() =>
  * - Click toast to deep-link into the right room
  */
 export function ChatLauncher() {
+  const accessToken = useAuthStore((s) => s.accessToken);
   const [open, setOpen] = useState(false);
   const [initialRoomId, setInitialRoomId] = useState<string | undefined>();
   const [activeRoomId, setActiveRoomId] = useState<string | undefined>();
@@ -24,6 +26,11 @@ export function ChatLauncher() {
 
   // ── Initial unread + 30s fallback poll ────────────────────────────────────
   useEffect(() => {
+    if (!accessToken) {
+      setUnread(0);
+      return;
+    }
+
     let mounted = true;
     const fetchUnread = async () => {
       try {
@@ -40,10 +47,12 @@ export function ChatLauncher() {
       mounted = false;
       clearInterval(id);
     };
-  }, []);
+  }, [accessToken]);
 
   // ── Realtime: increment badge + show vault toast ──────────────────────────
   useEffect(() => {
+    if (!accessToken) return;
+
     const handler = (data: WebSocketMessage) => {
       if (data.type !== "chat_notification" || !data.notification) return;
 
@@ -69,7 +78,7 @@ export function ChatLauncher() {
 
     chatWebSocket.onNotification(handler);
     return () => chatWebSocket.offNotification(handler);
-  }, [open, activeRoomId]);
+  }, [accessToken, open, activeRoomId]);
 
   const handleOpen = () => {
     setOpen(true);

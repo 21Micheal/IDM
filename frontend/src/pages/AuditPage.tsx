@@ -41,7 +41,7 @@ export default function AuditPage() {
     if (event.includes("approved") || event.includes("created") || event.includes("success"))
       return "bg-teal/15 text-teal";
     if (event.includes("login") || event.includes("viewed") || event.includes("downloaded"))
-      return "bg-accent/15 text-accent-foreground";
+      return "bg-accent/15 text-accent";
     return "bg-muted text-muted-foreground";
   };
 

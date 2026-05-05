@@ -17,6 +17,11 @@ import { documentApi, documentTypesAPI, normalizeListResponse } from "../service
 import { toast } from "@/components/ui/vault-toast";
 import { cn } from "../lib/utils";
 import type { DocumentType } from "@/types";
+import {
+  applyDocumentTypeConfigToDescription,
+  deriveDocumentTypeConfig,
+  stripTypeConfigMarkers,
+} from "@/lib/documentTypeConfig";
 
 // ── Constants ─────────────────────────────────────────────────────────────────
 
@@ -69,7 +74,10 @@ function buildPayload(values: DocTypeForm) {
     code:              values.code,
     reference_prefix:  values.reference_prefix,
     reference_padding: values.reference_padding,
-    description:       values.description,
+    description:       applyDocumentTypeConfigToDescription(values.description, {
+      isPersonalType: isPersonal,
+      metadataMode,
+    }),
     is_personal_type:  isPersonal,
     metadata_mode:     metadataMode,
     metadata_fields:   metadataMode === "admin_defined"
@@ -234,9 +242,9 @@ export default function AdminDocumentTypesPage() {
       code:              type.code,
       reference_prefix:  type.reference_prefix,
       reference_padding: type.reference_padding ?? 5,
-      description:       type.description ?? "",
-      is_personal_type:  type.is_personal_type ?? false,
-      metadata_mode:     type.metadata_mode ?? ((type.is_personal_type ?? false) ? "user_defined" : "admin_defined"),
+      description:       stripTypeConfigMarkers(type.description ?? ""),
+      is_personal_type:  deriveDocumentTypeConfig(type).isPersonalType,
+      metadata_mode:     deriveDocumentTypeConfig(type).metadataMode,
       metadata_fields:   (type.metadata_fields ?? []).map((f) => ({
         label:              f.label,
         field_key:          f.field_key,
@@ -275,8 +283,8 @@ export default function AdminDocumentTypesPage() {
           </p>
           {missingTypeFlags && (
             <p className="text-xs text-amber-600 mt-2">
-              Personal type settings are enabled in UI, but your API responses do not yet include these fields.
-              Changes may not persist until backend support is deployed.
+              Backend flags are not yet exposed; the UI is persisting personal-type settings
+              through compatibility markers so your selections still apply.
             </p>
           )}
         </div>
@@ -310,19 +318,26 @@ export default function AdminDocumentTypesPage() {
               >
                 <div className="flex items-center justify-between">
                   <div>
-                    <p className="font-semibold text-foreground text-sm">{t.name}</p>
-                    <p className="text-xs text-muted-foreground mt-0.5">
-                      <span className="font-mono">{t.reference_prefix}</span>-{"0".repeat(t.reference_padding ?? 5)}
-                      {" · "}
-                      {t.metadata_mode === "user_defined"
-                        ? "user-defined metadata"
-                        : `${t.metadata_fields?.length ?? 0} custom field${(t.metadata_fields?.length ?? 0) !== 1 ? "s" : ""}`}
-                    </p>
-                    {(t.is_personal_type || t.metadata_mode === "user_defined") && (
-                      <p className="text-[11px] text-accent mt-1 font-medium">
-                        {t.is_personal_type ? "Personal type" : "User-defined metadata"}
-                      </p>
-                    )}
+                    {(() => {
+                      const typeConfig = deriveDocumentTypeConfig(t);
+                      return (
+                        <>
+                          <p className="font-semibold text-foreground text-sm">{t.name}</p>
+                          <p className="text-xs text-muted-foreground mt-0.5">
+                            <span className="font-mono">{t.reference_prefix}</span>-{"0".repeat(t.reference_padding ?? 5)}
+                            {" · "}
+                            {typeConfig.metadataMode === "user_defined"
+                              ? "user-defined metadata"
+                              : `${t.metadata_fields?.length ?? 0} custom field${(t.metadata_fields?.length ?? 0) !== 1 ? "s" : ""}`}
+                          </p>
+                          {(typeConfig.isPersonalType || typeConfig.metadataMode === "user_defined") && (
+                            <p className="text-[11px] text-accent mt-1 font-medium">
+                              {typeConfig.isPersonalType ? "Personal type" : "User-defined metadata"}
+                            </p>
+                          )}
+                        </>
+                      );
+                    })()}
                   </div>
                   <ChevronRight className="w-4 h-4 text-muted-foreground" />
                 </div>

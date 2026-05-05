@@ -248,7 +248,7 @@ def _run_tesseract(
     n_items = len(df["text"])
 
     # Track layout position for grouping
-    lines: dict[tuple, list[str]] = {}   # (block_num, par_num, line_num) → [word, ...]
+    lines: dict[tuple, list[dict]] = {}  # (block_num, par_num, line_num) → positioned words
     line_order: list[tuple] = []
 
     total_words = 0
@@ -273,7 +273,7 @@ def _run_tesseract(
                 if key not in lines:
                     lines[key] = []
                     line_order.append(key)
-                lines[key].append(word)
+                lines[key].append(_word_cell(df, i, word))
             continue
 
         total_words += 1
@@ -285,7 +285,7 @@ def _run_tesseract(
             if key not in lines:
                 lines[key] = []
                 line_order.append(key)
-            lines[key].append(word)
+            lines[key].append(_word_cell(df, i, word))
         else:
             logger.debug(
                 "ocr_image: page %d dropping low-conf word %r (conf=%d)",
@@ -300,7 +300,7 @@ def _run_tesseract(
         if prev_block is not None and block_num != prev_block:
             text_lines.append("")  # blank line between blocks
         prev_block = block_num
-        text_lines.append(" ".join(lines[key]))
+        text_lines.append(_join_positioned_words(lines[key]))
 
     text = "\n".join(text_lines).strip()
 
@@ -319,3 +319,51 @@ def _run_tesseract(
         low_quality=low_quality,
         psm_used=psm,
     )
+
+
+def _word_cell(data: dict, index: int, text: str) -> dict:
+    """Return a small positioned word record from pytesseract image_to_data."""
+    def _int_field(name: str, default: int = 0) -> int:
+        try:
+            return int(data.get(name, [default])[index])
+        except (TypeError, ValueError, IndexError):
+            return default
+
+    return {
+        "text": text,
+        "left": _int_field("left"),
+        "top": _int_field("top"),
+        "width": _int_field("width"),
+        "height": _int_field("height"),
+    }
+
+
+def _join_positioned_words(words: list[dict]) -> str:
+    """
+    Join words while preserving obvious column gaps.
+
+    A plain single-space join destroys invoice header grids such as
+    "SUPPLIER | ACCOUNT CODE | INVOICE DATE". Tabs give the extractor a
+    reliable column boundary without making normal prose noisy.
+    """
+    if not words:
+        return ""
+
+    ordered = sorted(words, key=lambda w: (w["left"], w["top"]))
+    char_widths = [
+        w["width"] / max(len(w["text"]), 1)
+        for w in ordered
+        if w["width"] > 0 and w["text"]
+    ]
+    median_char_width = float(np.median(char_widths)) if char_widths else 8.0
+    column_gap = max(32.0, median_char_width * 5.0)
+
+    parts = [ordered[0]["text"]]
+    prev = ordered[0]
+    for word in ordered[1:]:
+        gap = word["left"] - (prev["left"] + prev["width"])
+        parts.append("\t" if gap > column_gap else " ")
+        parts.append(word["text"])
+        prev = word
+
+    return "".join(parts)
