@@ -13,7 +13,7 @@
  */
 import { useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { workflowAPI } from "@/services/api";
+import { documentsAPI, workflowAPI } from "@/services/api";
 import {
   CheckCircle, XCircle, RotateCcw, PauseCircle,
   PlayCircle, Loader2, Clock, ChevronDown, History,
@@ -48,6 +48,8 @@ interface Props {
   task: WorkflowTask;
   documentId: string;
 }
+
+type WorkflowActionKind = "approve" | "reject" | "return" | "hold" | "release";
 
 // ── Action colour map ─────────────────────────────────────────────────────────
 const ACTION_STYLES: Record<string, string> = {
@@ -122,56 +124,128 @@ export default function WorkflowActionPanel({ task, documentId }: Props) {
   const [activeAction, setActiveAction] = useState<
     "approve" | "reject" | "return" | "hold" | null
   >(null);
+  const [optimisticAction, setOptimisticAction] = useState<WorkflowActionKind | null>(null);
   const [comment, setComment]   = useState("");
   const [holdHours, setHoldHours] = useState(24);
 
-  const invalidate = () => {
-    qc.invalidateQueries({ queryKey: ["document", documentId] });
+  const removeTaskFromQueues = () => {
+    qc.setQueriesData<WorkflowTask[]>({ queryKey: ["workflow", "my-tasks"] }, (prev) =>
+      Array.isArray(prev) ? prev.filter((item) => item.id !== task.id) : prev,
+    );
+  };
+
+  const patchTaskInQueues = (patch: Partial<WorkflowTask>) => {
+    qc.setQueriesData<WorkflowTask[]>({ queryKey: ["workflow", "my-tasks"] }, (prev) =>
+      Array.isArray(prev)
+        ? prev.map((item) => (item.id === task.id ? { ...item, ...patch } : item))
+        : prev,
+    );
+  };
+
+  const patchDocumentStatus = (status: string) => {
+    qc.setQueryData(["document", documentId], (prev: any) =>
+      prev ? { ...prev, status, updated_at: new Date().toISOString() } : prev,
+    );
+  };
+
+  const refetchWorkflowState = () => {
     qc.invalidateQueries({ queryKey: ["workflow", "my-tasks"] });
+    qc.invalidateQueries({ queryKey: ["documents"] });
+    qc.invalidateQueries({ queryKey: ["notifications"] });
     qc.invalidateQueries({ queryKey: ["task-history", task.id] });
+    qc.invalidateQueries({ queryKey: ["documents", "pending"] });
+    qc.invalidateQueries({ queryKey: ["documents", "completed"] });
+    void qc.refetchQueries({ queryKey: ["document", documentId], type: "active" });
+    void qc.refetchQueries({ queryKey: ["workflow", "my-tasks"], type: "active" });
+    void qc.fetchQuery({
+      queryKey: ["document", documentId],
+      queryFn: () => documentsAPI.get(documentId).then((r) => r.data),
+    });
+  };
+
+  const beginOptimisticAction = (action: WorkflowActionKind) => {
+    setOptimisticAction(action);
+    if (action === "approve") {
+      removeTaskFromQueues();
+      patchDocumentStatus("pending_approval");
+      return;
+    }
+    if (action === "reject") {
+      removeTaskFromQueues();
+      patchDocumentStatus("rejected");
+      return;
+    }
+    if (action === "return") {
+      removeTaskFromQueues();
+      patchDocumentStatus("returned");
+      return;
+    }
+    if (action === "hold") {
+      patchTaskInQueues({ status: "held", status_display: "On Hold", held_until: new Date().toISOString() });
+      patchDocumentStatus("on_hold");
+      return;
+    }
+    patchTaskInQueues({ status: "in_progress", status_display: "In progress", held_until: undefined });
+    patchDocumentStatus("pending_approval");
+  };
+
+  const completeAction = () => {
+    setOptimisticAction(null);
+    setActiveAction(null);
+    setComment("");
+    refetchWorkflowState();
+  };
+
+  const failAction = (message: string) => {
+    setOptimisticAction(null);
+    toast.error(message);
+    refetchWorkflowState();
   };
 
   const approveMutation = useMutation({
     mutationFn: () => workflowAPI.approveTask(task.id, comment),
-    onSuccess: () => { toast.success("Document approved"); invalidate(); setActiveAction(null); },
+    onMutate: () => beginOptimisticAction("approve"),
+    onSuccess: () => { toast.success("Document approved"); completeAction(); },
     onError:   (e: { response?: { data?: { detail?: string } } }) =>
-      toast.error(e?.response?.data?.detail ?? "Approval failed"),
+      failAction(e?.response?.data?.detail ?? "Approval failed"),
   });
 
   const rejectMutation = useMutation({
     mutationFn: () => workflowAPI.rejectTask(task.id, comment),
-    onSuccess: () => { toast.success("Document rejected"); invalidate(); setActiveAction(null); },
+    onMutate: () => beginOptimisticAction("reject"),
+    onSuccess: () => { toast.success("Document rejected"); completeAction(); },
     onError:   (e: { response?: { data?: { detail?: string } } }) =>
-      toast.error(e?.response?.data?.detail ?? "Rejection failed"),
+      failAction(e?.response?.data?.detail ?? "Rejection failed"),
   });
 
   const returnMutation = useMutation({
     mutationFn: () => workflowAPI.returnForReview(task.id, comment),
+    onMutate: () => beginOptimisticAction("return"),
     onSuccess: () => {
       toast.success("Document returned for review");
-      invalidate();
-      setActiveAction(null);
+      completeAction();
     },
     onError: (e: { response?: { data?: { detail?: string } } }) =>
-      toast.error(e?.response?.data?.detail ?? "Return failed"),
+      failAction(e?.response?.data?.detail ?? "Return failed"),
   });
 
   const holdMutation = useMutation({
     mutationFn: () => workflowAPI.holdTask(task.id, comment, holdHours),
+    onMutate: () => beginOptimisticAction("hold"),
     onSuccess: () => {
       toast.success(`Document placed on hold for ${holdHours}h`);
-      invalidate();
-      setActiveAction(null);
+      completeAction();
     },
     onError: (e: { response?: { data?: { detail?: string } } }) =>
-      toast.error(e?.response?.data?.detail ?? "Hold failed"),
+      failAction(e?.response?.data?.detail ?? "Hold failed"),
   });
 
   const releaseMutation = useMutation({
     mutationFn: () => workflowAPI.releaseHold(task.id),
-    onSuccess: () => { toast.success("Hold released"); invalidate(); },
+    onMutate: () => beginOptimisticAction("release"),
+    onSuccess: () => { toast.success("Hold released"); completeAction(); },
     onError:   (e: { response?: { data?: { detail?: string } } }) =>
-      toast.error(e?.response?.data?.detail ?? "Release failed"),
+      failAction(e?.response?.data?.detail ?? "Release failed"),
   });
 
   const isHeld     = task.status === "held";
@@ -181,6 +255,17 @@ export default function WorkflowActionPanel({ task, documentId }: Props) {
                      returnMutation.isPending  || holdMutation.isPending;
 
   const resetForm = () => { setComment(""); setHoldHours(24); setActiveAction(null); };
+
+  if (optimisticAction === "approve" || optimisticAction === "reject" || optimisticAction === "return") {
+    return (
+      <div className="card border-l-4 border-primary p-5">
+        <div className="flex items-center gap-3 text-sm text-foreground">
+          <Loader2 className="h-4 w-4 animate-spin text-primary" />
+          Updating workflow state...
+        </div>
+      </div>
+    );
+  }
 
   return (
     <div className="card border-l-4 border-brand-500 p-5 space-y-4">

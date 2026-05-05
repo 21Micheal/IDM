@@ -43,7 +43,9 @@ export class ChatWebSocketService {
 
   // Message callbacks
   onMessage(callback: (message: WebSocketMessage) => void) {
-    this.messageCallbacks.push(callback);
+    if (!this.messageCallbacks.includes(callback)) {
+      this.messageCallbacks.push(callback);
+    }
   }
 
   offMessage(callback: (message: WebSocketMessage) => void) {
@@ -52,7 +54,9 @@ export class ChatWebSocketService {
 
   // Typing callbacks
   onTyping(callback: (typing: TypingIndicator) => void) {
-    this.typingCallbacks.push(callback);
+    if (!this.typingCallbacks.includes(callback)) {
+      this.typingCallbacks.push(callback);
+    }
   }
 
   offTyping(callback: (typing: TypingIndicator) => void) {
@@ -61,7 +65,9 @@ export class ChatWebSocketService {
 
   // Notification callbacks
   onNotification(callback: (notification: WebSocketMessage) => void) {
-    this.notificationCallbacks.push(callback);
+    if (!this.notificationCallbacks.includes(callback)) {
+      this.notificationCallbacks.push(callback);
+    }
     this.connectNotifications();
   }
 

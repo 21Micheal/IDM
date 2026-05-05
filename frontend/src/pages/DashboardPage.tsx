@@ -92,6 +92,49 @@ function getAuditPresentation(event: any) {
   return { icon: ShieldCheck, label: "Activity", tone: "bg-muted text-muted-foreground border-border" };
 }
 
+type AuditSummaryParts = {
+  prefix: string;
+  title: string;
+};
+
+function cleanAuditTitle(rawTitle: string): string {
+  return rawTitle
+    .replace(/\[[^\]]+\]/g, "")
+    .replace(/\bdocument\s+/ig, "")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+function formatAuditSummary(event: DashboardAuditEvent): AuditSummaryParts {
+  const summary = event.summary || event.event || "";
+  const objectTitle = cleanAuditTitle(event.object_repr || "");
+
+  const verbMatch = summary.match(/^(.+?)\s+(submitted|uploaded|edited|updated|created|deleted|approved|rejected|downloaded|viewed|shared|failed)\b/i);
+  const verb = verbMatch?.[2]?.toLowerCase() ?? "";
+
+  if (verbMatch) {
+    const actorName = verbMatch[1].trim();
+    const nameParts = actorName.split(/\s+/);
+    const shortName = nameParts.length > 1
+      ? `${nameParts[0][0]}. ${nameParts[nameParts.length - 1]}`
+      : actorName;
+
+    const titleFromSummary = cleanAuditTitle(summary.replace(verbMatch[0], ""));
+    const title = objectTitle || titleFromSummary;
+
+    return {
+      prefix: `${shortName}${verb ? ` ${verb}` : ""}`.trim(),
+      title: title || summary,
+    };
+  }
+
+  const cleanedSummary = cleanAuditTitle(summary);
+  return {
+    prefix: "",
+    title: objectTitle || cleanedSummary,
+  };
+}
+
 function TaskMetaInfo({ dueAt }: { dueAt: string | null }) {
   if (!dueAt) return null;
 
@@ -674,6 +717,7 @@ export default function DashboardPage() {
                   .slice(0, 2)
                   .map((s) => s[0]?.toUpperCase())
                   .join("") || "S";
+                const { prefix, title } = formatAuditSummary(event);
                 return (
                   <li key={event.id} className="flex gap-3">
                     <div className="relative">
@@ -685,7 +729,8 @@ export default function DashboardPage() {
                     <div className="flex-1 pb-1 min-w-0">
                       <p className="text-sm text-foreground truncate">
                         <span className="text-muted-foreground">{meta.label.toLowerCase()}</span>{" "}
-                        <span className="font-medium">{event.summary || event.event}</span>
+                        {prefix && <span className="text-muted-foreground">{prefix} </span>}
+                        <span className="font-medium text-foreground">{title}</span>
                       </p>
                       <div className="flex items-center gap-1.5 text-[11px] text-muted-foreground mt-0.5">
                         <Icon className="w-3 h-3" />

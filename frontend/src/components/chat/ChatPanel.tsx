@@ -85,6 +85,7 @@ export function ChatPanel({ onClose, initialRoomId, onActiveRoomChange }: ChatPa
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const inputRef = useRef<HTMLInputElement>(null);
   const typingTimeoutRef = useRef<number | null>(null);
+  const seenNotificationIdsRef = useRef<Set<string>>(new Set());
 
   const me = currentUser?.id ?? "";
   const currentUserName = [currentUser?.first_name, currentUser?.last_name].filter(Boolean).join(" ").trim() || "You";
@@ -171,6 +172,49 @@ export function ChatPanel({ onClose, initialRoomId, onActiveRoomChange }: ChatPa
       onActiveRoomChange?.(undefined);
     };
   }, [onActiveRoomChange]);
+
+  // ── Keep the room list live for messages arriving outside the active room ──
+  useEffect(() => {
+    const onNotification = (data: WebSocketMessage) => {
+      if (data.type !== "chat_notification" || !data.notification) return;
+      const notification = data.notification;
+      if (seenNotificationIdsRef.current.has(notification.id)) return;
+      seenNotificationIdsRef.current.add(notification.id);
+      if (seenNotificationIdsRef.current.size > 100) {
+        const [oldest] = seenNotificationIdsRef.current;
+        seenNotificationIdsRef.current.delete(oldest);
+      }
+      if (selectedRoom?.id === notification.room_id) return;
+
+      const lastMessage = {
+        id: notification.id,
+        content: notification.message,
+        sender: notification.sender,
+        created_at: notification.created_at,
+        message_type: "text",
+      };
+
+      setRooms((prev) => {
+        const existingRoom = prev.find((room) => room.id === notification.room_id);
+        if (!existingRoom) return prev;
+        return prev
+          .map((room) =>
+            room.id === notification.room_id
+              ? {
+                  ...room,
+                  last_message: lastMessage,
+                  unread_count: room.unread_count + 1,
+                  updated_at: notification.created_at,
+                }
+              : room,
+          )
+          .sort((a, b) => new Date(b.updated_at).getTime() - new Date(a.updated_at).getTime());
+      });
+    };
+
+    chatWebSocket.onNotification(onNotification);
+    return () => chatWebSocket.offNotification(onNotification);
+  }, [selectedRoom?.id]);
 
   // ── Deep-link via initialRoomId ───────────────────────────────────────────
   useEffect(() => {
