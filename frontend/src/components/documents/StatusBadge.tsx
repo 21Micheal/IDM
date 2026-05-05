@@ -17,7 +17,7 @@ type Tone =
 const TONE: Record<Tone, string> = {
   neutral: "bg-muted text-muted-foreground border border-border",
   info:    "bg-secondary text-secondary-foreground border border-border",
-  warning: "bg-accent/15 text-accent-foreground border border-accent/30",
+  warning: "bg-accent/15 text-accent border border-accent/40",
   success: "bg-teal/15 text-teal border border-teal/30",
   danger:  "bg-destructive/10 text-destructive border border-destructive/30",
   primary: "bg-primary/10 text-primary border border-primary/20",

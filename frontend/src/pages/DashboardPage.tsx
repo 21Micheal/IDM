@@ -245,6 +245,13 @@ export default function DashboardPage() {
   const dashboardSearchTerm = dashboardSearch.trim();
   const hasActiveDashboardSelection =
     activeDashboardResultIndex >= 0 && activeDashboardResultIndex < dashboardResults.length;
+  const visibleTasks = (myTasks as WorkflowTask[]).slice(0, 4);
+  const taskGridClass =
+    visibleTasks.length === 1
+      ? "mt-5 grid grid-cols-1 gap-3 md:max-w-xl"
+      : visibleTasks.length === 2
+        ? "mt-5 grid grid-cols-1 gap-3 md:grid-cols-2"
+        : "mt-5 grid grid-cols-1 gap-3 md:grid-cols-2 xl:grid-cols-4";
 
   // ── Helper Functions ───────────────────────────────────────────────────────
 
@@ -751,24 +758,33 @@ export default function DashboardPage() {
       </div>
 
       {/* Pending tasks */}
-      <div className="bg-card rounded-xl border border-border p-6" style={{ boxShadow: "var(--shadow-card)" }}>
+      <div className="bg-card rounded-xl border border-border p-5" style={{ boxShadow: "var(--shadow-card)" }}>
         <div className="flex items-center justify-between gap-3">
-          <div className="space-y-1">
+          <div className="space-y-1 min-w-0">
             <p className="text-sm font-semibold text-foreground">Pending tasks</p>
-            <p className="text-sm text-muted-foreground">Tasks waiting for your attention.</p>
+            <p className="text-sm text-muted-foreground">
+              {tasksLoading
+                ? "Checking tasks waiting for your attention."
+                : myTasks.length
+                  ? "Tasks waiting for your attention."
+                  : "All clear. No tasks need your attention right now."}
+            </p>
           </div>
-          <div className="rounded-full bg-teal/10 px-3 py-1 text-xs font-semibold text-teal">
+          <div className="shrink-0 rounded-full bg-teal/10 px-3 py-1 text-xs font-semibold text-teal">
             {myTasks.length} open
           </div>
         </div>
 
-        <div className="mt-5 grid grid-cols-1 gap-3 md:grid-cols-2 xl:grid-cols-4">
-          {tasksLoading ? (
-            <div className="rounded-lg bg-muted/40 p-6 text-center text-sm text-muted-foreground md:col-span-2 xl:col-span-4">
+        {tasksLoading ? (
+          <div className="mt-4 rounded-lg bg-muted/40 p-4 text-sm text-muted-foreground">
+            <div className="flex items-center gap-2">
+              <Loader2 className="h-4 w-4 animate-spin text-accent" />
               Loading tasks...
             </div>
-          ) : myTasks.length ? (
-            myTasks.slice(0, 4).map((task: WorkflowTask) => {
+          </div>
+        ) : visibleTasks.length ? (
+          <div className={taskGridClass}>
+            {visibleTasks.map((task: WorkflowTask) => {
               const doc = task.workflow_instance?.document;
               const documentType =
                 doc?.document_type_name ?? doc?.document_type?.name ?? task.document_type_name ?? "Unclassified";
@@ -799,13 +815,14 @@ export default function DashboardPage() {
                   </div>
                 </Link>
               );
-            })
-          ) : (
-            <div className="rounded-lg bg-muted/40 p-6 text-center text-sm text-muted-foreground md:col-span-2 xl:col-span-4">
-              You have no pending tasks right now.
-            </div>
-          )}
-        </div>
+            })}
+          </div>
+        ) : (
+          <div className="mt-4 inline-flex items-center gap-2 rounded-lg border border-teal/25 bg-teal/10 px-3 py-2 text-sm font-medium text-teal">
+            <CheckCircle className="h-4 w-4" />
+            You have no pending tasks right now.
+          </div>
+        )}
       </div>
     </div>
   );
