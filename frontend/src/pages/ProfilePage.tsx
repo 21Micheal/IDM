@@ -80,7 +80,7 @@ export default function ProfilePage() {
               {user.first_name} {user.last_name}
             </h2>
             <p className="text-sm text-muted-foreground">{user.email}</p>
-            <span className="badge bg-accent/15 text-accent-foreground mt-1">
+            <span className="badge bg-accent/15 text-accent mt-1">
               {user.job_description || "Staff"}
             </span>
           </div>

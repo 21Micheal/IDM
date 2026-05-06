@@ -15,7 +15,6 @@ import {
 } from "lucide-react";
 import { toast } from "@/components/ui/vault-toast";
 import clsx from "clsx";
-import { QUERY_FIVE_MIN_STALE, QUERY_ONE_MINUTE_STALE, QUERY_SHORT_STALE } from "@/lib/reactQueryDefaults";
 
 // ── Types ─────────────────────────────────────────────────────────────────────
 type AssigneeType = "group_any" | "group_all" | "group_specific";
@@ -271,7 +270,6 @@ function StepEditPanel({
       return raw.map((item) => item?.user ?? item).filter((u): u is AppUser => Boolean(u?.id && u?.email));
     },
     enabled: !!step.assignee_group && needsGroupMember,
-    ...QUERY_ONE_MINUTE_STALE,
   });
 
   const color = getGroupColor(step.assignee_group);
@@ -463,7 +461,7 @@ function StepEditPanel({
               className={clsx(
                 "px-3 py-2 rounded-lg text-xs font-medium transition-colors border",
                 step.allow_return
-                  ? "bg-accent/20 text-accent-foreground border-accent/50"
+                  ? "bg-accent/20 text-accent border-accent/50"
                   : "bg-muted text-muted-foreground border-border"
               )}
             >
@@ -913,7 +911,7 @@ function FlowchartEditor({
           >
             <button
               onClick={(e) => { e.stopPropagation(); onAddStep(); }}
-              className="flex items-center gap-2 px-3 py-2 bg-card border-2 border-dashed border-border rounded-xl text-xs font-medium text-muted-foreground hover:border-accent hover:text-accent-foreground hover:bg-accent/10 transition-all shadow-sm"
+              className="flex items-center gap-2 px-3 py-2 bg-card border-2 border-dashed border-border rounded-xl text-xs font-medium text-muted-foreground hover:border-accent hover:text-accent hover:bg-accent/10 transition-all shadow-sm"
             >
               <Plus className="w-3.5 h-3.5" /> Add step
             </button>
@@ -977,7 +975,6 @@ function RoutingRulesPanel({ template }: {
     queryKey: ["workflow-rules", templateId],
     queryFn: () => workflowAPI.listRules({ template: templateId }).then(r => r.data.results ?? r.data),
     enabled: hasDocumentType,
-    ...QUERY_SHORT_STALE,
   });
 
   const createRule = useMutation({
@@ -1162,7 +1159,7 @@ function RoutingRulesPanel({ template }: {
             return (
               <div key={rule.id} className="rounded-xl border border-border bg-card px-4 py-3 group hover:border-foreground/20 transition-colors">
                 <div className="flex items-start gap-3">
-                  <div className="w-8 h-8 rounded-lg bg-accent/15 text-accent-foreground flex items-center justify-center text-xs font-semibold shrink-0">
+                  <div className="w-8 h-8 rounded-lg bg-accent/15 text-accent flex items-center justify-center text-xs font-semibold shrink-0">
                     {idx + 1}
                   </div>
                   <div className="flex-1 min-w-0">
@@ -1233,7 +1230,6 @@ function TemplateEditor({
   const { data: groups } = useQuery<Group[]>({
     queryKey: ["groups-all"],
     queryFn: () => groupsAPI.list().then((r: any) => r.data.results ?? r.data),
-    ...QUERY_FIVE_MIN_STALE,
   });
 
   const availableDocTypes = useMemo(
@@ -1247,7 +1243,7 @@ function TemplateEditor({
       ?? null,
     [availableDocTypes, selectedDocumentTypeId, template?.document_type_name, docType?.name]
   );
-  const canEditDocumentType = !template;
+  const canEditDocumentType = !template && !docType;
 
   const saveMutation = useMutation({
     mutationFn: (payload: {
@@ -1338,7 +1334,7 @@ function TemplateEditor({
               Template scope
             </span>
             {selectedDocumentTypeName && (
-              <span className="inline-flex items-center gap-1 text-xs font-medium text-accent-foreground bg-accent/20 px-2.5 py-1 rounded-full">
+              <span className="inline-flex items-center gap-1 text-xs font-medium text-accent bg-accent/20 px-2.5 py-1 rounded-full">
                 {selectedDocumentTypeName}
               </span>
             )}
@@ -1357,15 +1353,7 @@ function TemplateEditor({
           />
           <div className="mt-3 max-w-sm">
             <Label required>Document type</Label>
-            {!canEditDocumentType ? (
-              <div className="rounded-lg border border-border bg-muted/40 px-3 py-2 text-sm font-medium text-foreground">
-                {selectedDocumentTypeName ?? "No document type assigned"}
-              </div>
-            ) : docType ? (
-              <div className="rounded-lg border border-border bg-muted/40 px-3 py-2 text-sm font-medium text-foreground">
-                {docType.name}
-              </div>
-            ) : (
+            {canEditDocumentType ? (
               <select
                 value={selectedDocumentTypeId ?? ""}
                 onChange={(e) => {
@@ -1379,6 +1367,10 @@ function TemplateEditor({
                   <option key={item.id} value={item.id}>{item.name}</option>
                 ))}
               </select>
+            ) : (
+              <div className="rounded-lg border border-border bg-muted/40 px-3 py-2 text-sm font-medium text-foreground">
+                {selectedDocumentTypeName ?? "No document type assigned"}
+              </div>
             )}
           </div>
         </div>
@@ -1406,7 +1398,7 @@ function TemplateEditor({
             </div>
           )}
           {isDirty && (
-            <span className="text-[11px] text-accent-foreground bg-accent/20 px-2 py-1 rounded-md">Unsaved</span>
+            <span className="text-[11px] text-accent bg-accent/20 px-2 py-1 rounded-md">Unsaved</span>
           )}
           <button onClick={handleSave} disabled={saveMutation.isPending} className="btn-primary text-sm">
             {saveMutation.isPending ? <Loader2 className="w-4 h-4 animate-spin" /> : <Save className="w-4 h-4" />}
@@ -1512,8 +1504,11 @@ function DocTypeDetailModal({
           <div className="mb-4">
             <div className="flex items-center justify-between mb-3">
               <h3 className="text-sm font-semibold text-foreground">Available Templates</h3>
-              <button onClick={onCreateTemplate} className="text-xs font-medium text-accent-foreground hover:text-accent-foreground">
-                + Create New
+              <button
+                onClick={onCreateTemplate}
+                className="inline-flex items-center gap-1 rounded-lg bg-accent/15 px-2.5 py-1.5 text-xs font-medium text-accent hover:bg-accent/25"
+              >
+                <Plus className="w-3.5 h-3.5" /> Create New
               </button>
             </div>
 
@@ -1562,8 +1557,11 @@ function DocTypeDetailModal({
               <div className="text-center py-12 bg-muted/40 rounded-xl">
                 <LayoutTemplate className="w-12 h-12 mx-auto mb-3 text-muted-foreground/60" />
                 <p className="text-sm text-muted-foreground">No templates available</p>
-                <button onClick={onCreateTemplate} className="mt-3 text-sm text-accent-foreground hover:underline">
-                  + Create your first template
+                <button
+                  onClick={onCreateTemplate}
+                  className="mt-3 inline-flex items-center gap-1.5 rounded-lg bg-accent/15 px-3 py-2 text-sm font-medium text-accent hover:bg-accent/25"
+                >
+                  <Plus className="w-4 h-4" /> Create your first template
                 </button>
               </div>
             )}
@@ -1606,7 +1604,6 @@ export default function WorkflowBuilderPage() {
     queryKey: ["document-types"],
     queryFn: () => documentTypesAPI.list().then((r) => r.data as unknown),
     select: (data) => normalizeListResponse<DocumentType>(data),
-    ...QUERY_FIVE_MIN_STALE,
   });
 
   const { data: allTemplates, isLoading: templatesLoading } = useQuery<WorkflowTemplate[]>({
@@ -1614,7 +1611,6 @@ export default function WorkflowBuilderPage() {
     queryFn: () => workflowAPI.listTemplates().then(r =>
       (r.data.results ?? r.data as WorkflowTemplate[]).map(normalizeTemplate)
     ),
-    ...QUERY_SHORT_STALE,
   });
 
   const effectiveTemplateId = editingTemplateId || selectedDocType?.workflow_template || null;
@@ -1631,10 +1627,17 @@ export default function WorkflowBuilderPage() {
       return normalizeTemplate(response.data);
     },
     enabled: !!effectiveTemplateId,
-    ...QUERY_FIVE_MIN_STALE,
+    staleTime: 1000 * 60 * 5,
   });
 
   const handleDocTypeClick = (dt: DocumentType) => {
+    if (!dt.workflow_template) {
+      setShowDetailModal(dt);
+      setSelectedDocType(null);
+      setEditingTemplateId(null);
+      setCreatingForDocType(null);
+      return;
+    }
     setSelectedDocType(dt);
     setEditingTemplateId(null);
     setCreatingForDocType(null);
@@ -1660,7 +1663,7 @@ export default function WorkflowBuilderPage() {
     }
   }, [qc, selectedDocType]);
 
-  const handleStartCreateForDocType = (docType: DocumentType | null) => {
+  const handleStartCreateForDocType = (docType: DocumentType) => {
     setCreatingForDocType(docType);
     setSelectedDocType(null);
     setEditingTemplateId(null);
@@ -1749,14 +1752,6 @@ export default function WorkflowBuilderPage() {
             <h1 className="text-lg font-bold text-foreground">
               {sidebarTab === "doctypes" ? "Document Types" : "Templates"}
             </h1>
-            {sidebarTab === "templates" && (
-              <button
-                onClick={() => handleStartCreateForDocType(null)}
-                className="flex items-center gap-1 px-3 py-1.5 text-xs font-medium bg-primary text-white rounded-lg hover:bg-primary/90"
-              >
-                <Plus className="w-3 h-3" /> New
-              </button>
-            )}
           </div>
 
           <div className="flex bg-muted p-1 rounded-lg mb-4">
@@ -1788,7 +1783,7 @@ export default function WorkflowBuilderPage() {
               </div>
               <div className="flex-1 flex items-center gap-1.5 px-3 py-2 bg-accent/10">
                 <span className="w-1.5 h-1.5 rounded-full bg-accent" />
-                <span className="text-accent-foreground font-medium">{withoutTemplate} pending</span>
+                <span className="text-accent font-medium">{withoutTemplate} pending</span>
               </div>
             </div>
           )}
@@ -1808,13 +1803,13 @@ export default function WorkflowBuilderPage() {
           {sidebarTab === "doctypes" ? (
             filteredDocTypes.map(dt => {
               const hasTemplate = !!dt.workflow_template;
-              const isSelected = selectedDocType?.id === dt.id;
+              const isSelected = selectedDocType?.id === dt.id || creatingForDocType?.id === dt.id;
               return (
                 <div key={dt.id} className="relative group">
                   <button
                     onClick={() => handleDocTypeClick(dt)}
                     className={clsx(
-                      "w-full text-left rounded-xl p-3 transition-all border",
+                      "w-full text-left rounded-xl p-3 pr-10 transition-all border",
                       isSelected ? "bg-accent/10 border-accent/40" : "bg-card border-border hover:border-foreground/20"
                     )}
                   >
@@ -1828,7 +1823,7 @@ export default function WorkflowBuilderPage() {
                         <p className="text-xs text-muted-foreground font-mono mt-0.5">{dt.reference_prefix}-XXXXX</p>
                       </div>
                       {!hasTemplate && (
-                        <span className="text-[10px] text-accent-foreground font-medium bg-accent/20 px-2 py-0.5 rounded-full">
+                        <span className="text-[10px] text-accent font-medium bg-accent/20 px-2 py-0.5 rounded-full">
                           Setup
                         </span>
                       )}
@@ -1836,7 +1831,11 @@ export default function WorkflowBuilderPage() {
                   </button>
                   <button
                     onClick={(e) => { e.stopPropagation(); setShowDetailModal(dt); }}
-                    className="absolute right-2 top-1/2 -translate-y-1/2 opacity-0 group-hover:opacity-100 p-1.5 bg-card border border-border rounded-lg hover:bg-muted/40"
+                    className={clsx(
+                      "absolute right-2 top-1/2 -translate-y-1/2 p-1.5 bg-card border border-border rounded-lg hover:bg-muted/40",
+                      hasTemplate ? "opacity-0 group-hover:opacity-100" : "opacity-100 border-accent/40 bg-accent/10"
+                    )}
+                    title={hasTemplate ? "Manage templates" : "Set up template"}
                   >
                     <MoreVertical className="w-3.5 h-3.5 text-muted-foreground" />
                   </button>
@@ -1884,7 +1883,7 @@ export default function WorkflowBuilderPage() {
               <LayoutTemplate className="w-10 h-10 mx-auto mb-3 text-muted-foreground/50" />
               <p className="text-sm font-medium text-foreground">No templates found</p>
               <p className="text-xs mt-1">
-                {search ? "Try a different search term" : "Create a template to get started"}
+                {search ? "Try a different search term" : "Choose a document type to create a template"}
               </p>
             </div>
           )}

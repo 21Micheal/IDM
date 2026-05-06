@@ -13,7 +13,7 @@ export default function AuditPage() {
   const [dateTo, setDateTo] = useState(format(new Date(), "yyyy-MM-dd"));
   const [page, setPage] = useState(1);
 
-  const PAGE_SIZE = 50;
+  const PAGE_SIZE = 10;
 
   const { data, isLoading } = useQuery({
     queryKey: ["audit-logs", searchTerm, eventFilter, dateFrom, dateTo, page],
@@ -41,7 +41,7 @@ export default function AuditPage() {
     if (event.includes("approved") || event.includes("created") || event.includes("success"))
       return "bg-teal/15 text-teal";
     if (event.includes("login") || event.includes("viewed") || event.includes("downloaded"))
-      return "bg-accent/15 text-accent-foreground";
+      return "bg-accent/15 text-accent";
     return "bg-muted text-muted-foreground";
   };
 
@@ -83,7 +83,7 @@ export default function AuditPage() {
   const totalPages = Math.ceil((data?.count ?? 0) / PAGE_SIZE);
 
   return (
-    <div className="max-w-6xl mx-auto py-10 px-6">
+    <div className="max-w-7xl mx-auto py-10 px-6">
       {/* Header */}
       <div className="flex items-end justify-between mb-10">
         <div>
@@ -209,7 +209,7 @@ export default function AuditPage() {
                   <td className="px-6 py-4">
                     <div className="flex items-center gap-2">
                       <User className="w-4 h-4 text-muted-foreground" />
-                      <span className="text-foreground font-medium">{log.actor_email || "System"}</span>
+                      <span className="text-foreground font-medium">{log.actor_name || log.actor_email || "System"}</span>
                     </div>
                   </td>
                   <td className="px-6 py-4 text-muted-foreground">

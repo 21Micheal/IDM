@@ -1,8 +1,9 @@
-import { Suspense, lazy, useEffect, useState } from "react";
+import { Suspense, lazy, useEffect, useRef, useState } from "react";
 import { MessageSquare, X } from "lucide-react";
 import { chatAPI } from "@/services/api";
 import { chatWebSocket } from "@/services/chatWebSocket";
 import { vaultToast } from "@/components/ui/vault-toast";
+import { useAuthStore } from "@/store/authStore";
 import type { WebSocketMessage } from "@/types/chat";
 
 const ChatPanel = lazy(() =>
@@ -16,20 +17,61 @@ const ChatPanel = lazy(() =>
  * - Click toast to deep-link into the right room
  */
 export function ChatLauncher() {
+  const accessToken = useAuthStore((s) => s.accessToken);
   const [open, setOpen] = useState(false);
   const [initialRoomId, setInitialRoomId] = useState<string | undefined>();
   const [activeRoomId, setActiveRoomId] = useState<string | undefined>();
   const [unread, setUnread] = useState(0);
   const [pulse, setPulse] = useState(false);
+  const openRef = useRef(open);
+  const activeRoomIdRef = useRef(activeRoomId);
+  const lastServerUnreadRef = useRef<number | null>(null);
+  const lastSocketPopupAtRef = useRef(0);
+  const seenNotificationIdsRef = useRef<Set<string>>(new Set());
+
+  useEffect(() => {
+    openRef.current = open;
+  }, [open]);
+
+  useEffect(() => {
+    activeRoomIdRef.current = activeRoomId;
+  }, [activeRoomId]);
 
   // ── Initial unread + 30s fallback poll ────────────────────────────────────
   useEffect(() => {
+    if (!accessToken) {
+      setUnread(0);
+      return;
+    }
+
     let mounted = true;
     const fetchUnread = async () => {
       try {
         const r = await chatAPI.unread.count();
         if (!mounted) return;
-        setUnread(r.data.unread_count ?? 0);
+        const nextUnread = r.data.unread_count ?? 0;
+        const previousServerUnread = lastServerUnreadRef.current;
+        const recentlyToasted = Date.now() - lastSocketPopupAtRef.current < 5000;
+
+        setUnread(nextUnread);
+        lastServerUnreadRef.current = nextUnread;
+
+        if (
+          previousServerUnread !== null &&
+          nextUnread > previousServerUnread &&
+          !recentlyToasted &&
+          !openRef.current
+        ) {
+          setPulse(true);
+          window.setTimeout(() => setPulse(false), 1200);
+          vaultToast.message("New chat message", {
+            description: "Open chat to read the latest message.",
+            action: {
+              label: "Open",
+              onClick: () => setOpen(true),
+            },
+          });
+        }
       } catch {
         /* silent */
       }
@@ -40,22 +82,36 @@ export function ChatLauncher() {
       mounted = false;
       clearInterval(id);
     };
-  }, []);
+  }, [accessToken]);
 
   // ── Realtime: increment badge + show vault toast ──────────────────────────
   useEffect(() => {
+    if (!accessToken) return;
+
     const handler = (data: WebSocketMessage) => {
       if (data.type !== "chat_notification" || !data.notification) return;
+      const n = data.notification;
+      if (seenNotificationIdsRef.current.has(n.id)) return;
+      seenNotificationIdsRef.current.add(n.id);
+      if (seenNotificationIdsRef.current.size > 100) {
+        const [oldest] = seenNotificationIdsRef.current;
+        seenNotificationIdsRef.current.delete(oldest);
+      }
 
-      setUnread((n) => n + 1);
+      setUnread((count) => {
+        const next = count + 1;
+        lastServerUnreadRef.current = Math.max(lastServerUnreadRef.current ?? 0, next);
+        return next;
+      });
+      lastSocketPopupAtRef.current = Date.now();
       setPulse(true);
       window.setTimeout(() => setPulse(false), 1200);
 
       // Don't toast if the panel is already open on that room
-      if (open && activeRoomId === data.notification.room_id) return;
+      if (openRef.current && activeRoomIdRef.current === n.room_id) return;
 
-      const n = data.notification;
-      vaultToast.info(`${n.sender.name} · ${n.room_name}`, {
+      vaultToast.message(`${n.sender.name} · ${n.room_name}`, {
+        id: `chat-${n.id}`,
         description: n.message,
         action: {
           label: "Open",
@@ -69,12 +125,13 @@ export function ChatLauncher() {
 
     chatWebSocket.onNotification(handler);
     return () => chatWebSocket.offNotification(handler);
-  }, [open, activeRoomId]);
+  }, [accessToken]);
 
   const handleOpen = () => {
     setOpen(true);
     // Optimistically clear badge — server marks read on room open
     setUnread(0);
+    lastServerUnreadRef.current = 0;
   };
 
   const handleClose = () => {

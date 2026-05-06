@@ -89,8 +89,10 @@ class LoginView(APIView):
         # Since MFA is now default, always send OTP
         try:
             send_otp_email(user, purpose="login")
-        except Exception:
-            print(f"ERROR: Failed to send OTP email to {user.email}")
+        except Exception as e:
+            print(f"ERROR: Failed to send OTP email to {user.email}: {type(e).__name__}: {str(e)}")
+            import traceback
+            traceback.print_exc()
             return Response(
                 {"detail": "Could not send OTP email. Contact your administrator."},
                 status=503,

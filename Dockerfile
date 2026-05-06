@@ -1,4 +1,4 @@
-FROM python:3.12-slim
+FROM python:3.12-slim-bookworm
 
 # Set environment variables
 ENV PYTHONDONTWRITEBYTECODE 1
@@ -26,9 +26,9 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     poppler-utils \
     # LibreOffice for Office document conversion:
     libreoffice \
-    # for additional languages eg swahili, add tesseract-ocr-swa
     && apt-get clean \
     && rm -rf /var/lib/apt/lists/*
+# Note: for additional languages eg swahili, add tesseract-ocr-swa to the install list above
 
 # Install Python dependencies
 # Using a separate step for requirements allows Docker to cache this layer

@@ -306,6 +306,7 @@ def _extract_reference(text: str, doc_type: str) -> Optional[str]:
 
 _SUPPLIER_INLINE_RE = re.compile(
     r"(?:vendor|supplier|service\s*provider|sold\s*by|issued\s*by"
+    r"|vendor\s*name|supplier\s*name|company\s*name|payee\s*name"
     r"|billed?\s*(?:from|by)|business\s*name)"   # "from", "company", "firm" removed — too generic
     r"\s*[:\-]\s*(.+)",
     re.I,
@@ -337,8 +338,22 @@ _ENTITY_SUFFIX_RE = re.compile(
 )
 
 
+def _clean_inline_value(value: str, max_len: int = 120) -> str:
+    """Trim common OCR bleed from labelled values on crowded invoice lines."""
+    value = re.sub(r"\s+", " ", value).strip(" \t:-|")
+    value = re.split(
+        r"\s{2,}|\t|\||\b(?:tel|phone|mobile|email|e-?mail|www\.|p\.?\s*o\.?\s*box|"
+        r"invoice\s*(?:no|date)|account\s*(?:code|no)|due\s*date|date)\b",
+        value,
+        maxsplit=1,
+        flags=re.I,
+    )[0]
+    return value.strip(" \t:-,|")[:max_len]
+
+
 def _extract_supplier(lines: list[str]) -> Optional[str]:
     def _is_valid(candidate: str) -> bool:
+        candidate = _clean_inline_value(candidate)
         if len(candidate) < 3:
             return False
         if _SUPPLIER_REJECT_RE.search(candidate):
@@ -352,14 +367,14 @@ def _extract_supplier(lines: list[str]) -> Optional[str]:
     for line in lines:
         m = _SUPPLIER_INLINE_RE.search(line)
         if m:
-            candidate = m.group(1).strip()[:120]
+            candidate = _clean_inline_value(m.group(1))
             if _is_valid(candidate):
                 return candidate
 
     # Priority 2: section header, name on the next line
     for i, line in enumerate(lines):
         if _SUPPLIER_HEADER_RE.match(line) and i + 1 < len(lines):
-            candidate = lines[i + 1].strip()[:120]
+            candidate = _clean_inline_value(lines[i + 1])
             if _is_valid(candidate):
                 return candidate
 
@@ -437,11 +452,59 @@ _SKIP_TITLE_RE = re.compile(
     re.I,
 )
 _LABEL_LINE_RE = re.compile(r"^[A-Za-z][A-Za-z0-9 /.\-]{1,40}:\s+\S")
+_DOC_HEADING_RE = re.compile(
+    r"\b(?:tax\s+invoice|invoice|local\s+purchase\s+order|purchase\s+order|"
+    r"delivery\s+note|goods\s+received\s+note|credit\s+note|debit\s+note|"
+    r"official\s+receipt|receipt|quotation|quote|pro\s*forma|contract|"
+    r"agreement|payment\s+voucher|voucher|statement\s+of\s+account|"
+    r"expense\s+(?:claim|report|form)|imprest)\b",
+    re.I,
+)
 
 
-def _extract_title(lines: list[str], doc_type_raw: str) -> Optional[str]:
+def _title_case_document_heading(value: str) -> str:
+    return re.sub(r"\s+", " ", value.strip()).title()
+
+
+def _extract_title(
+    lines: list[str],
+    doc_type_raw: str,
+    *,
+    supplier: Optional[str] = None,
+    reference: Optional[str] = None,
+) -> Optional[str]:
+    # Prefer the actual document heading over the first visible header line.
+    for line in lines[:18]:
+        lower_line = line.lower()
+        if (
+            ("account" in lower_line or "supplier" in lower_line or "vendor" in lower_line)
+            and ("date" in lower_line or "code" in lower_line or "\t" in line or "|" in line)
+        ):
+            continue
+        m = _DOC_HEADING_RE.search(line)
+        if not m:
+            continue
+        heading = _title_case_document_heading(m.group(0))
+        if reference:
+            return f"{heading} {reference}"[:120]
+        if supplier:
+            return f"{heading} - {supplier}"[:120]
+        return heading[:120]
+
+    # Then use explicit subject/title/description labels.
+    for line in lines[:30]:
+        explicit = _labelled_text(
+            r"(?:document\s*title|title|subject|description|particulars|purpose)",
+            line,
+            120,
+        )
+        if explicit:
+            return explicit
+
     for line in lines:
         if len(line) < 4:
+            continue
+        if supplier and line.strip().lower() == supplier.strip().lower():
             continue
         if re.match(r"^[\d\W]+$", line):
             continue
@@ -482,6 +545,76 @@ def _labelled_code(label_pattern: str, text: str) -> Optional[str]:
         text, re.I | re.M,
     )
     return m.group(1).strip() if m else None
+
+
+_ACCOUNT_LABEL_RE = re.compile(
+    r"^(?:a/?c|acct\.?|account|gl|g/l|ledger|billing|client|customer|project)"
+    r"\s*(?:code|no\.?|number|#|id)?$",
+    re.I,
+)
+_CODE_VALUE_RE = re.compile(r"^[A-Z0-9][A-Z0-9\-_/]{1,40}$", re.I)
+
+
+def _split_cells(line: str) -> list[str]:
+    """Split OCR text into table-ish cells, preserving normal phrases."""
+    if "\t" in line or "|" in line:
+        return [cell.strip(" :-") for cell in re.split(r"\t+|\|+", line) if cell.strip(" :-")]
+    return [cell.strip(" :-") for cell in re.split(r"\s{2,}", line) if cell.strip(" :-")]
+
+
+def _normalise_label_cell(cell: str) -> str:
+    cell = re.sub(r"[^A-Za-z0-9/#. ]+", " ", cell)
+    return re.sub(r"\s+", " ", cell).strip().lower()
+
+
+def _extract_code_from_header_grid(lines: list[str], label_re: re.Pattern) -> Optional[str]:
+    """
+    Extract codes from two-row header grids.
+
+    Example:
+        SUPPLIER        ACCOUNT CODE       INVOICE DATE
+        ACME LTD        400-211            2026-05-01
+    """
+    for i, line in enumerate(lines[:-1]):
+        headers = [_normalise_label_cell(cell) for cell in _split_cells(line)]
+        if len(headers) < 2:
+            continue
+
+        values = _split_cells(lines[i + 1])
+        if len(values) < 2:
+            continue
+
+        for idx, header in enumerate(headers):
+            if idx >= len(values):
+                continue
+            if not label_re.match(header):
+                continue
+
+            candidate = values[idx].strip()
+            # If OCR merged the value with a following cell, keep the first code-like token.
+            token = re.split(r"\s{2,}|\t|\|", candidate, maxsplit=1)[0].strip()
+            token = re.sub(r"^[^\w]+|[^\w\-/]+$", "", token)
+            if _CODE_VALUE_RE.match(token) and token.upper() not in _REF_REJECT:
+                return token
+    return None
+
+
+def _extract_account_code(text: str, lines: list[str]) -> Optional[str]:
+    labelled = _labelled_code(
+        r"(?:a/?c\s*(?:code|no\.?|number)?|account\s*(?:code|no\.?|number|#)?"
+        r"|acct\.?\s*(?:code|no\.?|number|#)?|g/?l\s*(?:code|no\.?|number)?"
+        r"|ledger\s*code|billing\s*code|client\s*(?:code|no\.?|id)"
+        r"|customer\s*(?:code|no\.?|id)|project\s*code)",
+        text,
+    )
+    if labelled:
+        return labelled
+
+    grid = _extract_code_from_header_grid(lines, _ACCOUNT_LABEL_RE)
+    if grid:
+        return grid
+
+    return None
 
 
 # ── Main extractor class ───────────────────────────────────────────────────────
@@ -570,10 +703,6 @@ class DocumentFieldExtractor:
         if self.doc_type_label:
             suggestions["document_type"] = self.doc_type_label
 
-        title = _extract_title(self.lines, self.doc_type_label)
-        if title:
-            suggestions["title"] = title
-
         supplier = _extract_supplier(self.lines)
         if supplier:
             suggestions["supplier"] = supplier
@@ -587,6 +716,15 @@ class DocumentFieldExtractor:
         ref = _extract_reference(self.text, self.doc_type)
         if ref:
             suggestions["reference_number"] = ref
+
+        title = _extract_title(
+            self.lines,
+            self.doc_type_label,
+            supplier=suggestions.get("supplier"),
+            reference=suggestions.get("reference_number"),
+        )
+        if title:
+            suggestions["title"] = title
 
         # ── Dates ─────────────────────────────────────────────────────────
         self._extract_dates(suggestions)
@@ -720,10 +858,7 @@ class DocumentFieldExtractor:
             out["subtotal"] = subtotal
 
         # Account/GL code
-        acct = _labelled_code(
-            r"(?:account\s*(?:code|no\.?)?|acct\.?\s*(?:code|no\.?)?|gl\s*(?:code|no\.?)?|billing\s*code)",
-            text,
-        )
+        acct = _extract_account_code(text, self.lines)
         if acct:
             out["account_code"] = acct
 
@@ -949,8 +1084,8 @@ class DocumentFieldExtractor:
     def _extract_utility_bill(self, out: dict) -> None:
         self._extract_invoice(out)
 
-        acct = _labelled_code(
-            r"(?:account\s*(?:number|no\.?)|meter\s*(?:number|no\.?)|customer\s*(?:number|no\.?|id))",
+        acct = _extract_account_code(self.text, self.lines) or _labelled_code(
+            r"(?:meter\s*(?:number|no\.?)|customer\s*(?:number|no\.?|id))",
             self.text,
         )
         if acct:
@@ -971,10 +1106,7 @@ class DocumentFieldExtractor:
         if subtotal:
             out["subtotal"] = subtotal
 
-        acct = _labelled_code(
-            r"(?:account\s*(?:code|no\.?)?|acct\.?\s*(?:code|no\.?)?|gl\s*(?:code|no\.?)?)",
-            self.text,
-        )
+        acct = _extract_account_code(self.text, self.lines)
         if acct:
             out["account_code"] = acct
 
@@ -986,10 +1118,7 @@ class DocumentFieldExtractor:
 
         # Account code (if not already set by type-specific extractor)
         if "account_code" not in out:
-            acct = _labelled_code(
-                r"(?:account\s*(?:code|no\.?)?|acct\.?\s*(?:code|no\.?)?|gl\s*code|project\s*code|billing\s*code)",
-                text,
-            )
+            acct = _extract_account_code(text, self.lines)
             if acct:
                 out["account_code"] = acct
 

@@ -6,7 +6,7 @@ export default defineConfig({
   plugins: [react()],
   resolve: {
     alias: {
-      "@": path.resolve(__dirname, "./src"),
+      "@/": path.resolve(__dirname, "./src") + "/",
     },
   },
   // PDF.js worker is a large binary — exclude from dep pre-bundling

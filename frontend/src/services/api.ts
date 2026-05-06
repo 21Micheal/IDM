@@ -65,41 +65,79 @@ function normalizeApiBase(rawBase: string): string {
 
 function resolveApiBaseUrl(): string {
   const rawApiUrl = import.meta.env.VITE_API_URL?.trim();
+  console.log('Raw VITE_API_URL from import.meta.env:', rawApiUrl);
+  
   if (!rawApiUrl) {
+    console.log('No VITE_API_URL found, using default /api/v1');
     return "/api/v1";
   }
 
   const normalized = normalizeApiBase(rawApiUrl);
+  console.log('Normalized API URL:', normalized);
 
   if (typeof window !== "undefined") {
-    const currentHost = window.location.hostname;
-    if (currentHost === "localhost" || currentHost === "127.0.0.1" || currentHost === "::1") {
-      return "/api/v1";
-    }
-
     try {
       const parsed = new URL(normalized, window.location.origin);
       if (parsed.protocol === "http:" || parsed.protocol === "https:") {
-        return parsed.href.replace(/\/+$|\/$/, "");
+        const finalUrl = parsed.href.replace(/\/+$|\/$/, "");
+        console.log('Final resolved API URL:', finalUrl);
+        return finalUrl;
       }
-    } catch {
+    } catch (error) {
+      console.log('URL parsing failed, falling back to /api/v1', error);
       // fall back to proxy-friendly relative API path
     }
   }
 
+  console.log('Using fallback /api/v1');
   return "/api/v1";
 }
 
 export const apiBaseUrl = resolveApiBaseUrl();
+console.log('API Base URL resolved to:', apiBaseUrl);
 
 export const api = axios.create({
   baseURL: apiBaseUrl,
   headers: { "Content-Type": "application/json" },
 });
 
+let refreshPromise: Promise<string> | null = null;
+
+async function refreshAccessToken(): Promise<string> {
+  if (!refreshPromise) {
+    refreshPromise = (async () => {
+      const authState = useAuthStore.getState();
+      if (authState.isSessionExpired()) {
+        authState.logout();
+        throw new Error("Session expired");
+      }
+
+      const refreshToken = authState.refreshToken;
+      if (!refreshToken) throw new Error("Missing refresh token");
+
+      const { data } = await axios.post(
+        `${api.defaults.baseURL}/token/refresh/`,
+        { refresh: refreshToken }
+      );
+      useAuthStore.getState().setTokens(data.access, data.refresh ?? refreshToken);
+      return data.access as string;
+    })().finally(() => {
+      refreshPromise = null;
+    });
+  }
+
+  return refreshPromise;
+}
+
 // Attach JWT on every request
 api.interceptors.request.use((config: InternalAxiosRequestConfig) => {
-  const token = useAuthStore.getState().accessToken;
+  const authState = useAuthStore.getState();
+  if (authState.isSessionExpired()) {
+    authState.logout();
+    return config;
+  }
+
+  const token = authState.accessToken;
   if (token) config.headers.Authorization = `Bearer ${token}`;
   return config;
 });
@@ -111,16 +149,18 @@ api.interceptors.response.use(
     const original = error.config as InternalAxiosRequestConfig & {
       _retry?: boolean;
     };
-    if (error.response?.status === 401 && !original._retry) {
+    const isRefreshRequest = original.url?.includes("/token/refresh/");
+    const hasAuthHeader = Boolean(original.headers?.Authorization);
+    if (error.response?.status === 401 && (original._retry || isRefreshRequest) && hasAuthHeader) {
+      useAuthStore.getState().logout();
+      return Promise.reject(error);
+    }
+
+    if (error.response?.status === 401 && !original._retry && !isRefreshRequest) {
       original._retry = true;
       try {
-        const refreshToken = useAuthStore.getState().refreshToken;
-        const { data } = await axios.post(
-          `${api.defaults.baseURL}/token/refresh/`,
-          { refresh: refreshToken }
-        );
-        useAuthStore.getState().setTokens(data.access, refreshToken!);
-        original.headers.Authorization = `Bearer ${data.access}`;
+        const accessToken = await refreshAccessToken();
+        original.headers.Authorization = `Bearer ${accessToken}`;
         return api(original);
       } catch {
         useAuthStore.getState().logout();

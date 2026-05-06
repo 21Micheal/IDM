@@ -301,3 +301,50 @@ def _pdf_effective_dpi(file_path: str, fallback_dpi: int) -> int:
 
     # Always render at at least target_dpi; cap at 400 to avoid OOM on large files.
     return max(200, min(fallback_dpi, 400))
+
+
+def _extract_pdf_tables_as_text(file_path: str) -> str:
+    """
+    Extract simple PDF tables as labelled lines.
+
+    pdfplumber often sees invoice header grids that plain text extraction loses:
+        Supplier | Account Code | Invoice Date
+        ACME Ltd | 400-211      | 2026-05-01
+
+    Serialising those as "Supplier: ACME Ltd" etc. lets the shared field
+    extractor use high-precision labelled patterns for both searchable PDFs and
+    OCR-routed scans.
+    """
+    try:
+        import pdfplumber
+    except Exception:
+        return ""
+
+    labelled_lines: list[str] = []
+    try:
+        with pdfplumber.open(file_path) as pdf:
+            for page in pdf.pages:
+                for table in page.extract_tables() or []:
+                    if len(table) < 2:
+                        continue
+
+                    headers = [
+                        " ".join(str(cell or "").split()).strip(" :-")
+                        for cell in table[0]
+                    ]
+                    if sum(bool(header) for header in headers) < 2:
+                        continue
+
+                    for row in table[1:4]:
+                        values = [
+                            " ".join(str(cell or "").split()).strip()
+                            for cell in row
+                        ]
+                        for header, value in zip(headers, values):
+                            if header and value:
+                                labelled_lines.append(f"{header}: {value}")
+    except Exception as exc:
+        logger.debug("_extract_pdf_tables_as_text: failed for %s: %s", file_path, exc)
+        return ""
+
+    return "\n".join(labelled_lines)

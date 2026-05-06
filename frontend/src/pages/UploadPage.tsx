@@ -32,6 +32,7 @@ import { toast } from "@/components/ui/vault-toast";
 import type { DocumentType, MetadataField } from "@/types";
 import clsx from "clsx";
 import { QUERY_FIVE_MIN_STALE } from "@/lib/reactQueryDefaults";
+import { deriveDocumentTypeConfig } from "@/lib/documentTypeConfig";
 
 // ── Types ─────────────────────────────────────────────────────────────────────
 
@@ -509,11 +510,9 @@ export default function UploadPage({ scanOnly = false }: UploadPageProps) {
     ...QUERY_FIVE_MIN_STALE,
   });
   const selectedType = docTypes.find((t) => t.id === selectedTypeId);
-  const hasExplicitPersonalType = typeof selectedType?.is_personal_type === "boolean";
-  const isSelfUpload = hasExplicitPersonalType
-    ? Boolean(selectedType?.is_personal_type)
-    : /personal/i.test(selectedType?.name ?? "");
-  const metadataMode = selectedType?.metadata_mode ?? (isSelfUpload ? "user_defined" : "admin_defined");
+  const typeConfig = deriveDocumentTypeConfig(selectedType);
+  const isSelfUpload = typeConfig.isPersonalType;
+  const metadataMode = typeConfig.metadataMode;
 
   // ── Derived state ───────────────────────────────────────────────────────────
   const isOcrFlow = isScanned && !isSelfUpload;
@@ -623,8 +622,12 @@ export default function UploadPage({ scanOnly = false }: UploadPageProps) {
         ref_number:        "reference_number",
         reference_no:      "reference_number",
         doc_reference:     "reference_number",
+        account:           "account_code",
         account_code:      "account_code",
         account_no:        "account_code",
+        account_number:    "account_code",
+        a_c:               "account_code",
+        a_c_no:            "account_code",
         gl_code:           "account_code",
         cost_centre:       "cost_centre",
         cost_center:       "cost_centre",
@@ -659,13 +662,15 @@ export default function UploadPage({ scanOnly = false }: UploadPageProps) {
           const metadataKey = metaField.key ?? metaField.field_key;
           if (!metadataKey) continue;
 
-          const key = metadataKey.toLowerCase().replace(/[\s-]/g, "_");
+          const key = metadataKey.toLowerCase().replace(/[^a-z0-9]+/g, "_").replace(/^_+|_+$/g, "");
           // Direct key match first
           const directValue = (fields as Record<string, string | undefined>)[key];
           // Alias match second
           const aliasKey = OCR_KEY_ALIASES[key];
           const aliasValue = aliasKey ? (fields as Record<string, string | undefined>)[aliasKey] : undefined;
-          const value = directValue || aliasValue;
+          const referenceFallbackKeys = new Set(["account", "account_code", "account_no", "account_number", "a_c", "a_c_no"]);
+          const referenceFallback = referenceFallbackKeys.has(key) ? fields.reference_number : undefined;
+          const value = directValue || aliasValue || referenceFallback;
 
           if (value) {
             setValue(`metadata.${metadataKey}`, value);

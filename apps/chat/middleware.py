@@ -25,25 +25,17 @@ class JwtAuthMiddleware:
     def __init__(self, inner):
         self.inner = inner
 
-    def __call__(self, scope):
-        return JwtAuthMiddlewareInstance(scope, self.inner)
-
-
-class JwtAuthMiddlewareInstance:
-    def __init__(self, scope, inner):
-        self.scope = dict(scope)
-        self.inner = inner
-
-    async def __call__(self, receive, send):
-        query_params = parse_qs(self.scope.get("query_string", b"").decode())
+    async def __call__(self, scope, receive, send):
+        # Parse query string to get token
+        query_params = parse_qs(scope.get("query_string", b"").decode())
         token = (query_params.get("token") or [None])[0]
 
         if token and (
-            not self.scope.get("user") or not self.scope["user"].is_authenticated
+            not scope.get("user") or not scope["user"].is_authenticated
         ):
-            self.scope["user"] = await get_user_for_token(token)
+            scope["user"] = await get_user_for_token(token)
 
-        return await self.inner(self.scope, receive, send)
+        return await self.inner(scope, receive, send)
 
 
 def JwtAuthMiddlewareStack(inner):
