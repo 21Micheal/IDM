@@ -178,6 +178,9 @@ class WorkflowTaskViewSet(viewsets.ReadOnlyModelViewSet):
         qs   = WorkflowTask.objects.select_related(
             "step", "assigned_to", "workflow_instance__document",
             "workflow_instance__document__document_type",
+            "workflow_instance__document__department",
+            "workflow_instance__document__uploaded_by",
+            "workflow_instance__document__uploaded_by__department",
         )
         if user.has_admin_access:
             if s := self.request.query_params.get("status"):
@@ -194,7 +197,14 @@ class WorkflowTaskViewSet(viewsets.ReadOnlyModelViewSet):
         tasks = (
             WorkflowTask.objects
             .filter(assigned_to=request.user, status__in=["in_progress", "held"])
-            .select_related("step", "workflow_instance__document", "workflow_instance__document__document_type")
+            .select_related(
+                "step",
+                "workflow_instance__document",
+                "workflow_instance__document__document_type",
+                "workflow_instance__document__department",
+                "workflow_instance__document__uploaded_by",
+                "workflow_instance__document__uploaded_by__department",
+            )
             .order_by("due_at")
         )
         return Response(WorkflowTaskSerializer(tasks, many=True).data)

@@ -116,10 +116,12 @@ export interface UserSummary {
   email: string;
   first_name: string;
   last_name: string;
+  full_name?: string;
   job_description?: string;
   is_staff?: boolean;
   has_admin_access?: boolean;
   group_names?: string[];
+  department_name?: string | null;
 }
 
 export interface WorkflowTask {
@@ -139,12 +141,18 @@ export interface WorkflowTask {
       reference_number: string;
       document_type_name?: string;
       document_type?: DocumentType;
+      department?: string | null;
+      department_name?: string | null;
+      uploaded_by?: UserSummary;
     };
   };
   document_id?: string;
   document_title?: string;
   document_ref?: string;
   document_type_name?: string;
+  document_department_name?: string | null;
+  uploaded_by_name?: string | null;
+  uploader_department_name?: string | null;
   file_name?: string;
   file_mime_type?: string;
   status: "pending" | "in_progress" | "approved" | "rejected" | "returned" | "held" | "skipped";
