@@ -23,6 +23,7 @@ const GroupsPage = lazy(() => import("@/pages/GroupsPage"));
 const ProfilePage = lazy(() => import("@/pages/ProfilePage"));
 const WorkflowBuilderPage = lazy(() => import("@/pages/WorkflowBuilderPage"));
 const NotificationsPage = lazy(() => import("@/pages/NotificationsPage"));
+const FolderPage = lazy(() => import("@/pages/FolderPage"));
 
 // ── Guards ────────────────────────────────────────────────────────────────────
 
@@ -230,6 +231,7 @@ export default function App() {
               <Route path="documents/upload" element={<UploadPage />} />
               <Route path="documents/scan"   element={<UploadPage scanOnly />} />
               <Route path="documents/:id"    element={<DocumentDetailPage />} />
+              <Route path="documents/folders/:folderId" element={<FolderPage />} />
 
               {/* Search */}
               <Route path="search"    element={<SearchPage />} />

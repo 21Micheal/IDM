@@ -209,3 +209,59 @@ export interface DocumentEditTokenResponse {
   file_name: string;
   mime_type: string;
 }
+
+
+// folder types
+
+export interface DocumentFolder {
+  id: string;
+  parent: string | null;
+  parent_name: string | null;
+  name: string;
+  color: string;
+  icon: string;
+  is_favourites: boolean;
+  is_system: boolean;
+  position: number;
+  child_count: number;
+  document_count: number;
+  created_at: string;
+  updated_at: string;
+  // Only present in tree response
+  children?: DocumentFolder[];
+}
+
+export interface DocumentFolderItem {
+  id: string;
+  folder: string;
+  document: string;
+  position: number;
+  added_at: string;
+  document_title: string;
+  document_reference: string;
+  document_status: string;
+  document_type_name: string;
+  document_file_mime_type: string;
+  document_file_name: string;
+  document_updated_at: string;
+}
+
+export interface DocumentFavourite {
+  id: string;
+  document: string;
+  document_title: string;
+  document_reference: string;
+  document_status: string;
+  document_type_name: string;
+  document_file_mime_type: string;
+  document_file_name: string;
+  document_updated_at: string;
+  access_count: number;
+  added_at: string;
+  last_accessed: string | null;
+}
+
+export interface FavouriteCheckResult {
+  starred: boolean;
+  favourite_id: string | null;
+}
