@@ -447,6 +447,9 @@ export const usersAPI = {
   delete: (id: string) => api.delete(`/users/${id}/`),
   resetPassword: (id: string) => api.post(`/users/${id}/reset-password/`),
   toggleActive: (id: string) => api.post(`/users/${id}/toggle-active/`),
+  delegations: (id: string) => api.get(`/users/${id}/delegations/`),
+  reassignActiveTasks: (id: string, toUserId: string) =>
+    api.post(`/users/${id}/reassign-active-tasks/`, { to_user_id: toUserId }),
 };
 
 export const departmentsAPI = {
@@ -464,6 +467,15 @@ export const profileAPI = {
 
   // MFA is now default, but we keep toggle for admin flexibility
   toggleMFA: (enable = true) => api.post("/auth/mfa/", { enable }),
+  listDelegations: () => api.get("/delegations/"),
+  createDelegation: (data: { delegate_id: string; starts_at: string; ends_at: string }) =>
+    api.post("/delegations/", data),
+  updateDelegation: (
+    id: string,
+    data: Partial<{ delegate_id: string; starts_at: string; ends_at: string; is_active: boolean }>,
+  ) => api.patch(`/delegations/${id}/`, data),
+  deleteDelegation: (id: string) => api.delete(`/delegations/${id}/`),
+  delegationCandidates: () => api.get("/delegations/candidates/"),
 };
 
 export const groupsAPI = {

@@ -1,5 +1,5 @@
 import { useState } from "react";
-import { useMutation } from "@tanstack/react-query";
+import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useForm } from "react-hook-form";
 import { zodResolver } from "@hookform/resolvers/zod";
 import { z } from "zod";
@@ -20,10 +20,32 @@ const pwSchema = z.object({
   path: ["confirm_password"],
 });
 type PwForm = z.infer<typeof pwSchema>;
+type DelegationForm = { delegate_id: string; starts_at: string; ends_at: string };
+
+interface Delegation {
+  id: string;
+  delegate: { id: string; full_name?: string; email: string };
+  starts_at: string;
+  ends_at: string;
+  is_active: boolean;
+  is_current: boolean;
+}
+
+interface UserOption {
+  id: string;
+  full_name: string;
+  email: string;
+}
 
 export default function ProfilePage() {
   const user = useAuthStore((s) => s.user);
+  const qc = useQueryClient();
   const [showPw, setShowPw] = useState(false);
+  const [delegationForm, setDelegationForm] = useState<DelegationForm>({
+    delegate_id: "",
+    starts_at: "",
+    ends_at: "",
+  });
 
   const { register, handleSubmit, reset, formState: { errors } } = useForm<PwForm>({
     resolver: zodResolver(pwSchema),
@@ -55,10 +77,42 @@ export default function ProfilePage() {
     onError: () => toast.error("Failed to update MFA"),
   });
 
+  const { data: delegations = [] } = useQuery<Delegation[]>({
+    queryKey: ["delegations", "mine"],
+    queryFn: () => profileAPI.listDelegations().then((r) => r.data.results ?? r.data),
+    enabled: Boolean(user),
+  });
+
+  const { data: delegationCandidates = [] } = useQuery<UserOption[]>({
+    queryKey: ["delegations", "candidates"],
+    queryFn: () => profileAPI.delegationCandidates().then((r) => r.data),
+    enabled: Boolean(user),
+  });
+
+  const createDelegationMutation = useMutation({
+    mutationFn: () => profileAPI.createDelegation(delegationForm),
+    onSuccess: () => {
+      toast.success("Out of office delegation created");
+      setDelegationForm({ delegate_id: "", starts_at: "", ends_at: "" });
+      qc.invalidateQueries({ queryKey: ["delegations"] });
+    },
+    onError: (err: { response?: { data?: { detail?: string } } }) =>
+      toast.error(err?.response?.data?.detail || "Failed to create delegation"),
+  });
+
+  const disableDelegationMutation = useMutation({
+    mutationFn: (delegationId: string) => profileAPI.updateDelegation(delegationId, { is_active: false }),
+    onSuccess: () => {
+      toast.success("Delegation disabled");
+      qc.invalidateQueries({ queryKey: ["delegations"] });
+    },
+    onError: () => toast.error("Failed to disable delegation"),
+  });
+
   if (!user) return null;
 
   return (
-    <div className="max-w-2xl mx-auto py-10 px-6 space-y-8">
+    <div className="max-w-5xl mx-auto py-10 px-6 space-y-8">
       <div>
         <div className="flex items-center gap-3 mb-2">
           <div className="w-10 h-10 rounded-xl bg-primary/10 flex items-center justify-center">
@@ -208,6 +262,74 @@ export default function ProfilePage() {
             </button>
           </div>
         )}
+      </div>
+
+      <div className="card p-6">
+        <div className="flex items-center gap-2 mb-2">
+          <h2 className="font-semibold text-foreground">Out of office delegation</h2>
+        </div>
+        <p className="text-sm text-muted-foreground mb-5">
+          Delegate your workflow tasks to another user for a specific period. Your tasks remain visible to you.
+        </p>
+
+        <div className="grid grid-cols-1 md:grid-cols-3 gap-3 mb-4">
+          <select
+            className="input"
+            value={delegationForm.delegate_id}
+            onChange={(e) => setDelegationForm((s) => ({ ...s, delegate_id: e.target.value }))}
+          >
+            <option value="">Select delegate</option>
+            {delegationCandidates.map((candidate) => (
+              <option key={candidate.id} value={candidate.id}>
+                {candidate.full_name || candidate.email}
+              </option>
+            ))}
+          </select>
+          <input
+            type="datetime-local"
+            className="input"
+            value={delegationForm.starts_at}
+            onChange={(e) => setDelegationForm((s) => ({ ...s, starts_at: e.target.value }))}
+          />
+          <input
+            type="datetime-local"
+            className="input"
+            value={delegationForm.ends_at}
+            onChange={(e) => setDelegationForm((s) => ({ ...s, ends_at: e.target.value }))}
+          />
+        </div>
+        <button
+          className="btn-primary"
+          disabled={!delegationForm.delegate_id || !delegationForm.starts_at || !delegationForm.ends_at || createDelegationMutation.isPending}
+          onClick={() =>
+            createDelegationMutation.mutate()
+          }
+        >
+          {createDelegationMutation.isPending && <Loader2 className="w-4 h-4 animate-spin" />}
+          Create delegation
+        </button>
+
+        <div className="mt-5 space-y-3">
+          {!delegations.length && <p className="text-sm text-muted-foreground">No delegations set.</p>}
+          {delegations.map((delegation) => (
+            <div key={delegation.id} className="border border-border rounded-lg p-3 flex items-center justify-between">
+              <div>
+                <p className="font-medium text-foreground">{delegation.delegate.full_name || delegation.delegate.email}</p>
+                <p className="text-xs text-muted-foreground">
+                  {new Date(delegation.starts_at).toLocaleString()} - {new Date(delegation.ends_at).toLocaleString()}
+                </p>
+              </div>
+              <div className="flex items-center gap-2">
+                <span className="badge">{delegation.is_current ? "Active now" : delegation.is_active ? "Scheduled" : "Disabled"}</span>
+                {delegation.is_active && (
+                  <button className="btn-secondary" onClick={() => disableDelegationMutation.mutate(delegation.id)}>
+                    Disable
+                  </button>
+                )}
+              </div>
+            </div>
+          ))}
+        </div>
       </div>
     </div>
   );

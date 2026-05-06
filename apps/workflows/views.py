@@ -9,6 +9,7 @@ Added actions on WorkflowTaskViewSet:
 """
 from django.db import models, transaction
 from django.db.models import Count
+from django.utils import timezone
 from rest_framework import viewsets, permissions, status
 from rest_framework.decorators import action
 from rest_framework.response import Response
@@ -25,6 +26,7 @@ from .serializers import (
     WorkflowTaskActionSerializer,
 )
 from .services import WorkflowService, WorkflowError
+from apps.accounts.models import UserDelegation
 class IsGroupAdmin(permissions.BasePermission):
     message = "Only administrators can perform this action."
 
@@ -186,17 +188,38 @@ class WorkflowTaskViewSet(viewsets.ReadOnlyModelViewSet):
             if s := self.request.query_params.get("status"):
                 qs = qs.filter(status=s)
             return qs
-        # Other users: tasks assigned to them that are active
+        now = timezone.now()
+        delegate_for_user_ids = list(
+            UserDelegation.objects.filter(
+                delegate=user,
+                is_active=True,
+                starts_at__lte=now,
+                ends_at__gte=now,
+            ).values_list("delegator_id", flat=True)
+        )
+        # Non-admin users can see their own active tasks plus delegated tasks.
         return qs.filter(
-            assigned_to=user,
+            models.Q(assigned_to=user) | models.Q(assigned_to_id__in=delegate_for_user_ids),
             status__in=["in_progress", "held"],
         )
 
     @action(detail=False, methods=["get"], url_path="my_tasks")
     def my_tasks(self, request):
+        now = timezone.now()
+        delegate_for_user_ids = list(
+            UserDelegation.objects.filter(
+                delegate=request.user,
+                is_active=True,
+                starts_at__lte=now,
+                ends_at__gte=now,
+            ).values_list("delegator_id", flat=True)
+        )
         tasks = (
             WorkflowTask.objects
-            .filter(assigned_to=request.user, status__in=["in_progress", "held"])
+            .filter(
+                models.Q(assigned_to=request.user) | models.Q(assigned_to_id__in=delegate_for_user_ids),
+                status__in=["in_progress", "held"],
+            )
             .select_related(
                 "step",
                 "workflow_instance__document",
@@ -329,6 +352,13 @@ class WorkflowTaskViewSet(viewsets.ReadOnlyModelViewSet):
     # ── Helper ─────────────────────────────────────────────────────────────
 
     def _check_permission(self, task, user):
-        if task.assigned_to != user and not user.has_admin_access:
+        has_active_delegation = UserDelegation.objects.filter(
+            delegator=task.assigned_to,
+            delegate=user,
+            is_active=True,
+            starts_at__lte=timezone.now(),
+            ends_at__gte=timezone.now(),
+        ).exists()
+        if task.assigned_to != user and not user.has_admin_access and not has_active_delegation:
             from rest_framework.exceptions import PermissionDenied
             raise PermissionDenied("You are not authorised to action this task.")

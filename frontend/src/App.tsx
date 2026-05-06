@@ -18,6 +18,7 @@ const AdminPage = lazy(() => import("@/pages/AdminPage"));
 const AdminDocumentTypesPage = lazy(() => import("@/pages/AdminDocumentTypesPage"));
 const AuditPage = lazy(() => import("@/pages/AuditPage"));
 const UsersPage = lazy(() => import("@/pages/UsersPage"));
+const UserDetailPage = lazy(() => import("@/pages/UserDetailPage"));
 const DepartmentsPage = lazy(() => import("@/pages/DepartmentsPage"));
 const GroupsPage = lazy(() => import("@/pages/GroupsPage"));
 const ProfilePage = lazy(() => import("@/pages/ProfilePage"));
@@ -251,6 +252,7 @@ export default function App() {
 
               {/* Admin-only */}
               <Route path="admin/users"           element={<RequireAdmin><UsersPage /></RequireAdmin>} />
+              <Route path="admin/users/:id"       element={<RequireAdmin><UserDetailPage /></RequireAdmin>} />
               <Route path="admin/settings"        element={<RequireAdmin><AdminPage /></RequireAdmin>} />
               <Route path="admin/document-types"  element={<RequireAdmin><AdminDocumentTypesPage /></RequireAdmin>} />
               <Route path="admin/departments"     element={<RequireAdmin><DepartmentsPage /></RequireAdmin>} />

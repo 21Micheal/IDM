@@ -3,13 +3,14 @@ from rest_framework.routers import DefaultRouter
 from .views import (
     LoginView, VerifyOTPView, ResendOTPView,
     MeView, ChangePasswordView, EnableMFAView,
-    UserViewSet, DepartmentViewSet, UserGroupViewSet,
+    UserViewSet, DepartmentViewSet, UserGroupViewSet, UserDelegationViewSet,
 )
 
 router = DefaultRouter()
 router.register(r"users",       UserViewSet,          basename="user")
 router.register(r"departments", DepartmentViewSet,    basename="department")
 router.register(r"groups",      UserGroupViewSet,     basename="group")
+router.register(r"delegations", UserDelegationViewSet, basename="delegation")
 
 urlpatterns = [
     # Auth

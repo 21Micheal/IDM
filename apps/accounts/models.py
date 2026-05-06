@@ -184,6 +184,40 @@ class User(AbstractBaseUser, PermissionsMixin):
         return self.get_group_permissions_for_doctype(document_type_id)
 
 
+class UserDelegation(models.Model):
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    delegator = models.ForeignKey(
+        User, on_delete=models.CASCADE, related_name="delegations_outgoing"
+    )
+    delegate = models.ForeignKey(
+        User, on_delete=models.CASCADE, related_name="delegations_incoming"
+    )
+    starts_at = models.DateTimeField()
+    ends_at = models.DateTimeField()
+    is_active = models.BooleanField(default=True)
+    created_by = models.ForeignKey(
+        User, null=True, blank=True, on_delete=models.SET_NULL, related_name="created_delegations"
+    )
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ["-starts_at"]
+        indexes = [
+            models.Index(fields=["delegator", "starts_at", "ends_at"]),
+            models.Index(fields=["delegate", "starts_at", "ends_at"]),
+            models.Index(fields=["is_active"]),
+        ]
+
+    def __str__(self):
+        return f"{self.delegator.email} -> {self.delegate.email}"
+
+    @property
+    def is_current(self):
+        now = timezone.now()
+        return self.is_active and self.starts_at <= now <= self.ends_at
+
+
 # ── Email OTP ─────────────────────────────────────────────────────────────────
 
 class EmailOTP(models.Model):

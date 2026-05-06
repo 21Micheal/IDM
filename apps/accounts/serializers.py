@@ -2,7 +2,8 @@ from django.contrib.auth.password_validation import validate_password
 from django.core.exceptions import ValidationError as DjangoValidationError
 from django.utils.crypto import get_random_string
 from rest_framework import serializers
-from .models import User, Department, UserGroup, GroupPermission, UserGroupMembership
+from django.utils import timezone
+from .models import User, Department, UserGroup, GroupPermission, UserGroupMembership, UserDelegation
 
 
 class DepartmentSerializer(serializers.ModelSerializer):
@@ -194,3 +195,51 @@ class UserGroupSerializer(serializers.ModelSerializer):
 
     def get_has_admin_access(self, obj):
         return obj.has_admin_access
+
+
+class UserDelegationSerializer(serializers.ModelSerializer):
+    delegator = UserSummarySerializer(read_only=True)
+    delegate = UserSummarySerializer(read_only=True)
+    delegator_id = serializers.PrimaryKeyRelatedField(
+        queryset=User.objects.filter(is_active=True),
+        source="delegator",
+        write_only=True,
+        required=False,
+    )
+    delegate_id = serializers.PrimaryKeyRelatedField(
+        queryset=User.objects.filter(is_active=True),
+        source="delegate",
+        write_only=True,
+    )
+    is_current = serializers.BooleanField(read_only=True)
+
+    class Meta:
+        model = UserDelegation
+        fields = [
+            "id",
+            "delegator",
+            "delegate",
+            "delegator_id",
+            "delegate_id",
+            "starts_at",
+            "ends_at",
+            "is_active",
+            "is_current",
+            "created_at",
+        ]
+        read_only_fields = ["id", "delegator", "delegate", "is_current", "created_at"]
+
+    def validate(self, attrs):
+        delegator = attrs.get("delegator") or getattr(self.instance, "delegator", None)
+        delegate = attrs.get("delegate") or getattr(self.instance, "delegate", None)
+        starts_at = attrs.get("starts_at") or getattr(self.instance, "starts_at", None)
+        ends_at = attrs.get("ends_at") or getattr(self.instance, "ends_at", None)
+
+        if delegator and delegate and delegator.id == delegate.id:
+            raise serializers.ValidationError("You cannot delegate tasks to yourself.")
+        if starts_at and ends_at and starts_at >= ends_at:
+            raise serializers.ValidationError("Delegation end time must be after start time.")
+        if ends_at and ends_at <= timezone.now():
+            raise serializers.ValidationError("Delegation end time must be in the future.")
+
+        return attrs
