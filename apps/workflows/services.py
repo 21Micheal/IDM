@@ -32,6 +32,7 @@ from .models import (
 )
 from apps.documents.models import DocumentStatus
 from apps.accounts.models import User
+from apps.audit.models import AuditEvent, AuditLog
 
 
 class WorkflowError(Exception):
@@ -134,6 +135,15 @@ class WorkflowService:
         step       = task.step
         doc        = instance.document
 
+        AuditLog.objects.create(
+            event=AuditEvent.WORKFLOW_APPROVED,
+            actor=actor,
+            object_type=doc.__class__.__name__,
+            object_id=str(doc.pk),
+            object_repr=str(doc)[:255],
+            changes={"task_id": str(task.id), "action": action.action, "comment": action.comment},
+        )
+
         # Notify stakeholders of approval
         WorkflowService._notify_action(action, doc)
 
@@ -158,6 +168,15 @@ class WorkflowService:
         
         instance = task.workflow_instance
         doc      = instance.document
+
+        AuditLog.objects.create(
+            event=AuditEvent.WORKFLOW_REJECTED,
+            actor=actor,
+            object_type=doc.__class__.__name__,
+            object_id=str(doc.pk),
+            object_repr=str(doc)[:255],
+            changes={"task_id": str(task.id), "action": action.action, "comment": action.comment},
+        )
 
         # Notify stakeholders of rejection
         WorkflowService._notify_action(action, doc)
@@ -202,6 +221,16 @@ class WorkflowService:
         instance       = task.workflow_instance
         current_order  = task.step.order
         doc            = instance.document
+
+        AuditLog.objects.create(
+            event=AuditEvent.WORKFLOW_RETURNED,
+            actor=actor,
+            object_type=doc.__class__.__name__,
+            object_id=str(doc.pk),
+            object_repr=str(doc)[:255],
+            changes={"task_id": str(task.id), "action": action.action, "comment": action.comment, "return_to": return_to},
+        )
+
         WorkflowService._skip_active_tasks(instance, step_order=current_order)
 
         if return_to == "previous_step" and current_order > 1:
@@ -257,6 +286,15 @@ class WorkflowService:
         doc.status = "On Hold"
         doc.save(update_fields=["status", "updated_at"])
 
+        AuditLog.objects.create(
+            event=AuditEvent.WORKFLOW_HELD,
+            actor=actor,
+            object_type=doc.__class__.__name__,
+            object_id=str(doc.pk),
+            object_repr=str(doc)[:255],
+            changes={"task_id": str(task.id), "action": action.action, "comment": action.comment, "hold_hours": hold_hours},
+        )
+
         # Notify uploader
         WorkflowService._notify_action(action, doc)
 
@@ -279,6 +317,15 @@ class WorkflowService:
         action = WorkflowTaskAction.objects.create(
             task=task, actor=actor, action="released",
             comment="Manually released from hold",
+        )
+
+        AuditLog.objects.create(
+            event=AuditEvent.WORKFLOW_RELEASED,
+            actor=actor,
+            object_type=task.workflow_instance.document.__class__.__name__,
+            object_id=str(task.workflow_instance.document.pk),
+            object_repr=str(task.workflow_instance.document)[:255],
+            changes={"task_id": str(task.id), "action": action.action, "comment": action.comment},
         )
 
         # Restore document status to the step's label

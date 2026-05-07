@@ -16,6 +16,12 @@ class DocumentFilter(django_filters.FilterSet):
     supplier      = django_filters.CharFilter(lookup_expr="icontains")
     date_from     = django_filters.DateFilter(field_name="document_date", lookup_expr="gte")
     date_to       = django_filters.DateFilter(field_name="document_date", lookup_expr="lte")
+    created_from  = django_filters.DateFilter(field_name="created_at", lookup_expr="date__gte")
+    created_to    = django_filters.DateFilter(field_name="created_at", lookup_expr="date__lte")
+    updated_from  = django_filters.DateFilter(field_name="updated_at", lookup_expr="date__gte")
+    updated_to    = django_filters.DateFilter(field_name="updated_at", lookup_expr="date__lte")
+    approved_from = django_filters.DateFilter(field_name="workflow_instance__completed_at", lookup_expr="date__gte")
+    approved_to   = django_filters.DateFilter(field_name="workflow_instance__completed_at", lookup_expr="date__lte")
     amount_min    = django_filters.NumberFilter(field_name="amount", lookup_expr="gte")
     amount_max    = django_filters.NumberFilter(field_name="amount", lookup_expr="lte")
     tags          = django_filters.UUIDFilter(field_name="tags__id")
@@ -28,6 +34,7 @@ class DocumentFilter(django_filters.FilterSet):
         model  = Document
         fields = [
             "status", "document_type", "supplier", "date_from", "date_to",
+            "created_from", "created_to", "updated_from", "updated_to", "approved_from", "approved_to",
             "amount_min", "amount_max", "tags", "personal_tag", "department", "reference",
             "is_self_upload",
         ]

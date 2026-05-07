@@ -6,6 +6,7 @@ import {
   FileText, Clock, CheckCircle, GitBranch, ArrowRight,
   ChevronLeft, ChevronRight,
   Calendar, Loader2, Search, ShieldCheck, Sparkles,
+  Filter, X,
 } from "lucide-react";
 import { Link, useNavigate } from "react-router-dom";
 import StatusBadge from "@/components/documents/StatusBadge";
@@ -18,9 +19,23 @@ import { highlightSearchText, getPreferredHighlights } from "@/lib/search";
 import { QUERY_FIVE_MIN_STALE, QUERY_SHORT_STALE, QUERY_FOCUS_OFF } from "@/lib/reactQueryDefaults";
 import { formatDocumentFileType } from "@/lib/documentFormat";
 import { preloadDocumentWorkspace } from "@/lib/routePreload";
+import {
+  DEFAULT_WORKFLOW_TASK_FILTERS,
+  buildWorkflowTaskFilterOptions,
+  filterWorkflowTasks,
+  getTaskDepartment,
+  getTaskDocumentFormat,
+  getTaskDocumentId,
+  getTaskDocumentTitle,
+  getTaskDocumentType,
+  getTaskUploaderName,
+  hasWorkflowTaskFilters,
+  type WorkflowTaskFilters,
+} from "@/lib/workflowTaskFilters";
 
 const RECENT_DOCS_PAGE_SIZE = 5;
 const RECENT_AUDIT_PAGE_SIZE = 5;
+const TREND_WINDOW_DAYS = 30;
 
 type PaginatedResponse<T> = {
   count: number;
@@ -46,6 +61,78 @@ type StorageStats = {
   total_mb: number;
   percentage: number;
 };
+
+type StatTrend = {
+  value: number;
+  isPositive: boolean;
+  direction: "up" | "down" | "flat";
+  suffix?: string;
+  label?: string;
+};
+
+function addDays(date: Date, days: number) {
+  const next = new Date(date);
+  next.setDate(next.getDate() + days);
+  return next;
+}
+
+function toDateParam(date: Date) {
+  const year = date.getFullYear();
+  const month = String(date.getMonth() + 1).padStart(2, "0");
+  const day = String(date.getDate()).padStart(2, "0");
+  return `${year}-${month}-${day}`;
+}
+
+function getDashboardTrendWindow() {
+  const today = new Date();
+  today.setHours(0, 0, 0, 0);
+
+  return {
+    today: toDateParam(today),
+    currentFrom: toDateParam(addDays(today, -(TREND_WINDOW_DAYS - 1))),
+    currentTo: toDateParam(today),
+    previousFrom: toDateParam(addDays(today, -(TREND_WINDOW_DAYS * 2 - 1))),
+    previousTo: toDateParam(addDays(today, -TREND_WINDOW_DAYS)),
+  };
+}
+
+function getPercentChange(current: number, previous: number) {
+  if (previous === 0) return current > 0 ? 100 : 0;
+  return Math.round((Math.abs(current - previous) / previous) * 10) / 10;
+}
+
+function buildTrend(
+  current: number,
+  previous: number,
+  positiveWhenIncrease: boolean,
+  label: string,
+): StatTrend | undefined {
+  if (current === 0 && previous === 0) return undefined;
+
+  const direction =
+    current > previous ? "up" : current < previous ? "down" : "flat";
+  const isPositive =
+    direction === "flat" ||
+    (positiveWhenIncrease ? direction === "up" : direction === "down");
+
+  return {
+    value: getPercentChange(current, previous),
+    isPositive,
+    direction,
+    label,
+  };
+}
+
+function countDueSoonTasks(tasks: WorkflowTask[]) {
+  const now = Date.now();
+  const tomorrow = now + 24 * 60 * 60 * 1000;
+
+  return tasks.filter((task) => {
+    if (!task.due_at) return false;
+    const dueAt = new Date(task.due_at).getTime();
+    return Number.isFinite(dueAt) && dueAt <= tomorrow;
+  }).length;
+}
 
 function formatStorageAmount(bytes: number) {
   if (bytes >= 1024 ** 3) {
@@ -74,8 +161,8 @@ function formatStorageAmount(bytes: number) {
 
 function getAuditPresentation(event: any) {
   const name = String(event?.event ?? "");
-  if (name.startsWith("user.login")) {
-    return { icon: Clock, label: "Login", tone: "bg-accent/15 text-accent border-accent/30" };
+  if (name.startsWith("user.")) {
+    return { icon: Clock, label: "", tone: "bg-accent/15 text-accent border-accent/30" };
   }
   if (name.startsWith("workflow.")) {
     return { icon: GitBranch, label: "Workflow", tone: "bg-secondary text-secondary-foreground border-border" };
@@ -109,7 +196,14 @@ function formatAuditSummary(event: DashboardAuditEvent): AuditSummaryParts {
   const summary = event.summary || event.event || "";
   const objectTitle = cleanAuditTitle(event.object_repr || "");
 
-  const verbMatch = summary.match(/^(.+?)\s+(submitted|uploaded|edited|updated|created|deleted|approved|rejected|downloaded|viewed|shared|failed)\b/i);
+  if (event.event?.startsWith("user.")) {
+    return {
+      prefix: "",
+      title: summary,
+    };
+  }
+
+  const verbMatch = summary.match(/^(.+?)\s+(submitted|uploaded|edited|updated|created|deleted|approved|rejected|downloaded|viewed|shared|failed|logged|enabled|returned|held|released|archived)\b/i);
   const verb = verbMatch?.[2]?.toLowerCase() ?? "";
 
   if (verbMatch) {
@@ -172,9 +266,11 @@ export default function DashboardPage() {
   const [dashboardSearch, setDashboardSearch] = useState("");
   const [isDashboardSearchFocused, setIsDashboardSearchFocused] = useState(false);
   const [activeDashboardResultIndex, setActiveDashboardResultIndex] = useState(-1);
+  const [taskFilters, setTaskFilters] = useState<WorkflowTaskFilters>(DEFAULT_WORKFLOW_TASK_FILTERS);
 
   const dashboardSearchRef = useRef<HTMLDivElement | null>(null);
   const debouncedDashboardSearch = useDebounce(dashboardSearch.trim(), 300);
+  const trendWindow = useMemo(() => getDashboardTrendWindow(), []);
 
   // ── Queries ───────────────────────────────────────────────────────────────
 
@@ -207,12 +303,93 @@ export default function DashboardPage() {
     ...QUERY_SHORT_STALE,
   });
 
-  const { data: completedCount = 0 } = useQuery({
-    queryKey: ["documents", "completed", "count"],
+  const { data: approvedTodayCount = 0 } = useQuery({
+    queryKey: ["documents", "approved", "today-count", trendWindow.today],
     queryFn: () =>
       documentsAPI.list({
         status: "approved",
         is_self_upload: false,
+        approved_from: trendWindow.today,
+        page: 1,
+        page_size: 1,
+      }).then((r) => r.data.count ?? 0),
+    ...QUERY_SHORT_STALE,
+  });
+
+  const { data: documentsCreatedThisPeriod = 0 } = useQuery({
+    queryKey: ["documents", "created-count", trendWindow.currentFrom, trendWindow.currentTo],
+    queryFn: () =>
+      documentsAPI.list({
+        created_from: trendWindow.currentFrom,
+        created_to: trendWindow.currentTo,
+        page: 1,
+        page_size: 1,
+      }).then((r) => r.data.count ?? 0),
+    ...QUERY_SHORT_STALE,
+  });
+
+  const { data: documentsCreatedPreviousPeriod = 0 } = useQuery({
+    queryKey: ["documents", "created-count", trendWindow.previousFrom, trendWindow.previousTo],
+    queryFn: () =>
+      documentsAPI.list({
+        created_from: trendWindow.previousFrom,
+        created_to: trendWindow.previousTo,
+        page: 1,
+        page_size: 1,
+      }).then((r) => r.data.count ?? 0),
+    ...QUERY_SHORT_STALE,
+  });
+
+  const { data: pendingCreatedThisPeriod = 0 } = useQuery({
+    queryKey: ["documents", "pending", "created-count", trendWindow.currentFrom, trendWindow.currentTo],
+    queryFn: () =>
+      documentsAPI.list({
+        status: "pending_approval",
+        is_self_upload: false,
+        created_from: trendWindow.currentFrom,
+        created_to: trendWindow.currentTo,
+        page: 1,
+        page_size: 1,
+      }).then((r) => r.data.count ?? 0),
+    ...QUERY_SHORT_STALE,
+  });
+
+  const { data: pendingCreatedPreviousPeriod = 0 } = useQuery({
+    queryKey: ["documents", "pending", "created-count", trendWindow.previousFrom, trendWindow.previousTo],
+    queryFn: () =>
+      documentsAPI.list({
+        status: "pending_approval",
+        is_self_upload: false,
+        created_from: trendWindow.previousFrom,
+        created_to: trendWindow.previousTo,
+        page: 1,
+        page_size: 1,
+      }).then((r) => r.data.count ?? 0),
+    ...QUERY_SHORT_STALE,
+  });
+
+  const { data: approvedThisPeriod = 0 } = useQuery({
+    queryKey: ["documents", "approved", "approved-count", trendWindow.currentFrom, trendWindow.currentTo],
+    queryFn: () =>
+      documentsAPI.list({
+        status: "approved",
+        is_self_upload: false,
+        approved_from: trendWindow.currentFrom,
+        approved_to: trendWindow.currentTo,
+        page: 1,
+        page_size: 1,
+      }).then((r) => r.data.count ?? 0),
+    ...QUERY_SHORT_STALE,
+  });
+
+  const { data: approvedPreviousPeriod = 0 } = useQuery({
+    queryKey: ["documents", "approved", "approved-count", trendWindow.previousFrom, trendWindow.previousTo],
+    queryFn: () =>
+      documentsAPI.list({
+        status: "approved",
+        is_self_upload: false,
+        approved_from: trendWindow.previousFrom,
+        approved_to: trendWindow.previousTo,
         page: 1,
         page_size: 1,
       }).then((r) => r.data.count ?? 0),
@@ -288,7 +465,43 @@ export default function DashboardPage() {
   const dashboardSearchTerm = dashboardSearch.trim();
   const hasActiveDashboardSelection =
     activeDashboardResultIndex >= 0 && activeDashboardResultIndex < dashboardResults.length;
-  const visibleTasks = (myTasks as WorkflowTask[]).slice(0, 4);
+  const allTasks = myTasks as WorkflowTask[];
+  const totalDocumentsTrend = buildTrend(
+    documentsCreatedThisPeriod,
+    documentsCreatedPreviousPeriod,
+    true,
+    `Documents created in the last ${TREND_WINDOW_DAYS} days vs previous ${TREND_WINDOW_DAYS} days`,
+  );
+  const pendingApprovalTrend = buildTrend(
+    pendingCreatedThisPeriod,
+    pendingCreatedPreviousPeriod,
+    false,
+    `Pending approvals created in the last ${TREND_WINDOW_DAYS} days vs previous ${TREND_WINDOW_DAYS} days`,
+  );
+  const approvedTrend = buildTrend(
+    approvedThisPeriod,
+    approvedPreviousPeriod,
+    true,
+    `Documents approved in the last ${TREND_WINDOW_DAYS} days vs previous ${TREND_WINDOW_DAYS} days`,
+  );
+  const dueSoonTaskCount = countDueSoonTasks(allTasks);
+  const tasksTrend: StatTrend | undefined =
+    dueSoonTaskCount > 0
+      ? {
+          value: dueSoonTaskCount,
+          isPositive: false,
+          direction: "flat",
+          suffix: " due",
+          label: "Tasks due within 24 hours or overdue",
+        }
+      : undefined;
+  const taskFilterOptions = useMemo(() => buildWorkflowTaskFilterOptions(allTasks), [allTasks]);
+  const filteredTasks = useMemo(
+    () => filterWorkflowTasks(allTasks, taskFilters),
+    [allTasks, taskFilters],
+  );
+  const hasTaskFilters = hasWorkflowTaskFilters(taskFilters);
+  const visibleTasks = filteredTasks.slice(0, hasTaskFilters ? 8 : 4);
   const taskGridClass =
     visibleTasks.length === 1
       ? "mt-5 grid grid-cols-1 gap-3 md:max-w-xl"
@@ -319,6 +532,15 @@ export default function DashboardPage() {
     setActiveDashboardResultIndex(-1);
     navigate(`/documents/${hit.id}`);
   };
+
+  const updateTaskFilter = <K extends keyof WorkflowTaskFilters>(
+    key: K,
+    value: WorkflowTaskFilters[K],
+  ) => {
+    setTaskFilters((current) => ({ ...current, [key]: value }));
+  };
+
+  const clearTaskFilters = () => setTaskFilters(DEFAULT_WORKFLOW_TASK_FILTERS);
 
   useEffect(() => {
     const handleClickOutside = (event: MouseEvent) => {
@@ -560,7 +782,7 @@ export default function DashboardPage() {
           value={totalDocuments}
           icon={FileText}
           color="primary"
-          trend={{ value: 4.2, isPositive: true }}
+          trend={totalDocumentsTrend}
           href="/documents"
         />
         <StatCard
@@ -568,15 +790,15 @@ export default function DashboardPage() {
           value={pendingCount}
           icon={Clock}
           color="accent"
-          trend={{ value: 12, isPositive: false, suffix: "" }}
+          trend={pendingApprovalTrend}
           href="/documents?status=pending_approval"
         />
         <StatCard
           title="Approved Today"
-          value={completedCount}
+          value={approvedTodayCount}
           icon={CheckCircle}
           color="primary"
-          trend={{ value: 8.1, isPositive: true }}
+          trend={approvedTrend}
           href="/documents?status=approved"
         />
         <StatCard
@@ -584,7 +806,7 @@ export default function DashboardPage() {
           value={myTasks.length}
           icon={ShieldCheck}
           color="teal"
-          trend={{ value: 0.4, isPositive: true }}
+          trend={tasksTrend}
           href="/workflow"
         />
       </div>
@@ -728,7 +950,7 @@ export default function DashboardPage() {
                     </div>
                     <div className="flex-1 pb-1 min-w-0">
                       <p className="text-sm text-foreground truncate">
-                        <span className="text-muted-foreground">{meta.label.toLowerCase()}</span>{" "}
+                        {meta.label ? <span className="text-muted-foreground">{meta.label.toLowerCase()} </span> : null}
                         {prefix && <span className="text-muted-foreground">{prefix} </span>}
                         <span className="font-medium text-foreground">{title}</span>
                       </p>
@@ -804,21 +1026,110 @@ export default function DashboardPage() {
 
       {/* Pending tasks */}
       <div className="bg-card rounded-xl border border-border p-5" style={{ boxShadow: "var(--shadow-card)" }}>
-        <div className="flex items-center justify-between gap-3">
+        <div className="flex flex-col gap-4 lg:flex-row lg:items-start lg:justify-between">
           <div className="space-y-1 min-w-0">
             <p className="text-sm font-semibold text-foreground">Pending tasks</p>
             <p className="text-sm text-muted-foreground">
               {tasksLoading
                 ? "Checking tasks waiting for your attention."
-                : myTasks.length
-                  ? "Tasks waiting for your attention."
+                : allTasks.length
+                  ? hasTaskFilters
+                    ? `${filteredTasks.length} of ${allTasks.length} tasks match your filters.`
+                    : "Tasks waiting for your attention."
                   : "All clear. No tasks need your attention right now."}
             </p>
           </div>
-          <div className="shrink-0 rounded-full bg-teal/10 px-3 py-1 text-xs font-semibold text-teal">
-            {myTasks.length} open
+          <div className="flex shrink-0 items-center gap-2">
+            <div className="rounded-full bg-teal/10 px-3 py-1 text-xs font-semibold text-teal">
+              {allTasks.length} open
+            </div>
+            <Link
+              to="/workflow"
+              className="inline-flex items-center gap-1 rounded-lg border border-border bg-card px-3 py-1.5 text-xs font-semibold text-foreground transition-colors hover:bg-muted"
+            >
+              View queue <ArrowRight className="h-3.5 w-3.5" />
+            </Link>
           </div>
         </div>
+
+        {allTasks.length > 0 && (
+          <div className="mt-5 rounded-lg border border-border bg-muted/20 p-3">
+            <div className="grid grid-cols-1 gap-3 md:grid-cols-2 xl:grid-cols-6">
+              <div className="relative xl:col-span-2">
+                <Search className="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-muted-foreground" />
+                <input
+                  type="search"
+                  value={taskFilters.search}
+                  onChange={(e) => updateTaskFilter("search", e.target.value)}
+                  placeholder="Find title, reference, uploader..."
+                  className="input h-10 w-full pl-9 text-sm"
+                />
+              </div>
+              <select
+                value={taskFilters.documentType}
+                onChange={(e) => updateTaskFilter("documentType", e.target.value)}
+                className="input h-10 text-sm"
+              >
+                <option value="">All document types</option>
+                {taskFilterOptions.documentTypes.map((option) => (
+                  <option key={option.value} value={option.value}>
+                    {option.label} ({option.count})
+                  </option>
+                ))}
+              </select>
+              <select
+                value={taskFilters.department}
+                onChange={(e) => updateTaskFilter("department", e.target.value)}
+                className="input h-10 text-sm"
+              >
+                <option value="">All departments</option>
+                {taskFilterOptions.departments.map((option) => (
+                  <option key={option.value} value={option.value}>
+                    {option.label} ({option.count})
+                  </option>
+                ))}
+              </select>
+              <select
+                value={taskFilters.fileFormat}
+                onChange={(e) => updateTaskFilter("fileFormat", e.target.value)}
+                className="input h-10 text-sm"
+              >
+                <option value="">All formats</option>
+                {taskFilterOptions.fileFormats.map((option) => (
+                  <option key={option.value} value={option.value}>
+                    {option.label} ({option.count})
+                  </option>
+                ))}
+              </select>
+              <select
+                value={taskFilters.urgency}
+                onChange={(e) => updateTaskFilter("urgency", e.target.value as WorkflowTaskFilters["urgency"])}
+                className="input h-10 text-sm"
+              >
+                <option value="">Any urgency</option>
+                <option value="overdue">Overdue</option>
+                <option value="due_soon">Due in 24h</option>
+                <option value="held">On hold</option>
+              </select>
+            </div>
+            <div className="mt-3 flex flex-wrap items-center justify-between gap-2 text-xs text-muted-foreground">
+              <div className="inline-flex items-center gap-1.5">
+                <Filter className="h-3.5 w-3.5" />
+                <span>{filteredTasks.length} matching task{filteredTasks.length !== 1 ? "s" : ""}</span>
+              </div>
+              {hasTaskFilters && (
+                <button
+                  type="button"
+                  onClick={clearTaskFilters}
+                  className="inline-flex items-center gap-1 font-semibold text-foreground transition-colors hover:text-accent"
+                >
+                  <X className="h-3.5 w-3.5" />
+                  Clear filters
+                </button>
+              )}
+            </div>
+          </div>
+        )}
 
         {tasksLoading ? (
           <div className="mt-4 rounded-lg bg-muted/40 p-4 text-sm text-muted-foreground">
@@ -830,14 +1141,15 @@ export default function DashboardPage() {
         ) : visibleTasks.length ? (
           <div className={taskGridClass}>
             {visibleTasks.map((task: WorkflowTask) => {
-              const doc = task.workflow_instance?.document;
-              const documentType =
-                doc?.document_type_name ?? doc?.document_type?.name ?? task.document_type_name ?? "Unclassified";
-              const documentFormat = formatDocumentFileType(task.file_name, task.file_mime_type);
+              const documentId = getTaskDocumentId(task);
+              const documentType = getTaskDocumentType(task);
+              const documentFormat = getTaskDocumentFormat(task);
+              const department = getTaskDepartment(task);
+              const uploaderName = getTaskUploaderName(task);
               return (
                 <Link
                   key={task.id}
-                  to={doc?.id ? `/documents/${doc.id}` : "/workflow"}
+                  to={documentId ? `/documents/${documentId}` : "/workflow"}
                   className="block rounded-lg border border-border bg-muted/30 p-4 transition-colors hover:bg-muted/60"
                 >
                   <div className="flex items-start gap-3">
@@ -846,7 +1158,7 @@ export default function DashboardPage() {
                     </div>
                     <div className="min-w-0 flex-1">
                       <p className="truncate text-sm font-semibold text-foreground">
-                        {doc?.title || task.document_title || "Untitled document"}
+                        {getTaskDocumentTitle(task)}
                       </p>
                       <div className="mt-1 flex flex-wrap items-center gap-2 text-xs text-muted-foreground">
                         <span>{documentType}</span>
@@ -855,12 +1167,25 @@ export default function DashboardPage() {
                         <span>•</span>
                         <span>{task.step?.name}</span>
                       </div>
+                      <div className="mt-1 flex flex-wrap items-center gap-2 text-xs text-muted-foreground">
+                        <span>{department}</span>
+                        {uploaderName && (
+                          <>
+                            <span>•</span>
+                            <span>{uploaderName}</span>
+                          </>
+                        )}
+                      </div>
                       <div className="mt-1"><TaskMetaInfo dueAt={task.due_at} /></div>
                     </div>
                   </div>
                 </Link>
               );
             })}
+          </div>
+        ) : allTasks.length ? (
+          <div className="mt-4 rounded-lg border border-dashed border-border bg-muted/20 px-4 py-5 text-sm text-muted-foreground">
+            No tasks match the selected filters.
           </div>
         ) : (
           <div className="mt-4 inline-flex items-center gap-2 rounded-lg border border-teal/25 bg-teal/10 px-3 py-2 text-sm font-medium text-teal">

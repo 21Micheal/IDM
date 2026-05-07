@@ -381,3 +381,202 @@ class DocumentComment(models.Model):
 
     class Meta:
         ordering = ["created_at"]
+
+# user-created folder hierarchy and document favourites.
+
+class DocumentFolder(models.Model):
+    """
+    User-owned folder / subfolder tree for organising documents.
+ 
+    - Folders are always owned by a single user (private by default).
+    - Nesting is unlimited but UI enforces max depth of 5 for UX sanity.
+    - A document can live in multiple folders (M2M via DocumentFolderItem).
+    - `is_favourites` marks the system-created "Favourites" root folder that
+      is auto-provisioned for every user on first use.
+    """
+ 
+    id         = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    owner      = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.CASCADE,
+        related_name="document_folders",
+    )
+    parent     = models.ForeignKey(
+        "self",
+        null=True,
+        blank=True,
+        on_delete=models.CASCADE,
+        related_name="children",
+    )
+    name       = models.CharField(max_length=120)
+    color      = models.CharField(max_length=7, default="#6366f1", blank=True)
+    icon       = models.CharField(max_length=40, default="folder", blank=True)
+ 
+    # System folders cannot be deleted or renamed by the user.
+    is_favourites = models.BooleanField(
+        default=False,
+        help_text="True for the auto-created Favourites folder.",
+    )
+    is_system  = models.BooleanField(
+        default=False,
+        help_text="True for any system-managed folder (Favourites included).",
+    )
+ 
+    position   = models.PositiveSmallIntegerField(
+        default=0,
+        help_text="Sort order within the parent level.",
+    )
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+ 
+    class Meta:
+        ordering        = ["position", "name"]
+        unique_together = [("owner", "parent", "name")]
+        indexes         = [
+            models.Index(fields=["owner", "parent"]),
+            models.Index(fields=["owner", "is_favourites"]),
+        ]
+ 
+    def __str__(self):
+        return f"{self.owner_id}/{self.name}"
+ 
+    @property
+    def depth(self) -> int:
+        """0 = root folder. Max UI-allowed depth is 4 (5 levels total)."""
+        d, node = 0, self
+        while node.parent_id:
+            d += 1
+            node = node.parent
+        return d
+ 
+    @classmethod
+    def get_or_create_favourites(cls, user) -> "DocumentFolder":
+        folder, _ = cls.objects.get_or_create(
+            owner=user,
+            is_favourites=True,
+            defaults={
+                "name": "Favourites",
+                "icon": "star",
+                "color": "#f59e0b",
+                "is_system": True,
+                "parent": None,
+                "position": 0,
+            },
+        )
+        return folder
+ 
+ 
+class DocumentFolderItem(models.Model):
+    """
+    Many-to-many join between a folder and a document.
+    Carries an optional per-user sort position.
+    """
+ 
+    id         = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    folder     = models.ForeignKey(
+        DocumentFolder,
+        on_delete=models.CASCADE,
+        related_name="items",
+    )
+    document   = models.ForeignKey(
+        "Document",
+        on_delete=models.CASCADE,
+        related_name="folder_items",
+    )
+    added_by   = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.CASCADE,
+        related_name="folder_items",
+    )
+    position   = models.PositiveSmallIntegerField(default=0)
+    added_at   = models.DateTimeField(auto_now_add=True)
+ 
+    class Meta:
+        ordering        = ["position", "added_at"]
+        unique_together = [("folder", "document")]
+        indexes         = [
+            models.Index(fields=["folder", "position"]),
+        ]
+ 
+    def __str__(self):
+        return f"{self.folder.name} ← {self.document.reference_number}"
+ 
+ 
+class DocumentFavourite(models.Model):
+    """
+    Lightweight shortcut model — a document the user has explicitly starred.
+ 
+    This is separate from DocumentFolderItem so that:
+      • starring a document works with a single POST (no folder ID needed)
+      • the Favourites folder auto-reflects the starred set
+      • future "quick-access" counts / sorting can be stored here
+ 
+    The Favourites folder (DocumentFolder.is_favourites=True) is kept in
+    sync via post_save / post_delete signals at the bottom of this file.
+    """
+ 
+    id         = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    user       = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.CASCADE,
+        related_name="document_favourites",
+    )
+    document   = models.ForeignKey(
+        "Document",
+        on_delete=models.CASCADE,
+        related_name="favourited_by",
+    )
+    access_count = models.PositiveIntegerField(
+        default=0,
+        help_text="Incremented each time the user opens this document.",
+    )
+    added_at   = models.DateTimeField(auto_now_add=True)
+    last_accessed = models.DateTimeField(null=True, blank=True)
+ 
+    class Meta:
+        ordering        = ["-added_at"]
+        unique_together = [("user", "document")]
+        indexes         = [
+            models.Index(fields=["user", "added_at"]),
+            models.Index(fields=["user", "access_count"]),
+        ]
+ 
+    def __str__(self):
+        return f"{self.user_id} ★ {self.document.reference_number}"
+ 
+    def record_access(self):
+        """Call whenever the user opens the document to track frequency."""
+        from django.utils import timezone as tz
+        DocumentFavourite.objects.filter(id=self.id).update(
+            access_count=models.F("access_count") + 1,
+            last_accessed=tz.now(),
+        )
+ 
+ 
+# ─── Signals — keep Favourites folder in sync with DocumentFavourite ──────────
+ 
+from django.db.models.signals import post_save, post_delete
+from django.dispatch import receiver
+ 
+ 
+@receiver(post_save, sender=DocumentFavourite)
+def _sync_favourite_to_folder_on_save(sender, instance, created, **kwargs):
+    if not created:
+        return
+    folder = DocumentFolder.get_or_create_favourites(instance.user)
+    DocumentFolderItem.objects.get_or_create(
+        folder=folder,
+        document=instance.document,
+        defaults={"added_by": instance.user},
+    )
+ 
+ 
+@receiver(post_delete, sender=DocumentFavourite)
+def _sync_favourite_to_folder_on_delete(sender, instance, **kwargs):
+    try:
+        folder = DocumentFolder.objects.get(owner=instance.user, is_favourites=True)
+        DocumentFolderItem.objects.filter(
+            folder=folder, document=instance.document
+        ).delete()
+    except DocumentFolder.DoesNotExist:
+        pass

@@ -18,11 +18,13 @@ const AdminPage = lazy(() => import("@/pages/AdminPage"));
 const AdminDocumentTypesPage = lazy(() => import("@/pages/AdminDocumentTypesPage"));
 const AuditPage = lazy(() => import("@/pages/AuditPage"));
 const UsersPage = lazy(() => import("@/pages/UsersPage"));
+const UserDetailPage = lazy(() => import("@/pages/UserDetailPage"));
 const DepartmentsPage = lazy(() => import("@/pages/DepartmentsPage"));
 const GroupsPage = lazy(() => import("@/pages/GroupsPage"));
 const ProfilePage = lazy(() => import("@/pages/ProfilePage"));
 const WorkflowBuilderPage = lazy(() => import("@/pages/WorkflowBuilderPage"));
 const NotificationsPage = lazy(() => import("@/pages/NotificationsPage"));
+const FolderPage = lazy(() => import("@/pages/FolderPage"));
 
 // ── Guards ────────────────────────────────────────────────────────────────────
 
@@ -230,6 +232,7 @@ export default function App() {
               <Route path="documents/upload" element={<UploadPage />} />
               <Route path="documents/scan"   element={<UploadPage scanOnly />} />
               <Route path="documents/:id"    element={<DocumentDetailPage />} />
+              <Route path="documents/folders/:folderId" element={<FolderPage />} />
 
               {/* Search */}
               <Route path="search"    element={<SearchPage />} />
@@ -249,6 +252,7 @@ export default function App() {
 
               {/* Admin-only */}
               <Route path="admin/users"           element={<RequireAdmin><UsersPage /></RequireAdmin>} />
+              <Route path="admin/users/:id"       element={<RequireAdmin><UserDetailPage /></RequireAdmin>} />
               <Route path="admin/settings"        element={<RequireAdmin><AdminPage /></RequireAdmin>} />
               <Route path="admin/document-types"  element={<RequireAdmin><AdminDocumentTypesPage /></RequireAdmin>} />
               <Route path="admin/departments"     element={<RequireAdmin><DepartmentsPage /></RequireAdmin>} />

@@ -1,0 +1,109 @@
+/**
+ * components/documents/StarButton.tsx
+ *
+ * Drop-in favourite toggle.
+ * Usage:
+ *   <StarButton documentId={doc.id} />
+ *
+ * Works in both list rows and the detail header.
+ * Uses optimistic updates — the star flips instantly with a rollback on error.
+ */
+
+import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
+import { Star } from "lucide-react";
+import clsx from "clsx";
+import { favouritesAPI } from "@/services/foldersApi";
+import type { FavouriteCheckResult } from "../../types";
+
+interface StarButtonProps {
+  documentId: string;
+  /** Size variant */
+  size?: "sm" | "md";
+  className?: string;
+}
+
+export function StarButton({
+  documentId,
+  size = "md",
+  className,
+}: StarButtonProps) {
+  const qc        = useQueryClient();
+  const cacheKey  = ["favourite-check", documentId];
+
+  // Check starred status
+  const { data } = useQuery<FavouriteCheckResult>({
+    queryKey: cacheKey,
+    queryFn: () => favouritesAPI.check(documentId).then((r) => r.data),
+    staleTime: 30_000,
+  });
+
+  const starred = data?.starred ?? false;
+
+  // Toggle with optimistic update
+  const toggle = useMutation({
+    mutationFn: () => favouritesAPI.toggle(documentId),
+
+    onMutate: async () => {
+      await qc.cancelQueries({ queryKey: cacheKey });
+      const previous = qc.getQueryData<FavouriteCheckResult>(cacheKey);
+      qc.setQueryData<FavouriteCheckResult>(cacheKey, (old) => ({
+        starred: !old?.starred,
+        favourite_id: old?.favourite_id ?? null,
+      }));
+      return { previous };
+    },
+
+    onError: (_err, _vars, context) => {
+      if (context?.previous !== undefined) {
+        qc.setQueryData(cacheKey, context.previous);
+      }
+    },
+
+    onSuccess: (res) => {
+      // Update favourites list cache
+      qc.invalidateQueries({ queryKey: ["favourites"] });
+      qc.invalidateQueries({ queryKey: ["folder-documents"] });
+      qc.invalidateQueries({ queryKey: ["folders", "tree"] });
+      // Update check cache with server truth
+      qc.setQueryData<FavouriteCheckResult>(cacheKey, {
+        starred: res.data.starred,
+        favourite_id: res.data.id ?? data?.favourite_id ?? null,
+      });
+    },
+  });
+
+  const iconSize = size === "sm" ? "w-3.5 h-3.5" : "w-4 h-4";
+  const btnSize  = size === "sm" ? "p-1" : "p-1.5";
+
+  return (
+    <button
+      type="button"
+      title={starred ? "Remove from favourites" : "Add to favourites"}
+      aria-label={starred ? "Unstar document" : "Star document"}
+      onClick={(e) => {
+        e.preventDefault();
+        e.stopPropagation();
+        toggle.mutate();
+      }}
+      disabled={toggle.isPending}
+      className={clsx(
+        btnSize,
+        "rounded-lg transition-all",
+        starred
+          ? "text-amber-400 hover:text-amber-500"
+          : "text-muted-foreground hover:text-amber-400",
+        "hover:bg-amber-50 dark:hover:bg-amber-900/20",
+        className,
+      )}
+    >
+      <Star
+        className={clsx(
+          iconSize,
+          "transition-all",
+          starred && "fill-current",
+          toggle.isPending && "opacity-50",
+        )}
+      />
+    </button>
+  );
+}

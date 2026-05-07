@@ -6,6 +6,7 @@ from django.contrib.auth.password_validation import validate_password
 from django.core.exceptions import ValidationError as DjangoValidationError
 from django.utils.crypto import get_random_string
 from django.utils import timezone
+from django.db.models import Q
 
 from rest_framework import generics, status, permissions, viewsets, filters, exceptions
 from rest_framework.decorators import action
@@ -13,12 +14,13 @@ from rest_framework.response import Response
 from rest_framework.views import APIView
 from rest_framework_simplejwt.tokens import RefreshToken
 
-from .models import User, Department, EmailOTP, UserGroup, GroupAction, GroupPermission, UserGroupMembership
+from .models import User, Department, EmailOTP, UserGroup, GroupAction, GroupPermission, UserGroupMembership, UserDelegation
 from .serializers import (
     UserSerializer, UserCreateSerializer, UserUpdateSerializer,
     DepartmentSerializer, UserSummarySerializer,
-    UserGroupSerializer, GroupPermissionSerializer, UserGroupMembershipSerializer,
+    UserGroupSerializer, GroupPermissionSerializer, UserGroupMembershipSerializer, UserDelegationSerializer,
 )
+from apps.notifications.tasks import _create_notification, _send_email
 from .email_otp import send_otp_email
 from apps.audit.models import AuditLog, AuditEvent
 
@@ -229,7 +231,7 @@ class EnableMFAView(APIView):
 
         state = "enabled" if request.user.mfa_enabled else "disabled"
         AuditLog.objects.create(
-            event=AuditEvent.USER_MFA_CHANGED,
+            event=AuditEvent.USER_MFA_ENABLED,
             actor=request.user,
             object_type="User",
             object_id=str(request.user.id),
@@ -437,6 +439,59 @@ You will be required to set a new password when you next log in.
         memberships = user.group_memberships.select_related("group").all()
         return Response(UserGroupMembershipSerializer(memberships, many=True).data)
 
+    @action(detail=True, methods=["get"])
+    def delegations(self, request, pk=None):
+        user = self.get_object()
+        outgoing = UserDelegation.objects.filter(delegator=user).select_related("delegator", "delegate")
+        return Response(UserDelegationSerializer(outgoing, many=True).data)
+
+    @action(detail=True, methods=["post"], url_path="reassign-active-tasks")
+    def reassign_active_tasks(self, request, pk=None):
+        user = self.get_object()
+        to_user_id = request.data.get("to_user_id")
+        if not to_user_id:
+            return Response({"detail": "to_user_id is required."}, status=400)
+        if str(user.id) == str(to_user_id):
+            return Response({"detail": "Cannot reassign tasks to the same user."}, status=400)
+
+        try:
+            to_user = User.objects.get(id=to_user_id, is_active=True)
+        except User.DoesNotExist:
+            return Response({"detail": "Target user not found or inactive."}, status=404)
+
+        from apps.workflows.models import WorkflowTask, WorkflowTaskAction
+
+        tasks = WorkflowTask.objects.filter(
+            assigned_to=user,
+            status__in=["in_progress", "held"],
+        )
+        task_ids = list(tasks.values_list("id", flat=True))
+        updated = tasks.update(assigned_to=to_user)
+
+        if task_ids:
+            WorkflowTaskAction.objects.bulk_create(
+                [
+                    WorkflowTaskAction(
+                        task_id=task_id,
+                        actor=request.user,
+                        action="reassigned",
+                        comment=f"Task reassigned from {user.get_full_name() or user.email} to {to_user.get_full_name() or to_user.email}",
+                    )
+                    for task_id in task_ids
+                ]
+            )
+
+        AuditLog.objects.create(
+            event=AuditEvent.PERMISSION_CHANGED,
+            actor=request.user,
+            object_type="User",
+            object_id=str(user.id),
+            object_repr=user.email,
+            changes={"action": "reassign_active_tasks", "count": updated, "to_user_id": str(to_user.id)},
+            ip_address=request.META.get("REMOTE_ADDR"),
+        )
+        return Response({"detail": f"Reassigned {updated} active task(s).", "count": updated})
+
 
 # ── Department ────────────────────────────────────────────────────────────────
 
@@ -579,3 +634,72 @@ class UserGroupViewSet(viewsets.ModelViewSet):
         group       = self.get_object()
         memberships = group.memberships.select_related("user", "added_by").all()
         return Response(UserGroupMembershipSerializer(memberships, many=True).data)
+
+
+class UserDelegationViewSet(viewsets.ModelViewSet):
+    serializer_class = UserDelegationSerializer
+
+    def get_queryset(self):
+        user = self.request.user
+        qs = UserDelegation.objects.select_related("delegator", "delegate")
+        if user.has_admin_access:
+            if delegator := self.request.query_params.get("delegator"):
+                qs = qs.filter(delegator_id=delegator)
+            if delegate := self.request.query_params.get("delegate"):
+                qs = qs.filter(delegate_id=delegate)
+            return qs
+        return qs.filter(Q(delegator=user) | Q(delegate=user))
+
+    def get_permissions(self):
+        return [permissions.IsAuthenticated()]
+
+    def perform_create(self, serializer):
+        user = self.request.user
+        delegator = serializer.validated_data.get("delegator") or user
+
+        if not user.has_admin_access and delegator != user:
+            raise exceptions.PermissionDenied("You can only create delegations for yourself.")
+
+        delegation = serializer.save(delegator=delegator, created_by=user)
+        self._notify_delegate_of_delegation(delegation)
+
+    def _notify_delegate_of_delegation(self, delegation: UserDelegation) -> None:
+        start = delegation.starts_at.strftime("%d %b %Y %H:%M UTC")
+        end = delegation.ends_at.strftime("%d %b %Y %H:%M UTC")
+        message = (
+            f"You have been delegated workflow tasks by {delegation.delegator.get_full_name()} "
+            f"from {start} to {end}. Reason: {delegation.comment.strip()}"
+        )
+        link = "/profile"
+
+        _create_notification(delegation.delegate, message, link, "delegation")
+        _send_email(
+            delegation.delegate,
+            subject=f"DMS — New delegation from {delegation.delegator.get_full_name()}",
+            body=(
+                f"Hello {delegation.delegate.first_name},\n\n"
+                f"{delegation.delegator.get_full_name()} has delegated workflow tasks to you.\n\n"
+                f"  From: {start}\n"
+                f"  To:   {end}\n"
+                f"  Reason: {delegation.comment.strip()}\n\n"
+                f"Please log in to DMS to view your delegated workload.\n"
+            ),
+        )
+
+    def perform_update(self, serializer):
+        instance = self.get_object()
+        user = self.request.user
+        if not user.has_admin_access and instance.delegator_id != user.id:
+            raise exceptions.PermissionDenied("You can only update your own delegations.")
+        serializer.save()
+
+    def perform_destroy(self, instance):
+        user = self.request.user
+        if not user.has_admin_access and instance.delegator_id != user.id:
+            raise exceptions.PermissionDenied("You can only remove your own delegations.")
+        instance.delete()
+
+    @action(detail=False, methods=["get"])
+    def candidates(self, request):
+        users = User.objects.filter(is_active=True).exclude(id=request.user.id).order_by("first_name", "last_name")
+        return Response(UserSummarySerializer(users, many=True).data)

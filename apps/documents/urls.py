@@ -1,44 +1,50 @@
 """
 apps/documents/urls.py
 
-Fixes in this revision
+Changes from previous version
 ──────────────────────────────
-1. Updated WebDAV patterns to support token-in-path authentication.
-   The primary route is now /webdav/<doc_id>/<token>/<filename>.
-   This avoids 401 challenges in LibreOffice/MS Office.
+1. Registered three new viewsets:
+     DocumentFolderViewSet       →  /documents/folders/
+     DocumentFolderItemViewSet   →  /documents/folder-items/
+     DocumentFavouriteViewSet    →  /documents/favourites/
 
-2. Maintained legacy 2-segment and bare collection routes as fallbacks.
+2. WebDAV patterns unchanged.
 """
 from django.urls import path
 from rest_framework.routers import DefaultRouter
 from .views import DocumentViewSet, DocumentTypeViewSet
 from .webdav import DocumentWebDAVView
+from .folder_views import (
+    DocumentFolderViewSet,
+    DocumentFolderItemViewSet,
+    DocumentFavouriteViewSet,
+)
 
 router = DefaultRouter()
-router.register(r"types", DocumentTypeViewSet, basename="document-type")
-router.register(r"",      DocumentViewSet,     basename="document")
+router.register(r"types",        DocumentTypeViewSet,       basename="document-type")
+router.register(r"folders",      DocumentFolderViewSet,     basename="document-folder")
+router.register(r"folder-items", DocumentFolderItemViewSet, basename="folder-item")
+router.register(r"favourites",   DocumentFavouriteViewSet,  basename="document-favourite")
+# Register documents last so its empty-prefix doesn't shadow the others
+router.register(r"",             DocumentViewSet,           basename="document")
 
 urlpatterns = [
-    # Collection probe — no token, no filename (LibreOffice initial PROPFIND)
+    # ── WebDAV ─────────────────────────────────────────────────────────────
     path(
         "webdav/<uuid:document_id>/",
         DocumentWebDAVView.as_view(),
         name="document-webdav-collection",
     ),
-    # Legacy 2-segment — filename only, no token (Basic-auth clients)
     path(
         "webdav/<uuid:document_id>/<str:filename>",
         DocumentWebDAVView.as_view(),
         name="document-webdav-legacy",
     ),
-    # Tokenized collection path — LibreOffice probes the directory before
-    # creating/saving the file.
     path(
         "webdav/<uuid:document_id>/<str:token>/",
         DocumentWebDAVView.as_view(),
         name="document-webdav-token-root",
     ),
-    # ★ Primary — token + filename in path (LibreOffice / MS Office via URI scheme)
     path(
         "webdav/<uuid:document_id>/<str:token>/<path:filename>",
         DocumentWebDAVView.as_view(),

@@ -33,6 +33,9 @@ import { clsx as cn } from "clsx";
 import { QUERY_SHORT_STALE } from "@/lib/reactQueryDefaults";
 import { formatDocumentFileType } from "@/lib/documentFormat";
 
+import { StarButton } from "@/components/documents/StarButton";
+import { AddToFolderMenu } from "@/components/documents/AddToFolderMenu";
+
 import { clearDocumentVersionCache } from "@/utils/versionPreviewCache";
 
 const AUDIT_PAGE_SIZE = 5;
@@ -272,6 +275,10 @@ export default function DocumentDetailPage() {
           <div className="flex items-center gap-3 flex-wrap">
             <h1 className="text-xl font-bold text-foreground">{doc.title}</h1>
             <StatusBadge status={doc.status} />
+            <div className="flex items-center gap-1">
+              <StarButton documentId={doc.id} />
+              <AddToFolderMenu documentId={doc.id} />
+            </div>
             {isPersonal && (
             <span className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full text-xs font-semibold bg-primary/10 text-primary border border-primary/20">
               <Lock className="w-3 h-3" /> Personal

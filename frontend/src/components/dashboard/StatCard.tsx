@@ -1,6 +1,6 @@
 import React from 'react';
 import { Link } from 'react-router-dom';
-import { ArrowDownRight, ArrowUpRight } from 'lucide-react';
+import { ArrowDownRight, ArrowRight, ArrowUpRight } from 'lucide-react';
 import { cn } from "../../lib/utils";
 
 interface StatCardProps {
@@ -10,7 +10,9 @@ interface StatCardProps {
   trend?: {
     value: number;
     isPositive: boolean;
+    direction?: 'up' | 'down' | 'flat';
     suffix?: string;
+    label?: string;
   };
   /** Indigo Vault semantic variants */
   color?: 'primary' | 'accent' | 'teal' | 'secondary';
@@ -32,6 +34,14 @@ export const StatCard: React.FC<StatCardProps> = ({
   color = 'primary',
   href,
 }) => {
+  const trendDirection = trend?.direction ?? (trend?.isPositive ? 'up' : 'down');
+  const TrendIcon =
+    trendDirection === 'up'
+      ? ArrowUpRight
+      : trendDirection === 'down'
+        ? ArrowDownRight
+        : ArrowRight;
+
   const cardContent = (
     <div
       className="group h-full rounded-xl border border-border bg-card p-5 transition-all duration-300 hover:-translate-y-0.5"
@@ -56,14 +66,12 @@ export const StatCard: React.FC<StatCardProps> = ({
                 "flex items-center gap-1 text-xs font-semibold",
                 trend.isPositive ? "text-teal" : "text-destructive"
               )}
+              title={trend.label}
+              aria-label={trend.label}
             >
-              {trend.isPositive ? (
-                <ArrowUpRight className="h-3.5 w-3.5" />
-              ) : (
-                <ArrowDownRight className="h-3.5 w-3.5" />
-              )}
+              <TrendIcon className="h-3.5 w-3.5" />
               <span>
-                {trend.isPositive ? '+' : ''}
+                {trendDirection === 'up' ? '+' : trendDirection === 'down' ? '-' : ''}
                 {trend.value}
                 {trend.suffix ?? '%'}
               </span>
