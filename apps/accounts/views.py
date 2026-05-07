@@ -20,6 +20,7 @@ from .serializers import (
     DepartmentSerializer, UserSummarySerializer,
     UserGroupSerializer, GroupPermissionSerializer, UserGroupMembershipSerializer, UserDelegationSerializer,
 )
+from apps.notifications.tasks import _create_notification, _send_email
 from .email_otp import send_otp_email
 from apps.audit.models import AuditLog, AuditEvent
 
@@ -230,7 +231,7 @@ class EnableMFAView(APIView):
 
         state = "enabled" if request.user.mfa_enabled else "disabled"
         AuditLog.objects.create(
-            event=AuditEvent.USER_MFA_CHANGED,
+            event=AuditEvent.USER_MFA_ENABLED,
             actor=request.user,
             object_type="User",
             object_id=str(request.user.id),
@@ -659,7 +660,31 @@ class UserDelegationViewSet(viewsets.ModelViewSet):
         if not user.has_admin_access and delegator != user:
             raise exceptions.PermissionDenied("You can only create delegations for yourself.")
 
-        serializer.save(delegator=delegator, created_by=user)
+        delegation = serializer.save(delegator=delegator, created_by=user)
+        self._notify_delegate_of_delegation(delegation)
+
+    def _notify_delegate_of_delegation(self, delegation: UserDelegation) -> None:
+        start = delegation.starts_at.strftime("%d %b %Y %H:%M UTC")
+        end = delegation.ends_at.strftime("%d %b %Y %H:%M UTC")
+        message = (
+            f"You have been delegated workflow tasks by {delegation.delegator.get_full_name()} "
+            f"from {start} to {end}. Reason: {delegation.comment.strip()}"
+        )
+        link = "/profile"
+
+        _create_notification(delegation.delegate, message, link, "delegation")
+        _send_email(
+            delegation.delegate,
+            subject=f"DMS — New delegation from {delegation.delegator.get_full_name()}",
+            body=(
+                f"Hello {delegation.delegate.first_name},\n\n"
+                f"{delegation.delegator.get_full_name()} has delegated workflow tasks to you.\n\n"
+                f"  From: {start}\n"
+                f"  To:   {end}\n"
+                f"  Reason: {delegation.comment.strip()}\n\n"
+                f"Please log in to DMS to view your delegated workload.\n"
+            ),
+        )
 
     def perform_update(self, serializer):
         instance = self.get_object()

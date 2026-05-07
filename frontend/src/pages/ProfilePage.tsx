@@ -20,13 +20,14 @@ const pwSchema = z.object({
   path: ["confirm_password"],
 });
 type PwForm = z.infer<typeof pwSchema>;
-type DelegationForm = { delegate_id: string; starts_at: string; ends_at: string };
+type DelegationForm = { delegate_id: string; starts_at: string; ends_at: string; comment: string };
 
 interface Delegation {
   id: string;
   delegate: { id: string; full_name?: string; email: string };
   starts_at: string;
   ends_at: string;
+  comment: string;
   is_active: boolean;
   is_current: boolean;
 }
@@ -45,6 +46,7 @@ export default function ProfilePage() {
     delegate_id: "",
     starts_at: "",
     ends_at: "",
+    comment: "",
   });
 
   const { register, handleSubmit, reset, formState: { errors } } = useForm<PwForm>({
@@ -93,7 +95,7 @@ export default function ProfilePage() {
     mutationFn: () => profileAPI.createDelegation(delegationForm),
     onSuccess: () => {
       toast.success("Out of office delegation created");
-      setDelegationForm({ delegate_id: "", starts_at: "", ends_at: "" });
+      setDelegationForm({ delegate_id: "", starts_at: "", ends_at: "", comment: "" });
       qc.invalidateQueries({ queryKey: ["delegations"] });
     },
     onError: (err: { response?: { data?: { detail?: string } } }) =>
@@ -298,9 +300,24 @@ export default function ProfilePage() {
             onChange={(e) => setDelegationForm((s) => ({ ...s, ends_at: e.target.value }))}
           />
         </div>
+        <div className="mb-4">
+          <label className="block mb-2 text-sm font-medium text-foreground">Reason for delegation</label>
+          <textarea
+            className="input h-24"
+            value={delegationForm.comment}
+            onChange={(e) => setDelegationForm((s) => ({ ...s, comment: e.target.value }))}
+            placeholder="Explain why you are delegating these tasks..."
+          />
+        </div>
         <button
           className="btn-primary"
-          disabled={!delegationForm.delegate_id || !delegationForm.starts_at || !delegationForm.ends_at || createDelegationMutation.isPending}
+          disabled={
+            !delegationForm.delegate_id ||
+            !delegationForm.starts_at ||
+            !delegationForm.ends_at ||
+            !delegationForm.comment.trim() ||
+            createDelegationMutation.isPending
+          }
           onClick={() =>
             createDelegationMutation.mutate()
           }
@@ -318,6 +335,9 @@ export default function ProfilePage() {
                 <p className="text-xs text-muted-foreground">
                   {new Date(delegation.starts_at).toLocaleString()} - {new Date(delegation.ends_at).toLocaleString()}
                 </p>
+                {delegation.comment && (
+                  <p className="text-sm text-muted-foreground mt-1">Reason: {delegation.comment}</p>
+                )}
               </div>
               <div className="flex items-center gap-2">
                 <span className="badge">{delegation.is_current ? "Active now" : delegation.is_active ? "Scheduled" : "Disabled"}</span>

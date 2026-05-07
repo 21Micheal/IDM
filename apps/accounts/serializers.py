@@ -211,6 +211,7 @@ class UserDelegationSerializer(serializers.ModelSerializer):
         source="delegate",
         write_only=True,
     )
+    comment = serializers.CharField(required=False, allow_blank=False)
     is_current = serializers.BooleanField(read_only=True)
 
     class Meta:
@@ -223,6 +224,7 @@ class UserDelegationSerializer(serializers.ModelSerializer):
             "delegate_id",
             "starts_at",
             "ends_at",
+            "comment",
             "is_active",
             "is_current",
             "created_at",
@@ -230,6 +232,12 @@ class UserDelegationSerializer(serializers.ModelSerializer):
         read_only_fields = ["id", "delegator", "delegate", "is_current", "created_at"]
 
     def validate(self, attrs):
+        comment = attrs.get("comment")
+        if self.instance is None:
+            if comment is None or not str(comment).strip():
+                raise serializers.ValidationError({"comment": "Please provide a reason for delegation."})
+        elif "comment" in attrs and not str(comment).strip():
+            raise serializers.ValidationError({"comment": "Delegation reason cannot be blank."})
         delegator = attrs.get("delegator") or getattr(self.instance, "delegator", None)
         delegate = attrs.get("delegate") or getattr(self.instance, "delegate", None)
         starts_at = attrs.get("starts_at") or getattr(self.instance, "starts_at", None)

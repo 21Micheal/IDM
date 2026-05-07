@@ -88,8 +88,8 @@ function formatStorageAmount(bytes: number) {
 
 function getAuditPresentation(event: any) {
   const name = String(event?.event ?? "");
-  if (name.startsWith("user.login")) {
-    return { icon: Clock, label: "Login", tone: "bg-accent/15 text-accent border-accent/30" };
+  if (name.startsWith("user.")) {
+    return { icon: Clock, label: "", tone: "bg-accent/15 text-accent border-accent/30" };
   }
   if (name.startsWith("workflow.")) {
     return { icon: GitBranch, label: "Workflow", tone: "bg-secondary text-secondary-foreground border-border" };
@@ -123,7 +123,14 @@ function formatAuditSummary(event: DashboardAuditEvent): AuditSummaryParts {
   const summary = event.summary || event.event || "";
   const objectTitle = cleanAuditTitle(event.object_repr || "");
 
-  const verbMatch = summary.match(/^(.+?)\s+(submitted|uploaded|edited|updated|created|deleted|approved|rejected|downloaded|viewed|shared|failed)\b/i);
+  if (event.event?.startsWith("user.")) {
+    return {
+      prefix: "",
+      title: summary,
+    };
+  }
+
+  const verbMatch = summary.match(/^(.+?)\s+(submitted|uploaded|edited|updated|created|deleted|approved|rejected|downloaded|viewed|shared|failed|logged|enabled|returned|held|released|archived)\b/i);
   const verb = verbMatch?.[2]?.toLowerCase() ?? "";
 
   if (verbMatch) {
@@ -759,7 +766,7 @@ export default function DashboardPage() {
                     </div>
                     <div className="flex-1 pb-1 min-w-0">
                       <p className="text-sm text-foreground truncate">
-                        <span className="text-muted-foreground">{meta.label.toLowerCase()}</span>{" "}
+                        {meta.label ? <span className="text-muted-foreground">{meta.label.toLowerCase()} </span> : null}
                         {prefix && <span className="text-muted-foreground">{prefix} </span>}
                         <span className="font-medium text-foreground">{title}</span>
                       </p>

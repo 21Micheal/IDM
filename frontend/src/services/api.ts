@@ -468,11 +468,11 @@ export const profileAPI = {
   // MFA is now default, but we keep toggle for admin flexibility
   toggleMFA: (enable = true) => api.post("/auth/mfa/", { enable }),
   listDelegations: () => api.get("/delegations/"),
-  createDelegation: (data: { delegate_id: string; starts_at: string; ends_at: string }) =>
+  createDelegation: (data: { delegate_id: string; starts_at: string; ends_at: string; comment: string }) =>
     api.post("/delegations/", data),
   updateDelegation: (
     id: string,
-    data: Partial<{ delegate_id: string; starts_at: string; ends_at: string; is_active: boolean }>,
+    data: Partial<{ delegate_id: string; starts_at: string; ends_at: string; comment: string; is_active: boolean }>,
   ) => api.patch(`/delegations/${id}/`, data),
   deleteDelegation: (id: string) => api.delete(`/delegations/${id}/`),
   delegationCandidates: () => api.get("/delegations/candidates/"),

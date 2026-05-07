@@ -12,6 +12,7 @@ class Notification(models.Model):
         ("hold_expired", "Hold Expired"),
         ("task_overdue", "Task Overdue"),
         ("workflow_action", "Workflow Action"),
+        ("delegation", "Delegation"),
     ]
 
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)

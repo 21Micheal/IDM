@@ -21,6 +21,12 @@ class AuditLogSerializer(serializers.ModelSerializer):
     def get_actor_name(self, obj):
         if obj.actor:
             return obj.actor.get_full_name() or obj.actor.email
+
+        if obj.object_repr and "@" in obj.object_repr:
+            local_part = obj.object_repr.split("@", 1)[0]
+            friendly = re.sub(r"[._]+", " ", local_part).strip()
+            return friendly.title()
+
         return ""
 
     def get_summary(self, obj):
@@ -66,6 +72,9 @@ class AuditLogSerializer(serializers.ModelSerializer):
             "document.submitted": "submitted",
             "workflow.approved": "approved",
             "workflow.rejected": "rejected",
+            "workflow.returned": "returned",
+            "workflow.held": "put on hold",
+            "workflow.released": "released from hold",
             "document.archived": "archived",
             "document.version_uploaded": "uploaded a new version of",
             "document.version_restored": "restored",

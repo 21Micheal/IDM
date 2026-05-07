@@ -31,6 +31,7 @@ interface Delegation {
   delegate: { id: string; full_name?: string; email: string };
   starts_at: string;
   ends_at: string;
+  comment: string;
   is_active: boolean;
   is_current: boolean;
 }
@@ -212,6 +213,9 @@ export default function UserDetailPage() {
               <p className="text-muted-foreground">
                 {format(new Date(d.starts_at), "dd MMM yyyy HH:mm")} to {format(new Date(d.ends_at), "dd MMM yyyy HH:mm")}
               </p>
+              {d.comment && (
+                <p className="text-sm text-muted-foreground mt-1">Reason: {d.comment}</p>
+              )}
             </div>
             <div className="flex items-center gap-2">
               <span className="badge">{d.is_current ? "Active now" : d.is_active ? "Scheduled" : "Disabled"}</span>

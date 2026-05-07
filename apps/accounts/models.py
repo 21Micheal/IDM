@@ -195,6 +195,7 @@ class UserDelegation(models.Model):
     starts_at = models.DateTimeField()
     ends_at = models.DateTimeField()
     is_active = models.BooleanField(default=True)
+    comment = models.TextField(blank=True, default="")
     created_by = models.ForeignKey(
         User, null=True, blank=True, on_delete=models.SET_NULL, related_name="created_delegations"
     )
