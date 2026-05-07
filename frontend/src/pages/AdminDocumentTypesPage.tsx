@@ -7,7 +7,7 @@
  * - removes special characters
  */
 
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useState } from "react";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { useForm, useFieldArray } from "react-hook-form";
 import {
@@ -35,6 +35,21 @@ const FIELD_TYPES = [
   { value: "boolean",  label: "Yes / No" },
   { value: "textarea", label: "Long text" },
 ];
+
+// Default definitions for fields backed by first-class Document columns.
+// They are seeded for convenience, but admins can edit/remove/re-order them per client.
+const CORE_DEFAULT_FIELDS: MetadataFieldForm[] = [
+  { label: "Document Title",    field_key: "title",         field_type: "text",     is_required: true,  select_options_raw: "", help_text: "Name shown to users", order: 0 },
+  { label: "Supplier / Vendor", field_key: "supplier",      field_type: "text",     is_required: false, select_options_raw: "", help_text: "Business partner", order: 1 },
+  { label: "Amount",            field_key: "amount",        field_type: "currency", is_required: false, select_options_raw: "", help_text: "Document total amount", order: 2 },
+  { label: "Currency",          field_key: "currency",      field_type: "select",   is_required: false, select_options_raw: "KES, USD, EUR, GBP, UGX, TZS, NGN, ZAR", help_text: "ISO currency code", order: 3 },
+  { label: "Document Date",     field_key: "document_date", field_type: "date",     is_required: false, select_options_raw: "", help_text: "Date on the document", order: 4 },
+  { label: "Due Date",          field_key: "due_date",      field_type: "date",     is_required: false, select_options_raw: "", help_text: "Payment due date", order: 5 },
+];
+
+function coreDefaultFields() {
+  return CORE_DEFAULT_FIELDS.map((field) => ({ ...field }));
+}
 
 // ── Types ─────────────────────────────────────────────────────────────────────
 
@@ -117,7 +132,6 @@ function toFieldKey(label: string): string {
 export default function AdminDocumentTypesPage() {
   const qc = useQueryClient();
   const [editingId, setEditingId] = useState<string | "new" | null>(null);
-  const generatedFieldKeysRef = useRef<Record<string, string>>({});
 
   const { data: types, isLoading } = useQuery<unknown, Error, DocumentType[]>({
     queryKey: ["document-types"],
@@ -152,34 +166,12 @@ export default function AdminDocumentTypesPage() {
     }
   }, [isPersonalType, form]);
 
-  useEffect(() => {
-    const activeFieldIds = new Set(fields.map((field) => field.id));
-
-    fields.forEach((field, idx) => {
-      if (!(field.id in generatedFieldKeysRef.current)) {
-        generatedFieldKeysRef.current[field.id] = String(
-          form.getValues(`metadata_fields.${idx}.field_key`) ?? "",
-        );
-      }
-    });
-
-    Object.keys(generatedFieldKeysRef.current).forEach((fieldId) => {
-      if (!activeFieldIds.has(fieldId)) {
-        delete generatedFieldKeysRef.current[fieldId];
-      }
-    });
-  }, [fields, form]);
-
-  const syncFieldKeyFromLabel = (fieldId: string, idx: number, label: string) => {
+  const syncFieldKeyFromLabel = (idx: number, label: string) => {
     const generatedKey = toFieldKey(label);
     const keyPath = `metadata_fields.${idx}.field_key` as const;
     const currentKey = String(form.getValues(keyPath) ?? "");
-    const lastGeneratedKey = generatedFieldKeysRef.current[fieldId] ?? "";
-    const shouldSync = !currentKey || currentKey === lastGeneratedKey;
 
-    generatedFieldKeysRef.current[fieldId] = generatedKey;
-
-    if (generatedKey && shouldSync && currentKey !== generatedKey) {
+    if (currentKey !== generatedKey) {
       form.setValue(keyPath, generatedKey, {
         shouldDirty: true,
         shouldTouch: true,
@@ -222,21 +214,40 @@ export default function AdminDocumentTypesPage() {
     },
   });
 
+  const deleteMutation = useMutation({
+    mutationFn: (type: DocumentType) => documentTypesAPI.delete(type.id),
+    onSuccess: (_, type) => {
+      toast.success(`Document type "${type.name}" deleted successfully`);
+      qc.invalidateQueries({ queryKey: ["document-types"] });
+      if (editingId === type.id) {
+        setEditingId(null);
+      }
+    },
+    onError: (err: any) => {
+      const detail = err?.response?.data?.detail;
+      toast.error(detail || "Failed to delete document type. Please try again.");
+    },
+  });
+
+  const confirmDelete = (type: DocumentType) => {
+    if (window.confirm(`Delete document type "${type.name}"? This cannot be undone.`)) {
+      deleteMutation.mutate(type);
+    }
+  };
+
   // ── Open helpers ────────────────────────────────────────────────────────────
 
   const openNew = () => {
-    generatedFieldKeysRef.current = {};
     form.reset({
       name: "", code: "", reference_prefix: "",
       reference_padding: 5, description: "",
       is_personal_type: false, metadata_mode: "admin_defined",
-      metadata_fields: [],
+      metadata_fields: coreDefaultFields(),
     });
     setEditingId("new");
   };
 
   const openEdit = (type: DocumentType) => {
-    generatedFieldKeysRef.current = {};
     form.reset({
       name:              type.name,
       code:              type.code,
@@ -247,7 +258,7 @@ export default function AdminDocumentTypesPage() {
       metadata_mode:     deriveDocumentTypeConfig(type).metadataMode,
       metadata_fields:   (type.metadata_fields ?? []).map((f) => ({
         label:              f.label,
-        field_key:          f.field_key,
+        field_key:          f.key ?? f.field_key,
         field_type:         f.field_type,
         is_required:        f.is_required,
         help_text:          f.help_text ?? "",
@@ -295,56 +306,79 @@ export default function AdminDocumentTypesPage() {
 
       <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
 
-        {/* Type list */}
-        <div className="space-y-2">
-          {isLoading ? (
-            <div className="text-muted-foreground text-sm">Loading…</div>
-          ) : (types ?? []).length === 0 ? (
-            <div className="text-center py-10 text-muted-foreground">
-              <AlertCircle className="w-7 h-7 mx-auto mb-2 opacity-30" />
-              <p className="text-sm">No document types yet.</p>
-            </div>
-          ) : (
-            (types ?? []).map((t) => (
-              <button
-                key={t.id}
-                onClick={() => openEdit(t)}
-                className={cn(
-                  "w-full text-left p-4 rounded-xl border transition-all",
-                  editingId === t.id
-                    ? "border-accent bg-accent/10"
-                    : "border-border bg-card hover:border-accent/40"
-                )}
-              >
-                <div className="flex items-center justify-between">
-                  <div>
-                    {(() => {
-                      const typeConfig = deriveDocumentTypeConfig(t);
-                      return (
-                        <>
-                          <p className="font-semibold text-foreground text-sm">{t.name}</p>
-                          <p className="text-xs text-muted-foreground mt-0.5">
-                            <span className="font-mono">{t.reference_prefix}</span>-{"0".repeat(t.reference_padding ?? 5)}
-                            {" · "}
-                            {typeConfig.metadataMode === "user_defined"
-                              ? "user-defined metadata"
-                              : `${t.metadata_fields?.length ?? 0} custom field${(t.metadata_fields?.length ?? 0) !== 1 ? "s" : ""}`}
-                          </p>
-                          {(typeConfig.isPersonalType || typeConfig.metadataMode === "user_defined") && (
-                            <p className="text-[11px] text-accent mt-1 font-medium">
-                              {typeConfig.isPersonalType ? "Personal type" : "User-defined metadata"}
+        {!editingId && (
+          <div className="space-y-2">
+            {isLoading ? (
+              <div className="text-muted-foreground text-sm">Loading…</div>
+            ) : (types ?? []).length === 0 ? (
+              <div className="text-center py-10 text-muted-foreground">
+                <AlertCircle className="w-7 h-7 mx-auto mb-2 opacity-30" />
+                <p className="text-sm">No document types yet.</p>
+              </div>
+            ) : (
+              (types ?? []).map((t) => (
+                <div
+                  key={t.id}
+                  onClick={() => openEdit(t)}
+                  role="button"
+                  tabIndex={0}
+                  onKeyDown={(e) => {
+                    if (e.key === "Enter" || e.key === " ") {
+                      e.preventDefault();
+                      openEdit(t);
+                    }
+                  }}
+                  className={cn(
+                    "w-full text-left p-4 rounded-xl border transition-all cursor-pointer",
+                    editingId === t.id
+                      ? "border-accent bg-accent/10"
+                      : "border-border bg-card hover:border-accent/40"
+                  )}
+                >
+                  <div className="flex items-center justify-between">
+                    <div>
+                      {(() => {
+                        const typeConfig = deriveDocumentTypeConfig(t);
+                        return (
+                          <>
+                            <p className="font-semibold text-foreground text-sm">{t.name}</p>
+                            <p className="text-xs text-muted-foreground mt-0.5">
+                              <span className="font-mono">{t.reference_prefix}</span>-{"0".repeat(t.reference_padding ?? 5)}
+                              {" · "}
+                              {typeConfig.metadataMode === "user_defined"
+                                ? "user-defined metadata"
+                                : `${t.metadata_fields?.length ?? 0} custom field${(t.metadata_fields?.length ?? 0) !== 1 ? "s" : ""}`}
                             </p>
-                          )}
-                        </>
-                      );
-                    })()}
+                            {(typeConfig.isPersonalType || typeConfig.metadataMode === "user_defined") && (
+                              <p className="text-[11px] text-accent mt-1 font-medium">
+                                {typeConfig.isPersonalType ? "Personal type" : "User-defined metadata"}
+                              </p>
+                            )}
+                          </>
+                        );
+                      })()}
+                    </div>
+                    <div className="flex items-center gap-2">
+                      <button
+                        type="button"
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          confirmDelete(t);
+                        }}
+                        disabled={deleteMutation.isPending}
+                        className="p-1.5 rounded-md text-muted-foreground hover:text-destructive hover:bg-destructive/10 transition-colors disabled:opacity-50"
+                        title="Delete document type"
+                      >
+                        <Trash2 className="w-4 h-4" />
+                      </button>
+                      <ChevronRight className="w-4 h-4 text-muted-foreground" />
+                    </div>
                   </div>
-                  <ChevronRight className="w-4 h-4 text-muted-foreground" />
                 </div>
-              </button>
-            ))
-          )}
-        </div>
+              ))
+            )}
+          </div>
+        )}
 
         {/* Editor panel */}
         {editingId && (
@@ -353,12 +387,35 @@ export default function AdminDocumentTypesPage() {
               <h2 className="font-semibold text-foreground">
                 {editingId === "new" ? "New document type" : "Edit document type"}
               </h2>
-              <button
-                onClick={() => setEditingId(null)}
-                className="text-muted-foreground hover:text-foreground p-1 rounded-md hover:bg-muted"
-              >
-                <X className="w-4 h-4" />
-              </button>
+              <div className="flex items-center gap-2">
+                {editingId !== "new" && (
+                  <button
+                    type="button"
+                    onClick={() => {
+                      const type = (types ?? []).find((t) => t.id === editingId);
+                      if (type) {
+                        confirmDelete(type);
+                      }
+                    }}
+                    disabled={deleteMutation.isPending}
+                    className="text-muted-foreground hover:text-destructive p-1 rounded-md hover:bg-destructive/10 disabled:opacity-50"
+                    title="Delete document type"
+                  >
+                    {deleteMutation.isPending ? (
+                      <Loader2 className="w-4 h-4 animate-spin" />
+                    ) : (
+                      <Trash2 className="w-4 h-4" />
+                    )}
+                  </button>
+                )}
+                <button
+                  onClick={() => setEditingId(null)}
+                  className="text-muted-foreground hover:text-foreground p-1 rounded-md hover:bg-muted"
+                  type="button"
+                >
+                  <X className="w-4 h-4" />
+                </button>
+              </div>
             </div>
 
             <form
@@ -459,7 +516,7 @@ export default function AdminDocumentTypesPage() {
                     </h3>
                     <p className="text-xs text-muted-foreground mt-0.5">
                       {useAdminMetadata
-                        ? "Core fields (supplier, amount, date) are always present."
+                        ? "Define every field this document type should show during upload, including title, supplier, dates, and amounts."
                         : "Disabled: users will define their own searchable fields at upload time."}
                     </p>
                   </div>
@@ -517,7 +574,7 @@ export default function AdminDocumentTypesPage() {
                             <input
                               {...form.register(`metadata_fields.${idx}.label`, {
                                 required: true,
-                                onChange: (e) => syncFieldKeyFromLabel(field.id, idx, e.target.value),
+                                onChange: (e) => syncFieldKeyFromLabel(idx, e.target.value),
                               })}
                               placeholder="e.g. Invoice Number"
                               className={iCls}
@@ -531,12 +588,13 @@ export default function AdminDocumentTypesPage() {
                               {...form.register(`metadata_fields.${idx}.field_key`, { required: true })}
                               placeholder="invoice_number"
                               className={cn(iCls, "font-mono text-xs bg-muted/20")}
+                              readOnly
                               spellCheck={false}
                               autoComplete="off"
                               autoCapitalize="none"
                             />
                             <p className="mt-1 text-[11px] text-muted-foreground">
-                              Auto-generated from the label. Edit manually if you need a custom key.
+                              Auto-generated from the label.
                             </p>
                           </div>
                           <div>

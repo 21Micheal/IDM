@@ -27,11 +27,15 @@ from apps.accounts.serializers import UserSummarySerializer
 from apps.accounts.models import GroupAction
 from apps.workflows.models import WorkflowTemplate, WorkflowTask
 from django.db import transaction, IntegrityError
+from django.db.models import Q
 from django.utils.text import slugify
 import mimetypes
 from apps.search.utils import summarize_bulk_index_error
 
 PERSONAL_DOCUMENT_TYPE_CODE = "PERSONAL"
+DOCUMENT_COLUMN_METADATA_KEYS = {
+    "title", "supplier", "amount", "currency", "document_date", "due_date",
+}
 logger = logging.getLogger(__name__)
 
 
@@ -476,10 +480,14 @@ class DocumentUploadSerializer(serializers.ModelSerializer):
             doc_type = DocumentType.objects.get(pk=doc_type_id)
         except DocumentType.DoesNotExist:
             return value
-        missing = [
-            f.key for f in doc_type.metadata_fields.filter(is_required=True)
-            if not value.get(f.key)
-        ]
+        missing = []
+        for field in doc_type.metadata_fields.filter(is_required=True):
+            if field.key in DOCUMENT_COLUMN_METADATA_KEYS:
+                candidate = self.initial_data.get(field.key)
+            else:
+                candidate = value.get(field.key)
+            if candidate in (None, ""):
+                missing.append(field.key)
         if missing:
             raise serializers.ValidationError(
                 f"Required metadata fields missing: {', '.join(missing)}"
@@ -652,6 +660,8 @@ class DocumentTypeWriteSerializer(serializers.ModelSerializer):
             "metadata_fields",
         ]
         extra_kwargs = {
+            "name":              {"validators": []},
+            "code":              {"validators": []},
             "icon":              {"required": False, "allow_blank": True},
             "description":       {"required": False, "allow_blank": True},
             "is_personal_type":  {"required": False},
@@ -659,8 +669,52 @@ class DocumentTypeWriteSerializer(serializers.ModelSerializer):
             "workflow_template": {"required": False, "allow_null": True},
         }
 
+    def _active_conflicts(self, *, name: str, code: str):
+        qs = DocumentType.objects.filter(is_active=True)
+        if self.instance:
+            qs = qs.exclude(pk=self.instance.pk)
+        return qs.filter(Q(name=name) | Q(code=code))
+
+    def _find_restorable_instance(self, *, name: str, code: str):
+        matches = list(
+            DocumentType.objects
+            .filter(is_active=False)
+            .filter(Q(name=name) | Q(code=code))
+            .order_by("created_at")
+        )
+        if not matches:
+            return None
+
+        exact_matches = [item for item in matches if item.name == name and item.code == code]
+        if exact_matches:
+            return exact_matches[0]
+
+        if len(matches) == 1:
+            return matches[0]
+
+        raise serializers.ValidationError(
+            {
+                "non_field_errors": [
+                    "An inactive document type already uses this name/code combination. "
+                    "Please choose a different name or code."
+                ]
+            }
+        )
+
     def validate(self, attrs):
         attrs = super().validate(attrs)
+        name = attrs.get("name", getattr(self.instance, "name", None))
+        code = attrs.get("code", getattr(self.instance, "code", None))
+
+        conflicts = self._active_conflicts(name=name, code=code)
+        errors = {}
+        if conflicts.filter(name=name).exists():
+            errors["name"] = "A document type with this name already exists."
+        if conflicts.filter(code=code).exists():
+            errors["code"] = "A document type with this code already exists."
+        if errors:
+            raise serializers.ValidationError(errors)
+
         is_personal_type = attrs.get(
             "is_personal_type",
             getattr(self.instance, "is_personal_type", False),
@@ -673,8 +727,14 @@ class DocumentTypeWriteSerializer(serializers.ModelSerializer):
                 self.instance,
                 "metadata_mode",
                 DocumentType.MetadataMode.ADMIN_DEFINED,
-            )
+        )
         return attrs
+
+    def _apply_validated_data(self, instance: DocumentType, validated_data: dict) -> DocumentType:
+        for attr, value in validated_data.items():
+            setattr(instance, attr, value)
+        instance.save()
+        return instance
 
     def validate_metadata_fields(self, value):
         """
@@ -753,7 +813,15 @@ class DocumentTypeWriteSerializer(serializers.ModelSerializer):
         fields_data = validated_data.pop("metadata_fields", [])
         if validated_data.get("metadata_mode") == DocumentType.MetadataMode.USER_DEFINED:
             fields_data = []
-        doc_type    = DocumentType.objects.create(**validated_data)
+        restorable = self._find_restorable_instance(
+            name=validated_data["name"],
+            code=validated_data["code"],
+        )
+        if restorable:
+            validated_data["is_active"] = True
+            doc_type = self._apply_validated_data(restorable, validated_data)
+        else:
+            doc_type = DocumentType.objects.create(**validated_data)
         self._save_metadata_fields(doc_type, fields_data)
         self._sync_workflow_template(doc_type)
         return doc_type
@@ -763,9 +831,7 @@ class DocumentTypeWriteSerializer(serializers.ModelSerializer):
         fields_data = validated_data.pop("metadata_fields", None)
         next_metadata_mode = validated_data.get("metadata_mode", instance.metadata_mode)
 
-        for attr, value in validated_data.items():
-            setattr(instance, attr, value)
-        instance.save()
+        self._apply_validated_data(instance, validated_data)
         self._sync_workflow_template(instance)
 
         # Only replace fields if the key was present in the request

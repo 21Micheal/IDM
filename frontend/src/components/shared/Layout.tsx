@@ -92,6 +92,7 @@ const mainNav: NavEntry[] = [
 ];
 
 const adminNav: NavLeaf[] = [
+  { to: "/admin/document-types", icon: FileText,  label: "Document types", allowedRoles: ["admin"] },
   { to: "/admin/users",       icon: Users,     label: "Users",       allowedRoles: ["admin"] },
   { to: "/admin/departments", icon: Building2, label: "Departments", allowedRoles: ["admin"] },
   { to: "/admin/groups",      icon: Shield,    label: "Groups",      allowedRoles: ["admin"] },

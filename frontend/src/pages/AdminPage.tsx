@@ -1,430 +1,26 @@
-import { useEffect, useState } from "react";
+import { useState } from "react";
 import { useNavigate } from "react-router-dom";
-import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
-import { documentTypesAPI, normalizeListResponse, workflowAPI } from "@/services/api";
+import { useQuery } from "@tanstack/react-query";
+import { workflowAPI } from "@/services/api";
 import {
-  Plus, GitBranch, Trash2, Edit2, Loader2, X, Save,
+  Plus, GitBranch,
   Users, Building2, Shield, Settings, ChevronRight,
   FileText, Database, Mail, Lock, Globe,
 } from "lucide-react";
-import { useForm, useFieldArray } from "react-hook-form";
-import { toast } from "@/components/ui/vault-toast";
 import clsx from "clsx";
-import type { DocumentType } from "@/types";
-import {
-  applyDocumentTypeConfigToDescription,
-  deriveDocumentTypeConfig,
-  stripTypeConfigMarkers,
-} from "@/lib/documentTypeConfig";
-
-// ── Constants ─────────────────────────────────────────────────────────────────
-
-const FIELD_TYPES = [
-  { value: "text",     label: "Text" },
-  { value: "varchar",  label: "VARCHAR" },
-  { value: "number",   label: "Number" },
-  { value: "date",     label: "Date" },
-  { value: "currency", label: "Currency" },
-  { value: "select",   label: "Select" },
-  { value: "boolean",  label: "Yes / No" },
-  { value: "textarea", label: "Long text" },
-];
-
-type DocTypeFormData = {
-  name: string;
-  code: string;
-  reference_prefix: string;
-  reference_padding: number;
-  description: string;
-  is_personal_type: boolean;
-  metadata_mode: "admin_defined" | "user_defined";
-  metadata_fields: Array<{
-    label: string;
-    field_key: string;
-    field_type: string;
-    is_required: boolean;
-    order: number;
-  }>;
-};
-
-// ── Document type form (shared by create + edit) ──────────────────────────────
-
-function DocumentTypeForm({
-  defaultValues,
-  onSubmit,
-  onCancel,
-  isPending,
-  submitLabel,
-}: {
-  defaultValues: DocTypeFormData;
-  onSubmit:      (data: DocTypeFormData) => void;
-  onCancel:      () => void;
-  isPending:     boolean;
-  submitLabel:   string;
-}) {
-  const { register, control, handleSubmit, watch, setValue } = useForm<DocTypeFormData>({ defaultValues });
-  const { fields, append, remove } = useFieldArray({ control, name: "metadata_fields" });
-  const isPersonalType = watch("is_personal_type");
-  const metadataMode = watch("metadata_mode");
-  const useAdminMetadata = !isPersonalType && metadataMode === "admin_defined";
-
-  useEffect(() => {
-    if (isPersonalType && metadataMode !== "user_defined") {
-      setValue("metadata_mode", "user_defined", { shouldDirty: true });
-    }
-  }, [isPersonalType, metadataMode, setValue]);
-
-  const handleSubmitWithPayload = (values: DocTypeFormData) => {
-    const finalMetadataMode = values.is_personal_type ? "user_defined" : values.metadata_mode;
-    const payload = {
-      ...values,
-      metadata_mode: finalMetadataMode,
-      workflow_template: values.is_personal_type ? null : undefined,
-      description: applyDocumentTypeConfigToDescription(values.description, {
-        isPersonalType: values.is_personal_type,
-        metadataMode: finalMetadataMode,
-      }),
-      metadata_fields: finalMetadataMode === "admin_defined" ? values.metadata_fields : [],
-    };
-    onSubmit(payload as unknown as DocTypeFormData);
-  };
-
-  return (
-    <form onSubmit={handleSubmit(handleSubmitWithPayload)} className="space-y-5">
-      <div className="grid grid-cols-2 gap-4">
-        <div>
-          <label className="label">Type name <span className="text-destructive">*</span></label>
-          <input {...register("name", { required: true })} className="input" placeholder="e.g. Supplier Invoice" />
-        </div>
-        <div>
-          <label className="label">Code <span className="text-destructive">*</span></label>
-          <input {...register("code", { required: true })} className="input" placeholder="e.g. INV" />
-        </div>
-      </div>
-
-      <div className="grid grid-cols-2 gap-4">
-        <div>
-          <label className="label">Reference prefix <span className="text-destructive">*</span></label>
-          <input {...register("reference_prefix", { required: true })} className="input" placeholder="INV" />
-        </div>
-        <div>
-          <label className="label">Padding digits</label>
-          <input {...register("reference_padding", { valueAsNumber: true })} type="number" min={1} max={10} className="input" />
-        </div>
-      </div>
-
-      <div>
-        <label className="label">Description</label>
-        <textarea {...register("description")} rows={2} className="input" placeholder="Brief description…" />
-      </div>
-
-      <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-        <label className="flex items-center gap-2 text-sm text-foreground">
-          <input
-            type="checkbox"
-            {...register("is_personal_type")}
-            className="w-4 h-4 rounded border-border text-accent focus:ring-ring"
-          />
-          This is a personal document type
-        </label>
-        <div>
-          <label className="label">Metadata mode</label>
-          <select
-            {...register("metadata_mode")}
-            disabled={isPersonalType}
-            className={clsx("input", isPersonalType && "opacity-60 cursor-not-allowed")}
-          >
-            <option value="admin_defined">Admin-defined metadata fields</option>
-            <option value="user_defined">User-defined metadata fields</option>
-          </select>
-          <p className="text-xs text-muted-foreground mt-1">
-            {isPersonalType
-              ? "Personal types always use user-defined metadata."
-              : "Choose whether metadata is admin-defined or user-defined at upload."}
-          </p>
-        </div>
-      </div>
-
-      {/* Custom metadata fields */}
-      <div className="border border-border rounded-xl p-4 space-y-3 bg-muted/30">
-        <div className="flex items-center justify-between">
-          <div>
-            <h3 className="font-semibold text-foreground text-sm">Custom metadata fields</h3>
-            <p className="text-xs text-muted-foreground mt-0.5">
-              {useAdminMetadata
-                ? "Core fields (supplier, amount, date) are always present."
-                : "Disabled: users will define their own searchable fields at upload time."}
-            </p>
-          </div>
-          {useAdminMetadata && (
-            <button
-              type="button"
-              onClick={() => append({ label: "", field_key: "", field_type: "text", is_required: false, order: fields.length })}
-              className="btn-secondary text-xs px-2.5 py-1.5"
-            >
-              <Plus className="w-3.5 h-3.5" /> Add field
-            </button>
-          )}
-        </div>
-
-        {fields.map((field, index) => (
-          <div key={field.id} className="grid grid-cols-12 gap-2 items-center bg-card border border-border rounded-lg p-3">
-            <div className="col-span-3">
-              <input
-                {...register(`metadata_fields.${index}.label`)}
-                className="input text-sm"
-                placeholder="Label"
-              />
-            </div>
-            <div className="col-span-3">
-              <input
-                {...register(`metadata_fields.${index}.field_key`)}
-                className="input text-sm font-mono"
-                placeholder="field_key"
-              />
-            </div>
-            <div className="col-span-3">
-              <select {...register(`metadata_fields.${index}.field_type`)} className="input text-sm">
-                {FIELD_TYPES.map((t) => (
-                  <option key={t.value} value={t.value}>{t.label}</option>
-                ))}
-              </select>
-            </div>
-            <div className="col-span-2 flex items-center gap-1.5">
-              <input
-                {...register(`metadata_fields.${index}.is_required`)}
-                type="checkbox"
-                className="w-4 h-4 rounded border-border text-accent focus:ring-ring"
-              />
-              <span className="text-xs text-foreground">Required</span>
-            </div>
-            <div className="col-span-1 flex justify-end">
-              <button type="button" onClick={() => remove(index)} className="text-muted-foreground hover:text-destructive transition-colors">
-                <Trash2 className="w-4 h-4" />
-              </button>
-            </div>
-          </div>
-        ))}
-
-        {!useAdminMetadata && (
-          <p className="text-xs text-muted-foreground text-center py-2">
-            Admin-defined metadata is disabled for this type.
-          </p>
-        )}
-        {useAdminMetadata && !fields.length && (
-          <p className="text-xs text-muted-foreground text-center py-2">
-            No custom fields configured yet.
-          </p>
-        )}
-      </div>
-
-      <div className="flex gap-3 pt-1">
-        <button type="submit" disabled={isPending} className="btn-primary">
-          {isPending ? <Loader2 className="w-4 h-4 animate-spin" /> : <Save className="w-4 h-4" />}
-          {submitLabel}
-        </button>
-        <button type="button" onClick={onCancel} className="btn-secondary">
-          Cancel
-        </button>
-      </div>
-    </form>
-  );
-}
-
-// ── Document types tab ────────────────────────────────────────────────────────
-
-function DocumentTypesTab() {
-  const qc = useQueryClient();
-  const [showCreate, setShowCreate] = useState(false);
-  const [editId, setEditId]         = useState<string | null>(null);
-
-  const { data: docTypes, isLoading } = useQuery<unknown, Error, DocumentType[]>({
-    queryKey: ["document-types"],
-    queryFn:  () => documentTypesAPI.list().then((r) => r.data as unknown),
-    select: (data) => normalizeListResponse<DocumentType>(data),
-  });
-
-  const createMutation = useMutation({
-    mutationFn: (data: unknown) => documentTypesAPI.create(data),
-    onSuccess: () => {
-      toast.success("Document type created");
-      qc.invalidateQueries({ queryKey: ["document-types"] });
-      setShowCreate(false);
-    },
-    onError: () => toast.error("Failed to create document type"),
-  });
-
-  const updateMutation = useMutation({
-    mutationFn: ({ id, data }: { id: string; data: unknown }) =>
-      documentTypesAPI.update(id, data),
-    onSuccess: () => {
-      toast.success("Document type updated");
-      qc.invalidateQueries({ queryKey: ["document-types"] });
-      setEditId(null);
-    },
-    onError: () => toast.error("Failed to update document type"),
-  });
-
-  const editTarget = docTypes?.find((d) => d.id === editId);
-
-  const blankForm: DocTypeFormData = {
-    name: "", code: "", reference_prefix: "",
-    reference_padding: 5, description: "",
-    is_personal_type: false, metadata_mode: "admin_defined",
-    metadata_fields: [],
-  };
-
-  return (
-    <div className="space-y-4">
-      <div className="flex items-center justify-between">
-        <p className="text-sm text-muted-foreground">{docTypes?.length ?? 0} document types configured</p>
-        <button onClick={() => { setShowCreate(true); setEditId(null); }} className="btn-primary">
-          <Plus className="w-4 h-4" /> New document type
-        </button>
-      </div>
-
-      {/* Create form */}
-      {showCreate && (
-        <div className="card p-6">
-          <div className="flex items-center justify-between mb-5">
-            <h2 className="font-semibold text-foreground">Create document type</h2>
-            <button onClick={() => setShowCreate(false)} className="text-muted-foreground hover:text-foreground">
-              <X className="w-4 h-4" />
-            </button>
-          </div>
-          <DocumentTypeForm
-            defaultValues={blankForm}
-            onSubmit={(v) => createMutation.mutate(v)}
-            onCancel={() => setShowCreate(false)}
-            isPending={createMutation.isPending}
-            submitLabel="Create document type"
-          />
-        </div>
-      )}
-
-      {/* Edit form */}
-      {editId && editTarget && (
-        <div className="card p-6 border-l-4 border-l-accent">
-          <div className="flex items-center justify-between mb-5">
-            <h2 className="font-semibold text-foreground">Edit — {editTarget.name}</h2>
-            <button onClick={() => setEditId(null)} className="text-muted-foreground hover:text-foreground">
-              <X className="w-4 h-4" />
-            </button>
-          </div>
-          <DocumentTypeForm
-            defaultValues={{
-              name:              editTarget.name,
-              code:              editTarget.code,
-              reference_prefix:  editTarget.reference_prefix,
-              reference_padding: editTarget.reference_padding ?? 5,
-              description:       stripTypeConfigMarkers(editTarget.description ?? ""),
-              is_personal_type:  deriveDocumentTypeConfig(editTarget).isPersonalType,
-              metadata_mode:     deriveDocumentTypeConfig(editTarget).metadataMode,
-              metadata_fields:   (editTarget.metadata_fields ?? []).map((f) => ({
-                label:      f.label,
-                field_key:  f.key ?? f.field_key,
-                field_type: f.field_type,
-                is_required: f.is_required,
-                order:       f.order,
-              })),
-            }}
-            onSubmit={(v) => updateMutation.mutate({ id: editId, data: v })}
-            onCancel={() => setEditId(null)}
-            isPending={updateMutation.isPending}
-            submitLabel="Save changes"
-          />
-        </div>
-      )}
-
-      {/* Cards grid */}
-      <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-4">
-        {isLoading && Array.from({ length: 6 }).map((_, i) => (
-          <div key={i} className="card p-5 space-y-3 animate-pulse">
-            <div className="h-5 bg-muted rounded w-2/3" />
-            <div className="h-4 bg-muted rounded w-1/2" />
-            <div className="h-4 bg-muted rounded w-3/4" />
-          </div>
-        ))}
-
-        {docTypes?.map((type) => (
-          (() => {
-            const config = deriveDocumentTypeConfig(type);
-            return (
-          <div
-            key={type.id}
-            className={clsx(
-              "card p-5 space-y-3 transition-all",
-              editId === type.id && "ring-2 ring-accent"
-            )}
-            style={{ boxShadow: "var(--shadow-card)" }}
-          >
-            <div className="flex items-start justify-between gap-2">
-              <div className="min-w-0">
-                <h3 className="font-semibold text-foreground truncate">{type.name}</h3>
-                <p className="text-xs font-mono text-muted-foreground mt-0.5">
-                  {type.reference_prefix}-{"0".repeat(type.reference_padding ?? 5)}
-                </p>
-              </div>
-              <span className="badge bg-accent/15 text-accent flex-shrink-0">{type.code}</span>
-            </div>
-
-            {type.description && (
-              <p className="text-sm text-muted-foreground line-clamp-2">{stripTypeConfigMarkers(type.description)}</p>
-            )}
-
-            <div className="flex items-center justify-between text-xs">
-              <span className="text-muted-foreground">
-                {config.metadataMode === "user_defined"
-                  ? "user-defined metadata"
-                  : `${type.metadata_fields?.length ?? 0} custom field${type.metadata_fields?.length !== 1 ? "s" : ""}`}
-              </span>
-              <span
-                className={clsx(
-                  "badge",
-                  config.isPersonalType
-                    ? "bg-primary/15 text-primary"
-                    : type.workflow_template
-                    ? "bg-[hsl(var(--teal))]/15 text-[hsl(var(--teal))]"
-                    : "bg-muted text-muted-foreground"
-                )}
-              >
-                {config.isPersonalType ? "Personal" : type.workflow_template ? "Workflow ✓" : "No workflow"}
-              </span>
-            </div>
-
-            <div className="flex gap-2 pt-1">
-              <button
-                onClick={() => { setEditId(type.id); setShowCreate(false); }}
-                className="btn-secondary text-xs px-2.5 py-1"
-              >
-                <Edit2 className="w-3 h-3" /> Edit
-              </button>
-            </div>
-          </div>
-            );
-          })()
-        ))}
-
-        {!isLoading && !docTypes?.length && (
-          <div className="col-span-3 card p-10 text-center">
-            <FileText className="w-8 h-8 text-muted-foreground/40 mx-auto mb-3" />
-            <p className="text-sm text-muted-foreground">No document types yet.</p>
-            <button onClick={() => setShowCreate(true)} className="btn-primary mt-3">
-              <Plus className="w-4 h-4" /> Create first type
-            </button>
-          </div>
-        )}
-      </div>
-    </div>
-  );
-}
-
 // ── Users tab ────────────────────────────────────────────────────────────────
 
 function UsersTab() {
   const navigate = useNavigate();
 
   const cards = [
+    {
+      icon: FileText,
+      title: "Document types",
+      description: "Define document categories, metadata fields, numbering, and upload schema rules.",
+      action: "Manage document types",
+      to: "/admin/document-types",
+    },
     {
       icon: Users,
       title: "Users",
@@ -449,7 +45,7 @@ function UsersTab() {
   ];
 
   return (
-    <div className="grid grid-cols-1 sm:grid-cols-3 gap-5">
+    <div className="grid grid-cols-1 sm:grid-cols-2 xl:grid-cols-4 gap-5">
       {cards.map(({ icon: Icon, title, description, action, to }) => (
         <div
           key={to}
@@ -615,16 +211,15 @@ function SettingsTab() {
 // ── Main AdminPage ─────────────────────────────────────────────────────────────
 
 const TABS = [
-  { id: "types",    label: "Document types",    icon: FileText   },
   { id: "workflow", label: "Workflow templates", icon: GitBranch  },
-  { id: "users",    label: "Users",              icon: Users      },
+  { id: "users",    label: "Management",         icon: Users      },
   { id: "settings", label: "Settings",           icon: Settings   },
 ] as const;
 
 type TabId = typeof TABS[number]["id"];
 
 export default function AdminPage() {
-  const [activeTab, setActiveTab] = useState<TabId>("types");
+  const [activeTab, setActiveTab] = useState<TabId>("users");
 
   return (
     <div className="space-y-6">
@@ -632,7 +227,7 @@ export default function AdminPage() {
       <div>
         <h1 className="text-2xl font-bold text-foreground tracking-tight">Administration</h1>
         <p className="text-muted-foreground text-sm mt-1">
-          Manage document types, workflows, users, and system settings.
+          Manage document types, workflows, users, and system settings from one place.
         </p>
       </div>
 
@@ -658,7 +253,6 @@ export default function AdminPage() {
       </div>
 
       {/* Tab content */}
-      {activeTab === "types"    && <DocumentTypesTab />}
       {activeTab === "workflow" && <WorkflowTab />}
       {activeTab === "users"    && <UsersTab />}
       {activeTab === "settings" && <SettingsTab />}

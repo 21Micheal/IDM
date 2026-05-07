@@ -7,8 +7,8 @@ import {
   useFieldArray,
   Controller,
   type Control,
+  type Path,
   type UseFormRegister,
-  type UseFormSetValue,
 } from "react-hook-form";
 import { documentsAPI, documentTypesAPI, normalizeListResponse } from "@/services/api";
 import {
@@ -111,7 +111,68 @@ type ScanStage =
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
 
-const CURRENCY_OPTIONS = ["KES", "USD", "EUR", "GBP", "UGX", "TZS", "NGN", "ZAR"];
+const DOCUMENT_FIELD_KEYS = ["title", "supplier", "amount", "currency", "document_date", "due_date"] as const;
+type DocumentFieldKey = (typeof DOCUMENT_FIELD_KEYS)[number];
+const DOCUMENT_FIELD_KEY_SET = new Set<string>(DOCUMENT_FIELD_KEYS);
+
+function getMetadataFieldKey(field: MetadataField) {
+  return field.key ?? field.field_key;
+}
+
+function isDocumentFieldKey(key: string): key is DocumentFieldKey {
+  return DOCUMENT_FIELD_KEY_SET.has(key);
+}
+
+function getUploadFieldName(field: MetadataField): Path<UploadFormValues> {
+  const key = getMetadataFieldKey(field);
+  return isDocumentFieldKey(key) ? key : (`metadata.${key}` as Path<UploadFormValues>);
+}
+
+function getSuggestedFieldKey(field: MetadataField) {
+  const key = getMetadataFieldKey(field);
+  return isDocumentFieldKey(key) ? key : `metadata.${key}`;
+}
+
+function documentValuesFromForm(values: Record<string, unknown>) {
+  const metadata =
+    values.metadata && typeof values.metadata === "object"
+      ? (values.metadata as Record<string, unknown>)
+      : {};
+
+  return DOCUMENT_FIELD_KEYS.reduce<Record<DocumentFieldKey, string>>((acc, key) => {
+    const directValue = values[key];
+    const metadataValue = metadata[key];
+    acc[key] = String((directValue ?? metadataValue ?? "") as string).trim();
+    return acc;
+  }, {
+    title: "",
+    supplier: "",
+    amount: "",
+    currency: "",
+    document_date: "",
+    due_date: "",
+  });
+}
+
+function metadataWithoutDocumentFields(metadata: unknown) {
+  if (!metadata || typeof metadata !== "object") return {};
+  return Object.entries(metadata as Record<string, unknown>).reduce<Record<string, unknown>>((acc, [key, value]) => {
+    if (!isDocumentFieldKey(key)) {
+      acc[key] = value;
+    }
+    return acc;
+  }, {});
+}
+
+function getFieldErrorMessage(errors: Record<string, any>, name: string) {
+  const directMessage = errors[name]?.message;
+  if (directMessage) return String(directMessage);
+
+  const nestedError = name
+    .split(".")
+    .reduce<any>((current, part) => current?.[part], errors);
+  return nestedError?.message ? String(nestedError.message) : undefined;
+}
 
 function SuggestionPill({ label }: { label: string }) {
   return (
@@ -146,14 +207,18 @@ function DynamicField({
   errors,
   enforceRequired,
   suggested,
+  name,
 }: {
   field: MetadataField;
   register: UseFormRegister<UploadFormValues>;
   control: Control<UploadFormValues>;
-  errors: Record<string, { message?: string }>;
+  errors: Record<string, any>;
   enforceRequired: boolean;
   suggested?: boolean;
+  name?: Path<UploadFormValues>;
 }) {
+  const fieldKey = getMetadataFieldKey(field);
+  const fieldName = name ?? (`metadata.${fieldKey}` as Path<UploadFormValues>);
   const rules =
     field.is_required && enforceRequired
       ? { required: `${field.label} is required` }
@@ -162,7 +227,7 @@ function DynamicField({
     field.is_required && enforceRequired ? (
       <span className="text-destructive ml-1">*</span>
     ) : null;
-  const errMsg = errors[`metadata.${field.key}`]?.message;
+  const errMsg = getFieldErrorMessage(errors, fieldName);
 
   const wrapper = (children: React.ReactNode) => (
     <div>
@@ -179,7 +244,7 @@ function DynamicField({
   if (field.field_type === "select") {
     return wrapper(
       <Controller
-        name={`metadata.${field.key}`}
+        name={fieldName}
         control={control}
         rules={rules}
         render={({ field: f }) => (
@@ -199,12 +264,12 @@ function DynamicField({
     return (
       <div className="flex items-center gap-2">
         <input
-          {...register(`metadata.${field.key}`)}
+          {...register(fieldName)}
           type="checkbox"
-          id={field.key}
+          id={fieldKey}
           className="w-4 h-4 rounded border-border text-primary focus:ring-primary"
         />
-        <label htmlFor={field.key} className="text-sm text-foreground">
+        <label htmlFor={fieldKey} className="text-sm text-foreground">
           {field.label}
         </label>
       </div>
@@ -212,7 +277,7 @@ function DynamicField({
   }
   if (field.field_type === "textarea") {
     return wrapper(
-      <textarea {...register(`metadata.${field.key}`, rules)} rows={3} className="input" />
+      <textarea {...register(fieldName, rules)} rows={3} className="input" />
     );
   }
   const inputType =
@@ -223,7 +288,7 @@ function DynamicField({
       : "text";
   return wrapper(
     <input
-      {...register(`metadata.${field.key}`, rules)}
+      {...register(fieldName, rules)}
       type={inputType}
       step={field.field_type === "currency" ? "0.01" : undefined}
       placeholder={field.default_value || field.help_text || ""}
@@ -659,7 +724,7 @@ export default function UploadPage({ scanOnly = false }: UploadPageProps) {
 
       if (selectedType?.metadata_fields) {
         for (const metaField of selectedType.metadata_fields) {
-          const metadataKey = metaField.key ?? metaField.field_key;
+          const metadataKey = getMetadataFieldKey(metaField);
           if (!metadataKey) continue;
 
           const key = metadataKey.toLowerCase().replace(/[^a-z0-9]+/g, "_").replace(/^_+|_+$/g, "");
@@ -673,8 +738,11 @@ export default function UploadPage({ scanOnly = false }: UploadPageProps) {
           const value = directValue || aliasValue || referenceFallback;
 
           if (value) {
-            setValue(`metadata.${metadataKey}`, value);
-            fieldsSet.add(`metadata.${metadataKey}`);
+            const fieldName = isDocumentFieldKey(metadataKey)
+              ? metadataKey
+              : (`metadata.${metadataKey}` as Path<UploadFormValues>);
+            setValue(fieldName, value);
+            fieldsSet.add(isDocumentFieldKey(metadataKey) ? metadataKey : `metadata.${metadataKey}`);
           }
         }
       }
@@ -793,24 +861,28 @@ export default function UploadPage({ scanOnly = false }: UploadPageProps) {
       return;
     }
 
+    const documentValues = documentValuesFromForm(values);
+    const fallbackTitle = droppedFile.name.replace(/\.[^.]+$/, "") || "Uploaded document";
+
     const fd = new FormData();
     fd.append("file", droppedFile);
     fd.append(
       "title",
       isOcrFlow
-        ? (droppedFile.name.replace(/\.[^.]+$/, "") || "Scanned document")
-        : (values.title as string)
+        ? (fallbackTitle || "Scanned document")
+        : (documentValues.title || fallbackTitle)
     );
     fd.append("document_type_id", selectedTypeId);
     fd.append("is_self_upload", isSelfUpload ? "true" : "false");
     fd.append("is_scanned", isScanned ? "true" : "false");
-    if (!isOcrFlow && values.supplier) fd.append("supplier", values.supplier as string);
-    if (!isOcrFlow && values.amount) fd.append("amount", values.amount as string);
-    if (!isOcrFlow && values.currency) fd.append("currency", values.currency as string);
-    if (!isOcrFlow && values.document_date) fd.append("document_date", values.document_date as string);
+    if (!isOcrFlow && documentValues.supplier) fd.append("supplier", documentValues.supplier);
+    if (!isOcrFlow && documentValues.amount) fd.append("amount", documentValues.amount);
+    if (!isOcrFlow && documentValues.currency) fd.append("currency", documentValues.currency);
+    if (!isOcrFlow && documentValues.document_date) fd.append("document_date", documentValues.document_date);
+    if (!isOcrFlow && documentValues.due_date) fd.append("due_date", documentValues.due_date);
     personalTags.forEach((tag) => fd.append("personal_tags", tag));
     const adminMetadata = !isSelfUpload && !isOcrFlow && values.metadata && Object.keys(values.metadata as object).length > 0
-      ? (values.metadata as Record<string, unknown>)
+      ? metadataWithoutDocumentFields(values.metadata)
       : {};
     const mergedMetadata =
       isSelfUpload
@@ -828,14 +900,16 @@ export default function UploadPage({ scanOnly = false }: UploadPageProps) {
     if (!uploadedDocId) return;
     setScanStage("submitting");
 
-    const payload: Record<string, unknown> = { title: values.title };
-    if (values.supplier) payload.supplier = values.supplier;
-    if (values.amount) payload.amount = values.amount;
-    if (values.currency) payload.currency = values.currency;
-    if (values.document_date) payload.document_date = values.document_date;
-    if (values.due_date) payload.due_date = values.due_date;
-    if (values.metadata && Object.keys(values.metadata).length > 0)
-      payload.metadata = values.metadata;
+    const documentValues = documentValuesFromForm(values);
+    const payload: Record<string, unknown> = {};
+    if (documentValues.title) payload.title = documentValues.title;
+    if (documentValues.supplier) payload.supplier = documentValues.supplier;
+    if (documentValues.amount) payload.amount = documentValues.amount;
+    if (documentValues.currency) payload.currency = documentValues.currency;
+    if (documentValues.document_date) payload.document_date = documentValues.document_date;
+    if (documentValues.due_date) payload.due_date = documentValues.due_date;
+    const metadata = metadataWithoutDocumentFields(values.metadata);
+    if (Object.keys(metadata).length > 0) payload.metadata = metadata;
 
     saveMutation.mutate({ id: uploadedDocId, payload });
   });
@@ -943,90 +1017,6 @@ export default function UploadPage({ scanOnly = false }: UploadPageProps) {
 
               {/* Review form */}
               <div className="space-y-6">
-                {/* Title */}
-                <div>
-                  <label className="label flex items-center gap-1.5">
-                    Document Title <span className="text-destructive">*</span>
-                    {suggestedFields.has("title") && <SuggestionPill label="OCR" />}
-                  </label>
-                  <input
-                    {...register("title", { required: "Title is required" })}
-                    className={clsx("input", suggestedFields.has("title") && "ring-1 ring-teal/40")}
-                    placeholder="e.g. Acme Corp Invoice March 2026"
-                  />
-                  {errors.title && (
-                    <p className="text-destructive text-xs mt-1">{String(errors.title.message)}</p>
-                  )}
-                </div>
-
-                {/* Supplier + Document Date */}
-                <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
-                  <div>
-                    <label className="label flex items-center gap-1.5">
-                      Supplier / Vendor
-                      {suggestedFields.has("supplier") && <SuggestionPill label="OCR" />}
-                    </label>
-                    <input
-                      {...register("supplier")}
-                      className={clsx("input", suggestedFields.has("supplier") && "ring-1 ring-teal/40")}
-                      placeholder="Supplier name"
-                    />
-                  </div>
-                  <div>
-                    <label className="label flex items-center gap-1.5">
-                      Document Date
-                      {suggestedFields.has("document_date") && <SuggestionPill label="OCR" />}
-                    </label>
-                    <input
-                      {...register("document_date")}
-                      type="date"
-                      className={clsx("input", suggestedFields.has("document_date") && "ring-1 ring-teal/40")}
-                    />
-                  </div>
-                </div>
-
-                {/* Amount + Currency + Due Date */}
-                <div className="grid grid-cols-1 md:grid-cols-3 gap-6">
-                  <div>
-                    <label className="label flex items-center gap-1.5">
-                      Amount
-                      {suggestedFields.has("amount") && <SuggestionPill label="OCR" />}
-                    </label>
-                    <input
-                      {...register("amount")}
-                      type="number"
-                      step="0.01"
-                      className={clsx("input", suggestedFields.has("amount") && "ring-1 ring-teal/40")}
-                      placeholder="0.00"
-                    />
-                  </div>
-                  <div>
-                    <label className="label flex items-center gap-1.5">
-                      Currency
-                      {suggestedFields.has("currency") && <SuggestionPill label="OCR" />}
-                    </label>
-                    <select
-                      {...register("currency")}
-                      className={clsx("input", suggestedFields.has("currency") && "ring-1 ring-teal/40")}
-                    >
-                      {CURRENCY_OPTIONS.map((c) => (
-                        <option key={c} value={c}>{c}</option>
-                      ))}
-                    </select>
-                  </div>
-                  <div>
-                    <label className="label flex items-center gap-1.5">
-                      Due Date
-                      {suggestedFields.has("due_date") && <SuggestionPill label="OCR" />}
-                    </label>
-                    <input
-                      {...register("due_date")}
-                      type="date"
-                      className={clsx("input", suggestedFields.has("due_date") && "ring-1 ring-teal/40")}
-                    />
-                  </div>
-                </div>
-
                 {/* Extra OCR-detected fields shown as read-only info chips */}
                 {(ocrFields.reference_number || ocrFields.account_code || ocrFields.document_type) && (
                   <div>
@@ -1062,12 +1052,12 @@ export default function UploadPage({ scanOnly = false }: UploadPageProps) {
                   </div>
                 )}
 
-                {/* Dynamic metadata for the selected document type */}
+                {/* Dynamic fields for the selected document type */}
                 {hasMetadata && (
                   <div>
                     <h3 className="font-semibold text-foreground mb-4 flex items-center gap-2">
                       <CheckCircle className="w-5 h-5 text-teal" />
-                      Additional Information
+                      Document Details
                     </h3>
                     <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
                       {[...selectedType!.metadata_fields]
@@ -1080,7 +1070,8 @@ export default function UploadPage({ scanOnly = false }: UploadPageProps) {
                             control={control}
                             errors={errors as Record<string, { message?: string }>}
                             enforceRequired={false}
-                            suggested={suggestedFields.has(`metadata.${field.key}`)}
+                            suggested={suggestedFields.has(getSuggestedFieldKey(field))}
+                            name={getUploadFieldName(field)}
                           />
                         ))}
                     </div>
@@ -1284,11 +1275,11 @@ export default function UploadPage({ scanOnly = false }: UploadPageProps) {
                   )}
                 </div>
 
-                {/* Dynamic metadata */}
+                {/* Dynamic document fields */}
                 {hasMetadata && (
                   <div className="mb-8">
                     <h3 className="font-semibold text-foreground mb-4 flex items-center gap-2">
-                      <CheckCircle className="w-5 h-5 text-teal" /> Additional Information
+                      <CheckCircle className="w-5 h-5 text-teal" /> Document Details
                     </h3>
                     <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
                       {[...selectedType!.metadata_fields]
@@ -1302,6 +1293,7 @@ export default function UploadPage({ scanOnly = false }: UploadPageProps) {
                             errors={errors as Record<string, { message?: string }>}
                             enforceRequired={!relaxReq}
                             suggested={false}
+                            name={getUploadFieldName(field)}
                           />
                         ))}
                     </div>
@@ -1309,33 +1301,6 @@ export default function UploadPage({ scanOnly = false }: UploadPageProps) {
                 )}
 
                 <div className="space-y-6">
-                  {/* Title */}
-                  <div>
-                    <label className="label">
-                      Document Title <span className="text-destructive">*</span>
-                    </label>
-                    <input
-                      {...register("title", { required: "Title is required" })}
-                      className="input"
-                      placeholder="e.g. Acme Corp Invoice March 2026"
-                    />
-                    {errors.title && (
-                      <p className="text-destructive text-xs mt-1">{String(errors.title.message)}</p>
-                    )}
-                  </div>
-
-                  {/* Supplier + Date */}
-                  <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
-                    <div>
-                      <label className="label">Supplier</label>
-                      <input {...register("supplier")} className="input" placeholder="Supplier name" />
-                    </div>
-                    <div>
-                      <label className="label">Document Date</label>
-                      <input {...register("document_date")} type="date" className="input" />
-                    </div>
-                  </div>
-
                   {/* Personal tags */}
                   {isSelfUpload && (
                     <div>
@@ -1390,27 +1355,6 @@ export default function UploadPage({ scanOnly = false }: UploadPageProps) {
                     </div>
                   )}
 
-                  {/* Amount + Currency */}
-                  <div className="grid grid-cols-1 md:grid-cols-3 gap-6">
-                    <div className="md:col-span-2">
-                      <label className="label">Amount</label>
-                      <input
-                        {...register("amount")}
-                        type="number"
-                        step="0.01"
-                        className="input"
-                        placeholder="0.00"
-                      />
-                    </div>
-                    <div>
-                      <label className="label">Currency</label>
-                      <select {...register("currency")} className="input">
-                        {CURRENCY_OPTIONS.map((c) => (
-                          <option key={c} value={c}>{c}</option>
-                        ))}
-                      </select>
-                    </div>
-                  </div>
                 </div>
 
                 {/* Upload progress */}
