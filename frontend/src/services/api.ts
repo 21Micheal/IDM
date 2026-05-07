@@ -446,7 +446,7 @@ export const usersAPI = {
   ) => api.patch(`/users/${id}/`, data),
   delete: (id: string) => api.delete(`/users/${id}/`),
   resetPassword: (id: string) => api.post(`/users/${id}/reset-password/`),
-  toggleActive: (id: string) => api.post(`/users/${id}/toggle-active/`),
+  toggleActive: (id: string) => api.post(`/users/${id}/toggle_active/`),
   delegations: (id: string) => api.get(`/users/${id}/delegations/`),
   reassignActiveTasks: (id: string, toUserId: string) =>
     api.post(`/users/${id}/reassign-active-tasks/`, { to_user_id: toUserId }),

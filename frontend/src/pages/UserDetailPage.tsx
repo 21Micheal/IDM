@@ -46,22 +46,26 @@ export default function UserDetailPage() {
     queryKey: ["users", "detail", id],
     queryFn: () => usersAPI.get(id).then((r) => r.data),
     enabled: Boolean(id),
+    staleTime: 1000 * 60 * 2,
   });
 
   const { data: users = [] } = useQuery<User[]>({
     queryKey: ["users", "all"],
     queryFn: () => usersAPI.list().then((r) => r.data.results ?? r.data),
+    staleTime: 1000 * 60 * 2,
   });
 
   const { data: departments = [] } = useQuery<Department[]>({
     queryKey: ["departments"],
     queryFn: () => departmentsAPI.list().then((r) => r.data.results ?? r.data),
+    staleTime: 1000 * 60 * 5,
   });
 
   const { data: delegations = [] } = useQuery<Delegation[]>({
     queryKey: ["users", "delegations", id],
     queryFn: () => usersAPI.delegations(id).then((r) => r.data),
     enabled: Boolean(id),
+    staleTime: 1000 * 60 * 2,
   });
 
   const [form, setForm] = useState({
@@ -107,8 +111,8 @@ export default function UserDetailPage() {
     mutationFn: () => usersAPI.toggleActive(id),
     onSuccess: () => {
       toast.success("User status updated");
-      qc.invalidateQueries({ queryKey: ["users"] });
-      qc.invalidateQueries({ queryKey: ["users", "detail", id] });
+      qc.invalidateQueries({ queryKey: ["users"], exact: false });
+      qc.invalidateQueries({ queryKey: ["users", "detail", id], exact: true });
     },
     onError: () => toast.error("Failed to toggle status"),
   });
