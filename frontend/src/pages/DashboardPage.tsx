@@ -35,6 +35,7 @@ import {
 
 const RECENT_DOCS_PAGE_SIZE = 5;
 const RECENT_AUDIT_PAGE_SIZE = 5;
+const TREND_WINDOW_DAYS = 30;
 
 type PaginatedResponse<T> = {
   count: number;
@@ -60,6 +61,78 @@ type StorageStats = {
   total_mb: number;
   percentage: number;
 };
+
+type StatTrend = {
+  value: number;
+  isPositive: boolean;
+  direction: "up" | "down" | "flat";
+  suffix?: string;
+  label?: string;
+};
+
+function addDays(date: Date, days: number) {
+  const next = new Date(date);
+  next.setDate(next.getDate() + days);
+  return next;
+}
+
+function toDateParam(date: Date) {
+  const year = date.getFullYear();
+  const month = String(date.getMonth() + 1).padStart(2, "0");
+  const day = String(date.getDate()).padStart(2, "0");
+  return `${year}-${month}-${day}`;
+}
+
+function getDashboardTrendWindow() {
+  const today = new Date();
+  today.setHours(0, 0, 0, 0);
+
+  return {
+    today: toDateParam(today),
+    currentFrom: toDateParam(addDays(today, -(TREND_WINDOW_DAYS - 1))),
+    currentTo: toDateParam(today),
+    previousFrom: toDateParam(addDays(today, -(TREND_WINDOW_DAYS * 2 - 1))),
+    previousTo: toDateParam(addDays(today, -TREND_WINDOW_DAYS)),
+  };
+}
+
+function getPercentChange(current: number, previous: number) {
+  if (previous === 0) return current > 0 ? 100 : 0;
+  return Math.round((Math.abs(current - previous) / previous) * 10) / 10;
+}
+
+function buildTrend(
+  current: number,
+  previous: number,
+  positiveWhenIncrease: boolean,
+  label: string,
+): StatTrend | undefined {
+  if (current === 0 && previous === 0) return undefined;
+
+  const direction =
+    current > previous ? "up" : current < previous ? "down" : "flat";
+  const isPositive =
+    direction === "flat" ||
+    (positiveWhenIncrease ? direction === "up" : direction === "down");
+
+  return {
+    value: getPercentChange(current, previous),
+    isPositive,
+    direction,
+    label,
+  };
+}
+
+function countDueSoonTasks(tasks: WorkflowTask[]) {
+  const now = Date.now();
+  const tomorrow = now + 24 * 60 * 60 * 1000;
+
+  return tasks.filter((task) => {
+    if (!task.due_at) return false;
+    const dueAt = new Date(task.due_at).getTime();
+    return Number.isFinite(dueAt) && dueAt <= tomorrow;
+  }).length;
+}
 
 function formatStorageAmount(bytes: number) {
   if (bytes >= 1024 ** 3) {
@@ -197,6 +270,7 @@ export default function DashboardPage() {
 
   const dashboardSearchRef = useRef<HTMLDivElement | null>(null);
   const debouncedDashboardSearch = useDebounce(dashboardSearch.trim(), 300);
+  const trendWindow = useMemo(() => getDashboardTrendWindow(), []);
 
   // ── Queries ───────────────────────────────────────────────────────────────
 
@@ -229,12 +303,93 @@ export default function DashboardPage() {
     ...QUERY_SHORT_STALE,
   });
 
-  const { data: completedCount = 0 } = useQuery({
-    queryKey: ["documents", "completed", "count"],
+  const { data: approvedTodayCount = 0 } = useQuery({
+    queryKey: ["documents", "approved", "today-count", trendWindow.today],
     queryFn: () =>
       documentsAPI.list({
         status: "approved",
         is_self_upload: false,
+        approved_from: trendWindow.today,
+        page: 1,
+        page_size: 1,
+      }).then((r) => r.data.count ?? 0),
+    ...QUERY_SHORT_STALE,
+  });
+
+  const { data: documentsCreatedThisPeriod = 0 } = useQuery({
+    queryKey: ["documents", "created-count", trendWindow.currentFrom, trendWindow.currentTo],
+    queryFn: () =>
+      documentsAPI.list({
+        created_from: trendWindow.currentFrom,
+        created_to: trendWindow.currentTo,
+        page: 1,
+        page_size: 1,
+      }).then((r) => r.data.count ?? 0),
+    ...QUERY_SHORT_STALE,
+  });
+
+  const { data: documentsCreatedPreviousPeriod = 0 } = useQuery({
+    queryKey: ["documents", "created-count", trendWindow.previousFrom, trendWindow.previousTo],
+    queryFn: () =>
+      documentsAPI.list({
+        created_from: trendWindow.previousFrom,
+        created_to: trendWindow.previousTo,
+        page: 1,
+        page_size: 1,
+      }).then((r) => r.data.count ?? 0),
+    ...QUERY_SHORT_STALE,
+  });
+
+  const { data: pendingCreatedThisPeriod = 0 } = useQuery({
+    queryKey: ["documents", "pending", "created-count", trendWindow.currentFrom, trendWindow.currentTo],
+    queryFn: () =>
+      documentsAPI.list({
+        status: "pending_approval",
+        is_self_upload: false,
+        created_from: trendWindow.currentFrom,
+        created_to: trendWindow.currentTo,
+        page: 1,
+        page_size: 1,
+      }).then((r) => r.data.count ?? 0),
+    ...QUERY_SHORT_STALE,
+  });
+
+  const { data: pendingCreatedPreviousPeriod = 0 } = useQuery({
+    queryKey: ["documents", "pending", "created-count", trendWindow.previousFrom, trendWindow.previousTo],
+    queryFn: () =>
+      documentsAPI.list({
+        status: "pending_approval",
+        is_self_upload: false,
+        created_from: trendWindow.previousFrom,
+        created_to: trendWindow.previousTo,
+        page: 1,
+        page_size: 1,
+      }).then((r) => r.data.count ?? 0),
+    ...QUERY_SHORT_STALE,
+  });
+
+  const { data: approvedThisPeriod = 0 } = useQuery({
+    queryKey: ["documents", "approved", "approved-count", trendWindow.currentFrom, trendWindow.currentTo],
+    queryFn: () =>
+      documentsAPI.list({
+        status: "approved",
+        is_self_upload: false,
+        approved_from: trendWindow.currentFrom,
+        approved_to: trendWindow.currentTo,
+        page: 1,
+        page_size: 1,
+      }).then((r) => r.data.count ?? 0),
+    ...QUERY_SHORT_STALE,
+  });
+
+  const { data: approvedPreviousPeriod = 0 } = useQuery({
+    queryKey: ["documents", "approved", "approved-count", trendWindow.previousFrom, trendWindow.previousTo],
+    queryFn: () =>
+      documentsAPI.list({
+        status: "approved",
+        is_self_upload: false,
+        approved_from: trendWindow.previousFrom,
+        approved_to: trendWindow.previousTo,
         page: 1,
         page_size: 1,
       }).then((r) => r.data.count ?? 0),
@@ -311,6 +466,35 @@ export default function DashboardPage() {
   const hasActiveDashboardSelection =
     activeDashboardResultIndex >= 0 && activeDashboardResultIndex < dashboardResults.length;
   const allTasks = myTasks as WorkflowTask[];
+  const totalDocumentsTrend = buildTrend(
+    documentsCreatedThisPeriod,
+    documentsCreatedPreviousPeriod,
+    true,
+    `Documents created in the last ${TREND_WINDOW_DAYS} days vs previous ${TREND_WINDOW_DAYS} days`,
+  );
+  const pendingApprovalTrend = buildTrend(
+    pendingCreatedThisPeriod,
+    pendingCreatedPreviousPeriod,
+    false,
+    `Pending approvals created in the last ${TREND_WINDOW_DAYS} days vs previous ${TREND_WINDOW_DAYS} days`,
+  );
+  const approvedTrend = buildTrend(
+    approvedThisPeriod,
+    approvedPreviousPeriod,
+    true,
+    `Documents approved in the last ${TREND_WINDOW_DAYS} days vs previous ${TREND_WINDOW_DAYS} days`,
+  );
+  const dueSoonTaskCount = countDueSoonTasks(allTasks);
+  const tasksTrend: StatTrend | undefined =
+    dueSoonTaskCount > 0
+      ? {
+          value: dueSoonTaskCount,
+          isPositive: false,
+          direction: "flat",
+          suffix: " due",
+          label: "Tasks due within 24 hours or overdue",
+        }
+      : undefined;
   const taskFilterOptions = useMemo(() => buildWorkflowTaskFilterOptions(allTasks), [allTasks]);
   const filteredTasks = useMemo(
     () => filterWorkflowTasks(allTasks, taskFilters),
@@ -598,7 +782,7 @@ export default function DashboardPage() {
           value={totalDocuments}
           icon={FileText}
           color="primary"
-          trend={{ value: 4.2, isPositive: true }}
+          trend={totalDocumentsTrend}
           href="/documents"
         />
         <StatCard
@@ -606,15 +790,15 @@ export default function DashboardPage() {
           value={pendingCount}
           icon={Clock}
           color="accent"
-          trend={{ value: 12, isPositive: false, suffix: "" }}
+          trend={pendingApprovalTrend}
           href="/documents?status=pending_approval"
         />
         <StatCard
           title="Approved Today"
-          value={completedCount}
+          value={approvedTodayCount}
           icon={CheckCircle}
           color="primary"
-          trend={{ value: 8.1, isPositive: true }}
+          trend={approvedTrend}
           href="/documents?status=approved"
         />
         <StatCard
@@ -622,7 +806,7 @@ export default function DashboardPage() {
           value={myTasks.length}
           icon={ShieldCheck}
           color="teal"
-          trend={{ value: 0.4, isPositive: true }}
+          trend={tasksTrend}
           href="/workflow"
         />
       </div>
