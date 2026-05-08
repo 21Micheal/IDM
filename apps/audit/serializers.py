@@ -75,6 +75,8 @@ class AuditLogSerializer(serializers.ModelSerializer):
             "workflow.returned": "returned",
             "workflow.held": "put on hold",
             "workflow.released": "released from hold",
+            "workflow.delegated": "delegated tasks to",
+            "workflow.reassigned": "reassigned tasks to",
             "document.archived": "archived",
             "document.version_uploaded": "uploaded a new version of",
             "document.version_restored": "restored",

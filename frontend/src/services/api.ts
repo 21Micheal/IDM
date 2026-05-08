@@ -228,6 +228,21 @@ export const documentsAPI = {
       onUploadProgress: config?.onUploadProgress,
     }),
 
+  duplicateCheck: (checksum: string, documentId?: string) =>
+    api.get<{
+      exists: boolean;
+      identical_to_current?: boolean;
+      document_id?: string;
+      reference_number?: string;
+      uploaded_at?: string;
+      uploaded_by?: string;
+    }>("/documents/duplicate-check/", {
+      params: {
+        checksum,
+        ...(documentId ? { document_id: documentId } : {}),
+      },
+    }),
+
   update: (id: string, data: Record<string, unknown>) =>
     api.patch(`/documents/${id}/`, data),
 
@@ -351,6 +366,7 @@ export const documentTypesAPI = {
   create: (data: unknown) => api.post("/documents/types/", data),
   update: (id: string, data: unknown) =>
     api.patch(`/documents/types/${id}/`, data),
+  delete: (id: string) => api.delete(`/documents/types/${id}/`),
 };
 
 export const searchAPI = {

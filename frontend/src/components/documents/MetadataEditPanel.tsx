@@ -2,11 +2,21 @@
  * MetadataEditPanel.tsx
  *
  * Shown on DocumentDetailPage when document is in draft or rejected state.
- * Allows editing title, supplier, amount, dates, and dynamic metadata fields
- * without touching the file, reference, or document type.
+ * Allows editing metadata fields without touching the file, reference, or
+ * document type. Admin-defined document details are rendered from the
+ * document type metadata fields only.
  */
 import { useMutation, useQueryClient } from "@tanstack/react-query";
-import { useForm, useFieldArray, Controller, type Control, type UseFormRegister } from "react-hook-form";
+import type { ReactNode } from "react";
+import {
+  useForm,
+  useFieldArray,
+  Controller,
+  type Control,
+  type FieldErrors,
+  type Path,
+  type UseFormRegister,
+} from "react-hook-form";
 import { documentsAPI } from "@/services/api";
 import { Edit2, Save, X, Loader2, Plus } from "lucide-react";
 import { toast } from "@/components/ui/vault-toast";
@@ -29,63 +39,113 @@ type MetadataEditValues = {
   personal_metadata_fields: { key: string; value: string }[];
 };
 
+const DOCUMENT_FIELD_KEYS = ["title", "supplier", "amount", "currency", "document_date", "due_date"] as const;
+type DocumentFieldKey = (typeof DOCUMENT_FIELD_KEYS)[number];
+const DOCUMENT_FIELD_KEY_SET = new Set<string>(DOCUMENT_FIELD_KEYS);
+
+function getMetadataFieldKey(field: MetadataField) {
+  return field.key ?? field.field_key;
+}
+
+function isDocumentFieldKey(key: string): key is DocumentFieldKey {
+  return DOCUMENT_FIELD_KEY_SET.has(key);
+}
+
+function getEditFieldName(field: MetadataField): Path<MetadataEditValues> {
+  const key = getMetadataFieldKey(field);
+  return isDocumentFieldKey(key) ? key : (`metadata.${key}` as Path<MetadataEditValues>);
+}
+
+function metadataWithoutDocumentFields(metadata: unknown) {
+  if (!metadata || typeof metadata !== "object") return {};
+  return Object.entries(metadata as Record<string, unknown>).reduce<Record<string, unknown>>((acc, [key, value]) => {
+    if (!isDocumentFieldKey(key)) {
+      acc[key] = value;
+    }
+    return acc;
+  }, {});
+}
+
+function getFieldErrorMessage(errors: FieldErrors<MetadataEditValues>, name: string) {
+  const directMessage = errors[name as keyof MetadataEditValues]?.message;
+  if (directMessage) return String(directMessage);
+
+  const nestedError = name
+    .split(".")
+    .reduce<any>((current, part) => current?.[part], errors);
+  return nestedError?.message ? String(nestedError.message) : undefined;
+}
+
 function DynamicField({
   field,
   register,
   control,
+  errors,
+  name,
 }: {
   field: MetadataField;
-  register: UseFormRegister<any>;
-  control: Control<any>;
+  register: UseFormRegister<MetadataEditValues>;
+  control: Control<MetadataEditValues>;
+  errors: FieldErrors<MetadataEditValues>;
+  name?: Path<MetadataEditValues>;
 }) {
+  const fieldKey = getMetadataFieldKey(field);
+  const fieldName = name ?? (`metadata.${fieldKey}` as Path<MetadataEditValues>);
   const rules = field.is_required ? { required: `${field.label} is required` } : {};
+  const requiredMark = field.is_required ? <span className="text-red-500 ml-1">*</span> : null;
+  const errMsg = getFieldErrorMessage(errors, fieldName);
+
+  const wrapper = (children: ReactNode) => (
+    <div>
+      <label className="label">
+        {field.label}
+        {requiredMark}
+      </label>
+      {children}
+      {errMsg && <p className="text-red-500 text-xs mt-1">{errMsg}</p>}
+    </div>
+  );
 
   if (field.field_type === "select") {
-    return (
-      <div>
-        <label className="label">
-          {field.label}{field.is_required && <span className="text-red-500 ml-1">*</span>}
-        </label>
-        <Controller
-          name={`metadata.${field.key}`}
-          control={control}
-          rules={rules}
-          render={({ field: f }) => (
-            <select {...f} className="input">
-              <option value="">Select…</option>
-              {(field.select_options || []).map((opt) => (
-                <option key={opt} value={opt}>{opt}</option>
-              ))}
-            </select>
-          )}
-        />
-      </div>
+    return wrapper(
+      <Controller
+        name={fieldName}
+        control={control}
+        rules={rules}
+        render={({ field: f }) => (
+          <select {...f} value={String(f.value ?? "")} className="input">
+            <option value="">Select…</option>
+            {(field.select_options || []).map((opt) => (
+              <option key={opt} value={opt}>{opt}</option>
+            ))}
+          </select>
+        )}
+      />
     );
   }
 
   if (field.field_type === "boolean") {
     return (
-      <div className="flex items-center gap-2 pt-5">
-        <input
-          {...register(`metadata.${field.key}`)}
-          type="checkbox"
-          id={`meta-${field.key}`}
-          className="w-4 h-4 rounded border-border text-primary"
-        />
-        <label htmlFor={`meta-${field.key}`} className="text-sm text-foreground">
-          {field.label}
-        </label>
+      <div>
+        <div className="flex items-center gap-2 pt-5">
+          <input
+            {...register(fieldName, rules)}
+            type="checkbox"
+            id={`meta-${fieldKey}`}
+            className="w-4 h-4 rounded border-border text-primary"
+          />
+          <label htmlFor={`meta-${fieldKey}`} className="text-sm text-foreground">
+            {field.label}
+            {requiredMark}
+          </label>
+        </div>
+        {errMsg && <p className="text-red-500 text-xs mt-1">{errMsg}</p>}
       </div>
     );
   }
 
   if (field.field_type === "textarea") {
-    return (
-      <div>
-        <label className="label">{field.label}</label>
-        <textarea {...register(`metadata.${field.key}`, rules)} rows={3} className="input" />
-      </div>
-    );
+    return wrapper(<textarea {...register(fieldName, rules)} rows={3} className="input" />);
   }
 
   const inputType =
@@ -93,18 +153,13 @@ function DynamicField({
     field.field_type === "number" || field.field_type === "currency" ? "number" :
     "text";
 
-  return (
-    <div>
-      <label className="label">
-        {field.label}{field.is_required && <span className="text-red-500 ml-1">*</span>}
-      </label>
-      <input
-        {...register(`metadata.${field.key}`, rules)}
-        type={inputType}
-        step={field.field_type === "currency" ? "0.01" : undefined}
-        className="input"
-      />
-    </div>
+  return wrapper(
+    <input
+      {...register(fieldName, rules)}
+      type={inputType}
+      step={field.field_type === "currency" ? "0.01" : undefined}
+      className="input"
+    />
   );
 }
 
@@ -123,7 +178,7 @@ export default function MetadataEditPanel({ document: doc, onClose }: Props) {
       currency:      doc.currency,
       document_date: doc.document_date ?? "",
       due_date:      doc.due_date ?? "",
-      metadata:      doc.metadata ?? {},
+      metadata:      metadataWithoutDocumentFields(doc.metadata),
       personal_tags: (doc.personal_tags ?? []).length > 0
         ? (doc.personal_tags ?? []).map((tag) => ({ value: tag }))
         : [{ value: "" }],
@@ -142,6 +197,7 @@ export default function MetadataEditPanel({ document: doc, onClose }: Props) {
     append: appendPersonalMetadataField,
     remove: removePersonalMetadataField,
   } = useFieldArray({ control, name: "personal_metadata_fields" });
+  const metadataFields = doc.is_self_upload ? [] : (doc.document_type?.metadata_fields ?? []);
 
   const mutation = useMutation({
     mutationFn: (data: Record<string, unknown>) =>
@@ -171,14 +227,20 @@ export default function MetadataEditPanel({ document: doc, onClose }: Props) {
         acc[item.key] = item.value;
         return acc;
       }, {});
-    const payload: Record<string, unknown> = { ...values };
-    if (!doc.is_self_upload) {
-      delete payload.personal_tags;
-      delete payload.personal_metadata_fields;
-    } else {
+    const payload: Record<string, unknown> = doc.is_self_upload
+      ? { ...values }
+      : { metadata: metadataWithoutDocumentFields(values.metadata) };
+    if (doc.is_self_upload) {
       payload.personal_tags = personalTags;
       payload.metadata = personalMetadata;
       delete payload.personal_metadata_fields;
+    } else {
+      metadataFields.forEach((field) => {
+        const key = getMetadataFieldKey(field);
+        if (isDocumentFieldKey(key)) {
+          payload[key] = values[key];
+        }
+      });
     }
     if (payload.amount === "" || payload.amount === null || payload.amount === undefined) {
       delete payload.amount;
@@ -191,8 +253,6 @@ export default function MetadataEditPanel({ document: doc, onClose }: Props) {
     }
     mutation.mutate(payload);
   };
-
-  const metadataFields = doc.is_self_upload ? [] : (doc.document_type?.metadata_fields ?? []);
 
   return (
     <div className="h-full overflow-y-auto p-4 space-y-5">
@@ -207,29 +267,6 @@ export default function MetadataEditPanel({ document: doc, onClose }: Props) {
       </div>
 
       <form onSubmit={handleSubmit(onSubmit)} className="space-y-4">
-        {/* Core fields */}
-        <div>
-          <label className="label">Title <span className="text-red-500">*</span></label>
-          <input
-            {...register("title", { required: "Title is required" })}
-            className="input"
-          />
-          {errors.title && (
-            <p className="text-red-500 text-xs mt-1">{errors.title.message as string}</p>
-          )}
-        </div>
-
-        <div className="grid grid-cols-2 gap-3">
-          <div>
-            <label className="label">Supplier</label>
-            <input {...register("supplier")} className="input" placeholder="Supplier name" />
-          </div>
-          <div>
-            <label className="label">Document date</label>
-            <input {...register("document_date")} type="date" className="input" />
-          </div>
-        </div>
-
         {doc.is_self_upload && (
           <div>
             <label className="label">
@@ -311,32 +348,6 @@ export default function MetadataEditPanel({ document: doc, onClose }: Props) {
           </div>
         )}
 
-        <div className="grid grid-cols-3 gap-3">
-          <div className="col-span-2">
-            <label className="label">Amount</label>
-            <input
-              {...register("amount")}
-              type="number"
-              step="0.01"
-              className="input"
-              placeholder="0.00"
-            />
-          </div>
-          <div>
-            <label className="label">Currency</label>
-            <select {...register("currency")} className="input">
-              {["USD", "EUR", "GBP", "KES", "ZAR", "NGN"].map((c) => (
-                <option key={c} value={c}>{c}</option>
-              ))}
-            </select>
-          </div>
-        </div>
-
-        <div>
-          <label className="label">Due date</label>
-          <input {...register("due_date")} type="date" className="input" />
-        </div>
-
         {/* Dynamic metadata fields */}
         {metadataFields.length > 0 && (
           <div className="border-t border-border pt-4 space-y-4">
@@ -350,7 +361,9 @@ export default function MetadataEditPanel({ document: doc, onClose }: Props) {
                   key={field.id}
                   field={field}
                   register={register}
-                  control={control as unknown as Control<any>}
+                  control={control}
+                  errors={errors}
+                  name={getEditFieldName(field)}
                 />
               ))}
           </div>

@@ -23,6 +23,20 @@ interface UploadVersionDrawerProps {
   triggerClassName?: string;
 }
 
+type DuplicateCheckResult = {
+  file: File;
+  exists: boolean;
+  identicalToCurrent: boolean;
+};
+
+async function calculateFileSha256(file: File): Promise<string> {
+  const buffer = await file.arrayBuffer();
+  const digest = await crypto.subtle.digest("SHA-256", buffer);
+  return Array.from(new Uint8Array(digest))
+    .map((byte) => byte.toString(16).padStart(2, "0"))
+    .join("");
+}
+
 /**
  * Upload a new version of a document.
  *
@@ -45,7 +59,11 @@ export function UploadVersionDrawer({
   const [file, setFile] = useState<File | null>(null);
   const [summary, setSummary] = useState("");
   const [progress, setProgress] = useState(0);
+  const [isCheckingDuplicate, setIsCheckingDuplicate] = useState(false);
+  const [isIdenticalToCurrent, setIsIdenticalToCurrent] = useState(false);
   const fileInputRef = useRef<HTMLInputElement>(null);
+  const duplicateCheckRunRef = useRef(0);
+  const duplicateCheckResultRef = useRef<DuplicateCheckResult | null>(null);
 
   const acceptMap = accept ?? {
     "application/pdf": [".pdf"],
@@ -62,15 +80,49 @@ export function UploadVersionDrawer({
   );
 
   const resetState = useCallback(() => {
+    duplicateCheckRunRef.current += 1;
+    duplicateCheckResultRef.current = null;
     setFile(null);
     setSummary("");
     setProgress(0);
+    setIsCheckingDuplicate(false);
+    setIsIdenticalToCurrent(false);
   }, []);
 
-  const setSelectedFile = useCallback((nextFile: File | null) => {
+  const setSelectedFile = useCallback(async (nextFile: File | null) => {
+    const checkRun = duplicateCheckRunRef.current + 1;
+    duplicateCheckRunRef.current = checkRun;
+    duplicateCheckResultRef.current = null;
     setFile(nextFile);
-    if (nextFile) setProgress(0);
-  }, []);
+    setIsIdenticalToCurrent(false);
+    if (!nextFile) {
+      setIsCheckingDuplicate(false);
+      return;
+    }
+    setProgress(0);
+    setIsCheckingDuplicate(true);
+    try {
+      const checksum = await calculateFileSha256(nextFile);
+      const { data: duplicateInfo } = await documentsAPI.duplicateCheck(checksum, documentId);
+      if (duplicateCheckRunRef.current !== checkRun) return;
+
+      const identicalToCurrent = Boolean(duplicateInfo.identical_to_current);
+      duplicateCheckResultRef.current = {
+        file: nextFile,
+        exists: Boolean(duplicateInfo.exists),
+        identicalToCurrent,
+      };
+      setIsIdenticalToCurrent(identicalToCurrent);
+    } catch {
+      if (duplicateCheckRunRef.current !== checkRun) return;
+      duplicateCheckResultRef.current = null;
+      setIsIdenticalToCurrent(false);
+    } finally {
+      if (duplicateCheckRunRef.current === checkRun) {
+        setIsCheckingDuplicate(false);
+      }
+    }
+  }, [documentId]);
 
   // Reset whenever the dialog closes.
   useEffect(() => {
@@ -79,13 +131,13 @@ export function UploadVersionDrawer({
 
   const handleFileSelect = useCallback((event: React.ChangeEvent<HTMLInputElement>) => {
     const nextFile = event.target.files?.[0] ?? null;
-    setSelectedFile(nextFile);
+    void setSelectedFile(nextFile);
   }, [setSelectedFile]);
 
   const handleDrop = useCallback((event: React.DragEvent<HTMLDivElement>) => {
     event.preventDefault();
     const nextFile = event.dataTransfer.files?.[0] ?? null;
-    setSelectedFile(nextFile);
+    void setSelectedFile(nextFile);
   }, [setSelectedFile]);
 
   const mutation = useMutation({
@@ -108,8 +160,37 @@ export function UploadVersionDrawer({
     },
   });
 
-  const handleUpload = () => {
+  const handleUpload = async () => {
     if (!file) return;
+    if (mutation.isPending || isCheckingDuplicate || isIdenticalToCurrent) return;
+
+    try {
+      const previousCheck = duplicateCheckResultRef.current;
+      const duplicateInfo = previousCheck?.file === file
+        ? {
+            exists: previousCheck.exists,
+            identical_to_current: previousCheck.identicalToCurrent,
+          }
+        : (await documentsAPI.duplicateCheck(await calculateFileSha256(file), documentId)).data;
+
+      if (duplicateInfo.identical_to_current) {
+        setIsIdenticalToCurrent(true);
+        toast.error("This file is identical to the current version.");
+        return;
+      }
+      if (duplicateInfo.exists) {
+        const proceed = window.confirm(
+          "This file already exists in the system. Do you want to link it to your workflow?"
+        );
+        if (!proceed) {
+          toast.info("Upload cancelled.");
+          return;
+        }
+      }
+    } catch {
+      // Duplicate pre-check is advisory; continue with upload if it fails.
+    }
+
     const formData = new FormData();
     formData.append("file", file);
     if (summary.trim()) {
@@ -142,7 +223,7 @@ export function UploadVersionDrawer({
             className="space-y-4"
             onSubmit={(e) => {
               e.preventDefault();
-              handleUpload();
+              void handleUpload();
             }}
           >
             <DialogHeader>
@@ -198,7 +279,7 @@ export function UploadVersionDrawer({
                     type="button"
                     onClick={(e) => {
                       e.stopPropagation();
-                      setSelectedFile(null);
+                      void setSelectedFile(null);
                       if (fileInputRef.current) fileInputRef.current.value = "";
                     }}
                     className="inline-flex items-center gap-1 text-xs text-destructive hover:underline mt-1"
@@ -235,6 +316,18 @@ export function UploadVersionDrawer({
               />
             </div>
 
+            {file && isCheckingDuplicate && (
+              <p className="text-xs text-muted-foreground">
+                Checking selected file…
+              </p>
+            )}
+
+            {file && !isCheckingDuplicate && isIdenticalToCurrent && (
+              <p className="text-xs text-destructive">
+                This file is identical to the current version.
+              </p>
+            )}
+
             {mutation.isPending && progress > 0 && (
               <div className="space-y-1">
                 <div className="h-1.5 bg-muted rounded-full overflow-hidden">
@@ -260,7 +353,7 @@ export function UploadVersionDrawer({
               </button>
               <button
                 type="submit"
-                disabled={!file || mutation.isPending}
+                disabled={!file || mutation.isPending || isCheckingDuplicate || isIdenticalToCurrent}
                 className="btn-primary"
               >
                 {mutation.isPending ? (
