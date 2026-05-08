@@ -482,12 +482,12 @@ You will be required to set a new password when you next log in.
             )
 
         AuditLog.objects.create(
-            event=AuditEvent.PERMISSION_CHANGED,
+            event=AuditEvent.WORKFLOW_REASSIGNED,
             actor=request.user,
             object_type="User",
             object_id=str(user.id),
-            object_repr=user.email,
-            changes={"action": "reassign_active_tasks", "count": updated, "to_user_id": str(to_user.id)},
+            object_repr=user.get_full_name() or user.email,
+            changes={"action": "reassign_active_tasks", "count": updated, "to_user_id": str(to_user.id), "to_user_name": to_user.get_full_name() or to_user.email},
             ip_address=request.META.get("REMOTE_ADDR"),
         )
         return Response({"detail": f"Reassigned {updated} active task(s).", "count": updated})
@@ -662,6 +662,23 @@ class UserDelegationViewSet(viewsets.ModelViewSet):
 
         delegation = serializer.save(delegator=delegator, created_by=user)
         self._notify_delegate_of_delegation(delegation)
+
+        AuditLog.objects.create(
+            event=AuditEvent.WORKFLOW_DELEGATED,
+            actor=user,
+            object_type="User",
+            object_id=str(delegation.delegate.id),
+            object_repr=delegation.delegate.get_full_name() or delegation.delegate.email,
+            changes={
+                "action": "create_delegation",
+                "delegator_id": str(delegator.id),
+                "delegator_name": delegator.get_full_name() or delegator.email,
+                "starts_at": delegation.starts_at.isoformat(),
+                "ends_at": delegation.ends_at.isoformat(),
+                "comment": delegation.comment,
+            },
+            ip_address=self.request.META.get("REMOTE_ADDR"),
+        )
 
     def _notify_delegate_of_delegation(self, delegation: UserDelegation) -> None:
         start = delegation.starts_at.strftime("%d %b %Y %H:%M UTC")

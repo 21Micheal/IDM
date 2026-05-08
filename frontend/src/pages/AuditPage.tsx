@@ -199,7 +199,7 @@ export default function AuditPage() {
                 </tr>
               ))}
 
-              {data?.results?.map((log: { id: string; event: string; actor_email?: string; object_type?: string; object_repr?: string; ip_address?: string; timestamp: string }) => (
+              {data?.results?.map((log: { id: string; event: string; actor_name?: string; actor_email?: string; object_type?: string; object_repr?: string; ip_address?: string; timestamp: string }) => (
                 <tr key={log.id} className="hover:bg-muted/40 transition-colors">
                   <td className="px-6 py-4">
                     <span className={`inline-flex items-center px-2.5 py-1 rounded-full text-xs font-medium ${eventColor(log.event)}`}>

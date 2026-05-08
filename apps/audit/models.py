@@ -21,6 +21,8 @@ class AuditEvent(models.TextChoices):
     WORKFLOW_RETURNED = "workflow.returned", "Workflow Step Returned"
     WORKFLOW_HELD = "workflow.held", "Workflow Step Held"
     WORKFLOW_RELEASED = "workflow.released", "Workflow Step Released"
+    WORKFLOW_DELEGATED = "workflow.delegated", "Workflow Tasks Delegated"
+    WORKFLOW_REASSIGNED = "workflow.reassigned", "Workflow Tasks Reassigned"
     DOCUMENT_ARCHIVED = "document.archived", "Document Archived"
     DOCUMENT_VERSION_UPLOADED = "document.version_uploaded", "New Version Uploaded"
     DOCUMENT_VERSION_RESTORED = "document.version_restored", "Version Restored"

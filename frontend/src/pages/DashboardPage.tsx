@@ -9,8 +9,8 @@ import {
   Filter, X,
 } from "lucide-react";
 import { Link, useNavigate } from "react-router-dom";
-import StatusBadge from "@/components/documents/StatusBadge";
 import { formatDistanceToNow } from "date-fns";
+import StatusBadge from "@/components/documents/StatusBadge";
 import { useEffect, useRef, useState, useMemo } from "react";
 import type { Document, DocumentSearchResponse, SearchHit, WorkflowTask } from "@/types";
 import { StatCard } from "@/components/dashboard/StatCard";
@@ -234,10 +234,12 @@ const EVENT_VERB_MAP: Record<string, string> = {
   "workflow.held": "put on hold",
   "workflow.released": "released",
   "workflow.assigned": "assigned",
+  "workflow.delegated": "delegated tasks to",
+  "workflow.reassigned": "reassigned tasks to",
   "workflow.completed": "completed the workflow for",
 };
 
-const VERB_RE = /(submitted|uploaded|edited|updated|created|deleted|approved|rejected|downloaded|viewed|shared|failed|logged in|logged out|signed in|signed out|enabled|disabled|returned|held|released|archived|added)\b/i;
+const VERB_RE = /(submitted|uploaded|edited|updated|created|deleted|approved|rejected|downloaded|viewed|shared|failed|logged in|logged out|signed in|signed out|enabled|disabled|returned|held|released|archived|added|delegated|reassigned)\b/i;
 
 function formatAuditSummary(event: DashboardAuditEvent): AuditSummaryParts {
   const actor = deriveActorName(event);
@@ -715,7 +717,7 @@ export default function DashboardPage() {
                                 <p
                                   className="truncate text-sm font-semibold text-foreground"
                                   dangerouslySetInnerHTML={{
-                                    __html: highlightSearchText(hit.title, dashboardSearchTerm),
+                                    __html: highlightSearchText(String(hit.title || ""), dashboardSearchTerm),
                                   }}
                                 />
                                 {hit.supplier && (
