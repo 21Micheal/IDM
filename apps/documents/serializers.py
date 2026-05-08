@@ -30,6 +30,7 @@ from django.db import transaction, IntegrityError
 from django.db.models import Q
 from django.utils.text import slugify
 import mimetypes
+from django.core.files.storage import default_storage
 from apps.search.utils import summarize_bulk_index_error
 
 PERSONAL_DOCUMENT_TYPE_CODE = "PERSONAL"
@@ -37,6 +38,14 @@ DOCUMENT_COLUMN_METADATA_KEYS = {
     "title", "supplier", "amount", "currency", "document_date", "due_date",
 }
 logger = logging.getLogger(__name__)
+
+def _find_existing_document_for_checksum(checksum: str, exclude_document_id=None):
+    if not checksum:
+        return None
+    qs = Document.objects.filter(checksum=checksum).exclude(file="")
+    if exclude_document_id:
+        qs = qs.exclude(id=exclude_document_id)
+    return qs.order_by("created_at").first()
 
 
 def _normalize_personal_tags(value) -> list[str]:
@@ -509,6 +518,7 @@ class DocumentUploadSerializer(serializers.ModelSerializer):
         tags       = validated_data.pop("tags", [])
         validated_data.pop("personal_tags", None)
         request    = self.context["request"]
+        upload     = validated_data.pop("file")
         if validated_data.get("is_self_upload"):
             validated_data["document_type"] = _get_personal_document_type()
             tags = []
@@ -517,7 +527,6 @@ class DocumentUploadSerializer(serializers.ModelSerializer):
 
         validated_data["reference_number"] = doc_type.next_reference()
 
-        upload = validated_data["file"]
         validated_data["file_name"]   = upload.name
         validated_data["file_size"]   = upload.size
         validated_data["uploaded_by"] = request.user
@@ -553,7 +562,17 @@ class DocumentUploadSerializer(serializers.ModelSerializer):
         for chunk in upload.chunks():
             sha256.update(chunk)
         upload.seek(0)
-        validated_data["checksum"] = sha256.hexdigest()
+        checksum = sha256.hexdigest()
+        validated_data["checksum"] = checksum
+
+        # Global de-duplication by checksum:
+        # keep one binary in storage, create many document records that
+        # reference the same stored file path.
+        duplicate_source = _find_existing_document_for_checksum(checksum)
+        if duplicate_source and duplicate_source.file:
+            validated_data["file"] = duplicate_source.file.name
+        else:
+            validated_data["file"] = upload
 
         try:
             doc = super().create(validated_data)
@@ -566,6 +585,30 @@ class DocumentUploadSerializer(serializers.ModelSerializer):
             doc = Document.objects.get(
                 reference_number=validated_data["reference_number"]
             )
+
+        # Second pass to close races where another upload of the same checksum
+        # commits between pre-create lookup and this row insert.
+        canonical_source = duplicate_source or _find_existing_document_for_checksum(
+            checksum,
+            exclude_document_id=doc.id,
+        )
+        if canonical_source and canonical_source.file:
+            previous_storage_name = doc.file.name
+            if previous_storage_name != canonical_source.file.name:
+                Document.objects.filter(id=doc.id).update(file=canonical_source.file.name)
+                doc.file.name = canonical_source.file.name
+                # Delete the just-uploaded blob if nothing else references it.
+                if previous_storage_name and not Document.objects.filter(file=previous_storage_name).exclude(id=doc.id).exists():
+                    try:
+                        if default_storage.exists(previous_storage_name):
+                            default_storage.delete(previous_storage_name)
+                    except Exception:
+                        logger.exception(
+                            "Failed to delete unreferenced duplicate blob %s",
+                            previous_storage_name,
+                        )
+            doc._deduplicated_from_document_id = str(canonical_source.id)
+            doc._deduplicated_from_reference = canonical_source.reference_number
 
         try:
             doc.tags.set(tags)

@@ -160,28 +160,29 @@ function formatStorageAmount(bytes: number) {
 }
 
 function getAuditPresentation(event: any) {
-  const name = String(event?.event ?? "");
-  if (name.startsWith("user.")) {
-    return { icon: Clock, label: "", tone: "bg-accent/15 text-accent border-accent/30" };
+  const name = String(event?.event ?? "").toLowerCase();
+  if (name.includes("login") || name.includes("logout") || name.startsWith("user.")) {
+    return { icon: ShieldCheck, tone: "bg-accent/15 text-accent border-accent/30" };
   }
-  if (name.startsWith("workflow.")) {
-    return { icon: GitBranch, label: "Workflow", tone: "bg-secondary text-secondary-foreground border-border" };
+  if (name.startsWith("workflow.") || name.includes("approve") || name.includes("reject") || name.includes("submit")) {
+    return { icon: GitBranch, tone: "bg-primary/10 text-primary border-primary/20" };
   }
-  if (name.includes("download")) {
-    return { icon: ArrowRight, label: "Access", tone: "bg-teal/15 text-teal border-teal/30" };
+  if (name.includes("download") || name.includes("view") || name.includes("share")) {
+    return { icon: ArrowRight, tone: "bg-teal/15 text-teal border-teal/30" };
   }
-  if (name.includes("edit") || name.includes("update") || name.includes("version")) {
-    return { icon: FileText, label: "Document", tone: "bg-primary/10 text-primary border-primary/20" };
+  if (name.includes("upload") || name.includes("create") || name.includes("edit") || name.includes("update") || name.includes("version")) {
+    return { icon: FileText, tone: "bg-primary/10 text-primary border-primary/20" };
   }
-  if (name.includes("delete") || name.includes("reject") || name.includes("fail")) {
-    return { icon: ShieldCheck, label: "Alert", tone: "bg-destructive/10 text-destructive border-destructive/30" };
+  if (name.includes("delete") || name.includes("fail") || name.includes("error")) {
+    return { icon: ShieldCheck, tone: "bg-destructive/10 text-destructive border-destructive/30" };
   }
-  return { icon: ShieldCheck, label: "Activity", tone: "bg-muted text-muted-foreground border-border" };
+  return { icon: ShieldCheck, tone: "bg-muted text-muted-foreground border-border" };
 }
 
 type AuditSummaryParts = {
-  prefix: string;
-  title: string;
+  actor: string;
+  verb: string;
+  target: string;
 };
 
 function cleanAuditTitle(rawTitle: string): string {
@@ -192,41 +193,77 @@ function cleanAuditTitle(rawTitle: string): string {
     .trim();
 }
 
+function shortenName(fullName: string): string {
+  const parts = fullName.split(/\s+/).filter(Boolean);
+  if (parts.length === 0) return fullName;
+  if (parts.length === 1) return parts[0];
+  return `${parts[0][0]}. ${parts[parts.length - 1]}`;
+}
+
+function deriveActorName(event: DashboardAuditEvent): string {
+  if (event.actor_name && event.actor_name.trim()) return shortenName(event.actor_name.trim());
+  if (event.actor_email) {
+    const local = event.actor_email.split("@")[0];
+    return shortenName(local.replace(/[._-]+/g, " "));
+  }
+  return "System";
+}
+
+// Map raw event codes to clean, human verbs.
+const EVENT_VERB_MAP: Record<string, string> = {
+  "user.login": "signed in",
+  "user.logout": "signed out",
+  "user.login_failed": "failed to sign in",
+  "user.password_changed": "changed their password",
+  "user.created": "was added",
+  "user.updated": "updated their profile",
+  "document.created": "uploaded",
+  "document.uploaded": "uploaded",
+  "document.updated": "updated",
+  "document.edited": "edited",
+  "document.deleted": "deleted",
+  "document.downloaded": "downloaded",
+  "document.viewed": "viewed",
+  "document.shared": "shared",
+  "document.archived": "archived",
+  "document.version_created": "added a new version of",
+  "workflow.submitted": "submitted",
+  "workflow.approved": "approved",
+  "workflow.rejected": "rejected",
+  "workflow.returned": "returned",
+  "workflow.held": "put on hold",
+  "workflow.released": "released",
+  "workflow.assigned": "assigned",
+  "workflow.completed": "completed the workflow for",
+};
+
+const VERB_RE = /(submitted|uploaded|edited|updated|created|deleted|approved|rejected|downloaded|viewed|shared|failed|logged in|logged out|signed in|signed out|enabled|disabled|returned|held|released|archived|added)\b/i;
+
 function formatAuditSummary(event: DashboardAuditEvent): AuditSummaryParts {
-  const summary = event.summary || event.event || "";
+  const actor = deriveActorName(event);
+  const code = String(event.event ?? "").toLowerCase();
+  const summary = (event.summary || "").trim();
   const objectTitle = cleanAuditTitle(event.object_repr || "");
 
-  if (event.event?.startsWith("user.")) {
-    return {
-      prefix: "",
-      title: summary,
-    };
+  const mappedVerb = EVENT_VERB_MAP[code];
+  if (mappedVerb) {
+    return { actor, verb: mappedVerb, target: objectTitle };
   }
 
-  const verbMatch = summary.match(/^(.+?)\s+(submitted|uploaded|edited|updated|created|deleted|approved|rejected|downloaded|viewed|shared|failed|logged|enabled|returned|held|released|archived)\b/i);
-  const verb = verbMatch?.[2]?.toLowerCase() ?? "";
-
-  if (verbMatch) {
-    const actorName = verbMatch[1].trim();
-    const nameParts = actorName.split(/\s+/);
-    const shortName = nameParts.length > 1
-      ? `${nameParts[0][0]}. ${nameParts[nameParts.length - 1]}`
-      : actorName;
-
-    const titleFromSummary = cleanAuditTitle(summary.replace(verbMatch[0], ""));
-    const title = objectTitle || titleFromSummary;
-
-    return {
-      prefix: `${shortName}${verb ? ` ${verb}` : ""}`.trim(),
-      title: title || summary,
-    };
+  if (summary) {
+    const match = summary.match(VERB_RE);
+    if (match) {
+      const verb = match[1].toLowerCase();
+      const after = summary.slice(match.index! + match[0].length).trim();
+      const target = objectTitle || cleanAuditTitle(after);
+      return { actor, verb, target };
+    }
+    return { actor, verb: "", target: objectTitle || cleanAuditTitle(summary) };
   }
 
-  const cleanedSummary = cleanAuditTitle(summary);
-  return {
-    prefix: "",
-    title: objectTitle || cleanedSummary,
-  };
+  const action = code.split(".").pop() || code;
+  const verb = action.replace(/_/g, " ").trim();
+  return { actor, verb, target: objectTitle };
 }
 
 function TaskMetaInfo({ dueAt }: { dueAt: string | null }) {
@@ -923,7 +960,7 @@ export default function DashboardPage() {
             </h2>
             <span className="rounded-full bg-teal/10 px-2 py-0.5 text-[10px] font-medium text-teal">Live</span>
           </div>
-          <p className="text-xs text-muted-foreground">Recent user actions</p>
+          <p className="text-xs text-muted-foreground">A plain-language feed of what just happened.</p>
 
           <ul className="mt-5 space-y-4 flex-1">
             {auditLoading ? (
@@ -933,13 +970,14 @@ export default function DashboardPage() {
                 const meta = getAuditPresentation(event);
                 const Icon = meta.icon;
                 const isLast = index === (recentAudit.results.length - 1);
-                const initials = (event.actor_name || event.actor_email || "S")
+                const initialsSource = event.actor_name || event.actor_email || "System";
+                const initials = initialsSource
                   .split(/[ @._-]/)
                   .filter(Boolean)
                   .slice(0, 2)
                   .map((s) => s[0]?.toUpperCase())
                   .join("") || "S";
-                const { prefix, title } = formatAuditSummary(event);
+                const { actor, verb, target } = formatAuditSummary(event);
                 return (
                   <li key={event.id} className="flex gap-3">
                     <div className="relative">
@@ -949,13 +987,18 @@ export default function DashboardPage() {
                       {!isLast && <div className="absolute left-1/2 top-8 h-full w-px -translate-x-1/2 bg-border" />}
                     </div>
                     <div className="flex-1 pb-1 min-w-0">
-                      <p className="text-sm text-foreground truncate">
-                        {meta.label ? <span className="text-muted-foreground">{meta.label.toLowerCase()} </span> : null}
-                        {prefix && <span className="text-muted-foreground">{prefix} </span>}
-                        <span className="font-medium text-foreground">{title}</span>
+                      <p className="text-sm text-foreground leading-snug">
+                        <span className="font-medium text-foreground">{actor}</span>
+                        {verb && <span className="text-muted-foreground"> {verb}</span>}
+                        {target && <span className="font-medium text-foreground"> {target}</span>}
+                        {!verb && !target && (
+                          <span className="text-muted-foreground"> performed an action</span>
+                        )}
                       </p>
-                      <div className="flex items-center gap-1.5 text-[11px] text-muted-foreground mt-0.5">
-                        <Icon className="w-3 h-3" />
+                      <div className="mt-1 flex items-center gap-1.5 text-[11px] text-muted-foreground">
+                        <span className={`inline-flex h-4 w-4 items-center justify-center rounded-full border ${meta.tone}`}>
+                          <Icon className="w-2.5 h-2.5" />
+                        </span>
                         <span>{formatDistanceToNow(new Date(event.timestamp), { addSuffix: true })}</span>
                       </div>
                     </div>

@@ -5,6 +5,7 @@ import secrets
 from urllib.parse import quote as urlquote, urlparse, urlunparse
 
 from django.core.files.base import ContentFile
+from django.core.exceptions import ValidationError
 from django.http import HttpResponse
 from django.utils import timezone
 from django.db import transaction, models
@@ -240,11 +241,62 @@ class DocumentViewSet(AuditMixin, viewsets.ModelViewSet):
         serializer.is_valid(raise_exception=True)
         doc = serializer.save()
         self._queue_office_preview(doc)
+        audit_changes = {}
+        duplicate_source_id = getattr(doc, "_deduplicated_from_document_id", None)
+        duplicate_source_reference = getattr(doc, "_deduplicated_from_reference", None)
+        if duplicate_source_id:
+            audit_changes["deduplicated"] = True
+            audit_changes["linked_to_document_id"] = duplicate_source_id
+            if duplicate_source_reference:
+                audit_changes["linked_to_reference_number"] = duplicate_source_reference
+        self.record_audit("document.uploaded", doc, audit_changes)
         doc.refresh_from_db()
         return Response(
             DocumentDetailSerializer(doc, context=self.get_serializer_context()).data,
             status=status.HTTP_201_CREATED,
         )
+
+    @action(detail=False, methods=["get"], url_path="duplicate-check")
+    def duplicate_check(self, request):
+        checksum = (request.query_params.get("checksum") or "").strip().lower()
+        current_document_id = (request.query_params.get("document_id") or "").strip()
+        if len(checksum) != 64 or any(c not in "0123456789abcdef" for c in checksum):
+            return Response(
+                {"detail": "A valid SHA-256 checksum is required."},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        identical_to_current = False
+        if current_document_id:
+            try:
+                current_doc = Document.objects.only("id", "checksum").get(id=current_document_id)
+                identical_to_current = current_doc.checksum == checksum
+            except (Document.DoesNotExist, ValidationError, ValueError):
+                identical_to_current = False
+
+        duplicate_doc = (
+            Document.objects
+            .filter(checksum=checksum)
+            .exclude(file="")
+            .select_related("uploaded_by")
+            .order_by("created_at")
+            .first()
+        )
+
+        if not duplicate_doc:
+            return Response({
+                "exists": identical_to_current,
+                "identical_to_current": identical_to_current,
+            })
+
+        return Response({
+            "exists": True,
+            "identical_to_current": identical_to_current,
+            "document_id": str(duplicate_doc.id),
+            "reference_number": duplicate_doc.reference_number,
+            "uploaded_at": duplicate_doc.created_at,
+            "uploaded_by": duplicate_doc.uploaded_by.get_full_name().strip() or duplicate_doc.uploaded_by.email,
+        })
 
     def perform_destroy(self, instance):
         instance.status = DocumentStatus.VOID

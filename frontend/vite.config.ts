@@ -71,7 +71,6 @@ export default defineConfig({
       "127.0.0.1",
       ".ngrok-free.dev",
       "superaesthetically-semicylindric-gidget.ngrok-free.dev",
-      "sb-726r3ftdtyrb.vercel.run",
     ],
     historyApiFallback: true,
     proxy: {

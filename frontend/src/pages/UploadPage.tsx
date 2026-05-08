@@ -164,6 +164,14 @@ function metadataWithoutDocumentFields(metadata: unknown) {
   }, {});
 }
 
+async function calculateFileSha256(file: File): Promise<string> {
+  const buffer = await file.arrayBuffer();
+  const digest = await crypto.subtle.digest("SHA-256", buffer);
+  return Array.from(new Uint8Array(digest))
+    .map((byte) => byte.toString(16).padStart(2, "0"))
+    .join("");
+}
+
 function getFieldErrorMessage(errors: Record<string, any>, name: string) {
   const directMessage = errors[name]?.message;
   if (directMessage) return String(directMessage);
@@ -778,6 +786,7 @@ export default function UploadPage({ scanOnly = false }: UploadPageProps) {
       "application/vnd.openxmlformats-officedocument.wordprocessingml.document": [".docx"],
       "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet": [".xlsx"],
       "application/msword": [".doc"],
+      "application/vnd.openxmlformats-officedocument.presentationml.presentation": [".pptx"],
       "image/*": [".png", ".jpg", ".jpeg", ".tiff", ".bmp", ".webp"],
     },
   });
@@ -830,7 +839,7 @@ export default function UploadPage({ scanOnly = false }: UploadPageProps) {
 
   // ── Submit handlers ─────────────────────────────────────────────────────────
 
-  const onUpload = (values: Record<string, unknown>) => {
+  const onUpload = async (values: Record<string, unknown>) => {
     if (!droppedFile) { toast.error("Please select a file"); return; }
     if (!selectedTypeId) {
       toast.error("Please select a document type");
@@ -863,6 +872,22 @@ export default function UploadPage({ scanOnly = false }: UploadPageProps) {
 
     const documentValues = documentValuesFromForm(values);
     const fallbackTitle = droppedFile.name.replace(/\.[^.]+$/, "") || "Uploaded document";
+
+    try {
+      const checksum = await calculateFileSha256(droppedFile);
+      const { data: duplicateInfo } = await documentsAPI.duplicateCheck(checksum);
+      if (duplicateInfo.exists) {
+        const proceed = window.confirm(
+          "This file already exists in the system. Do you want to link it to your workflow?"
+        );
+        if (!proceed) {
+          toast.info("Upload cancelled.");
+          return;
+        }
+      }
+    } catch {
+      // Duplicate pre-check is advisory; continue with upload if it fails.
+    }
 
     const fd = new FormData();
     fd.append("file", droppedFile);
@@ -1225,7 +1250,7 @@ export default function UploadPage({ scanOnly = false }: UploadPageProps) {
                     </p>
                     <p className="text-muted-foreground text-sm mt-1">or click to browse</p>
                     <p className="text-xs text-muted-foreground/70 mt-3">
-                      PDF · DOCX · XLSX · DOC · PNG · JPG · TIFF
+                      PDF · DOCX · XLSX · PPTX · DOC · PNG · JPG · TIFF
                     </p>
                   </>
                 )}

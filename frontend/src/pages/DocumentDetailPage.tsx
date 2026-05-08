@@ -28,7 +28,7 @@ import {
 } from "lucide-react";
 import { toast } from "@/components/ui/vault-toast";
 import { useAuthStore } from "@/store/authStore";
-import type { Document } from "@/types";
+import type { Document, MetadataField } from "@/types";
 import { clsx as cn } from "clsx";
 import { QUERY_SHORT_STALE } from "@/lib/reactQueryDefaults";
 import { formatDocumentFileType } from "@/lib/documentFormat";
@@ -40,10 +40,59 @@ import { clearDocumentVersionCache } from "@/utils/versionPreviewCache";
 
 const AUDIT_PAGE_SIZE = 5;
 
+const DOCUMENT_FIELD_KEYS = ["title", "supplier", "amount", "currency", "document_date", "due_date"] as const;
+type DocumentFieldKey = (typeof DOCUMENT_FIELD_KEYS)[number];
+const DOCUMENT_FIELD_KEY_SET = new Set<string>(DOCUMENT_FIELD_KEYS);
+
+function getMetadataFieldKey(field: MetadataField) {
+  return field.key ?? field.field_key;
+}
+
+function isDocumentFieldKey(key: string): key is DocumentFieldKey {
+  return DOCUMENT_FIELD_KEY_SET.has(key);
+}
+
 function formatBytes(b: number) {
   if (b < 1024) return `${b} B`;
   if (b < 1024 * 1024) return `${(b / 1024).toFixed(1)} KB`;
   return `${(b / 1024 / 1024).toFixed(1)} MB`;
+}
+
+function formatDateValue(value: unknown) {
+  if (!value) return "—";
+  const date = new Date(String(value));
+  return Number.isNaN(date.getTime()) ? String(value) : format(date, "dd MMM yyyy");
+}
+
+function getDocumentFieldValue(doc: Document, key: DocumentFieldKey) {
+  return doc[key];
+}
+
+function formatDocumentDetailValue(doc: Document, field: MetadataField) {
+  const key = getMetadataFieldKey(field);
+  const value = isDocumentFieldKey(key) ? getDocumentFieldValue(doc, key) : doc.metadata?.[key];
+
+  if (value === null || value === undefined || value === "") return "—";
+
+  if (field.field_type === "date") {
+    return formatDateValue(value);
+  }
+
+  if (field.field_type === "currency") {
+    const amount = Number(value);
+    return Number.isFinite(amount)
+      ? new Intl.NumberFormat("en-US", {
+          style: "currency",
+          currency: doc.currency || "USD",
+        }).format(amount)
+      : String(value);
+  }
+
+  if (field.field_type === "boolean") {
+    return value ? "Yes" : "No";
+  }
+
+  return String(value);
 }
 
 type TabId = "preview" | "versions" | "comments" | "audit" | "edit";
@@ -217,9 +266,18 @@ export default function DocumentDetailPage() {
   const isPersonal = Boolean((doc as any).is_self_upload);
   const isScanned  = Boolean((doc as any).is_scanned);
   const personalTags = doc.personal_tags ?? [];
-  const extraMetadataEntries = Object.entries(doc.metadata ?? {}).filter(
+  const personalMetadataEntries = Object.entries(doc.metadata ?? {}).filter(
     ([key]) => key !== "personal_tags",
   );
+  const documentDetailRows = isPersonal
+    ? []
+    : [...(doc.document_type?.metadata_fields ?? [])]
+        .sort((a, b) => a.order - b.order)
+        .map((field) => ({
+          key: field.id,
+          label: field.label,
+          value: formatDocumentDetailValue(doc, field),
+        }));
   const permissions = doc.permissions ?? [];
   const hasAdminAccess = Boolean(user?.has_admin_access);
   const canViewDocument = hasAdminAccess || permissions.includes("view");
@@ -347,19 +405,75 @@ export default function DocumentDetailPage() {
             </div>
           )}
 
+          {!isPersonal && documentDetailRows.length > 0 && (
+            <div className="card p-5 space-y-3">
+              <h2 className="font-semibold text-foreground text-sm">Document details</h2>
+              <dl className="space-y-2 text-sm">
+                {documentDetailRows.map(({ key, label, value }) => (
+                  <div key={key} className="flex justify-between gap-2">
+                    <dt className="text-muted-foreground">{label}</dt>
+                    <dd className="text-foreground text-right font-medium truncate max-w-[180px]">{value}</dd>
+                  </div>
+                ))}
+              </dl>
+            </div>
+          )}
+
+          {isPersonal && (
+            <div className="card p-5 space-y-4">
+              <h2 className="font-semibold text-foreground text-sm">Personal details</h2>
+
+              <div>
+                <p className="text-xs font-semibold text-muted-foreground uppercase tracking-wide mb-2">
+                  Personal tags
+                </p>
+                {personalTags.length > 0 ? (
+                  <div className="flex flex-wrap gap-2">
+                    {personalTags.map((tag) => (
+                      <span
+                        key={tag}
+                        className="badge text-xs bg-primary/10 text-primary border border-primary/20"
+                      >
+                        {tag}
+                      </span>
+                    ))}
+                  </div>
+                ) : (
+                  <p className="text-sm text-muted-foreground">—</p>
+                )}
+              </div>
+
+              <div>
+                <p className="text-xs font-semibold text-muted-foreground uppercase tracking-wide mb-2">
+                  Custom metadata
+                </p>
+                {personalMetadataEntries.length > 0 ? (
+                  <dl className="space-y-2 text-sm">
+                    {personalMetadataEntries.map(([key, val]) => (
+                      <div key={key} className="flex justify-between gap-2">
+                        <dt className="text-muted-foreground capitalize">{key.replace(/_/g, " ")}</dt>
+                        <dd className="text-foreground text-right font-medium truncate max-w-[180px]">
+                          {String(val)}
+                        </dd>
+                      </div>
+                    ))}
+                  </dl>
+                ) : (
+                  <p className="text-sm text-muted-foreground">—</p>
+                )}
+              </div>
+            </div>
+          )}
+
           <div className="card p-5 space-y-3">
-            <h2 className="font-semibold text-foreground text-sm">Document details</h2>
+            <h2 className="font-semibold text-foreground text-sm">File details</h2>
             <dl className="space-y-2 text-sm">
               {[
-                { label: "Type",    value: doc.document_type?.name },
-                { label: "Supplier", value: doc.supplier || "—" },
-                { label: "Amount",  value: doc.amount ? new Intl.NumberFormat("en-US", { style: "currency", currency: doc.currency }).format(doc.amount) : "—" },
-                { label: "Date",    value: doc.document_date ? format(new Date(doc.document_date), "dd MMM yyyy") : "—" },
-                { label: "Due date", value: doc.due_date ? format(new Date(doc.due_date), "dd MMM yyyy") : "—" },
+                { label: "Type", value: doc.document_type?.name },
                 { label: "Version", value: `v${doc.current_version}` },
-                { label: "Format",  value: formatDocumentFileType(doc.file_name, doc.file_mime_type) },
-                { label: "File",    value: doc.file_name },
-                { label: "Size",    value: formatBytes(doc.file_size) },
+                { label: "Format", value: formatDocumentFileType(doc.file_name, doc.file_mime_type) },
+                { label: "File", value: doc.file_name },
+                { label: "Size", value: formatBytes(doc.file_size) },
                 { label: "Uploaded by", value: `${doc.uploaded_by?.first_name} ${doc.uploaded_by?.last_name}` },
                 { label: "Created", value: format(new Date(doc.created_at), "dd MMM yyyy HH:mm") },
               ].map(({ label, value }) => (
@@ -385,36 +499,6 @@ export default function DocumentDetailPage() {
             <Suspense fallback={<div className="card p-5 text-sm text-muted-foreground">Loading workflow actions…</div>}>
               <WorkflowActionPanel task={activeTask} documentId={id!} />
             </Suspense>
-          )}
-
-          {extraMetadataEntries.length > 0 && (
-            <div className="card p-5 space-y-2">
-              <h2 className="font-semibold text-foreground text-sm">Additional metadata</h2>
-              <dl className="space-y-2 text-sm">
-                {extraMetadataEntries.map(([key, val]) => (
-                  <div key={key} className="flex justify-between gap-2">
-                    <dt className="text-muted-foreground capitalize">{key.replace(/_/g, " ")}</dt>
-                    <dd className="text-foreground font-medium">{String(val)}</dd>
-                  </div>
-                ))}
-              </dl>
-            </div>
-          )}
-
-          {isPersonal && personalTags.length > 0 && (
-            <div className="card p-5">
-              <h2 className="font-semibold text-foreground text-sm mb-3">Personal tags</h2>
-              <div className="flex flex-wrap gap-2">
-                {personalTags.map((tag) => (
-                  <span
-                    key={tag}
-                    className="badge text-xs bg-primary/10 text-primary border border-primary/20"
-                  >
-                    {tag}
-                  </span>
-                ))}
-              </div>
-            </div>
           )}
 
           {doc.tags?.length > 0 && (
