@@ -15,7 +15,7 @@ import {
   LayoutDashboard, FileText, Upload, Search,
   GitBranch, ShieldCheck, Settings, LogOut,
   Bell, Users, Building2, UserCircle, Shield,
-  ChevronDown, ChevronRight, Archive, ScanLine, Loader2,
+  ChevronDown, ChevronRight, Archive, ScanLine, Loader2, UserCheck, Monitor, Lock,
 } from "lucide-react";
 import { useAuthStore } from "../../store/authStore";
 import { useQuery } from "@tanstack/react-query";
@@ -79,6 +79,7 @@ const mainNav: NavEntry[] = [
       { to: "/search",                    icon: Search,   label: "Search" },
     ],
   } as NavGroup,
+  { to: "/personal-documents", icon: Lock, label: "Personal documents" } as NavLeaf,
   {
     icon: GitBranch,
     label: "Workflow",
@@ -86,6 +87,17 @@ const mainNav: NavEntry[] = [
     children: [
       { to: "/workflow",         icon: GitBranch, label: "My tasks" },
       { to: "/workflow/builder", icon: Settings,  label: "Builder", allowedRoles: ["admin"] },
+    ],
+  } as NavGroup,
+  {
+    icon: UserCircle,
+    label: "Profile",
+    prefix: "/profile",
+    children: [
+      { to: "/profile?tab=settings", icon: Settings, label: "Settings" },
+      { to: "/profile?tab=security", icon: ShieldCheck, label: "Security" },
+      { to: "/profile?tab=delegation", icon: UserCheck, label: "Delegation" },
+      { to: "/profile?tab=preferences", icon: Monitor, label: "Preferences" },
     ],
   } as NavGroup,
   { to: "/audit", icon: ShieldCheck, label: "Audit trail" } as NavLeaf,
@@ -452,6 +464,11 @@ export default function Layout() {
           className="h-14 bg-card border-b border-border flex items-center justify-end px-6 gap-3 flex-shrink-0"
           style={{ boxShadow: "var(--shadow-card)" }}
         >
+          {idleReady ? (
+            <Suspense fallback={null}>
+              <ChatLauncher />
+            </Suspense>
+          ) : null}
           <button
             onClick={() => navigate("/notifications")}
             className="relative text-muted-foreground hover:text-foreground p-1.5 rounded-md hover:bg-muted transition-colors"
@@ -474,12 +491,6 @@ export default function Layout() {
           </Suspense>
         </main>
       </div>
-
-      {idleReady ? (
-        <Suspense fallback={null}>
-          <ChatLauncher />
-        </Suspense>
-      ) : null}
     </div>
   );
 }

@@ -46,7 +46,12 @@ from __future__ import annotations
 import logging
 import re
 from datetime import datetime
-from typing import Optional
+from typing import Optional, TYPE_CHECKING
+
+from django.conf import settings
+
+if TYPE_CHECKING:
+    from apps.documents.ocr.layoutlm import PageData
 
 logger = logging.getLogger(__name__)
 
@@ -59,6 +64,7 @@ _DOCTYPE_PATTERNS: list[tuple[re.Pattern, str, str]] = [
     (re.compile(r"\bpurchase\s+order\b", re.I),                           "purchase_order", "Purchase Order"),
     (re.compile(r"\btax\s+invoice\b", re.I),                              "invoice",        "Tax Invoice"),
     (re.compile(r"\binvoice\b", re.I),                                    "invoice",        "Invoice"),
+    (re.compile(r"\b(?:balance\s+due|payment\s+due|payment\s+pending)\b", re.I), "invoice", "Invoice"),
     (re.compile(r"\b(?:service\s+agreement|service\s+contract)\b", re.I), "contract",       "Service Agreement"),
     (re.compile(r"\bcontract\b", re.I),                                   "contract",       "Contract"),
     (re.compile(r"\bagreement\b", re.I),                                  "contract",       "Agreement"),
@@ -161,6 +167,38 @@ def _find_first_date(text: str, label_pattern: str) -> Optional[str]:
     return _parse_date(m.group(1)) if m else None
 
 
+def _find_nearby_label_date(lines: list[str], label_pattern: str, lookahead: int = 2) -> Optional[str]:
+    """
+    Find a date near a label in OCR line output.
+
+    Scans often split a header label and value across lines:
+        PAYMENT DUE
+        ... May 22, 2026
+    Regex over the full text is too greedy/noisy for that shape, so this
+    keeps the search local to the label line and the next couple of lines.
+    """
+    label_re = re.compile(label_pattern, re.I)
+    date_re = re.compile(_DATE_VALUE_PAT, re.I)
+
+    for i, line in enumerate(lines):
+        if not label_re.search(line):
+            continue
+
+        candidates: list[str] = []
+        for candidate_line in lines[i : i + lookahead + 1]:
+            for m in date_re.finditer(candidate_line):
+                parsed = _parse_date(m.group(1))
+                if parsed:
+                    candidates.append(parsed)
+
+        if candidates:
+            prefer_last = "due" in label_re.pattern.lower()
+            if prefer_last and re.search(r"\bdue\b", line, re.I):
+                return candidates[-1]
+            return candidates[0]
+    return None
+
+
 # ── Amount / currency extraction ───────────────────────────────────────────────
 
 def _extract_amounts(text: str) -> list[tuple[float, str]]:
@@ -253,7 +291,7 @@ _REF_VALUE_PAT = (
 
 _REF_LABELS: dict[str, re.Pattern] = {
     "invoice":        re.compile(
-        r"(?:invoice\s*(?:no\.?|num(?:ber)?|#)|inv\.?\s*(?:no\.?|#)?)" + _SEP + _REF_VALUE_PAT,
+        r"(?:invoice\s*(?:details?|no\.?|num(?:ber)?|#)|inv\.?\s*(?:no\.?|#)?)" + _SEP + r"#?" + _REF_VALUE_PAT,
         re.I | re.M,
     ),
     "purchase_order": re.compile(
@@ -299,32 +337,70 @@ def _extract_reference(text: str, doc_type: str) -> Optional[str]:
             if val.upper() in _REF_REJECT or len(val) < 2:
                 continue
             return val
+
+    # Common footer/header phrasing: "Please use NX-88291-B as the reference".
+    footer_ref = re.search(
+        r"\buse\s+#?\s*" + _REF_VALUE_PAT + r"\s+as\s+(?:the\s+)?ref(?:erence)?\b",
+        text,
+        re.I,
+    )
+    if footer_ref:
+        return footer_ref.group(1).strip()
+
+    # Header fallback for designs that show only "#NX-88291-B" beside invoice
+    # details. Restrict to the top few lines so table SKU codes do not win.
+    top_text = "\n".join([ln.strip() for ln in text.splitlines() if ln.strip()][:6])
+    header_ref = re.search(r"#\s*" + _REF_VALUE_PAT, top_text, re.I)
+    if header_ref:
+        return header_ref.group(1).strip()
     return None
 
 
 # ── Supplier extraction ────────────────────────────────────────────────────────
 
 _SUPPLIER_INLINE_RE = re.compile(
-    r"(?:vendor|supplier|service\s*provider|sold\s*by|issued\s*by"
-    r"|vendor\s*name|supplier\s*name|company\s*name|payee\s*name"
-    r"|billed?\s*(?:from|by)|business\s*name)"   # "from", "company", "firm" removed — too generic
+    r"(?:"
+    r"vendor|supplier|service\s*provider|sold\s*by|issued\s*by"
+    r"|vendor\s*name|supplier\s*name|company\s*name"
+    r"|billed?\s*(?:from|by)|business\s*name"
+    # Extended for East Africa + general financial docs
+    r"|payee(?:\s*name)?|pay(?:able)?\s*to|in\s*favour\s*of"
+    r"|beneficiary(?:\s*name)?"
+    r"|sold\s*to|shipped?\s*(?:by|from)"
+    r"|prepared\s*by|raised\s*by"
+    r"|party\s*(?:a|one|1)"          # contracts often use "Party A: ..."
+    r"|contractor|consultant|service\s*provider"
+    r"|client\s*name|customer\s*name" # on statements the issuer labels the recipient
+    r")"
     r"\s*[:\-]\s*(.+)",
     re.I,
 )
+
 _SUPPLIER_HEADER_RE = re.compile(
     r"^(?:supplier|vendor|service\s*provider)\s*(?:details?|info(?:rmation)?|address)?$",
+    re.I,
+)
+_SUPPLIER_HEADER_WITH_TRAILING_LABEL_RE = re.compile(
+    r"\b(?:supplier|vendor|service\s*provider)\b.*\b(?:account\s*code|invoice\s*date|due\s*date|order\s*ref)\b",
+    re.I,
+)
+_COMPACT_SUPPLIER_ROW_RE = re.compile(
+    r"^(?P<supplier>.+?)\s+(?P<account>[A-Z0-9][A-Z0-9\-_/]{2,40})\s+"
+    r"(?P<date1>\d{1,2}\s+[A-Za-z]{3,9}\s+\d{4}|\d{1,2}[/-]\d{1,2}[/-]\d{2,4}|[A-Za-z]{3,9}\s+\d{1,2},?\s+\d{4})\s+"
+    r"(?P<date2>\d{1,2}\s+[A-Za-z]{3,9}\s+\d{4}|\d{1,2}[/-]\d{1,2}[/-]\d{2,4}|[A-Za-z]{3,9}\s+\d{1,2},?\s+\d{4})$",
     re.I,
 )
 
 # Lines to reject as supplier candidates regardless of which strategy matched them
 _SUPPLIER_REJECT_RE = re.compile(
-    r"@"                                      # email address
-    r"|\b(?:lpo|p\.?o\.?\s*(?:box|no))\b"   # P.O. Box or LPO reference in same line
-    r"|\b(?:tel|phone|fax|mobile|cell)\b"    # contact numbers
-    r"|\bwww\."                              # website URL
-    r"|\d{6,}"                              # long numeric strings (account/ref numbers)
-    r"|\bno\.?\s*[:\-]"                     # "No:" labels (invoice no, LPO no, etc.)
-    ,
+    (
+        r"@"                                     # email address
+        r"|\b(?:l\.?p\.?o|p\.?o\.?\s*(?:box))\b"  # P.O. Box or LPO (not "PO no")
+        r"|\b(?:tel|phone|fax|mobile|cell)\b"   # contact numbers
+        r"|\bwww\."                              # website URL
+        r"|\d{7,}"                               # very long numeric strings (>=7 digits)
+        r"|\bno\.?\s*[:\-]\s*\d"                 # "No.: 12345" style reference lines
+    ),
     re.I,
 )
 
@@ -341,6 +417,7 @@ _ENTITY_SUFFIX_RE = re.compile(
 def _clean_inline_value(value: str, max_len: int = 120) -> str:
     """Trim common OCR bleed from labelled values on crowded invoice lines."""
     value = re.sub(r"\s+", " ", value).strip(" \t:-|")
+    # Split on tabs, multiple spaces, pipes, or common field delimiters
     value = re.split(
         r"\s{2,}|\t|\||\b(?:tel|phone|mobile|email|e-?mail|www\.|p\.?\s*o\.?\s*box|"
         r"invoice\s*(?:no|date)|account\s*(?:code|no)|due\s*date|date)\b",
@@ -348,7 +425,28 @@ def _clean_inline_value(value: str, max_len: int = 120) -> str:
         maxsplit=1,
         flags=re.I,
     )[0]
-    return value.strip(" \t:-,|")[:max_len]
+    # Remove trailing generic business terms that commonly appear after supplier names
+    value = re.sub(
+        r"\s+(?:payment\s+pending|pending\s+payment|payment\s+due|due|pending|payable)\s*$",
+        "",
+        value,
+        flags=re.I,
+    )
+    value = re.split(
+        r"\b(?:\d{1,2}[/-]\d{1,2}[/-]\d{2,4}"
+        r"|(?:Jan(?:uary)?|Feb(?:ruary)?|Mar(?:ch)?|Apr(?:il)?|May|Jun(?:e)?"
+        r"|Jul(?:y)?|Aug(?:ust)?|Sep(?:tember)?|Oct(?:ober)?|Nov(?:ember)?|Dec(?:ember)?)"
+        r"\s+\d{1,2},?\s+\d{4}"
+        r"|\d{1,2}\s+(?:Jan(?:uary)?|Feb(?:ruary)?|Mar(?:ch)?|Apr(?:il)?|May|Jun(?:e)?"
+        r"|Jul(?:y)?|Aug(?:ust)?|Sep(?:tember)?|Oct(?:ober)?|Nov(?:ember)?|Dec(?:ember)?)\s+\d{4})\b",
+        value,
+        maxsplit=1,
+        flags=re.I,
+    )[0].strip()
+    m_entity = _ENTITY_SUFFIX_RE.search(value)
+    if m_entity:
+        value = value[:m_entity.end()].strip(" \t:-,|")
+    return value.strip(" \t:-,|.")[:max_len]
 
 
 def _extract_supplier(lines: list[str]) -> Optional[str]:
@@ -378,7 +476,27 @@ def _extract_supplier(lines: list[str]) -> Optional[str]:
             if _is_valid(candidate):
                 return candidate
 
-    # Priority 3: positional — first valid line at the top of the document,
+    # Priority 2b: OCR often merges top labels into one line:
+    # "SUPPLIER ACCOUNT CODE LOG-404", then the supplier value appears next line.
+    for i, line in enumerate(lines):
+        if _SUPPLIER_HEADER_WITH_TRAILING_LABEL_RE.search(line) and i + 1 < len(lines):
+            candidate = _extract_grid_field(
+                line,
+                lines[i + 1],
+                re.compile(r"\b(?:supplier|vendor|payee|billed?\s*to|issued\s*by)\b", re.I),
+            )
+            if candidate and _is_valid(candidate):
+                return candidate
+
+            compact = _COMPACT_SUPPLIER_ROW_RE.match(lines[i + 1].strip())
+            if compact:
+                candidate = _clean_inline_value(compact.group("supplier"))
+                if _is_valid(candidate):
+                    return candidate
+
+            candidate = _clean_inline_value(lines[i + 1])
+            if _is_valid(candidate):
+                return candidate
     # before the "Bill To / Billed To" boundary and before the document-type heading.
     # On most invoices/receipts the issuer's name is the very first line.
     _DOCTYPE_HEADING_RE = re.compile(
@@ -393,10 +511,13 @@ def _extract_supplier(lines: list[str]) -> Optional[str]:
             break  # stop at the document-type heading (e.g. "TAX INVOICE")
         if _BILL_TO_RE.search(line):
             break  # stop at "Bill To"
-        if _is_valid(line) and len(line) >= 5:
+        # Handle tab-separated lines - take the first part as potential supplier
+        tab_parts = re.split(r"\t", line, maxsplit=1)
+        first_part = _clean_inline_value(tab_parts[0].strip())
+        if _is_valid(first_part) and len(first_part) >= 5:
             # Prefer lines that look like company names: not pure address lines
-            if not re.match(r"^(?:p\.?\s*o\.?\s*box|po\s+box|\d+\s+\w)", line, re.I):
-                return line.strip()[:120]
+            if not re.match(r"^(?:p\.?\s*o\.?\s*box|po\s+box|\d+\s+\w)", first_part, re.I):
+                return first_part[:120]
 
     # Priority 4: first line with a legal entity suffix that passes rejection checks.
     # IMPORTANT: extract only the portion up to and including the suffix — the same
@@ -448,7 +569,9 @@ def _extract_tax_and_subtotal(text: str) -> tuple[Optional[str], Optional[str]]:
 _SKIP_TITLE_RE = re.compile(
     r"^\$|subtotal|^tax\b|total|^\d[\d\s,./]*$"
     r"|@|\bsuite\b|\bblvd\b|\bstreet\b|\bave(?:nue)?\b|\broad\b"
-    r"|\bpo\s+box\b|\bzip\b|\bpostal\b",
+    r"|\bpo\s+box\b|\bzip\b|\bpostal\b"
+    r"|\bpayment\s+due\b|\bbalance\s+due\b|\bissued\b|\bterms\b|\bdue\b"
+    r"|\bpayable\b|\breceivable\b|\bnote\b|\bgoods\b",
     re.I,
 )
 _LABEL_LINE_RE = re.compile(r"^[A-Za-z][A-Za-z0-9 /.\-]{1,40}:\s+\S")
@@ -476,6 +599,8 @@ def _extract_title(
     # Prefer the actual document heading over the first visible header line.
     for line in lines[:18]:
         lower_line = line.lower()
+        if supplier and re.search(r"\bsupplier\s+invoice\b", line, re.I):
+            return supplier[:120].rstrip(".")
         if (
             ("account" in lower_line or "supplier" in lower_line or "vendor" in lower_line)
             and ("date" in lower_line or "code" in lower_line or "\t" in line or "|" in line)
@@ -501,10 +626,21 @@ def _extract_title(
         if explicit:
             return explicit
 
+    # For invoices/forms the safest title is a composed document heading. Do
+    # this before the broad "first reasonable line" fallback, otherwise table
+    # item rows can become the title when OCR misses the visible heading.
+    if doc_type_raw and (reference or supplier):
+        doc_type_clean = re.sub(r"\s+", " ", doc_type_raw.strip()).title()
+        if reference:
+            return f"{doc_type_clean} {reference}"[:120]
+        return f"{doc_type_clean} - {supplier}"[:120]
+
+    # If no explicit title found, try to find a reasonable line that's not an address
     for line in lines:
         if len(line) < 4:
             continue
-        if supplier and line.strip().lower() == supplier.strip().lower():
+        # Skip if the line contains the supplier name (even partially)
+        if supplier and supplier.lower() in line.lower():
             continue
         if re.match(r"^[\d\W]+$", line):
             continue
@@ -517,7 +653,31 @@ def _extract_title(
             line, re.I,
         ):
             continue
+        # Additional check: skip lines that look like company names with legal entities
+        if re.search(r"\b(?:Ltd\.?|Limited|Inc\.?|Corp\.?|GmbH|LLC|PLC)\b", line, re.I):
+            continue
+        # Skip lines with tab characters (likely table headers)
+        if "\t" in line:
+            continue
+        # Skip addresses (lines that look like addresses)
+        if re.search(r"\b(?:street|road|avenue|blvd|suite|po\s+box|westlands|nairobi|karen|kilimani)\b", line, re.I):
+            continue
+        # Skip likely line-item rows: they often contain qty/rate/amount columns.
+        if re.search(r"\b(?:sku|qty|rate|amount)\b", line, re.I):
+            continue
+        if len(re.findall(r"\d[\d,]*(?:\.\d+)?", line)) >= 2:
+            continue
         return line[:120]
+    
+    # If still no good title found, generate a default one
+    if doc_type_raw:
+        doc_type_clean = re.sub(r"\s+", " ", doc_type_raw.strip()).title()
+        if reference:
+            return f"{doc_type_clean} {reference}"[:120]
+        if supplier:
+            return f"{doc_type_clean} - {supplier}"[:120]
+        return doc_type_clean[:120]
+    
     return None
 
 
@@ -580,7 +740,7 @@ def _extract_code_from_header_grid(lines: list[str], label_re: re.Pattern) -> Op
         if len(headers) < 2:
             continue
 
-        values = _split_cells(lines[i + 1])
+        values = [_clean_inline_value(cell) for cell in _split_cells(lines[i + 1])]
         if len(values) < 2:
             continue
 
@@ -590,13 +750,50 @@ def _extract_code_from_header_grid(lines: list[str], label_re: re.Pattern) -> Op
             if not label_re.match(header):
                 continue
 
-            candidate = values[idx].strip()
+            candidate = values[idx]
             # If OCR merged the value with a following cell, keep the first code-like token.
             token = re.split(r"\s{2,}|\t|\|", candidate, maxsplit=1)[0].strip()
             token = re.sub(r"^[^\w]+|[^\w\-/]+$", "", token)
             if _CODE_VALUE_RE.match(token) and token.upper() not in _REF_REJECT:
                 return token
     return None
+
+
+def _extract_grid_field(line: str, next_line: str, field_re: re.Pattern) -> Optional[str]:
+    """Map a header row to the next line's values and return the matching field value."""
+    headers = [_normalise_label_cell(cell) for cell in _split_cells(line)]
+    values = [_clean_inline_value(cell) for cell in _split_cells(next_line)]
+    for idx, header in enumerate(headers):
+        if idx >= len(values):
+            continue
+        if field_re.search(header):
+            return values[idx]
+    return None
+
+
+def _extract_grid_dates(header_line: str, value_line: str) -> dict[str, Optional[str]]:
+    """Extract invoice and due dates from a two-row header/value grid."""
+    headers = [_normalise_label_cell(cell) for cell in _split_cells(header_line)]
+    values = [_clean_inline_value(cell) for cell in _split_cells(value_line)]
+    dates: dict[str, Optional[str]] = {"document_date": None, "due_date": None}
+
+    for idx, header in enumerate(headers):
+        if idx >= len(values):
+            continue
+        value = values[idx]
+        if not value:
+            continue
+
+        if re.search(r"\b(?:invoice|issue(?:d)?|document|date)\s*date\b|\bdate\s*issued\b", header, re.I):
+            parsed = _parse_date(value)
+            if parsed:
+                dates["document_date"] = parsed
+        elif re.search(r"\b(?:due|payment\s*due|settle(?:ment)?|payment)\s*date\b", header, re.I):
+            parsed = _parse_date(value)
+            if parsed:
+                dates["due_date"] = parsed
+
+    return dates
 
 
 def _extract_account_code(text: str, lines: list[str]) -> Optional[str]:
@@ -609,6 +806,32 @@ def _extract_account_code(text: str, lines: list[str]) -> Optional[str]:
     )
     if labelled:
         return labelled
+
+    # OCR can drop separators and return "ACCOUNT CODE LOG-DIST-404" inline.
+    inline = _first_match(
+        text,
+        r"(?:a/?c\s*(?:code|no\.?|number)?|account\s*(?:code|no\.?|number|#)?"
+        r"|acct\.?\s*(?:code|no\.?|number|#)?|g/?l\s*(?:code|no\.?|number)?"
+        r"|ledger\s*code|billing\s*code|client\s*(?:code|no\.?|id)"
+        r"|customer\s*(?:code|no\.?|id)|project\s*code)"
+        r"(?:\s*[:\-]\s*|\s+)"
+        r"([A-Z0-9][A-Z0-9\-_/]{1,40})"
+        r"(?=\s+(?:invoice|due|order|ref|date)\b|$)",
+    )
+    if inline and _CODE_VALUE_RE.match(inline) and inline.upper() not in _REF_REJECT:
+        return inline
+
+    for i, line in enumerate(lines[:-1]):
+        if re.search(r"\bsupplier\b", line, re.I) and re.search(r"\baccount\s*code\b", line, re.I):
+            grid = _extract_code_from_header_grid([line, lines[i + 1]], _ACCOUNT_LABEL_RE)
+            if grid:
+                return grid
+
+            compact = _COMPACT_SUPPLIER_ROW_RE.match(lines[i + 1].strip())
+            if compact:
+                token = compact.group("account").strip()
+                if _CODE_VALUE_RE.match(token) and token.upper() not in _REF_REJECT:
+                    return token
 
     grid = _extract_code_from_header_grid(lines, _ACCOUNT_LABEL_RE)
     if grid:
@@ -750,9 +973,16 @@ class DocumentFieldExtractor:
         doc_date = _find_first_date(
             text,
             r"(?:invoice\s*date|bill\s*date|document\s*date|issue(?:d)?\s*date"
-            r"|date\s*of\s*issue|p\.?o\.?\s*date|order\s*date|receipt\s*date"
+            r"|issued|date\s*of\s*issue|p\.?o\.?\s*date|order\s*date|receipt\s*date"
             r"|request\s*date|voucher\s*date)",   # "date" alone removed here
         )
+        if not doc_date:
+            doc_date = _find_nearby_label_date(
+                self.lines,
+                r"(?:invoice\s*date|bill\s*date|document\s*date|issue(?:d)?\s*date"
+                r"|issued|date\s*of\s*issue)",
+                lookahead=1,
+            )
         # Fallback: bare "Date:" only if it appears BEFORE any "Due Date:" label
         if not doc_date:
             bare_m = re.search(
@@ -777,8 +1007,38 @@ class DocumentFieldExtractor:
             r"(?:due\s*date|payment\s*(?:due\s*)?date|pay(?:ment)?\s*by"
             r"|payment\s*due(?:\s*date)?|settle(?:ment)?\s*date)",
         )
+        if not due_date:
+            due_date = _find_nearby_label_date(
+                self.lines,
+                r"(?:due\s*date|payment\s*(?:due\s*)?date|payment\s*due|pay(?:ment)?\s*by)",
+                lookahead=2,
+            )
         if due_date:
             out["due_date"] = due_date
+
+        # Compact 2-line header fallback:
+        # "SUPPLIER ACCOUNT CODE INVOICE DATE DUE DATE"
+        # "Titan Logistics GmbH. SUPP-7721-DE April 28, 2026 May 12, 2026"
+        if "document_date" not in out or "due_date" not in out:
+            for i, line in enumerate(self.lines[:-1]):
+                if re.search(r"\bsupplier\b", line, re.I) and re.search(r"\baccount\s*code\b", line, re.I):
+                    compact = _COMPACT_SUPPLIER_ROW_RE.match(self.lines[i + 1].strip())
+                    if compact:
+                        d1 = _parse_date(compact.group("date1"))
+                        d2 = _parse_date(compact.group("date2"))
+                        if d1 and "document_date" not in out:
+                            out["document_date"] = d1
+                        if d2 and "due_date" not in out:
+                            out["due_date"] = d2
+                        break
+
+                    dates = _extract_grid_dates(line, self.lines[i + 1])
+                    if dates.get("document_date") and "document_date" not in out:
+                        out["document_date"] = dates["document_date"]
+                    if dates.get("due_date") and "due_date" not in out:
+                        out["due_date"] = dates["due_date"]
+                    if dates.get("document_date") or dates.get("due_date"):
+                        break
 
         # ── Effective / start date (contracts) ────────────────────────────
         eff = _find_first_date(
@@ -1166,21 +1426,51 @@ class DocumentFieldExtractor:
         if vat_m:
             out["vat_number"] = vat_m.group(1).strip()
 
-
 # ── Public convenience function ────────────────────────────────────────────────
 
 
-def extract_document_fields(ocr_text: str) -> dict:
+def extract_document_fields(ocr_text: str, pages_data: list[PageData] = None) -> dict:
     """
-    Entry point called by the Celery task.
-
-    Returns the suggestions dict populated by DocumentFieldExtractor.
+    Run regex extraction → LayoutLMv3 layout-aware extraction → merge.
     """
     if not ocr_text or not ocr_text.strip():
         return {}
+
+    # ── Tier 1: Regex + heuristics (highest precision for labelled fields) ─
     try:
         extractor = DocumentFieldExtractor(ocr_text)
-        return extractor.extract()
+        regex_results = extractor.extract()
+        doc_type = extractor.doc_type
     except Exception:
-        logger.exception("extract_document_fields: unexpected error")
-        return {}
+        logger.exception("extract_document_fields: regex extractor failed")
+        regex_results = {}
+        doc_type = "general"
+
+    # ── Tier 2: LayoutLMv3 (fills gaps where regex misses visual fields) ──
+    layoutlm_results = {}
+    if pages_data:
+        try:
+            from apps.documents.ocr.layoutlm import extract_with_layoutlm
+            layoutlm_results = extract_with_layoutlm(pages_data, doc_type=doc_type)
+        except Exception:
+            logger.exception("extract_document_fields: LayoutLMv3 failed")
+
+    # ── Merge strategy ───────────────────────────────────────────────────
+    # Default: LayoutLMv3 fills missing fields only (non-destructive).
+    # Set LAYOUTLMV3_OVERRIDE_REGEX=True to let LayoutLM win on conflict.
+    merged = dict(regex_results)
+
+    for key, value in layoutlm_results.items():
+        if key not in merged or not merged.get(key):
+            merged[key] = value
+
+    if getattr(settings, "LAYOUTLMV3_OVERRIDE_REGEX", False):
+        for key, value in layoutlm_results.items():
+            if value and len(str(value)) > 1:
+                merged[key] = value
+
+    # Ensure document_type is preserved from regex classifier
+    if "document_type" in regex_results and regex_results["document_type"]:
+        merged["document_type"] = regex_results["document_type"]
+
+    return {k: v for k, v in merged.items() if v is not None and v != ""}

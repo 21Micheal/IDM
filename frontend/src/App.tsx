@@ -117,6 +117,11 @@ const ROUTE_FALLBACK_CONTENT = [
     description: "Loading your account safeguards for this required step.",
   },
   {
+    match: (pathname: string) => pathname.startsWith("/personal-documents"),
+    title: "Preparing personal documents",
+    description: "Loading your private uploads, tags, and personal notes.",
+  },
+  {
     match: (pathname: string) => pathname.startsWith("/documents/upload"),
     title: "Preparing upload workspace",
     description: "Loading document intake and metadata capture tools.",
@@ -229,6 +234,7 @@ export default function App() {
 
               {/* Documents */}
               <Route path="documents"        element={<DocumentsPage />} />
+              <Route path="personal-documents" element={<DocumentsPage personalOnly />} />
               <Route path="documents/upload" element={<UploadPage />} />
               <Route path="documents/scan"   element={<UploadPage scanOnly />} />
               <Route path="documents/:id"    element={<DocumentDetailPage />} />

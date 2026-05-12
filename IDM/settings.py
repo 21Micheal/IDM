@@ -199,10 +199,37 @@ ELASTICSEARCH_DSL = {
 }
 
 # ── OCR ───────────────────────────────────────────────────────────────────────
-OCR_ENGINE = env("OCR_ENGINE", default="tesseract")
+OCR_ENGINE = env("OCR_ENGINE", default="paddle")
 TESSERACT_CMD = env("TESSERACT_CMD", default="")
 OCR_LANGUAGES = env("OCR_LANGUAGES", default="eng")
 OCR_DPI = env.int("OCR_DPI", default=300)
+OCR_CONFIDENCE_THRESHOLD = env.int("OCR_CONFIDENCE_THRESHOLD", default=40)
+OCR_QUALITY_RATIO = env.float("OCR_QUALITY_RATIO", default=0.50)
+# If OCR remains pending/processing beyond this age, treat it as stale/failed.
+OCR_PROCESSING_STALE_SECONDS = env.int("OCR_PROCESSING_STALE_SECONDS", default=300)
+
+# PaddleOCR runtime settings
+OCR_PADDLE_LANG = env("OCR_PADDLE_LANG", default="en")
+OCR_PADDLE_USE_GPU = env.bool("OCR_PADDLE_USE_GPU", default=False)
+OCR_PADDLE_USE_ANGLE_CLS = env.bool("OCR_PADDLE_USE_ANGLE_CLS", default=True)
+
+# spaCy NER post-processing settings
+OCR_SPACY_ENABLED = env.bool("OCR_SPACY_ENABLED", default=True)
+OCR_SPACY_MODEL = env("OCR_SPACY_MODEL", default="en_core_web_sm")
+
+# ── LayoutLMv3 ───────────────────────────────────────────────────────────────
+LAYOUTLMV3_ENABLED = env.bool("LAYOUTLMV3_ENABLED", default=True)
+LAYOUTLMV3_MODEL = env(
+    "LAYOUTLMV3_MODEL",
+    default="Theivaprakasham/layoutlmv3-finetuned-invoice",
+)
+LAYOUTLMV3_DEVICE = env("LAYOUTLMV3_DEVICE", default="auto")   # auto | cpu | cuda
+LAYOUTLMV3_CONFIDENCE = env.float("LAYOUTLMV3_CONFIDENCE", default=0.85)
+LAYOUTLMV3_MAX_LENGTH = env.int("LAYOUTLMV3_MAX_LENGTH", default=512)
+LAYOUTLMV3_OVERRIDE_REGEX = env.bool("LAYOUTLMV3_OVERRIDE_REGEX", default=False)
+LAYOUTLMV3_COMPILE = env.bool("LAYOUTLMV3_COMPILE", default=False)   # PyTorch 2 only
+# Admin-defined label mappings: {"invoice": {"CUSTOM_LABEL": "my_field"}}
+LAYOUTLMV3_FIELD_MAP = env.json("LAYOUTLMV3_FIELD_MAP", default={})
 
 LIBREOFFICE_CMD = env("LIBREOFFICE_CMD", default="libreoffice")
 # Backward-compatible alias used by tasks.py

@@ -216,10 +216,6 @@ export default function MetadataEditPanel({ document: doc, onClose }: Props) {
     const personalTags = (values.personal_tags ?? [])
       .map((tag) => tag.value.trim())
       .filter(Boolean);
-    if (doc.is_self_upload && personalTags.length === 0) {
-      toast.error("Please add at least one personal tag.");
-      return;
-    }
     const personalMetadata = (values.personal_metadata_fields ?? [])
       .map((item) => ({ key: item.key.trim(), value: item.value.trim() }))
       .filter((item) => item.key.length > 0 && item.value.length > 0)
@@ -269,16 +265,12 @@ export default function MetadataEditPanel({ document: doc, onClose }: Props) {
       <form onSubmit={handleSubmit(onSubmit)} className="space-y-4">
         {doc.is_self_upload && (
           <div>
-            <label className="label">
-              Personal tags <span className="text-red-500">*</span>
-            </label>
+            <label className="label">Personal tags</label>
             <div className="space-y-2">
               {personalTagFields.map((field, index) => (
                 <div key={field.id} className="flex items-center gap-2">
                   <input
-                    {...register(`personal_tags.${index}.value` as const, {
-                      required: index === 0 ? "Personal tags are required" : false,
-                    })}
+                    {...register(`personal_tags.${index}.value` as const)}
                     className="input flex-1"
                     placeholder={`Tag ${index + 1}`}
                   />
@@ -302,7 +294,7 @@ export default function MetadataEditPanel({ document: doc, onClose }: Props) {
               <Plus className="w-4 h-4" /> Add another tag
             </button>
             <p className="text-xs text-muted-foreground mt-1">
-              Add as many tags as you need for this personal document.
+              Optional. Add tags only when they help you organize this document.
             </p>
           </div>
         )}

@@ -334,7 +334,7 @@ export default function FolderPage() {
   // Flat folder list for breadcrumb traversal
   useQuery({
     queryKey: ["folders"],
-    queryFn: () => foldersAPI.list().then((r) => r.data.results ?? r.data),
+    queryFn: () => foldersAPI.list().then((r) => Array.isArray(r.data) ? r.data : []),
     staleTime: 60_000,
   });
 

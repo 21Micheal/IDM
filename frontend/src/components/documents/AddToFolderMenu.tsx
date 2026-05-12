@@ -18,6 +18,7 @@ import type { DocumentFolder } from "../../types";
 
 interface Props {
   documentId: string;
+  showLabel?: boolean;
   className?: string;
 }
 
@@ -25,14 +26,14 @@ interface FlatFolderWithMembership extends DocumentFolder {
   isMember: boolean;
 }
 
-export function AddToFolderMenu({ documentId, className }: Props) {
+export function AddToFolderMenu({ documentId, showLabel = false, className }: Props) {
   const [open, setOpen] = useState(false);
   const qc              = useQueryClient();
 
   // Flat folder list with document_count
   const { data: folders = [] } = useQuery<DocumentFolder[]>({
     queryKey: ["folders"],
-    queryFn: () => foldersAPI.list().then((r) => r.data.results ?? r.data),
+    queryFn: () => foldersAPI.list().then((r) => Array.isArray(r.data) ? r.data : []),
     staleTime: 60_000,
     enabled: open,
   });
@@ -109,11 +110,18 @@ export function AddToFolderMenu({ documentId, className }: Props) {
     <div className={clsx("relative", className)}>
       <button
         type="button"
-        title="Add to folder"
+        title="Organize in folders"
+        aria-label="Organize document in folders"
         onClick={(e) => { e.stopPropagation(); setOpen((o) => !o); }}
-        className="p-1.5 rounded-lg text-muted-foreground hover:text-foreground hover:bg-muted transition-colors"
+        className={clsx(
+          showLabel
+            ? "inline-flex items-center gap-2 rounded-lg border border-border bg-card px-3 py-2 text-sm font-medium"
+            : "p-1.5 rounded-lg",
+          "text-muted-foreground hover:text-foreground hover:bg-muted transition-colors",
+        )}
       >
         <FolderPlus className="w-4 h-4" />
+        {showLabel && <span>Organize in folders</span>}
       </button>
 
       {open && (
@@ -121,7 +129,10 @@ export function AddToFolderMenu({ documentId, className }: Props) {
           <div className="fixed inset-0 z-40" onClick={() => setOpen(false)} />
           <div className="absolute right-0 top-9 z-50 w-56 rounded-xl border border-border bg-card shadow-xl overflow-hidden">
             <div className="px-3 py-2.5 border-b border-border">
-              <p className="text-xs font-semibold text-foreground">Add to folder</p>
+              <p className="text-xs font-semibold text-foreground">Organize in folders</p>
+              <p className="mt-0.5 text-[11px] text-muted-foreground">
+                Select a folder to add or remove this document.
+              </p>
             </div>
 
             {folders.length === 0 ? (

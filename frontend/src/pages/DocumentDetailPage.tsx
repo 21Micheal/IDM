@@ -333,9 +333,9 @@ export default function DocumentDetailPage() {
           <div className="flex items-center gap-3 flex-wrap">
             <h1 className="text-xl font-bold text-foreground">{doc.title}</h1>
             <StatusBadge status={doc.status} />
-            <div className="flex items-center gap-1">
-              <StarButton documentId={doc.id} />
-              <AddToFolderMenu documentId={doc.id} />
+            <div className="flex items-center gap-2">
+              <StarButton documentId={doc.id} showLabel />
+              <AddToFolderMenu documentId={doc.id} showLabel />
             </div>
             {isPersonal && (
             <span className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full text-xs font-semibold bg-primary/10 text-primary border border-primary/20">
@@ -484,13 +484,30 @@ export default function DocumentDetailPage() {
               ))}
 
               {isScanned && (
-                <div className="flex justify-between gap-2 pt-2 border-t border-border">
-                  <dt className="text-muted-foreground">OCR status</dt>
-                  <dd>
-                    <OcrStatusBadge status={ocrStatus as any} showDone />
-                    {!ocrStatus && <span className="text-muted-foreground text-xs">—</span>}
-                  </dd>
-                </div>
+                <>
+                  <div className="flex justify-between gap-2 pt-2 border-t border-border">
+                    <dt className="text-muted-foreground">OCR status</dt>
+                    <dd>
+                      <OcrStatusBadge status={ocrStatus as any} showDone />
+                      {!ocrStatus && <span className="text-muted-foreground text-xs">—</span>}
+                    </dd>
+                  </div>
+                  {(doc.metadata as any)?.ocr_quality && (
+                    <div className="flex justify-between gap-2">
+                      <dt className="text-muted-foreground">OCR engine</dt>
+                      <dd className="text-right">
+                        <span className="text-xs font-medium capitalize">
+                          {(doc.metadata as any).ocr_quality.engine || 'Unknown'}
+                        </span>
+                        {(doc.metadata as any).ocr_quality.mean_confidence && (
+                          <span className="text-xs text-muted-foreground ml-1">
+                            ({(doc.metadata as any).ocr_quality.mean_confidence}% conf.)
+                          </span>
+                        )}
+                      </dd>
+                    </div>
+                  )}
+                </>
               )}
             </dl>
           </div>

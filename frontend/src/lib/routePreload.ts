@@ -18,6 +18,7 @@ export function preloadDocumentWorkspace() {
 export function preloadCommonRoutes() {
   loadOnce("route:dashboard", () => import("@/pages/DashboardPage"));
   loadOnce("route:documents", () => import("@/pages/DocumentsPage"));
+  loadOnce("route:personal-documents", () => import("@/pages/DocumentsPage"));
   loadOnce("route:upload", () => import("@/pages/UploadPage"));
   loadOnce("route:scan-upload", () => import("@/pages/UploadPage"));
   loadOnce("route:search", () => import("@/pages/SearchPage"));
@@ -43,6 +44,11 @@ export function preloadRouteForPath(pathname: string) {
 
   if (pathname === "/documents") {
     loadOnce("route:documents", () => import("@/pages/DocumentsPage"));
+    return;
+  }
+
+  if (pathname.startsWith("/personal-documents")) {
+    loadOnce("route:personal-documents", () => import("@/pages/DocumentsPage"));
     return;
   }
 

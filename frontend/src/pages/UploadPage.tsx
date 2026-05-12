@@ -1,4 +1,4 @@
-import { useState, useCallback, useEffect, useRef } from "react";
+import { useState, useCallback, useEffect, useMemo, useRef } from "react";
 import { useNavigate } from "react-router-dom";
 import { useDropzone } from "react-dropzone";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
@@ -12,123 +12,103 @@ import {
 } from "react-hook-form";
 import { documentsAPI, documentTypesAPI, normalizeListResponse } from "@/services/api";
 import {
-  Upload,
-  File,
-  X,
-  Loader2,
-  ArrowRight,
-  CheckCircle,
-  Plus,
-  Lock,
-  Info,
-  ScanLine,
-  Sparkles,
-  AlertCircle,
-  ChevronRight,
-  RotateCcw,
-  ShieldAlert,
+  Upload, File, X, Loader2, ArrowRight, CheckCircle, Plus, Lock,
+  Info, ScanLine, Sparkles, AlertCircle, ChevronRight, ShieldAlert,
+  Cpu, List, FileText, Tags,
 } from "lucide-react";
 import { toast } from "@/components/ui/vault-toast";
 import type { DocumentType, MetadataField } from "@/types";
 import clsx from "clsx";
 import { QUERY_FIVE_MIN_STALE } from "@/lib/reactQueryDefaults";
 import { deriveDocumentTypeConfig } from "@/lib/documentTypeConfig";
+import { applyOcrToFields, type OcrFields } from "@/lib/ocrFieldMatcher";
 
 // ── Types ─────────────────────────────────────────────────────────────────────
 
-type PersonalTagField = { value: string };
+type PersonalTagField      = { value: string };
 type PersonalMetadataField = { key: string; value: string };
+type OcrLineItem = Record<string, string | number | null | undefined>;
 
 type UploadFormValues = {
-  title: string;
-  supplier?: string;
-  amount?: string;
-  currency?: string;
+  title:         string;
+  supplier?:     string;
+  amount?:       string;
+  currency?:     string;
   document_date?: string;
-  due_date?: string;
-  metadata: Record<string, unknown>;
+  due_date?:     string;
+  // New line-item fields — stored in metadata when not first-class columns
+  quantity?:     string;
+  description?:  string;
+  uom?:          string;
+  metadata:      Record<string, unknown>;
+  personal_description?: string;
+  personal_text?: string;
   personal_tags: PersonalTagField[];
   personal_metadata_fields: PersonalMetadataField[];
 };
 
-/**
- * OCR suggestions shape — mirrors the new backend response.
- *
- * The backend now returns:
- *   { ocr_status, suggestions: { fields: {...}, quality: {...} } }
- *
- * `fields` carries every extracted key (reference_number, account_code, etc.)
- * `quality` carries { mean_confidence, overall_quality_ratio, low_quality_warning, … }
- */
-type OcrFields = {
-  title?: string;
-  supplier?: string;
-  amount?: string;
-  currency?: string;
-  document_date?: string;
-  due_date?: string;
-  reference_number?: string;
-  document_type?: string;
-  account_code?: string;
-  cost_centre?: string;
-  vendor_code?: string;
-  approved_by?: string;
-  payment_terms?: string;
-  tax_amount?: string;
-  subtotal?: string;
-  payment_method?: string;
-  transaction_ref?: string;
-  kra_pin?: string;
-  vat_number?: string;
-  po_reference?: string;
-  signed_by?: string;
-  contract_value?: string;
-  raw_lines?: string[];
-};
-
 type OcrQuality = {
-  mean_confidence?: number;
+  mean_confidence?:       number;
   overall_quality_ratio?: number;
-  low_quality_warning?: boolean;
-  total_pages?: number;
-  low_quality_pages?: number;
+  low_quality_warning?:   boolean;
+  total_pages?:           number;
+  low_quality_pages?:     number;
+  engine?:                "paddle" | "tesseract" | "textract" | string;
 };
 
 type OcrSuggestions = {
-  fields?: OcrFields;
-  quality?: OcrQuality;
+  fields?:     OcrFields;
+  quality?:    OcrQuality;
 };
 
-// Stage of the scanned-upload flow
 type ScanStage =
-  | "idle"            // nothing uploaded yet
-  | "uploading"       // axios progress
-  | "ocr_pending"     // uploaded, OCR not started
-  | "ocr_processing"  // OCR in progress
-  | "ocr_done"        // suggestions ready → show review form
-  | "ocr_failed"      // OCR failed → let user fill manually
-  | "submitting";     // saving final metadata
+  | "idle"
+  | "uploading"
+  | "ocr_pending"
+  | "ocr_processing"
+  | "ocr_done"
+  | "ocr_failed"
+  | "submitting";
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
 
-const DOCUMENT_FIELD_KEYS = ["title", "supplier", "amount", "currency", "document_date", "due_date"] as const;
+const DOCUMENT_FIELD_KEYS = [
+  "title", "supplier", "amount", "currency", "document_date", "due_date",
+  // New first-class-ish fields — passed as top-level metadata keys but handled
+  // as named fields in the form so admins can map them via metadata_fields too
+  "quantity", "description", "uom",
+] as const;
 type DocumentFieldKey = (typeof DOCUMENT_FIELD_KEYS)[number];
 const DOCUMENT_FIELD_KEY_SET = new Set<string>(DOCUMENT_FIELD_KEYS);
 
-function getMetadataFieldKey(field: MetadataField) {
-  return field.key ?? field.field_key;
+// The six columns that the Document model stores directly (not in metadata)
+const DIRECT_COLUMN_KEYS = new Set<string>([
+  "title", "supplier", "amount", "currency", "document_date", "due_date",
+]);
+
+function getMetadataFieldKey(field: MetadataField): string {
+  return (field.key ?? field.field_key ?? "") as string;
 }
 
 function isDocumentFieldKey(key: string): key is DocumentFieldKey {
   return DOCUMENT_FIELD_KEY_SET.has(key);
 }
 
-function getUploadFieldName(field: MetadataField): Path<UploadFormValues> {
-  const key = getMetadataFieldKey(field);
-  return isDocumentFieldKey(key) ? key : (`metadata.${key}` as Path<UploadFormValues>);
+function isDirectColumnKey(key: string): boolean {
+  return DIRECT_COLUMN_KEYS.has(key);
 }
 
-function getSuggestedFieldKey(field: MetadataField) {
+function documentNameFromFile(file: File | null | undefined): string {
+  if (!file?.name) return "";
+  return file.name.replace(/\.[^.]+$/, "") || file.name;
+}
+
+function getUploadFieldName(field: MetadataField): Path<UploadFormValues> {
+  const key = getMetadataFieldKey(field);
+  return isDocumentFieldKey(key) ? (key as Path<UploadFormValues>) : (`metadata.${key}` as Path<UploadFormValues>);
+}
+
+function getSuggestedFieldKey(field: MetadataField): string {
   const key = getMetadataFieldKey(field);
   return isDocumentFieldKey(key) ? key : `metadata.${key}`;
 }
@@ -138,54 +118,81 @@ function documentValuesFromForm(values: Record<string, unknown>) {
     values.metadata && typeof values.metadata === "object"
       ? (values.metadata as Record<string, unknown>)
       : {};
-
-  return DOCUMENT_FIELD_KEYS.reduce<Record<DocumentFieldKey, string>>((acc, key) => {
-    const directValue = values[key];
-    const metadataValue = metadata[key];
-    acc[key] = String((directValue ?? metadataValue ?? "") as string).trim();
-    return acc;
-  }, {
-    title: "",
-    supplier: "",
-    amount: "",
-    currency: "",
-    document_date: "",
-    due_date: "",
-  });
+  return DOCUMENT_FIELD_KEYS.reduce<Record<DocumentFieldKey, string>>(
+    (acc, key) => {
+      acc[key] = String((values[key] ?? metadata[key] ?? "") as string).trim();
+      return acc;
+    },
+    {
+      title: "", supplier: "", amount: "", currency: "",
+      document_date: "", due_date: "",
+      quantity: "", description: "", uom: "",
+    },
+  );
 }
 
-function metadataWithoutDocumentFields(metadata: unknown) {
+function metadataWithoutDocumentFields(metadata: unknown): Record<string, unknown> {
   if (!metadata || typeof metadata !== "object") return {};
-  return Object.entries(metadata as Record<string, unknown>).reduce<Record<string, unknown>>((acc, [key, value]) => {
-    if (!isDocumentFieldKey(key)) {
-      acc[key] = value;
-    }
-    return acc;
-  }, {});
+  return Object.entries(metadata as Record<string, unknown>).reduce<Record<string, unknown>>(
+    (acc, [key, value]) => {
+      if (!isDocumentFieldKey(key)) acc[key] = value;
+      return acc;
+    },
+    {},
+  );
 }
 
 async function calculateFileSha256(file: File): Promise<string> {
   const buffer = await file.arrayBuffer();
   const digest = await crypto.subtle.digest("SHA-256", buffer);
   return Array.from(new Uint8Array(digest))
-    .map((byte) => byte.toString(16).padStart(2, "0"))
+    .map((b) => b.toString(16).padStart(2, "0"))
     .join("");
 }
 
-function getFieldErrorMessage(errors: Record<string, any>, name: string) {
-  const directMessage = errors[name]?.message;
-  if (directMessage) return String(directMessage);
-
-  const nestedError = name
-    .split(".")
-    .reduce<any>((current, part) => current?.[part], errors);
-  return nestedError?.message ? String(nestedError.message) : undefined;
+function getFieldErrorMessage(errors: Record<string, unknown>, name: string): string | undefined {
+  const direct = (errors[name] as { message?: string } | undefined)?.message;
+  if (direct) return String(direct);
+  const nested = name.split(".").reduce<unknown>((cur, p) => (cur as Record<string, unknown>)?.[p], errors);
+  return (nested as { message?: string } | undefined)?.message
+    ? String((nested as { message: string }).message)
+    : undefined;
 }
 
-function SuggestionPill({ label }: { label: string }) {
+function ocrString(value: string | string[] | undefined): string | undefined {
+  return typeof value === "string" ? value : undefined;
+}
+
+// ── Small presentational components ──────────────────────────────────────────
+
+function SuggestionPill({ score }: { score?: number }) {
+  const isLow = score !== undefined && score <= 1;
   return (
-    <span className="inline-flex items-center gap-1 text-[10px] font-semibold px-1.5 py-0.5 rounded-full bg-teal/15 text-teal border border-teal/25">
+    <span
+      className={clsx(
+        "inline-flex items-center gap-1 text-[10px] font-semibold px-1.5 py-0.5 rounded-full border",
+        isLow
+          ? "bg-amber-50 text-amber-700 border-amber-200"
+          : "bg-teal/15 text-teal border-teal/25",
+      )}
+      title={score !== undefined ? `OCR confidence score: ${score}/4` : "OCR auto-filled"}
+    >
       <Sparkles className="w-2.5 h-2.5" />
+      OCR{isLow ? " ?" : ""}
+    </span>
+  );
+}
+
+function EngineBadge({ engine }: { engine?: string }) {
+  if (!engine) return null;
+  const label =
+    engine === "paddle"    ? "PaddleOCR"
+    : engine === "tesseract" ? "Tesseract"
+    : engine === "textract"  ? "AWS Textract"
+    : engine;
+  return (
+    <span className="inline-flex items-center gap-1 text-[10px] font-semibold px-1.5 py-0.5 rounded-full bg-muted border border-border text-muted-foreground">
+      <Cpu className="w-2.5 h-2.5" />
       {label}
     </span>
   );
@@ -197,11 +204,116 @@ function LowQualityBanner({ quality }: { quality: OcrQuality }) {
     <div className="flex items-start gap-3 rounded-xl border border-amber-200 bg-amber-50 px-4 py-3 mb-6">
       <ShieldAlert className="w-5 h-5 text-amber-500 flex-shrink-0 mt-0.5" />
       <div>
-        <p className="text-sm font-semibold text-amber-800">Low scan quality ({pct}% confident)</p>
+        <p className="text-sm font-semibold text-amber-800">
+          Low scan quality ({pct}% confident)
+        </p>
         <p className="text-xs text-amber-700 mt-0.5">
-          The scan may be blurry, skewed, or low-resolution. Please verify all pre-filled fields carefully before saving.
+          The scan may be blurry, skewed, or low-resolution. Please verify all
+          pre-filled fields carefully before saving.
         </p>
       </div>
+    </div>
+  );
+}
+
+/** Read-only chips for detected OCR data that didn't map to a metadata field */
+function OcrInfoChips({ fields }: { fields: OcrFields }) {
+  const chips: { label: string; value: string }[] = [];
+  if (fields.reference_number)   chips.push({ label: "Ref",           value: fields.reference_number });
+  if (fields.document_type)      chips.push({ label: "Type",          value: fields.document_type });
+  if (fields.account_code)       chips.push({ label: "Account",       value: fields.account_code });
+  if (fields.kra_pin)            chips.push({ label: "KRA PIN",       value: fields.kra_pin });
+  if (fields.vat_number)         chips.push({ label: "VAT No",        value: fields.vat_number });
+  if (fields.vendor_code)        chips.push({ label: "Vendor Code",   value: fields.vendor_code });
+  if (fields.cost_centre)        chips.push({ label: "Cost Centre",   value: fields.cost_centre });
+  if (fields.po_reference)       chips.push({ label: "PO Ref",        value: fields.po_reference });
+  if (fields.transaction_ref)    chips.push({ label: "Txn Ref",       value: fields.transaction_ref });
+  if (fields.payment_method)     chips.push({ label: "Payment",       value: fields.payment_method });
+  if (fields.payment_terms)      chips.push({ label: "Terms",         value: fields.payment_terms });
+  if (fields.approved_by)        chips.push({ label: "Approved By",   value: fields.approved_by });
+  if (fields.signed_by)          chips.push({ label: "Signed By",     value: fields.signed_by });
+  if (fields.contract_value)     chips.push({ label: "Contract Value",value: fields.contract_value });
+  if (fields.tax_amount)         chips.push({ label: "Tax",           value: fields.tax_amount });
+  if (fields.subtotal)           chips.push({ label: "Subtotal",      value: fields.subtotal });
+  if (fields.effective_date)     chips.push({ label: "Effective",     value: fields.effective_date });
+  if (fields.expiry_date)        chips.push({ label: "Expires",       value: fields.expiry_date });
+  if (fields.delivery_date)      chips.push({ label: "Delivery",      value: fields.delivery_date });
+  if (fields.registered_address) chips.push({ label: "Address",       value: fields.registered_address });
+  // New
+  if (ocrString(fields.quantity)) chips.push({ label: "Qty", value: ocrString(fields.quantity)! });
+  if (ocrString(fields.uom))      chips.push({ label: "UOM", value: ocrString(fields.uom)! });
+  if (chips.length === 0) return null;
+  return (
+    <div>
+      <p className="text-xs font-semibold text-muted-foreground uppercase tracking-wide mb-2">
+        Additional detected information
+      </p>
+      <div className="flex flex-wrap gap-2">
+        {chips.map(({ label, value }) => (
+          <span
+            key={label}
+            className="inline-flex items-center gap-1.5 text-xs bg-muted border border-border rounded-full px-3 py-1"
+          >
+            <span className="text-muted-foreground">{label}:</span>
+            <span className="font-mono font-medium text-foreground">{value}</span>
+          </span>
+        ))}
+      </div>
+    </div>
+  );
+}
+
+/** Collapsible table of extracted line items */
+function LineItemsPanel({ items }: { items: OcrLineItem[] }) {
+  const [open, setOpen] = useState(false);
+  if (!items.length) return null;
+  return (
+    <div className="mb-4">
+      <button
+        type="button"
+        onClick={() => setOpen((v) => !v)}
+        className="flex items-center gap-2 text-sm font-medium text-muted-foreground hover:text-foreground select-none"
+      >
+        <List className="w-4 h-4" />
+        <span>
+          {open ? "Hide" : "Show"} detected line items ({items.length})
+        </span>
+        <ChevronRight
+          className={clsx("w-4 h-4 transition-transform", open && "rotate-90")}
+        />
+      </button>
+      {open && (
+        <div className="mt-2 overflow-x-auto rounded-xl border border-border">
+          <table className="w-full text-xs">
+            <thead className="bg-muted/60">
+              <tr>
+                {["#", "Description", "Qty", "UOM", "Unit Price", "Total"].map((h) => (
+                  <th
+                    key={h}
+                    className="text-left px-3 py-2 font-semibold text-muted-foreground"
+                  >
+                    {h}
+                  </th>
+                ))}
+              </tr>
+            </thead>
+            <tbody>
+              {items.map((item, i) => (
+                <tr key={i} className="border-t border-border even:bg-muted/20">
+                  <td className="px-3 py-1.5 text-muted-foreground">{i + 1}</td>
+                  <td className="px-3 py-1.5 font-medium text-foreground max-w-[240px] truncate">
+                    {item.description}
+                  </td>
+                  <td className="px-3 py-1.5 font-mono">{item.quantity}</td>
+                  <td className="px-3 py-1.5 font-mono uppercase">{item.uom}</td>
+                  <td className="px-3 py-1.5 font-mono">{item.unit_price}</td>
+                  <td className="px-3 py-1.5 font-mono">{item.line_total}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      )}
     </div>
   );
 }
@@ -214,35 +326,32 @@ function DynamicField({
   control,
   errors,
   enforceRequired,
-  suggested,
+  suggestionScore,
   name,
 }: {
-  field: MetadataField;
-  register: UseFormRegister<UploadFormValues>;
-  control: Control<UploadFormValues>;
-  errors: Record<string, any>;
+  field:          MetadataField;
+  register:       UseFormRegister<UploadFormValues>;
+  control:        Control<UploadFormValues>;
+  errors:         Record<string, unknown>;
   enforceRequired: boolean;
-  suggested?: boolean;
-  name?: Path<UploadFormValues>;
+  suggestionScore?: number;
+  name?:          Path<UploadFormValues>;
 }) {
-  const fieldKey = getMetadataFieldKey(field);
+  const fieldKey  = getMetadataFieldKey(field);
   const fieldName = name ?? (`metadata.${fieldKey}` as Path<UploadFormValues>);
-  const rules =
-    field.is_required && enforceRequired
-      ? { required: `${field.label} is required` }
-      : {};
-  const requiredMark =
-    field.is_required && enforceRequired ? (
-      <span className="text-destructive ml-1">*</span>
-    ) : null;
-  const errMsg = getFieldErrorMessage(errors, fieldName);
+  const rules     =
+    field.is_required && enforceRequired ? { required: `${field.label} is required` } : {};
+  const errMsg    = getFieldErrorMessage(errors, fieldName);
+  const suggested = suggestionScore !== undefined;
 
   const wrapper = (children: React.ReactNode) => (
     <div>
       <label className="label flex items-center gap-1.5">
         {field.label}
-        {requiredMark}
-        {suggested && <SuggestionPill label="OCR" />}
+        {field.is_required && enforceRequired && (
+          <span className="text-destructive ml-1">*</span>
+        )}
+        {suggested && <SuggestionPill score={suggestionScore} />}
       </label>
       {children}
       {errMsg && <p className="text-destructive text-xs mt-1">{errMsg}</p>}
@@ -259,13 +368,11 @@ function DynamicField({
           <select {...f} value={String(f.value ?? "")} className="input">
             <option value="">Select…</option>
             {(field.select_options ?? []).map((opt) => (
-              <option key={opt} value={opt}>
-                {opt}
-              </option>
+              <option key={opt} value={opt}>{opt}</option>
             ))}
           </select>
         )}
-      />
+      />,
     );
   }
   if (field.field_type === "boolean") {
@@ -284,39 +391,34 @@ function DynamicField({
     );
   }
   if (field.field_type === "textarea") {
-    return wrapper(
-      <textarea {...register(fieldName, rules)} rows={3} className="input" />
-    );
+    return wrapper(<textarea {...register(fieldName, rules)} rows={3} className="input" />);
   }
   const inputType =
-    field.field_type === "date"
-      ? "date"
-      : field.field_type === "number" || field.field_type === "currency"
-      ? "number"
-      : "text";
+    field.field_type === "date" ? "date"
+    : field.field_type === "number" || field.field_type === "currency" ? "number"
+    : "text";
   return wrapper(
     <input
       {...register(fieldName, rules)}
       type={inputType}
       step={field.field_type === "currency" ? "0.01" : undefined}
       placeholder={field.default_value || field.help_text || ""}
-      className={clsx("input", suggested && "ring-1 ring-teal/40")}
-    />
+      className={clsx(
+        "input",
+        suggested && suggestionScore! <= 1 && "ring-1 ring-amber-400/50",
+        suggested && suggestionScore! >= 2 && "ring-1 ring-teal/40",
+      )}
+    />,
   );
 }
 
-// ── Personal tag row ──────────────────────────────────────────────────────────
+// ── Personal tag / metadata rows ──────────────────────────────────────────────
 
 function PersonalTagRow({
-  index,
-  total,
-  register,
-  onRemove,
+  index, total, register, onRemove,
 }: {
-  index: number;
-  total: number;
-  register: UseFormRegister<UploadFormValues>;
-  onRemove: () => void;
+  index: number; total: number;
+  register: UseFormRegister<UploadFormValues>; onRemove: () => void;
 }) {
   return (
     <div className="flex items-center gap-2 rounded-full border border-primary/20 bg-primary/5 px-3 py-2 shadow-sm">
@@ -327,15 +429,12 @@ function PersonalTagRow({
         {...register(`personal_tags.${index}.value` as const)}
         className="min-w-0 flex-1 border-0 bg-transparent p-0 text-sm text-foreground placeholder:text-muted-foreground focus:outline-none focus:ring-0"
         placeholder={`Tag ${index + 1}`}
-        aria-label={`Personal tag ${index + 1}`}
       />
       <button
         type="button"
         onClick={onRemove}
         disabled={total === 1}
         className="inline-flex h-8 w-8 flex-shrink-0 items-center justify-center rounded-full border border-border bg-card text-muted-foreground hover:text-destructive hover:border-destructive/30 hover:bg-destructive/5 disabled:opacity-40 disabled:cursor-not-allowed"
-        title="Remove tag"
-        aria-label={`Remove personal tag ${index + 1}`}
       >
         <X className="w-4 h-4" />
       </button>
@@ -344,22 +443,17 @@ function PersonalTagRow({
 }
 
 function PersonalMetadataRow({
-  index,
-  total,
-  register,
-  onRemove,
+  index, total, register, onRemove,
 }: {
-  index: number;
-  total: number;
-  register: UseFormRegister<UploadFormValues>;
-  onRemove: () => void;
+  index: number; total: number;
+  register: UseFormRegister<UploadFormValues>; onRemove: () => void;
 }) {
   return (
     <div className="grid grid-cols-[1fr_1fr_auto] items-center gap-2 rounded-lg border border-border bg-card px-3 py-2">
       <input
         {...register(`personal_metadata_fields.${index}.key` as const)}
         className="input h-9"
-        placeholder="Field name (e.g. project)"
+        placeholder="Field name"
       />
       <input
         {...register(`personal_metadata_fields.${index}.value` as const)}
@@ -371,8 +465,6 @@ function PersonalMetadataRow({
         onClick={onRemove}
         disabled={total === 1}
         className="inline-flex h-8 w-8 items-center justify-center rounded-md border border-border bg-card text-muted-foreground hover:text-destructive hover:border-destructive/30 hover:bg-destructive/5 disabled:opacity-40 disabled:cursor-not-allowed"
-        title="Remove custom field"
-        aria-label={`Remove custom field ${index + 1}`}
       >
         <X className="w-4 h-4" />
       </button>
@@ -383,10 +475,10 @@ function PersonalMetadataRow({
 // ── OCR polling hook ──────────────────────────────────────────────────────────
 
 function useOcrPoller(
-  documentId: string | null,
-  enabled: boolean,
-  onDone: (suggestions: OcrSuggestions) => void,
-  onFailed: () => void
+  documentId:    string | null,
+  enabled:       boolean,
+  onDone:        (suggestions: OcrSuggestions) => void,
+  onFailed:      () => void,
 ) {
   const intervalRef = useRef<ReturnType<typeof setInterval> | null>(null);
 
@@ -398,50 +490,37 @@ function useOcrPoller(
         const { data } = await documentsAPI.ocrSuggestions(documentId);
         if (data.ocr_status === "done") {
           if (intervalRef.current) clearInterval(intervalRef.current);
-          // Handle both the old flat shape and the new nested shape gracefully.
-          // New shape: data.suggestions = { fields: {...}, quality: {...} }
-          // Old/flat shape: data.suggestions = { title, supplier, ... }
           const raw = data.suggestions as Record<string, unknown> | null;
           let parsed: OcrSuggestions = {};
           if (raw && typeof raw === "object") {
-            if ("fields" in raw || "quality" in raw) {
-              // New nested shape
-              parsed = raw as OcrSuggestions;
-            } else {
-              // Legacy flat shape — wrap it
-              parsed = { fields: raw as OcrFields };
-            }
+            parsed = ("fields" in raw || "quality" in raw)
+              ? (raw as OcrSuggestions)
+              : { fields: raw as OcrFields };
           }
           onDone(parsed);
         } else if (data.ocr_status === "failed") {
           if (intervalRef.current) clearInterval(intervalRef.current);
           onFailed();
         }
-      } catch {
-        // transient network error — keep polling
-      }
+      } catch { /* transient — keep polling */ }
     };
 
     poll();
     intervalRef.current = setInterval(poll, 3000);
-    return () => {
-      if (intervalRef.current) clearInterval(intervalRef.current);
-    };
+    return () => { if (intervalRef.current) clearInterval(intervalRef.current); };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [documentId, enabled]);
 }
 
-// ── OCR status screen ─────────────────────────────────────────────────────────
+// ── OCR wait screen ───────────────────────────────────────────────────────────
 
 function OcrWaitScreen({
-  stage,
-  fileName,
-  rawLines,
-  onSkip,
+  stage, fileName, rawLines, onSkip,
 }: {
-  stage: "ocr_pending" | "ocr_processing";
-  fileName: string;
+  stage:     "ocr_pending" | "ocr_processing";
+  fileName:  string;
   rawLines?: string[];
-  onSkip: () => void;
+  onSkip:    () => void;
 }) {
   return (
     <div className="flex flex-col items-center py-16 px-6 text-center">
@@ -461,7 +540,6 @@ function OcrWaitScreen({
       <p className="text-sm text-muted-foreground mb-8">
         This usually takes a few seconds. The form will appear automatically when ready.
       </p>
-
       {rawLines && rawLines.length > 0 && (
         <div className="w-full max-w-md text-left rounded-xl border border-border bg-muted/40 p-4 mb-6">
           <p className="text-xs font-semibold text-muted-foreground uppercase tracking-wide mb-2">
@@ -469,19 +547,15 @@ function OcrWaitScreen({
           </p>
           <div className="space-y-0.5 max-h-32 overflow-y-auto">
             {rawLines.slice(0, 12).map((line, i) => (
-              <p key={i} className="text-xs text-foreground font-mono truncate">
-                {line}
-              </p>
+              <p key={i} className="text-xs text-foreground font-mono truncate">{line}</p>
             ))}
           </div>
         </div>
       )}
-
       <div className="flex items-center gap-2 text-sm text-muted-foreground">
         <Loader2 className="w-4 h-4 animate-spin" />
         <span>Processing…</span>
       </div>
-
       <button
         type="button"
         onClick={onSkip}
@@ -493,26 +567,16 @@ function OcrWaitScreen({
   );
 }
 
-// ── Step indicator ────────────────────────────────────────────────────────────
+// ── Step badge ────────────────────────────────────────────────────────────────
 
-function StepBadge({
-  n,
-  active,
-  done,
-}: {
-  n: number;
-  active?: boolean;
-  done?: boolean;
-}) {
+function StepBadge({ n, active, done }: { n: number; active?: boolean; done?: boolean }) {
   return (
     <div
       className={clsx(
         "w-6 h-6 rounded-full flex items-center justify-center text-xs font-bold flex-shrink-0 transition-colors",
-        done
-          ? "bg-teal text-white"
-          : active
-          ? "bg-primary text-primary-foreground"
-          : "bg-muted text-muted-foreground"
+        done    ? "bg-teal text-white"
+        : active ? "bg-primary text-primary-foreground"
+                 : "bg-muted text-muted-foreground",
       )}
     >
       {done ? <CheckCircle className="w-3.5 h-3.5" /> : n}
@@ -527,35 +591,31 @@ interface UploadPageProps {
 }
 
 export default function UploadPage({ scanOnly = false }: UploadPageProps) {
-  const navigate = useNavigate();
-  const queryClient = useQueryClient();
+  const navigate     = useNavigate();
+  const queryClient  = useQueryClient();
 
-  // ── File & type ─────────────────────────────────────────────────────────────
-  const [droppedFile, setDroppedFile] = useState<File | null>(null);
-  const [selectedTypeId, setSelectedTypeId] = useState("");
-  const [uploadProgress, setUploadProgress] = useState(0);
+  const [droppedFile,      setDroppedFile]      = useState<File | null>(null);
+  const [selectedTypeId,   setSelectedTypeId]   = useState("");
+  const [uploadProgress,   setUploadProgress]   = useState(0);
+  const [isScanned,        setIsScanned]         = useState(scanOnly);
 
-  // ── Mode flags ──────────────────────────────────────────────────────────────
-  const [isScanned, setIsScanned] = useState(scanOnly);
+  const [scanStage,        setScanStage]         = useState<ScanStage>("idle");
+  const [uploadedDocId,    setUploadedDocId]     = useState<string | null>(null);
+  const [ocrSuggestions,   setOcrSuggestions]   = useState<OcrSuggestions | null>(null);
+  // Detected line items (display-only — not editable in the form)
+  const [ocrLineItems,     setOcrLineItems]      = useState<OcrLineItem[]>([]);
+  // Map from form path → OCR confidence score
+  const [suggestedFields,  setSuggestedFields]  = useState<Map<string, number>>(new Map());
+  const [showPersonalExtras, setShowPersonalExtras] = useState(false);
 
-  // ── OCR scan flow state ─────────────────────────────────────────────────────
-  const [scanStage, setScanStage] = useState<ScanStage>("idle");
-  const [uploadedDocId, setUploadedDocId] = useState<string | null>(null);
-  const [ocrSuggestions, setOcrSuggestions] = useState<OcrSuggestions | null>(null);
-  const [suggestedFields, setSuggestedFields] = useState<Set<string>>(new Set());
-
-  // ── Form ────────────────────────────────────────────────────────────────────
   const {
-    register,
-    handleSubmit,
-    control,
-    reset,
-    setValue,
-    clearErrors,
+    register, handleSubmit, control, reset, setValue, clearErrors, getValues,
     formState: { errors },
   } = useForm<UploadFormValues>({
     defaultValues: {
       metadata: {},
+      personal_description: "",
+      personal_text: "",
       personal_tags: [{ value: "" }],
       personal_metadata_fields: [{ key: "", value: "" }],
       currency: "KES",
@@ -568,6 +628,7 @@ export default function UploadPage({ scanOnly = false }: UploadPageProps) {
     remove: removePersonalTag,
     replace: replacePersonalTags,
   } = useFieldArray({ control, name: "personal_tags" });
+
   const {
     fields: personalMetadataFields,
     append: appendPersonalMetadata,
@@ -575,207 +636,185 @@ export default function UploadPage({ scanOnly = false }: UploadPageProps) {
     replace: replacePersonalMetadata,
   } = useFieldArray({ control, name: "personal_metadata_fields" });
 
-  // ── Document types ──────────────────────────────────────────────────────────
   const { data: docTypes = [] } = useQuery<unknown, Error, DocumentType[]>({
     queryKey: ["document-types"],
-    queryFn: () => documentTypesAPI.list().then((r) => r.data as unknown),
-    select: (data) => normalizeListResponse<DocumentType>(data),
+    queryFn:  () => documentTypesAPI.list().then((r) => r.data as unknown),
+    select:   (data) => normalizeListResponse<DocumentType>(data),
     ...QUERY_FIVE_MIN_STALE,
   });
-  const selectedType = docTypes.find((t) => t.id === selectedTypeId);
-  const typeConfig = deriveDocumentTypeConfig(selectedType);
+
+  const visibleDocTypes = useMemo(
+    () => scanOnly
+      ? docTypes.filter((type) => !deriveDocumentTypeConfig(type).isPersonalType)
+      : docTypes,
+    [docTypes, scanOnly],
+  );
+  const selectedType = visibleDocTypes.find((t) => t.id === selectedTypeId);
+  const typeConfig   = deriveDocumentTypeConfig(selectedType);
   const isSelfUpload = typeConfig.isPersonalType;
   const metadataMode = typeConfig.metadataMode;
 
-  // ── Derived state ───────────────────────────────────────────────────────────
-  const isOcrFlow = isScanned && !isSelfUpload;
-
-  // The right panel details form is visible when:
-  // - NOT in OCR flow (manual mode) AND
-  // - a type is selected AND
-  // - we're in the idle stage (not mid-upload)
-  const showManualForm =
-    !isOcrFlow &&
-    Boolean(selectedTypeId) &&
-    scanStage === "idle";
-
-  // The OCR right-panel info box is visible when in OCR flow and idle
+  const isOcrFlow      = isScanned && !isSelfUpload;
+  const showManualForm = !isOcrFlow && Boolean(selectedTypeId) && scanStage === "idle";
   const showOcrIdlePanel = isOcrFlow && scanStage === "idle";
-
-  const showOcrWait =
-    isOcrFlow && (scanStage === "ocr_pending" || scanStage === "ocr_processing");
-  const showOcrReview = isOcrFlow && scanStage === "ocr_done";
-  const showOcrFailed = isOcrFlow && scanStage === "ocr_failed";
+  const showOcrWait    = isOcrFlow && (scanStage === "ocr_pending" || scanStage === "ocr_processing");
+  const showOcrReview  = isOcrFlow && scanStage === "ocr_done";
+  const showOcrFailed  = isOcrFlow && scanStage === "ocr_failed";
 
   const hasMetadata =
-    !isSelfUpload && metadataMode === "admin_defined" && !!selectedType && selectedType.metadata_fields.length > 0;
+    !isSelfUpload &&
+    metadataMode === "admin_defined" &&
+    !!selectedType &&
+    selectedType.metadata_fields.length > 0;
+  const hasConfiguredDocumentNameField =
+    !!selectedType?.metadata_fields?.some((field) => getMetadataFieldKey(field) === "title");
+
   const relaxReq = isSelfUpload || isScanned;
 
-  // ── Side-effects ────────────────────────────────────────────────────────────
-
-  // When type changes, reset form fields but NOT the dropped file.
-  // The file should persist across type changes (user selects type first, then drops file).
+  // Reset form when document type changes
   useEffect(() => {
     if (selectedTypeId) {
       reset({
         metadata: {},
+        personal_description: "",
+        personal_text: "",
         personal_tags: [{ value: "" }],
         personal_metadata_fields: [{ key: "", value: "" }],
-        currency: "KES",
-        title: "",
-        supplier: "",
-        amount: "",
-        document_date: "",
-        due_date: "",
+        currency: "KES", title: "", supplier: "", amount: "",
+        document_date: "", due_date: "",
+        quantity: "", description: "", uom: "",
       });
       setUploadProgress(0);
+      setShowPersonalExtras(false);
     }
   }, [selectedTypeId, reset]);
 
   useEffect(() => {
-    clearErrors();
-  }, [isSelfUpload, isScanned, clearErrors]);
+    if (!droppedFile) return;
+    const currentTitle = String(getValues("title") ?? "").trim();
+    if (!currentTitle) {
+      setValue("title", documentNameFromFile(droppedFile));
+    }
+  }, [droppedFile, getValues, setValue]);
+
+  useEffect(() => { clearErrors(); }, [isSelfUpload, isScanned, clearErrors]);
 
   useEffect(() => {
     setIsScanned(scanOnly);
+    if (scanOnly && selectedTypeId && !visibleDocTypes.some((type) => type.id === selectedTypeId)) {
+      setSelectedTypeId("");
+    }
     if (!scanOnly) {
       setScanStage("idle");
       setUploadedDocId(null);
       setOcrSuggestions(null);
-      setSuggestedFields(new Set());
+      setOcrLineItems([]);
+      setSuggestedFields(new Map());
     }
     replacePersonalTags([{ value: "" }]);
     replacePersonalMetadata([{ key: "", value: "" }]);
-  }, [scanOnly, replacePersonalTags, replacePersonalMetadata]);
+    setShowPersonalExtras(false);
+  }, [scanOnly, selectedTypeId, visibleDocTypes, replacePersonalTags, replacePersonalMetadata]);
 
   // ── OCR poller ──────────────────────────────────────────────────────────────
 
   useOcrPoller(
     uploadedDocId,
     isOcrFlow && (scanStage === "ocr_pending" || scanStage === "ocr_processing"),
+
+    // onDone — run 4-pass matcher against every admin-configured metadata field
     (suggestions) => {
       setOcrSuggestions(suggestions);
       setScanStage("ocr_done");
 
-      const fields = suggestions.fields ?? {};
-      const fieldsSet = new Set<string>();
+      const fields    = suggestions.fields ?? {};
+      const scoreMap  = new Map<string, number>();
 
-      // ── Fill top-level form fields ─────────────────────────────────────
-      const fill = (key: keyof UploadFormValues, value: string | undefined) => {
-        if (value) {
-          setValue(key, value);
-          fieldsSet.add(key);
+      // Store detected line items for display
+      if (Array.isArray(fields.line_items) && fields.line_items.length > 0) {
+        setOcrLineItems(fields.line_items as unknown as OcrLineItem[]);
+      }
+
+      // Helper — fill a named form field and record its confidence score
+      const fillDirect = (key: Path<UploadFormValues>, value: string | undefined, score = 4) => {
+        if (value?.trim()) {
+          setValue(key, value.trim());
+          scoreMap.set(key, score);
         }
       };
 
-      fill("title", fields.title);
-      fill("supplier", fields.supplier);
-      fill("amount", fields.amount);
-      fill("currency", fields.currency);
-      fill("document_date", fields.document_date);
-      fill("due_date", fields.due_date);
+      // 1. Fill the six first-class Document columns (direct DB fields)
+      if (hasConfiguredDocumentNameField) {
+        fillDirect("title", fields.title);
+      }
+      fillDirect("supplier",      fields.supplier);
+      fillDirect("amount",        fields.amount);
+      fillDirect("currency",      fields.currency);
+      fillDirect("document_date", fields.document_date);
+      fillDirect("due_date",      fields.due_date);
 
-      // ── Fill metadata fields from the selected document type ───────────
-      // Strategy: for each metadata field on the document type, look for a
-      // matching OCR suggestion by:
-      //   1. Exact key match          (field.key === "account_code")
-      //   2. Common alias mappings    (field.key === "invoice_number" → fields.reference_number)
-      // This allows the admin to name metadata fields using standard conventions
-      // and get auto-fill without any per-type configuration.
-      const OCR_KEY_ALIASES: Record<string, keyof OcrFields> = {
-        // metadata field key → OCR suggestion key
-        invoice_number:    "reference_number",
-        invoice_no:        "reference_number",
-        inv_number:        "reference_number",
-        po_number:         "reference_number",
-        po_no:             "reference_number",
-        lpo_number:        "reference_number",
-        receipt_number:    "reference_number",
-        contract_number:   "reference_number",
-        ref_number:        "reference_number",
-        reference_no:      "reference_number",
-        doc_reference:     "reference_number",
-        account:           "account_code",
-        account_code:      "account_code",
-        account_no:        "account_code",
-        account_number:    "account_code",
-        a_c:               "account_code",
-        a_c_no:            "account_code",
-        gl_code:           "account_code",
-        cost_centre:       "cost_centre",
-        cost_center:       "cost_centre",
-        department_code:   "cost_centre",
-        vendor_code:       "vendor_code",
-        supplier_code:     "vendor_code",
-        approved_by:       "approved_by",
-        authorised_by:     "approved_by",
-        authorized_by:     "approved_by",
-        payment_terms:     "payment_terms",
-        payment_method:    "payment_method",
-        mode_of_payment:   "payment_method",
-        transaction_ref:   "transaction_ref",
-        mpesa_ref:         "transaction_ref",
-        cheque_number:     "transaction_ref",
-        kra_pin:           "kra_pin",
-        vat_number:        "vat_number",
-        tax_number:        "vat_number",
-        po_reference:      "po_reference",
-        purchase_order_ref:"po_reference",
-        tax_amount:        "tax_amount",
-        vat_amount:        "tax_amount",
-        subtotal:          "subtotal",
-        net_amount:        "subtotal",
-        contract_value:    "contract_value",
-        signed_by:         "signed_by",
-        signatory:         "signed_by",
-      };
+      // 2. Fill the three new line-item fields
+      fillDirect("quantity",    ocrString(fields.quantity));
+      fillDirect("description", ocrString(fields.description));
+      fillDirect("uom",         ocrString(fields.uom));
 
-      if (selectedType?.metadata_fields) {
-        for (const metaField of selectedType.metadata_fields) {
-          const metadataKey = getMetadataFieldKey(metaField);
+      // 3. Fill admin metadata fields using the 4-pass matcher
+      if (selectedType?.metadata_fields?.length) {
+        const matches = applyOcrToFields(selectedType.metadata_fields, fields);
+
+        for (const { field, match } of matches) {
+          const metadataKey = getMetadataFieldKey(field);
           if (!metadataKey) continue;
 
-          const key = metadataKey.toLowerCase().replace(/[^a-z0-9]+/g, "_").replace(/^_+|_+$/g, "");
-          // Direct key match first
-          const directValue = (fields as Record<string, string | undefined>)[key];
-          // Alias match second
-          const aliasKey = OCR_KEY_ALIASES[key];
-          const aliasValue = aliasKey ? (fields as Record<string, string | undefined>)[aliasKey] : undefined;
-          const referenceFallbackKeys = new Set(["account", "account_code", "account_no", "account_number", "a_c", "a_c_no"]);
-          const referenceFallback = referenceFallbackKeys.has(key) ? fields.reference_number : undefined;
-          const value = directValue || aliasValue || referenceFallback;
+          const formPath: Path<UploadFormValues> = isDocumentFieldKey(metadataKey)
+            ? (metadataKey as Path<UploadFormValues>)
+            : (`metadata.${metadataKey}` as Path<UploadFormValues>);
 
-          if (value) {
-            const fieldName = isDocumentFieldKey(metadataKey)
+          // Don't overwrite a higher-confidence direct fill
+          const existingScore = scoreMap.get(formPath) ?? 0;
+          if (match.score > existingScore) {
+            setValue(formPath, match.value);
+            const trackKey = isDocumentFieldKey(metadataKey)
               ? metadataKey
-              : (`metadata.${metadataKey}` as Path<UploadFormValues>);
-            setValue(fieldName, value);
-            fieldsSet.add(isDocumentFieldKey(metadataKey) ? metadataKey : `metadata.${metadataKey}`);
+              : `metadata.${metadataKey}`;
+            scoreMap.set(trackKey, match.score);
           }
         }
       }
 
-      setSuggestedFields(fieldsSet);
+      setSuggestedFields(scoreMap);
 
-      const warn = suggestions.quality?.low_quality_warning;
+      const engine    = suggestions.quality?.engine;
+      const warn      = suggestions.quality?.low_quality_warning;
+      const engineLabel =
+        engine === "paddle"    ? "PaddleOCR"
+        : engine === "tesseract" ? "Tesseract"
+        : engine === "textract"  ? "AWS Textract"
+        : "";
+
       if (warn) {
         toast.warning("OCR complete — low scan quality detected. Please verify all fields carefully.");
       } else {
-        toast.success("OCR complete! Review the extracted details below.");
+        toast.success(
+          engineLabel
+            ? `OCR complete (${engineLabel})! Review the extracted details below.`
+            : "OCR complete! Review the extracted details below.",
+        );
       }
     },
+
+    // onFailed
     () => {
       setScanStage("ocr_failed");
       toast.warning("OCR could not extract text. Please fill in the details manually.");
-    }
+    },
   );
 
   // ── Dropzone ────────────────────────────────────────────────────────────────
 
   const onDrop = useCallback((accepted: File[]) => {
     const file = accepted[0];
-    if (!file) return;
-    setDroppedFile(file);
+    if (file) setDroppedFile(file);
   }, []);
 
   const { getRootProps, getInputProps, isDragActive } = useDropzone({
@@ -791,12 +830,12 @@ export default function UploadPage({ scanOnly = false }: UploadPageProps) {
     },
   });
 
-  // ── Upload mutation ─────────────────────────────────────────────────────────
+  // ── Mutations ───────────────────────────────────────────────────────────────
 
   const uploadMutation = useMutation({
     mutationFn: (fd: FormData) =>
       documentsAPI.upload(fd, {
-        onUploadProgress: (e: { loaded: number; total?: number }) => {
+        onUploadProgress: (e: ProgressEvent) => {
           if (e.total) setUploadProgress(Math.round((e.loaded * 100) / e.total));
         },
       }),
@@ -804,9 +843,7 @@ export default function UploadPage({ scanOnly = false }: UploadPageProps) {
       setUploadProgress(0);
       if (isOcrFlow) {
         setUploadedDocId(data.id);
-        setScanStage(
-          data.ocr_status === "processing" ? "ocr_processing" : "ocr_pending"
-        );
+        setScanStage(data.ocr_status === "processing" ? "ocr_processing" : "ocr_pending");
       } else {
         const msg = isSelfUpload ? "Personal document saved" : "Document uploaded";
         toast.success(`${msg}: ${data.reference_number}`);
@@ -820,8 +857,6 @@ export default function UploadPage({ scanOnly = false }: UploadPageProps) {
       setScanStage("idle");
     },
   });
-
-  // ── Metadata-save mutation ──────────────────────────────────────────────────
 
   const saveMutation = useMutation({
     mutationFn: ({ id, payload }: { id: string; payload: Record<string, unknown> }) =>
@@ -840,11 +875,8 @@ export default function UploadPage({ scanOnly = false }: UploadPageProps) {
   // ── Submit handlers ─────────────────────────────────────────────────────────
 
   const onUpload = async (values: Record<string, unknown>) => {
-    if (!droppedFile) { toast.error("Please select a file"); return; }
-    if (!selectedTypeId) {
-      toast.error("Please select a document type");
-      return;
-    }
+    if (!droppedFile)    { toast.error("Please select a file");          return; }
+    if (!selectedTypeId) { toast.error("Please select a document type"); return; }
 
     const personalTags = (Array.isArray(values.personal_tags) ? values.personal_tags : [])
       .map((tag) => {
@@ -854,65 +886,79 @@ export default function UploadPage({ scanOnly = false }: UploadPageProps) {
         return "";
       })
       .filter(Boolean);
-    const personalMetadataEntries = (Array.isArray(values.personal_metadata_fields) ? values.personal_metadata_fields : [])
-      .map((entry) => ({
-        key: String(entry?.key ?? "").trim(),
-        value: String(entry?.value ?? "").trim(),
-      }))
-      .filter((entry) => entry.key.length > 0 && entry.value.length > 0);
-    const personalMetadata = personalMetadataEntries.reduce<Record<string, string>>((acc, entry) => {
-      acc[entry.key] = entry.value;
-      return acc;
-    }, {});
 
-    if (isSelfUpload && personalTags.length === 0) {
-      toast.error("Please add at least one personal tag.");
-      return;
-    }
+    const personalMetadataEntries = (
+      Array.isArray(values.personal_metadata_fields) ? values.personal_metadata_fields : []
+    )
+      .map((e) => ({
+        key:   String((e as { key?: unknown })?.key   ?? "").trim(),
+        value: String((e as { value?: unknown })?.value ?? "").trim(),
+      }))
+      .filter((e) => e.key.length > 0 && e.value.length > 0);
+
+    const personalMetadata = personalMetadataEntries.reduce<Record<string, string>>(
+      (acc, e) => { acc[e.key] = e.value; return acc; }, {},
+    );
 
     const documentValues = documentValuesFromForm(values);
-    const fallbackTitle = droppedFile.name.replace(/\.[^.]+$/, "") || "Uploaded document";
+    const fileDocumentName = documentNameFromFile(droppedFile) || "Uploaded document";
+    const submittedDocumentName =
+      isSelfUpload || hasConfiguredDocumentNameField
+        ? documentValues.title || fileDocumentName
+        : fileDocumentName;
 
+    // Advisory duplicate check
     try {
       const checksum = await calculateFileSha256(droppedFile);
       const { data: duplicateInfo } = await documentsAPI.duplicateCheck(checksum);
       if (duplicateInfo.exists) {
         const proceed = window.confirm(
-          "This file already exists in the system. Do you want to link it to your workflow?"
+          "This file already exists in the system. Do you want to upload it again?"
         );
-        if (!proceed) {
-          toast.info("Upload cancelled.");
-          return;
-        }
+        if (!proceed) { toast.info("Upload cancelled."); return; }
       }
-    } catch {
-      // Duplicate pre-check is advisory; continue with upload if it fails.
-    }
+    } catch { /* advisory — never block the upload */ }
 
     const fd = new FormData();
-    fd.append("file", droppedFile);
-    fd.append(
-      "title",
-      isOcrFlow
-        ? (fallbackTitle || "Scanned document")
-        : (documentValues.title || fallbackTitle)
-    );
+    fd.append("file",             droppedFile);
+    fd.append("title",            submittedDocumentName);
     fd.append("document_type_id", selectedTypeId);
-    fd.append("is_self_upload", isSelfUpload ? "true" : "false");
-    fd.append("is_scanned", isScanned ? "true" : "false");
-    if (!isOcrFlow && documentValues.supplier) fd.append("supplier", documentValues.supplier);
-    if (!isOcrFlow && documentValues.amount) fd.append("amount", documentValues.amount);
-    if (!isOcrFlow && documentValues.currency) fd.append("currency", documentValues.currency);
-    if (!isOcrFlow && documentValues.document_date) fd.append("document_date", documentValues.document_date);
-    if (!isOcrFlow && documentValues.due_date) fd.append("due_date", documentValues.due_date);
+    fd.append("is_self_upload",   isSelfUpload ? "true" : "false");
+    fd.append("is_scanned",       isScanned    ? "true" : "false");
+
+    if (!isOcrFlow) {
+      if (documentValues.supplier)      fd.append("supplier",      documentValues.supplier);
+      if (documentValues.amount)        fd.append("amount",        documentValues.amount);
+      if (documentValues.currency)      fd.append("currency",      documentValues.currency);
+      if (documentValues.document_date) fd.append("document_date", documentValues.document_date);
+      if (documentValues.due_date)      fd.append("due_date",      documentValues.due_date);
+    }
+
     personalTags.forEach((tag) => fd.append("personal_tags", tag));
-    const adminMetadata = !isSelfUpload && !isOcrFlow && values.metadata && Object.keys(values.metadata as object).length > 0
-      ? metadataWithoutDocumentFields(values.metadata)
-      : {};
-    const mergedMetadata =
-      isSelfUpload
-        ? Object.keys(personalMetadata).length > 0 ? personalMetadata : {}
-        : adminMetadata;
+
+    const adminMetadata: Record<string, unknown> =
+      !isSelfUpload && !isOcrFlow && values.metadata
+        ? metadataWithoutDocumentFields(values.metadata)
+        : {};
+
+    // Include the three new scalar fields in metadata when present
+    if (!isOcrFlow && !isSelfUpload) {
+      if (documentValues.quantity)    adminMetadata.quantity    = documentValues.quantity;
+      if (documentValues.description) adminMetadata.description = documentValues.description;
+      if (documentValues.uom)         adminMetadata.uom         = documentValues.uom;
+    }
+
+    if (isSelfUpload) {
+      const personalDescription = String(values.personal_description ?? "").trim();
+      const personalText = String(values.personal_text ?? "").trim();
+      if (personalDescription) personalMetadata.description = personalDescription;
+      if (personalText) personalMetadata.personal_text = personalText;
+    }
+
+    const mergedMetadata = isSelfUpload
+      ? (Object.keys(personalMetadata).length > 0 ? personalMetadata : {})
+      : adminMetadata;
+
     if (Object.keys(mergedMetadata).length > 0) {
       fd.append("metadata", JSON.stringify(mergedMetadata));
     }
@@ -924,17 +970,28 @@ export default function UploadPage({ scanOnly = false }: UploadPageProps) {
   const onConfirmOcr = handleSubmit((values) => {
     if (!uploadedDocId) return;
     setScanStage("submitting");
-
     const documentValues = documentValuesFromForm(values);
+    const fileDocumentName = documentNameFromFile(droppedFile);
+
     const payload: Record<string, unknown> = {};
-    if (documentValues.title) payload.title = documentValues.title;
-    if (documentValues.supplier) payload.supplier = documentValues.supplier;
-    if (documentValues.amount) payload.amount = documentValues.amount;
-    if (documentValues.currency) payload.currency = documentValues.currency;
+    if (hasConfiguredDocumentNameField && documentValues.title) {
+      payload.title = documentValues.title;
+    } else if (!hasConfiguredDocumentNameField && fileDocumentName) {
+      payload.title = fileDocumentName;
+    }
+    if (documentValues.supplier)      payload.supplier      = documentValues.supplier;
+    if (documentValues.amount)        payload.amount        = documentValues.amount;
+    if (documentValues.currency)      payload.currency      = documentValues.currency;
     if (documentValues.document_date) payload.document_date = documentValues.document_date;
-    if (documentValues.due_date) payload.due_date = documentValues.due_date;
-    const metadata = metadataWithoutDocumentFields(values.metadata);
-    if (Object.keys(metadata).length > 0) payload.metadata = metadata;
+    if (documentValues.due_date)      payload.due_date      = documentValues.due_date;
+
+    // Build metadata — exclude direct column keys, include new fields
+    const metadataBase = metadataWithoutDocumentFields(values.metadata);
+    if (documentValues.quantity)    metadataBase.quantity    = documentValues.quantity;
+    if (documentValues.description) metadataBase.description = documentValues.description;
+    if (documentValues.uom)         metadataBase.uom         = documentValues.uom;
+
+    if (Object.keys(metadataBase).length > 0) payload.metadata = metadataBase;
 
     saveMutation.mutate({ id: uploadedDocId, payload });
   });
@@ -945,17 +1002,17 @@ export default function UploadPage({ scanOnly = false }: UploadPageProps) {
     navigate(`/documents/${uploadedDocId}`);
   };
 
-  // ── Convenience ─────────────────────────────────────────────────────────────
-
-  const ocrFields = ocrSuggestions?.fields ?? {};
-  const ocrQuality = ocrSuggestions?.quality;
+  const ocrFields    = ocrSuggestions?.fields  ?? {};
+  const ocrQuality   = ocrSuggestions?.quality;
   const isLowQuality = ocrQuality?.low_quality_warning === true;
+
+  const getFieldScore = (field: MetadataField): number | undefined =>
+    suggestedFields.get(getSuggestedFieldKey(field));
 
   // ── Render ──────────────────────────────────────────────────────────────────
 
   return (
     <div className="max-w-5xl mx-auto py-8">
-      {/* Header */}
       <div className="mb-8">
         <h1 className="text-3xl font-bold text-foreground tracking-tight">
           {scanOnly ? "Scan Document" : "Upload Document"}
@@ -967,12 +1024,9 @@ export default function UploadPage({ scanOnly = false }: UploadPageProps) {
         </p>
       </div>
 
-      {/* ── OCR wait / review / submitting screens ─────────────────────────── */}
+      {/* ── OCR wait / review / submitting ──────────────────────────────── */}
       {isOcrFlow && scanStage !== "idle" && scanStage !== "uploading" && (
-        <div
-          className="bg-card rounded-2xl border border-border"
-          style={{ boxShadow: "var(--shadow-card)" }}
-        >
+        <div className="bg-card rounded-2xl border border-border" style={{ boxShadow: "var(--shadow-card)" }}>
           {showOcrWait && (
             <OcrWaitScreen
               stage={scanStage as "ocr_pending" | "ocr_processing"}
@@ -987,7 +1041,7 @@ export default function UploadPage({ scanOnly = false }: UploadPageProps) {
 
           {(showOcrReview || showOcrFailed) && (
             <div className="p-8">
-              {/* Review header */}
+              {/* Header */}
               <div className="flex items-center gap-3 mb-6">
                 {showOcrFailed ? (
                   <div className="w-10 h-10 rounded-xl bg-amber-100 flex items-center justify-center">
@@ -1005,25 +1059,25 @@ export default function UploadPage({ scanOnly = false }: UploadPageProps) {
                   <p className="text-sm text-muted-foreground">
                     {showOcrFailed
                       ? "Please fill in the details manually and confirm."
-                      : "Fields marked with the OCR badge were auto-filled. Check them before saving."}
+                      : "Fields marked OCR were auto-filled — teal = confident, amber = verify carefully."}
                   </p>
                 </div>
-
-                {/* Reference number chip — uses reference_number (new) */}
-                {ocrFields.reference_number && (
-                  <div className="ml-auto text-right hidden sm:block">
-                    <p className="text-xs text-muted-foreground">Detected reference</p>
-                    <p className="text-sm font-mono font-semibold text-foreground">
-                      {ocrFields.reference_number}
-                    </p>
-                  </div>
-                )}
+                <div className="ml-auto hidden sm:flex flex-col items-end gap-1">
+                  {ocrQuality?.engine && <EngineBadge engine={ocrQuality.engine} />}
+                  {ocrFields.reference_number && (
+                    <div className="text-right">
+                      <p className="text-xs text-muted-foreground">Detected reference</p>
+                      <p className="text-sm font-mono font-semibold text-foreground">
+                        {ocrFields.reference_number}
+                      </p>
+                    </div>
+                  )}
+                </div>
               </div>
 
-              {/* Low-quality warning banner */}
               {isLowQuality && ocrQuality && <LowQualityBanner quality={ocrQuality} />}
 
-              {/* OCR raw text preview */}
+              {/* Raw text preview */}
               {ocrFields.raw_lines && ocrFields.raw_lines.length > 0 && (
                 <details className="mb-6 group">
                   <summary className="cursor-pointer list-none flex items-center gap-2 text-sm font-medium text-muted-foreground hover:text-foreground select-none">
@@ -1032,52 +1086,20 @@ export default function UploadPage({ scanOnly = false }: UploadPageProps) {
                   </summary>
                   <div className="mt-2 rounded-xl border border-border bg-muted/40 p-4 max-h-48 overflow-y-auto">
                     {ocrFields.raw_lines.map((line, i) => (
-                      <p key={i} className="text-xs font-mono text-foreground leading-relaxed">
-                        {line}
-                      </p>
+                      <p key={i} className="text-xs font-mono text-foreground leading-relaxed">{line}</p>
                     ))}
                   </div>
                 </details>
               )}
 
-              {/* Review form */}
               <div className="space-y-6">
-                {/* Extra OCR-detected fields shown as read-only info chips */}
-                {(ocrFields.reference_number || ocrFields.account_code || ocrFields.document_type) && (
-                  <div>
-                    <p className="text-xs font-semibold text-muted-foreground uppercase tracking-wide mb-2">
-                      Additional detected information
-                    </p>
-                    <div className="flex flex-wrap gap-2">
-                      {ocrFields.reference_number && (
-                        <span className="inline-flex items-center gap-1.5 text-xs bg-muted border border-border rounded-full px-3 py-1">
-                          <span className="text-muted-foreground">Ref:</span>
-                          <span className="font-mono font-medium text-foreground">{ocrFields.reference_number}</span>
-                        </span>
-                      )}
-                      {ocrFields.document_type && (
-                        <span className="inline-flex items-center gap-1.5 text-xs bg-muted border border-border rounded-full px-3 py-1">
-                          <span className="text-muted-foreground">Type:</span>
-                          <span className="font-medium text-foreground">{ocrFields.document_type}</span>
-                        </span>
-                      )}
-                      {ocrFields.account_code && (
-                        <span className="inline-flex items-center gap-1.5 text-xs bg-muted border border-border rounded-full px-3 py-1">
-                          <span className="text-muted-foreground">Account:</span>
-                          <span className="font-mono font-medium text-foreground">{ocrFields.account_code}</span>
-                        </span>
-                      )}
-                      {ocrFields.kra_pin && (
-                        <span className="inline-flex items-center gap-1.5 text-xs bg-muted border border-border rounded-full px-3 py-1">
-                          <span className="text-muted-foreground">KRA PIN:</span>
-                          <span className="font-mono font-medium text-foreground">{ocrFields.kra_pin}</span>
-                        </span>
-                      )}
-                    </div>
-                  </div>
-                )}
+                {/* Line items detected from tables */}
+                {ocrLineItems.length > 0 && <LineItemsPanel items={ocrLineItems} />}
 
-                {/* Dynamic fields for the selected document type */}
+                {/* Read-only info chips */}
+                <OcrInfoChips fields={ocrFields} />
+
+                {/* Admin metadata fields */}
                 {hasMetadata && (
                   <div>
                     <h3 className="font-semibold text-foreground mb-4 flex items-center gap-2">
@@ -1093,9 +1115,9 @@ export default function UploadPage({ scanOnly = false }: UploadPageProps) {
                             field={field}
                             register={register}
                             control={control}
-                            errors={errors as Record<string, { message?: string }>}
+                            errors={errors as Record<string, unknown>}
                             enforceRequired={false}
-                            suggested={suggestedFields.has(getSuggestedFieldKey(field))}
+                            suggestionScore={getFieldScore(field)}
                             name={getUploadFieldName(field)}
                           />
                         ))}
@@ -1117,7 +1139,7 @@ export default function UploadPage({ scanOnly = false }: UploadPageProps) {
                     ) : (
                       <>
                         <CheckCircle className="w-5 h-5" />
-                        Confirm & Save
+                        Confirm &amp; Save
                         <ArrowRight className="w-4 h-4" />
                       </>
                     )}
@@ -1143,18 +1165,13 @@ export default function UploadPage({ scanOnly = false }: UploadPageProps) {
         </div>
       )}
 
-      {/* ── Main upload layout (idle / uploading) ─────────────────────────── */}
+      {/* ── Main upload layout ─────────────────────────────────────────── */}
       {(scanStage === "idle" || scanStage === "uploading") && (
         <div className="grid grid-cols-1 lg:grid-cols-12 gap-8">
-
-          {/* ── Left column ────────────────────────────────────────────────── */}
+          {/* Left column */}
           <div className="lg:col-span-5 space-y-6">
-
-            {/* Step 1 — Document Type (FIRST now) */}
-            <div
-              className="bg-card rounded-2xl border border-border p-6"
-              style={{ boxShadow: "var(--shadow-card)" }}
-            >
+            {/* Step 1 — Document Type */}
+            <div className="bg-card rounded-2xl border border-border p-6" style={{ boxShadow: "var(--shadow-card)" }}>
               <h2 className="font-semibold text-foreground mb-4 flex items-center gap-2">
                 <StepBadge n={1} active={!selectedTypeId} done={Boolean(selectedTypeId)} />
                 Document Type
@@ -1165,16 +1182,12 @@ export default function UploadPage({ scanOnly = false }: UploadPageProps) {
                 className="input w-full"
               >
                 <option value="">— Choose document type —</option>
-                {docTypes.map((t) => (
-                  <option key={t.id} value={t.id}>
-                    {t.name}
-                  </option>
+                {visibleDocTypes.map((t) => (
+                  <option key={t.id} value={t.id}>{t.name}</option>
                 ))}
               </select>
               {selectedType?.description && (
-                <p className="mt-3 text-xs text-muted-foreground">
-                  {selectedType.description}
-                </p>
+                <p className="mt-3 text-xs text-muted-foreground">{selectedType.description}</p>
               )}
               {selectedType && (
                 <div className="mt-4 flex items-start gap-2 text-xs text-primary bg-primary/10 border border-primary/20 rounded-lg px-3 py-2">
@@ -1189,10 +1202,7 @@ export default function UploadPage({ scanOnly = false }: UploadPageProps) {
             </div>
 
             {/* Step 2 — Attach File */}
-            <div
-              className="bg-card rounded-2xl border border-border p-6"
-              style={{ boxShadow: "var(--shadow-card)" }}
-            >
+            <div className="bg-card rounded-2xl border border-border p-6" style={{ boxShadow: "var(--shadow-card)" }}>
               <h2 className="font-semibold text-foreground mb-4 flex items-center gap-2">
                 <StepBadge n={2} active={Boolean(selectedTypeId) && !droppedFile} done={Boolean(droppedFile)} />
                 Attach File
@@ -1201,29 +1211,22 @@ export default function UploadPage({ scanOnly = false }: UploadPageProps) {
                 {...getRootProps()}
                 className={clsx(
                   "border-2 border-dashed rounded-2xl p-8 text-center cursor-pointer transition-all",
-                  isDragActive
-                    ? "border-primary bg-primary/5"
-                    : droppedFile
-                    ? isScanned
-                      ? "border-teal/50 bg-teal/5"
-                      : "border-primary/50 bg-primary/5"
-                    : "border-border hover:border-primary/50 hover:bg-muted/40"
+                  isDragActive  ? "border-primary bg-primary/5"
+                  : droppedFile
+                    ? isScanned ? "border-teal/50 bg-teal/5" : "border-primary/50 bg-primary/5"
+                    : "border-border hover:border-primary/50 hover:bg-muted/40",
                 )}
               >
                 <input {...getInputProps()} />
                 {droppedFile ? (
                   <div className="flex flex-col items-center">
-                    <div
-                      className={clsx(
-                        "w-12 h-12 rounded-xl flex items-center justify-center mb-3",
-                        isScanned ? "bg-teal/15" : "bg-primary/10"
-                      )}
-                    >
-                      {isScanned ? (
-                        <ScanLine className="w-6 h-6 text-teal" />
-                      ) : (
-                        <File className="w-6 h-6 text-primary" />
-                      )}
+                    <div className={clsx(
+                      "w-12 h-12 rounded-xl flex items-center justify-center mb-3",
+                      isScanned ? "bg-teal/15" : "bg-primary/10",
+                    )}>
+                      {isScanned
+                        ? <ScanLine className="w-6 h-6 text-teal" />
+                        : <File className="w-6 h-6 text-primary" />}
                     </div>
                     <p className="font-semibold text-foreground text-sm">{droppedFile.name}</p>
                     <p className="text-xs text-muted-foreground mt-1">
@@ -1231,10 +1234,7 @@ export default function UploadPage({ scanOnly = false }: UploadPageProps) {
                     </p>
                     <button
                       type="button"
-                      onClick={(e) => {
-                        e.stopPropagation();
-                        setDroppedFile(null);
-                      }}
+                      onClick={(e) => { e.stopPropagation(); setDroppedFile(null); }}
                       className="mt-3 text-destructive hover:text-destructive/80 text-xs flex items-center gap-1"
                     >
                       <X className="w-3.5 h-3.5" /> Remove
@@ -1258,10 +1258,7 @@ export default function UploadPage({ scanOnly = false }: UploadPageProps) {
             </div>
 
             {scanOnly && (
-              <div
-                className="bg-card rounded-2xl border border-teal/30 p-6 space-y-2"
-                style={{ boxShadow: "var(--shadow-card)" }}
-              >
+              <div className="bg-card rounded-2xl border border-teal/30 p-6 space-y-2" style={{ boxShadow: "var(--shadow-card)" }}>
                 <h2 className="font-semibold text-foreground mb-2 flex items-center gap-2">
                   <StepBadge n={3} active={Boolean(droppedFile)} />
                   Scan Mode (OCR)
@@ -1276,15 +1273,13 @@ export default function UploadPage({ scanOnly = false }: UploadPageProps) {
             )}
           </div>
 
-          {/* ── Right column ────────────────────────────────────────────────── */}
+          {/* Right column */}
           <div className="lg:col-span-7">
-
-            {/* Manual details form — only when type is chosen and not OCR mode */}
             {showManualForm && (
               <div
                 className={clsx(
                   "bg-card rounded-2xl border p-8",
-                  isSelfUpload ? "border-primary/30" : "border-border"
+                  isSelfUpload ? "border-primary/30" : "border-border",
                 )}
                 style={{ boxShadow: "var(--shadow-card)" }}
               >
@@ -1300,11 +1295,11 @@ export default function UploadPage({ scanOnly = false }: UploadPageProps) {
                   )}
                 </div>
 
-                {/* Dynamic document fields */}
                 {hasMetadata && (
                   <div className="mb-8">
                     <h3 className="font-semibold text-foreground mb-4 flex items-center gap-2">
-                      <CheckCircle className="w-5 h-5 text-teal" /> Document Details
+                      <CheckCircle className="w-5 h-5 text-teal" />
+                      Document Details
                     </h3>
                     <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
                       {[...selectedType!.metadata_fields]
@@ -1315,9 +1310,9 @@ export default function UploadPage({ scanOnly = false }: UploadPageProps) {
                             field={field}
                             register={register}
                             control={control}
-                            errors={errors as Record<string, { message?: string }>}
+                            errors={errors as Record<string, unknown>}
                             enforceRequired={!relaxReq}
-                            suggested={false}
+                            suggestionScore={undefined}
                             name={getUploadFieldName(field)}
                           />
                         ))}
@@ -1326,63 +1321,119 @@ export default function UploadPage({ scanOnly = false }: UploadPageProps) {
                 )}
 
                 <div className="space-y-6">
-                  {/* Personal tags */}
                   {isSelfUpload && (
-                    <div>
-                      <label className="label">
-                        Personal tags <span className="text-destructive">*</span>
-                      </label>
-                      <div className="space-y-2">
-                        {personalTagFields.map((field, index) => (
-                          <PersonalTagRow
-                            key={field.id}
-                            index={index}
-                            total={personalTagFields.length}
-                            register={register}
-                            onRemove={() => removePersonalTag(index)}
+                    <>
+                      <div className="grid grid-cols-1 md:grid-cols-2 gap-5">
+                        <div>
+                          <label className="label">Document name</label>
+                          <input
+                            {...register("title")}
+                            className="input"
+                            placeholder={droppedFile?.name.replace(/\.[^.]+$/, "") || "Document name"}
                           />
-                        ))}
-                      </div>
-                      <button
-                        type="button"
-                        onClick={() => appendPersonalTag({ value: "" })}
-                        className="mt-3 inline-flex items-center gap-2 text-sm font-medium text-primary hover:text-primary/80"
-                      >
-                        <Plus className="w-4 h-4" /> Add another tag
-                      </button>
-                    </div>
-                  )}
-
-                  {isSelfUpload && (
-                    <div>
-                      <label className="label">Custom personal fields</label>
-                      <p className="text-xs text-muted-foreground mb-2">
-                        Add your own searchable key/value fields for this personal document.
-                      </p>
-                      <div className="space-y-2">
-                        {personalMetadataFields.map((field, index) => (
-                          <PersonalMetadataRow
-                            key={field.id}
-                            index={index}
-                            total={personalMetadataFields.length}
-                            register={register}
-                            onRemove={() => removePersonalMetadata(index)}
+                        </div>
+                        <div>
+                          <label className="label">Description</label>
+                          <input
+                            {...register("personal_description")}
+                            className="input"
+                            placeholder="Short description"
                           />
-                        ))}
+                        </div>
                       </div>
-                      <button
-                        type="button"
-                        onClick={() => appendPersonalMetadata({ key: "", value: "" })}
-                        className="mt-3 inline-flex items-center gap-2 text-sm font-medium text-primary hover:text-primary/80"
-                      >
-                        <Plus className="w-4 h-4" /> Add custom field
-                      </button>
-                    </div>
-                  )}
 
+                      <div>
+                        <label className="label">Document text</label>
+                        <textarea
+                          {...register("personal_text")}
+                          rows={5}
+                          className="input resize-y"
+                          placeholder="Type notes, pasted text, reference details, or anything you want kept with this document."
+                        />
+                      </div>
+
+                      <div className="rounded-xl border border-border bg-muted/30 p-4">
+                        <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
+                          <div className="flex items-start gap-3">
+                            <div className="mt-0.5 flex h-9 w-9 flex-shrink-0 items-center justify-center rounded-lg bg-primary/10 text-primary">
+                              <Tags className="h-4 w-4" />
+                            </div>
+                            <div>
+                              <p className="text-sm font-semibold text-foreground">
+                                Optional tags and custom fields
+                              </p>
+                              <p className="mt-0.5 text-xs text-muted-foreground">
+                                Add extra organization only when this document needs it.
+                              </p>
+                            </div>
+                          </div>
+                          <button
+                            type="button"
+                            onClick={() => setShowPersonalExtras((open) => !open)}
+                            className={clsx(
+                              "inline-flex items-center justify-center gap-2 rounded-lg border px-3 py-2 text-sm font-semibold transition-colors",
+                              showPersonalExtras
+                                ? "border-primary bg-primary text-primary-foreground"
+                                : "border-border bg-card text-foreground hover:bg-muted",
+                            )}
+                          >
+                            <FileText className="h-4 w-4" />
+                            {showPersonalExtras ? "Hide optional details" : "Add optional details"}
+                          </button>
+                        </div>
+
+                        {showPersonalExtras && (
+                          <div className="mt-5 space-y-5 border-t border-border pt-5">
+                            <div>
+                              <label className="label">Personal tags</label>
+                              <div className="space-y-2">
+                                {personalTagFields.map((field, index) => (
+                                  <PersonalTagRow
+                                    key={field.id}
+                                    index={index}
+                                    total={personalTagFields.length}
+                                    register={register}
+                                    onRemove={() => removePersonalTag(index)}
+                                  />
+                                ))}
+                              </div>
+                              <button
+                                type="button"
+                                onClick={() => appendPersonalTag({ value: "" })}
+                                className="mt-3 inline-flex items-center gap-2 text-sm font-medium text-primary hover:text-primary/80"
+                              >
+                                <Plus className="w-4 h-4" /> Add another tag
+                              </button>
+                            </div>
+
+                            <div>
+                              <label className="label">Custom personal fields</label>
+                              <div className="space-y-2">
+                                {personalMetadataFields.map((field, index) => (
+                                  <PersonalMetadataRow
+                                    key={field.id}
+                                    index={index}
+                                    total={personalMetadataFields.length}
+                                    register={register}
+                                    onRemove={() => removePersonalMetadata(index)}
+                                  />
+                                ))}
+                              </div>
+                              <button
+                                type="button"
+                                onClick={() => appendPersonalMetadata({ key: "", value: "" })}
+                                className="mt-3 inline-flex items-center gap-2 text-sm font-medium text-primary hover:text-primary/80"
+                              >
+                                <Plus className="w-4 h-4" /> Add custom field
+                              </button>
+                            </div>
+                          </div>
+                        )}
+                      </div>
+                    </>
+                  )}
                 </div>
 
-                {/* Upload progress */}
                 {uploadMutation.isPending && uploadProgress > 0 && (
                   <div className="mt-6">
                     <div className="flex justify-between text-xs text-muted-foreground mb-1.5">
@@ -1398,7 +1449,6 @@ export default function UploadPage({ scanOnly = false }: UploadPageProps) {
                   </div>
                 )}
 
-                {/* Actions */}
                 <div className="flex gap-4 pt-6 mt-6 border-t border-border">
                   <button
                     type="button"
@@ -1428,7 +1478,6 @@ export default function UploadPage({ scanOnly = false }: UploadPageProps) {
               </div>
             )}
 
-            {/* OCR idle info panel — visible when OCR mode is selected but not yet uploaded */}
             {scanOnly && showOcrIdlePanel && (
               <div
                 className="bg-card rounded-2xl border border-teal/30 p-8 flex flex-col items-center text-center"
@@ -1439,7 +1488,7 @@ export default function UploadPage({ scanOnly = false }: UploadPageProps) {
                 </div>
                 <h3 className="text-lg font-semibold text-foreground mb-2">OCR Scan Mode</h3>
                 <p className="text-sm text-muted-foreground max-w-sm mb-6">
-                  Upload the file and the OCR pipeline will extract the text automatically.
+                  Upload the file and the OCR pipeline will extract text automatically.
                   You'll then review and confirm the extracted details before saving.
                 </p>
                 <div className="w-full space-y-2 text-left rounded-xl bg-muted/40 border border-border p-4 mb-6 text-sm">
@@ -1457,7 +1506,6 @@ export default function UploadPage({ scanOnly = false }: UploadPageProps) {
                   ))}
                 </div>
 
-                {/* Upload progress */}
                 {uploadMutation.isPending && uploadProgress > 0 && (
                   <div className="w-full mb-4">
                     <div className="flex justify-between text-xs text-muted-foreground mb-1.5">
@@ -1501,14 +1549,11 @@ export default function UploadPage({ scanOnly = false }: UploadPageProps) {
                 </div>
               </div>
             )}
-
-            {/* Nothing selected yet — right panel intentionally empty */}
-            {/* No placeholder shown; the left column's step badges guide the user */}
           </div>
         </div>
       )}
 
-      {/* Uploading spinner for OCR flow */}
+      {/* Uploading spinner (OCR flow) */}
       {scanStage === "uploading" && (
         <div className="flex flex-col items-center py-16 text-center">
           <Loader2 className="w-12 h-12 animate-spin text-teal mb-4" />
@@ -1516,10 +1561,7 @@ export default function UploadPage({ scanOnly = false }: UploadPageProps) {
           {uploadProgress > 0 && (
             <div className="w-64 mt-4">
               <div className="h-2 bg-muted rounded-full overflow-hidden">
-                <div
-                  className="h-full bg-teal transition-all"
-                  style={{ width: `${uploadProgress}%` }}
-                />
+                <div className="h-full bg-teal transition-all" style={{ width: `${uploadProgress}%` }} />
               </div>
               <p className="text-xs text-muted-foreground mt-1">{uploadProgress}%</p>
             </div>

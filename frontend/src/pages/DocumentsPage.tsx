@@ -4,8 +4,8 @@
  * Indigo Vault redesign:
  *  - Semantic HSL tokens throughout
  *  - StatusBadge with dot+pill color coding
- *  - Selection checkboxes hidden on "My Documents" tab (actions live in row)
- *  - Supplier filter dropdown
+ *  - Reusable workflow/all and personal-only document library modes
+ *  - Workflow filters stay out of the personal document library
  */
 
 import { useEffect, useMemo, useState } from "react";
@@ -15,7 +15,7 @@ import { documentsAPI, documentTypesAPI, normalizeListResponse } from "@/service
 import {
   FileText, UploadCloud, Lock, Users, LayoutList,
   Archive, Trash2, Loader2, CheckSquare, Square, X, CheckCircle, XCircle,
-  Search as SearchIcon, SlidersHorizontal,
+  Search as SearchIcon, SlidersHorizontal, Eye,
 } from "lucide-react";
 import { format } from "date-fns";
 import { cn } from "../lib/utils";
@@ -29,12 +29,11 @@ import { preloadDocumentWorkspace } from "@/lib/routePreload";
 
 const PAGE_SIZE = 10;
 type BulkAction = "approve" | "reject" | "archive" | "void";
-type Tab = "all" | "workflow" | "personal";
+type Tab = "all" | "workflow";
 
 const TABS: { id: Tab; label: string; icon: React.ReactNode; tip: string }[] = [
-  { id: "all",       label: "All Documents", icon: <LayoutList className="w-4 h-4" />, tip: "Every document you have access to" },
+  { id: "all",       label: "All Documents", icon: <LayoutList className="w-4 h-4" />, tip: "Every workflow document you have access to" },
   { id: "workflow",  label: "Workflow",      icon: <Users className="w-4 h-4" />,      tip: "Documents going through an approval process" },
-  { id: "personal",  label: "My Documents",  icon: <Lock className="w-4 h-4" />,       tip: "Your personal uploads — visible only to you and admins" },
 ];
 
 const STATUS_OPTIONS = ["draft", "pending_approval", "approved", "rejected", "archived", "void"];
@@ -208,7 +207,21 @@ function PersonalTagChips({
   );
 }
 
-export default function DocumentsPage() {
+function getPersonalDescription(doc: Document): string {
+  const directDesc = doc.description;
+  if (typeof directDesc === "string" && directDesc.trim()) return directDesc.trim();
+
+  const metaDesc = doc.metadata?.description;
+  if (typeof metaDesc === "string" && metaDesc.trim()) return metaDesc.trim();
+
+  return "";
+}
+
+interface DocumentsPageProps {
+  personalOnly?: boolean;
+}
+
+export default function DocumentsPage({ personalOnly = false }: DocumentsPageProps) {
   const queryClient = useQueryClient();
   const [searchParams, setSearchParams] = useSearchParams();
   const statusFromUrl = searchParams.get("status");
@@ -234,7 +247,7 @@ export default function DocumentsPage() {
     if (normalizedStatusFromUrl) {
       setActiveTab(normalizedStatusFromUrl === "archived" ? "all" : "workflow");
     }
-    if (normalizedStatusFromUrl === "archived") {
+    if (normalizedStatusFromUrl === "archived" || personalOnly) {
       setSearch("");
       setTypeFilter("");
       setSupplierFilter("");
@@ -242,7 +255,7 @@ export default function DocumentsPage() {
     }
     setPage(1);
     setSelectedIds([]);
-  }, [normalizedStatusFromUrl]);
+  }, [normalizedStatusFromUrl, personalOnly]);
 
   const clearUrlStatusFilter = () => {
     if (!searchParams.has("status")) return;
@@ -255,30 +268,30 @@ export default function DocumentsPage() {
     queryKey: ["document-types"],
     queryFn: () => documentTypesAPI.list().then((r) => r.data as unknown),
     select: (data) => normalizeListResponse(data),
-    enabled: !isArchiveView,
+    enabled: !isArchiveView && !personalOnly,
     ...QUERY_FIVE_MIN_STALE,
   });
 
   const params: Record<string, unknown> = {
     search: isArchiveView ? undefined : debouncedSearch || undefined,
-    status: isArchiveView ? "archived" : statusFilter || undefined,
-    document_type: isArchiveView ? undefined : typeFilter || undefined,
-    supplier: isArchiveView ? undefined : supplierFilter || undefined,
+    status: isArchiveView ? "archived" : personalOnly ? undefined : statusFilter || undefined,
+    document_type: isArchiveView || personalOnly ? undefined : typeFilter || undefined,
+    supplier: isArchiveView || personalOnly ? undefined : supplierFilter || undefined,
     ordering: `${sortDir === "desc" ? "-" : ""}${sort}`,
     page,
     page_size: PAGE_SIZE,
   };
 
-  if (!isArchiveView && activeTab === "workflow") params.is_self_upload = false;
-  if (!isArchiveView && activeTab === "personal") params.is_self_upload = true;
-  if (!isArchiveView && activeTab === "personal" && personalTagFilter) params.personal_tag = personalTagFilter;
+  if (!isArchiveView) params.is_self_upload = personalOnly;
+  if (!isArchiveView && personalOnly && personalTagFilter) params.personal_tag = personalTagFilter;
 
   const { data, isLoading } = useQuery({
     queryKey: ["documents", activeTab, params],
     queryFn: () => documentsAPI.list(params),
     select: (r) => r.data,
-    placeholderData: (prev) => prev,
     ...QUERY_SHORT_STALE,
+    staleTime: personalOnly ? 0 : QUERY_SHORT_STALE.staleTime,
+    refetchOnMount: personalOnly ? "always" : true,
   });
 
   const docs = data?.results ?? [];
@@ -296,15 +309,14 @@ export default function DocumentsPage() {
     const totalPages = Math.ceil(totalCount / PAGE_SIZE);
     const baseParams: Record<string, unknown> = {
       search: isArchiveView ? undefined : debouncedSearch || undefined,
-      status: isArchiveView ? "archived" : statusFilter || undefined,
-      document_type: isArchiveView ? undefined : typeFilter || undefined,
-      supplier: isArchiveView ? undefined : supplierFilter || undefined,
+      status: isArchiveView ? "archived" : personalOnly ? undefined : statusFilter || undefined,
+      document_type: isArchiveView || personalOnly ? undefined : typeFilter || undefined,
+      supplier: isArchiveView || personalOnly ? undefined : supplierFilter || undefined,
       ordering: `${sortDir === "desc" ? "-" : ""}${sort}`,
       page_size: PAGE_SIZE,
     };
-    if (!isArchiveView && activeTab === "workflow") baseParams.is_self_upload = false;
-    if (!isArchiveView && activeTab === "personal") baseParams.is_self_upload = true;
-    if (!isArchiveView && activeTab === "personal" && personalTagFilter) baseParams.personal_tag = personalTagFilter;
+    if (!isArchiveView) baseParams.is_self_upload = personalOnly;
+    if (!isArchiveView && personalOnly && personalTagFilter) baseParams.personal_tag = personalTagFilter;
 
     if (page < totalPages) {
       queryClient.prefetchQuery({
@@ -320,7 +332,7 @@ export default function DocumentsPage() {
         staleTime: 30_000,
       });
     }
-  }, [data?.count, queryClient, activeTab, debouncedSearch, statusFilter, typeFilter, supplierFilter, sort, sortDir, page, personalTagFilter, isArchiveView]);
+  }, [data?.count, queryClient, activeTab, debouncedSearch, statusFilter, typeFilter, supplierFilter, sort, sortDir, page, personalTagFilter, isArchiveView, personalOnly]);
 
   const archiveMutation = useMutation({
     mutationFn: (id: string) => documentsAPI.archive(id),
@@ -376,7 +388,6 @@ export default function DocumentsPage() {
 
   const handlePersonalTagClick = (tag: string) => {
     clearUrlStatusFilter();
-    setActiveTab("personal");
     setSearch("");
     setStatusFilter("");
     setTypeFilter("");
@@ -391,7 +402,7 @@ export default function DocumentsPage() {
     [...docs.flatMap((doc: Document) => doc.personal_tags ?? []), personalTagFilter].filter(Boolean)
   )).sort((a, b) => a.localeCompare(b));
 
-  const selectionEnabled = !isArchiveView && activeTab !== "personal";
+  const selectionEnabled = !isArchiveView && !personalOnly;
   const showBulkToolbar = selectionEnabled && selectedIds.length > 0;
 
   const availableBulkActions: BulkAction[] = showBulkToolbar
@@ -403,14 +414,13 @@ export default function DocumentsPage() {
         }, ["approve", "reject", "archive", "void"] as BulkAction[])
     : [];
 
-  const baseCols = 8;
-  const totalCols =
-    baseCols +
-    (selectionEnabled ? 1 : 0) +
-    (activeTab !== "personal" && !isArchiveView ? 1 : 0) +
-    (activeTab === "personal" ? 1 : 0);
+  const totalCols = personalOnly
+    ? 7 // Reference, name, description, tags, uploaded, uploaded by, actions
+    : 5 + (selectionEnabled ? 1 : 0) + (!isArchiveView ? 1 : 0);
 
-  const activeFilterCount = [statusFilter, typeFilter, supplierFilter].filter(Boolean).length;
+  const activeFilterCount = personalOnly
+    ? 0
+    : [statusFilter, typeFilter, supplierFilter].filter(Boolean).length;
 
   return (
     <div className={cn("p-6 max-w-7xl mx-auto space-y-6", isArchiveView && "max-w-6xl")}>
@@ -441,6 +451,26 @@ export default function DocumentsPage() {
             )}
           </div>
         </div>
+      ) : personalOnly ? (
+        <div className="flex items-center justify-between">
+          <div>
+            <div className="mb-2 inline-flex items-center gap-2 rounded-full border border-primary/20 bg-primary/5 px-3 py-1 text-xs font-semibold text-primary">
+              <Lock className="h-3.5 w-3.5" />
+              Personal vault
+            </div>
+            <h1 className="text-2xl font-bold text-foreground tracking-tight">Personal documents</h1>
+            <p className="text-sm text-muted-foreground mt-1">
+              Documents you control outside the approval workflow.
+            </p>
+          </div>
+          <Link
+            to="/documents/upload"
+            className="inline-flex items-center gap-2 px-5 py-2.5 text-sm font-medium rounded-lg transition-all bg-primary text-primary-foreground hover:bg-primary/90"
+            style={{ boxShadow: "var(--shadow-elegant)" }}
+          >
+            <UploadCloud className="w-4 h-4" /> Upload Personal Document
+          </Link>
+        </div>
       ) : (
         <div className="flex items-center justify-between">
           <div>
@@ -462,7 +492,7 @@ export default function DocumentsPage() {
       )}
 
       {/* Tabs */}
-      {!isArchiveView && (
+      {!isArchiveView && !personalOnly && (
         <div className="flex items-end gap-0.5 border-b border-border">
           {TABS.map((tab) => (
             <button
@@ -484,7 +514,7 @@ export default function DocumentsPage() {
       )}
 
       {/* Personal tab explainer */}
-      {!isArchiveView && activeTab === "personal" && (
+      {!isArchiveView && personalOnly && (
         <div className="flex items-start gap-3 rounded-xl border border-primary/20 bg-primary/5 px-4 py-3 text-sm text-foreground">
           <Lock className="w-4 h-4 mt-0.5 flex-shrink-0 text-primary" />
           <span>
@@ -493,10 +523,10 @@ export default function DocumentsPage() {
         </div>
       )}
 
-      {/* Personal tag chips */}
-      {!isArchiveView && activeTab === "personal" && personalTagOptions.length > 0 && (
+      {/* Personal tag filters */}
+      {!isArchiveView && personalOnly && personalTagOptions.length > 0 && (
         <div className="flex flex-wrap items-center gap-2">
-          <span className="text-xs font-semibold uppercase tracking-wide text-muted-foreground mr-2">Filter by tag</span>
+          <span className="text-xs font-semibold uppercase tracking-wide text-muted-foreground mr-2">Tags</span>
           <button
             type="button"
             onClick={() => setPersonalTagFilter("")}
@@ -541,23 +571,25 @@ export default function DocumentsPage() {
               />
             </div>
 
-            <button
-              onClick={() => setShowFilters(!showFilters)}
-              className={cn(
-                "inline-flex items-center gap-2 px-4 py-2.5 text-sm font-medium rounded-lg border transition-colors",
-                showFilters || activeFilterCount > 0
-                  ? "border-accent/40 bg-accent/10 text-accent"
-                  : "border-border bg-card text-muted-foreground hover:text-foreground hover:border-border"
-              )}
-            >
-              <SlidersHorizontal className="w-4 h-4" />
-              Filters
-              {activeFilterCount > 0 && (
-                <span className="ml-1 inline-flex items-center justify-center w-5 h-5 rounded-full bg-accent text-accent-foreground text-[10px] font-bold">
-                  {activeFilterCount}
-                </span>
-              )}
-            </button>
+            {!personalOnly && (
+              <button
+                onClick={() => setShowFilters(!showFilters)}
+                className={cn(
+                  "inline-flex items-center gap-2 px-4 py-2.5 text-sm font-medium rounded-lg border transition-colors",
+                  showFilters || activeFilterCount > 0
+                    ? "border-accent/40 bg-accent/10 text-accent"
+                    : "border-border bg-card text-muted-foreground hover:text-foreground hover:border-border"
+                )}
+              >
+                <SlidersHorizontal className="w-4 h-4" />
+                Filters
+                {activeFilterCount > 0 && (
+                  <span className="ml-1 inline-flex items-center justify-center w-5 h-5 rounded-full bg-accent text-accent-foreground text-[10px] font-bold">
+                    {activeFilterCount}
+                  </span>
+                )}
+              </button>
+            )}
 
             {data && (
               <span className="ml-auto text-sm text-muted-foreground self-center">
@@ -567,26 +599,24 @@ export default function DocumentsPage() {
           </div>
 
           {/* Expanded filter row */}
-          {showFilters && (
+          {showFilters && !personalOnly && (
             <div
               className="flex flex-wrap gap-3 items-center rounded-xl border border-border bg-muted/30 px-4 py-3"
               style={{ boxShadow: "var(--shadow-card)" }}
             >
-              {activeTab !== "personal" && (
-                <div className="space-y-1">
-                  <label className="text-[10px] font-semibold uppercase tracking-widest text-muted-foreground">Status</label>
-                  <select
-                    value={statusFilter}
-                    onChange={(e) => { clearUrlStatusFilter(); setStatusFilter(e.target.value); setPage(1); }}
-                    className="block text-sm bg-card border border-border rounded-lg px-3 py-2 focus:outline-none focus:ring-2 focus:ring-accent/40 focus:border-accent transition-colors min-w-[140px]"
-                  >
-                    <option value="">All statuses</option>
-                    {STATUS_OPTIONS.map((s) => (
-                      <option key={s} value={s}>{s.replace(/_/g, " ")}</option>
-                    ))}
-                  </select>
-                </div>
-              )}
+              <div className="space-y-1">
+                <label className="text-[10px] font-semibold uppercase tracking-widest text-muted-foreground">Status</label>
+                <select
+                  value={statusFilter}
+                  onChange={(e) => { clearUrlStatusFilter(); setStatusFilter(e.target.value); setPage(1); }}
+                  className="block text-sm bg-card border border-border rounded-lg px-3 py-2 focus:outline-none focus:ring-2 focus:ring-accent/40 focus:border-accent transition-colors min-w-[140px]"
+                >
+                  <option value="">All statuses</option>
+                  {STATUS_OPTIONS.map((s) => (
+                    <option key={s} value={s}>{s.replace(/_/g, " ")}</option>
+                  ))}
+                </select>
+              </div>
 
               <div className="space-y-1">
                 <label className="text-[10px] font-semibold uppercase tracking-widest text-muted-foreground">Type</label>
@@ -669,22 +699,23 @@ export default function DocumentsPage() {
                   </th>
                 )}
                 <th className="text-left px-4 py-3 font-semibold text-[11px] uppercase tracking-wider text-muted-foreground">Reference</th>
-                <th className="text-left px-4 py-3 font-semibold text-[11px] uppercase tracking-wider text-muted-foreground">Title</th>
-                <th className="text-left px-4 py-3 font-semibold text-[11px] uppercase tracking-wider text-muted-foreground">Type</th>
-                <th className="text-left px-4 py-3 font-semibold text-[11px] uppercase tracking-wider text-muted-foreground">Format</th>
-                <th className="text-left px-4 py-3 font-semibold text-[11px] uppercase tracking-wider text-muted-foreground">Supplier</th>
-                <th className="text-right px-4 py-3 font-semibold text-[11px] uppercase tracking-wider text-muted-foreground">Amount</th>
-                <th className="text-left px-4 py-3 font-semibold text-[11px] uppercase tracking-wider text-muted-foreground">Date</th>
+                <th className="text-left px-4 py-3 font-semibold text-[11px] uppercase tracking-wider text-muted-foreground">Document Name</th>
 
-                {activeTab !== "personal" && !isArchiveView && (
+                {personalOnly && (
+                  <>
+                    <th className="text-left px-4 py-3 font-semibold text-[11px] uppercase tracking-wider text-muted-foreground">Description</th>
+                    <th className="text-left px-4 py-3 font-semibold text-[11px] uppercase tracking-wider text-muted-foreground">Tags</th>
+                  </>
+                )}
+
+                {!personalOnly && !isArchiveView && (
                   <th className="text-left px-4 py-3 font-semibold text-[11px] uppercase tracking-wider text-muted-foreground">Status</th>
                 )}
 
                 <th className="text-left px-4 py-3 font-semibold text-[11px] uppercase tracking-wider text-muted-foreground">Uploaded</th>
+                <th className="text-left px-4 py-3 font-semibold text-[11px] uppercase tracking-wider text-muted-foreground">Uploaded By</th>
 
-                {activeTab === "personal" && (
-                  <th className="text-right px-4 py-3 font-semibold text-[11px] uppercase tracking-wider text-muted-foreground">Actions</th>
-                )}
+                <th className="text-right px-4 py-3 font-semibold text-[11px] uppercase tracking-wider text-muted-foreground">Actions</th>
               </tr>
             </thead>
 
@@ -718,7 +749,7 @@ export default function DocumentsPage() {
               ) : (
                 docs.map((doc: Document) => {
                   const isSelected = selectedIds.includes(doc.id);
-                  const isPersonal = doc.is_self_upload === true;
+                  const personalDescription = getPersonalDescription(doc);
 
                   return (
                     <tr
@@ -726,7 +757,6 @@ export default function DocumentsPage() {
                       className={cn(
                         "hover:bg-muted/40 transition-colors group",
                         isSelected && "bg-accent/5",
-                        isPersonal && activeTab === "all" && !isSelected && "bg-primary/[0.02]",
                         isArchiveView && "bg-muted/[0.18] hover:bg-muted/40"
                       )}
                     >
@@ -753,12 +783,6 @@ export default function DocumentsPage() {
                           >
                             {doc.reference_number}
                           </Link>
-                          {activeTab === "all" && isPersonal && (
-                            <span className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded-full text-[10px] font-semibold bg-primary/10 text-primary border border-primary/20">
-                              <Lock className="w-2.5 h-2.5" />
-                              Personal
-                            </span>
-                          )}
                           {isArchiveView && (
                             <span className="inline-flex items-center gap-1 rounded-full border border-border bg-background px-1.5 py-0.5 text-[10px] font-semibold text-muted-foreground">
                               <Archive className="h-2.5 w-2.5" />
@@ -778,40 +802,35 @@ export default function DocumentsPage() {
                           >
                             {doc.title}
                           </Link>
-                          {isPersonal && doc.personal_tags?.length ? (
-                            <PersonalTagChips
-                              tags={doc.personal_tags}
-                              onTagClick={isArchiveView ? undefined : handlePersonalTagClick}
-                            />
-                          ) : null}
+                          <span className="inline-flex items-center rounded-md border border-border bg-muted/40 px-2 py-0.5 text-[10px] font-semibold uppercase text-muted-foreground tracking-wide">
+                            {formatDocumentFileType(doc.file_name, doc.file_mime_type)}
+                          </span>
                         </div>
                       </td>
 
-                      <td className="px-4 py-3.5 text-muted-foreground whitespace-nowrap text-xs">
-                        {doc.document_type_name || "—"}
-                      </td>
+                      {personalOnly && (
+                        <>
+                          <td className="px-4 py-3.5 text-xs text-foreground/80 max-w-[16rem]">
+                            {personalDescription ? (
+                              <span className="line-clamp-2">{personalDescription}</span>
+                            ) : (
+                              <span className="text-muted-foreground">—</span>
+                            )}
+                          </td>
+                          <td className="px-4 py-3.5 min-w-[12rem]">
+                            {doc.personal_tags?.length ? (
+                              <PersonalTagChips
+                                tags={doc.personal_tags}
+                                onTagClick={isArchiveView ? undefined : handlePersonalTagClick}
+                              />
+                            ) : (
+                              <span className="text-xs text-muted-foreground">—</span>
+                            )}
+                          </td>
+                        </>
+                      )}
 
-                      <td className="px-4 py-3.5">
-                        <span className="inline-flex items-center rounded-md border border-border bg-muted/40 px-2 py-0.5 text-[10px] font-semibold uppercase text-muted-foreground tracking-wide">
-                          {formatDocumentFileType(doc.file_name, doc.file_mime_type)}
-                        </span>
-                      </td>
-
-                      <td className="px-4 py-3.5 text-foreground/80 max-w-[8rem] truncate text-xs">
-                        {doc.supplier || "—"}
-                      </td>
-
-                      <td className="px-4 py-3.5 text-right text-foreground whitespace-nowrap font-semibold tabular-nums text-xs">
-                        {doc.amount
-                          ? `${Number(doc.amount).toLocaleString(undefined, { minimumFractionDigits: 2 })} ${doc.currency || "USD"}`
-                          : "—"}
-                      </td>
-
-                      <td className="px-4 py-3.5 text-muted-foreground whitespace-nowrap text-xs">
-                        {doc.document_date ? format(new Date(doc.document_date), "dd MMM yyyy") : "—"}
-                      </td>
-
-                      {activeTab !== "personal" && !isArchiveView && (
+                      {!personalOnly && !isArchiveView && (
                         <td className="px-4 py-3.5">
                           <StatusBadge status={doc.status} />
                         </td>
@@ -821,20 +840,33 @@ export default function DocumentsPage() {
                         {format(new Date(doc.created_at), "dd MMM yyyy")}
                       </td>
 
-                      {activeTab === "personal" && (
-                        <td className="px-4 py-3.5">
-                          <div className="flex items-center justify-end gap-1 opacity-0 group-hover:opacity-100 transition-opacity">
-                            {!["archived", "void"].includes(doc.status) && (
-                              <button
-                                title="Archive"
-                                onClick={() => {
-                                  if (window.confirm("Archive this personal document?")) archiveMutation.mutate(doc.id);
-                                }}
-                                className="p-1.5 rounded-md text-muted-foreground hover:bg-accent/15 hover:text-accent transition-colors"
-                              >
-                                <Archive className="w-4 h-4" />
-                              </button>
-                            )}
+                      <td className="px-4 py-3.5 text-foreground/80 max-w-[8rem] truncate text-xs">
+                        {doc.uploaded_by?.full_name || doc.uploaded_by?.email || "—"}
+                      </td>
+
+                      <td className="px-4 py-3.5">
+                        <div className="flex items-center justify-end gap-1.5">
+                          <Link
+                            to={`/documents/${doc.id}`}
+                            onMouseEnter={preloadDocumentWorkspace}
+                            onFocus={preloadDocumentWorkspace}
+                            className="inline-flex items-center gap-1.5 rounded-md border border-border bg-card px-2.5 py-1.5 text-xs font-medium text-foreground hover:border-accent/40 hover:bg-accent/10 hover:text-accent transition-colors"
+                          >
+                            <Eye className="w-3.5 h-3.5" />
+                            View
+                          </Link>
+                          {personalOnly && !["archived", "void"].includes(doc.status) && (
+                            <button
+                              title="Archive"
+                              onClick={() => {
+                                if (window.confirm("Archive this personal document?")) archiveMutation.mutate(doc.id);
+                              }}
+                              className="p-1.5 rounded-md text-muted-foreground hover:bg-accent/15 hover:text-accent transition-colors"
+                            >
+                              <Archive className="w-4 h-4" />
+                            </button>
+                          )}
+                          {personalOnly && (
                             <button
                               title="Delete"
                               onClick={() => {
@@ -844,9 +876,9 @@ export default function DocumentsPage() {
                             >
                               <Trash2 className="w-4 h-4" />
                             </button>
-                          </div>
-                        </td>
-                      )}
+                          )}
+                        </div>
+                      </td>
                     </tr>
                   );
                 })

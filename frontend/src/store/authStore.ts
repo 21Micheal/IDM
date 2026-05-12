@@ -14,6 +14,7 @@ export interface AuthUser {
   group_names?: string[];
   mfa_enabled: boolean;
   must_change_password: boolean;          // ← new field
+  department_name?: string | null;
   department?: { id: string; name: string };
 }
 

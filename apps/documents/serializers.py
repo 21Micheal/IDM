@@ -170,6 +170,7 @@ class DocumentListSerializer(serializers.ModelSerializer):
     uploaded_by        = UserSummarySerializer(read_only=True)
     tags               = TagSerializer(many=True, read_only=True)
     personal_tags      = serializers.SerializerMethodField()
+    description        = serializers.SerializerMethodField()
     permissions        = serializers.SerializerMethodField()
     preview_pdf        = serializers.SerializerMethodField()
     is_edit_locked     = serializers.SerializerMethodField()
@@ -182,6 +183,7 @@ class DocumentListSerializer(serializers.ModelSerializer):
             "id", "title", "reference_number",
             "document_type", "document_type_name",
             "status", "supplier", "amount", "currency", "document_date",
+            "description", # Added for personal documents
             "file_name", "file_size", "file_mime_type",
             "uploaded_by", "tags", "personal_tags", "permissions",
             "is_self_upload",
@@ -191,6 +193,12 @@ class DocumentListSerializer(serializers.ModelSerializer):
             "current_version", "created_at", "updated_at",
             "available_bulk_actions",
         ]
+
+    def get_description(self, obj):
+        if not isinstance(obj.metadata, dict):
+            return ""
+        value = obj.metadata.get("description")
+        return value.strip() if isinstance(value, str) else ""
 
     def get_personal_tags(self, obj):
         tags = obj.metadata.get("personal_tags", []) if isinstance(obj.metadata, dict) else []
@@ -385,10 +393,6 @@ class DocumentMetadataEditSerializer(serializers.ModelSerializer):
         personal_tags = validated_data.pop("personal_tags", None)
         if personal_tags is not None:
             normalized_tags = _normalize_personal_tags(personal_tags)
-            if instance.is_self_upload and not normalized_tags:
-                raise serializers.ValidationError(
-                    {"personal_tags": "Please add at least one personal tag."}
-                )
             metadata = dict(validated_data.get("metadata") or instance.metadata or {})
             metadata["personal_tags"] = normalized_tags
             validated_data["metadata"] = metadata
@@ -475,8 +479,6 @@ class DocumentUploadSerializer(serializers.ModelSerializer):
                 _extract_personal_tag_values(self.initial_data)
                 or (value.get("personal_tags") if isinstance(value, dict) else None)
             )
-            if not personal_tags:
-                raise serializers.ValidationError("Please add at least one personal tag.")
             value = dict(value)
             value["personal_tags"] = personal_tags
             return value
@@ -515,12 +517,19 @@ class DocumentUploadSerializer(serializers.ModelSerializer):
         import magic as python_magic
         from elasticsearch.helpers import BulkIndexError
 
-        tags       = validated_data.pop("tags", [])
-        validated_data.pop("personal_tags", None)
+        tags          = validated_data.pop("tags", [])
+        personal_tags = validated_data.pop("personal_tags", None)
         request    = self.context["request"]
         upload     = validated_data.pop("file")
         if validated_data.get("is_self_upload"):
             validated_data["document_type"] = _get_personal_document_type()
+            metadata = dict(validated_data.get("metadata") or {})
+            metadata["personal_tags"] = _normalize_personal_tags(
+                personal_tags
+                if personal_tags is not None
+                else metadata.get("personal_tags")
+            )
+            validated_data["metadata"] = metadata
             tags = []
         doc_type   = validated_data["document_type"]
         is_scanned = validated_data.get("is_scanned", False)
@@ -886,4 +895,4 @@ class DocumentTypeWriteSerializer(serializers.ModelSerializer):
         elif next_metadata_mode == DocumentType.MetadataMode.USER_DEFINED:
             self._save_metadata_fields(instance, [])
 
-        return instance
+        return insta

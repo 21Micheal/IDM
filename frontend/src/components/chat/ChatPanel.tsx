@@ -1,11 +1,11 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import { type ReactNode, useEffect, useMemo, useRef, useState } from "react";
 import {
   ArrowLeft,
   MessageCircle,
   MoreVertical,
+  Plus,
   Search,
   Send,
-  Users,
   X,
 } from "lucide-react";
 import clsx from "clsx";
@@ -77,9 +77,11 @@ export function ChatPanel({ onClose, initialRoomId, onActiveRoomChange }: ChatPa
   const [users, setUsers] = useState<User[]>([]);
   const [groups, setGroups] = useState<Group[]>([]);
   const [newMessage, setNewMessage] = useState("");
-  const [searchQuery, setSearchQuery] = useState("");
+  const [chatSearchQuery, setChatSearchQuery] = useState("");
+  const [recipientSearchQuery, setRecipientSearchQuery] = useState("");
   const [loading, setLoading] = useState(true);
-  const [showUserList, setShowUserList] = useState(false);
+  const [showComposer, setShowComposer] = useState(false);
+  const [composerLoading, setComposerLoading] = useState(false);
   const [typingUsers, setTypingUsers] = useState<Set<string>>(new Set());
 
   const messagesEndRef = useRef<HTMLDivElement>(null);
@@ -90,29 +92,14 @@ export function ChatPanel({ onClose, initialRoomId, onActiveRoomChange }: ChatPa
   const me = currentUser?.id ?? "";
   const currentUserName = [currentUser?.first_name, currentUser?.last_name].filter(Boolean).join(" ").trim() || "You";
 
-  // ── Load rooms + users + groups on open ────────────────────────────────────────
+  // ── Load rooms on open ────────────────────────────────────────────────────────
   useEffect(() => {
     let alive = true;
     (async () => {
       try {
-        const [roomsRes, usersRes, groupsRes] = await Promise.all([
-          chatAPI.rooms.list(),
-          chatAPI.users.list(),
-          groupsAPI.list(),
-        ]);
+        const roomsRes = await chatAPI.rooms.list();
         if (!alive) return;
         setRooms(roomsRes.data.results || roomsRes.data);
-        setUsers(usersRes.data.results || usersRes.data);
-        
-        // Process groups data
-        const groupsData = groupsRes.data.results || groupsRes.data;
-        const processedGroups: Group[] = groupsData.map((group: any) => ({
-          id: group.id,
-          name: group.name,
-          description: group.description,
-          member_count: group.member_count || 0,
-        }));
-        setGroups(processedGroups);
       } catch (e) {
         console.error("Chat load failed", e);
       } finally {
@@ -123,6 +110,42 @@ export function ChatPanel({ onClose, initialRoomId, onActiveRoomChange }: ChatPa
       alive = false;
     };
   }, []);
+
+  // ── Load possible recipients only when someone starts composing ───────────────
+  useEffect(() => {
+    if (!showComposer || users.length > 0 || groups.length > 0) return;
+
+    let alive = true;
+    setComposerLoading(true);
+    (async () => {
+      try {
+        const [usersRes, groupsRes] = await Promise.all([
+          chatAPI.users.list(),
+          groupsAPI.list(),
+        ]);
+        if (!alive) return;
+
+        setUsers((usersRes.data.results || usersRes.data).filter((user: User) => user.id !== me));
+
+        const groupsData = groupsRes.data.results || groupsRes.data;
+        const processedGroups: Group[] = groupsData.map((group: any) => ({
+          id: group.id,
+          name: group.name,
+          description: group.description,
+          member_count: group.member_count || 0,
+        }));
+        setGroups(processedGroups);
+      } catch (e) {
+        console.error("Chat recipients load failed", e);
+      } finally {
+        if (alive) setComposerLoading(false);
+      }
+    })();
+
+    return () => {
+      alive = false;
+    };
+  }, [showComposer, users.length, groups.length, me]);
 
   // ── WebSocket: messages + typing for the active room ──────────────────────
   useEffect(() => {
@@ -241,6 +264,7 @@ export function ChatPanel({ onClose, initialRoomId, onActiveRoomChange }: ChatPa
       setRooms((prev) =>
         prev.map((r) => (r.id === roomId ? { ...r, unread_count: 0 } : r)),
       );
+      setShowComposer(false);
       setTimeout(() => inputRef.current?.focus(), 50);
     } catch (e) {
       console.error("Open room failed", e);
@@ -255,7 +279,8 @@ export function ChatPanel({ onClose, initialRoomId, onActiveRoomChange }: ChatPa
         prev.find((r) => r.id === room.id) ? prev : [room, ...prev],
       );
       await loadRoom(room.id);
-      setShowUserList(false);
+      setShowComposer(false);
+      setRecipientSearchQuery("");
     } catch (e) {
       console.error("DM failed", e);
     }
@@ -268,7 +293,8 @@ export function ChatPanel({ onClose, initialRoomId, onActiveRoomChange }: ChatPa
       );
       if (existingRoom) {
         await loadRoom(existingRoom.id);
-        setShowUserList(false);
+        setShowComposer(false);
+        setRecipientSearchQuery("");
         return;
       }
 
@@ -291,7 +317,8 @@ export function ChatPanel({ onClose, initialRoomId, onActiveRoomChange }: ChatPa
       const room = res.data as ChatRoom;
       setRooms((prev) => [room, ...prev]);
       await loadRoom(room.id);
-      setShowUserList(false);
+      setShowComposer(false);
+      setRecipientSearchQuery("");
     } catch (e) {
       console.error("Group chat failed", e);
     }
@@ -371,7 +398,7 @@ export function ChatPanel({ onClose, initialRoomId, onActiveRoomChange }: ChatPa
 
   // ── Filtering ─────────────────────────────────────────────────────────────
   const filteredRooms = useMemo(() => {
-    const q = searchQuery.toLowerCase();
+    const q = chatSearchQuery.toLowerCase();
     if (!q) return rooms;
     return rooms.filter(
       (r) =>
@@ -380,26 +407,30 @@ export function ChatPanel({ onClose, initialRoomId, onActiveRoomChange }: ChatPa
         lastMessagePreview(r).toLowerCase().includes(q) ||
         r.participants.some((p) => userLabel(p).toLowerCase().includes(q)),
     );
-  }, [rooms, searchQuery, me]);
+  }, [rooms, chatSearchQuery, me]);
 
   const filteredUsers = useMemo(() => {
-    const q = searchQuery.toLowerCase();
-    if (!q) return users;
-    return users.filter(
-      (u) =>
-        userLabel(u).toLowerCase().includes(q) || u.email.toLowerCase().includes(q),
-    );
-  }, [users, searchQuery]);
+    const q = recipientSearchQuery.trim().toLowerCase();
+    if (!showComposer || !q) return [];
+    return users
+      .filter(
+        (u) =>
+          userLabel(u).toLowerCase().includes(q) || u.email.toLowerCase().includes(q),
+      )
+      .slice(0, 8);
+  }, [users, recipientSearchQuery, showComposer]);
 
   const filteredGroups = useMemo(() => {
-    const q = searchQuery.toLowerCase();
-    if (!q) return groups;
-    return groups.filter(
-      (g) =>
-        g.name.toLowerCase().includes(q) || 
-        (g.description && g.description.toLowerCase().includes(q)),
-    );
-  }, [groups, searchQuery]);
+    const q = recipientSearchQuery.trim().toLowerCase();
+    if (!showComposer || !q) return [];
+    return groups
+      .filter(
+        (g) =>
+          g.name.toLowerCase().includes(q) ||
+          (g.description && g.description.toLowerCase().includes(q)),
+      )
+      .slice(0, 6);
+  }, [groups, recipientSearchQuery, showComposer]);
 
   function roomTitle(room: ChatRoom) {
     const others = otherParticipants(room, me);
@@ -436,127 +467,73 @@ export function ChatPanel({ onClose, initialRoomId, onActiveRoomChange }: ChatPa
   // ── Render ────────────────────────────────────────────────────────────────
   return (
     <div
-      className="fixed bottom-24 right-6 z-40 flex h-[640px] max-h-[calc(100vh-7rem)] w-[760px] max-w-[calc(100vw-3rem)] origin-bottom-right overflow-hidden rounded-2xl border border-border bg-card animate-scale-in"
+      className="fixed right-3 top-16 z-40 flex h-[calc(100vh-5rem)] max-h-[640px] w-[calc(100vw-1.5rem)] max-w-[760px] origin-top-right overflow-hidden rounded-2xl border border-border bg-slate-300/95 backdrop-blur-sm animate-scale-in md:right-6"
       style={{ boxShadow: "var(--shadow-elegant)" }}
       role="dialog"
       aria-label="Chat"
     >
-      {/* ── Sidebar: rooms / users ──────────────────────────────────── */}
-      <aside className="flex w-[280px] flex-shrink-0 flex-col border-r border-border bg-muted/30">
-        <div
-          className="flex items-center justify-between px-4 py-3 text-primary-foreground"
-          style={{ background: "var(--gradient-sidebar)" }}
-        >
+      {/* ── Sidebar: rooms / compose ──────────────────────────────────── */}
+      <aside className="flex w-[270px] flex-shrink-0 flex-col border-r border-border bg-muted/40">
+        <div className="flex items-center justify-between border-b border-sidebar-border px-4 py-3 text-primary-foreground" style={{ background: "var(--gradient-sidebar)" }}>
           <div className="flex items-center gap-2">
-            <MessageCircle className="h-4 w-4 text-accent" />
-            <h2 className="text-sm font-semibold tracking-wide">Messages</h2>
+            <span className="flex h-7 w-7 items-center justify-center rounded-md bg-white/15 text-primary-foreground ring-1 ring-white/20">
+              <MessageCircle className="h-4 w-4" />
+            </span>
+            <div>
+              <h2 className="text-sm font-semibold text-primary-foreground">Chat</h2>
+              <p className="text-[10px] text-primary-foreground/70">
+                {showComposer ? "Start conversation" : "Conversations"}
+              </p>
+            </div>
           </div>
           <button
             onClick={onClose}
-            className="rounded-md p-1 text-sidebar-foreground/80 hover:bg-sidebar-accent hover:text-sidebar-accent-foreground transition-colors"
+            className="rounded-md p-1 text-primary-foreground/80 transition-colors hover:bg-white/15 hover:text-primary-foreground"
             aria-label="Close"
           >
             <X className="h-4 w-4" />
           </button>
         </div>
 
-        <div className="space-y-2 border-b border-border bg-card p-3">
-          <div className="relative">
-            <Search className="pointer-events-none absolute left-3 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-muted-foreground" />
-            <input
-              type="text"
-              value={searchQuery}
-              onChange={(e) => setSearchQuery(e.target.value)}
-              placeholder={showUserList ? "Find a person…" : "Search chats…"}
-              className="h-9 w-full rounded-md border border-border bg-background pl-9 pr-3 text-xs outline-none transition focus:border-accent focus:ring-2 focus:ring-accent/30"
-            />
-          </div>
+        <div className="space-y-2 border-b border-border bg-slate-200/80 p-3">
           <button
-            onClick={() => setShowUserList((v) => !v)}
+            onClick={() => {
+              setShowComposer((value) => !value);
+              setRecipientSearchQuery("");
+            }}
             className={clsx(
-              "flex w-full items-center justify-center gap-2 rounded-md px-3 py-1.5 text-xs font-medium transition-colors",
-              showUserList
+              "flex w-full items-center justify-center gap-2 rounded-md px-3 py-2 text-xs font-semibold transition-colors",
+              showComposer
                 ? "border border-border bg-background text-foreground hover:bg-muted"
                 : "bg-primary text-primary-foreground hover:bg-primary/90",
             )}
           >
-            {showUserList ? (
+            {showComposer ? (
               <>
                 <ArrowLeft className="h-3.5 w-3.5" /> Back to chats
               </>
             ) : (
               <>
-                <Users className="h-3.5 w-3.5" /> New conversation
+                <Plus className="h-3.5 w-3.5" /> Start conversation
               </>
             )}
           </button>
+          {!showComposer && (
+            <div className="relative">
+              <Search className="pointer-events-none absolute left-3 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-muted-foreground" />
+              <input
+                type="text"
+                value={chatSearchQuery}
+                onChange={(e) => setChatSearchQuery(e.target.value)}
+                placeholder="Search chats"
+                className="h-9 w-full rounded-md border border-input bg-background pl-9 pr-3 text-xs outline-none transition focus:border-ring focus:ring-2 focus:ring-ring/30"
+              />
+            </div>
+          )}
         </div>
 
         <div className="flex-1 overflow-y-auto px-2 py-2">
-          {showUserList ? (
-            <>
-              {/* Groups Section */}
-              {filteredGroups.length > 0 && (
-                <>
-                  <div className="px-2.5 py-2">
-                    <p className="text-[10px] font-semibold uppercase tracking-wider text-muted-foreground">
-                      Groups
-                    </p>
-                  </div>
-                  {filteredGroups.map((group) => (
-                    <button
-                      key={group.id}
-                      onClick={() => startGroupChat(group)}
-                      className="flex w-full items-center gap-3 rounded-md px-2.5 py-2 text-left transition-colors hover:bg-muted"
-                    >
-                      <div className="flex h-9 w-9 shrink-0 items-center justify-center rounded-full bg-gradient-to-br from-blue-500 to-purple-600 text-white font-semibold text-xs">
-                        {initials(group.name)}
-                      </div>
-                      <div className="min-w-0 flex-1">
-                        <p className="truncate text-xs font-medium text-foreground">
-                          {group.name}
-                        </p>
-                        <p className="truncate text-[11px] text-muted-foreground">
-                          Group • {group.member_count || 0} members
-                        </p>
-                      </div>
-                    </button>
-                  ))}
-                </>
-              )}
-
-              {/* Users Section */}
-              {filteredGroups.length > 0 && filteredUsers.length > 0 && (
-                <div className="px-2.5 py-2">
-                  <p className="text-[10px] font-semibold uppercase tracking-wider text-muted-foreground">
-                    People
-                  </p>
-                </div>
-              )}
-
-              {filteredUsers.length === 0 && filteredGroups.length === 0 ? (
-                <EmptyState label="No users or groups found" />
-              ) : (
-                filteredUsers.map((u) => (
-                  <button
-                    key={u.id}
-                    onClick={() => startDirectMessage(u)}
-                    className="flex w-full items-center gap-3 rounded-md px-2.5 py-2 text-left transition-colors hover:bg-muted"
-                  >
-                    <Avatar label={initials(userLabel(u))} />
-                    <div className="min-w-0 flex-1">
-                      <p className="truncate text-xs font-medium text-foreground">
-                        {userLabel(u)}
-                      </p>
-                      <p className="truncate text-[11px] text-muted-foreground">
-                        {u.email}
-                      </p>
-                    </div>
-                  </button>
-                ))
-              )}
-            </>
-          ) : loading ? (
+          {loading ? (
             <div className="space-y-2 p-2">
               {Array.from({ length: 4 }).map((_, i) => (
                 <div
@@ -578,7 +555,7 @@ export function ChatPanel({ onClose, initialRoomId, onActiveRoomChange }: ChatPa
                   className={clsx(
                     "group mb-0.5 flex w-full items-center gap-3 rounded-md px-2.5 py-2 text-left transition-colors",
                     active
-                      ? "bg-accent/15 ring-1 ring-accent/40"
+                      ? "bg-primary/10 ring-1 ring-primary/30"
                       : "hover:bg-muted",
                   )}
                 >
@@ -606,7 +583,7 @@ export function ChatPanel({ onClose, initialRoomId, onActiveRoomChange }: ChatPa
                         {lastMessagePreview(room)}
                       </p>
                       {room.unread_count > 0 && (
-                        <span className="ml-auto inline-flex h-4 min-w-[16px] items-center justify-center rounded-full bg-accent px-1 text-[10px] font-bold text-accent-foreground">
+                        <span className="ml-auto inline-flex h-4 min-w-[16px] animate-pulse items-center justify-center rounded-full bg-accent px-1 text-[10px] font-bold text-accent-foreground">
                           {room.unread_count}
                         </span>
                       )}
@@ -620,11 +597,21 @@ export function ChatPanel({ onClose, initialRoomId, onActiveRoomChange }: ChatPa
       </aside>
 
       {/* ── Conversation pane ───────────────────────────────────────── */}
-      <section className="flex min-w-0 flex-1 flex-col bg-background">
-        {selectedRoom ? (
+      <section className="flex min-w-0 flex-1 flex-col bg-slate-100">
+        {showComposer ? (
+          <RecipientSearchPane
+            composerLoading={composerLoading}
+            filteredGroups={filteredGroups}
+            filteredUsers={filteredUsers}
+            recipientSearchQuery={recipientSearchQuery}
+            setRecipientSearchQuery={setRecipientSearchQuery}
+            startDirectMessage={startDirectMessage}
+            startGroupChat={startGroupChat}
+          />
+        ) : selectedRoom ? (
           <>
             {/* Header */}
-            <div className="flex items-center justify-between border-b border-border bg-card px-4 py-3">
+            <div className="flex items-center justify-between border-b border-border bg-slate-200/60 px-4 py-3">
               <div className="flex min-w-0 items-center gap-3">
                 <Avatar label={initials(roomTitle(selectedRoom))} accent />
                 <div className="min-w-0">
@@ -713,8 +700,8 @@ export function ChatPanel({ onClose, initialRoomId, onActiveRoomChange }: ChatPa
             </div>
 
             {/* Composer */}
-            <div className="border-t border-border bg-card px-4 py-3">
-              <div className="flex items-end gap-2 rounded-xl border border-border bg-background px-3 py-2 transition-colors focus-within:border-accent focus-within:ring-2 focus-within:ring-accent/30">
+            <div className="border-t border-border bg-slate-200/60 px-4 py-3">
+              <div className="flex items-end gap-2 rounded-xl border border-input bg-background px-3 py-2 transition-colors focus-within:border-ring focus-within:ring-2 focus-within:ring-ring/30">
                 <input
                   ref={inputRef}
                   type="text"
@@ -746,8 +733,7 @@ export function ChatPanel({ onClose, initialRoomId, onActiveRoomChange }: ChatPa
         ) : (
           <div className="flex flex-1 flex-col items-center justify-center px-6 text-center">
             <div
-              className="mb-4 flex h-16 w-16 items-center justify-center rounded-2xl text-accent-foreground"
-              style={{ background: "var(--gradient-accent)" }}
+              className="mb-4 flex h-16 w-16 items-center justify-center rounded-2xl bg-primary text-primary-foreground shadow-lg"
             >
               <MessageCircle className="h-7 w-7" />
             </div>
@@ -766,6 +752,128 @@ export function ChatPanel({ onClose, initialRoomId, onActiveRoomChange }: ChatPa
 }
 
 // ── Small atoms ─────────────────────────────────────────────────────────────
+
+function RecipientSearchPane({
+  composerLoading,
+  filteredGroups,
+  filteredUsers,
+  recipientSearchQuery,
+  setRecipientSearchQuery,
+  startDirectMessage,
+  startGroupChat,
+}: {
+  composerLoading: boolean;
+  filteredGroups: Group[];
+  filteredUsers: User[];
+  recipientSearchQuery: string;
+  setRecipientSearchQuery: (value: string) => void;
+  startDirectMessage: (user: User) => void;
+  startGroupChat: (group: Group) => void;
+}) {
+  const hasQuery = recipientSearchQuery.trim().length > 0;
+
+  return (
+    <>
+      <div className="border-b border-border bg-slate-100/60 px-5 py-4">
+        <h3 className="text-sm font-semibold text-foreground">Start conversation</h3>
+        <div className="relative mt-3">
+          <Search className="pointer-events-none absolute left-3 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-muted-foreground" />
+          <input
+            type="text"
+            value={recipientSearchQuery}
+            onChange={(e) => setRecipientSearchQuery(e.target.value)}
+            placeholder="Search people or groups"
+            className="h-10 w-full rounded-md border border-input bg-background pl-9 pr-3 text-sm outline-none transition focus:border-ring focus:ring-2 focus:ring-ring/30"
+            autoFocus
+          />
+        </div>
+      </div>
+
+      <div className="flex-1 overflow-y-auto px-4 py-3">
+        {!hasQuery ? (
+          <EmptyState
+            icon="search"
+            label="Search to start a chat"
+            hint="Type a name, email, or group"
+          />
+        ) : composerLoading ? (
+          <div className="space-y-2">
+            {Array.from({ length: 4 }).map((_, i) => (
+              <div key={i} className="h-14 animate-pulse rounded-md bg-muted" />
+            ))}
+          </div>
+        ) : filteredGroups.length === 0 && filteredUsers.length === 0 ? (
+          <EmptyState label="No matching recipients" />
+        ) : (
+          <>
+            {filteredGroups.length > 0 && (
+              <RecipientSection title="Groups">
+                {filteredGroups.map((group) => (
+                  <button
+                    key={group.id}
+                    onClick={() => startGroupChat(group)}
+                    className="flex w-full items-center gap-3 rounded-md px-3 py-2.5 text-left transition-colors hover:bg-muted"
+                  >
+                    <Avatar label={initials(group.name)} accent />
+                    <div className="min-w-0 flex-1">
+                      <p className="truncate text-sm font-medium text-foreground">
+                        {group.name}
+                      </p>
+                      <p className="truncate text-[11px] text-muted-foreground">
+                        Group - {group.member_count || 0} members
+                      </p>
+                    </div>
+                  </button>
+                ))}
+              </RecipientSection>
+            )}
+
+            {filteredUsers.length > 0 && (
+              <RecipientSection title="People">
+                {filteredUsers.map((user) => (
+                  <button
+                    key={user.id}
+                    onClick={() => startDirectMessage(user)}
+                    className="flex w-full items-center gap-3 rounded-md px-3 py-2.5 text-left transition-colors hover:bg-muted"
+                  >
+                    <Avatar label={initials(userLabel(user))} />
+                    <div className="min-w-0 flex-1">
+                      <p className="truncate text-sm font-medium text-foreground">
+                        {userLabel(user)}
+                      </p>
+                      <p className="truncate text-[11px] text-muted-foreground">
+                        {user.email}
+                      </p>
+                    </div>
+                  </button>
+                ))}
+              </RecipientSection>
+            )}
+          </>
+        )}
+      </div>
+    </>
+  );
+}
+
+function RecipientSection({
+  title,
+  children,
+}: {
+  title: string;
+  children: ReactNode;
+}) {
+  return (
+    <div className="mb-3">
+      <div className="px-3 py-2">
+        <p className="text-[10px] font-semibold uppercase tracking-wider text-muted-foreground">
+          {title}
+        </p>
+      </div>
+      <div className="space-y-1">{children}</div>
+    </div>
+  );
+}
 
 function Avatar({
   label,
@@ -800,10 +908,20 @@ function Dot({ delay }: { delay: string }) {
   );
 }
 
-function EmptyState({ label, hint }: { label: string; hint?: string }) {
+function EmptyState({
+  label,
+  hint,
+  icon = "message",
+}: {
+  label: string;
+  hint?: string;
+  icon?: "message" | "search";
+}) {
+  const Icon = icon === "search" ? Search : MessageCircle;
+
   return (
     <div className="flex flex-col items-center justify-center px-4 py-10 text-center">
-      <MessageCircle className="mb-2 h-8 w-8 text-muted-foreground/40" />
+      <Icon className="mb-2 h-8 w-8 text-muted-foreground/40" />
       <p className="text-xs font-medium text-muted-foreground">{label}</p>
       {hint && (
         <p className="mt-0.5 text-[11px] text-muted-foreground/70">{hint}</p>

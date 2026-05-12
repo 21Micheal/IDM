@@ -30,6 +30,7 @@ services:
       interval: 10s
       timeout: 5s
       retries: 5
+
   elasticsearch:
     image: docker.elastic.co/elasticsearch/elasticsearch:8.12.0
     restart: unless-stopped
@@ -45,10 +46,9 @@ services:
   backend:
     build:
       context: .
-      dockerfile: Dockerfile 
+      dockerfile: Dockerfile
       network: host
     restart: unless-stopped
-    # Changed 'config' to 'IDM' and use Daphne for WebSocket support
     command: sh -c "python manage.py migrate --noinput && daphne IDM.asgi:application -b 0.0.0.0 -p 8000"
     environment:
       - DEBUG=True
@@ -77,8 +77,7 @@ services:
       context: .
       network: host
     restart: unless-stopped
-    # Changed 'config' to 'IDM'
-    command: celery -A IDM worker -l info -Q default,indexing,notifications
+    command: celery -A IDM worker -l info -Q default,indexing,notifications,ocr
     environment:
       - DATABASE_URL=mysql://idm_user:${DB_PASSWORD:-idm_password}@db:3306/idm_db
       - REDIS_URL=redis://:${REDIS_PASSWORD:-redis_password}@redis:6379/0
@@ -87,7 +86,7 @@ services:
       - DJANGO_SETTINGS_MODULE=IDM.settings
     volumes:
       - .:/app
-      - media_files:/app/media   
+      - media_files:/app/media
     depends_on:
       db:
         condition: service_healthy
@@ -96,11 +95,24 @@ services:
       elasticsearch:
         condition: service_started
 
+  # ── OCR worker — PaddleOCR (default) + Tesseract fallback + spaCy NER ──────
+  #
+  # PaddleOCR runs entirely on CPU here (-c 2 = 2 concurrent tasks).
+  # For GPU-accelerated OCR: set OCR_PADDLE_USE_GPU=true and ensure the
+  # host has CUDA drivers + nvidia-docker runtime configured.
+  #
+  # spaCy NER uses en_core_web_sm (8 MB, pre-downloaded in the Dockerfile).
+  # For higher accuracy at the cost of ~800 MB RAM, set:
+  #   OCR_SPACY_MODEL=en_core_web_lg
+  # and add the download step to your Dockerfile:
+  #   RUN python -m spacy download en_core_web_lg
   celery_ocr:
     build:
       context: .
       network: host
     restart: unless-stopped
+    # Concurrency 2 — PaddleOCR is thread-safe. Raise to 4 on a machine with
+    # ≥8 GB RAM and no GPU to saturate CPU cores across multiple documents.
     command: celery -A IDM worker -Q ocr -c 2 --loglevel=info
     environment:
       - DATABASE_URL=mysql://idm_user:${DB_PASSWORD:-idm_password}@db:3306/idm_db
@@ -108,12 +120,59 @@ services:
       - ELASTICSEARCH_URL=http://elasticsearch:9200
       - MEDIA_ROOT=/app/media
       - DJANGO_SETTINGS_MODULE=IDM.settings
-      - OCR_ENGINE=tesseract
-      - OCR_LANGUAGES=eng
-      - OCR_DPI=300
+
+      # ── OCR engine selection ──────────────────────────────────────────────
+      # Options: "paddle" (default) | "tesseract" | "textract"
+      - OCR_ENGINE=${OCR_ENGINE:-paddle}
+
+      # ── PaddleOCR settings ────────────────────────────────────────────────
+      # Language: "en" covers English + common East African business text.
+      # For Arabic, set OCR_PADDLE_LANG=ar; for Chinese, set OCR_PADDLE_LANG=ch.
+      - OCR_PADDLE_LANG=${OCR_PADDLE_LANG:-en}
+      # Set to "true" only if you have CUDA + nvidia-docker configured.
+      - OCR_PADDLE_USE_GPU=${OCR_PADDLE_USE_GPU:-false}
+      # Direction classifier — corrects upside-down / rotated text. Keep true.
+      - OCR_PADDLE_USE_ANGLE_CLS=${OCR_PADDLE_USE_ANGLE_CLS:-true}
+
+      # ── Tesseract settings (used when OCR_ENGINE=tesseract or as fallback) ─
+      - OCR_LANGUAGES=${OCR_LANGUAGES:-eng}
+
+      # ── Common OCR settings ───────────────────────────────────────────────
+      - OCR_DPI=${OCR_DPI:-300}
+      - OCR_CONFIDENCE_THRESHOLD=${OCR_CONFIDENCE_THRESHOLD:-40}
+      - OCR_QUALITY_RATIO=${OCR_QUALITY_RATIO:-0.50}
+
+      # ── spaCy NER settings ────────────────────────────────────────────────
+      # Disable NER by setting OCR_SPACY_ENABLED=false (e.g. for low-RAM hosts).
+      - OCR_SPACY_ENABLED=${OCR_SPACY_ENABLED:-true}
+      # "en_core_web_sm" — 8 MB, fast, good enough for supplier/date/amount NER.
+      # "en_core_web_lg" — 560 MB, significantly better on ambiguous text.
+      # "en_core_web_trf" — transformer-based, best accuracy, requires ~2 GB RAM.
+      - OCR_SPACY_MODEL=${OCR_SPACY_MODEL:-en_core_web_sm}
+
+      # ── LayoutLMv3 settings ──────────────────────────────────────────────
+      # Disable LayoutLMv3 by setting LAYOUTLMV3_ENABLED=false (e.g. for low-RAM hosts).
+      - LAYOUTLMV3_ENABLED=${LAYOUTLMV3_ENABLED:-true}
+      # HuggingFace model identifier for invoice field extraction.
+      - LAYOUTLMV3_MODEL=${LAYOUTLMV3_MODEL:-Theivaprakasham/layoutlmv3-finetuned-invoice}
+      # Device: auto | cpu | cuda (auto detects CUDA if available)
+      - LAYOUTLMV3_DEVICE=${LAYOUTLMV3_DEVICE:-auto}
+      # Confidence threshold for field predictions (0.0-1.0).
+      - LAYOUTLMV3_CONFIDENCE=${LAYOUTLMV3_CONFIDENCE:-0.85}
+      # Maximum sequence length for model input (tokens).
+      - LAYOUTLMV3_MAX_LENGTH=${LAYOUTLMV3_MAX_LENGTH:-512}
+      # Allow LayoutLMv3 to override regex results when set to true.
+      - LAYOUTLMV3_OVERRIDE_REGEX=${LAYOUTLMV3_OVERRIDE_REGEX:-false}
+      # Enable PyTorch 2 compilation for faster inference (requires PyTorch 2+).
+      - LAYOUTLMV3_COMPILE=${LAYOUTLMV3_COMPILE:-false}
+      # Custom field mappings as JSON: {"invoice": {"CUSTOM_LABEL": "my_field"}}
+      - LAYOUTLMV3_FIELD_MAP=${LAYOUTLMV3_FIELD_MAP:-{}}
     volumes:
       - .:/app
       - media_files:/app/media
+      # Cache PaddleOCR models between container restarts to avoid re-downloading
+      # the ~8 MB PP-OCRv4 detection/recognition models on every deploy.
+      - paddle_models:/root/.paddleocr
     depends_on:
       db:
         condition: service_healthy
@@ -153,7 +212,7 @@ services:
       network: host
       target: development
     env_file:
-      - .env  # Points to the root .env file
+      - .env
     volumes:
       - ./frontend:/app
       - /app/node_modules
@@ -175,3 +234,6 @@ volumes:
   redis_data:
   es_data:
   media_files:
+  # Named volume for PaddleOCR model cache — avoids re-downloading (~8 MB)
+  # PP-OCRv4 detection + recognition + direction models on every container restart.
+  paddle_models:

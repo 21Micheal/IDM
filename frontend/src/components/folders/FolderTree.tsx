@@ -405,11 +405,13 @@ export function FolderTree({ activeFolderId = null, onFolderSelect }: FolderTree
         </p>
         <button
           type="button"
-          title="New root folder"
-          className="p-0.5 rounded hover:bg-sidebar-accent/50 text-sidebar-foreground/60 hover:text-sidebar-foreground transition-colors"
+          title="Create new folder"
+          aria-label="Create new folder"
+          className="inline-flex items-center gap-1.5 rounded-md border border-sidebar-border/60 bg-white/10 px-2 py-1 text-[11px] font-semibold text-sidebar-foreground hover:bg-sidebar-accent/70 hover:text-white transition-colors"
           onClick={() => setAddingRoot(true)}
         >
           <Plus className="w-3.5 h-3.5" />
+          New folder
         </button>
       </div>
 
