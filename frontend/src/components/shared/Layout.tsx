@@ -13,9 +13,9 @@ import { Suspense, lazy, useEffect, useRef, useState } from "react";
 import { Outlet, NavLink, useNavigate, useLocation } from "react-router-dom";
 import {
   LayoutDashboard, FileText, Upload, Search,
-  GitBranch, ShieldCheck, Settings, LogOut,
+  Workflow, ShieldCheck, Settings, LogOut,
   Bell, Users, Building2, UserCircle, Shield,
-  ChevronDown, ChevronRight, Archive, ScanLine, Loader2, UserCheck, Monitor, Lock,
+  ChevronDown, ChevronRight, Archive, ScanLine, Loader2, UserCheck, Monitor, Lock, History,
 } from "lucide-react";
 import { useAuthStore } from "../../store/authStore";
 import { useQuery } from "@tanstack/react-query";
@@ -81,14 +81,15 @@ const mainNav: NavEntry[] = [
   } as NavGroup,
   { to: "/personal-documents", icon: Lock, label: "Personal documents" } as NavLeaf,
   {
-    icon: GitBranch,
+    icon: Workflow,
     label: "Workflow",
     prefix: "/workflow",
     children: [
-      { to: "/workflow",         icon: GitBranch, label: "My tasks" },
+      { to: "/workflow",         icon: Workflow, label: "My tasks" },
       { to: "/workflow/builder", icon: Settings,  label: "Builder", allowedRoles: ["admin"] },
     ],
   } as NavGroup,
+  { to: "/audit", icon: History, label: "Audit trail" } as NavLeaf,
   {
     icon: UserCircle,
     label: "Profile",
@@ -100,7 +101,6 @@ const mainNav: NavEntry[] = [
       { to: "/profile?tab=preferences", icon: Monitor, label: "Preferences" },
     ],
   } as NavGroup,
-  { to: "/audit", icon: ShieldCheck, label: "Audit trail" } as NavLeaf,
 ];
 
 const adminNav: NavLeaf[] = [
@@ -153,7 +153,7 @@ function SidebarGroup({
       </button>
 
       {open && (
-        <div className="mt-0.5 ml-4 pl-3 border-l border-sidebar-border space-y-0.5">
+        <div className="mt-0.5 ml-4 pl-3 border-l-2 border-white/10 space-y-0.5">
           {visibleChildren.map(({ to, icon: Icon, label, exact }) => {
             const badgeValue = to === "/workflow" ? taskCount : undefined;
             const target = navTarget(to);

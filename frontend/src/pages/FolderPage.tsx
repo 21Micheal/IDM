@@ -431,12 +431,27 @@ export default function FolderPage() {
       </div>
 
       {/* Subfolders */}
-      {subfolders.length > 0 && (
+      {(subfolders.length > 0 || !folder.is_favourites) && (
         <section>
           <h2 className="text-sm font-semibold text-muted-foreground uppercase tracking-wider mb-3">
             Subfolders
           </h2>
           <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 gap-3">
+            {!folder.is_favourites && (
+              <button
+                type="button"
+                className="group flex items-center gap-3 rounded-xl border border-dashed border-border bg-card p-4 hover:border-primary/30 hover:bg-muted/30 transition-all text-left"
+              >
+                <div className="flex h-10 w-10 items-center justify-center rounded-lg bg-primary/5 text-primary shrink-0">
+                  <Plus className="w-5 h-5" />
+                </div>
+                <div className="flex-1 min-w-0">
+                  <p className="text-sm font-semibold text-foreground truncate">New Folder</p>
+                  <p className="text-[11px] text-muted-foreground truncate">Create subdirectory</p>
+                </div>
+              </button>
+            )}
+
             {subfolders.map((sf) => (
               <SubfolderCard key={sf.id} folder={sf} />
             ))}

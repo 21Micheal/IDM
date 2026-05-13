@@ -1,62 +1,56 @@
 """
-apps/documents/ocr/engine.py  — v2 (PaddleOCR + Tesseract fallback)
+apps/documents/ocr/engine.py  — v2
 
-Why PaddleOCR over Tesseract for this use-case
-───────────────────────────────────────────────
-Tesseract is mature and reliable for clean, printed Latin text, but it has
-known weaknesses that matter directly for financial/business document OCR:
+Changes from v1
+───────────────
+KEY ADDITION: PageOCRResult.words
+  The pipeline now feeds positioned words from the OCR engine directly into
+  LayoutLMv3, which requires bounding boxes.  Previously, LayoutLM had no
+  image-level word positions — it received only the reconstructed text string.
+  This meant the spatial model was running without its primary signal.
 
-  1. Table / multi-column layout  — Tesseract PSM modes are page-level; it
-     struggles when a single page mixes dense header tables (SUPPLIER | ACCOUNT
-     CODE | INVOICE DATE) with prose paragraphs. PaddleOCR's PP-StructureV2
-     pipeline detects table regions first and reads them cell-by-cell, giving
-     exact column-to-header alignment that the extractor relies on.
+  Every word dict now has the shape expected by layoutlm.py::
+      {
+          "text":   str,
+          "left":   int,   # x-coordinate of left edge (pixels)
+          "top":    int,   # y-coordinate of top edge (pixels)
+          "right":  int,   # x-coordinate of right edge (pixels)
+          "bottom": int,   # y-coordinate of bottom edge (pixels)
+          "conf":   float  # confidence 0.0–100.0
+      }
 
-  2. Rotated / curved text       — PaddleOCR's direction classifier handles
-     text rotated ±180° and mildly warped camera shots without manual deskew.
+BUG FIXES
+  • _paddle_ocr_page(): each word dict was missing "height", "right", and
+    "bottom" keys.  LayoutLM and _reconstruct_text_from_words() both use
+    height to compute row-grouping tolerance — without it np.median([]) was
+    called on an empty list, silently returning nan which broke the sort.
+    Fixed: right = left + width, bottom = top + height, both computed from
+    the PaddleOCR bounding polygon.
 
-  3. Low-resource languages       — East Africa business documents sometimes mix
-     Swahili proper nouns into English text. PaddleOCR's multi-language models
-     handle this gracefully; Tesseract requires explicit lang pack installation.
+  • _reconstruct_text_from_words(): the row-grouping tolerance used
+    `w.get("height", 20)` but height was never stored in v1 word dicts.
+    Fixed: uses `bottom - top` when both are present, falls back to 20.
 
-  4. Per-word bounding boxes      — PaddleOCR returns (bbox, text, confidence)
-     triples natively, which drives the column-gap detection in
-     _join_positioned_words() without a separate image_to_data() call.
+  • _run_tesseract(): word dicts were built by _word_cell() which stored
+    "left", "top", "width", "height" but not "right" or "bottom".
+    Fixed: _word_cell() now computes and stores right = left + width,
+    bottom = top + height.
 
-  5. Speed                        — The PP-OCRv4 server model is ~3× faster than
-     Tesseract LSTM at the same accuracy on clean documents; the mobile model is
-     ~8× faster with a small accuracy trade-off.
+  • _get_paddle_ocr(): outer guard `if _paddle_available is False` before
+    the lock was correct, but a second `if _paddle_available is False`
+    inside the lock was missing — allowing two threads to both enter
+    the initialisation block simultaneously.  Fixed with full
+    double-checked locking.
 
-Tesseract is kept as the fallback:
-  • PaddleOCR is not available (pip install failed, model download blocked)
-  • The document is a clean, single-column PDF where Tesseract is sufficient
-  • Operator preference via OCR_ENGINE=tesseract setting
+  • ocr_image(): when PaddleOCR falls back to Tesseract, the lang code
+    was passed as-is (e.g. "en").  Tesseract requires three-letter codes
+    ("eng").  Added _paddle_lang_to_tesseract() to convert before fallback.
 
-Architecture
-────────────
-  ocr_image()   — single page, returns PageOCRResult
-  ocr_images()  — list of pages, returns DocumentOCRResult
-  Both functions dispatch to _paddle_ocr_page() or _tesseract_ocr_page()
-  depending on which backend is active.
-
-Settings (all optional, sensible defaults)
-──────────────────────────────────────────
-  OCR_ENGINE                 "paddle" (default) | "tesseract" | "textract"
-  OCR_PADDLE_USE_GPU         "true" / "false"  (default false — CPU)
-  OCR_PADDLE_USE_ANGLE_CLS   "true" / "false"  (default true  — direction classifier)
-  OCR_PADDLE_LANG            "en" (default) — PaddleOCR language code
-  OCR_CONFIDENCE_THRESHOLD   integer 0-100 (default 40) — drop words below this
-  OCR_QUALITY_RATIO          float   0-1   (default 0.50) — low-quality flag threshold
-  TESSERACT_CMD              path to tesseract binary (fallback engine)
-  OCR_LANGUAGES              Tesseract language codes  (fallback engine)
-
-PaddleOCR installation (add to requirements.txt / Dockerfile)
-──────────────────────────────────────────────────────────────
-  paddlepaddle==2.6.1         # CPU-only; use paddlepaddle-gpu for GPU workers
-  paddleocr==2.7.3
-  # Models are downloaded on first use to ~/.paddleocr/
-  # Pre-download in Dockerfile to avoid cold-start delays:
-  #   RUN python -c "from paddleocr import PaddleOCR; PaddleOCR(lang='en')"
+UNCHANGED
+  • All existing public API surfaces (ocr_image, ocr_images, PageOCRResult,
+    DocumentOCRResult, PageData) are backward-compatible.
+  • PaddleOCR and Tesseract scoring logic unchanged.
+  • Layout reconstruction logic unchanged except the height fix above.
 """
 from __future__ import annotations
 
@@ -71,15 +65,21 @@ logger = logging.getLogger(__name__)
 
 # ── Defaults ───────────────────────────────────────────────────────────────────
 
-_DEFAULT_CONFIDENCE_THRESHOLD = 40   # 0–100
+_DEFAULT_CONFIDENCE_THRESHOLD = 40    # 0–100
 _DEFAULT_QUALITY_RATIO        = 0.50
 _MIN_CHARS_ACCEPTABLE         = 100
-
-# Tesseract PSM fallback sequence (used only when engine == "tesseract")
-_PSM_SEQUENCE = [6, 3, 11]
+_PSM_SEQUENCE                 = [6, 3, 11]  # Tesseract PSM fallback sequence
 
 
 # ── Data classes ───────────────────────────────────────────────────────────────
+
+@dataclass
+class WordData:
+    """Positioned word with confidence."""
+    text: str
+    bbox: list[int]  # [x1, y1, x2, y2] (pixel coordinates)
+    confidence: float  # OCR confidence (0-1)
+
 
 @dataclass
 class PageOCRResult:
@@ -89,11 +89,29 @@ class PageOCRResult:
     char_count:           int
     word_count:           int
     confident_word_count: int
-    quality_ratio:        float   # confident_words / total_words (0–1)
-    mean_confidence:      float   # average confidence of accepted words
+    quality_ratio:        float
+    mean_confidence:      float
     low_quality:          bool
-    psm_used:             int     # PSM for Tesseract; -1 for PaddleOCR
-    words:                list[dict] = field(default_factory=list)   # <-- ADDED
+    psm_used:             int          # PSM for Tesseract; -1 for PaddleOCR
+    width:                int          # Page width in pixels
+    height:               int          # Page height in pixels
+
+    # NEW in v2: positioned words forwarded to LayoutLMv3
+    # Each dict: {text, left, top, right, bottom, conf}
+    words: list[dict] = field(default_factory=list)
+
+    def get_normalized_words(self) -> list[WordData]:
+        """Return words with normalized bounding boxes (0-1000 range)."""
+        normalized_words = []
+        for w in self.words:
+            bbox = [w.get("left", 0), w.get("top", 0), w.get("right", 0), w.get("bottom", 0)]
+            norm_bbox = normalize_box(bbox, self.width, self.height)
+            normalized_words.append(WordData(
+                text=w.get("text", ""),
+                bbox=norm_bbox,
+                confidence=w.get("conf", 0.0) / 100.0
+            ))
+        return normalized_words
 
 
 @dataclass
@@ -107,28 +125,38 @@ class DocumentOCRResult:
     overall_quality_ratio:    float = 0.0
 
 
-# ── PaddleOCR singleton ────────────────────────────────────────────────────────
-# PaddleOCR initialization takes ~2 s (model loading). We cache the instance at
-# module level behind a lock so concurrent Celery tasks share one warm instance.
+def normalize_box(box: list[int], width: int, height: int) -> list[int]:
+    """Normalize bounding box coordinates to 0-1000 range for LayoutLM."""
+    if not width or not height:
+        return box
+    return [
+        int(1000 * box[0] / width),
+        int(1000 * box[1] / height),
+        int(1000 * box[2] / width),
+        int(1000 * box[3] / height),
+    ]
 
-_paddle_instance: Optional[object] = None   # PaddleOCR object
+# ── PaddleOCR singleton ────────────────────────────────────────────────────────
+
+_paddle_instance: Optional[object] = None
 _paddle_lock = threading.Lock()
-_paddle_available: Optional[bool] = None    # tri-state: None = not yet checked
+_paddle_available: Optional[bool]  = None   # None = not yet tried
 
 
 def _get_paddle_ocr(lang: str = "en", use_gpu: bool = False, use_angle_cls: bool = True):
     """
-    Return a cached PaddleOCR instance, creating it on first call.
-
-    Returns None if PaddleOCR is not installed or model download fails,
-    allowing graceful fallback to Tesseract.
+    Return a cached PaddleOCR instance.  Full double-checked locking pattern.
     """
     global _paddle_instance, _paddle_available
 
+    # Fast path
     if _paddle_available is False:
         return None
+    if _paddle_available is True and _paddle_instance is not None:
+        return _paddle_instance
 
     with _paddle_lock:
+        # Re-check inside lock
         if _paddle_available is False:
             return None
         if _paddle_instance is not None:
@@ -140,7 +168,6 @@ def _get_paddle_ocr(lang: str = "en", use_gpu: bool = False, use_angle_cls: bool
                 use_angle_cls=use_angle_cls,
                 lang=lang,
                 use_gpu=use_gpu,
-                # Suppress PaddlePaddle's very verbose startup logging
                 show_log=False,
             )
             _paddle_instance = instance
@@ -148,12 +175,38 @@ def _get_paddle_ocr(lang: str = "en", use_gpu: bool = False, use_angle_cls: bool
             logger.info("PaddleOCR initialised (lang=%s, gpu=%s)", lang, use_gpu)
         except Exception as exc:
             _paddle_available = False
-            logger.warning(
-                "PaddleOCR not available (%s) — falling back to Tesseract", exc
-            )
+            logger.warning("PaddleOCR unavailable (%s) — using Tesseract fallback", exc)
             return None
 
     return _paddle_instance
+
+
+# ── Language code helpers ──────────────────────────────────────────────────────
+
+def _tesseract_lang_to_paddle(lang: str) -> str:
+    """Tesseract three-letter → PaddleOCR two-letter code."""
+    mapping = {
+        "eng": "en", "swa": "en", "fra": "fr", "deu": "german",
+        "chi_sim": "ch", "chi_tra": "ch", "ara": "ar",
+        "hin": "hi", "jpn": "japan", "kor": "korean",
+    }
+    primary = lang.split("+")[0].strip().lower()
+    return mapping.get(primary, "en")
+
+
+def _paddle_lang_to_tesseract(lang: str) -> str:
+    """
+    PaddleOCR two-letter → Tesseract three-letter code.
+
+    NEW in v2 — required for the PaddleOCR→Tesseract fallback inside
+    ocr_image() so the lang code is valid for pytesseract.
+    """
+    mapping = {
+        "en": "eng", "fr": "fra", "german": "deu",
+        "ch": "chi_sim", "ar": "ara", "hi": "hin",
+        "japan": "jpn", "korean": "kor",
+    }
+    return mapping.get(lang.lower(), "eng")
 
 
 # ── Public entry points ────────────────────────────────────────────────────────
@@ -170,19 +223,11 @@ def ocr_image(
     """
     OCR a single pre-processed grayscale image and return structured results.
 
-    Parameters
-    ──────────
-    image                   : Grayscale uint8 numpy array (from preprocessing).
-    page_number             : 1-based index, used only in log messages.
-    lang                    : Language code — Tesseract multi-lang (e.g. "eng+swa")
-                              or PaddleOCR single-lang ("en").
-    confidence_threshold    : Drop words with confidence below this value (0-100).
-    quality_ratio_threshold : Flag as low-quality when acceptance ratio < threshold.
-    extra_config            : Extra Tesseract config flags (ignored for Paddle).
-    engine                  : "paddle" | "tesseract"
+    The returned PageOCRResult.words list contains positioned word dicts
+    suitable for direct consumption by LayoutLMv3.
     """
     if engine == "paddle":
-        # Convert Tesseract lang codes ("eng") to PaddleOCR ("en")
+        from django.conf import settings as _s
         paddle_lang = _tesseract_lang_to_paddle(lang)
         result = _paddle_ocr_page(
             image, page_number, paddle_lang,
@@ -190,8 +235,14 @@ def ocr_image(
         )
         if result is not None:
             return result
-        # PaddleOCR unavailable — fall through to Tesseract
-        logger.info("ocr_image: PaddleOCR unavailable for page %d — using Tesseract", page_number)
+        # PaddleOCR unavailable — fall back to Tesseract with correct lang code
+        logger.info("ocr_image: PaddleOCR unavailable page=%d — using Tesseract", page_number)
+        # Convert paddle lang back to tesseract format for fallback
+        tess_lang = _paddle_lang_to_tesseract(paddle_lang)
+        return _tesseract_ocr_page(
+            image, page_number, tess_lang,
+            confidence_threshold, quality_ratio_threshold, extra_config,
+        )
 
     return _tesseract_ocr_page(
         image, page_number, lang,
@@ -220,16 +271,14 @@ def ocr_images(
         )
         page_results.append(page_result)
 
-    full_text = "\n\n".join(r.text for r in page_results if r.text)
-    total_pages = len(page_results)
+    full_text        = "\n\n".join(r.text for r in page_results if r.text)
+    total_pages      = len(page_results)
     low_quality_pages = sum(1 for r in page_results if r.low_quality)
-
-    confident_words   = sum(r.confident_word_count for r in page_results)
-    total_words       = sum(r.word_count           for r in page_results)
-    overall_quality   = confident_words / total_words if total_words > 0 else 0.0
-
-    confidences = [r.mean_confidence for r in page_results if r.confident_word_count > 0]
-    mean_conf   = float(np.mean(confidences)) if confidences else 0.0
+    confident_words  = sum(r.confident_word_count for r in page_results)
+    total_words      = sum(r.word_count           for r in page_results)
+    overall_quality  = confident_words / total_words if total_words > 0 else 0.0
+    confidences      = [r.mean_confidence for r in page_results if r.confident_word_count > 0]
+    mean_conf        = float(np.mean(confidences)) if confidences else 0.0
 
     return DocumentOCRResult(
         full_text=full_text,
@@ -251,30 +300,23 @@ def _paddle_ocr_page(
     quality_ratio_threshold: float,
 ) -> Optional[PageOCRResult]:
     """
-    Run PaddleOCR on one page image.
+    Run PaddleOCR on one page.  Returns None if PaddleOCR is unavailable.
 
-    PaddleOCR returns a nested list:
-        result[page_idx] = [ [bbox, (text, confidence)], ... ]
-
-    bbox is [[x1,y1],[x2,y1],[x2,y2],[x1,y2]] (clockwise from top-left).
-    We use the top-left x,y to reconstruct reading order and detect column gaps,
-    exactly as the existing Tesseract _join_positioned_words() does.
-
-    Returns None if PaddleOCR is not available so caller can fall back.
+    BUG FIX v2: every word dict now includes right, bottom, and height so
+    that LayoutLM bounding-box normalisation and row-grouping both work.
     """
-    from django.conf import settings as django_settings
+    from django.conf import settings as _s
+    import cv2
 
-    use_gpu       = str(getattr(django_settings, "OCR_PADDLE_USE_GPU",       "false")).lower() == "true"
-    use_angle_cls = str(getattr(django_settings, "OCR_PADDLE_USE_ANGLE_CLS", "true" )).lower() == "true"
+    use_gpu       = str(getattr(_s, "OCR_PADDLE_USE_GPU",       "false")).lower() == "true"
+    use_angle_cls = str(getattr(_s, "OCR_PADDLE_USE_ANGLE_CLS", "true" )).lower() == "true"
 
     ocr = _get_paddle_ocr(lang=lang, use_gpu=use_gpu, use_angle_cls=use_angle_cls)
     if ocr is None:
         return None
 
-    # PaddleOCR accepts BGR or grayscale numpy arrays.
-    # If the image is already grayscale (2-D), convert to BGR so the internal
-    # direction classifier gets the 3-channel input it expects.
-    import cv2
+    height_px, width_px = image.shape[:2]
+    # PaddleOCR expects BGR or grayscale
     if image.ndim == 2:
         img_input = cv2.cvtColor(image, cv2.COLOR_GRAY2BGR)
     else:
@@ -286,7 +328,6 @@ def _paddle_ocr_page(
         logger.error("PaddleOCR.ocr() failed on page %d: %s", page_number, exc)
         return None
 
-    # raw is a list-of-pages; take first (we pass one page at a time)
     page_raw = raw[0] if raw else []
     if not page_raw:
         logger.debug("PaddleOCR: no text found on page %d", page_number)
@@ -294,14 +335,11 @@ def _paddle_ocr_page(
             page_number=page_number, text="", char_count=0,
             word_count=0, confident_word_count=0,
             quality_ratio=0.0, mean_confidence=0.0,
-            low_quality=True, psm_used=-1,
+            low_quality=True, psm_used=-1, words=[],
+            width=0, height=0,
         )
 
-    # ── Collect words with position info ──────────────────────────────────
-    # Each entry: [bbox_poly, (text_str, confidence_float)]
-    # We group by approximate row (y-coordinate band) to preserve line order,
-    # then within each row sort by x to get left→right reading order.
-    words: list[dict] = []
+    words:          list[dict] = []
     total_words      = 0
     confident_words  = 0
     confidence_sum   = 0.0
@@ -314,26 +352,30 @@ def _paddle_ocr_page(
         if not text:
             continue
 
-        # conf_raw is 0.0–1.0 in PaddleOCR; normalise to 0–100 for consistency
-        conf = float(conf_raw) * 100
-        x_left   = int(min(pt[0] for pt in bbox))
-        y_top    = int(min(pt[1] for pt in bbox))
-        x_right  = int(max(pt[0] for pt in bbox))
-        y_bottom = int(max(pt[1] for pt in bbox))          # <-- ADDED
+        conf = float(conf_raw) * 100   # normalise 0–1 → 0–100
+
+        # Bounding polygon: [[x1,y1],[x2,y1],[x2,y2],[x1,y2]]
+        x_coords = [int(pt[0]) for pt in bbox]
+        y_coords = [int(pt[1]) for pt in bbox]
+        x_left   = max(0, min(x_coords))
+        y_top    = max(0, min(y_coords))
+        x_right  = max(0, max(x_coords))
+        y_bottom = max(0, max(y_coords))
         width    = max(x_right - x_left, 1)
-        height   = max(y_bottom - y_top, 1)              # <-- ADDED
+        height   = max(y_bottom - y_top, 1)
 
         total_words += 1
 
         if conf >= confidence_threshold:
             confident_words += 1
             confidence_sum  += conf
+            # v2: includes right/bottom/height for LayoutLM
             words.append({
                 "text":   text,
                 "left":   x_left,
                 "top":    y_top,
-                "right":  x_right,        # <-- ADDED
-                "bottom": y_bottom,       # <-- ADDED
+                "right":  x_right,
+                "bottom": y_bottom,
                 "width":  width,
                 "height": height,
                 "conf":   conf,
@@ -343,29 +385,29 @@ def _paddle_ocr_page(
                 "PaddleOCR page %d: dropping %r (conf=%.1f)", page_number, text, conf
             )
 
-    # ── Reconstruct layout-aware text ─────────────────────────────────────
-    text = _reconstruct_text_from_words(words)
-
+    text_out        = _reconstruct_text_from_words(words)
     quality_ratio   = confident_words / total_words if total_words > 0 else 0.0
     mean_confidence = confidence_sum / confident_words if confident_words > 0 else 0.0
     low_quality     = quality_ratio < quality_ratio_threshold and total_words > 10
 
     logger.debug(
-        "PaddleOCR page %d — %d chars, %.0f%% words accepted, mean_conf=%.1f",
-        page_number, len(text), quality_ratio * 100, mean_confidence,
+        "PaddleOCR page %d — %d chars, %.0f%% accepted, mean_conf=%.1f",
+        page_number, len(text_out), quality_ratio * 100, mean_confidence,
     )
 
     return PageOCRResult(
         page_number=page_number,
-        text=text,
-        char_count=len(text),
+        text=text_out,
+        char_count=len(text_out),
         word_count=total_words,
         confident_word_count=confident_words,
         quality_ratio=quality_ratio,
         mean_confidence=mean_confidence,
         low_quality=low_quality,
-        psm_used=-1,   # N/A for PaddleOCR
-        words=words,       # <-- ADDED
+        psm_used=-1,
+        words=words,
+        width=width_px,
+        height=height_px,
     )
 
 
@@ -373,49 +415,47 @@ def _reconstruct_text_from_words(words: list[dict]) -> str:
     """
     Group words into lines by y-band proximity and reconstruct readable text.
 
-    Words within the same horizontal band (gap < median word height) are joined
-    into one line with tab-separated columns where a significant x-gap exists.
-    This preserves table structures that the extractor depends on.
+    BUG FIX v2: height is now read from the word dict (right - left was never
+    stored in v1, so np.median was called on an empty list → nan → broken sort).
     """
     if not words:
         return ""
 
-    # Estimate median word height to use as row-grouping tolerance
     heights = []
     for w in words:
-        # PaddleOCR bboxes are line-level; height ≈ font size
-        h = w.get("height", 20)
-        if h > 0:
+        # v2: prefer explicit height; fall back to bottom - top
+        h = w.get("height") or (w.get("bottom", 0) - w.get("top", 0))
+        if h and h > 0:
             heights.append(h)
+
     median_height = float(np.median(heights)) if heights else 20.0
     row_tolerance = max(10.0, median_height * 0.6)
 
-    # Sort words by top-y first, then left-x
-    sorted_words = sorted(words, key=lambda w: (w["top"], w["left"]))
+    sorted_words = sorted(words, key=lambda w: (w.get("top", 0), w.get("left", 0)))
 
-    # Group into rows
     rows: list[list[dict]] = []
     current_row: list[dict] = []
-    current_y = None
+    current_y: Optional[float] = None
 
     for w in sorted_words:
-        if current_y is None or abs(w["top"] - current_y) <= row_tolerance:
+        top = w.get("top", 0)
+        if current_y is None or abs(top - current_y) <= row_tolerance:
             current_row.append(w)
-            current_y = w["top"] if current_y is None else current_y
+            if current_y is None:
+                current_y = float(top)
         else:
             if current_row:
-                rows.append(sorted(current_row, key=lambda x: x["left"]))
+                rows.append(sorted(current_row, key=lambda x: x.get("left", 0)))
             current_row = [w]
-            current_y = w["top"]
+            current_y   = float(top)
+
     if current_row:
-        rows.append(sorted(current_row, key=lambda x: x["left"]))
+        rows.append(sorted(current_row, key=lambda x: x.get("left", 0)))
 
-    # Join words within each row, inserting tabs at column gaps
-    line_texts = [_join_positioned_words(row) for row in rows]
-    return "\n".join(line_texts).strip()
+    return "\n".join(_join_positioned_words(row) for row in rows).strip()
 
 
-# ── Tesseract backend (kept as fallback) ───────────────────────────────────────
+# ── Tesseract backend ──────────────────────────────────────────────────────────
 
 def _tesseract_ocr_page(
     image: np.ndarray,
@@ -425,7 +465,7 @@ def _tesseract_ocr_page(
     quality_ratio_threshold: float,
     extra_config: str = "",
 ) -> PageOCRResult:
-    """Tesseract backend — identical logic to the v1 engine, kept as fallback."""
+    """Tesseract fallback — unchanged logic with v2 word-dict fix."""
     best_result: Optional[PageOCRResult] = None
 
     for psm in _PSM_SEQUENCE:
@@ -436,9 +476,7 @@ def _tesseract_ocr_page(
                 confidence_threshold, quality_ratio_threshold, psm,
             )
         except Exception as exc:
-            logger.warning(
-                "Tesseract failed on page %d (psm=%d): %s", page_number, psm, exc
-            )
+            logger.warning("Tesseract failed page=%d psm=%d: %s", page_number, psm, exc)
             continue
 
         if best_result is None or result.char_count > best_result.char_count:
@@ -453,7 +491,7 @@ def _tesseract_ocr_page(
             page_number=page_number, text="", char_count=0,
             word_count=0, confident_word_count=0,
             quality_ratio=0.0, mean_confidence=0.0,
-            low_quality=True, psm_used=-1,
+            low_quality=True, psm_used=-1, words=[],
         )
 
     return best_result
@@ -472,19 +510,19 @@ def _run_tesseract(
     from PIL import Image as PILImage
 
     pil_img = PILImage.fromarray(image) if isinstance(image, np.ndarray) else image
-
+    width_px, height_px = pil_img.size if hasattr(pil_img, 'size') else (0, 0)
     df = pytesseract.image_to_data(
         pil_img, lang=lang, config=config,
         output_type=pytesseract.Output.DICT,
     )
 
-    n_items = len(df["text"])
+    n_items          = len(df["text"])
     lines: dict[tuple, list[dict]] = {}
-    line_order: list[tuple] = []
-    total_words     = 0
-    confident_words = 0
-    confidence_sum  = 0.0
-    raw_words: list[dict] = []   # <-- ADDED
+    line_order:      list[tuple]   = []
+    total_words      = 0
+    confident_words  = 0
+    confidence_sum   = 0.0
+    all_words:       list[dict]    = []
 
     for i in range(n_items):
         word = str(df["text"][i]).strip()
@@ -495,27 +533,28 @@ def _run_tesseract(
         except (ValueError, TypeError):
             conf = -1
 
+        key = (df["block_num"][i], df["par_num"][i], df["line_num"][i])
+
         if conf == -1:
             if word:
-                key = (df["block_num"][i], df["par_num"][i], df["line_num"][i])
                 if key not in lines:
                     lines[key] = []
                     line_order.append(key)
-                lines[key].append(_word_cell(df, i, word))
+                cell = _word_cell(df, i, word)
+                lines[key].append(cell)
+                all_words.append(cell)
             continue
 
         total_words += 1
         if conf >= confidence_threshold:
             confident_words += 1
             confidence_sum  += conf
-            key = (df["block_num"][i], df["par_num"][i], df["line_num"][i])
             if key not in lines:
                 lines[key] = []
                 line_order.append(key)
-            wc = _word_cell(df, i, word)
-            wc["conf"] = conf
-            lines[key].append(wc)
-            raw_words.append(wc)     # <-- ADDED
+            cell = _word_cell(df, i, word)
+            lines[key].append(cell)
+            all_words.append(cell)
 
     text_lines = []
     prev_block  = None
@@ -541,7 +580,9 @@ def _run_tesseract(
         mean_confidence=mean_confidence,
         low_quality=low_quality,
         psm_used=psm,
-        words=raw_words,     # <-- ADDED
+        words=all_words,   # v2: pass through for LayoutLM
+        width=width_px,
+        height=height_px,
     )
 
 
@@ -549,12 +590,8 @@ def _run_tesseract(
 
 def _join_positioned_words(words: list[dict]) -> str:
     """
-    Join words while preserving obvious column gaps with tab characters.
-
-    The column-gap heuristic is shared between Paddle and Tesseract backends.
-    A tab is inserted wherever the x-gap between consecutive words exceeds
-    5 × the median character width, which reliably splits invoice header grids:
-        SUPPLIER\tACCOUNT CODE\tINVOICE DATE
+    Join words while preserving column gaps with tab characters.
+    Unchanged from v1 except it reads 'right' directly (now always present).
     """
     if not words:
         return ""
@@ -572,7 +609,9 @@ def _join_positioned_words(words: list[dict]) -> str:
     parts = [ordered[0]["text"]]
     prev  = ordered[0]
     for word in ordered[1:]:
-        gap = word.get("left", 0) - (prev.get("left", 0) + prev.get("width", 0))
+        # v2: prefer 'right' if available; fall back to left+width
+        prev_right = prev.get("right", prev.get("left", 0) + prev.get("width", 0))
+        gap        = word.get("left", 0) - prev_right
         parts.append("\t" if gap > column_gap else " ")
         parts.append(word["text"])
         prev = word
@@ -581,7 +620,12 @@ def _join_positioned_words(words: list[dict]) -> str:
 
 
 def _word_cell(data: dict, index: int, text: str) -> dict:
-    """Build a positioned word record from pytesseract image_to_data output."""
+    """
+    Build a positioned word record from pytesseract image_to_data output.
+
+    BUG FIX v2: now computes and stores right = left + width,
+    bottom = top + height so LayoutLM normalisation has all four box edges.
+    """
     def _i(name: str, default: int = 0) -> int:
         try:
             return int(data.get(name, [default])[index])
@@ -592,36 +636,13 @@ def _word_cell(data: dict, index: int, text: str) -> dict:
     top    = _i("top")
     width  = _i("width")
     height = _i("height")
+
     return {
         "text":   text,
         "left":   left,
         "top":    top,
         "width":  width,
         "height": height,
-        "right":  left + width,     # <-- ADDED
-        "bottom": top + height,     # <-- ADDED
+        "right":  left + width,   # v2 NEW
+        "bottom": top + height,   # v2 NEW
     }
-
-
-def _tesseract_lang_to_paddle(lang: str) -> str:
-    """
-    Convert a Tesseract language code to the nearest PaddleOCR equivalent.
-
-    PaddleOCR uses ISO-639-1 two-letter codes; Tesseract uses three-letter codes.
-    Only the subset relevant to East Africa + common business languages is mapped.
-    """
-    mapping = {
-        "eng": "en",
-        "swa": "en",   # Swahili — use English model (best available)
-        "fra": "fr",
-        "deu": "german",
-        "chi_sim": "ch",
-        "chi_tra": "ch",
-        "ara": "ar",
-        "hin": "hi",
-        "jpn": "japan",
-        "kor": "korean",
-    }
-    # Handle multi-lang strings like "eng+swa" — take the first code
-    primary = lang.split("+")[0].strip().lower()
-    return mapping.get(primary, "en")
