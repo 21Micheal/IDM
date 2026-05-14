@@ -15,6 +15,8 @@ interface Member    { id: string; user: { id: string; full_name: string; email: 
 interface Group     { id: string; name: string; description: string; permissions: GroupPerm[]; member_count: number; has_admin_access: boolean }
 interface User      { id: string; full_name: string; email: string; job_description?: string }
 
+const HOD_GROUP_NAME = "HOD";
+
 const ALL_ACTIONS = [
   { value: "view",     label: "View",     description: "Open and read documents" },
   { value: "upload",   label: "Upload",   description: "Add new documents" },
@@ -182,6 +184,8 @@ function GroupDetail({
   const [tab, setTab] = useState<"permissions" | "members">("permissions");
   const [userSearch, setUserSearch] = useState("");
   const [adminAccess, setAdminAccess] = useState(group.has_admin_access);
+  const isHodGroup = group.name === HOD_GROUP_NAME;
+  const isBuiltInGroup = group.has_admin_access || isHodGroup;
 
   useEffect(() => {
     setAdminAccess(group.has_admin_access);
@@ -198,7 +202,7 @@ function GroupDetail({
       search: userSearch || undefined,
       page_size: 20
     }).then((r) => r.data.results ?? r.data),
-    enabled: tab === "members",
+    enabled: tab === "members" && !isHodGroup,
   });
 
   const setPermsMutation = useMutation({
@@ -277,11 +281,16 @@ function GroupDetail({
                   System administrator group
                 </p>
               )}
+              {isHodGroup && (
+                <p className="text-xs font-semibold uppercase tracking-widest text-accent mt-1">
+                  Synced from department heads
+                </p>
+              )}
               {group.description && <p className="text-sm text-muted-foreground">{group.description}</p>}
             </div>
           </div>
           <div className="flex items-center gap-2">
-            {!group.has_admin_access && (
+            {!isBuiltInGroup && (
               <button
                 onClick={() => {
                   if (window.confirm(`Delete group "${group.name}"? This will remove its members and permissions.`)) {
@@ -341,12 +350,13 @@ function GroupDetail({
                 <button
                   type="button"
                   onClick={() => adminAccessMutation.mutate(!adminAccess)}
-                  disabled={adminAccessMutation.isPending}
+                  disabled={adminAccessMutation.isPending || isHodGroup}
                   className={clsx(
                     "inline-flex items-center gap-3 rounded-full border px-4 py-2 text-sm font-semibold transition-colors",
                     adminAccess
                       ? "bg-accent/15 border-accent text-accent"
-                      : "bg-muted border-border text-muted-foreground hover:text-foreground"
+                      : "bg-muted border-border text-muted-foreground hover:text-foreground",
+                    isHodGroup && "opacity-60 cursor-not-allowed"
                   )}
                   aria-pressed={adminAccess}
                 >
@@ -396,12 +406,14 @@ function GroupDetail({
                             Expires {new Date(m.expires_at).toLocaleDateString()}
                           </span>
                         )}
-                        <button
-                          onClick={() => removeMemberMutation.mutate(m.user.id)}
-                          className="opacity-0 group-hover:opacity-100 text-destructive hover:bg-destructive/10 p-2 rounded-lg transition-all"
-                        >
-                          <X className="w-4 h-4" />
-                        </button>
+                        {!isHodGroup && (
+                          <button
+                            onClick={() => removeMemberMutation.mutate(m.user.id)}
+                            className="opacity-0 group-hover:opacity-100 text-destructive hover:bg-destructive/10 p-2 rounded-lg transition-all"
+                          >
+                            <X className="w-4 h-4" />
+                          </button>
+                        )}
                       </div>
                     </div>
                   ))}
@@ -416,13 +428,20 @@ function GroupDetail({
               {/* Add Members */}
               <div>
                 <h3 className="font-semibold text-base text-foreground mb-4">Add members</h3>
+                {isHodGroup && (
+                  <div className="mb-4 rounded-xl border border-accent/30 bg-accent/10 p-4 text-sm text-foreground">
+                    HOD group membership is managed by setting a head on each department.
+                  </div>
+                )}
                 <input
                   value={userSearch}
                   onChange={(e) => setUserSearch(e.target.value)}
                   className="input mb-4"
                   placeholder="Search users by name or email…"
+                  disabled={isHodGroup}
                 />
 
+                {!isHodGroup && (
                 <div className="max-h-96 overflow-y-auto border border-border rounded-xl divide-y divide-border bg-card">
                   {allUsers
                     ?.filter((u) => !memberIds.has(u.id))
@@ -451,6 +470,7 @@ function GroupDetail({
                       </div>
                     ))}
                 </div>
+                )}
               </div>
             </div>
           )}
@@ -577,7 +597,8 @@ export default function GroupsPage() {
 
         {orderedGroups?.map((group) => {
           const ruleCount = group.permissions.filter((p) => p.action !== "admin").length;
-          const isSystemGroup = group.has_admin_access;
+          const isHodGroup = group.name === HOD_GROUP_NAME;
+          const isSystemGroup = group.has_admin_access || isHodGroup;
 
           return (
             <div
@@ -595,9 +616,14 @@ export default function GroupsPage() {
                     <h3 className="font-semibold text-lg text-foreground group-hover:text-accent transition-colors">
                       {group.name}
                     </h3>
-                    {isSystemGroup && (
+                    {group.has_admin_access && (
                       <span className="inline-flex items-center rounded-full bg-accent/15 px-2.5 py-1 text-[11px] font-semibold text-accent mt-2">
                         System administrator group
+                      </span>
+                    )}
+                    {isHodGroup && (
+                      <span className="inline-flex items-center rounded-full bg-accent/15 px-2.5 py-1 text-[11px] font-semibold text-accent mt-2">
+                        Synced from department heads
                       </span>
                     )}
                     {group.description && (

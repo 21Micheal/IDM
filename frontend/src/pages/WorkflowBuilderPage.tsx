@@ -353,7 +353,9 @@ function StepEditPanel({
             >
               <option value="">Select group</option>
               {groups.map(g => (
-                <option key={g.id} value={g.id}>{g.name}</option>
+                <option key={g.id} value={g.id}>
+                  {g.name === "HOD" ? "HOD - uploader department head" : g.name}
+                </option>
               ))}
             </select>
           </div>

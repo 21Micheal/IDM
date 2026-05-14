@@ -49,6 +49,13 @@ class Department(models.Model):
     id         = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
     name       = models.CharField(max_length=120, unique=True)
     code       = models.CharField(max_length=20,  unique=True)
+    head       = models.ForeignKey(
+        "User",
+        null=True,
+        blank=True,
+        on_delete=models.SET_NULL,
+        related_name="headed_departments",
+    )
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
 
@@ -289,6 +296,8 @@ class UserGroup(models.Model):
     """
     ADMIN_GROUP_NAME = "Administrators"
     ADMIN_GROUP_DESCRIPTION = "Built-in group with application-wide administrator access."
+    HOD_GROUP_NAME = "HOD"
+    HOD_GROUP_DESCRIPTION = "Built-in group containing the active heads of department."
 
     id          = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
     name        = models.CharField(max_length=120, unique=True)
@@ -312,6 +321,10 @@ class UserGroup(models.Model):
             permission.document_type_id is None and permission.action == GroupAction.ADMIN.value
             for permission in self.permissions.all()
         )
+
+    @property
+    def is_hod_group(self) -> bool:
+        return self.name == self.HOD_GROUP_NAME
 
     @classmethod
     def ensure_administrators_group(cls, created_by=None):
@@ -349,6 +362,50 @@ class UserGroup(models.Model):
                 defaults={"added_by": created_by},
             )
 
+        return group
+
+    @classmethod
+    def ensure_hod_group(cls, created_by=None):
+        group, _ = cls.objects.get_or_create(
+            name=cls.HOD_GROUP_NAME,
+            defaults={
+                "description": cls.HOD_GROUP_DESCRIPTION,
+                "is_active": True,
+                "created_by": created_by,
+            },
+        )
+
+        updates = {}
+        if not group.description:
+            updates["description"] = cls.HOD_GROUP_DESCRIPTION
+        if not group.is_active:
+            updates["is_active"] = True
+        if created_by is not None and group.created_by_id is None:
+            updates["created_by"] = created_by
+        if updates:
+            cls.objects.filter(pk=group.pk).update(**updates)
+            group.refresh_from_db()
+
+        cls.sync_hod_memberships(added_by=created_by, group=group)
+        return group
+
+    @classmethod
+    def sync_hod_memberships(cls, added_by=None, group=None):
+        group = group or cls.ensure_hod_group(created_by=added_by)
+        head_ids = set(
+            Department.objects
+            .filter(head__isnull=False, head__is_active=True)
+            .values_list("head_id", flat=True)
+        )
+
+        for head_id in head_ids:
+            UserGroupMembership.objects.update_or_create(
+                user_id=head_id,
+                group=group,
+                defaults={"added_by": added_by, "expires_at": None},
+            )
+
+        group.memberships.exclude(user_id__in=head_ids).delete()
         return group
 
 

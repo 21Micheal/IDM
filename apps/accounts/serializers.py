@@ -8,17 +8,68 @@ from .models import User, Department, UserGroup, GroupPermission, UserGroupMembe
 
 class DepartmentSerializer(serializers.ModelSerializer):
     user_count = serializers.SerializerMethodField()
+    head = serializers.SerializerMethodField()
+    head_id = serializers.PrimaryKeyRelatedField(
+        queryset=User.objects.filter(is_active=True),
+        source="head",
+        write_only=True,
+        required=False,
+        allow_null=True,
+    )
 
     class Meta:
         model  = Department
-        fields = ["id", "name", "code", "user_count", "created_at"]
+        fields = ["id", "name", "code", "head", "head_id", "user_count", "created_at"]
         read_only_fields = ["id", "created_at"]
 
     def get_user_count(self, obj):
         return obj.users.filter(is_active=True).count()
 
+    def get_head(self, obj):
+        if not obj.head:
+            return None
+        return {
+            "id": str(obj.head.id),
+            "email": obj.head.email,
+            "first_name": obj.head.first_name,
+            "last_name": obj.head.last_name,
+            "full_name": obj.head.get_full_name(),
+            "job_description": obj.head.job_description,
+            "is_staff": obj.head.is_staff,
+        }
+
     def validate_code(self, value):
         return value.upper().strip()
+
+    def validate(self, attrs):
+        head = attrs.get("head")
+        if head is None:
+            return attrs
+
+        department = self.instance
+        if department is None:
+            raise serializers.ValidationError({
+                "head_id": "Create the department before assigning its head."
+            })
+        if department and head.department_id != department.id:
+            raise serializers.ValidationError({
+                "head_id": "The department head must belong to this department."
+            })
+        return attrs
+
+    def create(self, validated_data):
+        department = super().create(validated_data)
+        UserGroup.sync_hod_memberships(
+            added_by=self.context.get("request").user if self.context.get("request") else None
+        )
+        return department
+
+    def update(self, instance, validated_data):
+        department = super().update(instance, validated_data)
+        UserGroup.sync_hod_memberships(
+            added_by=self.context.get("request").user if self.context.get("request") else None
+        )
+        return department
 
 
 class UserSummarySerializer(serializers.ModelSerializer):
@@ -143,7 +194,26 @@ class UserUpdateSerializer(serializers.ModelSerializer):
                     raise serializers.ValidationError(
                         f"You do not have permission to change '{key}'."
                     )
+        if "department" in attrs and self.instance:
+            next_department = attrs.get("department")
+            mismatched_headed_departments = self.instance.headed_departments.exclude(
+                id=getattr(next_department, "id", None)
+            )
+            if mismatched_headed_departments.exists():
+                raise serializers.ValidationError({
+                    "department": (
+                        "This user is configured as a department head. "
+                        "Change the department head before moving them."
+                    )
+                })
         return attrs
+
+    def update(self, instance, validated_data):
+        user = super().update(instance, validated_data)
+        UserGroup.sync_hod_memberships(
+            added_by=self.context.get("request").user if self.context.get("request") else None
+        )
+        return user
 
 
 # ── Group serializers ─────────────────────────────────────────────────────────
@@ -195,6 +265,21 @@ class UserGroupSerializer(serializers.ModelSerializer):
 
     def get_has_admin_access(self, obj):
         return obj.has_admin_access
+
+    def validate(self, attrs):
+        if self.instance and self.instance.name in (
+            UserGroup.ADMIN_GROUP_NAME,
+            UserGroup.HOD_GROUP_NAME,
+        ):
+            if "name" in attrs and attrs["name"] != self.instance.name:
+                raise serializers.ValidationError({
+                    "name": f"The {self.instance.name} group cannot be renamed."
+                })
+            if attrs.get("is_active") is False:
+                raise serializers.ValidationError({
+                    "is_active": f"The {self.instance.name} group cannot be deactivated."
+                })
+        return attrs
 
 
 class UserDelegationSerializer(serializers.ModelSerializer):

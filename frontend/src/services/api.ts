@@ -471,9 +471,9 @@ export const usersAPI = {
 
 export const departmentsAPI = {
   list: () => api.get("/departments/"),
-  create: (data: { name: string; code: string }) =>
+  create: (data: { name: string; code: string; head_id?: string | null }) =>
     api.post("/departments/", data),
-  update: (id: string, data: { name?: string; code?: string }) =>
+  update: (id: string, data: { name?: string; code?: string; head_id?: string | null }) =>
     api.patch(`/departments/${id}/`, data),
   delete: (id: string) => api.delete(`/departments/${id}/`),
 };
