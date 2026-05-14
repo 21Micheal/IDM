@@ -199,10 +199,23 @@ ELASTICSEARCH_DSL = {
 }
 
 # ── OCR ───────────────────────────────────────────────────────────────────────
-OCR_ENGINE = env("OCR_ENGINE", default="tesseract")
+OCR_ENGINE = env("OCR_ENGINE", default="paddle")
 TESSERACT_CMD = env("TESSERACT_CMD", default="")
 OCR_LANGUAGES = env("OCR_LANGUAGES", default="eng")
 OCR_DPI = env.int("OCR_DPI", default=300)
+OCR_CONFIDENCE_THRESHOLD = env.int("OCR_CONFIDENCE_THRESHOLD", default=40)
+OCR_QUALITY_RATIO = env.float("OCR_QUALITY_RATIO", default=0.50)
+# If OCR remains pending/processing beyond this age, treat it as stale/failed.
+OCR_PROCESSING_STALE_SECONDS = env.int("OCR_PROCESSING_STALE_SECONDS", default=300)
+
+# PaddleOCR runtime settings
+OCR_PADDLE_LANG = env("OCR_PADDLE_LANG", default="en")
+OCR_PADDLE_USE_GPU = env.bool("OCR_PADDLE_USE_GPU", default=False)
+OCR_PADDLE_USE_ANGLE_CLS = env.bool("OCR_PADDLE_USE_ANGLE_CLS", default=True)
+
+# spaCy NER post-processing settings
+OCR_SPACY_ENABLED = env.bool("OCR_SPACY_ENABLED", default=True)
+OCR_SPACY_MODEL = env("OCR_SPACY_MODEL", default="en_core_web_sm")
 
 LIBREOFFICE_CMD = env("LIBREOFFICE_CMD", default="libreoffice")
 # Backward-compatible alias used by tasks.py

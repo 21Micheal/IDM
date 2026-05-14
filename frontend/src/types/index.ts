@@ -58,6 +58,7 @@ export interface Document {
   currency: string;
   document_date: string | null;
   due_date: string | null;
+  description?: string;
   file: string;
   file_name: string;
   file_size: number;

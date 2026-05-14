@@ -1,22 +1,22 @@
-// 5. Updated File: src/pages/auth/LoginPage.tsx
-// Centered, modern card design with better spacing and Flaxem branding.
+// src/pages/LoginPage.tsx
 import { useState } from "react";
 import { useNavigate } from "react-router-dom";
 import { useQueryClient } from "@tanstack/react-query";
 import { useForm } from "react-hook-form";
 import { zodResolver } from "@hookform/resolvers/zod";
 import { z } from "zod";
-import { Loader2, Mail, RefreshCw, Lock, ArrowRight } from "lucide-react";
+import { Loader2, Mail, RefreshCw, Lock, ArrowRight, ShieldCheck } from "lucide-react";
+
 import { api, authAPI, documentsAPI, notificationsAPI, workflowAPI } from "@/services/api";
 import { useAuthStore } from "@/store/authStore";
 import { toast } from "@/components/ui/vault-toast";
-import { FlaxemLogo } from "@/components/shared/FlaxemLogo";
 import type { AuthUser } from "@/store/authStore";
 
 const credSchema = z.object({
   email: z.string().email("Please enter a valid email address."),
   password: z.string().min(1, "Password is required."),
 });
+
 const otpSchema = z.object({
   otp: z.string().length(6, "Verification code must be 6 digits."),
 });
@@ -28,6 +28,7 @@ export default function LoginPage() {
   const navigate = useNavigate();
   const qc = useQueryClient();
   const { setTokens, setUser } = useAuthStore();
+
   const [step, setStep] = useState<"credentials" | "otp">("credentials");
   const [pendingUserId, setPendingUserId] = useState("");
   const [userEmail, setUserEmail] = useState("");
@@ -57,11 +58,9 @@ export default function LoginPage() {
       }
     }
 
-    // Warm the dashboard caches so the first protected screen has data immediately.
-    // Small artificial delay ensures the authStore update has propagated to Axios interceptors.
+    // Warm caches
     await new Promise((resolve) => setTimeout(resolve, 100));
 
-    // Warm the dashboard caches so the first protected screen has data immediately.
     await Promise.allSettled([
       qc.prefetchQuery({
         queryKey: ["documents", "recent"],
@@ -96,6 +95,7 @@ export default function LoginPage() {
     setLoading(true);
     try {
       const { data } = await authAPI.login(values.email, values.password);
+
       if (data.mfa_required) {
         setPendingUserId(data.user_id);
         setUserEmail(values.email);
@@ -132,7 +132,10 @@ export default function LoginPage() {
       setResendCooldown(60);
       const timer = setInterval(() => {
         setResendCooldown((prev) => {
-          if (prev <= 1) { clearInterval(timer); return 0; }
+          if (prev <= 1) {
+            clearInterval(timer);
+            return 0;
+          }
           return prev - 1;
         });
       }, 1000);
@@ -144,50 +147,65 @@ export default function LoginPage() {
   };
 
   return (
-    <div className="min-h-screen bg-gradient-to-br from-slate-100 to-slate-200 flex items-center justify-center p-4">
+    <div className="min-h-screen bg-gradient-to-br from-sky-50 via-sky-100 to-blue-200 flex items-center justify-center p-4">
       <div className="w-full max-w-md">
         <div className="text-center mb-8">
-          <div className="flex justify-center">
-            <FlaxemLogo variant="dark" className="h-10" />
+          <div className="flex justify-center items-center gap-2">
+            <div className="w-10 h-10 rounded-xl bg-sky-600 text-white flex items-center justify-center shadow-lg shadow-sky-500/30">
+              <ShieldCheck className="w-6 h-6" />
+            </div>
+            <span className="text-2xl font-semibold text-slate-900 tracking-tight">Flaxem</span>
           </div>
           <p className="text-slate-600 text-sm mt-3">Secure Document Management System</p>
         </div>
 
-        <div className="bg-white rounded-2xl shadow-xl border border-slate-100 p-8">
+        <div className="bg-white/90 backdrop-blur rounded-2xl shadow-xl shadow-sky-900/5 border border-white p-10">
           {step === "credentials" ? (
             <>
-              <h2 className="text-xl font-semibold text-slate-900 mb-6">Sign in to your account</h2>
-              <form onSubmit={credForm.handleSubmit(onCredentials)} className="space-y-5">
+              <h2 className="text-2xl font-semibold text-slate-900 mb-1">Welcome back</h2>
+              <p className="text-sm text-slate-500 mb-8">Sign in to your account to continue</p>
+
+              <form onSubmit={credForm.handleSubmit(onCredentials)} className="space-y-6">
                 <div>
-                  <label className="block text-sm font-medium text-slate-700 mb-1">Email address</label>
+                  <label className="block text-sm font-medium text-slate-700 mb-2">Email address</label>
                   <div className="relative">
-                    <Mail className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-slate-400" />
+                    <Mail className="absolute left-3.5 top-1/2 -translate-y-1/2 w-4 h-4 text-slate-400" />
                     <input
                       {...credForm.register("email")}
                       type="email"
-                      className="w-full pl-9 pr-3 py-2.5 border border-slate-300 rounded-lg focus:ring-2 focus:ring-primary focus:border-primary transition-colors"
+                      className="w-full pl-10 pr-3 py-3.5 bg-slate-50 border border-slate-200 rounded-xl focus:ring-2 focus:ring-sky-500 focus:border-sky-500 focus:bg-white transition-all outline-none"
                       placeholder="you@company.com"
                       autoComplete="email"
                       autoFocus
                     />
                   </div>
-                  {credForm.formState.errors.email && <p className="text-red-500 text-xs mt-1">{credForm.formState.errors.email.message}</p>}
+                  {credForm.formState.errors.email && (
+                    <p className="text-red-500 text-xs mt-1.5">{credForm.formState.errors.email.message}</p>
+                  )}
                 </div>
+
                 <div>
-                  <label className="block text-sm font-medium text-slate-700 mb-1">Password</label>
+                  <label className="block text-sm font-medium text-slate-700 mb-2">Password</label>
                   <div className="relative">
-                    <Lock className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-slate-400" />
+                    <Lock className="absolute left-3.5 top-1/2 -translate-y-1/2 w-4 h-4 text-slate-400" />
                     <input
                       {...credForm.register("password")}
                       type="password"
-                      className="w-full pl-9 pr-3 py-2.5 border border-slate-300 rounded-lg focus:ring-2 focus:ring-primary focus:border-primary transition-colors"
+                      className="w-full pl-10 pr-3 py-3.5 bg-slate-50 border border-slate-200 rounded-xl focus:ring-2 focus:ring-sky-500 focus:border-sky-500 focus:bg-white transition-all outline-none"
                       placeholder="••••••••"
                       autoComplete="current-password"
                     />
                   </div>
-                  {credForm.formState.errors.password && <p className="text-red-500 text-xs mt-1">{credForm.formState.errors.password.message}</p>}
+                  {credForm.formState.errors.password && (
+                    <p className="text-red-500 text-xs mt-1.5">{credForm.formState.errors.password.message}</p>
+                  )}
                 </div>
-                <button type="submit" disabled={loading} className="w-full flex items-center justify-center gap-2 py-2.5 px-4 bg-primary hover:bg-primary/90 text-white font-medium rounded-lg shadow-sm transition-colors disabled:opacity-70">
+
+                <button
+                  type="submit"
+                  disabled={loading}
+                  className="w-full flex items-center justify-center gap-2 py-3.5 px-4 bg-sky-600 hover:bg-sky-700 text-white font-medium rounded-xl shadow-lg shadow-sky-500/30 transition-all disabled:opacity-70"
+                >
                   {loading && <Loader2 className="w-4 h-4 animate-spin" />}
                   Sign in <ArrowRight className="w-4 h-4" />
                 </button>
@@ -195,21 +213,24 @@ export default function LoginPage() {
             </>
           ) : (
             <>
-              <div className="flex items-center gap-4 mb-6">
-                <div className="w-12 h-12 bg-primary/10 rounded-xl flex items-center justify-center">
-                  <Mail className="w-6 h-6 text-primary" />
+              <div className="flex items-center gap-4 mb-8">
+                <div className="w-12 h-12 bg-sky-100 rounded-xl flex items-center justify-center">
+                  <Mail className="w-6 h-6 text-sky-600" />
                 </div>
                 <div>
                   <h2 className="font-semibold text-slate-900">Two-Factor Authentication</h2>
-                  <p className="text-sm text-slate-500">We sent a code to <span className="font-medium text-slate-700">{userEmail}</span></p>
+                  <p className="text-sm text-slate-500">
+                    We sent a code to <span className="font-medium text-slate-700">{userEmail}</span>
+                  </p>
                 </div>
               </div>
-              <form onSubmit={otpForm.handleSubmit(onOTP)} className="space-y-5">
+
+              <form onSubmit={otpForm.handleSubmit(onOTP)} className="space-y-6">
                 <div>
-                  <label className="block text-sm font-medium text-slate-700 mb-1">Verification Code</label>
+                  <label className="block text-sm font-medium text-slate-700 mb-2">Verification Code</label>
                   <input
                     {...otpForm.register("otp")}
-                    className="w-full text-center text-2xl tracking-[0.5em] font-mono py-3 border border-slate-300 rounded-lg focus:ring-2 focus:ring-primary focus:border-primary"
+                    className="w-full text-center text-2xl tracking-[0.5em] font-mono py-4 bg-slate-50 border border-slate-200 rounded-xl focus:ring-2 focus:ring-sky-500 focus:border-sky-500 focus:bg-white outline-none"
                     placeholder="000000"
                     maxLength={6}
                     autoFocus
@@ -219,16 +240,33 @@ export default function LoginPage() {
                       if (val.length === 6) otpForm.handleSubmit(onOTP)();
                     }}
                   />
-                  {otpForm.formState.errors.otp && <p className="text-red-500 text-xs mt-1">{otpForm.formState.errors.otp.message}</p>}
+                  {otpForm.formState.errors.otp && (
+                    <p className="text-red-500 text-xs mt-1.5">{otpForm.formState.errors.otp.message}</p>
+                  )}
                 </div>
-                <button type="submit" disabled={loading} className="w-full flex items-center justify-center gap-2 py-2.5 px-4 bg-primary hover:bg-primary/90 text-white font-medium rounded-lg shadow-sm transition-colors">
+
+                <button
+                  type="submit"
+                  disabled={loading}
+                  className="w-full flex items-center justify-center gap-2 py-3.5 px-4 bg-sky-600 hover:bg-sky-700 text-white font-medium rounded-xl shadow-lg shadow-sky-500/30 transition-all disabled:opacity-70"
+                >
                   {loading && <Loader2 className="w-4 h-4 animate-spin" />}
                   Verify & Sign In
                 </button>
               </form>
-              <div className="flex items-center justify-between mt-6 pt-4 border-t border-slate-100">
-                <button onClick={() => setStep("credentials")} className="text-sm text-slate-500 hover:text-slate-700 transition-colors">← Use a different account</button>
-                <button onClick={resendOTP} disabled={resending || resendCooldown > 0} className="flex items-center gap-1.5 text-sm font-medium text-primary hover:text-primary/80 disabled:opacity-50">
+
+              <div className="flex items-center justify-between mt-6 pt-5 border-t border-slate-100">
+                <button
+                  onClick={() => setStep("credentials")}
+                  className="text-sm text-slate-500 hover:text-slate-700 transition-colors"
+                >
+                  ← Use a different account
+                </button>
+                <button
+                  onClick={resendOTP}
+                  disabled={resending || resendCooldown > 0}
+                  className="flex items-center gap-1.5 text-sm font-medium text-sky-600 hover:text-sky-700 disabled:opacity-50"
+                >
                   <RefreshCw className={`w-3.5 h-3.5 ${resending ? "animate-spin" : ""}`} />
                   {resendCooldown > 0 ? `Resend in ${resendCooldown}s` : "Resend Code"}
                 </button>
@@ -236,7 +274,10 @@ export default function LoginPage() {
             </>
           )}
         </div>
-        <p className="text-center text-slate-500 text-xs mt-6">© {new Date().getFullYear()} Flaxem Systems. All rights reserved.</p>
+
+        <p className="text-center text-slate-500 text-xs mt-6">
+          © {new Date().getFullYear()} Flaxem Systems. All rights reserved.
+        </p>
       </div>
     </div>
   );

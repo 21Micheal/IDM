@@ -11,7 +11,7 @@ const ChatPanel = lazy(() =>
 );
 
 /**
- * Floating bottom-right chat launcher.
+ * Header chat launcher.
  * - Persistent unread badge (polled + WS-incremented)
  * - Receiver-side toast pop-up via vaultToast on every chat_notification
  * - Click toast to deep-link into the right room
@@ -142,23 +142,20 @@ export function ChatLauncher() {
 
   return (
     <>
-      {/* ── Launcher (FAB) ─────────────────────────────────────────────── */}
+      {/* ── Launcher ───────────────────────────────────────────────────── */}
       <button
         onClick={open ? handleClose : handleOpen}
         aria-label={open ? "Close chat" : "Open chat"}
-        className="group fixed bottom-6 right-6 z-40 flex h-14 w-14 items-center justify-center rounded-full text-primary-foreground transition-all duration-300 hover:scale-105 active:scale-95"
-        style={{
-          background: "var(--gradient-sidebar)",
-          boxShadow: "var(--shadow-elegant)",
-        }}
+        title={open ? "Close chat" : "Open chat"}
+        className="group relative flex h-8 w-8 items-center justify-center rounded-md border border-transparent text-muted-foreground transition-colors hover:bg-muted hover:text-foreground active:scale-95"
       >
         {/* Animated accent ring on new message */}
         <span
-          className={`pointer-events-none absolute inset-0 rounded-full ring-2 ring-accent transition-opacity ${
+          className={`pointer-events-none absolute inset-0 rounded-md ring-2 ring-accent transition-opacity ${
             pulse ? "animate-ping opacity-70" : "opacity-0"
           }`}
         />
-        <span className="absolute inset-0 rounded-full ring-1 ring-sidebar-border/40" />
+        {open && <span className="absolute inset-x-1 bottom-0 h-0.5 rounded-full bg-accent" />}
 
         {open ? (
           <X className="h-5 w-5" strokeWidth={2.25} />
@@ -167,13 +164,13 @@ export function ChatLauncher() {
         )}
 
         {!open && unread > 0 && (
-          <span className="absolute -top-1 -right-1 inline-flex h-5 min-w-[20px] items-center justify-center rounded-full bg-destructive px-1.5 text-[10px] font-bold text-destructive-foreground ring-2 ring-background animate-pulse">
+          <span className="absolute -top-1 -right-1 inline-flex h-4 min-w-[16px] items-center justify-center rounded-full bg-destructive px-1 text-[9px] font-bold text-destructive-foreground ring-2 ring-background animate-pulse">
             {unread > 99 ? "99+" : unread}
           </span>
         )}
       </button>
 
-      {/* ── Slide-up panel ─────────────────────────────────────────────── */}
+      {/* ── Header anchored panel ──────────────────────────────────────── */}
       {open && (
         <Suspense fallback={null}>
           <ChatPanel

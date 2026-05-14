@@ -12,7 +12,7 @@ DocumentFieldExtractor is the entry point. It runs three extraction strategies
 in priority order for each field:
 
   1. LabelledFieldStrategy  — "Label: Value" patterns (highest precision)
-  2. LayoutHeuristicStrategy — positional cues (top of document = title/supplier)
+  2. LayoutHeuristicStrategy — positional cues (top of document = supplier)
   3. FallbackPatternStrategy — broad regex sweeps when the above find nothing
 
 Each strategy returns a dict of field → value. Results are merged with earlier
@@ -38,7 +38,7 @@ Supported document types and their key fields
   general         → fallback for unrecognised types
 
 All extractors populate these universal fields regardless of document type:
-  title, document_type, reference_number, amount, currency,
+  document_type, reference_number, amount, currency,
   document_date, due_date, supplier, raw_lines
 """
 from __future__ import annotations
@@ -351,6 +351,27 @@ def _clean_inline_value(value: str, max_len: int = 120) -> str:
     return value.strip(" \t:-,|")[:max_len]
 
 
+def _first_bill_to_line_index(lines: list[str]) -> Optional[int]:
+    """Index of the first BILL TO / SHIP TO line, or None if absent."""
+    for i, line in enumerate(lines):
+        if re.search(r"\bbill(?:ed)?\s*to\b", line, re.I):
+            return i
+        if re.search(r"\bship(?:ped)?\s*to\b", line, re.I):
+            return i
+    return None
+
+
+def _looks_like_invoice_column_header_row(line: str) -> bool:
+    """True when the line is mostly invoice grid labels (not a company name)."""
+    lf = re.sub(r"[\t|]+", " ", line).lower()
+    markers = (
+        "account code", "supplier id", "supplier", "invoice date",
+        "date issued", "due date", "payment due",
+    )
+    hits = sum(1 for m in markers if m in lf)
+    return hits >= 2
+
+
 def _extract_supplier(lines: list[str]) -> Optional[str]:
     def _is_valid(candidate: str) -> bool:
         candidate = _clean_inline_value(candidate)
@@ -378,35 +399,42 @@ def _extract_supplier(lines: list[str]) -> Optional[str]:
             if _is_valid(candidate):
                 return candidate
 
-    # Priority 3: positional — first valid line at the top of the document,
-    # before the "Bill To / Billed To" boundary and before the document-type heading.
-    # On most invoices/receipts the issuer's name is the very first line.
+    # Priority 3: positional — issuer lines *before* BILL TO only. Never use the
+    # customer block under "Bill To" as supplier.
     _DOCTYPE_HEADING_RE = re.compile(
         r"\b(?:invoice|receipt|purchase\s*order|lpo|delivery\s*note|contract"
         r"|agreement|quotation|expense|imprest|voucher|statement)\b",
         re.I,
     )
-    _BILL_TO_RE = re.compile(r"\bbill(?:ed)?\s*to\b|\bship(?:ped)?\s*to\b", re.I)
 
-    for line in lines[:8]:  # only consider the first 8 lines as "header zone"
+    bill_to_idx = _first_bill_to_line_index(lines)
+    header_cap = min(8, bill_to_idx if bill_to_idx is not None else 8)
+
+    for line in lines[:header_cap]:
         if _DOCTYPE_HEADING_RE.search(line):
-            break  # stop at the document-type heading (e.g. "TAX INVOICE")
-        if _BILL_TO_RE.search(line):
-            break  # stop at "Bill To"
+            m = _DOCTYPE_HEADING_RE.search(line)
+            prefix = line[: m.start()].strip() if m else ""
+            if len(prefix) >= 3 and _is_valid(prefix):
+                return prefix[:120]
+            continue
+        # Tab- or pipe-separated rows are almost always header grids or line items,
+        # not a lone legal-entity name line.
+        if "\t" in line or "|" in line:
+            continue
+        if _looks_like_invoice_column_header_row(line):
+            continue
         if _is_valid(line) and len(line) >= 5:
-            # Prefer lines that look like company names: not pure address lines
             if not re.match(r"^(?:p\.?\s*o\.?\s*box|po\s+box|\d+\s+\w)", line, re.I):
                 return line.strip()[:120]
 
-    # Priority 4: first line with a legal entity suffix that passes rejection checks.
-    # IMPORTANT: extract only the portion up to and including the suffix — the same
-    # line may contain other data (codes, dates) after the company name.
+    # Priority 4: legal-entity suffix — only *above* BILL TO
     _ENTITY_TRUNCATE_RE = re.compile(
         r"^(.{0,80}?\b(?:LLC|Ltd\.?|Limited|Inc\.?|Corp\.?|GmbH|PLC|LLP|S\.A\.?|Pty\.?))"
         r"(?:[\s,.]|$)",
         re.I,
     )
-    for line in lines:
+    entity_limit = bill_to_idx if bill_to_idx is not None else len(lines)
+    for line in lines[:entity_limit]:
         m = _ENTITY_TRUNCATE_RE.match(line)
         if m:
             candidate = m.group(1).strip()
@@ -443,84 +471,6 @@ def _extract_tax_and_subtotal(text: str) -> tuple[Optional[str], Optional[str]]:
     return tax, subtotal
 
 
-# ── Title extraction ───────────────────────────────────────────────────────────
-
-_SKIP_TITLE_RE = re.compile(
-    r"^\$|subtotal|^tax\b|total|^\d[\d\s,./]*$"
-    r"|@|\bsuite\b|\bblvd\b|\bstreet\b|\bave(?:nue)?\b|\broad\b"
-    r"|\bpo\s+box\b|\bzip\b|\bpostal\b",
-    re.I,
-)
-_LABEL_LINE_RE = re.compile(r"^[A-Za-z][A-Za-z0-9 /.\-]{1,40}:\s+\S")
-_DOC_HEADING_RE = re.compile(
-    r"\b(?:tax\s+invoice|invoice|local\s+purchase\s+order|purchase\s+order|"
-    r"delivery\s+note|goods\s+received\s+note|credit\s+note|debit\s+note|"
-    r"official\s+receipt|receipt|quotation|quote|pro\s*forma|contract|"
-    r"agreement|payment\s+voucher|voucher|statement\s+of\s+account|"
-    r"expense\s+(?:claim|report|form)|imprest)\b",
-    re.I,
-)
-
-
-def _title_case_document_heading(value: str) -> str:
-    return re.sub(r"\s+", " ", value.strip()).title()
-
-
-def _extract_title(
-    lines: list[str],
-    doc_type_raw: str,
-    *,
-    supplier: Optional[str] = None,
-    reference: Optional[str] = None,
-) -> Optional[str]:
-    # Prefer the actual document heading over the first visible header line.
-    for line in lines[:18]:
-        lower_line = line.lower()
-        if (
-            ("account" in lower_line or "supplier" in lower_line or "vendor" in lower_line)
-            and ("date" in lower_line or "code" in lower_line or "\t" in line or "|" in line)
-        ):
-            continue
-        m = _DOC_HEADING_RE.search(line)
-        if not m:
-            continue
-        heading = _title_case_document_heading(m.group(0))
-        if reference:
-            return f"{heading} {reference}"[:120]
-        if supplier:
-            return f"{heading} - {supplier}"[:120]
-        return heading[:120]
-
-    # Then use explicit subject/title/description labels.
-    for line in lines[:30]:
-        explicit = _labelled_text(
-            r"(?:document\s*title|title|subject|description|particulars|purpose)",
-            line,
-            120,
-        )
-        if explicit:
-            return explicit
-
-    for line in lines:
-        if len(line) < 4:
-            continue
-        if supplier and line.strip().lower() == supplier.strip().lower():
-            continue
-        if re.match(r"^[\d\W]+$", line):
-            continue
-        if _SKIP_TITLE_RE.search(line):
-            continue
-        if _LABEL_LINE_RE.match(line):
-            continue
-        if doc_type_raw and re.fullmatch(
-            re.escape(doc_type_raw) + r"[\s/\-]*(?:form|request|note)?",
-            line, re.I,
-        ):
-            continue
-        return line[:120]
-    return None
-
-
 # ── Generic labelled-field extractor ──────────────────────────────────────────
 
 def _first_match(text: str, pattern: str, group: int = 1) -> Optional[str]:
@@ -550,6 +500,21 @@ def _labelled_code(label_pattern: str, text: str) -> Optional[str]:
 _ACCOUNT_LABEL_RE = re.compile(
     r"^(?:a/?c|acct\.?|account|gl|g/l|ledger|billing|client|customer|project)"
     r"\s*(?:code|no\.?|number|#|id)?$",
+    re.I,
+)
+# Stricter: grid column must be clearly "code" / GL — not a generic "account"
+# column that OCR maps to bank account numbers.
+_ACCOUNT_GRID_LABEL_RE = re.compile(
+    r"^(?:"
+    r"(?:a/?c|acct\.?|account)\s+code"
+    r"|account\s*#"
+    r"|g/?l(?:\s*code)?"
+    r"|ledger\s*code"
+    r"|billing\s*code"
+    r"|client\s*(?:code|id)"
+    r"|customer\s*(?:code|id)"
+    r"|project\s*code"
+    r")$",
     re.I,
 )
 _CODE_VALUE_RE = re.compile(r"^[A-Z0-9][A-Z0-9\-_/]{1,40}$", re.I)
@@ -599,20 +564,219 @@ def _extract_code_from_header_grid(lines: list[str], label_re: re.Pattern) -> Op
     return None
 
 
+_SUPPLIER_GRID_HEADER_RE = re.compile(
+    r"^(?:supplier|vendor)\s*(?:id|no\.?|#|number)(?:\s*)$|"
+    r"^(?:supplier|vendor)\s+id$",
+    re.I,
+)
+
+
+def _extract_supplier_from_header_grid(lines: list[str]) -> Optional[str]:
+    """
+    Supplier / vendor id from two-row header grids, e.g.:
+
+        ACCOUNT CODE    SUPPLIER ID     DATE ISSUED
+        NET-OPS-88      SUPP-CCS-99     Oct 25, 2024
+    """
+    for i, line in enumerate(lines[:-1]):
+        headers = [_normalise_label_cell(cell) for cell in _split_cells(line)]
+        if len(headers) < 2:
+            continue
+
+        values = _split_cells(lines[i + 1])
+        if len(values) < 2:
+            continue
+
+        for idx, header in enumerate(headers):
+            if idx >= len(values):
+                continue
+            if not _SUPPLIER_GRID_HEADER_RE.match(header):
+                continue
+
+            candidate = values[idx].strip()
+            token = re.split(r"\s{2,}|\t|\|", candidate, maxsplit=1)[0].strip()
+            token = re.sub(r"^[^\w]+|[^\w\-/]+$", "", token)
+            if len(token) < 3:
+                continue
+            if token.upper() in _REF_REJECT:
+                continue
+            if _SUPPLIER_REJECT_RE.search(token):
+                continue
+            return token[:120]
+    return None
+
+
+_DOC_DATE_GRID_HDR = re.compile(
+    r"^(?:date\s*issued|invoice\s*date|issue\s*date|document\s*date|bill\s*date)$",
+    re.I,
+)
+_DUE_DATE_GRID_HDR = re.compile(
+    r"^(?:due\s*date|payment\s*due|pay(?:ment)?\s*by|settle(?:ment)?\s*date)$",
+    re.I,
+)
+
+
+def _extract_dates_from_header_grid(lines: list[str]) -> tuple[Optional[str], Optional[str]]:
+    """Parse document_date and due_date cells from two-row header grids."""
+    doc_date: Optional[str] = None
+    due_date: Optional[str] = None
+    for i, line in enumerate(lines[:-1]):
+        headers = [_normalise_label_cell(cell) for cell in _split_cells(line)]
+        if len(headers) < 2:
+            continue
+        values = _split_cells(lines[i + 1])
+        if len(values) < 2:
+            continue
+        for idx, header in enumerate(headers):
+            if idx >= len(values):
+                continue
+            raw_val = values[idx].strip()
+            if not raw_val:
+                continue
+            parsed = _parse_date(raw_val)
+            if not parsed:
+                parsed = _parse_date(re.sub(r"\s+", " ", raw_val))
+            if not parsed:
+                continue
+            if _DOC_DATE_GRID_HDR.match(header) and not doc_date:
+                doc_date = parsed
+            if _DUE_DATE_GRID_HDR.match(header) and not due_date:
+                due_date = parsed
+    return doc_date, due_date
+
+
+_MONTH_RE = (
+    r"(?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)[a-z]*"
+)
+
+
+def _is_plausible_gl_account_code(value: str) -> bool:
+    """Reject long all-digit values (bank / customer account numbers)."""
+    s = (value or "").strip()
+    if len(s) >= 10 and re.fullmatch(r"\d[\d\s,]*", s):
+        return False
+    return True
+
+
+def _try_standard_invoice_grid_pair(header_line: str, value_line: str) -> Optional[dict[str, str]]:
+    """
+    Parse common space-separated invoice header grids, e.g.:
+
+        ACCOUNT CODE SUPPLIER ID DATE ISSUED DUE DATE
+        NET-OPS-88 SUPP-CCS-99 Oct 25, 2024 Nov 24, 2024
+
+    Also handles permuted header column order (values stay left-to-right).
+    """
+    hdr = _normalise_label_cell(header_line)
+    need = ("supplier id", "due date")
+    if not all(k in hdr for k in need):
+        return None
+    if "date issued" not in hdr and "invoice date" not in hdr:
+        return None
+    if "account code" not in hdr:
+        return None
+
+    # Column order left-to-right in the header row (tabs / pipes → spaces for regex)
+    header_flat = re.sub(r"[\t|]+", " ", header_line)
+    col_keys: list[str] = []
+    for m in re.finditer(
+        r"(account\s+code|supplier\s+id|date\s+issued|invoice\s+date|due\s+date)",
+        header_flat,
+        re.I,
+    ):
+        key = m.group(1).lower().replace("  ", " ")
+        if "account code" in key:
+            col_keys.append("account_code")
+        elif "supplier id" in key:
+            col_keys.append("vendor_code")
+        elif "date issued" in key or "invoice date" in key:
+            col_keys.append("document_date")
+        elif "due date" in key:
+            col_keys.append("due_date")
+    if len(col_keys) != 4 or len(set(col_keys)) != 4:
+        return None
+
+    first_m = re.search(rf"\b({_MONTH_RE}\s+\d{{1,2}},?\s*\d{{4}})\b", value_line, re.I)
+    if not first_m:
+        return None
+    tail = value_line[first_m.end() :]
+    second_m = re.search(rf"\b({_MONTH_RE}\s+\d{{1,2}},?\s*\d{{4}})\b", tail, re.I)
+    if not second_m:
+        return None
+
+    prefix = value_line[: first_m.start()].strip()
+    code_tokens = re.findall(r"\S+", prefix)
+    if len(code_tokens) < 2:
+        return None
+
+    d_issue_s = first_m.group(1)
+    d_due_s = second_m.group(1)
+    d_a = _parse_date(d_issue_s)
+    d_b = _parse_date(d_due_s)
+    if not d_a or not d_b:
+        return None
+
+    # Map spatial (left-to-right) value cells to header columns
+    code_positions = sorted(
+        i for i, k in enumerate(col_keys) if k in ("account_code", "vendor_code")
+    )
+    date_positions = sorted(
+        i for i, k in enumerate(col_keys) if k in ("document_date", "due_date")
+    )
+    if len(code_positions) != 2 or len(date_positions) != 2:
+        return None
+
+    cells: dict[str, str] = {}
+    for pos, tok in zip(code_positions, code_tokens[:2]):
+        cells[col_keys[pos]] = tok
+    for pos, dval in zip(date_positions, (d_a, d_b)):
+        cells[col_keys[pos]] = dval
+
+    out: dict[str, str] = {}
+    if cells.get("account_code"):
+        acct = cells["account_code"]
+        if _is_plausible_gl_account_code(acct):
+            out["account_code"] = acct
+    if cells.get("vendor_code"):
+        out["vendor_code"] = cells["vendor_code"]
+    if cells.get("document_date"):
+        out["document_date"] = cells["document_date"]
+    if cells.get("due_date"):
+        out["due_date"] = cells["due_date"]
+
+    return out if out else None
+
+
+def _standard_invoice_grid_parse(lines: list[str]) -> dict[str, str]:
+    """Return non-empty keys for account_code, vendor_code, document_date, due_date."""
+    for i, line in enumerate(lines[:-1]):
+        parsed = _try_standard_invoice_grid_pair(line, lines[i + 1])
+        if parsed:
+            return parsed
+    return {}
+
+
 def _extract_account_code(text: str, lines: list[str]) -> Optional[str]:
+    std = _standard_invoice_grid_parse(lines)
+    if std.get("account_code") and _is_plausible_gl_account_code(std["account_code"]):
+        return std["account_code"]
+
+    grid = _extract_code_from_header_grid(lines, _ACCOUNT_GRID_LABEL_RE)
+    if grid and _is_plausible_gl_account_code(grid):
+        return grid
+
     labelled = _labelled_code(
-        r"(?:a/?c\s*(?:code|no\.?|number)?|account\s*(?:code|no\.?|number|#)?"
-        r"|acct\.?\s*(?:code|no\.?|number|#)?|g/?l\s*(?:code|no\.?|number)?"
-        r"|ledger\s*code|billing\s*code|client\s*(?:code|no\.?|id)"
-        r"|customer\s*(?:code|no\.?|id)|project\s*code)",
+        r"(?:a/?c\s*code|account\s+code|acct\.?\s*code|g/?l\s*(?:code|no\.?)"
+        r"|ledger\s*code|billing\s*code|client\s*(?:code|id)|customer\s*(?:code|id)"
+        r"|project\s*code)",
         text,
     )
-    if labelled:
+    if labelled and _is_plausible_gl_account_code(labelled):
         return labelled
 
-    grid = _extract_code_from_header_grid(lines, _ACCOUNT_LABEL_RE)
-    if grid:
-        return grid
+    grid_loose = _extract_code_from_header_grid(lines, _ACCOUNT_LABEL_RE)
+    if grid_loose and _is_plausible_gl_account_code(grid_loose):
+        return grid_loose
 
     return None
 
@@ -717,15 +881,6 @@ class DocumentFieldExtractor:
         if ref:
             suggestions["reference_number"] = ref
 
-        title = _extract_title(
-            self.lines,
-            self.doc_type_label,
-            supplier=suggestions.get("supplier"),
-            reference=suggestions.get("reference_number"),
-        )
-        if title:
-            suggestions["title"] = title
-
         # ── Dates ─────────────────────────────────────────────────────────
         self._extract_dates(suggestions)
 
@@ -735,6 +890,15 @@ class DocumentFieldExtractor:
 
         # ── Universal supplementary fields ─────────────────────────────────
         self._extract_universal_fields(suggestions)
+
+        std_grid = _standard_invoice_grid_parse(self.lines)
+        for key in ("account_code", "vendor_code", "document_date", "due_date"):
+            if std_grid.get(key):
+                suggestions[key] = std_grid[key]
+        if not std_grid.get("vendor_code"):
+            tab_vid = _extract_supplier_from_header_grid(self.lines)
+            if tab_vid:
+                suggestions["vendor_code"] = tab_vid
 
         return {k: v for k, v in suggestions.items() if v is not None and v != ""}
 
@@ -839,6 +1003,12 @@ class DocumentFieldExtractor:
                         break
                 if "document_date" in out:
                     break
+
+        grid_doc, grid_due = _extract_dates_from_header_grid(self.lines)
+        if grid_doc and "document_date" not in out:
+            out["document_date"] = grid_doc
+        if grid_due and "due_date" not in out:
+            out["due_date"] = grid_due
 
     # ── Invoice extractor ──────────────────────────────────────────────────
 

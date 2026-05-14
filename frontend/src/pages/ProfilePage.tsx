@@ -1,5 +1,6 @@
-import { useState } from "react";
+import { useState, useEffect } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import { useSearchParams } from "react-router-dom";
 import { useForm } from "react-hook-form";
 import { zodResolver } from "@hookform/resolvers/zod";
 import { z } from "zod";
@@ -46,6 +47,7 @@ interface UserOption {
 type ProfileTab = "settings" | "security" | "delegation" | "preferences";
 
 export default function ProfilePage() {
+  const [searchParams] = useSearchParams();
   const user = useAuthStore((s) => s.user);
   const qc = useQueryClient();
   const [activeTab, setActiveTab] = useState<ProfileTab>("settings");
@@ -57,6 +59,14 @@ export default function ProfilePage() {
     ends_at: "",
     comment: "",
   });
+
+  // Handle URL parameter for tab navigation
+  useEffect(() => {
+    const tabParam = searchParams.get("tab") as ProfileTab;
+    if (tabParam && ["settings", "security", "delegation", "preferences"].includes(tabParam)) {
+      setActiveTab(tabParam);
+    }
+  }, [searchParams]);
 
   const { register, handleSubmit, reset, formState: { errors } } = useForm<PwForm>({
     resolver: zodResolver(pwSchema),
@@ -221,16 +231,15 @@ export default function ProfilePage() {
                         )} />
                         {user.mfa_enabled ? "Enabled" : "Not enabled"}
                       </span>
-                      <button
-                        onClick={() => toggleMFAMutation.mutate(!user.mfa_enabled)}
-                        disabled={toggleMFAMutation.isPending}
-                        className="text-xs text-primary hover:underline font-medium"
-                      >
-                        {toggleMFAMutation.isPending 
-                          ? "Updating..." 
-                          : user.mfa_enabled ? "Disable" : "Enable"
-                        }
-                      </button>
+                      {!user.mfa_enabled && (
+                        <button
+                          onClick={() => toggleMFAMutation.mutate(true)}
+                          disabled={toggleMFAMutation.isPending}
+                          className="text-xs text-primary hover:underline font-medium"
+                        >
+                          {toggleMFAMutation.isPending ? "Updating..." : "Enable"}
+                        </button>
+                      )}
                     </div>
                   </div>
                 </div>
@@ -443,12 +452,12 @@ export default function ProfilePage() {
                     </div>
 
                     <button
-                      onClick={() => toggleMFAMutation.mutate(!user.mfa_enabled)}
-                      disabled={toggleMFAMutation.isPending}
+                      onClick={() => !user.mfa_enabled && toggleMFAMutation.mutate(true)}
+                      disabled={toggleMFAMutation.isPending || user.mfa_enabled}
                       className={clsx(
                         "px-6 py-2.5 rounded-xl text-sm font-medium transition-all flex items-center gap-2",
                         user.mfa_enabled
-                          ? "border-2 border-destructive text-destructive hover:bg-destructive/5"
+                          ? "border-2 border-muted text-muted-foreground opacity-50 cursor-not-allowed"
                           : "bg-primary text-primary-foreground hover:bg-primary/90"
                       )}
                     >
@@ -456,8 +465,8 @@ export default function ProfilePage() {
                         <Loader2 className="w-4 h-4 animate-spin" />
                       ) : user.mfa_enabled ? (
                         <>
-                          <Ban className="w-4 h-4" />
-                          Disable MFA
+                          <Shield className="w-4 h-4" />
+                          MFA Enabled
                         </>
                       ) : (
                         <>

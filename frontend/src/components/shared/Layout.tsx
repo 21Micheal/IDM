@@ -13,9 +13,9 @@ import { Suspense, lazy, useEffect, useRef, useState } from "react";
 import { Outlet, NavLink, useNavigate, useLocation } from "react-router-dom";
 import {
   LayoutDashboard, FileText, Upload, Search,
-  GitBranch, ShieldCheck, Settings, LogOut,
+  Workflow, ShieldCheck, Settings, LogOut,
   Bell, Users, Building2, UserCircle, Shield,
-  ChevronDown, ChevronRight, Archive, ScanLine, Loader2,
+  ChevronDown, ChevronRight, Archive, ScanLine, Loader2, UserCheck, Monitor, Lock, History,
 } from "lucide-react";
 import { useAuthStore } from "../../store/authStore";
 import { useQuery } from "@tanstack/react-query";
@@ -79,16 +79,28 @@ const mainNav: NavEntry[] = [
       { to: "/search",                    icon: Search,   label: "Search" },
     ],
   } as NavGroup,
+  { to: "/personal-documents", icon: Lock, label: "Personal documents" } as NavLeaf,
   {
-    icon: GitBranch,
+    icon: Workflow,
     label: "Workflow",
     prefix: "/workflow",
     children: [
-      { to: "/workflow",         icon: GitBranch, label: "My tasks" },
+      { to: "/workflow",         icon: Workflow, label: "My tasks" },
       { to: "/workflow/builder", icon: Settings,  label: "Builder", allowedRoles: ["admin"] },
     ],
   } as NavGroup,
-  { to: "/audit", icon: ShieldCheck, label: "Audit trail" } as NavLeaf,
+  { to: "/audit", icon: History, label: "Audit trail" } as NavLeaf,
+  {
+    icon: UserCircle,
+    label: "Profile",
+    prefix: "/profile",
+    children: [
+      { to: "/profile?tab=settings", icon: Settings, label: "Settings" },
+      { to: "/profile?tab=security", icon: ShieldCheck, label: "Security" },
+      { to: "/profile?tab=delegation", icon: UserCheck, label: "Delegation" },
+      { to: "/profile?tab=preferences", icon: Monitor, label: "Preferences" },
+    ],
+  } as NavGroup,
 ];
 
 const adminNav: NavLeaf[] = [
@@ -141,7 +153,7 @@ function SidebarGroup({
       </button>
 
       {open && (
-        <div className="mt-0.5 ml-4 pl-3 border-l border-sidebar-border space-y-0.5">
+        <div className="mt-0.5 ml-4 pl-3 border-l-2 border-white/10 space-y-0.5">
           {visibleChildren.map(({ to, icon: Icon, label, exact }) => {
             const badgeValue = to === "/workflow" ? taskCount : undefined;
             const target = navTarget(to);
@@ -452,6 +464,11 @@ export default function Layout() {
           className="h-14 bg-card border-b border-border flex items-center justify-end px-6 gap-3 flex-shrink-0"
           style={{ boxShadow: "var(--shadow-card)" }}
         >
+          {idleReady ? (
+            <Suspense fallback={null}>
+              <ChatLauncher />
+            </Suspense>
+          ) : null}
           <button
             onClick={() => navigate("/notifications")}
             className="relative text-muted-foreground hover:text-foreground p-1.5 rounded-md hover:bg-muted transition-colors"
@@ -474,12 +491,6 @@ export default function Layout() {
           </Suspense>
         </main>
       </div>
-
-      {idleReady ? (
-        <Suspense fallback={null}>
-          <ChatLauncher />
-        </Suspense>
-      ) : null}
     </div>
   );
 }

@@ -399,17 +399,19 @@ export function FolderTree({ activeFolderId = null, onFolderSelect }: FolderTree
   return (
     <div className="select-none">
       {/* Section header */}
-      <div className="flex items-center justify-between px-3 pt-4 pb-1">
+      <div className="flex flex-col gap-2 px-3 pt-4 pb-2">
         <p className="text-[10px] font-semibold uppercase tracking-widest text-sidebar-foreground/60">
           My Folders
         </p>
         <button
           type="button"
-          title="New root folder"
-          className="p-0.5 rounded hover:bg-sidebar-accent/50 text-sidebar-foreground/60 hover:text-sidebar-foreground transition-colors"
+          title="Create new folder"
+          aria-label="Create new folder"
+          className="w-full inline-flex items-center justify-center gap-1.5 rounded-md border border-sidebar-border/60 bg-white/10 px-2 py-1.5 text-[11px] font-semibold text-sidebar-foreground hover:bg-sidebar-accent/70 hover:text-white transition-colors"
           onClick={() => setAddingRoot(true)}
         >
           <Plus className="w-3.5 h-3.5" />
+          Add folder
         </button>
       </div>
 

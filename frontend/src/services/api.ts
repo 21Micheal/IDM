@@ -8,7 +8,6 @@ import type {
 // ── OCR suggestion types (exported for use in components) ─────────────────────
 
 export type OcrFieldSuggestions = {
-  title?: string;
   supplier?: string;
   amount?: string;
   currency?: string;
@@ -34,6 +33,8 @@ export type OcrFieldSuggestions = {
 };
 
 export type OcrQualityMetrics = {
+  extraction_source?: string;
+  chars_per_page?: number;
   mean_confidence?: number;
   overall_quality_ratio?: number;
   low_quality_warning?: boolean;

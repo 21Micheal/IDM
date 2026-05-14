@@ -257,7 +257,7 @@ def ocr_document(self, document_id: str):
             logger.warning("ocr_document: document %s not found", document_id)
         return
 
-    engine = getattr(django_settings, "OCR_ENGINE", "tesseract").lower()
+    engine = getattr(django_settings, "OCR_ENGINE", "paddle").lower()
 
     try:
         doc = Document.objects.get(id=document_id)
@@ -293,6 +293,15 @@ def ocr_document(self, document_id: str):
 
     except Exception as exc:
         logger.error("ocr_document failed for %s: %s", document_id, exc)
+        # Permanent code/config/runtime import errors should not be retried;
+        # mark failed immediately so frontend polling can terminate.
+        if isinstance(exc, (SyntaxError, ImportError, ModuleNotFoundError)):
+            Document.objects.filter(id=document_id).update(ocr_status=OCRStatus.FAILED)
+            logger.error(
+                "ocr_document: permanent failure for %s — marked as failed",
+                document_id,
+            )
+            return
         # Reset to PENDING so the next delivery can claim it
         Document.objects.filter(id=document_id).update(ocr_status=OCRStatus.PENDING)
         try:
@@ -320,6 +329,7 @@ def _ocr_tesseract(doc) -> str:
     The real implementation lives in apps.documents.ocr.tasks_ocr.
     """
     from apps.documents.ocr.tasks_ocr import _ocr_tesseract_v2
+
     text, _quality = _ocr_tesseract_v2(doc)
     return text
 

@@ -39,7 +39,7 @@ const FIELD_TYPES = [
 // Default definitions for fields backed by first-class Document columns.
 // They are seeded for convenience, but admins can edit/remove/re-order them per client.
 const CORE_DEFAULT_FIELDS: MetadataFieldForm[] = [
-  { label: "Document Title",    field_key: "title",         field_type: "text",     is_required: true,  select_options_raw: "", help_text: "Name shown to users", order: 0 },
+  { label: "Document Name",     field_key: "title",         field_type: "text",     is_required: true,  select_options_raw: "", help_text: "Name shown to users", order: 0 },
   { label: "Supplier / Vendor", field_key: "supplier",      field_type: "text",     is_required: false, select_options_raw: "", help_text: "Business partner", order: 1 },
   { label: "Amount",            field_key: "amount",        field_type: "currency", is_required: false, select_options_raw: "", help_text: "Document total amount", order: 2 },
   { label: "Currency",          field_key: "currency",      field_type: "select",   is_required: false, select_options_raw: "KES, USD, EUR, GBP, UGX, TZS, NGN, ZAR", help_text: "ISO currency code", order: 3 },
@@ -500,7 +500,7 @@ export default function AdminDocumentTypesPage() {
                     </select>
                     <p className="mt-1 text-[11px] text-muted-foreground">
                       {isPersonalType
-                        ? "Personal types always use user-defined metadata."
+                        ? "Personal types let users choose optional tags, custom fields, descriptions, and free text at upload time."
                         : "Choose whether metadata comes from admin field definitions or user-defined key/value fields."}
                     </p>
                   </div>
@@ -516,8 +516,10 @@ export default function AdminDocumentTypesPage() {
                     </h3>
                     <p className="text-xs text-muted-foreground mt-0.5">
                       {useAdminMetadata
-                        ? "Define every field this document type should show during upload, including title, supplier, dates, and amounts."
-                        : "Disabled: users will define their own searchable fields at upload time."}
+                        ? "Define every field this document type should show during upload, such as supplier, dates, and amounts. The document name can come from the file name."
+                        : isPersonalType
+                          ? "Personal upload details are user-controlled and optional."
+                          : "Disabled: users will define their own searchable fields at upload time."}
                     </p>
                   </div>
                   {useAdminMetadata && (

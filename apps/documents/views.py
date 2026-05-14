@@ -996,14 +996,8 @@ echo "✓ DocVault LibreOffice integration installed."
           {
             "ocr_status": "done" | "pending" | "processing" | "failed" | "",
             "suggestions": {
-              "title": "...",
-              "supplier": "...",
-              "amount": "123.45",
-              "currency": "USD",
-              "document_date": "2024-03-15",
-              "due_date": "2024-04-15",
-              "invoice_number": "INV-001",
-              "raw_lines": ["...", ...]
+              "fields": { ... } | null,
+              "quality": { ... } | null
             } | null
           }
 
@@ -1013,8 +1007,28 @@ echo "✓ DocVault LibreOffice integration installed."
         """
         from .models import OCRStatus
         doc = self.get_object()
+
+        # Auto-heal stale OCR states so frontend pollers don't spin forever.
+        if doc.ocr_status in (OCRStatus.PENDING, OCRStatus.PROCESSING):
+            stale_after = int(getattr(settings, "OCR_PROCESSING_STALE_SECONDS", 300))
+            age_seconds = max(0, int((timezone.now() - doc.updated_at).total_seconds()))
+            if age_seconds >= stale_after:
+                Document.objects.filter(
+                    id=doc.id,
+                    ocr_status__in=[OCRStatus.PENDING, OCRStatus.PROCESSING],
+                ).update(ocr_status=OCRStatus.FAILED, updated_at=timezone.now())
+                doc.refresh_from_db(fields=["ocr_status", "updated_at"])
+
         meta = doc.metadata or {}
-        suggestions = meta.get("ocr_suggestions") if doc.ocr_status == OCRStatus.DONE else None
+        suggestions = None
+        if doc.ocr_status == OCRStatus.DONE:
+            fields = meta.get("ocr_suggestions")
+            quality = meta.get("ocr_quality")
+            if fields or quality:
+                suggestions = {
+                    "fields": fields or None,
+                    "quality": quality or None,
+                }
         return Response({
             "ocr_status": doc.ocr_status,
             "suggestions": suggestions,

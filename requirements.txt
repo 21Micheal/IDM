@@ -53,5 +53,36 @@ shortuuid==1.0.13
 pytesseract>=0.3.10
 pdf2image>=1.17.0
 Pillow>=10.0.0
-opencv-python-headless>=4.8.0
+opencv-python-headless==4.6.0.66
 # boto3>=1.34.0        # only needed when OCR_ENGINE=textract
+
+
+# PADDLEOCR
+# CPU-only. Switch to paddlepaddle-gpu==2.6.2 if your celery_ocr container
+# has CUDA drivers available (requires nvidia-docker runtime).
+paddlepaddle==2.6.2
+paddleocr==2.7.3
+Cython<3
+protobuf>=3.20.2,<5.0.0
+#
+# The PP-OCRv4 models (~8 MB) are downloaded on first use to ~/.paddleocr/.
+# Pre-download them in your Dockerfile to avoid cold-start latency on first job:
+#
+#   RUN python -c "from paddleocr import PaddleOCR; \
+#       PaddleOCR(lang='en', use_angle_cls=True, show_log=False)"
+#
+# The docker-compose.yml mounts a named volume at /root/.paddleocr so models
+# persist across container rebuilds and aren't re-downloaded on every deploy.
+
+# SPACY NER
+spacy==3.7.4
+en-core-web-sm @ https://github.com/explosion/spacy-models/releases/download/en_core_web_sm-3.7.1/en_core_web_sm-3.7.1-py3-none-any.whl
+#   RUN python -m spacy download en_core_web_sm
+#
+# Optional larger models (set OCR_SPACY_MODEL accordingly):
+#   python -m spacy download en_core_web_lg      # ~560 MB — much better NER
+#   python -m spacy download en_core_web_trf     # transformer-based — best accuracy
+
+
+# DATEUTIL  (already likely installed, add for explicit pinning)
+python-dateutil>=2.8.2
