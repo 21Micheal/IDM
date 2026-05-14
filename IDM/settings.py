@@ -217,20 +217,6 @@ OCR_PADDLE_USE_ANGLE_CLS = env.bool("OCR_PADDLE_USE_ANGLE_CLS", default=True)
 OCR_SPACY_ENABLED = env.bool("OCR_SPACY_ENABLED", default=True)
 OCR_SPACY_MODEL = env("OCR_SPACY_MODEL", default="en_core_web_sm")
 
-# ── LayoutLMv3 ───────────────────────────────────────────────────────────────
-LAYOUTLMV3_ENABLED = env.bool("LAYOUTLMV3_ENABLED", default=True)
-LAYOUTLMV3_MODEL = env(
-    "LAYOUTLMV3_MODEL",
-    default="Theivaprakasham/layoutlmv3-finetuned-invoice",
-)
-LAYOUTLMV3_DEVICE = env("LAYOUTLMV3_DEVICE", default="auto")   # auto | cpu | cuda
-LAYOUTLMV3_CONFIDENCE = env.float("LAYOUTLMV3_CONFIDENCE", default=0.85)
-LAYOUTLMV3_MAX_LENGTH = env.int("LAYOUTLMV3_MAX_LENGTH", default=512)
-LAYOUTLMV3_OVERRIDE_REGEX = env.bool("LAYOUTLMV3_OVERRIDE_REGEX", default=False)
-LAYOUTLMV3_COMPILE = env.bool("LAYOUTLMV3_COMPILE", default=False)   # PyTorch 2 only
-# Admin-defined label mappings: {"invoice": {"CUSTOM_LABEL": "my_field"}}
-LAYOUTLMV3_FIELD_MAP = env.json("LAYOUTLMV3_FIELD_MAP", default={})
-
 LIBREOFFICE_CMD = env("LIBREOFFICE_CMD", default="libreoffice")
 # Backward-compatible alias used by tasks.py
 LIBREOFFICE_BIN = env("LIBREOFFICE_BIN", default=LIBREOFFICE_CMD)

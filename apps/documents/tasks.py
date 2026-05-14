@@ -329,8 +329,9 @@ def _ocr_tesseract(doc) -> str:
     The real implementation lives in apps.documents.ocr.tasks_ocr.
     """
     from apps.documents.ocr.tasks_ocr import _ocr_tesseract_v2
-    doc_result, _quality = _ocr_tesseract_v2(doc)
-    return doc_result.full_text
+
+    text, _quality = _ocr_tesseract_v2(doc)
+    return text
 
 
 def _ocr_textract(doc) -> str:

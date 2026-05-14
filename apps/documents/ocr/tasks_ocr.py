@@ -1,652 +1,621 @@
 """
-apps/documents/ocr/tasks_ocr.py  — v6
+apps/documents/ocr/tasks_ocr.py
+
+OCR and structured-field extraction for the Celery `ocr_document` task.
 
 Pipeline
 ────────
-  rasterise  →  preprocess  →  OCR (Paddle | Tesseract | Textract)
-             →  regex extractor
-             →  spaCy NER  (gap-filler)
-             →  LayoutLMv3 (spatial arbitration, optional)
-             →  FieldResolver  (multi-signal scoring)
-             →  metadata_updates
+1. **Searchable PDFs** — If the file is a PDF with a usable text layer (same
+   density heuristic as `extract_text`), use pdfplumber text plus optional
+   table-derived "Label: Value" lines. No raster OCR.
 
-Signal priority inside FieldResolver (highest → lowest)
-────────────────────────────────────────────────────────
-  1. LayoutLM  — pixel-level spatial understanding, wins on ambiguous grids
-  2. Regex     — deterministic label:value patterns
-  3. NER       — statistical entity recognition, fills remaining gaps
+2. **Scans / images / sparse PDFs** — Rasterise (PDF → images via pdf2image),
+   then run **PaddleOCR** by default, with automatic **Tesseract** fallback
+   when Paddle returns empty or raises.
 
-Changes from v5
-───────────────
-ARCHITECTURE
-  • LayoutLM is now a first-class pipeline stage.  run_ocr() collects
-    positioned words from every OCR page (stored on PageOCRResult.words,
-    added to engine.py v2) and PIL images, then passes them to
-    extract_with_layoutlm().  Results enter FieldResolver alongside regex
-    and NER so scoring arbitrates conflicts.
+3. **Field suggestions** — `DocumentFieldExtractor` (regex/heuristics) plus
+   optional **spaCy NER** hints; `FieldResolver` merges regex and NER without
+   overwriting high-precision regex hits.
 
-  • FieldResolver replaces the brittle _merge_suggestions() dict merge.
-    Every source produces scored candidates; the resolver selects the
-    highest-confidence value per field and records its source for auditing.
-
-  • _ocr_paddle_v1 / _ocr_tesseract_v2 now return a 4-tuple:
-      (full_text, quality_meta, pil_pages, all_words_per_page)
-    The last two are passed to LayoutLM without a second OCR pass.
-
-BUG FIXES
-  • _merge_suggestions() removed entirely — was incorrectly overwriting
-    higher-confidence regex hits with lower-confidence NER results.
-
-  • spaCy double-checked locking: the outer fast-path guard was
-    `if _spacy_available is False` which allowed two concurrent threads
-    to both see None and both try to load the model.  Fixed.
-
-  • _ner_extract(): supplier upgrade condition previously evaluated
-    `ner_result["supplier"]` without checking if the key existed,
-    causing KeyError in Python < 3.10 on docs with no ORG entities.
-
-  • _pdf_effective_dpi(): exceptions now logged at WARNING with the
-    error text instead of being silently swallowed.
-
-  • All code paths return a complete quality dict via _empty_quality().
-
-OBSERVABILITY
-  • run_ocr() writes "ocr_sources" into metadata_updates — a per-field
-    dict recording which pipeline stage contributed each resolved value.
-    Operators can inspect this from the admin to diagnose misclassifications.
+Engines (settings.OCR_ENGINE)
+──────────────────────────────
+  paddle     — default; PP-OCRv4 via PaddleOCR
+  tesseract  — legacy Tesseract + OpenCV preprocessing
+  textract   — AWS Textract (unchanged)
 """
 from __future__ import annotations
 
 import logging
 import re
 import threading
-from celery import shared_task
-from .engine import ocr_image, ocr_images
-from .field_resolver import FieldResolver
 from typing import Optional
+
+import numpy as np
 
 logger = logging.getLogger(__name__)
 
+# Match apps/documents/tasks.py `extract_text` — below this, treat as scan.
+_MIN_CHARS_PER_PAGE_NATIVE_PDF = 50
 
-# ─────────────────────────────────────────────────────────────────────────────
-# spaCy singleton — double-checked locking
-# ─────────────────────────────────────────────────────────────────────────────
-
-_spacy_nlp:       Optional[object] = None
-_spacy_lock       = threading.Lock()
-_spacy_available: Optional[bool]   = None
+# Paddle singleton (expensive to construct per document)
+_paddle_lock = threading.Lock()
+_paddle_ocr = None
 
 
-def _get_spacy_nlp():
-    global _spacy_nlp, _spacy_available
+def _get_paddle_ocr():
+    global _paddle_ocr
+    if _paddle_ocr is not None:
+        return _paddle_ocr
+    from django.conf import settings as django_settings
 
-    # Fast path (no lock needed once initialised)
-    if _spacy_available is False:
-        return None
-    if _spacy_available is True and _spacy_nlp is not None:
-        return _spacy_nlp
+    with _paddle_lock:
+        if _paddle_ocr is not None:
+            return _paddle_ocr
+        from paddleocr import PaddleOCR
 
-    with _spacy_lock:
-        # Re-check inside lock (double-checked locking)
-        if _spacy_available is False:
-            return None
-        if _spacy_nlp is not None:
-            return _spacy_nlp
-
-        from django.conf import settings as _s
-        enabled = str(getattr(_s, "OCR_SPACY_ENABLED", "true")).lower() not in ("false", "0", "no")
-        if not enabled:
-            _spacy_available = False
-            return None
-
-        model = getattr(_s, "OCR_SPACY_MODEL", "en_core_web_sm")
-        try:
-            import spacy
-            nlp = spacy.load(model, exclude=["parser", "lemmatizer", "attribute_ruler"])
-            _spacy_nlp       = nlp
-            _spacy_available = True
-            logger.info("spaCy NER loaded: %s", model)
-        except Exception as exc:
-            _spacy_available = False
-            logger.warning(
-                "spaCy unavailable (%s) — NER skipped. "
-                "pip install spacy && python -m spacy download %s",
-                exc, model,
-            )
-            return None
-
-    return _spacy_nlp
+        lang = getattr(django_settings, "OCR_PADDLE_LANG", "en")
+        use_gpu = getattr(django_settings, "OCR_PADDLE_USE_GPU", False)
+        use_angle = getattr(django_settings, "OCR_PADDLE_USE_ANGLE_CLS", True)
+        _paddle_ocr_local = PaddleOCR(
+            lang=lang,
+            use_angle_cls=use_angle,
+            use_gpu=use_gpu,
+            show_log=False,
+        )
+        _paddle_ocr = _paddle_ocr_local
+        return _paddle_ocr
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Public API
+# Public API — called from ocr_document() in tasks.py
 # ─────────────────────────────────────────────────────────────────────────────
+
 
 def run_ocr(doc) -> tuple[str, dict]:
     """
-    Full OCR + NER + LayoutLM + field-resolution pipeline.
+    Run OCR (or native PDF text) on a Document and return (extracted_text, metadata_updates).
 
-    Returns (extracted_text, metadata_updates).
-
-    metadata_updates structure::
-
-        {
-            "ocr_suggestions": {field: value, ...},   # resolved fields
-            "ocr_quality":     {engine, mean_confidence, ...},
-            "ocr_sources":     {field: "regex"|"ner"|"layoutlm", ...}
-        }
+    metadata_updates is merged into doc.metadata:
+        ocr_suggestions — structured field suggestions (regex + NER)
+        ocr_quality     — confidence / source / page stats when available
     """
-    from django.conf import settings as _s
+    from django.conf import settings as django_settings
 
-    engine = getattr(_s, "OCR_ENGINE", "paddle").lower().strip()
-    logger.info("run_ocr: doc=%s engine=%s", doc.id, engine)
+    mime = (doc.file_mime_type or "").lower()
+    file_path = doc.file.path
 
-    # ── Stage 1: OCR ─────────────────────────────────────────────────────────
-    if engine == "textract":
-        from apps.documents.tasks import _ocr_textract
-        text         = _ocr_textract(doc)
-        quality_meta = _empty_quality("textract")
-        pil_pages: list = []
-        all_words: list[list[dict]] = []
+    text = ""
+    quality_meta: dict = {}
 
-    elif engine == "tesseract":
-        text, quality_meta, pil_pages, all_words = _ocr_tesseract_v2(doc)
+    # ── Native PDF text layer (digitally created PDFs, not scans) ───────────
+    if mime == "application/pdf":
+        native_text, cpp = _pdf_native_text_and_density(file_path)
+        if cpp >= _MIN_CHARS_PER_PAGE_NATIVE_PDF:
+            table_text = _extract_pdf_tables_as_text(file_path)
+            text = native_text + (("\n\n" + table_text) if table_text else "")
+            quality_meta = {
+                "extraction_source": "pdf_text_layer",
+                "chars_per_page": round(cpp, 1),
+                "mean_confidence": 100.0,
+                "overall_quality_ratio": 1.0,
+                "total_pages": _pdf_page_count(file_path),
+                "low_quality_pages": 0,
+                "low_quality_warning": False,
+            }
+            logger.info(
+                "run_ocr: doc=%s using PDF text layer (%.1f chars/page, %d pages)",
+                doc.id, cpp, quality_meta["total_pages"],
+            )
 
-    else:
-        if engine not in ("paddle",):
-            logger.warning("run_ocr: unknown OCR_ENGINE=%r — using paddle", engine)
-        text, quality_meta, pil_pages, all_words = _ocr_paddle_v1(doc)
+    # ── Raster OCR when no usable text layer ────────────────────────────────
+    if not (text or "").strip():
+        engine = getattr(django_settings, "OCR_ENGINE", "paddle").lower()
 
-    # ── Stage 2: Regex extractor ──────────────────────────────────────────────
-    from apps.documents.ocr.extractor import extract_document_fields, DocumentFieldExtractor
-    regex_suggestions: dict = extract_document_fields(text)
+        if engine == "textract":
+            from apps.documents.tasks import _ocr_textract
 
-    # Expose the detected doc_type so LayoutLM can use the right label map
-    try:
-        _ext = DocumentFieldExtractor(text)
-        doc._ocr_doc_type = _ext.doc_type
-    except Exception:
-        doc._ocr_doc_type = "general"
+            text = _ocr_textract(doc)
+            quality_meta = {
+                "extraction_source": "textract",
+                "mean_confidence": 0.0,
+                "overall_quality_ratio": 0.0,
+                "total_pages": 0,
+                "low_quality_pages": 0,
+                "low_quality_warning": False,
+            }
+        elif engine == "tesseract":
+            text, quality_meta = _ocr_tesseract_v2(doc)
+            quality_meta.setdefault("extraction_source", "tesseract")
+        else:
+            text, quality_meta = _ocr_paddle_v2(doc)
+            quality_meta.setdefault("extraction_source", "paddle")
+            if not (text or "").strip():
+                logger.warning(
+                    "run_ocr: doc=%s PaddleOCR empty — falling back to Tesseract",
+                    doc.id,
+                )
+                text, quality_meta = _ocr_tesseract_v2(doc)
+                quality_meta["extraction_source"] = "tesseract_fallback"
 
-    # ── Stage 3: spaCy NER ────────────────────────────────────────────────────
-    ner_updates: dict = _ner_extract(text, existing=regex_suggestions)
+    from apps.documents.ocr.extractor import extract_document_fields
 
-    # ── Stage 4: LayoutLM (optional, gated by LAYOUTLMV3_ENABLED) ────────────
-    layoutlm_updates: dict = {}
-    if pil_pages and all_words:
-        layoutlm_updates = _run_layoutlm(pil_pages, all_words, doc)
+    regex_suggestions = extract_document_fields(text)
+    ner_hints = _ner_field_hints(text)
 
-    # ── Stage 5: Multi-signal field resolution ────────────────────────────────
     from apps.documents.ocr.field_resolver import FieldResolver
-    resolver = FieldResolver()
-    resolved, source_map = resolver.resolve(
-        regex_result    = regex_suggestions,
-        ner_result      = ner_updates,
-        layoutlm_result = layoutlm_updates,
-    )
 
-    metadata_updates: dict = {
-        "ocr_suggestions": resolved,
-        "ocr_quality":     quality_meta,
-        "ocr_sources":     source_map,
-    }
+    merged, _sources = FieldResolver().resolve(regex_suggestions, ner_hints)
 
-    loggable_sources = {f: s for f, s in source_map.items() if f != "raw_lines"}
-    logger.info(
-        "run_ocr: doc=%s fields=%d sources=%s",
-        doc.id, len(resolved), loggable_sources,
-    )
+    metadata_updates: dict = {"ocr_suggestions": merged}
+    if quality_meta:
+        metadata_updates["ocr_quality"] = quality_meta
+
     return text, metadata_updates
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# LayoutLM integration
+# spaCy NER → canonical field hints (merged after regex extraction)
 # ─────────────────────────────────────────────────────────────────────────────
 
-def _run_layoutlm(
-    pil_pages: list,
-    all_words: list[list[dict]],
-    doc,
-) -> dict:
-    """
-    Call LayoutLMv3 extraction with the rasterised pages and positioned words.
 
-    pil_pages : list of PIL.Image.Image (RGB), one per page
-    all_words : list of word-lists per page; each word dict has keys
-                text, left, top, right, bottom, conf
-    Returns a canonical field dict or {} on any failure.
-    """
+def _ner_field_hints(text: str) -> dict[str, str]:
+    """Map spaCy entities to extractor field names (conservative)."""
+    from django.conf import settings as django_settings
+
+    if not (text or "").strip():
+        return {}
+    if not getattr(django_settings, "OCR_SPACY_ENABLED", True):
+        return {}
+
+    model_name = getattr(django_settings, "OCR_SPACY_MODEL", "en_core_web_sm")
     try:
-        from apps.documents.ocr.layoutlm import extract_with_layoutlm, PageData
+        import spacy
 
-        doc_type = getattr(doc, "_ocr_doc_type", "general")
+        nlp = spacy.load(model_name)
+    except Exception as exc:
+        logger.debug("_ner_field_hints: spaCy unavailable (%s): %s", model_name, exc)
+        return {}
 
-        pages_data = [
-            PageData(image=img, words=words)
-            for img, words in zip(pil_pages, all_words)
-            if words
-        ]
-        if not pages_data:
-            return {}
+    from apps.documents.ocr.extractor import _parse_date
 
-        result = extract_with_layoutlm(pages_data, doc_type=doc_type)
-        logger.info(
-            "_run_layoutlm: doc=%s doc_type=%s fields=%d",
-            doc.id, doc_type, len(result),
+    def _bill_to_char_span(t: str) -> Optional[tuple[int, int]]:
+        m = re.search(r"(?im)^\s*bill(?:ed)?\s*to\s*:?\s*$", t)
+        if not m:
+            m = re.search(r"\bbill(?:ed)?\s*to\s*:?", t, re.I)
+        if not m:
+            return None
+        start = m.start()
+        chunk = t[m.end() : m.end() + 1500]
+        boundary = re.search(
+            r"(?im)^\s*(?:product|item|description|qty|ship\s*to|sold\s*to|service)\b",
+            chunk,
         )
-        return result
+        end = m.end() + (boundary.start() if boundary else len(chunk))
+        return (start, end)
 
-    except ImportError:
-        return {}
-    except Exception as exc:
-        logger.warning("_run_layoutlm: doc=%s error: %s", doc.id, exc)
-        return {}
+    doc = nlp(text[:200_000])
+    hints: dict[str, str] = {}
 
+    bill_span = _bill_to_char_span(text)
 
-# ─────────────────────────────────────────────────────────────────────────────
-# PaddleOCR backend
-# ─────────────────────────────────────────────────────────────────────────────
+    orgs = [e for e in doc.ents if e.label_ == "ORG" and len(e.text.strip()) > 3]
+    outside = [
+        e for e in orgs
+        if not (bill_span and bill_span[0] <= e.start_char < bill_span[1])
+    ]
+    if outside:
+        first_org = min(outside, key=lambda e: e.start_char)
+        hints["supplier"] = " ".join(first_org.text.split())
 
-def _ocr_paddle_v1(doc) -> tuple[str, dict, list, list[list[dict]]]:
-    """
-    OCR with PaddleOCR (or Tesseract fallback).
+    for ent in doc.ents:
+        if ent.label_ != "DATE":
+            continue
+        if bill_span and bill_span[0] <= ent.start_char < bill_span[1]:
+            continue
+        parsed = _parse_date(ent.text)
+        if parsed:
+            hints.setdefault("document_date", parsed)
+            break
 
-    Returns (full_text, quality_meta, pil_pages, all_words_per_page).
-    """
-    from django.conf import settings as _s
-
-    lang   = getattr(_s, "OCR_PADDLE_LANG",             "en")
-    dpi    = int(getattr(_s, "OCR_DPI",                  300))
-    conf_t = int(getattr(_s, "OCR_CONFIDENCE_THRESHOLD",  40))
-    qual_t = float(getattr(_s, "OCR_QUALITY_RATIO",      0.50))
-
-    mime      = doc.file_mime_type or ""
-    file_path = doc.file.path
-    logger.debug("_ocr_paddle_v1: doc=%s file=%s mime=%s", doc.id, file_path, mime)
-
-    pil_pages = _rasterise(file_path, mime, dpi)
-    if not pil_pages:
-        logger.warning("_ocr_paddle_v1: no pages rasterised for doc=%s", doc.id)
-        return "", _empty_quality("paddle"), [], []
-
-    from apps.documents.ocr.preprocessing import prepare_image_for_ocr, pil_to_cv2
-    from apps.documents.ocr.engine import ocr_images
-    import numpy as np
-
-    cv2_pages = []
-    for i, pil_img in enumerate(pil_pages):
-        try:
-            arr          = pil_to_cv2(pil_img)
-            preprocessed = prepare_image_for_ocr(arr, dpi=dpi)
-            cv2_pages.append(preprocessed)
-        except Exception as exc:
-            logger.warning(
-                "_ocr_paddle_v1: preprocess failed page=%d doc=%s: %s",
-                i + 1, doc.id, exc,
-            )
-            cv2_pages.append(np.array(pil_img.convert("L")))
-
-    doc_result = ocr_images(
-        cv2_pages,
-        lang=lang,
-        confidence_threshold=conf_t,
-        quality_ratio_threshold=qual_t,
-        engine="paddle",
-    )
-
-    from apps.documents.ocr.engine import _paddle_available
-    actual_engine = "tesseract" if _paddle_available is False else "paddle"
-
-    logger.info(
-        "_ocr_paddle_v1: doc=%s engine=%s pages=%d lq=%d "
-        "mean_conf=%.1f quality=%.0f%%",
-        doc.id, actual_engine,
-        doc_result.total_pages, doc_result.low_quality_pages,
-        doc_result.mean_document_confidence,
-        doc_result.overall_quality_ratio * 100,
-    )
-
-    quality_meta = {
-        "engine":                actual_engine,
-        "mean_confidence":       round(doc_result.mean_document_confidence, 1),
-        "overall_quality_ratio": round(doc_result.overall_quality_ratio, 3),
-        "total_pages":           doc_result.total_pages,
-        "low_quality_pages":     doc_result.low_quality_pages,
-        "low_quality_warning":   doc_result.low_quality_pages > 0,
-    }
-
-    # PageOCRResult.words was added in engine.py v2
-    all_words: list[list[dict]] = [pr.words for pr in doc_result.page_results]
-
-    return doc_result.full_text, quality_meta, pil_pages, all_words
+    return hints
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Tesseract backend
+# PDF helpers
 # ─────────────────────────────────────────────────────────────────────────────
 
-def _ocr_tesseract_v2(doc) -> tuple[str, dict, list, list[list[dict]]]:
-    """
-    OCR with Tesseract.
 
-    Returns (full_text, quality_meta, pil_pages, all_words_per_page).
-    """
-    from django.conf import settings as _s
-    import pytesseract
-
-    cmd = getattr(_s, "TESSERACT_CMD", "").strip()
-    if cmd:
-        pytesseract.pytesseract.tesseract_cmd = cmd
-
-    lang   = getattr(_s, "OCR_LANGUAGES",              "eng")
-    dpi    = int(getattr(_s, "OCR_DPI",                 300))
-    conf_t = int(getattr(_s, "OCR_CONFIDENCE_THRESHOLD", 40))
-    qual_t = float(getattr(_s, "OCR_QUALITY_RATIO",     0.50))
-
-    mime      = doc.file_mime_type or ""
-    file_path = doc.file.path
-    logger.debug("_ocr_tesseract_v2: doc=%s file=%s mime=%s", doc.id, file_path, mime)
-
-    pil_pages = _rasterise(file_path, mime, dpi)
-    if not pil_pages:
-        logger.warning("_ocr_tesseract_v2: no pages rasterised for doc=%s", doc.id)
-        return "", _empty_quality("tesseract"), [], []
-
-    from apps.documents.ocr.preprocessing import prepare_image_for_ocr, pil_to_cv2
-    from apps.documents.ocr.engine import ocr_images
-    import numpy as np
-
-    cv2_pages = []
-    for i, pil_img in enumerate(pil_pages):
-        try:
-            arr          = pil_to_cv2(pil_img)
-            preprocessed = prepare_image_for_ocr(arr, dpi=dpi)
-            cv2_pages.append(preprocessed)
-        except Exception as exc:
-            logger.warning(
-                "_ocr_tesseract_v2: preprocess failed page=%d doc=%s: %s",
-                i + 1, doc.id, exc,
-            )
-            cv2_pages.append(np.array(pil_img.convert("L")))
-
-    doc_result = ocr_images(
-        cv2_pages,
-        lang=lang,
-        confidence_threshold=conf_t,
-        quality_ratio_threshold=qual_t,
-        engine="tesseract",
-    )
-
-    logger.info(
-        "_ocr_tesseract_v2: doc=%s pages=%d lq=%d mean_conf=%.1f quality=%.0f%%",
-        doc.id,
-        doc_result.total_pages, doc_result.low_quality_pages,
-        doc_result.mean_document_confidence,
-        doc_result.overall_quality_ratio * 100,
-    )
-
-    quality_meta = {
-        "engine":                "tesseract",
-        "mean_confidence":       round(doc_result.mean_document_confidence, 1),
-        "overall_quality_ratio": round(doc_result.overall_quality_ratio, 3),
-        "total_pages":           doc_result.total_pages,
-        "low_quality_pages":     doc_result.low_quality_pages,
-        "low_quality_warning":   doc_result.low_quality_pages > 0,
-    }
-
-    all_words: list[list[dict]] = [pr.words for pr in doc_result.page_results]
-
-    return doc_result.full_text, quality_meta, pil_pages, all_words
-
-
-# ─────────────────────────────────────────────────────────────────────────────
-# spaCy NER extraction
-# ─────────────────────────────────────────────────────────────────────────────
-
-_NER_MAX_CHARS   = 8_000
-_MIN_ORG_LEN     = 3
-_MONEY_LABELS    = frozenset({"MONEY", "CARDINAL"})
-_ORG_LABELS      = frozenset({"ORG"})
-_DATE_LABELS     = frozenset({"DATE"})
-_LOCATION_LABELS = frozenset({"GPE", "LOC"})
-_QUANTITY_LABELS = frozenset({"QUANTITY"})
-
-_NER_AMOUNT_RE = re.compile(
-    r"(?P<cur>[A-Z]{3}|Ksh\.?|KSh\.?|Kshs\.?|UShs\.?|TSh\.?|[$€£])?\s*"
-    r"(?P<val>\d{1,3}(?:[,\s]\d{3})*(?:[.,]\d{1,4})?)"
-    r"(?:\s*(?P<cur2>[A-Z]{3}|Ksh\.?|KSh\.?|Kshs\.?))?",
-    re.IGNORECASE,
-)
-_CURRENCY_NORMALISE: dict[str, str] = {
-    "KSH": "KES", "KSHS": "KES", "KSH.": "KES",
-    "USHS": "UGX", "TSH": "TZS",
-    "$": "USD", "€": "EUR", "£": "GBP",
-}
-_UOM_NER_RE = re.compile(
-    r"\b(kg|kgs|kilogram\w*|litre\w*|liter\w*|ltr\w*|metre\w*|meter\w*"
-    r"|piece\w*|pcs?|unit\w*|box(?:es)?|carton\w*|bag\w*|roll\w*|pair\w*"
-    r"|hour\w*|hr\w*|day\w*|month\w*|year\w*|gallon\w*|tonne\w*|ton\w*"
-    r"|gram\w*|each|ea|lump\s*sum|dozen|gross|pallet\w*|drum\w*|bottle\w*)\b",
-    re.I,
-)
-_RELATIVE_DATE_RE = re.compile(
-    r"\b(?:last|next|this|yesterday|tomorrow|ago|month|week|year)\b", re.I
-)
-_DATE_FORMATS_NER = [
-    "%Y-%m-%d", "%Y/%m/%d",
-    "%d %B %Y", "%d %b %Y",
-    "%B %d %Y", "%b %d %Y",
-    "%B %d, %Y", "%b %d, %Y",
-    "%d/%m/%Y", "%m/%d/%Y",
-    "%d-%m-%Y", "%m-%d-%Y",
-    "%d.%m.%Y", "%d/%m/%y",
-]
-
-
-def _parse_ner_date(text: str) -> Optional[str]:
-    text = text.strip()
-    if _RELATIVE_DATE_RE.search(text):
-        return None
-    from datetime import datetime
-    for fmt in _DATE_FORMATS_NER:
-        try:
-            return datetime.strptime(text, fmt).strftime("%Y-%m-%d")
-        except ValueError:
-            pass
-    try:
-        from dateutil import parser as _dp
-        return _dp.parse(text, dayfirst=True).strftime("%Y-%m-%d")
-    except Exception:
-        return None
-
-
-def _parse_ner_money(text: str) -> Optional[tuple[float, str]]:
-    m = _NER_AMOUNT_RE.search(text)
-    if not m:
-        return None
-    raw_val = (m.group("val") or "").replace(",", "").replace(" ", "")
-    if len(re.sub(r"\D", "", raw_val)) < 2:
-        return None
-    raw_cur = (m.group("cur") or m.group("cur2") or "").strip().upper().rstrip(".")
-    cur_iso = _CURRENCY_NORMALISE.get(raw_cur, raw_cur) if raw_cur else ""
-    try:
-        val = float(raw_val)
-    except ValueError:
-        return None
-    return (val, cur_iso) if val >= 1.0 else None
-
-
-def _best_org(orgs: list[str]) -> str:
-    _SUFFIX = re.compile(
-        r"\b(?:ltd\.?|limited|inc\.?|corp\.?|llc|plc|llp|gmbh|s\.a\.?|pty\.?)\b", re.I
-    )
-    def _score(n: str) -> float:
-        s = len(n) * 0.5
-        if _SUFFIX.search(n): s += 20
-        if n.isupper() and len(n) < 6: s -= 15
-        return s
-    return max(orgs, key=_score)
-
-
-def _ner_extract(text: str, existing: dict) -> dict:
-    """
-    Gap-fill only — never overwrite an existing value except for the
-    supplier short-abbreviation upgrade rule.
-    """
-    nlp = _get_spacy_nlp()
-    if nlp is None:
-        return {}
-
-    sample = text[:_NER_MAX_CHARS]
-    if not sample.strip():
-        return {}
-
-    try:
-        doc_nlp = nlp(sample)
-    except Exception as exc:
-        logger.warning("spaCy NER failed: %s", exc)
-        return {}
-
-    updates:    dict      = {}
-    orgs:       list[str] = []
-    money_ents: list[tuple[float, str]] = []
-    dates:      list[str] = []
-    locations:  list[str] = []
-    qty_spans:  list[str] = []
-
-    for ent in doc_nlp.ents:
-        label = ent.label_
-        span  = ent.text.strip()
-        if label in _ORG_LABELS and len(span) >= _MIN_ORG_LEN:
-            orgs.append(span)
-        elif label in _MONEY_LABELS:
-            p = _parse_ner_money(span)
-            if p:
-                money_ents.append(p)
-        elif label in _DATE_LABELS:
-            d = _parse_ner_date(span)
-            if d:
-                dates.append(d)
-        elif label in _LOCATION_LABELS and len(span) >= 3:
-            locations.append(span)
-        elif label in _QUANTITY_LABELS:
-            qty_spans.append(span)
-
-    if orgs:
-        best = _best_org(orgs)
-        existing_sup = existing.get("supplier", "")
-        if not existing_sup:
-            updates["supplier"] = best
-        elif len(existing_sup) <= 5 and existing_sup.isupper():
-            updates["supplier"] = best
-
-    if money_ents and "amount" not in existing:
-        best_val, best_cur = max(money_ents, key=lambda x: x[0])
-        updates["amount"] = str(round(best_val, 2))
-        if best_cur and "currency" not in existing:
-            updates["currency"] = best_cur
-
-    if dates:
-        if "document_date" not in existing:
-            updates["document_date"] = dates[0]
-        if len(dates) >= 2 and "due_date" not in existing and dates[1] != dates[0]:
-            updates["due_date"] = dates[1]
-
-    if locations and "registered_address" not in existing:
-        updates["registered_address"] = ", ".join(locations[:3])
-
-    if qty_spans and "quantity" not in existing:
-        for span in qty_spans:
-            qty_m = re.search(r"(\d+(?:[.,]\d+)?)", span)
-            if qty_m:
-                updates["quantity"] = qty_m.group(1)
-                uom_m = _UOM_NER_RE.search(span)
-                if uom_m and "uom" not in existing:
-                    updates["uom"] = uom_m.group(1).lower()
-                break
-
-    return updates
-
-
-# ─────────────────────────────────────────────────────────────────────────────
-# Rasterisation
-# ─────────────────────────────────────────────────────────────────────────────
-
-def _rasterise(file_path: str, mime: str, dpi: int) -> list:
-    from PIL import Image
-    if mime == "application/pdf":
-        return _rasterise_pdf(file_path, dpi)
-    try:
-        img = Image.open(file_path)
-        img.load()
-        return [img.convert("RGB")]
-    except Exception as exc:
-        logger.error("_rasterise: cannot open %s (%s): %s", file_path, mime, exc)
-        return []
-
-
-def _rasterise_pdf(file_path: str, target_dpi: int) -> list:
-    from pdf2image import convert_from_path
-    dpi = _pdf_effective_dpi(file_path, target_dpi)
-    try:
-        pages = convert_from_path(file_path, dpi=dpi, fmt="RGB", thread_count=1)
-        logger.debug("_rasterise_pdf: %s → %d pages @ %d dpi", file_path, len(pages), dpi)
-        return pages
-    except Exception as exc:
-        logger.error("_rasterise_pdf: pdf2image failed for %s: %s", file_path, exc)
-        return []
-
-
-def _pdf_effective_dpi(file_path: str, fallback: int) -> int:
+def _pdf_page_count(file_path: str) -> int:
     try:
         import pdfplumber
+
         with pdfplumber.open(file_path) as pdf:
-            if pdf.pages:
-                p = pdf.pages[0]
-                logger.debug(
-                    "_pdf_effective_dpi: %s page0 %.0f×%.0f pts",
-                    file_path, float(p.width), float(p.height),
-                )
+            return len(pdf.pages)
+    except Exception:
+        return 0
+
+
+def _pdf_native_text_and_density(file_path: str) -> tuple[str, float]:
+    """
+    Return (concatenated page text, chars per page) using pdfplumber only.
+
+    Table augmentation is applied later in run_ocr so density reflects the
+    real text layer (same threshold as extract_text).
+    """
+    try:
+        import pdfplumber
+
+        with pdfplumber.open(file_path) as pdf:
+            if not pdf.pages:
+                return "", 0.0
+            parts = [(p.extract_text() or "") for p in pdf.pages]
+            text = "\n".join(parts)
+            n = len(pdf.pages)
+            cpp = len(text.strip()) / max(n, 1)
+            return text, float(cpp)
     except Exception as exc:
-        logger.warning(
-            "_pdf_effective_dpi: cannot inspect %s (%s) — using %d dpi",
-            file_path, exc, fallback,
-        )
-    return max(200, min(fallback, 400))
+        logger.warning("_pdf_native_text_and_density: failed for %s: %s", file_path, exc)
+        return "", 0.0
 
 
 def _extract_pdf_tables_as_text(file_path: str) -> str:
-    """Extract PDF table cells as 'Header: Value' lines (for text-native PDFs)."""
+    """
+    Extract simple PDF tables as labelled lines.
+
+    pdfplumber often sees invoice header grids that plain text extraction loses.
+    """
     try:
         import pdfplumber
-    except ImportError:
+    except Exception:
         return ""
-    lines: list[str] = []
+
+    labelled_lines: list[str] = []
     try:
         with pdfplumber.open(file_path) as pdf:
             for page in pdf.pages:
                 for table in page.extract_tables() or []:
                     if len(table) < 2:
                         continue
-                    headers = [" ".join(str(c or "").split()).strip(" :-") for c in table[0]]
-                    if sum(bool(h) for h in headers) < 2:
+
+                    headers = [
+                        " ".join(str(cell or "").split()).strip(" :-")
+                        for cell in table[0]
+                    ]
+                    if sum(bool(header) for header in headers) < 2:
                         continue
+
                     for row in table[1:4]:
-                        values = [" ".join(str(c or "").split()).strip() for c in row]
-                        for h, v in zip(headers, values):
-                            if h and v:
-                                lines.append(f"{h}: {v}")
+                        values = [
+                            " ".join(str(cell or "").split()).strip()
+                            for cell in row
+                        ]
+                        for header, value in zip(headers, values):
+                            if header and value:
+                                labelled_lines.append(f"{header}: {value}")
     except Exception as exc:
-        logger.debug("_extract_pdf_tables_as_text: %s: %s", file_path, exc)
-    return "\n".join(lines)
+        logger.debug("_extract_pdf_tables_as_text: failed for %s: %s", file_path, exc)
+        return ""
+
+    return "\n".join(labelled_lines)
 
 
-def _empty_quality(engine: str) -> dict:
-    return {
-        "engine":                engine,
-        "mean_confidence":       0.0,
-        "overall_quality_ratio": 0.0,
-        "total_pages":           0,
-        "low_quality_pages":     0,
-        "low_quality_warning":   True,
+# ─────────────────────────────────────────────────────────────────────────────
+# PaddleOCR backend
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+def _join_paddle_words(words: list[dict]) -> str:
+    """Join positioned Paddle words; wide horizontal gaps become tabs."""
+    if not words:
+        return ""
+
+    ordered = sorted(words, key=lambda w: (w["left"], w["top"]))
+    char_widths = [
+        w["width"] / max(len(w["text"]), 1)
+        for w in ordered
+        if w["width"] > 0 and w["text"]
+    ]
+    median_char_width = float(np.median(char_widths)) if char_widths else 8.0
+    column_gap = max(32.0, median_char_width * 5.0)
+
+    parts = [ordered[0]["text"]]
+    prev = ordered[0]
+    for word in ordered[1:]:
+        gap = word["left"] - (prev["left"] + prev["width"])
+        parts.append("\t" if gap > column_gap else " ")
+        parts.append(word["text"])
+        prev = word
+
+    return "".join(parts)
+
+
+def _paddle_page_to_lines(page_result: list | None) -> tuple[str, float, int, int]:
+    """
+    Convert PaddleOCR result for one page to text + quality stats.
+
+    Returns (text, mean_conf_0_100, word_count, low_conf_word_count).
+    """
+    words: list[dict] = []
+    if not page_result:
+        return "", 0.0, 0, 0
+
+    for line in page_result:
+        if not line or len(line) < 2:
+            continue
+        box, (txt, conf) = line[0], line[1]
+        if not txt or not str(txt).strip():
+            continue
+        xs = [float(p[0]) for p in box]
+        ys = [float(p[1]) for p in box]
+        left, top, right, bottom = min(xs), min(ys), max(xs), max(ys)
+        c = float(conf) if conf is not None else 0.0
+        words.append(
+            {
+                "text": str(txt).strip(),
+                "left": int(left),
+                "top": int(top),
+                "width": int(max(1, right - left)),
+                "height": int(max(1, bottom - top)),
+                "conf": c,
+            }
+        )
+
+    if not words:
+        return "", 0.0, 0, 0
+
+    # Cluster into lines by vertical overlap / proximity
+    words_sorted = sorted(words, key=lambda w: (w["top"] + w["height"] / 2, w["left"]))
+    lines_clusters: list[list[dict]] = []
+    for w in words_sorted:
+        cy = w["top"] + w["height"] / 2
+        placed = False
+        for cluster in lines_clusters:
+            ref = cluster[0]
+            ref_y = ref["top"] + ref["height"] / 2
+            if abs(cy - ref_y) <= max(10.0, ref["height"] * 0.75):
+                cluster.append(w)
+                placed = True
+                break
+        if not placed:
+            lines_clusters.append([w])
+
+    lines_clusters.sort(key=lambda c: min(w["top"] for w in c))
+
+    text_lines = []
+    conf_sum = 0.0
+    n_conf = 0
+    low_conf = 0
+    for cluster in lines_clusters:
+        cluster.sort(key=lambda x: x["left"])
+        line_txt = _join_paddle_words(cluster)
+        if line_txt.strip():
+            text_lines.append(line_txt)
+        for ww in cluster:
+            conf_sum += ww["conf"] * 100.0
+            n_conf += 1
+            if ww["conf"] < 0.5:
+                low_conf += 1
+
+    mean_conf = conf_sum / n_conf if n_conf else 0.0
+    return "\n".join(text_lines), mean_conf, n_conf, low_conf
+
+
+def _ocr_paddle_v2(doc) -> tuple[str, dict]:
+    """Run PaddleOCR on rasterised pages; returns (full_text, quality_metadata_dict)."""
+    from django.conf import settings as django_settings
+
+    dpi = int(getattr(django_settings, "OCR_DPI", 300))
+    mime = doc.file_mime_type or ""
+    file_path = doc.file.path
+
+    pil_pages = _rasterise(file_path, mime, dpi)
+    if not pil_pages:
+        logger.warning("_ocr_paddle_v2: no pages rasterised for %s", doc.id)
+        return "", {}
+
+    try:
+        ocr_engine = _get_paddle_ocr()
+    except Exception as exc:
+        logger.error("_ocr_paddle_v2: PaddleOCR init failed: %s", exc)
+        return "", {}
+
+    page_texts: list[str] = []
+    page_means: list[float] = []
+    low_quality_pages = 0
+
+    for i, pil_img in enumerate(pil_pages):
+        try:
+            rgb = np.array(pil_img.convert("RGB"))
+            result = ocr_engine.ocr(rgb, cls=True)
+        except Exception as exc:
+            logger.warning(
+                "_ocr_paddle_v2: Paddle failed page %d of doc %s: %s",
+                i + 1, doc.id, exc,
+            )
+            page_texts.append("")
+            low_quality_pages += 1
+            continue
+
+        # PaddleOCR 2.x: first element is the list of lines for the image
+        page_lines = result[0] if result and isinstance(result, list) else None
+        ptext, mean_c, wcount, low_w = _paddle_page_to_lines(page_lines)
+        page_texts.append(ptext)
+        if not wcount:
+            if not (ptext or "").strip():
+                low_quality_pages += 1
+            continue
+
+        page_means.append(mean_c)
+        if low_w / wcount > 0.5 or mean_c < 45:
+            low_quality_pages += 1
+
+    full_text = "\n\n".join(t for t in page_texts if t)
+    n_pages = len(pil_pages)
+    mean_doc_conf = float(np.mean(page_means)) if page_means else 0.0
+    confident_pages = sum(1 for m in page_means if m >= 45)
+    overall_ratio = confident_pages / max(len(page_means), 1) if page_means else 0.0
+
+    return full_text, {
+        "mean_confidence": round(mean_doc_conf, 1),
+        "overall_quality_ratio": round(max(0.0, min(1.0, overall_ratio)), 3),
+        "total_pages": n_pages,
+        "low_quality_pages": low_quality_pages,
+        "low_quality_warning": low_quality_pages > 0,
     }
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Tesseract backend
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+def _ocr_tesseract_v2(doc) -> tuple[str, dict]:
+    """
+    OCR a Document using Tesseract with OpenCV pre-processing.
+
+    Returns (full_text, quality_metadata_dict).
+    """
+    from django.conf import settings as django_settings
+    import pytesseract
+
+    cmd = getattr(django_settings, "TESSERACT_CMD", "").strip()
+    if cmd:
+        pytesseract.pytesseract.tesseract_cmd = cmd
+
+    lang = getattr(django_settings, "OCR_LANGUAGES", "eng")
+    dpi = int(getattr(django_settings, "OCR_DPI", 300))
+    confidence_threshold = int(getattr(django_settings, "OCR_CONFIDENCE_THRESHOLD", 40))
+    quality_ratio = float(getattr(django_settings, "OCR_QUALITY_RATIO", 0.50))
+
+    mime = doc.file_mime_type or ""
+    file_path = doc.file.path
+
+    pil_pages = _rasterise(file_path, mime, dpi)
+
+    if not pil_pages:
+        logger.warning("_ocr_tesseract_v2: no pages rasterised for %s", doc.id)
+        return "", {}
+
+    from apps.documents.ocr.preprocessing import prepare_image_for_ocr, pil_to_cv2
+    from apps.documents.ocr.engine import ocr_images
+
+    cv2_pages = []
+    for i, pil_img in enumerate(pil_pages):
+        try:
+            arr = pil_to_cv2(pil_img)
+            preprocessed = prepare_image_for_ocr(arr, dpi=dpi)
+            cv2_pages.append(preprocessed)
+        except Exception as exc:
+            logger.warning(
+                "_ocr_tesseract_v2: preprocessing failed for page %d of doc %s: %s",
+                i + 1, doc.id, exc,
+            )
+            import numpy as np
+
+            fallback = np.array(pil_img.convert("L"))
+            cv2_pages.append(fallback)
+
+    doc_result = ocr_images(
+        cv2_pages,
+        lang=lang,
+        confidence_threshold=confidence_threshold,
+        quality_ratio_threshold=quality_ratio,
+    )
+
+    logger.info(
+        "_ocr_tesseract_v2: doc=%s pages=%d low_quality=%d "
+        "mean_conf=%.1f overall_quality=%.0f%%",
+        doc.id,
+        doc_result.total_pages,
+        doc_result.low_quality_pages,
+        doc_result.mean_document_confidence,
+        doc_result.overall_quality_ratio * 100,
+    )
+
+    quality_meta = {
+        "extraction_source": "tesseract",
+        "mean_confidence": round(doc_result.mean_document_confidence, 1),
+        "overall_quality_ratio": round(doc_result.overall_quality_ratio, 3),
+        "total_pages": doc_result.total_pages,
+        "low_quality_pages": doc_result.low_quality_pages,
+        "low_quality_warning": doc_result.low_quality_pages > 0,
+    }
+
+    return doc_result.full_text, quality_meta
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Rasterisation helpers
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+def _rasterise(file_path: str, mime: str, dpi: int) -> list:
+    """Convert a document file to a list of PIL Images (one per page)."""
+    from PIL import Image
+
+    if mime == "application/pdf":
+        return _rasterise_pdf(file_path, dpi)
+
+    if mime.startswith("image/"):
+        try:
+            img = Image.open(file_path)
+            img.load()
+            return [img.convert("RGB")]
+        except Exception as exc:
+            logger.error("_rasterise: cannot open image %s: %s", file_path, exc)
+            return []
+
+    try:
+        img = Image.open(file_path)
+        img.load()
+        return [img.convert("RGB")]
+    except Exception:
+        logger.warning("_rasterise: unsupported MIME %s for %s", mime, file_path)
+        return []
+
+
+def _rasterise_pdf(file_path: str, target_dpi: int) -> list:
+    """Rasterise a PDF to PIL Images using pdf2image."""
+    from pdf2image import convert_from_path
+
+    effective_dpi = _pdf_effective_dpi(file_path, target_dpi)
+
+    try:
+        pages = convert_from_path(
+            file_path,
+            dpi=effective_dpi,
+            fmt="RGB",
+            thread_count=1,
+        )
+        logger.debug(
+            "_rasterise_pdf: %s → %d pages @ %d dpi",
+            file_path, len(pages), effective_dpi,
+        )
+        return pages
+    except Exception as exc:
+        logger.error("_rasterise_pdf: pdf2image failed for %s: %s", file_path, exc)
+        return []
+
+
+def _pdf_effective_dpi(file_path: str, fallback_dpi: int) -> int:
+    """Pick a sane render DPI for pdf2image (bounded for memory)."""
+    try:
+        import pdfplumber
+
+        with pdfplumber.open(file_path) as pdf:
+            if not pdf.pages:
+                return fallback_dpi
+            page = pdf.pages[0]
+            width_pts = float(page.width)
+            height_pts = float(page.height)
+            if width_pts <= 0 or height_pts <= 0:
+                return fallback_dpi
+            logger.debug(
+                "_pdf_effective_dpi: page0 %.0f×%.0f pts",
+                width_pts,
+                height_pts,
+            )
+    except Exception:
+        pass
+
+    return max(200, min(fallback_dpi, 400))

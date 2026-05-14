@@ -47,23 +47,14 @@ try:
     result = _extract_supplier(lines)
     print(f"FINAL SUPPLIER RESULT: '{result}'")
     
-    # Test title extraction
-    try:
-        from apps.documents.ocr.extractor import _extract_title, DocumentFieldExtractor
-        
-        print("\n=== TESTING TITLE EXTRACTION ===")
-        extractor = DocumentFieldExtractor(sample_text)
-        title = _extract_title(lines, "Invoice", supplier=result, reference="INV-2026-001")
-        print(f"TITLE RESULT: '{title}'")
-        
-        print("\n=== TESTING FULL EXTRACTOR ===")
-        full_result = extractor.extract()
-        print("FULL EXTRACTION RESULTS:")
-        for key, value in full_result.items():
-            print(f"  {key}: '{value}'")
-            
-    except Exception as e:
-        print(f"Title extraction failed: {e}")
+    print("\n=== TESTING FULL EXTRACTOR ===")
+    from apps.documents.ocr.extractor import DocumentFieldExtractor
+
+    extractor = DocumentFieldExtractor(sample_text)
+    full_result = extractor.extract()
+    print("FULL EXTRACTION RESULTS:")
+    for key, value in full_result.items():
+        print(f"  {key}: '{value}'")
     
 except ImportError as e:
     print(f"Import failed: {e}")

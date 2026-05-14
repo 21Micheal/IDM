@@ -56,11 +56,6 @@ PaddleOCR(lang='en', use_angle_cls=True, use_gpu=False, show_log=False)"
 # Verify the spaCy NER model installed from requirements.txt.
 RUN python -c "import spacy; spacy.load('en_core_web_sm')"
 
-# Pre-download LayoutLMv3 model for invoice field extraction
-#    This runs at build time so first LayoutLMv3 extraction doesn't incur download delay.
-#    Model is cached in HuggingFace cache inside the image.
-RUN python -c "from transformers import AutoProcessor, AutoModelForTokenClassification; AutoProcessor.from_pretrained('Theivaprakasham/layoutlmv3-finetuned-invoice'); AutoModelForTokenClassification.from_pretrained('Theivaprakasham/layoutlmv3-finetuned-invoice')"
-
 # Copy the rest of the application code
 COPY . .
 

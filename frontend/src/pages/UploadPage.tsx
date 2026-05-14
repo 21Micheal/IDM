@@ -744,9 +744,6 @@ export default function UploadPage({ scanOnly = false }: UploadPageProps) {
       };
 
       // 1. Fill the six first-class Document columns (direct DB fields)
-      if (hasConfiguredDocumentNameField) {
-        fillDirect("title", fields.title);
-      }
       fillDirect("supplier",      fields.supplier);
       fillDirect("amount",        fields.amount);
       fillDirect("currency",      fields.currency);

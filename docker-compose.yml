@@ -149,24 +149,6 @@ services:
       # "en_core_web_lg" — 560 MB, significantly better on ambiguous text.
       # "en_core_web_trf" — transformer-based, best accuracy, requires ~2 GB RAM.
       - OCR_SPACY_MODEL=${OCR_SPACY_MODEL:-en_core_web_sm}
-
-      # ── LayoutLMv3 settings ──────────────────────────────────────────────
-      # Disable LayoutLMv3 by setting LAYOUTLMV3_ENABLED=false (e.g. for low-RAM hosts).
-      - LAYOUTLMV3_ENABLED=${LAYOUTLMV3_ENABLED:-true}
-      # HuggingFace model identifier for invoice field extraction.
-      - LAYOUTLMV3_MODEL=${LAYOUTLMV3_MODEL:-Theivaprakasham/layoutlmv3-finetuned-invoice}
-      # Device: auto | cpu | cuda (auto detects CUDA if available)
-      - LAYOUTLMV3_DEVICE=${LAYOUTLMV3_DEVICE:-auto}
-      # Confidence threshold for field predictions (0.0-1.0).
-      - LAYOUTLMV3_CONFIDENCE=${LAYOUTLMV3_CONFIDENCE:-0.85}
-      # Maximum sequence length for model input (tokens).
-      - LAYOUTLMV3_MAX_LENGTH=${LAYOUTLMV3_MAX_LENGTH:-512}
-      # Allow LayoutLMv3 to override regex results when set to true.
-      - LAYOUTLMV3_OVERRIDE_REGEX=${LAYOUTLMV3_OVERRIDE_REGEX:-false}
-      # Enable PyTorch 2 compilation for faster inference (requires PyTorch 2+).
-      - LAYOUTLMV3_COMPILE=${LAYOUTLMV3_COMPILE:-false}
-      # Custom field mappings as JSON: {"invoice": {"CUSTOM_LABEL": "my_field"}}
-      - LAYOUTLMV3_FIELD_MAP=${LAYOUTLMV3_FIELD_MAP:-{}}
     volumes:
       - .:/app
       - media_files:/app/media
