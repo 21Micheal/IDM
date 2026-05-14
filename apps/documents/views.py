@@ -269,14 +269,14 @@ class DocumentViewSet(AuditMixin, viewsets.ModelViewSet):
         identical_to_current = False
         if current_document_id:
             try:
-                current_doc = Document.objects.only("id", "checksum").get(id=current_document_id)
+                current_doc = self.get_queryset().only("id", "checksum").get(id=current_document_id)
                 identical_to_current = current_doc.checksum == checksum
             except (Document.DoesNotExist, ValidationError, ValueError):
                 identical_to_current = False
 
         duplicate_doc = (
             Document.objects
-            .filter(checksum=checksum)
+            .filter(checksum=checksum, uploaded_by=request.user)
             .exclude(file="")
             .select_related("uploaded_by")
             .order_by("created_at")

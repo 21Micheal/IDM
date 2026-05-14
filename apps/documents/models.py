@@ -141,7 +141,14 @@ class Tag(models.Model):
 def document_upload_path(instance, filename):
     from django.utils import timezone
     year = timezone.now().year
-    return os.path.join("documents", instance.document_type.code, str(year), filename)
+    uploader_id = instance.uploaded_by_id or "unassigned"
+    return os.path.join(
+        "documents",
+        instance.document_type.code,
+        str(year),
+        str(uploader_id),
+        filename,
+    )
 
 
 class DocumentStatus(models.TextChoices):

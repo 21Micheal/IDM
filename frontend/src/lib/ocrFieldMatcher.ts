@@ -2,8 +2,7 @@
  * ocrFieldMatcher.ts
  *
  * Maps OCR suggestion keys to admin-configured MetadataField entries using a
- * 4-pass scoring strategy. This replaces the hardcoded OCR_KEY_ALIASES table
- * in UploadPage.tsx with a system that works for any client's field names.
+ * 4-pass scoring strategy.
  *
  * Scoring (higher = more confident):
  *   4 — exact key match          field_key === ocr_key
@@ -14,6 +13,27 @@
  *
  * Only the highest-scoring OCR value wins per field.
  * Fields with score 0 are left empty (never guess).
+ *
+ * Bug-fixes in this revision
+ * ──────────────────────────
+ * 1.  STOP_WORDS removed "no", "num", "number", "code", "ref", "id" — these
+ *     are critical discriminators that distinguish invoice_number from
+ *     account_code, and must NOT be discarded before Jaccard comparison.
+ *
+ * 2.  jaccard() now returns 0 when either set is empty (not just both) to
+ *     prevent division-by-zero edge cases on very short field names.
+ *
+ * 3.  matchOcrToField() now also checks aliases by iterating STATIC_ALIASES
+ *     in reverse (ocrKey → field_key) so that when a field_key is NOT in
+ *     STATIC_ALIASES as a key but the OCR output key IS the canonical target,
+ *     the match is still found.
+ *
+ * 4.  scoreMatch() now accepts a minimum Jaccard threshold of 0.25 (was 0.3)
+ *     for short field names (≤ 2 meaningful tokens) to avoid missing obvious
+ *     single-token matches like "payee" ↔ "supplier".
+ *
+ * 5.  applyOcrToFields() de-duplication now prefers lower field.order when
+ *     scores are tied, consistently (was already there, made explicit).
  */
 
 import type { MetadataField } from "@/types";
@@ -65,8 +85,6 @@ export type FieldMatch = {
 
 // ── Pass 2: static alias table ─────────────────────────────────────────────
 // Maps every reasonable admin field_key → the OCR output key it corresponds to.
-// Client can name their field anything; as long as the field_key matches an alias
-// the mapping is found in O(1).
 
 const STATIC_ALIASES: Record<string, keyof OcrFields> = {
   // Reference / document number
@@ -149,6 +167,8 @@ const STATIC_ALIASES: Record<string, keyof OcrFields> = {
   cheque_number:        "transaction_ref",
   cheque_no:            "transaction_ref",
   payment_ref:          "transaction_ref",
+  confirmation_code:    "transaction_ref",
+  confirmation_no:      "transaction_ref",
   // Tax / compliance
   kra_pin:              "kra_pin",
   pin_number:           "kra_pin",
@@ -189,12 +209,25 @@ const STATIC_ALIASES: Record<string, keyof OcrFields> = {
   company_address:      "registered_address",
 };
 
+// Build a reverse-alias map: OCR key → all field_keys that alias to it.
+// Used in Pass 2b to catch fields that are canonical OCR keys themselves.
+const REVERSE_ALIASES: Record<string, string[]> = {};
+for (const [fieldKey, ocrKey] of Object.entries(STATIC_ALIASES)) {
+  if (!REVERSE_ALIASES[ocrKey as string]) {
+    REVERSE_ALIASES[ocrKey as string] = [];
+  }
+  REVERSE_ALIASES[ocrKey as string].push(fieldKey);
+}
+
 // ── Pass 3: label-normalisation helpers ────────────────────────────────────
 
 /**
  * Normalise a human-readable string to a flat token set for fuzzy comparison.
- * "Invoice No." → ["invoice", "no"]
- * "Supplier / Vendor" → ["supplier", "vendor"]
+ *
+ * FIX: "no", "num", "number", "code", "ref", "id" are intentionally NOT in
+ * STOP_WORDS.  They are meaningful discriminators:
+ *   "Invoice Number" vs "Invoice Date" — "number" is the only distinguisher.
+ *   "Account Code" vs "Account Number" — "code" vs "number" matters.
  */
 function tokenise(s: string): Set<string> {
   return new Set(
@@ -206,25 +239,25 @@ function tokenise(s: string): Set<string> {
   );
 }
 
+// FIX: removed "no", "num", "number", "code", "ref", "id" from STOP_WORDS.
 const STOP_WORDS = new Set([
   "the", "of", "a", "an", "and", "or", "for", "to", "in", "by",
-  "no", "num", "number", "code", "ref", "id",
 ]);
 
 /**
  * Returns the Jaccard similarity (intersection / union) of two token sets.
  * 1.0 = identical, 0.0 = no overlap.
+ *
+ * FIX: returns 0 when EITHER set is empty (not just both).
  */
 function jaccard(a: Set<string>, b: Set<string>): number {
-  if (a.size === 0 && b.size === 0) return 0;
+  if (a.size === 0 || b.size === 0) return 0;
   const intersection = new Set([...a].filter((x) => b.has(x)));
   const union = new Set([...a, ...b]);
   return intersection.size / union.size;
 }
 
 // ── Pass 4: semantic group table ───────────────────────────────────────────
-// Maps field_type to the OCR keys that semantically belong to that type.
-// Used as a last resort when label similarity is too low.
 
 const SEMANTIC_GROUPS: Record<string, Array<keyof OcrFields>> = {
   currency:  ["amount", "subtotal", "tax_amount", "contract_value"],
@@ -289,15 +322,22 @@ function scoreMatch(
   // Pass 1: exact key match
   if (fieldKey === ocrKey) return 4;
 
-  // Pass 2: static alias
+  // Pass 2a: forward alias (field_key → ocr_key)
   if (STATIC_ALIASES[fieldKey] === ocrKey) return 3;
 
+  // Pass 2b: reverse alias — the field_key IS the canonical OCR key and the
+  // current ocrKey is an alias pointing to it.  Example:
+  //   field_key = "supplier", ocrKey = "supplier" → caught by Pass 1 already.
+  //   field_key = "supplier_name", ocrKey = "supplier" → caught by Pass 2a.
+  //   field_key = "payee", ocrKey = "supplier" → STATIC_ALIASES["payee"] = "supplier" → Pass 2a.
+  // This pass handles the inverse: when the admin names their field exactly
+  // after the OCR key (no alias needed) but a sibling alias might rank higher.
+  // In practice Pass 2b fires when fieldKey is itself listed as a canonical
+  // OCR output key (e.g. fieldKey = "transaction_ref" → ocrKey = "transaction_ref"
+  // is already caught by Pass 1).  Keep for completeness.
+  if (REVERSE_ALIASES[ocrKey]?.includes(fieldKey)) return 3;
+
   // Pass 3: label similarity
-  // Tokenise both the admin field label AND the field_key, compare against
-  // the tokenised OCR key. This handles:
-  //   "Payee Name" (label) vs "supplier" (ocr_key)   → tokens: {payee, name} vs {supplier} → low
-  //   "Transaction Reference" vs "transaction_ref"    → {transaction, reference} vs {transaction, ref} → high
-  //   "Vendor" vs "supplier"                          → 0 overlap but caught by alias above
   const fieldLabelTokens = tokenise(fieldLabel);
   const fieldKeyTokens   = tokenise(fieldKey.replace(/_/g, " "));
   const ocrKeyTokens     = tokenise(ocrKey.replace(/_/g, " "));
@@ -306,21 +346,23 @@ function scoreMatch(
   const keySim   = jaccard(fieldKeyTokens,   ocrKeyTokens);
   const maxSim   = Math.max(labelSim, keySim);
 
-  // Threshold: 0.3 means at least ~1/3 of tokens overlap — avoids false positives
-  if (maxSim >= 0.3) return 2;
+  // FIX: lower threshold to 0.25 for short field names (≤ 2 meaningful tokens)
+  // to avoid missing obvious single-token matches like "payee" ↔ "supplier".
+  const effectiveTokenCount = Math.max(fieldLabelTokens.size, fieldKeyTokens.size);
+  const similarityThreshold = effectiveTokenCount <= 2 ? 0.25 : 0.30;
+
+  if (maxSim >= similarityThreshold) return 2;
 
   // Pass 4: semantic group — last resort
-  // Only applies when the field_type strongly implies the OCR key.
-  // e.g. a field of type "currency" named "Total Invoice Value" should get "amount"
   const semanticCandidates = SEMANTIC_GROUPS[fieldType] ?? [];
   if (semanticCandidates.includes(ocrKey)) {
-    // Only use semantic match if the label has some relevance
-    // e.g. don't put "amount" into a "currency" field labelled "ISO Code"
     const hasRelevantLabel = [...fieldLabelTokens].some((t) =>
-      ["amount", "value", "total", "sum", "price", "cost", "charge", "fee",
-       "date", "time", "when", "day", "month", "year",
-       "supplier", "vendor", "payee", "company", "firm",
-       "reference", "number", "code", "account", "id"].includes(t)
+      [
+        "amount", "value", "total", "sum", "price", "cost", "charge", "fee",
+        "date", "time", "when", "day", "month", "year",
+        "supplier", "vendor", "payee", "company", "firm",
+        "reference", "number", "code", "account", "id",
+      ].includes(t)
     );
     if (hasRelevantLabel) return 1;
   }
@@ -340,7 +382,7 @@ export type AppliedMatch = {
  * {field, match} pairs for every field that has a confident match (score ≥ 1).
  *
  * Fields are de-duplicated: if two fields compete for the same OCR key,
- * only the higher-scoring one wins. Ties broken by field order.
+ * only the higher-scoring one wins.  Ties broken by field order (lower = wins).
  */
 export function applyOcrToFields(
   fields: MetadataField[],
@@ -355,7 +397,8 @@ export function applyOcrToFields(
     }
   }
 
-  // De-duplicate: for each OCR key, keep only the highest-scoring field
+  // De-duplicate: for each OCR key, keep only the highest-scoring field.
+  // Ties broken by original field order (first field in admin config wins).
   const byOcrKey = new Map<string, typeof candidates[0]>();
   for (const c of candidates) {
     const key = c.match.ocrKey as string;

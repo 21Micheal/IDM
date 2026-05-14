@@ -1,26 +1,24 @@
-/**
- * ForceChangePasswordPage.tsx
- *
- * Shown immediately after first login when must_change_password=true.
- * Logic preserved — UI updated with modern split-screen Flaxem branding.
- */
+// src/pages/ForceChangePasswordPage.tsx
+"use client";
+
 import { useState } from "react";
 import { useNavigate } from "react-router-dom";
 import { useForm } from "react-hook-form";
 import { zodResolver } from "@hookform/resolvers/zod";
 import { z } from "zod";
-import { api, authAPI, profileAPI } from "@/services/api";
+import { Lock, Eye, EyeOff, Loader2, ShieldCheck, Check, ArrowRight, KeyRound } from "lucide-react";
+
+import { authAPI, profileAPI } from "@/services/api";
 import { useAuthStore } from "@/store/authStore";
-import { Lock, Eye, EyeOff, Loader2, ShieldCheck, KeyRound, Check, ArrowRight } from "lucide-react";
-import { vaultToast as toast } from "@/components/ui/vault-toast";
+import { toast } from "@/components/ui/vault-toast";
 import { FlaxemLogo } from "@/components/shared/FlaxemLogo";
 
 const schema = z.object({
-  old_password:     z.string().min(1, "Current (temporary) password required"),
-  new_password:     z.string()
-    .min(8,  "At least 8 characters")
-    .regex(/[A-Z]/,    "Include at least one uppercase letter")
-    .regex(/[0-9]/,    "Include at least one number")
+  old_password: z.string().min(1, "Current temporary password is required"),
+  new_password: z.string()
+    .min(8, "At least 8 characters")
+    .regex(/[A-Z]/, "Include at least one uppercase letter")
+    .regex(/[0-9]/, "Include at least one number")
     .regex(/[^A-Za-z0-9]/, "Include at least one special character"),
   confirm_password: z.string(),
 }).refine((d) => d.new_password === d.confirm_password, {
@@ -31,282 +29,289 @@ const schema = z.object({
 type FormData = z.infer<typeof schema>;
 
 const requirements = [
-  { label: "At least 8 characters",      test: (v: string) => v.length >= 8 },
-  { label: "One uppercase letter",        test: (v: string) => /[A-Z]/.test(v) },
-  { label: "One number",                  test: (v: string) => /[0-9]/.test(v) },
-  { label: "One special character",       test: (v: string) => /[^A-Za-z0-9]/.test(v) },
+  { label: "At least 8 characters", test: (v: string) => v.length >= 8 },
+  { label: "One uppercase letter", test: (v: string) => /[A-Z]/.test(v) },
+  { label: "One number", test: (v: string) => /[0-9]/.test(v) },
+  { label: "One special character", test: (v: string) => /[^A-Za-z0-9]/.test(v) },
 ];
 
-function getStrength(pw: string): { score: number; label: string; tone: string } {
+function getStrength(pw: string): { score: number; label: string; color: string } {
   const passed = requirements.filter((r) => r.test(pw)).length;
-  if (!pw) return { score: 0, label: "Empty", tone: "bg-muted" };
-  if (passed <= 1) return { score: 1, label: "Weak", tone: "bg-destructive" };
-  if (passed === 2) return { score: 2, label: "Fair", tone: "bg-amber-500" };
-  if (passed === 3) return { score: 3, label: "Good", tone: "bg-yellow-500" };
-  return { score: 4, label: "Strong", tone: "bg-emerald-500" };
+  if (!pw) return { score: 0, label: "Empty", color: "bg-slate-200" };
+  if (passed <= 1) return { score: 1, label: "Weak", color: "bg-[#FF2E2E]" };
+  if (passed === 2) return { score: 2, label: "Fair", color: "bg-amber-500" };
+  if (passed === 3) return { score: 3, label: "Good", color: "bg-yellow-500" };
+  return { score: 4, label: "Strong", color: "bg-emerald-500" };
 }
 
 export default function ForceChangePasswordPage() {
-  const navigate  = useNavigate();
+  const navigate = useNavigate();
   const { setUser } = useAuthStore();
+
   const [showOld, setShowOld] = useState(false);
   const [showNew, setShowNew] = useState(false);
   const [showConfirm, setShowConfirm] = useState(false);
+  const [loading, setLoading] = useState(false);
 
   const { register, handleSubmit, watch, formState: { errors } } = useForm<FormData>({
     resolver: zodResolver(schema),
+    mode: "onChange",
   });
-
-  const [loading, setLoading] = useState(false);
-
-  const onSubmit = async (values: FormData) => {
-    setLoading(true);
-    try {
-      await profileAPI.changePassword(values.old_password, values.new_password);
-      
-      // Refresh user object so must_change_password becomes false
-      const { data: me } = await authAPI.me();
-      setUser(me);
-
-      toast.success("Password updated. Welcome to Flaxem IDM!");
-      navigate("/", { replace: true });
-    } catch (err: unknown) {
-      const detail = (err as { response?: { data?: { detail?: string | string[] } } })
-        ?.response?.data?.detail;
-      toast.error(Array.isArray(detail) ? detail.join(" ") : detail || "Failed to update password");
-    } finally {
-      setLoading(false);
-    }
-  };
 
   const newPwValue = watch("new_password") ?? "";
   const confirmValue = watch("confirm_password") ?? "";
   const strength = getStrength(newPwValue);
   const matches = confirmValue.length > 0 && confirmValue === newPwValue;
 
+  const onSubmit = async (values: FormData) => {
+    setLoading(true);
+    try {
+      await profileAPI.changePassword(values.old_password, values.new_password);
+
+      // Refresh user so must_change_password becomes false
+      const { data: me } = await authAPI.me();
+      setUser(me);
+
+      toast.success("Password updated successfully! Welcome to Flaxem.");
+      navigate("/", { replace: true });
+    } catch (err: any) {
+      const detail = err?.response?.data?.detail;
+      toast.error(Array.isArray(detail) ? detail.join(" ") : detail || "Failed to update password");
+    } finally {
+      setLoading(false);
+    }
+  };
+
   return (
-    <div className="min-h-screen grid lg:grid-cols-[1.05fr_1fr] bg-background">
-      {/* Brand panel */}
-      <aside
-        className="relative hidden lg:flex flex-col justify-between p-12 text-white overflow-hidden"
-        style={{ background: "var(--gradient-sidebar)" }}
-      >
-        <div className="absolute -top-32 -right-32 h-96 w-96 rounded-full bg-accent/20 blur-3xl pointer-events-none" />
-        <div className="absolute -bottom-40 -left-20 h-[28rem] w-[28rem] rounded-full bg-primary/30 blur-3xl pointer-events-none" />
-        <div
-          className="absolute inset-0 opacity-[0.06] pointer-events-none"
-          style={{
-            backgroundImage:
-              "linear-gradient(to right, white 1px, transparent 1px), linear-gradient(to bottom, white 1px, transparent 1px)",
-            backgroundSize: "44px 44px",
-          }}
-        />
-
-        <div className="relative z-10">
-          <FlaxemLogo variant="light" className="h-10" />
+    <div className="min-h-screen flex">
+      {/* Left Panel - Branding */}
+      <div className="hidden lg:flex lg:w-1/2 bg-gradient-to-br from-[#0066CC] via-[#0052a3] to-[#003d7a] relative overflow-hidden">
+        <div className="absolute inset-0 opacity-10">
+          <svg viewBox="0 0 400 400" className="w-full h-full">
+            <path d="M0 100L100 50H200L100 100H0Z" fill="white"/>
+            <path d="M50 150L150 100H250L150 150H50Z" fill="white"/>
+            <path d="M100 200L200 150H300L200 200H100Z" fill="white"/>
+            <path d="M150 250L250 200H350L250 250H150Z" fill="white"/>
+          </svg>
         </div>
 
-        <div className="relative z-10 max-w-md space-y-6">
-          <span className="inline-flex items-center gap-2 rounded-full bg-white/10 px-3 py-1 text-xs font-medium ring-1 ring-white/15 backdrop-blur-sm">
-            <KeyRound className="h-3.5 w-3.5 text-accent" />
-            One-time setup
-          </span>
-          <h1 className="text-4xl font-semibold leading-tight tracking-tight">
-            Secure your account before you continue.
-          </h1>
-          <p className="text-white/70 leading-relaxed">
-            For your safety, replace the temporary password we emailed you with a strong, memorable one.
-            You'll use this every time you sign in to Flaxem IDM.
+        <div className="relative z-10 flex flex-col justify-between p-12 w-full">
+          <FlaxemLogo variant="light" className="h-14 w-auto" />
+
+          <div className="space-y-6 max-w-md">
+            <div className="inline-flex items-center gap-2 bg-white/10 backdrop-blur-sm px-4 py-2 text-xs font-medium tracking-wide rounded-full">
+              <KeyRound className="w-4 h-4 text-[#FF2E2E]" />
+              ONE-TIME SETUP
+            </div>
+
+            <h1 className="text-4xl font-bold text-white leading-tight">
+              Secure your account
+            </h1>
+            <p className="text-sky-100/80 leading-relaxed">
+              For your protection, please replace the temporary password with a strong, memorable one.
+            </p>
+          </div>
+
+          <p className="text-sky-200/50 text-sm">
+            Flaxem Systems • Secure Document Management
           </p>
+        </div>
+      </div>
 
-          <div className="rounded-xl border border-white/10 bg-white/5 p-5 backdrop-blur-sm">
-            <div className="flex items-center gap-3 mb-3">
-              <div className="h-9 w-9 rounded-lg bg-accent/20 ring-1 ring-accent/40 flex items-center justify-center">
-                <ShieldCheck className="h-5 w-5 text-accent" />
-              </div>
-              <p className="font-medium">Strong password tips</p>
-            </div>
-            <ul className="space-y-1.5 text-sm text-white/75">
-              <li>• Use a unique passphrase you don't reuse elsewhere.</li>
-              <li>• Mix letters, numbers, and a symbol.</li>
-              <li>• Avoid names, dates, or dictionary words.</li>
-            </ul>
-          </div>
+      {/* Right Panel - Form */}
+      <div className="flex-1 flex items-center justify-center p-6 lg:p-12 bg-white relative overflow-hidden">
+        {/* Subtle background pattern */}
+        <div className="absolute inset-0 opacity-[0.02]">
+          <svg className="w-full h-full" viewBox="0 0 100 100" preserveAspectRatio="none">
+            <pattern id="grid" width="20" height="20" patternUnits="userSpaceOnUse">
+              <path d="M0 10L10 5H20L10 10H0Z" fill="#0066CC"/>
+            </pattern>
+            <rect width="100%" height="100%" fill="url(#grid)" />
+          </svg>
         </div>
 
-        <p className="relative z-10 text-xs text-white/50">
-          © {new Date().getFullYear()} Flaxem Systems · Reliable Financial Solutions
-        </p>
-      </aside>
-
-      {/* Form panel */}
-      <main className="flex items-center justify-center p-6 sm:p-10">
-        <div className="w-full max-w-md">
-          <div className="lg:hidden flex justify-center mb-8">
-            <FlaxemLogo variant="dark" className="h-9" />
+        <div className="w-full max-w-md relative z-10">
+          {/* Mobile Logo */}
+          <div className="flex justify-center mb-8 lg:hidden">
+            <FlaxemLogo variant="dark" className="h-12 w-auto" />
           </div>
 
-          <div className="rounded-2xl border border-border bg-card shadow-[var(--shadow-elegant)] p-8">
-            <div className="flex items-center gap-3 mb-6">
-              <div className="h-11 w-11 rounded-xl bg-primary/10 ring-1 ring-primary/15 flex items-center justify-center">
-                <Lock className="h-5 w-5 text-primary" />
+          <div className="space-y-8">
+            <div className="relative">
+              <div className="absolute -left-4 top-0 w-1 h-14 bg-gradient-to-b from-[#FF2E2E] to-[#0066CC] rounded-full"></div>
+              <div className="flex items-center gap-3 mb-4">
+                <div className="w-10 h-10 bg-slate-900 flex items-center justify-center">
+                  <Lock className="w-5 h-5 text-white" />
+                </div>
+                <span className="text-xs font-semibold uppercase tracking-wider text-[#FF2E2E]">Security Required</span>
               </div>
-              <div>
-                <h2 className="text-xl font-semibold tracking-tight text-foreground">Set your password</h2>
-                <p className="text-xs text-muted-foreground">Required to continue to Flaxem IDM</p>
-              </div>
+              <h2 className="text-2xl font-bold text-slate-900 mb-2">Set your password</h2>
+              <p className="text-slate-500">Create a strong password to access Flaxem DMS</p>
             </div>
 
-            <form onSubmit={handleSubmit(onSubmit)} className="space-y-5">
-              {/* Temporary password */}
-              <div>
-                <label className="block text-sm font-medium text-foreground mb-1.5">
-                  Temporary password
+            <form onSubmit={handleSubmit(onSubmit)} className="space-y-6">
+              {/* Temporary Password */}
+              <div className="space-y-1">
+                <label className="block text-xs font-semibold uppercase tracking-wider text-slate-400 mb-2">
+                  Temporary Password
                 </label>
-                <div className="relative">
+                <div className="relative group">
                   <input
                     {...register("old_password")}
                     type={showOld ? "text" : "password"}
-                    className="w-full h-11 rounded-lg border border-input bg-background pl-3 pr-10 text-sm focus:outline-none focus:ring-2 focus:ring-ring focus:border-ring transition-colors"
+                    className="w-full px-0 py-3 bg-transparent border-0 border-b-2 border-slate-200 text-slate-900 text-lg placeholder:text-slate-300 focus:ring-0 focus:border-[#0066CC] transition-colors outline-none peer pr-10"
                     placeholder="From your welcome email"
                     autoFocus
                   />
                   <button
                     type="button"
                     onClick={() => setShowOld((v) => !v)}
-                    className="absolute right-3 top-1/2 -translate-y-1/2 text-muted-foreground hover:text-foreground"
-                    aria-label={showOld ? "Hide password" : "Show password"}
+                    className="absolute right-0 top-1/2 -translate-y-1/2 text-slate-300 hover:text-slate-600 peer-focus:text-[#0066CC] transition-colors"
                   >
-                    {showOld ? <EyeOff className="w-4 h-4" /> : <Eye className="w-4 h-4" />}
+                    {showOld ? <EyeOff className="w-5 h-5" /> : <Eye className="w-5 h-5" />}
                   </button>
                 </div>
                 {errors.old_password && (
-                  <p className="text-destructive text-xs mt-1.5">{errors.old_password.message}</p>
+                  <p className="text-[#FF2E2E] text-sm mt-2 flex items-center gap-1">
+                    <span className="w-1 h-1 rounded-full bg-[#FF2E2E]"></span>
+                    {errors.old_password.message}
+                  </p>
                 )}
               </div>
 
-              {/* New password */}
-              <div>
-                <label className="block text-sm font-medium text-foreground mb-1.5">New password</label>
-                <div className="relative">
+              {/* New Password */}
+              <div className="space-y-1">
+                <label className="block text-xs font-semibold uppercase tracking-wider text-slate-400 mb-2">
+                  New Password
+                </label>
+                <div className="relative group">
                   <input
                     {...register("new_password")}
                     type={showNew ? "text" : "password"}
-                    className="w-full h-11 rounded-lg border border-input bg-background pl-3 pr-10 text-sm focus:outline-none focus:ring-2 focus:ring-ring focus:border-ring transition-colors"
+                    className="w-full px-0 py-3 bg-transparent border-0 border-b-2 border-slate-200 text-slate-900 text-lg placeholder:text-slate-300 focus:ring-0 focus:border-[#0066CC] transition-colors outline-none peer pr-10"
                     placeholder="Create a strong password"
                   />
                   <button
                     type="button"
                     onClick={() => setShowNew((v) => !v)}
-                    className="absolute right-3 top-1/2 -translate-y-1/2 text-muted-foreground hover:text-foreground"
-                    aria-label={showNew ? "Hide password" : "Show password"}
+                    className="absolute right-0 top-1/2 -translate-y-1/2 text-slate-300 hover:text-slate-600 peer-focus:text-[#0066CC] transition-colors"
                   >
-                    {showNew ? <EyeOff className="w-4 h-4" /> : <Eye className="w-4 h-4" />}
+                    {showNew ? <EyeOff className="w-5 h-5" /> : <Eye className="w-5 h-5" />}
                   </button>
                 </div>
 
-                {/* Strength meter */}
+                {/* Strength Indicator */}
                 {newPwValue && (
-                  <div className="mt-3">
-                    <div className="flex gap-1.5">
+                  <div className="mt-4">
+                    <div className="flex gap-1.5 mb-2">
                       {[1, 2, 3, 4].map((i) => (
                         <div
                           key={i}
-                          className={`h-1.5 flex-1 rounded-full transition-colors ${
-                            i <= strength.score ? strength.tone : "bg-muted"
+                          className={`h-1 flex-1 rounded-full transition-colors ${
+                            i <= strength.score ? strength.color : "bg-slate-100"
                           }`}
                         />
                       ))}
                     </div>
-                    <p className="mt-1.5 text-xs text-muted-foreground">
-                      Strength: <span className="font-medium text-foreground">{strength.label}</span>
-                    </p>
+                    <p className="text-xs text-slate-500">Strength: <span className="font-medium">{strength.label}</span></p>
                   </div>
                 )}
 
-                {/* Requirements grid */}
-                <ul className="mt-3 grid grid-cols-2 gap-y-1.5 gap-x-3">
+                {/* Requirements */}
+                <div className="mt-4 flex flex-wrap gap-2">
                   {requirements.map((req) => {
                     const met = req.test(newPwValue);
                     return (
-                      <li
+                      <div
                         key={req.label}
-                        className={`flex items-center gap-1.5 text-xs ${
-                          met ? "text-emerald-600" : "text-muted-foreground"
+                        className={`inline-flex items-center gap-1.5 px-3 py-1 text-xs rounded-full transition-colors ${
+                          met 
+                            ? "bg-emerald-50 text-emerald-700 border border-emerald-200" 
+                            : "bg-slate-50 text-slate-400 border border-slate-100"
                         }`}
                       >
-                        <span
-                          className={`flex h-3.5 w-3.5 items-center justify-center rounded-full ${
-                            met ? "bg-emerald-500/15" : "bg-muted"
-                          }`}
-                        >
-                          {met ? (
-                            <Check className="h-2.5 w-2.5 text-emerald-600" strokeWidth={3} />
-                          ) : (
-                            <span className="h-1 w-1 rounded-full bg-muted-foreground/50" />
-                          )}
-                        </span>
+                        {met ? (
+                          <Check className="w-3 h-3" strokeWidth={3} />
+                        ) : (
+                          <span className="w-1 h-1 rounded-full bg-current" />
+                        )}
                         {req.label}
-                      </li>
+                      </div>
                     );
                   })}
-                </ul>
+                </div>
 
                 {errors.new_password && (
-                  <p className="text-destructive text-xs mt-2">{errors.new_password.message}</p>
+                  <p className="text-[#FF2E2E] text-sm mt-2 flex items-center gap-1">
+                    <span className="w-1 h-1 rounded-full bg-[#FF2E2E]"></span>
+                    {errors.new_password.message}
+                  </p>
                 )}
               </div>
 
-              {/* Confirm */}
-              <div>
-                <label className="block text-sm font-medium text-foreground mb-1.5">Confirm new password</label>
-                <div className="relative">
+              {/* Confirm Password */}
+              <div className="space-y-1">
+                <label className="block text-xs font-semibold uppercase tracking-wider text-slate-400 mb-2">
+                  Confirm New Password
+                </label>
+                <div className="relative group">
                   <input
                     {...register("confirm_password")}
                     type={showConfirm ? "text" : "password"}
-                    className={`w-full h-11 rounded-lg border bg-background pl-3 pr-10 text-sm focus:outline-none focus:ring-2 focus:ring-ring transition-colors ${
-                      matches ? "border-emerald-500/60 focus:border-emerald-500" : "border-input focus:border-ring"
+                    className={`w-full px-0 py-3 bg-transparent border-0 border-b-2 text-slate-900 text-lg placeholder:text-slate-300 focus:ring-0 transition-colors outline-none peer pr-10 ${
+                      matches ? "border-emerald-500" : "border-slate-200 focus:border-[#0066CC]"
                     }`}
                     placeholder="Repeat your new password"
                   />
                   <button
                     type="button"
                     onClick={() => setShowConfirm((v) => !v)}
-                    className="absolute right-3 top-1/2 -translate-y-1/2 text-muted-foreground hover:text-foreground"
-                    aria-label={showConfirm ? "Hide password" : "Show password"}
+                    className={`absolute right-0 top-1/2 -translate-y-1/2 transition-colors ${
+                      matches ? "text-emerald-500" : "text-slate-300 hover:text-slate-600 peer-focus:text-[#0066CC]"
+                    }`}
                   >
-                    {showConfirm ? <EyeOff className="w-4 h-4" /> : <Eye className="w-4 h-4" />}
+                    {showConfirm ? <EyeOff className="w-5 h-5" /> : <Eye className="w-5 h-5" />}
                   </button>
                 </div>
                 {matches && (
-                  <p className="text-emerald-600 text-xs mt-1.5 flex items-center gap-1">
-                    <Check className="w-3 h-3" strokeWidth={3} /> Passwords match
+                  <p className="text-emerald-600 text-sm mt-2 flex items-center gap-1">
+                    <Check className="w-4 h-4" strokeWidth={3} />
+                    Passwords match
                   </p>
                 )}
                 {errors.confirm_password && (
-                  <p className="text-destructive text-xs mt-1.5">{errors.confirm_password.message}</p>
+                  <p className="text-[#FF2E2E] text-sm mt-2 flex items-center gap-1">
+                    <span className="w-1 h-1 rounded-full bg-[#FF2E2E]"></span>
+                    {errors.confirm_password.message}
+                  </p>
                 )}
               </div>
 
               <button
                 type="submit"
                 disabled={loading}
-                className="w-full inline-flex items-center justify-center gap-2 h-11 px-4 rounded-lg bg-primary text-primary-foreground font-medium shadow-sm hover:bg-primary/90 transition-colors disabled:opacity-70"
+                className="group relative w-full py-4 px-6 bg-slate-900 hover:bg-slate-800 text-white font-semibold rounded-none transition-all disabled:opacity-70 disabled:cursor-not-allowed mt-8 overflow-hidden"
               >
-                {loading ? (
-                  <Loader2 className="w-4 h-4 animate-spin" />
-                ) : (
-                  <>Set password & continue <ArrowRight className="w-4 h-4" /></>
-                )}
+                <span className="absolute inset-y-0 left-0 w-1 bg-[#FF2E2E] group-hover:w-2 transition-all"></span>
+                <span className="relative flex items-center justify-center gap-3">
+                  {loading ? (
+                    <Loader2 className="w-5 h-5 animate-spin" />
+                  ) : (
+                    <>
+                      Set Password & Continue
+                      <ArrowRight className="w-5 h-5 group-hover:translate-x-1 transition-transform" />
+                    </>
+                  )}
+                </span>
               </button>
             </form>
           </div>
 
-          <p className="text-center text-muted-foreground text-xs mt-6">
+          <p className="text-center text-slate-400 text-xs mt-12">
             Need help? Contact your Flaxem administrator.
           </p>
         </div>
-      </main>
+      </div>
     </div>
   );
 }

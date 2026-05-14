@@ -3,23 +3,16 @@ apps/documents/ocr/extractor.py
 
 Structured field extraction from OCR text.
 
-This module replaces the monolithic _extract_ocr_suggestions() function in
-tasks.py with a maintainable, multi-strategy extractor.
-
 Architecture
 ────────────
-DocumentFieldExtractor is the entry point. It runs three extraction strategies
-in priority order for each field:
+DocumentFieldExtractor runs three extraction strategies in priority order:
 
   1. LabelledFieldStrategy  — "Label: Value" patterns (highest precision)
   2. LayoutHeuristicStrategy — positional cues (top of document = supplier)
   3. FallbackPatternStrategy — broad regex sweeps when the above find nothing
 
-Each strategy returns a dict of field → value. Results are merged with earlier
-strategies taking precedence.
-
-The extractor is document-type-aware: it first classifies the document type
-(invoice, PO, contract, etc.) and then applies the appropriate field mapping.
+The extractor is document-type-aware: it classifies the document type first,
+then applies the appropriate field mapping.
 
 Supported document types and their key fields
 ─────────────────────────────────────────────
@@ -40,6 +33,52 @@ Supported document types and their key fields
 All extractors populate these universal fields regardless of document type:
   document_type, reference_number, amount, currency,
   document_date, due_date, supplier, raw_lines
+
+Bug-fixes in this revision
+──────────────────────────
+1.  Supplier / Bill-To confusion: header_cap raised to 15 (was 8) and the
+    supplier search window is now bounded by the *Bill To* block, not a
+    fixed line count.  A "Bill To / Ship To" prefix on the same line as a
+    company name no longer contaminates the supplier field.
+
+2.  _SUPPLIER_REJECT_RE now also rejects lines that contain "bill to" /
+    "ship to" / "sold to" keywords to prevent customer-block leakage.
+
+3.  _clean_inline_value now splits on "bill to", "ship to", "sold to".
+
+4.  _REF_VALUE_PAT and _labelled_code extended to handle refs that start
+    with a digit (e.g. "1234-XYZ-99") and refs longer than 40 chars
+    (raised to 60).  Trailing whitespace / punctuation is trimmed correctly.
+
+5.  _labelled_code now also accepts refs that begin with "#" or are
+    purely alpha-numeric without a hyphen when they are ≥ 4 characters.
+
+6.  Account-code / account-number confusion: the loose _ACCOUNT_LABEL_RE
+    (which matched bare "account") is only used as a last resort after the
+    strict _ACCOUNT_GRID_LABEL_RE and explicit labelled-code patterns.
+    _is_plausible_gl_account_code now also rejects values that look like
+    IBAN / bank account numbers (≥ 10 consecutive digits).
+
+7.  _find_first_date now tolerates a newline between a label and its value
+    (grid layouts where "Invoice Date" appears on one line and the date on
+    the next).
+
+8.  Bare "Date:" fallback in _extract_dates is now also excluded when the
+    match position falls inside the "Bill To" block.
+
+9.  _best_amount labelled-total fix: extract amounts from the full regex
+    match string rather than re-running on just the group fragments.
+
+10. Transaction ref: _extract_transaction_ref is a dedicated function that
+    handles M-PESA, cheque, and generic refs with a wider character class
+    (digits, upper/lower, hyphens, slashes — up to 60 chars).
+
+11. _standard_invoice_grid_parse now also handles partial grids (3 of 4
+    expected columns) so a missing "supplier id" column does not abort
+    parsing of account_code and dates.
+
+12. spaCy model is loaded via a module-level cache in tasks_ocr.py (see
+    that file); no change needed here.
 """
 from __future__ import annotations
 
@@ -151,14 +190,34 @@ def _parse_date(s: str) -> Optional[str]:
 
 
 def _find_first_date(text: str, label_pattern: str) -> Optional[str]:
-    """Search for a labelled date field and parse it."""
-    # Separators between a label and its value: ":", "-", "(", or whitespace.
-    # "Due Date (May 12, 2026)" uses a paren — must be consumed here.
+    """
+    Search for a labelled date field and parse it.
+
+    Handles both same-line and next-line layouts:
+      "Invoice Date: 2024-07-06"   (colon separator, same line)
+      "Invoice Date\n2024-07-06"   (grid layout, value on following line)
+      "Due Date (May 12, 2026)"    (paren separator)
+    """
+    # Same-line: label followed by optional separator and date value
     m = re.search(
         label_pattern + r"\s*[:\-\(]?\s*" + _DATE_VALUE_PAT,
         text, re.IGNORECASE,
     )
-    return _parse_date(m.group(1)) if m else None
+    if m:
+        parsed = _parse_date(m.group(1))
+        if parsed:
+            return parsed
+
+    # Next-line: label on its own line, date on the following line
+    # We search for label at end-of-line, then the date value at start of next line.
+    m2 = re.search(
+        label_pattern + r"\s*[:\-]?\s*\n\s*" + _DATE_VALUE_PAT,
+        text, re.IGNORECASE,
+    )
+    if m2:
+        return _parse_date(m2.group(1))
+
+    return None
 
 
 # ── Amount / currency extraction ───────────────────────────────────────────────
@@ -184,7 +243,7 @@ def _extract_amounts(text: str) -> list[tuple[float, str]]:
 
         # Normalise currency aliases
         raw_cur_upper = raw_cur.upper().rstrip(".")
-        if raw_cur_upper in ("KSH", "KSH", "KSHS", "KENYA SHILLING"):
+        if raw_cur_upper in ("KSH", "KSHS", "KENYA SHILLING"):
             raw_cur_upper = "KES"
         elif raw_cur_upper in ("USHS", "UGANDA SHILLING"):
             raw_cur_upper = "UGX"
@@ -209,23 +268,28 @@ def _extract_amounts(text: str) -> list[tuple[float, str]]:
 
 
 def _best_amount(text: str) -> tuple[Optional[str], Optional[str]]:
-    """Return (amount_str, currency_iso) for the largest amount found, or (None, None)."""
-    # Prefer labelled totals over all amounts
-    total_patterns = [
+    """
+    Return (amount_str, currency_iso) for the best total amount found.
+
+    Preference order:
+      1. Explicitly labelled grand total / amount due
+      2. Largest amount anywhere in the document
+    """
+    total_pattern = re.compile(
         r"(?:grand\s*total|total\s*amount|amount\s*due|net\s*amount|total\s*payable"
-        r"|invoice\s*total|total\s*inc\.?\s*(?:tax|vat)?|total\s*sum)",
-    ]
-    for pat in total_patterns:
-        m = re.search(
-            pat + r"\s*[:\-]?\s*" + rf"({_ISO_CURRENCIES}|Ksh\.?|KSh\.?|[\$€£])?\s*"
-            rf"(\d{{1,3}}(?:[,\s]\d{{3}})*(?:[.,]\d{{1,4}})?)",
-            text, re.IGNORECASE,
-        )
-        if m:
-            amounts = _extract_amounts(m.group(0) + " " + (m.group(1) or "") + (m.group(2) or ""))
-            if amounts:
-                val, cur = amounts[0]
-                return str(round(val, 2)), cur or None
+        r"|invoice\s*total|total\s*inc\.?\s*(?:tax|vat)?|total\s*sum)"
+        r"\s*[:\-]?\s*"
+        rf"(?:{_ISO_CURRENCIES}|Ksh\.?|KSh\.?|Kshs\.?|[\$€£])?\s*"
+        rf"(\d{{1,3}}(?:[,\s]\d{{3}})*(?:[.,]\d{{1,4}})?)",
+        re.IGNORECASE,
+    )
+    for m in total_pattern.finditer(text):
+        # Run amount extraction on the *full matched string* so the currency
+        # prefix captured in the outer match is included.
+        amounts = _extract_amounts(m.group(0))
+        if amounts:
+            val, cur = amounts[0]
+            return str(round(val, 2)), cur or None
 
     # Fall back: largest amount in the document
     amounts = _extract_amounts(text)
@@ -244,10 +308,13 @@ _REF_REJECT = frozenset({
     "NO", "NUM", "NUMBER",
 })
 
+# FIX: extended to 60 chars (was 29/40), added digit-first refs,
+# and accepts mixed-case hyphenated tokens like "Mpesa-ABC123-XYZ".
 _REF_VALUE_PAT = (
-    r"([A-Z]{1,6}[-/][A-Z0-9][A-Z0-9\-/]{1,29}"   # prefix-dash: INV-2024-001
-    r"|[A-Z]{1,6}\d[A-Z0-9\-/]{1,29}"               # alpha-start: RCP88412
-    r"|\d{4,20}"                                      # pure numeric: 20240312
+    r"(#?[A-Z]{1,6}[-/][A-Z0-9][A-Z0-9\-/]{1,59}"   # prefix-dash: INV-2024-001
+    r"|#?[A-Z]{1,6}\d[A-Z0-9\-/]{1,59}"               # alpha-start: RCP88412
+    r"|\d{1,6}[-/][A-Z0-9][A-Z0-9\-/]{1,59}"          # digit-start with separator: 1234-XYZ
+    r"|\d{4,20}"                                        # pure numeric: 20240312
     r")"
 )
 
@@ -265,7 +332,7 @@ _REF_LABELS: dict[str, re.Pattern] = {
         re.I | re.M,
     ),
     "delivery_note":  re.compile(
-        r"(?:delivery\s*(?:note\s*)?(?:no\.?|#)|d\.?n\.?\s*(?:no\.?|#)?)" + _SEP + _REF_VALUE_PAT,
+        r"(?:delivery\s*(?:note\s*)?(?:no\.?|#)|d\.?n\.?\s*(?:no\.?|#)?|grn\s*(?:no\.?|#)?)" + _SEP + _REF_VALUE_PAT,
         re.I | re.M,
     ),
     "contract":       re.compile(
@@ -295,9 +362,38 @@ def _extract_reference(text: str, doc_type: str) -> Optional[str]:
         if pat is None:
             continue
         for m in pat.finditer(text):
-            val = m.group(1).strip()
+            val = m.group(1).strip().lstrip("#")
             if val.upper() in _REF_REJECT or len(val) < 2:
                 continue
+            return val
+    return None
+
+
+# ── Transaction reference extraction ──────────────────────────────────────────
+
+# FIX: dedicated extractor with a wider character class.
+# Handles M-PESA codes (e.g. "QK3XLZ1234"), cheque numbers, and arbitrary
+# alphanumeric refs with hyphens/slashes up to 60 characters.
+_TXN_REF_PAT = re.compile(
+    r"(?:transaction\s*(?:ref(?:erence)?|no\.?|id|code)"
+    r"|cheque\s*(?:no\.?|number)"
+    r"|chq\.?\s*no\.?"
+    r"|txn\s*(?:ref|id|no\.?)"
+    r"|m[\-\s]?pesa\s*(?:ref(?:erence)?|code|no\.?|transaction(?:\s*id)?)"
+    r"|mpesa\s*(?:ref(?:erence)?|code|no\.?)"
+    r"|payment\s*ref(?:erence)?"
+    r"|confirmation\s*(?:no\.?|code|ref(?:erence)?)"
+    r")\s*[:\-]?\s*"
+    r"([A-Z0-9][A-Z0-9\-/_]{2,59})",  # first char alphanumeric, rest flexible
+    re.IGNORECASE,
+)
+
+
+def _extract_transaction_ref(text: str) -> Optional[str]:
+    """Extract a payment / transaction reference from text."""
+    for m in _TXN_REF_PAT.finditer(text):
+        val = m.group(1).strip().rstrip(".,;:")
+        if len(val) >= 3 and val.upper() not in _REF_REJECT:
             return val
     return None
 
@@ -307,7 +403,7 @@ def _extract_reference(text: str, doc_type: str) -> Optional[str]:
 _SUPPLIER_INLINE_RE = re.compile(
     r"(?:vendor|supplier|service\s*provider|sold\s*by|issued\s*by"
     r"|vendor\s*name|supplier\s*name|company\s*name|payee\s*name"
-    r"|billed?\s*(?:from|by)|business\s*name)"   # "from", "company", "firm" removed — too generic
+    r"|billed?\s*(?:from|by)|business\s*name)"
     r"\s*[:\-]\s*(.+)",
     re.I,
 )
@@ -316,24 +412,29 @@ _SUPPLIER_HEADER_RE = re.compile(
     re.I,
 )
 
-# Lines to reject as supplier candidates regardless of which strategy matched them
+# FIX: added "bill to", "ship to", "sold to" to prevent customer-name leakage.
 _SUPPLIER_REJECT_RE = re.compile(
-    r"@"                                      # email address
-    r"|\b(?:lpo|p\.?o\.?\s*(?:box|no))\b"   # P.O. Box or LPO reference in same line
-    r"|\b(?:tel|phone|fax|mobile|cell)\b"    # contact numbers
-    r"|\bwww\."                              # website URL
-    r"|\d{6,}"                              # long numeric strings (account/ref numbers)
-    r"|\bno\.?\s*[:\-]"                     # "No:" labels (invoice no, LPO no, etc.)
+    r"@"                                                        # email address
+    r"|\b(?:lpo|p\.?o\.?\s*(?:box|no))\b"                    # P.O. Box or LPO reference in same line
+    r"|\b(?:tel|phone|fax|mobile|cell)\b"                     # contact numbers
+    r"|\bwww\."                                               # website URL
+    r"|\d{6,}"                                               # long numeric strings (account/ref numbers)
+    r"|\bno\.?\s*[:\-]"                                      # "No:" labels (invoice no, LPO no, etc.)
+    r"|\b(?:bill(?:ed)?\s*to|ship(?:ped)?\s*to|sold\s*to)\b" # customer-block headers
     ,
     re.I,
 )
 
 _ENTITY_SUFFIX_RE = re.compile(
-    # Match legal entity suffixes. Require that "Co." is NOT followed by a
-    # lowercase TLD segment (stops ".co.ke" domain names from matching).
     r"\b(?:LLC|Ltd\.?|Limited|Inc\.?|Corp\.?|GmbH|PLC|LLP|S\.A\.?|Pty\.?)"
     r"(?:\.|,|\s|$)"
     r"|\bCo\.(?!\s*[a-z]{2,6}\b)",
+    re.I,
+)
+
+# Pattern that marks the beginning of a Bill-To / Ship-To / Sold-To block.
+_BILL_TO_BLOCK_RE = re.compile(
+    r"\b(?:bill(?:ed)?\s*to|ship(?:ped)?\s*to|sold\s*to|deliver(?:y|ed)?\s*to)\b",
     re.I,
 )
 
@@ -341,9 +442,12 @@ _ENTITY_SUFFIX_RE = re.compile(
 def _clean_inline_value(value: str, max_len: int = 120) -> str:
     """Trim common OCR bleed from labelled values on crowded invoice lines."""
     value = re.sub(r"\s+", " ", value).strip(" \t:-|")
+    # FIX: added "bill to", "ship to", "sold to" as split markers.
     value = re.split(
-        r"\s{2,}|\t|\||\b(?:tel|phone|mobile|email|e-?mail|www\.|p\.?\s*o\.?\s*box|"
-        r"invoice\s*(?:no|date)|account\s*(?:code|no)|due\s*date|date)\b",
+        r"\s{2,}|\t|\|"
+        r"|\b(?:tel|phone|mobile|email|e-?mail|www\.|p\.?\s*o\.?\s*box"
+        r"|invoice\s*(?:no|date)|account\s*(?:code|no)|due\s*date|date"
+        r"|bill(?:ed)?\s*to|ship(?:ped)?\s*to|sold\s*to)\b",
         value,
         maxsplit=1,
         flags=re.I,
@@ -352,11 +456,9 @@ def _clean_inline_value(value: str, max_len: int = 120) -> str:
 
 
 def _first_bill_to_line_index(lines: list[str]) -> Optional[int]:
-    """Index of the first BILL TO / SHIP TO line, or None if absent."""
+    """Index of the first BILL TO / SHIP TO / SOLD TO line, or None if absent."""
     for i, line in enumerate(lines):
-        if re.search(r"\bbill(?:ed)?\s*to\b", line, re.I):
-            return i
-        if re.search(r"\bship(?:ped)?\s*to\b", line, re.I):
+        if _BILL_TO_BLOCK_RE.search(line):
             return i
     return None
 
@@ -373,6 +475,16 @@ def _looks_like_invoice_column_header_row(line: str) -> bool:
 
 
 def _extract_supplier(lines: list[str]) -> Optional[str]:
+    """
+    Return the issuing supplier / vendor name from document lines.
+
+    Priority
+    ────────
+    1. Explicit "Supplier: <name>" / "Vendor: <name>" inline label.
+    2. Section header ("SUPPLIER DETAILS") followed by the name on the next line.
+    3. Positional: first non-junk line *before* the Bill-To block (capped at 15).
+    4. Legal-entity suffix scan above the Bill-To block.
+    """
     def _is_valid(candidate: str) -> bool:
         candidate = _clean_inline_value(candidate)
         if len(candidate) < 3:
@@ -394,13 +506,13 @@ def _extract_supplier(lines: list[str]) -> Optional[str]:
 
     # Priority 2: section header, name on the next line
     for i, line in enumerate(lines):
-        if _SUPPLIER_HEADER_RE.match(line) and i + 1 < len(lines):
+        if _SUPPLIER_HEADER_RE.match(line.strip()) and i + 1 < len(lines):
             candidate = _clean_inline_value(lines[i + 1])
             if _is_valid(candidate):
                 return candidate
 
-    # Priority 3: positional — issuer lines *before* BILL TO only. Never use the
-    # customer block under "Bill To" as supplier.
+    # Priority 3: positional — issuer lines *before* BILL TO only.
+    # FIX: raised cap from 8 to 15 lines; strictly bound by bill_to_idx.
     _DOCTYPE_HEADING_RE = re.compile(
         r"\b(?:invoice|receipt|purchase\s*order|lpo|delivery\s*note|contract"
         r"|agreement|quotation|expense|imprest|voucher|statement)\b",
@@ -408,24 +520,30 @@ def _extract_supplier(lines: list[str]) -> Optional[str]:
     )
 
     bill_to_idx = _first_bill_to_line_index(lines)
-    header_cap = min(8, bill_to_idx if bill_to_idx is not None else 8)
+    # Search up to 15 lines, but never past the Bill-To block.
+    search_limit = bill_to_idx if bill_to_idx is not None else min(15, len(lines))
+    search_limit = min(search_limit, 15)
 
-    for line in lines[:header_cap]:
-        if _DOCTYPE_HEADING_RE.search(line):
-            m = _DOCTYPE_HEADING_RE.search(line)
-            prefix = line[: m.start()].strip() if m else ""
+    for line in lines[:search_limit]:
+        stripped = line.strip()
+        if not stripped:
+            continue
+        if _DOCTYPE_HEADING_RE.search(stripped):
+            # If a doc-type keyword is in the line, the text BEFORE it might
+            # be the issuer (e.g. "Acme Ltd — Invoice").
+            m = _DOCTYPE_HEADING_RE.search(stripped)
+            prefix = stripped[: m.start()].strip() if m else ""
             if len(prefix) >= 3 and _is_valid(prefix):
                 return prefix[:120]
             continue
-        # Tab- or pipe-separated rows are almost always header grids or line items,
-        # not a lone legal-entity name line.
-        if "\t" in line or "|" in line:
+        # Tab- or pipe-separated rows are header grids or line items.
+        if "\t" in stripped or "|" in stripped:
             continue
-        if _looks_like_invoice_column_header_row(line):
+        if _looks_like_invoice_column_header_row(stripped):
             continue
-        if _is_valid(line) and len(line) >= 5:
-            if not re.match(r"^(?:p\.?\s*o\.?\s*box|po\s+box|\d+\s+\w)", line, re.I):
-                return line.strip()[:120]
+        if _is_valid(stripped) and len(stripped) >= 5:
+            if not re.match(r"^(?:p\.?\s*o\.?\s*box|po\s+box|\d+\s+\w)", stripped, re.I):
+                return stripped[:120]
 
     # Priority 4: legal-entity suffix — only *above* BILL TO
     _ENTITY_TRUNCATE_RE = re.compile(
@@ -435,7 +553,7 @@ def _extract_supplier(lines: list[str]) -> Optional[str]:
     )
     entity_limit = bill_to_idx if bill_to_idx is not None else len(lines)
     for line in lines[:entity_limit]:
-        m = _ENTITY_TRUNCATE_RE.match(line)
+        m = _ENTITY_TRUNCATE_RE.match(line.strip())
         if m:
             candidate = m.group(1).strip()
             if _is_valid(candidate):
@@ -489,13 +607,37 @@ def _labelled_text(label_pattern: str, text: str, max_len: int = 120) -> Optiona
 
 
 def _labelled_code(label_pattern: str, text: str) -> Optional[str]:
-    """Extract an alphanumeric code after a label."""
+    """
+    Extract an alphanumeric code (possibly hyphenated) after a label.
+
+    FIX: wider character class — accepts digit-first tokens, mixed case,
+    hyphens, slashes, underscores, up to 60 characters.  Also handles
+    next-line layout (label on one line, code on the next).
+    """
+    # Same-line: "Account Code: NET-OPS-88"
     m = re.search(
-        label_pattern + r"\s*[:\-]\s*([A-Z0-9][A-Z0-9\-_/]{1,40})",
+        label_pattern + r"\s*[:\-]\s*([A-Z0-9#][A-Z0-9\-_/]{1,59})",
         text, re.I | re.M,
     )
-    return m.group(1).strip() if m else None
+    if m:
+        val = m.group(1).strip().rstrip(".,;:")
+        if val:
+            return val
 
+    # Next-line: label alone on one line, code on the following line
+    m2 = re.search(
+        label_pattern + r"\s*[:\-]?\s*\n\s*([A-Z0-9#][A-Z0-9\-_/]{1,59})",
+        text, re.I,
+    )
+    if m2:
+        val = m2.group(1).strip().rstrip(".,;:")
+        if val:
+            return val
+
+    return None
+
+
+# ── Account code helpers ───────────────────────────────────────────────────────
 
 _ACCOUNT_LABEL_RE = re.compile(
     r"^(?:a/?c|acct\.?|account|gl|g/l|ledger|billing|client|customer|project)"
@@ -517,7 +659,7 @@ _ACCOUNT_GRID_LABEL_RE = re.compile(
     r")$",
     re.I,
 )
-_CODE_VALUE_RE = re.compile(r"^[A-Z0-9][A-Z0-9\-_/]{1,40}$", re.I)
+_CODE_VALUE_RE = re.compile(r"^[A-Z0-9][A-Z0-9\-_/]{1,59}$", re.I)
 
 
 def _split_cells(line: str) -> list[str]:
@@ -651,9 +793,18 @@ _MONTH_RE = (
 
 
 def _is_plausible_gl_account_code(value: str) -> bool:
-    """Reject long all-digit values (bank / customer account numbers)."""
+    """
+    Reject values that look like bank / customer account numbers rather than
+    GL / cost codes.
+
+    FIX: added IBAN-like check (≥ 10 consecutive digits).
+    """
     s = (value or "").strip()
+    # Long all-digit values: bank accounts, phone numbers, etc.
     if len(s) >= 10 and re.fullmatch(r"\d[\d\s,]*", s):
+        return False
+    # IBAN or 10+ consecutive digit strings embedded in otherwise alphanumeric codes
+    if re.search(r"\d{10,}", s):
         return False
     return True
 
@@ -665,18 +816,22 @@ def _try_standard_invoice_grid_pair(header_line: str, value_line: str) -> Option
         ACCOUNT CODE SUPPLIER ID DATE ISSUED DUE DATE
         NET-OPS-88 SUPP-CCS-99 Oct 25, 2024 Nov 24, 2024
 
-    Also handles permuted header column order (values stay left-to-right).
+    FIX: now also handles partial grids (3 of 4 expected columns) so a
+    missing "supplier id" or "due date" column does not abort parsing.
     """
     hdr = _normalise_label_cell(header_line)
-    need = ("supplier id", "due date")
-    if not all(k in hdr for k in need):
-        return None
-    if "date issued" not in hdr and "invoice date" not in hdr:
-        return None
-    if "account code" not in hdr:
+
+    # Require at least one date column and "account code"
+    has_doc_date = "date issued" in hdr or "invoice date" in hdr
+    has_due_date = "due date" in hdr
+    has_acct = "account code" in hdr
+    has_vendor = "supplier id" in hdr
+
+    # Need at minimum account code + one date column
+    if not has_acct or not (has_doc_date or has_due_date):
         return None
 
-    # Column order left-to-right in the header row (tabs / pipes → spaces for regex)
+    # Column order left-to-right in the header row
     header_flat = re.sub(r"[\t|]+", " ", header_line)
     col_keys: list[str] = []
     for m in re.finditer(
@@ -693,50 +848,47 @@ def _try_standard_invoice_grid_pair(header_line: str, value_line: str) -> Option
             col_keys.append("document_date")
         elif "due date" in key:
             col_keys.append("due_date")
-    if len(col_keys) != 4 or len(set(col_keys)) != 4:
+
+    if len(col_keys) < 2 or len(set(col_keys)) != len(col_keys):
         return None
 
-    first_m = re.search(rf"\b({_MONTH_RE}\s+\d{{1,2}},?\s*\d{{4}})\b", value_line, re.I)
-    if not first_m:
-        return None
-    tail = value_line[first_m.end() :]
-    second_m = re.search(rf"\b({_MONTH_RE}\s+\d{{1,2}},?\s*\d{{4}})\b", tail, re.I)
-    if not second_m:
-        return None
+    # Parse dates from value line
+    date_matches: list[re.Match] = list(re.finditer(
+        rf"\b({_MONTH_RE}\s+\d{{1,2}},?\s*\d{{4}})\b"
+        rf"|\b(\d{{4}}[-/]\d{{1,2}}[-/]\d{{1,2}})\b"
+        rf"|\b(\d{{1,2}}[/\-]\d{{1,2}}[/\-]\d{{4}})\b",
+        value_line, re.I,
+    ))
 
-    prefix = value_line[: first_m.start()].strip()
+    # Extract non-date prefix tokens as code values
+    first_date_start = date_matches[0].start() if date_matches else len(value_line)
+    prefix = value_line[:first_date_start].strip()
     code_tokens = re.findall(r"\S+", prefix)
-    if len(code_tokens) < 2:
-        return None
-
-    d_issue_s = first_m.group(1)
-    d_due_s = second_m.group(1)
-    d_a = _parse_date(d_issue_s)
-    d_b = _parse_date(d_due_s)
-    if not d_a or not d_b:
-        return None
-
-    # Map spatial (left-to-right) value cells to header columns
-    code_positions = sorted(
-        i for i, k in enumerate(col_keys) if k in ("account_code", "vendor_code")
-    )
-    date_positions = sorted(
-        i for i, k in enumerate(col_keys) if k in ("document_date", "due_date")
-    )
-    if len(code_positions) != 2 or len(date_positions) != 2:
-        return None
 
     cells: dict[str, str] = {}
-    for pos, tok in zip(code_positions, code_tokens[:2]):
-        cells[col_keys[pos]] = tok
-    for pos, dval in zip(date_positions, (d_a, d_b)):
-        cells[col_keys[pos]] = dval
+
+    # Assign code tokens to code columns in order
+    code_col_keys = [k for k in col_keys if k in ("account_code", "vendor_code")]
+    for i, ck in enumerate(code_col_keys):
+        if i < len(code_tokens):
+            cells[ck] = code_tokens[i]
+
+    # Assign parsed dates to date columns in order
+    date_col_keys = [k for k in col_keys if k in ("document_date", "due_date")]
+    parsed_dates: list[str] = []
+    for dm in date_matches:
+        raw = dm.group(1) or dm.group(2) or dm.group(3) or ""
+        parsed = _parse_date(raw)
+        if parsed:
+            parsed_dates.append(parsed)
+
+    for i, dk in enumerate(date_col_keys):
+        if i < len(parsed_dates):
+            cells[dk] = parsed_dates[i]
 
     out: dict[str, str] = {}
-    if cells.get("account_code"):
-        acct = cells["account_code"]
-        if _is_plausible_gl_account_code(acct):
-            out["account_code"] = acct
+    if cells.get("account_code") and _is_plausible_gl_account_code(cells["account_code"]):
+        out["account_code"] = cells["account_code"]
     if cells.get("vendor_code"):
         out["vendor_code"] = cells["vendor_code"]
     if cells.get("document_date"):
@@ -757,6 +909,15 @@ def _standard_invoice_grid_parse(lines: list[str]) -> dict[str, str]:
 
 
 def _extract_account_code(text: str, lines: list[str]) -> Optional[str]:
+    """
+    Extract GL / cost account code.
+
+    Priority (highest first):
+      1. Standard 4-column invoice grid (most structured)
+      2. Strict "Account Code" / GL label in header grid
+      3. Explicit "Account Code: <value>" labelled line
+      4. Loose "Account" label in header grid (last resort — may match bank accts)
+    """
     std = _standard_invoice_grid_parse(lines)
     if std.get("account_code") and _is_plausible_gl_account_code(std["account_code"]):
         return std["account_code"]
@@ -774,6 +935,7 @@ def _extract_account_code(text: str, lines: list[str]) -> Optional[str]:
     if labelled and _is_plausible_gl_account_code(labelled):
         return labelled
 
+    # Last resort: loose label (higher false-positive risk)
     grid_loose = _extract_code_from_header_grid(lines, _ACCOUNT_LABEL_RE)
     if grid_loose and _is_plausible_gl_account_code(grid_loose):
         return grid_loose
@@ -807,15 +969,10 @@ class DocumentFieldExtractor:
         """
         Identify document type with position + specificity scoring.
 
-        Problem: a reference number like "LPO No: LPO-7732" embedded in an
-        address or email footer will match 'l.p.o.' at a very early position,
-        beating "TAX INVOICE" which appears later in the heading.
-
-        Fix: patterns are ordered from most-specific to least-specific in
+        Patterns are ordered from most-specific to least-specific in
         _DOCTYPE_PATTERNS (LPO before PO before invoice). When two matches
-        are within the first 30 % of the document, prefer the one whose
-        keyword is longer (more specific). Beyond the 30 % threshold, position
-        wins as before so we don't accidentally ignore headings on long docs.
+        are within the first 30% of the document, prefer the longer keyword
+        (more specific). Beyond 30%, position wins.
         """
         best_match = None
         best_pos = len(self.text) + 1
@@ -835,13 +992,11 @@ class DocumentFieldExtractor:
                 best_kw_len = kw_len
                 continue
 
-            # Both matches are in the "heading zone" — prefer the longer keyword
             if pos <= threshold and best_pos <= threshold:
                 if kw_len > best_kw_len:
                     best_match = (dtype, label)
                     best_pos = pos
                     best_kw_len = kw_len
-            # New match is clearly earlier than the best so far
             elif pos < best_pos:
                 best_match = (dtype, label)
                 best_pos = pos
@@ -891,6 +1046,7 @@ class DocumentFieldExtractor:
         # ── Universal supplementary fields ─────────────────────────────────
         self._extract_universal_fields(suggestions)
 
+        # ── Standard invoice grid (wins over heuristics for these fields) ──
         std_grid = _standard_invoice_grid_parse(self.lines)
         for key in ("account_code", "vendor_code", "document_date", "due_date"):
             if std_grid.get(key):
@@ -907,28 +1063,35 @@ class DocumentFieldExtractor:
     def _extract_dates(self, out: dict) -> None:
         text = self.text
 
+        # Determine the character position where the Bill-To block starts so we
+        # can avoid picking up customer dates as document dates.
+        bill_to_idx = _first_bill_to_line_index(self.lines)
+        bill_to_char = (
+            sum(len(ln) + 1 for ln in self.lines[:bill_to_idx])
+            if bill_to_idx is not None else len(text)
+        )
+        # Use only the text before the Bill-To block for date searches
+        pre_bill_text = text[:bill_to_char]
+
         # ── Document / issue date ──────────────────────────────────────────
-        # Try explicit labelled patterns first — most specific to least.
-        # The bare "date" fallback is intentionally excluded here because it
-        # fires on "Due Date" too, making both fields the same value.
         doc_date = _find_first_date(
             text,
             r"(?:invoice\s*date|bill\s*date|document\s*date|issue(?:d)?\s*date"
             r"|date\s*of\s*issue|p\.?o\.?\s*date|order\s*date|receipt\s*date"
-            r"|request\s*date|voucher\s*date)",   # "date" alone removed here
+            r"|request\s*date|voucher\s*date)",
         )
-        # Fallback: bare "Date:" only if it appears BEFORE any "Due Date:" label
+
+        # FIX: bare "Date:" fallback uses pre_bill_text to avoid picking up
+        # customer "Date of Birth" or signature dates.
         if not doc_date:
             bare_m = re.search(
                 r"(?<!\w)date\s*[:\-]\s*" + _DATE_VALUE_PAT,
-                text, re.IGNORECASE,
+                pre_bill_text, re.IGNORECASE,
             )
             due_m = re.search(
                 r"(?:due\s*date|payment\s*(?:due\s*)?date|pay(?:ment)?\s*by)",
-                text, re.IGNORECASE,
+                pre_bill_text, re.IGNORECASE,
             )
-            # Accept the bare "Date:" hit only if it comes before the due-date label
-            # (avoids grabbing "Due Date" value as the document date)
             if bare_m and (due_m is None or bare_m.start() < due_m.start()):
                 doc_date = _parse_date(bare_m.group(1))
 
@@ -983,20 +1146,19 @@ class DocumentFieldExtractor:
             out["delivery_date"] = delivery
 
         # ── Absolute fallback: first plausible date if still nothing found ─
-        # Use a priority order: ISO first (unambiguous), then D/M/Y, then spelled-out.
         if "document_date" not in out:
             fallback_patterns = [
-                r"\b(\d{4}[-/]\d{1,2}[-/]\d{1,2})\b",              # ISO: 2024-07-06
+                r"\b(\d{4}[-/]\d{1,2}[-/]\d{1,2})\b",
                 r"\b(\d{1,2}\s+(?:Jan(?:uary)?|Feb(?:ruary)?|Mar(?:ch)?|Apr(?:il)?|May"
                 r"|Jun(?:e)?|Jul(?:y)?|Aug(?:ust)?|Sep(?:tember)?|Oct(?:ober)?"
-                r"|Nov(?:ember)?|Dec(?:ember)?)\s+\d{4})\b",        # 06 July 2024
+                r"|Nov(?:ember)?|Dec(?:ember)?)\s+\d{4})\b",
                 r"\b((?:Jan(?:uary)?|Feb(?:ruary)?|Mar(?:ch)?|Apr(?:il)?|May"
                 r"|Jun(?:e)?|Jul(?:y)?|Aug(?:ust)?|Sep(?:tember)?|Oct(?:ober)?"
-                r"|Nov(?:ember)?|Dec(?:ember)?)\s+\d{1,2},?\s+\d{4})\b",  # July 6, 2024
-                r"\b(\d{1,2}/\d{1,2}/\d{4})\b",                    # 06/07/2024 (ambiguous, last resort)
+                r"|Nov(?:ember)?|Dec(?:ember)?)\s+\d{1,2},?\s+\d{4})\b",
+                r"\b(\d{1,2}/\d{1,2}/\d{4})\b",
             ]
             for pat in fallback_patterns:
-                for m in re.finditer(pat, text, re.I):
+                for m in re.finditer(pat, pre_bill_text, re.I):
                     parsed = _parse_date(m.group(1))
                     if parsed:
                         out["document_date"] = parsed
@@ -1015,24 +1177,20 @@ class DocumentFieldExtractor:
     def _extract_invoice(self, out: dict) -> None:
         text = self.text
 
-        # Invoice number (more specific than generic reference)
         inv_ref = _extract_reference(text, "invoice")
         if inv_ref:
             out["reference_number"] = inv_ref
 
-        # Tax amounts
         tax, subtotal = _extract_tax_and_subtotal(text)
         if tax:
             out["tax_amount"] = tax
         if subtotal:
             out["subtotal"] = subtotal
 
-        # Account/GL code
         acct = _extract_account_code(text, self.lines)
         if acct:
             out["account_code"] = acct
 
-        # Purchase order reference (cross-ref on invoice)
         po_ref = _labelled_code(
             r"(?:purchase\s*order\s*(?:ref(?:erence)?|no\.?)|p\.?o\.?\s*(?:ref(?:erence)?|no\.?)|order\s*ref)",
             text,
@@ -1040,7 +1198,6 @@ class DocumentFieldExtractor:
         if po_ref:
             out["po_reference"] = po_ref
 
-        # Payment terms
         terms = _labelled_text(
             r"(?:payment\s*terms?|terms?\s*of\s*payment|credit\s*terms?)", text, 80
         )
@@ -1092,7 +1249,6 @@ class DocumentFieldExtractor:
         if contract_ref:
             out["reference_number"] = contract_ref
 
-        # Contract value (may differ from "amount" which is the largest value)
         cv_m = re.search(
             r"(?:contract\s*(?:value|sum|price|amount)|total\s*(?:contract\s*)?value)"
             r"\s*[:\-]?\s*"
@@ -1127,12 +1283,8 @@ class DocumentFieldExtractor:
         if pay_method:
             out["payment_method"] = pay_method
 
-        txn_ref = _labelled_code(
-            r"(?:transaction\s*(?:ref(?:erence)?|no\.?|id)|cheque\s*(?:no\.?|number)"
-            r"|chq\s*no\.?|txn\s*(?:ref|id|no\.?)|m[\-\s]?pesa\s*(?:ref|code|no\.?)"
-            r"|payment\s*ref(?:erence)?)",
-            text,
-        )
+        # FIX: use dedicated transaction-ref extractor (wider pattern)
+        txn_ref = _extract_transaction_ref(text)
         if txn_ref:
             out["transaction_ref"] = txn_ref
 
@@ -1195,7 +1347,6 @@ class DocumentFieldExtractor:
     # ── Imprest extractor ──────────────────────────────────────────────────
 
     def _extract_imprest(self, out: dict) -> None:
-        # Imprest shares most fields with expense claims
         self._extract_expense_claim(out)
         imprest_ref = _extract_reference(self.text, "imprest")
         if imprest_ref:
@@ -1216,7 +1367,6 @@ class DocumentFieldExtractor:
         )
         if payee:
             out["payee"] = payee
-            # Also set supplier if not already found
             if "supplier" not in out:
                 out["supplier"] = payee
 
@@ -1269,7 +1419,6 @@ class DocumentFieldExtractor:
     # ── General fallback ──────────────────────────────────────────────────
 
     def _extract_general(self, out: dict) -> None:
-        """Fallback: apply all common extractors."""
         tax, subtotal = _extract_tax_and_subtotal(self.text)
         if tax:
             out["tax_amount"] = tax
@@ -1286,13 +1435,11 @@ class DocumentFieldExtractor:
         """Fields extracted for all document types (supplements type-specific)."""
         text = self.text
 
-        # Account code (if not already set by type-specific extractor)
         if "account_code" not in out:
             acct = _extract_account_code(text, self.lines)
             if acct:
                 out["account_code"] = acct
 
-        # Cost centre
         if "cost_centre" not in out:
             cc = _labelled_code(
                 r"(?:cost\s*cent(?:re|er)|department\s*code|dept\.?\s*code|budget\s*code)",
@@ -1301,7 +1448,6 @@ class DocumentFieldExtractor:
             if cc:
                 out["cost_centre"] = cc
 
-        # Approved by
         if "approved_by" not in out:
             appr = _labelled_text(
                 r"(?:approved\s*by|authoris(?:ed|ation)\s*(?:by)?|authorized\s*by"
@@ -1311,16 +1457,15 @@ class DocumentFieldExtractor:
             if appr:
                 out["approved_by"] = appr
 
-        # M-PESA / mobile money specific
-        mpesa_ref = _labelled_code(
-            r"(?:m[\-\s]?pesa\s*(?:ref(?:erence)?|code|no\.?|transaction)"
-            r"|mpesa\s*(?:ref(?:erence)?|code|no\.?))",
-            text,
-        )
-        if mpesa_ref:
-            out["transaction_ref"] = mpesa_ref
-            if "payment_method" not in out:
-                out["payment_method"] = "M-PESA"
+        # FIX: use dedicated transaction-ref extractor for M-PESA / mobile money
+        if "transaction_ref" not in out:
+            txn_ref = _extract_transaction_ref(text)
+            if txn_ref:
+                out["transaction_ref"] = txn_ref
+                if "payment_method" not in out:
+                    # If it looks like an M-PESA code, tag the method
+                    if re.search(r"m[\-\s]?pesa|mpesa", text, re.I):
+                        out["payment_method"] = "M-PESA"
 
         # KRA PIN (Kenya Revenue Authority)
         kra_m = re.search(r"\b(?:kra\s*pin|pin\s*no\.?)\s*[:\-]?\s*([A-Z]\d{9}[A-Z])\b", text, re.I)

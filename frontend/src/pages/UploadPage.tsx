@@ -909,10 +909,10 @@ export default function UploadPage({ scanOnly = false }: UploadPageProps) {
       const checksum = await calculateFileSha256(droppedFile);
       const { data: duplicateInfo } = await documentsAPI.duplicateCheck(checksum);
       if (duplicateInfo.exists) {
-        const proceed = window.confirm(
-          "This file already exists in the system. Do you want to upload it again?"
+        toast.warning(
+          "You have already uploaded this document. Open the existing document instead."
         );
-        if (!proceed) { toast.info("Upload cancelled."); return; }
+        return;
       }
     } catch { /* advisory — never block the upload */ }
 

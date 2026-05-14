@@ -64,6 +64,26 @@ class DocumentSearchView(APIView):
         page_size = min(100, int(data.get("page_size", 20)))
 
         s = DocumentIndex.search()
+        user = request.user
+        if not user.has_admin_access:
+            from apps.documents.models import Document
+            from django.db.models import Q as DjangoQ
+
+            accessible_ids = (
+                Document.objects
+                .filter(
+                    DjangoQ(uploaded_by=user)
+                    | DjangoQ(
+                        workflow_instance__tasks__assigned_to=user,
+                        workflow_instance__tasks__status__in=[
+                            "pending", "in_progress", "held", "returned",
+                        ],
+                    )
+                )
+                .values_list("id", flat=True)
+                .distinct()
+            )
+            s = s.filter("ids", values=[str(doc_id) for doc_id in accessible_ids])
 
         # === PARTIAL WORD MATCHING (the fix you asked for) ===
         if search_text:

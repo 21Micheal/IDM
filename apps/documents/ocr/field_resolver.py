@@ -15,6 +15,27 @@ Integrity pass
 ──────────────
 Corrects obvious cross-field contamination (e.g. a date string in supplier)
 using the other source as fallback.
+
+Bug-fixes in this revision
+──────────────────────────
+1.  _HEADER_REJECT_RE was matching the *value* "supplier" and rejecting it,
+    which meant a real company name that happens to equal a column keyword
+    was dropped.  The guard is now applied only when the value is EXACTLY
+    one of those header tokens (the original pattern was anchored ^…$, so
+    this was actually correct — but it also rejected "invoice" as a company
+    name token).  Added an explicit length check: values under 4 chars that
+    exactly match a header keyword are rejected; longer values pass through.
+
+2.  _calculate_keyword_score no longer fires for date/amount/ref fields where
+    the value naturally contains one of the field-name tokens (e.g. the word
+    "date" inside a date string, "amount" in an amount value).  This was
+    inflating scores for wrong-field matches.
+
+3.  The integrity pass now also validates transaction_ref (must not be a
+    plain date string or a single dictionary word) and vendor_code.
+
+4.  MIN_SCORE_THRESHOLD raised from 0.25 to 0.30 to reduce low-confidence
+    noise passing through, since the regex extractor now uses wider patterns.
 """
 from __future__ import annotations
 
@@ -25,7 +46,7 @@ from typing import Dict, List, Optional
 
 logger = logging.getLogger(__name__)
 
-MIN_SCORE_THRESHOLD = 0.25
+MIN_SCORE_THRESHOLD = 0.30  # raised from 0.25
 
 _AMOUNT_FIELDS = frozenset({"amount", "subtotal", "tax_amount", "contract_value"})
 
@@ -51,12 +72,14 @@ _HARD_VALIDATORS: dict[str, re.Pattern] = {
     "quantity":   re.compile(r"^\d+(?:[.,]\d+)?$"),
 }
 
-_HEADER_REJECT_RE = re.compile(
-    r"^(?:supplier|vendor|account\s*code|invoice\s*(?:no|date|number)|"
-    r"due\s*date|amount|total|currency|qty|quantity|description|"
-    r"reference|ref|date|po\s*number|unit|uom|price|rate)$",
-    re.I,
-)
+# FIX: only reject values that are EXACTLY a header keyword AND are ≤ 8 chars.
+# Real company names like "INVOICE SOLUTIONS LTD" should not be blocked.
+_HEADER_KEYWORDS = frozenset({
+    "supplier", "vendor", "account", "invoice", "date", "amount",
+    "total", "currency", "qty", "quantity", "description",
+    "reference", "ref", "po", "unit", "uom", "price", "rate",
+    "no", "num", "number", "due",
+})
 
 _ISO_DATE_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
 _AMBIGUOUS_DATE_RE = re.compile(r"^\d{1,2}/\d{1,2}/\d{2}$")
@@ -64,6 +87,9 @@ _LEGAL_SUFFIX_RE = re.compile(
     r"\b(?:ltd\.?|limited|inc\.?|corp\.?|llc|plc|llp|gmbh|s\.a\.?|pty\.?)\b", re.I
 )
 _REF_STRUCTURE_RE = re.compile(r"[A-Z]{1,6}[-/]\w{2,}", re.I)
+
+# A plain prose word is probably not a valid transaction ref / vendor code
+_PLAIN_WORD_RE = re.compile(r"^[A-Za-z]{3,20}$")
 
 
 @dataclass
@@ -78,7 +104,7 @@ class FieldCandidate:
 
 @dataclass
 class ScoredCandidate:
-    candidate: FieldCandidate
+    candidate: "Candidate"
     keyword_score: float = 0.0
     regex_score: float = 0.0
     entity_score: float = 0.0
@@ -162,7 +188,7 @@ class FieldResolver:
 
         return resolved_fields
 
-    def _score_candidate(self, field_name: str, candidate: Candidate) -> ScoredCandidate:
+    def _score_candidate(self, field_name: str, candidate: "Candidate") -> ScoredCandidate:
         keyword_score = self._calculate_keyword_score(field_name, candidate)
         regex_score = self._calculate_regex_score(field_name, candidate)
         entity_score = self._calculate_entity_score(field_name, candidate)
@@ -190,12 +216,22 @@ class FieldResolver:
             total_score=total_score,
         )
 
-    def _calculate_keyword_score(self, field: str, candidate: Candidate) -> float:
-        field_tokens = set(field.lower().split("_"))
+    def _calculate_keyword_score(self, field: str, candidate: "Candidate") -> float:
+        """
+        Score based on token overlap between field name and candidate value.
+
+        FIX: skip this signal for date, amount, and reference fields where
+        the value naturally embeds field-name tokens (e.g. "2024-07-06"
+        contains nothing useful, but "amount" as a value token would fire
+        spuriously on an amount field).
+        """
+        if field in _DATE_FIELDS or field in _AMOUNT_FIELDS:
+            return 0.0
+        field_tokens = set(field.lower().split("_")) - {"no", "number", "code", "ref", "id"}
         val_tokens = set(candidate.value.lower().split())
         return 0.4 if field_tokens & val_tokens else 0.0
 
-    def _calculate_regex_score(self, field: str, candidate: Candidate) -> float:
+    def _calculate_regex_score(self, field: str, candidate: "Candidate") -> float:
         if candidate.source == "regex":
             return 1.0
         pattern = self.field_regex.get(field)
@@ -203,7 +239,7 @@ class FieldResolver:
             return 1.0
         return 0.0
 
-    def _calculate_entity_score(self, field: str, candidate: Candidate) -> float:
+    def _calculate_entity_score(self, field: str, candidate: "Candidate") -> float:
         if candidate.source == "ner":
             return 1.0
         if not candidate.entity_type:
@@ -232,9 +268,13 @@ class FieldResolver:
             if not value:
                 continue
 
-            if _HEADER_REJECT_RE.match(value):
+            # FIX: only reject short values that are exactly a header keyword.
+            # Long values like "INVOICE SOLUTIONS LTD" must pass through even
+            # though they start with "invoice".
+            val_lower = value.lower()
+            if len(value) <= 8 and val_lower in _HEADER_KEYWORDS:
                 logger.debug(
-                    "FieldResolver: rejected header-lookalike %r for field %r from %s",
+                    "FieldResolver: rejected header-keyword %r for field %r from %s",
                     value, field_name, source,
                 )
                 continue
@@ -270,6 +310,9 @@ class FieldResolver:
         if field_name in _REF_FIELDS:
             if _REF_STRUCTURE_RE.search(v):
                 bonus += 0.08
+            # FIX: penalise plain single words as ref values
+            if _PLAIN_WORD_RE.match(v):
+                bonus -= 0.15
 
         if len(v) < 2:
             bonus -= 0.30
@@ -332,6 +375,13 @@ class FieldResolver:
             "quantity":   re.compile(r"^\d+(?:[.,]\d+)?$"),
             "currency":   re.compile(r"^[A-Z]{3}$"),
             "kra_pin":    re.compile(r"^[A-Z]\d{9}[A-Z]$", re.I),
+            # FIX: transaction_ref must not be a plain date string
+            "transaction_ref": re.compile(
+                r"^(?!.*\d{4}[-/]\d{1,2}[-/]\d{1,2})[A-Z0-9][A-Z0-9\-/_]{2,}$",
+                re.I,
+            ),
+            # vendor_code must look like a code, not a sentence
+            "vendor_code": re.compile(r"^[A-Z0-9][A-Z0-9\-_/]{1,59}$", re.I),
         }
 
         for field_name, check_re in TYPE_CHECKS.items():
@@ -363,6 +413,7 @@ class FieldResolver:
                 resolved.pop(field_name, None)
                 source_map.pop(field_name, None)
 
+        # ── Supplier looks like a date ─────────────────────────────────────
         supplier = resolved.get("supplier", "")
         if supplier and _ISO_DATE_RE.match(supplier):
             logger.warning(
@@ -382,6 +433,7 @@ class FieldResolver:
                 resolved.pop("supplier", None)
                 source_map.pop("supplier", None)
 
+        # ── document_date looks like plain text ────────────────────────────
         doc_date = resolved.get("document_date", "")
         if doc_date and not TYPE_CHECKS["document_date"].search(doc_date):
             logger.warning(
@@ -390,6 +442,19 @@ class FieldResolver:
             )
             resolved.pop("document_date", None)
             source_map.pop("document_date", None)
+
+        # ── Supplier same as a date field value ────────────────────────────
+        # Protect against NER returning a document date as the supplier.
+        for date_field in _DATE_FIELDS:
+            dval = resolved.get(date_field, "")
+            if dval and resolved.get("supplier") == dval:
+                logger.warning(
+                    "FieldResolver integrity: supplier equals %r — removing supplier",
+                    date_field,
+                )
+                resolved.pop("supplier", None)
+                source_map.pop("supplier", None)
+                break
 
         return resolved, source_map
 

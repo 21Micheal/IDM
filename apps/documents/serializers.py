@@ -39,10 +39,16 @@ DOCUMENT_COLUMN_METADATA_KEYS = {
 }
 logger = logging.getLogger(__name__)
 
-def _find_existing_document_for_checksum(checksum: str, exclude_document_id=None):
+def _find_existing_document_for_checksum(
+    checksum: str,
+    exclude_document_id=None,
+    uploaded_by=None,
+):
     if not checksum:
         return None
     qs = Document.objects.filter(checksum=checksum).exclude(file="")
+    if uploaded_by is not None:
+        qs = qs.filter(uploaded_by=uploaded_by)
     if exclude_document_id:
         qs = qs.exclude(id=exclude_document_id)
     return qs.order_by("created_at").first()
@@ -574,14 +580,24 @@ class DocumentUploadSerializer(serializers.ModelSerializer):
         checksum = sha256.hexdigest()
         validated_data["checksum"] = checksum
 
-        # Global de-duplication by checksum:
-        # keep one binary in storage, create many document records that
-        # reference the same stored file path.
-        duplicate_source = _find_existing_document_for_checksum(checksum)
-        if duplicate_source and duplicate_source.file:
-            validated_data["file"] = duplicate_source.file.name
-        else:
-            validated_data["file"] = upload
+        same_user_duplicate = _find_existing_document_for_checksum(
+            checksum,
+            uploaded_by=request.user,
+        )
+        if same_user_duplicate:
+            raise serializers.ValidationError({
+                "file": (
+                    "You have already uploaded this document. "
+                    "Use the existing document instead."
+                ),
+                "duplicate_document_id": str(same_user_duplicate.id),
+                "duplicate_reference_number": same_user_duplicate.reference_number,
+            })
+
+        # Store every user's upload independently. The public file_name remains
+        # the original upload name; storage may suffix the internal path to
+        # avoid collisions with another user's file.
+        validated_data["file"] = upload
 
         try:
             doc = super().create(validated_data)
@@ -595,29 +611,36 @@ class DocumentUploadSerializer(serializers.ModelSerializer):
                 reference_number=validated_data["reference_number"]
             )
 
-        # Second pass to close races where another upload of the same checksum
-        # commits between pre-create lookup and this row insert.
-        canonical_source = duplicate_source or _find_existing_document_for_checksum(
+        # Second pass to close races where this user uploads the same checksum
+        # between the pre-create lookup and this row insert.
+        same_user_duplicate = _find_existing_document_for_checksum(
             checksum,
             exclude_document_id=doc.id,
+            uploaded_by=request.user,
         )
-        if canonical_source and canonical_source.file:
+        if same_user_duplicate:
             previous_storage_name = doc.file.name
-            if previous_storage_name != canonical_source.file.name:
-                Document.objects.filter(id=doc.id).update(file=canonical_source.file.name)
-                doc.file.name = canonical_source.file.name
-                # Delete the just-uploaded blob if nothing else references it.
-                if previous_storage_name and not Document.objects.filter(file=previous_storage_name).exclude(id=doc.id).exists():
-                    try:
-                        if default_storage.exists(previous_storage_name):
-                            default_storage.delete(previous_storage_name)
-                    except Exception:
-                        logger.exception(
-                            "Failed to delete unreferenced duplicate blob %s",
-                            previous_storage_name,
-                        )
-            doc._deduplicated_from_document_id = str(canonical_source.id)
-            doc._deduplicated_from_reference = canonical_source.reference_number
+            doc.delete()
+            file_still_referenced = Document.objects.filter(
+                file=previous_storage_name
+            ).exists()
+            if previous_storage_name and not file_still_referenced:
+                try:
+                    if default_storage.exists(previous_storage_name):
+                        default_storage.delete(previous_storage_name)
+                except Exception:
+                    logger.exception(
+                        "Failed to delete rejected duplicate blob %s",
+                        previous_storage_name,
+                    )
+            raise serializers.ValidationError({
+                "file": (
+                    "You have already uploaded this document. "
+                    "Use the existing document instead."
+                ),
+                "duplicate_document_id": str(same_user_duplicate.id),
+                "duplicate_reference_number": same_user_duplicate.reference_number,
+            })
 
         try:
             doc.tags.set(tags)
