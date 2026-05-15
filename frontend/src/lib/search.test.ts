@@ -38,6 +38,28 @@ test("highlightSearchText marks the matched term", () => {
   assert.match(result, /Invoice/);
 });
 
+test("highlightSearchText escapes snippet html before adding marks", () => {
+  const result = highlightSearchText("<script>alert('x')</script> ACME", "ACME");
+
+  assert.match(result, /&lt;script&gt;/);
+  assert.doesNotMatch(result, /<script>/);
+  assert.match(result, />ACME<\/mark>/);
+});
+
+test("getPreferredHighlights keeps snippets that match any search term", () => {
+  const hit = createSearchHit({
+    highlights: {
+      extracted_text: "The delivery sentence contains cement only.",
+      title: "Invoice summary",
+    },
+  });
+
+  const preferred = getPreferredHighlights(hit, "ACME cement");
+
+  assert.equal(preferred.length, 1);
+  assert.equal(preferred[0][0], "extracted_text");
+});
+
 test("getPreferredHighlights prioritizes content-like fields ahead of metadata", () => {
   const hit = createSearchHit({
     highlights: {

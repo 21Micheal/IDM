@@ -11,6 +11,8 @@ from django_elasticsearch_dsl import Document as ESDocument, Index, fields
 document_index = Index("dms_documents")
 document_index.settings(number_of_shards=1, number_of_replicas=1)
 
+_METADATA_SKIP_KEYS = frozenset({"ocr_suggestions", "ocr_quality"})
+
 
 def _normalize_es_value(value):
     if value is None:
@@ -45,22 +47,51 @@ def _normalize_es_value(value):
     return str(value)
 
 
+def _normalize_personal_tags(value) -> list[str]:
+    if value in (None, ""):
+        return []
+    if isinstance(value, list):
+        raw_items = value
+    else:
+        raw_items = str(value).split(",")
+    tags: list[str] = []
+    for item in raw_items:
+        tag = str(item).strip()
+        if tag and tag not in tags:
+            tags.append(tag)
+    return tags
+
+
 def _prepare_metadata_for_index(metadata):
     """
     Normalize document metadata for Elasticsearch.
 
     OCR suggestions are kept in the database for the UI, but they are not
     needed for search and can be large/nested enough to trip index mapping
-    conflicts. Excluding them here keeps document uploads resilient while the
-    OCR endpoint still reads the full payload from the database.
+    conflicts.
     """
     if not isinstance(metadata, dict):
         return {}
 
     normalized = _normalize_es_value(metadata)
     if isinstance(normalized, dict):
-        normalized.pop("ocr_suggestions", None)
-    return normalized
+        for key in _METADATA_SKIP_KEYS:
+            normalized.pop(key, None)
+    return normalized if isinstance(normalized, dict) else {}
+
+
+def _metadata_search_text(metadata: dict) -> str:
+    """Flatten scalar metadata values into one searchable string."""
+    parts: list[str] = []
+    for key, value in (metadata or {}).items():
+        if key in _METADATA_SKIP_KEYS or key == "personal_tags":
+            continue
+        normalized = _normalize_es_value(value)
+        if isinstance(normalized, str) and normalized.strip():
+            parts.append(normalized.strip())
+        elif isinstance(normalized, list):
+            parts.extend(str(item).strip() for item in normalized if str(item).strip())
+    return " ".join(parts)
 
 
 @document_index.doc_type
@@ -68,17 +99,26 @@ class DocumentIndex(ESDocument):
     title = fields.TextField(analyzer="english")
     reference_number = fields.KeywordField()
     document_type = fields.KeywordField()
-    file_name = fields.KeywordField()
+    file_name = fields.TextField(
+        fields={"keyword": fields.KeywordField()},
+    )
     file_mime_type = fields.KeywordField()
     supplier = fields.TextField(fields={"keyword": fields.KeywordField()})
     amount = fields.FloatField()
     currency = fields.KeywordField()
     document_date = fields.DateField()
+    due_date = fields.DateField()
     status = fields.KeywordField()
     extracted_text = fields.TextField(analyzer="english")
     metadata = fields.ObjectField()
+    metadata_text = fields.TextField(analyzer="english")
     tags = fields.KeywordField(multi=True)
+    personal_tags = fields.KeywordField(multi=True)
+    is_self_upload = fields.BooleanField()
+    current_version = fields.IntegerField()
+    department = fields.KeywordField()
     uploaded_by = fields.KeywordField()
+    uploaded_by_id = fields.KeywordField()
     created_at = fields.DateField()
 
     class Django:
@@ -96,10 +136,38 @@ class DocumentIndex(ESDocument):
         return instance.file_mime_type
 
     def prepare_tags(self, instance):
-        return [t.name for t in instance.tags.all()]
+        if hasattr(instance, "_prefetched_objects_cache") and "tags" in getattr(
+            instance, "_prefetched_objects_cache", {}
+        ):
+            return [t.name for t in instance.tags.all()]
+        return list(instance.tags.values_list("name", flat=True))
 
-    def prepare_uploaded_by(self, instance):
-        return instance.uploaded_by.get_full_name()
+    def prepare_personal_tags(self, instance):
+        meta = instance.metadata if isinstance(instance.metadata, dict) else {}
+        return _normalize_personal_tags(meta.get("personal_tags"))
 
     def prepare_metadata(self, instance):
         return _prepare_metadata_for_index(instance.metadata)
+
+    def prepare_metadata_text(self, instance):
+        meta = _prepare_metadata_for_index(instance.metadata)
+        parts = [_metadata_search_text(meta)]
+        parts.extend(self.prepare_personal_tags(instance))
+        return " ".join(part for part in parts if part)
+
+    def prepare_is_self_upload(self, instance):
+        return bool(instance.is_self_upload)
+
+    def prepare_current_version(self, instance):
+        return int(instance.current_version or 1)
+
+    def prepare_department(self, instance):
+        if instance.department_id and instance.department:
+            return instance.department.name
+        return ""
+
+    def prepare_uploaded_by(self, instance):
+        return instance.uploaded_by.get_full_name() or instance.uploaded_by.email
+
+    def prepare_uploaded_by_id(self, instance):
+        return str(instance.uploaded_by_id)

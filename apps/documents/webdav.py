@@ -587,11 +587,12 @@ class DocumentWebDAVView(View):
                 preview_pdf="",
             )
 
-        # Re-index for search
-        try:
-            from apps.search.tasks import index_document
-            index_document.delay(str(doc.id))
-        except Exception:
-            pass
+        from apps.search.indexing import schedule_document_search_pipeline
+
+        schedule_document_search_pipeline(
+            str(doc.id),
+            reextract_content=True,
+            index_immediately=True,
+        )
 
         return HttpResponse(status=204)

@@ -451,8 +451,13 @@ class DocumentMetadataEditSerializer(serializers.ModelSerializer):
                 )
 
         try:
-            from apps.search.tasks import index_document
-            index_document.delay(str(instance.id))
+            from apps.search.indexing import schedule_document_search_pipeline
+
+            schedule_document_search_pipeline(
+                str(instance.id),
+                reextract_content=False,
+                index_immediately=True,
+            )
         except Exception:
             logger.exception("Failed to queue async reindex for document %s", instance.id)
 
@@ -719,8 +724,13 @@ class DocumentUploadSerializer(serializers.ModelSerializer):
         # search results immediately (with empty extracted_text if OCR hasn't
         # finished yet; the OCR task will re-index when done)
         try:
-            from apps.search.tasks import index_document
-            index_document.delay(str(doc.id))
+            from apps.search.indexing import schedule_document_search_pipeline
+
+            schedule_document_search_pipeline(
+                str(doc.id),
+                reextract_content=False,
+                index_immediately=True,
+            )
         except Exception:
             pass
 

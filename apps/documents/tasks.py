@@ -120,7 +120,7 @@ def _version_preview_storage_name(version_id: str) -> str:
 # ─────────────────────────────────────────────────────────────────────────────
 
 @shared_task(bind=True, max_retries=3, queue="indexing")
-def extract_text(self, document_id: str):
+def extract_text(self, document_id: str, force: bool = False):
     """
     Extract text from a document that was NOT explicitly flagged as scanned.
 
@@ -140,8 +140,8 @@ def extract_text(self, document_id: str):
         logger.warning("extract_text: document %s not found", document_id)
         return
 
-    # Skip only if OCR is already running or complete — NOT on "pending".
-    if doc.ocr_status in (OCRStatus.PROCESSING, OCRStatus.DONE):
+    # Skip only if OCR is already running or complete — unless forced (new file version).
+    if not force and doc.ocr_status in (OCRStatus.PROCESSING, OCRStatus.DONE):
         logger.info(
             "extract_text: skipping %s — OCR already %s",
             document_id, doc.ocr_status,

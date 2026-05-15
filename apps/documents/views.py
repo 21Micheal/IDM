@@ -423,14 +423,15 @@ class DocumentViewSet(AuditMixin, viewsets.ModelViewSet):
         
         self._queue_office_preview(doc)
         self.record_audit("document.version_uploaded", doc, {"version": new_version})
-        
-        # Queue Elasticsearch indexing for the updated document
-        try:
-            from apps.search.tasks import index_document
-            index_document.delay(str(doc.id))
-        except Exception:
-            pass
-            
+
+        from apps.search.indexing import schedule_document_search_pipeline
+
+        schedule_document_search_pipeline(
+            str(doc.id),
+            reextract_content=True,
+            index_immediately=True,
+        )
+
         return Response(DocumentVersionSerializer(version).data, status=201)
 
     @action(detail=True, methods=["post"])
@@ -522,14 +523,15 @@ class DocumentViewSet(AuditMixin, viewsets.ModelViewSet):
                 "deleted_versions": [v.version_number for v in later_versions],
             },
         )
-        
-        # Queue Elasticsearch indexing for the restored document
-        try:
-            from apps.search.tasks import index_document
-            index_document.delay(str(doc.id))
-        except Exception:
-            pass
-            
+
+        from apps.search.indexing import schedule_document_search_pipeline
+
+        schedule_document_search_pipeline(
+            str(doc.id),
+            reextract_content=True,
+            index_immediately=True,
+        )
+
         doc.refresh_from_db()
         return Response(DocumentVersionSerializer(version, context=self.get_serializer_context()).data, status=200)
 

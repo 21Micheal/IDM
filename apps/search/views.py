@@ -1,54 +1,145 @@
-"""Search tasks and API views."""
-from celery import shared_task
-import logging
-from elasticsearch.helpers import BulkIndexError
+"""Search API views."""
+from __future__ import annotations
 
-logger = logging.getLogger(__name__)
+import re
+from collections.abc import Iterable
 
-
-@shared_task(bind=True, max_retries=3, queue="indexing")
-def index_document(self, document_id: str):
-    from apps.documents.models import Document
-    from .documents import DocumentIndex
-    try:
-        doc = Document.objects.get(id=document_id)
-        DocumentIndex().update(doc)
-    except BulkIndexError as exc:
-        logger.error(
-            "Indexing failed for %s: %s",
-            document_id,
-            getattr(exc, "errors", exc),
-        )
-        return
-    except Exception as exc:
-        logger.error("Indexing failed for %s: %s", document_id, exc)
-        raise self.retry(exc=exc, countdown=30)
-
-
-@shared_task(queue="indexing")
-def reindex_all():
-    from apps.documents.models import Document
-    from .documents import DocumentIndex
-    idx = DocumentIndex()
-    qs = Document.objects.all().iterator(chunk_size=500)
-    for doc in qs:
-        try:
-            idx.update(doc)
-        except BulkIndexError as exc:
-            logger.warning(
-                "Reindex error for %s: %s",
-                doc.id,
-                getattr(exc, "errors", exc),
-            )
-        except Exception as exc:
-            logger.warning("Reindex error for %s: %s", doc.id, exc)
-
-
-# ── Search API view ──────────────────────────────────────────────────────────
 from rest_framework.views import APIView
 from rest_framework.response import Response
 from rest_framework.permissions import IsAuthenticated
 from elasticsearch_dsl import Q
+
+SEARCH_TEXT_FIELDS = [
+    "title^6",
+    "reference_number^5",
+    "supplier^4",
+    "metadata_text^3",
+    "tags^4",
+    "personal_tags^4",
+    "file_name^2",
+    "extracted_text^2",
+]
+
+SEARCH_SNIPPET_FIELDS = [
+    "extracted_text",
+    "metadata_text",
+    "supplier",
+    "title",
+    "reference_number",
+    "tags",
+    "personal_tags",
+    "file_name",
+]
+
+_TOKEN_RE = re.compile(r"[\w-]+", re.UNICODE)
+_ES_HIGHLIGHT_TAG_RE = re.compile(r"</?em>")
+_QUERY_STRING_SPECIAL_RE = re.compile(r'([+\-=!(){}\[\]^"~?:\\/]|&&|\|\|)')
+
+
+def _search_terms(search_text: str) -> list[str]:
+    terms: list[str] = []
+    for term in _TOKEN_RE.findall(search_text.lower()):
+        if len(term) < 2 or term in terms:
+            continue
+        terms.append(term)
+    return terms
+
+
+def _wildcard_query(search_text: str) -> str:
+    terms = _search_terms(search_text)
+    escaped_terms = [
+        _QUERY_STRING_SPECIAL_RE.sub(r"\\\1", term)
+        for term in terms
+    ]
+    return " AND ".join(f"*{term}*" for term in escaped_terms)
+
+
+def _as_searchable_text(value) -> str:
+    if value in (None, ""):
+        return ""
+    if isinstance(value, str):
+        return value
+    if isinstance(value, Iterable) and not isinstance(value, (dict, bytes, bytearray)):
+        return " ".join(str(item) for item in value if item not in (None, ""))
+    return str(value)
+
+
+def _find_match_index(text: str, search_text: str, terms: list[str]) -> int:
+    lowered = text.lower()
+    phrase = search_text.strip().lower()
+    if phrase:
+        phrase_index = lowered.find(phrase)
+        if phrase_index != -1:
+            return phrase_index
+
+    indexes = [lowered.find(term) for term in terms]
+    indexes = [index for index in indexes if index != -1]
+    return min(indexes) if indexes else -1
+
+
+def _sentence_around_match(text: str, match_index: int, max_length: int = 260) -> str:
+    if match_index < 0:
+        return ""
+
+    before = text.rfind(".", 0, match_index)
+    before = max(before, text.rfind("!", 0, match_index), text.rfind("?", 0, match_index), text.rfind("\n", 0, match_index))
+    start = before + 1 if before != -1 else 0
+
+    after_candidates = [
+        index for index in (
+            text.find(".", match_index),
+            text.find("!", match_index),
+            text.find("?", match_index),
+            text.find("\n", match_index),
+        )
+        if index != -1
+    ]
+    end = min(after_candidates) + 1 if after_candidates else len(text)
+
+    if end - start > max_length:
+        half_context = max_length // 2
+        start = max(0, match_index - half_context)
+        end = min(len(text), match_index + half_context)
+
+    snippet = re.sub(r"\s+", " ", text[start:end]).strip()
+    if start > 0:
+        snippet = f"... {snippet}"
+    if end < len(text):
+        snippet = f"{snippet} ..."
+    return snippet
+
+
+def _build_source_highlights(hit, search_text: str) -> dict[str, str]:
+    terms = _search_terms(search_text)
+    if not terms and not search_text.strip():
+        return {}
+
+    highlights: dict[str, str] = {}
+    for field in SEARCH_SNIPPET_FIELDS:
+        source_text = _as_searchable_text(getattr(hit, field, ""))
+        if not source_text:
+            continue
+
+        match_index = _find_match_index(source_text, search_text, terms)
+        if match_index == -1:
+            continue
+
+        snippet = _sentence_around_match(source_text, match_index)
+        if snippet:
+            highlights[field] = snippet
+
+    return highlights
+
+
+def _clean_es_highlights(raw_highlights: dict[str, list[str] | str]) -> dict[str, str]:
+    cleaned = {}
+    for field, value in raw_highlights.items():
+        fragments = value if isinstance(value, list) else [value]
+        text = " ... ".join(str(fragment) for fragment in fragments if fragment)
+        text = _ES_HIGHLIGHT_TAG_RE.sub("", text)
+        if text:
+            cleaned[field] = text
+    return cleaned
 
 
 class DocumentSearchView(APIView):
@@ -85,48 +176,55 @@ class DocumentSearchView(APIView):
             )
             s = s.filter("ids", values=[str(doc_id) for doc_id in accessible_ids])
 
-        # === PARTIAL WORD MATCHING (the fix you asked for) ===
         if search_text:
+            wildcard_query = _wildcard_query(search_text)
             s = s.query(
                 Q(
                     "bool",
                     should=[
-                        # Multi-match with fuzziness for typo tolerance
                         Q(
                             "multi_match",
                             query=search_text,
-                            fields=[
-                                "title^4",
-                                "reference_number^3",
-                                "supplier^2",
-                                "extracted_text",
-                                "metadata.personal_tags^2",
-                                "metadata.supplier",
-                                "metadata.reference_number",
-                                "metadata.account_code",
-                                "metadata.cost_centre",
-                                "metadata.vendor_code",
-                                "metadata.po_reference",
-                                "metadata.transaction_ref",
-                                "metadata.kra_pin",
-                                "metadata.vat_number",
-                                "metadata.payment_terms",
-                                "metadata.payment_method",
-                            ],
-                            fuzziness="AUTO",
-                            operator="or",
+                            fields=SEARCH_TEXT_FIELDS,
+                            type="phrase",
+                            boost=4,
                         ),
-                        # Prefix matching for incomplete words (pepp → pepper)
+                        Q(
+                            "multi_match",
+                            query=search_text,
+                            fields=SEARCH_TEXT_FIELDS,
+                            operator="and",
+                        ),
+                        Q(
+                            "multi_match",
+                            query=search_text,
+                            fields=SEARCH_TEXT_FIELDS,
+                            fuzziness="AUTO",
+                            operator="and",
+                        ),
+                        *(
+                            [
+                                Q(
+                                    "query_string",
+                                    query=wildcard_query,
+                                    fields=SEARCH_TEXT_FIELDS,
+                                    default_operator="AND",
+                                    analyze_wildcard=True,
+                                )
+                            ]
+                            if wildcard_query
+                            else []
+                        ),
                         Q("prefix", title=search_text.lower()),
                         Q("prefix", reference_number=search_text.lower()),
                         Q("prefix", supplier=search_text.lower()),
-                        Q("prefix", extracted_text=search_text.lower()),
+                        Q("prefix", **{"tags": search_text.lower()}),
+                        Q("prefix", **{"personal_tags": search_text.lower()}),
                     ],
                     minimum_should_match=1,
                 )
             )
 
-        # === Filters (unchanged but kept clean) ===
         if filters.get("document_type"):
             s = s.filter("term", document_type=filters["document_type"])
 
@@ -135,6 +233,9 @@ class DocumentSearchView(APIView):
             if isinstance(statuses, str):
                 statuses = [statuses]
             s = s.filter("terms", status=statuses)
+
+        if filters.get("is_self_upload") is not None:
+            s = s.filter("term", is_self_upload=bool(filters["is_self_upload"]))
 
         if filters.get("date_from"):
             s = s.filter("range", document_date={"gte": filters["date_from"]})
@@ -158,12 +259,27 @@ class DocumentSearchView(APIView):
                 tags = [tags]
             s = s.filter("terms", tags=tags)
 
-        # Pagination
+        if filters.get("personal_tags"):
+            personal_tags = filters["personal_tags"]
+            if isinstance(personal_tags, str):
+                personal_tags = [personal_tags]
+            s = s.filter("terms", personal_tags=personal_tags)
+
         start = (page - 1) * page_size
         s = s[start : start + page_size]
 
-        # Highlighting
-        s = s.highlight("title", "extracted_text", fragment_size=180, number_of_fragments=2)
+        s = s.highlight(
+            "title",
+            "extracted_text",
+            "metadata_text",
+            "tags",
+            "personal_tags",
+            fragment_size=180,
+            number_of_fragments=2,
+            boundary_scanner="sentence",
+            order="score",
+            require_field_match=True,
+        )
 
         response = s.execute()
 
@@ -172,12 +288,11 @@ class DocumentSearchView(APIView):
             highlight_dict = {}
             if hasattr(hit.meta, "highlight"):
                 try:
-                    highlight_dict = {
-                        k: " ... ".join(v)
-                        for k, v in hit.meta.highlight.to_dict().items()
-                    }
+                    highlight_dict = _clean_es_highlights(hit.meta.highlight.to_dict())
                 except Exception:
                     highlight_dict = {}
+            source_highlights = _build_source_highlights(hit, search_text) if search_text else {}
+            highlight_dict = {**highlight_dict, **source_highlights}
 
             hits.append({
                 "id": hit.meta.id,
@@ -191,6 +306,9 @@ class DocumentSearchView(APIView):
                 "amount": getattr(hit, "amount", None),
                 "status": getattr(hit, "status", ""),
                 "document_date": getattr(hit, "document_date", None),
+                "is_self_upload": getattr(hit, "is_self_upload", False),
+                "tags": list(getattr(hit, "tags", []) or []),
+                "personal_tags": list(getattr(hit, "personal_tags", []) or []),
                 "highlights": highlight_dict,
             })
 

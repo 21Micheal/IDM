@@ -77,7 +77,7 @@ INSTALLED_APPS = [
     "apps.documents",
     "apps.workflows",
     "apps.audit",
-    "apps.search",
+    "apps.search.apps.SearchConfig",
     "apps.notifications",
     "apps.chat",
 ]
