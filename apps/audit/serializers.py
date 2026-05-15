@@ -90,7 +90,7 @@ class AuditLogSerializer(serializers.ModelSerializer):
             "document.version_preview_queued": "queued version preview generation for",
             "document.edit_lock_acquired": "started editing",
             "document.edit_lock_released": "stopped editing",
-            "document.previewed": "opened a watermarked preview of",
+            "document.previewed": "opened a preview of",
             "document.printed": "used the browser print dialog for",
             "permission.changed": "changed permissions on",
             "audit.exported": "exported",
