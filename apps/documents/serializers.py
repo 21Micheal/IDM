@@ -703,6 +703,16 @@ class DocumentUploadSerializer(serializers.ModelSerializer):
                     ocr_status=OCRStatus.PENDING
                 )
                 ocr_document.delay(str(doc.id))
+                from apps.audit.models import AuditEvent
+                from apps.audit.utils import record_audit_event
+
+                record_audit_event(
+                    AuditEvent.DOCUMENT_OCR_QUEUED,
+                    actor=request.user,
+                    obj=doc,
+                    request=request,
+                    changes={"source": "upload", "is_scanned": True},
+                )
             except Exception as exc:
                 import logging
                 logging.getLogger(__name__).error(

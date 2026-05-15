@@ -268,7 +268,7 @@ class DocumentViewSet(AuditMixin, viewsets.ModelViewSet):
             audit_changes["linked_to_document_id"] = duplicate_source_id
             if duplicate_source_reference:
                 audit_changes["linked_to_reference_number"] = duplicate_source_reference
-        self.record_audit("document.uploaded", doc, audit_changes)
+        self.record_audit(AuditEvent.DOCUMENT_CREATED, doc, audit_changes)
         doc.refresh_from_db()
         return Response(
             DocumentDetailSerializer(doc, context=self.get_serializer_context()).data,
@@ -808,7 +808,7 @@ class DocumentViewSet(AuditMixin, viewsets.ModelViewSet):
         cache.delete(_preview_start_cache_key(str(doc.id)))
         doc.refresh_from_db()
         self._queue_office_preview(doc)
-        self.record_audit("document.preview_triggered", doc)
+        self.record_audit(AuditEvent.DOCUMENT_PREVIEW_QUEUED, doc)
 
         return Response({
             "detail": "Preview generation queued.",
@@ -858,7 +858,7 @@ class DocumentViewSet(AuditMixin, viewsets.ModelViewSet):
         cache.delete(_version_preview_error_cache_key(str(version.id)))
         cache.delete(_version_preview_start_cache_key(str(version.id)))
         self._queue_office_version_preview(version)
-        self.record_audit("document.version_preview_triggered", doc, {"version_id": str(version.id)})
+        self.record_audit(AuditEvent.DOCUMENT_VERSION_PREVIEW_QUEUED, doc, {"version_id": str(version.id)})
 
         return Response({
             "detail": "Version preview generation queued.",
@@ -929,7 +929,7 @@ class DocumentViewSet(AuditMixin, viewsets.ModelViewSet):
             fragment="",
         ))
 
-        self.record_audit("document.edit_lock_acquired", doc)
+        self.record_audit(AuditEvent.DOCUMENT_EDIT_LOCK_ACQUIRED, doc)
 
         return Response({
             "token":       jwt_token,   # JWT is what DocumentViewer.tsx reads
@@ -1021,7 +1021,7 @@ nohup "$SOFFICE" "$OPEN_URL" >/dev/null 2>&1 &
         script = self._get_open_script_content(doc.file_name, open_url)
         response = HttpResponse(script, content_type="text/x-shellscript; charset=utf-8")
         response["Content-Disposition"] = f'attachment; filename="open-{doc.id}.sh"'
-        self.record_audit("document.edit_lock_acquired", doc)
+        self.record_audit(AuditEvent.DOCUMENT_EDIT_LOCK_ACQUIRED, doc)
         return response
 
     def _get_install_script_content(self, app_origin):
@@ -1100,7 +1100,7 @@ echo "✓ DocVault LibreOffice integration installed."
         if not doc.release_lock(user=request.user, force=force):
             return Response({"detail": "Lock held by another user."}, status=423)
 
-        self.record_audit("document.edit_lock_released", doc)
+        self.record_audit(AuditEvent.DOCUMENT_EDIT_LOCK_RELEASED, doc)
         return Response({"detail": "Lock released."})
 
     @action(detail=True, methods=["post"])
@@ -1120,7 +1120,7 @@ echo "✓ DocVault LibreOffice integration installed."
 
         Document.objects.filter(id=doc.id).update(ocr_status=OCRStatus.PENDING, is_scanned=True)
         ocr_document.delay(str(doc.id))
-        self.record_audit("document.ocr_queued", doc)
+        self.record_audit(AuditEvent.DOCUMENT_OCR_QUEUED, doc)
         return Response({"detail": "OCR queued.", "ocr_status": OCRStatus.PENDING})
 
     @action(detail=True, methods=["get"])
@@ -1255,9 +1255,11 @@ echo "✓ DocVault LibreOffice integration installed."
                         raise ValueError("Only approved documents can be archived.")
                     doc.status = DocumentStatus.ARCHIVED
                     doc.save(update_fields=["status", "updated_at"])
+                    self.record_audit(AuditEvent.DOCUMENT_ARCHIVED, doc, {"bulk_action": True, "comment": comment})
                 elif act == "void":
                     doc.status = DocumentStatus.VOID
                     doc.save(update_fields=["status", "updated_at"])
+                    self.record_audit(AuditEvent.DOCUMENT_DELETED, doc, {"bulk_action": True, "comment": comment})
                 results.append({"id": str(doc_id), "success": True})
             except (WorkflowError, ValueError, AttributeError) as exc:
                 results.append({"id": str(doc_id), "success": False, "detail": str(exc)})

@@ -8,6 +8,8 @@ from rest_framework.parsers import FormParser, JSONParser, MultiPartParser
 from rest_framework.response import Response
 
 from apps.accounts.models import GroupAction
+from apps.audit.models import AuditEvent
+from apps.audit.utils import record_audit_event
 
 from .bulk_upload import create_bulk_upload_documents, sync_bulk_upload_status
 from .models import BulkUpload, BulkUploadStatus, DocumentType
@@ -128,5 +130,13 @@ class BulkUploadViewSet(viewsets.GenericViewSet):
         )
         serializer.is_valid(raise_exception=True)
         bulk_upload = serializer.save()
+        for doc in bulk_upload.documents.all():
+            record_audit_event(
+                AuditEvent.DOCUMENT_BULK_REVIEWED,
+                actor=request.user,
+                obj=doc,
+                request=request,
+                changes={"bulk_upload_id": str(bulk_upload.id)},
+            )
         out = BulkUploadDetailSerializer(bulk_upload, context={"request": request})
         return Response(out.data)

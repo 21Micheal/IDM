@@ -14,6 +14,41 @@ export default function AuditPage() {
   const [page, setPage] = useState(1);
 
   const PAGE_SIZE = 10;
+  const eventOptions = [
+    ["document.created", "Document Created"],
+    ["document.bulk_uploaded", "Bulk Uploaded"],
+    ["document.bulk_reviewed", "Bulk Upload Reviewed"],
+    ["document.viewed", "Document Viewed"],
+    ["document.previewed", "Document Previewed"],
+    ["document.downloaded", "Document Downloaded"],
+    ["document.printed", "Document Printed"],
+    ["document.updated", "Document Updated"],
+    ["document.deleted", "Document Deleted"],
+    ["document.archived", "Document Archived"],
+    ["document.submitted", "Document Submitted"],
+    ["document.version_uploaded", "Version Uploaded"],
+    ["document.version_restored", "Version Restored"],
+    ["document.preview_queued", "Preview Queued"],
+    ["document.version_preview_queued", "Version Preview Queued"],
+    ["document.ocr_queued", "OCR Queued"],
+    ["document.ocr_completed", "OCR Completed"],
+    ["document.ocr_failed", "OCR Failed"],
+    ["document.edit_lock_acquired", "Edit Lock Acquired"],
+    ["document.edit_lock_released", "Edit Lock Released"],
+    ["workflow.approved", "Workflow Approved"],
+    ["workflow.rejected", "Workflow Rejected"],
+    ["workflow.returned", "Workflow Returned"],
+    ["workflow.held", "Workflow Held"],
+    ["workflow.released", "Workflow Released"],
+    ["workflow.cancelled", "Workflow Cancelled"],
+    ["workflow.delegated", "Workflow Delegated"],
+    ["workflow.reassigned", "Workflow Reassigned"],
+    ["user.login", "User Login"],
+    ["user.login_failed", "Login Failed"],
+    ["user.mfa_enabled", "MFA Enabled"],
+    ["permission.changed", "Permission Changed"],
+    ["audit.exported", "Audit Exported"],
+  ] as const;
 
   const { data, isLoading } = useQuery({
     queryKey: ["audit-logs", searchTerm, eventFilter, dateFrom, dateTo, page],
@@ -38,10 +73,12 @@ export default function AuditPage() {
   const eventColor = (event: string) => {
     if (event.includes("deleted") || event.includes("rejected") || event.includes("failed"))
       return "bg-destructive/10 text-destructive";
-    if (event.includes("approved") || event.includes("created") || event.includes("success"))
+    if (event.includes("approved") || event.includes("created") || event.includes("completed") || event.includes("success"))
       return "bg-teal/15 text-teal";
-    if (event.includes("login") || event.includes("viewed") || event.includes("downloaded"))
+    if (event.includes("login") || event.includes("viewed") || event.includes("previewed") || event.includes("downloaded") || event.includes("exported"))
       return "bg-accent/15 text-accent";
+    if (event.includes("workflow") || event.includes("submitted") || event.includes("queued"))
+      return "bg-primary/10 text-primary";
     return "bg-muted text-muted-foreground";
   };
 
@@ -141,15 +178,9 @@ export default function AuditPage() {
               className="input"
             >
               <option value="">All Events</option>
-              <option value="document.created">Document Created</option>
-              <option value="document.viewed">Document Viewed</option>
-              <option value="document.downloaded">Document Downloaded</option>
-              <option value="document.deleted">Document Deleted</option>
-              <option value="workflow.approved">Workflow Approved</option>
-              <option value="workflow.rejected">Workflow Rejected</option>
-              <option value="user.login">User Login</option>
-              <option value="user.login_failed">Login Failed</option>
-              <option value="user.created">User Created</option>
+              {eventOptions.map(([value, label]) => (
+                <option key={value} value={value}>{label}</option>
+              ))}
             </select>
           </div>
 
@@ -199,7 +230,7 @@ export default function AuditPage() {
                 </tr>
               ))}
 
-              {data?.results?.map((log: { id: string; event: string; actor_name?: string; actor_email?: string; object_type?: string; object_repr?: string; ip_address?: string; timestamp: string }) => (
+              {data?.results?.map((log: { id: string; event: string; summary?: string; actor_name?: string; actor_email?: string; object_type?: string; object_repr?: string; ip_address?: string; timestamp: string }) => (
                 <tr key={log.id} className="hover:bg-muted/40 transition-colors">
                   <td className="px-6 py-4">
                     <span className={`inline-flex items-center px-2.5 py-1 rounded-full text-xs font-medium ${eventColor(log.event)}`}>
@@ -213,6 +244,7 @@ export default function AuditPage() {
                     </div>
                   </td>
                   <td className="px-6 py-4 text-muted-foreground">
+                    {log.summary && <div className="mb-1 text-foreground">{log.summary}</div>}
                     {log.object_type && (
                       <span className="font-mono text-xs bg-muted px-2 py-0.5 rounded text-foreground">
                         {log.object_type}

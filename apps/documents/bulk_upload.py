@@ -9,6 +9,8 @@ from django.db import transaction
 
 from .models import BulkUpload, BulkUploadStatus, Document, OCRStatus
 from .serializers import DocumentUploadSerializer
+from apps.audit.models import AuditEvent
+from apps.audit.utils import record_audit_event
 
 
 def document_title_from_filename(filename: str) -> str:
@@ -120,6 +122,17 @@ def create_bulk_upload_documents(
                 doc.tags.add(*tag_ids)
             bulk_upload.successful_uploads += 1
             bulk_upload.save(update_fields=["successful_uploads", "updated_at"])
+            record_audit_event(
+                AuditEvent.DOCUMENT_BULK_UPLOADED,
+                actor=request.user,
+                obj=doc,
+                request=request,
+                changes={
+                    "bulk_upload_id": str(bulk_upload.id),
+                    "file_name": doc.file_name,
+                    "is_scanned": is_scanned,
+                },
+            )
         except Exception:
             bulk_upload.failed_uploads += 1
             bulk_upload.save(update_fields=["failed_uploads", "updated_at"])

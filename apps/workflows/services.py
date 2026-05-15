@@ -353,6 +353,14 @@ class WorkflowService:
         doc        = instance.document
         doc.status = DocumentStatus.DRAFT
         doc.save(update_fields=["status", "updated_at"])
+        AuditLog.objects.create(
+            event=AuditEvent.WORKFLOW_CANCELLED,
+            actor=actor,
+            object_type=doc.__class__.__name__,
+            object_id=str(doc.pk),
+            object_repr=str(doc)[:255],
+            changes={"workflow_instance_id": str(instance.id)},
+        )
 
     # ── Internals ──────────────────────────────────────────────────────────
 
