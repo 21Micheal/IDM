@@ -959,7 +959,7 @@ export default function DashboardPage() {
         <section className="rounded-xl border border-border bg-card p-5 flex flex-col" style={{ boxShadow: "var(--shadow-card)" }}>
           <div className="flex items-center justify-between">
             <h2 className="text-sm font-semibold text-foreground">
-              {user?.has_admin_access ? "Audit Trail" : "My Activity"}
+              {user?.has_admin_access ? "Audit Trail" : "Document Activity"}
             </h2>
             <span className="rounded-full bg-teal/10 px-2 py-0.5 text-[10px] font-medium text-teal">Live</span>
           </div>

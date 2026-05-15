@@ -121,20 +121,21 @@ class MyActivityListView(generics.ListAPIView):
             Document.objects.filter(Q(uploaded_by=user) | Q(owned_by=user))
             .values_list("id", flat=True)
         )
-        doc_ids = [str(doc_id) for doc_id in doc_ids]
         task_doc_ids = list(
             WorkflowTask.objects.filter(assigned_to=user)
             .values_list("workflow_instance__document_id", flat=True)
         )
-        task_doc_ids = [str(doc_id) for doc_id in task_doc_ids]
+
+        tracked_doc_ids = [str(doc_id) for doc_id in set(doc_ids + task_doc_ids)]
+        if not tracked_doc_ids:
+            return AuditLog.objects.none()
 
         return (
             AuditLog.objects
             .filter(
-                Q(actor=user)
-                | Q(object_type="Document", object_id__in=doc_ids)
-                | Q(object_type="Document", object_id__in=task_doc_ids)
+                Q(object_type="Document", object_id__in=tracked_doc_ids)
             )
+            .exclude(actor=user)
             .select_related("actor")
             .order_by("-timestamp")
         )
