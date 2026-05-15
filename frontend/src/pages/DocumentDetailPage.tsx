@@ -287,6 +287,7 @@ export default function DocumentDetailPage() {
   const canArchive = hasAdminAccess || permissions.includes("archive");
   const canRestoreVersion = hasAdminAccess || permissions.includes("upload");
   const canReOcr = hasAdminAccess || (isScanned && permissions.includes("upload"));
+  const canDownload = hasAdminAccess || permissions.includes("download");
 
   const canSubmit =
     !isPersonal &&
@@ -634,14 +635,16 @@ export default function DocumentDetailPage() {
                       {v.change_summary && <p className="text-xs text-foreground/80 mt-1 italic">"{v.change_summary}"</p>}
                     </div>
                     <div className="flex items-center gap-2 flex-shrink-0">
+                      {canDownload && v.file_url && (
                       <a
-                        href={v.file_url ?? `/api/v1/documents/webdav/${doc.id}/${encodeURIComponent(v.file_name)}?version=${v.version_number}`}
+                        href={v.file_url}
                         download={v.file_name}
                         title="Download this version"
                         className="btn-secondary text-xs px-2 py-1 flex items-center gap-1"
                       >
                         <Download className="w-3.5 h-3.5" />
                       </a>
+                      )}
                       {!isCurrent && canRestoreVersion && (
                         awaitConfirm ? (
                           <div className="flex items-center gap-1.5 rounded-lg border border-primary/40 bg-primary/10 px-2.5 py-1.5">

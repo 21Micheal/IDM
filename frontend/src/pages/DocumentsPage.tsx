@@ -15,7 +15,7 @@ import { documentsAPI, documentTypesAPI, normalizeListResponse } from "@/service
 import {
   FileText, UploadCloud, Lock, Users, LayoutList,
   Archive, Trash2, Loader2, CheckSquare, Square, X, CheckCircle, XCircle,
-  Search as SearchIcon, SlidersHorizontal, Eye,
+  Search as SearchIcon, SlidersHorizontal, Eye, Check,
 } from "lucide-react";
 import { format } from "date-fns";
 import { cn } from "../lib/utils";
@@ -29,12 +29,6 @@ import { preloadDocumentWorkspace } from "@/lib/routePreload";
 
 const PAGE_SIZE = 10;
 type BulkAction = "approve" | "reject" | "archive" | "void";
-type Tab = "all" | "workflow";
-
-const TABS: { id: Tab; label: string; icon: React.ReactNode; tip: string }[] = [
-  { id: "all",       label: "All Documents", icon: <LayoutList className="w-4 h-4" />, tip: "Every workflow document you have access to" },
-  { id: "workflow",  label: "Workflow",      icon: <Users className="w-4 h-4" />,      tip: "Documents going through an approval process" },
-];
 
 const STATUS_OPTIONS = ["draft", "pending_approval", "approved", "rejected", "archived", "void"];
 
@@ -228,7 +222,6 @@ export default function DocumentsPage({ personalOnly = false }: DocumentsPagePro
   const normalizedStatusFromUrl = STATUS_OPTIONS.includes(statusFromUrl ?? "") ? (statusFromUrl ?? "") : "";
   const isArchiveView = normalizedStatusFromUrl === "archived";
 
-  const [activeTab, setActiveTab] = useState<Tab>("workflow");
   const [search, setSearch] = useState("");
   const [statusFilter, setStatusFilter] = useState(normalizedStatusFromUrl);
   const [typeFilter, setTypeFilter] = useState("");
@@ -244,9 +237,6 @@ export default function DocumentsPage({ personalOnly = false }: DocumentsPagePro
 
   useEffect(() => {
     setStatusFilter(normalizedStatusFromUrl);
-    if (normalizedStatusFromUrl) {
-      setActiveTab(normalizedStatusFromUrl === "archived" ? "all" : "workflow");
-    }
     if (normalizedStatusFromUrl === "archived" || personalOnly) {
       setSearch("");
       setTypeFilter("");
@@ -286,7 +276,7 @@ export default function DocumentsPage({ personalOnly = false }: DocumentsPagePro
   if (!isArchiveView && personalOnly && personalTagFilter) params.personal_tag = personalTagFilter;
 
   const { data, isLoading } = useQuery({
-    queryKey: ["documents", activeTab, params],
+    queryKey: ["documents", "list", params],
     queryFn: () => documentsAPI.list(params),
     select: (r) => r.data,
     ...QUERY_SHORT_STALE,
@@ -320,19 +310,19 @@ export default function DocumentsPage({ personalOnly = false }: DocumentsPagePro
 
     if (page < totalPages) {
       queryClient.prefetchQuery({
-        queryKey: ["documents", activeTab, { ...baseParams, page: page + 1 }],
+        queryKey: ["documents", "list", { ...baseParams, page: page + 1 }],
         queryFn: () => documentsAPI.list({ ...baseParams, page: page + 1 }),
         staleTime: 30_000,
       });
     }
     if (page > 1) {
       queryClient.prefetchQuery({
-        queryKey: ["documents", activeTab, { ...baseParams, page: page - 1 }],
+        queryKey: ["documents", "list", { ...baseParams, page: page - 1 }],
         queryFn: () => documentsAPI.list({ ...baseParams, page: page - 1 }),
         staleTime: 30_000,
       });
     }
-  }, [data?.count, queryClient, activeTab, debouncedSearch, statusFilter, typeFilter, supplierFilter, sort, sortDir, page, personalTagFilter, isArchiveView, personalOnly]);
+  }, [data?.count, queryClient, debouncedSearch, statusFilter, typeFilter, supplierFilter, sort, sortDir, page, personalTagFilter, isArchiveView, personalOnly]);
 
   const archiveMutation = useMutation({
     mutationFn: (id: string) => documentsAPI.archive(id),
@@ -363,17 +353,6 @@ export default function DocumentsPage({ personalOnly = false }: DocumentsPagePro
     onError: () => toast.error("Bulk action failed"),
   });
 
-  const switchTab = (tab: Tab) => {
-    clearUrlStatusFilter();
-    setActiveTab(tab);
-    setSearch("");
-    setStatusFilter("");
-    setTypeFilter("");
-    setSupplierFilter("");
-    setPersonalTagFilter("");
-    setPage(1);
-    setSelectedIds([]);
-  };
 
   const toggleAll = () => {
     const pageIds = docs.map((d: Document) => d.id);
@@ -491,27 +470,6 @@ export default function DocumentsPage({ personalOnly = false }: DocumentsPagePro
         </div>
       )}
 
-      {/* Tabs */}
-      {!isArchiveView && !personalOnly && (
-        <div className="flex items-end gap-0.5 border-b border-border">
-          {TABS.map((tab) => (
-            <button
-              key={tab.id}
-              title={tab.tip}
-              onClick={() => switchTab(tab.id)}
-              className={cn(
-                "inline-flex items-center gap-2 px-5 py-2.5 text-sm font-medium rounded-t-lg border border-transparent transition-all -mb-px",
-                activeTab === tab.id
-                  ? "border-border border-b-card bg-card text-foreground shadow-sm"
-                  : "text-muted-foreground hover:text-foreground hover:bg-muted/50"
-              )}
-            >
-              {tab.icon}
-              {tab.label}
-            </button>
-          ))}
-        </div>
-      )}
 
       {/* Personal tab explainer */}
       {!isArchiveView && personalOnly && (
@@ -691,10 +649,10 @@ export default function DocumentsPage({ personalOnly = false }: DocumentsPagePro
               <tr className="border-b border-border bg-muted/30">
                 {selectionEnabled && (
                   <th className="px-4 py-3 w-12">
-                    <button onClick={toggleAll} className="text-muted-foreground hover:text-accent transition-colors">
+                    <button onClick={toggleAll} className="text-muted-foreground hover:text-accent transition-colors" title="Select all on page">
                       {allChecked
-                        ? <CheckSquare className="w-4.5 h-4.5 text-accent" />
-                        : <Square className="w-4.5 h-4.5" />}
+                        ? <CheckSquare className="w-4 h-4 text-accent" />
+                        : <Square className="w-4 h-4" />}
                     </button>
                   </th>
                 )}
@@ -764,11 +722,12 @@ export default function DocumentsPage({ personalOnly = false }: DocumentsPagePro
                         <td className="px-4 py-3.5">
                           <button
                             onClick={() => toggleOne(doc.id)}
-                            className="text-muted-foreground hover:text-accent transition-colors"
+                            className={cn(
+                              "transition-all",
+                              isSelected ? "text-accent opacity-100" : "text-muted-foreground opacity-0 group-hover:opacity-100"
+                            )}
                           >
-                            {isSelected
-                              ? <CheckSquare className="w-4.5 h-4.5 text-accent" />
-                              : <Square className="w-4.5 h-4.5" />}
+                            {isSelected ? <CheckSquare className="w-4 h-4" /> : <Square className="w-4 h-4" />}
                           </button>
                         </td>
                       )}

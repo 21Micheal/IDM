@@ -32,6 +32,7 @@ from django.utils.text import slugify
 import mimetypes
 from django.core.files.storage import default_storage
 from apps.search.utils import summarize_bulk_index_error
+from .file_streaming import build_absolute_document_file_url, user_can_download_document
 
 PERSONAL_DOCUMENT_TYPE_CODE = "PERSONAL"
 DOCUMENT_COLUMN_METADATA_KEYS = {
@@ -157,9 +158,17 @@ class DocumentVersionSerializer(serializers.ModelSerializer):
 
     def get_file_url(self, obj):
         request = self.context.get("request")
-        if not obj.file:
+        if not obj.file or not request:
             return None
-        return request.build_absolute_uri(obj.file.url) if request else obj.file.url
+        try:
+            doc = obj.document
+        except Exception:
+            return None
+        if not user_can_download_document(request.user, doc):
+            return None
+        return build_absolute_document_file_url(
+            request, doc, version_id=str(obj.id), use_preview=False, disposition="attachment"
+        )
 
 
 class DocumentCommentSerializer(serializers.ModelSerializer):
@@ -228,9 +237,11 @@ class DocumentListSerializer(serializers.ModelSerializer):
 
     def get_preview_pdf(self, obj):
         request = self.context.get("request")
-        if not obj.preview_pdf:
+        if not obj.preview_pdf or not request:
             return None
-        return request.build_absolute_uri(obj.preview_pdf.url) if request else obj.preview_pdf.url
+        return build_absolute_document_file_url(
+            request, obj, version_id="", use_preview=True, disposition="inline"
+        )
 
     def get_is_edit_locked(self, obj):
         return obj.is_edit_locked
@@ -290,6 +301,7 @@ class DocumentDetailSerializer(serializers.ModelSerializer):
     versions    = DocumentVersionSerializer(many=True, read_only=True)
     comments    = serializers.SerializerMethodField()
     permissions = serializers.SerializerMethodField()
+    file        = serializers.SerializerMethodField()
     preview_pdf = serializers.SerializerMethodField()
     is_edit_locked = serializers.SerializerMethodField()
     edit_locked_by_name = serializers.SerializerMethodField()
@@ -315,7 +327,7 @@ class DocumentDetailSerializer(serializers.ModelSerializer):
             "created_at", "updated_at",
         ]
         read_only_fields = [
-            "id", "reference_number", "file_name", "file_size", "file_mime_type",
+            "id", "reference_number", "file", "file_name", "file_size", "file_mime_type",
             "checksum", "uploaded_by", "is_self_upload",
             "is_scanned", "ocr_status", "ocr_suggestions",
             "preview_pdf", "preview_status",
@@ -352,9 +364,19 @@ class DocumentDetailSerializer(serializers.ModelSerializer):
 
     def get_preview_pdf(self, obj):
         request = self.context.get("request")
-        if not obj.preview_pdf:
+        if not obj.preview_pdf or not request:
             return None
-        return request.build_absolute_uri(obj.preview_pdf.url) if request else obj.preview_pdf.url
+        return build_absolute_document_file_url(
+            request, obj, version_id="", use_preview=True, disposition="inline"
+        )
+
+    def get_file(self, obj):
+        request = self.context.get("request")
+        if not request or not obj.file:
+            return None
+        return build_absolute_document_file_url(
+            request, obj, version_id="", use_preview=False, disposition="inline"
+        )
 
     def get_is_edit_locked(self, obj):
         return obj.is_edit_locked

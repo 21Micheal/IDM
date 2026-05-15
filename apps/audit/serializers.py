@@ -83,6 +83,8 @@ class AuditLogSerializer(serializers.ModelSerializer):
             "document.edit_lock_acquired": "started editing",
             "document.edit_lock_released": "stopped editing",
             "document.ocr_queued": "queued OCR for",
+            "document.previewed": "opened a watermarked preview of",
+            "document.printed": "used the browser print dialog for",
             "permission.changed": "changed permissions on",
         }
         return verb_map.get(event, "updated")

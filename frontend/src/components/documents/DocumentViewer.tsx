@@ -18,7 +18,7 @@
 
 import { lazy, Suspense, useCallback, useEffect, useRef, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { documentsAPI } from "../../services/api";
+import { documentsAPI, api } from "../../services/api";
 import { useAuthStore } from "@/store/authStore";
 import { toast } from "@/components/ui/vault-toast";
 import {
@@ -105,13 +105,13 @@ const OFFICE_APP_BY_EXTENSION: Record<string, { app: string; msScheme: string }>
 };
 
 const POLL_INTERVAL_MS        = 2_000;
-const POLL_TIMEOUT_MS         = 240_000;
+const PREVIEW_DELAY_NOTICE_MS = 60_000;
 const FAILED_CONFIRM_DELAY_MS = 1_500;
 
 // ── Utilities ──────────────────────────────────────────────────────────────────
 
-function normalizeUrl(url: string | undefined): string | undefined {
-  if (!url) return url;
+function normalizeUrl(url: string | null | undefined): string | undefined {
+  if (!url) return url ?? undefined;
   if (window.location.protocol === "https:" && url.startsWith("http://")) {
     return url.replace("http://", "https://");
   }
@@ -189,7 +189,7 @@ function PdfViewer({
   canUploadVersion,
   onVersionUploaded,
 }: {
-  url: string;
+  url: string | null;
   doc: Document;
   canUploadVersion: boolean;
   onVersionUploaded: () => void;
@@ -212,7 +212,13 @@ function PdfViewer({
     setLoading(true);
     setError("");
 
-    const normalizedUrl = normalizeUrl(url) || "";
+    const normalizedUrl = normalizeUrl(url || "") || "";
+
+    if (!normalizedUrl) {
+      setLoading(false);
+      setError("No preview URL available yet.");
+      return () => { cancelled = true; };
+    }
 
     const documentPromise = import("pdfjs-dist")
       .then((pdfjsLib) => {
@@ -293,9 +299,6 @@ function PdfViewer({
       <div className="flex flex-col items-center justify-center h-64 gap-4 px-4 text-center">
         <AlertCircle className="w-8 h-8 text-destructive" />
         <p className="text-destructive text-sm">{error}</p>
-        <a href={url} download className="btn-secondary inline-flex items-center gap-2">
-          <Download className="w-4 h-4" /> Download
-        </a>
       </div>
     );
 
@@ -353,13 +356,6 @@ function PdfViewer({
             <RotateCw className="w-4 h-4" />
           </button>
         </div>
-        <a
-          href={url}
-          download
-          className="btn-secondary text-xs px-3 py-1 flex items-center gap-1.5"
-        >
-          <Download className="w-3.5 h-3.5" /> Download
-        </a>
       </div>
 
       {/* Canvas */}
@@ -379,10 +375,46 @@ function PdfViewer({
 
 // ── ImageViewer ────────────────────────────────────────────────────────────────
 
-function ImageViewer({ url: rawUrl }: { url: string }) {
-  const url               = normalizeUrl(rawUrl) || "";
+function ImageViewer({
+  url: rawUrl,
+}: {
+  url: string | null;
+}) {
+  const url               = normalizeUrl(rawUrl || "") || "";
   const [scale, setScale] = useState(1);
   const [err, setErr]     = useState(false);
+  const [blobUrl, setBlobUrl] = useState<string | null>(null);
+  const token = useAuthStore((s) => s.accessToken);
+
+  useEffect(() => {
+    if (!url) {
+      setBlobUrl(null);
+      setErr(true);
+      return;
+    }
+    let cancelled = false;
+    let objectUrl = "";
+    setErr(false);
+    (async () => {
+      try {
+        const res = await api.get(url, {
+          responseType: "blob",
+          headers: token ? { Authorization: `Bearer ${token}` } : {},
+        });
+        if (cancelled) return;
+        objectUrl = URL.createObjectURL(res.data);
+        setBlobUrl(objectUrl);
+      } catch {
+        if (!cancelled) setErr(true);
+      }
+    })();
+    return () => {
+      cancelled = true;
+      if (objectUrl) URL.revokeObjectURL(objectUrl);
+    };
+  }, [url, token]);
+
+  const displayUrl = blobUrl || "";
 
   return (
     <div>
@@ -407,33 +439,19 @@ function ImageViewer({ url: rawUrl }: { url: string }) {
             <ZoomIn className="w-4 h-4" />
           </button>
         </div>
-        <a
-          href={url}
-          download
-          className="btn-secondary text-xs px-3 py-1 flex items-center gap-1.5"
-        >
-          <Download className="w-3.5 h-3.5" /> Download
-        </a>
       </div>
       <div
         className="overflow-auto bg-muted/60 border border-t-0 border-border rounded-b-lg p-4 flex items-start justify-center"
         style={{ maxHeight: "75vh" }}
       >
-        {err ? (
+        {err || !displayUrl ? (
           <div className="flex flex-col items-center gap-3 text-muted-foreground py-16">
             <ImageOff className="w-10 h-10" />
             <p className="text-sm">Image could not be loaded.</p>
-            <a
-              href={url}
-              download
-              className="btn-secondary text-xs flex items-center gap-1.5"
-            >
-              <Download className="w-3.5 h-3.5" /> Download
-            </a>
           </div>
         ) : (
           <img
-            src={url}
+            src={displayUrl}
             alt="Preview"
             onError={() => setErr(true)}
             style={{
@@ -457,13 +475,13 @@ function OfficeEditPanel({
   doc,
   initialPreview,
   selectedVersionId,
-  canUploadVersion,
+  canEditInEditor,
   onVersionUploaded,
 }: {
   doc: Document;
   initialPreview: DocumentPreviewResponse;
   selectedVersionId?: string | null;
-  canUploadVersion: boolean;
+  canEditInEditor: boolean;
   onVersionUploaded: () => void;
 }) {
   const qc   = useQueryClient();
@@ -472,7 +490,7 @@ function OfficeEditPanel({
   const [lockData, setLockData]               = useState<DocumentEditTokenResponse | null>(null);
   const [versionPolling, setVersionPolling]   = useState(false);
   const [previewProgress, setPreviewProgress] = useState(0);
-  const [timedOut, setTimedOut]               = useState(false);
+  const [previewTakingLong, setPreviewTakingLong] = useState(false);
   const [isConfirmingFailed, setIsConfirmingFailed] = useState(false);
   const previewPollRef        = useRef<ReturnType<typeof setInterval> | null>(null);
   const versionPollRef        = useRef<ReturnType<typeof setInterval> | null>(null);
@@ -495,9 +513,9 @@ function OfficeEditPanel({
       const cacheKey = getPreviewCacheKey(doc.id, doc.current_version, selectedVersionId);
       const cached = getCachedVersionPreview(cacheKey);
 
-      // For current-version preview, always hit API so new uploads/version bumps
-      // are reflected immediately. Use cache only for historical version browsing.
-      if (cached && selectedVersionId && cached.preview_status !== "failed") {
+      // Only reuse completed historical previews. Pending / processing entries
+      // must go back to the API so we follow the backend's real state.
+      if (cached && selectedVersionId && cached.preview_status === "done" && cached.url) {
         return cached;
       }
 
@@ -505,7 +523,7 @@ function OfficeEditPanel({
         const result = await documentsAPI.previewUrl(doc.id, selectedVersionId ?? undefined);
         const normalizedResult = {
           ...result.data,
-          url: normalizeUrl(result.data.url) || result.data.url,
+          url: normalizeUrl(result.data.url ?? undefined) ?? result.data.url ?? null,
           raw_url: result.data.raw_url ? normalizeUrl(result.data.raw_url) || result.data.raw_url : undefined,
         };
 
@@ -513,12 +531,12 @@ function OfficeEditPanel({
         return normalizedResult;
       } catch (error) {
         const fallback = getCachedVersionPreview(cacheKey);
-        if (fallback) return fallback;
+        if (fallback?.preview_status === "done" && fallback.url) return fallback;
         throw error;
       }
     },
     placeholderData: initialPreview,
-    staleTime: selectedVersionId ? 30_000 : 0,
+    staleTime: 0,
     refetchInterval: false,
     retry: 2,
   });
@@ -544,7 +562,7 @@ function OfficeEditPanel({
   const startPolling = useCallback(() => {
     stopPolling();
     startTimeRef.current  = Date.now();
-    setTimedOut(false);
+    setPreviewTakingLong(false);
     pollingRef.current    = true;
 
     previewPollRef.current = setInterval(async () => {
@@ -552,10 +570,10 @@ function OfficeEditPanel({
       if (typeof document !== "undefined" && document.hidden) return;
 
       const elapsed = Date.now() - (startTimeRef.current ?? Date.now());
-      setPreviewProgress(Math.min(95, (elapsed / POLL_TIMEOUT_MS) * 100));
+      setPreviewProgress(Math.min(95, (elapsed / PREVIEW_DELAY_NOTICE_MS) * 100));
 
-      if (elapsed >= POLL_TIMEOUT_MS) {
-        setTimedOut(true);
+      if (elapsed >= PREVIEW_DELAY_NOTICE_MS) {
+        setPreviewTakingLong(true);
       }
 
       try {
@@ -577,10 +595,10 @@ function OfficeEditPanel({
     const s = preview?.preview_status;
     if (s === "pending" || s === "processing") {
       clearFailedConfirmation();
-      if (!pollingRef.current && !timedOut) startPolling();
+      if (!pollingRef.current) startPolling();
     } else if (s === "failed") {
       stopPolling();
-      if (!failedConfirmRef.current && !timedOut) {
+      if (!failedConfirmRef.current) {
         setIsConfirmingFailed(true);
         failedConfirmRef.current = setTimeout(async () => {
           failedConfirmRef.current = null;
@@ -600,17 +618,16 @@ function OfficeEditPanel({
       if (s === "done") setPreviewProgress(100);
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [preview?.preview_status, timedOut]);
+  }, [preview?.preview_status]);
 
   useEffect(() => () => {
     stopPolling();
     if (failedConfirmRef.current) clearTimeout(failedConfirmRef.current);
   }, [stopPolling]);
 
-  const isConverting  = ["pending", "processing"].includes(preview?.preview_status ?? "");
+  const isPreparing   = ["pending", "processing"].includes(preview?.preview_status ?? "");
   const hasPdf        = preview?.viewer === "pdfjs" && !!preview.url;
   const previewFailed = preview?.preview_status === "failed" && !isConfirmingFailed;
-  const activeDownloadUrl = normalizeUrl(preview?.raw_url ?? preview?.url ?? initialPreview.raw_url ?? initialPreview.url) ?? "";
 
   // ── Lock mutations ────────────────────────────────────────────────────────
 
@@ -653,7 +670,7 @@ function OfficeEditPanel({
         ? documentsAPI.triggerVersionPreview(doc.id, selectedVersionId)
         : documentsAPI.triggerPreview(doc.id),
     onSuccess: () => {
-      setTimedOut(false);
+      setPreviewTakingLong(false);
       setPreviewProgress(0);
       startPolling();
       qc.invalidateQueries({
@@ -766,7 +783,7 @@ function OfficeEditPanel({
     });
   };
 
-  const canShowOpenButton = canUploadVersion && !lockedByOther;
+  const canShowOpenButton = canEditInEditor && !lockedByOther;
   const openLabel = lockData || lockedByMe
     ? `Open in ${info.app}`
     : `Edit in ${info.app}`;
@@ -786,12 +803,12 @@ function OfficeEditPanel({
               <CheckCircle2 className="w-3 h-3" /> Ready
             </span>
           )}
-          {isConverting && (
+          {isPreparing && (
             <span className="inline-flex items-center gap-1 text-xs text-accent font-medium bg-accent/10 px-2 py-0.5 rounded-full border border-accent/20">
-              <Loader2 className="w-3 h-3 animate-spin" /> Generating
+              <Loader2 className="w-3 h-3 animate-spin" /> Preparing
             </span>
           )}
-          {timedOut && isConverting && (
+          {previewTakingLong && isPreparing && (
             <span className="inline-flex items-center gap-1 text-xs text-amber-700 font-medium bg-amber-500/10 px-2 py-0.5 rounded-full border border-amber-500/20">
               <Clock className="w-3 h-3" /> Taking longer
             </span>
@@ -809,21 +826,6 @@ function OfficeEditPanel({
         </div>
 
         <div className="flex items-center gap-2 flex-wrap">
-          <a
-            href={activeDownloadUrl}
-            target="_blank"
-            rel="noopener noreferrer"
-            className="btn-secondary text-xs px-3 py-1.5"
-          >
-            <ExternalLink className="w-3.5 h-3.5" /> Open original
-          </a>
-          <a
-            href={activeDownloadUrl}
-            download
-            className="btn-secondary text-xs px-3 py-1.5"
-          >
-            <Download className="w-3.5 h-3.5" /> Download
-          </a>
           {canShowOpenButton && (
             <button
               onClick={handleOpenClick}
@@ -894,7 +896,7 @@ function OfficeEditPanel({
       {/* Preview body */}
       <div className="card overflow-hidden">
         <div className="bg-card p-4">
-          {isConverting && (
+          {isPreparing && (
             <div className="flex flex-col items-center justify-center gap-4 py-24">
               <div className="w-32 h-1.5 bg-muted rounded-full overflow-hidden">
                 <div
@@ -903,40 +905,38 @@ function OfficeEditPanel({
                 />
               </div>
               <div className="text-center">
-                <p className="font-medium text-foreground">Generating preview</p>
+                <p className="font-medium text-foreground">Preparing preview</p>
                 <p className="text-xs text-muted-foreground mt-1">
-                  {timedOut
-                    ? `Converting ${info.app} to PDF is taking longer than usual, but it is still running.`
-                    : `Converting ${info.app} to PDF — ${Math.round(previewProgress)}%`}
+                  {previewTakingLong
+                    ? "This is taking longer than usual, but it is still in progress."
+                    : `Almost ready — ${Math.round(previewProgress)}%`}
                 </p>
               </div>
             </div>
           )}
 
-          {hasPdf && !isConverting && (
+          {hasPdf && !isPreparing && (
             <PdfViewer
-              url={preview!.url!}
+              url={preview!.url}
               doc={doc}
               canUploadVersion={false /* upload section is rendered once below */}
               onVersionUploaded={onVersionUploaded}
             />
           )}
 
-          {previewFailed && !isConverting && (
+          {previewFailed && !isPreparing && (
             <div className="flex flex-col items-center gap-4 py-10 text-center">
               <AlertCircle className="w-12 h-12 text-destructive" />
               <div>
                 <p className="font-medium text-foreground">
-                  {timedOut ? "Preview timed out" : "Preview generation failed"}
+                  Preview could not be prepared
                 </p>
                 <p className="text-sm text-muted-foreground mt-1">
-                  {timedOut
-                    ? "The conversion is taking longer than expected. You can retry or download the file."
-                    : `Could not convert this ${info.app} document to PDF.`}
+                  Try again shortly. Some documents take longer than others.
                 </p>
                 {preview?.preview_error && (
                   <p className="mt-2 text-xs text-destructive bg-destructive/5 border border-destructive/20 rounded p-2 text-left max-w-2xl break-words">
-                    Conversion error: {preview.preview_error}
+                    Details: {preview.preview_error}
                   </p>
                 )}
               </div>
@@ -951,14 +951,11 @@ function OfficeEditPanel({
                     : <RefreshCw className="w-4 h-4" />}
                   Retry
                 </button>
-                <a href={activeDownloadUrl} download className="btn-primary text-sm">
-                  <Download className="w-4 h-4" /> Download instead
-                </a>
               </div>
             </div>
           )}
 
-          {!isConverting && !hasPdf && !previewFailed && (
+          {!isPreparing && !hasPdf && !previewFailed && (
             <div className="flex flex-col items-center gap-4 py-16 text-center">
               <Loader2 className="w-10 h-10 text-muted-foreground animate-spin" />
               <p className="text-sm text-muted-foreground">Initializing preview…</p>
@@ -968,7 +965,7 @@ function OfficeEditPanel({
       </div>
 
       {/* Helper note when the file type can't be opened directly */}
-      {!info.msScheme && !isLinux && canUploadVersion && !lockedByOther && (
+      {!info.msScheme && !isLinux && canEditInEditor && !lockedByOther && (
         <div className="rounded-lg border border-border bg-muted/40 px-4 py-3 text-xs text-muted-foreground">
           One-click editing is not available for this file type. Download the
           file, edit it locally, then use <strong>Upload version manually</strong>{" "}
@@ -1014,22 +1011,17 @@ export default function DocumentViewer({ document: doc, submitSlot }: Props) {
       const cacheKey = getPreviewCacheKey(doc.id, doc.current_version, selectedVersionId);
       const cached = getCachedVersionPreview(cacheKey);
       
-      // For current version, always verify with API to avoid stale preview state
-      // after uploads or restores. For historical version browsing, cache is fine.
-      if (cached) {
-        const isSuccessfulPreview = cached.preview_status !== "failed";
-
-        if (selectedVersionId && isSuccessfulPreview) {
-          return cached;
-        }
-        // If it's current version or a failed version preview, bypass cache.
+      // Only reuse completed historical previews. Pending / processing entries
+      // must go back to the API so navigation follows the backend's real state.
+      if (cached && selectedVersionId && cached.preview_status === "done" && cached.url) {
+        return cached;
       }
       
       try {
         const r = await documentsAPI.previewUrl(doc.id, selectedVersionId ?? undefined);
         const normalizedResult = {
           ...r.data,
-          url: normalizeUrl(r.data.url)!,
+          url: normalizeUrl(r.data.url ?? undefined) ?? r.data.url ?? null,
           raw_url: r.data.raw_url ? normalizeUrl(r.data.raw_url) : undefined,
         };
         
@@ -1038,12 +1030,11 @@ export default function DocumentViewer({ document: doc, submitSlot }: Props) {
       } catch (error) {
         // If API call fails, try to serve from cache as fallback
         const fallback = getCachedVersionPreview(cacheKey);
-        if (fallback) return fallback;
+        if (fallback?.preview_status === "done" && fallback.url) return fallback;
         throw error;
       }
     },
-    placeholderData: (previousData) => previousData,
-    staleTime: selectedVersionId ? 30_000 : 0,
+    staleTime: 0,
     retry: 2,
   });
 
@@ -1065,6 +1056,8 @@ export default function DocumentViewer({ document: doc, submitSlot }: Props) {
   }, [qc, doc.id]);
 
   const canUploadVersion = Boolean(doc.permissions?.includes("upload"));
+  const canEdit          = Boolean(doc.permissions?.includes("edit"));
+  const canDownload      = Boolean(doc.permissions?.includes("download"));
   const isOfficeByMime   = OFFICE_MIMES.has(doc.file_mime_type);
   const isOfficeByExt    = OFFICE_EXTENSIONS.has(getFileExtension(doc.file_name));
   const isOffice         = isOfficeByMime || isOfficeByExt;
@@ -1093,7 +1086,7 @@ export default function DocumentViewer({ document: doc, submitSlot }: Props) {
             if (cancelled) return;
             const normalizedResult = {
               ...result.data,
-              url: normalizeUrl(result.data.url) || result.data.url,
+              url: normalizeUrl(result.data.url ?? undefined) ?? result.data.url ?? null,
               raw_url: result.data.raw_url ? normalizeUrl(result.data.raw_url) || result.data.raw_url : undefined,
             };
             setCachedVersionPreview(cacheKey, normalizedResult);
@@ -1117,6 +1110,18 @@ export default function DocumentViewer({ document: doc, submitSlot }: Props) {
     };
   }, [doc.id, doc.versions, selectedVersionId]);
 
+  useEffect(() => {
+    let last = 0;
+    const onPrint = () => {
+      const now = Date.now();
+      if (now - last < 4000) return;
+      last = now;
+      documentsAPI.filePrintEvent(doc.id).catch(() => {});
+    };
+    window.addEventListener("beforeprint", onPrint);
+    return () => window.removeEventListener("beforeprint", onPrint);
+  }, [doc.id]);
+
   if (isLoading)
     return (
       <div className="flex items-center justify-center h-64">
@@ -1132,7 +1137,8 @@ export default function DocumentViewer({ document: doc, submitSlot }: Props) {
       </div>
     );
 
-  const rawFileUrl = normalizeUrl(preview.raw_url ?? preview.url) ?? "";
+  const openInNewTabUrl = canDownload ? (normalizeUrl(preview.url ?? "") ?? "") : "";
+  const downloadHref = canDownload ? (normalizeUrl(preview.raw_url ?? "") ?? "") : "";
   const selectedVersion = selectedVersionId
     ? doc.versions?.find((version) => version.id === selectedVersionId) ?? null
     : null;
@@ -1160,14 +1166,27 @@ export default function DocumentViewer({ document: doc, submitSlot }: Props) {
             </span>
           )}
         </div>
-        <a
-          href={rawFileUrl}
-          target="_blank"
-          rel="noopener noreferrer"
-          className="btn-secondary text-xs px-3 py-1.5"
-        >
-          <ExternalLink className="w-3.5 h-3.5" /> Open in new tab
-        </a>
+        <div className="flex items-center gap-2 flex-wrap">
+          {openInNewTabUrl && (
+          <a
+            href={openInNewTabUrl}
+            target="_blank"
+            rel="noopener noreferrer"
+            className="btn-secondary text-xs px-3 py-1.5"
+          >
+            <ExternalLink className="w-3.5 h-3.5" /> Open in new tab
+          </a>
+          )}
+          {downloadHref && (
+          <a
+            href={downloadHref}
+            download
+            className="btn-secondary text-xs px-3 py-1.5"
+          >
+            <Download className="w-3.5 h-3.5" /> Download
+          </a>
+          )}
+        </div>
       </div>
 
       {/* Version pills */}
@@ -1217,7 +1236,7 @@ export default function DocumentViewer({ document: doc, submitSlot }: Props) {
       {/* PDF (non-office) */}
       {preview.viewer === "pdfjs" && !isOffice && (
         <PdfViewer
-          url={preview.url!}
+          url={preview.url}
           doc={doc}
           canUploadVersion={canUploadVersion && !isLockedByOther}
           onVersionUploaded={onVersionUploaded}
@@ -1230,14 +1249,14 @@ export default function DocumentViewer({ document: doc, submitSlot }: Props) {
           doc={doc}
           initialPreview={preview}
           selectedVersionId={selectedVersionId}
-          canUploadVersion={canUploadVersion}
+          canEditInEditor={canEdit}
           onVersionUploaded={onVersionUploaded}
         />
       )}
 
       {/* Images */}
       {isImage && !isOffice && preview.viewer !== "pdfjs" && (
-        <ImageViewer url={preview.url!} />
+        <ImageViewer url={preview.url} />
       )}
 
       {/* Unsupported / download only */}
@@ -1245,13 +1264,18 @@ export default function DocumentViewer({ document: doc, submitSlot }: Props) {
         <div className="card p-10 text-center border-2 border-dashed">
           <Download className="w-12 h-12 text-muted-foreground mx-auto mb-4" />
           <p className="text-foreground/80 mb-4">Preview not available for this file type.</p>
+          {canDownload && preview.url && (
           <a
-            href={preview.url!}
+            href={preview.url}
             download
             className="btn-primary inline-flex items-center gap-2"
           >
             <Download className="w-4 h-4" /> Download file
           </a>
+          )}
+          {!canDownload && (
+            <p className="text-sm text-muted-foreground">You do not have permission to download this file.</p>
+          )}
         </div>
       )}
 

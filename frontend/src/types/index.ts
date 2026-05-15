@@ -200,8 +200,8 @@ export interface DocumentSearchResponse {
 
 export interface DocumentPreviewResponse {
   viewer: "pdfjs" | "image" | "processing" | "download";
-  url: string;
-  raw_url?: string;
+  url: string | null;
+  raw_url?: string | null;
   preview_status?: "pending" | "processing" | "done" | "failed" | "";
   preview_error?: string;
 }
@@ -210,7 +210,7 @@ export interface DocumentEditTokenResponse {
   token: string;
   username: string;
   webdav_url: string;
-  file_url: string;
+  file_url: string | null;
   release_url: string;
   jwt_token: string;
   expires_in: number;

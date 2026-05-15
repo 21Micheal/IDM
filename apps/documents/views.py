@@ -40,6 +40,19 @@ from .serializers import (
 from .filters import DocumentFilter
 from .permissions import HasDocumentPermission
 from apps.audit.mixins import AuditMixin
+from apps.audit.models import AuditEvent
+from rest_framework_simplejwt.authentication import JWTAuthentication
+from .authentication import DocumentFileSignatureAuthentication
+from .file_streaming import (
+    build_absolute_document_file_url,
+    build_http_file_response,
+    read_document_bytes,
+    unsign_file_payload,
+    user_can_download_document,
+    user_can_edit_document,
+    user_can_view_document,
+    verify_file_query_matches_payload,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -166,6 +179,12 @@ class DocumentViewSet(AuditMixin, viewsets.ModelViewSet):
         if self.action == "create":
             return DocumentUploadSerializer
         return DocumentDetailSerializer
+
+    def retrieve(self, request, *args, **kwargs):
+        instance = self.get_object()
+        self.record_audit(AuditEvent.DOCUMENT_VIEWED, instance, {})
+        serializer = self.get_serializer(instance)
+        return Response(serializer.data)
 
     def _queue_office_preview(self, doc: Document) -> None:
         if not doc.is_office_doc():
@@ -517,30 +536,42 @@ class DocumentViewSet(AuditMixin, viewsets.ModelViewSet):
     @action(detail=True, methods=["get"])
     def preview_url(self, request, pk=None):
         doc = self.get_object()
+        can_dl = user_can_download_document(request.user, doc)
         version_id = request.query_params.get("version_id")
         version = None
         if version_id:
             version = get_object_or_404(DocumentVersion, id=version_id, document=doc)
 
+        def inline_link(vid: str, use_preview: bool):
+            return build_absolute_document_file_url(
+                request, doc, version_id=vid, use_preview=use_preview, disposition="inline"
+            )
+
+        def raw_link(vid: str, use_preview: bool):
+            if not can_dl:
+                return None
+            return build_absolute_document_file_url(
+                request, doc, version_id=vid, use_preview=use_preview, disposition="attachment"
+            )
+
         if version:
-            try:
-                absolute_file_url = request.build_absolute_uri(version.file.url)
-            except ValueError:
+            if not version.file:
                 return Response({"detail": "Version file is missing."}, status=400)
 
             mime = mimetypes.guess_type(version.file_name or "")[0] or ""
+            vid = str(version.id)
             if mime == "application/pdf":
                 return Response({
                     "viewer": "pdfjs",
-                    "url": absolute_file_url,
-                    "raw_url": absolute_file_url,
+                    "url": inline_link(vid, False),
+                    "raw_url": raw_link(vid, False),
                     "preview_status": "done",
                 })
             if mime.startswith("image/"):
                 return Response({
                     "viewer": "image",
-                    "url": absolute_file_url,
-                    "raw_url": absolute_file_url,
+                    "url": inline_link(vid, False),
+                    "raw_url": raw_link(vid, False),
                     "preview_status": "done",
                 })
             if mime in (
@@ -576,30 +607,28 @@ class DocumentViewSet(AuditMixin, viewsets.ModelViewSet):
                 preview_error = cache.get(_version_preview_error_cache_key(str(version.id)))
 
                 if preview_status == PreviewStatus.DONE and preview_exists:
-                    from django.core.files.storage import default_storage
-                    preview_url = request.build_absolute_uri(default_storage.url(preview_name))
                     viewer = "pdfjs"
+                    url = inline_link(vid, True)
                 else:
-                    preview_url = absolute_file_url
                     viewer = "processing"
+                    url = None
 
                 return Response({
                     "viewer": viewer,
-                    "url": preview_url,
-                    "raw_url": absolute_file_url,
+                    "url": url,
+                    "raw_url": raw_link(vid, False),
                     "preview_status": preview_status,
                     "preview_error": preview_error,
                 })
 
             return Response({
                 "viewer": "download",
-                "url": absolute_file_url,
-                "raw_url": absolute_file_url,
+                "url": raw_link(vid, False),
+                "raw_url": raw_link(vid, False),
+                "preview_status": "done",
             })
 
-        try:
-            absolute_file_url = request.build_absolute_uri(doc.file.url)
-        except ValueError:
+        if not doc.file:
             return Response({"detail": "No file attached."}, status=400)
 
         mime = doc.file_mime_type or ""
@@ -607,16 +636,16 @@ class DocumentViewSet(AuditMixin, viewsets.ModelViewSet):
         if mime == "application/pdf":
             return Response({
                 "viewer": "pdfjs",
-                "url": absolute_file_url,
-                "raw_url": absolute_file_url,
+                "url": inline_link("", False),
+                "raw_url": raw_link("", False),
                 "preview_status": "done",
             })
 
         if mime.startswith("image/"):
             return Response({
                 "viewer": "image",
-                "url": absolute_file_url,
-                "raw_url": absolute_file_url,
+                "url": inline_link("", False),
+                "raw_url": raw_link("", False),
                 "preview_status": "done",
             })
 
@@ -628,25 +657,119 @@ class DocumentViewSet(AuditMixin, viewsets.ModelViewSet):
             preview_error = cache.get(_preview_error_cache_key(str(doc.id)))
 
             if preview_status == PreviewStatus.DONE and doc.preview_pdf:
-                preview_url = request.build_absolute_uri(doc.preview_pdf.url)
                 viewer = "pdfjs"
+                url = inline_link("", True)
             else:
-                preview_url = absolute_file_url
                 viewer = "processing"
+                url = None
 
             return Response({
                 "viewer": viewer,
-                "url": preview_url,
-                "raw_url": absolute_file_url,
+                "url": url,
+                "raw_url": raw_link("", False),
                 "preview_status": preview_status,
                 "preview_error": preview_error,
             })
 
         return Response({
             "viewer": "download",
-            "url": absolute_file_url,
-            "raw_url": absolute_file_url,
+            "url": raw_link("", False),
+            "raw_url": raw_link("", False),
+            "preview_status": "done",
         })
+
+    @action(
+        detail=True,
+        methods=["get"],
+        url_path="file",
+        authentication_classes=[JWTAuthentication, DocumentFileSignatureAuthentication],
+        permission_classes=[permissions.IsAuthenticated, HasDocumentPermission],
+    )
+    def file(self, request, pk=None):
+        doc = self.get_object()
+        sig = (request.query_params.get("sig") or "").strip()
+        if sig:
+            try:
+                payload = unsign_file_payload(sig)
+            except Exception:
+                return Response({"detail": "Invalid or expired file link."}, status=400)
+            if payload.get("doc") != str(doc.id) or payload.get("sub") != str(request.user.id):
+                return Response({"detail": "File link is not valid for this document."}, status=403)
+            if not verify_file_query_matches_payload(request, payload):
+                return Response({"detail": "File link parameters were altered."}, status=400)
+
+        disposition = (request.query_params.get("disposition") or "inline").strip()
+        if disposition not in ("inline", "attachment"):
+            disposition = "inline"
+
+        can_download = user_can_download_document(request.user, doc)
+
+        if disposition == "attachment" and not can_download:
+            return Response({"detail": "Download not permitted."}, status=403)
+
+        if not user_can_view_document(request.user, doc):
+            return Response({"detail": "Forbidden."}, status=403)
+
+        version_id = (request.query_params.get("version_id") or "").strip()
+        version = None
+        if version_id:
+            version = get_object_or_404(DocumentVersion, id=version_id, document=doc)
+
+        use_preview = str(request.query_params.get("use_preview", "0")).lower() in ("1", "true", "yes")
+
+        is_office = version.is_office_doc() if version else doc.is_office_doc()
+        if use_preview and not is_office:
+            return Response(
+                {"detail": "Preview mode is only valid for Office documents."},
+                status=400,
+            )
+
+        if disposition == "inline" and not use_preview and is_office:
+            return Response(
+                {"detail": "Inline Office originals are not served; use the PDF preview."},
+                status=400,
+            )
+
+        try:
+            raw, content_type, name = read_document_bytes(doc, version=version, use_preview=use_preview)
+        except FileNotFoundError as exc:
+            return Response({"detail": str(exc)}, status=404)
+
+        inline_previewable = (
+            content_type == "application/pdf"
+            or content_type.startswith("image/")
+        )
+        if disposition == "inline" and not can_download and not inline_previewable:
+            return Response(
+                {"detail": "This file type cannot be previewed without download permission."},
+                status=403,
+            )
+
+        if disposition == "attachment":
+            self.record_audit(
+                AuditEvent.DOCUMENT_DOWNLOADED,
+                doc,
+                {"version_id": version_id or None, "use_preview": use_preview},
+            )
+        else:
+            self.record_audit(
+                AuditEvent.DOCUMENT_PREVIEWED,
+                doc,
+                {"version_id": version_id or None, "use_preview": use_preview},
+            )
+
+        return build_http_file_response(
+            raw=raw,
+            content_type=content_type,
+            download_name=name,
+            disposition=disposition,
+        )
+
+    @action(detail=True, methods=["post"], url_path="file_print_event")
+    def file_print_event(self, request, pk=None):
+        doc = self.get_object()
+        self.record_audit(AuditEvent.DOCUMENT_PRINTED, doc, {})
+        return Response({"ok": True})
 
     @action(detail=True, methods=["post"])
     def trigger_preview(self, request, pk=None):
@@ -743,6 +866,8 @@ class DocumentViewSet(AuditMixin, viewsets.ModelViewSet):
     @action(detail=True, methods=["post"])
     def edit_token(self, request, pk=None):
         doc = self.get_object()
+        if not user_can_edit_document(request.user, doc):
+            return Response({"detail": "Edit not permitted."}, status=403)
 
         try:
             locked = doc.acquire_lock(request.user)
@@ -775,7 +900,13 @@ class DocumentViewSet(AuditMixin, viewsets.ModelViewSet):
         )
 
         api_base = request.build_absolute_uri("/api/v1").rstrip("/")
-        file_url = request.build_absolute_uri(doc.file.url)
+        file_url = (
+            build_absolute_document_file_url(
+                request, doc, version_id="", use_preview=False, disposition="attachment"
+            )
+            if user_can_download_document(request.user, doc)
+            else None
+        )
         release_url = f"{api_base}/documents/{doc.id}/release_lock/"
 
         # Token MUST be a path segment — NOT a query string.
@@ -842,6 +973,9 @@ nohup "$SOFFICE" "$OPEN_URL" >/dev/null 2>&1 &
     @action(detail=True, methods=["get"])
     def open_script(self, request, pk=None):
         doc = self.get_object()
+        if not user_can_edit_document(request.user, doc):
+            return Response({"detail": "Edit not permitted."}, status=403)
+
         try:
             locked = doc.acquire_lock(request.user)
         except Exception as exc:

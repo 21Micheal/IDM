@@ -354,11 +354,15 @@ export const documentsAPI = {
   releaseLock: (id: string, force = false) =>
     api.post<{ detail: string }>(`/documents/${id}/release_lock/`, { force }),
 
-  /** Get current preview URL. GET. Used for polling during Office→PDF conversion. */
+  /** Get signed preview / file URLs (never exposes anonymous /media paths). */
   previewUrl: (id: string, versionId?: string) =>
     api.get<DocumentPreviewResponse>(`/documents/${id}/preview_url/`, {
       params: versionId ? { version_id: versionId } : undefined,
     }),
+
+  /** Compliance: log browser print dialog for this document (debounced client-side). */
+  filePrintEvent: (id: string) =>
+    api.post<{ ok: boolean }>(`/documents/${id}/file_print_event/`),
 };
 
 export const documentTypesAPI = {

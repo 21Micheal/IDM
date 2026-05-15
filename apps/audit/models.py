@@ -12,7 +12,9 @@ import uuid
 class AuditEvent(models.TextChoices):
     DOCUMENT_CREATED = "document.created", "Document Created"
     DOCUMENT_VIEWED = "document.viewed", "Document Viewed"
-    DOCUMENT_DOWNLOADED = "document.downloaded", "Document Downloaded"
+    DOCUMENT_PREVIEWED = "document.previewed", "Document File Previewed (inline)"
+    DOCUMENT_DOWNLOADED = "document.downloaded", "Document File Downloaded (attachment)"
+    DOCUMENT_PRINTED = "document.printed", "Document Print Requested"
     DOCUMENT_UPDATED = "document.updated", "Document Updated"
     DOCUMENT_DELETED = "document.deleted", "Document Deleted"
     DOCUMENT_SUBMITTED = "document.submitted", "Submitted for Approval"

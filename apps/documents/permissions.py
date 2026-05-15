@@ -163,6 +163,10 @@ class HasDocumentPermission(permissions.BasePermission):
             "destroy":         GroupAction.DELETE.value,
             "bulk_action":     GroupAction.VIEW.value,
             "versions":        GroupAction.VIEW.value,
+            "file":              GroupAction.VIEW.value,
+            "file_print_event":  GroupAction.VIEW.value,
+            "edit_token":        GroupAction.EDIT.value,
+            "open_script":       GroupAction.EDIT.value,
         }
 
         if action in _action_map:

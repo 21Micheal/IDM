@@ -163,6 +163,9 @@ CORS_ALLOW_CREDENTIALS = True
 # ── Storage ──────────────────────────────────────────────────────────────────
 MEDIA_ROOT = env("MEDIA_ROOT", default=str(BASE_DIR / "media"))
 MEDIA_URL = "/media/"
+# When False (default in production), do not expose /media/ via Django — use authenticated
+# document file endpoints instead. Set SERVE_MEDIA_PUBLIC=True for local dev without DEBUG.
+SERVE_MEDIA_PUBLIC = env.bool("SERVE_MEDIA_PUBLIC", default=False)
 STATIC_ROOT = BASE_DIR / "staticfiles"
 STATIC_URL = "/static/"
 

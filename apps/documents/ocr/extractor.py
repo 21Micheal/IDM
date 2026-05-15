@@ -120,9 +120,15 @@ _DOCTYPE_PATTERNS: list[tuple[re.Pattern, str, str]] = [
 # Separator between label and value: ":", "-", " " or nothing
 _SEP = r"\s*[:\-]?\s*"
 
-# Date value pattern — matches ISO, DMY, MDY, and spelled-out formats
+# Date value pattern — matches ISO, DMY, MDY, and spelled-out formats.
+#
+# The ISO branch uses a lookbehind (?<![A-Za-z0-9\-/]) that prevents the year
+# from matching when it is embedded inside a reference number such as
+# "INV-2024-07-15" or "PO-2024-11-30".  The lookbehind sits inside the outer
+# capturing group so m.group(1) still returns only the date string itself,
+# keeping the API identical for all callers (_find_first_date, _parse_date).
 _DATE_VALUE_PAT = (
-    r"(\d{4}[-/]\d{1,2}[-/]\d{1,2}"
+    r"((?<![A-Za-z0-9\-/])\d{4}[-/]\d{1,2}[-/]\d{1,2}\b"
     r"|\d{1,2}[/.\-]\d{1,2}[/.\-]\d{2,4}"
     r"|(?:Jan(?:uary)?|Feb(?:ruary)?|Mar(?:ch)?|Apr(?:il)?|May|Jun(?:e)?"
     r"|Jul(?:y)?|Aug(?:ust)?|Sep(?:tember)?|Oct(?:ober)?|Nov(?:ember)?|Dec(?:ember)?)"
@@ -379,8 +385,8 @@ _TXN_REF_PAT = re.compile(
     r"|cheque\s*(?:no\.?|number)"
     r"|chq\.?\s*no\.?"
     r"|txn\s*(?:ref|id|no\.?)"
-    r"|m[\-\s]?pesa\s*(?:ref(?:erence)?|code|no\.?|transaction(?:\s*id)?)"
-    r"|mpesa\s*(?:ref(?:erence)?|code|no\.?)"
+    r"|m[\-\s]?pesa\s*(?:ref(?:erence)?\s*(?:no\.?|code)?|code|no\.?|transaction(?:\s*id)?)"
+    r"|mpesa\s*(?:ref(?:erence)?\s*(?:no\.?|code)?|code|no\.?)"
     r"|payment\s*ref(?:erence)?"
     r"|confirmation\s*(?:no\.?|code|ref(?:erence)?)"
     r")\s*[:\-]?\s*"
@@ -1148,14 +1154,20 @@ class DocumentFieldExtractor:
         # ── Absolute fallback: first plausible date if still nothing found ─
         if "document_date" not in out:
             fallback_patterns = [
-                r"\b(\d{4}[-/]\d{1,2}[-/]\d{1,2})\b",
+                # ISO: negative lookbehind prevents matching years embedded inside
+                # reference numbers such as "INV-2024-07-15" or "PO-2024-11-30".
+                # Without the guard, \d{4}[-/]\d{1,2}[-/]\d{1,2} would match
+                # "2024-07-15" starting at the digit run inside the ref string.
+                r"(?<![A-Za-z0-9\-/])(\d{4}[-/]\d{1,2}[-/]\d{1,2})\b",
                 r"\b(\d{1,2}\s+(?:Jan(?:uary)?|Feb(?:ruary)?|Mar(?:ch)?|Apr(?:il)?|May"
                 r"|Jun(?:e)?|Jul(?:y)?|Aug(?:ust)?|Sep(?:tember)?|Oct(?:ober)?"
                 r"|Nov(?:ember)?|Dec(?:ember)?)\s+\d{4})\b",
                 r"\b((?:Jan(?:uary)?|Feb(?:ruary)?|Mar(?:ch)?|Apr(?:il)?|May"
                 r"|Jun(?:e)?|Jul(?:y)?|Aug(?:ust)?|Sep(?:tember)?|Oct(?:ober)?"
                 r"|Nov(?:ember)?|Dec(?:ember)?)\s+\d{1,2},?\s+\d{4})\b",
-                r"\b(\d{1,2}/\d{1,2}/\d{4})\b",
+                # Ambiguous DMY/MDY last — only accept if unambiguously separated
+                # from a surrounding ref (same lookbehind guard).
+                r"(?<![A-Za-z0-9\-/])(\d{1,2}/\d{1,2}/\d{4})\b",
             ]
             for pat in fallback_patterns:
                 for m in re.finditer(pat, pre_bill_text, re.I):
