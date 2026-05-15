@@ -97,8 +97,9 @@ function getDashboardTrendWindow() {
 }
 
 function getPercentChange(current: number, previous: number) {
-  if (previous === 0) return current > 0 ? 100 : 0;
-  return Math.round((Math.abs(current - previous) / previous) * 10) / 10;
+  if (!Number.isFinite(current) || !Number.isFinite(previous)) return 0.0;
+  if (previous === 0) return 0.0;
+  return Math.round(((current - previous) / previous) * 1000) / 10;
 }
 
 function buildTrend(
@@ -106,14 +107,31 @@ function buildTrend(
   previous: number,
   positiveWhenIncrease: boolean,
   label: string,
-): StatTrend | undefined {
-  if (current === 0 && previous === 0) return undefined;
-
+): StatTrend {
   const direction =
     current > previous ? "up" : current < previous ? "down" : "flat";
   const isPositive =
     direction === "flat" ||
     (positiveWhenIncrease ? direction === "up" : direction === "down");
+
+  if (current === 0 && previous === 0) {
+    return {
+      value: 0.0,
+      isPositive: true,
+      direction: "flat",
+      label,
+    };
+  }
+
+  if (previous === 0) {
+    return {
+      value: current,
+      isPositive: true,
+      direction: "up",
+      suffix: " new",
+      label,
+    };
+  }
 
   return {
     value: getPercentChange(current, previous),
