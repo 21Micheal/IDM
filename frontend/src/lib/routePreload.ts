@@ -21,6 +21,7 @@ export function preloadCommonRoutes() {
   loadOnce("route:personal-documents", () => import("@/pages/DocumentsPage"));
   loadOnce("route:upload", () => import("@/pages/UploadPage"));
   loadOnce("route:scan-upload", () => import("@/pages/UploadPage"));
+  loadOnce("route:bulk-scan", () => import("@/pages/BulkScanPage"));
   loadOnce("route:search", () => import("@/pages/SearchPage"));
   loadOnce("route:workflow", () => import("@/pages/WorkflowPage"));
   loadOnce("route:notifications", () => import("@/pages/NotificationsPage"));
@@ -29,6 +30,11 @@ export function preloadCommonRoutes() {
 export function preloadRouteForPath(pathname: string) {
   if (pathname === "/") {
     loadOnce("route:dashboard", () => import("@/pages/DashboardPage"));
+    return;
+  }
+
+  if (pathname.startsWith("/documents/bulk-scan")) {
+    loadOnce("route:bulk-scan", () => import("@/pages/BulkScanPage"));
     return;
   }
 

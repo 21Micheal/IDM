@@ -12,6 +12,7 @@ const DashboardPage = lazy(() => import("@/pages/DashboardPage"));
 const DocumentsPage = lazy(() => import("@/pages/DocumentsPage"));
 const DocumentDetailPage = lazy(() => import("@/pages/DocumentDetailPage"));
 const UploadPage = lazy(() => import("@/pages/UploadPage"));
+const BulkScanPage = lazy(() => import("@/pages/BulkScanPage"));
 const SearchPage = lazy(() => import("@/pages/SearchPage"));
 const WorkflowPage = lazy(() => import("@/pages/WorkflowPage"));
 const AdminPage = lazy(() => import("@/pages/AdminPage"));
@@ -127,6 +128,11 @@ const ROUTE_FALLBACK_CONTENT = [
     description: "Loading document intake and metadata capture tools.",
   },
   {
+    match: (pathname: string) => pathname.startsWith("/documents/bulk-scan"),
+    title: "Preparing bulk scan",
+    description: "Loading batch OCR intake and per-document review tools.",
+  },
+  {
     match: (pathname: string) => pathname.startsWith("/documents/scan"),
     title: "Preparing scan workspace",
     description: "Loading OCR intake, extraction pipeline, and scan review tools.",
@@ -237,6 +243,7 @@ export default function App() {
               <Route path="personal-documents" element={<DocumentsPage personalOnly />} />
               <Route path="documents/upload" element={<UploadPage />} />
               <Route path="documents/scan"   element={<UploadPage scanOnly />} />
+              <Route path="documents/bulk-scan" element={<BulkScanPage />} />
               <Route path="documents/:id"    element={<DocumentDetailPage />} />
               <Route path="documents/folders/:folderId" element={<FolderPage />} />
 

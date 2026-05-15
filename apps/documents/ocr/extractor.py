@@ -97,6 +97,8 @@ _DOCTYPE_PATTERNS: list[tuple[re.Pattern, str, str]] = [
     (re.compile(r"\b(?:local\s+purchase\s+order|l\.?p\.?o\.?)\b", re.I), "purchase_order", "Local Purchase Order"),
     (re.compile(r"\bpurchase\s+order\b", re.I),                           "purchase_order", "Purchase Order"),
     (re.compile(r"\btax\s+invoice\b", re.I),                              "invoice",        "Tax Invoice"),
+    (re.compile(r"\bsales\s+invoice\b", re.I),                            "invoice",        "Sales Invoice"),
+    (re.compile(r"\bcommercial\s+invoice\b", re.I),                       "invoice",        "Commercial Invoice"),
     (re.compile(r"\binvoice\b", re.I),                                    "invoice",        "Invoice"),
     (re.compile(r"\b(?:service\s+agreement|service\s+contract)\b", re.I), "contract",       "Service Agreement"),
     (re.compile(r"\bcontract\b", re.I),                                   "contract",       "Contract"),
@@ -156,12 +158,37 @@ _SYMBOL_TO_ISO = {
     "TSh": "TZS",
 }
 
-# Amount pattern: currency prefix/suffix with numeric value
+def _normalise_ocr_amounts(text: str) -> str:
+    """
+    Fix OCR spacing artifacts in numeric values before amount extraction.
+
+    PaddleOCR and Tesseract sometimes insert a space after the thousands comma:
+    '$5, 725.00' instead of '$5,725.00'.  This causes the amount regex to
+    match only the fragment after the comma ('725.00') rather than the full
+    number.  We collapse 'digit,<spaces>digit{3}' back to 'digit,digit{3}'.
+    Applied iteratively to handle multi-comma numbers like '1, 200, 000'.
+    """
+    prev = None
+    while prev != text:
+        prev = text
+        text = re.sub(r"(\d),\s+(\d{3})\b", r"\1,\2", text)
+    return text
+
+
+# Amount pattern: currency prefix/suffix with numeric value.
+# Matches both thousand-separated numbers (1,234,567.00) and plain numbers (11992).
+# The word boundary \b prevents matching partial numbers embedded in longer strings
+# (e.g. won't match '992' from the middle of '11992').
+_AMOUNT_NUM = (
+    r"(?:\d{1,3}(?:[,]\d{3})+(?:[.,]\d{1,4})?"   # formatted: 1,234 or 1,234,567.00
+    r"|\d{1,3}(?:[.,]\d{1,4})?"                   # short plain: 5 or 5.00 or 5.0000
+    r"|\d{4,15}(?:[.,]\d{1,4})?)"                 # long plain: 11992 or 817500.00
+)
 _AMOUNT_PAT = re.compile(
     rf"(?:({_ISO_CURRENCIES}|Ksh\.?|KSh\.?|Kshs\.?|UShs\.?|TSh\.?)\s*"
     rf"|[\$€£]\s*)"
-    rf"(\d{{1,3}}(?:[,\s]\d{{3}})*(?:[.,]\d{{1,4}})?)"
-    rf"|(\d{{1,3}}(?:[,\s]\d{{3}})*(?:[.,]\d{{1,4}})?)"
+    rf"\b({_AMOUNT_NUM})\b"
+    rf"|\b({_AMOUNT_NUM})\b"
     rf"\s*({_ISO_CURRENCIES}|Ksh\.?|KSh\.?|Kshs\.?|UShs\.?|TSh\.?)",
     re.IGNORECASE,
 )
@@ -203,10 +230,22 @@ def _find_first_date(text: str, label_pattern: str) -> Optional[str]:
       "Invoice Date: 2024-07-06"   (colon separator, same line)
       "Invoice Date\n2024-07-06"   (grid layout, value on following line)
       "Due Date (May 12, 2026)"    (paren separator)
+      "INVOICE DATE  October 25, 2024"  (whitespace-only separator, inline grid)
     """
     # Same-line: label followed by optional separator and date value
     m = re.search(
         label_pattern + r"\s*[:\-\(]?\s*" + _DATE_VALUE_PAT,
+        text, re.IGNORECASE,
+    )
+    if m:
+        parsed = _parse_date(m.group(1))
+        if parsed:
+            return parsed
+
+    # Same-line with whitespace-only separator (2+ spaces or tab — no colon)
+    # Handles OCR inline grids like "INVOICE DATE  October 25, 2024"
+    m = re.search(
+        label_pattern + r"[\t ]{2,}" + _DATE_VALUE_PAT,
         text, re.IGNORECASE,
     )
     if m:
@@ -231,6 +270,7 @@ def _find_first_date(text: str, label_pattern: str) -> Optional[str]:
 def _extract_amounts(text: str) -> list[tuple[float, str]]:
     """Return list of (value, currency_iso) from all monetary mentions in text."""
     results: list[tuple[float, str]] = []
+    text = _normalise_ocr_amounts(text)
 
     for m in _AMOUNT_PAT.finditer(text):
         raw_cur_pre = m.group(1) or ""
@@ -281,9 +321,12 @@ def _best_amount(text: str) -> tuple[Optional[str], Optional[str]]:
       1. Explicitly labelled grand total / amount due
       2. Largest amount anywhere in the document
     """
+    text = _normalise_ocr_amounts(text)
     total_pattern = re.compile(
         r"(?:grand\s*total|total\s*amount|amount\s*due|net\s*amount|total\s*payable"
-        r"|invoice\s*total|total\s*inc\.?\s*(?:tax|vat)?|total\s*sum)"
+        r"|invoice\s*total|total\s*inc\.?\s*(?:tax|vat)?"
+        r"|total\s*sum|total\s*for\s*this\s*invoice"
+        r"|amount\s*payable|balance\s*due|total\s*due)"
         r"\s*[:\-]?\s*"
         rf"(?:{_ISO_CURRENCIES}|Ksh\.?|KSh\.?|Kshs\.?|[\$€£])?\s*"
         rf"(\d{{1,3}}(?:[,\s]\d{{3}})*(?:[.,]\d{{1,4}})?)",
@@ -296,6 +339,20 @@ def _best_amount(text: str) -> tuple[Optional[str], Optional[str]]:
         if amounts:
             val, cur = amounts[0]
             return str(round(val, 2)), cur or None
+        # Currency-less total line (e.g. "Total for This Invoice: 817,500.0000")
+        # Parse group(1) directly since there is no currency prefix/suffix.
+        raw_num = re.sub(r"[,\s]", "", m.group(1))
+        try:
+            val = float(raw_num)
+            if val > 0:
+                # Try to find a currency anywhere else in the document
+                all_doc_amounts = _extract_amounts(text)
+                doc_currency = next(
+                    (c for _, c in all_doc_amounts if c), None
+                )
+                return str(round(val, 2)), doc_currency
+        except ValueError:
+            pass
 
     # Fall back: largest amount in the document
     amounts = _extract_amounts(text)
@@ -372,6 +429,53 @@ def _extract_reference(text: str, doc_type: str) -> Optional[str]:
             if val.upper() in _REF_REJECT or len(val) < 2:
                 continue
             return val
+
+    # ── Orphaned-label fallback for multi-column scan layouts ────────────────
+    # Some scan OCR outputs have labels like "INVOICE NO:" with their values
+    # appearing several lines earlier in the linear text (two-column layout
+    # read left-to-right, top-to-bottom per column).
+    # Strategy: find the label, look in the preceding N lines for standalone
+    # code-like values that have no label of their own, taking the first
+    # (document-order) match so earlier values (invoice no) beat later ones
+    # (delivery no) when both appear before their respective labels.
+    label_hints: dict[str, re.Pattern] = {
+        "invoice":        re.compile(r"invoice\s*no\.?\s*:?\s*$", re.I | re.M),
+        "purchase_order": re.compile(r"(?:purchase\s*order|p\.?o\.?)\s*no\.?\s*:?\s*$", re.I | re.M),
+        "receipt":        re.compile(r"receipt\s*no\.?\s*:?\s*$", re.I | re.M),
+        "delivery_note":  re.compile(r"(?:delivery\s*(?:note\s*)?|d\.?n\.?)\s*no\.?\s*:?\s*$", re.I | re.M),
+    }
+    label_pat = label_hints.get(doc_type)
+    if label_pat:
+        label_m = label_pat.search(text)
+        if label_m:
+            lines = text.splitlines()
+            label_lineno = text[:label_m.start()].count("\n")
+            search_start = max(0, label_lineno - 15)
+            _standalone_ref_re = re.compile(
+                r"^([A-Z]{1,6}[-/][A-Z0-9][A-Z0-9\-/]{1,59}"
+                r"|[A-Z]{1,6}\d[A-Z0-9\-/]{1,59}"
+                r"|\d{4,20})(?:\s|$)",
+                re.I,
+            )
+            # Pattern to detect lines that are actually amounts (number + currency)
+            # e.g. '11992 KSH' or '817,500.00 USD' — skip these
+            _amount_line_re = re.compile(
+                r"^\d[\d,. ]*\s*(?:USD|EUR|GBP|KES|KSH|UGX|TZS|RWF|ETB|NGN|GHS|ZAR"
+                r"|Ksh\.?|KSh\.?|Kshs\.?)\s*$",
+                re.I,
+            )
+            # Search in document order (top-to-bottom) to prefer the document's
+            # own reference number over sibling references that appear later.
+            for line in lines[search_start:label_lineno]:
+                line_stripped = line.strip()
+                if _amount_line_re.match(line_stripped):
+                    continue  # skip amount lines like '11992 KSH'
+                ref_m = _standalone_ref_re.match(line_stripped)
+                if ref_m:
+                    val = ref_m.group(1)
+                    if val.upper() not in _REF_REJECT and len(val) >= 4:
+                        return val
+
     return None
 
 
@@ -427,6 +531,9 @@ _SUPPLIER_REJECT_RE = re.compile(
     r"|\d{6,}"                                               # long numeric strings (account/ref numbers)
     r"|\bno\.?\s*[:\-]"                                      # "No:" labels (invoice no, LPO no, etc.)
     r"|\b(?:bill(?:ed)?\s*to|ship(?:ped)?\s*to|sold\s*to)\b" # customer-block headers
+    r"|^\d{1,2}[/.\-]\d{1,2}[/.\-]\d{2,4}$"                # standalone date strings
+    r"|^\d{4}[-/]\d{1,2}[-/]\d{1,2}$"                       # ISO date strings
+    r"|^\d+\s*(?:KES|KSH|USD|EUR|GBP|KSh|Ksh)"              # amount+currency lines
     ,
     re.I,
 )
@@ -443,6 +550,38 @@ _BILL_TO_BLOCK_RE = re.compile(
     r"\b(?:bill(?:ed)?\s*to|ship(?:ped)?\s*to|sold\s*to|deliver(?:y|ed)?\s*to)\b",
     re.I,
 )
+
+
+_DOC_TITLE_ADJECTIVES = frozenset({
+    "official", "commercial", "local", "standard", "original", "formal",
+    "tax", "proforma", "pro-forma", "revised", "final", "amended",
+    "duplicate", "copy", "consolidated", "combined", "interim",
+    "preliminary", "draft", "sample", "approved", "sales", "purchase",
+    "service", "utility", "monthly", "annual", "quarterly", "weekly",
+    "general", "special", "private", "public", "domestic", "international",
+    "electronic", "digital", "original", "corrected", "supplementary",
+})
+
+
+def _prefix_looks_like_company(prefix: str) -> bool:
+    """
+    Return True only when a prefix-before-doc-type keyword looks like a real
+    company name rather than a document title adjective.
+
+    'OFFICIAL COMMERCIAL' → False  (all generic title adjectives)
+    'Velocity Logistics'  → True   (meaningful non-adjective token)
+    'Acme Ltd'            → True   (legal suffix)
+    """
+    if not prefix or len(prefix) < 3:
+        return False
+    if _ENTITY_SUFFIX_RE.search(prefix):
+        return True
+    tokens = prefix.split()
+    meaningful = [
+        t for t in tokens
+        if t.lower() not in _DOC_TITLE_ADJECTIVES and len(t) > 2
+    ]
+    return bool(meaningful) and any(t[0].isupper() for t in meaningful)
 
 
 def _clean_inline_value(value: str, max_len: int = 120) -> str:
@@ -530,7 +669,7 @@ def _extract_supplier(lines: list[str]) -> Optional[str]:
     search_limit = bill_to_idx if bill_to_idx is not None else min(15, len(lines))
     search_limit = min(search_limit, 15)
 
-    for line in lines[:search_limit]:
+    for idx_line, line in enumerate(lines[:search_limit]):
         stripped = line.strip()
         if not stripped:
             continue
@@ -539,8 +678,17 @@ def _extract_supplier(lines: list[str]) -> Optional[str]:
             # be the issuer (e.g. "Acme Ltd — Invoice").
             m = _DOCTYPE_HEADING_RE.search(stripped)
             prefix = stripped[: m.start()].strip() if m else ""
-            if len(prefix) >= 3 and _is_valid(prefix):
+            if len(prefix) >= 3 and _is_valid(prefix) and _prefix_looks_like_company(prefix):
                 return prefix[:120]
+            # Also check if the PREVIOUS line is a company name whose suffix
+            # wraps onto this line (e.g. "WAKI GENERAL SUPPLIES\nLTD INVOICE").
+            if idx_line > 0:
+                prev_line = lines[idx_line - 1].strip()
+                suffix_prefix = stripped[: m.start()].strip()  # e.g. "LTD"
+                if suffix_prefix and _is_valid(prev_line):
+                    combined = (prev_line + " " + suffix_prefix).strip()
+                    if _is_valid(combined) and len(combined) >= 5:
+                        return combined[:120]
             continue
         # Tab- or pipe-separated rows are header grids or line items.
         if "\t" in stripped or "|" in stripped:
@@ -616,11 +764,18 @@ def _labelled_code(label_pattern: str, text: str) -> Optional[str]:
     """
     Extract an alphanumeric code (possibly hyphenated) after a label.
 
-    FIX: wider character class — accepts digit-first tokens, mixed case,
-    hyphens, slashes, underscores, up to 60 characters.  Also handles
-    next-line layout (label on one line, code on the next).
+    Handles three separator styles:
+      • Colon/dash:  "Account Code: NET-OPS-88"
+      • Whitespace:  "ACCOUNT CODE  LOG-DIST-404"  (2+ spaces or tab, no colon)
+      • Next-line:   label alone on one line, code on the following line
     """
-    # Same-line: "Account Code: NET-OPS-88"
+    _INLINE_LABEL_REJECT = re.compile(
+        r"^(?:SUPPLIER|VENDOR|INVOICE|DATE|DUE|PAYMENT|TOTAL|AMOUNT|CURRENCY"
+        r"|DESCRIPTION|QTY|UNIT|COST|REF|ORDER|DELIVERY|TERMS)\b",
+        re.I,
+    )
+
+    # Same-line with colon/dash separator
     m = re.search(
         label_pattern + r"\s*[:\-]\s*([A-Z0-9#][A-Z0-9\-_/]{1,59})",
         text, re.I | re.M,
@@ -628,6 +783,16 @@ def _labelled_code(label_pattern: str, text: str) -> Optional[str]:
     if m:
         val = m.group(1).strip().rstrip(".,;:")
         if val:
+            return val
+
+    # Same-line with whitespace-only separator (2+ spaces or tab)
+    m = re.search(
+        label_pattern + r"[\t ]{2,}([A-Z0-9#][A-Z0-9\-_/]{1,59})",
+        text, re.I | re.M,
+    )
+    if m:
+        val = m.group(1).strip().rstrip(".,;:")
+        if val and not _INLINE_LABEL_REJECT.match(val):
             return val
 
     # Next-line: label alone on one line, code on the following line
@@ -935,7 +1100,7 @@ def _extract_account_code(text: str, lines: list[str]) -> Optional[str]:
     labelled = _labelled_code(
         r"(?:a/?c\s*code|account\s+code|acct\.?\s*code|g/?l\s*(?:code|no\.?)"
         r"|ledger\s*code|billing\s*code|client\s*(?:code|id)|customer\s*(?:code|id)"
-        r"|project\s*code)",
+        r"|project\s*code|account\s*#)",
         text,
     )
     if labelled and _is_plausible_gl_account_code(labelled):

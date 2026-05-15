@@ -365,6 +365,24 @@ export const documentsAPI = {
     api.post<{ ok: boolean }>(`/documents/${id}/file_print_event/`),
 };
 
+export const bulkUploadAPI = {
+  create: (
+    formData: FormData,
+    config?: { onUploadProgress?: (progressEvent: { loaded: number; total?: number }) => void },
+  ) =>
+    api.post("/documents/bulk-uploads/", formData, {
+      headers: { "Content-Type": "multipart/form-data" },
+      onUploadProgress: config?.onUploadProgress,
+    }),
+
+  get: (id: string) => api.get(`/documents/bulk-uploads/${id}/`),
+
+  status: (id: string) => api.get(`/documents/bulk-uploads/${id}/status/`),
+
+  review: (id: string, documents: Record<string, unknown>[]) =>
+    api.post(`/documents/bulk-uploads/${id}/review/`, { documents }),
+};
+
 export const documentTypesAPI = {
   list: () => api.get("/documents/types/"),
   get: (id: string) => api.get(`/documents/types/${id}/`),

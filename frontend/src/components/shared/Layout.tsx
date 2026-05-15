@@ -76,6 +76,7 @@ const mainNav: NavEntry[] = [
       { to: "/documents?status=archived", icon: Archive,  label: "Archived" },
       { to: "/documents/upload",          icon: Upload,   label: "Upload" },
       { to: "/documents/scan",            icon: ScanLine, label: "Scan" },
+      { to: "/documents/bulk-scan",      icon: ScanLine, label: "Bulk scan" },
       { to: "/search",                    icon: Search,   label: "Search" },
     ],
   } as NavGroup,

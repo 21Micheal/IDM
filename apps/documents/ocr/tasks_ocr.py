@@ -123,8 +123,19 @@ def run_ocr(doc) -> tuple[str, dict]:
     text = ""
     quality_meta: dict = {}
 
+    # ── Pre-packaged OCR zip (zip disguised as PDF, contains .txt + .jpeg) ──
+    # Some document scanning workflows produce a zip archive renamed as .pdf
+    # containing manifest.json, per-page .txt (OCR text), and .jpeg (image).
+    # Detect by trying to open as zip first.
+    if not text.strip():
+        text, quality_meta = _try_ocr_package(file_path)
+        if text.strip():
+            logger.info(
+                "run_ocr: doc=%s loaded pre-packaged OCR from zip bundle", doc.id
+            )
+
     # ── Native PDF text layer (digitally created PDFs, not scans) ───────────
-    if mime == "application/pdf":
+    if not text.strip() and mime == "application/pdf":
         native_text, cpp = _pdf_native_text_and_density(file_path)
         if cpp >= _MIN_CHARS_PER_PAGE_NATIVE_PDF:
             table_text = _extract_pdf_tables_as_text(file_path)
@@ -273,6 +284,73 @@ def _ner_field_hints(text: str) -> dict[str, str]:
             break
 
     return hints
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Pre-packaged OCR zip bundle support
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+def _try_ocr_package(file_path: str) -> tuple[str, dict]:
+    """
+    Attempt to read a zip-wrapped OCR bundle.
+
+    Some scanning pipelines produce a zip archive (sometimes renamed .pdf)
+    containing:
+      manifest.json  — {"num_pages": N, "pages": [{page_number, text: {path}, ...}]}
+      1.txt, 2.txt … — per-page OCR text
+      1.jpeg, 2.jpeg … — per-page raster images (not used here)
+
+    Returns (full_text, quality_meta) on success, or ("", {}) if the file
+    is not a valid OCR bundle.
+    """
+    import zipfile
+    import json
+
+    if not zipfile.is_zipfile(file_path):
+        return "", {}
+
+    try:
+        with zipfile.ZipFile(file_path, "r") as zf:
+            names = zf.namelist()
+
+            # Must have a manifest and at least one text file
+            if "manifest.json" not in names:
+                return "", {}
+            has_text = any(n.endswith(".txt") for n in names)
+            if not has_text:
+                return "", {}
+
+            manifest = json.loads(zf.read("manifest.json").decode("utf-8", errors="replace"))
+            pages = manifest.get("pages", [])
+            if not pages:
+                return "", {}
+
+            page_texts: list[str] = []
+            for page in sorted(pages, key=lambda p: p.get("page_number", 0)):
+                txt_path = (page.get("text") or {}).get("path", "")
+                if txt_path and txt_path in names:
+                    raw = zf.read(txt_path).decode("utf-8", errors="replace")
+                    page_texts.append(raw.strip())
+
+            if not page_texts:
+                return "", {}
+
+            full_text = "\n\n".join(t for t in page_texts if t)
+            num_pages = manifest.get("num_pages", len(pages))
+            quality_meta = {
+                "extraction_source": "ocr_package",
+                "mean_confidence": 85.0,   # pre-packaged text is assumed decent quality
+                "overall_quality_ratio": 1.0,
+                "total_pages": num_pages,
+                "low_quality_pages": 0,
+                "low_quality_warning": False,
+            }
+            return full_text, quality_meta
+
+    except Exception as exc:
+        logger.debug("_try_ocr_package: %s is not a valid OCR bundle: %s", file_path, exc)
+        return "", {}
 
 
 # ─────────────────────────────────────────────────────────────────────────────
