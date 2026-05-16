@@ -220,6 +220,17 @@ OCR_PADDLE_USE_ANGLE_CLS = env.bool("OCR_PADDLE_USE_ANGLE_CLS", default=True)
 OCR_SPACY_ENABLED = env.bool("OCR_SPACY_ENABLED", default=True)
 OCR_SPACY_MODEL = env("OCR_SPACY_MODEL", default="en_core_web_sm")
 
+# ── IDP (Intelligent Document Processing) ───────────────────────────────────
+# Claude is the primary field-extraction engine when ANTHROPIC_API_KEY is set.
+# If the key is absent or OCR_IDP_ENGINE=regex, the local OCR + regex pipeline
+# remains the fallback path.
+ANTHROPIC_API_KEY = env("ANTHROPIC_API_KEY", default="")
+OCR_IDP_ENGINE = env("OCR_IDP_ENGINE", default="auto")
+OCR_IDP_MODEL = env("OCR_IDP_MODEL", default="claude-haiku-4-5")
+OCR_IDP_VISION_DPI = env.int("OCR_IDP_VISION_DPI", default=150)
+OCR_IDP_TIMEOUT = env.int("OCR_IDP_TIMEOUT", default=60)
+OCR_IDP_MAX_PAGES = env.int("OCR_IDP_MAX_PAGES", default=3)
+
 LIBREOFFICE_CMD = env("LIBREOFFICE_CMD", default="libreoffice")
 # Backward-compatible alias used by tasks.py
 LIBREOFFICE_BIN = env("LIBREOFFICE_BIN", default=LIBREOFFICE_CMD)

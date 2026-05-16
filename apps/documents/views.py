@@ -1164,8 +1164,15 @@ echo "✓ DocVault LibreOffice integration installed."
         meta = doc.metadata or {}
         suggestions = None
         if doc.ocr_status == OCRStatus.DONE:
-            fields = meta.get("ocr_suggestions")
-            quality = meta.get("ocr_quality")
+            ocr_block = meta.get("ocr_suggestions")
+            if isinstance(ocr_block, dict) and (
+                "fields" in ocr_block or "quality" in ocr_block
+            ):
+                fields = ocr_block.get("fields")
+                quality = ocr_block.get("quality") or meta.get("ocr_quality")
+            else:
+                fields = ocr_block
+                quality = meta.get("ocr_quality")
             if fields or quality:
                 suggestions = {
                     "fields": fields or None,

@@ -66,12 +66,9 @@ OCR_IDP_MAX_PAGES        Max pages to send to Vision. Default: 3
 """
 from __future__ import annotations
 
-import base64
 import json
 import logging
 import time
-from pathlib import Path
-from typing import Optional
 
 logger = logging.getLogger(__name__)
 
@@ -159,15 +156,11 @@ def run_idp(doc) -> tuple[str, dict]:
 
     # ── Route to correct engine ────────────────────────────────────────────────
     try:
-        if engine_setting == "regex":
-            return _run_regex_fallback(doc, start)
-
         api_key = getattr(django_settings, "ANTHROPIC_API_KEY", "").strip()
         if not api_key:
-            logger.warning(
-                "idp.run_idp: ANTHROPIC_API_KEY not set — falling back to regex"
-            )
-            return _run_regex_fallback(doc, start)
+            # Should not normally reach here (run_ocr guards this),
+            # but handle defensively just in case.
+            raise RuntimeError("ANTHROPIC_API_KEY not set")
 
         mime = doc.file_mime_type or ""
         file_path = doc.file.path
@@ -186,9 +179,9 @@ def run_idp(doc) -> tuple[str, dict]:
             fields, raw_text = _extract_via_text(file_path, mime, api_key, django_settings)
 
     except Exception as exc:
-        logger.error("idp.run_idp: Claude extraction failed for %s: %s", doc.id, exc)
-        logger.info("idp.run_idp: falling back to regex extractor")
-        return _run_regex_fallback(doc, start)
+        logger.error("idp.run_idp: Claude extraction failed for %s: %s — delegating to local pipeline", doc.id, exc)
+        from apps.documents.ocr.tasks_ocr import _run_local_pipeline
+        return _run_local_pipeline(doc)
 
     elapsed = round(time.monotonic() - start, 2)
 
@@ -241,18 +234,8 @@ def _detect_engine(file_path: str, mime: str) -> str:
         return "claude_vision"
 
     if mime == "application/pdf":
-        try:
-            import pdfplumber
-            with pdfplumber.open(file_path) as pdf:
-                if not pdf.pages:
-                    return "claude_vision"
-                # Sample first page
-                text = pdf.pages[0].extract_text() or ""
-                chars_per_page = len(text.strip())
-                # Fewer than 100 chars → likely scanned → use vision
-                return "claude_vision" if chars_per_page < 100 else "claude_text"
-        except Exception:
-            return "claude_vision"
+        from apps.documents.ocr.tasks_ocr import is_sparse_pdf
+        return "claude_vision" if is_sparse_pdf(file_path) else "claude_text"
 
     # Non-PDF, non-image (DOCX, XLSX) → text mode
     return "claude_text"
@@ -271,13 +254,14 @@ def _extract_via_vision(
     Returns (fields_dict, raw_text_for_storage).
     """
     import anthropic
+    from apps.documents.ocr.tasks_ocr import render_doc_to_images
 
     model = getattr(settings, "OCR_IDP_MODEL", "claude-haiku-4-5")
     dpi = int(getattr(settings, "OCR_IDP_VISION_DPI", 150))
     timeout = int(getattr(settings, "OCR_IDP_TIMEOUT", 60))
     max_pages = int(getattr(settings, "OCR_IDP_MAX_PAGES", 3))
 
-    pages_b64 = _render_to_images(file_path, mime, dpi, max_pages)
+    pages_b64 = render_doc_to_images(file_path, mime, dpi=dpi, max_pages=max_pages)
     if not pages_b64:
         raise RuntimeError("Could not render any pages from document")
 
@@ -306,7 +290,7 @@ def _extract_via_vision(
     raw_json = response.content[0].text.strip()
     fields = _parse_claude_json(raw_json)
 
-    # Also extract raw text for full-text search (don't depend on Claude for this)
+    # Extract raw text for full-text search storage
     raw_text = _extract_raw_text(file_path, mime)
 
     return fields, raw_text
@@ -325,12 +309,16 @@ def _extract_via_text(
     Returns (fields_dict, raw_text_for_storage).
     """
     import anthropic
+    from apps.documents.ocr.tasks_ocr import _extract_pdf_tables_as_text
 
     model = getattr(settings, "OCR_IDP_MODEL", "claude-haiku-4-5")
     timeout = int(getattr(settings, "OCR_IDP_TIMEOUT", 60))
 
     raw_text = _extract_raw_text(file_path, mime)
-    augmented_text = _augment_with_tables(file_path, mime, raw_text)
+
+    # Augment with table-derived labelled lines (same helper used by local pipeline)
+    table_text = _extract_pdf_tables_as_text(file_path) if mime == "application/pdf" else ""
+    augmented_text = raw_text + (("\n\n" + table_text) if table_text else "")
 
     if not augmented_text.strip():
         raise RuntimeError("No text could be extracted from document")
@@ -359,70 +347,6 @@ def _extract_via_text(
     return fields, raw_text
 
 
-# ── Rendering helpers ──────────────────────────────────────────────────────────
-
-def _render_to_images(
-    file_path: str,
-    mime: str,
-    dpi: int,
-    max_pages: int,
-) -> list[tuple[str, str]]:
-    """
-    Render document pages to base64-encoded PNG images.
-    Returns list of (base64_string, media_type) tuples.
-    """
-    results: list[tuple[str, str]] = []
-
-    if mime.startswith("image/"):
-        with open(file_path, "rb") as f:
-            data = f.read()
-        b64 = base64.standard_b64encode(data).decode()
-        # Normalise to JPEG for smaller payloads if large
-        results.append((b64, mime))
-        return results
-
-    if mime == "application/pdf":
-        try:
-            import pypdfium2 as pdfium
-            doc = pdfium.PdfDocument(file_path)
-            n = min(len(doc), max_pages)
-            scale = dpi / 72.0  # pdfium renders at 72 DPI by default
-
-            for i in range(n):
-                page = doc[i]
-                bitmap = page.render(scale=scale, optimise_mode=pdfium.OptimiseMode.NONE)
-                pil_img = bitmap.to_pil()
-
-                import io
-                buf = io.BytesIO()
-                pil_img.save(buf, format="JPEG", quality=85, optimize=True)
-                buf.seek(0)
-                b64 = base64.standard_b64encode(buf.read()).decode()
-                results.append((b64, "image/jpeg"))
-
-            return results
-        except Exception as exc:
-            logger.error("_render_to_images: pypdfium2 failed: %s", exc)
-            # Fallback to pdf2image
-            try:
-                from pdf2image import convert_from_path
-                import io
-                pages = convert_from_path(file_path, dpi=dpi)
-                for pil_img in pages[:max_pages]:
-                    buf = io.BytesIO()
-                    pil_img.save(buf, format="JPEG", quality=85)
-                    buf.seek(0)
-                    b64 = base64.standard_b64encode(buf.read()).decode()
-                    results.append((b64, "image/jpeg"))
-                return results
-            except Exception as exc2:
-                logger.error("_render_to_images: pdf2image fallback failed: %s", exc2)
-                return []
-
-    # Non-PDF, non-image: can't render
-    return []
-
-
 # ── Text extraction helpers ────────────────────────────────────────────────────
 
 def _extract_raw_text(file_path: str, mime: str) -> str:
@@ -447,48 +371,6 @@ def _extract_raw_text(file_path: str, mime: str) -> str:
             return ""
 
     return ""
-
-
-def _augment_with_tables(file_path: str, mime: str, raw_text: str) -> str:
-    """
-    Append table-derived "Label: Value" lines to raw text.
-    Preserves column header → cell value relationships that extract_text() collapses.
-    """
-    if mime != "application/pdf":
-        return raw_text
-
-    try:
-        import pdfplumber
-        augmented: list[str] = []
-        with pdfplumber.open(file_path) as pdf:
-            for page in pdf.pages:
-                tables = page.extract_tables() or []
-                for table in tables:
-                    if not table or len(table[0]) > 6 or len(table) > 10:
-                        continue
-                    header_row = table[0]
-                    data_rows = table[1:]
-                    if not data_rows:
-                        for cell in header_row:
-                            if cell and "\n" in str(cell):
-                                parts = str(cell).split("\n", 1)
-                                label, value = parts[0].strip(), parts[1].strip()
-                                if label and value:
-                                    augmented.append(f"{label}: {value}")
-                    else:
-                        for data_row in data_rows:
-                            for header, value in zip(header_row, data_row):
-                                h = str(header or "").strip()
-                                v = str(value or "").strip()
-                                if h and v and h.upper() != v.upper():
-                                    augmented.append(f"{h}: {v}")
-
-        if augmented:
-            return raw_text + "\n\n" + "\n".join(augmented)
-    except Exception as exc:
-        logger.debug("_augment_with_tables: %s", exc)
-
-    return raw_text
 
 
 # ── JSON parsing ───────────────────────────────────────────────────────────────
@@ -543,47 +425,3 @@ def _parse_claude_json(raw: str) -> dict:
             cleaned[k] = v
 
     return cleaned
-
-
-# ── Regex fallback ────────────────────────────────────────────────────────────
-
-def _run_regex_fallback(doc, start: float) -> tuple[str, dict]:
-    """Fall back to the original regex-based extractor."""
-    from apps.documents.ocr.tasks_ocr import _ocr_tesseract_v2, _extract_raw_text as _raw
-    from apps.documents.ocr.extractor import extract_document_fields
-
-    mime = doc.file_mime_type or ""
-    file_path = doc.file.path
-
-    if doc.is_scanned or mime.startswith("image/"):
-        text, quality_meta = _ocr_tesseract_v2(doc)
-    else:
-        text = _extract_raw_text(file_path, mime)
-        quality_meta = {}
-
-    from apps.documents.ocr.tasks_ocr import _extract_pdf_tables_as_text
-    if mime == "application/pdf" and not doc.is_scanned:
-        table_text = _extract_pdf_tables_as_text(file_path)
-        if table_text:
-            text = text + "\n\n" + table_text
-
-    fields = extract_document_fields(text)
-    elapsed = round(time.monotonic() - start, 2)
-
-    quality = {
-        "engine":              "regex",
-        "model":               None,
-        "confidence":          "medium",
-        "low_quality_warning": quality_meta.get("low_quality_warning", False),
-        "processing_time_s":   elapsed,
-        "prompt_version":      None,
-        **({"mean_confidence": quality_meta["mean_confidence"]} if quality_meta.get("mean_confidence") else {}),
-        **({"overall_quality_ratio": quality_meta["overall_quality_ratio"]} if quality_meta.get("overall_quality_ratio") else {}),
-    }
-
-    return text, {
-        "ocr_suggestions": {
-            "fields":  fields,
-            "quality": quality,
-        }
-    }

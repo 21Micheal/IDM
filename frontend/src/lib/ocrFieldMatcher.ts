@@ -69,7 +69,7 @@ export type OcrFields = {
   signed_date?: string;
   registered_address?: string;
   raw_lines?: string[];
-  [key: string]: string | string[] | undefined;
+  [key: string]: string | number | boolean | string[] | Record<string, unknown>[] | undefined;
 };
 
 type OcrFieldKey = Extract<keyof OcrFields, string>;
@@ -287,9 +287,15 @@ export function matchOcrToField(
   const fieldType = (field.field_type ?? "text").toLowerCase();
 
   // All OCR keys that have a non-empty string value
-  const availableKeys = Object.keys(ocrFields).filter(
-    (k) => k !== "raw_lines" && typeof ocrFields[k] === "string" && (ocrFields[k] as string).trim() !== ""
-  ) as OcrFieldKey[];
+  const availableKeys = Object.keys(ocrFields).filter((k) => {
+    if (k === "raw_lines" || k === "line_items") return false;
+    const value = ocrFields[k];
+    return (
+      (typeof value === "string" && value.trim() !== "") ||
+      typeof value === "number" ||
+      typeof value === "boolean"
+    );
+  }) as OcrFieldKey[];
 
   if (availableKeys.length === 0) return null;
 
@@ -309,7 +315,7 @@ export function matchOcrToField(
   return {
     ocrKey: bestKey,
     score: bestScore,
-    value: ocrFields[bestKey] as string,
+    value: String(ocrFields[bestKey]),
   };
 }
 

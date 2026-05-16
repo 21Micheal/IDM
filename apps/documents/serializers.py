@@ -396,9 +396,16 @@ class DocumentDetailSerializer(serializers.ModelSerializer):
         meta = obj.metadata or {}
         result = {}
         if suggestions := meta.get("ocr_suggestions"):
-            result["fields"] = suggestions
+            if isinstance(suggestions, dict) and (
+                "fields" in suggestions or "quality" in suggestions
+            ):
+                result["fields"] = suggestions.get("fields")
+                if suggestions.get("quality"):
+                    result["quality"] = suggestions.get("quality")
+            else:
+                result["fields"] = suggestions
         if quality := meta.get("ocr_quality"):
-            result["quality"] = quality   # includes low_quality_warning bool
+            result.setdefault("quality", quality)   # includes low_quality_warning bool
         return result or None
 
 

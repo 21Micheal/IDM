@@ -159,8 +159,54 @@ function getFieldErrorMessage(errors: Record<string, unknown>, name: string): st
     : undefined;
 }
 
-function ocrString(value: string | string[] | undefined): string | undefined {
+function ocrString(value: unknown): string | undefined {
   return typeof value === "string" ? value : undefined;
+}
+
+function ocrScalar(value: unknown): string | undefined {
+  if (typeof value === "string") {
+    const trimmed = value.trim();
+    return trimmed || undefined;
+  }
+  if (typeof value === "number" || typeof value === "boolean") {
+    return String(value);
+  }
+  return undefined;
+}
+
+const OCR_FIELD_ALIASES: Record<string, Array<keyof OcrFields>> = {
+  transaction_reference: ["transaction_ref", "reference_number"],
+  transaction_number: ["transaction_ref", "reference_number"],
+  payment_reference: ["transaction_ref", "reference_number"],
+  payment_ref: ["transaction_ref", "reference_number"],
+  reference: ["reference_number"],
+  reference_no: ["reference_number"],
+  reference_number: ["reference_number"],
+  account: ["account_code"],
+  account_code: ["account_code"],
+  account_number: ["account_code"],
+  account_no: ["account_code"],
+  vat_no: ["vat_number"],
+  vat_number: ["vat_number"],
+  tax_number: ["vat_number"],
+  payment: ["payment_method"],
+  payment_method: ["payment_method"],
+  subtotal: ["subtotal"],
+  sub_total: ["subtotal"],
+};
+
+function getExactOcrValueForField(field: MetadataField, fields: OcrFields): string | undefined {
+  const key = getMetadataFieldKey(field).toLowerCase().trim();
+  const labelKey = (field.label ?? "").toLowerCase().trim().replace(/[^a-z0-9]+/g, "_").replace(/^_+|_+$/g, "");
+  const candidates = [key, labelKey]
+    .flatMap((candidate) => [candidate, ...(OCR_FIELD_ALIASES[candidate] ?? [])])
+    .filter(Boolean) as string[];
+
+  for (const candidate of candidates) {
+    const value = ocrScalar(fields[candidate]);
+    if (value) return value;
+  }
+  return undefined;
 }
 
 // ── Small presentational components ──────────────────────────────────────────
@@ -736,9 +782,10 @@ export default function UploadPage({ scanOnly = false }: UploadPageProps) {
       }
 
       // Helper — fill a named form field and record its confidence score
-      const fillDirect = (key: Path<UploadFormValues>, value: string | undefined, score = 4) => {
-        if (value?.trim()) {
-          setValue(key, value.trim());
+      const fillDirect = (key: Path<UploadFormValues>, value: unknown, score = 4) => {
+        const scalar = ocrScalar(value);
+        if (scalar) {
+          setValue(key, scalar);
           scoreMap.set(key, score);
         }
       };
@@ -757,6 +804,16 @@ export default function UploadPage({ scanOnly = false }: UploadPageProps) {
 
       // 3. Fill admin metadata fields using the 4-pass matcher
       if (selectedType?.metadata_fields?.length) {
+        for (const field of selectedType.metadata_fields) {
+          const metadataKey = getMetadataFieldKey(field);
+          if (!metadataKey || isDirectColumnKey(metadataKey)) continue;
+          const value = getExactOcrValueForField(field, fields);
+          if (!value) continue;
+          const formPath = `metadata.${metadataKey}` as Path<UploadFormValues>;
+          setValue(formPath, value);
+          scoreMap.set(formPath, 4);
+        }
+
         const matches = applyOcrToFields(selectedType.metadata_fields, fields);
 
         for (const { field, match } of matches) {

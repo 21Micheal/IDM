@@ -244,7 +244,6 @@ def ocr_document(self, document_id: str):
     UPDATE so that duplicate Celery deliveries are safely no-ops.
     """
     from .models import Document, OCRStatus
-    from django.conf import settings as django_settings
 
     # Atomic claim — only one worker proceeds
     claimed = Document.objects.filter(
@@ -264,8 +263,6 @@ def ocr_document(self, document_id: str):
         except Document.DoesNotExist:
             logger.warning("ocr_document: document %s not found", document_id)
         return
-
-    engine = getattr(django_settings, "OCR_ENGINE", "paddle").lower()
 
     try:
         doc = Document.objects.get(id=document_id)
@@ -292,22 +289,37 @@ def ocr_document(self, document_id: str):
             obj=doc,
             changes={
                 "characters": len(text),
-                "suggested_fields": list((metadata_updates.get("ocr_suggestions") or {}).keys()),
-                "quality": metadata_updates.get("ocr_quality") or {},
+                "suggested_fields": [
+                    k for k, v in (
+                        (metadata_updates.get("ocr_suggestions") or {}).get("fields", {})
+                        if isinstance(metadata_updates.get("ocr_suggestions"), dict)
+                        else {}
+                    ).items()
+                    if v and k != "raw_lines"
+                ],
+                "quality": (
+                    (metadata_updates.get("ocr_suggestions") or {}).get("quality")
+                    or metadata_updates.get("ocr_quality")
+                    or {}
+                ),
             },
         )
 
-        suggestions = metadata_updates.get("ocr_suggestions", {})
-        quality = metadata_updates.get("ocr_quality", {})
+        ocr_block = metadata_updates.get("ocr_suggestions", {})
+        suggestions = ocr_block.get("fields", ocr_block) if isinstance(ocr_block, dict) else {}
+        quality = (
+            ocr_block.get("quality", metadata_updates.get("ocr_quality", {}))
+            if isinstance(ocr_block, dict)
+            else metadata_updates.get("ocr_quality", {})
+        )
 
         logger.info(
-            "ocr_document: completed for %s (%d chars, mean_conf=%.1f, "
-            "quality=%.0f%%, suggestions=%s)",
+            "ocr_document: completed for %s (%d chars, engine=%s, confidence=%s, fields=%s)",
             document_id,
             len(text),
-            quality.get("mean_confidence", 0),
-            quality.get("overall_quality_ratio", 0) * 100,
-            list(suggestions.keys()),
+            quality.get("engine", "unknown"),
+            quality.get("confidence", "?"),
+            [k for k, v in suggestions.items() if v and k != "raw_lines"],
         )
         _trigger_index(document_id)
 
