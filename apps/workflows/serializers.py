@@ -148,6 +148,7 @@ class WorkflowStepWriteSerializer(serializers.ModelSerializer):
         }
 
     def to_internal_value(self, data):
+        UserGroup.ensure_hod_group()
         mutable = dict(data)
         mutable["assignee_type"] = normalize_assignee_type(mutable.get("assignee_type"))
         return super().to_internal_value(mutable)

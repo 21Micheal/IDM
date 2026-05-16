@@ -354,11 +354,33 @@ export const documentsAPI = {
   releaseLock: (id: string, force = false) =>
     api.post<{ detail: string }>(`/documents/${id}/release_lock/`, { force }),
 
-  /** Get current preview URL. GET. Used for polling during Office→PDF conversion. */
+  /** Get signed preview / file URLs (never exposes anonymous /media paths). */
   previewUrl: (id: string, versionId?: string) =>
     api.get<DocumentPreviewResponse>(`/documents/${id}/preview_url/`, {
       params: versionId ? { version_id: versionId } : undefined,
     }),
+
+  /** Compliance: log browser print dialog for this document (debounced client-side). */
+  filePrintEvent: (id: string) =>
+    api.post<{ ok: boolean }>(`/documents/${id}/file_print_event/`),
+};
+
+export const bulkUploadAPI = {
+  create: (
+    formData: FormData,
+    config?: { onUploadProgress?: (progressEvent: { loaded: number; total?: number }) => void },
+  ) =>
+    api.post("/documents/bulk-uploads/", formData, {
+      headers: { "Content-Type": "multipart/form-data" },
+      onUploadProgress: config?.onUploadProgress,
+    }),
+
+  get: (id: string) => api.get(`/documents/bulk-uploads/${id}/`),
+
+  status: (id: string) => api.get(`/documents/bulk-uploads/${id}/status/`),
+
+  review: (id: string, documents: Record<string, unknown>[]) =>
+    api.post(`/documents/bulk-uploads/${id}/review/`, { documents }),
 };
 
 export const documentTypesAPI = {
@@ -471,9 +493,9 @@ export const usersAPI = {
 
 export const departmentsAPI = {
   list: () => api.get("/departments/"),
-  create: (data: { name: string; code: string }) =>
+  create: (data: { name: string; code: string; head_id?: string | null }) =>
     api.post("/departments/", data),
-  update: (id: string, data: { name?: string; code?: string }) =>
+  update: (id: string, data: { name?: string; code?: string; head_id?: string | null }) =>
     api.patch(`/departments/${id}/`, data),
   delete: (id: string) => api.delete(`/departments/${id}/`),
 };

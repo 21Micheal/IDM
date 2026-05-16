@@ -22,6 +22,7 @@ import logging
 from .models import (
     Document, DocumentType, MetadataField,
     DocumentVersion, DocumentComment, Tag, OCRStatus,
+    BulkUpload, BulkUploadStatus, DocumentStatus,
 )
 from apps.accounts.serializers import UserSummarySerializer
 from apps.accounts.models import GroupAction
@@ -32,6 +33,7 @@ from django.utils.text import slugify
 import mimetypes
 from django.core.files.storage import default_storage
 from apps.search.utils import summarize_bulk_index_error
+from .file_streaming import build_absolute_document_file_url, user_can_download_document
 
 PERSONAL_DOCUMENT_TYPE_CODE = "PERSONAL"
 DOCUMENT_COLUMN_METADATA_KEYS = {
@@ -39,10 +41,16 @@ DOCUMENT_COLUMN_METADATA_KEYS = {
 }
 logger = logging.getLogger(__name__)
 
-def _find_existing_document_for_checksum(checksum: str, exclude_document_id=None):
+def _find_existing_document_for_checksum(
+    checksum: str,
+    exclude_document_id=None,
+    uploaded_by=None,
+):
     if not checksum:
         return None
     qs = Document.objects.filter(checksum=checksum).exclude(file="")
+    if uploaded_by is not None:
+        qs = qs.filter(uploaded_by=uploaded_by)
     if exclude_document_id:
         qs = qs.exclude(id=exclude_document_id)
     return qs.order_by("created_at").first()
@@ -151,9 +159,17 @@ class DocumentVersionSerializer(serializers.ModelSerializer):
 
     def get_file_url(self, obj):
         request = self.context.get("request")
-        if not obj.file:
+        if not obj.file or not request:
             return None
-        return request.build_absolute_uri(obj.file.url) if request else obj.file.url
+        try:
+            doc = obj.document
+        except Exception:
+            return None
+        if not user_can_download_document(request.user, doc):
+            return None
+        return build_absolute_document_file_url(
+            request, doc, version_id=str(obj.id), use_preview=False, disposition="attachment"
+        )
 
 
 class DocumentCommentSerializer(serializers.ModelSerializer):
@@ -168,6 +184,10 @@ class DocumentCommentSerializer(serializers.ModelSerializer):
 class DocumentListSerializer(serializers.ModelSerializer):
     document_type_name = serializers.CharField(source="document_type.name", read_only=True)
     uploaded_by        = UserSummarySerializer(read_only=True)
+    department_name    = serializers.CharField(source="department.name", read_only=True, default=None)
+    uploaded_by_department_name = serializers.CharField(
+        source="uploaded_by.department.name", read_only=True, default=None
+    )
     tags               = TagSerializer(many=True, read_only=True)
     personal_tags      = serializers.SerializerMethodField()
     description        = serializers.SerializerMethodField()
@@ -185,7 +205,7 @@ class DocumentListSerializer(serializers.ModelSerializer):
             "status", "supplier", "amount", "currency", "document_date",
             "description", # Added for personal documents
             "file_name", "file_size", "file_mime_type",
-            "uploaded_by", "tags", "personal_tags", "permissions",
+            "uploaded_by", "department_name", "uploaded_by_department_name", "tags", "personal_tags", "permissions",
             "is_self_upload",
             "is_scanned", "ocr_status",
             "preview_pdf", "preview_status",
@@ -222,9 +242,11 @@ class DocumentListSerializer(serializers.ModelSerializer):
 
     def get_preview_pdf(self, obj):
         request = self.context.get("request")
-        if not obj.preview_pdf:
+        if not obj.preview_pdf or not request:
             return None
-        return request.build_absolute_uri(obj.preview_pdf.url) if request else obj.preview_pdf.url
+        return build_absolute_document_file_url(
+            request, obj, version_id="", use_preview=True, disposition="inline"
+        )
 
     def get_is_edit_locked(self, obj):
         return obj.is_edit_locked
@@ -284,6 +306,7 @@ class DocumentDetailSerializer(serializers.ModelSerializer):
     versions    = DocumentVersionSerializer(many=True, read_only=True)
     comments    = serializers.SerializerMethodField()
     permissions = serializers.SerializerMethodField()
+    file        = serializers.SerializerMethodField()
     preview_pdf = serializers.SerializerMethodField()
     is_edit_locked = serializers.SerializerMethodField()
     edit_locked_by_name = serializers.SerializerMethodField()
@@ -309,7 +332,7 @@ class DocumentDetailSerializer(serializers.ModelSerializer):
             "created_at", "updated_at",
         ]
         read_only_fields = [
-            "id", "reference_number", "file_name", "file_size", "file_mime_type",
+            "id", "reference_number", "file", "file_name", "file_size", "file_mime_type",
             "checksum", "uploaded_by", "is_self_upload",
             "is_scanned", "ocr_status", "ocr_suggestions",
             "preview_pdf", "preview_status",
@@ -346,9 +369,19 @@ class DocumentDetailSerializer(serializers.ModelSerializer):
 
     def get_preview_pdf(self, obj):
         request = self.context.get("request")
-        if not obj.preview_pdf:
+        if not obj.preview_pdf or not request:
             return None
-        return request.build_absolute_uri(obj.preview_pdf.url) if request else obj.preview_pdf.url
+        return build_absolute_document_file_url(
+            request, obj, version_id="", use_preview=True, disposition="inline"
+        )
+
+    def get_file(self, obj):
+        request = self.context.get("request")
+        if not request or not obj.file:
+            return None
+        return build_absolute_document_file_url(
+            request, obj, version_id="", use_preview=False, disposition="inline"
+        )
 
     def get_is_edit_locked(self, obj):
         return obj.is_edit_locked
@@ -422,8 +455,13 @@ class DocumentMetadataEditSerializer(serializers.ModelSerializer):
                 )
 
         try:
-            from apps.search.tasks import index_document
-            index_document.delay(str(instance.id))
+            from apps.search.indexing import schedule_document_search_pipeline
+
+            schedule_document_search_pipeline(
+                str(instance.id),
+                reextract_content=False,
+                index_immediately=True,
+            )
         except Exception:
             logger.exception("Failed to queue async reindex for document %s", instance.id)
 
@@ -574,14 +612,24 @@ class DocumentUploadSerializer(serializers.ModelSerializer):
         checksum = sha256.hexdigest()
         validated_data["checksum"] = checksum
 
-        # Global de-duplication by checksum:
-        # keep one binary in storage, create many document records that
-        # reference the same stored file path.
-        duplicate_source = _find_existing_document_for_checksum(checksum)
-        if duplicate_source and duplicate_source.file:
-            validated_data["file"] = duplicate_source.file.name
-        else:
-            validated_data["file"] = upload
+        same_user_duplicate = _find_existing_document_for_checksum(
+            checksum,
+            uploaded_by=request.user,
+        )
+        if same_user_duplicate:
+            raise serializers.ValidationError({
+                "file": (
+                    "You have already uploaded this document. "
+                    "Use the existing document instead."
+                ),
+                "duplicate_document_id": str(same_user_duplicate.id),
+                "duplicate_reference_number": same_user_duplicate.reference_number,
+            })
+
+        # Store every user's upload independently. The public file_name remains
+        # the original upload name; storage may suffix the internal path to
+        # avoid collisions with another user's file.
+        validated_data["file"] = upload
 
         try:
             doc = super().create(validated_data)
@@ -595,29 +643,36 @@ class DocumentUploadSerializer(serializers.ModelSerializer):
                 reference_number=validated_data["reference_number"]
             )
 
-        # Second pass to close races where another upload of the same checksum
-        # commits between pre-create lookup and this row insert.
-        canonical_source = duplicate_source or _find_existing_document_for_checksum(
+        # Second pass to close races where this user uploads the same checksum
+        # between the pre-create lookup and this row insert.
+        same_user_duplicate = _find_existing_document_for_checksum(
             checksum,
             exclude_document_id=doc.id,
+            uploaded_by=request.user,
         )
-        if canonical_source and canonical_source.file:
+        if same_user_duplicate:
             previous_storage_name = doc.file.name
-            if previous_storage_name != canonical_source.file.name:
-                Document.objects.filter(id=doc.id).update(file=canonical_source.file.name)
-                doc.file.name = canonical_source.file.name
-                # Delete the just-uploaded blob if nothing else references it.
-                if previous_storage_name and not Document.objects.filter(file=previous_storage_name).exclude(id=doc.id).exists():
-                    try:
-                        if default_storage.exists(previous_storage_name):
-                            default_storage.delete(previous_storage_name)
-                    except Exception:
-                        logger.exception(
-                            "Failed to delete unreferenced duplicate blob %s",
-                            previous_storage_name,
-                        )
-            doc._deduplicated_from_document_id = str(canonical_source.id)
-            doc._deduplicated_from_reference = canonical_source.reference_number
+            doc.delete()
+            file_still_referenced = Document.objects.filter(
+                file=previous_storage_name
+            ).exists()
+            if previous_storage_name and not file_still_referenced:
+                try:
+                    if default_storage.exists(previous_storage_name):
+                        default_storage.delete(previous_storage_name)
+                except Exception:
+                    logger.exception(
+                        "Failed to delete rejected duplicate blob %s",
+                        previous_storage_name,
+                    )
+            raise serializers.ValidationError({
+                "file": (
+                    "You have already uploaded this document. "
+                    "Use the existing document instead."
+                ),
+                "duplicate_document_id": str(same_user_duplicate.id),
+                "duplicate_reference_number": same_user_duplicate.reference_number,
+            })
 
         try:
             doc.tags.set(tags)
@@ -652,6 +707,16 @@ class DocumentUploadSerializer(serializers.ModelSerializer):
                     ocr_status=OCRStatus.PENDING
                 )
                 ocr_document.delay(str(doc.id))
+                from apps.audit.models import AuditEvent
+                from apps.audit.utils import record_audit_event
+
+                record_audit_event(
+                    AuditEvent.DOCUMENT_OCR_QUEUED,
+                    actor=request.user,
+                    obj=doc,
+                    request=request,
+                    changes={"source": "upload", "is_scanned": True},
+                )
             except Exception as exc:
                 import logging
                 logging.getLogger(__name__).error(
@@ -673,8 +738,13 @@ class DocumentUploadSerializer(serializers.ModelSerializer):
         # search results immediately (with empty extracted_text if OCR hasn't
         # finished yet; the OCR task will re-index when done)
         try:
-            from apps.search.tasks import index_document
-            index_document.delay(str(doc.id))
+            from apps.search.indexing import schedule_document_search_pipeline
+
+            schedule_document_search_pipeline(
+                str(doc.id),
+                reextract_content=False,
+                index_immediately=True,
+            )
         except Exception:
             pass
 
@@ -836,10 +906,8 @@ class DocumentTypeWriteSerializer(serializers.ModelSerializer):
         try:
             for i, field_data in enumerate(fields_data):
                 field_data = dict(field_data)
-                # Rename field_key → key to match the model field name
                 if "field_key" in field_data:
                     field_data["key"] = field_data.pop("field_key")
-                # Ensure order matches position in list if not explicitly set
                 if "order" not in field_data or field_data["order"] == 0:
                     field_data["order"] = i
                 MetadataField.objects.create(document_type=doc_type, **field_data)
@@ -886,7 +954,6 @@ class DocumentTypeWriteSerializer(serializers.ModelSerializer):
         self._apply_validated_data(instance, validated_data)
         self._sync_workflow_template(instance)
 
-        # Only replace fields if the key was present in the request
         if fields_data is not None:
             if next_metadata_mode == DocumentType.MetadataMode.USER_DEFINED:
                 self._save_metadata_fields(instance, [])
@@ -895,4 +962,266 @@ class DocumentTypeWriteSerializer(serializers.ModelSerializer):
         elif next_metadata_mode == DocumentType.MetadataMode.USER_DEFINED:
             self._save_metadata_fields(instance, [])
 
-        return insta
+        return instance
+
+
+class BulkUploadSerializer(serializers.ModelSerializer):
+    """
+    Serializer for creating a bulk upload batch.
+    
+    Accepts:
+    - document_type_id: The document type for all files in the batch
+    - files: List of files to upload
+    - common_tag_ids: Optional tags to apply to all documents
+    - is_scanned: Whether to treat all files as scanned (trigger OCR)
+    """
+    document_type_id = serializers.PrimaryKeyRelatedField(
+        queryset=DocumentType.objects.filter(is_active=True),
+        source="document_type",
+        write_only=True,
+    )
+    document_type = DocumentTypeSerializer(read_only=True)
+    uploaded_by = UserSummarySerializer(read_only=True)
+    common_tags = TagSerializer(many=True, read_only=True)
+    common_tag_ids = serializers.PrimaryKeyRelatedField(
+        queryset=Tag.objects.all(),
+        many=True,
+        source="common_tags",
+        write_only=True,
+        required=False,
+    )
+    
+    class Meta:
+        model = BulkUpload
+        fields = [
+            "id",
+            "document_type",
+            "document_type_id",
+            "uploaded_by",
+            "status",
+            "total_files",
+            "successful_uploads",
+            "failed_uploads",
+            "approved_count",
+            "rejected_count",
+            "common_tags",
+            "common_tag_ids",
+            "progress_percentage",
+            "created_at",
+            "updated_at",
+        ]
+        read_only_fields = [
+            "id",
+            "uploaded_by",
+            "status",
+            "total_files",
+            "successful_uploads",
+            "failed_uploads",
+            "approved_count",
+            "rejected_count",
+            "progress_percentage",
+            "created_at",
+            "updated_at",
+        ]
+
+
+class BulkUploadCreateSerializer(serializers.Serializer):
+    """
+    Serializer for initiating a bulk upload.
+    
+    This creates the BulkUpload record and returns document IDs
+    for tracking. The actual file uploads happen via the regular
+    document upload endpoint, but tagged with the bulk_upload_id.
+    """
+    document_type_id = serializers.PrimaryKeyRelatedField(
+        queryset=DocumentType.objects.filter(is_active=True),
+        source="document_type",
+    )
+    files = serializers.ListField(
+        child=serializers.FileField(),
+        min_length=1,
+        max_length=50,
+    )
+    common_tag_ids = serializers.PrimaryKeyRelatedField(
+        queryset=Tag.objects.all(),
+        many=True,
+        required=False,
+    )
+    is_scanned = serializers.BooleanField(default=True)
+
+    def validate_is_scanned(self, value):
+        if isinstance(value, str):
+            return value.lower() in ("true", "1", "yes", "on")
+        return bool(value)
+
+    def validate(self, attrs):
+        document_type = attrs["document_type"]
+        if document_type.is_personal_type:
+            raise serializers.ValidationError(
+                {"document_type_id": "Bulk upload is not supported for personal document types."}
+            )
+        return attrs
+
+
+class BulkUploadDocumentReadSerializer(serializers.Serializer):
+    """Read-only document row returned while a batch is processing or in review."""
+    document_id = serializers.UUIDField()
+    reference_number = serializers.CharField()
+    title = serializers.CharField()
+    file_name = serializers.CharField()
+    ocr_status = serializers.CharField()
+    ocr_suggestions = serializers.DictField(required=False, allow_null=True)
+    metadata = serializers.DictField(required=False)
+    supplier = serializers.CharField(allow_blank=True)
+    amount = serializers.CharField(allow_blank=True, required=False)
+    currency = serializers.CharField(allow_blank=True)
+    document_date = serializers.CharField(allow_blank=True, required=False)
+    due_date = serializers.CharField(allow_blank=True, required=False)
+
+
+class BulkUploadDetailSerializer(BulkUploadSerializer):
+    documents = serializers.SerializerMethodField()
+    ocr_progress = serializers.SerializerMethodField()
+
+    class Meta(BulkUploadSerializer.Meta):
+        fields = BulkUploadSerializer.Meta.fields + ["documents", "ocr_progress"]
+
+    def get_documents(self, obj):
+        from .bulk_upload import serialize_bulk_document
+
+        return [
+            serialize_bulk_document(doc)
+            for doc in obj.documents.order_by("created_at")
+        ]
+
+    def get_ocr_progress(self, obj):
+        docs = obj.documents.all()
+        total = docs.count()
+        if total == 0:
+            return {"total": 0, "done": 0, "failed": 0, "pending": 0}
+        done = docs.filter(ocr_status=OCRStatus.DONE).count()
+        failed = docs.filter(ocr_status=OCRStatus.FAILED).count()
+        pending = docs.filter(ocr_status__in=[OCRStatus.PENDING, OCRStatus.PROCESSING, ""]).count()
+        return {
+            "total": total,
+            "done": done,
+            "failed": failed,
+            "pending": pending,
+        }
+
+
+class BulkUploadReviewItemSerializer(serializers.Serializer):
+    """One document decision in the bulk review submit payload."""
+    document_id = serializers.UUIDField()
+    title = serializers.CharField(required=False, allow_blank=True)
+    supplier = serializers.CharField(required=False, allow_blank=True)
+    amount = serializers.CharField(required=False, allow_blank=True)
+    currency = serializers.CharField(required=False, allow_blank=True)
+    document_date = serializers.CharField(required=False, allow_blank=True)
+    due_date = serializers.CharField(required=False, allow_blank=True)
+    metadata = serializers.DictField(required=False)
+    approved = serializers.BooleanField(default=False)
+    rejected = serializers.BooleanField(default=False)
+
+    def validate(self, attrs):
+        if attrs.get("approved") and attrs.get("rejected"):
+            raise serializers.ValidationError(
+                "A document cannot be both approved and rejected."
+            )
+        if not attrs.get("approved") and not attrs.get("rejected"):
+            raise serializers.ValidationError(
+                "Each document must be approved or rejected."
+            )
+        return attrs
+
+
+class BulkUploadReviewSerializer(serializers.Serializer):
+    """Submit per-document metadata and approve/reject decisions for a batch."""
+    documents = BulkUploadReviewItemSerializer(many=True)
+
+    def validate(self, attrs):
+        bulk_upload = self.context["bulk_upload"]
+        batch_ids = {
+            str(doc_id)
+            for doc_id in bulk_upload.documents.values_list("id", flat=True)
+        }
+        submitted_ids = {str(item["document_id"]) for item in attrs["documents"]}
+        if submitted_ids != batch_ids:
+            missing = batch_ids - submitted_ids
+            extra = submitted_ids - batch_ids
+            raise serializers.ValidationError(
+                {
+                    "documents": (
+                        "Review payload must include every document in the batch. "
+                        f"Missing: {len(missing)}, unknown: {len(extra)}."
+                    )
+                }
+            )
+        return attrs
+
+    @transaction.atomic
+    def save(self):
+        from apps.workflows.services import WorkflowService, WorkflowError
+
+        bulk_upload = self.context["bulk_upload"]
+        request = self.context["request"]
+        approved_count = 0
+        rejected_count = 0
+        workflow_errors: list[str] = []
+
+        for item in self.validated_data["documents"]:
+            doc = Document.objects.select_for_update().get(
+                id=item["document_id"],
+                bulk_upload=bulk_upload,
+            )
+
+            if item.get("rejected"):
+                doc.status = DocumentStatus.VOID
+                doc.save(update_fields=["status", "updated_at"])
+                rejected_count += 1
+                continue
+
+            edit_payload: dict = {}
+            for field in ("title", "supplier", "currency", "document_date", "due_date"):
+                if field in item and item[field]:
+                    edit_payload[field] = item[field]
+            if item.get("amount"):
+                edit_payload["amount"] = item["amount"]
+            if item.get("metadata") is not None:
+                edit_payload["metadata"] = item["metadata"]
+
+            if edit_payload:
+                editor = DocumentMetadataEditSerializer(
+                    doc,
+                    data=edit_payload,
+                    partial=True,
+                    context=self.context,
+                )
+                editor.is_valid(raise_exception=True)
+                editor.save()
+                doc.refresh_from_db()
+
+            if doc.document_type.workflow_template_id:
+                try:
+                    WorkflowService.start(doc, request.user)
+                except WorkflowError as exc:
+                    workflow_errors.append(f"{doc.reference_number}: {exc}")
+
+            approved_count += 1
+
+        bulk_upload.approved_count = approved_count
+        bulk_upload.rejected_count = rejected_count
+        bulk_upload.status = BulkUploadStatus.COMPLETED
+        bulk_upload.save(
+            update_fields=[
+                "approved_count",
+                "rejected_count",
+                "status",
+                "updated_at",
+            ]
+        )
+
+        if workflow_errors:
+            raise serializers.ValidationError({"workflow": workflow_errors})
+
+        return bulk_upload

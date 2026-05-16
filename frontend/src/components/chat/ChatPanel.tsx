@@ -57,6 +57,13 @@ function otherParticipants(room: ChatRoom, currentUserId: string) {
   return room.participants.filter((participant) => participant.id !== currentUserId);
 }
 
+const PENDING_DIRECT_PREFIX = "pending-direct-";
+const PENDING_GROUP_PREFIX = "pending-group-";
+
+function isPendingRoom(room?: ChatRoom | null) {
+  return !!room && (room.id.startsWith(PENDING_DIRECT_PREFIX) || room.id.startsWith(PENDING_GROUP_PREFIX));
+}
+
 function messageRoomId(message: ChatMessage) {
   return message.room || (message as ChatMessage & { room_id?: string }).room_id;
 }
@@ -91,6 +98,15 @@ export function ChatPanel({ onClose, initialRoomId, onActiveRoomChange }: ChatPa
 
   const me = currentUser?.id ?? "";
   const currentUserName = [currentUser?.first_name, currentUser?.last_name].filter(Boolean).join(" ").trim() || "You";
+  const chatCurrentUser = currentUser
+    ? {
+        id: currentUser.id,
+        email: currentUser.email,
+        first_name: currentUser.first_name,
+        last_name: currentUser.last_name,
+        name: [currentUser.first_name, currentUser.last_name].filter(Boolean).join(" ").trim() || currentUser.email || "You",
+      }
+    : null;
 
   // ── Load rooms on open ────────────────────────────────────────────────────────
   useEffect(() => {
@@ -273,12 +289,45 @@ export function ChatPanel({ onClose, initialRoomId, onActiveRoomChange }: ChatPa
 
   const startDirectMessage = async (user: User) => {
     try {
-      const res = await chatAPI.rooms.getDirectMessage(user.id);
-      const room = res.data as ChatRoom;
-      setRooms((prev) =>
-        prev.find((r) => r.id === room.id) ? prev : [room, ...prev],
+      const existingRoom = rooms.find(
+        (room) =>
+          room.room_type === "direct" &&
+          otherParticipants(room, me)[0]?.id === user.id,
       );
-      await loadRoom(room.id);
+
+      if (existingRoom) {
+        await loadRoom(existingRoom.id);
+      } else {
+        setSelectedRoom({
+          id: `${PENDING_DIRECT_PREFIX}${user.id}`,
+          room_type: "direct",
+          name: userLabel(user),
+          participants: [
+            chatCurrentUser ?? {
+              id: me,
+              email: currentUser?.email ?? "",
+              first_name: currentUser?.first_name ?? "",
+              last_name: currentUser?.last_name ?? "",
+              name: currentUserName,
+            },
+            user,
+          ],
+          created_by: chatCurrentUser ?? {
+            id: me,
+            email: currentUser?.email ?? "",
+            first_name: currentUser?.first_name ?? "",
+            last_name: currentUser?.last_name ?? "",
+            name: currentUserName,
+          },
+          created_at: new Date().toISOString(),
+          updated_at: new Date().toISOString(),
+          is_active: true,
+          last_message: null,
+          unread_count: 0,
+        } as ChatRoom);
+        setMessages([]);
+      }
+
       setShowComposer(false);
       setRecipientSearchQuery("");
     } catch (e) {
@@ -309,14 +358,38 @@ export function ChatPanel({ onClose, initialRoomId, onActiveRoomChange }: ChatPa
         return;
       }
 
-      const res = await chatAPI.rooms.create({
+      const participants = memberships
+        .map((membership) => membership.user)
+        .filter((user): user is User => Boolean(user && user.id !== me));
+
+      setSelectedRoom({
+        id: `${PENDING_GROUP_PREFIX}${group.id}`,
+        room_type: "group",
         name: group.name,
-        room_type: 'group',
-        participant_ids: participantIds,
-      });
-      const room = res.data as ChatRoom;
-      setRooms((prev) => [room, ...prev]);
-      await loadRoom(room.id);
+        participants: [
+          chatCurrentUser ?? {
+            id: me,
+            email: currentUser?.email ?? "",
+            first_name: currentUser?.first_name ?? "",
+            last_name: currentUser?.last_name ?? "",
+            name: currentUserName,
+          },
+          ...participants,
+        ],
+        created_by: chatCurrentUser ?? {
+          id: me,
+          email: currentUser?.email ?? "",
+          first_name: currentUser?.first_name ?? "",
+          last_name: currentUser?.last_name ?? "",
+          name: currentUserName,
+        },
+        created_at: new Date().toISOString(),
+        updated_at: new Date().toISOString(),
+        is_active: true,
+        last_message: null,
+        unread_count: 0,
+      } as ChatRoom);
+      setMessages([]);
       setShowComposer(false);
       setRecipientSearchQuery("");
     } catch (e) {
@@ -324,14 +397,56 @@ export function ChatPanel({ onClose, initialRoomId, onActiveRoomChange }: ChatPa
     }
   };
 
+  const createActualRoomForPending = async (pendingRoom: ChatRoom) => {
+    if (pendingRoom.room_type === "direct") {
+      const recipient = otherParticipants(pendingRoom, me)[0];
+      if (!recipient) throw new Error("Missing direct recipient");
+
+      const res = await chatAPI.rooms.create({
+        room_type: "direct",
+        participant_ids: [recipient.id],
+      });
+      const room = res.data as ChatRoom;
+      setRooms((prev) => (prev.find((r) => r.id === room.id) ? prev : [room, ...prev]));
+      await loadRoom(room.id);
+      return room;
+    }
+
+    const participantIds = otherParticipants(pendingRoom, me).map((user) => user.id);
+    if (participantIds.length === 0) {
+      throw new Error("Group chat requires at least one other active member");
+    }
+
+    const res = await chatAPI.rooms.create({
+      name: pendingRoom.name || "Group chat",
+      room_type: "group",
+      participant_ids: participantIds,
+    });
+    const room = res.data as ChatRoom;
+    setRooms((prev) => (prev.find((r) => r.id === room.id) ? prev : [room, ...prev]));
+    await loadRoom(room.id);
+    return room;
+  };
+
   const sendMessage = async () => {
     const content = newMessage.trim();
     if (!content || !selectedRoom) return;
 
+    let room = selectedRoom;
+    if (isPendingRoom(selectedRoom)) {
+      try {
+        room = await createActualRoomForPending(selectedRoom);
+      } catch (e) {
+        console.error("Send failed due to room creation", e);
+        setNewMessage(content);
+        return;
+      }
+    }
+
     // Optimistic append for instant UX — server WS will reconcile by id
     const optimistic: ChatMessage = {
       id: `tmp-${Date.now()}`,
-      room: selectedRoom.id,
+      room: room.id,
       sender: {
         id: me,
         email: currentUser?.email ?? "",
@@ -351,10 +466,10 @@ export function ChatPanel({ onClose, initialRoomId, onActiveRoomChange }: ChatPa
 
     try {
       setRooms((prev) =>
-        prev.map((room) =>
-          room.id === selectedRoom.id
+        prev.map((roomItem) =>
+          roomItem.id === room.id
             ? {
-                ...room,
+                ...roomItem,
                 last_message: {
                   id: optimistic.id,
                   content,
@@ -364,7 +479,7 @@ export function ChatPanel({ onClose, initialRoomId, onActiveRoomChange }: ChatPa
                 },
                 updated_at: optimistic.created_at,
               }
-            : room,
+            : roomItem,
         ),
       );
 
@@ -374,7 +489,7 @@ export function ChatPanel({ onClose, initialRoomId, onActiveRoomChange }: ChatPa
       } else {
         const res = await chatAPI.messages.create({
           content,
-          room_id: selectedRoom.id,
+          room_id: room.id,
           message_type: "text",
         });
         const saved = res.data as ChatMessage;
@@ -630,19 +745,28 @@ export function ChatPanel({ onClose, initialRoomId, onActiveRoomChange }: ChatPa
 
             {/* Messages */}
             <div className="flex-1 space-y-3 overflow-y-auto px-5 py-4">
+              {messages.length === 0 && (
+                <div className="flex min-h-[180px] flex-col items-center justify-center rounded-3xl border border-dashed border-border bg-background/80 p-8 text-center text-sm text-muted-foreground">
+                  <p className="mb-2 text-sm font-semibold text-foreground">
+                    No messages yet
+                  </p>
+                  <p>Send the first message to start this conversation.</p>
+                </div>
+              )}
+
               {messages.map((msg, idx) => {
-                const mine = msg.sender.id === me;
-                const prev = messages[idx - 1];
-                const showAvatar =
-                  !mine && (!prev || prev.sender.id !== msg.sender.id);
-                return (
-                  <div
-                    key={msg.id}
-                    className={clsx(
-                      "flex items-end gap-2 animate-fade-in",
-                      mine ? "justify-end" : "justify-start",
-                    )}
-                  >
+                  const mine = msg.sender.id === me;
+                  const prev = messages[idx - 1];
+                  const showAvatar =
+                    !mine && (!prev || prev.sender.id !== msg.sender.id);
+                  return (
+                    <div
+                      key={msg.id}
+                      className={clsx(
+                        "flex items-end gap-2 animate-fade-in",
+                        mine ? "justify-end" : "justify-start",
+                      )}
+                    >
                     {!mine && (
                       <div className="w-7">
                         {showAvatar && (

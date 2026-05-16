@@ -1,5 +1,5 @@
 import { Suspense, lazy, useEffect, useRef, useState } from "react";
-import { MessageSquare, X } from "lucide-react";
+import { MessageSquareText, X } from "lucide-react";
 import { chatAPI } from "@/services/api";
 import { chatWebSocket } from "@/services/chatWebSocket";
 import { vaultToast } from "@/components/ui/vault-toast";
@@ -160,7 +160,7 @@ export function ChatLauncher() {
         {open ? (
           <X className="h-5 w-5" strokeWidth={2.25} />
         ) : (
-          <MessageSquare className="h-5 w-5" strokeWidth={2.25} />
+          <MessageSquareText className="h-5 w-5" strokeWidth={2.25} />
         )}
 
         {!open && unread > 0 && (

@@ -120,7 +120,7 @@ def _version_preview_storage_name(version_id: str) -> str:
 # ─────────────────────────────────────────────────────────────────────────────
 
 @shared_task(bind=True, max_retries=3, queue="indexing")
-def extract_text(self, document_id: str):
+def extract_text(self, document_id: str, force: bool = False):
     """
     Extract text from a document that was NOT explicitly flagged as scanned.
 
@@ -140,8 +140,8 @@ def extract_text(self, document_id: str):
         logger.warning("extract_text: document %s not found", document_id)
         return
 
-    # Skip only if OCR is already running or complete — NOT on "pending".
-    if doc.ocr_status in (OCRStatus.PROCESSING, OCRStatus.DONE):
+    # Skip only if OCR is already running or complete — unless forced (new file version).
+    if not force and doc.ocr_status in (OCRStatus.PROCESSING, OCRStatus.DONE):
         logger.info(
             "extract_text: skipping %s — OCR already %s",
             document_id, doc.ocr_status,
@@ -170,6 +170,14 @@ def extract_text(self, document_id: str):
                     document_id, chars_per_page,
                 )
                 _mark_pending(document_id, auto_flag_scanned=True)
+                from apps.audit.models import AuditEvent
+                from apps.audit.utils import record_audit_event
+
+                record_audit_event(
+                    AuditEvent.DOCUMENT_OCR_QUEUED,
+                    obj=doc,
+                    changes={"source": "auto_detected_sparse_pdf"},
+                )
                 ocr_document.delay(document_id)
                 return
  
@@ -276,6 +284,18 @@ def ocr_document(self, document_id: str):
             ocr_status=OCRStatus.DONE,
             metadata=updated_metadata,
         )
+        from apps.audit.models import AuditEvent
+        from apps.audit.utils import record_audit_event
+
+        record_audit_event(
+            AuditEvent.DOCUMENT_OCR_COMPLETED,
+            obj=doc,
+            changes={
+                "characters": len(text),
+                "suggested_fields": list((metadata_updates.get("ocr_suggestions") or {}).keys()),
+                "quality": metadata_updates.get("ocr_quality") or {},
+            },
+        )
 
         suggestions = metadata_updates.get("ocr_suggestions", {})
         quality = metadata_updates.get("ocr_quality", {})
@@ -297,6 +317,17 @@ def ocr_document(self, document_id: str):
         # mark failed immediately so frontend polling can terminate.
         if isinstance(exc, (SyntaxError, ImportError, ModuleNotFoundError)):
             Document.objects.filter(id=document_id).update(ocr_status=OCRStatus.FAILED)
+            try:
+                from apps.audit.models import AuditEvent
+                from apps.audit.utils import record_audit_event
+
+                record_audit_event(
+                    AuditEvent.DOCUMENT_OCR_FAILED,
+                    obj=doc,
+                    changes={"error": str(exc)[:500], "permanent": True},
+                )
+            except Exception:
+                logger.exception("ocr_document: failed to record permanent OCR audit event for %s", document_id)
             logger.error(
                 "ocr_document: permanent failure for %s — marked as failed",
                 document_id,
@@ -310,6 +341,17 @@ def ocr_document(self, document_id: str):
             Document.objects.filter(id=document_id).update(
                 ocr_status=OCRStatus.FAILED
             )
+            try:
+                from apps.audit.models import AuditEvent
+                from apps.audit.utils import record_audit_event
+
+                record_audit_event(
+                    AuditEvent.DOCUMENT_OCR_FAILED,
+                    obj=doc,
+                    changes={"error": str(exc)[:500], "permanent": False},
+                )
+            except Exception:
+                logger.exception("ocr_document: failed to record OCR failure audit event for %s", document_id)
             logger.error(
                 "ocr_document: max retries exceeded for %s — marked as failed",
                 document_id,

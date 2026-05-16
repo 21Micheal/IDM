@@ -3,9 +3,9 @@ import { useQuery } from "@tanstack/react-query";
 import { api, documentsAPI, searchAPI, workflowAPI } from "@/services/api";
 import { useAuthStore } from "@/store/authStore";
 import {
-  FileText, Clock, CheckCircle, GitBranch, ArrowRight,
+  Files, Hourglass, CircleCheckBig, GitBranch, ArrowRight,
   ChevronLeft, ChevronRight,
-  Calendar, Loader2, Search, ShieldCheck, Sparkles,
+  Calendar, FileText, Inbox, ListChecks, Loader2, Search, ShieldCheck, Sparkles,
   Filter, X,
 } from "lucide-react";
 import { Link, useNavigate } from "react-router-dom";
@@ -97,8 +97,9 @@ function getDashboardTrendWindow() {
 }
 
 function getPercentChange(current: number, previous: number) {
-  if (previous === 0) return current > 0 ? 100 : 0;
-  return Math.round((Math.abs(current - previous) / previous) * 10) / 10;
+  if (!Number.isFinite(current) || !Number.isFinite(previous)) return 0.0;
+  if (previous === 0) return 0.0;
+  return Math.round(((current - previous) / previous) * 1000) / 10;
 }
 
 function buildTrend(
@@ -106,14 +107,31 @@ function buildTrend(
   previous: number,
   positiveWhenIncrease: boolean,
   label: string,
-): StatTrend | undefined {
-  if (current === 0 && previous === 0) return undefined;
-
+): StatTrend {
   const direction =
     current > previous ? "up" : current < previous ? "down" : "flat";
   const isPositive =
     direction === "flat" ||
     (positiveWhenIncrease ? direction === "up" : direction === "down");
+
+  if (current === 0 && previous === 0) {
+    return {
+      value: 0.0,
+      isPositive: true,
+      direction: "flat",
+      label,
+    };
+  }
+
+  if (previous === 0) {
+    return {
+      value: current,
+      isPositive: true,
+      direction: "up",
+      suffix: " new",
+      label,
+    };
+  }
 
   return {
     value: getPercentChange(current, previous),
@@ -132,6 +150,21 @@ function countDueSoonTasks(tasks: WorkflowTask[]) {
     const dueAt = new Date(task.due_at).getTime();
     return Number.isFinite(dueAt) && dueAt <= tomorrow;
   }).length;
+}
+
+function getDocumentOwnerName(doc: Document) {
+  const owner = doc.uploaded_by;
+  const fullName = owner?.full_name || [owner?.first_name, owner?.last_name].filter(Boolean).join(" ").trim();
+  return fullName || owner?.email || "—";
+}
+
+function getDocumentDepartmentName(doc: Document) {
+  return (
+    doc.department_name ||
+    doc.uploaded_by_department_name ||
+    doc.uploaded_by?.department_name ||
+    "—"
+  );
 }
 
 function formatStorageAmount(bytes: number) {
@@ -218,28 +251,39 @@ const EVENT_VERB_MAP: Record<string, string> = {
   "user.created": "was added",
   "user.updated": "updated their profile",
   "document.created": "uploaded",
-  "document.uploaded": "uploaded",
+  "document.bulk_uploaded": "bulk uploaded",
+  "document.bulk_reviewed": "reviewed",
   "document.updated": "updated",
   "document.edited": "edited",
   "document.deleted": "deleted",
   "document.downloaded": "downloaded",
   "document.viewed": "viewed",
+  "document.previewed": "previewed",
+  "document.printed": "printed",
+  "document.ocr_queued": "queued OCR for",
+  "document.ocr_completed": "completed OCR for",
+  "document.ocr_failed": "failed OCR for",
+  "document.preview_queued": "queued preview for",
+  "document.edit_lock_acquired": "started editing",
+  "document.edit_lock_released": "stopped editing",
   "document.shared": "shared",
   "document.archived": "archived",
-  "document.version_created": "added a new version of",
-  "workflow.submitted": "submitted",
+  "document.version_uploaded": "added a new version of",
+  "document.version_restored": "restored",
+  "document.version_preview_queued": "queued version preview for",
+  "document.submitted": "submitted",
   "workflow.approved": "approved",
   "workflow.rejected": "rejected",
   "workflow.returned": "returned",
   "workflow.held": "put on hold",
   "workflow.released": "released",
-  "workflow.assigned": "assigned",
+  "workflow.cancelled": "cancelled the workflow for",
   "workflow.delegated": "delegated tasks to",
   "workflow.reassigned": "reassigned tasks to",
-  "workflow.completed": "completed the workflow for",
+  "audit.exported": "exported",
 };
 
-const VERB_RE = /(submitted|uploaded|edited|updated|created|deleted|approved|rejected|downloaded|viewed|shared|failed|logged in|logged out|signed in|signed out|enabled|disabled|returned|held|released|archived|added|delegated|reassigned)\b/i;
+const VERB_RE = /(submitted|uploaded|edited|updated|created|deleted|approved|rejected|downloaded|viewed|previewed|printed|shared|failed|queued|completed|logged in|logged out|signed in|signed out|enabled|disabled|returned|held|released|archived|added|delegated|reassigned|exported)\b/i;
 
 function formatAuditSummary(event: DashboardAuditEvent): AuditSummaryParts {
   const actor = deriveActorName(event);
@@ -505,6 +549,8 @@ export default function DashboardPage() {
   const hasActiveDashboardSelection =
     activeDashboardResultIndex >= 0 && activeDashboardResultIndex < dashboardResults.length;
   const allTasks = myTasks as WorkflowTask[];
+  const hasOpenTasks = allTasks.length > 0;
+  const showAdminRecentColumns = Boolean(user?.has_admin_access);
   const totalDocumentsTrend = buildTrend(
     documentsCreatedThisPeriod,
     documentsCreatedPreviousPeriod,
@@ -547,15 +593,9 @@ export default function DashboardPage() {
       : visibleTasks.length === 2
         ? "mt-5 grid grid-cols-1 gap-3 md:grid-cols-2"
         : "mt-5 grid grid-cols-1 gap-3 md:grid-cols-2 xl:grid-cols-4";
-
-  // ── Helper Functions ───────────────────────────────────────────────────────
-
-  // Highlight only the searched term in the snippet (same as SearchPage)
-  const highlightTerm = (text: string, term: string) => {
-    if (!term || !text) return text;
-    const escapedTerm = term.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-    const regex = new RegExp(`(${escapedTerm})`, "gi");
-    return text.replace(regex, '<span class="bg-yellow-200 text-yellow-800 font-medium px-0.5 rounded">$1</span>');
+  const activityCardStyle = {
+    boxShadow: "var(--shadow-card)",
+    height: "clamp(24rem, calc(100vh - 18rem), 30rem)",
   };
 
   // ── Handlers ──────────────────────────────────────────────────────────────
@@ -598,7 +638,7 @@ export default function DashboardPage() {
   // ── Render ────────────────────────────────────────────────────────────────
 
   return (
-    <div className="mx-auto w-full max-w-[1680px] space-y-6">
+    <div className="min-h-full w-full space-y-6">
       {/* Header */}
       <div className="flex flex-col gap-4 xl:flex-row xl:items-end xl:justify-between">
         <div className="space-y-2">
@@ -690,6 +730,8 @@ export default function DashboardPage() {
                   <>
                     <div className="divide-y divide-border">
                       {dashboardResults.map((hit: SearchHit, index) => {
+                        const preferredHighlights = getPreferredHighlights(hit, dashboardSearchTerm).slice(0, 2);
+
                         return (
                           <button
                             key={hit.id}
@@ -728,15 +770,14 @@ export default function DashboardPage() {
                                     }}
                                   />
                                 )}
-                                {/* Show highlighted snippets like SearchPage */}
-                                {hit.highlights && Object.keys(hit.highlights).length > 0 ? (
+                                {preferredHighlights.length > 0 ? (
                                   <div className="mt-2 rounded-md bg-muted/40 px-2.5 py-2">
                                     <div className="line-clamp-3 text-xs leading-5 text-foreground space-y-2">
-                                      {getPreferredHighlights(hit, dashboardSearchTerm).slice(0, 2).map(([field, snippet]) => (
+                                      {preferredHighlights.map(([field, snippet]) => (
                                         <div key={field} className="italic">
                                           <span
                                             dangerouslySetInnerHTML={{
-                                              __html: highlightTerm(snippet, dashboardSearchTerm),
+                                              __html: highlightSearchText(snippet, dashboardSearchTerm),
                                             }}
                                           />
                                         </div>
@@ -744,12 +785,11 @@ export default function DashboardPage() {
                                     </div>
                                   </div>
                                 ) : (
-                                  // Fallback: show highlighted metadata when no content highlights available
                                   <div className="mt-2 rounded-md bg-muted/40 px-2.5 py-2">
                                     <div className="line-clamp-3 text-xs leading-5 text-foreground italic">
                                       <span
                                         dangerouslySetInnerHTML={{
-                                          __html: highlightTerm(
+                                          __html: highlightSearchText(
                                             hit.supplier || hit.title || hit.reference_number,
                                             dashboardSearchTerm
                                           ),
@@ -819,7 +859,7 @@ export default function DashboardPage() {
         <StatCard
           title="Total Documents"
           value={totalDocuments}
-          icon={FileText}
+          icon={Files}
           color="primary"
           trend={totalDocumentsTrend}
           href="/documents"
@@ -827,7 +867,7 @@ export default function DashboardPage() {
         <StatCard
           title="Pending Approval"
           value={pendingCount}
-          icon={Clock}
+          icon={Hourglass}
           color="accent"
           trend={pendingApprovalTrend}
           href="/documents?status=pending_approval"
@@ -835,7 +875,7 @@ export default function DashboardPage() {
         <StatCard
           title="Approved Today"
           value={approvedTodayCount}
-          icon={CheckCircle}
+          icon={CircleCheckBig}
           color="primary"
           trend={approvedTrend}
           href="/documents?status=approved"
@@ -843,7 +883,7 @@ export default function DashboardPage() {
         <StatCard
           title="My Tasks"
           value={myTasks.length}
-          icon={ShieldCheck}
+          icon={ListChecks}
           color="teal"
           trend={tasksTrend}
           href="/workflow"
@@ -851,11 +891,11 @@ export default function DashboardPage() {
       </div>
 
       {/* Recent Documents (wide) + Audit Trail w/ Storage (narrow) */}
-      <div className="grid grid-cols-1 xl:grid-cols-3 gap-6">
+      <div className="grid min-w-0 grid-cols-1 items-stretch gap-6 xl:grid-cols-3">
         {/* Recent Documents — clean compact rows */}
         <section
-          className="xl:col-span-2 rounded-xl border border-border bg-card overflow-hidden"
-          style={{ boxShadow: "var(--shadow-card)" }}
+          className="flex min-w-0 flex-col overflow-hidden rounded-xl border border-border bg-card xl:col-span-2"
+          style={activityCardStyle}
         >
           <div className="flex items-center justify-between border-b border-border px-5 py-4">
             <div>
@@ -867,19 +907,25 @@ export default function DashboardPage() {
             </Link>
           </div>
 
-          <div className="overflow-x-auto">
+          <div className="min-h-0 flex-1 overflow-auto">
             {docsLoading ? (
-              <div className="p-10 flex justify-center">
+              <div className="flex h-full items-center justify-center p-10">
                 <Loader2 className="w-6 h-6 text-muted-foreground animate-spin" />
               </div>
             ) : recentDocs?.results?.length ? (
-              <table className="w-full text-sm">
+              <table className={`w-full table-fixed text-sm ${showAdminRecentColumns ? "min-w-[920px]" : "min-w-[640px]"}`}>
                 <thead>
                   <tr className="text-left text-[11px] uppercase tracking-wider text-muted-foreground">
-                    <th className="px-5 py-3 font-medium">Name</th>
-                    <th className="px-5 py-3 font-medium hidden md:table-cell">Type</th>
-                    <th className="px-5 py-3 font-medium">Status</th>
-                    <th className="px-5 py-3 font-medium hidden md:table-cell">Updated</th>
+                    <th className={`${showAdminRecentColumns ? "w-[32%]" : "w-[48%]"} px-5 py-3 font-medium`}>Name</th>
+                    {showAdminRecentColumns && (
+                      <>
+                        <th className="hidden w-[16%] px-5 py-3 font-medium lg:table-cell">Owner</th>
+                        <th className="hidden w-[16%] px-5 py-3 font-medium xl:table-cell">Department</th>
+                      </>
+                    )}
+                    <th className={`${showAdminRecentColumns ? "w-[12%]" : "w-[18%]"} hidden px-5 py-3 font-medium md:table-cell`}>Type</th>
+                    <th className={`${showAdminRecentColumns ? "w-[14%]" : "w-[22%]"} px-5 py-3 font-medium`}>Status</th>
+                    <th className={`${showAdminRecentColumns ? "w-[10%]" : "w-[12%]"} hidden px-5 py-3 font-medium md:table-cell`}>Updated</th>
                   </tr>
                 </thead>
                 <tbody>
@@ -890,12 +936,12 @@ export default function DashboardPage() {
                       onClick={() => { preloadDocumentWorkspace(); navigate(`/documents/${doc.id}`); }}
                       onMouseEnter={preloadDocumentWorkspace}
                     >
-                      <td className="px-5 py-3">
+                      <td className="max-w-0 px-5 py-3">
                         <div className="flex items-center gap-3 min-w-0">
                           <div className="flex h-9 w-9 items-center justify-center rounded-md bg-primary/5 text-primary shrink-0">
                             <FileText className="h-4 w-4" />
                           </div>
-                          <div className="min-w-0">
+                          <div className="min-w-0 flex-1">
                             <p className="font-medium text-foreground truncate">{doc.title}</p>
                             <p className="text-[11px] text-muted-foreground truncate">
                               {doc.reference_number} · {doc.document_type_name || doc.document_type?.name || "Unclassified"}
@@ -903,13 +949,25 @@ export default function DashboardPage() {
                           </div>
                         </div>
                       </td>
-                      <td className="px-5 py-3 text-muted-foreground hidden md:table-cell">
-                        {formatDocumentFileType(doc.file_name, doc.file_mime_type)}
+                      {showAdminRecentColumns && (
+                        <>
+                          <td className="hidden max-w-0 px-5 py-3 text-xs text-foreground/80 lg:table-cell">
+                            <span className="block truncate">{getDocumentOwnerName(doc)}</span>
+                          </td>
+                          <td className="hidden max-w-0 px-5 py-3 text-xs text-muted-foreground xl:table-cell">
+                            <span className="block truncate">{getDocumentDepartmentName(doc)}</span>
+                          </td>
+                        </>
+                      )}
+                      <td className="hidden px-5 py-3 text-muted-foreground md:table-cell">
+                        <span className="block truncate">
+                          {formatDocumentFileType(doc.file_name, doc.file_mime_type)}
+                        </span>
                       </td>
-                      <td className="px-5 py-3">
+                      <td className="px-5 py-3 align-middle">
                         <StatusBadge status={doc.status} />
                       </td>
-                      <td className="px-5 py-3 text-muted-foreground hidden md:table-cell">
+                      <td className="hidden whitespace-nowrap px-5 py-3 text-muted-foreground md:table-cell">
                         {formatDistanceToNow(new Date(doc.updated_at), { addSuffix: true })}
                       </td>
                     </tr>
@@ -917,7 +975,7 @@ export default function DashboardPage() {
                 </tbody>
               </table>
             ) : (
-              <div className="px-6 py-14 text-center">
+              <div className="flex h-full flex-col items-center justify-center px-6 py-10 text-center">
                 <FileText className="mx-auto h-12 w-12 text-muted-foreground/50" />
                 <p className="mt-4 text-sm text-muted-foreground">No recent documents yet.</p>
                 <Link to="/documents/upload" className="mt-3 inline-flex text-sm font-semibold text-foreground hover:text-accent transition-colors">
@@ -928,7 +986,7 @@ export default function DashboardPage() {
           </div>
 
           {recentDocsCount > RECENT_DOCS_PAGE_SIZE && (
-            <div className="flex items-center justify-between border-t border-border bg-muted/20 px-5 py-3">
+            <div className="shrink-0 flex items-center justify-between border-t border-border bg-muted/20 px-5 py-3">
               <span className="text-xs text-muted-foreground">
                 Page {recentDocsPage} of {recentDocsPages}
               </span>
@@ -955,18 +1013,18 @@ export default function DashboardPage() {
         </section>
 
         {/* Audit Trail with Storage merged at bottom */}
-        <section className="rounded-xl border border-border bg-card p-5 flex flex-col" style={{ boxShadow: "var(--shadow-card)" }}>
+        <section className="flex min-w-0 flex-col overflow-hidden rounded-xl border border-border bg-card p-5" style={activityCardStyle}>
           <div className="flex items-center justify-between">
             <h2 className="text-sm font-semibold text-foreground">
-              {user?.has_admin_access ? "Audit Trail" : "My Activity"}
+              {user?.has_admin_access ? "Audit Trail" : "Document Activity"}
             </h2>
             <span className="rounded-full bg-teal/10 px-2 py-0.5 text-[10px] font-medium text-teal">Live</span>
           </div>
           <p className="text-xs text-muted-foreground">A plain-language feed of what just happened.</p>
 
-          <ul className="mt-5 space-y-4 flex-1">
+          <ul className="mt-5 min-h-0 flex-1 space-y-4 overflow-y-auto pr-1">
             {auditLoading ? (
-              <li className="rounded-lg bg-muted/40 p-4 text-center text-xs text-muted-foreground">Loading activity…</li>
+              <li className="flex h-full items-center justify-center rounded-lg bg-muted/40 p-4 text-center text-xs text-muted-foreground">Loading activity…</li>
             ) : recentAudit?.results?.length ? (
               recentAudit.results.map((event: DashboardAuditEvent, index: number) => {
                 const meta = getAuditPresentation(event);
@@ -1008,12 +1066,12 @@ export default function DashboardPage() {
                 );
               })
             ) : (
-              <li className="rounded-lg bg-muted/40 p-4 text-center text-xs text-muted-foreground">No recent audit events.</li>
+              <li className="flex h-full items-center justify-center rounded-lg bg-muted/40 p-4 text-center text-xs text-muted-foreground">No recent audit events.</li>
             )}
           </ul>
 
           {recentAuditCount > RECENT_AUDIT_PAGE_SIZE && (
-            <div className="mt-4 flex items-center justify-between border-t border-border pt-3">
+            <div className="mt-4 flex shrink-0 items-center justify-between border-t border-border pt-3">
               <span className="text-[11px] text-muted-foreground">
                 {recentAuditPage} / {recentAuditPages}
               </span>
@@ -1038,12 +1096,12 @@ export default function DashboardPage() {
             </div>
           )}
 
-          <Link to="/audit" className="mt-3 text-xs font-semibold text-foreground hover:text-accent transition-colors text-center">
+          <Link to="/audit" className="mt-3 shrink-0 text-center text-xs font-semibold text-foreground transition-colors hover:text-accent">
             View full log →
           </Link>
 
           {/* Storage merged at bottom */}
-          <div className="mt-5 rounded-lg border border-dashed border-border p-4">
+          <div className="mt-4 shrink-0 rounded-lg border border-dashed border-border p-3">
             <div className="flex items-center justify-between">
               <p className="text-xs font-medium text-foreground">Storage Used</p>
               <p className="text-[11px] text-muted-foreground">{storage.percentage}%</p>
@@ -1070,14 +1128,19 @@ export default function DashboardPage() {
       </div>
 
       {/* Pending tasks */}
-      <div className="bg-card rounded-xl border border-border p-5" style={{ boxShadow: "var(--shadow-card)" }}>
+      <div
+        className={`rounded-xl border border-border bg-card p-5 ${
+          hasOpenTasks ? "w-full" : "w-full max-w-xl"
+        }`}
+        style={{ boxShadow: "var(--shadow-card)" }}
+      >
         <div className="flex flex-col gap-4 lg:flex-row lg:items-start lg:justify-between">
           <div className="space-y-1 min-w-0">
             <p className="text-sm font-semibold text-foreground">Pending tasks</p>
             <p className="text-sm text-muted-foreground">
               {tasksLoading
                 ? "Checking tasks waiting for your attention."
-                : allTasks.length
+                  : hasOpenTasks
                   ? hasTaskFilters
                     ? `${filteredTasks.length} of ${allTasks.length} tasks match your filters.`
                     : "Tasks waiting for your attention."
@@ -1085,7 +1148,8 @@ export default function DashboardPage() {
             </p>
           </div>
           <div className="flex shrink-0 items-center gap-2">
-            <div className="rounded-full bg-teal/10 px-3 py-1 text-xs font-semibold text-teal">
+            <div className="inline-flex items-center gap-1.5 rounded-full bg-teal/10 px-3 py-1 text-xs font-semibold text-teal">
+              <Inbox className="h-3.5 w-3.5" />
               {allTasks.length} open
             </div>
             <Link
@@ -1097,7 +1161,7 @@ export default function DashboardPage() {
           </div>
         </div>
 
-        {allTasks.length > 0 && (
+        {hasOpenTasks && (
           <div className="mt-5 rounded-lg border border-border bg-muted/20 p-3">
             <div className="grid grid-cols-1 gap-3 md:grid-cols-2 xl:grid-cols-6">
               <div className="relative xl:col-span-2">
@@ -1199,7 +1263,7 @@ export default function DashboardPage() {
                 >
                   <div className="flex items-start gap-3">
                     <div className="mt-0.5 rounded-md border border-accent/30 bg-accent/15 p-2 text-accent">
-                      <Clock className="w-4 h-4" />
+                      <Hourglass className="w-4 h-4" />
                     </div>
                     <div className="min-w-0 flex-1">
                       <p className="truncate text-sm font-semibold text-foreground">
@@ -1228,13 +1292,13 @@ export default function DashboardPage() {
               );
             })}
           </div>
-        ) : allTasks.length ? (
+        ) : hasOpenTasks ? (
           <div className="mt-4 rounded-lg border border-dashed border-border bg-muted/20 px-4 py-5 text-sm text-muted-foreground">
             No tasks match the selected filters.
           </div>
         ) : (
           <div className="mt-4 inline-flex items-center gap-2 rounded-lg border border-teal/25 bg-teal/10 px-3 py-2 text-sm font-medium text-teal">
-            <CheckCircle className="h-4 w-4" />
+            <CircleCheckBig className="h-4 w-4" />
             You have no pending tasks right now.
           </div>
         )}

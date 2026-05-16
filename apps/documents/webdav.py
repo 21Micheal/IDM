@@ -185,7 +185,9 @@ class DocumentWebDAVView(View):
             return False
         if user.has_admin_access:
             return True
-        if doc.uploaded_by_id == user.id:
+        if getattr(doc, "is_self_upload", False) and (
+            doc.uploaded_by_id == user.id or getattr(doc, "owned_by_id", None) == user.id
+        ):
             return True
 
         permissions = user.get_all_permissions_for_doctype(str(doc.document_type_id))
@@ -270,6 +272,9 @@ class DocumentWebDAVView(View):
         if not doc:
             return HttpResponse("Not Found", status=404)
 
+        if not self._can(user, doc, "edit"):
+            return HttpResponse("Forbidden", status=403)
+
         request.dav_user = user
         request.dav_doc  = doc
         request.dav_href = request.build_absolute_uri(request.path)
@@ -304,7 +309,7 @@ class DocumentWebDAVView(View):
     def get(self, request, document_id, filename=""):
         doc  = request.dav_doc
         user = request.dav_user
-        if not self._can(user, doc, "view"):
+        if not self._can(user, doc, "edit"):
             return HttpResponse("Forbidden", status=403)
         try:
             content = doc.file.read()
@@ -324,7 +329,7 @@ class DocumentWebDAVView(View):
     def propfind(self, request, document_id, filename=""):
         doc  = request.dav_doc
         user = request.dav_user
-        if not self._can(user, doc, "view"):
+        if not self._can(user, doc, "edit"):
             return HttpResponse("Forbidden", status=403)
 
         depth = request.headers.get("Depth", "infinity")
@@ -421,7 +426,7 @@ class DocumentWebDAVView(View):
     def lock(self, request, document_id, filename=""):
         doc  = request.dav_doc
         user = request.dav_user
-        if not self._can(user, doc, "upload"):
+        if not self._can(user, doc, "edit"):
             return HttpResponse("Forbidden", status=403)
 
         existing = _PROTOCOL_LOCKS.get(str(document_id))
@@ -489,7 +494,7 @@ class DocumentWebDAVView(View):
         script file-watching is required — the editor handles WebDAV natively.
 
         Checks performed:
-          1. UPLOAD permission
+          1. EDIT permission
           2. Application-level lock — requester must own it or it must be expired
           3. WebDAV protocol lock — honour the If/Lock-Token headers
           4. Checksum de-duplication — skip identical saves
@@ -500,7 +505,7 @@ class DocumentWebDAVView(View):
         doc  = request.dav_doc
         user = request.dav_user
 
-        if not self._can(user, doc, "upload"):
+        if not self._can(user, doc, "edit"):
             return HttpResponse("Forbidden", status=403)
 
         # Application-level lock check
@@ -582,11 +587,12 @@ class DocumentWebDAVView(View):
                 preview_pdf="",
             )
 
-        # Re-index for search
-        try:
-            from apps.search.tasks import index_document
-            index_document.delay(str(doc.id))
-        except Exception:
-            pass
+        from apps.search.indexing import schedule_document_search_pipeline
+
+        schedule_document_search_pipeline(
+            str(doc.id),
+            reextract_content=True,
+            index_immediately=True,
+        )
 
         return HttpResponse(status=204)

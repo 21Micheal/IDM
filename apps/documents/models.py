@@ -141,7 +141,14 @@ class Tag(models.Model):
 def document_upload_path(instance, filename):
     from django.utils import timezone
     year = timezone.now().year
-    return os.path.join("documents", instance.document_type.code, str(year), filename)
+    uploader_id = instance.uploaded_by_id or "unassigned"
+    return os.path.join(
+        "documents",
+        instance.document_type.code,
+        str(year),
+        str(uploader_id),
+        filename,
+    )
 
 
 class DocumentStatus(models.TextChoices):
@@ -223,6 +230,13 @@ class Document(models.Model):
         default="",
         db_index=True,
         help_text="Current state of the OCR text-extraction pipeline.",
+    )
+    bulk_upload = models.ForeignKey(
+        "BulkUpload",
+        null=True,
+        blank=True,
+        on_delete=models.SET_NULL,
+        related_name="documents",
     )
 
     # ── Office preview fields ────────────────────────────────────────────────
@@ -571,6 +585,63 @@ def _sync_favourite_to_folder_on_save(sender, instance, created, **kwargs):
     )
  
  
+class BulkUploadStatus(models.TextChoices):
+    PENDING = "pending", "Pending"
+    UPLOADING = "uploading", "Uploading"
+    PROCESSING = "processing", "Processing"
+    REVIEW = "review", "Review"
+    COMPLETED = "completed", "Completed"
+    FAILED = "failed", "Failed"
+
+
+class BulkUpload(models.Model):
+    """
+    Tracks a batch upload operation for multiple documents.
+    
+    Allows users to upload multiple files of the same document type,
+    process them with OCR, then review and approve/reject before final submission.
+    """
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    document_type = models.ForeignKey(
+        DocumentType, on_delete=models.PROTECT, related_name="bulk_uploads"
+    )
+    uploaded_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL, on_delete=models.PROTECT, related_name="bulk_uploads"
+    )
+    status = models.CharField(
+        max_length=20,
+        choices=BulkUploadStatus.choices,
+        default=BulkUploadStatus.PENDING,
+        db_index=True,
+    )
+    total_files = models.PositiveSmallIntegerField(default=0)
+    successful_uploads = models.PositiveSmallIntegerField(default=0)
+    failed_uploads = models.PositiveSmallIntegerField(default=0)
+    approved_count = models.PositiveSmallIntegerField(default=0)
+    rejected_count = models.PositiveSmallIntegerField(default=0)
+    
+    # Optional: common tags to apply to all documents in the batch
+    common_tags = models.ManyToManyField(Tag, blank=True, related_name="bulk_uploads")
+    
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+    
+    class Meta:
+        ordering = ["-created_at"]
+        indexes = [
+            models.Index(fields=["status", "uploaded_by"]),
+        ]
+    
+    def __str__(self):
+        return f"BulkUpload {self.id} - {self.document_type.name} ({self.status})"
+    
+    @property
+    def progress_percentage(self) -> float:
+        if self.total_files == 0:
+            return 0.0
+        return (self.successful_uploads / self.total_files) * 100
+
+
 @receiver(post_delete, sender=DocumentFavourite)
 def _sync_favourite_to_folder_on_delete(sender, instance, **kwargs):
     try:

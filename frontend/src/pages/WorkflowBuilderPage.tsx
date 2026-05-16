@@ -88,6 +88,8 @@ interface GroupMembershipApiItem {
 }
 
 // ── Constants ─────────────────────────────────────────────────────────────────
+const HOD_GROUP_NAME = "HOD";
+
 const ASSIGNEE_MODES: { value: AssigneeType; label: string; description: string; Icon: typeof Users }[] = [
   { value: "group_any", label: "Any member", description: "Single approver from group", Icon: Users },
   { value: "group_all", label: "All members", description: "Consensus required", Icon: UsersRound },
@@ -105,6 +107,10 @@ const getGroupColor = (id: string | null | undefined) => {
   for (let i = 0; i < id.length; i++) hash = (hash * 31 + id.charCodeAt(i)) >>> 0;
   return GROUP_COLORS[hash % GROUP_COLORS.length];
 };
+
+function isHodGroupName(name: string | null | undefined) {
+  return (name ?? "").trim().toLowerCase() === HOD_GROUP_NAME.toLowerCase();
+}
 
 const CURRENCIES = ["USD", "EUR", "GBP", "KES", "ZAR", "NGN", "GHS", "AED", "INR", "JPY", "CAD", "AUD", "CHF", "CNY"];
 const STATUS_PRESETS = [
@@ -260,7 +266,9 @@ function StepEditPanel({
   onClose: () => void;
   onDelete: () => void;
 }) {
-  const needsGroupMember = step.assignee_type === "group_specific";
+  const selectedGroup = groups.find((group) => group.id === step.assignee_group);
+  const isHodGroupSelected = isHodGroupName(selectedGroup?.name ?? step.assignee_group_name);
+  const needsGroupMember = step.assignee_type === "group_specific" && !isHodGroupSelected;
 
   const { data: groupMembers = [], isLoading: membersLoading } = useQuery<AppUser[]>({
     queryKey: ["group-members", step.assignee_group],
@@ -273,6 +281,23 @@ function StepEditPanel({
   });
 
   const color = getGroupColor(step.assignee_group);
+
+  useEffect(() => {
+    if (!isHodGroupSelected) return;
+    if (step.assignee_type !== "group_any" || step.assignee_user || step.assignee_user_name) {
+      onChange({
+        assignee_type: "group_any",
+        assignee_user: null,
+        assignee_user_name: undefined,
+      });
+    }
+  }, [
+    isHodGroupSelected,
+    onChange,
+    step.assignee_type,
+    step.assignee_user,
+    step.assignee_user_name,
+  ]);
 
   return (
     <aside className="w-[420px] flex-shrink-0 flex flex-col bg-card border border-border rounded-xl shadow-elegant overflow-hidden">
@@ -342,9 +367,11 @@ function StepEditPanel({
               onChange={e => {
                 const id = e.target.value || null;
                 const g = groups.find(x => x.id === id);
+                const isHod = isHodGroupName(g?.name);
                 onChange({
                   assignee_group: id,
                   assignee_group_name: g?.name,
+                  assignee_type: isHod ? "group_any" : step.assignee_type,
                   assignee_user: null,
                   assignee_user_name: undefined,
                 });
@@ -353,7 +380,9 @@ function StepEditPanel({
             >
               <option value="">Select group</option>
               {groups.map(g => (
-                <option key={g.id} value={g.id}>{g.name}</option>
+                <option key={g.id} value={g.id}>
+                  {isHodGroupName(g.name) ? "HOD - uploader department head" : g.name}
+                </option>
               ))}
             </select>
           </div>
@@ -370,12 +399,18 @@ function StepEditPanel({
                   assignee_user_name: next === "group_specific" ? step.assignee_user_name : undefined,
                 });
               }}
+              disabled={isHodGroupSelected}
               className={inp}
             >
               {ASSIGNEE_MODES.map(m => (
                 <option key={m.value} value={m.value}>{m.label} — {m.description}</option>
               ))}
             </select>
+            {isHodGroupSelected && (
+              <p className="text-[11px] text-muted-foreground mt-1">
+                The assignee will be picked automatically from the uploader&apos;s department head.
+              </p>
+            )}
           </div>
 
           {needsGroupMember && (
@@ -430,42 +465,53 @@ function StepEditPanel({
 
         <div>
           <Label>Approver actions</Label>
-          <div className="grid grid-cols-3 gap-2">
+          <div className="space-y-2">
             <button
               type="button"
               onClick={() => onChange({ allow_approve: !step.allow_approve })}
               className={clsx(
-                "px-3 py-2 rounded-lg text-xs font-medium transition-colors border",
+                "w-full flex items-center justify-between px-4 py-2.5 rounded-xl border transition-all",
                 step.allow_approve
-                  ? "bg-teal/15 text-teal border-teal/40"
-                  : "bg-muted text-muted-foreground border-border"
+                  ? "bg-teal/5 border-teal/30 text-teal shadow-sm"
+                  : "bg-muted/30 border-border text-muted-foreground"
               )}
             >
-              ✓ Approve
+              <span className="text-xs font-semibold">Allow Approval</span>
+              <div className={clsx("w-8 h-4 rounded-full relative transition-colors", step.allow_approve ? "bg-teal" : "bg-muted-foreground/30")}>
+                <div className={clsx("absolute top-0.5 w-3 h-3 rounded-full bg-white transition-transform", step.allow_approve ? "translate-x-4" : "translate-x-0.5")} />
+              </div>
             </button>
+
             <button
               type="button"
               onClick={() => onChange({ allow_reject: !step.allow_reject })}
               className={clsx(
-                "px-3 py-2 rounded-lg text-xs font-medium transition-colors border",
+                "w-full flex items-center justify-between px-4 py-2.5 rounded-xl border transition-all",
                 step.allow_reject
-                  ? "bg-destructive/15 text-destructive border-destructive/40"
-                  : "bg-muted text-muted-foreground border-border"
+                  ? "bg-destructive/5 border-destructive/30 text-destructive shadow-sm"
+                  : "bg-muted/30 border-border text-muted-foreground"
               )}
             >
-              ✗ Reject
+              <span className="text-xs font-semibold">Allow Rejection</span>
+              <div className={clsx("w-8 h-4 rounded-full relative transition-colors", step.allow_reject ? "bg-destructive" : "bg-muted-foreground/30")}>
+                <div className={clsx("absolute top-0.5 w-3 h-3 rounded-full bg-white transition-transform", step.allow_reject ? "translate-x-4" : "translate-x-0.5")} />
+              </div>
             </button>
+
             <button
               type="button"
               onClick={() => onChange({ allow_return: !step.allow_return })}
               className={clsx(
-                "px-3 py-2 rounded-lg text-xs font-medium transition-colors border",
+                "w-full flex items-center justify-between px-4 py-2.5 rounded-xl border transition-all",
                 step.allow_return
-                  ? "bg-accent/20 text-accent border-accent/50"
-                  : "bg-muted text-muted-foreground border-border"
+                  ? "bg-accent/5 border-accent/30 text-accent shadow-sm"
+                  : "bg-muted/30 border-border text-muted-foreground"
               )}
             >
-              ↩ Return
+              <span className="text-xs font-semibold">Allow Return to Previous</span>
+              <div className={clsx("w-8 h-4 rounded-full relative transition-colors", step.allow_return ? "bg-accent" : "bg-muted-foreground/30")}>
+                <div className={clsx("absolute top-0.5 w-3 h-3 rounded-full bg-white transition-transform", step.allow_return ? "translate-x-4" : "translate-x-0.5")} />
+              </div>
             </button>
           </div>
         </div>
@@ -1279,7 +1325,19 @@ function TemplateEditor({
     if (!name.trim()) { toast.error("Template name is required"); return; }
     if (!selectedDocumentTypeId) { toast.error("Choose the document type this template belongs to"); return; }
     if (steps.length === 0) { toast.error("Add at least one approval step"); return; }
-    for (const s of steps) {
+    const stepsForSave = steps.map((step) => {
+      const group = (groups ?? []).find((item) => item.id === step.assignee_group);
+      if (!isHodGroupName(group?.name ?? step.assignee_group_name)) return step;
+      return {
+        ...step,
+        assignee_type: "group_any" as AssigneeType,
+        assignee_group_name: group?.name ?? step.assignee_group_name,
+        assignee_user: null,
+        assignee_user_name: undefined,
+      };
+    });
+
+    for (const s of stepsForSave) {
       if (!s.name.trim()) { toast.error(`Step ${s.order} needs a name`); return; }
       if (!s.assignee_group) { toast.error(`"${s.name}" needs a group`); return; }
       if (s.assignee_type === "group_specific" && !s.assignee_user) {
@@ -1295,7 +1353,7 @@ function TemplateEditor({
       description: description.trim(),
       document_type: selectedDocumentTypeId,
       is_active: template ? template.is_active : true,
-      steps: steps.map(stepToPayload),
+      steps: stepsForSave.map(stepToPayload),
     });
   };
 

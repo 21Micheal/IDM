@@ -68,6 +68,8 @@ export interface Document {
   personal_tags?: string[];
   uploaded_by: UserSummary;
   department?: string | null;
+  department_name?: string | null;
+  uploaded_by_department_name?: string | null;
   permissions?: string[];
   is_self_upload?: boolean;
   is_scanned?: boolean;
@@ -200,8 +202,8 @@ export interface DocumentSearchResponse {
 
 export interface DocumentPreviewResponse {
   viewer: "pdfjs" | "image" | "processing" | "download";
-  url: string;
-  raw_url?: string;
+  url: string | null;
+  raw_url?: string | null;
   preview_status?: "pending" | "processing" | "done" | "failed" | "";
   preview_error?: string;
 }
@@ -210,7 +212,7 @@ export interface DocumentEditTokenResponse {
   token: string;
   username: string;
   webdav_url: string;
-  file_url: string;
+  file_url: string | null;
   release_url: string;
   jwt_token: string;
   expires_in: number;

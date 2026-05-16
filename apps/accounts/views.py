@@ -496,7 +496,7 @@ You will be required to set a new password when you next log in.
 # ── Department ────────────────────────────────────────────────────────────────
 
 class DepartmentViewSet(viewsets.ModelViewSet):
-    queryset = Department.objects.all().order_by("name")
+    queryset = Department.objects.select_related("head").all().order_by("name")
     serializer_class = DepartmentSerializer
 
     def get_permissions(self):
@@ -522,6 +522,7 @@ class UserGroupViewSet(viewsets.ModelViewSet):
 
     def get_queryset(self):
         UserGroup.ensure_administrators_group(created_by=getattr(self.request, "user", None))
+        UserGroup.ensure_hod_group(created_by=getattr(self.request, "user", None))
         return super().get_queryset()
 
     def get_permissions(self):
@@ -535,13 +536,18 @@ class UserGroupViewSet(viewsets.ModelViewSet):
 
     def destroy(self, request, *args, **kwargs):
         group = self.get_object()
-        if group.name == UserGroup.ADMIN_GROUP_NAME:
-            return Response({"detail": "The Administrators group cannot be deleted."}, status=400)
+        if group.name in (UserGroup.ADMIN_GROUP_NAME, UserGroup.HOD_GROUP_NAME):
+            return Response({"detail": f"The {group.name} group cannot be deleted."}, status=400)
         return super().destroy(request, *args, **kwargs)
 
     @action(detail=True, methods=["post"])
     def add_member(self, request, pk=None):
         group   = self.get_object()
+        if group.name == UserGroup.HOD_GROUP_NAME:
+            return Response(
+                {"detail": "HOD group membership is managed through department heads."},
+                status=400,
+            )
         user_id = request.data.get("user_id")
         expires = request.data.get("expires_at")
 
@@ -565,6 +571,11 @@ class UserGroupViewSet(viewsets.ModelViewSet):
     @action(detail=True, methods=["post"])
     def remove_member(self, request, pk=None):
         group   = self.get_object()
+        if group.name == UserGroup.HOD_GROUP_NAME:
+            return Response(
+                {"detail": "HOD group membership is managed through department heads."},
+                status=400,
+            )
         user_id = request.data.get("user_id")
         deleted, _ = UserGroupMembership.objects.filter(user_id=user_id, group=group).delete()
         if not deleted:
@@ -605,6 +616,9 @@ class UserGroupViewSet(viewsets.ModelViewSet):
     def set_admin_access(self, request, pk=None):
         group = self.get_object()
         enabled = bool(request.data.get("enabled"))
+
+        if group.name == UserGroup.HOD_GROUP_NAME:
+            return Response({"detail": "The HOD group cannot be granted administrator access."}, status=400)
 
         if group.name == UserGroup.ADMIN_GROUP_NAME and not enabled:
             return Response({"detail": "The Administrators group must keep administrator access."}, status=400)

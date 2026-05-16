@@ -14,6 +14,7 @@ from django.urls import path
 from rest_framework.routers import DefaultRouter
 from .views import DocumentViewSet, DocumentTypeViewSet
 from .webdav import DocumentWebDAVView
+from .bulk_upload_views import BulkUploadViewSet
 from .folder_views import (
     DocumentFolderViewSet,
     DocumentFolderItemViewSet,
@@ -21,6 +22,7 @@ from .folder_views import (
 )
 
 router = DefaultRouter()
+router.register(r"bulk-uploads", BulkUploadViewSet, basename="bulk-upload")
 router.register(r"types",        DocumentTypeViewSet,       basename="document-type")
 router.register(r"folders",      DocumentFolderViewSet,     basename="document-folder")
 router.register(r"folder-items", DocumentFolderItemViewSet, basename="folder-item")

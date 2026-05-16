@@ -14,7 +14,7 @@ import { Outlet, NavLink, useNavigate, useLocation } from "react-router-dom";
 import {
   LayoutDashboard, FileText, Upload, Search,
   Workflow, ShieldCheck, Settings, LogOut,
-  Bell, Users, Building2, UserCircle, Shield,
+  Bell, Users, Building2, UserRoundCog, Shield,
   ChevronDown, ChevronRight, Archive, ScanLine, Loader2, UserCheck, Monitor, Lock, History,
 } from "lucide-react";
 import { useAuthStore } from "../../store/authStore";
@@ -76,6 +76,7 @@ const mainNav: NavEntry[] = [
       { to: "/documents?status=archived", icon: Archive,  label: "Archived" },
       { to: "/documents/upload",          icon: Upload,   label: "Upload" },
       { to: "/documents/scan",            icon: ScanLine, label: "Scan" },
+      { to: "/documents/bulk-scan",      icon: ScanLine, label: "Bulk scan" },
       { to: "/search",                    icon: Search,   label: "Search" },
     ],
   } as NavGroup,
@@ -91,7 +92,7 @@ const mainNav: NavEntry[] = [
   } as NavGroup,
   { to: "/audit", icon: History, label: "Audit trail" } as NavLeaf,
   {
-    icon: UserCircle,
+    icon: UserRoundCog,
     label: "Profile",
     prefix: "/profile",
     children: [
@@ -208,7 +209,7 @@ function ProfileMenu() {
         title="Profile"
         aria-label="Open profile menu"
       >
-        <UserCircle className="h-5 w-5" />
+        <UserRoundCog className="h-5 w-5" />
       </button>
 
       {open && (
@@ -225,7 +226,7 @@ function ProfileMenu() {
               onClick={() => { setOpen(false); navigate("/profile"); }}
               className="flex items-center gap-2 w-full px-4 py-2 text-sm text-foreground hover:bg-muted transition-colors"
             >
-              <UserCircle className="w-4 h-4 text-muted-foreground" />
+              <UserRoundCog className="w-4 h-4 text-muted-foreground" />
               My profile
             </button>
             <button

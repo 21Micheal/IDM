@@ -353,6 +353,14 @@ class WorkflowService:
         doc        = instance.document
         doc.status = DocumentStatus.DRAFT
         doc.save(update_fields=["status", "updated_at"])
+        AuditLog.objects.create(
+            event=AuditEvent.WORKFLOW_CANCELLED,
+            actor=actor,
+            object_type=doc.__class__.__name__,
+            object_id=str(doc.pk),
+            object_repr=str(doc)[:255],
+            changes={"workflow_instance_id": str(instance.id)},
+        )
 
     # ── Internals ──────────────────────────────────────────────────────────
 
@@ -369,7 +377,7 @@ class WorkflowService:
             if step.sla_hours else None
         )
 
-        assignees = WorkflowService._resolve_assignees(step)
+        assignees = WorkflowService._resolve_assignees(step, instance.document)
         tasks = []
         for assigned in assignees:
             tasks.append(
@@ -397,7 +405,7 @@ class WorkflowService:
             pass
 
     @staticmethod
-    def _resolve_assignees(step: WorkflowStep):
+    def _resolve_assignees(step: WorkflowStep, document=None):
         if step.assignee_type == "specific_user":
             if not step.assignee_user_id:
                 raise WorkflowError(f"Step '{step.name}' is missing its assigned user.")
@@ -411,6 +419,32 @@ class WorkflowService:
                     f"Selected user is not an active member of group '{step.assignee_group.name}'."
                 )
             return [step.assignee_user]
+
+        if step.assignee_group and step.assignee_group.is_hod_group:
+            department = (
+                getattr(document, "department", None)
+                or getattr(getattr(document, "uploaded_by", None), "department", None)
+            )
+            if not department:
+                raise WorkflowError(
+                    f"Step '{step.name}' requires a department head, but no department was found."
+                )
+            if not department.head_id:
+                raise WorkflowError(
+                    f"Department '{department.name}' has no head configured."
+                )
+            if not department.head.is_active:
+                raise WorkflowError(
+                    f"Department '{department.name}' head is not active."
+                )
+            if not WorkflowService._is_active_group_member(
+                step.assignee_group,
+                department.head,
+            ):
+                raise WorkflowError(
+                    f"Department '{department.name}' head is not an active member of the HOD group."
+                )
+            return [department.head]
 
         if step.assignee_type == "group_any":
             members = WorkflowService._active_group_members(step.assignee_group)

@@ -7,7 +7,7 @@ import StatusBadge from "@/components/documents/StatusBadge";
 import { format } from "date-fns";
 import type { DocumentSearchResponse, SearchHit } from "@/types";
 import { useDebounce } from "@/hooks/useDebounce";
-import { escapeSearchRegex, getPreferredHighlights } from "@/lib/search";
+import { getPreferredHighlights, highlightSearchText } from "@/lib/search";
 import { formatDocumentFileType } from "@/lib/documentFormat";
 
 export default function SearchPage() {
@@ -78,14 +78,6 @@ export default function SearchPage() {
     setDateTo("");
     setStatusFilter("");
     setPage(1);
-  };
-
-  // Highlight only the searched term in the snippet
-  const highlightTerm = (text: string, term: string) => {
-    if (!term || !text) return text;
-    const escapedTerm = escapeSearchRegex(term);
-    const regex = new RegExp(`(${escapedTerm})`, "gi");
-    return text.replace(regex, '<span class="bg-yellow-200 text-yellow-800 font-medium px-0.5 rounded">$1</span>');
   };
 
   return (
@@ -174,69 +166,81 @@ export default function SearchPage() {
           )}
 
           <div className="space-y-4">
-            {searchMutation.data.results.map((hit: SearchHit) => (
-              <Link
-                key={hit.id}
-                to={`/documents/${hit.id}`}
-                className="card p-6 block hover:shadow-md transition-all group"
-              >
-                <div className="flex items-start justify-between gap-6">
-                  <div className="flex-1 min-w-0">
-                    <div className="flex items-center gap-3 mb-2">
-                      <span className="font-mono text-xs text-brand-600 font-medium">
-                        {hit.reference_number}
-                      </span>
-                      <span className="text-xs text-gray-400">•</span>
-                      <span className="text-xs text-gray-500">{hit.document_type}</span>
-                      <span className="text-xs text-gray-400">•</span>
-                      <span className="rounded-md border border-gray-200 bg-gray-50 px-2 py-0.5 text-[11px] font-semibold text-gray-500">
-                        {formatDocumentFileType(hit.file_name, hit.file_mime_type)}
-                      </span>
+            {searchMutation.data.results.map((hit: SearchHit) => {
+              const preferredHighlights = getPreferredHighlights(hit, searchTerm);
+
+              return (
+                <Link
+                  key={hit.id}
+                  to={`/documents/${hit.id}`}
+                  className="card p-6 block hover:shadow-md transition-all group"
+                >
+                  <div className="flex items-start justify-between gap-6">
+                    <div className="flex-1 min-w-0">
+                      <div className="flex items-center gap-3 mb-2">
+                        <span className="font-mono text-xs text-brand-600 font-medium">
+                          {hit.reference_number}
+                        </span>
+                        <span className="text-xs text-gray-400">•</span>
+                        <span className="text-xs text-gray-500">{hit.document_type}</span>
+                        <span className="text-xs text-gray-400">•</span>
+                        <span className="rounded-md border border-gray-200 bg-gray-50 px-2 py-0.5 text-[11px] font-semibold text-gray-500">
+                          {formatDocumentFileType(hit.file_name, hit.file_mime_type)}
+                        </span>
+                      </div>
+
+                      <h3 className="font-semibold text-lg text-gray-900 group-hover:text-brand-700 transition-colors line-clamp-2">
+                        <span
+                          dangerouslySetInnerHTML={{
+                            __html: highlightSearchText(hit.title, searchTerm),
+                          }}
+                        />
+                      </h3>
+
+                      {hit.supplier && (
+                        <p
+                          className="text-sm text-gray-600 mt-1"
+                          dangerouslySetInnerHTML={{
+                            __html: highlightSearchText(hit.supplier, searchTerm),
+                          }}
+                        />
+                      )}
+
+                      {preferredHighlights.length > 0 && (
+                        <div className="mt-4 text-sm text-gray-600 border-l-2 border-brand-200 pl-4 space-y-3">
+                          {preferredHighlights.map(([field, snippet]) => (
+                            <div key={field} className="italic">
+                              <span
+                                dangerouslySetInnerHTML={{
+                                  __html: highlightSearchText(snippet, searchTerm),
+                                }}
+                              />
+                            </div>
+                          ))}
+                        </div>
+                      )}
                     </div>
 
-                    <h3 className="font-semibold text-lg text-gray-900 group-hover:text-brand-700 transition-colors line-clamp-2">
-                      {hit.title}
-                    </h3>
-
-                    {hit.supplier && (
-                      <p className="text-sm text-gray-600 mt-1">{hit.supplier}</p>
-                    )}
-
-                    {/* Only highlight the searched term - modern style */}
-                    {hit.highlights && Object.keys(hit.highlights).length > 0 && (
-                      <div className="mt-4 text-sm text-gray-600 border-l-2 border-brand-200 pl-4 space-y-3">
-                        {getPreferredHighlights(hit, searchTerm).map(([field, snippet]) => (
-                          <div key={field} className="italic">
-                            <span
-                              dangerouslySetInnerHTML={{
-                                __html: highlightTerm(snippet, searchTerm),
-                              }}
-                            />
-                          </div>
-                        ))}
-                      </div>
-                    )}
+                    <div className="flex flex-col items-end gap-3 flex-shrink-0 text-right">
+                      <StatusBadge status={hit.status} />
+                      {hit.document_date && (
+                        <div className="text-xs text-gray-500">
+                          {format(new Date(hit.document_date), "dd MMM yyyy")}
+                        </div>
+                      )}
+                      {hit.amount && (
+                        <div className="font-medium text-gray-900">
+                          {hit.amount.toLocaleString("en-US", {
+                            style: "currency",
+                            currency: "USD",
+                          })}
+                        </div>
+                      )}
+                    </div>
                   </div>
-
-                  <div className="flex flex-col items-end gap-3 flex-shrink-0 text-right">
-                    <StatusBadge status={hit.status} />
-                    {hit.document_date && (
-                      <div className="text-xs text-gray-500">
-                        {format(new Date(hit.document_date), "dd MMM yyyy")}
-                      </div>
-                    )}
-                    {hit.amount && (
-                      <div className="font-medium text-gray-900">
-                        {hit.amount.toLocaleString("en-US", {
-                          style: "currency",
-                          currency: "USD",
-                        })}
-                      </div>
-                    )}
-                  </div>
-                </div>
-              </Link>
-            ))}
+                </Link>
+              );
+            })}
           </div>
 
           {searchMutation.data.total > page * 20 && (
@@ -257,10 +261,3 @@ export default function SearchPage() {
     </div>
   );
 }
-
-// Helper: Highlight only the searched term
-const highlightTerm = (text: string, term: string): string => {
-  if (!term || !text) return text || "";
-  const regex = new RegExp(`(${term})`, "gi");
-  return text.replace(regex, '<span class="bg-yellow-200 font-medium text-yellow-800 px-0.5 rounded">$1</span>');
-};

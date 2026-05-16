@@ -5,7 +5,7 @@ import { zodResolver } from "@hookform/resolvers/zod";
 import { z } from "zod";
 import { departmentsAPI, usersAPI } from "@/services/api";
 import {
-  Plus, Trash2, Loader2, Building2, X, UserPlus, Users, Check,
+  Plus, Trash2, Loader2, Building2, X, UserPlus, Users, Check, Crown,
 } from "lucide-react";
 import { toast } from "@/components/ui/vault-toast";
 import clsx from "clsx";
@@ -14,6 +14,7 @@ interface Department {
   id: string;
   name: string;
   code: string;
+  head: User | null;
   user_count: number;
 }
 
@@ -80,9 +81,11 @@ function DeptForm({
 // ── Department Detail Panel ───────────────────────────────────────────────────
 function DepartmentDetail({
   department,
+  onDepartmentUpdated,
   onClose,
 }: {
   department: Department;
+  onDepartmentUpdated: (department: Department) => void;
   onClose: () => void;
 }) {
   const qc = useQueryClient();
@@ -123,10 +126,26 @@ function DepartmentDetail({
       qc.invalidateQueries({ queryKey: ["department-members", department.id] });
       qc.invalidateQueries({ queryKey: ["departments"] });
     },
-    onError: () => toast.error("Failed to remove user"),
+    onError: (err: any) =>
+      toast.error(err?.response?.data?.department?.[0] || "Failed to remove user"),
+  });
+
+  const setHeadMutation = useMutation({
+    mutationFn: (headId: string | null) =>
+      departmentsAPI.update(department.id, { head_id: headId }),
+    onSuccess: ({ data }) => {
+      toast.success(data.head ? "Department head updated" : "Department head cleared");
+      onDepartmentUpdated(data);
+      qc.invalidateQueries({ queryKey: ["departments"] });
+      qc.invalidateQueries({ queryKey: ["groups"] });
+      qc.invalidateQueries({ queryKey: ["group-members"] });
+    },
+    onError: (err: any) =>
+      toast.error(err?.response?.data?.head_id?.[0] || "Failed to update department head"),
   });
 
   const memberIds = new Set(members.map((m) => m.id));
+  const currentHead = department.head;
 
   return (
     <div className="fixed inset-0 z-50 flex">
@@ -156,6 +175,44 @@ function DepartmentDetail({
         </div>
 
         <div className="flex-1 overflow-y-auto p-8 space-y-10">
+          {/* Department Head */}
+          <div>
+            <div className="flex justify-between items-center mb-5">
+              <h3 className="font-semibold text-lg text-foreground flex items-center gap-2">
+                <Crown className="w-4 h-4 text-muted-foreground" />
+                Department head
+              </h3>
+              {currentHead && (
+                <button
+                  type="button"
+                  onClick={() => setHeadMutation.mutate(null)}
+                  disabled={setHeadMutation.isPending}
+                  className="text-xs font-semibold text-muted-foreground hover:text-destructive transition-colors"
+                >
+                  Clear head
+                </button>
+              )}
+            </div>
+
+            {currentHead ? (
+              <div className="flex items-center gap-4 p-4 bg-accent/10 border border-accent/30 rounded-xl">
+                <div className="w-10 h-10 rounded-full bg-accent/20 flex items-center justify-center text-accent text-sm font-bold flex-shrink-0">
+                  {currentHead.full_name.split(" ").map((n) => n[0]).join("").slice(0, 2)}
+                </div>
+                <div className="flex-1 min-w-0">
+                  <p className="font-medium text-foreground text-sm">{currentHead.full_name}</p>
+                  <p className="text-xs text-muted-foreground truncate">{currentHead.email}</p>
+                </div>
+                <span className="badge bg-accent/15 text-accent text-xs">HOD</span>
+              </div>
+            ) : (
+              <div className="border border-dashed border-border rounded-xl p-8 text-center">
+                <Crown className="w-9 h-9 text-muted-foreground/40 mx-auto mb-3" />
+                <p className="text-muted-foreground text-sm">No department head has been set.</p>
+              </div>
+            )}
+          </div>
+
           {/* Members Section */}
           <div>
             <div className="flex justify-between items-center mb-5">
@@ -187,11 +244,25 @@ function DepartmentDetail({
                       <p className="text-xs text-muted-foreground truncate">{user.email}</p>
                     </div>
                     <div className="flex items-center gap-3">
+                      {currentHead?.id === user.id && (
+                        <span className="badge bg-accent/15 text-accent text-xs">Head</span>
+                      )}
                       <span className="badge bg-secondary text-secondary-foreground text-xs">
                         {user.job_description || "Staff"}
                       </span>
+                      {currentHead?.id !== user.id && (
+                        <button
+                          onClick={() => setHeadMutation.mutate(user.id)}
+                          disabled={setHeadMutation.isPending}
+                          className="opacity-0 group-hover:opacity-100 text-accent hover:bg-accent/10 p-2 rounded-lg transition-all"
+                          title="Set as department head"
+                        >
+                          <Crown className="w-4 h-4" />
+                        </button>
+                      )}
                       <button
                         onClick={() => removeMemberMutation.mutate(user.id)}
+                        disabled={currentHead?.id === user.id}
                         className="opacity-0 group-hover:opacity-100 text-destructive hover:bg-destructive/10 p-2 rounded-lg transition-all"
                         title="Remove from department"
                       >
@@ -394,6 +465,7 @@ export default function DepartmentsPage() {
       {selectedDept && (
         <DepartmentDetail
           department={selectedDept}
+          onDepartmentUpdated={setSelectedDept}
           onClose={() => setSelectedDept(null)}
         />
       )}
