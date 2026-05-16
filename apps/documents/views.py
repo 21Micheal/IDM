@@ -158,7 +158,13 @@ class DocumentViewSet(AuditMixin, viewsets.ModelViewSet):
         user = self.request.user
         qs   = (
             Document.objects
-            .select_related("document_type", "uploaded_by", "department", "edit_locked_by")
+            .select_related(
+                "document_type",
+                "uploaded_by",
+                "uploaded_by__department",
+                "department",
+                "edit_locked_by",
+            )
             .prefetch_related("tags", "versions", "workflow_instance__tasks__step")
         )
         if user.has_admin_access:

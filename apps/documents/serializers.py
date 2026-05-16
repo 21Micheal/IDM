@@ -184,6 +184,10 @@ class DocumentCommentSerializer(serializers.ModelSerializer):
 class DocumentListSerializer(serializers.ModelSerializer):
     document_type_name = serializers.CharField(source="document_type.name", read_only=True)
     uploaded_by        = UserSummarySerializer(read_only=True)
+    department_name    = serializers.CharField(source="department.name", read_only=True, default=None)
+    uploaded_by_department_name = serializers.CharField(
+        source="uploaded_by.department.name", read_only=True, default=None
+    )
     tags               = TagSerializer(many=True, read_only=True)
     personal_tags      = serializers.SerializerMethodField()
     description        = serializers.SerializerMethodField()
@@ -201,7 +205,7 @@ class DocumentListSerializer(serializers.ModelSerializer):
             "status", "supplier", "amount", "currency", "document_date",
             "description", # Added for personal documents
             "file_name", "file_size", "file_mime_type",
-            "uploaded_by", "tags", "personal_tags", "permissions",
+            "uploaded_by", "department_name", "uploaded_by_department_name", "tags", "personal_tags", "permissions",
             "is_self_upload",
             "is_scanned", "ocr_status",
             "preview_pdf", "preview_status",

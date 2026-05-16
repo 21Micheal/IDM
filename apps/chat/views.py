@@ -23,6 +23,8 @@ class ChatRoomViewSet(viewsets.ModelViewSet):
             chatroomparticipant__user=self.request.user,
             chatroomparticipant__is_active=True,
             is_active=True
+        ).annotate(message_count=Count('messages')).filter(
+            message_count__gt=0
         ).select_related('created_by').prefetch_related('participants', 'messages')
     
     def get_serializer_class(self):
@@ -70,6 +72,15 @@ class ChatRoomViewSet(viewsets.ModelViewSet):
         ).annotate(participant_count=Count('participants', distinct=True)).filter(
             participant_count=2
         ).first()
+
+        if room and not room.messages.exists():
+            # Older clients could create a room before sending a message.
+            # Treat empty direct rooms as stale and retire them so the user
+            # does not get stuck with ghost conversations.
+            room.is_active = False
+            room.save(update_fields=['is_active'])
+            ChatRoomParticipant.objects.filter(room=room).update(is_active=False)
+            room = None
         
         if not room:
             # Create new direct message room

@@ -74,10 +74,11 @@ class DepartmentSerializer(serializers.ModelSerializer):
 
 class UserSummarySerializer(serializers.ModelSerializer):
     full_name = serializers.SerializerMethodField()
+    department_name  = serializers.CharField(source="department.name", read_only=True, default=None)
 
     class Meta:
         model  = User
-        fields = ["id", "email", "first_name", "last_name", "full_name", "job_description", "is_staff"]
+        fields = ["id", "email", "first_name", "last_name", "full_name", "job_description", "is_staff", "department_name"]
 
     def get_full_name(self, obj):
         return obj.get_full_name()

@@ -68,6 +68,8 @@ export interface Document {
   personal_tags?: string[];
   uploaded_by: UserSummary;
   department?: string | null;
+  department_name?: string | null;
+  uploaded_by_department_name?: string | null;
   permissions?: string[];
   is_self_upload?: boolean;
   is_scanned?: boolean;
