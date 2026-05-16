@@ -174,6 +174,16 @@ function ocrScalar(value: unknown): string | undefined {
   return undefined;
 }
 
+function normalizeDateInput(value: string): string {
+  if (/^\d{4}-\d{2}-\d{2}$/.test(value)) return value;
+  const slash = value.match(/^(\d{1,2})\/(\d{1,2})\/(\d{4})$/);
+  if (slash) {
+    const [, month, day, year] = slash;
+    return `${year}-${month.padStart(2, "0")}-${day.padStart(2, "0")}`;
+  }
+  return value;
+}
+
 const OCR_FIELD_ALIASES: Record<string, Array<keyof OcrFields>> = {
   transaction_reference: ["transaction_ref", "reference_number"],
   transaction_number: ["transaction_ref", "reference_number"],
@@ -785,7 +795,10 @@ export default function UploadPage({ scanOnly = false }: UploadPageProps) {
       const fillDirect = (key: Path<UploadFormValues>, value: unknown, score = 4) => {
         const scalar = ocrScalar(value);
         if (scalar) {
-          setValue(key, scalar);
+          const normalized = String(key).endsWith("_date")
+            ? normalizeDateInput(scalar)
+            : scalar;
+          setValue(key, normalized);
           scoreMap.set(key, score);
         }
       };
@@ -810,7 +823,8 @@ export default function UploadPage({ scanOnly = false }: UploadPageProps) {
           const value = getExactOcrValueForField(field, fields);
           if (!value) continue;
           const formPath = `metadata.${metadataKey}` as Path<UploadFormValues>;
-          setValue(formPath, value);
+          const normalized = field.field_type === "date" ? normalizeDateInput(value) : value;
+          setValue(formPath, normalized);
           scoreMap.set(formPath, 4);
         }
 

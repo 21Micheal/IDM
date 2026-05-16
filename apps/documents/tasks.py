@@ -265,7 +265,12 @@ def ocr_document(self, document_id: str):
         return
 
     try:
-        doc = Document.objects.get(id=document_id)
+        doc = (
+            Document.objects
+            .select_related("document_type")
+            .prefetch_related("document_type__metadata_fields")
+            .get(id=document_id)
+        )
 
         # ── Run OCR via the new modular pipeline ──────────────────────────
         from apps.documents.ocr.tasks_ocr import run_ocr
