@@ -3,9 +3,9 @@ import { useQuery } from "@tanstack/react-query";
 import { api, documentsAPI, searchAPI, workflowAPI } from "@/services/api";
 import { useAuthStore } from "@/store/authStore";
 import {
-  Files, Hourglass, CircleCheckBig, GitBranch, ArrowRight,
-  ChevronLeft, ChevronRight,
-  Calendar, FileText, Inbox, ListChecks, Loader2, Search, ShieldCheck, Sparkles,
+  GitBranch, ArrowRight, ChevronLeft, ChevronRight,
+  Layers, Timer, ShieldCheck, ClipboardCheck,
+  Calendar, FileText, Inbox, ListChecks, Loader2, Search, Sparkles,
   Filter, X,
 } from "lucide-react";
 import { Link, useNavigate } from "react-router-dom";
@@ -595,7 +595,7 @@ export default function DashboardPage() {
         : "mt-5 grid grid-cols-1 gap-3 md:grid-cols-2 xl:grid-cols-4";
   const activityCardStyle = {
     boxShadow: "var(--shadow-card)",
-    height: "clamp(24rem, calc(100vh - 18rem), 30rem)",
+    minHeight: "440px",
   };
 
   // ── Handlers ──────────────────────────────────────────────────────────────
@@ -859,7 +859,7 @@ export default function DashboardPage() {
         <StatCard
           title="Total Documents"
           value={totalDocuments}
-          icon={Files}
+          icon={Layers}
           color="primary"
           trend={totalDocumentsTrend}
           href="/documents"
@@ -867,7 +867,7 @@ export default function DashboardPage() {
         <StatCard
           title="Pending Approval"
           value={pendingCount}
-          icon={Hourglass}
+          icon={Timer}
           color="accent"
           trend={pendingApprovalTrend}
           href="/documents?status=pending_approval"
@@ -875,7 +875,7 @@ export default function DashboardPage() {
         <StatCard
           title="Approved Today"
           value={approvedTodayCount}
-          icon={CircleCheckBig}
+          icon={ShieldCheck}
           color="primary"
           trend={approvedTrend}
           href="/documents?status=approved"
@@ -883,7 +883,7 @@ export default function DashboardPage() {
         <StatCard
           title="My Tasks"
           value={myTasks.length}
-          icon={ListChecks}
+          icon={ClipboardCheck}
           color="teal"
           trend={tasksTrend}
           href="/workflow"
@@ -907,7 +907,7 @@ export default function DashboardPage() {
             </Link>
           </div>
 
-          <div className="min-h-0 flex-1 overflow-auto">
+          <div className="flex-1">
             {docsLoading ? (
               <div className="flex h-full items-center justify-center p-10">
                 <Loader2 className="w-6 h-6 text-muted-foreground animate-spin" />
@@ -965,7 +965,9 @@ export default function DashboardPage() {
                         </span>
                       </td>
                       <td className="px-5 py-3 align-middle">
-                        <StatusBadge status={doc.status} />
+                        <div className="max-w-[180px] truncate inline-flex">
+                          <StatusBadge status={doc.status} />
+                        </div>
                       </td>
                       <td className="hidden whitespace-nowrap px-5 py-3 text-muted-foreground md:table-cell">
                         {formatDistanceToNow(new Date(doc.updated_at), { addSuffix: true })}
@@ -1014,15 +1016,19 @@ export default function DashboardPage() {
 
         {/* Audit Trail with Storage merged at bottom */}
         <section className="flex min-w-0 flex-col overflow-hidden rounded-xl border border-border bg-card p-5" style={activityCardStyle}>
-          <div className="flex items-center justify-between">
-            <h2 className="text-sm font-semibold text-foreground">
-              {user?.has_admin_access ? "Audit Trail" : "Document Activity"}
-            </h2>
-            <span className="rounded-full bg-teal/10 px-2 py-0.5 text-[10px] font-medium text-teal">Live</span>
+          <div className="flex items-start justify-between">
+            <div>
+              <h2 className="text-sm font-semibold text-foreground">
+                {user?.has_admin_access ? "Audit Trail" : "Document Activity"}
+              </h2>
+              <p className="text-xs text-muted-foreground">A plain-language feed of what just happened.</p>
+            </div>
+            <Link to="/audit" className="text-xs font-semibold text-foreground hover:text-accent transition-colors">
+              View all
+            </Link>
           </div>
-          <p className="text-xs text-muted-foreground">A plain-language feed of what just happened.</p>
 
-          <ul className="mt-5 min-h-0 flex-1 space-y-4 overflow-y-auto pr-1">
+          <ul className="mt-5 flex-1 space-y-4">
             {auditLoading ? (
               <li className="flex h-full items-center justify-center rounded-lg bg-muted/40 p-4 text-center text-xs text-muted-foreground">Loading activity…</li>
             ) : recentAudit?.results?.length ? (
@@ -1096,10 +1102,6 @@ export default function DashboardPage() {
             </div>
           )}
 
-          <Link to="/audit" className="mt-3 shrink-0 text-center text-xs font-semibold text-foreground transition-colors hover:text-accent">
-            View full log →
-          </Link>
-
           {/* Storage merged at bottom */}
           <div className="mt-4 shrink-0 rounded-lg border border-dashed border-border p-3">
             <div className="flex items-center justify-between">
@@ -1128,12 +1130,8 @@ export default function DashboardPage() {
       </div>
 
       {/* Pending tasks */}
-      <div
-        className={`rounded-xl border border-border bg-card p-5 ${
-          hasOpenTasks ? "w-full" : "w-full max-w-xl"
-        }`}
-        style={{ boxShadow: "var(--shadow-card)" }}
-      >
+      {(tasksLoading || hasOpenTasks) && (
+        <div className="rounded-xl border border-border bg-card p-5" style={{ boxShadow: "var(--shadow-card)" }}>
         <div className="flex flex-col gap-4 lg:flex-row lg:items-start lg:justify-between">
           <div className="space-y-1 min-w-0">
             <p className="text-sm font-semibold text-foreground">Pending tasks</p>
@@ -1296,13 +1294,9 @@ export default function DashboardPage() {
           <div className="mt-4 rounded-lg border border-dashed border-border bg-muted/20 px-4 py-5 text-sm text-muted-foreground">
             No tasks match the selected filters.
           </div>
-        ) : (
-          <div className="mt-4 inline-flex items-center gap-2 rounded-lg border border-teal/25 bg-teal/10 px-3 py-2 text-sm font-medium text-teal">
-            <CircleCheckBig className="h-4 w-4" />
-            You have no pending tasks right now.
-          </div>
-        )}
-      </div>
+        ) : null}
+        </div>
+      )}
     </div>
   );
 }
