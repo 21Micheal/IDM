@@ -1,7 +1,7 @@
 """
 apps/documents/ocr/idp.py
 
-Intelligent Document Processing (IDP) using Claude Vision.
+Intelligent Document Processing (IDP) using Anthropic Claude.
 
 This module replaces the regex-based _extract_ocr_suggestions() / extractor.py
 with a vision-language model that understands document structure semantically.
@@ -10,10 +10,10 @@ Architecture
 ────────────
                         ┌─────────────────────────────┐
   PDF (native text) ───►│ pdfplumber → structured text │
-                        │ + table augmentation          │──► Claude (text mode)
+                        │ + table augmentation          │──► LLM text mode
                         └─────────────────────────────┘         │
                                                                  ▼
-  PDF (scanned) ────────► pypdfium2 render → PNG ──────► Claude (vision mode)
+  PDF (scanned) ────────► pypdfium2 render → JPEG ─────► LLM vision mode
                                                                  │
   Image upload ─────────────────────────────────────────►        │
                                                                  ▼
@@ -23,38 +23,40 @@ Architecture
                                               Merge into Document.metadata
                                               + update top-level model fields
 
-Why Claude Vision instead of local models (LayoutLM, PaddleNLP, etc.)
+Why LLM/VLM extraction instead of local-only heuristics
 ──────────────────────────────────────────────────────────────────────
 • Local transformer models require GPU for acceptable inference speed.
   On CPU, LayoutLMv3 takes 30–60 s per page — unacceptable for a Celery task.
 • Local models require fine-tuning per document type to reach production accuracy.
-• Claude Vision understands document semantics natively: it knows that
+• Vision-language models understand document semantics: they can infer that
   "Velocity Logistics Solutions" is the supplier because it sits under the
   SUPPLIER column header — not because it matched a regex pattern.
 • claude-haiku-4-5 is ~$0.0004/page. At 500 docs/day = ~$6/day.
-• Graceful fallback: if Claude is unavailable, the regex extractor still runs.
+• Graceful fallback: if Claude is unavailable, the PDF text extractor still runs.
 
 Engine selection
 ────────────────
-OCR_IDP_ENGINE setting controls the extraction path:
+IDP_PROVIDER selects Anthropic or the non-LLM fallback, while OCR_IDP_ENGINE
+controls the extraction path:
 
-  "claude_vision"  → Render PDF to PNG, send to Claude Vision
+  "vision"         → Render PDF/images and send images to the configured model
                      Best for: scanned docs, complex layouts, mixed content
                      Model: claude-haiku-4-5 (fast+cheap) or claude-sonnet-4-6
 
-  "claude_text"    → Extract text with pdfplumber (spatially augmented),
-                     send to Claude as text prompt
+  "text"           → Extract text with pdfplumber (spatially augmented),
+                     send text to the configured model
                      Best for: native digital PDFs
                      Model: claude-haiku-4-5
 
   "auto"           → Detect: sparse text → vision mode, dense text → text mode
                      Recommended default
 
-  "regex"          → Original regex extractor (fallback, no API cost)
+  "regex"          → Local OCR/regex pipeline (fallback, no API cost)
 
 Django settings
 ───────────────
-ANTHROPIC_API_KEY        Required. Set in environment or settings.
+IDP_PROVIDER             "anthropic" | "regex"
+ANTHROPIC_API_KEY        Required for IDP_PROVIDER=anthropic.
 OCR_IDP_ENGINE           "auto" | "claude_vision" | "claude_text" | "regex"
                          Default: "auto"
 OCR_IDP_MODEL            Claude model to use. Default: "claude-haiku-4-5"
@@ -193,6 +195,38 @@ def _format_custom_field_instruction(field: dict) -> str:
     return instruction
 
 
+def _idp_provider(settings) -> str:
+    provider = getattr(settings, "IDP_PROVIDER", None)
+    if not provider:
+        provider = getattr(settings, "OCR_IDP_PROVIDER", "anthropic")
+    return str(provider or "anthropic").strip().lower()
+
+
+def _model_for_provider(settings, provider: str, mode: str | None = None) -> str:
+    if provider == "anthropic":
+        return getattr(settings, "OCR_IDP_MODEL", "claude-haiku-4-5")
+    return getattr(settings, "OCR_IDP_MODEL", "claude-haiku-4-5")
+
+
+def _engine_mode(engine_setting: str, file_path: str, mime: str) -> str:
+    engine_setting = (engine_setting or "auto").lower()
+    if engine_setting in {"vision", "claude_vision"}:
+        return "vision"
+    if engine_setting in {"text", "claude_text"}:
+        return "text"
+    if mime.startswith("image/"):
+        return "vision"
+    if mime == "application/pdf":
+        from apps.documents.ocr.tasks_ocr import is_sparse_pdf
+        return "vision" if is_sparse_pdf(file_path) else "text"
+    return "text"
+
+
+def _engine_name(provider: str, mode: str) -> str:
+    prefix = "claude" if provider == "anthropic" else provider
+    return f"{prefix}_{mode}"
+
+
 # ── Main entry point ───────────────────────────────────────────────────────────
 
 def run_idp(doc) -> tuple[str, dict]:
@@ -219,53 +253,44 @@ def run_idp(doc) -> tuple[str, dict]:
     from django.conf import settings as django_settings
 
     engine_setting = getattr(django_settings, "OCR_IDP_ENGINE", "auto").lower()
+    provider = _idp_provider(django_settings)
     start = time.monotonic()
 
     # ── Route to correct engine ────────────────────────────────────────────────
     try:
-        api_key = getattr(django_settings, "ANTHROPIC_API_KEY", "").strip()
-        if not api_key:
-            # Should not normally reach here (run_ocr guards this),
-            # but handle defensively just in case.
-            raise RuntimeError("ANTHROPIC_API_KEY not set")
-
         mime = doc.file_mime_type or ""
         file_path = doc.file.path
 
-        # Determine effective engine
-        if engine_setting == "auto":
-            engine = _detect_engine(file_path, mime)
-        elif engine_setting == "claude_vision":
-            engine = "claude_vision"
-        else:
-            engine = "claude_text"
-
+        mode = _engine_mode(engine_setting, file_path, mime)
+        engine = _engine_name(provider, mode)
         extraction_prompt = _build_extraction_prompt(doc)
-        if engine == "claude_vision":
+        if mode == "vision":
             fields, raw_text = _extract_via_vision(
-                file_path, mime, api_key, django_settings, extraction_prompt
+                file_path, mime, django_settings, provider, extraction_prompt
             )
         else:
             fields, raw_text = _extract_via_text(
-                file_path, mime, api_key, django_settings, extraction_prompt
+                file_path, mime, django_settings, provider, extraction_prompt
             )
 
     except Exception as exc:
-        logger.error("idp.run_idp: Claude extraction failed for %s: %s — delegating to local pipeline", doc.id, exc)
-        from apps.documents.ocr.tasks_ocr import _run_local_pipeline
-        return _run_local_pipeline(doc)
+        logger.error(
+            "idp.run_idp: %s extraction failed for %s: %s — delegating to PDF text fallback",
+            provider,
+            doc.id,
+            exc,
+        )
+        from apps.documents.ocr.tasks_ocr import _run_pdf_text_fallback
+        return _run_pdf_text_fallback(doc)
 
     elapsed = round(time.monotonic() - start, 2)
 
     # ── Build metadata updates ────────────────────────────────────────────────
-    model = getattr(
-        __import__("django.conf", fromlist=["settings"]).settings,
-        "OCR_IDP_MODEL",
-        "claude-haiku-4-5",
-    )
+    model = _model_for_provider(django_settings, provider, mode)
 
     quality = {
         "engine":              engine,
+        "provider":            provider,
         "model":               model,
         "confidence":          fields.pop("confidence", None) or "medium",
         "low_quality_warning": _as_bool(fields.pop("low_quality_warning", False)),
@@ -281,62 +306,22 @@ def run_idp(doc) -> tuple[str, dict]:
     }
 
     logger.info(
-        "idp.run_idp: doc=%s engine=%s confidence=%s time=%.2fs fields=%s",
-        doc.id, engine, quality["confidence"], elapsed,
+        "idp.run_idp: doc=%s provider=%s engine=%s model=%s confidence=%s time=%.2fs fields=%s",
+        doc.id, provider, engine, model, quality["confidence"], elapsed,
         [k for k, v in fields.items() if v is not None and k != "raw_lines"],
     )
 
     return raw_text, metadata_updates
 
-
-# ── Engine detection ───────────────────────────────────────────────────────────
-
-def _detect_engine(file_path: str, mime: str) -> str:
-    """
-    Choose extraction engine based on document content.
-
-    Vision mode for:
-      - Image files (always)
-      - PDFs with sparse native text (scanned/image-based)
-
-    Text mode for:
-      - PDFs with dense native text (digital invoices, contracts)
-    """
-    if mime.startswith("image/"):
-        return "claude_vision"
-
-    if mime == "application/pdf":
-        from apps.documents.ocr.tasks_ocr import is_sparse_pdf
-        return "claude_vision" if is_sparse_pdf(file_path) else "claude_text"
-
-    # Non-PDF, non-image (DOCX, XLSX) → text mode
-    return "claude_text"
-
-
 # ── Vision extraction path ─────────────────────────────────────────────────────
 
-def _extract_via_vision(
-    file_path: str,
-    mime: str,
-    api_key: str,
-    settings,
-    extraction_prompt: str,
-) -> tuple[dict, str]:
-    """
-    Render document pages to images and send to Claude Vision.
-    Returns (fields_dict, raw_text_for_storage).
-    """
+
+def _call_anthropic_vision(settings, model: str, pages_b64: list[tuple[str, str]], prompt: str) -> str:
     import anthropic
-    from apps.documents.ocr.tasks_ocr import render_doc_to_images
 
-    model = getattr(settings, "OCR_IDP_MODEL", "claude-haiku-4-5")
-    dpi = int(getattr(settings, "OCR_IDP_VISION_DPI", 150))
-    timeout = int(getattr(settings, "OCR_IDP_TIMEOUT", 60))
-    max_pages = int(getattr(settings, "OCR_IDP_MAX_PAGES", 3))
-
-    pages_b64 = render_doc_to_images(file_path, mime, dpi=dpi, max_pages=max_pages)
-    if not pages_b64:
-        raise RuntimeError("Could not render any pages from document")
+    api_key = getattr(settings, "ANTHROPIC_API_KEY", "").strip()
+    if not api_key:
+        raise RuntimeError("ANTHROPIC_API_KEY is not set")
 
     content = []
     for i, (img_b64, img_mime) in enumerate(pages_b64):
@@ -350,17 +335,70 @@ def _extract_via_vision(
                 "data":       img_b64,
             },
         })
-    content.append({"type": "text", "text": extraction_prompt})
+    content.append({"type": "text", "text": prompt})
 
-    client = anthropic.Anthropic(api_key=api_key, timeout=timeout)
+    client = anthropic.Anthropic(
+        api_key=api_key,
+        timeout=int(getattr(settings, "OCR_IDP_TIMEOUT", 60)),
+    )
     response = client.messages.create(
         model=model,
         max_tokens=2048,
         system=_SYSTEM_PROMPT,
         messages=[{"role": "user", "content": content}],
     )
+    return response.content[0].text.strip()
 
-    raw_json = response.content[0].text.strip()
+
+def _call_anthropic_text(settings, model: str, document_context: str, prompt: str) -> str:
+    import anthropic
+
+    api_key = getattr(settings, "ANTHROPIC_API_KEY", "").strip()
+    if not api_key:
+        raise RuntimeError("ANTHROPIC_API_KEY is not set")
+
+    client = anthropic.Anthropic(
+        api_key=api_key,
+        timeout=int(getattr(settings, "OCR_IDP_TIMEOUT", 60)),
+    )
+    response = client.messages.create(
+        model=model,
+        max_tokens=2048,
+        system=_SYSTEM_PROMPT,
+        messages=[{
+            "role": "user",
+            "content": f"{document_context}\n\n{prompt}",
+        }],
+    )
+    return response.content[0].text.strip()
+
+
+def _extract_via_vision(
+    file_path: str,
+    mime: str,
+    settings,
+    provider: str,
+    extraction_prompt: str,
+) -> tuple[dict, str]:
+    """
+    Render document pages to images and send to Claude Vision.
+    Returns (fields_dict, raw_text_for_storage).
+    """
+    from apps.documents.ocr.tasks_ocr import render_doc_to_images
+
+    model = _model_for_provider(settings, provider, "vision")
+    dpi = int(getattr(settings, "OCR_IDP_VISION_DPI", 150))
+    max_pages = int(getattr(settings, "OCR_IDP_MAX_PAGES", 3))
+
+    pages_b64 = render_doc_to_images(file_path, mime, dpi=dpi, max_pages=max_pages)
+    if not pages_b64:
+        raise RuntimeError("Could not render any pages from document")
+
+    if provider == "anthropic":
+        raw_json = _call_anthropic_vision(settings, model, pages_b64, extraction_prompt)
+    else:
+        raise RuntimeError(f"Unsupported IDP_PROVIDER: {provider}")
+
     fields = _normalise_claude_fields(_parse_claude_json(raw_json))
 
     # Extract raw text for full-text search storage
@@ -374,19 +412,17 @@ def _extract_via_vision(
 def _extract_via_text(
     file_path: str,
     mime: str,
-    api_key: str,
     settings,
+    provider: str,
     extraction_prompt: str,
 ) -> tuple[dict, str]:
     """
     Extract text from PDF with spatial augmentation and send to Claude as text.
     Returns (fields_dict, raw_text_for_storage).
     """
-    import anthropic
     from apps.documents.ocr.tasks_ocr import _extract_pdf_tables_as_text
 
-    model = getattr(settings, "OCR_IDP_MODEL", "claude-haiku-4-5")
-    timeout = int(getattr(settings, "OCR_IDP_TIMEOUT", 60))
+    model = _model_for_provider(settings, provider, "text")
 
     raw_text = _extract_raw_text(file_path, mime)
 
@@ -404,18 +440,11 @@ def _extract_via_text(
         f"{'─' * 60}"
     )
 
-    client = anthropic.Anthropic(api_key=api_key, timeout=timeout)
-    response = client.messages.create(
-        model=model,
-        max_tokens=2048,
-        system=_SYSTEM_PROMPT,
-        messages=[{
-            "role": "user",
-            "content": f"{document_context}\n\n{extraction_prompt}",
-        }],
-    )
+    if provider == "anthropic":
+        raw_json = _call_anthropic_text(settings, model, document_context, extraction_prompt)
+    else:
+        raise RuntimeError(f"Unsupported IDP_PROVIDER: {provider}")
 
-    raw_json = response.content[0].text.strip()
     fields = _normalise_claude_fields(_parse_claude_json(raw_json))
 
     return fields, raw_text

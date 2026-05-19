@@ -112,10 +112,13 @@ def run_ocr(doc) -> tuple[str, dict]:
     Run IDP/OCR on a Document and return (extracted_text, metadata_updates).
 
     Routing priority:
-      1. IDP via Claude (when ANTHROPIC_API_KEY is set and OCR_IDP_ENGINE != "regex")
-         — Claude Vision for scanned/image docs
-         — Claude text mode for native digital PDFs
-         Falls back to the local pipeline automatically on any API failure.
+      1. IDP via Anthropic when credentials are set
+         and OCR_IDP_ENGINE != "regex".
+
+         IDP_PROVIDER:
+           "anthropic" → Claude via Anthropic API
+
+         Falls back to PDF text extraction automatically on any API failure.
 
       2. Local pipeline (always available, no API key needed):
          a. Pre-packaged OCR zip bundle
@@ -128,7 +131,8 @@ def run_ocr(doc) -> tuple[str, dict]:
             "ocr_suggestions": {
                 "fields":  { ...all extracted fields... },
                 "quality": {
-                    "engine":              str,   # "claude_vision"|"claude_text"|"paddle"|...
+                    "engine":              str,   # "claude_text"|"claude_vision"|...
+                    "provider":            str,   # "anthropic"|"local"
                     "confidence":          str,   # "high"|"medium"|"low" (IDP) or None (local)
                     "low_quality_warning": bool,
                     ...
@@ -140,27 +144,75 @@ def run_ocr(doc) -> tuple[str, dict]:
         metadata_updates["ocr_suggestions"]["fields"]   for field suggestions
         metadata_updates["ocr_suggestions"]["quality"]  for quality metrics
     Backward-compatible: tasks.py also checks "ocr_quality" at the top level
-    (kept via _wrap_local_metadata below).
+    (kept via _metadata_from_extracted_text below).
     """
     from django.conf import settings as django_settings
 
-    api_key = getattr(django_settings, "ANTHROPIC_API_KEY", "").strip()
     idp_engine = getattr(django_settings, "OCR_IDP_ENGINE", "auto").lower()
+    provider = getattr(django_settings, "IDP_PROVIDER", "anthropic").lower()
 
-    # ── IDP path (Claude) ────────────────────────────────────────────────────
-    if api_key and idp_engine != "regex":
+    # ── IDP path ─────────────────────────────────────────────────────────────
+    if _has_idp_provider_config(django_settings, provider) and idp_engine != "regex":
         try:
             from apps.documents.ocr.idp import run_idp
             return run_idp(doc)
         except Exception as exc:
             logger.error(
-                "run_ocr: IDP failed for doc=%s (%s) — falling back to local pipeline",
-                doc.id, exc,
+                "run_ocr: IDP failed for doc=%s provider=%s (%s) — falling back to PDF text",
+                doc.id, provider, exc,
             )
-            # Fall through to local pipeline below
+            return _run_pdf_text_fallback(doc)
+
+    if provider == "anthropic" and idp_engine != "regex":
+        return _run_pdf_text_fallback(doc)
 
     # ── Local pipeline ───────────────────────────────────────────────────────
     return _run_local_pipeline(doc)
+
+
+def _has_idp_provider_config(settings, provider: str) -> bool:
+    if provider == "regex":
+        return False
+    if provider == "anthropic":
+        return bool(getattr(settings, "ANTHROPIC_API_KEY", "").strip())
+    return False
+
+
+def _run_pdf_text_fallback(doc) -> tuple[str, dict]:
+    """
+    Lightweight fallback for the Anthropic path: PDF text layer + regex fields.
+
+    Unlike the full local OCR pipeline, this does not rasterise pages or load
+    Paddle/Tesseract. It is intentionally cheap and dependency-light.
+    """
+    mime = (doc.file_mime_type or "").lower()
+    file_path = doc.file.path
+
+    text = ""
+    quality_meta = {
+        "extraction_source": "pdf_text_fallback",
+        "mean_confidence": 0.0,
+        "overall_quality_ratio": 0.0,
+        "total_pages": 0,
+        "low_quality_pages": 0,
+        "low_quality_warning": True,
+    }
+
+    if mime == "application/pdf":
+        native_text, cpp = _pdf_native_text_and_density(file_path)
+        table_text = _extract_pdf_tables_as_text(file_path)
+        text = native_text + (("\n\n" + table_text) if table_text else "")
+        page_count = _pdf_page_count(file_path)
+        quality_meta.update({
+            "chars_per_page": round(cpp, 1),
+            "mean_confidence": 100.0 if text.strip() else 0.0,
+            "overall_quality_ratio": 1.0 if text.strip() else 0.0,
+            "total_pages": page_count,
+            "low_quality_pages": 0 if text.strip() else page_count,
+            "low_quality_warning": not bool(text.strip()),
+        })
+
+    return _metadata_from_extracted_text(text, quality_meta)
 
 
 def _run_local_pipeline(doc) -> tuple[str, dict]:
@@ -230,6 +282,10 @@ def _run_local_pipeline(doc) -> tuple[str, dict]:
                 text, quality_meta = _ocr_tesseract_v2(doc)
                 quality_meta["extraction_source"] = "tesseract_fallback"
 
+    return _metadata_from_extracted_text(text, quality_meta)
+
+
+def _metadata_from_extracted_text(text: str, quality_meta: dict) -> tuple[str, dict]:
     # ── Field extraction: regex + NER → merge ────────────────────────────────
     from apps.documents.ocr.extractor import extract_document_fields
     from apps.documents.ocr.field_resolver import FieldResolver
@@ -241,6 +297,7 @@ def _run_local_pipeline(doc) -> tuple[str, dict]:
     # ── Build unified metadata shape (same as IDP output) ────────────────────
     quality_block = {
         "engine":              quality_meta.get("extraction_source", "local"),
+        "provider":            "local",
         "model":               None,
         "confidence":          None,
         "low_quality_warning": quality_meta.get("low_quality_warning", False),

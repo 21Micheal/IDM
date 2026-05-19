@@ -221,10 +221,18 @@ OCR_SPACY_ENABLED = env.bool("OCR_SPACY_ENABLED", default=True)
 OCR_SPACY_MODEL = env("OCR_SPACY_MODEL", default="en_core_web_sm")
 
 # ── IDP (Intelligent Document Processing) ───────────────────────────────────
-# Claude is the primary field-extraction engine when ANTHROPIC_API_KEY is set.
-# If the key is absent or OCR_IDP_ENGINE=regex, the local OCR + regex pipeline
-# remains the fallback path.
+# Provider selection:
+#   anthropic → Claude via Anthropic API
+#   regex     → skip LLM and use local OCR + regex pipeline
+#   huggingface is intentionally commented out until it is ready for testing.
+IDP_PROVIDER = env("IDP_PROVIDER", default=env("OCR_IDP_PROVIDER", default="anthropic"))
+
 ANTHROPIC_API_KEY = env("ANTHROPIC_API_KEY", default="")
+
+# HuggingFace provider placeholders remain commented out for later testing.
+# HF_API_KEY = env("HF_API_KEY", default="")
+# HF_IDP_MODEL = env("HF_IDP_MODEL", default="Qwen/Qwen2-VL-7B-Instruct")
+
 OCR_IDP_ENGINE = env("OCR_IDP_ENGINE", default="auto")
 OCR_IDP_MODEL = env("OCR_IDP_MODEL", default="claude-haiku-4-5")
 OCR_IDP_VISION_DPI = env.int("OCR_IDP_VISION_DPI", default=150)
