@@ -6,7 +6,7 @@ import {
   GitBranch, ArrowRight, ChevronLeft, ChevronRight,
   Layers, Timer, ShieldCheck, ClipboardCheck,
   Calendar, FileText, Inbox, ListChecks, Loader2, Search, Sparkles,
-  Filter, X,
+  Filter, X, Hourglass,
 } from "lucide-react";
 import { Link, useNavigate } from "react-router-dom";
 import { formatDistanceToNow } from "date-fns";
@@ -350,10 +350,16 @@ export default function DashboardPage() {
   const [isDashboardSearchFocused, setIsDashboardSearchFocused] = useState(false);
   const [activeDashboardResultIndex, setActiveDashboardResultIndex] = useState(-1);
   const [taskFilters, setTaskFilters] = useState<WorkflowTaskFilters>(DEFAULT_WORKFLOW_TASK_FILTERS);
+  const [metricsEnabled, setMetricsEnabled] = useState(false);
 
   const dashboardSearchRef = useRef<HTMLDivElement | null>(null);
   const debouncedDashboardSearch = useDebounce(dashboardSearch.trim(), 300);
   const trendWindow = useMemo(() => getDashboardTrendWindow(), []);
+
+  useEffect(() => {
+    const timer = window.setTimeout(() => setMetricsEnabled(true), 600);
+    return () => window.clearTimeout(timer);
+  }, []);
 
   // ── Queries ───────────────────────────────────────────────────────────────
 
@@ -371,7 +377,8 @@ export default function DashboardPage() {
   const { data: totalDocuments = 0 } = useQuery({
     queryKey: ["documents", "count", "all"],
     queryFn: () => documentsAPI.list({ page: 1, page_size: 1 }).then((r) => r.data.count ?? 0),
-    ...QUERY_SHORT_STALE,
+    enabled: metricsEnabled,
+    ...QUERY_FIVE_MIN_STALE,
   });
 
   const { data: pendingCount = 0 } = useQuery({
@@ -383,7 +390,8 @@ export default function DashboardPage() {
         page: 1,
         page_size: 1,
       }).then((r) => r.data.count ?? 0),
-    ...QUERY_SHORT_STALE,
+    enabled: metricsEnabled,
+    ...QUERY_FIVE_MIN_STALE,
   });
 
   const { data: approvedTodayCount = 0 } = useQuery({
@@ -396,7 +404,8 @@ export default function DashboardPage() {
         page: 1,
         page_size: 1,
       }).then((r) => r.data.count ?? 0),
-    ...QUERY_SHORT_STALE,
+    enabled: metricsEnabled,
+    ...QUERY_FIVE_MIN_STALE,
   });
 
   const { data: documentsCreatedThisPeriod = 0 } = useQuery({
@@ -408,7 +417,8 @@ export default function DashboardPage() {
         page: 1,
         page_size: 1,
       }).then((r) => r.data.count ?? 0),
-    ...QUERY_SHORT_STALE,
+    enabled: metricsEnabled,
+    ...QUERY_FIVE_MIN_STALE,
   });
 
   const { data: documentsCreatedPreviousPeriod = 0 } = useQuery({
@@ -420,7 +430,8 @@ export default function DashboardPage() {
         page: 1,
         page_size: 1,
       }).then((r) => r.data.count ?? 0),
-    ...QUERY_SHORT_STALE,
+    enabled: metricsEnabled,
+    ...QUERY_FIVE_MIN_STALE,
   });
 
   const { data: pendingCreatedThisPeriod = 0 } = useQuery({
@@ -434,7 +445,8 @@ export default function DashboardPage() {
         page: 1,
         page_size: 1,
       }).then((r) => r.data.count ?? 0),
-    ...QUERY_SHORT_STALE,
+    enabled: metricsEnabled,
+    ...QUERY_FIVE_MIN_STALE,
   });
 
   const { data: pendingCreatedPreviousPeriod = 0 } = useQuery({
@@ -448,7 +460,8 @@ export default function DashboardPage() {
         page: 1,
         page_size: 1,
       }).then((r) => r.data.count ?? 0),
-    ...QUERY_SHORT_STALE,
+    enabled: metricsEnabled,
+    ...QUERY_FIVE_MIN_STALE,
   });
 
   const { data: approvedThisPeriod = 0 } = useQuery({
@@ -462,7 +475,8 @@ export default function DashboardPage() {
         page: 1,
         page_size: 1,
       }).then((r) => r.data.count ?? 0),
-    ...QUERY_SHORT_STALE,
+    enabled: metricsEnabled,
+    ...QUERY_FIVE_MIN_STALE,
   });
 
   const { data: approvedPreviousPeriod = 0 } = useQuery({
@@ -476,7 +490,8 @@ export default function DashboardPage() {
         page: 1,
         page_size: 1,
       }).then((r) => r.data.count ?? 0),
-    ...QUERY_SHORT_STALE,
+    enabled: metricsEnabled,
+    ...QUERY_FIVE_MIN_STALE,
   });
 
   const { data: myTasks = [], isLoading: tasksLoading } = useQuery({
@@ -503,6 +518,7 @@ export default function DashboardPage() {
   const { data: storageStats } = useQuery<StorageStats>({
     queryKey: ["storage", "stats"],
     queryFn: () => api.get("/storage/stats/").then((res) => res.data),
+    enabled: metricsEnabled,
     ...QUERY_FIVE_MIN_STALE,
   });
 
