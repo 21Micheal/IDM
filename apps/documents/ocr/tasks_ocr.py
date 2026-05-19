@@ -148,37 +148,49 @@ def run_ocr(doc) -> tuple[str, dict]:
     """
     from django.conf import settings as django_settings
 
-    idp_engine = getattr(django_settings, "OCR_IDP_ENGINE", "auto").lower()
-    provider = getattr(django_settings, "IDP_PROVIDER", "anthropic").lower()
+    idp_engine = _normalise_setting(getattr(django_settings, "OCR_IDP_ENGINE", "auto"))
+    provider = _normalise_setting(getattr(django_settings, "IDP_PROVIDER", "anthropic"))
+
+    if provider == "regex" or idp_engine == "regex":
+        return _run_local_pipeline(doc)
+
+    if provider != "anthropic":
+        logger.warning(
+            "run_ocr: unsupported IDP_PROVIDER=%s for doc=%s — falling back to PDF text",
+            provider,
+            doc.id,
+        )
+        return _run_pdf_text_fallback(doc, reason=f"unsupported_provider:{provider}")
+
+    if not _has_anthropic_config(django_settings):
+        logger.info(
+            "run_ocr: ANTHROPIC_API_KEY missing for doc=%s — falling back to PDF text",
+            doc.id,
+        )
+        return _run_pdf_text_fallback(doc, reason="anthropic_key_missing")
 
     # ── IDP path ─────────────────────────────────────────────────────────────
-    if _has_idp_provider_config(django_settings, provider) and idp_engine != "regex":
-        try:
-            from apps.documents.ocr.idp import run_idp
-            return run_idp(doc)
-        except Exception as exc:
-            logger.error(
-                "run_ocr: IDP failed for doc=%s provider=%s (%s) — falling back to PDF text",
-                doc.id, provider, exc,
-            )
-            return _run_pdf_text_fallback(doc)
-
-    if provider == "anthropic" and idp_engine != "regex":
-        return _run_pdf_text_fallback(doc)
-
-    # ── Local pipeline ───────────────────────────────────────────────────────
-    return _run_local_pipeline(doc)
+    try:
+        from apps.documents.ocr.idp import run_idp
+        return run_idp(doc)
+    except Exception as exc:
+        logger.error(
+            "run_ocr: Anthropic IDP failed for doc=%s (%s) — falling back to PDF text",
+            doc.id,
+            exc,
+        )
+        return _run_pdf_text_fallback(doc, reason="anthropic_error")
 
 
-def _has_idp_provider_config(settings, provider: str) -> bool:
-    if provider == "regex":
-        return False
-    if provider == "anthropic":
-        return bool(getattr(settings, "ANTHROPIC_API_KEY", "").strip())
-    return False
+def _normalise_setting(value: object) -> str:
+    return str(value or "").strip().lower()
 
 
-def _run_pdf_text_fallback(doc) -> tuple[str, dict]:
+def _has_anthropic_config(settings) -> bool:
+    return bool(getattr(settings, "ANTHROPIC_API_KEY", "").strip())
+
+
+def _run_pdf_text_fallback(doc, *, reason: str = "anthropic_unavailable") -> tuple[str, dict]:
     """
     Lightweight fallback for the Anthropic path: PDF text layer + regex fields.
 
@@ -196,6 +208,7 @@ def _run_pdf_text_fallback(doc) -> tuple[str, dict]:
         "total_pages": 0,
         "low_quality_pages": 0,
         "low_quality_warning": True,
+        "fallback_reason": reason,
     }
 
     if mime == "application/pdf":
@@ -293,6 +306,7 @@ def _metadata_from_extracted_text(text: str, quality_meta: dict) -> tuple[str, d
     regex_suggestions = extract_document_fields(text)
     ner_hints = _ner_field_hints(text)
     merged, _sources = FieldResolver().resolve(regex_suggestions, ner_hints)
+    merged = _clean_local_suggestions(merged)
 
     # ── Build unified metadata shape (same as IDP output) ────────────────────
     quality_block = {
@@ -315,6 +329,26 @@ def _metadata_from_extracted_text(text: str, quality_meta: dict) -> tuple[str, d
         # that reads metadata["ocr_quality"] directly (e.g. admin views)
         "ocr_quality": quality_meta,
     }
+
+
+def _clean_local_suggestions(fields: dict) -> dict:
+    cleaned = dict(fields or {})
+    account_code = cleaned.get("account_code")
+    if account_code:
+        from apps.documents.ocr.extractor import _is_plausible_gl_account_code
+
+        folded = " ".join(str(account_code).split()).casefold()
+        supplier = cleaned.get("supplier")
+        if (
+            (supplier and folded == " ".join(str(supplier).split()).casefold())
+            or not _is_plausible_gl_account_code(str(account_code))
+        ):
+            logger.info(
+                "run_ocr: dropping implausible local account_code=%r",
+                str(account_code)[:80],
+            )
+            cleaned.pop("account_code", None)
+    return cleaned
 
 
 # ─────────────────────────────────────────────────────────────────────────────

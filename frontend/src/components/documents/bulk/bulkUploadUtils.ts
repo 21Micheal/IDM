@@ -1,5 +1,5 @@
 import type { DocumentType, MetadataField } from "@/types";
-import { applyOcrToFields, type OcrFields } from "@/lib/ocrFieldMatcher";
+import { applyOcrToFields, sanitizeOcrFields, type OcrFields } from "@/lib/ocrFieldMatcher";
 import type {
   BulkDocReviewState,
   BulkReviewSubmitItem,
@@ -30,8 +30,8 @@ export function documentNameFromFileName(fileName: string): string {
 function parseOcrFields(item: BulkUploadDocumentItem): OcrFields {
   const raw = item.ocr_suggestions;
   if (!raw) return {};
-  if (raw.fields) return raw.fields;
-  return raw as unknown as OcrFields;
+  if (raw.fields) return sanitizeOcrFields(raw.fields);
+  return sanitizeOcrFields(raw as unknown as OcrFields);
 }
 
 export function buildReviewStateFromBatchItem(

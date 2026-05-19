@@ -225,7 +225,7 @@ OCR_SPACY_MODEL = env("OCR_SPACY_MODEL", default="en_core_web_sm")
 #   anthropic → Claude via Anthropic API
 #   regex     → skip LLM and use local OCR + regex pipeline
 #   huggingface is intentionally commented out until it is ready for testing.
-IDP_PROVIDER = env("IDP_PROVIDER", default=env("OCR_IDP_PROVIDER", default="anthropic"))
+IDP_PROVIDER = env("IDP_PROVIDER", default="anthropic")
 
 ANTHROPIC_API_KEY = env("ANTHROPIC_API_KEY", default="")
 

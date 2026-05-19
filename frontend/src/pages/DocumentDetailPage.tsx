@@ -95,6 +95,19 @@ function formatDocumentDetailValue(doc: Document, field: MetadataField) {
   return String(value);
 }
 
+function getOcrQuality(metadata: Document["metadata"] | null | undefined) {
+  const ocrSuggestions = (metadata as any)?.ocr_suggestions;
+  return (
+    (ocrSuggestions && typeof ocrSuggestions === "object" ? ocrSuggestions.quality : null) ||
+    (metadata as any)?.ocr_quality ||
+    null
+  );
+}
+
+function formatOcrEngine(engine: unknown) {
+  return String(engine || "Unknown").replace(/_/g, " ");
+}
+
 function normalizeUrl(url: string | null | undefined): string | undefined {
   if (!url) return url ?? undefined;
   if (window.location.protocol === "https:" && url.startsWith("http://")) {
@@ -354,6 +367,7 @@ export default function DocumentDetailPage() {
   const canRestoreVersion = hasAdminAccess || permissions.includes("upload");
   const canReOcr = hasAdminAccess || (isScanned && permissions.includes("upload"));
   const canDownload = hasAdminAccess || permissions.includes("download");
+  const ocrQuality = getOcrQuality(doc.metadata);
 
   const canSubmit =
     !isPersonal &&
@@ -559,16 +573,16 @@ export default function DocumentDetailPage() {
                       {!ocrStatus && <span className="text-muted-foreground text-xs">—</span>}
                     </dd>
                   </div>
-                  {(doc.metadata as any)?.ocr_quality && (
+                  {ocrQuality && (
                     <div className="flex justify-between gap-2">
                       <dt className="text-muted-foreground">OCR engine</dt>
                       <dd className="text-right">
                         <span className="text-xs font-medium capitalize">
-                          {(doc.metadata as any).ocr_quality.engine || 'Unknown'}
+                          {formatOcrEngine(ocrQuality.engine)}
                         </span>
-                        {(doc.metadata as any).ocr_quality.mean_confidence && (
+                        {ocrQuality.mean_confidence && (
                           <span className="text-xs text-muted-foreground ml-1">
-                            ({(doc.metadata as any).ocr_quality.mean_confidence}% conf.)
+                            ({ocrQuality.mean_confidence}% conf.)
                           </span>
                         )}
                       </dd>

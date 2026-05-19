@@ -21,7 +21,7 @@ import type { DocumentType, MetadataField } from "@/types";
 import clsx from "clsx";
 import { QUERY_FIVE_MIN_STALE } from "@/lib/reactQueryDefaults";
 import { deriveDocumentTypeConfig } from "@/lib/documentTypeConfig";
-import { applyOcrToFields, type OcrFields } from "@/lib/ocrFieldMatcher";
+import { applyOcrToFields, sanitizeOcrFields, type OcrFields } from "@/lib/ocrFieldMatcher";
 
 // ── Types ─────────────────────────────────────────────────────────────────────
 
@@ -780,10 +780,11 @@ export default function UploadPage({ scanOnly = false }: UploadPageProps) {
 
     // onDone — run 4-pass matcher against every admin-configured metadata field
     (suggestions) => {
-      setOcrSuggestions(suggestions);
+      const fields = sanitizeOcrFields(suggestions.fields ?? {});
+      const sanitizedSuggestions = { ...suggestions, fields };
+      setOcrSuggestions(sanitizedSuggestions);
       setScanStage("ocr_done");
 
-      const fields    = suggestions.fields ?? {};
       const scoreMap  = new Map<string, number>();
 
       // Store detected line items for display

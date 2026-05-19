@@ -70,6 +70,7 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 import time
 
 logger = logging.getLogger(__name__)
@@ -77,7 +78,7 @@ logger = logging.getLogger(__name__)
 # ── Field extraction prompt ────────────────────────────────────────────────────
 # Versioned so we can A/B test prompt changes without code deploys.
 
-_PROMPT_VERSION = "3"
+_PROMPT_VERSION = "4"
 
 _SYSTEM_PROMPT = """You are a precise document field extraction engine for an enterprise document management system. Your job is to extract structured data from business documents with high accuracy.
 
@@ -92,7 +93,7 @@ _STANDARD_FIELDS: dict[str, str] = {
     "title": "A clean document title for a document management system. Combine supplier, document type, and reference when possible. Max 120 chars. Do not use address lines or column headers.",
     "supplier": "Company or person ISSUING the document: seller, vendor, supplier, or service provider. Not the bill-to party.",
     "reference_number": "Primary identifier belonging to this document: invoice number, PO number, order reference, contract number, receipt number, or delivery number. Strip leading #.",
-    "account_code": "Supplier account code, GL code, cost centre code, customer code, or alphanumeric accounting reference assigned to this transaction.",
+    "account_code": "Only an explicit account/customer/GL/cost-centre code labelled on the document. Return null unless a nearby label such as Account Code, Account No, Customer Code, GL Code, Cost Centre, or Supplier Account clearly identifies it. Do not infer this from invoice numbers, PO numbers, vendor names, addresses, tax IDs, phone numbers, bank accounts, or arbitrary alphanumeric strings.",
     "document_date": "Issue/invoice/document date in YYYY-MM-DD. If only month and year are present, use the first day of that month.",
     "due_date": "Payment due date, expiry date, or required-by date in YYYY-MM-DD.",
     "amount": "Final total amount due after tax as a plain decimal number. No currency symbols, commas, or spaces.",
@@ -171,15 +172,19 @@ RETURN SHAPE:
 
 STRICT RULES:
 1. Set any field to null if not clearly present. Never guess or invent values.
-2. Also fill custom_fields using the exact admin field keys shown above.
-3. If a custom field overlaps a standard field, return the same value in both places.
-4. supplier = the ISSUING party, not the bill-to/customer/recipient.
-5. amount = the FINAL total after tax. Do not use subtotal unless no total is present.
-6. Numbers and currency amounts must be plain decimals only: no symbols, commas, or spaces.
-7. Dates must be YYYY-MM-DD. Never return ambiguous formats like 10/25/2024.
-8. For select fields, use one of the configured options when the document clearly supports it; otherwise null.
-9. For blurry, skewed, cropped, or otherwise poor-quality scans, set low_quality_warning to true.
-10. confidence must be "high", "medium", or "low".
+2. A weak, partial, blurry, or guessed value is not a value. Return null for that field instead.
+3. Do not use overall confidence to justify speculative fields. confidence describes the extraction as a whole; individual missing fields must remain null.
+4. account_code requires an explicit nearby account/customer/GL/cost-centre label. If the document lacks that label, account_code must be null.
+5. Do not reuse reference_number, po_reference, vendor_code, vat_number, kra_pin, bank_details, phone numbers, addresses, or line-item codes as account_code.
+6. Also fill custom_fields using the exact admin field keys shown above.
+7. If a custom field overlaps a standard field, return the same value in both places, but only when the value is clearly present.
+8. supplier = the ISSUING party, not the bill-to/customer/recipient.
+9. amount = the FINAL total after tax. Do not use subtotal unless no total is present.
+10. Numbers and currency amounts must be plain decimals only: no symbols, commas, or spaces.
+11. Dates must be YYYY-MM-DD. Never return ambiguous formats like 10/25/2024.
+12. For select fields, use one of the configured options when the document clearly supports it; otherwise null.
+13. For blurry, skewed, cropped, or otherwise poor-quality scans, set low_quality_warning to true.
+14. confidence must be "high", "medium", or "low".
 
 Return ONLY the JSON object. Nothing else."""
 
@@ -195,16 +200,7 @@ def _format_custom_field_instruction(field: dict) -> str:
     return instruction
 
 
-def _idp_provider(settings) -> str:
-    provider = getattr(settings, "IDP_PROVIDER", None)
-    if not provider:
-        provider = getattr(settings, "OCR_IDP_PROVIDER", "anthropic")
-    return str(provider or "anthropic").strip().lower()
-
-
-def _model_for_provider(settings, provider: str, mode: str | None = None) -> str:
-    if provider == "anthropic":
-        return getattr(settings, "OCR_IDP_MODEL", "claude-haiku-4-5")
+def _claude_model(settings) -> str:
     return getattr(settings, "OCR_IDP_MODEL", "claude-haiku-4-5")
 
 
@@ -220,11 +216,6 @@ def _engine_mode(engine_setting: str, file_path: str, mime: str) -> str:
         from apps.documents.ocr.tasks_ocr import is_sparse_pdf
         return "vision" if is_sparse_pdf(file_path) else "text"
     return "text"
-
-
-def _engine_name(provider: str, mode: str) -> str:
-    prefix = "claude" if provider == "anthropic" else provider
-    return f"{prefix}_{mode}"
 
 
 # ── Main entry point ───────────────────────────────────────────────────────────
@@ -253,40 +244,30 @@ def run_idp(doc) -> tuple[str, dict]:
     from django.conf import settings as django_settings
 
     engine_setting = getattr(django_settings, "OCR_IDP_ENGINE", "auto").lower()
-    provider = _idp_provider(django_settings)
+    provider = "anthropic"
     start = time.monotonic()
 
-    # ── Route to correct engine ────────────────────────────────────────────────
-    try:
-        mime = doc.file_mime_type or ""
-        file_path = doc.file.path
+    mime = doc.file_mime_type or ""
+    file_path = doc.file.path
+    mode = _engine_mode(engine_setting, file_path, mime)
+    engine = f"claude_{mode}"
+    extraction_prompt = _build_extraction_prompt(doc)
 
-        mode = _engine_mode(engine_setting, file_path, mime)
-        engine = _engine_name(provider, mode)
-        extraction_prompt = _build_extraction_prompt(doc)
-        if mode == "vision":
-            fields, raw_text = _extract_via_vision(
-                file_path, mime, django_settings, provider, extraction_prompt
-            )
-        else:
-            fields, raw_text = _extract_via_text(
-                file_path, mime, django_settings, provider, extraction_prompt
-            )
-
-    except Exception as exc:
-        logger.error(
-            "idp.run_idp: %s extraction failed for %s: %s — delegating to PDF text fallback",
-            provider,
-            doc.id,
-            exc,
+    if mode == "vision":
+        fields, raw_text = _extract_via_vision(
+            file_path, mime, django_settings, extraction_prompt
         )
-        from apps.documents.ocr.tasks_ocr import _run_pdf_text_fallback
-        return _run_pdf_text_fallback(doc)
+    else:
+        fields, raw_text = _extract_via_text(
+            file_path, mime, django_settings, extraction_prompt
+        )
 
     elapsed = round(time.monotonic() - start, 2)
 
     # ── Build metadata updates ────────────────────────────────────────────────
-    model = _model_for_provider(django_settings, provider, mode)
+    model = _claude_model(django_settings)
+
+    fields = _clean_extracted_fields(fields)
 
     quality = {
         "engine":              engine,
@@ -377,7 +358,6 @@ def _extract_via_vision(
     file_path: str,
     mime: str,
     settings,
-    provider: str,
     extraction_prompt: str,
 ) -> tuple[dict, str]:
     """
@@ -386,7 +366,7 @@ def _extract_via_vision(
     """
     from apps.documents.ocr.tasks_ocr import render_doc_to_images
 
-    model = _model_for_provider(settings, provider, "vision")
+    model = _claude_model(settings)
     dpi = int(getattr(settings, "OCR_IDP_VISION_DPI", 150))
     max_pages = int(getattr(settings, "OCR_IDP_MAX_PAGES", 3))
 
@@ -394,11 +374,7 @@ def _extract_via_vision(
     if not pages_b64:
         raise RuntimeError("Could not render any pages from document")
 
-    if provider == "anthropic":
-        raw_json = _call_anthropic_vision(settings, model, pages_b64, extraction_prompt)
-    else:
-        raise RuntimeError(f"Unsupported IDP_PROVIDER: {provider}")
-
+    raw_json = _call_anthropic_vision(settings, model, pages_b64, extraction_prompt)
     fields = _normalise_claude_fields(_parse_claude_json(raw_json))
 
     # Extract raw text for full-text search storage
@@ -413,7 +389,6 @@ def _extract_via_text(
     file_path: str,
     mime: str,
     settings,
-    provider: str,
     extraction_prompt: str,
 ) -> tuple[dict, str]:
     """
@@ -422,7 +397,7 @@ def _extract_via_text(
     """
     from apps.documents.ocr.tasks_ocr import _extract_pdf_tables_as_text
 
-    model = _model_for_provider(settings, provider, "text")
+    model = _claude_model(settings)
 
     raw_text = _extract_raw_text(file_path, mime)
 
@@ -440,11 +415,7 @@ def _extract_via_text(
         f"{'─' * 60}"
     )
 
-    if provider == "anthropic":
-        raw_json = _call_anthropic_text(settings, model, document_context, extraction_prompt)
-    else:
-        raise RuntimeError(f"Unsupported IDP_PROVIDER: {provider}")
-
+    raw_json = _call_anthropic_text(settings, model, document_context, extraction_prompt)
     fields = _normalise_claude_fields(_parse_claude_json(raw_json))
 
     return fields, raw_text
@@ -571,3 +542,47 @@ def _normalise_claude_fields(parsed: dict) -> dict:
         }
 
     return parsed
+
+
+def _clean_extracted_fields(fields: dict) -> dict:
+    cleaned = dict(fields or {})
+    account_code = cleaned.get("account_code")
+    if account_code and not _is_plausible_account_code(str(account_code), cleaned):
+        logger.info(
+            "idp.run_idp: dropping implausible account_code=%r",
+            str(account_code)[:80],
+        )
+        cleaned.pop("account_code", None)
+    return cleaned
+
+
+def _is_plausible_account_code(value: str, fields: dict) -> bool:
+    value_norm = " ".join(str(value or "").split()).strip()
+    if not value_norm:
+        return False
+
+    comparisons = (
+        "supplier",
+        "title",
+        "reference_number",
+        "transaction_ref",
+        "po_reference",
+        "vendor_code",
+        "vat_number",
+        "kra_pin",
+        "bank_details",
+    )
+    folded = value_norm.casefold()
+    for key in comparisons:
+        other = fields.get(key)
+        if other and folded == " ".join(str(other).split()).casefold():
+            return False
+
+    if re.search(r"\d{10,}", value_norm):
+        return False
+    if re.search(r"\b(?:ltd|limited|inc|llc|plc|corp|company|partners|enterprises)\b", value_norm, re.I):
+        return False
+    if re.search(r"[A-Za-z]{2,}\s+[A-Za-z]{2,}", value_norm) and not re.search(r"[\d#/_-]", value_norm):
+        return False
+
+    return bool(re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9#/_\-. ]{1,59}", value_norm))
