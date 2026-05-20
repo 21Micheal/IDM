@@ -370,6 +370,12 @@ function scoreMatch(
   fieldType: string,
   ocrKey: string,
 ): number {
+  // Avoid overly-aggressive fuzzy matching for account-like fields.
+  // Only exact key matches or static aliases should populate GL/account codes.
+  const accountish = /account|acct|gl|ledger|billing|client|customer|project|cost|code/.test(fieldKey) ||
+    fieldLabel.toLowerCase().includes("account") ||
+    fieldLabel.toLowerCase().includes("code");
+
   // Pass 1: exact key match
   if (fieldKey === ocrKey) return 4;
 
@@ -402,7 +408,12 @@ function scoreMatch(
   const effectiveTokenCount = Math.max(fieldLabelTokens.size, fieldKeyTokens.size);
   const similarityThreshold = effectiveTokenCount <= 2 ? 0.25 : 0.30;
 
-  if (maxSim >= similarityThreshold) return 2;
+  // For account-like fields, do not accept loose label-similarity matches
+  // — require an alias or exact match instead to avoid picking supplier names.
+  if (maxSim >= similarityThreshold) {
+    if (accountish) return 0;
+    return 2;
+  }
 
   // Pass 4: semantic group — last resort
   const semanticCandidates = SEMANTIC_GROUPS[fieldType] ?? [];
@@ -415,7 +426,11 @@ function scoreMatch(
         "reference", "number", "code", "account", "id",
       ].includes(t)
     );
-    if (hasRelevantLabel) return 1;
+    if (hasRelevantLabel) {
+      // Do not allow semantic-group fallback to populate account-like fields.
+      if (accountish) return 0;
+      return 1;
+    }
   }
 
   return 0;
