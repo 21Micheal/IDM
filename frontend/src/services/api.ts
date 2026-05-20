@@ -449,9 +449,12 @@ export const workflowAPI = {
 };
 
 export const notificationsAPI = {
-  list: () => api.get("/notifications/"),
+  list: (params?: { is_read?: boolean }) => api.get("/notifications/", { params }),
+  unreadCount: () => api.get("/notifications/unread_count/"),
   markRead: (id: string) =>
     api.patch(`/notifications/${id}/`, { is_read: true }),
+  markUnread: (id: string) =>
+    api.patch(`/notifications/${id}/`, { is_read: false }),
   markAllRead: () => api.post("/notifications/mark_all_read/"),
 };
 

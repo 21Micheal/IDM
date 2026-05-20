@@ -8,6 +8,8 @@ from __future__ import annotations
 
 import logging
 
+from django.db import transaction
+
 logger = logging.getLogger(__name__)
 
 
@@ -18,14 +20,19 @@ def document_queryset_for_index():
         "document_type",
         "uploaded_by",
         "department",
-    ).prefetch_related("tags")
+    ).prefetch_related("tags", "workflow_instance__tasks")
+
+
+def _delay_after_commit(task, *args, **kwargs) -> None:
+    """Queue Celery work after the surrounding transaction commits."""
+    transaction.on_commit(lambda: task.delay(*args, **kwargs))
 
 
 def queue_index_document(document_id: str) -> None:
     try:
         from apps.search.tasks import index_document
 
-        index_document.delay(str(document_id))
+        _delay_after_commit(index_document, str(document_id))
     except Exception as exc:
         logger.warning(
             "queue_index_document: could not queue indexing for %s: %s",
@@ -56,7 +63,7 @@ def queue_content_extraction(document_id: str, *, force: bool = False) -> None:
         Document.objects.filter(id=document_id).update(ocr_status=OCRStatus.PENDING)
         from apps.documents.tasks import ocr_document
 
-        ocr_document.delay(document_id)
+        _delay_after_commit(ocr_document, document_id)
         return
 
     if force:
@@ -64,7 +71,7 @@ def queue_content_extraction(document_id: str, *, force: bool = False) -> None:
 
     from apps.documents.tasks import extract_text
 
-    extract_text.delay(document_id, force=force)
+    _delay_after_commit(extract_text, document_id, force=force)
 
 
 def schedule_document_search_pipeline(

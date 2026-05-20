@@ -19,9 +19,14 @@ class Notification(models.Model):
     recipient = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.CASCADE, related_name="notifications")
     type = models.CharField(max_length=20, choices=NOTIFICATION_TYPES, default="task_assigned")
     message = models.TextField()
-    link = models.CharField(max_length=255, blank=True)
+    link = models.CharField(max_length=500, blank=True)
     is_read = models.BooleanField(default=False)
     created_at = models.DateTimeField(auto_now_add=True)
 
     class Meta:
-        ordering = ["-created_at"]
+        ordering = ["-created_at", "-id"]
+        indexes = [
+            models.Index(fields=["recipient", "is_read", "-created_at"]),
+            models.Index(fields=["recipient", "-created_at"]),
+            models.Index(fields=["type", "-created_at"]),
+        ]
