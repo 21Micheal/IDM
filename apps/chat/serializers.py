@@ -1,6 +1,7 @@
 from rest_framework import serializers
 from django.contrib.auth import get_user_model
 from django.db import transaction
+from django.db.models import Count
 from .models import ChatRoom, ChatMessage, ChatRoomParticipant, UnreadMessage, ChatNotification
 
 User = get_user_model()
@@ -87,18 +88,36 @@ class ChatMessageSerializer(serializers.ModelSerializer):
 
 class ChatMessageCreateSerializer(serializers.ModelSerializer):
     reply_to = serializers.UUIDField(required=False, allow_null=True)
+    client_id = serializers.CharField(required=False, allow_blank=True, write_only=True)
     
     class Meta:
         model = ChatMessage
-        fields = ['content', 'message_type', 'file_attachment', 'reply_to']
+        fields = ['content', 'message_type', 'file_attachment', 'reply_to', 'client_id']
+
+    def validate_content(self, value):
+        value = (value or '').strip()
+        if not value:
+            raise serializers.ValidationError("Message content cannot be empty")
+        if len(value) > 4000:
+            raise serializers.ValidationError("Message content cannot exceed 4000 characters")
+        return value
+
+    def validate_message_type(self, value):
+        if value != 'text':
+            raise serializers.ValidationError("Only text messages are currently supported")
+        return value
     
     def validate_reply_to(self, value):
         if value:
             try:
                 from .models import ChatMessage
-                return ChatMessage.objects.get(id=value)
+                message = ChatMessage.objects.get(id=value)
             except ChatMessage.DoesNotExist:
                 raise serializers.ValidationError("Reply message not found")
+            room_id = self.context.get('room_id')
+            if room_id and str(message.room_id) != str(room_id):
+                raise serializers.ValidationError("Reply message must be in the same room")
+            return message
         return None
 
 
@@ -135,11 +154,28 @@ class ChatRoomCreateSerializer(serializers.ModelSerializer):
         request = self.context.get('request')
         creator = request.user if request else None
         participant_ids = list(dict.fromkeys(participant_ids))
+        room_type = validated_data.get('room_type') or 'direct'
 
         if creator:
             participant_ids = [user_id for user_id in participant_ids if user_id != creator.id]
 
         with transaction.atomic():
+            if creator and room_type == 'direct' and len(participant_ids) == 1:
+                other_user_id = participant_ids[0]
+                existing = ChatRoom.objects.select_for_update().filter(
+                    room_type='direct',
+                    is_active=True,
+                    chatroomparticipant__user=creator,
+                    chatroomparticipant__is_active=True,
+                ).filter(
+                    chatroomparticipant__user_id=other_user_id,
+                    chatroomparticipant__is_active=True,
+                ).annotate(participant_count=Count('participants', distinct=True)).filter(
+                    participant_count=2,
+                ).first()
+                if existing:
+                    return existing
+
             room = ChatRoom.objects.create(
                 created_by=creator,
                 **validated_data

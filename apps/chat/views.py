@@ -1,14 +1,22 @@
-from rest_framework import serializers, viewsets, status, permissions
+from rest_framework import viewsets, status, permissions
 from rest_framework.decorators import action
 from rest_framework.response import Response
 from django.contrib.auth import get_user_model
-from django.db.models import Q, Count
+from django.db.models import Count
+from django.db import transaction
 from django.utils import timezone
 from .models import ChatRoom, ChatMessage, ChatRoomParticipant, UnreadMessage, ChatNotification
 from .serializers import (
     ChatRoomSerializer, ChatMessageSerializer, ChatRoomCreateSerializer,
     ChatMessageCreateSerializer, UnreadMessageSerializer, ChatNotificationSerializer,
     UserSerializer
+)
+from .services import (
+    broadcast_chat_notifications,
+    broadcast_message,
+    create_delivery_records,
+    create_message_for_room,
+    get_room_for_user,
 )
 
 User = get_user_model()
@@ -17,24 +25,25 @@ User = get_user_model()
 class ChatRoomViewSet(viewsets.ModelViewSet):
     serializer_class = ChatRoomSerializer
     permission_classes = [permissions.IsAuthenticated]
+    http_method_names = ['get', 'post', 'head', 'options']
     
     def get_queryset(self):
-        return ChatRoom.objects.filter(
+        qs = ChatRoom.objects.filter(
             chatroomparticipant__user=self.request.user,
             chatroomparticipant__is_active=True,
             is_active=True
-        ).annotate(message_count=Count('messages')).filter(
-            message_count__gt=0
-        ).select_related('created_by').prefetch_related('participants', 'messages')
+        ).distinct().select_related('created_by').prefetch_related('participants', 'messages')
+
+        if self.action == 'list':
+            qs = qs.annotate(message_count=Count('messages')).filter(message_count__gt=0)
+
+        return qs
     
     def get_serializer_class(self):
         if self.action == 'create':
             return ChatRoomCreateSerializer
         return ChatRoomSerializer
     
-    def perform_create(self, serializer):
-        serializer.save()
-
     def create(self, request, *args, **kwargs):
         serializer = self.get_serializer(data=request.data)
         serializer.is_valid(raise_exception=True)
@@ -60,35 +69,32 @@ class ChatRoomViewSet(viewsets.ModelViewSet):
                 status=status.HTTP_404_NOT_FOUND
             )
         
-        # Look for existing direct message room
-        room = ChatRoom.objects.filter(
-            room_type='direct',
-            chatroomparticipant__user=request.user,
-            chatroomparticipant__is_active=True,
-            is_active=True,
-        ).filter(
-            chatroomparticipant__user=other_user,
-            chatroomparticipant__is_active=True,
-        ).annotate(participant_count=Count('participants', distinct=True)).filter(
-            participant_count=2
-        ).first()
-
-        if room and not room.messages.exists():
-            # Older clients could create a room before sending a message.
-            # Treat empty direct rooms as stale and retire them so the user
-            # does not get stuck with ghost conversations.
-            room.is_active = False
-            room.save(update_fields=['is_active'])
-            ChatRoomParticipant.objects.filter(room=room).update(is_active=False)
-            room = None
-        
-        if not room:
-            # Create new direct message room
-            room = ChatRoom.objects.create(
+        with transaction.atomic():
+            # Look for existing direct message room.
+            room = ChatRoom.objects.select_for_update().filter(
                 room_type='direct',
-                created_by=request.user
-            )
-            room.participants.set([request.user, other_user])
+                chatroomparticipant__user=request.user,
+                chatroomparticipant__is_active=True,
+                is_active=True,
+            ).filter(
+                chatroomparticipant__user=other_user,
+                chatroomparticipant__is_active=True,
+            ).annotate(participant_count=Count('participants', distinct=True)).filter(
+                participant_count=2
+            ).first()
+
+            if room and not room.messages.exists():
+                room.is_active = False
+                room.save(update_fields=['is_active'])
+                ChatRoomParticipant.objects.filter(room=room).update(is_active=False)
+                room = None
+
+            if not room:
+                room = ChatRoom.objects.create(
+                    room_type='direct',
+                    created_by=request.user
+                )
+                room.participants.set([request.user, other_user])
         
         serializer = self.get_serializer(room)
         return Response(serializer.data)
@@ -175,38 +181,34 @@ class ChatRoomViewSet(viewsets.ModelViewSet):
 class ChatMessageViewSet(viewsets.ModelViewSet):
     serializer_class = ChatMessageSerializer
     permission_classes = [permissions.IsAuthenticated]
+    http_method_names = ['get', 'post', 'head', 'options']
     
     def get_queryset(self):
         room_id = self.request.query_params.get('room_id')
         if room_id:
             return ChatMessage.objects.filter(
                 room_id=room_id,
-                room__participants=self.request.user
-            ).select_related('sender', 'reply_to', 'room')
+                room__chatroomparticipant__user=self.request.user,
+                room__chatroomparticipant__is_active=True,
+                room__is_active=True,
+            ).distinct().select_related('sender', 'reply_to', 'room')
         return ChatMessage.objects.filter(
-            room__participants=self.request.user
-        ).select_related('sender', 'reply_to', 'room')
+            room__chatroomparticipant__user=self.request.user,
+            room__chatroomparticipant__is_active=True,
+            room__is_active=True,
+        ).distinct().select_related('sender', 'reply_to', 'room')
+
+    def get_serializer_context(self):
+        context = super().get_serializer_context()
+        room_id = self.request.data.get('room_id') or self.request.query_params.get('room_id')
+        if room_id:
+            context['room_id'] = room_id
+        return context
     
     def get_serializer_class(self):
         if self.action in ['create', 'update', 'partial_update']:
             return ChatMessageCreateSerializer
         return ChatMessageSerializer
-    
-    def perform_create(self, serializer):
-        room_id = self.request.data.get('room_id')
-        if not room_id:
-            raise serializers.ValidationError("room_id is required")
-        
-        try:
-            room = ChatRoom.objects.get(
-                id=room_id,
-                participants=self.request.user,
-                is_active=True
-            )
-        except ChatRoom.DoesNotExist:
-            raise serializers.ValidationError("Invalid room or access denied")
-        
-        serializer.save(sender=self.request.user, room=room)
     
     def create(self, request, *args, **kwargs):
         """Override create to handle room_id and return proper response"""
@@ -215,48 +217,24 @@ class ChatMessageViewSet(viewsets.ModelViewSet):
         
         room_id = request.data.get('room_id')
         try:
-            room = ChatRoom.objects.get(
-                id=room_id,
-                participants=request.user,
-                is_active=True
-            )
-        except ChatRoom.DoesNotExist:
+            room = get_room_for_user(request.user, room_id)
+        except (ChatRoom.DoesNotExist, ValueError, TypeError):
             return Response(
                 {'error': 'Invalid room or access denied'},
                 status=status.HTTP_400_BAD_REQUEST
             )
         
-        message = serializer.save(sender=request.user, room=room)
-        
-        # Create unread messages for other participants
-        participants = ChatRoomParticipant.objects.filter(
+        client_id = serializer.validated_data.pop('client_id', None)
+        message = create_message_for_room(
             room=room,
-            is_active=True
-        ).exclude(user=request.user)
-        
-        unread_messages = []
-        for participant in participants:
-            unread_messages.append(
-                UnreadMessage(
-                    user=participant.user,
-                    message=message,
-                    room=room
-                )
-            )
-        
-        UnreadMessage.objects.bulk_create(unread_messages)
-        
-        # Create chat notifications
-        notifications = []
-        for participant in participants:
-            notifications.append(
-                ChatNotification(
-                    recipient=participant.user,
-                    message=message
-                )
-            )
-        
-        ChatNotification.objects.bulk_create(notifications)
+            sender=request.user,
+            content=serializer.validated_data['content'],
+            message_type=serializer.validated_data.get('message_type', 'text'),
+            reply_to=serializer.validated_data.get('reply_to'),
+        )
+        participants = create_delivery_records(message)
+        broadcast_message(message, client_id=client_id)
+        broadcast_chat_notifications(message, participants)
         
         # Return the created message
         response_serializer = ChatMessageSerializer(message, context={'request': request})
@@ -273,15 +251,20 @@ class ChatMessageViewSet(viewsets.ModelViewSet):
                 status=status.HTTP_400_BAD_REQUEST
             )
         
-        # Mark messages as read for this user
+        accessible_ids = ChatMessage.objects.filter(
+            room__chatroomparticipant__user=request.user,
+            room__chatroomparticipant__is_active=True,
+            id__in=message_ids,
+        ).values_list('id', flat=True)
+
         UnreadMessage.objects.filter(
             user=request.user,
-            message_id__in=message_ids
+            message_id__in=accessible_ids
         ).delete()
         
         ChatNotification.objects.filter(
             recipient=request.user,
-            message_id__in=message_ids
+            message_id__in=accessible_ids
         ).update(is_read=True)
         
         return Response({'status': 'messages marked as read'})

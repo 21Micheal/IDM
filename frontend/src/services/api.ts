@@ -564,7 +564,7 @@ export const chatAPI = {
   // Messages
   messages: {
     list: (roomId?: string) => api.get("/chat/messages/", { params: { room_id: roomId } }),
-    create: (data: { content: string; room_id: string; message_type?: string; reply_to?: string }) =>
+    create: (data: { content: string; room_id: string; message_type?: string; reply_to?: string; client_id?: string }) =>
       api.post("/chat/messages/", data),
     markRead: (messageIds: string[]) =>
       api.post("/chat/messages/mark_read/", { message_ids: messageIds }),

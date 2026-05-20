@@ -169,11 +169,16 @@ export function ChatPanel({ onClose, initialRoomId, onActiveRoomChange }: ChatPa
       if (!data.message || !selectedRoom) return;
       if (messageRoomId(data.message) !== selectedRoom.id) return;
 
-      setMessages((prev) =>
-        prev.find((m) => m.id === data.message!.id)
-          ? prev
-          : [...prev, data.message!],
-      );
+      setMessages((prev) => {
+        if (prev.find((m) => m.id === data.message!.id)) return prev;
+        if (data.message!.client_id) {
+          const optimisticIndex = prev.findIndex((m) => m.id === data.message!.client_id);
+          if (optimisticIndex !== -1) {
+            return prev.map((m, index) => (index === optimisticIndex ? data.message! : m));
+          }
+        }
+        return [...prev, data.message!];
+      });
       setRooms((prev) =>
         prev.map((room) =>
           room.id === selectedRoom.id
@@ -485,12 +490,18 @@ export function ChatPanel({ onClose, initialRoomId, onActiveRoomChange }: ChatPa
 
       // Prefer WS for lowest latency; REST as fallback
       if (chatWebSocket.isConnectedToRoom()) {
-        chatWebSocket.sendMessage({ content, message_type: "text" });
+        const sent = chatWebSocket.sendMessage({
+          content,
+          message_type: "text",
+          client_id: optimistic.id,
+        });
+        if (!sent) throw new Error("Chat socket not connected");
       } else {
         const res = await chatAPI.messages.create({
           content,
           room_id: room.id,
           message_type: "text",
+          client_id: optimistic.id,
         });
         const saved = res.data as ChatMessage;
         setMessages((prev) => prev.map((m) => (m.id === optimistic.id ? saved : m)));
