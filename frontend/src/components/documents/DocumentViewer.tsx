@@ -467,6 +467,17 @@ function ImageViewer({
 
 // ── OfficeEditPanel ────────────────────────────────────────────────────────────
 
+type OfficeEditPanelProps = {
+  doc: Document;
+  preview: DocumentPreviewResponse | undefined;
+  refetchPreview: () => Promise<import("@tanstack/react-query").QueryObserverResult<DocumentPreviewResponse, Error>>;
+  selectedVersionId?: string | null;
+  canEditInEditor: boolean;
+  onVersionUploaded: () => void;
+  showHeaderOpenButton?: boolean;
+  onOfficeEditActionChange?: (action: { label: string; enabled: boolean; onClick: () => void }) => void;
+};
+
 function OfficeEditPanel({
   doc,
   preview,
@@ -474,14 +485,9 @@ function OfficeEditPanel({
   selectedVersionId,
   canEditInEditor,
   onVersionUploaded,
-}: {
-  doc: Document;
-  preview: DocumentPreviewResponse | undefined;
-  refetchPreview: () => Promise<import("@tanstack/react-query").QueryObserverResult<DocumentPreviewResponse, Error>>;
-  selectedVersionId?: string | null;
-  canEditInEditor: boolean;
-  onVersionUploaded: () => void;
-}) {
+  showHeaderOpenButton = true,
+  onOfficeEditActionChange,
+}: OfficeEditPanelProps) {
   const qc   = useQueryClient();
   const user = useAuthStore((s) => s.user);
 
@@ -707,27 +713,27 @@ function OfficeEditPanel({
     }
   };
 
-  const openInEditor = () => {
-    if (!lockData) return;
+  const openInEditor = useCallback((data = lockData) => {
+    if (!data) return;
     const { msScheme } = info as { msScheme?: string };
 
     if (isWindows) {
       if (!msScheme) { toast.error("No URI scheme available for this file type."); return; }
-      window.location.href = `${msScheme}:ofe|u|${lockData.webdav_url}`;
+      window.location.href = `${msScheme}:ofe|u|${data.webdav_url}`;
     } else if (isLinux && handlerInstalled) {
-      const webdavUrl = lockData.webdav_url.replace(/^https?:\/\//, (m) =>
+      const webdavUrl = data.webdav_url.replace(/^https?:\/\//, (m) =>
         m === "https://" ? "vnd.sun.star.webdavs://" : "vnd.sun.star.webdav://");
       const encoded = btoa(webdavUrl).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
       window.location.href = `docvault-open://${encoded}`;
     }
-  };
+  }, [handlerInstalled, info, isLinux, isWindows, lockData]);
 
   /**
    * One-click handler used by the minimal "Open in <App>" button.
    * If we don't yet have a lock we acquire it first, then open the editor
    * once the mutation resolves.
    */
-  const handleOpenClick = () => {
+  const handleOpenClick = useCallback(() => {
     if (lockedByOther) return;
     if (isLinux && !handlerInstalled) {
       toast.info("Run the one-time Linux install script before starting document editing.");
@@ -738,17 +744,24 @@ function OfficeEditPanel({
       return;
     }
     acquireLock.mutate(undefined, {
-      onSuccess: () => {
-        // openInEditor is called after lockData is set; defer to next tick
-        setTimeout(() => openInEditor(), 0);
+      onSuccess: (data) => {
+        openInEditor(data);
       },
     });
-  };
+  }, [acquireLock.mutate, handlerInstalled, isLinux, lockData, lockedByOther, openInEditor]);
 
   const canShowOpenButton = canEditInEditor && !lockedByOther;
   const openLabel = lockData || lockedByMe
     ? `Open in ${info.app}`
     : `Edit in ${info.app}`;
+
+  useEffect(() => {
+    onOfficeEditActionChange?.({
+      label: openLabel,
+      enabled: canShowOpenButton,
+      onClick: handleOpenClick,
+    });
+  }, [onOfficeEditActionChange, openLabel, canShowOpenButton, handleOpenClick]);
 
   // ─────────────────────────────────────────────────────────────────────────
   // Render
@@ -788,7 +801,7 @@ function OfficeEditPanel({
         </div>
 
         <div className="flex items-center gap-2 flex-wrap">
-          {canShowOpenButton && (
+          {canShowOpenButton && showHeaderOpenButton && (
             <button
               onClick={handleOpenClick}
               disabled={acquireLock.isPending}
@@ -950,15 +963,25 @@ interface Props {
    * button supplied by the parent page).
    */
   submitSlot?: ReactNode;
+  /**
+   * Hide the upload action bar rendered beneath the preview.
+   */
+  hideUploadActionBar?: boolean;
+  /**
+   * Inform the page when the current preview links become available.
+   */
+  onPreviewLinksChange?: (links: { openInNewTabUrl: string; downloadHref: string }) => void;
 }
 
-export default function DocumentViewer({ document: doc, submitSlot }: Props) {
+export default function DocumentViewer({ document: doc, submitSlot, hideUploadActionBar, onPreviewLinksChange }: Props) {
   const qc   = useQueryClient();
   const user = useAuthStore((s) => s.user);
   const [selectedVersionId, setSelectedVersionId] = useState<string | null>(null);
+  const [officeEditAction, setOfficeEditAction] = useState<{ label: string; enabled: boolean; onClick: () => void } | null>(null);
 
   useEffect(() => {
     setSelectedVersionId(null);
+    setOfficeEditAction(null);
   }, [doc.id]);
 
   useEffect(() => {
@@ -1036,9 +1059,9 @@ export default function DocumentViewer({ document: doc, submitSlot }: Props) {
     qc.invalidateQueries({ queryKey: ["document-preview", doc.id] });
   }, [qc, doc.id]);
 
-  const canUploadVersion = Boolean(doc.permissions?.includes("upload"));
-  const canEdit          = Boolean(doc.permissions?.includes("edit"));
-  const canDownload      = Boolean(doc.permissions?.includes("download"));
+  const canUploadVersion = Boolean(doc.permissions?.includes("upload")) || Boolean(user?.has_admin_access);
+  const canEdit          = Boolean(doc.permissions?.includes("edit")) || Boolean(user?.has_admin_access);
+  const canDownload      = Boolean(doc.permissions?.includes("download")) || Boolean(user?.has_admin_access);
   const isOfficeByMime   = OFFICE_MIMES.has(doc.file_mime_type);
   const isOfficeByExt    = OFFICE_EXTENSIONS.has(getFileExtension(doc.file_name));
   const isOffice         = isOfficeByMime || isOfficeByExt;
@@ -1105,6 +1128,17 @@ export default function DocumentViewer({ document: doc, submitSlot }: Props) {
     return () => window.removeEventListener("beforeprint", onPrint);
   }, [doc.id]);
 
+  const openInNewTabUrl = canDownload && preview ? (normalizeUrl(preview.url ?? "") ?? "") : "";
+  const downloadHref = canDownload && preview ? (normalizeUrl(preview.raw_url ?? "") ?? "") : "";
+
+  const selectedVersion = selectedVersionId
+    ? doc.versions?.find((version) => version.id === selectedVersionId) ?? null
+    : null;
+
+  useEffect(() => {
+    onPreviewLinksChange?.({ openInNewTabUrl, downloadHref });
+  }, [onPreviewLinksChange, openInNewTabUrl, downloadHref]);
+
   if (isLoading)
     return (
       <div className="flex items-center justify-center h-64">
@@ -1120,12 +1154,6 @@ export default function DocumentViewer({ document: doc, submitSlot }: Props) {
       </div>
     );
 
-  const openInNewTabUrl = canDownload ? (normalizeUrl(preview.url ?? "") ?? "") : "";
-  const downloadHref = canDownload ? (normalizeUrl(preview.raw_url ?? "") ?? "") : "";
-  const selectedVersion = selectedVersionId
-    ? doc.versions?.find((version) => version.id === selectedVersionId) ?? null
-    : null;
-
   return (
     <div className="space-y-3">
       {/* Lock banner */}
@@ -1135,7 +1163,7 @@ export default function DocumentViewer({ document: doc, submitSlot }: Props) {
         onRelease={() => releaseLock.mutate()}
       />
 
-      {/* Header — title + version indicator + open-in-new-tab */}
+      {/* Header — title + version indicator + edit action */}
       <div className="flex items-center justify-between flex-wrap gap-2">
         <div className="flex items-center gap-2 flex-wrap">
           <h3 className="font-medium text-foreground text-sm">Document preview</h3>
@@ -1149,27 +1177,19 @@ export default function DocumentViewer({ document: doc, submitSlot }: Props) {
             </span>
           )}
         </div>
-        <div className="flex items-center gap-2 flex-wrap">
-          {openInNewTabUrl && (
-          <a
-            href={openInNewTabUrl}
-            target="_blank"
-            rel="noopener noreferrer"
-            className="btn-secondary text-xs px-3 py-1.5"
-          >
-            <ExternalLink className="w-3.5 h-3.5" /> Open in new tab
-          </a>
-          )}
-          {downloadHref && (
-          <a
-            href={downloadHref}
-            download
-            className="btn-secondary text-xs px-3 py-1.5"
-          >
-            <Download className="w-3.5 h-3.5" /> Download
-          </a>
-          )}
-        </div>
+        {officeEditAction && (
+          <div className="flex items-center gap-2 flex-wrap">
+            <button
+              type="button"
+              onClick={officeEditAction.onClick}
+              disabled={!officeEditAction.enabled}
+              className="btn-secondary text-xs px-3 py-1.5 disabled:opacity-50 disabled:cursor-not-allowed"
+              title={officeEditAction.label}
+            >
+              <ExternalLink className="w-3.5 h-3.5" /> {officeEditAction.label}
+            </button>
+          </div>
+        )}
       </div>
 
       {/* Version pills */}
@@ -1239,6 +1259,8 @@ export default function DocumentViewer({ document: doc, submitSlot }: Props) {
           selectedVersionId={selectedVersionId}
           canEditInEditor={canEdit}
           onVersionUploaded={onVersionUploaded}
+          showHeaderOpenButton={false}
+          onOfficeEditActionChange={setOfficeEditAction}
         />
       )}
 
@@ -1272,9 +1294,9 @@ export default function DocumentViewer({ document: doc, submitSlot }: Props) {
         Contains "Upload new version" (button + modal) and any caller-supplied
         action (e.g. "Submit for approval"). Hidden if there's nothing to show.
       */}
-      {((canUploadVersion && !isLockedByOther) || submitSlot) && (
+      {((canUploadVersion && !isLockedByOther && !hideUploadActionBar) || submitSlot) && (
         <div className="flex flex-wrap items-center justify-end gap-2 pt-2 border-t border-border">
-          {canUploadVersion && !isLockedByOther && (
+          {canUploadVersion && !isLockedByOther && !hideUploadActionBar && (
             <Suspense fallback={<div className="inline-flex h-11 items-center justify-center rounded-lg border border-border bg-card px-4 text-sm text-muted-foreground">Loading upload tools…</div>}>
               <UploadVersionDrawer
                 documentId={doc.id}

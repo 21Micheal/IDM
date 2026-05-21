@@ -1,4 +1,4 @@
-import { useState, useCallback, useEffect, useMemo, useRef } from "react";
+import { useState, useCallback, useEffect, useMemo, useRef, type MouseEvent, type ReactNode } from "react";
 import { useNavigate } from "react-router-dom";
 import { useDropzone } from "react-dropzone";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
@@ -400,17 +400,19 @@ function DynamicField({
   const errMsg    = getFieldErrorMessage(errors, fieldName);
   const suggested = suggestionScore !== undefined;
 
-  const wrapper = (children: React.ReactNode) => (
-    <div>
-      <label className="label flex items-center gap-1.5">
-        {field.label}
+  const wrapper = (children: ReactNode) => (
+    <div className="grid gap-2 border-b border-border/60 py-3 sm:grid-cols-[minmax(160px,0.55fr)_minmax(0,1fr)] sm:items-start">
+      <label className="flex min-h-9 items-center gap-1.5 text-sm font-normal text-muted-foreground">
+        <span>{field.label}</span>
         {field.is_required && enforceRequired && (
-          <span className="text-destructive ml-1">*</span>
+          <span className="text-destructive">*</span>
         )}
         {suggested && <SuggestionPill score={suggestionScore} />}
       </label>
-      {children}
-      {errMsg && <p className="text-destructive text-xs mt-1">{errMsg}</p>}
+      <div>
+        {children}
+        {errMsg && <p className="text-destructive text-xs mt-1">{errMsg}</p>}
+      </div>
     </div>
   );
 
@@ -433,7 +435,9 @@ function DynamicField({
   }
   if (field.field_type === "boolean") {
     return (
-      <div className="flex items-center gap-2">
+      <div className="grid gap-2 border-b border-border/60 py-3 sm:grid-cols-[minmax(160px,0.55fr)_minmax(0,1fr)] sm:items-center">
+        <span className="text-sm font-normal text-muted-foreground">{field.label}</span>
+        <div className="flex items-center gap-2">
         <input
           {...register(fieldName)}
           type="checkbox"
@@ -441,8 +445,9 @@ function DynamicField({
           className="w-4 h-4 rounded border-border text-primary focus:ring-primary"
         />
         <label htmlFor={fieldKey} className="text-sm text-foreground">
-          {field.label}
+          Yes
         </label>
+        </div>
       </div>
     );
   }
@@ -629,13 +634,79 @@ function StepBadge({ n, active, done }: { n: number; active?: boolean; done?: bo
   return (
     <div
       className={clsx(
-        "w-6 h-6 rounded-full flex items-center justify-center text-xs font-bold flex-shrink-0 transition-colors",
-        done    ? "bg-teal text-white"
+        "w-5 h-5 rounded-sm flex items-center justify-center text-[11px] font-semibold flex-shrink-0 transition-colors",
+        done    ? "bg-accent text-accent-foreground"
         : active ? "bg-primary text-primary-foreground"
-                 : "bg-muted text-muted-foreground",
+                 : "bg-muted text-muted-foreground border border-border",
       )}
     >
       {done ? <CheckCircle className="w-3.5 h-3.5" /> : n}
+    </div>
+  );
+}
+
+function DetailsTab() {
+  return (
+    <div className="border-b border-border">
+      <div className="flex flex-wrap">
+        <button
+          type="button"
+          className="-mb-px h-11 border border-t-2 border-border border-t-primary bg-background px-5 text-sm text-primary transition-colors"
+        >
+          Details
+        </button>
+      </div>
+    </div>
+  );
+}
+
+function InforFieldRow({
+  label,
+  children,
+}: {
+  label: string;
+  children: ReactNode;
+}) {
+  return (
+    <div className="grid gap-2 border-b border-border/60 py-3 sm:grid-cols-[minmax(160px,0.55fr)_minmax(0,1fr)] sm:items-start">
+      <label className="flex min-h-9 items-center text-sm font-normal text-muted-foreground">
+        {label}
+      </label>
+      <div>{children}</div>
+    </div>
+  );
+}
+
+function SelectedFileDropHint({
+  file,
+  isDragActive,
+  onRemove,
+}: {
+  file: File;
+  isDragActive: boolean;
+  onRemove: (event: MouseEvent<HTMLButtonElement>) => void;
+}) {
+  return (
+    <div className="mt-6 flex flex-col items-center text-center">
+      <div className="relative mb-3 h-9 w-9 text-muted-foreground">
+        <Upload className="h-9 w-9 stroke-[1.35]" />
+      </div>
+      <p className="text-sm font-semibold text-foreground">
+        {isDragActive ? "Drop file here" : "Click here or drag and drop to add file"}
+      </p>
+      <p className="mt-2 max-w-md text-sm leading-snug text-foreground">
+        The file has been selected. Press the save button to save the changes or select another file.
+      </p>
+      <p className="mt-2 text-xs text-muted-foreground">
+        {file.name} · {(file.size / (1024 * 1024)).toFixed(2)} MB
+      </p>
+      <button
+        type="button"
+        onClick={onRemove}
+        className="mt-3 inline-flex items-center gap-1 text-xs font-medium text-destructive hover:text-destructive/80"
+      >
+        <X className="w-3.5 h-3.5" /> Remove
+      </button>
     </div>
   );
 }
@@ -654,6 +725,7 @@ export default function UploadPage({ scanOnly = false }: UploadPageProps) {
   const [selectedTypeId,   setSelectedTypeId]   = useState("");
   const [uploadProgress,   setUploadProgress]   = useState(0);
   const [isScanned,        setIsScanned]         = useState(scanOnly);
+  const [pdfPreviewUrl,    setPdfPreviewUrl]     = useState<string | null>(null);
 
   const [scanStage,        setScanStage]         = useState<ScanStage>("idle");
   const [uploadedDocId,    setUploadedDocId]     = useState<string | null>(null);
@@ -750,6 +822,14 @@ export default function UploadPage({ scanOnly = false }: UploadPageProps) {
     const currentTitle = String(getValues("title") ?? "").trim();
     if (!currentTitle) {
       setValue("title", documentNameFromFile(droppedFile));
+    }
+    // Create PDF preview URL if the file is a PDF
+    if (droppedFile.type === "application/pdf") {
+      const url = URL.createObjectURL(droppedFile);
+      setPdfPreviewUrl(url);
+      return () => URL.revokeObjectURL(url);
+    } else {
+      setPdfPreviewUrl(null);
     }
   }, [droppedFile, getValues, setValue]);
 
@@ -1081,21 +1161,23 @@ export default function UploadPage({ scanOnly = false }: UploadPageProps) {
   // ── Render ──────────────────────────────────────────────────────────────────
 
   return (
-    <div className="max-w-5xl mx-auto py-8">
-      <div className="mb-8">
-        <h1 className="text-3xl font-bold text-foreground tracking-tight">
-          {scanOnly ? "Scan Document" : "Upload Document"}
-        </h1>
-        <p className="text-muted-foreground mt-1">
-          {scanOnly
-            ? "Select a document type, attach your scanned file, and review OCR suggestions."
-            : "Select a document type, attach your file, then fill in the details."}
-        </p>
+    <div className="min-h-[calc(100vh-4rem)] bg-background px-4 py-5 sm:px-6 lg:px-8">
+      <div className="mb-5 border-b border-border pb-4 text-center">
+        <div className="mx-auto max-w-3xl">
+          <h1 className="text-2xl font-semibold text-foreground tracking-tight">
+            {scanOnly ? "Scan Document" : "Upload Document"}
+          </h1>
+          <p className="mt-1 text-sm text-muted-foreground">
+            {scanOnly
+              ? "Select a document type, attach your scanned file, and review OCR suggestions."
+              : "Select a document type, attach your file, then fill in the details."}
+          </p>
+        </div>
       </div>
 
       {/* ── OCR wait / review / submitting ──────────────────────────────── */}
       {isOcrFlow && scanStage !== "idle" && scanStage !== "uploading" && (
-        <div className="bg-card rounded-2xl border border-border" style={{ boxShadow: "var(--shadow-card)" }}>
+        <div className="border border-border bg-background" style={{ boxShadow: "var(--shadow-card)" }}>
           {showOcrWait && (
             <OcrWaitScreen
               stage={scanStage as "ocr_pending" | "ocr_processing"}
@@ -1109,34 +1191,34 @@ export default function UploadPage({ scanOnly = false }: UploadPageProps) {
           )}
 
           {(showOcrReview || showOcrFailed) && (
-            <div className="p-8">
+            <div className="rounded-2xl border border-border bg-white dark:bg-slate-950 p-6 max-w-[650px] mx-auto" style={{ boxShadow: "var(--shadow-card)" }}>
               {/* Header */}
-              <div className="flex items-center gap-3 mb-6">
+              <div className="flex items-start gap-3 mb-5">
                 {showOcrFailed ? (
-                  <div className="w-10 h-10 rounded-xl bg-amber-100 flex items-center justify-center">
-                    <AlertCircle className="w-5 h-5 text-amber-600" />
+                  <div className="w-8 h-8 rounded-lg bg-amber-100 dark:bg-amber-950 flex items-center justify-center flex-shrink-0">
+                    <AlertCircle className="w-4 h-4 text-amber-600 dark:text-amber-400" />
                   </div>
                 ) : (
-                  <div className="w-10 h-10 rounded-xl bg-teal/15 flex items-center justify-center">
-                    <Sparkles className="w-5 h-5 text-teal" />
+                  <div className="w-8 h-8 rounded-lg bg-teal/15 flex items-center justify-center flex-shrink-0">
+                    <Sparkles className="w-4 h-4 text-teal" />
                   </div>
                 )}
-                <div>
-                  <h2 className="text-xl font-bold text-foreground">
+                <div className="flex-1 min-w-0">
+                  <h2 className="text-lg font-semibold text-foreground">
                     {showOcrFailed ? "OCR could not extract text" : "Review extracted details"}
                   </h2>
-                  <p className="text-sm text-muted-foreground">
+                  <p className="text-xs text-muted-foreground mt-0.5">
                     {showOcrFailed
                       ? "Please fill in the details manually and confirm."
                       : "Fields marked OCR were auto-filled — teal = confident, amber = verify carefully."}
                   </p>
                 </div>
-                <div className="ml-auto hidden sm:flex flex-col items-end gap-1">
+                <div className="hidden sm:flex flex-col items-end gap-1.5 flex-shrink-0">
                   {ocrQuality?.engine && <EngineBadge engine={ocrQuality.engine} />}
                   {ocrFields.reference_number && (
                     <div className="text-right">
-                      <p className="text-xs text-muted-foreground">Detected reference</p>
-                      <p className="text-sm font-mono font-semibold text-foreground">
+                      <p className="text-[10px] text-muted-foreground">Detected reference</p>
+                      <p className="text-xs font-mono font-semibold text-foreground">
                         {ocrFields.reference_number}
                       </p>
                     </div>
@@ -1148,20 +1230,20 @@ export default function UploadPage({ scanOnly = false }: UploadPageProps) {
 
               {/* Raw text preview */}
               {ocrFields.raw_lines && ocrFields.raw_lines.length > 0 && (
-                <details className="mb-6 group">
-                  <summary className="cursor-pointer list-none flex items-center gap-2 text-sm font-medium text-muted-foreground hover:text-foreground select-none">
-                    <ChevronRight className="w-4 h-4 transition-transform group-open:rotate-90" />
+                <details className="mb-5 group">
+                  <summary className="cursor-pointer list-none flex items-center gap-2 text-xs font-semibold text-muted-foreground hover:text-foreground select-none">
+                    <ChevronRight className="w-3 h-3 transition-transform group-open:rotate-90" />
                     Show extracted text ({ocrFields.raw_lines.length} lines)
                   </summary>
-                  <div className="mt-2 rounded-xl border border-border bg-muted/40 p-4 max-h-48 overflow-y-auto">
+                  <div className="mt-2 rounded-lg border border-border bg-muted/20 p-3 max-h-40 overflow-y-auto">
                     {ocrFields.raw_lines.map((line, i) => (
-                      <p key={i} className="text-xs font-mono text-foreground leading-relaxed">{line}</p>
+                      <p key={i} className="text-[11px] font-mono text-muted-foreground leading-relaxed">{line}</p>
                     ))}
                   </div>
                 </details>
               )}
 
-              <div className="space-y-6">
+              <div className="space-y-5">
                 {/* Line items detected from tables */}
                 {ocrLineItems.length > 0 && <LineItemsPanel items={ocrLineItems} />}
 
@@ -1171,11 +1253,11 @@ export default function UploadPage({ scanOnly = false }: UploadPageProps) {
                 {/* Admin metadata fields */}
                 {hasMetadata && (
                   <div>
-                    <h3 className="font-semibold text-foreground mb-4 flex items-center gap-2">
-                      <CheckCircle className="w-5 h-5 text-teal" />
+                    <h3 className="font-semibold text-foreground mb-3 flex items-center gap-2 text-sm">
+                      <CheckCircle className="w-4 h-4 text-teal" />
                       Document Details
                     </h3>
-                    <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
+                    <div className="space-y-2.5">
                       {[...selectedType!.metadata_fields]
                         .sort((a, b) => a.order - b.order)
                         .map((field) => (
@@ -1195,28 +1277,27 @@ export default function UploadPage({ scanOnly = false }: UploadPageProps) {
                 )}
 
                 {/* Actions */}
-                <div className="flex gap-4 pt-4 border-t border-border">
+                <div className="flex gap-3 pt-4 border-t border-border">
                   <button
                     type="button"
                     onClick={onConfirmOcr}
                     disabled={saveMutation.isPending}
-                    className="flex-1 flex items-center justify-center gap-2 text-base py-3 rounded-xl font-semibold bg-teal text-teal-foreground hover:bg-teal/90 transition-all disabled:opacity-50"
+                    className="inline-flex items-center justify-center gap-2 px-4 py-2 rounded-lg font-semibold bg-teal text-teal-foreground hover:bg-teal/90 transition-all disabled:opacity-50 text-sm"
                     style={{ boxShadow: "var(--shadow-elegant)" }}
                   >
                     {saveMutation.isPending ? (
-                      <Loader2 className="w-5 h-5 animate-spin" />
+                      <Loader2 className="w-4 h-4 animate-spin" />
                     ) : (
                       <>
-                        <CheckCircle className="w-5 h-5" />
+                        <CheckCircle className="w-4 h-4" />
                         Confirm &amp; Save
-                        <ArrowRight className="w-4 h-4" />
                       </>
                     )}
                   </button>
                   <button
                     type="button"
                     onClick={onSkipToDocument}
-                    className="px-6 py-3 rounded-xl font-semibold border border-border bg-card text-foreground hover:bg-muted transition-colors text-sm"
+                    className="px-4 py-2 rounded-lg font-semibold border border-border bg-card text-foreground hover:bg-muted transition-colors text-sm"
                   >
                     Skip for now
                   </button>
@@ -1236,12 +1317,12 @@ export default function UploadPage({ scanOnly = false }: UploadPageProps) {
 
       {/* ── Main upload layout ─────────────────────────────────────────── */}
       {(scanStage === "idle" || scanStage === "uploading") && (
-        <div className="grid grid-cols-1 lg:grid-cols-12 gap-8">
+        <div className="grid grid-cols-1 gap-8 xl:grid-cols-12 xl:justify-center xl:px-0 xl:max-w-[1360px] xl:mx-auto">
           {/* Left column */}
-          <div className="lg:col-span-5 space-y-6">
+          <div className="xl:col-start-2 xl:col-span-5 space-y-5">
             {/* Step 1 — Document Type */}
-            <div className="bg-card rounded-2xl border border-border p-6" style={{ boxShadow: "var(--shadow-card)" }}>
-              <h2 className="font-semibold text-foreground mb-4 flex items-center gap-2">
+            <div className="border border-border bg-background p-5" style={{ boxShadow: "var(--shadow-card)" }}>
+              <h2 className="mb-4 flex items-center gap-2 text-sm font-semibold text-foreground">
                 <StepBadge n={1} active={!selectedTypeId} done={Boolean(selectedTypeId)} />
                 Document Type
               </h2>
@@ -1259,7 +1340,7 @@ export default function UploadPage({ scanOnly = false }: UploadPageProps) {
                 <p className="mt-3 text-xs text-muted-foreground">{selectedType.description}</p>
               )}
               {selectedType && (
-                <div className="mt-4 flex items-start gap-2 text-xs text-primary bg-primary/10 border border-primary/20 rounded-lg px-3 py-2">
+                <div className="mt-4 flex items-start gap-2 border border-primary/25 bg-primary/5 px-3 py-2 text-xs text-primary">
                   <Info className="w-4 h-4 flex-shrink-0 mt-0.5" />
                   <span>
                     {isSelfUpload
@@ -1271,54 +1352,57 @@ export default function UploadPage({ scanOnly = false }: UploadPageProps) {
             </div>
 
             {/* Step 2 — Attach File */}
-            <div className="bg-card rounded-2xl border border-border p-6" style={{ boxShadow: "var(--shadow-card)" }}>
-              <h2 className="font-semibold text-foreground mb-4 flex items-center gap-2">
+            <div className="border border-border bg-background p-5" style={{ boxShadow: "var(--shadow-card)" }}>
+              <h2 className="mb-4 flex items-center gap-2 text-sm font-semibold text-foreground">
                 <StepBadge n={2} active={Boolean(selectedTypeId) && !droppedFile} done={Boolean(droppedFile)} />
                 Attach File
               </h2>
               <div
                 {...getRootProps()}
                 className={clsx(
-                  "border-2 border-dashed rounded-2xl p-8 text-center cursor-pointer transition-all",
+                  "cursor-pointer border border-dashed p-5 text-center transition-all",
                   isDragActive  ? "border-primary bg-primary/5"
                   : droppedFile
-                    ? isScanned ? "border-teal/50 bg-teal/5" : "border-primary/50 bg-primary/5"
-                    : "border-border hover:border-primary/50 hover:bg-muted/40",
+                    ? "border-border bg-background"
+                    : "border-border bg-muted/20 hover:border-primary/60 hover:bg-background",
                 )}
               >
                 <input {...getInputProps()} />
                 {droppedFile ? (
-                  <div className="flex flex-col items-center">
-                    <div className={clsx(
-                      "w-12 h-12 rounded-xl flex items-center justify-center mb-3",
-                      isScanned ? "bg-teal/15" : "bg-primary/10",
-                    )}>
-                      {isScanned
-                        ? <ScanLine className="w-6 h-6 text-teal" />
-                        : <File className="w-6 h-6 text-primary" />}
-                    </div>
-                    <p className="font-semibold text-foreground text-sm">{droppedFile.name}</p>
-                    <p className="text-xs text-muted-foreground mt-1">
-                      {(droppedFile.size / (1024 * 1024)).toFixed(2)} MB
-                    </p>
-                    <button
-                      type="button"
-                      onClick={(e) => { e.stopPropagation(); setDroppedFile(null); }}
-                      className="mt-3 text-destructive hover:text-destructive/80 text-xs flex items-center gap-1"
-                    >
-                      <X className="w-3.5 h-3.5" /> Remove
-                    </button>
+                  <div className="flex w-full flex-col items-center">
+                    {pdfPreviewUrl && droppedFile.type === "application/pdf" ? (
+                      <div className="w-full flex justify-center">
+                        <iframe
+                          src={pdfPreviewUrl}
+                          className="h-[520px] max-w-[680px] w-full border border-border bg-card shadow-sm"
+                          title="PDF Preview"
+                        />
+                      </div>
+                    ) : (
+                      <div className={clsx(
+                        "mb-4 flex h-72 w-full items-center justify-center border border-border bg-card",
+                        isScanned ? "text-teal" : "text-primary",
+                      )}>
+                        {isScanned
+                          ? <ScanLine className="w-14 h-14" />
+                          : <File className="w-14 h-14" />}
+                      </div>
+                    )}
+                    <SelectedFileDropHint
+                      file={droppedFile}
+                      isDragActive={isDragActive}
+                      onRemove={(e) => { e.stopPropagation(); setDroppedFile(null); setPdfPreviewUrl(null); }}
+                    />
                   </div>
                 ) : (
                   <>
-                    <div className="w-12 h-12 rounded-2xl bg-muted text-muted-foreground mx-auto mb-3 flex items-center justify-center">
-                      <Upload className="w-6 h-6" />
+                    <div className="mx-auto mb-3 flex h-12 w-12 items-center justify-center text-muted-foreground">
+                      <Upload className="w-8 h-8 stroke-[1.35]" />
                     </div>
                     <p className="font-semibold text-foreground">
-                      {isDragActive ? "Drop here" : "Drag & drop"}
+                      {isDragActive ? "Drop here" : "Click here or drag and drop to add file"}
                     </p>
-                    <p className="text-muted-foreground text-sm mt-1">or click to browse</p>
-                    <p className="text-xs text-muted-foreground/70 mt-3">
+                    <p className="text-xs text-muted-foreground mt-3">
                       PDF · DOCX · XLSX · PPTX · DOC · PNG · JPG · TIFF
                     </p>
                   </>
@@ -1327,8 +1411,8 @@ export default function UploadPage({ scanOnly = false }: UploadPageProps) {
             </div>
 
             {scanOnly && (
-              <div className="bg-card rounded-2xl border border-teal/30 p-6 space-y-2" style={{ boxShadow: "var(--shadow-card)" }}>
-                <h2 className="font-semibold text-foreground mb-2 flex items-center gap-2">
+              <div className="space-y-2 border border-teal/30 bg-background p-5" style={{ boxShadow: "var(--shadow-card)" }}>
+                <h2 className="mb-2 flex items-center gap-2 text-sm font-semibold text-foreground">
                   <StepBadge n={3} active={Boolean(droppedFile)} />
                   Scan Mode (OCR)
                 </h2>
@@ -1343,34 +1427,36 @@ export default function UploadPage({ scanOnly = false }: UploadPageProps) {
           </div>
 
           {/* Right column */}
-          <div className="lg:col-span-7">
+          <div className={clsx("xl:col-start-8 xl:col-span-5", droppedFile ? "xl:mt-10" : "") }>
             {showManualForm && (
               <div
                 className={clsx(
-                  "bg-card rounded-2xl border p-8",
-                  isSelfUpload ? "border-primary/30" : "border-border",
+                  "border bg-background max-w-[780px] w-full mx-auto",
+                  isSelfUpload ? "border-primary/40" : "border-border",
                 )}
                 style={{ boxShadow: "var(--shadow-card)" }}
               >
-                <div className="flex items-center gap-2.5 mb-6">
-                  <StepBadge n={4} active />
-                  <h2 className="text-xl font-semibold text-foreground">
-                    {isSelfUpload ? "Personal Details" : "Document Details"}
-                  </h2>
-                  {isSelfUpload && (
-                    <span className="ml-auto inline-flex items-center gap-1 text-xs font-semibold text-primary">
-                      <Lock className="w-3.5 h-3.5" /> Personal
-                    </span>
-                  )}
-                </div>
+                <DetailsTab />
+                <div className="p-5 sm:p-6">
+                  <div className="mb-5 flex items-center gap-2.5">
+                    <StepBadge n={4} active />
+                    <h2 className="text-base font-semibold text-foreground">
+                      {isSelfUpload ? "Personal Details" : "Document Details"}
+                    </h2>
+                    {isSelfUpload && (
+                      <span className="ml-auto inline-flex items-center gap-1 text-xs font-semibold text-primary">
+                        <Lock className="w-3.5 h-3.5" /> Personal
+                      </span>
+                    )}
+                  </div>
 
-                {hasMetadata && (
-                  <div className="mb-8">
-                    <h3 className="font-semibold text-foreground mb-4 flex items-center gap-2">
-                      <CheckCircle className="w-5 h-5 text-teal" />
-                      Document Details
-                    </h3>
-                    <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
+                  {hasMetadata && (
+                    <div className="mb-8">
+                      <div className="grid gap-2 border-b border-border/70 py-3 sm:grid-cols-[minmax(160px,0.55fr)_minmax(0,1fr)]">
+                        <span className="text-sm text-muted-foreground">Document Type</span>
+                        <span className="text-sm text-foreground">{selectedType?.name}</span>
+                      </div>
+                      <div>
                       {[...selectedType!.metadata_fields]
                         .sort((a, b) => a.order - b.order)
                         .map((field) => (
@@ -1385,43 +1471,40 @@ export default function UploadPage({ scanOnly = false }: UploadPageProps) {
                             name={getUploadFieldName(field)}
                           />
                         ))}
+                      </div>
                     </div>
-                  </div>
-                )}
+                  )}
 
-                <div className="space-y-6">
-                  {isSelfUpload && (
-                    <>
-                      <div className="grid grid-cols-1 md:grid-cols-2 gap-5">
+                  <div className="space-y-6">
+                    {isSelfUpload && (
+                      <>
                         <div>
-                          <label className="label">Document name</label>
+                          <InforFieldRow label="Document name">
                           <input
                             {...register("title")}
                             className="input"
                             placeholder={droppedFile?.name.replace(/\.[^.]+$/, "") || "Document name"}
                           />
-                        </div>
-                        <div>
-                          <label className="label">Description</label>
+                          </InforFieldRow>
+                          <InforFieldRow label="Description">
                           <input
                             {...register("personal_description")}
                             className="input"
                             placeholder="Short description"
                           />
+                          </InforFieldRow>
                         </div>
-                      </div>
 
-                      <div>
-                        <label className="label">Document text</label>
+                        <InforFieldRow label="Document text">
                         <textarea
                           {...register("personal_text")}
                           rows={5}
                           className="input resize-y"
                           placeholder="Type notes, pasted text, reference details, or anything you want kept with this document."
                         />
-                      </div>
+                        </InforFieldRow>
 
-                      <div className="rounded-xl border border-border bg-muted/30 p-4">
+                      <div className="border border-border bg-muted/20 p-4">
                         <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
                           <div className="flex items-start gap-3">
                             <div className="mt-0.5 flex h-9 w-9 flex-shrink-0 items-center justify-center rounded-lg bg-primary/10 text-primary">
@@ -1500,11 +1583,11 @@ export default function UploadPage({ scanOnly = false }: UploadPageProps) {
                         )}
                       </div>
                     </>
-                  )}
-                </div>
+                    )}
+                  </div>
 
-                {uploadMutation.isPending && uploadProgress > 0 && (
-                  <div className="mt-6">
+                  {uploadMutation.isPending && uploadProgress > 0 && (
+                    <div className="mt-6">
                     <div className="flex justify-between text-xs text-muted-foreground mb-1.5">
                       <span>{isSelfUpload ? "Saving personal document…" : "Uploading…"}</span>
                       <span className="font-semibold text-foreground">{uploadProgress}%</span>
@@ -1516,14 +1599,14 @@ export default function UploadPage({ scanOnly = false }: UploadPageProps) {
                       />
                     </div>
                   </div>
-                )}
+                  )}
 
-                <div className="flex gap-4 pt-6 mt-6 border-t border-border">
+                  <div className="mt-6 flex gap-4 border-t border-border pt-6">
                   <button
                     type="button"
                     onClick={handleSubmit(onUpload)}
                     disabled={uploadMutation.isPending || !droppedFile}
-                    className="flex-1 flex items-center justify-center gap-2 text-base py-3 rounded-xl font-semibold bg-primary text-primary-foreground hover:bg-primary/90 transition-all disabled:opacity-50 disabled:cursor-not-allowed"
+                    className="inline-flex items-center justify-center gap-2 rounded-sm bg-primary px-6 py-2.5 text-base font-semibold text-primary-foreground transition-all hover:bg-primary/90 disabled:cursor-not-allowed disabled:opacity-50"
                     style={{ boxShadow: "var(--shadow-elegant)" }}
                   >
                     {uploadMutation.isPending ? (
@@ -1539,10 +1622,11 @@ export default function UploadPage({ scanOnly = false }: UploadPageProps) {
                   <button
                     type="button"
                     onClick={() => navigate("/documents")}
-                    className="px-8 py-3 rounded-xl font-semibold border border-border bg-card text-foreground hover:bg-muted transition-colors"
+                    className="rounded-sm border border-border bg-card px-8 py-3 font-semibold text-foreground transition-colors hover:bg-muted"
                   >
                     Cancel
                   </button>
+                  </div>
                 </div>
               </div>
             )}
@@ -1595,7 +1679,7 @@ export default function UploadPage({ scanOnly = false }: UploadPageProps) {
                     type="button"
                     onClick={handleSubmit(onUpload)}
                     disabled={uploadMutation.isPending || !droppedFile || !selectedTypeId}
-                    className="flex-1 flex items-center justify-center gap-2 py-3 rounded-xl font-semibold bg-teal text-teal-foreground hover:bg-teal/90 transition-all disabled:opacity-50 disabled:cursor-not-allowed"
+                    className="inline-flex items-center justify-center gap-2 rounded-xl bg-teal px-6 py-2.5 font-semibold text-teal-foreground hover:bg-teal/90 transition-all disabled:opacity-50 disabled:cursor-not-allowed"
                     style={{ boxShadow: "var(--shadow-elegant)" }}
                   >
                     {uploadMutation.isPending ? (
