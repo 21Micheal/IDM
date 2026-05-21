@@ -83,7 +83,7 @@ function AuthBootstrap({ children }: { children: React.ReactNode }) {
     };
   }, [accessToken, isSessionExpired, logout, setUser, user?.has_admin_access]);
 
-  if (!ready) return null;
+  if (!ready) return <RouteFallback />;
   return <>{children}</>;
 }
 

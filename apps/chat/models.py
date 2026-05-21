@@ -33,10 +33,14 @@ class ChatRoom(models.Model):
     
     class Meta:
         ordering = ['-updated_at']
+        indexes = [
+            models.Index(fields=['is_active', 'room_type', '-updated_at']),
+            models.Index(fields=['created_by', '-updated_at']),
+        ]
     
     def __str__(self):
         if self.room_type == 'direct':
-            participants = self.participants.all()
+            participants = list(self.participants.all()[:2])
             if len(participants) == 2:
                 return f"DM: {participants[0].get_full_name()} & {participants[1].get_full_name()}"
         return self.name or f"{self.get_room_type_display()}: {self.id}"
@@ -55,6 +59,7 @@ class ChatRoomParticipant(models.Model):
         indexes = [
             models.Index(fields=['user', 'room']),
             models.Index(fields=['room', 'user']),
+            models.Index(fields=['user', 'is_active']),
         ]
 
 
@@ -96,6 +101,7 @@ class ChatMessage(models.Model):
         indexes = [
             models.Index(fields=['room', 'created_at']),
             models.Index(fields=['sender', 'created_at']),
+            models.Index(fields=['room', '-created_at']),
         ]
     
     def __str__(self):
@@ -129,5 +135,5 @@ class ChatNotification(models.Model):
         ordering = ['-created_at']
         indexes = [
             models.Index(fields=['recipient', 'is_read']),
-            models.Index(fields=['recipient', 'created_at']),
+            models.Index(fields=['recipient', '-created_at']),
         ]

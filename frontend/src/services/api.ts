@@ -449,9 +449,12 @@ export const workflowAPI = {
 };
 
 export const notificationsAPI = {
-  list: () => api.get("/notifications/"),
+  list: (params?: { is_read?: boolean }) => api.get("/notifications/", { params }),
+  unreadCount: () => api.get("/notifications/unread_count/"),
   markRead: (id: string) =>
     api.patch(`/notifications/${id}/`, { is_read: true }),
+  markUnread: (id: string) =>
+    api.patch(`/notifications/${id}/`, { is_read: false }),
   markAllRead: () => api.post("/notifications/mark_all_read/"),
 };
 
@@ -561,7 +564,7 @@ export const chatAPI = {
   // Messages
   messages: {
     list: (roomId?: string) => api.get("/chat/messages/", { params: { room_id: roomId } }),
-    create: (data: { content: string; room_id: string; message_type?: string; reply_to?: string }) =>
+    create: (data: { content: string; room_id: string; message_type?: string; reply_to?: string; client_id?: string }) =>
       api.post("/chat/messages/", data),
     markRead: (messageIds: string[]) =>
       api.post("/chat/messages/mark_read/", { message_ids: messageIds }),

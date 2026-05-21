@@ -4,6 +4,12 @@ from channels.db import database_sync_to_async
 from django.contrib.auth import get_user_model
 from django.utils import timezone
 from .models import ChatRoom, ChatMessage, UnreadMessage, ChatNotification, ChatRoomParticipant
+from .services import (
+    create_delivery_records,
+    create_message_for_room,
+    room_display_name_for_user,
+    serialize_message,
+)
 
 User = get_user_model()
 
@@ -47,8 +53,9 @@ class ChatConsumer(AsyncWebsocketConsumer):
         try:
             data = json.loads(text_data)
             message_type = data.get('type', 'text')
-            content = data.get('content', '')
+            content = (data.get('content') or '').strip()
             reply_to_id = data.get('reply_to', None)
+            client_id = data.get('client_id', None)
 
             if message_type == 'typing':
                 # Handle typing indicators
@@ -68,58 +75,54 @@ class ChatConsumer(AsyncWebsocketConsumer):
                 await self.mark_messages_read(data.get('message_ids', []))
                 return
 
+            if message_type != 'text':
+                await self.send_error('Only text messages are currently supported')
+                return
+
+            if not content:
+                await self.send_error('Message content cannot be empty')
+                return
+
+            if len(content) > 4000:
+                await self.send_error('Message content cannot exceed 4000 characters')
+                return
+
             # Create and save message
-            message = await self.create_message(content, message_type, reply_to_id)
+            delivery = await self.create_message_delivery(content, message_type, reply_to_id, client_id)
 
             # Send message to room group
             await self.channel_layer.group_send(
                 self.room_group_name,
                 {
                     'type': 'chat_message',
-                    'message': {
-                        'id': str(message.id),
-                        'content': message.content,
-                        'sender': {
-                            'id': str(message.sender.id),
-                            'name': message.sender.get_full_name() or message.sender.email,
-                            'email': message.sender.email
-                        },
-                        'message_type': message.message_type,
-                        'reply_to': str(message.reply_to.id) if message.reply_to else None,
-                        'is_edited': message.is_edited,
-                        'created_at': message.created_at.isoformat(),
-                        'room': str(message.room.id),
-                        'room_id': str(message.room.id)
-                    }
+                    'message': delivery['message'],
                 }
             )
 
-            # Create unread messages for all participants except sender
-            await self.create_unread_messages(message)
-
-            # Create chat notifications for real-time toasts
-            participants = await self.create_chat_notifications(message)
-            await self.send_chat_notifications(message, participants)
+            for notification in delivery['notifications']:
+                await self.channel_layer.group_send(
+                    f"user_{notification['recipient_id']}",
+                    {
+                        'type': 'chat_notification',
+                        'notification': notification['payload'],
+                    }
+                )
 
         except json.JSONDecodeError:
-            await self.send(text_data=json.dumps({
-                'type': 'error',
-                'message': 'Invalid JSON format'
-            }))
-        except Exception as e:
-            await self.send(text_data=json.dumps({
-                'type': 'error',
-                'message': str(e)
-            }))
+            await self.send_error('Invalid JSON format')
+        except Exception:
+            await self.send_error('Unable to send message')
+
+    async def send_error(self, message):
+        await self.send(text_data=json.dumps({
+            'type': 'error',
+            'detail': message,
+        }))
 
     async def chat_message(self, event):
         """Send chat message to WebSocket"""
         message = event['message']
         
-        # Don't send the message back to the sender
-        if message['sender']['id'] == str(self.user.id):
-            return
-
         await self.send(text_data=json.dumps({
             'type': 'new_message',
             'message': message
@@ -148,104 +151,44 @@ class ChatConsumer(AsyncWebsocketConsumer):
                 user=self.user,
                 is_active=True
             ).exists()
-        except:
+        except Exception:
             return False
 
     @database_sync_to_async
-    def create_message(self, content, message_type, reply_to_id):
+    def create_message_delivery(self, content, message_type, reply_to_id, client_id):
         reply_to = None
         if reply_to_id:
             try:
-                reply_to = ChatMessage.objects.get(id=reply_to_id)
+                reply_to = ChatMessage.objects.get(id=reply_to_id, room_id=self.room_id)
             except ChatMessage.DoesNotExist:
                 pass
 
-        message = ChatMessage.objects.create(
-            room_id=self.room_id,
+        room = ChatRoom.objects.get(id=self.room_id, is_active=True)
+        message = create_message_for_room(
+            room=room,
             sender=self.user,
             content=content,
             message_type=message_type,
             reply_to=reply_to
         )
-        
-        # Update room's updated_at timestamp
-        room = message.room
-        room.save()
-        
-        return message
-
-    @database_sync_to_async
-    def create_unread_messages(self, message):
-        """Create unread message records for all participants except sender"""
-        participants = ChatRoomParticipant.objects.filter(
-            room=message.room,
-            is_active=True
-        ).exclude(user=message.sender).select_related('user')
-        
-        unread_messages = []
-        for participant in participants:
-            unread_messages.append(
-                UnreadMessage(
-                    user=participant.user,
-                    message=message,
-                    room=message.room
-                )
-            )
-        
-        UnreadMessage.objects.bulk_create(unread_messages)
-
-    @database_sync_to_async
-    def create_chat_notifications(self, message):
-        """Create chat notifications for real-time toast notifications"""
-        participants = ChatRoomParticipant.objects.filter(
-            room=message.room,
-            is_active=True
-        ).exclude(user=message.sender).select_related('user')
-        
-        notifications = []
-        for participant in participants:
-            notifications.append(
-                ChatNotification(
-                    recipient=participant.user,
-                    message=message
-                )
-            )
-        
-        ChatNotification.objects.bulk_create(notifications)
-        return list(participants)
-
-    async def send_chat_notifications(self, message, participants):
-        """Send notifications to user-specific channels"""
-        room_name = await self.get_room_name(message.room)
-        
-        for participant in participants:
-            await self.channel_layer.group_send(
-                f"user_{participant.user.id}",
+        participants = create_delivery_records(message)
+        return {
+            'message': serialize_message(message, client_id=client_id),
+            'notifications': [
                 {
-                    'type': 'chat_notification',
-                    'notification': {
+                    'recipient_id': str(participant.user_id),
+                    'payload': {
                         'id': str(message.id),
                         'message': message.content,
-                        'sender': {
-                            'id': str(message.sender.id),
-                            'name': message.sender.get_full_name() or message.sender.email,
-                            'email': message.sender.email
-                        },
-                        'room_id': str(message.room.id),
-                        'room_name': room_name,
-                        'created_at': message.created_at.isoformat()
-                    }
+                        'sender': serialize_message(message)['sender'],
+                        'room_id': str(message.room_id),
+                        'room_name': room_display_name_for_user(message.room, participant.user),
+                        'created_at': message.created_at.isoformat(),
+                    },
                 }
-            )
-
-    @database_sync_to_async
-    def get_room_name(self, room):
-        if room.room_type == 'direct':
-            participants = list(room.participants.all())
-            if len(participants) == 2:
-                other_user = participants[0] if participants[1] == self.user else participants[1]
-                return other_user.get_full_name() or other_user.email
-        return room.name or f"{room.get_room_type_display()}"
+                for participant in participants
+            ],
+        }
 
     @database_sync_to_async
     def update_last_read(self):
@@ -265,11 +208,13 @@ class ChatConsumer(AsyncWebsocketConsumer):
         """Mark specific messages as read for this user"""
         UnreadMessage.objects.filter(
             user=self.user,
+            room_id=self.room_id,
             message_id__in=message_ids
         ).delete()
         
         ChatNotification.objects.filter(
             recipient=self.user,
+            message__room_id=self.room_id,
             message_id__in=message_ids
         ).update(is_read=True)
 

@@ -69,7 +69,7 @@ export type OcrFields = {
   signed_date?: string;
   registered_address?: string;
   raw_lines?: string[];
-  [key: string]: string | string[] | undefined;
+  [key: string]: string | number | boolean | string[] | Record<string, unknown>[] | undefined;
 };
 
 type OcrFieldKey = Extract<keyof OcrFields, string>;
@@ -82,6 +82,50 @@ export type FieldMatch = {
   /** The value extracted */
   value: string;
 };
+
+export function sanitizeOcrFields(ocrFields: OcrFields): OcrFields {
+  const cleaned = { ...ocrFields };
+  if (cleaned.account_code && !isPlausibleAccountCode(String(cleaned.account_code), cleaned)) {
+    delete cleaned.account_code;
+  }
+  return cleaned;
+}
+
+function normaliseComparable(value: unknown): string {
+  return String(value ?? "").trim().replace(/\s+/g, " ").toLowerCase();
+}
+
+function isPlausibleAccountCode(value: string, fields: OcrFields): boolean {
+  const trimmed = value.trim().replace(/\s+/g, " ");
+  if (!trimmed) return false;
+
+  const folded = normaliseComparable(trimmed);
+  for (const key of [
+    "supplier",
+    "title",
+    "reference_number",
+    "transaction_ref",
+    "po_reference",
+    "vendor_code",
+    "vat_number",
+    "kra_pin",
+    "bank_details",
+  ]) {
+    if (fields[key] && folded === normaliseComparable(fields[key])) {
+      return false;
+    }
+  }
+
+  if (/\d{10,}/.test(trimmed)) return false;
+  if (/\b(ltd|limited|inc|llc|plc|corp|company|partners|enterprises)\b/i.test(trimmed)) {
+    return false;
+  }
+  if (/[A-Za-z]{2,}\s+[A-Za-z]{2,}/.test(trimmed) && !/[\d#/_-]/.test(trimmed)) {
+    return false;
+  }
+
+  return /^[A-Za-z0-9][A-Za-z0-9#/_\-. ]{1,59}$/.test(trimmed);
+}
 
 // ── Pass 2: static alias table ─────────────────────────────────────────────
 // Maps every reasonable admin field_key → the OCR output key it corresponds to.
@@ -282,14 +326,21 @@ export function matchOcrToField(
   field: MetadataField,
   ocrFields: OcrFields,
 ): FieldMatch | null {
+  const cleanedOcrFields = sanitizeOcrFields(ocrFields);
   const fieldKey = (field.key ?? field.field_key ?? "").toLowerCase().trim();
   const fieldLabel = (field.label ?? "").trim();
   const fieldType = (field.field_type ?? "text").toLowerCase();
 
   // All OCR keys that have a non-empty string value
-  const availableKeys = Object.keys(ocrFields).filter(
-    (k) => k !== "raw_lines" && typeof ocrFields[k] === "string" && (ocrFields[k] as string).trim() !== ""
-  ) as OcrFieldKey[];
+  const availableKeys = Object.keys(cleanedOcrFields).filter((k) => {
+    if (k === "raw_lines" || k === "line_items") return false;
+    const value = cleanedOcrFields[k];
+    return (
+      (typeof value === "string" && value.trim() !== "") ||
+      typeof value === "number" ||
+      typeof value === "boolean"
+    );
+  }) as OcrFieldKey[];
 
   if (availableKeys.length === 0) return null;
 
@@ -309,7 +360,7 @@ export function matchOcrToField(
   return {
     ocrKey: bestKey,
     score: bestScore,
-    value: ocrFields[bestKey] as string,
+    value: String(cleanedOcrFields[bestKey]),
   };
 }
 
@@ -319,6 +370,12 @@ function scoreMatch(
   fieldType: string,
   ocrKey: string,
 ): number {
+  // Avoid overly-aggressive fuzzy matching for account-like fields.
+  // Only exact key matches or static aliases should populate GL/account codes.
+  const accountish = /account|acct|gl|ledger|billing|client|customer|project|cost|code/.test(fieldKey) ||
+    fieldLabel.toLowerCase().includes("account") ||
+    fieldLabel.toLowerCase().includes("code");
+
   // Pass 1: exact key match
   if (fieldKey === ocrKey) return 4;
 
@@ -351,7 +408,12 @@ function scoreMatch(
   const effectiveTokenCount = Math.max(fieldLabelTokens.size, fieldKeyTokens.size);
   const similarityThreshold = effectiveTokenCount <= 2 ? 0.25 : 0.30;
 
-  if (maxSim >= similarityThreshold) return 2;
+  // For account-like fields, do not accept loose label-similarity matches
+  // — require an alias or exact match instead to avoid picking supplier names.
+  if (maxSim >= similarityThreshold) {
+    if (accountish) return 0;
+    return 2;
+  }
 
   // Pass 4: semantic group — last resort
   const semanticCandidates = SEMANTIC_GROUPS[fieldType] ?? [];
@@ -364,7 +426,11 @@ function scoreMatch(
         "reference", "number", "code", "account", "id",
       ].includes(t)
     );
-    if (hasRelevantLabel) return 1;
+    if (hasRelevantLabel) {
+      // Do not allow semantic-group fallback to populate account-like fields.
+      if (accountish) return 0;
+      return 1;
+    }
   }
 
   return 0;
@@ -388,10 +454,11 @@ export function applyOcrToFields(
   fields: MetadataField[],
   ocrFields: OcrFields,
 ): AppliedMatch[] {
+  const cleanedOcrFields = sanitizeOcrFields(ocrFields);
   // Score every field
   const candidates: Array<{ field: MetadataField; match: FieldMatch; order: number }> = [];
   for (let i = 0; i < fields.length; i++) {
-    const match = matchOcrToField(fields[i], ocrFields);
+    const match = matchOcrToField(fields[i], cleanedOcrFields);
     if (match) {
       candidates.push({ field: fields[i], match, order: i });
     }

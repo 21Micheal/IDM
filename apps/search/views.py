@@ -3,10 +3,13 @@ from __future__ import annotations
 
 import re
 from collections.abc import Iterable
+from datetime import date, datetime
 
-from rest_framework.views import APIView
+from elasticsearch import ApiError, ConnectionError as ESConnectionError, TransportError
 from rest_framework.response import Response
+from rest_framework import status
 from rest_framework.permissions import IsAuthenticated
+from rest_framework.views import APIView
 from elasticsearch_dsl import Q
 
 SEARCH_TEXT_FIELDS = [
@@ -31,6 +34,8 @@ SEARCH_SNIPPET_FIELDS = [
     "file_name",
 ]
 
+MAX_SEARCH_LENGTH = 500
+
 _TOKEN_RE = re.compile(r"[\w-]+", re.UNICODE)
 _ES_HIGHLIGHT_TAG_RE = re.compile(r"</?em>")
 _QUERY_STRING_SPECIAL_RE = re.compile(r'([+\-=!(){}\[\]^"~?:\\/]|&&|\|\|)')
@@ -43,6 +48,56 @@ def _search_terms(search_text: str) -> list[str]:
             continue
         terms.append(term)
     return terms
+
+
+def _as_text(value) -> str:
+    if value in (None, ""):
+        return ""
+    return str(value).strip()
+
+
+def _parse_positive_int(value, default: int, *, maximum: int | None = None) -> int:
+    try:
+        parsed = int(value)
+    except (TypeError, ValueError):
+        return default
+    parsed = max(1, parsed)
+    if maximum is not None:
+        parsed = min(maximum, parsed)
+    return parsed
+
+
+def _as_filter_dict(value) -> dict:
+    return value if isinstance(value, dict) else {}
+
+
+def _as_list(value) -> list:
+    if value in (None, ""):
+        return []
+    if isinstance(value, str):
+        return [value]
+    if isinstance(value, Iterable) and not isinstance(value, (dict, bytes, bytearray)):
+        return [item for item in value if item not in (None, "")]
+    return [value]
+
+
+def _parse_bool(value) -> bool | None:
+    if isinstance(value, bool):
+        return value
+    if value in (None, ""):
+        return None
+    normalized = str(value).strip().lower()
+    if normalized in {"true", "1", "yes", "y", "on"}:
+        return True
+    if normalized in {"false", "0", "no", "n", "off"}:
+        return False
+    return None
+
+
+def _es_value(value):
+    if isinstance(value, (datetime, date)):
+        return value.isoformat()
+    return value
 
 
 def _wildcard_query(search_text: str) -> str:
@@ -149,32 +204,15 @@ class DocumentSearchView(APIView):
         from .documents import DocumentIndex
 
         data = request.data
-        search_text = data.get("search", "").strip()
-        filters = data.get("filters", {}) or {}
-        page = max(1, int(data.get("page", 1)))
-        page_size = min(100, int(data.get("page_size", 20)))
+        search_text = _as_text(data.get("search"))[:MAX_SEARCH_LENGTH]
+        filters = _as_filter_dict(data.get("filters"))
+        page = _parse_positive_int(data.get("page", 1), 1)
+        page_size = _parse_positive_int(data.get("page_size", 20), 20, maximum=100)
 
         s = DocumentIndex.search()
         user = request.user
         if not user.has_admin_access:
-            from apps.documents.models import Document
-            from django.db.models import Q as DjangoQ
-
-            accessible_ids = (
-                Document.objects
-                .filter(
-                    DjangoQ(uploaded_by=user)
-                    | DjangoQ(
-                        workflow_instance__tasks__assigned_to=user,
-                        workflow_instance__tasks__status__in=[
-                            "pending", "in_progress", "held", "returned",
-                        ],
-                    )
-                )
-                .values_list("id", flat=True)
-                .distinct()
-            )
-            s = s.filter("ids", values=[str(doc_id) for doc_id in accessible_ids])
+            s = s.filter("term", accessible_user_ids=str(user.id))
 
         if search_text:
             wildcard_query = _wildcard_query(search_text)
@@ -229,13 +267,13 @@ class DocumentSearchView(APIView):
             s = s.filter("term", document_type=filters["document_type"])
 
         if filters.get("status"):
-            statuses = filters["status"]
-            if isinstance(statuses, str):
-                statuses = [statuses]
+            statuses = _as_list(filters["status"])
             s = s.filter("terms", status=statuses)
 
         if filters.get("is_self_upload") is not None:
-            s = s.filter("term", is_self_upload=bool(filters["is_self_upload"]))
+            is_self_upload = _parse_bool(filters.get("is_self_upload"))
+            if is_self_upload is not None:
+                s = s.filter("term", is_self_upload=is_self_upload)
 
         if filters.get("date_from"):
             s = s.filter("range", document_date={"gte": filters["date_from"]})
@@ -254,16 +292,15 @@ class DocumentSearchView(APIView):
                 pass
 
         if filters.get("tags"):
-            tags = filters["tags"]
-            if isinstance(tags, str):
-                tags = [tags]
+            tags = _as_list(filters["tags"])
             s = s.filter("terms", tags=tags)
 
         if filters.get("personal_tags"):
-            personal_tags = filters["personal_tags"]
-            if isinstance(personal_tags, str):
-                personal_tags = [personal_tags]
+            personal_tags = _as_list(filters["personal_tags"])
             s = s.filter("terms", personal_tags=personal_tags)
+
+        if not search_text:
+            s = s.sort("-created_at")
 
         start = (page - 1) * page_size
         s = s[start : start + page_size]
@@ -281,7 +318,13 @@ class DocumentSearchView(APIView):
             require_field_match=True,
         )
 
-        response = s.execute()
+        try:
+            response = s.execute()
+        except (ApiError, ESConnectionError, TransportError):
+            return Response(
+                {"detail": "Search service is temporarily unavailable."},
+                status=status.HTTP_503_SERVICE_UNAVAILABLE,
+            )
 
         hits = []
         for hit in response.hits:
@@ -305,7 +348,7 @@ class DocumentSearchView(APIView):
                 "supplier": getattr(hit, "supplier", ""),
                 "amount": getattr(hit, "amount", None),
                 "status": getattr(hit, "status", ""),
-                "document_date": getattr(hit, "document_date", None),
+                "document_date": _es_value(getattr(hit, "document_date", None)),
                 "is_self_upload": getattr(hit, "is_self_upload", False),
                 "tags": list(getattr(hit, "tags", []) or []),
                 "personal_tags": list(getattr(hit, "personal_tags", []) or []),

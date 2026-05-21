@@ -119,6 +119,8 @@ class DocumentIndex(ESDocument):
     department = fields.KeywordField()
     uploaded_by = fields.KeywordField()
     uploaded_by_id = fields.KeywordField()
+    owned_by_id = fields.KeywordField()
+    accessible_user_ids = fields.KeywordField(multi=True)
     created_at = fields.DateField()
 
     class Django:
@@ -171,3 +173,21 @@ class DocumentIndex(ESDocument):
 
     def prepare_uploaded_by_id(self, instance):
         return str(instance.uploaded_by_id)
+
+    def prepare_owned_by_id(self, instance):
+        return str(instance.owned_by_id) if instance.owned_by_id else ""
+
+    def prepare_accessible_user_ids(self, instance):
+        user_ids = {str(instance.uploaded_by_id)}
+        if instance.owned_by_id:
+            user_ids.add(str(instance.owned_by_id))
+
+        workflow = getattr(instance, "workflow_instance", None)
+        tasks = getattr(workflow, "tasks", None)
+        if tasks is not None:
+            active_statuses = {"pending", "in_progress", "held", "returned"}
+            for task in tasks.all():
+                if task.status in active_statuses and task.assigned_to_id:
+                    user_ids.add(str(task.assigned_to_id))
+
+        return sorted(user_ids)

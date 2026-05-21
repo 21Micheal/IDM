@@ -62,6 +62,8 @@ services:
     volumes:
       - .:/app
       - media_files:/app/media
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
     ports:
       - "8000:8000"
     depends_on:
@@ -87,6 +89,8 @@ services:
     volumes:
       - .:/app
       - media_files:/app/media
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
     depends_on:
       db:
         condition: service_healthy
@@ -155,6 +159,8 @@ services:
       # Cache PaddleOCR models between container restarts to avoid re-downloading
       # the ~8 MB PP-OCRv4 detection/recognition models on every deploy.
       - paddle_models:/root/.paddleocr
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
     depends_on:
       db:
         condition: service_healthy

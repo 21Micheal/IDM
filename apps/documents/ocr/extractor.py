@@ -971,11 +971,17 @@ def _is_plausible_gl_account_code(value: str) -> bool:
     FIX: added IBAN-like check (≥ 10 consecutive digits).
     """
     s = (value or "").strip()
+    if not s:
+        return False
     # Long all-digit values: bank accounts, phone numbers, etc.
     if len(s) >= 10 and re.fullmatch(r"\d[\d\s,]*", s):
         return False
     # IBAN or 10+ consecutive digit strings embedded in otherwise alphanumeric codes
     if re.search(r"\d{10,}", s):
+        return False
+    if re.search(r"\b(?:ltd|limited|inc|llc|plc|corp|company|partners|enterprises)\b", s, re.I):
+        return False
+    if re.search(r"[A-Za-z]{2,}\s+[A-Za-z]{2,}", s) and not re.search(r"[\d#/_-]", s):
         return False
     return True
 
@@ -1105,11 +1111,6 @@ def _extract_account_code(text: str, lines: list[str]) -> Optional[str]:
     )
     if labelled and _is_plausible_gl_account_code(labelled):
         return labelled
-
-    # Last resort: loose label (higher false-positive risk)
-    grid_loose = _extract_code_from_header_grid(lines, _ACCOUNT_LABEL_RE)
-    if grid_loose and _is_plausible_gl_account_code(grid_loose):
-        return grid_loose
 
     return None
 

@@ -5,6 +5,7 @@ All notification tasks — in-app + email for every workflow event.
 from celery import shared_task
 from django.core.mail import send_mail
 from django.conf import settings
+from django.db import IntegrityError
 import logging
 
 logger = logging.getLogger(__name__)
@@ -38,6 +39,32 @@ def _create_notification(recipient, message: str, link: str = "", notification_t
         )
     except Exception as exc:
         logger.warning("In-app notification failed: %s", exc)
+
+
+def _create_once(recipient, message: str, link: str = "", notification_type: str = "task_assigned") -> bool:
+    """
+    Create a notification only if the same exact notice does not already exist.
+
+    This is intentionally conservative: it prevents noisy recurring tasks from
+    flooding an inbox while still allowing distinct workflow actions through.
+    """
+    if not recipient:
+        return False
+    try:
+        from .models import Notification
+
+        _, created = Notification.objects.get_or_create(
+            recipient=recipient,
+            type=notification_type,
+            message=message,
+            link=link,
+        )
+        return created
+    except IntegrityError:
+        return False
+    except Exception as exc:
+        logger.warning("In-app notification failed: %s", exc)
+        return False
 
 
 # ── Task assigned ─────────────────────────────────────────────────────────────
@@ -335,20 +362,21 @@ def notify_task_overdue(task_id: str) -> None:
         f"OVERDUE: Your approval task for '{doc.title}' "
         f"({doc.reference_number}) has passed its SLA deadline."
     )
-    _create_notification(task.assigned_to, msg, link, "task_overdue")
-    _send_email(
-        task.assigned_to,
-        subject=f"DMS — SLA overdue: {doc.reference_number}",
-        body=(
-            f"Hello {task.assigned_to.first_name},\n\n"
-            f"An approval task has passed its SLA deadline and requires urgent action.\n\n"
-            f"  Document: {doc.title}\n"
-            f"  Reference: {doc.reference_number}\n"
-            f"  Step: {task.step.name}\n"
-            f"  Was due: {task.due_at.strftime('%d %b %Y %H:%M UTC') if task.due_at else 'N/A'}\n\n"
-            f"Please log in to DMS immediately.\n"
-        ),
-    )
+    created = _create_once(task.assigned_to, msg, link, "task_overdue")
+    if created:
+        _send_email(
+            task.assigned_to,
+            subject=f"DMS — SLA overdue: {doc.reference_number}",
+            body=(
+                f"Hello {task.assigned_to.first_name},\n\n"
+                f"An approval task has passed its SLA deadline and requires urgent action.\n\n"
+                f"  Document: {doc.title}\n"
+                f"  Reference: {doc.reference_number}\n"
+                f"  Step: {task.step.name}\n"
+                f"  Was due: {task.due_at.strftime('%d %b %Y %H:%M UTC') if task.due_at else 'N/A'}\n\n"
+                f"Please log in to DMS immediately.\n"
+            ),
+        )
 
 
 # ── Workflow action (approve, reject, held, released, returned) ────────────────

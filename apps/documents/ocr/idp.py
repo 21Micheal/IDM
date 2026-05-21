@@ -1,7 +1,7 @@
 """
 apps/documents/ocr/idp.py
 
-Intelligent Document Processing (IDP) using Claude Vision.
+Intelligent Document Processing (IDP) using Anthropic Claude.
 
 This module replaces the regex-based _extract_ocr_suggestions() / extractor.py
 with a vision-language model that understands document structure semantically.
@@ -10,10 +10,10 @@ Architecture
 ────────────
                         ┌─────────────────────────────┐
   PDF (native text) ───►│ pdfplumber → structured text │
-                        │ + table augmentation          │──► Claude (text mode)
+                        │ + table augmentation          │──► LLM text mode
                         └─────────────────────────────┘         │
                                                                  ▼
-  PDF (scanned) ────────► pypdfium2 render → PNG ──────► Claude (vision mode)
+  PDF (scanned) ────────► pypdfium2 render → JPEG ─────► LLM vision mode
                                                                  │
   Image upload ─────────────────────────────────────────►        │
                                                                  ▼
@@ -23,38 +23,40 @@ Architecture
                                               Merge into Document.metadata
                                               + update top-level model fields
 
-Why Claude Vision instead of local models (LayoutLM, PaddleNLP, etc.)
+Why LLM/VLM extraction instead of local-only heuristics
 ──────────────────────────────────────────────────────────────────────
 • Local transformer models require GPU for acceptable inference speed.
   On CPU, LayoutLMv3 takes 30–60 s per page — unacceptable for a Celery task.
 • Local models require fine-tuning per document type to reach production accuracy.
-• Claude Vision understands document semantics natively: it knows that
+• Vision-language models understand document semantics: they can infer that
   "Velocity Logistics Solutions" is the supplier because it sits under the
   SUPPLIER column header — not because it matched a regex pattern.
 • claude-haiku-4-5 is ~$0.0004/page. At 500 docs/day = ~$6/day.
-• Graceful fallback: if Claude is unavailable, the regex extractor still runs.
+• Graceful fallback: if Claude is unavailable, the PDF text extractor still runs.
 
 Engine selection
 ────────────────
-OCR_IDP_ENGINE setting controls the extraction path:
+IDP_PROVIDER selects Anthropic or the non-LLM fallback, while OCR_IDP_ENGINE
+controls the extraction path:
 
-  "claude_vision"  → Render PDF to PNG, send to Claude Vision
+  "vision"         → Render PDF/images and send images to the configured model
                      Best for: scanned docs, complex layouts, mixed content
                      Model: claude-haiku-4-5 (fast+cheap) or claude-sonnet-4-6
 
-  "claude_text"    → Extract text with pdfplumber (spatially augmented),
-                     send to Claude as text prompt
+  "text"           → Extract text with pdfplumber (spatially augmented),
+                     send text to the configured model
                      Best for: native digital PDFs
                      Model: claude-haiku-4-5
 
   "auto"           → Detect: sparse text → vision mode, dense text → text mode
                      Recommended default
 
-  "regex"          → Original regex extractor (fallback, no API cost)
+  "regex"          → Local OCR/regex pipeline (fallback, no API cost)
 
 Django settings
 ───────────────
-ANTHROPIC_API_KEY        Required. Set in environment or settings.
+IDP_PROVIDER             "anthropic" | "regex"
+ANTHROPIC_API_KEY        Required for IDP_PROVIDER=anthropic.
 OCR_IDP_ENGINE           "auto" | "claude_vision" | "claude_text" | "regex"
                          Default: "auto"
 OCR_IDP_MODEL            Claude model to use. Default: "claude-haiku-4-5"
@@ -66,19 +68,17 @@ OCR_IDP_MAX_PAGES        Max pages to send to Vision. Default: 3
 """
 from __future__ import annotations
 
-import base64
 import json
 import logging
+import re
 import time
-from pathlib import Path
-from typing import Optional
 
 logger = logging.getLogger(__name__)
 
 # ── Field extraction prompt ────────────────────────────────────────────────────
 # Versioned so we can A/B test prompt changes without code deploys.
 
-_PROMPT_VERSION = "2"
+_PROMPT_VERSION = "4"
 
 _SYSTEM_PROMPT = """You are a precise document field extraction engine for an enterprise document management system. Your job is to extract structured data from business documents with high accuracy.
 
@@ -88,45 +88,134 @@ You will receive either:
 
 Return ONLY a valid JSON object. No explanation, no markdown code fences, no preamble."""
 
-_EXTRACTION_PROMPT = """Extract the following fields from this document. Return ONLY a valid JSON object.
-
-FIELDS:
-{
-  "document_type": "Exact document type: Invoice, Tax Invoice, Purchase Order, Local Purchase Order, Receipt, Contract, Service Agreement, Delivery Note, Expense Claim, Imprest, Payment Voucher, Quotation, Credit Note, Debit Note, Utility Bill, or Statement. Use the term as it appears in the document.",
-  "title": "A clean, useful document title. Example: 'Velocity Logistics Invoice SHIP-8890-X' or 'Acme Supplies Tax Invoice Oct 2024'. Max 120 chars. Do NOT use address lines or column headers as the title.",
-  "supplier": "Name of the company or person ISSUING the document (the seller/vendor/service provider). NOT the bill-to party. Extract the legal name, not address.",
-  "reference_number": "Primary document identifier: invoice number, PO number, order ref, contract number, receipt number. Strip any leading # symbol.",
-  "account_code": "Supplier account code, GL code, cost centre code, or any alphanumeric accounting reference code assigned to this transaction.",
-  "document_date": "Issue/invoice date in YYYY-MM-DD. If only month+year, use first of month.",
-  "due_date": "Payment due date or expiry date in YYYY-MM-DD.",
-  "amount": "TOTAL amount due (after tax) as a plain decimal number. No currency symbols, no commas. Use the final total, NOT the subtotal.",
-  "currency": "ISO 4217 code: USD, EUR, GBP, KES, UGX, TZS, etc. Infer from context or symbols ($=USD, £=GBP, €=EUR, KES/Ksh=KES).",
-  "tax_amount": "VAT, GST, or tax amount as a plain decimal number.",
-  "subtotal": "Pre-tax subtotal as a plain decimal number.",
-  "payment_terms": "Payment terms text, e.g. 'Net 30', 'Due on receipt'.",
-  "payment_method": "Payment method if specified: Cash, Cheque, Bank Transfer, M-PESA, Wire Transfer, etc.",
-  "transaction_ref": "Payment transaction reference, M-PESA code, cheque number, or wire reference.",
-  "po_reference": "Purchase order reference number if this document references a PO.",
-  "vendor_code": "Vendor or supplier ID code assigned by the buyer.",
-  "approved_by": "Name of the person who approved or authorized this document.",
-  "kra_pin": "Kenya Revenue Authority PIN (format: one letter + 9 digits + one letter, e.g. P051234567A).",
-  "vat_number": "VAT or tax registration number.",
-  "bank_details": "Bank name and account details if present for payment remittance.",
-  "confidence": "Your extraction confidence: 'high' if document is clear and all key fields are present, 'medium' if some fields are uncertain, 'low' if document is unclear or incomplete.",
-  "low_quality_warning": false
+_STANDARD_FIELDS: dict[str, str] = {
+    "document_type": "Exact document type as it appears, e.g. Invoice, Tax Invoice, Purchase Order, Receipt, Contract, Delivery Note, Quotation, Credit Note, Debit Note, Utility Bill, or Statement.",
+    "title": "A clean document title for a document management system. Combine supplier, document type, and reference when possible. Max 120 chars. Do not use address lines or column headers.",
+    "supplier": "Company or person ISSUING the document: seller, vendor, supplier, or service provider. Not the bill-to party.",
+    "reference_number": "Primary identifier belonging to this document: invoice number, PO number, order reference, contract number, receipt number, or delivery number. Strip leading #.",
+    "account_code": "Only an explicit account/customer/GL/cost-centre code labelled on the document. Return null unless a nearby label such as Account Code, Account No, Customer Code, GL Code, Cost Centre, or Supplier Account clearly identifies it. Do not infer this from invoice numbers, PO numbers, vendor names, addresses, tax IDs, phone numbers, bank accounts, or arbitrary alphanumeric strings.",
+    "document_date": "Issue/invoice/document date in YYYY-MM-DD. If only month and year are present, use the first day of that month.",
+    "due_date": "Payment due date, expiry date, or required-by date in YYYY-MM-DD.",
+    "amount": "Final total amount due after tax as a plain decimal number. No currency symbols, commas, or spaces.",
+    "currency": "ISO 4217 currency code: USD, EUR, GBP, KES, UGX, TZS, NGN, ZAR, etc. Infer from symbols or context.",
+    "tax_amount": "VAT, GST, sales tax, or tax amount as a plain decimal number.",
+    "subtotal": "Pre-tax subtotal/net amount as a plain decimal number.",
+    "payment_terms": "Payment terms text, e.g. Net 30, Due on receipt.",
+    "payment_method": "Payment method if specified: Cash, Cheque, Bank Transfer, M-PESA, Wire Transfer, Card, etc.",
+    "transaction_ref": "Payment transaction reference, M-PESA code, cheque number, card/wire/reference number.",
+    "po_reference": "Purchase order reference number if this document references a separate PO.",
+    "vendor_code": "Vendor or supplier ID code assigned by the buyer.",
+    "approved_by": "Name of the person who approved or authorized this document.",
+    "kra_pin": "Kenya Revenue Authority PIN, e.g. P051234567A.",
+    "vat_number": "VAT, tax registration, GST, or sales tax registration number.",
+    "bank_details": "Bank name and account/payment remittance details if present.",
 }
 
+
+def _document_type_context(doc) -> dict:
+    doc_type = getattr(doc, "document_type", None)
+    if not doc_type:
+        return {"name": "", "code": "", "metadata_fields": []}
+
+    metadata_fields = []
+    for field in doc_type.metadata_fields.all().order_by("order", "label"):
+        metadata_fields.append({
+            "key": field.key,
+            "label": field.label,
+            "type": field.field_type,
+            "required": field.is_required,
+            "help_text": field.help_text,
+            "select_options": field.select_options or [],
+        })
+
+    return {
+        "name": doc_type.name,
+        "code": doc_type.code,
+        "metadata_fields": metadata_fields,
+    }
+
+
+def _build_extraction_prompt(doc) -> str:
+    context = _document_type_context(doc)
+    standard_schema = {
+        **{key: None for key in _STANDARD_FIELDS},
+        "confidence": "high | medium | low",
+        "low_quality_warning": False,
+    }
+    custom_schema = {
+        field["key"]: None for field in context["metadata_fields"]
+        if field.get("key")
+    }
+    custom_instructions = "\n".join(
+        _format_custom_field_instruction(field)
+        for field in context["metadata_fields"]
+        if field.get("key")
+    ) or "- No admin-defined custom metadata fields for this document type."
+
+    return f"""Extract structured fields from this document. Return ONLY a valid JSON object.
+
+DOCUMENT TYPE CONFIGURATION:
+Name: {context["name"] or "Unknown"}
+Code: {context["code"] or "Unknown"}
+
+STANDARD FIELD DEFINITIONS:
+{json.dumps(_STANDARD_FIELDS, indent=2)}
+
+ADMIN-DEFINED METADATA FIELDS:
+{custom_instructions}
+
+RETURN SHAPE:
+{json.dumps({
+    "fields": standard_schema,
+    "custom_fields": custom_schema,
+}, indent=2)}
+
 STRICT RULES:
-1. Set any field to null if not clearly present — never guess or invent values.
-2. supplier = the ISSUING party (top of invoice, letterhead). Bill-to is the RECIPIENT. They are different.
-3. amount = the FINAL total (labeled TOTAL, TOTAL AMOUNT, AMOUNT DUE, etc.) — never the subtotal.
-4. reference_number = the document's OWN identifier, not a PO reference on an invoice.
-5. title should be useful for a document management system — combine supplier + doc type + ref number.
-6. For scanned or blurry documents: set low_quality_warning to true.
-7. Numbers: plain decimals only — no commas, no currency symbols, no spaces.
-8. Dates: YYYY-MM-DD only. Never return ambiguous formats like 10/25/2024.
+1. Set any field to null if not clearly present. Never guess or invent values.
+2. A weak, partial, blurry, or guessed value is not a value. Return null for that field instead.
+3. Do not use overall confidence to justify speculative fields. confidence describes the extraction as a whole; individual missing fields must remain null.
+4. account_code requires an explicit nearby account/customer/GL/cost-centre label. If the document lacks that label, account_code must be null.
+5. Do not reuse reference_number, po_reference, vendor_code, vat_number, kra_pin, bank_details, phone numbers, addresses, or line-item codes as account_code.
+6. Also fill custom_fields using the exact admin field keys shown above.
+7. If a custom field overlaps a standard field, return the same value in both places, but only when the value is clearly present.
+8. supplier = the ISSUING party, not the bill-to/customer/recipient.
+9. amount = the FINAL total after tax. Do not use subtotal unless no total is present.
+10. Numbers and currency amounts must be plain decimals only: no symbols, commas, or spaces.
+11. Dates must be YYYY-MM-DD. Never return ambiguous formats like 10/25/2024.
+12. For select fields, use one of the configured options when the document clearly supports it; otherwise null.
+13. For blurry, skewed, cropped, or otherwise poor-quality scans, set low_quality_warning to true.
+14. confidence must be "high", "medium", or "low".
 
 Return ONLY the JSON object. Nothing else."""
+
+
+def _format_custom_field_instruction(field: dict) -> str:
+    instruction = (
+        f'- "{field["key"]}" ({field["type"]}, label: "{field["label"]}")'
+    )
+    if field.get("help_text"):
+        instruction += f' - {field["help_text"]}'
+    if field.get("select_options"):
+        instruction += f' Options: {field["select_options"]}'
+    return instruction
+
+
+def _claude_model(settings) -> str:
+    return getattr(settings, "OCR_IDP_MODEL", "claude-haiku-4-5")
+
+
+def _engine_mode(engine_setting: str, file_path: str, mime: str) -> str:
+    engine_setting = (engine_setting or "auto").lower()
+    if engine_setting in {"vision", "claude_vision"}:
+        return "vision"
+    if engine_setting in {"text", "claude_text"}:
+        return "text"
+    if mime.startswith("image/"):
+        return "vision"
+    if mime == "application/pdf":
+        from apps.documents.ocr.tasks_ocr import is_sparse_pdf
+        return "vision" if is_sparse_pdf(file_path) else "text"
+    return "text"
 
 
 # ── Main entry point ───────────────────────────────────────────────────────────
@@ -155,55 +244,37 @@ def run_idp(doc) -> tuple[str, dict]:
     from django.conf import settings as django_settings
 
     engine_setting = getattr(django_settings, "OCR_IDP_ENGINE", "auto").lower()
+    provider = "anthropic"
     start = time.monotonic()
 
-    # ── Route to correct engine ────────────────────────────────────────────────
-    try:
-        if engine_setting == "regex":
-            return _run_regex_fallback(doc, start)
+    mime = doc.file_mime_type or ""
+    file_path = doc.file.path
+    mode = _engine_mode(engine_setting, file_path, mime)
+    engine = f"claude_{mode}"
+    extraction_prompt = _build_extraction_prompt(doc)
 
-        api_key = getattr(django_settings, "ANTHROPIC_API_KEY", "").strip()
-        if not api_key:
-            logger.warning(
-                "idp.run_idp: ANTHROPIC_API_KEY not set — falling back to regex"
-            )
-            return _run_regex_fallback(doc, start)
-
-        mime = doc.file_mime_type or ""
-        file_path = doc.file.path
-
-        # Determine effective engine
-        if engine_setting == "auto":
-            engine = _detect_engine(file_path, mime)
-        elif engine_setting == "claude_vision":
-            engine = "claude_vision"
-        else:
-            engine = "claude_text"
-
-        if engine == "claude_vision":
-            fields, raw_text = _extract_via_vision(file_path, mime, api_key, django_settings)
-        else:
-            fields, raw_text = _extract_via_text(file_path, mime, api_key, django_settings)
-
-    except Exception as exc:
-        logger.error("idp.run_idp: Claude extraction failed for %s: %s", doc.id, exc)
-        logger.info("idp.run_idp: falling back to regex extractor")
-        return _run_regex_fallback(doc, start)
+    if mode == "vision":
+        fields, raw_text = _extract_via_vision(
+            file_path, mime, django_settings, extraction_prompt
+        )
+    else:
+        fields, raw_text = _extract_via_text(
+            file_path, mime, django_settings, extraction_prompt
+        )
 
     elapsed = round(time.monotonic() - start, 2)
 
     # ── Build metadata updates ────────────────────────────────────────────────
-    model = getattr(
-        __import__("django.conf", fromlist=["settings"]).settings,
-        "OCR_IDP_MODEL",
-        "claude-haiku-4-5",
-    )
+    model = _claude_model(django_settings)
+
+    fields = _clean_extracted_fields(fields)
 
     quality = {
         "engine":              engine,
+        "provider":            provider,
         "model":               model,
-        "confidence":          fields.pop("confidence", "medium"),
-        "low_quality_warning": bool(fields.pop("low_quality_warning", False)),
+        "confidence":          fields.pop("confidence", None) or "medium",
+        "low_quality_warning": _as_bool(fields.pop("low_quality_warning", False)),
         "processing_time_s":   elapsed,
         "prompt_version":      _PROMPT_VERSION,
     }
@@ -216,70 +287,22 @@ def run_idp(doc) -> tuple[str, dict]:
     }
 
     logger.info(
-        "idp.run_idp: doc=%s engine=%s confidence=%s time=%.2fs fields=%s",
-        doc.id, engine, quality["confidence"], elapsed,
+        "idp.run_idp: doc=%s provider=%s engine=%s model=%s confidence=%s time=%.2fs fields=%s",
+        doc.id, provider, engine, model, quality["confidence"], elapsed,
         [k for k, v in fields.items() if v is not None and k != "raw_lines"],
     )
 
     return raw_text, metadata_updates
 
-
-# ── Engine detection ───────────────────────────────────────────────────────────
-
-def _detect_engine(file_path: str, mime: str) -> str:
-    """
-    Choose extraction engine based on document content.
-
-    Vision mode for:
-      - Image files (always)
-      - PDFs with sparse native text (scanned/image-based)
-
-    Text mode for:
-      - PDFs with dense native text (digital invoices, contracts)
-    """
-    if mime.startswith("image/"):
-        return "claude_vision"
-
-    if mime == "application/pdf":
-        try:
-            import pdfplumber
-            with pdfplumber.open(file_path) as pdf:
-                if not pdf.pages:
-                    return "claude_vision"
-                # Sample first page
-                text = pdf.pages[0].extract_text() or ""
-                chars_per_page = len(text.strip())
-                # Fewer than 100 chars → likely scanned → use vision
-                return "claude_vision" if chars_per_page < 100 else "claude_text"
-        except Exception:
-            return "claude_vision"
-
-    # Non-PDF, non-image (DOCX, XLSX) → text mode
-    return "claude_text"
-
-
 # ── Vision extraction path ─────────────────────────────────────────────────────
 
-def _extract_via_vision(
-    file_path: str,
-    mime: str,
-    api_key: str,
-    settings,
-) -> tuple[dict, str]:
-    """
-    Render document pages to images and send to Claude Vision.
-    Returns (fields_dict, raw_text_for_storage).
-    """
+
+def _call_anthropic_vision(settings, model: str, pages_b64: list[tuple[str, str]], prompt: str) -> str:
     import anthropic
 
-    model = getattr(settings, "OCR_IDP_MODEL", "claude-haiku-4-5")
-    dpi = int(getattr(settings, "OCR_IDP_VISION_DPI", 150))
-    timeout = int(getattr(settings, "OCR_IDP_TIMEOUT", 60))
-    max_pages = int(getattr(settings, "OCR_IDP_MAX_PAGES", 3))
-
-    pages_b64 = _render_to_images(file_path, mime, dpi, max_pages)
-    if not pages_b64:
-        raise RuntimeError("Could not render any pages from document")
+    api_key = getattr(settings, "ANTHROPIC_API_KEY", "").strip()
+    if not api_key:
+        raise RuntimeError("ANTHROPIC_API_KEY is not set")
 
     content = []
     for i, (img_b64, img_mime) in enumerate(pages_b64):
@@ -293,20 +316,68 @@ def _extract_via_vision(
                 "data":       img_b64,
             },
         })
-    content.append({"type": "text", "text": _EXTRACTION_PROMPT})
+    content.append({"type": "text", "text": prompt})
 
-    client = anthropic.Anthropic(api_key=api_key, timeout=timeout)
+    client = anthropic.Anthropic(
+        api_key=api_key,
+        timeout=int(getattr(settings, "OCR_IDP_TIMEOUT", 60)),
+    )
     response = client.messages.create(
         model=model,
-        max_tokens=1024,
+        max_tokens=2048,
         system=_SYSTEM_PROMPT,
         messages=[{"role": "user", "content": content}],
     )
+    return response.content[0].text.strip()
 
-    raw_json = response.content[0].text.strip()
-    fields = _parse_claude_json(raw_json)
 
-    # Also extract raw text for full-text search (don't depend on Claude for this)
+def _call_anthropic_text(settings, model: str, document_context: str, prompt: str) -> str:
+    import anthropic
+
+    api_key = getattr(settings, "ANTHROPIC_API_KEY", "").strip()
+    if not api_key:
+        raise RuntimeError("ANTHROPIC_API_KEY is not set")
+
+    client = anthropic.Anthropic(
+        api_key=api_key,
+        timeout=int(getattr(settings, "OCR_IDP_TIMEOUT", 60)),
+    )
+    response = client.messages.create(
+        model=model,
+        max_tokens=2048,
+        system=_SYSTEM_PROMPT,
+        messages=[{
+            "role": "user",
+            "content": f"{document_context}\n\n{prompt}",
+        }],
+    )
+    return response.content[0].text.strip()
+
+
+def _extract_via_vision(
+    file_path: str,
+    mime: str,
+    settings,
+    extraction_prompt: str,
+) -> tuple[dict, str]:
+    """
+    Render document pages to images and send to Claude Vision.
+    Returns (fields_dict, raw_text_for_storage).
+    """
+    from apps.documents.ocr.tasks_ocr import render_doc_to_images
+
+    model = _claude_model(settings)
+    dpi = int(getattr(settings, "OCR_IDP_VISION_DPI", 150))
+    max_pages = int(getattr(settings, "OCR_IDP_MAX_PAGES", 3))
+
+    pages_b64 = render_doc_to_images(file_path, mime, dpi=dpi, max_pages=max_pages)
+    if not pages_b64:
+        raise RuntimeError("Could not render any pages from document")
+
+    raw_json = _call_anthropic_vision(settings, model, pages_b64, extraction_prompt)
+    fields = _normalise_claude_fields(_parse_claude_json(raw_json))
+
+    # Extract raw text for full-text search storage
     raw_text = _extract_raw_text(file_path, mime)
 
     return fields, raw_text
@@ -317,20 +388,22 @@ def _extract_via_vision(
 def _extract_via_text(
     file_path: str,
     mime: str,
-    api_key: str,
     settings,
+    extraction_prompt: str,
 ) -> tuple[dict, str]:
     """
     Extract text from PDF with spatial augmentation and send to Claude as text.
     Returns (fields_dict, raw_text_for_storage).
     """
-    import anthropic
+    from apps.documents.ocr.tasks_ocr import _extract_pdf_tables_as_text
 
-    model = getattr(settings, "OCR_IDP_MODEL", "claude-haiku-4-5")
-    timeout = int(getattr(settings, "OCR_IDP_TIMEOUT", 60))
+    model = _claude_model(settings)
 
     raw_text = _extract_raw_text(file_path, mime)
-    augmented_text = _augment_with_tables(file_path, mime, raw_text)
+
+    # Augment with table-derived labelled lines (same helper used by local pipeline)
+    table_text = _extract_pdf_tables_as_text(file_path) if mime == "application/pdf" else ""
+    augmented_text = raw_text + (("\n\n" + table_text) if table_text else "")
 
     if not augmented_text.strip():
         raise RuntimeError("No text could be extracted from document")
@@ -342,85 +415,10 @@ def _extract_via_text(
         f"{'─' * 60}"
     )
 
-    client = anthropic.Anthropic(api_key=api_key, timeout=timeout)
-    response = client.messages.create(
-        model=model,
-        max_tokens=1024,
-        system=_SYSTEM_PROMPT,
-        messages=[{
-            "role": "user",
-            "content": f"{document_context}\n\n{_EXTRACTION_PROMPT}",
-        }],
-    )
-
-    raw_json = response.content[0].text.strip()
-    fields = _parse_claude_json(raw_json)
+    raw_json = _call_anthropic_text(settings, model, document_context, extraction_prompt)
+    fields = _normalise_claude_fields(_parse_claude_json(raw_json))
 
     return fields, raw_text
-
-
-# ── Rendering helpers ──────────────────────────────────────────────────────────
-
-def _render_to_images(
-    file_path: str,
-    mime: str,
-    dpi: int,
-    max_pages: int,
-) -> list[tuple[str, str]]:
-    """
-    Render document pages to base64-encoded PNG images.
-    Returns list of (base64_string, media_type) tuples.
-    """
-    results: list[tuple[str, str]] = []
-
-    if mime.startswith("image/"):
-        with open(file_path, "rb") as f:
-            data = f.read()
-        b64 = base64.standard_b64encode(data).decode()
-        # Normalise to JPEG for smaller payloads if large
-        results.append((b64, mime))
-        return results
-
-    if mime == "application/pdf":
-        try:
-            import pypdfium2 as pdfium
-            doc = pdfium.PdfDocument(file_path)
-            n = min(len(doc), max_pages)
-            scale = dpi / 72.0  # pdfium renders at 72 DPI by default
-
-            for i in range(n):
-                page = doc[i]
-                bitmap = page.render(scale=scale, optimise_mode=pdfium.OptimiseMode.NONE)
-                pil_img = bitmap.to_pil()
-
-                import io
-                buf = io.BytesIO()
-                pil_img.save(buf, format="JPEG", quality=85, optimize=True)
-                buf.seek(0)
-                b64 = base64.standard_b64encode(buf.read()).decode()
-                results.append((b64, "image/jpeg"))
-
-            return results
-        except Exception as exc:
-            logger.error("_render_to_images: pypdfium2 failed: %s", exc)
-            # Fallback to pdf2image
-            try:
-                from pdf2image import convert_from_path
-                import io
-                pages = convert_from_path(file_path, dpi=dpi)
-                for pil_img in pages[:max_pages]:
-                    buf = io.BytesIO()
-                    pil_img.save(buf, format="JPEG", quality=85)
-                    buf.seek(0)
-                    b64 = base64.standard_b64encode(buf.read()).decode()
-                    results.append((b64, "image/jpeg"))
-                return results
-            except Exception as exc2:
-                logger.error("_render_to_images: pdf2image fallback failed: %s", exc2)
-                return []
-
-    # Non-PDF, non-image: can't render
-    return []
 
 
 # ── Text extraction helpers ────────────────────────────────────────────────────
@@ -447,48 +445,6 @@ def _extract_raw_text(file_path: str, mime: str) -> str:
             return ""
 
     return ""
-
-
-def _augment_with_tables(file_path: str, mime: str, raw_text: str) -> str:
-    """
-    Append table-derived "Label: Value" lines to raw text.
-    Preserves column header → cell value relationships that extract_text() collapses.
-    """
-    if mime != "application/pdf":
-        return raw_text
-
-    try:
-        import pdfplumber
-        augmented: list[str] = []
-        with pdfplumber.open(file_path) as pdf:
-            for page in pdf.pages:
-                tables = page.extract_tables() or []
-                for table in tables:
-                    if not table or len(table[0]) > 6 or len(table) > 10:
-                        continue
-                    header_row = table[0]
-                    data_rows = table[1:]
-                    if not data_rows:
-                        for cell in header_row:
-                            if cell and "\n" in str(cell):
-                                parts = str(cell).split("\n", 1)
-                                label, value = parts[0].strip(), parts[1].strip()
-                                if label and value:
-                                    augmented.append(f"{label}: {value}")
-                    else:
-                        for data_row in data_rows:
-                            for header, value in zip(header_row, data_row):
-                                h = str(header or "").strip()
-                                v = str(value or "").strip()
-                                if h and v and h.upper() != v.upper():
-                                    augmented.append(f"{h}: {v}")
-
-        if augmented:
-            return raw_text + "\n\n" + "\n".join(augmented)
-    except Exception as exc:
-        logger.debug("_augment_with_tables: %s", exc)
-
-    return raw_text
 
 
 # ── JSON parsing ───────────────────────────────────────────────────────────────
@@ -545,45 +501,88 @@ def _parse_claude_json(raw: str) -> dict:
     return cleaned
 
 
-# ── Regex fallback ────────────────────────────────────────────────────────────
+def _as_bool(value) -> bool:
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, str):
+        return value.strip().lower() in {"1", "true", "yes", "y"}
+    return bool(value)
 
-def _run_regex_fallback(doc, start: float) -> tuple[str, dict]:
-    """Fall back to the original regex-based extractor."""
-    from apps.documents.ocr.tasks_ocr import _ocr_tesseract_v2, _extract_raw_text as _raw
-    from apps.documents.ocr.extractor import extract_document_fields
 
-    mime = doc.file_mime_type or ""
-    file_path = doc.file.path
+def _normalise_claude_fields(parsed: dict) -> dict:
+    """
+    Accept both prompt v3's nested response and older flat JSON responses.
 
-    if doc.is_scanned or mime.startswith("image/"):
-        text, quality_meta = _ocr_tesseract_v2(doc)
-    else:
-        text = _extract_raw_text(file_path, mime)
-        quality_meta = {}
+    Prompt v3 asks Claude for:
+        {"fields": {...}, "custom_fields": {...}}
 
-    from apps.documents.ocr.tasks_ocr import _extract_pdf_tables_as_text
-    if mime == "application/pdf" and not doc.is_scanned:
-        table_text = _extract_pdf_tables_as_text(file_path)
-        if table_text:
-            text = text + "\n\n" + table_text
+    The rest of the OCR pipeline expects one flat suggestions dict, so custom
+    metadata keys are merged into the same dict. Quality keys stay top-level
+    for run_idp() to pop into the quality block.
+    """
+    if not isinstance(parsed, dict):
+        return {}
 
-    fields = extract_document_fields(text)
-    elapsed = round(time.monotonic() - start, 2)
+    fields = parsed.get("fields")
+    custom_fields = parsed.get("custom_fields")
+    if isinstance(fields, dict) or isinstance(custom_fields, dict):
+        merged: dict = {}
+        if isinstance(fields, dict):
+            merged.update(fields)
+        if isinstance(custom_fields, dict):
+            merged.update(custom_fields)
 
-    quality = {
-        "engine":              "regex",
-        "model":               None,
-        "confidence":          "medium",
-        "low_quality_warning": quality_meta.get("low_quality_warning", False),
-        "processing_time_s":   elapsed,
-        "prompt_version":      None,
-        **({"mean_confidence": quality_meta["mean_confidence"]} if quality_meta.get("mean_confidence") else {}),
-        **({"overall_quality_ratio": quality_meta["overall_quality_ratio"]} if quality_meta.get("overall_quality_ratio") else {}),
-    }
-
-    return text, {
-        "ocr_suggestions": {
-            "fields":  fields,
-            "quality": quality,
+        for key in ("confidence", "low_quality_warning"):
+            if key in parsed and key not in merged:
+                merged[key] = parsed[key]
+        return {
+            key: value
+            for key, value in merged.items()
+            if value is not None and value != "" and value != "null"
         }
-    }
+
+    return parsed
+
+
+def _clean_extracted_fields(fields: dict) -> dict:
+    cleaned = dict(fields or {})
+    account_code = cleaned.get("account_code")
+    if account_code and not _is_plausible_account_code(str(account_code), cleaned):
+        logger.info(
+            "idp.run_idp: dropping implausible account_code=%r",
+            str(account_code)[:80],
+        )
+        cleaned.pop("account_code", None)
+    return cleaned
+
+
+def _is_plausible_account_code(value: str, fields: dict) -> bool:
+    value_norm = " ".join(str(value or "").split()).strip()
+    if not value_norm:
+        return False
+
+    comparisons = (
+        "supplier",
+        "title",
+        "reference_number",
+        "transaction_ref",
+        "po_reference",
+        "vendor_code",
+        "vat_number",
+        "kra_pin",
+        "bank_details",
+    )
+    folded = value_norm.casefold()
+    for key in comparisons:
+        other = fields.get(key)
+        if other and folded == " ".join(str(other).split()).casefold():
+            return False
+
+    if re.search(r"\d{10,}", value_norm):
+        return False
+    if re.search(r"\b(?:ltd|limited|inc|llc|plc|corp|company|partners|enterprises)\b", value_norm, re.I):
+        return False
+    if re.search(r"[A-Za-z]{2,}\s+[A-Za-z]{2,}", value_norm) and not re.search(r"[\d#/_-]", value_norm):
+        return False
+
+    return bool(re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9#/_\-. ]{1,59}", value_norm))

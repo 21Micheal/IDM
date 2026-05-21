@@ -109,11 +109,129 @@ def _get_spacy_model(model_name: str):
 
 def run_ocr(doc) -> tuple[str, dict]:
     """
-    Run OCR (or native PDF text) on a Document and return (extracted_text, metadata_updates).
+    Run IDP/OCR on a Document and return (extracted_text, metadata_updates).
 
-    metadata_updates is merged into doc.metadata:
-        ocr_suggestions — structured field suggestions (regex + NER)
-        ocr_quality     — confidence / source / page stats when available
+    Routing priority:
+      1. IDP via Anthropic when credentials are set
+         and OCR_IDP_ENGINE != "regex".
+
+         IDP_PROVIDER:
+           "anthropic" → Claude via Anthropic API
+
+         Falls back to PDF text extraction automatically on any API failure.
+
+      2. Local pipeline (always available, no API key needed):
+         a. Pre-packaged OCR zip bundle
+         b. Native PDF text layer (pdfplumber + table augmentation)
+         c. Raster OCR: PaddleOCR → Tesseract fallback (or Textract)
+         d. Field extraction: regex extractor + spaCy NER → FieldResolver merge
+
+    metadata_updates shape (same for both paths):
+        {
+            "ocr_suggestions": {
+                "fields":  { ...all extracted fields... },
+                "quality": {
+                    "engine":              str,   # "claude_text"|"claude_vision"|...
+                    "provider":            str,   # "anthropic"|"local"
+                    "confidence":          str,   # "high"|"medium"|"low" (IDP) or None (local)
+                    "low_quality_warning": bool,
+                    ...
+                }
+            }
+        }
+
+    The Celery task (ocr_document in tasks.py) reads:
+        metadata_updates["ocr_suggestions"]["fields"]   for field suggestions
+        metadata_updates["ocr_suggestions"]["quality"]  for quality metrics
+    Backward-compatible: tasks.py also checks "ocr_quality" at the top level
+    (kept via _metadata_from_extracted_text below).
+    """
+    from django.conf import settings as django_settings
+
+    idp_engine = _normalise_setting(getattr(django_settings, "OCR_IDP_ENGINE", "auto"))
+    provider = _normalise_setting(getattr(django_settings, "IDP_PROVIDER", "anthropic"))
+
+    if provider == "regex" or idp_engine == "regex":
+        return _run_local_pipeline(doc)
+
+    if provider != "anthropic":
+        logger.warning(
+            "run_ocr: unsupported IDP_PROVIDER=%s for doc=%s — falling back to PDF text",
+            provider,
+            doc.id,
+        )
+        return _run_pdf_text_fallback(doc, reason=f"unsupported_provider:{provider}")
+
+    if not _has_anthropic_config(django_settings):
+        logger.info(
+            "run_ocr: ANTHROPIC_API_KEY missing for doc=%s — falling back to PDF text",
+            doc.id,
+        )
+        return _run_pdf_text_fallback(doc, reason="anthropic_key_missing")
+
+    # ── IDP path ─────────────────────────────────────────────────────────────
+    try:
+        from apps.documents.ocr.idp import run_idp
+        return run_idp(doc)
+    except Exception as exc:
+        logger.error(
+            "run_ocr: Anthropic IDP failed for doc=%s (%s) — falling back to PDF text",
+            doc.id,
+            exc,
+        )
+        return _run_pdf_text_fallback(doc, reason="anthropic_error")
+
+
+def _normalise_setting(value: object) -> str:
+    return str(value or "").strip().lower()
+
+
+def _has_anthropic_config(settings) -> bool:
+    return bool(getattr(settings, "ANTHROPIC_API_KEY", "").strip())
+
+
+def _run_pdf_text_fallback(doc, *, reason: str = "anthropic_unavailable") -> tuple[str, dict]:
+    """
+    Lightweight fallback for the Anthropic path: PDF text layer + regex fields.
+
+    Unlike the full local OCR pipeline, this does not rasterise pages or load
+    Paddle/Tesseract. It is intentionally cheap and dependency-light.
+    """
+    mime = (doc.file_mime_type or "").lower()
+    file_path = doc.file.path
+
+    text = ""
+    quality_meta = {
+        "extraction_source": "pdf_text_fallback",
+        "mean_confidence": 0.0,
+        "overall_quality_ratio": 0.0,
+        "total_pages": 0,
+        "low_quality_pages": 0,
+        "low_quality_warning": True,
+        "fallback_reason": reason,
+    }
+
+    if mime == "application/pdf":
+        native_text, cpp = _pdf_native_text_and_density(file_path)
+        table_text = _extract_pdf_tables_as_text(file_path)
+        text = native_text + (("\n\n" + table_text) if table_text else "")
+        page_count = _pdf_page_count(file_path)
+        quality_meta.update({
+            "chars_per_page": round(cpp, 1),
+            "mean_confidence": 100.0 if text.strip() else 0.0,
+            "overall_quality_ratio": 1.0 if text.strip() else 0.0,
+            "total_pages": page_count,
+            "low_quality_pages": 0 if text.strip() else page_count,
+            "low_quality_warning": not bool(text.strip()),
+        })
+
+    return _metadata_from_extracted_text(text, quality_meta)
+
+
+def _run_local_pipeline(doc) -> tuple[str, dict]:
+    """
+    Local OCR pipeline: zip bundle → PDF text layer → raster OCR → field extraction.
+    Produces the same metadata_updates shape as run_idp() for consistency.
     """
     from django.conf import settings as django_settings
 
@@ -123,18 +241,12 @@ def run_ocr(doc) -> tuple[str, dict]:
     text = ""
     quality_meta: dict = {}
 
-    # ── Pre-packaged OCR zip (zip disguised as PDF, contains .txt + .jpeg) ──
-    # Some document scanning workflows produce a zip archive renamed as .pdf
-    # containing manifest.json, per-page .txt (OCR text), and .jpeg (image).
-    # Detect by trying to open as zip first.
-    if not text.strip():
-        text, quality_meta = _try_ocr_package(file_path)
-        if text.strip():
-            logger.info(
-                "run_ocr: doc=%s loaded pre-packaged OCR from zip bundle", doc.id
-            )
+    # ── Pre-packaged OCR zip bundle ──────────────────────────────────────────
+    text, quality_meta = _try_ocr_package(file_path)
+    if text.strip():
+        logger.info("run_ocr: doc=%s loaded pre-packaged OCR from zip bundle", doc.id)
 
-    # ── Native PDF text layer (digitally created PDFs, not scans) ───────────
+    # ── Native PDF text layer ────────────────────────────────────────────────
     if not text.strip() and mime == "application/pdf":
         native_text, cpp = _pdf_native_text_and_density(file_path)
         if cpp >= _MIN_CHARS_PER_PAGE_NATIVE_PDF:
@@ -154,13 +266,12 @@ def run_ocr(doc) -> tuple[str, dict]:
                 doc.id, cpp, quality_meta["total_pages"],
             )
 
-    # ── Raster OCR when no usable text layer ────────────────────────────────
+    # ── Raster OCR ───────────────────────────────────────────────────────────
     if not (text or "").strip():
         engine = getattr(django_settings, "OCR_ENGINE", "paddle").lower()
 
         if engine == "textract":
             from apps.documents.tasks import _ocr_textract
-
             text = _ocr_textract(doc)
             quality_meta = {
                 "extraction_source": "textract",
@@ -184,20 +295,60 @@ def run_ocr(doc) -> tuple[str, dict]:
                 text, quality_meta = _ocr_tesseract_v2(doc)
                 quality_meta["extraction_source"] = "tesseract_fallback"
 
+    return _metadata_from_extracted_text(text, quality_meta)
+
+
+def _metadata_from_extracted_text(text: str, quality_meta: dict) -> tuple[str, dict]:
+    # ── Field extraction: regex + NER → merge ────────────────────────────────
     from apps.documents.ocr.extractor import extract_document_fields
+    from apps.documents.ocr.field_resolver import FieldResolver
 
     regex_suggestions = extract_document_fields(text)
     ner_hints = _ner_field_hints(text)
-
-    from apps.documents.ocr.field_resolver import FieldResolver
-
     merged, _sources = FieldResolver().resolve(regex_suggestions, ner_hints)
+    merged = _clean_local_suggestions(merged)
 
-    metadata_updates: dict = {"ocr_suggestions": merged}
-    if quality_meta:
-        metadata_updates["ocr_quality"] = quality_meta
+    # ── Build unified metadata shape (same as IDP output) ────────────────────
+    quality_block = {
+        "engine":              quality_meta.get("extraction_source", "local"),
+        "provider":            "local",
+        "model":               None,
+        "confidence":          None,
+        "low_quality_warning": quality_meta.get("low_quality_warning", False),
+        **{k: v for k, v in quality_meta.items()
+           if k not in ("extraction_source", "low_quality_warning")},
+    }
 
-    return text, metadata_updates
+    return text, {
+        # New unified shape — consumed by the updated ocr_document task
+        "ocr_suggestions": {
+            "fields":  merged,
+            "quality": quality_block,
+        },
+        # Legacy top-level key — keeps backward compat with any code
+        # that reads metadata["ocr_quality"] directly (e.g. admin views)
+        "ocr_quality": quality_meta,
+    }
+
+
+def _clean_local_suggestions(fields: dict) -> dict:
+    cleaned = dict(fields or {})
+    account_code = cleaned.get("account_code")
+    if account_code:
+        from apps.documents.ocr.extractor import _is_plausible_gl_account_code
+
+        folded = " ".join(str(account_code).split()).casefold()
+        supplier = cleaned.get("supplier")
+        if (
+            (supplier and folded == " ".join(str(supplier).split()).casefold())
+            or not _is_plausible_gl_account_code(str(account_code))
+        ):
+            logger.info(
+                "run_ocr: dropping implausible local account_code=%r",
+                str(account_code)[:80],
+            )
+            cleaned.pop("account_code", None)
+    return cleaned
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -752,3 +903,105 @@ def _pdf_effective_dpi(file_path: str, fallback_dpi: int) -> int:
         pass
 
     return max(200, min(fallback_dpi, 400))
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# IDP rendering helpers — used by apps/documents/ocr/idp.py
+# Kept here so idp.py can import them without circular dependencies.
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+def render_doc_to_images(
+    file_path: str,
+    mime: str,
+    dpi: int = 150,
+    max_pages: int = 3,
+) -> list[tuple[str, str]]:
+    """
+    Render document pages to base64-encoded JPEG images for Claude Vision.
+
+    Returns a list of (base64_string, media_type) tuples, one per page
+    (up to max_pages).
+
+    Tries pypdfium2 first (faster, no poppler dependency), falls back to
+    pdf2image (uses poppler).  Images are always returned as image/jpeg at
+    the specified DPI.
+    """
+    import base64
+    import io
+
+    results: list[tuple[str, str]] = []
+
+    # ── Direct image files ───────────────────────────────────────────────────
+    if mime.startswith("image/"):
+        try:
+            from PIL import Image
+            with Image.open(file_path) as img:
+                buf = io.BytesIO()
+                img.convert("RGB").save(buf, format="JPEG", quality=88, optimize=True)
+                buf.seek(0)
+                results.append((
+                    base64.standard_b64encode(buf.read()).decode(),
+                    "image/jpeg",
+                ))
+        except Exception as exc:
+            logger.error("render_doc_to_images: image open failed: %s", exc)
+        return results
+
+    # ── PDF rendering ────────────────────────────────────────────────────────
+    if mime == "application/pdf":
+        # Try pypdfium2 first — no system dependency, faster
+        try:
+            import pypdfium2 as pdfium
+
+            pdf_doc = pdfium.PdfDocument(file_path)
+            scale = dpi / 72.0
+            for i in range(min(len(pdf_doc), max_pages)):
+                page = pdf_doc[i]
+                bitmap = page.render(scale=scale)
+                pil_img = bitmap.to_pil()
+                buf = io.BytesIO()
+                pil_img.save(buf, format="JPEG", quality=88, optimize=True)
+                buf.seek(0)
+                results.append((
+                    base64.standard_b64encode(buf.read()).decode(),
+                    "image/jpeg",
+                ))
+            if results:
+                return results
+        except Exception as exc:
+            logger.debug("render_doc_to_images: pypdfium2 failed (%s), trying pdf2image", exc)
+
+        # Fallback: pdf2image (requires poppler-utils)
+        try:
+            from pdf2image import convert_from_path
+            pages = convert_from_path(file_path, dpi=dpi, fmt="RGB", thread_count=1)
+            for pil_img in pages[:max_pages]:
+                buf = io.BytesIO()
+                pil_img.save(buf, format="JPEG", quality=88, optimize=True)
+                buf.seek(0)
+                results.append((
+                    base64.standard_b64encode(buf.read()).decode(),
+                    "image/jpeg",
+                ))
+        except Exception as exc:
+            logger.error("render_doc_to_images: pdf2image also failed: %s", exc)
+
+    return results
+
+
+def is_sparse_pdf(file_path: str, threshold: int = 100) -> bool:
+    """
+    Return True when the PDF has too little native text to skip raster OCR.
+    Used by idp._detect_engine() to choose vision vs text extraction mode.
+    """
+    try:
+        import pdfplumber
+
+        with pdfplumber.open(file_path) as pdf:
+            if not pdf.pages:
+                return True
+            text = pdf.pages[0].extract_text() or ""
+            return len(text.strip()) < threshold
+    except Exception:
+        return True

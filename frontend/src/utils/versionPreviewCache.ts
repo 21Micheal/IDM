@@ -17,6 +17,16 @@ type VersionPreviewCache = {
 const VERSION_PREVIEW_CACHE_TTL = 5 * 60 * 1000; // 5 minutes
 const versionPreviewCache: VersionPreviewCache = {};
 
+export function getPreviewCacheKey(
+  documentId: string,
+  currentVersion: number,
+  versionId?: string | null,
+): string {
+  return versionId
+    ? `${documentId}-${versionId}`
+    : `${documentId}-current-v${currentVersion}`;
+}
+
 export function getCachedVersionPreview(cacheKey: string): DocumentPreviewResponse | null {
   const cached = versionPreviewCache[cacheKey];
   if (!cached) return null;

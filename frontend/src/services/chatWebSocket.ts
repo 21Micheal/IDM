@@ -14,6 +14,8 @@ export class ChatWebSocketService {
   private currentRoomId: string | null = null;
   private notificationReconnectAttempts = 0;
   private maxNotificationReconnectAttempts = 3;
+  private intentionalChatClose = false;
+  private intentionalNotificationClose = false;
 
   constructor() {}
 
@@ -86,18 +88,20 @@ export class ChatWebSocketService {
 
     // Disconnect from current room if connected
     this.disconnectChat();
+    this.intentionalChatClose = false;
 
     const wsUrl = this.buildWebSocketUrl(`/ws/chat/${roomId}/`);
 
-    this.chatSocket = new WebSocket(wsUrl);
+    const socket = new WebSocket(wsUrl);
+    this.chatSocket = socket;
     this.currentRoomId = roomId;
 
-    this.chatSocket.onopen = () => {
+    socket.onopen = () => {
       console.log(`Connected to chat room: ${roomId}`);
       this.reconnectAttempts = 0;
     };
 
-    this.chatSocket.onmessage = (event) => {
+    socket.onmessage = (event) => {
       try {
         const data = JSON.parse(event.data) as WebSocketMessage;
         
@@ -118,20 +122,22 @@ export class ChatWebSocketService {
       }
     };
 
-    this.chatSocket.onclose = (event) => {
+    socket.onclose = (event) => {
+      if (this.chatSocket !== socket) return;
       console.log(`Chat room connection closed: ${roomId}`);
       this.currentRoomId = null;
       
       // Attempt to reconnect if not intentionally closed
-      if (!event.wasClean && this.reconnectAttempts < this.maxReconnectAttempts) {
+      if (!this.intentionalChatClose && !event.wasClean && this.reconnectAttempts < this.maxReconnectAttempts) {
+        const nextAttempt = this.reconnectAttempts + 1;
+        this.reconnectAttempts = nextAttempt;
         setTimeout(() => {
-          this.reconnectAttempts++;
           this.connectToRoom(roomId);
-        }, this.reconnectDelay * this.reconnectAttempts);
+        }, this.reconnectDelay * nextAttempt);
       }
     };
 
-    this.chatSocket.onerror = (error) => {
+    socket.onerror = (error) => {
       console.error('Chat WebSocket error:', error);
     };
   }
@@ -144,14 +150,16 @@ export class ChatWebSocketService {
 
     const wsUrl = this.buildWebSocketUrl('/ws/notifications/');
 
-    this.notificationSocket = new WebSocket(wsUrl);
+    this.intentionalNotificationClose = false;
+    const socket = new WebSocket(wsUrl);
+    this.notificationSocket = socket;
 
-    this.notificationSocket.onopen = () => {
+    socket.onopen = () => {
       console.log('Connected to chat notifications');
       this.notificationReconnectAttempts = 0;
     };
 
-    this.notificationSocket.onmessage = (event) => {
+    socket.onmessage = (event) => {
       try {
         const data = JSON.parse(event.data) as WebSocketMessage;
         
@@ -163,24 +171,27 @@ export class ChatWebSocketService {
       }
     };
 
-    this.notificationSocket.onclose = (event) => {
+    socket.onclose = (event) => {
+      if (this.notificationSocket !== socket) return;
       console.log('Notification connection closed');
       this.notificationSocket = null;
       
       // Attempt to reconnect only when consumers exist and within cap.
       if (
         !event.wasClean &&
+        !this.intentionalNotificationClose &&
         this.notificationCallbacks.length > 0 &&
         this.notificationReconnectAttempts < this.maxNotificationReconnectAttempts
       ) {
+        const nextAttempt = this.notificationReconnectAttempts + 1;
+        this.notificationReconnectAttempts = nextAttempt;
         setTimeout(() => {
-          this.notificationReconnectAttempts++;
           this.connectNotifications();
-        }, this.reconnectDelay * this.notificationReconnectAttempts);
+        }, this.reconnectDelay * nextAttempt);
       }
     };
 
-    this.notificationSocket.onerror = (error) => {
+    socket.onerror = (error) => {
       console.error('Notification WebSocket error:', error);
     };
   }
@@ -190,12 +201,14 @@ export class ChatWebSocketService {
     content: string;
     message_type?: string;
     reply_to?: string;
-  }) {
+    client_id?: string;
+  }): boolean {
     if (this.chatSocket && this.chatSocket.readyState === WebSocket.OPEN) {
       this.chatSocket.send(JSON.stringify(data));
-    } else {
-      console.error('Chat socket not connected');
+      return true;
     }
+    console.error('Chat socket not connected');
+    return false;
   }
 
   // Send typing indicator
@@ -221,6 +234,7 @@ export class ChatWebSocketService {
   // Disconnect from chat room
   disconnectChat() {
     if (this.chatSocket) {
+      this.intentionalChatClose = true;
       this.chatSocket.close();
       this.chatSocket = null;
       this.currentRoomId = null;
@@ -230,6 +244,7 @@ export class ChatWebSocketService {
   // Disconnect from notifications
   disconnectNotifications() {
     if (this.notificationSocket) {
+      this.intentionalNotificationClose = true;
       this.notificationSocket.close();
       this.notificationSocket = null;
     }

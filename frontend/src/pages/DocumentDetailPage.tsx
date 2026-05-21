@@ -11,7 +11,7 @@
  * All business logic (locking, OCR polling, version restore, comments,
  * workflow tasks, mutations) is unchanged.
  */
-import { Suspense, lazy, useState, useEffect, useRef } from "react";
+import { Suspense, lazy, useState, useEffect, useRef, useCallback } from "react";
 import { useParams, useNavigate } from "react-router-dom";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { documentsAPI, workflowAPI } from "@/services/api";
@@ -36,7 +36,7 @@ import { formatDocumentFileType } from "@/lib/documentFormat";
 import { StarButton } from "@/components/documents/StarButton";
 import { AddToFolderMenu } from "@/components/documents/AddToFolderMenu";
 
-import { clearDocumentVersionCache } from "@/utils/versionPreviewCache";
+import { clearDocumentVersionCache, getCachedVersionPreview, getPreviewCacheKey, setCachedVersionPreview } from "@/utils/versionPreviewCache";
 
 const AUDIT_PAGE_SIZE = 5;
 
@@ -95,6 +95,27 @@ function formatDocumentDetailValue(doc: Document, field: MetadataField) {
   return String(value);
 }
 
+function getOcrQuality(metadata: Document["metadata"] | null | undefined) {
+  const ocrSuggestions = (metadata as any)?.ocr_suggestions;
+  return (
+    (ocrSuggestions && typeof ocrSuggestions === "object" ? ocrSuggestions.quality : null) ||
+    (metadata as any)?.ocr_quality ||
+    null
+  );
+}
+
+function formatOcrEngine(engine: unknown) {
+  return String(engine || "Unknown").replace(/_/g, " ");
+}
+
+function normalizeUrl(url: string | null | undefined): string | undefined {
+  if (!url) return url ?? undefined;
+  if (window.location.protocol === "https:" && url.startsWith("http://")) {
+    return url.replace("http://", "https://");
+  }
+  return url;
+}
+
 type TabId = "preview" | "versions" | "comments" | "audit" | "edit";
 
 type PaginatedResponse<T> = {
@@ -136,6 +157,64 @@ export default function DocumentDetailPage() {
   const ocrActive = ocrStatus === "pending" || ocrStatus === "processing";
   const previewStatus = doc?.preview_status;
   const previewActive = previewStatus === "pending" || previewStatus === "processing";
+
+  const warmPreview = useCallback(() => {
+    if (!doc?.id) return;
+
+    import("@/components/documents/DocumentViewer");
+
+    const cacheKey = getPreviewCacheKey(doc.id, doc.current_version);
+    const cached = getCachedVersionPreview(cacheKey);
+    if (cached?.preview_status === "done" && cached.url) return;
+
+    const shouldPrefetchPdfjs = /\.(pdf|docx?|xlsx?|pptx?|odt|ods|odp)$/i.test(doc.file_name || "") || doc.file_mime_type === "application/pdf";
+    if (shouldPrefetchPdfjs) {
+      import("pdfjs-dist");
+    }
+
+    void qc.prefetchQuery({
+      queryKey: ["document-preview", doc.id, "current", doc.current_version],
+      queryFn: async () => {
+        const result = await documentsAPI.previewUrl(doc.id);
+        const normalizedResult = {
+          ...result.data,
+          url: normalizeUrl(result.data.url ?? undefined) ?? result.data.url ?? null,
+          raw_url: result.data.raw_url ? normalizeUrl(result.data.raw_url) : undefined,
+        };
+        setCachedVersionPreview(cacheKey, normalizedResult);
+        return normalizedResult;
+      },
+      staleTime: 5 * 60_000,
+    });
+  }, [doc?.file_mime_type, doc?.file_name, doc?.current_version, doc?.id, qc]);
+
+  const prefetchVersionPreview = useCallback((versionId: string) => {
+    if (!doc?.id) return;
+
+    const cacheKey = getPreviewCacheKey(doc.id, doc.current_version, versionId);
+    const cached = getCachedVersionPreview(cacheKey);
+    if (cached?.preview_status === "done" && cached.url) return;
+
+    void qc.prefetchQuery({
+      queryKey: ["document-preview", doc.id, versionId, null],
+      queryFn: async () => {
+        const result = await documentsAPI.previewUrl(doc.id, versionId);
+        const normalizedResult = {
+          ...result.data,
+          url: normalizeUrl(result.data.url ?? undefined) ?? result.data.url ?? null,
+          raw_url: result.data.raw_url ? normalizeUrl(result.data.raw_url) : undefined,
+        };
+        setCachedVersionPreview(cacheKey, normalizedResult);
+        return normalizedResult;
+      },
+      staleTime: 5 * 60_000,
+    });
+  }, [doc?.id, doc?.current_version, qc]);
+
+  useEffect(() => {
+    if (!doc?.id || activeTab !== "preview") return;
+    warmPreview();
+  }, [activeTab, doc?.id, warmPreview]);
 
   useEffect(() => {
     if ((!ocrActive && !previewActive) || !id) {
@@ -288,6 +367,7 @@ export default function DocumentDetailPage() {
   const canRestoreVersion = hasAdminAccess || permissions.includes("upload");
   const canReOcr = hasAdminAccess || (isScanned && permissions.includes("upload"));
   const canDownload = hasAdminAccess || permissions.includes("download");
+  const ocrQuality = getOcrQuality(doc.metadata);
 
   const canSubmit =
     !isPersonal &&
@@ -493,16 +573,16 @@ export default function DocumentDetailPage() {
                       {!ocrStatus && <span className="text-muted-foreground text-xs">—</span>}
                     </dd>
                   </div>
-                  {(doc.metadata as any)?.ocr_quality && (
+                  {ocrQuality && (
                     <div className="flex justify-between gap-2">
                       <dt className="text-muted-foreground">OCR engine</dt>
                       <dd className="text-right">
                         <span className="text-xs font-medium capitalize">
-                          {(doc.metadata as any).ocr_quality.engine || 'Unknown'}
+                          {formatOcrEngine(ocrQuality.engine)}
                         </span>
-                        {(doc.metadata as any).ocr_quality.mean_confidence && (
+                        {ocrQuality.mean_confidence && (
                           <span className="text-xs text-muted-foreground ml-1">
-                            ({(doc.metadata as any).ocr_quality.mean_confidence}% conf.)
+                            ({ocrQuality.mean_confidence}% conf.)
                           </span>
                         )}
                       </dd>
@@ -549,6 +629,8 @@ export default function DocumentDetailPage() {
                   <button
                     key={tab.id}
                     onClick={() => handleTabClick(tab)}
+                    onMouseEnter={tab.id === "preview" ? warmPreview : undefined}
+                    onFocus={tab.id === "preview" ? warmPreview : undefined}
                     disabled={tab.disabled}
                     className={cn(
                       "px-4 py-2.5 text-sm font-medium border-b-2 transition-colors whitespace-nowrap inline-flex items-center gap-1.5 disabled:opacity-50 disabled:cursor-not-allowed",
@@ -611,6 +693,8 @@ export default function DocumentDetailPage() {
                 return (
                   <div
                     key={v.id}
+                    onMouseEnter={() => prefetchVersionPreview(v.id)}
+                    onFocus={() => prefetchVersionPreview(v.id)}
                     className={`card p-4 flex items-start gap-3 ${isCurrent ? "border-l-4 border-l-primary bg-primary/5" : ""}`}
                   >
                     <div

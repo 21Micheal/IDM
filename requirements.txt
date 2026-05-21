@@ -87,3 +87,6 @@ en-core-web-sm @ https://github.com/explosion/spacy-models/releases/download/en_
 
 # DATEUTIL  (already likely installed, add for explicit pinning)
 python-dateutil>=2.8.2
+# anthropic
+anthropic>=0.97.0
+pypdfium2>=4.30.0

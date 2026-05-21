@@ -47,6 +47,7 @@ import type {
 import {
   clearDocumentVersionCache,
   getCachedVersionPreview,
+  getPreviewCacheKey,
   setCachedVersionPreview,
 } from "@/utils/versionPreviewCache";
 
@@ -60,6 +61,11 @@ const pdfWorkerPath = new URL(
   "pdfjs-dist/build/pdf.worker.min.mjs",
   import.meta.url
 ).toString();
+
+const pdfjsImportPromise = import("pdfjs-dist");
+async function getPdfjsLib() {
+  return pdfjsImportPromise;
+}
 
 // ── Constants ──────────────────────────────────────────────────────────────────
 
@@ -122,16 +128,6 @@ function getFileExtension(name?: string): string {
   if (!name) return "";
   const idx = name.lastIndexOf(".");
   return idx >= 0 ? name.slice(idx).toLowerCase() : "";
-}
-
-function getPreviewCacheKey(
-  documentId: string,
-  currentVersion: number,
-  versionId?: string | null,
-): string {
-  return versionId
-    ? `${documentId}-${versionId}`
-    : `${documentId}-current-v${currentVersion}`;
 }
 
 // ── EditLockBanner ─────────────────────────────────────────────────────────────
@@ -220,7 +216,7 @@ function PdfViewer({
       return () => { cancelled = true; };
     }
 
-    const documentPromise = import("pdfjs-dist")
+    const documentPromise = getPdfjsLib()
       .then((pdfjsLib) => {
         if (cancelled) return Promise.reject("cancelled");
         pdfjsLib.GlobalWorkerOptions.workerSrc = pdfWorkerPath;
@@ -473,13 +469,15 @@ function ImageViewer({
 
 function OfficeEditPanel({
   doc,
-  initialPreview,
+  preview,
+  refetchPreview,
   selectedVersionId,
   canEditInEditor,
   onVersionUploaded,
 }: {
   doc: Document;
-  initialPreview: DocumentPreviewResponse;
+  preview: DocumentPreviewResponse | undefined;
+  refetchPreview: () => Promise<import("@tanstack/react-query").QueryObserverResult<DocumentPreviewResponse, Error>>;
   selectedVersionId?: string | null;
   canEditInEditor: boolean;
   onVersionUploaded: () => void;
@@ -504,42 +502,6 @@ function OfficeEditPanel({
   const isLocked      = Boolean(doc.is_edit_locked);
   const lockedByMe    = isLocked && doc.edit_locked_by === user?.id;
   const lockedByOther = isLocked && !lockedByMe;
-
-  // ── Preview query ─────────────────────────────────────────────────────────
-
-  const { data: preview, refetch: refetchPreview } = useQuery<DocumentPreviewResponse>({
-    queryKey: ["document-preview", doc.id, selectedVersionId ?? "current", selectedVersionId ? null : doc.current_version],
-    queryFn: async () => {
-      const cacheKey = getPreviewCacheKey(doc.id, doc.current_version, selectedVersionId);
-      const cached = getCachedVersionPreview(cacheKey);
-
-      // Only reuse completed historical previews. Pending / processing entries
-      // must go back to the API so we follow the backend's real state.
-      if (cached && selectedVersionId && cached.preview_status === "done" && cached.url) {
-        return cached;
-      }
-
-      try {
-        const result = await documentsAPI.previewUrl(doc.id, selectedVersionId ?? undefined);
-        const normalizedResult = {
-          ...result.data,
-          url: normalizeUrl(result.data.url ?? undefined) ?? result.data.url ?? null,
-          raw_url: result.data.raw_url ? normalizeUrl(result.data.raw_url) || result.data.raw_url : undefined,
-        };
-
-        setCachedVersionPreview(cacheKey, normalizedResult);
-        return normalizedResult;
-      } catch (error) {
-        const fallback = getCachedVersionPreview(cacheKey);
-        if (fallback?.preview_status === "done" && fallback.url) return fallback;
-        throw error;
-      }
-    },
-    placeholderData: initialPreview,
-    staleTime: 0,
-    refetchInterval: false,
-    retry: 2,
-  });
 
   // ── Preview polling ───────────────────────────────────────────────────────
 
@@ -1005,18 +967,37 @@ export default function DocumentViewer({ document: doc, submitSlot }: Props) {
     }
   }, [doc.versions, selectedVersionId]);
 
-  const { data: preview, isLoading, isError } = useQuery<DocumentPreviewResponse>({
+  const previewCacheKey = getPreviewCacheKey(doc.id, doc.current_version, selectedVersionId);
+  const initialCachedPreview = getCachedVersionPreview(previewCacheKey);
+
+  const prefetchVersionPreview = useCallback((versionId: string | null) => {
+    const queryKey = ["document-preview", doc.id, versionId ?? "current", versionId ? null : doc.current_version] as const;
+    if (qc.getQueryData<DocumentPreviewResponse>(queryKey)) return;
+
+    void qc.prefetchQuery({
+      queryKey,
+      queryFn: async () => {
+        const result = await documentsAPI.previewUrl(doc.id, versionId ?? undefined);
+        const normalizedResult = {
+          ...result.data,
+          url: normalizeUrl(result.data.url ?? undefined) ?? result.data.url ?? null,
+          raw_url: result.data.raw_url ? normalizeUrl(result.data.raw_url) : undefined,
+        };
+        return normalizedResult;
+      },
+      staleTime: 5 * 60_000,
+      retry: 2,
+    }).catch(() => {});
+  }, [doc.id, doc.current_version, qc]);
+
+  const { data: preview, isLoading, isError, refetch: refetchPreview } = useQuery<DocumentPreviewResponse, Error, DocumentPreviewResponse>({
     queryKey: ["document-preview", doc.id, selectedVersionId ?? "current", selectedVersionId ? null : doc.current_version],
     queryFn: async () => {
-      const cacheKey = getPreviewCacheKey(doc.id, doc.current_version, selectedVersionId);
-      const cached = getCachedVersionPreview(cacheKey);
-      
-      // Only reuse completed historical previews. Pending / processing entries
-      // must go back to the API so navigation follows the backend's real state.
-      if (cached && selectedVersionId && cached.preview_status === "done" && cached.url) {
+      const cached = getCachedVersionPreview(previewCacheKey);
+      if (cached?.preview_status === "done" && cached.url) {
         return cached;
       }
-      
+
       try {
         const r = await documentsAPI.previewUrl(doc.id, selectedVersionId ?? undefined);
         const normalizedResult = {
@@ -1024,17 +1005,17 @@ export default function DocumentViewer({ document: doc, submitSlot }: Props) {
           url: normalizeUrl(r.data.url ?? undefined) ?? r.data.url ?? null,
           raw_url: r.data.raw_url ? normalizeUrl(r.data.raw_url) : undefined,
         };
-        
-        setCachedVersionPreview(cacheKey, normalizedResult);
+
+        setCachedVersionPreview(previewCacheKey, normalizedResult);
         return normalizedResult;
       } catch (error) {
-        // If API call fails, try to serve from cache as fallback
-        const fallback = getCachedVersionPreview(cacheKey);
+        const fallback = getCachedVersionPreview(previewCacheKey);
         if (fallback?.preview_status === "done" && fallback.url) return fallback;
         throw error;
       }
     },
-    staleTime: 0,
+    placeholderData: initialCachedPreview ?? undefined,
+    staleTime: 5 * 60_000,
     retry: 2,
   });
 
@@ -1068,9 +1049,11 @@ export default function DocumentViewer({ document: doc, submitSlot }: Props) {
 
   // Preload adjacent versions for snappier nav
   useEffect(() => {
-    if (!doc.versions || !selectedVersionId) return;
+    if (!doc.versions || doc.versions.length === 0) return;
 
-    const currentIndex = doc.versions.findIndex(v => v.id === selectedVersionId);
+    const currentIndex = selectedVersionId
+      ? doc.versions.findIndex(v => v.id === selectedVersionId)
+      : doc.versions.findIndex(v => v.version_number === doc.current_version);
     if (currentIndex === -1) return;
 
     const preloadVersions: string[] = [];
@@ -1108,7 +1091,7 @@ export default function DocumentViewer({ document: doc, submitSlot }: Props) {
       cancelled = true;
       clearTimeout(timeoutHandle);
     };
-  }, [doc.id, doc.versions, selectedVersionId]);
+  }, [doc.id, doc.versions, selectedVersionId, doc.current_version]);
 
   useEffect(() => {
     let last = 0;
@@ -1196,6 +1179,8 @@ export default function DocumentViewer({ document: doc, submitSlot }: Props) {
             <button
               type="button"
               onClick={() => setSelectedVersionId(null)}
+              onMouseEnter={() => prefetchVersionPreview(null)}
+              onFocus={() => prefetchVersionPreview(null)}
               className={`text-xs px-2.5 py-1 rounded-full border transition-colors ${
                 selectedVersionId === null
                   ? "border-accent bg-accent/10 text-accent"
@@ -1214,6 +1199,8 @@ export default function DocumentViewer({ document: doc, submitSlot }: Props) {
                 key={version.id}
                 type="button"
                 onClick={() => isCurrentVersion ? setSelectedVersionId(null) : setSelectedVersionId(version.id)}
+                onMouseEnter={() => prefetchVersionPreview(isCurrentVersion ? null : version.id)}
+                onFocus={() => prefetchVersionPreview(isCurrentVersion ? null : version.id)}
                 className={`text-xs px-2.5 py-1 rounded-full border transition-colors ${
                   active
                     ? isCurrentVersion
@@ -1247,7 +1234,8 @@ export default function DocumentViewer({ document: doc, submitSlot }: Props) {
       {isOffice && (
         <OfficeEditPanel
           doc={doc}
-          initialPreview={preview}
+          preview={preview}
+          refetchPreview={refetchPreview}
           selectedVersionId={selectedVersionId}
           canEditInEditor={canEdit}
           onVersionUploaded={onVersionUploaded}
