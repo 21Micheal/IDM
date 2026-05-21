@@ -47,6 +47,7 @@ interface TaskAction {
 interface Props {
   task: WorkflowTask;
   documentId: string;
+  onCompleted?: () => void;
 }
 
 type WorkflowActionKind = "approve" | "reject" | "return" | "hold" | "release";
@@ -118,7 +119,7 @@ function TaskHistoryDrawer({ taskId }: { taskId: string }) {
 }
 
 // ── Main panel ────────────────────────────────────────────────────────────────
-export default function WorkflowActionPanel({ task, documentId }: Props) {
+export default function WorkflowActionPanel({ task, documentId, onCompleted }: Props) {
   const qc = useQueryClient();
 
   const [activeAction, setActiveAction] = useState<
@@ -194,6 +195,7 @@ export default function WorkflowActionPanel({ task, documentId }: Props) {
     setActiveAction(null);
     setComment("");
     refetchWorkflowState();
+    if (onCompleted) onCompleted();
   };
 
   const failAction = (message: string) => {
@@ -258,7 +260,7 @@ export default function WorkflowActionPanel({ task, documentId }: Props) {
 
   if (optimisticAction === "approve" || optimisticAction === "reject" || optimisticAction === "return") {
     return (
-      <div className="card border-l-4 border-primary p-5">
+      <div className="rounded-2xl border border-border bg-background p-4">
         <div className="flex items-center gap-3 text-sm text-foreground">
           <Loader2 className="h-4 w-4 animate-spin text-primary" />
           Updating workflow state...
@@ -268,11 +270,11 @@ export default function WorkflowActionPanel({ task, documentId }: Props) {
   }
 
   return (
-    <div className="card border-l-4 border-brand-500 p-5 space-y-4">
+    <div className="rounded-2xl border border-border bg-background p-4 space-y-4">
       {/* Panel header */}
       <div className="flex items-start justify-between gap-3">
         <div>
-          <h3 className="font-semibold text-gray-900 text-sm flex items-center gap-2">
+          <h3 className="font-semibold text-foreground text-sm flex items-center gap-2">
             <span
               className={clsx(
                 "w-2 h-2 rounded-full flex-shrink-0",
@@ -281,16 +283,16 @@ export default function WorkflowActionPanel({ task, documentId }: Props) {
             />
             {task.step.name}
           </h3>
-          <p className="text-xs text-gray-500 mt-0.5">{task.status_display}</p>
+          <p className="text-xs text-muted-foreground mt-0.5">{task.status_display}</p>
         </div>
-        <div className="text-right text-xs text-gray-400 flex-shrink-0">
+        <div className="text-right text-xs text-muted-foreground flex-shrink-0">
           {isHeld && task.held_until && (
-            <p className="text-blue-500 font-medium">
+            <p className="text-blue-600 font-medium">
               Auto-releases {formatDistanceToNow(new Date(task.held_until), { addSuffix: true })}
             </p>
           )}
           {task.due_at && !isHeld && (
-            <p className={new Date(task.due_at) < new Date() ? "text-red-500 font-medium" : ""}>
+            <p className={new Date(task.due_at) < new Date() ? "text-destructive font-medium" : ""}>
               Due {formatDistanceToNow(new Date(task.due_at), { addSuffix: true })}
             </p>
           )}
@@ -299,8 +301,8 @@ export default function WorkflowActionPanel({ task, documentId }: Props) {
 
       {/* Instructions */}
       {task.step.instructions && (
-        <div className="text-xs text-gray-600 bg-gray-50 rounded-lg px-3 py-2 border border-gray-100">
-          <span className="font-medium text-gray-700">Instructions: </span>
+        <div className="text-xs text-muted-foreground bg-muted/20 rounded-lg px-3 py-2 border border-border">
+          <span className="font-medium text-foreground">Instructions: </span>
           {task.step.instructions}
         </div>
       )}
@@ -310,7 +312,7 @@ export default function WorkflowActionPanel({ task, documentId }: Props) {
         <button
           onClick={() => releaseMutation.mutate()}
           disabled={releaseMutation.isPending}
-          className="w-full flex items-center justify-center gap-2 px-4 py-2.5 bg-blue-600 text-white text-sm font-medium rounded-lg hover:bg-blue-700 disabled:opacity-50 transition-colors"
+          className="w-full flex items-center justify-center gap-2 px-4 py-2.5 rounded-lg border border-blue-200 bg-blue-100 text-blue-800 text-sm font-medium hover:bg-blue-200 disabled:opacity-50 transition-colors"
         >
           {releaseMutation.isPending
             ? <Loader2 className="w-4 h-4 animate-spin" />
@@ -325,7 +327,7 @@ export default function WorkflowActionPanel({ task, documentId }: Props) {
           {task.step?.allow_approve !== false && (
             <button
               onClick={() => setActiveAction("approve")}
-              className="flex items-center justify-center gap-1.5 px-3 py-2.5 bg-green-600 text-white text-sm font-medium rounded-lg hover:bg-green-700 transition-colors"
+              className="flex items-center justify-center gap-1.5 px-3 py-2.5 rounded-lg border border-teal-200 bg-teal-50 text-teal-700 text-sm font-medium hover:bg-teal-100 transition-colors"
               title="Approve this document"
             >
               <CheckCircle className="w-4 h-4" /> Approve
@@ -334,7 +336,7 @@ export default function WorkflowActionPanel({ task, documentId }: Props) {
           {task.step?.allow_reject !== false && (
             <button
               onClick={() => setActiveAction("reject")}
-              className="flex items-center justify-center gap-1.5 px-3 py-2.5 bg-red-600 text-white text-sm font-medium rounded-lg hover:bg-red-700 transition-colors"
+              className="flex items-center justify-center gap-1.5 px-3 py-2.5 rounded-lg border border-red-200 bg-red-50 text-red-700 text-sm font-medium hover:bg-red-100 transition-colors"
               title="Reject this document — requires comment"
             >
               <XCircle className="w-4 h-4" /> Reject
@@ -343,7 +345,7 @@ export default function WorkflowActionPanel({ task, documentId }: Props) {
           {task.step?.allow_return !== false && (
             <button
               onClick={() => setActiveAction("return")}
-              className="flex items-center justify-center gap-1.5 px-3 py-2.5 bg-amber-500 text-white text-sm font-medium rounded-lg hover:bg-amber-600 transition-colors"
+              className="flex items-center justify-center gap-1.5 px-3 py-2.5 rounded-lg border border-amber-200 bg-amber-50 text-amber-800 text-sm font-medium hover:bg-amber-100 transition-colors"
               title="Return for review — sends back for rework"
             >
               <RotateCcw className="w-4 h-4" /> Return for review
@@ -351,7 +353,7 @@ export default function WorkflowActionPanel({ task, documentId }: Props) {
           )}
           <button
             onClick={() => setActiveAction("hold")}
-            className="flex items-center justify-center gap-1.5 px-3 py-2.5 bg-blue-600 text-white text-sm font-medium rounded-lg hover:bg-blue-700 transition-colors"
+            className="flex items-center justify-center gap-1.5 px-3 py-2.5 rounded-lg border border-blue-200 bg-blue-50 text-blue-700 text-sm font-medium hover:bg-blue-100 transition-colors"
             title="Pause processing and place on hold"
           >
             <PauseCircle className="w-4 h-4" /> Place on hold
@@ -361,8 +363,8 @@ export default function WorkflowActionPanel({ task, documentId }: Props) {
 
       {/* ── Approve form ───────────────────────────────────────────────── */}
       {activeAction === "approve" && (
-        <div className="space-y-3 border border-green-200 rounded-xl p-4 bg-green-50/40">
-          <p className="text-sm font-medium text-green-800">Approve document</p>
+        <div className="space-y-3 border border-border rounded-xl p-4 bg-muted/15">
+          <p className="text-sm font-medium text-foreground">Approve document</p>
           <div>
             <label className="label text-xs">Comment (optional)</label>
             <textarea
@@ -378,7 +380,7 @@ export default function WorkflowActionPanel({ task, documentId }: Props) {
             <button
               onClick={() => approveMutation.mutate()}
               disabled={anyPending}
-              className="flex items-center gap-1.5 px-4 py-2 bg-green-600 text-white text-sm font-medium rounded-lg hover:bg-green-700 disabled:opacity-50"
+              className="flex items-center gap-1.5 px-4 py-2 rounded-lg border border-primary/30 bg-primary/10 text-primary text-sm font-medium hover:bg-primary/15 disabled:opacity-50"
             >
               {approveMutation.isPending && <Loader2 className="w-3.5 h-3.5 animate-spin" />}
               Confirm approval
@@ -390,8 +392,8 @@ export default function WorkflowActionPanel({ task, documentId }: Props) {
 
       {/* ── Reject form ────────────────────────────────────────────────── */}
       {activeAction === "reject" && (
-        <div className="space-y-3 border border-red-200 rounded-xl p-4 bg-red-50/40">
-          <p className="text-sm font-medium text-red-800">Reject document</p>
+        <div className="space-y-3 border border-border rounded-xl p-4 bg-muted/15">
+          <p className="text-sm font-medium text-foreground">Reject document</p>
           <div>
             <label className="label text-xs">Rejection reason <span className="text-red-500">*</span></label>
             <textarea
@@ -410,7 +412,7 @@ export default function WorkflowActionPanel({ task, documentId }: Props) {
                 rejectMutation.mutate();
               }}
               disabled={anyPending}
-              className="flex items-center gap-1.5 px-4 py-2 bg-red-600 text-white text-sm font-medium rounded-lg hover:bg-red-700 disabled:opacity-50"
+              className="flex items-center gap-1.5 px-4 py-2 rounded-lg border border-destructive/20 bg-destructive/10 text-destructive text-sm font-medium hover:bg-destructive/15 disabled:opacity-50"
             >
               {rejectMutation.isPending && <Loader2 className="w-3.5 h-3.5 animate-spin" />}
               Confirm rejection
@@ -422,10 +424,10 @@ export default function WorkflowActionPanel({ task, documentId }: Props) {
 
       {/* ── Return for review form ─────────────────────────────────────── */}
       {activeAction === "return" && (
-        <div className="space-y-3 border border-amber-200 rounded-xl p-4 bg-amber-50/40">
+        <div className="space-y-3 border border-border rounded-xl p-4 bg-muted/15">
           <div>
-            <p className="text-sm font-medium text-amber-800">Return for review</p>
-            <p className="text-xs text-amber-600 mt-0.5">
+            <p className="text-sm font-medium text-foreground">Return for review</p>
+            <p className="text-xs text-muted-foreground mt-0.5">
               The document will be sent back for rework. The uploader will be notified by email.
               If this is step 1, the workflow resets and they must resubmit from scratch.
             </p>
@@ -448,7 +450,7 @@ export default function WorkflowActionPanel({ task, documentId }: Props) {
                 returnMutation.mutate();
               }}
               disabled={anyPending}
-              className="flex items-center gap-1.5 px-4 py-2 bg-amber-500 text-white text-sm font-medium rounded-lg hover:bg-amber-600 disabled:opacity-50"
+              className="flex items-center gap-1.5 px-4 py-2 rounded-lg border border-amber-300 bg-amber-100 text-amber-800 text-sm font-medium hover:bg-amber-200 disabled:opacity-50"
             >
               {returnMutation.isPending && <Loader2 className="w-3.5 h-3.5 animate-spin" />}
               Return document
@@ -460,10 +462,10 @@ export default function WorkflowActionPanel({ task, documentId }: Props) {
 
       {/* ── Hold form ──────────────────────────────────────────────────── */}
       {activeAction === "hold" && (
-        <div className="space-y-3 border border-blue-200 rounded-xl p-4 bg-blue-50/40">
+        <div className="space-y-3 border border-border rounded-xl p-4 bg-muted/15">
           <div>
-            <p className="text-sm font-medium text-blue-800">Place on hold</p>
-            <p className="text-xs text-blue-600 mt-0.5">
+            <p className="text-sm font-medium text-foreground">Place on hold</p>
+            <p className="text-xs text-muted-foreground mt-0.5">
               The document will be paused. It auto-resumes after the hold period.
               The requester will be notified.
             </p>
@@ -490,10 +492,10 @@ export default function WorkflowActionPanel({ task, documentId }: Props) {
                 onChange={(e) => setHoldHours(Math.max(1, Math.min(720, Number(e.target.value))))}
                 className="input w-28 text-sm"
               />
-              <span className="text-sm text-gray-500">
+              <span className="text-sm text-muted-foreground">
                 hours
                 {holdHours >= 24 && (
-                  <span className="ml-1 text-gray-400">
+                  <span className="ml-1 text-muted-foreground/70">
                     (= {Math.floor(holdHours / 24)}d{holdHours % 24 > 0 ? ` ${holdHours % 24}h` : ""})
                   </span>
                 )}
@@ -509,8 +511,8 @@ export default function WorkflowActionPanel({ task, documentId }: Props) {
                   className={clsx(
                     "px-2 py-0.5 text-xs rounded-full border transition-colors",
                     holdHours === h
-                      ? "bg-blue-600 text-white border-blue-600"
-                      : "border-gray-300 text-gray-600 hover:border-blue-400"
+                      ? "bg-primary/10 text-primary border-primary/30"
+                      : "border-gray-300 text-gray-600 hover:border-primary/70"
                   )}
                 >
                   {h < 24 ? `${h}h` : `${h / 24}d`}
@@ -525,7 +527,7 @@ export default function WorkflowActionPanel({ task, documentId }: Props) {
                 holdMutation.mutate();
               }}
               disabled={anyPending}
-              className="flex items-center gap-1.5 px-4 py-2 bg-blue-600 text-white text-sm font-medium rounded-lg hover:bg-blue-700 disabled:opacity-50"
+              className="flex items-center gap-1.5 px-4 py-2 rounded-lg border border-blue-200 bg-blue-100 text-blue-800 text-sm font-medium hover:bg-blue-200 disabled:opacity-50"
             >
               {holdMutation.isPending && <Loader2 className="w-3.5 h-3.5 animate-spin" />}
               <Clock className="w-3.5 h-3.5" />
@@ -537,7 +539,7 @@ export default function WorkflowActionPanel({ task, documentId }: Props) {
       )}
 
       {/* Action history */}
-      <div className="border-t border-gray-100 pt-3">
+      <div className="border-t border-border pt-3">
         <TaskHistoryDrawer taskId={task.id} />
       </div>
     </div>

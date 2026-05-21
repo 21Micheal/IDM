@@ -147,7 +147,7 @@ function normalizeUrl(url: string | null | undefined): string | undefined {
   return url;
 }
 
-type TabId = "attributes" | "properties" | "security" | "history" | "comments" | "audit" | "edit";
+type TabId = "workflow" | "attributes" | "properties" | "security" | "history" | "comments" | "audit" | "edit";
 
 type PaginatedResponse<T> = {
   count: number;
@@ -174,6 +174,7 @@ export default function DocumentDetailPage() {
   const [confirmRestoreId, setConfirmRestoreId] = useState<string | null>(null);
   const [auditPage, setAuditPage] = useState(1);
   const [viewerLinks, setViewerLinks] = useState({ openInNewTabUrl: "", downloadHref: "" });
+  const [workflowActionCompleted, setWorkflowActionCompleted] = useState(false);
   const printFrameRef = useRef<HTMLIFrameElement | null>(null);
 
   const pollRef = useRef<ReturnType<typeof setInterval> | null>(null);
@@ -330,6 +331,26 @@ export default function DocumentDetailPage() {
     ...QUERY_SHORT_STALE,
   });
   const activeTask = myTasks?.find((t: { document_id: string }) => t.document_id === id);
+  const activeTaskInitializedRef = useRef(false);
+
+  useEffect(() => {
+    if (!activeTaskInitializedRef.current && activeTask) {
+      activeTaskInitializedRef.current = true;
+      setActiveTab("workflow");
+    }
+  }, [activeTask]);
+
+  useEffect(() => {
+    if (!activeTask && activeTab === "workflow") {
+      setActiveTab("attributes");
+    }
+  }, [activeTask, activeTab]);
+
+  useEffect(() => {
+    if (activeTask) {
+      setWorkflowActionCompleted(false);
+    }
+  }, [activeTask]);
 
   const submitMutation = useMutation({
     mutationFn: () => documentsAPI.submit(id!),
@@ -422,6 +443,7 @@ export default function DocumentDetailPage() {
   const auditPages = Math.max(1, Math.ceil(auditCount / AUDIT_PAGE_SIZE));
 
   const tabs: { id: TabId; label: string; disabled?: boolean }[] = [
+    ...(activeTask ? [{ id: "workflow" as const, label: "Workflow" }] : []),
     { id: "attributes", label: "Details" },
     { id: "properties", label: "Properties" },
     { id: "security", label: "Security" },
@@ -500,6 +522,12 @@ export default function DocumentDetailPage() {
     <div className="space-y-4">
       <iframe ref={printFrameRef} title="Printable document" className="hidden" />
 
+      {workflowActionCompleted && !activeTask && (
+        <div className="rounded-2xl border border-border bg-muted/10 px-4 py-4 text-sm text-muted-foreground">
+          <p className="font-semibold text-foreground">Workflow action complete</p>
+          <p className="mt-1">This document has moved to the next stage and is no longer actionable from your current access level.</p>
+        </div>
+      )}
       <div className="flex flex-col xl:flex-row items-start xl:items-center justify-between gap-3 border-y border-border bg-slate-50 dark:bg-slate-950/60 px-4 py-2.5 text-xs shadow-sm">
         <div className="flex flex-col sm:flex-row sm:items-center gap-2 min-w-0">
           <button
@@ -654,6 +682,21 @@ export default function DocumentDetailPage() {
 
           {/* Tab contents frame */}
           <div className="rounded-2xl border border-border/80 bg-background p-4 min-h-[30rem]">
+
+            {/* WORKFLOW TAB */}
+            {activeTab === "workflow" && activeTask && (
+              <div className="space-y-4 animate-fade-in">
+                <div className="rounded-2xl border border-border bg-background p-4">
+                  <div className="mb-4 flex items-center justify-between gap-3">
+                    <h3 className="text-sm font-semibold text-foreground">Workflow task actions</h3>
+                    <span className="text-xs text-muted-foreground">Task controls</span>
+                  </div>
+                  <Suspense fallback={<div className="text-xs text-muted-foreground">Loading workflow actions…</div>}>
+                    <WorkflowActionPanel task={activeTask} documentId={id!} onCompleted={() => setWorkflowActionCompleted(true)} />
+                  </Suspense>
+                </div>
+              </div>
+            )}
 
             {/* PROPERTIES TAB */}
             {activeTab === "properties" && (
@@ -1144,13 +1187,6 @@ export default function DocumentDetailPage() {
                 />
             </Suspense>
           </div>
-
-          {/* Workflow task actions */}
-          {!isPersonal && activeTask && (
-            <Suspense fallback={<div className="card p-4 text-xs text-muted-foreground">Loading workflow actions…</div>}>
-              <WorkflowActionPanel task={activeTask} documentId={id!} />
-            </Suspense>
-          )}
         </div>
 
       </div>
