@@ -1,208 +1,140 @@
+import { useMemo, useState } from "react";
+import { useNavigate } from "react-router-dom";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { Link } from "react-router-dom";
-import { Bell, CheckCheck, ClipboardCheck, AlertTriangle, CheckCircle, XCircle, Info, Clock, Loader2, PauseCircle, PlayCircle, RotateCcw } from "lucide-react";
-import { notificationsAPI } from "@/services/api";
+import { Bell, CheckCheck, Loader2 } from "lucide-react";
+import { notificationsAPI, normalizeListResponse } from "@/services/api";
 import type { Notification } from "@/types";
+import { NotificationList, inferNotificationPriority } from "@/components/notifications/notifications-list";
 import clsx from "clsx";
 
-const getNotificationConfig = (type: string, message: string) => {
-  switch (type) {
-    case "task_assigned":
-      return {
-        icon: ClipboardCheck,
-        color: "text-blue-600 bg-blue-50 border-blue-100",
-        label: "Approval Request",
-      };
-    case "workflow_complete":
-      return {
-        icon: CheckCircle,
-        color: "text-teal bg-teal/10 border-teal/20",
-        label: "Workflow Complete",
-      };
-    case "document_returned":
-      return {
-        icon: RotateCcw,
-        color: "text-amber-600 bg-amber-50 border-amber-100",
-        label: "Returned for Review",
-      };
-    case "document_held":
-      return {
-        icon: PauseCircle,
-        color: "text-orange-600 bg-orange-50 border-orange-100",
-        label: "Document on Hold",
-      };
-    case "hold_released":
-      return {
-        icon: PlayCircle,
-        color: "text-green-600 bg-green-50 border-green-100",
-        label: "Hold Released",
-      };
-    case "hold_expired":
-      return {
-        icon: Clock,
-        color: "text-purple-600 bg-purple-50 border-purple-100",
-        label: "Hold Expired",
-      };
-    case "task_overdue":
-      return {
-        icon: AlertTriangle,
-        color: "text-destructive bg-destructive/10 border-destructive/20",
-        label: "Overdue",
-      };
-    case "workflow_action":
-      return {
-        icon: CheckCheck,
-        color: "text-muted-foreground bg-muted border-border",
-        label: "Workflow Update",
-      };
-    default:
-      // Fallback to message parsing for backward compatibility
-      const msg = message.toLowerCase();
-      if (msg.includes("action required") || msg.includes("approval required")) {
-        return {
-          icon: ClipboardCheck,
-          color: "text-blue-600 bg-blue-50 border-blue-100",
-          label: "Action Required",
-        };
-      }
-      if (msg.includes("overdue") || msg.includes("expired") || msg.includes("urgent")) {
-        return {
-          icon: AlertTriangle,
-          color: "text-destructive bg-destructive/10 border-destructive/20",
-          label: "Urgent",
-        };
-      }
-      if (msg.includes("approved") || msg.includes("complete") || msg.includes("released")) {
-        return {
-          icon: CheckCircle,
-          color: "text-teal bg-teal/10 border-teal/20",
-          label: "Update",
-        };
-      }
-      if (msg.includes("rejected") || msg.includes("returned") || msg.includes("hold")) {
-        return {
-          icon: XCircle,
-          color: "text-amber-600 bg-amber-50 border-amber-100",
-          label: "Alert",
-        };
-      }
-      return {
-        icon: Info,
-        color: "text-muted-foreground bg-muted border-border",
-        label: "Info",
-      };
-  }
-};
+type Filter = "unread" | "all" | "urgent";
 
 export default function NotificationsPage() {
   const qc = useQueryClient();
+  const navigate = useNavigate();
+  const [filter, setFilter] = useState<Filter>("unread");
 
   const { data: notifications = [], isLoading } = useQuery<Notification[]>({
     queryKey: ["notifications"],
-    queryFn: () => notificationsAPI.list().then((r) => r.data.results ?? r.data),
+    queryFn: () => notificationsAPI.list().then((r) => normalizeListResponse<Notification>(r.data)),
+    staleTime: 30_000,
   });
 
   const markReadMutation = useMutation({
     mutationFn: (id: string) => notificationsAPI.markRead(id),
-    onSuccess: () => qc.invalidateQueries({ queryKey: ["notifications"] }),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ["notifications"] });
+      qc.invalidateQueries({ queryKey: ["notifications", "unread-count"] });
+    },
   });
 
   const markAllReadMutation = useMutation({
     mutationFn: () => notificationsAPI.markAllRead(),
-    onSuccess: () => qc.invalidateQueries({ queryKey: ["notifications"] }),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ["notifications"] });
+      qc.invalidateQueries({ queryKey: ["notifications", "unread-count"] });
+    },
   });
 
-  // Filter to show only unread notifications so they "disappear" once viewed
-  const unreadNotifications = notifications.filter(n => !n.is_read);
+  const unreadCount = notifications.filter((notification) => !notification.is_read).length;
+  const urgentCount = notifications.filter((notification) => inferNotificationPriority(notification) === "high").length;
+
+  const visibleNotifications = useMemo(() => {
+    switch (filter) {
+      case "all":
+        return notifications;
+      case "urgent":
+        return notifications.filter((notification) => inferNotificationPriority(notification) === "high");
+      case "unread":
+      default:
+        return notifications.filter((notification) => !notification.is_read);
+    }
+  }, [filter, notifications]);
+
+  const filters: { id: Filter; label: string; count: number }[] = [
+    { id: "unread", label: "Unread", count: unreadCount },
+    { id: "urgent", label: "Urgent", count: urgentCount },
+    { id: "all", label: "All", count: notifications.length },
+  ];
 
   return (
-    <div className="max-w-4xl mx-auto py-10 px-6 space-y-8">
-      <div className="flex items-center justify-between">
-        <div>
-          <div className="flex items-center gap-3 mb-2">
-            <div className="w-10 h-10 rounded-xl bg-primary/10 flex items-center justify-center">
-              <Bell className="w-5 h-5 text-primary" />
-            </div>
-            <h1 className="text-3xl font-bold tracking-tight text-foreground">Notifications</h1>
+    <div className="mx-auto max-w-4xl px-4 py-6 sm:px-6">
+      {/* Header */}
+      <div className="mb-8 space-y-4">
+        <div className="flex items-start gap-4">
+          <div className="flex h-10 w-10 items-center justify-center rounded-lg border border-primary/20 bg-primary/10">
+            <Bell className="h-5 w-5 text-primary" />
           </div>
-          <p className="text-sm text-muted-foreground">Recent workflow actions and document updates.</p>
+          <div>
+            <h1 className="text-2xl font-semibold text-foreground">Notifications</h1>
+            <p className="mt-1 text-sm text-muted-foreground">
+              Workflow requests, document updates, and time-sensitive alerts.
+            </p>
+          </div>
         </div>
-        <button
-          onClick={() => markAllReadMutation.mutate()}
-          disabled={markAllReadMutation.isPending || unreadNotifications.length === 0}
-          className="btn-secondary"
-        >
-          <CheckCheck className="w-4 h-4" /> Mark all as read
-        </button>
+
+        {/* Filters and Actions */}
+        <div className="flex flex-wrap items-center gap-2">
+          <div className="flex gap-1 rounded-lg border border-border bg-muted/30 p-1">
+            {filters.map((item) => (
+              <button
+                key={item.id}
+                type="button"
+                onClick={() => setFilter(item.id)}
+                className={clsx(
+                  "inline-flex items-center gap-1.5 rounded-md px-3 py-1.5 text-sm font-medium transition-colors",
+                  filter === item.id
+                    ? "bg-primary text-primary-foreground"
+                    : "text-muted-foreground hover:text-foreground",
+                )}
+              >
+                {item.label}
+                <span
+                  className={clsx(
+                    "rounded-full px-1.5 py-0.5 text-[10px] font-medium",
+                    filter === item.id ? "bg-primary-foreground/20" : "bg-muted",
+                  )}
+                >
+                  {item.count}
+                </span>
+              </button>
+            ))}
+          </div>
+
+          <button
+            type="button"
+            onClick={() => markAllReadMutation.mutate()}
+            disabled={markAllReadMutation.isPending || unreadCount === 0}
+            className={clsx(
+              "inline-flex items-center gap-1.5 rounded-lg border border-border px-3 py-1.5 text-sm font-medium transition-colors",
+              markAllReadMutation.isPending || unreadCount === 0
+                ? "opacity-50 cursor-not-allowed text-muted-foreground"
+                : "hover:bg-muted text-foreground",
+            )}
+          >
+            {markAllReadMutation.isPending ? (
+              <Loader2 className="h-4 w-4 animate-spin" />
+            ) : (
+              <CheckCheck className="h-4 w-4" />
+            )}
+            Mark all read
+          </button>
+        </div>
       </div>
 
-      {isLoading ? (
-        <div className="flex items-center justify-center py-20">
-          <Loader2 className="w-8 h-8 text-primary animate-spin" />
-        </div>
-      ) : unreadNotifications.length === 0 ? (
-        <div className="card p-16 text-center">
-          <div className="w-16 h-16 rounded-full bg-muted flex items-center justify-center mx-auto mb-4">
-            <Bell className="w-8 h-8 text-muted-foreground/40" />
-          </div>
-          <h3 className="text-lg font-semibold text-foreground">No new notifications</h3>
-          <p className="text-sm text-muted-foreground mt-1">You're all caught up with your tasks and updates.</p>
-        </div>
-      ) : (
-        <div className="space-y-3">
-          {unreadNotifications.map((n) => {
-            const config = getNotificationConfig(n.type, n.message);
-            const Icon = config.icon;
-
-            const content = (
-              <div className="flex items-start gap-4">
-                <div className={clsx("w-10 h-10 rounded-xl flex items-center justify-center flex-shrink-0 border", config.color)}>
-                  <Icon className="w-5 h-5" />
-                </div>
-                <div className="flex-1 min-w-0">
-                  <div className="flex items-center justify-between gap-2 mb-1">
-                    <span className="text-[10px] uppercase tracking-widest font-bold text-muted-foreground opacity-70">
-                      {config.label}
-                    </span>
-                    <span className="text-[10px] text-muted-foreground flex items-center gap-1">
-                      <Clock className="w-3 h-3" />
-                      {new Date(n.created_at).toLocaleString(undefined, { dateStyle: 'medium', timeStyle: 'short' })}
-                    </span>
-                  </div>
-                  <p className="text-sm text-foreground leading-relaxed">{n.message}</p>
-                </div>
-              </div>
-            );
-
-            return (
-              <div key={n.id} className="card p-0 overflow-hidden hover:shadow-md transition-all">
-                <div className="bg-accent/5">
-                  {n.link ? (
-                    <Link
-                      to={n.link}
-                      onClick={() => {
-                        if (!n.is_read) markReadMutation.mutate(n.id);
-                      }}
-                      className="block px-5 py-4 hover:bg-muted/40 transition-colors"
-                    >
-                      {content}
-                    </Link>
-                  ) : (
-                    <button
-                      onClick={() => {
-                        if (!n.is_read) markReadMutation.mutate(n.id);
-                      }}
-                      className="w-full text-left px-5 py-4 hover:bg-muted/40 transition-colors"
-                    >
-                      {content}
-                    </button>
-                  )}
-                </div>
-              </div>
-            );
-          })}
-        </div>
-      )}
+      {/* Notifications List */}
+      <NotificationList
+        notifications={visibleNotifications}
+        isLoading={isLoading}
+        onMarkRead={(id) => markReadMutation.mutate(id)}
+        onOpenLink={(link) => navigate(link)}
+        onOpenWorkflow={(detail) => {
+          if (!detail.documentId) return;
+          navigate(`/notifications/workflow/${detail.documentId}`, {
+            state: { notification: detail },
+          });
+        }}
+      />
     </div>
   );
 }

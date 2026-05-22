@@ -118,7 +118,7 @@ function ProgressRing({
     };
     raf = requestAnimationFrame(tick);
     return () => cancelAnimationFrame(raf);
-  }, [duration, loading, CIRC]);
+  }, [duration, loading]);
 
   return (
     <svg

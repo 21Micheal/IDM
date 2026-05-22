@@ -30,7 +30,7 @@ export function documentNameFromFileName(fileName: string): string {
 function parseOcrFields(item: BulkUploadDocumentItem): OcrFields {
   const raw = item.ocr_suggestions;
   if (!raw) return {};
-  if (raw.fields) return sanitizeOcrFields(raw.fields);
+  if (raw.fields != null) return sanitizeOcrFields(raw.fields);
   return sanitizeOcrFields(raw as unknown as OcrFields);
 }
 
@@ -57,10 +57,11 @@ export function buildReviewStateFromBatchItem(
   const suggestedScores: Record<string, number> = {};
   const ocrFields = parseOcrFields(item);
 
-  const fill = (key: string, value: string | undefined, score = 4) => {
-    if (!value?.trim()) return;
-    const trimmed = value.trim();
-    values[key] = trimmed;
+  const fill = (key: string, value: string | number | undefined, score = 4) => {
+    if (value == null) return;
+    const strValue = String(value);
+    if (!strValue.trim()) return;
+    values[key] = strValue.trim();
     suggestedScores[key] = score;
   };
 
@@ -69,6 +70,10 @@ export function buildReviewStateFromBatchItem(
   fill("currency", ocrFields.currency);
   fill("document_date", ocrFields.document_date);
   fill("due_date", ocrFields.due_date);
+  // Fill new line-item fields from OCR data
+  fill("quantity", ocrFields.quantity ? String(ocrFields.quantity) : undefined);
+  fill("description", ocrFields.description ? String(ocrFields.description) : undefined);
+  fill("uom", ocrFields.uom ? String(ocrFields.uom) : undefined);
 
   if (documentType.metadata_fields?.length) {
     const matches = applyOcrToFields(documentType.metadata_fields, ocrFields);

@@ -74,6 +74,8 @@ from django.core.files.storage import default_storage
 from django.core.cache import cache
 from django.db import transaction
 from django.utils import timezone
+from django.utils.dateparse import parse_date
+from decimal import Decimal, InvalidOperation
 
 logger = logging.getLogger(__name__)
 
@@ -281,11 +283,54 @@ def ocr_document(self, document_id: str):
         current_metadata = doc.metadata or {}
         updated_metadata = {**current_metadata, **metadata_updates}
 
-        Document.objects.filter(id=document_id).update(
-            extracted_text=text[:1_000_000],
-            ocr_status=OCRStatus.DONE,
-            metadata=updated_metadata,
-        )
+        # If OCR suggested structured fields, persist a few high-value
+        # suggestions into top-level Document columns *only when those
+        # columns are empty*. This lets list/detail views show extracted
+        # supplier/amount/date without requiring additional frontend mapping.
+        ocr_block = (metadata_updates.get("ocr_suggestions") or {})
+        suggested = ocr_block.get("fields", {}) if isinstance(ocr_block, dict) else {}
+
+        update_kwargs = {
+            "extracted_text": text[:1_000_000],
+            "ocr_status": OCRStatus.DONE,
+            "metadata": updated_metadata,
+        }
+
+        try:
+            # title
+            if not doc.title and suggested.get("title"):
+                update_kwargs["title"] = str(suggested.get("title"))[:255]
+
+            # supplier
+            if (not doc.supplier or str(doc.supplier).strip() == "") and suggested.get("supplier"):
+                update_kwargs["supplier"] = str(suggested.get("supplier"))[:255]
+
+            # amount & currency
+            if (doc.amount is None or doc.amount == "") and suggested.get("amount") is not None:
+                try:
+                    update_kwargs["amount"] = Decimal(str(suggested.get("amount")))
+                except (InvalidOperation, TypeError, ValueError):
+                    pass
+            if (not doc.currency or str(doc.currency).strip() == "") and suggested.get("currency"):
+                update_kwargs["currency"] = str(suggested.get("currency"))[:3]
+
+            # dates
+            if (not doc.document_date) and suggested.get("document_date"):
+                parsed = parse_date(str(suggested.get("document_date")))
+                if parsed:
+                    update_kwargs["document_date"] = parsed
+            if (not doc.due_date) and suggested.get("due_date"):
+                parsed = parse_date(str(suggested.get("due_date")))
+                if parsed:
+                    update_kwargs["due_date"] = parsed
+
+            # reference number
+            if (not doc.reference_number or str(doc.reference_number).strip() == "") and suggested.get("reference_number"):
+                update_kwargs["reference_number"] = str(suggested.get("reference_number"))[:60]
+        except Exception:
+            logger.exception("ocr_document: failed to promote suggested fields to top-level for %s", document_id)
+
+        Document.objects.filter(id=document_id).update(**update_kwargs)
         from apps.audit.models import AuditEvent
         from apps.audit.utils import record_audit_event
 

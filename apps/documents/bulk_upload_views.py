@@ -1,6 +1,8 @@
 """
 ViewSet for bulk scan upload batches.
 """
+import logging
+
 from django.shortcuts import get_object_or_404
 from rest_framework import permissions, status, viewsets
 from rest_framework.decorators import action
@@ -13,6 +15,8 @@ from apps.audit.utils import record_audit_event
 
 from .bulk_upload import create_bulk_upload_documents, sync_bulk_upload_status
 from .models import BulkUpload, BulkUploadStatus, DocumentType
+
+logger = logging.getLogger(__name__)
 from .serializers import (
     BulkUploadCreateSerializer,
     BulkUploadDetailSerializer,
@@ -52,14 +56,55 @@ class BulkUploadViewSet(viewsets.GenericViewSet):
         return GroupAction.UPLOAD.value in perms
 
     def create(self, request, *args, **kwargs):
-        files = request.FILES.getlist("files")
+        files = request.FILES.getlist("files") or request.FILES.getlist("files[]")
+        if not files:
+            for key in request.FILES.keys():
+                normalized = key.lower()
+                if normalized.startswith("files") or normalized.startswith("file"):
+                    files = request.FILES.getlist(key)
+                    if files:
+                        break
 
         data = {
             "document_type_id": request.data.get("document_type_id"),
             "is_scanned": request.data.get("is_scanned", "true"),
             "files": files,
         }
-        tag_ids = request.data.getlist("common_tag_ids")
+        if not files:
+            logger.warning(
+                "Bulk upload create request contained no files. request.FILES keys=%s, content_type=%s, data_keys=%s, content_length=%s",
+                list(request.FILES.keys()),
+                request.content_type,
+                list(getattr(request.data, 'keys', lambda: [])()),
+                request.META.get('CONTENT_LENGTH'),
+            )
+
+        def _get_list(value):
+            if hasattr(value, "getlist"):
+                return value.getlist("common_tag_ids") or value.getlist("common_tag_ids[]")
+            if isinstance(value, dict):
+                result = value.get("common_tag_ids") or value.get("common_tag_ids[]")
+                if result is None:
+                    return []
+                if isinstance(result, (list, tuple)):
+                    return list(result)
+                return [result]
+            return []
+
+        tag_ids = _get_list(request.data)
+        if not tag_ids:
+            for key in getattr(request.data, "keys", lambda: [])():
+                normalized = key.lower()
+                if normalized.startswith("common_tag_ids"):
+                    raw = request.data.get(key)
+                    if raw is None:
+                        continue
+                    if isinstance(raw, (list, tuple)):
+                        tag_ids = list(raw)
+                    else:
+                        tag_ids = [raw]
+                    if tag_ids:
+                        break
         if tag_ids:
             data["common_tag_ids"] = tag_ids
 
@@ -92,12 +137,7 @@ class BulkUploadViewSet(viewsets.GenericViewSet):
         )
 
         out = BulkUploadDetailSerializer(bulk_upload, context={"request": request})
-        code = (
-            status.HTTP_201_CREATED
-            if bulk_upload.status != BulkUploadStatus.FAILED
-            else status.HTTP_400_BAD_REQUEST
-        )
-        return Response(out.data, status=code)
+        return Response(out.data, status=status.HTTP_201_CREATED)
 
     def retrieve(self, request, *args, **kwargs):
         bulk_upload = sync_bulk_upload_status(self.get_object())

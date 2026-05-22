@@ -13,9 +13,11 @@ import { Link, useSearchParams } from "react-router-dom";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { documentsAPI, documentTypesAPI, normalizeListResponse } from "@/services/api";
 import {
-  FileText, UploadCloud, Lock, Users, LayoutList,
+  FileText, UploadCloud, Lock, LayoutList,
   Archive, Trash2, Loader2, CheckSquare, Square, X, CheckCircle, XCircle,
-  Search as SearchIcon, SlidersHorizontal, Eye, Check,
+  Search as SearchIcon, SlidersHorizontal, Eye,
+  Rows3, LayoutGrid, Plus,
+  List,
 } from "lucide-react";
 import { format } from "date-fns";
 import { cn } from "../lib/utils";
@@ -211,6 +213,69 @@ function getPersonalDescription(doc: Document): string {
   return "";
 }
 
+function getDocumentTypeLabel(doc: Document): string {
+  return doc.document_type_name || doc.document_type?.name || "";
+}
+
+function formatInforDateTime(value?: string | null): string {
+  if (!value) return "";
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return "";
+  return format(date, "MM/dd/yyyy, HH:mm:ss");
+}
+
+function DocumentPreviewTile({ doc, large = false }: { doc: Document; large?: boolean }) {
+  const typeLabel = getDocumentTypeLabel(doc).toLowerCase();
+  const isInvoice = typeLabel.includes("invoice") || doc.title.toLowerCase().includes("inv");
+  const isPurchaseOrder = typeLabel.includes("purchase") || doc.title.toLowerCase().includes("po-");
+
+  if (isInvoice || isPurchaseOrder) {
+    return (
+      <div className={cn("bg-white p-2 text-[#1F2933]", large ? "h-full w-full" : "h-full w-full")}>
+        <div className="mb-2 flex items-start justify-between gap-2">
+          <div>
+            <div className="h-1.5 w-12 bg-[#303846]" />
+            <div className="mt-1 h-1 w-8 bg-[#C7CCD1]" />
+          </div>
+          <div className="text-right text-[7px] font-bold uppercase text-[#303846]">
+            {isInvoice ? "Invoice" : "PO"}
+          </div>
+        </div>
+        <div className="mb-2 grid grid-cols-2 gap-1">
+          <div className="h-5 bg-[#F2F4F5]" />
+          <div className="h-5 bg-[#F2F4F5]" />
+        </div>
+        <div className="space-y-1">
+          <div className="h-1.5 w-full bg-[#303846]" />
+          <div className="h-1.5 w-11/12 bg-[#E3E7EA]" />
+          <div className="h-1.5 w-10/12 bg-[#E3E7EA]" />
+          <div className="h-1.5 w-full bg-[#E3E7EA]" />
+          <div className="h-1.5 w-9/12 bg-[#E3E7EA]" />
+        </div>
+        <div className="mt-3 ml-auto h-1.5 w-12 bg-[#C7CCD1]" />
+        <div className="mt-1 ml-auto h-1.5 w-16 bg-[#C7CCD1]" />
+      </div>
+    );
+  }
+
+  return (
+    <div className="h-full w-full bg-white px-3 py-4 text-[6px] leading-none text-[#445E9D]">
+      <div className="space-y-1">
+        {Array.from({ length: large ? 18 : 14 }).map((_, index) => (
+          <div
+            key={index}
+            className={cn(
+              "h-px bg-current",
+              index % 5 === 0 ? "w-5/12" : index % 3 === 0 ? "w-8/12" : "w-3/12",
+              index > 7 && "ml-8",
+            )}
+          />
+        ))}
+      </div>
+    </div>
+  );
+}
+
 interface DocumentsPageProps {
   personalOnly?: boolean;
 }
@@ -232,6 +297,23 @@ export default function DocumentsPage({ personalOnly = false }: DocumentsPagePro
   const [page, setPage] = useState(1);
   const [selectedIds, setSelectedIds] = useState<string[]>([]);
   const [showFilters, setShowFilters] = useState(false);
+
+  // ── View mode (table / card / thumbnails) — Infor-style layout switcher ────
+  type ViewMode = "table" | "card" | "thumbnails";
+  const viewStorageKey = personalOnly ? "documents:viewMode:personal" : "documents:viewMode:all";
+  const [viewMode, setViewMode] = useState<ViewMode>(() => {
+    if (typeof window === "undefined") return "table";
+    const stored = window.localStorage.getItem(viewStorageKey);
+    return stored === "card" || stored === "thumbnails" || stored === "table" ? stored : "table";
+  });
+  useEffect(() => {
+    if (typeof window !== "undefined") {
+      window.localStorage.setItem(viewStorageKey, viewMode);
+    }
+  }, [viewMode, viewStorageKey]);
+  // Archived view always uses the table layout — switcher is hidden.
+  const effectiveView: ViewMode = isArchiveView ? "table" : viewMode;
+  const showLayoutSwitcher = !isArchiveView;
 
   const debouncedSearch = useDebounce(search, 300);
 
@@ -400,6 +482,418 @@ export default function DocumentsPage({ personalOnly = false }: DocumentsPagePro
   const activeFilterCount = personalOnly
     ? 0
     : [statusFilter, typeFilter, supplierFilter].filter(Boolean).length;
+
+  if (!isArchiveView && !personalOnly) {
+    const matchingCount = data?.count ?? 0;
+
+    return (
+      <div className="-m-6 flex h-[calc(100vh-3.5rem)] min-h-[42rem] overflow-hidden bg-[#EDEDED] text-[13px] text-[#1F2933]">
+        <div className="flex w-[70px] shrink-0 flex-col border-r border-[#C8CDD2] bg-[#F3F3F3]">
+          <div className="h-[69px] border-b border-[#C8CDD2] bg-[#2C7FAE]" />
+          <div className="flex-1" />
+        </div>
+
+        <div className="flex min-w-0 flex-1 flex-col">
+          <div className="flex h-[69px] shrink-0 items-center gap-3 bg-[#287EAD] px-5 text-white">
+            <div className="relative min-w-[220px] max-w-[340px] flex-1">
+              <SearchIcon className="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-[#5E6870]" />
+              <input
+                value={search}
+                onChange={(event) => {
+                  setSearch(event.target.value);
+                  setPage(1);
+                }}
+                placeholder="Search documents"
+                className="h-9 w-full border border-[#AEB5BB] bg-white pl-9 pr-3 text-sm text-[#1F2933] placeholder:text-[#6E767D] focus:outline-none focus:ring-1 focus:ring-white/70"
+              />
+            </div>
+
+            <select
+              value={statusFilter}
+              onChange={(event) => {
+                clearUrlStatusFilter();
+                setStatusFilter(event.target.value);
+                setPage(1);
+              }}
+              className="h-9 w-[150px] border border-[#AEB5BB] bg-white px-2 text-sm text-[#1F2933] focus:outline-none focus:ring-1 focus:ring-white/70"
+            >
+              <option value="">All statuses</option>
+              {STATUS_OPTIONS.map((status) => (
+                <option key={status} value={status}>{status.replace(/_/g, " ")}</option>
+              ))}
+            </select>
+
+            <select
+              value={typeFilter}
+              onChange={(event) => {
+                setTypeFilter(event.target.value);
+                setPage(1);
+              }}
+              className="h-9 w-[160px] border border-[#AEB5BB] bg-white px-2 text-sm text-[#1F2933] focus:outline-none focus:ring-1 focus:ring-white/70"
+            >
+              <option value="">All types</option>
+              {(typesData ?? []).map((type: any) => (
+                <option key={type.id} value={type.id}>{type.name}</option>
+              ))}
+            </select>
+
+            <select
+              value={supplierFilter}
+              onChange={(event) => {
+                setSupplierFilter(event.target.value);
+                setPage(1);
+              }}
+              className="h-9 w-[170px] border border-[#AEB5BB] bg-white px-2 text-sm text-[#1F2933] focus:outline-none focus:ring-1 focus:ring-white/70"
+            >
+              <option value="">All suppliers</option>
+              {supplierOptions.map((supplier) => (
+                <option key={supplier} value={supplier}>{supplier}</option>
+              ))}
+            </select>
+
+            {(search || statusFilter || typeFilter || supplierFilter) && (
+              <button
+                type="button"
+                onClick={() => {
+                  clearUrlStatusFilter();
+                  setSearch("");
+                  setStatusFilter("");
+                  setTypeFilter("");
+                  setSupplierFilter("");
+                  setPage(1);
+                }}
+                className="h-9 px-3 text-sm text-white/80 hover:text-white"
+              >
+                Clear
+              </button>
+            )}
+
+            <div className="ml-auto flex items-center gap-6 text-sm text-white/80">
+              <Link to="/documents/upload" className="inline-flex items-center gap-2 hover:text-white">
+                <Plus className="h-5 w-5" />
+                Add Document
+              </Link>
+            </div>
+          </div>
+
+          <div className="flex min-h-0 flex-1 pr-4">
+            <section className="flex min-w-0 flex-1 flex-col">
+              <div className="flex h-[66px] shrink-0 items-end border-b border-[#C8CDD2] bg-[#EDEDED] pl-4">
+                <button
+                  type="button"
+                  className="h-9 border border-[#B9C0C6] border-t-[#2B8DCB] border-t-2 bg-white px-4 text-sm text-[#2B86C5]"
+                >
+                  My Documents
+                </button>
+              </div>
+
+              <div className="flex h-[60px] shrink-0 items-center border-b border-[#C8CDD2] bg-white px-5">
+                <label className="inline-flex items-center gap-2 text-[#3F474F]">
+                  <input
+                    type="checkbox"
+                    checked={allChecked}
+                    onChange={toggleAll}
+                    className="h-3.5 w-3.5 border-[#AEB5BB]"
+                  />
+                  Select all
+                </label>
+                <div className="mx-4 h-6 w-px bg-[#C8CDD2]" />
+                <span className="font-semibold text-[#1F2933]">
+                  {isLoading ? "Loading documents" : `${matchingCount.toLocaleString()} matching documents`}
+                </span>
+                <div className="ml-auto flex items-center gap-5 text-xs text-[#5E6870]">
+                  <label className="inline-flex items-center gap-2">
+                    <span>Sort Results</span>
+                    <select
+                      value={sort}
+                      onChange={(event) => {
+                        setSort(event.target.value as typeof sort);
+                        setPage(1);
+                      }}
+                      className="border-0 bg-transparent py-1 pr-6 text-xs text-[#5E6870] focus:outline-none"
+                    >
+                      <option value="created_at">Created Date</option>
+                      <option value="title">Title</option>
+                      <option value="reference_number">Reference</option>
+                      <option value="document_date">Document Date</option>
+                      <option value="amount">Amount</option>
+                    </select>
+                  </label>
+                </div>
+              </div>
+
+              <div className="min-h-0 flex-1 overflow-auto bg-[#EDEDED]">
+                {effectiveView === "table" && (
+                  <table className="w-full min-w-[1080px] border-collapse bg-white text-sm">
+                    <thead className="sticky top-0 z-[1]">
+                      <tr className="h-[39px] border-b border-[#AEB5BB] bg-[#50545A] text-left text-xs font-semibold text-white">
+                        <th className="w-[50px] border-r border-[#858A90] px-4 py-3" />
+                        <th className="w-[60px] border-r border-[#858A90] px-4 py-3" />
+                        <th className="border-r border-[#858A90] px-3 py-3">Title</th>
+                        <th className="border-r border-[#858A90] px-3 py-3">Document Type</th>
+                        <th className="border-r border-[#858A90] px-3 py-3">Status</th>
+                        <th className="border-r border-[#858A90] px-3 py-3">Created By</th>
+                        <th className="border-r border-[#858A90] px-3 py-3">Created Date</th>
+                        <th className="px-3 py-3">Modified Date</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {isLoading ? (
+                        Array.from({ length: 6 }).map((_, rowIndex) => (
+                          <tr key={rowIndex} className="h-[44px] border-b border-[#D3D7DA]">
+                            {Array.from({ length: 8 }).map((_, cellIndex) => (
+                              <td key={cellIndex} className="border-r border-[#D3D7DA] px-3">
+                                <div className="h-3 w-2/3 animate-pulse bg-[#E1E5E8]" />
+                              </td>
+                            ))}
+                          </tr>
+                        ))
+                      ) : docs.length === 0 ? (
+                        <tr>
+                          <td colSpan={8} className="py-20 text-center text-[#5E6870]">
+                            No documents found
+                          </td>
+                        </tr>
+                      ) : (
+                        docs.map((doc: Document) => {
+                          const isSelected = selectedIds.includes(doc.id);
+                          const typeLabel = getDocumentTypeLabel(doc);
+
+                          return (
+                            <tr
+                              key={doc.id}
+                              className={cn(
+                                "h-[45px] border-b border-[#D3D7DA] bg-white hover:bg-[#F5F7F8]",
+                                isSelected && "bg-[#E7F2FA]",
+                              )}
+                            >
+                              <td className="border-r border-[#D3D7DA] px-4">
+                                <input
+                                  type="checkbox"
+                                  checked={isSelected}
+                                  onChange={() => toggleOne(doc.id)}
+                                  className="h-3.5 w-3.5 border-[#AEB5BB]"
+                                />
+                              </td>
+                              <td className="border-r border-[#D3D7DA]" />
+                              <td className="border-r border-[#D3D7DA] px-3">
+                                <Link
+                                  to={`/documents/${doc.id}`}
+                                  onMouseEnter={preloadDocumentWorkspace}
+                                  onFocus={preloadDocumentWorkspace}
+                                  className="font-semibold text-[#2B86C5] hover:underline"
+                                >
+                                  {doc.title}
+                                </Link>
+                              </td>
+                              <td className="border-r border-[#D3D7DA] px-3">{typeLabel}</td>
+                              <td className="border-r border-[#D3D7DA] px-3">
+                                <StatusBadge status={doc.status} />
+                              </td>
+                              <td className="border-r border-[#D3D7DA] px-3">
+                                {doc.uploaded_by?.full_name || doc.uploaded_by?.email || ""}
+                              </td>
+                              <td className="border-r border-[#D3D7DA] px-3">{formatInforDateTime(doc.created_at)}</td>
+                              <td className="px-3">{formatInforDateTime(doc.updated_at)}</td>
+                            </tr>
+                          );
+                        })
+                      )}
+                    </tbody>
+                  </table>
+                )}
+
+                {effectiveView === "card" && (
+                  <div className="divide-y divide-[#D3D7DA] bg-white">
+                    {isLoading ? (
+                      Array.from({ length: 5 }).map((_, index) => (
+                        <div key={index} className="flex h-[154px] gap-8 px-5 py-4">
+                          <div className="h-[123px] w-[89px] animate-pulse bg-[#E1E5E8]" />
+                          <div className="flex-1 space-y-3 pt-2">
+                            <div className="h-4 w-40 animate-pulse bg-[#E1E5E8]" />
+                            <div className="h-3 w-28 animate-pulse bg-[#E1E5E8]" />
+                            <div className="h-3 w-32 animate-pulse bg-[#E1E5E8]" />
+                          </div>
+                        </div>
+                      ))
+                    ) : docs.length === 0 ? (
+                      <div className="py-20 text-center text-[#5E6870]">No documents found</div>
+                    ) : (
+                      docs.map((doc: Document) => {
+                        const isSelected = selectedIds.includes(doc.id);
+                        const typeLabel = getDocumentTypeLabel(doc);
+
+                        return (
+                          <div key={doc.id} className="grid min-h-[154px] grid-cols-[42px_126px_minmax(360px,1fr)_minmax(260px,0.75fr)] gap-4 px-5 py-4">
+                            <div className="pt-1">
+                              <input
+                                type="checkbox"
+                                checked={isSelected}
+                                onChange={() => toggleOne(doc.id)}
+                                className="h-3.5 w-3.5 border-[#AEB5BB]"
+                              />
+                            </div>
+                            <Link
+                              to={`/documents/${doc.id}`}
+                              onMouseEnter={preloadDocumentWorkspace}
+                              onFocus={preloadDocumentWorkspace}
+                              className="h-[123px] w-[89px] border border-[#D3D7DA] bg-white"
+                            >
+                              <DocumentPreviewTile doc={doc} />
+                            </Link>
+                            <div className="min-w-0">
+                              <Link
+                                to={`/documents/${doc.id}`}
+                                onMouseEnter={preloadDocumentWorkspace}
+                                onFocus={preloadDocumentWorkspace}
+                                className="mb-1 block text-base font-semibold text-[#2B86C5] hover:underline"
+                              >
+                                {doc.title}
+                              </Link>
+                              {typeLabel && (
+                                <>
+                                  <p className="mt-2 text-[#5E6870]">Document Type</p>
+                                  <p className="font-semibold">{typeLabel}</p>
+                                </>
+                              )}
+                              <div className="mt-3">
+                                <p className="mb-1 text-[#5E6870]">Status</p>
+                                <StatusBadge status={doc.status} />
+                              </div>
+                              <p className="mt-3 text-[#5E6870]">Created By</p>
+                              <p className="font-semibold">{doc.uploaded_by?.full_name || doc.uploaded_by?.email || ""}</p>
+                            </div>
+                            <div className="pt-7">
+                              {formatInforDateTime(doc.created_at) && (
+                                <>
+                                  <p className="mt-3 text-[#5E6870]">Created Date</p>
+                                  <p className="font-semibold">{formatInforDateTime(doc.created_at)}</p>
+                                </>
+                              )}
+                              {formatInforDateTime(doc.updated_at) && (
+                                <>
+                                  <p className="mt-3 text-[#5E6870]">Modified Date</p>
+                                  <p className="font-semibold">{formatInforDateTime(doc.updated_at)}</p>
+                                </>
+                              )}
+                            </div>
+                          </div>
+                        );
+                      })
+                    )}
+                  </div>
+                )}
+
+                {effectiveView === "thumbnails" && (
+                  <div className="grid auto-rows-max grid-cols-[repeat(auto-fill,172px)] gap-7 p-7">
+                    {isLoading ? (
+                      Array.from({ length: 6 }).map((_, index) => (
+                        <div key={index} className="h-[212px] animate-pulse border border-[#D3D7DA] bg-white" />
+                      ))
+                    ) : docs.length === 0 ? (
+                      <div className="col-span-full py-20 text-center text-[#5E6870]">No documents found</div>
+                    ) : (
+                      docs.map((doc: Document) => {
+                        const isSelected = selectedIds.includes(doc.id);
+                        return (
+                          <div
+                            key={doc.id}
+                            className={cn(
+                              "h-[212px] border border-[#C9CED3] bg-white",
+                              isSelected && "outline outline-2 outline-[#2B86C5]",
+                            )}
+                          >
+                            <div className="flex h-[38px] items-center gap-2 border-b border-[#C9CED3] px-2">
+                              <input
+                                type="checkbox"
+                                checked={isSelected}
+                                onChange={() => toggleOne(doc.id)}
+                                className="h-3.5 w-3.5 border-[#AEB5BB]"
+                              />
+                              <Link
+                                to={`/documents/${doc.id}`}
+                                onMouseEnter={preloadDocumentWorkspace}
+                                onFocus={preloadDocumentWorkspace}
+                                className="truncate font-semibold text-[#2B86C5] hover:underline"
+                                title={doc.title}
+                              >
+                                {doc.title}
+                              </Link>
+                            </div>
+                            <Link
+                              to={`/documents/${doc.id}`}
+                              onMouseEnter={preloadDocumentWorkspace}
+                              onFocus={preloadDocumentWorkspace}
+                              className="mx-auto mt-2 block h-[160px] w-[114px] border border-[#D3D7DA]"
+                            >
+                              <DocumentPreviewTile doc={doc} large />
+                            </Link>
+                          </div>
+                        );
+                      })
+                    )}
+                  </div>
+                )}
+              </div>
+
+              <div className="flex h-[46px] shrink-0 items-center border-t border-[#C8CDD2] bg-white px-5">
+                {data && data.count > PAGE_SIZE ? (
+                  <div className="flex items-center gap-3 text-xs text-[#5E6870]">
+                    <button
+                      onClick={() => setPage((p) => Math.max(1, p - 1))}
+                      disabled={page === 1}
+                      className="border border-[#C8CDD2] px-3 py-1 disabled:opacity-40"
+                    >
+                      Previous
+                    </button>
+                    <span>
+                      {Math.min((page - 1) * PAGE_SIZE + 1, data.count)}-{Math.min(page * PAGE_SIZE, data.count)} of {data.count.toLocaleString()}
+                    </span>
+                    <button
+                      onClick={() => setPage((p) => p + 1)}
+                      disabled={page * PAGE_SIZE >= data.count}
+                      className="border border-[#C8CDD2] px-3 py-1 disabled:opacity-40"
+                    >
+                      Next
+                    </button>
+                  </div>
+                ) : null}
+                <div className="ml-auto flex items-center gap-3 text-[#6E767D]">
+                  <button
+                    type="button"
+                    title="List"
+                    aria-pressed={effectiveView === "table"}
+                    onClick={() => setViewMode("table")}
+                    className={cn("p-1 hover:text-[#1F2933]", effectiveView === "table" && "text-[#1F2933]")}
+                  >
+                    <List className="h-4 w-4" />
+                  </button>
+                  <button
+                    type="button"
+                    title="Card"
+                    aria-pressed={effectiveView === "card"}
+                    onClick={() => setViewMode("card")}
+                    className={cn("p-1 hover:text-[#1F2933]", effectiveView === "card" && "text-[#1F2933]")}
+                  >
+                    <Rows3 className="h-4 w-4" />
+                  </button>
+                  <button
+                    type="button"
+                    title="Thumbnails"
+                    aria-pressed={effectiveView === "thumbnails"}
+                    onClick={() => setViewMode("thumbnails")}
+                    className={cn("p-1 hover:text-[#1F2933]", effectiveView === "thumbnails" && "text-[#1F2933]")}
+                  >
+                    <LayoutGrid className="h-4 w-4" />
+                  </button>
+                </div>
+              </div>
+            </section>
+          </div>
+        </div>
+      </div>
+    );
+  }
 
   return (
     <div className={cn("p-6 max-w-7xl mx-auto space-y-6", isArchiveView && "max-w-6xl")}>
@@ -635,18 +1129,18 @@ export default function DocumentsPage({ personalOnly = false }: DocumentsPagePro
         />
       )}
 
-      {/* Table */}
+      {/* Results surface — Infor-style flat list, no centered card chrome */}
       <div
         className={cn(
-          "bg-card border border-border rounded-xl overflow-hidden",
-          isArchiveView && "border-muted-foreground/20 bg-muted/10"
+          "bg-white border-t border-b border-[#D6DBE0]",
+          isArchiveView && "bg-[#F4F6F8]"
         )}
-        style={{ boxShadow: "var(--shadow-card)" }}
       >
+        {effectiveView === "table" && (
         <div className="overflow-x-auto">
           <table className="w-full text-sm">
             <thead>
-              <tr className="border-b border-border bg-muted/30">
+              <tr className="border-b border-[#D6DBE0] bg-[#F4F6F8]">
                 {selectionEnabled && (
                   <th className="px-4 py-3 w-12">
                     <button onClick={toggleAll} className="text-muted-foreground hover:text-accent transition-colors" title="Select all on page">
@@ -656,24 +1150,24 @@ export default function DocumentsPage({ personalOnly = false }: DocumentsPagePro
                     </button>
                   </th>
                 )}
-                <th className="text-left px-4 py-3 font-semibold text-[11px] uppercase tracking-wider text-muted-foreground">Reference</th>
-                <th className="text-left px-4 py-3 font-semibold text-[11px] uppercase tracking-wider text-muted-foreground">Document Name</th>
+                <th className="text-left px-4 py-3 font-semibold text-[11px] uppercase tracking-wider text-[#5A6470]">Reference</th>
+                <th className="text-left px-4 py-3 font-semibold text-[11px] uppercase tracking-wider text-[#5A6470]">Document Name</th>
 
                 {personalOnly && (
                   <>
-                    <th className="text-left px-4 py-3 font-semibold text-[11px] uppercase tracking-wider text-muted-foreground">Description</th>
-                    <th className="text-left px-4 py-3 font-semibold text-[11px] uppercase tracking-wider text-muted-foreground">Tags</th>
+                    <th className="text-left px-4 py-3 font-semibold text-[11px] uppercase tracking-wider text-[#5A6470]">Description</th>
+                    <th className="text-left px-4 py-3 font-semibold text-[11px] uppercase tracking-wider text-[#5A6470]">Tags</th>
                   </>
                 )}
 
                 {!personalOnly && !isArchiveView && (
-                  <th className="text-left px-4 py-3 font-semibold text-[11px] uppercase tracking-wider text-muted-foreground">Status</th>
+                  <th className="text-left px-4 py-3 font-semibold text-[11px] uppercase tracking-wider text-[#5A6470]">Status</th>
                 )}
 
-                <th className="text-left px-4 py-3 font-semibold text-[11px] uppercase tracking-wider text-muted-foreground">Uploaded</th>
-                <th className="text-left px-4 py-3 font-semibold text-[11px] uppercase tracking-wider text-muted-foreground">Uploaded By</th>
+                <th className="text-left px-4 py-3 font-semibold text-[11px] uppercase tracking-wider text-[#5A6470]">Uploaded</th>
+                <th className="text-left px-4 py-3 font-semibold text-[11px] uppercase tracking-wider text-[#5A6470]">Uploaded By</th>
 
-                <th className="text-right px-4 py-3 font-semibold text-[11px] uppercase tracking-wider text-muted-foreground">Actions</th>
+                <th className="text-right px-4 py-3 font-semibold text-[11px] uppercase tracking-wider text-[#5A6470]">Actions</th>
               </tr>
             </thead>
 
@@ -845,10 +1339,208 @@ export default function DocumentsPage({ personalOnly = false }: DocumentsPagePro
             </tbody>
           </table>
         </div>
+        )}
+
+        {/* Card view (Infor-style) ─────────────────────────────────────────── */}
+        {effectiveView === "card" && (
+          <div className="divide-y divide-[#D6DBE0]">
+            {isLoading ? (
+              Array.from({ length: 5 }).map((_, i) => (
+                <div key={i} className="flex items-start gap-4 px-5 py-4">
+                  <div className="h-24 w-20 bg-muted rounded-md animate-pulse flex-shrink-0" />
+                  <div className="flex-1 space-y-2">
+                    <div className="h-4 w-1/3 bg-muted rounded animate-pulse" />
+                    <div className="h-3 w-1/2 bg-muted rounded animate-pulse" />
+                    <div className="h-3 w-1/4 bg-muted rounded animate-pulse" />
+                  </div>
+                </div>
+              ))
+            ) : docs.length === 0 ? (
+              <div className="text-center py-20 text-muted-foreground">
+                <FileText className="w-12 h-12 mx-auto mb-4 text-muted-foreground/30" />
+                <p className="font-semibold text-foreground text-base">No documents found</p>
+                <p className="text-sm mt-1.5 text-muted-foreground max-w-sm mx-auto">
+                  Try adjusting your search or filters to find what you're looking for.
+                </p>
+              </div>
+            ) : (
+              docs.map((doc: Document) => {
+                const isSelected = selectedIds.includes(doc.id);
+                const personalDescription = getPersonalDescription(doc);
+                return (
+                  <div
+                    key={doc.id}
+                    className={cn(
+                      "flex items-start gap-4 px-5 py-4 hover:bg-[#F4F6F8] transition-colors group",
+                      isSelected && "bg-[#E6F1FB]",
+                    )}
+                  >
+                    {selectionEnabled && (
+                      <button
+                        onClick={() => toggleOne(doc.id)}
+                        className={cn(
+                          "mt-1 transition-all",
+                          isSelected ? "text-accent opacity-100" : "text-muted-foreground opacity-0 group-hover:opacity-100"
+                        )}
+                      >
+                        {isSelected ? <CheckSquare className="w-4 h-4" /> : <Square className="w-4 h-4" />}
+                      </button>
+                    )}
+
+                    {/* Thumbnail placeholder */}
+                    <Link
+                      to={`/documents/${doc.id}`}
+                      onMouseEnter={preloadDocumentWorkspace}
+                      onFocus={preloadDocumentWorkspace}
+                      className="h-24 w-20 flex-shrink-0 rounded-md border border-border bg-muted/30 flex items-center justify-center text-muted-foreground hover:border-accent/40 hover:text-accent transition-colors"
+                    >
+                      <FileText className="w-8 h-8" />
+                    </Link>
+
+                    <div className="flex-1 min-w-0 space-y-3">
+                      {/* Title + reference */}
+                      <div>
+                        <Link
+                          to={`/documents/${doc.id}`}
+                          onMouseEnter={preloadDocumentWorkspace}
+                          onFocus={preloadDocumentWorkspace}
+                          className="text-[#1E2B3A] group-hover:text-[#0072CE] font-semibold truncate block transition-colors"
+                        >
+                          {doc.title}
+                        </Link>
+                        <span className="mt-1 inline-block font-mono text-[11px] bg-[#F4F6F8] text-[#1E2B3A] px-2 py-0.5 rounded-sm border border-[#D6DBE0]">
+                          {doc.reference_number}
+                        </span>
+                      </div>
+
+                      {/* Blocked metadata grid — File Format & Status are their own blocks */}
+                      <div className="grid grid-cols-2 md:grid-cols-4 gap-x-6 gap-y-3 text-xs">
+                        <div>
+                          <div className="text-[10px] font-semibold uppercase tracking-widest text-[#5A6470] mb-1">File format</div>
+                          <span className="inline-flex items-center rounded-sm border border-[#D6DBE0] bg-[#F4F6F8] px-2 py-0.5 text-[10px] font-semibold uppercase text-[#1E2B3A] tracking-wide">
+                            {formatDocumentFileType(doc.file_name, doc.file_mime_type)}
+                          </span>
+                        </div>
+
+                        {!personalOnly && !isArchiveView && (
+                          <div>
+                            <div className="text-[10px] font-semibold uppercase tracking-widest text-[#5A6470] mb-1">Status</div>
+                            <StatusBadge status={doc.status} />
+                          </div>
+                        )}
+
+                        <div>
+                          <div className="text-[10px] font-semibold uppercase tracking-widest text-[#5A6470] mb-1">Uploaded</div>
+                          <div className="text-[#1E2B3A]">{format(new Date(doc.created_at), "dd MMM yyyy")}</div>
+                        </div>
+                        <div>
+                          <div className="text-[10px] font-semibold uppercase tracking-widest text-[#5A6470] mb-1">Uploaded by</div>
+                          <div className="text-[#1E2B3A] truncate">{doc.uploaded_by?.full_name || doc.uploaded_by?.email || "—"}</div>
+                        </div>
+                      </div>
+
+                      {personalOnly && (
+                        <div className="space-y-2 pt-1">
+                          {personalDescription && (
+                            <p className="text-xs text-[#1E2B3A]/80 line-clamp-2">{personalDescription}</p>
+                          )}
+                          {doc.personal_tags?.length ? (
+                            <PersonalTagChips tags={doc.personal_tags} onTagClick={handlePersonalTagClick} />
+                          ) : null}
+                        </div>
+                      )}
+                    </div>
+
+                    <div className="flex items-center gap-1.5">
+                      <Link
+                        to={`/documents/${doc.id}`}
+                        onMouseEnter={preloadDocumentWorkspace}
+                        onFocus={preloadDocumentWorkspace}
+                        className="inline-flex items-center gap-1.5 rounded-md border border-border bg-card px-2.5 py-1.5 text-xs font-medium text-foreground hover:border-accent/40 hover:bg-accent/10 hover:text-accent transition-colors"
+                      >
+                        <Eye className="w-3.5 h-3.5" /> View
+                      </Link>
+                    </div>
+                  </div>
+                );
+              })
+            )}
+          </div>
+        )}
+
+        {/* Thumbnails view (Infor-style) ────────────────────────────────────── */}
+        {effectiveView === "thumbnails" && (
+          <div className="p-5">
+            {isLoading ? (
+              <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-5 gap-4">
+                {Array.from({ length: 10 }).map((_, i) => (
+                  <div key={i} className="border border-border rounded-lg p-3 space-y-3">
+                    <div className="h-3 w-2/3 bg-muted rounded animate-pulse" />
+                    <div className="aspect-[3/4] bg-muted rounded animate-pulse" />
+                  </div>
+                ))}
+              </div>
+            ) : docs.length === 0 ? (
+              <div className="text-center py-20 text-muted-foreground">
+                <FileText className="w-12 h-12 mx-auto mb-4 text-muted-foreground/30" />
+                <p className="font-semibold text-foreground text-base">No documents found</p>
+              </div>
+            ) : (
+              <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-5 gap-4">
+                {docs.map((doc: Document) => {
+                  const isSelected = selectedIds.includes(doc.id);
+                  return (
+                    <div
+                      key={doc.id}
+                      className={cn(
+                        "border border-border rounded-lg bg-card hover:border-accent/40 transition-colors group flex flex-col",
+                        isSelected && "border-accent/60 bg-accent/5",
+                      )}
+                    >
+                      <div className="flex items-center gap-2 px-3 py-2 border-b border-border">
+                        {selectionEnabled && (
+                          <button
+                            onClick={() => toggleOne(doc.id)}
+                            className={cn(
+                              "transition-all",
+                              isSelected ? "text-accent" : "text-muted-foreground hover:text-accent"
+                            )}
+                          >
+                            {isSelected ? <CheckSquare className="w-4 h-4" /> : <Square className="w-4 h-4" />}
+                          </button>
+                        )}
+                        <Link
+                          to={`/documents/${doc.id}`}
+                          onMouseEnter={preloadDocumentWorkspace}
+                          onFocus={preloadDocumentWorkspace}
+                          className="text-xs font-semibold text-accent truncate flex-1"
+                          title={doc.title}
+                        >
+                          {doc.reference_number}
+                        </Link>
+                      </div>
+                      <Link
+                        to={`/documents/${doc.id}`}
+                        onMouseEnter={preloadDocumentWorkspace}
+                        onFocus={preloadDocumentWorkspace}
+                        className="flex-1 aspect-[3/4] flex items-center justify-center bg-muted/20 text-muted-foreground group-hover:text-accent transition-colors"
+                      >
+                        <FileText className="w-12 h-12" />
+                      </Link>
+                      <div className="px-3 py-2 text-[11px] text-muted-foreground truncate" title={doc.title}>
+                        {doc.title}
+                      </div>
+                    </div>
+                  );
+                })}
+              </div>
+            )}
+          </div>
+        )}
 
         {/* Pagination */}
         {data && data.count > PAGE_SIZE && (
-          <div className="flex items-center justify-between px-5 py-3 border-t border-border bg-muted/20">
+          <div className="flex items-center justify-between px-5 py-3 border-t border-[#D6DBE0] bg-[#F4F6F8]">
             <span className="text-xs text-muted-foreground">
               Showing <span className="font-semibold text-foreground">{Math.min((page - 1) * PAGE_SIZE + 1, data.count)}</span>–
               <span className="font-semibold text-foreground">{Math.min(page * PAGE_SIZE, data.count)}</span> of {data.count.toLocaleString()}
@@ -869,6 +1561,37 @@ export default function DocumentsPage({ personalOnly = false }: DocumentsPagePro
                 Next
               </button>
             </div>
+          </div>
+        )}
+
+        {/* Layout switcher (Infor-style icons, bottom-right) ───────────────── */}
+        {showLayoutSwitcher && (
+          <div className="flex items-center justify-end gap-1 px-3 py-2 border-t border-[#D6DBE0] bg-[#F4F6F8]">
+            <span className="text-[10px] font-semibold uppercase tracking-widest text-[#5A6470] mr-2">
+              Layout
+            </span>
+            {([
+              { id: "table" as const, icon: Rows3, label: "List" },
+              { id: "card" as const, icon: LayoutList, label: "Card" },
+              { id: "thumbnails" as const, icon: LayoutGrid, label: "Thumbnails" },
+            ]).map(({ id, icon: Icon, label }) => (
+              <button
+                key={id}
+                type="button"
+                title={label}
+                aria-label={`Switch to ${label} view`}
+                aria-pressed={effectiveView === id}
+                onClick={() => setViewMode(id)}
+                className={cn(
+                  "p-1.5 rounded-sm transition-colors",
+                  effectiveView === id
+                    ? "bg-[#0072CE] text-white"
+                    : "text-[#5A6470] hover:text-[#1E2B3A] hover:bg-[#E6EAEE]",
+                )}
+              >
+                <Icon className="w-4 h-4" />
+              </button>
+            ))}
           </div>
         )}
       </div>

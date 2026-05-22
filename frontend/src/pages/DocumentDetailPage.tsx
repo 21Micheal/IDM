@@ -1,30 +1,36 @@
 /**
  * pages/DocumentDetailPage.tsx
  *
- * Indigo Vault refresh:
- * ─────────────────────
- * • Edit details is available directly on the page for eligible documents and
- *   opens MetadataEditPanel alongside the preview, regardless of file type.
- * • All raw gray/blue/amber/red Tailwind classes migrated to semantic HSL
- *   tokens (primary, accent, teal, destructive, muted) for consistent theming.
- *
- * All business logic (locking, OCR polling, version restore, comments,
- * workflow tasks, mutations) is unchanged.
+ * Infor DMS layout refresh:
+ * ─────────────────────────
+ * • Standardized enterprise 2-panel layout:
+ *   - Column 1: Document Viewer / Preview (Left)
+ *   - Column 2: Details & Tabs (Right)
+ * • Blue command bar showing document identity and primary document actions.
+ * • Migrated Document Activities into the Left Panel's tabs under "Audit trail" tab.
+ * • Removed Checkout, Save, Save as new document, and top Recently Modified tabs.
+ * • Removed AddToFolder / Document Storage bottom card.
+ * • Removed Checked Out By and Checked Out Date from Properties tab.
+ * • Preserved all business logic (locking, OCR polling, version restore, comments,
+ *   workflow tasks, mutations) and inline editing.
  */
 import { Suspense, lazy, useState, useEffect, useRef, useCallback } from "react";
 import { useParams, useNavigate } from "react-router-dom";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { documentsAPI, workflowAPI } from "@/services/api";
 const DocumentViewer = lazy(() => import("@/components/documents/DocumentViewer"));
+const UploadVersionDrawer = lazy(() => import("@/components/documents/UploadVersionDrawer").then((module) => ({ default: module.UploadVersionDrawer })));
 import StatusBadge from "@/components/documents/StatusBadge";
 import OcrStatusBadge from "@/components/documents/OcrStatusBadge";
+import { AddToFolderMenu } from "@/components/documents/AddToFolderMenu";
 const MetadataEditPanel = lazy(() => import("@/components/documents/MetadataEditPanel"));
 const WorkflowActionPanel = lazy(() => import("@/components/workflow/WorkflowActionPanel"));
 import { format } from "date-fns";
 import {
-  ArrowLeft, Send, Archive, MessageSquare, ShieldCheck,
+  ArrowLeft, Send, MessageSquare, ShieldCheck,
   Loader2, RotateCcw, Edit2, Lock, Info, Download,
-  CheckCircle, AlertTriangle, ScanLine, RefreshCw,
+  AlertTriangle, ScanLine, RefreshCw,
+  Printer, Trash2, X, Check
 } from "lucide-react";
 import { toast } from "@/components/ui/vault-toast";
 import { useAuthStore } from "@/store/authStore";
@@ -34,7 +40,6 @@ import { QUERY_SHORT_STALE } from "@/lib/reactQueryDefaults";
 import { formatDocumentFileType } from "@/lib/documentFormat";
 
 import { StarButton } from "@/components/documents/StarButton";
-import { AddToFolderMenu } from "@/components/documents/AddToFolderMenu";
 
 import { clearDocumentVersionCache, getCachedVersionPreview, getPreviewCacheKey, setCachedVersionPreview } from "@/utils/versionPreviewCache";
 
@@ -82,9 +87,9 @@ function formatDocumentDetailValue(doc: Document, field: MetadataField) {
     const amount = Number(value);
     return Number.isFinite(amount)
       ? new Intl.NumberFormat("en-US", {
-          style: "currency",
-          currency: doc.currency || "USD",
-        }).format(amount)
+        style: "currency",
+        currency: doc.currency || "USD",
+      }).format(amount)
       : String(value);
   }
 
@@ -108,6 +113,55 @@ function formatOcrEngine(engine: unknown) {
   return String(engine || "Unknown").replace(/_/g, " ");
 }
 
+function getCommandStatusLabel(status: string) {
+  return status
+    ? status.replace(/_/g, " ").replace(/\b\w/g, (char) => char.toUpperCase())
+    : "Unknown";
+}
+
+function getCommandStatusClass(status: string) {
+  const key = status?.toLowerCase?.().replace(/\s+/g, "_") ?? "";
+  if (["approved", "active", "enabled", "completed"].includes(key)) {
+    return "border-emerald-200 bg-emerald-50 text-emerald-800";
+  }
+  if (["pending_review", "pending_approval", "on_hold", "returned"].includes(key)) {
+    return "border-amber-200 bg-amber-50 text-amber-900";
+  }
+  if (["rejected", "void"].includes(key)) {
+    return "border-red-200 bg-red-50 text-red-800";
+  }
+  if (key === "archived") {
+    return "border-sky-200 bg-sky-50 text-sky-800";
+  }
+  return "border-slate-200 bg-white text-slate-800";
+}
+
+function describeAuditEvent(event: string) {
+  const normalized = event.replace(/_/g, " ").toLowerCase();
+  switch (normalized) {
+    case "created":
+      return "was created";
+    case "updated":
+      return "was updated";
+    case "metadata updated":
+      return "metadata was updated";
+    case "file uploaded":
+    case "document uploaded":
+      return "was uploaded";
+    case "file downloaded":
+    case "document downloaded":
+      return "was downloaded";
+    case "reviewed":
+      return "was reviewed";
+    case "workflow started":
+      return "workflow was started";
+    case "version restored":
+      return "version was restored";
+    default:
+      return normalized;
+  }
+}
+
 function normalizeUrl(url: string | null | undefined): string | undefined {
   if (!url) return url ?? undefined;
   if (window.location.protocol === "https:" && url.startsWith("http://")) {
@@ -116,7 +170,7 @@ function normalizeUrl(url: string | null | undefined): string | undefined {
   return url;
 }
 
-type TabId = "preview" | "versions" | "comments" | "audit" | "edit";
+type TabId = "workflow" | "attributes" | "properties" | "security" | "history" | "comments" | "audit" | "edit";
 
 type PaginatedResponse<T> = {
   count: number;
@@ -138,10 +192,13 @@ export default function DocumentDetailPage() {
   const qc = useQueryClient();
   const user = useAuthStore((s) => s.user);
 
-  const [activeTab, setActiveTab] = useState<TabId>("preview");
+  const [activeTab, setActiveTab] = useState<TabId>("attributes");
   const [comment, setComment] = useState("");
   const [confirmRestoreId, setConfirmRestoreId] = useState<string | null>(null);
   const [auditPage, setAuditPage] = useState(1);
+  const [viewerLinks, setViewerLinks] = useState({ openInNewTabUrl: "", downloadHref: "" });
+  const [workflowActionCompleted, setWorkflowActionCompleted] = useState(false);
+  const printFrameRef = useRef<HTMLIFrameElement | null>(null);
 
   const pollRef = useRef<ReturnType<typeof setInterval> | null>(null);
 
@@ -211,10 +268,22 @@ export default function DocumentDetailPage() {
     });
   }, [doc?.id, doc?.current_version, qc]);
 
+  const handleVersionUploaded = useCallback(() => {
+    if (!id) return;
+    clearDocumentVersionCache(id);
+    qc.invalidateQueries({ queryKey: ["document", id] });
+    qc.invalidateQueries({ queryKey: ["document-preview", id] });
+  }, [id, qc]);
+
+  const handlePreviewLinksChange = useCallback((links: { openInNewTabUrl: string; downloadHref: string }) => {
+    setViewerLinks(links);
+  }, []);
+
+  // Warm preview immediately
   useEffect(() => {
-    if (!doc?.id || activeTab !== "preview") return;
+    if (!doc?.id) return;
     warmPreview();
-  }, [activeTab, doc?.id, warmPreview]);
+  }, [doc?.id, warmPreview]);
 
   useEffect(() => {
     if ((!ocrActive && !previewActive) || !id) {
@@ -238,12 +307,7 @@ export default function DocumentDetailPage() {
     prevOcrRef.current = ocrStatus;
   }, [ocrStatus]);
 
-  useEffect(() => {
-    if (activeTab === "audit") {
-      setAuditPage(1);
-    }
-  }, [activeTab, id]);
-
+  // Audit activities query
   const { data: auditLogs } = useQuery({
     queryKey: ["document-audit", id, auditPage],
     queryFn: () =>
@@ -251,12 +315,12 @@ export default function DocumentDetailPage() {
         page: auditPage,
         page_size: AUDIT_PAGE_SIZE,
       }).then((r) => r.data as PaginatedResponse<DocumentAuditLog>),
-    enabled: activeTab === "audit" && !!id,
+    enabled: !!id,
     ...QUERY_SHORT_STALE,
   });
 
   useEffect(() => {
-    if (activeTab !== "audit" || !id || !auditLogs?.count) return;
+    if (!id || !auditLogs?.count) return;
 
     const totalPages = Math.max(1, Math.ceil(auditLogs.count / AUDIT_PAGE_SIZE));
 
@@ -285,7 +349,7 @@ export default function DocumentDetailPage() {
         staleTime: 30_000,
       });
     }
-  }, [activeTab, id, auditLogs?.count, auditPage, qc]);
+  }, [id, auditLogs?.count, auditPage, qc]);
 
   const { data: myTasks } = useQuery({
     queryKey: ["workflow", "my-tasks"],
@@ -294,6 +358,26 @@ export default function DocumentDetailPage() {
     ...QUERY_SHORT_STALE,
   });
   const activeTask = myTasks?.find((t: { document_id: string }) => t.document_id === id);
+  const activeTaskInitializedRef = useRef(false);
+
+  useEffect(() => {
+    if (!activeTaskInitializedRef.current && activeTask) {
+      activeTaskInitializedRef.current = true;
+      setActiveTab("workflow");
+    }
+  }, [activeTask]);
+
+  useEffect(() => {
+    if (!activeTask && activeTab === "workflow") {
+      setActiveTab("attributes");
+    }
+  }, [activeTask, activeTab]);
+
+  useEffect(() => {
+    if (activeTask) {
+      setWorkflowActionCompleted(false);
+    }
+  }, [activeTask]);
 
   const submitMutation = useMutation({
     mutationFn: () => documentsAPI.submit(id!),
@@ -343,7 +427,7 @@ export default function DocumentDetailPage() {
   if (!doc) return <p className="text-muted-foreground">Document not found.</p>;
 
   const isPersonal = Boolean((doc as any).is_self_upload);
-  const isScanned  = Boolean((doc as any).is_scanned);
+  const isScanned = Boolean((doc as any).is_scanned);
   const personalTags = doc.personal_tags ?? [];
   const personalMetadataEntries = Object.entries(doc.metadata ?? {}).filter(
     ([key]) => key !== "personal_tags",
@@ -351,23 +435,25 @@ export default function DocumentDetailPage() {
   const documentDetailRows = isPersonal
     ? []
     : [...(doc.document_type?.metadata_fields ?? [])]
-        .sort((a, b) => a.order - b.order)
-        .map((field) => ({
-          key: field.id,
-          label: field.label,
-          value: formatDocumentDetailValue(doc, field),
-        }));
+      .sort((a, b) => a.order - b.order)
+      .map((field) => ({
+        key: field.id,
+        label: field.label,
+        value: formatDocumentDetailValue(doc, field),
+      }));
   const permissions = doc.permissions ?? [];
   const hasAdminAccess = Boolean(user?.has_admin_access);
   const canViewDocument = hasAdminAccess || permissions.includes("view");
-  const canEdit    = hasAdminAccess || permissions.includes("edit");
+  const canEdit = hasAdminAccess || permissions.includes("edit");
   const canComment = hasAdminAccess || permissions.includes("comment");
   const canApprove = hasAdminAccess || permissions.includes("approve");
   const canArchive = hasAdminAccess || permissions.includes("archive");
   const canRestoreVersion = hasAdminAccess || permissions.includes("upload");
+  const canUploadVersion = hasAdminAccess || permissions.includes("upload");
   const canReOcr = hasAdminAccess || (isScanned && permissions.includes("upload"));
   const canDownload = hasAdminAccess || permissions.includes("download");
   const ocrQuality = getOcrQuality(doc.metadata);
+  const isLockedByOther = Boolean(doc.is_edit_locked && doc.edit_locked_by !== user?.id);
 
   const canSubmit =
     !isPersonal &&
@@ -382,103 +468,263 @@ export default function DocumentDetailPage() {
   const isDraftOrRejected = doc.status === "draft" || doc.status === "rejected";
   const auditCount = auditLogs?.count ?? 0;
   const auditPages = Math.max(1, Math.ceil(auditCount / AUDIT_PAGE_SIZE));
+  const sortedDocumentVersions = [...(doc.versions ?? [])].sort((a, b) => a.version_number - b.version_number);
 
-  // Build the tab list. "Edit details" sits next to "Audit trail" but instead
-  // of switching the panel it opens the MetadataEditPanel as a modal dialog.
-  const tabs: { id: TabId; label: string; isAction?: boolean; disabled?: boolean }[] = [
-    { id: "preview",  label: "Preview" },
-    { id: "versions", label: `Versions (${doc.versions?.length ?? 0})` },
-    { id: "comments", label: "Comments" },
-    ...(canViewDocument ? [{ id: "audit" as const, label: "Audit trail" }] : []),
+  const tabs: { id: TabId; label: string; disabled?: boolean }[] = [
+    ...(activeTask ? [{ id: "workflow" as const, label: "Workflow" }] : []),
+    { id: "attributes", label: "Details" },
+    { id: "properties", label: "Properties" },
+    { id: "security", label: "Security" },
+    { id: "history", label: `History (${sortedDocumentVersions.length})` },
+    { id: "comments", label: `Comments (${doc.comments?.length ?? 0})` },
+    { id: "audit", label: "Audit trail" },
     ...(isDraftOrRejected
-      ? [{ id: "edit" as const, label: "Edit details", isAction: true, disabled: !canEdit }]
+      ? [{ id: "edit" as const, label: "Edit details", disabled: !canEdit }]
       : []),
   ];
 
-  const handleTabClick = (tab: { id: TabId; isAction?: boolean; disabled?: boolean }) => {
+  const handleTabClick = (tab: { id: TabId; disabled?: boolean }) => {
     if (tab.disabled) return;
     setActiveTab(tab.id);
   };
 
+  const handlePrintDocument = async () => {
+    if (!canDownload || !doc.id) return;
+    const printUrl = viewerLinks.openInNewTabUrl || viewerLinks.downloadHref;
+    if (!printUrl) {
+      toast.info("Document preview is not ready for printing yet.");
+      return;
+    }
+
+    documentsAPI.filePrintEvent(doc.id).catch(() => {});
+
+    const frame = printFrameRef.current;
+    if (!frame) {
+      window.open(printUrl, "_blank", "noopener,noreferrer");
+      return;
+    }
+
+    let printed = false;
+    const fallback = window.setTimeout(() => {
+      if (printed) return;
+      window.open(printUrl, "_blank", "noopener,noreferrer");
+      toast.info("Opened the document in a new tab for printing.");
+    }, 1800);
+
+    frame.onload = () => {
+      try {
+        frame.contentWindow?.focus();
+        frame.contentWindow?.print();
+        printed = true;
+        window.clearTimeout(fallback);
+      } catch {
+        window.open(printUrl, "_blank", "noopener,noreferrer");
+      }
+    };
+    frame.src = printUrl;
+  };
+
+  // Grouping function for Infor DMS style Date grouping header
+  const formatActivityDateHeader = (timestampStr: string) => {
+    try {
+      const date = new Date(timestampStr);
+      const today = new Date();
+      const yesterday = new Date();
+      yesterday.setDate(today.getDate() - 1);
+
+      if (date.toDateString() === today.toDateString()) {
+        return "Today";
+      } else if (date.toDateString() === yesterday.toDateString()) {
+        return "Yesterday";
+      } else {
+        return format(date, "dd/MM/yyyy");
+      }
+    } catch {
+      return "History";
+    }
+  };
+
+  let lastDateHeader = "";
+
   return (
-    <div className="space-y-5">
-      {/* Header */}
-      <div className="flex items-start justify-between gap-4">
-        <div>
+    <div className="-m-6 min-h-[calc(100vh-3.5rem)] bg-[#EDEDED] text-[#1F2933]">
+      <iframe ref={printFrameRef} title="Printable document" className="hidden" />
+
+      {workflowActionCompleted && !activeTask && (
+        <div className="mx-5 mt-4 border border-[#C8CDD2] bg-white px-4 py-4 text-sm text-[#5E6870]">
+          <p className="font-semibold text-foreground">Workflow action complete</p>
+          <p className="mt-1">This document has moved to the next stage and is no longer actionable from your current access level.</p>
+        </div>
+      )}
+      <div className="flex min-h-[69px] flex-col gap-3 bg-[#287EAD] px-5 py-3 text-xs text-white xl:flex-row xl:items-center xl:justify-between">
+        <div className="flex min-w-0 flex-col gap-2 sm:flex-row sm:items-center">
           <button
             onClick={() => navigate(-1)}
-            className="flex items-center gap-1 text-sm text-muted-foreground hover:text-foreground mb-2 transition-colors"
+            className="flex h-9 items-center gap-1 border border-white/20 bg-[#206D99] px-3 text-xs text-white/85 transition-colors hover:text-white"
           >
-            <ArrowLeft className="w-4 h-4" /> Back
+            <ArrowLeft className="w-3.5 h-3.5" /> Back
           </button>
-          <div className="flex items-center gap-3 flex-wrap">
-            <h1 className="text-xl font-bold text-foreground">{doc.title}</h1>
-            <StatusBadge status={doc.status} />
-            <div className="flex items-center gap-2">
-              <StarButton documentId={doc.id} showLabel />
-              <AddToFolderMenu documentId={doc.id} showLabel />
-            </div>
-            {isPersonal && (
-            <span className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full text-xs font-semibold bg-primary/10 text-primary border border-primary/20">
-              <Lock className="w-3 h-3" /> Personal
-            </span>
-          )}
-          {isScanned && (
-            <span className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full text-xs font-semibold bg-teal/10 text-teal border border-teal/20">
-                <ScanLine className="w-3 h-3" /> Scanned
+          <div className="min-w-0">
+            <div className="flex flex-wrap items-center gap-2 text-white">
+              <h1 className="max-w-[28rem] truncate text-base font-semibold">{doc.title}</h1>
+              <span className={cn(
+                "inline-flex items-center border px-2.5 py-0.5 text-xs font-bold shadow-sm",
+                getCommandStatusClass(doc.status),
+              )}>
+                {getCommandStatusLabel(doc.status)}
               </span>
-            )}
+              {isPersonal && (
+                <span className="inline-flex items-center gap-1 border border-white/25 bg-white/10 px-2.5 py-0.5 text-[10px] font-semibold text-white">
+                  <Lock className="w-2.5 h-2.5" /> Personal
+                </span>
+              )}
+              {isScanned && (
+                <span className="inline-flex items-center gap-1 border border-white/25 bg-white/10 px-2.5 py-0.5 text-[10px] font-semibold text-white">
+                  <ScanLine className="w-2.5 h-2.5" /> Scanned
+                </span>
+              )}
+              {doc.is_edit_locked && (
+                <span className="inline-flex animate-fade-in items-center gap-1 border border-amber-200 bg-amber-100 px-2 py-0.5 text-[10px] font-semibold text-amber-800">
+                  <Lock className="w-2.5 h-2.5" /> Checked Out By {doc.edit_locked_by_name || "User"}
+                </span>
+              )}
+            </div>
+            <div className="mt-1 flex flex-wrap items-center gap-2 text-[11px] text-white/75">
+              <span className="max-w-[20rem] truncate font-medium">{doc.file_name}</span>
+              <span>{formatBytes(doc.file_size)}</span>
+              <span>{doc.current_version ? `v${doc.current_version}` : "—"}</span>
+              <span>{doc.reference_number}</span>
+            </div>
           </div>
-          <p className="text-sm text-muted-foreground mt-1 font-mono">{doc.reference_number}</p>
         </div>
-        <div className="flex gap-2 flex-shrink-0 flex-wrap justify-end">
+
+        <div className="flex w-full flex-wrap items-center justify-start gap-1.5 font-medium text-white/80 xl:w-auto xl:justify-end">
+          {canSubmit ? (
+            <button
+              onClick={() => submitMutation.mutate()}
+              disabled={submitMutation.isPending}
+              className="flex h-8 items-center gap-1 px-2 transition-colors hover:bg-white/10 hover:text-white disabled:opacity-50"
+              title="Submit for approval workflow"
+            >
+              {submitMutation.isPending ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <Send className="w-3.5 h-3.5" />}
+              <span>Start workflow</span>
+            </button>
+          ) : (
+            <button disabled className="hidden h-8 cursor-not-allowed items-center gap-1 px-2 opacity-40 sm:flex" title="Not eligible for submission">
+              <Send className="w-3.5 h-3.5" />
+              <span>Start workflow</span>
+            </button>
+          )}
+
+          <AddToFolderMenu
+            documentId={doc.id}
+            showLabel
+            className="text-white/80 hover:text-white"
+          />
+
+          <div className="flex items-center" title="Favourite document">
+            <StarButton
+              documentId={doc.id}
+              showLabel
+              className="border-white/20 bg-white/10 px-2.5 py-1 text-xs font-semibold text-white hover:bg-white/15"
+            />
+          </div>
+
+          <div className="mx-1 hidden h-5 w-px bg-white/20 sm:block" />
+
+          {canDownload && viewerLinks.downloadHref ? (
+            <a
+              href={viewerLinks.downloadHref}
+              download
+              className="flex h-8 items-center gap-1 px-2 transition-colors hover:bg-white/10 hover:text-white"
+              title="Download current document"
+            >
+              <Download className="w-3.5 h-3.5" />
+              <span>Download</span>
+            </a>
+          ) : (
+            <button
+              disabled
+              className="flex h-8 cursor-not-allowed items-center gap-1 px-2 opacity-40"
+              title={canDownload ? "Preview not ready yet" : "Download permission required"}
+            >
+              <Download className="w-3.5 h-3.5" />
+              <span>Download</span>
+            </button>
+          )}
+
+          <button
+            onClick={handlePrintDocument}
+            disabled={!canDownload || (!viewerLinks.openInNewTabUrl && !viewerLinks.downloadHref)}
+            className="flex h-8 items-center gap-1 px-2 transition-colors hover:bg-white/10 hover:text-white disabled:cursor-not-allowed disabled:opacity-40"
+            title={canDownload ? "Print document" : "Print permission required"}
+          >
+            <Printer className="w-3.5 h-3.5" />
+            <span>Print</span>
+          </button>
+
+          {canUploadVersion && !isLockedByOther && (
+            <Suspense fallback={<span className="inline-flex items-center gap-1 px-2 py-1 rounded bg-muted/10 text-xs text-muted-foreground">Loading…</span>}>
+              <UploadVersionDrawer documentId={doc.id} currentVersion={doc.current_version} onVersionUploaded={handleVersionUploaded} />
+            </Suspense>
+          )}
+
           {canArchiveNow && (
-            <button onClick={() => archiveMutation.mutate()} disabled={archiveMutation.isPending} className="btn-secondary">
-              {archiveMutation.isPending ? <Loader2 className="w-4 h-4 animate-spin" /> : <Archive className="w-4 h-4" />}
-              Archive
+            <button
+              onClick={() => archiveMutation.mutate()}
+              disabled={archiveMutation.isPending}
+              className="flex h-8 items-center gap-1 px-2 transition-colors hover:bg-white/10 hover:text-white disabled:opacity-50"
+              title="Archive document"
+            >
+              {archiveMutation.isPending ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <Trash2 className="w-3.5 h-3.5" />}
+              <span className="sr-only sm:not-sr-only">Delete</span>
             </button>
           )}
         </div>
       </div>
 
-      <div className="grid grid-cols-1 lg:grid-cols-3 gap-5">
-        {/* Sidebar */}
-        <div className="space-y-4">
+      {/* Enterprise workspace: preview left, document intelligence right */}
+      <div className="grid grid-cols-1 items-start gap-4 p-4 pr-8 lg:grid-cols-12">
+
+        {/* Column 1: Document Viewer (Left) */}
+        <div className="space-y-4 lg:col-span-8">
+
+          {/* Active Notifications / Status Banners */}
           {isPersonal && (
-            <div className="rounded-xl border border-primary/20 bg-primary/5 px-4 py-3 flex items-start gap-3 text-sm text-primary">
-              <Info className="w-4 h-4 mt-0.5 flex-shrink-0 text-primary" />
+            <div className="flex items-start gap-3 border border-[#C8CDD2] bg-white px-4 py-3 text-xs text-[#287EAD] shadow-sm animate-fade-in">
+              <Info className="mt-0.5 h-4 w-4 flex-shrink-0" />
               <div>
-                <p className="font-medium">Personal document</p>
-                <p className="text-xs mt-0.5 text-primary/70">Private to you and administrators. Cannot be submitted for approval.</p>
+                <p className="font-semibold">Personal document</p>
+                <p className="mt-0.5 text-[10px] text-[#5E6870]">Private to you and administrators. Cannot be submitted for approval.</p>
               </div>
             </div>
           )}
 
           {ocrActive && (
-            <div className="rounded-xl border border-teal/20 bg-teal/5 px-4 py-3 flex items-start gap-3 text-sm text-teal">
-              <Loader2 className="w-4 h-4 mt-0.5 flex-shrink-0 animate-spin" />
+            <div className="flex items-start gap-3 border border-[#C8CDD2] bg-white px-4 py-3 text-xs text-[#287EAD] shadow-sm">
+              <Loader2 className="mt-0.5 h-4 w-4 flex-shrink-0 animate-spin" />
               <div>
-                <p className="font-medium">Extracting text…</p>
-                <p className="text-xs mt-0.5 text-teal/80">
-                  OCR is running in the background. This page will update automatically when complete.
+                <p className="font-semibold">Extracting text…</p>
+                <p className="mt-0.5 text-[10px] text-[#5E6870]">
+                  OCR is running in the background. This page will update automatically.
                 </p>
               </div>
             </div>
           )}
 
           {ocrStatus === "failed" && (
-            <div className="rounded-xl border border-destructive/30 bg-destructive/5 px-4 py-3 flex items-start gap-3 text-sm text-destructive">
-              <AlertTriangle className="w-4 h-4 mt-0.5 flex-shrink-0" />
+            <div className="flex items-start gap-3 border border-destructive/30 bg-white px-4 py-3 text-xs text-destructive shadow-sm">
+              <AlertTriangle className="mt-0.5 h-4 w-4 flex-shrink-0" />
               <div className="flex-1">
-                <p className="font-medium">OCR failed</p>
-                <p className="text-xs mt-0.5 text-destructive/80">Text extraction did not complete. The document is still accessible but not fully searchable.</p>
+                <p className="font-semibold">OCR failed</p>
+                <p className="mt-0.5 text-[10px] text-destructive/80">Text extraction did not complete. Search index is limited.</p>
                 {canReOcr && (
                   <button
                     onClick={() => reOcrMutation.mutate()}
                     disabled={reOcrMutation.isPending}
-                    className="mt-2 inline-flex items-center gap-1.5 text-xs font-medium text-destructive hover:text-destructive/80"
+                    className="mt-2 inline-flex items-center gap-1 text-[10px] font-semibold text-destructive hover:underline"
                   >
-                    {reOcrMutation.isPending ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <RefreshCw className="w-3.5 h-3.5" />}
+                    {reOcrMutation.isPending ? <Loader2 className="h-3 w-3 animate-spin" /> : <RefreshCw className="h-3 w-3" />}
                     Re-run OCR
                   </button>
                 )}
@@ -486,160 +732,43 @@ export default function DocumentDetailPage() {
             </div>
           )}
 
-          {!isPersonal && documentDetailRows.length > 0 && (
-            <div className="card p-5 space-y-3">
-              <h2 className="font-semibold text-foreground text-sm">Document details</h2>
-              <dl className="space-y-2 text-sm">
-                {documentDetailRows.map(({ key, label, value }) => (
-                  <div key={key} className="flex justify-between gap-2">
-                    <dt className="text-muted-foreground">{label}</dt>
-                    <dd className="text-foreground text-right font-medium truncate max-w-[180px]">{value}</dd>
-                  </div>
-                ))}
-              </dl>
-            </div>
-          )}
-
-          {isPersonal && (
-            <div className="card p-5 space-y-4">
-              <h2 className="font-semibold text-foreground text-sm">Personal details</h2>
-
-              <div>
-                <p className="text-xs font-semibold text-muted-foreground uppercase tracking-wide mb-2">
-                  Personal tags
-                </p>
-                {personalTags.length > 0 ? (
-                  <div className="flex flex-wrap gap-2">
-                    {personalTags.map((tag) => (
-                      <span
-                        key={tag}
-                        className="badge text-xs bg-primary/10 text-primary border border-primary/20"
-                      >
-                        {tag}
-                      </span>
-                    ))}
-                  </div>
-                ) : (
-                  <p className="text-sm text-muted-foreground">—</p>
-                )}
+          <div className="border border-[#C8CDD2] bg-white shadow-sm">
+            <Suspense fallback={
+              <div className="flex min-h-[32rem] items-center justify-center bg-white">
+                <Loader2 className="h-8 w-8 animate-spin text-[#287EAD]" />
               </div>
-
-              <div>
-                <p className="text-xs font-semibold text-muted-foreground uppercase tracking-wide mb-2">
-                  Custom metadata
-                </p>
-                {personalMetadataEntries.length > 0 ? (
-                  <dl className="space-y-2 text-sm">
-                    {personalMetadataEntries.map(([key, val]) => (
-                      <div key={key} className="flex justify-between gap-2">
-                        <dt className="text-muted-foreground capitalize">{key.replace(/_/g, " ")}</dt>
-                        <dd className="text-foreground text-right font-medium truncate max-w-[180px]">
-                          {String(val)}
-                        </dd>
-                      </div>
-                    ))}
-                  </dl>
-                ) : (
-                  <p className="text-sm text-muted-foreground">—</p>
-                )}
-              </div>
-            </div>
-          )}
-
-          <div className="card p-5 space-y-3">
-            <h2 className="font-semibold text-foreground text-sm">File details</h2>
-            <dl className="space-y-2 text-sm">
-              {[
-                { label: "Type", value: doc.document_type?.name },
-                { label: "Version", value: `v${doc.current_version}` },
-                { label: "Format", value: formatDocumentFileType(doc.file_name, doc.file_mime_type) },
-                { label: "File", value: doc.file_name },
-                { label: "Size", value: formatBytes(doc.file_size) },
-                { label: "Uploaded by", value: `${doc.uploaded_by?.first_name} ${doc.uploaded_by?.last_name}` },
-                { label: "Created", value: format(new Date(doc.created_at), "dd MMM yyyy HH:mm") },
-              ].map(({ label, value }) => (
-                <div key={label} className="flex justify-between gap-2">
-                  <dt className="text-muted-foreground">{label}</dt>
-                  <dd className="text-foreground text-right font-medium truncate max-w-[180px]">{value}</dd>
-                </div>
-              ))}
-
-              {isScanned && (
-                <>
-                  <div className="flex justify-between gap-2 pt-2 border-t border-border">
-                    <dt className="text-muted-foreground">OCR status</dt>
-                    <dd>
-                      <OcrStatusBadge status={ocrStatus as any} showDone />
-                      {!ocrStatus && <span className="text-muted-foreground text-xs">—</span>}
-                    </dd>
-                  </div>
-                  {ocrQuality && (
-                    <div className="flex justify-between gap-2">
-                      <dt className="text-muted-foreground">OCR engine</dt>
-                      <dd className="text-right">
-                        <span className="text-xs font-medium capitalize">
-                          {formatOcrEngine(ocrQuality.engine)}
-                        </span>
-                        {ocrQuality.mean_confidence && (
-                          <span className="text-xs text-muted-foreground ml-1">
-                            ({ocrQuality.mean_confidence}% conf.)
-                          </span>
-                        )}
-                      </dd>
-                    </div>
-                  )}
-                </>
-              )}
-            </dl>
-          </div>
-
-          {!isPersonal && activeTask && (
-            <Suspense fallback={<div className="card p-5 text-sm text-muted-foreground">Loading workflow actions…</div>}>
-              <WorkflowActionPanel task={activeTask} documentId={id!} />
+            }>
+              <DocumentViewer
+                document={doc}
+                submitSlot={null}
+                hideUploadActionBar
+                onPreviewLinksChange={handlePreviewLinksChange}
+              />
             </Suspense>
-          )}
-
-          {doc.tags?.length > 0 && (
-            <div className="card p-5">
-              <h2 className="font-semibold text-foreground text-sm mb-3">
-                {isPersonal ? "Shared tags" : "Tags"}
-              </h2>
-              <div className="flex flex-wrap gap-2">
-                {doc.tags.map((tag) => (
-                  <span
-                    key={tag.id}
-                    className="badge text-xs"
-                    style={{ backgroundColor: tag.color + "22", color: tag.color }}
-                  >
-                    {tag.name}
-                  </span>
-                ))}
-              </div>
-            </div>
-          )}
+          </div>
         </div>
 
-        {/* Right tabs */}
-        <div className="lg:col-span-2 space-y-4 lg:-mt-4 xl:-mt-5">
-          <div className="border-b border-border">
-            <nav className="-mb-px flex gap-0 flex-wrap">
+        {/* Column 2: Details & Properties Tabs (Right) */}
+        <div className="space-y-3 lg:col-span-4">
+
+          {/* Tab Selection Row */}
+          <div className="border-b border-[#C8CDD2] bg-white px-3 pt-2">
+            <nav className="-mb-px flex gap-1 flex-wrap">
               {tabs.map((tab) => {
                 const isActive = activeTab === tab.id;
                 return (
                   <button
                     key={tab.id}
                     onClick={() => handleTabClick(tab)}
-                    onMouseEnter={tab.id === "preview" ? warmPreview : undefined}
-                    onFocus={tab.id === "preview" ? warmPreview : undefined}
                     disabled={tab.disabled}
                     className={cn(
-                      "px-4 py-2.5 text-sm font-medium border-b-2 transition-colors whitespace-nowrap inline-flex items-center gap-1.5 disabled:opacity-50 disabled:cursor-not-allowed",
+                      "inline-flex items-center gap-1 whitespace-nowrap border-b-2 px-2.5 py-2 text-sm font-semibold transition-all disabled:cursor-not-allowed disabled:opacity-40",
                       isActive
-                        ? "border-primary text-foreground"
-                        : "border-transparent text-muted-foreground hover:text-foreground hover:border-border"
+                        ? "border-[#287EAD] text-[#287EAD]"
+                        : "border-transparent text-[#5E6870] hover:border-[#C8CDD2] hover:text-[#1F2933]"
                     )}
                   >
-                    {tab.id === "edit" && <Edit2 className="w-3.5 h-3.5" />}
+                    {tab.id === "edit" && <Edit2 className="w-3 h-3" />}
                     {tab.label}
                   </button>
                 );
@@ -647,216 +776,493 @@ export default function DocumentDetailPage() {
             </nav>
           </div>
 
-          {(activeTab === "preview" || activeTab === "edit") && (
-            <div className="flex w-full h-full gap-4">
-              <div className={`${activeTab === "edit" ? "w-2/3" : "w-full"} transition-all`}>
-                <Suspense fallback={<div className="flex min-h-[24rem] items-center justify-center rounded-xl border border-border bg-card"><Loader2 className="w-8 h-8 text-primary animate-spin" /></div>}>
-                  <DocumentViewer
-                    document={doc}
-                    submitSlot={
-                      !isPersonal && isDraftOrRejected && canSubmit ? (
-                        <button
-                          onClick={() => submitMutation.mutate()}
-                          disabled={submitMutation.isPending}
-                          className="btn-primary"
-                        >
-                          {submitMutation.isPending ? (
-                            <Loader2 className="w-4 h-4 animate-spin" />
-                          ) : (
-                            <Send className="w-4 h-4" />
-                          )}
-                          Submit for approval
-                        </button>
-                      ) : null
-                    }
-                  />
-                </Suspense>
-              </div>
-              {activeTab === "edit" && (
-                <div className="w-1/3 border-l border-border bg-muted/20 backdrop-blur-sm rounded-xl shadow-sm">
-                  <Suspense fallback={<div className="p-6 text-sm text-muted-foreground">Loading editor…</div>}>
-                    <MetadataEditPanel document={doc} onClose={() => setActiveTab("preview")} />
+          {/* Tab contents frame */}
+          <div className="min-h-[34rem] border border-[#C8CDD2] bg-white p-4 shadow-sm">
+
+            {/* WORKFLOW TAB */}
+            {activeTab === "workflow" && activeTask && (
+              <div className="space-y-4 animate-fade-in">
+                <div className="rounded-2xl border border-border bg-background p-4">
+                  <div className="mb-4 flex items-center justify-between gap-3">
+                    <h3 className="text-sm font-semibold text-foreground">Workflow task actions</h3>
+                    <span className="text-sm text-muted-foreground">Task controls</span>
+                  </div>
+                  <Suspense fallback={<div className="text-sm text-muted-foreground">Loading workflow actions…</div>}>
+                    <WorkflowActionPanel task={activeTask} documentId={id!} onCompleted={() => setWorkflowActionCompleted(true)} />
                   </Suspense>
                 </div>
-              )}
-            </div>
-          )}
+              </div>
+            )}
 
-          {activeTab === "versions" && (
-            <div className="space-y-3">
-              {(!doc.versions || doc.versions.length === 0) && (
-                <div className="text-center py-10 text-muted-foreground"><p>No version history available.</p></div>
-              )}
-              {doc.versions?.map((v) => {
-                const isCurrent = v.version_number === doc.current_version;
-                const awaitConfirm = confirmRestoreId === v.id;
-                return (
-                  <div
-                    key={v.id}
-                    onMouseEnter={() => prefetchVersionPreview(v.id)}
-                    onFocus={() => prefetchVersionPreview(v.id)}
-                    className={`card p-4 flex items-start gap-3 ${isCurrent ? "border-l-4 border-l-primary bg-primary/5" : ""}`}
-                  >
-                    <div
-                      className={`w-9 h-9 rounded-full flex items-center justify-center text-xs font-bold flex-shrink-0 ${
-                        isCurrent ? "bg-primary/15 text-primary" : "bg-muted text-muted-foreground"
-                      }`}
-                    >
-                      v{v.version_number}
+            {/* PROPERTIES TAB */}
+            {activeTab === "properties" && (
+              <div className="space-y-4 animate-fade-in">
+                <div className="grid grid-cols-[140px_1fr] gap-x-4 gap-y-3.5 py-1 text-sm">
+                  <span className="text-muted-foreground">Document Type</span>
+                  <span className="text-foreground font-semibold">{doc.document_type?.name || "—"}</span>
+
+                  <span className="text-muted-foreground">Internal ID</span>
+                  <span className="text-foreground font-mono font-semibold">{doc.reference_number || "—"}</span>
+
+                  <span className="text-muted-foreground">Version</span>
+                  <span className="text-foreground font-semibold">{doc.current_version ? `v${doc.current_version}` : "—"}</span>
+
+                  <span className="text-muted-foreground">Modified By</span>
+                  <span className="text-foreground font-semibold">
+                    {doc.uploaded_by?.first_name ? `${doc.uploaded_by.first_name} ${doc.uploaded_by.last_name}` : "—"}
+                  </span>
+
+                  <span className="text-muted-foreground">Modified Date</span>
+                  <span className="text-foreground">
+                    {doc.updated_at ? format(new Date(doc.updated_at), "dd/MM/yyyy, HH:mm:ss") : "—"}
+                  </span>
+
+                  <span className="text-muted-foreground">Created By</span>
+                  <span className="text-foreground font-semibold">
+                    {doc.uploaded_by?.first_name ? `${doc.uploaded_by.first_name} ${doc.uploaded_by.last_name}` : "—"}
+                  </span>
+
+                  <span className="text-muted-foreground">Created Date</span>
+                  <span className="text-foreground">
+                    {doc.created_at ? format(new Date(doc.created_at), "dd/MM/yyyy, HH:mm:ss") : "—"}
+                  </span>
+
+                  <span className="text-muted-foreground">Filename</span>
+                  <span className="text-foreground truncate max-w-[240px] font-mono" title={doc.file_name}>{doc.file_name || "—"}</span>
+
+                  <span className="text-muted-foreground">Size</span>
+                  <span className="text-foreground font-mono">{doc.file_size || "—"}</span>
+
+                  <span className="text-muted-foreground">ID</span>
+                  <span className="text-foreground font-mono truncate max-w-[240px]" title={doc.id}>{doc.id || "—"}</span>
+
+                  <span className="text-muted-foreground">Format</span>
+                  <span className="text-foreground">{formatDocumentFileType(doc.file_name, doc.file_mime_type)}</span>
+
+                  <span className="text-muted-foreground">MIME Type</span>
+                  <span className="text-foreground font-mono break-all">{doc.file_mime_type}</span>
+
+                  {isScanned && (
+                    <>
+                      <span className="text-muted-foreground">OCR Status</span>
+                      <span>
+                        <OcrStatusBadge status={ocrStatus as any} showDone />
+                        {!ocrStatus && <span className="text-muted-foreground">—</span>}
+                      </span>
+                    </>
+                  )}
+
+                  {ocrQuality && (
+                    <>
+                      <span className="text-muted-foreground">OCR Engine</span>
+                      <span className="capitalize">{formatOcrEngine(ocrQuality.engine)}</span>
+
+                      <span className="text-muted-foreground">OCR Confidence</span>
+                      <span className="font-semibold text-teal-600 dark:text-teal-400">
+                        {ocrQuality.mean_confidence ? `${ocrQuality.mean_confidence}%` : "—"}
+                      </span>
+                    </>
+                  )}
+                </div>
+              </div>
+            )}
+
+            {/* ATTRIBUTES TAB */}
+            {activeTab === "attributes" && (
+              <div className="space-y-4 animate-fade-in">
+                <h3 className="text-sm font-semibold text-muted-foreground uppercase tracking-wider border-b border-border pb-2">
+                  Document Details
+                </h3>
+                {isPersonal ? (
+                  <div className="space-y-4 text-sm">
+                    <div>
+                      <span className="text-sm font-semibold text-muted-foreground uppercase tracking-wide block mb-2">Personal tags</span>
+                      {personalTags.length > 0 ? (
+                        <div className="flex flex-wrap gap-1.5">
+                          {personalTags.map((tag) => (
+                            <span key={tag} className="badge bg-primary/10 text-primary border border-primary/20">{tag}</span>
+                          ))}
+                        </div>
+                      ) : (
+                        <span className="text-sm text-muted-foreground">—</span>
+                      )}
                     </div>
-                    <div className="flex-1 min-w-0">
-                      <div className="flex items-center gap-2 flex-wrap">
-                        <p className="text-sm font-medium text-foreground truncate">{v.file_name}</p>
-                        {isCurrent && (
-                          <span className="inline-flex items-center gap-1 text-xs font-medium text-primary bg-primary/10 px-2 py-0.5 rounded-full">
-                            <CheckCircle className="w-3 h-3" /> Current
+
+                    <div className="pt-3 border-t border-border">
+                      <span className="text-sm font-semibold text-muted-foreground uppercase tracking-wide block mb-2">Custom metadata</span>
+                      {personalMetadataEntries.length > 0 ? (
+                        <div className="grid grid-cols-[140px_1fr] gap-x-4 gap-y-3.5 text-sm">
+                          {personalMetadataEntries.map(([key, val]) => (
+                            <div key={key} className="contents text-sm">
+                              <span className="text-muted-foreground capitalize">{key.replace(/_/g, " ")}</span>
+                              <span className="text-foreground font-semibold">{String(val)}</span>
+                            </div>
+                          ))}
+                        </div>
+                      ) : (
+                        <span className="text-sm text-muted-foreground">—</span>
+                      )}
+                    </div>
+                  </div>
+                ) : documentDetailRows.length > 0 ? (
+                  <div className="grid grid-cols-[140px_1fr] gap-x-4 gap-y-3.5 text-sm py-1">
+                    {documentDetailRows.map(({ key, label, value }) => (
+                      <div key={key} className="contents">
+                        <span className="text-muted-foreground">{label}</span>
+                        <span className="text-foreground font-semibold">{value}</span>
+                      </div>
+                    ))}
+                  </div>
+                ) : (
+                  <p className="py-2 text-sm text-muted-foreground">No metadata attributes found for this document type.</p>
+                )}
+              </div>
+            )}
+
+            {/* SECURITY TAB */}
+            {activeTab === "security" && (
+              <div className="animate-fade-in space-y-4">
+                <div className="border-b border-[#C8CDD2] pb-3">
+                  <p className="text-sm font-bold uppercase tracking-wider text-[#5E6870]">Access control</p>
+                  <p className="mt-1 text-sm text-[#5E6870]">Your effective permissions for this document.</p>
+                </div>
+
+                <div className="border border-[#C8CDD2] bg-[#F5F7F8] p-3">
+                  <div className="flex items-center justify-between gap-3">
+                    <div>
+                      <p className="text-sm font-semibold text-[#1F2933]">Role access</p>
+                      <p className="mt-0.5 text-xs text-[#5E6870]">Calculated from your role and document grants.</p>
+                    </div>
+                    <span className="border border-[#287EAD]/25 bg-white px-2.5 py-1 text-sm font-bold text-[#287EAD]">
+                      {hasAdminAccess ? "Administrator (Full Access)" : "Standard User"}
+                    </span>
+                  </div>
+                </div>
+
+                <div className="overflow-hidden border border-[#C8CDD2]">
+                  <div className="grid grid-cols-[1fr_auto] bg-[#50545A] px-3 py-2 text-sm font-semibold text-white">
+                    <span>Permission</span>
+                    <span>Status</span>
+                  </div>
+                  <div className="divide-y divide-[#D3D7DA] bg-white">
+                    {[
+                      { label: "View Document Details", allowed: canViewDocument },
+                      { label: "Edit / Update Metadata", allowed: canEdit },
+                      { label: "Add Document Comments", allowed: canComment },
+                      { label: "Download Original File", allowed: canDownload },
+                      { label: "Restore Historical Versions", allowed: canRestoreVersion },
+                      { label: "Archive / Delete Document", allowed: canArchive },
+                    ].map(({ label, allowed }) => (
+                      <div key={label} className="grid grid-cols-[1fr_auto] items-center gap-3 px-3 py-3 text-sm">
+                        <span className="font-medium text-[#1F2933]">{label}</span>
+                        {allowed ? (
+                          <span className="inline-flex items-center gap-1 border border-emerald-200 bg-emerald-50 px-2.5 py-1 text-xs font-bold text-emerald-800">
+                            <Check className="w-3 h-3 text-teal" /> Allowed
+                          </span>
+                        ) : (
+                          <span className="inline-flex items-center gap-1 border border-red-200 bg-red-50 px-2.5 py-1 text-xs font-bold text-red-800">
+                            <X className="w-3 h-3 text-destructive" /> Restricted
                           </span>
                         )}
                       </div>
-                      <p className="text-xs text-muted-foreground mt-0.5">
-                        {format(new Date(v.created_at), "dd MMM yyyy HH:mm")} · {v.created_by.first_name} {v.created_by.last_name} · {formatBytes(v.file_size)}
-                      </p>
-                      {v.change_summary && <p className="text-xs text-foreground/80 mt-1 italic">"{v.change_summary}"</p>}
-                    </div>
-                    <div className="flex items-center gap-2 flex-shrink-0">
-                      {canDownload && v.file_url && (
-                      <a
-                        href={v.file_url}
-                        download={v.file_name}
-                        title="Download this version"
-                        className="btn-secondary text-xs px-2 py-1 flex items-center gap-1"
-                      >
-                        <Download className="w-3.5 h-3.5" />
-                      </a>
-                      )}
-                      {!isCurrent && canRestoreVersion && (
-                        awaitConfirm ? (
-                          <div className="flex items-center gap-1.5 rounded-lg border border-primary/40 bg-primary/10 px-2.5 py-1.5">
-                            <AlertTriangle className="w-3.5 h-3.5 text-primary flex-shrink-0" />
-                            <span className="text-xs text-foreground">Restore v{v.version_number}?</span>
-                            <button
-                              onClick={() => restoreMutation.mutate(v.id)}
-                              disabled={restoreMutation.isPending}
-                              className="text-xs font-semibold text-primary hover:text-primary/80 ml-1"
-                            >
-                              {restoreMutation.isPending ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : "Yes"}
-                            </button>
-                            <button
-                              onClick={() => setConfirmRestoreId(null)}
-                              className="text-xs text-muted-foreground hover:text-foreground"
-                            >
-                              Cancel
-                            </button>
-                          </div>
-                        ) : (
-                          <button
-                            onClick={() => setConfirmRestoreId(v.id)}
-                            className="btn-secondary text-xs px-2 py-1 flex items-center gap-1"
-                          >
-                            <RotateCcw className="w-3 h-3" /> Restore
-                          </button>
-                        )
-                      )}
-                    </div>
+                    ))}
                   </div>
-                );
-              })}
-            </div>
-          )}
-
-          {activeTab === "comments" && (
-            <div className="space-y-4">
-              {doc.comments?.map((c) => (
-                <div
-                  key={c.id}
-                  className={`card p-4 ${c.is_internal ? "border-l-4 border-l-primary" : ""}`}
-                >
-                  <div className="flex items-center gap-2 mb-2">
-                    <span className="text-sm font-medium text-foreground">{c.author.first_name} {c.author.last_name}</span>
-                    {c.is_internal && (
-                      <span className="badge bg-primary/10 text-primary border border-primary/20 text-[10px]">
-                        Internal
-                      </span>
-                    )}
-                    <span className="text-xs text-muted-foreground ml-auto">
-                      {format(new Date(c.created_at), "dd MMM yyyy HH:mm")}
-                    </span>
-                  </div>
-                  <p className="text-sm text-foreground/90">{c.content}</p>
                 </div>
-              ))}
-              <div className="card p-4 space-y-3">
-                <textarea
-                  value={comment}
-                  onChange={(e) => setComment(e.target.value)}
-                  rows={3}
-                  className="input"
-                  placeholder="Add a comment…"
-                  disabled={!canComment}
-                />
-                <button
-                  onClick={() => comment.trim() && commentMutation.mutate(comment.trim())}
-                  disabled={!comment.trim() || commentMutation.isPending || !canComment}
-                  className="btn-primary"
-                >
-                  {commentMutation.isPending && <Loader2 className="w-4 h-4 animate-spin" />}
-                  <MessageSquare className="w-4 h-4" /> Add comment
-                </button>
               </div>
-            </div>
-          )}
+            )}
 
-          {activeTab === "audit" && (
-            <div className="space-y-2 max-w-2xl">
-              {auditLogs?.results?.length ? (
-                auditLogs.results.map((log) => (
-                  <div
-                    key={log.id}
-                    className="inline-flex w-full max-w-2xl items-start gap-3 rounded-lg border border-border bg-card px-3 py-2"
+            {/* HISTORY TAB */}
+            {activeTab === "history" && (
+              <div className="animate-fade-in space-y-4">
+                <div className="border-b border-[#C8CDD2] pb-3">
+                  <p className="text-sm font-bold uppercase tracking-wider text-[#5E6870]">Version history</p>
+                  <p className="mt-1 text-sm text-[#5E6870]">{sortedDocumentVersions.length} saved version{sortedDocumentVersions.length === 1 ? "" : "s"} for this document.</p>
+                </div>
+                {sortedDocumentVersions.length === 0 && (
+                  <div className="border border-[#C8CDD2] bg-[#F5F7F8] py-8 text-center text-sm text-[#5E6870]">No version history available.</div>
+                )}
+                {sortedDocumentVersions.length > 0 && (
+                  <div className="overflow-hidden border border-[#C8CDD2] bg-white">
+                    {sortedDocumentVersions.map((v) => {
+                      const isCurrent = v.version_number === doc.current_version;
+                      const awaitConfirm = confirmRestoreId === v.id;
+                      return (
+                        <div
+                          key={v.id}
+                          onMouseEnter={() => prefetchVersionPreview(v.id)}
+                          onFocus={() => prefetchVersionPreview(v.id)}
+                          className={cn(
+                            "grid grid-cols-[3rem_1fr] gap-3 border-b border-[#D3D7DA] px-3 py-3 last:border-b-0 transition-colors hover:bg-[#F5F7F8]",
+                            isCurrent && "bg-[#EEF6FB]",
+                          )}
+                        >
+                          <div className="flex flex-col items-center">
+                            <div className={cn(
+                              "flex h-9 w-9 select-none items-center justify-center border text-sm font-bold",
+                              isCurrent ? "border-[#287EAD] bg-white text-[#287EAD]" : "border-[#C8CDD2] bg-[#F5F7F8] text-[#5E6870]",
+                            )}>
+                              v{v.version_number}
+                            </div>
+                            <div className="mt-2 h-full min-h-6 w-px bg-[#D3D7DA]" />
+                          </div>
+                          <div className="min-w-0 space-y-2">
+                            <div className="flex items-start justify-between gap-3">
+                              <div className="min-w-0">
+                                <p className="truncate text-sm font-bold text-[#1F2933]" title={v.file_name}>{v.file_name}</p>
+                                <p className="mt-1 text-xs text-[#5E6870]">
+                                  {format(new Date(v.created_at), "dd MMM yyyy HH:mm")} · {v.created_by.first_name} {v.created_by.last_name} · {formatBytes(v.file_size)}
+                                </p>
+                              </div>
+                              {isCurrent && (
+                                <span className="shrink-0 border border-emerald-200 bg-emerald-50 px-2 py-0.5 text-xs font-bold text-emerald-800">Current</span>
+                              )}
+                            </div>
+
+                            {v.change_summary && (
+                              <p className="border-l-2 border-[#287EAD] bg-[#F5F7F8] px-2 py-1.5 text-sm italic text-[#1F2933]">"{v.change_summary}"</p>
+                            )}
+
+                            <div className="flex items-center gap-2">
+                              {canDownload && v.file_url && (
+                                <a
+                                  href={v.file_url}
+                                  download={v.file_name}
+                                  title="Download this version"
+                                  className="inline-flex items-center gap-1 border border-[#C8CDD2] bg-white px-2.5 py-1.5 text-xs font-semibold text-[#1F2933] hover:bg-[#F5F7F8]"
+                                >
+                                  <Download className="h-3.5 w-3.5" /> Download
+                                </a>
+                              )}
+                              {!isCurrent && canRestoreVersion && (
+                                awaitConfirm ? (
+                                  <div className="flex items-center gap-2 border border-[#287EAD]/40 bg-[#EEF6FB] px-2.5 py-1.5">
+                                    <span className="text-xs font-semibold text-[#1F2933]">Restore v{v.version_number}?</span>
+                                    <button
+                                      onClick={() => restoreMutation.mutate(v.id)}
+                                      disabled={restoreMutation.isPending}
+                                      className="text-xs font-bold text-[#287EAD] hover:underline"
+                                    >
+                                      {restoreMutation.isPending ? <Loader2 className="h-3 w-3 animate-spin" /> : "Confirm"}
+                                    </button>
+                                    <button
+                                      onClick={() => setConfirmRestoreId(null)}
+                                      className="text-xs text-[#5E6870] hover:underline"
+                                    >
+                                      Cancel
+                                    </button>
+                                  </div>
+                                ) : (
+                                  <button
+                                    onClick={() => setConfirmRestoreId(v.id)}
+                                    className="inline-flex items-center gap-1 border border-[#C8CDD2] bg-white px-2.5 py-1.5 text-xs font-semibold text-[#1F2933] hover:bg-[#F5F7F8]"
+                                    title="Restore to this version"
+                                  >
+                                    <RotateCcw className="h-3.5 w-3.5" /> Restore
+                                  </button>
+                                )
+                              )}
+                            </div>
+                          </div>
+                        </div>
+                      );
+                    })}
+                  </div>
+                )}
+              </div>
+            )}
+
+            {/* COMMENTS TAB */}
+            {activeTab === "comments" && (
+              <div className="animate-fade-in space-y-4">
+                <div className="border-b border-[#C8CDD2] pb-3">
+                  <p className="text-sm font-bold uppercase tracking-wider text-[#5E6870]">Comments</p>
+                  <p className="mt-1 text-sm text-[#5E6870]">{doc.comments?.length ?? 0} comment{(doc.comments?.length ?? 0) === 1 ? "" : "s"} on this document.</p>
+                </div>
+
+                <div className="max-h-[22rem] overflow-y-auto border border-[#C8CDD2] bg-white">
+                  {(!doc.comments || doc.comments.length === 0) && (
+                    <div className="px-4 py-8 text-center text-sm text-[#5E6870]">
+                      No comments added yet.
+                    </div>
+                  )}
+                  {doc.comments?.map((c) => (
+                    <div
+                      key={c.id}
+                      className={cn(
+                        "grid grid-cols-[2.5rem_1fr] gap-3 border-b border-[#D3D7DA] px-3 py-3 last:border-b-0",
+                        c.is_internal ? "bg-[#EEF6FB]" : "bg-white",
+                      )}
+                    >
+                      <div className="flex h-9 w-9 items-center justify-center border border-[#C8CDD2] bg-[#F5F7F8] text-xs font-bold uppercase text-[#287EAD]">
+                        {(c.author.first_name?.[0] ?? "")}{(c.author.last_name?.[0] ?? "")}
+                      </div>
+                      <div className="min-w-0">
+                        <div className="flex flex-wrap items-center justify-between gap-2">
+                          <span className="font-semibold text-[#1F2933]">{c.author.first_name} {c.author.last_name}</span>
+                          <span className="text-xs text-[#5E6870]">
+                            {format(new Date(c.created_at), "dd MMM yyyy HH:mm")}
+                          </span>
+                        </div>
+                        {c.is_internal && (
+                          <span className="mt-1 inline-flex border border-[#287EAD]/25 bg-white px-2 py-0.5 text-xs font-semibold text-[#287EAD]">Internal</span>
+                        )}
+                        <p className="mt-2 whitespace-pre-wrap text-sm leading-relaxed text-[#1F2933]">{c.content}</p>
+                      </div>
+                    </div>
+                  ))}
+                </div>
+
+                <div className="space-y-2 border border-[#C8CDD2] bg-[#F5F7F8] p-3">
+                  <label className="text-sm font-semibold text-[#1F2933]">Add comment</label>
+                  <textarea
+                    value={comment}
+                    onChange={(e) => setComment(e.target.value)}
+                    rows={3}
+                    className="block w-full border border-[#AEB5BB] bg-white px-3 py-2 text-sm text-[#1F2933] focus:outline-none focus:ring-1 focus:ring-[#287EAD]"
+                    placeholder="Add a comment…"
+                    disabled={!canComment}
+                  />
+                  <div className="flex justify-end">
+                    <button
+                      onClick={() => comment.trim() && commentMutation.mutate(comment.trim())}
+                      disabled={!comment.trim() || commentMutation.isPending || !canComment}
+                      className="inline-flex items-center gap-2 bg-[#287EAD] px-3 py-2 text-sm font-semibold text-white hover:bg-[#206D99] disabled:cursor-not-allowed disabled:opacity-50"
+                    >
+                      {commentMutation.isPending && <Loader2 className="w-3.5 h-3.5 animate-spin" />}
+                      <MessageSquare className="w-3 h-3" /> Add comment
+                    </button>
+                  </div>
+                </div>
+              </div>
+            )}
+
+            {/* AUDIT TRAIL TAB */}
+            {activeTab === "audit" && (
+              <div className="animate-fade-in space-y-4">
+                <div className="flex items-center justify-between gap-3 border-b border-[#C8CDD2] pb-3">
+                  <div>
+                    <p className="text-sm font-bold uppercase tracking-wider text-[#5E6870]">Audit trail</p>
+                    <p className="mt-1 text-sm text-[#5E6870]">{auditCount.toLocaleString()} recorded event{auditCount === 1 ? "" : "s"}.</p>
+                  </div>
+                  <button
+                    onClick={() => {
+                      if (auditLogs?.results?.length) {
+                        const blob = new Blob([JSON.stringify(auditLogs.results, null, 2)], { type: "application/json" });
+                        const url = URL.createObjectURL(blob);
+                        const a = document.createElement("a");
+                        a.href = url;
+                        a.download = `audit-log-${doc.reference_number}.json`;
+                        a.click();
+                        toast.success("Audit activity trail downloaded successfully!");
+                      } else {
+                        toast.error("No activity trail available to download.");
+                      }
+                    }}
+                    className="border border-[#C8CDD2] bg-white p-2 text-[#5E6870] transition-colors hover:bg-[#F5F7F8] hover:text-[#1F2933]"
+                    title="Download activity trail (JSON)"
                   >
-                    <ShieldCheck className="w-4 h-4 text-primary mt-0.5 flex-shrink-0" />
-                    <div className="flex-1 min-w-0">
-                      <p className="text-sm text-foreground">{log.summary || log.event}</p>
-                      <p className="text-xs text-muted-foreground">
-                        {log.actor_name || "System"} · {log.ip_address || "Unknown IP"} · {format(new Date(log.timestamp), "dd MMM yyyy HH:mm:ss")}
-                      </p>
+                    <Download className="h-4 w-4" />
+                  </button>
+                </div>
+
+                {/* Date grouped audit items */}
+                <div className="max-h-[28rem] overflow-y-auto border border-[#C8CDD2] bg-white">
+                  {auditLogs?.results?.length ? (
+                    auditLogs.results.map((log) => {
+                      const currentDateHeader = formatActivityDateHeader(log.timestamp);
+                      const showHeader = currentDateHeader !== lastDateHeader;
+                      lastDateHeader = currentDateHeader;
+
+                      return (
+                        <div key={log.id}>
+                          {showHeader && (
+                            <div className="select-none border-b border-[#C8CDD2] bg-[#F5F7F8] px-3 py-2 text-xs font-bold uppercase tracking-wider text-[#5E6870]">
+                              {currentDateHeader}
+                            </div>
+                          )}
+
+                          <div className="grid grid-cols-[2rem_1fr] gap-3 border-b border-[#D3D7DA] px-3 py-3 last:border-b-0 transition-colors hover:bg-[#F5F7F8]">
+                            <div className="mt-0.5 flex h-8 w-8 items-center justify-center border border-[#C8CDD2] bg-[#F5F7F8] text-[#287EAD]">
+                              <ShieldCheck className="h-4 w-4" />
+                            </div>
+                            <div className="min-w-0">
+                              <p className="text-sm leading-normal text-[#1F2933]">
+                                <span className="font-bold text-[#287EAD]">{doc.reference_number}</span> {describeAuditEvent(log.event)} by <span className="font-semibold">{log.actor_name || "System"}</span>
+                              </p>
+                              {log.summary && (
+                                <p className="mt-2 whitespace-pre-wrap border-l-2 border-[#287EAD] bg-[#F5F7F8] px-2 py-1.5 text-sm leading-relaxed text-[#5E6870]">
+                                  {log.summary}
+                                </p>
+                              )}
+                              <div className="mt-2 flex flex-wrap items-center gap-2 text-xs font-mono text-[#5E6870]">
+                                <span>{log.ip_address || "System"}</span>
+                                <span>·</span>
+                                <span>{format(new Date(log.timestamp), "HH:mm:ss")}</span>
+                              </div>
+                            </div>
+                          </div>
+                        </div>
+                      );
+                    })
+                  ) : (
+                    <div className="px-4 py-8 text-center text-sm text-[#5E6870]">
+                      No activity history found for this document yet.
+                    </div>
+                  )}
+                </div>
+
+                {/* Compact pagination inside Audit trail tab */}
+                {auditCount > AUDIT_PAGE_SIZE && (
+                  <div className="mt-1.5 flex select-none items-center justify-between border-t border-[#C8CDD2] pt-3 text-sm">
+                    <span className="text-sm text-[#5E6870]">
+                      Page {auditPage} of {auditPages}
+                    </span>
+                    <div className="flex items-center gap-1.5">
+                      <button
+                        type="button"
+                        onClick={() => setAuditPage((current) => Math.max(1, current - 1))}
+                        disabled={auditPage === 1}
+                        className="border border-[#C8CDD2] bg-white px-3 py-1.5 text-sm font-semibold text-[#1F2933] hover:bg-[#F5F7F8] disabled:cursor-not-allowed disabled:opacity-40"
+                      >
+                        Prev
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => setAuditPage((current) => Math.min(auditPages, current + 1))}
+                        disabled={auditPage >= auditPages}
+                        className="border border-[#C8CDD2] bg-white px-3 py-1.5 text-sm font-semibold text-[#1F2933] hover:bg-[#F5F7F8] disabled:cursor-not-allowed disabled:opacity-40"
+                      >
+                        Next
+                      </button>
                     </div>
                   </div>
-                ))
-              ) : (
-                <div className="rounded-lg border border-border bg-card px-4 py-6 text-sm text-muted-foreground">
-                  No audit history found for this document yet.
-                </div>
-              )}
+                )}
+              </div>
+            )}
 
-              {auditCount > AUDIT_PAGE_SIZE && (
-                <div className="flex items-center justify-between border-t border-border pt-4">
-                  <span className="text-xs text-muted-foreground">
-                    Page {auditPage} of {auditPages}
-                  </span>
-                  <div className="flex items-center gap-2">
-                    <button
-                      type="button"
-                      onClick={() => setAuditPage((current) => Math.max(1, current - 1))}
-                      disabled={auditPage === 1}
-                      className="btn-secondary text-xs px-3 py-1.5 disabled:opacity-40 disabled:cursor-not-allowed"
-                    >
-                      Previous
-                    </button>
-                    <button
-                      type="button"
-                      onClick={() => setAuditPage((current) => Math.min(auditPages, current + 1))}
-                      disabled={auditPage >= auditPages}
-                      className="btn-secondary text-xs px-3 py-1.5 disabled:opacity-40 disabled:cursor-not-allowed"
-                    >
-                      Next
-                    </button>
-                  </div>
+            {/* EDIT PROPERTIES TAB */}
+            {activeTab === "edit" && (
+              <div className="space-y-4 animate-fade-in">
+                <div className="flex items-center justify-between border-b border-border pb-2 mb-2">
+                  <h3 className="text-sm font-bold uppercase tracking-wider text-muted-foreground">
+                    Edit Properties
+                  </h3>
+                  <button
+                    onClick={() => setActiveTab("properties")}
+                    className="text-sm font-semibold text-muted-foreground transition-colors hover:text-foreground hover:underline"
+                  >
+                    Cancel
+                  </button>
                 </div>
-              )}
-            </div>
-          )}
+                <Suspense fallback={<div className="p-4 text-sm text-muted-foreground">Loading editor…</div>}>
+                  <MetadataEditPanel document={doc} onClose={() => setActiveTab("properties")} />
+                </Suspense>
+              </div>
+            )}
+
+          </div>
         </div>
+
       </div>
     </div>
   );

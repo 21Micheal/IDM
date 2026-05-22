@@ -16,7 +16,7 @@
  * version polling, install/open script flow, fallbacks) is unchanged.
  */
 
-import { lazy, Suspense, useCallback, useEffect, useRef, useState } from "react";
+import { lazy, Suspense, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { documentsAPI, api } from "../../services/api";
 import { useAuthStore } from "@/store/authStore";
@@ -301,12 +301,12 @@ function PdfViewer({
   return (
     <div>
       {/* Toolbar */}
-      <div className="flex items-center justify-between gap-2 bg-muted border border-border rounded-t-lg px-3 py-2">
+      <div className="flex items-center justify-between gap-2 border-b border-[#C8CDD2] bg-[#50545A] px-3 py-2 text-white">
         <div className="flex items-center gap-1">
           <button
             onClick={() => goTo(currentPage - 1)}
             disabled={currentPage <= 1}
-            className="btn-secondary px-2 py-1 disabled:opacity-40"
+            className="border border-white/20 bg-white/10 px-2 py-1 text-white hover:bg-white/15 disabled:opacity-40"
           >
             <ChevronLeft className="w-4 h-4" />
           </button>
@@ -317,14 +317,14 @@ function PdfViewer({
               min={1}
               max={totalPages}
               onChange={(e) => goTo(Number(e.target.value))}
-              className="w-12 text-center border border-input bg-card rounded px-1 py-0.5 text-foreground"
+              className="w-12 border border-[#AEB5BB] bg-white px-1 py-0.5 text-center text-[#1F2933]"
             />
-            <span className="text-muted-foreground">/ {totalPages}</span>
+            <span className="text-white/75">/ {totalPages}</span>
           </div>
           <button
             onClick={() => goTo(currentPage + 1)}
             disabled={currentPage >= totalPages}
-            className="btn-secondary px-2 py-1 disabled:opacity-40"
+            className="border border-white/20 bg-white/10 px-2 py-1 text-white hover:bg-white/15 disabled:opacity-40"
           >
             <ChevronRight className="w-4 h-4" />
           </button>
@@ -332,22 +332,22 @@ function PdfViewer({
         <div className="flex items-center gap-1">
           <button
             onClick={() => setScale((s) => Math.max(0.5, parseFloat((s - 0.2).toFixed(1))))}
-            className="btn-secondary px-2 py-1"
+            className="border border-white/20 bg-white/10 px-2 py-1 text-white hover:bg-white/15"
           >
             <ZoomOut className="w-4 h-4" />
           </button>
-          <span className="text-xs text-muted-foreground w-12 text-center">
+          <span className="w-12 text-center text-xs text-white/75">
             {Math.round(scale * 100)}%
           </span>
           <button
             onClick={() => setScale((s) => Math.min(3, parseFloat((s + 0.2).toFixed(1))))}
-            className="btn-secondary px-2 py-1"
+            className="border border-white/20 bg-white/10 px-2 py-1 text-white hover:bg-white/15"
           >
             <ZoomIn className="w-4 h-4" />
           </button>
           <button
             onClick={() => setRotation((r) => (r + 90) % 360)}
-            className="btn-secondary px-2 py-1 ml-1"
+            className="ml-1 border border-white/20 bg-white/10 px-2 py-1 text-white hover:bg-white/15"
           >
             <RotateCw className="w-4 h-4" />
           </button>
@@ -356,8 +356,8 @@ function PdfViewer({
 
       {/* Canvas */}
       <div
-        className="overflow-auto bg-muted/60 border border-t-0 border-border rounded-b-lg p-4"
-        style={{ maxHeight: "70vh" }}
+        className="overflow-auto bg-[#EDEDED] p-4"
+        style={{ maxHeight: "calc(100vh - 18rem)" }}
       >
         <div ref={containerRef} className="mx-auto" />
       </div>
@@ -414,31 +414,31 @@ function ImageViewer({
 
   return (
     <div>
-      <div className="flex items-center justify-between bg-muted border border-border rounded-t-lg px-3 py-2">
+      <div className="flex items-center justify-between border-b border-[#C8CDD2] bg-[#50545A] px-3 py-2 text-white">
         <div className="flex items-center gap-1">
           <button
             onClick={() => setScale((s) => Math.max(0.25, s - 0.25))}
-            className="btn-secondary px-2 py-1"
+            className="border border-white/20 bg-white/10 px-2 py-1 text-white hover:bg-white/15"
           >
             <ZoomOut className="w-4 h-4" />
           </button>
           <button
             onClick={() => setScale(1)}
-            className="btn-secondary px-2 py-1 text-xs min-w-[3.5rem] text-center"
+            className="min-w-[3.5rem] border border-white/20 bg-white/10 px-2 py-1 text-center text-xs text-white hover:bg-white/15"
           >
             {Math.round(scale * 100)}%
           </button>
           <button
             onClick={() => setScale((s) => Math.min(4, s + 0.25))}
-            className="btn-secondary px-2 py-1"
+            className="border border-white/20 bg-white/10 px-2 py-1 text-white hover:bg-white/15"
           >
             <ZoomIn className="w-4 h-4" />
           </button>
         </div>
       </div>
       <div
-        className="overflow-auto bg-muted/60 border border-t-0 border-border rounded-b-lg p-4 flex items-start justify-center"
-        style={{ maxHeight: "75vh" }}
+        className="flex items-start justify-center overflow-auto bg-[#EDEDED] p-4"
+        style={{ maxHeight: "calc(100vh - 18rem)" }}
       >
         {err || !displayUrl ? (
           <div className="flex flex-col items-center gap-3 text-muted-foreground py-16">
@@ -457,7 +457,7 @@ function ImageViewer({
               maxWidth: "100%",
               display: "block",
             }}
-            className="shadow-md rounded"
+            className="shadow-md"
           />
         )}
       </div>
@@ -467,6 +467,17 @@ function ImageViewer({
 
 // ── OfficeEditPanel ────────────────────────────────────────────────────────────
 
+type OfficeEditPanelProps = {
+  doc: Document;
+  preview: DocumentPreviewResponse | undefined;
+  refetchPreview: () => Promise<import("@tanstack/react-query").QueryObserverResult<DocumentPreviewResponse, Error>>;
+  selectedVersionId?: string | null;
+  canEditInEditor: boolean;
+  onVersionUploaded: () => void;
+  showHeaderOpenButton?: boolean;
+  onOfficeEditActionChange?: (action: { label: string; enabled: boolean; onClick: () => void }) => void;
+};
+
 function OfficeEditPanel({
   doc,
   preview,
@@ -474,14 +485,9 @@ function OfficeEditPanel({
   selectedVersionId,
   canEditInEditor,
   onVersionUploaded,
-}: {
-  doc: Document;
-  preview: DocumentPreviewResponse | undefined;
-  refetchPreview: () => Promise<import("@tanstack/react-query").QueryObserverResult<DocumentPreviewResponse, Error>>;
-  selectedVersionId?: string | null;
-  canEditInEditor: boolean;
-  onVersionUploaded: () => void;
-}) {
+  showHeaderOpenButton = true,
+  onOfficeEditActionChange,
+}: OfficeEditPanelProps) {
   const qc   = useQueryClient();
   const user = useAuthStore((s) => s.user);
 
@@ -707,27 +713,27 @@ function OfficeEditPanel({
     }
   };
 
-  const openInEditor = () => {
-    if (!lockData) return;
+  const openInEditor = useCallback((data = lockData) => {
+    if (!data) return;
     const { msScheme } = info as { msScheme?: string };
 
     if (isWindows) {
       if (!msScheme) { toast.error("No URI scheme available for this file type."); return; }
-      window.location.href = `${msScheme}:ofe|u|${lockData.webdav_url}`;
+      window.location.href = `${msScheme}:ofe|u|${data.webdav_url}`;
     } else if (isLinux && handlerInstalled) {
-      const webdavUrl = lockData.webdav_url.replace(/^https?:\/\//, (m) =>
+      const webdavUrl = data.webdav_url.replace(/^https?:\/\//, (m) =>
         m === "https://" ? "vnd.sun.star.webdavs://" : "vnd.sun.star.webdav://");
       const encoded = btoa(webdavUrl).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
       window.location.href = `docvault-open://${encoded}`;
     }
-  };
+  }, [handlerInstalled, info, isLinux, isWindows, lockData]);
 
   /**
    * One-click handler used by the minimal "Open in <App>" button.
    * If we don't yet have a lock we acquire it first, then open the editor
    * once the mutation resolves.
    */
-  const handleOpenClick = () => {
+  const handleOpenClick = useCallback(() => {
     if (lockedByOther) return;
     if (isLinux && !handlerInstalled) {
       toast.info("Run the one-time Linux install script before starting document editing.");
@@ -738,17 +744,24 @@ function OfficeEditPanel({
       return;
     }
     acquireLock.mutate(undefined, {
-      onSuccess: () => {
-        // openInEditor is called after lockData is set; defer to next tick
-        setTimeout(() => openInEditor(), 0);
+      onSuccess: (data) => {
+        openInEditor(data);
       },
     });
-  };
+  }, [acquireLock.mutate, handlerInstalled, isLinux, lockData, lockedByOther, openInEditor]);
 
   const canShowOpenButton = canEditInEditor && !lockedByOther;
   const openLabel = lockData || lockedByMe
     ? `Open in ${info.app}`
     : `Edit in ${info.app}`;
+
+  useEffect(() => {
+    onOfficeEditActionChange?.({
+      label: openLabel,
+      enabled: canShowOpenButton,
+      onClick: handleOpenClick,
+    });
+  }, [onOfficeEditActionChange, openLabel, canShowOpenButton, handleOpenClick]);
 
   // ─────────────────────────────────────────────────────────────────────────
   // Render
@@ -757,9 +770,9 @@ function OfficeEditPanel({
   return (
     <div className="space-y-3">
       {/* Minimal toolbar row — preview status + Open in editor */}
-      <div className="flex items-center justify-between gap-2 flex-wrap">
+      <div className="flex flex-wrap items-center justify-between gap-2 border-b border-[#C8CDD2] bg-white px-3 py-2">
         <div className="flex items-center gap-2 flex-wrap">
-          <span className="text-sm font-medium text-foreground">{info.app} preview</span>
+          <span className="text-sm font-semibold text-[#1F2933]">{info.app} preview</span>
           {hasPdf && (
             <span className="inline-flex items-center gap-1 text-xs text-teal font-medium bg-teal/10 px-2 py-0.5 rounded-full border border-teal/20">
               <CheckCircle2 className="w-3 h-3" /> Ready
@@ -788,11 +801,11 @@ function OfficeEditPanel({
         </div>
 
         <div className="flex items-center gap-2 flex-wrap">
-          {canShowOpenButton && (
+          {canShowOpenButton && showHeaderOpenButton && (
             <button
               onClick={handleOpenClick}
               disabled={acquireLock.isPending}
-              className="inline-flex items-center gap-1.5 rounded-md bg-accent text-accent-foreground text-xs font-medium px-3 py-1.5 hover:bg-accent/90 disabled:opacity-50 transition-colors"
+              className="inline-flex items-center gap-1.5 bg-[#287EAD] px-3 py-1.5 text-xs font-medium text-white transition-colors hover:bg-[#206D99] disabled:opacity-50"
               title={openLabel}
             >
               {acquireLock.isPending
@@ -805,7 +818,7 @@ function OfficeEditPanel({
             <button
               onClick={() => releaseLock.mutate()}
               disabled={releaseLock.isPending}
-              className="inline-flex items-center gap-1.5 text-xs font-medium text-muted-foreground hover:text-destructive border border-border rounded-md px-2.5 py-1.5 hover:bg-destructive/5 transition-colors"
+              className="inline-flex items-center gap-1.5 border border-[#C8CDD2] px-2.5 py-1.5 text-xs font-medium text-[#5E6870] transition-colors hover:bg-destructive/5 hover:text-destructive"
             >
               <Unlock className="w-3.5 h-3.5" /> Release lock
             </button>
@@ -815,7 +828,7 @@ function OfficeEditPanel({
 
       {/* Locked-by-other notice */}
       {lockedByOther && (
-        <div className="flex items-center gap-3 rounded-lg border border-destructive/30 bg-destructive/5 px-4 py-3 text-sm text-foreground">
+        <div className="mx-3 flex items-center gap-3 border border-destructive/30 bg-destructive/5 px-4 py-3 text-sm text-foreground">
           <Lock className="w-4 h-4 text-destructive flex-shrink-0" />
           <span>
             Editing is disabled — this document is currently locked by{" "}
@@ -826,7 +839,7 @@ function OfficeEditPanel({
 
       {/* Linux install one-time banner */}
       {isLinux && canShowOpenButton && !handlerInstalled && (
-        <div className="rounded-lg border border-accent/30 bg-accent/5 p-3 space-y-2">
+        <div className="mx-3 space-y-2 border border-accent/30 bg-accent/5 p-3">
           <p className="text-xs font-medium text-foreground">
             One-time setup for one-click editing on Linux
           </p>
@@ -856,11 +869,11 @@ function OfficeEditPanel({
       )}
 
       {/* Preview body */}
-      <div className="card overflow-hidden">
-        <div className="bg-card p-4">
+      <div className="overflow-hidden border border-[#C8CDD2] bg-white">
+        <div className="bg-white">
           {isPreparing && (
             <div className="flex flex-col items-center justify-center gap-4 py-24">
-              <div className="w-32 h-1.5 bg-muted rounded-full overflow-hidden">
+              <div className="h-1.5 w-32 overflow-hidden bg-[#D3D7DA]">
                 <div
                   className="h-full bg-accent transition-all duration-300"
                   style={{ width: `${previewProgress}%` }}
@@ -906,7 +919,7 @@ function OfficeEditPanel({
                 <button
                   onClick={() => retryPreviewMutation.mutate()}
                   disabled={retryPreviewMutation.isPending}
-                  className="btn-secondary text-sm"
+                  className="border border-[#C8CDD2] bg-white px-3 py-2 text-sm hover:bg-[#F5F7F8]"
                 >
                   {retryPreviewMutation.isPending
                     ? <Loader2 className="w-4 h-4 animate-spin" />
@@ -928,7 +941,7 @@ function OfficeEditPanel({
 
       {/* Helper note when the file type can't be opened directly */}
       {!info.msScheme && !isLinux && canEditInEditor && !lockedByOther && (
-        <div className="rounded-lg border border-border bg-muted/40 px-4 py-3 text-xs text-muted-foreground">
+        <div className="mx-3 border border-[#C8CDD2] bg-[#F5F7F8] px-4 py-3 text-xs text-[#5E6870]">
           One-click editing is not available for this file type. Download the
           file, edit it locally, then use <strong>Upload version manually</strong>{" "}
           below to save the new version.
@@ -950,22 +963,36 @@ interface Props {
    * button supplied by the parent page).
    */
   submitSlot?: ReactNode;
+  /**
+   * Hide the upload action bar rendered beneath the preview.
+   */
+  hideUploadActionBar?: boolean;
+  /**
+   * Inform the page when the current preview links become available.
+   */
+  onPreviewLinksChange?: (links: { openInNewTabUrl: string; downloadHref: string }) => void;
 }
 
-export default function DocumentViewer({ document: doc, submitSlot }: Props) {
+export default function DocumentViewer({ document: doc, submitSlot, hideUploadActionBar, onPreviewLinksChange }: Props) {
   const qc   = useQueryClient();
   const user = useAuthStore((s) => s.user);
   const [selectedVersionId, setSelectedVersionId] = useState<string | null>(null);
+  const [officeEditAction, setOfficeEditAction] = useState<{ label: string; enabled: boolean; onClick: () => void } | null>(null);
+  const sortedVersions = useMemo(
+    () => [...(doc.versions ?? [])].sort((a, b) => a.version_number - b.version_number),
+    [doc.versions],
+  );
 
   useEffect(() => {
     setSelectedVersionId(null);
+    setOfficeEditAction(null);
   }, [doc.id]);
 
   useEffect(() => {
-    if (selectedVersionId && !doc.versions?.some((version) => version.id === selectedVersionId)) {
+    if (selectedVersionId && !sortedVersions.some((version) => version.id === selectedVersionId)) {
       setSelectedVersionId(null);
     }
-  }, [doc.versions, selectedVersionId]);
+  }, [sortedVersions, selectedVersionId]);
 
   const previewCacheKey = getPreviewCacheKey(doc.id, doc.current_version, selectedVersionId);
   const initialCachedPreview = getCachedVersionPreview(previewCacheKey);
@@ -1036,9 +1063,9 @@ export default function DocumentViewer({ document: doc, submitSlot }: Props) {
     qc.invalidateQueries({ queryKey: ["document-preview", doc.id] });
   }, [qc, doc.id]);
 
-  const canUploadVersion = Boolean(doc.permissions?.includes("upload"));
-  const canEdit          = Boolean(doc.permissions?.includes("edit"));
-  const canDownload      = Boolean(doc.permissions?.includes("download"));
+  const canUploadVersion = Boolean(doc.permissions?.includes("upload")) || Boolean(user?.has_admin_access);
+  const canEdit          = Boolean(doc.permissions?.includes("edit")) || Boolean(user?.has_admin_access);
+  const canDownload      = Boolean(doc.permissions?.includes("download")) || Boolean(user?.has_admin_access);
   const isOfficeByMime   = OFFICE_MIMES.has(doc.file_mime_type);
   const isOfficeByExt    = OFFICE_EXTENSIONS.has(getFileExtension(doc.file_name));
   const isOffice         = isOfficeByMime || isOfficeByExt;
@@ -1047,18 +1074,23 @@ export default function DocumentViewer({ document: doc, submitSlot }: Props) {
     doc.file_mime_type?.startsWith("image/") ||
     /\.(png|jpe?g|gif|webp|svg|bmp)$/i.test(doc.file_name ?? "");
 
+  const onPreviewLinksChangeRef = useRef(onPreviewLinksChange);
+  useEffect(() => {
+    onPreviewLinksChangeRef.current = onPreviewLinksChange;
+  }, [onPreviewLinksChange]);
+
   // Preload adjacent versions for snappier nav
   useEffect(() => {
-    if (!doc.versions || doc.versions.length === 0) return;
+    if (sortedVersions.length === 0) return;
 
     const currentIndex = selectedVersionId
-      ? doc.versions.findIndex(v => v.id === selectedVersionId)
-      : doc.versions.findIndex(v => v.version_number === doc.current_version);
+      ? sortedVersions.findIndex(v => v.id === selectedVersionId)
+      : sortedVersions.findIndex(v => v.version_number === doc.current_version);
     if (currentIndex === -1) return;
 
     const preloadVersions: string[] = [];
-    if (currentIndex > 0) preloadVersions.push(doc.versions[currentIndex - 1].id);
-    if (currentIndex < doc.versions.length - 1) preloadVersions.push(doc.versions[currentIndex + 1].id);
+    if (currentIndex > 0) preloadVersions.push(sortedVersions[currentIndex - 1].id);
+    if (currentIndex < sortedVersions.length - 1) preloadVersions.push(sortedVersions[currentIndex + 1].id);
 
     let cancelled = false;
     const preload = () => {
@@ -1091,7 +1123,7 @@ export default function DocumentViewer({ document: doc, submitSlot }: Props) {
       cancelled = true;
       clearTimeout(timeoutHandle);
     };
-  }, [doc.id, doc.versions, selectedVersionId, doc.current_version]);
+  }, [doc.id, sortedVersions, selectedVersionId, doc.current_version]);
 
   useEffect(() => {
     let last = 0;
@@ -1104,6 +1136,17 @@ export default function DocumentViewer({ document: doc, submitSlot }: Props) {
     window.addEventListener("beforeprint", onPrint);
     return () => window.removeEventListener("beforeprint", onPrint);
   }, [doc.id]);
+
+  const openInNewTabUrl = canDownload && preview ? (normalizeUrl(preview.url ?? "") ?? "") : "";
+  const downloadHref = canDownload && preview ? (normalizeUrl(preview.raw_url ?? "") ?? "") : "";
+
+  const selectedVersion = selectedVersionId
+    ? sortedVersions.find((version) => version.id === selectedVersionId) ?? null
+    : null;
+
+  useEffect(() => {
+    onPreviewLinksChangeRef.current?.({ openInNewTabUrl, downloadHref });
+  }, [openInNewTabUrl, downloadHref]);
 
   if (isLoading)
     return (
@@ -1120,25 +1163,23 @@ export default function DocumentViewer({ document: doc, submitSlot }: Props) {
       </div>
     );
 
-  const openInNewTabUrl = canDownload ? (normalizeUrl(preview.url ?? "") ?? "") : "";
-  const downloadHref = canDownload ? (normalizeUrl(preview.raw_url ?? "") ?? "") : "";
-  const selectedVersion = selectedVersionId
-    ? doc.versions?.find((version) => version.id === selectedVersionId) ?? null
-    : null;
-
   return (
-    <div className="space-y-3">
+    <div className="space-y-0 bg-white">
       {/* Lock banner */}
-      <EditLockBanner
-        doc={doc}
-        currentUserId={user?.id}
-        onRelease={() => releaseLock.mutate()}
-      />
+      {doc.is_edit_locked && (
+        <div className="p-3 pb-0">
+          <EditLockBanner
+            doc={doc}
+            currentUserId={user?.id}
+            onRelease={() => releaseLock.mutate()}
+          />
+        </div>
+      )}
 
-      {/* Header — title + version indicator + open-in-new-tab */}
-      <div className="flex items-center justify-between flex-wrap gap-2">
+      {/* Header — title + version indicator + edit action */}
+      <div className="flex flex-wrap items-center justify-between gap-2 border-b border-[#C8CDD2] bg-white px-3 py-2">
         <div className="flex items-center gap-2 flex-wrap">
-          <h3 className="font-medium text-foreground text-sm">Document preview</h3>
+          <h3 className="text-sm font-semibold text-[#1F2933]">Document preview</h3>
           {selectedVersion ? (
             <span className="inline-flex items-center gap-1 text-xs text-accent font-medium bg-accent/10 border border-accent/20 px-2 py-0.5 rounded-full">
               <CheckCircle2 className="w-3 h-3" /> Previewing v{selectedVersion.version_number}
@@ -1149,48 +1190,40 @@ export default function DocumentViewer({ document: doc, submitSlot }: Props) {
             </span>
           )}
         </div>
-        <div className="flex items-center gap-2 flex-wrap">
-          {openInNewTabUrl && (
-          <a
-            href={openInNewTabUrl}
-            target="_blank"
-            rel="noopener noreferrer"
-            className="btn-secondary text-xs px-3 py-1.5"
-          >
-            <ExternalLink className="w-3.5 h-3.5" /> Open in new tab
-          </a>
-          )}
-          {downloadHref && (
-          <a
-            href={downloadHref}
-            download
-            className="btn-secondary text-xs px-3 py-1.5"
-          >
-            <Download className="w-3.5 h-3.5" /> Download
-          </a>
-          )}
-        </div>
+        {officeEditAction && (
+          <div className="flex items-center gap-2 flex-wrap">
+            <button
+              type="button"
+              onClick={officeEditAction.onClick}
+              disabled={!officeEditAction.enabled}
+              className="border border-[#C8CDD2] bg-white px-3 py-1.5 text-xs hover:bg-[#F5F7F8] disabled:cursor-not-allowed disabled:opacity-50"
+              title={officeEditAction.label}
+            >
+              <ExternalLink className="w-3.5 h-3.5" /> {officeEditAction.label}
+            </button>
+          </div>
+        )}
       </div>
 
       {/* Version pills */}
-      {doc.versions?.length > 0 && (
-        <div className="flex flex-wrap items-center gap-2">
-          {(!doc.versions.some(v => v.version_number === doc.current_version)) && (
+      {sortedVersions.length > 0 && (
+        <div className="flex flex-wrap items-center gap-2 border-b border-[#C8CDD2] bg-[#F5F7F8] px-3 py-2">
+          {(!sortedVersions.some(v => v.version_number === doc.current_version)) && (
             <button
               type="button"
               onClick={() => setSelectedVersionId(null)}
               onMouseEnter={() => prefetchVersionPreview(null)}
               onFocus={() => prefetchVersionPreview(null)}
-              className={`text-xs px-2.5 py-1 rounded-full border transition-colors ${
+                className={`border px-2.5 py-1 text-xs transition-colors ${
                 selectedVersionId === null
-                  ? "border-accent bg-accent/10 text-accent"
-                  : "border-border text-muted-foreground hover:bg-muted"
+                  ? "border-[#287EAD] bg-white text-[#287EAD]"
+                  : "border-[#C8CDD2] text-[#5E6870] hover:bg-white"
               }`}
             >
               Current
             </button>
           )}
-          {doc.versions.map((version) => {
+          {sortedVersions.map((version) => {
             const isCurrentVersion = version.version_number === doc.current_version;
             const active = isCurrentVersion ? selectedVersionId === null : selectedVersionId === version.id;
 
@@ -1201,12 +1234,12 @@ export default function DocumentViewer({ document: doc, submitSlot }: Props) {
                 onClick={() => isCurrentVersion ? setSelectedVersionId(null) : setSelectedVersionId(version.id)}
                 onMouseEnter={() => prefetchVersionPreview(isCurrentVersion ? null : version.id)}
                 onFocus={() => prefetchVersionPreview(isCurrentVersion ? null : version.id)}
-                className={`text-xs px-2.5 py-1 rounded-full border transition-colors ${
+                className={`border px-2.5 py-1 text-xs transition-colors ${
                   active
                     ? isCurrentVersion
-                      ? "border-teal bg-teal/10 text-teal"
-                      : "border-accent bg-accent/10 text-accent"
-                    : "border-border text-muted-foreground hover:bg-muted"
+                      ? "border-[#287EAD] bg-white text-[#287EAD]"
+                      : "border-[#287EAD] bg-white text-[#287EAD]"
+                    : "border-[#C8CDD2] text-[#5E6870] hover:bg-white"
                 }`}
                 title={version.file_name}
               >
@@ -1239,6 +1272,8 @@ export default function DocumentViewer({ document: doc, submitSlot }: Props) {
           selectedVersionId={selectedVersionId}
           canEditInEditor={canEdit}
           onVersionUploaded={onVersionUploaded}
+          showHeaderOpenButton={false}
+          onOfficeEditActionChange={setOfficeEditAction}
         />
       )}
 
@@ -1249,7 +1284,7 @@ export default function DocumentViewer({ document: doc, submitSlot }: Props) {
 
       {/* Unsupported / download only */}
       {preview.viewer === "download" && !isImage && !isOffice && (
-        <div className="card p-10 text-center border-2 border-dashed">
+        <div className="border-2 border-dashed border-[#C8CDD2] p-10 text-center">
           <Download className="w-12 h-12 text-muted-foreground mx-auto mb-4" />
           <p className="text-foreground/80 mb-4">Preview not available for this file type.</p>
           {canDownload && preview.url && (
@@ -1272,9 +1307,9 @@ export default function DocumentViewer({ document: doc, submitSlot }: Props) {
         Contains "Upload new version" (button + modal) and any caller-supplied
         action (e.g. "Submit for approval"). Hidden if there's nothing to show.
       */}
-      {((canUploadVersion && !isLockedByOther) || submitSlot) && (
-        <div className="flex flex-wrap items-center justify-end gap-2 pt-2 border-t border-border">
-          {canUploadVersion && !isLockedByOther && (
+      {((canUploadVersion && !isLockedByOther && !hideUploadActionBar) || submitSlot) && (
+        <div className="flex flex-wrap items-center justify-end gap-2 border-t border-[#C8CDD2] px-3 py-2">
+          {canUploadVersion && !isLockedByOther && !hideUploadActionBar && (
             <Suspense fallback={<div className="inline-flex h-11 items-center justify-center rounded-lg border border-border bg-card px-4 text-sm text-muted-foreground">Loading upload tools…</div>}>
               <UploadVersionDrawer
                 documentId={doc.id}

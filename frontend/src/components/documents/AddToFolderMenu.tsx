@@ -11,9 +11,10 @@
 
 import { useState } from "react";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
-import { FolderPlus, Check, Folder, Star, Plus, Loader2 } from "lucide-react";
+import { FolderPlus, Check, Folder, Star, Plus, Loader2, X } from "lucide-react";
 import clsx from "clsx";
 import { foldersAPI } from "@/services/foldersApi";
+import { normalizeListResponse } from "@/services/api";
 import type { DocumentFolder } from "../../types";
 
 interface Props {
@@ -22,18 +23,16 @@ interface Props {
   className?: string;
 }
 
-interface FlatFolderWithMembership extends DocumentFolder {
-  isMember: boolean;
-}
-
 export function AddToFolderMenu({ documentId, showLabel = false, className }: Props) {
   const [open, setOpen] = useState(false);
+  const [creating, setCreating] = useState(false);
+  const [folderName, setFolderName] = useState("");
   const qc              = useQueryClient();
 
   // Flat folder list with document_count
   const { data: folders = [] } = useQuery<DocumentFolder[]>({
     queryKey: ["folders"],
-    queryFn: () => foldersAPI.list().then((r) => Array.isArray(r.data) ? r.data : []),
+    queryFn: () => foldersAPI.list().then((r) => normalizeListResponse<DocumentFolder>(r.data)),
     staleTime: 60_000,
     enabled: open,
   });
@@ -50,10 +49,10 @@ export function AddToFolderMenu({ documentId, showLabel = false, className }: Pr
       const results = await Promise.all(
         folders.map(async (f) => {
           try {
-            const items = await foldersAPI
-              .documents(f.id)
-              .then((r) => r.data);
-            return items.some((i) => i.document === documentId)
+            const items = await foldersAPI.documents(f.id).then((r) =>
+              normalizeListResponse<Record<string, unknown>>(r.data),
+            );
+            return items.some((item) => getFolderItemDocumentId(item) === documentId)
               ? f.id
               : null;
           } catch {
@@ -87,6 +86,17 @@ export function AddToFolderMenu({ documentId, showLabel = false, className }: Pr
     },
   });
 
+  const createMutation = useMutation({
+    mutationFn: (name: string) => foldersAPI.create({ name, parent: null }),
+    onSuccess: ({ data }) => {
+      qc.invalidateQueries({ queryKey: ["folders"] });
+      qc.invalidateQueries({ queryKey: ["folders", "tree"] });
+      setFolderName("");
+      setCreating(false);
+      addMutation.mutate(data.id);
+    },
+  });
+
   const handleToggle = (folder: DocumentFolder) => {
     if (folder.is_favourites) return; // favourites managed via StarButton
     const isMember = memberships.includes(folder.id);
@@ -97,14 +107,21 @@ export function AddToFolderMenu({ documentId, showLabel = false, className }: Pr
     }
   };
 
-  const isPending = addMutation.isPending || removeMutation.isPending;
-
   // Sort: system first, then alphabetical
   const sortedFolders = [...folders].sort((a, b) => {
     if (a.is_system && !b.is_system) return -1;
     if (!a.is_system && b.is_system) return 1;
     return a.name.localeCompare(b.name);
   });
+  const availableFolders = sortedFolders.filter((folder) => !folder.is_favourites);
+  const isPending = addMutation.isPending || removeMutation.isPending;
+  const isCreating = createMutation.isPending;
+
+  const handleCreate = () => {
+    const name = folderName.trim();
+    if (!name || isCreating) return;
+    createMutation.mutate(name);
+  };
 
   return (
     <div className={clsx("relative", className)}>
@@ -115,35 +132,46 @@ export function AddToFolderMenu({ documentId, showLabel = false, className }: Pr
         onClick={(e) => { e.stopPropagation(); setOpen((o) => !o); }}
         className={clsx(
           showLabel
-            ? "inline-flex items-center gap-2 rounded-lg border border-border bg-card px-3 py-2 text-sm font-medium"
+            ? "inline-flex items-center gap-2 rounded-md border border-border bg-card px-2.5 py-1 text-xs font-semibold"
             : "p-1.5 rounded-lg",
           "text-muted-foreground hover:text-foreground hover:bg-muted transition-colors",
         )}
       >
         <FolderPlus className="w-4 h-4" />
-        {showLabel && <span>Organize in folders</span>}
+        {showLabel && <span>Add to folder</span>}
       </button>
 
       {open && (
         <>
           <div className="fixed inset-0 z-40" onClick={() => setOpen(false)} />
-          <div className="absolute right-0 top-9 z-50 w-56 rounded-xl border border-border bg-card shadow-xl overflow-hidden">
+          <div className="absolute right-0 top-9 z-50 w-72 rounded-xl border border-border bg-card shadow-xl overflow-hidden">
             <div className="px-3 py-2.5 border-b border-border">
-              <p className="text-xs font-semibold text-foreground">Organize in folders</p>
+              <p className="text-xs font-semibold text-foreground">Add to folder</p>
               <p className="mt-0.5 text-[11px] text-muted-foreground">
-                Select a folder to add or remove this document.
+                Choose an existing folder or create one here.
               </p>
             </div>
 
-            {folders.length === 0 ? (
-              <p className="px-3 py-4 text-xs text-muted-foreground text-center">
-                No folders yet. Create one in the sidebar.
-              </p>
+            {folders.length === 0 && !creating ? (
+              <div className="px-3 py-4 text-center">
+                <Folder className="mx-auto mb-2 h-8 w-8 text-muted-foreground/50" />
+                <p className="text-xs font-medium text-foreground">No folders found</p>
+                <p className="mt-1 text-[11px] text-muted-foreground">
+                  Create a folder and this document will be added to it.
+                </p>
+                <button
+                  type="button"
+                  onClick={() => setCreating(true)}
+                  className="mt-3 inline-flex items-center gap-1.5 rounded-md bg-primary px-3 py-1.5 text-xs font-semibold text-primary-foreground hover:bg-primary/90"
+                >
+                  <Plus className="h-3.5 w-3.5" />
+                  New folder
+                </button>
+              </div>
             ) : (
-              <div className="py-1 max-h-60 overflow-y-auto">
-                {sortedFolders
-                  .filter((f) => !f.is_favourites)
-                  .map((folder) => {
+              <>
+                <div className="py-1 max-h-60 overflow-y-auto">
+                  {availableFolders.map((folder) => {
                     const isMember = memberships.includes(folder.id);
                     const FolderIcon = folder.is_favourites ? Star : Folder;
                     return (
@@ -167,6 +195,62 @@ export function AddToFolderMenu({ documentId, showLabel = false, className }: Pr
                       </button>
                     );
                   })}
+                </div>
+
+                {!creating && (
+                  <button
+                    type="button"
+                    onClick={() => setCreating(true)}
+                    className="flex w-full items-center gap-2 border-t border-border px-3 py-2 text-sm font-medium text-primary hover:bg-primary/5"
+                  >
+                    <Plus className="h-4 w-4" />
+                    Create new folder
+                  </button>
+                )}
+              </>
+            )}
+
+            {creating && (
+              <div className="border-t border-border bg-muted/20 p-3">
+                <label className="mb-1 block text-[11px] font-semibold text-muted-foreground">
+                  New folder name
+                </label>
+                <div className="flex items-center gap-2">
+                  <input
+                    autoFocus
+                    value={folderName}
+                    onChange={(event) => setFolderName(event.target.value)}
+                    onKeyDown={(event) => {
+                      if (event.key === "Enter") handleCreate();
+                      if (event.key === "Escape") {
+                        setCreating(false);
+                        setFolderName("");
+                      }
+                    }}
+                    className="input h-8 text-xs"
+                    placeholder="Folder name"
+                  />
+                  <button
+                    type="button"
+                    onClick={handleCreate}
+                    disabled={!folderName.trim() || isCreating}
+                    className="inline-flex h-8 w-8 items-center justify-center rounded-md bg-primary text-primary-foreground hover:bg-primary/90 disabled:opacity-50"
+                    title="Create folder"
+                  >
+                    {isCreating ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Check className="h-3.5 w-3.5" />}
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setCreating(false);
+                      setFolderName("");
+                    }}
+                    className="inline-flex h-8 w-8 items-center justify-center rounded-md border border-border bg-card text-muted-foreground hover:text-foreground"
+                    title="Cancel"
+                  >
+                    <X className="h-3.5 w-3.5" />
+                  </button>
+                </div>
               </div>
             )}
           </div>
@@ -174,4 +258,15 @@ export function AddToFolderMenu({ documentId, showLabel = false, className }: Pr
       )}
     </div>
   );
+}
+
+function getFolderItemDocumentId(item: Record<string, unknown>): string | null {
+  const documentValue = item.document;
+  if (typeof documentValue === "string") return documentValue;
+  if (documentValue && typeof documentValue === "object" && "id" in documentValue) {
+    const id = (documentValue as { id?: unknown }).id;
+    return typeof id === "string" ? id : null;
+  }
+  const documentId = item.document_id;
+  return typeof documentId === "string" ? documentId : null;
 }
