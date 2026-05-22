@@ -3,10 +3,10 @@
  *
  * Infor DMS layout refresh:
  * ─────────────────────────
- * • Standardized 2-panel visual grid layout:
- *   - Column 1: Details & Tabs (Left) — lg:col-span-5 (41.7% width)
- *   - Column 2: Document Viewer / Preview (Right) — lg:col-span-7 (58.3% width) for maximum preview visibility
- * • Clean Action Toolbar showing filename/size, with Download, Start Workflow, Print, Favorite, Delete.
+ * • Standardized enterprise 2-panel layout:
+ *   - Column 1: Document Viewer / Preview (Left)
+ *   - Column 2: Details & Tabs (Right)
+ * • Blue command bar showing document identity and primary document actions.
  * • Migrated Document Activities into the Left Panel's tabs under "Audit trail" tab.
  * • Removed Checkout, Save, Save as new document, and top Recently Modified tabs.
  * • Removed AddToFolder / Document Storage bottom card.
@@ -111,6 +111,29 @@ function getOcrQuality(metadata: Document["metadata"] | null | undefined) {
 
 function formatOcrEngine(engine: unknown) {
   return String(engine || "Unknown").replace(/_/g, " ");
+}
+
+function getCommandStatusLabel(status: string) {
+  return status
+    ? status.replace(/_/g, " ").replace(/\b\w/g, (char) => char.toUpperCase())
+    : "Unknown";
+}
+
+function getCommandStatusClass(status: string) {
+  const key = status?.toLowerCase?.().replace(/\s+/g, "_") ?? "";
+  if (["approved", "active", "enabled", "completed"].includes(key)) {
+    return "border-emerald-200 bg-emerald-50 text-emerald-800";
+  }
+  if (["pending_review", "pending_approval", "on_hold", "returned"].includes(key)) {
+    return "border-amber-200 bg-amber-50 text-amber-900";
+  }
+  if (["rejected", "void"].includes(key)) {
+    return "border-red-200 bg-red-50 text-red-800";
+  }
+  if (key === "archived") {
+    return "border-sky-200 bg-sky-50 text-sky-800";
+  }
+  return "border-slate-200 bg-white text-slate-800";
 }
 
 function describeAuditEvent(event: string) {
@@ -445,13 +468,14 @@ export default function DocumentDetailPage() {
   const isDraftOrRejected = doc.status === "draft" || doc.status === "rejected";
   const auditCount = auditLogs?.count ?? 0;
   const auditPages = Math.max(1, Math.ceil(auditCount / AUDIT_PAGE_SIZE));
+  const sortedDocumentVersions = [...(doc.versions ?? [])].sort((a, b) => a.version_number - b.version_number);
 
   const tabs: { id: TabId; label: string; disabled?: boolean }[] = [
     ...(activeTask ? [{ id: "workflow" as const, label: "Workflow" }] : []),
     { id: "attributes", label: "Details" },
     { id: "properties", label: "Properties" },
     { id: "security", label: "Security" },
-    { id: "history", label: `History (${doc.versions?.length ?? 0})` },
+    { id: "history", label: `History (${sortedDocumentVersions.length})` },
     { id: "comments", label: `Comments (${doc.comments?.length ?? 0})` },
     { id: "audit", label: "Audit trail" },
     ...(isDraftOrRejected
@@ -523,64 +547,70 @@ export default function DocumentDetailPage() {
   let lastDateHeader = "";
 
   return (
-    <div className="space-y-4">
+    <div className="-m-6 min-h-[calc(100vh-3.5rem)] bg-[#EDEDED] text-[#1F2933]">
       <iframe ref={printFrameRef} title="Printable document" className="hidden" />
 
       {workflowActionCompleted && !activeTask && (
-        <div className="rounded-2xl border border-border bg-muted/10 px-4 py-4 text-sm text-muted-foreground">
+        <div className="mx-5 mt-4 border border-[#C8CDD2] bg-white px-4 py-4 text-sm text-[#5E6870]">
           <p className="font-semibold text-foreground">Workflow action complete</p>
           <p className="mt-1">This document has moved to the next stage and is no longer actionable from your current access level.</p>
         </div>
       )}
-      <div className="flex flex-col xl:flex-row items-start xl:items-center justify-between gap-3 border-y border-border bg-slate-50 dark:bg-slate-950/60 px-4 py-2.5 text-xs shadow-sm">
-        <div className="flex flex-col sm:flex-row sm:items-center gap-2 min-w-0">
+      <div className="flex min-h-[69px] flex-col gap-3 bg-[#287EAD] px-5 py-3 text-xs text-white xl:flex-row xl:items-center xl:justify-between">
+        <div className="flex min-w-0 flex-col gap-2 sm:flex-row sm:items-center">
           <button
             onClick={() => navigate(-1)}
-            className="flex items-center gap-1 text-xs text-slate-500 hover:text-foreground transition-colors"
+            className="flex h-9 items-center gap-1 border border-white/20 bg-[#206D99] px-3 text-xs text-white/85 transition-colors hover:text-white"
           >
             <ArrowLeft className="w-3.5 h-3.5" /> Back
           </button>
           <div className="min-w-0">
-            <div className="flex flex-wrap items-center gap-2 text-foreground">
-              <h1 className="text-base font-semibold truncate max-w-[18rem]">{doc.title}</h1>
-              <StatusBadge status={doc.status} />
+            <div className="flex flex-wrap items-center gap-2 text-white">
+              <h1 className="max-w-[28rem] truncate text-base font-semibold">{doc.title}</h1>
+              <span className={cn(
+                "inline-flex items-center border px-2.5 py-0.5 text-xs font-bold shadow-sm",
+                getCommandStatusClass(doc.status),
+              )}>
+                {getCommandStatusLabel(doc.status)}
+              </span>
               {isPersonal && (
-                <span className="inline-flex items-center gap-1 px-2.5 py-0.5 rounded-full text-[10px] font-semibold bg-primary/10 text-primary border border-primary/20">
+                <span className="inline-flex items-center gap-1 border border-white/25 bg-white/10 px-2.5 py-0.5 text-[10px] font-semibold text-white">
                   <Lock className="w-2.5 h-2.5" /> Personal
                 </span>
               )}
               {isScanned && (
-                <span className="inline-flex items-center gap-1 px-2.5 py-0.5 rounded-full text-[10px] font-semibold bg-teal/10 text-teal border border-teal/20">
+                <span className="inline-flex items-center gap-1 border border-white/25 bg-white/10 px-2.5 py-0.5 text-[10px] font-semibold text-white">
                   <ScanLine className="w-2.5 h-2.5" /> Scanned
                 </span>
               )}
               {doc.is_edit_locked && (
-                <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded bg-amber-100 dark:bg-amber-950 text-amber-800 dark:text-amber-300 text-[10px] font-semibold border border-amber-200 animate-fade-in">
+                <span className="inline-flex animate-fade-in items-center gap-1 border border-amber-200 bg-amber-100 px-2 py-0.5 text-[10px] font-semibold text-amber-800">
                   <Lock className="w-2.5 h-2.5" /> Checked Out By {doc.edit_locked_by_name || "User"}
                 </span>
               )}
             </div>
-            <div className="mt-1 flex flex-wrap items-center gap-2 text-[11px] text-slate-500">
-              <span className="font-medium truncate max-w-[16rem]">{doc.file_name}</span>
+            <div className="mt-1 flex flex-wrap items-center gap-2 text-[11px] text-white/75">
+              <span className="max-w-[20rem] truncate font-medium">{doc.file_name}</span>
               <span>{formatBytes(doc.file_size)}</span>
               <span>{doc.current_version ? `v${doc.current_version}` : "—"}</span>
+              <span>{doc.reference_number}</span>
             </div>
           </div>
         </div>
 
-        <div className="flex flex-wrap items-center gap-1.5 w-full xl:w-auto justify-start xl:justify-end font-medium text-slate-600">
+        <div className="flex w-full flex-wrap items-center justify-start gap-1.5 font-medium text-white/80 xl:w-auto xl:justify-end">
           {canSubmit ? (
             <button
               onClick={() => submitMutation.mutate()}
               disabled={submitMutation.isPending}
-              className="flex items-center gap-1 px-2 py-1 rounded hover:bg-primary/10 hover:text-primary text-foreground transition-colors"
+              className="flex h-8 items-center gap-1 px-2 transition-colors hover:bg-white/10 hover:text-white disabled:opacity-50"
               title="Submit for approval workflow"
             >
               {submitMutation.isPending ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <Send className="w-3.5 h-3.5" />}
               <span>Start workflow</span>
             </button>
           ) : (
-            <button disabled className="hidden sm:flex items-center gap-1 px-2 py-1 rounded opacity-40 cursor-not-allowed" title="Not eligible for submission">
+            <button disabled className="hidden h-8 cursor-not-allowed items-center gap-1 px-2 opacity-40 sm:flex" title="Not eligible for submission">
               <Send className="w-3.5 h-3.5" />
               <span>Start workflow</span>
             </button>
@@ -589,24 +619,24 @@ export default function DocumentDetailPage() {
           <AddToFolderMenu
             documentId={doc.id}
             showLabel
-            className="text-muted-foreground hover:text-foreground"
+            className="text-white/80 hover:text-white"
           />
 
           <div className="flex items-center" title="Favourite document">
             <StarButton
               documentId={doc.id}
               showLabel
-              className="rounded-md border-amber-200 bg-amber-50 px-2.5 py-1 text-xs font-semibold text-amber-700 hover:bg-amber-100 dark:border-amber-800/60 dark:bg-amber-950/40 dark:text-amber-300"
+              className="border-white/20 bg-white/10 px-2.5 py-1 text-xs font-semibold text-white hover:bg-white/15"
             />
           </div>
 
-          <div className="w-[1px] h-4 bg-border mx-1 hidden sm:block" />
+          <div className="mx-1 hidden h-5 w-px bg-white/20 sm:block" />
 
           {canDownload && viewerLinks.downloadHref ? (
             <a
               href={viewerLinks.downloadHref}
               download
-              className="flex items-center gap-1 px-2 py-1 rounded hover:bg-primary/10 hover:text-primary text-foreground transition-colors"
+              className="flex h-8 items-center gap-1 px-2 transition-colors hover:bg-white/10 hover:text-white"
               title="Download current document"
             >
               <Download className="w-3.5 h-3.5" />
@@ -615,7 +645,7 @@ export default function DocumentDetailPage() {
           ) : (
             <button
               disabled
-              className="flex items-center gap-1 px-2 py-1 rounded opacity-40 cursor-not-allowed"
+              className="flex h-8 cursor-not-allowed items-center gap-1 px-2 opacity-40"
               title={canDownload ? "Preview not ready yet" : "Download permission required"}
             >
               <Download className="w-3.5 h-3.5" />
@@ -626,7 +656,7 @@ export default function DocumentDetailPage() {
           <button
             onClick={handlePrintDocument}
             disabled={!canDownload || (!viewerLinks.openInNewTabUrl && !viewerLinks.downloadHref)}
-            className="flex items-center gap-1 px-2 py-1 rounded hover:bg-primary/10 hover:text-primary text-foreground transition-colors disabled:opacity-40 disabled:cursor-not-allowed"
+            className="flex h-8 items-center gap-1 px-2 transition-colors hover:bg-white/10 hover:text-white disabled:cursor-not-allowed disabled:opacity-40"
             title={canDownload ? "Print document" : "Print permission required"}
           >
             <Printer className="w-3.5 h-3.5" />
@@ -643,24 +673,86 @@ export default function DocumentDetailPage() {
             <button
               onClick={() => archiveMutation.mutate()}
               disabled={archiveMutation.isPending}
-              className="flex items-center gap-1 px-2 py-1 rounded hover:bg-destructive/10 hover:text-destructive text-foreground transition-colors"
+              className="flex h-8 items-center gap-1 px-2 transition-colors hover:bg-white/10 hover:text-white disabled:opacity-50"
               title="Archive document"
             >
-              {archiveMutation.isPending ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <Trash2 className="w-3.5 h-3.5 text-destructive" />}
+              {archiveMutation.isPending ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <Trash2 className="w-3.5 h-3.5" />}
               <span className="sr-only sm:not-sr-only">Delete</span>
             </button>
           )}
         </div>
       </div>
 
-      {/* 2-Column Panel Grid rearranged: Tabs details left, large Document Viewer on the right */}
-      <div className="grid grid-cols-1 lg:grid-cols-12 gap-6 items-start mt-1">
+      {/* Enterprise workspace: preview left, document intelligence right */}
+      <div className="grid grid-cols-1 items-start gap-4 p-4 pr-8 lg:grid-cols-12">
 
-        {/* Column 1: Details & Properties Tabs (Left) — lg:col-span-5 (41.7% width) */}
-        <div className="lg:col-span-5 space-y-3">
+        {/* Column 1: Document Viewer (Left) */}
+        <div className="space-y-4 lg:col-span-8">
+
+          {/* Active Notifications / Status Banners */}
+          {isPersonal && (
+            <div className="flex items-start gap-3 border border-[#C8CDD2] bg-white px-4 py-3 text-xs text-[#287EAD] shadow-sm animate-fade-in">
+              <Info className="mt-0.5 h-4 w-4 flex-shrink-0" />
+              <div>
+                <p className="font-semibold">Personal document</p>
+                <p className="mt-0.5 text-[10px] text-[#5E6870]">Private to you and administrators. Cannot be submitted for approval.</p>
+              </div>
+            </div>
+          )}
+
+          {ocrActive && (
+            <div className="flex items-start gap-3 border border-[#C8CDD2] bg-white px-4 py-3 text-xs text-[#287EAD] shadow-sm">
+              <Loader2 className="mt-0.5 h-4 w-4 flex-shrink-0 animate-spin" />
+              <div>
+                <p className="font-semibold">Extracting text…</p>
+                <p className="mt-0.5 text-[10px] text-[#5E6870]">
+                  OCR is running in the background. This page will update automatically.
+                </p>
+              </div>
+            </div>
+          )}
+
+          {ocrStatus === "failed" && (
+            <div className="flex items-start gap-3 border border-destructive/30 bg-white px-4 py-3 text-xs text-destructive shadow-sm">
+              <AlertTriangle className="mt-0.5 h-4 w-4 flex-shrink-0" />
+              <div className="flex-1">
+                <p className="font-semibold">OCR failed</p>
+                <p className="mt-0.5 text-[10px] text-destructive/80">Text extraction did not complete. Search index is limited.</p>
+                {canReOcr && (
+                  <button
+                    onClick={() => reOcrMutation.mutate()}
+                    disabled={reOcrMutation.isPending}
+                    className="mt-2 inline-flex items-center gap-1 text-[10px] font-semibold text-destructive hover:underline"
+                  >
+                    {reOcrMutation.isPending ? <Loader2 className="h-3 w-3 animate-spin" /> : <RefreshCw className="h-3 w-3" />}
+                    Re-run OCR
+                  </button>
+                )}
+              </div>
+            </div>
+          )}
+
+          <div className="border border-[#C8CDD2] bg-white shadow-sm">
+            <Suspense fallback={
+              <div className="flex min-h-[32rem] items-center justify-center bg-white">
+                <Loader2 className="h-8 w-8 animate-spin text-[#287EAD]" />
+              </div>
+            }>
+              <DocumentViewer
+                document={doc}
+                submitSlot={null}
+                hideUploadActionBar
+                onPreviewLinksChange={handlePreviewLinksChange}
+              />
+            </Suspense>
+          </div>
+        </div>
+
+        {/* Column 2: Details & Properties Tabs (Right) */}
+        <div className="space-y-3 lg:col-span-4">
 
           {/* Tab Selection Row */}
-          <div className="border-b border-border">
+          <div className="border-b border-[#C8CDD2] bg-white px-3 pt-2">
             <nav className="-mb-px flex gap-1 flex-wrap">
               {tabs.map((tab) => {
                 const isActive = activeTab === tab.id;
@@ -670,10 +762,10 @@ export default function DocumentDetailPage() {
                     onClick={() => handleTabClick(tab)}
                     disabled={tab.disabled}
                     className={cn(
-                      "px-2.5 py-2 text-xs font-semibold border-b-2 transition-all whitespace-nowrap inline-flex items-center gap-1 disabled:opacity-40 disabled:cursor-not-allowed",
+                      "inline-flex items-center gap-1 whitespace-nowrap border-b-2 px-2.5 py-2 text-sm font-semibold transition-all disabled:cursor-not-allowed disabled:opacity-40",
                       isActive
-                        ? "border-primary text-primary"
-                        : "border-transparent text-muted-foreground hover:text-foreground hover:border-border"
+                        ? "border-[#287EAD] text-[#287EAD]"
+                        : "border-transparent text-[#5E6870] hover:border-[#C8CDD2] hover:text-[#1F2933]"
                     )}
                   >
                     {tab.id === "edit" && <Edit2 className="w-3 h-3" />}
@@ -685,7 +777,7 @@ export default function DocumentDetailPage() {
           </div>
 
           {/* Tab contents frame */}
-          <div className="rounded-2xl border border-border/80 bg-background p-4 min-h-[30rem]">
+          <div className="min-h-[34rem] border border-[#C8CDD2] bg-white p-4 shadow-sm">
 
             {/* WORKFLOW TAB */}
             {activeTab === "workflow" && activeTask && (
@@ -693,9 +785,9 @@ export default function DocumentDetailPage() {
                 <div className="rounded-2xl border border-border bg-background p-4">
                   <div className="mb-4 flex items-center justify-between gap-3">
                     <h3 className="text-sm font-semibold text-foreground">Workflow task actions</h3>
-                    <span className="text-xs text-muted-foreground">Task controls</span>
+                    <span className="text-sm text-muted-foreground">Task controls</span>
                   </div>
-                  <Suspense fallback={<div className="text-xs text-muted-foreground">Loading workflow actions…</div>}>
+                  <Suspense fallback={<div className="text-sm text-muted-foreground">Loading workflow actions…</div>}>
                     <WorkflowActionPanel task={activeTask} documentId={id!} onCompleted={() => setWorkflowActionCompleted(true)} />
                   </Suspense>
                 </div>
@@ -705,7 +797,7 @@ export default function DocumentDetailPage() {
             {/* PROPERTIES TAB */}
             {activeTab === "properties" && (
               <div className="space-y-4 animate-fade-in">
-                <div className="grid grid-cols-[140px_1fr] gap-x-4 gap-y-3.5 text-xs py-1">
+                <div className="grid grid-cols-[140px_1fr] gap-x-4 gap-y-3.5 py-1 text-sm">
                   <span className="text-muted-foreground">Document Type</span>
                   <span className="text-foreground font-semibold">{doc.document_type?.name || "—"}</span>
 
@@ -792,7 +884,7 @@ export default function DocumentDetailPage() {
                           ))}
                         </div>
                       ) : (
-                        <span className="text-xs text-muted-foreground">—</span>
+                        <span className="text-sm text-muted-foreground">—</span>
                       )}
                     </div>
 
@@ -808,7 +900,7 @@ export default function DocumentDetailPage() {
                           ))}
                         </div>
                       ) : (
-                        <span className="text-xs text-muted-foreground">—</span>
+                        <span className="text-sm text-muted-foreground">—</span>
                       )}
                     </div>
                   </div>
@@ -822,26 +914,37 @@ export default function DocumentDetailPage() {
                     ))}
                   </div>
                 ) : (
-                  <p className="text-xs text-muted-foreground py-2">No metadata attributes found for this document type.</p>
+                  <p className="py-2 text-sm text-muted-foreground">No metadata attributes found for this document type.</p>
                 )}
               </div>
             )}
 
             {/* SECURITY TAB */}
             {activeTab === "security" && (
-              <div className="space-y-4 animate-fade-in">
-                <h3 className="text-sm font-semibold text-muted-foreground uppercase tracking-wider border-b border-border pb-2">
-                  Access & Permissions
-                </h3>
-                <div className="rounded-xl border border-border p-4 bg-muted/10 space-y-3.5">
-                  <div className="flex items-center justify-between text-xs">
-                    <span className="text-muted-foreground">Your Role Access</span>
-                    <span className="font-semibold text-foreground bg-primary/5 px-2 py-1 rounded border border-primary/20">
+              <div className="animate-fade-in space-y-4">
+                <div className="border-b border-[#C8CDD2] pb-3">
+                  <p className="text-sm font-bold uppercase tracking-wider text-[#5E6870]">Access control</p>
+                  <p className="mt-1 text-sm text-[#5E6870]">Your effective permissions for this document.</p>
+                </div>
+
+                <div className="border border-[#C8CDD2] bg-[#F5F7F8] p-3">
+                  <div className="flex items-center justify-between gap-3">
+                    <div>
+                      <p className="text-sm font-semibold text-[#1F2933]">Role access</p>
+                      <p className="mt-0.5 text-xs text-[#5E6870]">Calculated from your role and document grants.</p>
+                    </div>
+                    <span className="border border-[#287EAD]/25 bg-white px-2.5 py-1 text-sm font-bold text-[#287EAD]">
                       {hasAdminAccess ? "Administrator (Full Access)" : "Standard User"}
                     </span>
                   </div>
-                  <div className="w-full h-[1px] bg-border" />
-                  <div className="space-y-3">
+                </div>
+
+                <div className="overflow-hidden border border-[#C8CDD2]">
+                  <div className="grid grid-cols-[1fr_auto] bg-[#50545A] px-3 py-2 text-sm font-semibold text-white">
+                    <span>Permission</span>
+                    <span>Status</span>
+                  </div>
+                  <div className="divide-y divide-[#D3D7DA] bg-white">
                     {[
                       { label: "View Document Details", allowed: canViewDocument },
                       { label: "Edit / Update Metadata", allowed: canEdit },
@@ -850,14 +953,14 @@ export default function DocumentDetailPage() {
                       { label: "Restore Historical Versions", allowed: canRestoreVersion },
                       { label: "Archive / Delete Document", allowed: canArchive },
                     ].map(({ label, allowed }) => (
-                      <div key={label} className="flex items-center justify-between text-xs">
-                        <span className="text-muted-foreground">{label}</span>
+                      <div key={label} className="grid grid-cols-[1fr_auto] items-center gap-3 px-3 py-3 text-sm">
+                        <span className="font-medium text-[#1F2933]">{label}</span>
                         {allowed ? (
-                          <span className="inline-flex items-center gap-1 text-[10px] font-semibold text-teal bg-teal/15 px-2 py-0.5 rounded-full border border-teal/20">
+                          <span className="inline-flex items-center gap-1 border border-emerald-200 bg-emerald-50 px-2.5 py-1 text-xs font-bold text-emerald-800">
                             <Check className="w-3 h-3 text-teal" /> Allowed
                           </span>
                         ) : (
-                          <span className="inline-flex items-center gap-1 text-[10px] font-semibold text-destructive bg-destructive/15 px-2 py-0.5 rounded-full border border-destructive/20">
+                          <span className="inline-flex items-center gap-1 border border-red-200 bg-red-50 px-2.5 py-1 text-xs font-bold text-red-800">
                             <X className="w-3 h-3 text-destructive" /> Restricted
                           </span>
                         )}
@@ -870,127 +973,152 @@ export default function DocumentDetailPage() {
 
             {/* HISTORY TAB */}
             {activeTab === "history" && (
-              <div className="space-y-3.5 animate-fade-in">
-                <h3 className="text-xs font-bold text-muted-foreground uppercase tracking-wider border-b border-border pb-2">
-                  Document Version History
-                </h3>
-                {(!doc.versions || doc.versions.length === 0) && (
-                  <div className="text-center py-6 text-muted-foreground"><p className="text-xs">No version history available.</p></div>
+              <div className="animate-fade-in space-y-4">
+                <div className="border-b border-[#C8CDD2] pb-3">
+                  <p className="text-sm font-bold uppercase tracking-wider text-[#5E6870]">Version history</p>
+                  <p className="mt-1 text-sm text-[#5E6870]">{sortedDocumentVersions.length} saved version{sortedDocumentVersions.length === 1 ? "" : "s"} for this document.</p>
+                </div>
+                {sortedDocumentVersions.length === 0 && (
+                  <div className="border border-[#C8CDD2] bg-[#F5F7F8] py-8 text-center text-sm text-[#5E6870]">No version history available.</div>
                 )}
-                {doc.versions?.map((v) => {
-                  const isCurrent = v.version_number === doc.current_version;
-                  const awaitConfirm = confirmRestoreId === v.id;
-                  return (
-                    <div
-                      key={v.id}
-                      onMouseEnter={() => prefetchVersionPreview(v.id)}
-                      onFocus={() => prefetchVersionPreview(v.id)}
-                      className={`card p-3.5 flex flex-col gap-2 transition-colors ${isCurrent ? "border-l-4 border-l-primary bg-primary/5 dark:bg-primary/10" : "hover:bg-muted/10"
-                        }`}
-                    >
-                      <div className="flex items-center gap-2">
+                {sortedDocumentVersions.length > 0 && (
+                  <div className="overflow-hidden border border-[#C8CDD2] bg-white">
+                    {sortedDocumentVersions.map((v) => {
+                      const isCurrent = v.version_number === doc.current_version;
+                      const awaitConfirm = confirmRestoreId === v.id;
+                      return (
                         <div
-                          className={`w-6 h-6 rounded-full flex items-center justify-center text-[10px] font-bold flex-shrink-0 select-none ${isCurrent ? "bg-primary/15 text-primary border border-primary/20" : "bg-muted text-muted-foreground"
-                            }`}
+                          key={v.id}
+                          onMouseEnter={() => prefetchVersionPreview(v.id)}
+                          onFocus={() => prefetchVersionPreview(v.id)}
+                          className={cn(
+                            "grid grid-cols-[3rem_1fr] gap-3 border-b border-[#D3D7DA] px-3 py-3 last:border-b-0 transition-colors hover:bg-[#F5F7F8]",
+                            isCurrent && "bg-[#EEF6FB]",
+                          )}
                         >
-                          v{v.version_number}
-                        </div>
-                        <div className="min-w-0 flex-1">
-                          <p className="text-xs font-semibold text-foreground truncate" title={v.file_name}>{v.file_name}</p>
-                        </div>
-                      </div>
-
-                      <div className="text-[10px] text-muted-foreground space-y-0.5">
-                        <p>{format(new Date(v.created_at), "dd MMM yyyy HH:mm")}</p>
-                        <p>{v.created_by.first_name} {v.created_by.last_name}</p>
-                        <p>{formatBytes(v.file_size)}</p>
-                      </div>
-
-                      {v.change_summary && <p className="text-[10px] text-foreground/85 italic bg-muted/40 p-1.5 rounded">"{v.change_summary}"</p>}
-
-                      <div className="flex items-center gap-1.5 mt-1">
-                        {canDownload && v.file_url && (
-                          <a
-                            href={v.file_url}
-                            download={v.file_name}
-                            title="Download this version"
-                            className="btn-secondary text-[10px] px-2 py-1 flex items-center justify-center flex-1"
-                          >
-                            <Download className="w-3.5 h-3.5" />
-                          </a>
-                        )}
-                        {!isCurrent && canRestoreVersion && (
-                          awaitConfirm ? (
-                            <div className="flex flex-col gap-1.5 rounded border border-primary/40 bg-primary/10 p-2 animate-pulse w-full">
-                              <span className="text-[10px] text-foreground font-semibold">Restore v{v.version_number}?</span>
-                              <div className="flex gap-2">
-                                <button
-                                  onClick={() => restoreMutation.mutate(v.id)}
-                                  disabled={restoreMutation.isPending}
-                                  className="text-[10px] font-bold text-primary hover:underline"
-                                >
-                                  {restoreMutation.isPending ? <Loader2 className="w-3 h-3 animate-spin" /> : "Confirm"}
-                                </button>
-                                <button
-                                  onClick={() => setConfirmRestoreId(null)}
-                                  className="text-[10px] text-muted-foreground hover:underline"
-                                >
-                                  Cancel
-                                </button>
-                              </div>
+                          <div className="flex flex-col items-center">
+                            <div className={cn(
+                              "flex h-9 w-9 select-none items-center justify-center border text-sm font-bold",
+                              isCurrent ? "border-[#287EAD] bg-white text-[#287EAD]" : "border-[#C8CDD2] bg-[#F5F7F8] text-[#5E6870]",
+                            )}>
+                              v{v.version_number}
                             </div>
-                          ) : (
-                            <button
-                              onClick={() => setConfirmRestoreId(v.id)}
-                              className="btn-secondary text-[10px] px-2 py-1 flex items-center gap-1 flex-1 justify-center"
-                              title="Restore to this version"
-                            >
-                              <RotateCcw className="w-3 h-3" /> Restore
-                            </button>
-                          )
-                        )}
-                      </div>
-                    </div>
-                  );
-                })}
+                            <div className="mt-2 h-full min-h-6 w-px bg-[#D3D7DA]" />
+                          </div>
+                          <div className="min-w-0 space-y-2">
+                            <div className="flex items-start justify-between gap-3">
+                              <div className="min-w-0">
+                                <p className="truncate text-sm font-bold text-[#1F2933]" title={v.file_name}>{v.file_name}</p>
+                                <p className="mt-1 text-xs text-[#5E6870]">
+                                  {format(new Date(v.created_at), "dd MMM yyyy HH:mm")} · {v.created_by.first_name} {v.created_by.last_name} · {formatBytes(v.file_size)}
+                                </p>
+                              </div>
+                              {isCurrent && (
+                                <span className="shrink-0 border border-emerald-200 bg-emerald-50 px-2 py-0.5 text-xs font-bold text-emerald-800">Current</span>
+                              )}
+                            </div>
+
+                            {v.change_summary && (
+                              <p className="border-l-2 border-[#287EAD] bg-[#F5F7F8] px-2 py-1.5 text-sm italic text-[#1F2933]">"{v.change_summary}"</p>
+                            )}
+
+                            <div className="flex items-center gap-2">
+                              {canDownload && v.file_url && (
+                                <a
+                                  href={v.file_url}
+                                  download={v.file_name}
+                                  title="Download this version"
+                                  className="inline-flex items-center gap-1 border border-[#C8CDD2] bg-white px-2.5 py-1.5 text-xs font-semibold text-[#1F2933] hover:bg-[#F5F7F8]"
+                                >
+                                  <Download className="h-3.5 w-3.5" /> Download
+                                </a>
+                              )}
+                              {!isCurrent && canRestoreVersion && (
+                                awaitConfirm ? (
+                                  <div className="flex items-center gap-2 border border-[#287EAD]/40 bg-[#EEF6FB] px-2.5 py-1.5">
+                                    <span className="text-xs font-semibold text-[#1F2933]">Restore v{v.version_number}?</span>
+                                    <button
+                                      onClick={() => restoreMutation.mutate(v.id)}
+                                      disabled={restoreMutation.isPending}
+                                      className="text-xs font-bold text-[#287EAD] hover:underline"
+                                    >
+                                      {restoreMutation.isPending ? <Loader2 className="h-3 w-3 animate-spin" /> : "Confirm"}
+                                    </button>
+                                    <button
+                                      onClick={() => setConfirmRestoreId(null)}
+                                      className="text-xs text-[#5E6870] hover:underline"
+                                    >
+                                      Cancel
+                                    </button>
+                                  </div>
+                                ) : (
+                                  <button
+                                    onClick={() => setConfirmRestoreId(v.id)}
+                                    className="inline-flex items-center gap-1 border border-[#C8CDD2] bg-white px-2.5 py-1.5 text-xs font-semibold text-[#1F2933] hover:bg-[#F5F7F8]"
+                                    title="Restore to this version"
+                                  >
+                                    <RotateCcw className="h-3.5 w-3.5" /> Restore
+                                  </button>
+                                )
+                              )}
+                            </div>
+                          </div>
+                        </div>
+                      );
+                    })}
+                  </div>
+                )}
               </div>
             )}
 
             {/* COMMENTS TAB */}
             {activeTab === "comments" && (
-              <div className="space-y-4 animate-fade-in">
-                <h3 className="text-xs font-bold text-muted-foreground uppercase tracking-wider border-b border-border pb-2">
-                  Document Comments
-                </h3>
+              <div className="animate-fade-in space-y-4">
+                <div className="border-b border-[#C8CDD2] pb-3">
+                  <p className="text-sm font-bold uppercase tracking-wider text-[#5E6870]">Comments</p>
+                  <p className="mt-1 text-sm text-[#5E6870]">{doc.comments?.length ?? 0} comment{(doc.comments?.length ?? 0) === 1 ? "" : "s"} on this document.</p>
+                </div>
 
-                <div className="space-y-3 max-h-[16rem] overflow-y-auto pr-1">
+                <div className="max-h-[22rem] overflow-y-auto border border-[#C8CDD2] bg-white">
                   {(!doc.comments || doc.comments.length === 0) && (
-                    <div className="text-center py-4 text-muted-foreground">
-                      <p className="text-xs">No comments added yet.</p>
+                    <div className="px-4 py-8 text-center text-sm text-[#5E6870]">
+                      No comments added yet.
                     </div>
                   )}
                   {doc.comments?.map((c) => (
                     <div
                       key={c.id}
-                      className={`card p-2.5 ${c.is_internal ? "border-l-4 border-l-primary bg-primary/5 dark:bg-primary/10" : ""}`}
+                      className={cn(
+                        "grid grid-cols-[2.5rem_1fr] gap-3 border-b border-[#D3D7DA] px-3 py-3 last:border-b-0",
+                        c.is_internal ? "bg-[#EEF6FB]" : "bg-white",
+                      )}
                     >
-                      <div className="flex flex-col gap-0.5 mb-1 text-[10px]">
-                        <span className="font-semibold text-foreground">{c.author.first_name} {c.author.last_name}</span>
-                        <span className="text-muted-foreground">
-                          {format(new Date(c.created_at), "dd MMM yyyy HH:mm")}
-                        </span>
+                      <div className="flex h-9 w-9 items-center justify-center border border-[#C8CDD2] bg-[#F5F7F8] text-xs font-bold uppercase text-[#287EAD]">
+                        {(c.author.first_name?.[0] ?? "")}{(c.author.last_name?.[0] ?? "")}
                       </div>
-                      <p className="text-xs text-foreground/90 leading-relaxed whitespace-pre-wrap">{c.content}</p>
+                      <div className="min-w-0">
+                        <div className="flex flex-wrap items-center justify-between gap-2">
+                          <span className="font-semibold text-[#1F2933]">{c.author.first_name} {c.author.last_name}</span>
+                          <span className="text-xs text-[#5E6870]">
+                            {format(new Date(c.created_at), "dd MMM yyyy HH:mm")}
+                          </span>
+                        </div>
+                        {c.is_internal && (
+                          <span className="mt-1 inline-flex border border-[#287EAD]/25 bg-white px-2 py-0.5 text-xs font-semibold text-[#287EAD]">Internal</span>
+                        )}
+                        <p className="mt-2 whitespace-pre-wrap text-sm leading-relaxed text-[#1F2933]">{c.content}</p>
+                      </div>
                     </div>
                   ))}
                 </div>
 
-                <div className="card p-2.5 space-y-2 mt-2 border border-border/80">
+                <div className="space-y-2 border border-[#C8CDD2] bg-[#F5F7F8] p-3">
+                  <label className="text-sm font-semibold text-[#1F2933]">Add comment</label>
                   <textarea
                     value={comment}
                     onChange={(e) => setComment(e.target.value)}
-                    rows={2}
-                    className="input text-xs"
+                    rows={3}
+                    className="block w-full border border-[#AEB5BB] bg-white px-3 py-2 text-sm text-[#1F2933] focus:outline-none focus:ring-1 focus:ring-[#287EAD]"
                     placeholder="Add a comment…"
                     disabled={!canComment}
                   />
@@ -998,7 +1126,7 @@ export default function DocumentDetailPage() {
                     <button
                       onClick={() => comment.trim() && commentMutation.mutate(comment.trim())}
                       disabled={!comment.trim() || commentMutation.isPending || !canComment}
-                      className="btn-primary text-[10px] py-1 px-2.5 shadow-sm"
+                      className="inline-flex items-center gap-2 bg-[#287EAD] px-3 py-2 text-sm font-semibold text-white hover:bg-[#206D99] disabled:cursor-not-allowed disabled:opacity-50"
                     >
                       {commentMutation.isPending && <Loader2 className="w-3.5 h-3.5 animate-spin" />}
                       <MessageSquare className="w-3 h-3" /> Add comment
@@ -1010,11 +1138,12 @@ export default function DocumentDetailPage() {
 
             {/* AUDIT TRAIL TAB */}
             {activeTab === "audit" && (
-              <div className="space-y-4 animate-fade-in">
-                <div className="flex items-center justify-between border-b border-border pb-2">
-                  <h3 className="text-sm font-semibold text-muted-foreground uppercase tracking-wider">
-                    Audit trail
-                  </h3>
+              <div className="animate-fade-in space-y-4">
+                <div className="flex items-center justify-between gap-3 border-b border-[#C8CDD2] pb-3">
+                  <div>
+                    <p className="text-sm font-bold uppercase tracking-wider text-[#5E6870]">Audit trail</p>
+                    <p className="mt-1 text-sm text-[#5E6870]">{auditCount.toLocaleString()} recorded event{auditCount === 1 ? "" : "s"}.</p>
+                  </div>
                   <button
                     onClick={() => {
                       if (auditLogs?.results?.length) {
@@ -1029,15 +1158,15 @@ export default function DocumentDetailPage() {
                         toast.error("No activity trail available to download.");
                       }
                     }}
-                    className="p-1 rounded text-muted-foreground hover:text-foreground hover:bg-muted transition-colors"
+                    className="border border-[#C8CDD2] bg-white p-2 text-[#5E6870] transition-colors hover:bg-[#F5F7F8] hover:text-[#1F2933]"
                     title="Download activity trail (JSON)"
                   >
-                    <Download className="w-3.5 h-3.5" />
+                    <Download className="h-4 w-4" />
                   </button>
                 </div>
 
                 {/* Date grouped audit items */}
-                <div className="space-y-0.5 max-h-[26rem] overflow-y-auto pr-1">
+                <div className="max-h-[28rem] overflow-y-auto border border-[#C8CDD2] bg-white">
                   {auditLogs?.results?.length ? (
                     auditLogs.results.map((log) => {
                       const currentDateHeader = formatActivityDateHeader(log.timestamp);
@@ -1045,34 +1174,38 @@ export default function DocumentDetailPage() {
                       lastDateHeader = currentDateHeader;
 
                       return (
-                        <div key={log.id} className="space-y-0.5">
+                        <div key={log.id}>
                           {showHeader && (
-                            <div className="bg-[#ededed] dark:bg-muted/80 px-3 py-1 text-[10px] font-bold text-foreground border-y border-border select-none uppercase tracking-wider mt-2.5 first:mt-0">
+                            <div className="select-none border-b border-[#C8CDD2] bg-[#F5F7F8] px-3 py-2 text-xs font-bold uppercase tracking-wider text-[#5E6870]">
                               {currentDateHeader}
                             </div>
                           )}
 
-                          <div className="py-2.5 px-3 border-b border-border bg-card hover:bg-muted/5 transition-colors space-y-1">
-                            <p className="text-sm text-foreground leading-normal text-left">
-                              <span className="font-semibold text-primary">{doc.reference_number}</span> {describeAuditEvent(log.event)} by <span className="font-semibold text-foreground">{log.actor_name || "System"}</span>
-                            </p>
-                            {log.summary && (
-                              <p className="text-[10px] text-muted-foreground pl-2 border-l border-primary/20 italic whitespace-pre-wrap leading-relaxed mt-1 text-left">
-                                {log.summary}
+                          <div className="grid grid-cols-[2rem_1fr] gap-3 border-b border-[#D3D7DA] px-3 py-3 last:border-b-0 transition-colors hover:bg-[#F5F7F8]">
+                            <div className="mt-0.5 flex h-8 w-8 items-center justify-center border border-[#C8CDD2] bg-[#F5F7F8] text-[#287EAD]">
+                              <ShieldCheck className="h-4 w-4" />
+                            </div>
+                            <div className="min-w-0">
+                              <p className="text-sm leading-normal text-[#1F2933]">
+                                <span className="font-bold text-[#287EAD]">{doc.reference_number}</span> {describeAuditEvent(log.event)} by <span className="font-semibold">{log.actor_name || "System"}</span>
                               </p>
-                            )}
-                            <div className="flex flex-wrap items-center gap-1.5 pt-0.5 text-xs text-muted-foreground font-mono">
-                              <ShieldCheck className="w-3 h-3 text-primary/70" />
-                              <span>{log.ip_address || "System"}</span>
-                              <span>·</span>
-                              <span>{format(new Date(log.timestamp), "HH:mm:ss")}</span>
+                              {log.summary && (
+                                <p className="mt-2 whitespace-pre-wrap border-l-2 border-[#287EAD] bg-[#F5F7F8] px-2 py-1.5 text-sm leading-relaxed text-[#5E6870]">
+                                  {log.summary}
+                                </p>
+                              )}
+                              <div className="mt-2 flex flex-wrap items-center gap-2 text-xs font-mono text-[#5E6870]">
+                                <span>{log.ip_address || "System"}</span>
+                                <span>·</span>
+                                <span>{format(new Date(log.timestamp), "HH:mm:ss")}</span>
+                              </div>
                             </div>
                           </div>
                         </div>
                       );
                     })
                   ) : (
-                    <div className="rounded-lg border border-border bg-muted/5 px-4 py-8 text-center text-sm text-muted-foreground">
+                    <div className="px-4 py-8 text-center text-sm text-[#5E6870]">
                       No activity history found for this document yet.
                     </div>
                   )}
@@ -1080,8 +1213,8 @@ export default function DocumentDetailPage() {
 
                 {/* Compact pagination inside Audit trail tab */}
                 {auditCount > AUDIT_PAGE_SIZE && (
-                  <div className="flex items-center justify-between border-t border-border pt-3 mt-1.5 text-xs select-none">
-                    <span className="text-[10px] text-muted-foreground">
+                  <div className="mt-1.5 flex select-none items-center justify-between border-t border-[#C8CDD2] pt-3 text-sm">
+                    <span className="text-sm text-[#5E6870]">
                       Page {auditPage} of {auditPages}
                     </span>
                     <div className="flex items-center gap-1.5">
@@ -1089,7 +1222,7 @@ export default function DocumentDetailPage() {
                         type="button"
                         onClick={() => setAuditPage((current) => Math.max(1, current - 1))}
                         disabled={auditPage === 1}
-                        className="btn-secondary text-[10px] px-2.5 py-1 disabled:opacity-40 disabled:cursor-not-allowed shadow-sm"
+                        className="border border-[#C8CDD2] bg-white px-3 py-1.5 text-sm font-semibold text-[#1F2933] hover:bg-[#F5F7F8] disabled:cursor-not-allowed disabled:opacity-40"
                       >
                         Prev
                       </button>
@@ -1097,7 +1230,7 @@ export default function DocumentDetailPage() {
                         type="button"
                         onClick={() => setAuditPage((current) => Math.min(auditPages, current + 1))}
                         disabled={auditPage >= auditPages}
-                        className="btn-secondary text-[10px] px-2.5 py-1 disabled:opacity-40 disabled:cursor-not-allowed shadow-sm"
+                        className="border border-[#C8CDD2] bg-white px-3 py-1.5 text-sm font-semibold text-[#1F2933] hover:bg-[#F5F7F8] disabled:cursor-not-allowed disabled:opacity-40"
                       >
                         Next
                       </button>
@@ -1111,85 +1244,22 @@ export default function DocumentDetailPage() {
             {activeTab === "edit" && (
               <div className="space-y-4 animate-fade-in">
                 <div className="flex items-center justify-between border-b border-border pb-2 mb-2">
-                  <h3 className="text-[11px] font-bold text-muted-foreground uppercase tracking-wider">
+                  <h3 className="text-sm font-bold uppercase tracking-wider text-muted-foreground">
                     Edit Properties
                   </h3>
                   <button
                     onClick={() => setActiveTab("properties")}
-                    className="text-[11px] font-semibold text-muted-foreground hover:text-foreground hover:underline transition-colors"
+                    className="text-sm font-semibold text-muted-foreground transition-colors hover:text-foreground hover:underline"
                   >
                     Cancel
                   </button>
                 </div>
-                <Suspense fallback={<div className="p-4 text-xs text-muted-foreground">Loading editor…</div>}>
+                <Suspense fallback={<div className="p-4 text-sm text-muted-foreground">Loading editor…</div>}>
                   <MetadataEditPanel document={doc} onClose={() => setActiveTab("properties")} />
                 </Suspense>
               </div>
             )}
 
-          </div>
-        </div>
-
-        {/* Column 2: Document Viewer (Right) — lg:col-span-7 (58.3% width) */}
-        <div className="lg:col-span-7 space-y-4">
-
-          {/* Active Notifications / Status Banners */}
-          {isPersonal && (
-            <div className="rounded-xl border border-primary/20 bg-primary/5 px-4 py-3 flex items-start gap-3 text-xs text-primary shadow-sm animate-fade-in">
-              <Info className="w-4 h-4 mt-0.5 flex-shrink-0 text-primary" />
-              <div>
-                <p className="font-semibold">Personal document</p>
-                <p className="text-[10px] mt-0.5 text-primary/70">Private to you and administrators. Cannot be submitted for approval.</p>
-              </div>
-            </div>
-          )}
-
-          {ocrActive && (
-            <div className="rounded-xl border border-teal/20 bg-teal/5 px-4 py-3 flex items-start gap-3 text-xs text-teal shadow-sm">
-              <Loader2 className="w-4 h-4 mt-0.5 flex-shrink-0 animate-spin" />
-              <div>
-                <p className="font-semibold">Extracting text…</p>
-                <p className="text-[10px] mt-0.5 text-teal/80">
-                  OCR is running in the background. This page will update automatically.
-                </p>
-              </div>
-            </div>
-          )}
-
-          {ocrStatus === "failed" && (
-            <div className="rounded-xl border border-destructive/30 bg-destructive/5 px-4 py-3 flex items-start gap-3 text-xs text-destructive shadow-sm">
-              <AlertTriangle className="w-4 h-4 mt-0.5 flex-shrink-0" />
-              <div className="flex-1">
-                <p className="font-semibold">OCR failed</p>
-                <p className="text-[10px] mt-0.5 text-destructive/80">Text extraction did not complete. Search index is limited.</p>
-                {canReOcr && (
-                  <button
-                    onClick={() => reOcrMutation.mutate()}
-                    disabled={reOcrMutation.isPending}
-                    className="mt-2 inline-flex items-center gap-1 text-[10px] font-semibold text-destructive hover:underline"
-                  >
-                    {reOcrMutation.isPending ? <Loader2 className="w-3 h-3 animate-spin" /> : <RefreshCw className="w-3 h-3" />}
-                    Re-run OCR
-                  </button>
-                )}
-              </div>
-            </div>
-          )}
-
-          {/* Document Viewer Frame */}
-          <div className="card p-3 bg-card border border-border rounded-xl shadow-elegant">
-            <Suspense fallback={
-              <div className="flex min-h-[24rem] items-center justify-center rounded-lg border border-border bg-card">
-                <Loader2 className="w-8 h-8 text-primary animate-spin" />
-              </div>
-            }>
-                <DocumentViewer
-                  document={doc}
-                  submitSlot={null}
-                  hideUploadActionBar
-                  onPreviewLinksChange={handlePreviewLinksChange}
-                />
-            </Suspense>
           </div>
         </div>
 
