@@ -252,6 +252,10 @@ export default function DocumentDetailPage() {
     qc.invalidateQueries({ queryKey: ["document-preview", id] });
   }, [id, qc]);
 
+  const handlePreviewLinksChange = useCallback((links: { openInNewTabUrl: string; downloadHref: string }) => {
+    setViewerLinks(links);
+  }, []);
+
   // Warm preview immediately
   useEffect(() => {
     if (!doc?.id) return;
@@ -1183,7 +1187,7 @@ export default function DocumentDetailPage() {
                   document={doc}
                   submitSlot={null}
                   hideUploadActionBar
-                  onPreviewLinksChange={(links) => setViewerLinks(links)}
+                  onPreviewLinksChange={handlePreviewLinksChange}
                 />
             </Suspense>
           </div>

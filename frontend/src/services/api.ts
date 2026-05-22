@@ -225,7 +225,7 @@ export const documentsAPI = {
     config?: { onUploadProgress?: (progressEvent: any) => void }
   ) =>
     api.post("/documents/", formData, {
-      headers: { "Content-Type": "multipart/form-data" },
+      headers: { "Content-Type": undefined },
       onUploadProgress: config?.onUploadProgress,
     }),
 
@@ -260,7 +260,7 @@ export const documentsAPI = {
     config?: { onUploadProgress?: (progressEvent: any) => void }
   ) =>
     api.post(`/documents/${id}/upload_version/`, formData, {
-      headers: { "Content-Type": "multipart/form-data" },
+      headers: { "Content-Type": undefined },
       onUploadProgress: config?.onUploadProgress,
     }),
 
@@ -371,7 +371,7 @@ export const bulkUploadAPI = {
     config?: { onUploadProgress?: (progressEvent: { loaded: number; total?: number }) => void },
   ) =>
     api.post("/documents/bulk-uploads/", formData, {
-      headers: { "Content-Type": "multipart/form-data" },
+      headers: { "Content-Type": undefined },
       onUploadProgress: config?.onUploadProgress,
     }),
 

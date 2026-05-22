@@ -3,6 +3,7 @@ Helpers for bulk scan upload batches.
 """
 from __future__ import annotations
 
+import logging
 import os
 
 from django.db import transaction
@@ -11,6 +12,8 @@ from .models import BulkUpload, BulkUploadStatus, Document, OCRStatus
 from .serializers import DocumentUploadSerializer
 from apps.audit.models import AuditEvent
 from apps.audit.utils import record_audit_event
+
+logger = logging.getLogger(__name__)
 
 
 def document_title_from_filename(filename: str) -> str:
@@ -25,9 +28,16 @@ def serialize_bulk_document(doc: Document) -> dict:
     meta = dict(doc.metadata or {})
     suggestions = None
     if doc.ocr_status == OCRStatus.DONE:
-        fields = meta.get("ocr_suggestions")
+        ocr_suggestions = meta.get("ocr_suggestions")
         quality = meta.get("ocr_quality")
-        if fields or quality:
+        if ocr_suggestions or quality:
+            # Extract the nested fields if present, otherwise use the whole object
+            fields = None
+            if isinstance(ocr_suggestions, dict):
+                fields = ocr_suggestions.get("fields")
+                # If fields wasn't found in the nested structure, use the whole object
+                if fields is None:
+                    fields = ocr_suggestions
             suggestions = {
                 "fields": fields or None,
                 "quality": quality or None,
@@ -111,6 +121,12 @@ def create_bulk_upload_documents(
         serializer = DocumentUploadSerializer(data=payload, context={"request": request})
         try:
             if not serializer.is_valid():
+                logger.warning(
+                    "Bulk upload document validation failed for bulk_upload=%s file=%s errors=%s",
+                    bulk_upload.id,
+                    getattr(upload, 'name', None),
+                    serializer.errors,
+                )
                 bulk_upload.failed_uploads += 1
                 bulk_upload.save(update_fields=["failed_uploads", "updated_at"])
                 continue
@@ -133,7 +149,12 @@ def create_bulk_upload_documents(
                     "is_scanned": is_scanned,
                 },
             )
-        except Exception:
+        except Exception as exc:
+            logger.exception(
+                "Bulk upload document save failed for bulk_upload=%s file=%s",
+                bulk_upload.id,
+                getattr(upload, 'name', None),
+            )
             bulk_upload.failed_uploads += 1
             bulk_upload.save(update_fields=["failed_uploads", "updated_at"])
 

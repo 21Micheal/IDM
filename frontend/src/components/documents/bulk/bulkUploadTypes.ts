@@ -68,6 +68,9 @@ export type BulkReviewSubmitItem = {
   currency?: string;
   document_date?: string;
   due_date?: string;
+  quantity?: string;
+  description?: string;
+  uom?: string;
   metadata?: Record<string, unknown>;
   approved: boolean;
   rejected: boolean;

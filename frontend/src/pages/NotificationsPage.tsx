@@ -58,24 +58,24 @@ export default function NotificationsPage() {
   ];
 
   return (
-    <div className="mx-auto max-w-6xl px-5 py-6">
-      <div className="mb-6 flex flex-col gap-4 border-b border-border pb-5 lg:flex-row lg:items-end lg:justify-between">
-        <div>
-          <div className="mb-2 flex items-center gap-3">
-            <div className="flex h-10 w-10 items-center justify-center rounded-lg border border-primary/20 bg-primary/10">
-              <Bell className="h-5 w-5 text-primary" />
-            </div>
-            <div>
-              <h1 className="text-2xl font-semibold tracking-tight text-foreground">Notifications</h1>
-              <p className="mt-0.5 text-sm text-muted-foreground">
-                Workflow requests, document updates, and time-sensitive alerts.
-              </p>
-            </div>
+    <div className="mx-auto max-w-4xl px-4 py-6 sm:px-6">
+      {/* Header */}
+      <div className="mb-8 space-y-4">
+        <div className="flex items-start gap-4">
+          <div className="flex h-10 w-10 items-center justify-center rounded-lg border border-primary/20 bg-primary/10">
+            <Bell className="h-5 w-5 text-primary" />
+          </div>
+          <div>
+            <h1 className="text-2xl font-semibold text-foreground">Notifications</h1>
+            <p className="mt-1 text-sm text-muted-foreground">
+              Workflow requests, document updates, and time-sensitive alerts.
+            </p>
           </div>
         </div>
 
+        {/* Filters and Actions */}
         <div className="flex flex-wrap items-center gap-2">
-          <div className="flex rounded-lg border border-border bg-card p-1">
+          <div className="flex gap-1 rounded-lg border border-border bg-muted/30 p-1">
             {filters.map((item) => (
               <button
                 key={item.id}
@@ -85,14 +85,14 @@ export default function NotificationsPage() {
                   "inline-flex items-center gap-1.5 rounded-md px-3 py-1.5 text-sm font-medium transition-colors",
                   filter === item.id
                     ? "bg-primary text-primary-foreground"
-                    : "text-muted-foreground hover:bg-muted hover:text-foreground",
+                    : "text-muted-foreground hover:text-foreground",
                 )}
               >
                 {item.label}
                 <span
                   className={clsx(
-                    "rounded-full px-1.5 py-0.5 text-[10px]",
-                    filter === item.id ? "bg-primary-foreground/20" : "bg-muted text-muted-foreground",
+                    "rounded-full px-1.5 py-0.5 text-[10px] font-medium",
+                    filter === item.id ? "bg-primary-foreground/20" : "bg-muted",
                   )}
                 >
                   {item.count}
@@ -105,7 +105,12 @@ export default function NotificationsPage() {
             type="button"
             onClick={() => markAllReadMutation.mutate()}
             disabled={markAllReadMutation.isPending || unreadCount === 0}
-            className="btn-secondary h-10"
+            className={clsx(
+              "inline-flex items-center gap-1.5 rounded-lg border border-border px-3 py-1.5 text-sm font-medium transition-colors",
+              markAllReadMutation.isPending || unreadCount === 0
+                ? "opacity-50 cursor-not-allowed text-muted-foreground"
+                : "hover:bg-muted text-foreground",
+            )}
           >
             {markAllReadMutation.isPending ? (
               <Loader2 className="h-4 w-4 animate-spin" />
@@ -117,6 +122,7 @@ export default function NotificationsPage() {
         </div>
       </div>
 
+      {/* Notifications List */}
       <NotificationList
         notifications={visibleNotifications}
         isLoading={isLoading}

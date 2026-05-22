@@ -5,6 +5,7 @@ import {
   Bell,
   CheckCheck,
   CheckCircle,
+  ChevronRight,
   ClipboardCheck,
   Clock,
   Info,
@@ -28,62 +29,103 @@ interface NotificationListProps {
 }
 
 export function getNotificationConfig(type: string, message = "") {
+  const normalized = message.toLowerCase();
+
+  const invoiceApproved = normalized.includes("invoice") && normalized.includes("approved");
+  const invoiceApproval = normalized.includes("invoice") && normalized.includes("approval") && !invoiceApproved;
+  const documentApproval = normalized.includes("approval") && !normalized.includes("invoice");
+
+  if (invoiceApproved) {
+    return {
+      icon: CheckCircle,
+      color: "text-emerald-700 bg-emerald-50 border-emerald-200",
+      label: "Invoice Approved",
+      category: "Approved Invoice",
+    };
+  }
+
+  if (invoiceApproval) {
+    return {
+      icon: ClipboardCheck,
+      color: "text-sky-700 bg-sky-50 border-sky-200",
+      label: "Invoice Approval Needed",
+      category: "Invoice Approval",
+    };
+  }
+
+  if (documentApproval) {
+    return {
+      icon: ClipboardCheck,
+      color: "text-primary bg-primary/10 border-primary/20",
+      label: "Approval Request",
+      category: "Document Approval",
+    };
+  }
+
   switch (type) {
     case "task_assigned":
       return {
         icon: ClipboardCheck,
         color: "text-primary bg-primary/10 border-primary/20",
         label: "Approval Request",
+        category: "Requires Approval",
       };
     case "workflow_complete":
       return {
         icon: CheckCircle,
-        color: "text-teal bg-teal/10 border-teal/20",
+        color: "text-emerald-700 bg-emerald-50 border-emerald-200",
         label: "Workflow Complete",
+        category: "Approved",
       };
     case "document_returned":
       return {
         icon: RotateCcw,
         color: "text-amber-700 bg-amber-50 border-amber-200",
         label: "Returned for Review",
+        category: "Returned Document",
       };
     case "document_held":
       return {
         icon: PauseCircle,
         color: "text-orange-700 bg-orange-50 border-orange-200",
         label: "Document on Hold",
+        category: "Held",
       };
     case "hold_released":
       return {
         icon: PlayCircle,
         color: "text-teal bg-teal/10 border-teal/20",
         label: "Hold Released",
+        category: "Hold Released",
       };
     case "hold_expired":
       return {
         icon: Clock,
         color: "text-purple-700 bg-purple-50 border-purple-200",
         label: "Hold Expired",
+        category: "Hold Expired",
       };
     case "task_overdue":
       return {
         icon: AlertTriangle,
         color: "text-destructive bg-destructive/10 border-destructive/20",
         label: "Overdue",
+        category: "Urgent",
       };
     case "workflow_action":
       return {
         icon: CheckCheck,
         color: "text-muted-foreground bg-muted border-border",
         label: "Workflow Update",
+        category: "Workflow",
       };
-    default: {
-      const normalized = message.toLowerCase();
+    default:
       if (normalized.includes("overdue") || normalized.includes("urgent")) {
         return {
           icon: AlertTriangle,
           color: "text-destructive bg-destructive/10 border-destructive/20",
           label: "Urgent",
+          category: "Urgent",
         };
       }
       if (normalized.includes("returned") || normalized.includes("rejected") || normalized.includes("hold")) {
@@ -91,14 +133,15 @@ export function getNotificationConfig(type: string, message = "") {
           icon: XCircle,
           color: "text-amber-700 bg-amber-50 border-amber-200",
           label: "Attention",
+          category: "Attention",
         };
       }
       return {
         icon: Info,
         color: "text-muted-foreground bg-muted border-border",
         label: "Info",
+        category: "General",
       };
-    }
   }
 }
 
@@ -136,12 +179,12 @@ export function NotificationList({
 
   if (sortedNotifications.length === 0) {
     return (
-      <div className="card p-16 text-center">
-        <div className="w-16 h-16 rounded-full bg-muted flex items-center justify-center mx-auto mb-4">
-          <Bell className="w-8 h-8 text-muted-foreground/40" />
+      <div className="py-16 text-center">
+        <div className="mx-auto mb-4 flex h-12 w-12 items-center justify-center rounded-full bg-muted">
+          <Bell className="h-6 w-6 text-muted-foreground/50" />
         </div>
-        <h3 className="text-lg font-semibold text-foreground">No notifications</h3>
-        <p className="text-sm text-muted-foreground mt-1">You are all caught up with your tasks and updates.</p>
+        <h3 className="text-sm font-semibold text-foreground">No notifications</h3>
+        <p className="mt-1 text-xs text-muted-foreground">You are all caught up with your tasks and updates.</p>
       </div>
     );
   }
@@ -165,7 +208,7 @@ export function NotificationList({
 
   return (
     <>
-      <div className="divide-y divide-border overflow-hidden rounded-xl border border-border bg-card">
+      <div className="space-y-2">
         {sortedNotifications.map((notification) => {
           const config = getNotificationConfig(notification.type, notification.message);
           const Icon = config.icon;
@@ -177,44 +220,52 @@ export function NotificationList({
               type="button"
               onClick={() => openNotification(notification)}
               className={clsx(
-                "group flex w-full items-start gap-4 px-5 py-4 text-left transition-colors",
-                notification.is_read ? "bg-card hover:bg-muted/40" : "bg-primary/5 hover:bg-primary/10",
+                "group w-full rounded-lg border px-4 py-3 text-left transition-all hover:shadow-sm",
+                notification.is_read
+                  ? "border-border bg-transparent hover:bg-muted/30"
+                  : "border-primary/30 bg-primary/5 hover:bg-primary/10",
               )}
             >
-              <div className={clsx("flex h-10 w-10 flex-shrink-0 items-center justify-center rounded-lg border", config.color)}>
-                <Icon className="h-5 w-5" />
-              </div>
+              <div className="flex items-start gap-3">
+                <div className={clsx("flex h-8 w-8 flex-shrink-0 items-center justify-center rounded-md border text-sm", config.color)}>
+                  <Icon className="h-4 w-4" />
+                </div>
 
-              <div className="min-w-0 flex-1">
-                <div className="mb-1 flex flex-wrap items-center gap-2">
-                  <span className="text-[10px] font-bold uppercase tracking-widest text-muted-foreground">
-                    {config.label}
-                  </span>
-                  {!notification.is_read && <span className="h-2 w-2 rounded-full bg-primary" />}
-                  <span
-                    className={clsx(
-                      "rounded-full px-2 py-0.5 text-[10px] font-semibold uppercase",
-                      priority === "high" && "bg-destructive/10 text-destructive",
-                      priority === "medium" && "bg-amber-100 text-amber-800",
-                      priority === "low" && "bg-muted text-muted-foreground",
+                <div className="min-w-0 flex-1">
+                  <div className="flex flex-wrap items-center gap-2">
+                    <span className="text-xs font-semibold uppercase tracking-wider text-muted-foreground">
+                      {config.label}
+                    </span>
+                    {config.category && (
+                      <span className="rounded-full bg-muted/70 px-2 py-0.5 text-[10px] font-semibold uppercase tracking-wide text-muted-foreground">
+                        {config.category}
+                      </span>
                     )}
-                  >
-                    {priority}
-                  </span>
+                    {!notification.is_read && <span className="h-1.5 w-1.5 rounded-full bg-primary" />}
+                    <span
+                      className={clsx(
+                        "rounded px-1.5 py-0.5 text-[10px] font-semibold uppercase",
+                        priority === "high" && "bg-destructive/15 text-destructive",
+                        priority === "medium" && "bg-amber-100 text-amber-800 dark:bg-amber-900/30 dark:text-amber-400",
+                        priority === "low" && "bg-muted text-muted-foreground",
+                      )}
+                    >
+                      {priority}
+                    </span>
+                  </div>
+                  <p className={clsx("mt-1 text-sm leading-snug", notification.is_read ? "text-muted-foreground" : "font-medium text-foreground")}>
+                    {notification.message}
+                  </p>
+                  <div className="mt-1.5 text-xs text-muted-foreground">
+                    {new Date(notification.created_at).toLocaleString(undefined, {
+                      dateStyle: "short",
+                      timeStyle: "short",
+                    })}
+                  </div>
                 </div>
-                <p className={clsx("text-sm leading-relaxed", notification.is_read ? "text-muted-foreground" : "text-foreground font-medium")}>
-                  {notification.message}
-                </p>
-                <div className="mt-2 flex items-center gap-1.5 text-xs text-muted-foreground">
-                  <Clock className="h-3.5 w-3.5" />
-                  {new Date(notification.created_at).toLocaleString(undefined, {
-                    dateStyle: "medium",
-                    timeStyle: "short",
-                  })}
-                </div>
-              </div>
 
-              <AlertCircle className="mt-1 h-4 w-4 flex-shrink-0 text-muted-foreground opacity-50 transition-opacity group-hover:opacity-100" />
+                <ChevronRight className="mt-1 h-4 w-4 flex-shrink-0 text-muted-foreground opacity-40 transition-all group-hover:opacity-100" />
+              </div>
             </button>
           );
         })}

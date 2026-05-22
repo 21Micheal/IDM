@@ -306,7 +306,31 @@ def _metadata_from_extracted_text(text: str, quality_meta: dict) -> tuple[str, d
     regex_suggestions = extract_document_fields(text)
     ner_hints = _ner_field_hints(text)
     merged, _sources = FieldResolver().resolve(regex_suggestions, ner_hints)
+
+    try:
+        logger.info(
+            "_metadata_from_extracted_text: doc_text_len=%d regex_keys=%s ner_keys=%s merged_keys_before_clean=%s quality=%s",
+            len(text or ""),
+            list(regex_suggestions.keys()) if isinstance(regex_suggestions, dict) else [],
+            list(ner_hints.keys()) if isinstance(ner_hints, dict) else [],
+            list(merged.keys()) if isinstance(merged, dict) else [],
+            {
+                "engine": quality_meta.get("extraction_source"),
+                "mean_conf": quality_meta.get("mean_confidence"),
+                "ratio": quality_meta.get("overall_quality_ratio"),
+            },
+        )
+    except Exception:
+        logger.exception("_metadata_from_extracted_text: failed to log intermediate OCR suggestions")
+
     merged = _clean_local_suggestions(merged)
+    try:
+        logger.info(
+            "_metadata_from_extracted_text: merged_keys_after_clean=%s",
+            list(merged.keys()) if isinstance(merged, dict) else [],
+        )
+    except Exception:
+        logger.exception("_metadata_from_extracted_text: failed to log cleaned suggestions")
 
     # ── Build unified metadata shape (same as IDP output) ────────────────────
     quality_block = {

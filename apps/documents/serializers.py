@@ -1126,6 +1126,9 @@ class BulkUploadReviewItemSerializer(serializers.Serializer):
     currency = serializers.CharField(required=False, allow_blank=True)
     document_date = serializers.CharField(required=False, allow_blank=True)
     due_date = serializers.CharField(required=False, allow_blank=True)
+    quantity = serializers.CharField(required=False, allow_blank=True)
+    description = serializers.CharField(required=False, allow_blank=True)
+    uom = serializers.CharField(required=False, allow_blank=True)
     metadata = serializers.DictField(required=False)
     approved = serializers.BooleanField(default=False)
     rejected = serializers.BooleanField(default=False)
@@ -1194,8 +1197,14 @@ class BulkUploadReviewSerializer(serializers.Serializer):
                     edit_payload[field] = item[field]
             if item.get("amount"):
                 edit_payload["amount"] = item["amount"]
-            if item.get("metadata") is not None:
-                edit_payload["metadata"] = item["metadata"]
+            
+            # Add new line-item fields to metadata
+            metadata = dict(item.get("metadata") or {})
+            for field in ("quantity", "description", "uom"):
+                if item.get(field):
+                    metadata[field] = item[field]
+            if metadata:
+                edit_payload["metadata"] = metadata
 
             if edit_payload:
                 editor = DocumentMetadataEditSerializer(

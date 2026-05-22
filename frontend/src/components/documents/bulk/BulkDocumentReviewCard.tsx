@@ -137,6 +137,7 @@ export default function BulkDocumentReviewCard({ state, documentType, onChange }
                 onChange={(v) => setValue("title", v)}
                 suggested={isSuggested("title")}
               />
+              {/* Show supplier, amount, currency, document dates if they're in metadata_fields */}
               {fields.map((field) => {
                 const key = getMetadataFieldKey(field);
                 const path = [

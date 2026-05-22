@@ -1,5 +1,5 @@
 import { useQuery } from "@tanstack/react-query";
-import { Calendar, ChevronLeft, ExternalLink, MessageSquare, X } from "lucide-react";
+import { Calendar, ChevronLeft, ExternalLink, X } from "lucide-react";
 import clsx from "clsx";
 import { workflowAPI, normalizeListResponse } from "@/services/api";
 import { WorkflowVisualizer, type WorkflowStep } from "./workflow-visualizer";
@@ -21,35 +21,12 @@ interface NotificationDetailProps {
   onViewDocument: () => void;
 }
 
-const TYPE_STYLES: Record<string, { badge: string; label: string }> = {
-  task_assigned: {
-    badge: "border-primary/20 bg-primary/10 text-primary",
-    label: "Approval Required",
-  },
-  workflow_complete: {
-    badge: "border-teal/20 bg-teal/10 text-teal",
-    label: "Workflow Complete",
-  },
-  document_returned: {
-    badge: "border-amber-200 bg-amber-50 text-amber-800",
-    label: "Returned",
-  },
-  document_held: {
-    badge: "border-orange-200 bg-orange-50 text-orange-800",
-    label: "On Hold",
-  },
-  task_overdue: {
-    badge: "border-destructive/20 bg-destructive/10 text-destructive",
-    label: "Overdue",
-  },
-};
-
 function priorityClass(priority: NotificationDetailData["priority"]) {
   switch (priority) {
     case "high":
       return "border-destructive/20 bg-destructive/10 text-destructive";
     case "medium":
-      return "border-amber-200 bg-amber-50 text-amber-800";
+      return "border-amber-200 bg-amber-50 text-amber-800 dark:border-amber-900/40 dark:bg-amber-950/30 dark:text-amber-400";
     default:
       return "border-border bg-muted text-muted-foreground";
   }
@@ -60,10 +37,6 @@ export function NotificationDetail({
   onClose,
   onViewDocument,
 }: NotificationDetailProps) {
-  const typeStyle = TYPE_STYLES[notification.type] ?? {
-    badge: "border-border bg-muted text-muted-foreground",
-    label: notification.title,
-  };
   const isWorkflowNotification = notification.type.startsWith("workflow") ||
     notification.type.startsWith("task_") ||
     notification.type.startsWith("document_") ||
@@ -78,13 +51,15 @@ export function NotificationDetail({
 
   return (
     <div className="fixed inset-0 z-50 overflow-hidden bg-foreground/30 backdrop-blur-sm">
-      <div className="absolute bottom-0 right-0 top-0 flex w-full max-w-xl flex-col border-l border-border bg-background shadow-2xl">
-        <div className="border-b border-border bg-card px-5 py-4">
-          <div className="mb-3 flex items-center justify-between gap-3">
+      {/* Widened side-panel so the workflow chart has breathing room */}
+      <div className="absolute bottom-0 right-0 top-0 flex w-full max-w-4xl flex-col border-l border-border bg-background shadow-2xl">
+        {/* Header */}
+        <div className="border-b border-border px-6 py-4">
+          <div className="mb-4 flex items-center justify-between">
             <button
               type="button"
               onClick={onClose}
-              className="inline-flex items-center gap-1.5 text-sm font-medium text-muted-foreground hover:text-foreground"
+              className="inline-flex items-center gap-1.5 text-sm font-medium text-muted-foreground transition-colors hover:text-foreground"
             >
               <ChevronLeft className="h-4 w-4" />
               Back
@@ -92,73 +67,80 @@ export function NotificationDetail({
             <button
               type="button"
               onClick={onClose}
-              className="inline-flex h-8 w-8 items-center justify-center rounded-md text-muted-foreground hover:bg-muted hover:text-foreground"
+              className="inline-flex h-8 w-8 items-center justify-center rounded-md text-muted-foreground transition-colors hover:bg-muted hover:text-foreground"
               aria-label="Close notification details"
             >
               <X className="h-4 w-4" />
             </button>
           </div>
 
-          <div className="flex flex-wrap items-center gap-2">
-            <span className={clsx("rounded-full border px-2.5 py-1 text-xs font-semibold", typeStyle.badge)}>
-              {typeStyle.label}
-            </span>
-            <span className={clsx("rounded-full border px-2.5 py-1 text-xs font-semibold uppercase", priorityClass(notification.priority))}>
-              {notification.priority} priority
-            </span>
+          <div className="space-y-3">
+            <div className="flex items-center gap-2">
+              <span className={clsx("rounded-full border px-2 py-1 text-xs font-semibold", priorityClass(notification.priority))}>
+                {notification.priority} priority
+              </span>
+            </div>
+            <h2 className="text-lg font-semibold text-foreground">{notification.title}</h2>
+            <div className="flex items-center gap-2 text-sm text-muted-foreground">
+              <Calendar className="h-4 w-4" />
+              {new Date(notification.createdAt).toLocaleString(undefined, {
+                dateStyle: "medium",
+                timeStyle: "short",
+              })}
+            </div>
           </div>
-          <h2 className="mt-3 text-xl font-semibold text-foreground">{notification.title}</h2>
-          <p className="mt-1 flex items-center gap-1.5 text-sm text-muted-foreground">
-            <Calendar className="h-4 w-4" />
-            {new Date(notification.createdAt).toLocaleString(undefined, {
-              dateStyle: "medium",
-              timeStyle: "short",
-            })}
-          </p>
         </div>
 
-        <div className="flex-1 overflow-y-auto p-5">
-          <div className="rounded-lg border border-border bg-card p-4">
-            <div className="flex items-start gap-3">
-              <MessageSquare className="mt-0.5 h-5 w-5 flex-shrink-0 text-primary" />
-              <div>
-                <p className="text-sm font-semibold text-foreground">Notification details</p>
-                <p className="mt-1 text-sm leading-relaxed text-muted-foreground">
-                  {notification.message}
-                </p>
+        {/* Content */}
+        <div className="flex-1 overflow-y-auto px-6 py-4">
+          <div className="space-y-5">
+            {/* Message */}
+            <div className="space-y-2">
+              <p className="text-sm text-foreground leading-relaxed">{notification.message}</p>
+            </div>
+
+            {/* Workflow Diagram */}
+            {isWorkflowNotification && (
+              <div className="space-y-3 rounded-xl border border-border bg-muted/10 p-4">
+                <div className="flex items-center justify-between">
+                  <h3 className="text-xs font-semibold uppercase tracking-wider text-muted-foreground">
+                    Workflow Status
+                  </h3>
+                </div>
+                <WorkflowVisualizer
+                  steps={workflowData?.steps ?? []}
+                  currentStep={workflowData?.currentStep ?? -1}
+                  documentTitle={workflowData?.documentTitle}
+                  submittedBy={workflowData?.submittedBy}
+                  submittedDate={workflowData?.submittedDate}
+                  isLoading={workflowLoading}
+                />
               </div>
-            </div>
+            )}
           </div>
-
-          {isWorkflowNotification && (
-            <div className="mt-5">
-              <WorkflowVisualizer
-                steps={workflowData?.steps ?? []}
-                currentStep={workflowData?.currentStep ?? -1}
-                documentTitle={workflowData?.documentTitle}
-                submittedBy={workflowData?.submittedBy}
-                submittedDate={workflowData?.submittedDate}
-                isLoading={workflowLoading}
-              />
-            </div>
-          )}
         </div>
 
-        <div className="border-t border-border bg-card p-5">
-          <div className="flex gap-3">
+        {/* Footer */}
+        <div className="border-t border-border bg-muted/20 px-6 py-4">
+          <div className="flex gap-2">
             <button
               type="button"
               onClick={onViewDocument}
               disabled={!notification.viewDocumentLink}
-              className="btn-primary flex-1 justify-center disabled:opacity-40"
+              className={clsx(
+                "inline-flex w-full max-w-[220px] items-center justify-center gap-2 rounded-lg px-4 py-2 text-sm font-medium transition-colors sm:w-auto",
+                notification.viewDocumentLink
+                  ? "bg-primary text-primary-foreground hover:bg-primary/90"
+                  : "bg-muted text-muted-foreground opacity-50 cursor-not-allowed",
+              )}
             >
               <ExternalLink className="h-4 w-4" />
-              View document
+              View Document
             </button>
             <button
               type="button"
               onClick={onClose}
-              className="btn-secondary justify-center"
+              className="inline-flex items-center justify-center rounded-lg border border-border px-4 py-2 text-sm font-medium transition-colors hover:bg-muted"
             >
               Close
             </button>
@@ -246,26 +228,70 @@ async function loadWorkflowData(documentId: string): Promise<{
     ),
   );
 
-  const steps = orderedTasks.map<WorkflowStep>((task, index) => {
-    const history = histories[index] ?? [];
-    const latestAction = [...history].reverse().find((item) =>
-      ["approved", "rejected", "returned", "held", "released"].includes(String(item.action ?? "").toLowerCase()),
-    );
-    const status = mapTaskStatus(task.status, latestAction?.action);
-    const approver = formatPerson(task.assigned_to) || "Unassigned";
+  const tasksWithHistory = orderedTasks.map((task, index) => ({
+    task,
+    history: histories[index] ?? [],
+  }));
 
-    return {
-      id: task.id ?? `${task.step?.order ?? index}-${task.step?.name ?? "step"}`,
-      name: task.step?.name ?? `Step ${index + 1}`,
-      approver,
-      status,
-      completedAt: latestAction?.created_at
-        ? new Date(latestAction.created_at).toLocaleString(undefined, { dateStyle: "medium", timeStyle: "short" })
-        : undefined,
-      comment: latestAction?.comment || undefined,
-      order: task.step?.order ?? index + 1,
-    };
-  });
+  const grouped = tasksWithHistory.reduce((map, item) => {
+    const stepOrder = item.task.step?.order ?? 0;
+    const stepName = item.task.step?.name?.trim() || `Step ${stepOrder || map.size + 1}`;
+    const key = `${stepOrder}-${stepName}`;
+    if (!map.has(key)) {
+      map.set(key, {
+        order: stepOrder,
+        name: stepName,
+        items: [item],
+      });
+    } else {
+      map.get(key)!.items.push(item);
+    }
+    return map;
+  }, new Map<string, { order: number; name: string; items: Array<{ task: WorkflowTaskRecord; history: TaskHistoryRecord[] }> }>());
+
+  const latestActionForHistory = (history: TaskHistoryRecord[]) =>
+    [...history]
+      .reverse()
+      .find((item) =>
+        ["approved", "rejected", "returned", "held", "released"].includes(
+          String(item.action ?? "").toLowerCase(),
+        ),
+      );
+
+  const steps = Array.from(grouped.values())
+    .sort((a, b) => a.order - b.order)
+    .map<WorkflowStep>((group, index) => {
+      const allHistory = group.items.flatMap((item) => item.history ?? []);
+      const latestAction = latestActionForHistory(allHistory);
+
+      const taskStatuses = group.items.map((item) =>
+        mapTaskStatus(item.task.status, latestActionForHistory(item.history)?.action),
+      );
+      const status = taskStatuses.includes("rejected")
+        ? "rejected"
+        : taskStatuses.includes("in-progress")
+        ? "in-progress"
+        : taskStatuses.includes("completed")
+        ? "completed"
+        : "pending";
+
+      const approver =
+        group.items.find((item) => item.task.assigned_to)?.task.assigned_to ||
+        group.items[0].task.assigned_to ||
+        null;
+
+      return {
+        id: `step-${group.order}-${group.name}`,
+        name: group.name,
+        approver: formatPerson(approver) || "Unassigned",
+        status,
+        completedAt: latestAction?.created_at
+          ? new Date(latestAction.created_at).toLocaleDateString(undefined, { dateStyle: "medium", timeStyle: "short" })
+          : undefined,
+        comment: latestAction?.comment || undefined,
+        order: group.order || index + 1,
+      };
+    });
 
   if (!steps.some((step) => step.status === "in-progress" || step.status === "rejected")) {
     const firstPendingIndex = steps.findIndex((step) => step.status === "pending");

@@ -1070,6 +1070,11 @@ export default function DocumentViewer({ document: doc, submitSlot, hideUploadAc
     doc.file_mime_type?.startsWith("image/") ||
     /\.(png|jpe?g|gif|webp|svg|bmp)$/i.test(doc.file_name ?? "");
 
+  const onPreviewLinksChangeRef = useRef(onPreviewLinksChange);
+  useEffect(() => {
+    onPreviewLinksChangeRef.current = onPreviewLinksChange;
+  }, [onPreviewLinksChange]);
+
   // Preload adjacent versions for snappier nav
   useEffect(() => {
     if (!doc.versions || doc.versions.length === 0) return;
@@ -1136,8 +1141,8 @@ export default function DocumentViewer({ document: doc, submitSlot, hideUploadAc
     : null;
 
   useEffect(() => {
-    onPreviewLinksChange?.({ openInNewTabUrl, downloadHref });
-  }, [onPreviewLinksChange, openInNewTabUrl, downloadHref]);
+    onPreviewLinksChangeRef.current?.({ openInNewTabUrl, downloadHref });
+  }, [openInNewTabUrl, downloadHref]);
 
   if (isLoading)
     return (
