@@ -1,4 +1,4 @@
-import { useMemo, useState } from "react";
+import { useMemo } from "react";
 import {
   AlertCircle,
   AlertTriangle,
@@ -17,7 +17,7 @@ import {
 } from "lucide-react";
 import clsx from "clsx";
 import type { Notification } from "@/types";
-import { NotificationDetail, type NotificationDetailData } from "./notification-details";
+import type { WorkflowNotificationContext } from "./workflow-data";
 
 type Priority = "high" | "medium" | "low";
 
@@ -26,6 +26,7 @@ interface NotificationListProps {
   isLoading?: boolean;
   onMarkRead?: (id: string) => void;
   onOpenLink?: (link: string) => void;
+  onOpenWorkflow?: (detail: WorkflowNotificationContext) => void;
 }
 
 export function getNotificationConfig(type: string, message = "") {
@@ -157,9 +158,8 @@ export function NotificationList({
   isLoading = false,
   onMarkRead,
   onOpenLink,
+  onOpenWorkflow,
 }: NotificationListProps) {
-  const [selected, setSelected] = useState<NotificationDetailData | null>(null);
-
   const sortedNotifications = useMemo(
     () =>
       [...notifications].sort((a, b) => {
@@ -192,7 +192,7 @@ export function NotificationList({
   const openNotification = (notification: Notification) => {
     const config = getNotificationConfig(notification.type, notification.message);
     const priority = inferNotificationPriority(notification);
-    const detail: NotificationDetailData = {
+    const detail: WorkflowNotificationContext = {
       id: notification.id,
       title: config.label,
       message: notification.message,
@@ -202,90 +202,88 @@ export function NotificationList({
       viewDocumentLink: notification.link,
       documentId: getDocumentIdFromLink(notification.link),
     };
-    setSelected(detail);
     if (!notification.is_read) onMarkRead?.(notification.id);
+
+    if (detail.documentId) {
+      onOpenWorkflow?.(detail);
+      return;
+    }
+
+    if (notification.link) {
+      onOpenLink?.(notification.link);
+    }
   };
 
   return (
-    <>
-      <div className="space-y-2">
-        {sortedNotifications.map((notification) => {
-          const config = getNotificationConfig(notification.type, notification.message);
-          const Icon = config.icon;
-          const priority = inferNotificationPriority(notification);
+    <div className="space-y-2">
+      {sortedNotifications.map((notification) => {
+        const config = getNotificationConfig(notification.type, notification.message);
+        const Icon = config.icon;
+        const priority = inferNotificationPriority(notification);
 
-          return (
-            <button
-              key={notification.id}
-              type="button"
-              onClick={() => openNotification(notification)}
-              className={clsx(
-                "group w-full rounded-lg border px-4 py-3 text-left transition-all hover:shadow-sm",
-                notification.is_read
-                  ? "border-border bg-transparent hover:bg-muted/30"
-                  : "border-primary/30 bg-primary/5 hover:bg-primary/10",
-              )}
-            >
-              <div className="flex items-start gap-3">
-                <div className={clsx("flex h-8 w-8 flex-shrink-0 items-center justify-center rounded-md border text-sm", config.color)}>
-                  <Icon className="h-4 w-4" />
-                </div>
-
-                <div className="min-w-0 flex-1">
-                  <div className="flex flex-wrap items-center gap-2">
-                    <span className="text-xs font-semibold uppercase tracking-wider text-muted-foreground">
-                      {config.label}
-                    </span>
-                    {config.category && (
-                      <span className="rounded-full bg-muted/70 px-2 py-0.5 text-[10px] font-semibold uppercase tracking-wide text-muted-foreground">
-                        {config.category}
-                      </span>
-                    )}
-                    {!notification.is_read && <span className="h-1.5 w-1.5 rounded-full bg-primary" />}
-                    <span
-                      className={clsx(
-                        "rounded px-1.5 py-0.5 text-[10px] font-semibold uppercase",
-                        priority === "high" && "bg-destructive/15 text-destructive",
-                        priority === "medium" && "bg-amber-100 text-amber-800 dark:bg-amber-900/30 dark:text-amber-400",
-                        priority === "low" && "bg-muted text-muted-foreground",
-                      )}
-                    >
-                      {priority}
-                    </span>
-                  </div>
-                  <p className={clsx("mt-1 text-sm leading-snug", notification.is_read ? "text-muted-foreground" : "font-medium text-foreground")}>
-                    {notification.message}
-                  </p>
-                  <div className="mt-1.5 text-xs text-muted-foreground">
-                    {new Date(notification.created_at).toLocaleString(undefined, {
-                      dateStyle: "short",
-                      timeStyle: "short",
-                    })}
-                  </div>
-                </div>
-
-                <ChevronRight className="mt-1 h-4 w-4 flex-shrink-0 text-muted-foreground opacity-40 transition-all group-hover:opacity-100" />
+        return (
+          <button
+            key={notification.id}
+            type="button"
+            onClick={() => openNotification(notification)}
+            className={clsx(
+              "group w-full rounded-lg border px-4 py-3 text-left transition-all hover:shadow-sm",
+              notification.is_read
+                ? "border-border bg-transparent hover:bg-muted/30"
+                : "border-primary/30 bg-primary/5 hover:bg-primary/10",
+            )}
+          >
+            <div className="flex items-start gap-3">
+              <div className={clsx("flex h-8 w-8 flex-shrink-0 items-center justify-center rounded-md border text-sm", config.color)}>
+                <Icon className="h-4 w-4" />
               </div>
-            </button>
-          );
-        })}
-      </div>
 
-      {selected && (
-        <NotificationDetail
-          notification={selected}
-          onClose={() => setSelected(null)}
-          onViewDocument={() => {
-            if (selected.viewDocumentLink) onOpenLink?.(selected.viewDocumentLink);
-          }}
-        />
-      )}
-    </>
+              <div className="min-w-0 flex-1">
+                <div className="flex flex-wrap items-center gap-2">
+                  <span className="text-xs font-semibold uppercase tracking-wider text-muted-foreground">
+                    {config.label}
+                  </span>
+                  {config.category && (
+                    <span className="rounded-full bg-muted/70 px-2 py-0.5 text-[10px] font-semibold uppercase tracking-wide text-muted-foreground">
+                      {config.category}
+                    </span>
+                  )}
+                  {!notification.is_read && <span className="h-1.5 w-1.5 rounded-full bg-primary" />}
+                  <span
+                    className={clsx(
+                      "rounded px-1.5 py-0.5 text-[10px] font-semibold uppercase",
+                      priority === "high" && "bg-destructive/15 text-destructive",
+                      priority === "medium" && "bg-amber-100 text-amber-800 dark:bg-amber-900/30 dark:text-amber-400",
+                      priority === "low" && "bg-muted text-muted-foreground",
+                    )}
+                  >
+                    {priority}
+                  </span>
+                </div>
+                <p className={clsx("mt-1 text-sm leading-snug", notification.is_read ? "text-muted-foreground" : "font-medium text-foreground")}>
+                  {notification.message}
+                </p>
+                <div className="mt-1.5 text-xs text-muted-foreground">
+                  {new Date(notification.created_at).toLocaleString(undefined, {
+                    dateStyle: "short",
+                    timeStyle: "short",
+                  })}
+                </div>
+              </div>
+
+              <ChevronRight className="mt-1 h-4 w-4 flex-shrink-0 text-muted-foreground opacity-40 transition-all group-hover:opacity-100" />
+            </div>
+          </button>
+        );
+      })}
+    </div>
   );
 }
 
-function getDocumentIdFromLink(link?: string): string | undefined {
+export function getDocumentIdFromLink(link?: string): string | undefined {
   if (!link) return undefined;
-  const match = link.match(/\/documents\/([^/?#]+)/);
-  return match?.[1];
+  // Extract UUID or numeric ID from /documents/ or /tasks/ patterns
+  // This ensures we get a valid ID even if the link points to a specific task
+  const match = link.match(/\/(?:documents|tasks)\/([0-9a-fA-F-]{36}|[0-9]+)/);
+  return match ? match[1] : undefined;
 }

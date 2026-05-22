@@ -1,9 +1,10 @@
 import { useQuery } from "@tanstack/react-query";
 import { workflowAPI } from "@/services/api";
-import { Link } from "react-router-dom";
+import { useNavigate } from "react-router-dom";
 import { CheckCircle, Clock, Filter, GitBranch, Loader2, Search, X } from "lucide-react";
 import { formatDistanceToNow } from "date-fns";
 import { useMemo, useState } from "react";
+import type { WorkflowNotificationContext } from "@/components/notifications/workflow-data";
 import type { WorkflowTask } from "@/types";
 import {
   DEFAULT_WORKFLOW_TASK_FILTERS,
@@ -20,8 +21,28 @@ import {
   type WorkflowTaskFilters,
 } from "@/lib/workflowTaskFilters";
 
+function createWorkflowTaskNotificationDetail(task: WorkflowTask): WorkflowNotificationContext {
+  const documentId = getTaskDocumentId(task);
+  const title = getTaskDocumentTitle(task) || "Workflow task";
+  const message = task.workflow_instance?.document?.reference_number
+    ? `Approval task for ${task.workflow_instance.document.reference_number}`
+    : `Approval task for ${title}`;
+
+  return {
+    id: task.id,
+    title,
+    message,
+    type: "task_assigned",
+    createdAt: task.due_at ?? new Date().toISOString(),
+    priority: task.status === "held" || task.status === "pending" ? "medium" : "low",
+    viewDocumentLink: documentId ? `/documents/${documentId}` : undefined,
+    documentId,
+  };
+}
+
 export default function WorkflowPage() {
   const [filters, setFilters] = useState<WorkflowTaskFilters>(DEFAULT_WORKFLOW_TASK_FILTERS);
+  const navigate = useNavigate();
 
   const { data: tasks, isLoading } = useQuery<WorkflowTask[]>({
     queryKey: ["workflow", "my-tasks"],
@@ -188,10 +209,18 @@ export default function WorkflowPage() {
           const isOverdue = task.due_at && new Date(task.due_at) < new Date();
 
           return (
-            <Link
+            <button
               key={task.id}
-              to={documentId ? `/documents/${documentId}` : "/workflow"}
-              className="card p-5 flex items-start gap-4 hover:-translate-y-0.5 transition-transform hover:shadow-md"
+              type="button"
+              onClick={() => {
+                const detail = createWorkflowTaskNotificationDetail(task);
+                if (detail.documentId) {
+                  navigate(`/notifications/workflow/${detail.documentId}`, {
+                    state: { notification: detail },
+                  });
+                }
+              }}
+              className="card w-full text-left p-5 flex items-start gap-4 hover:-translate-y-0.5 transition-transform hover:shadow-md"
             >
               <div className="w-10 h-10 rounded-xl bg-accent/15 flex items-center justify-center flex-shrink-0">
                 <Clock className="w-5 h-5 text-accent" />
@@ -226,10 +255,11 @@ export default function WorkflowPage() {
                   )}
                 </div>
               </div>
-            </Link>
+            </button>
           );
         })}
       </div>
+
     </div>
   );
 }

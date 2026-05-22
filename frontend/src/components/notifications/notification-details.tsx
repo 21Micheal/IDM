@@ -258,45 +258,168 @@ async function loadWorkflowData(documentId: string): Promise<{
         ),
       );
 
-  const steps = Array.from(grouped.values())
+  // ------------------------------------------------------------------
+  // Workflow diagram step-building (with dynamic gateway branching)
+  // ------------------------------------------------------------------
+
+  // Keep the grouped and initial setup mapping the same.
+  const steps: WorkflowStep[] = [];
+
+  // 0) Insert Start Event
+  // NOTE: We don’t know the actual first task step id ahead of time,
+  // so we patch the `next` once task steps are computed.
+  const startStepId = "start";
+  steps.push({
+    id: startStepId,
+    name: "Start",
+    approver: "",
+    status: "completed",
+    kind: "start",
+    order: 0,
+    next: [],
+  });
+
+  // 1) Create task steps from grouped values + inject branch mapping.
+  const taskSteps = Array.from(grouped.values())
     .sort((a, b) => a.order - b.order)
     .map<WorkflowStep>((group, index) => {
       const allHistory = group.items.flatMap((item) => item.history ?? []);
       const latestAction = latestActionForHistory(allHistory);
 
       const taskStatuses = group.items.map((item) =>
-        mapTaskStatus(item.task.status, latestActionForHistory(item.history)?.action),
+        mapTaskStatus(
+          item.task.status,
+          latestActionForHistory(item.history)?.action,
+        ),
       );
       const status = taskStatuses.includes("rejected")
         ? "rejected"
         : taskStatuses.includes("in-progress")
-        ? "in-progress"
-        : taskStatuses.includes("completed")
-        ? "completed"
-        : "pending";
+          ? "in-progress"
+          : taskStatuses.includes("completed")
+            ? "completed"
+            : "pending";
 
       const approver =
         group.items.find((item) => item.task.assigned_to)?.task.assigned_to ||
         group.items[0].task.assigned_to ||
         null;
 
+      const stepId = `step-${group.order}-${group.name}`;
+
+      // --- CRITICAL BRANCHING LOGIC INJECTION ---
+      let nextNodes: string[] = [];
+      let kind: WorkflowStep["kind"] = "task";
+
+      // Replicating the flow graph based on step layout names.
+      if (group.name === "Originator Notification") {
+        nextNodes = ["step-1-Approver1"];
+      } else if (group.name === "Approver1") {
+        // Approver1 links directly into a Gateway branch splitter
+        nextNodes = ["gateway-approver1"];
+      } else if (group.name === "Approver1 Notification") {
+        nextNodes = ["step-2-Approved"];
+      } else if (group.name === "Approved") {
+        nextNodes = ["step-3-Approver2"];
+      } else if (group.name === "Approver2") {
+        // Approver2 links directly into the second Gateway splitter
+        nextNodes = ["gateway-approver2"];
+      } else if (group.name === "Approver2 Notification") {
+        nextNodes = ["step-4-Approved2"];
+      } else if (
+        group.name === "Approved2" ||
+        group.name === "RejectedTwo" ||
+        group.name === "Rejected"
+      ) {
+        // All final paths merge into the End Node
+        nextNodes = ["end"];
+      } else if (group.name === "Rejected1") {
+        nextNodes = ["step-2-Rejected"];
+      }
+
       return {
-        id: `step-${group.order}-${group.name}`,
+        id: stepId,
         name: group.name,
         approver: formatPerson(approver) || "Unassigned",
         status,
         completedAt: latestAction?.created_at
-          ? new Date(latestAction.created_at).toLocaleDateString(undefined, { dateStyle: "medium", timeStyle: "short" })
+          ? new Date(latestAction.created_at).toLocaleDateString(undefined, {
+              dateStyle: "medium",
+              timeStyle: "short",
+            })
           : undefined,
         comment: latestAction?.comment || undefined,
         order: group.order || index + 1,
+        kind,
+        next: nextNodes,
       };
     });
 
+  steps.push(...taskSteps);
+
+  // 2) Patch Start -> first task step
+  const firstTaskStep = taskSteps
+    .slice()
+    .sort((a, b) => a.order - b.order)[0];
+  const start = steps.find((s) => s.id === startStepId);
+  if (start && firstTaskStep?.id) {
+    start.next = [firstTaskStep.id];
+  }
+
+  // 3) Inject Gateway 1 (After Approver1 split)
+  const approver1Step = steps.find((s) => s.id === "step-1-Approver1");
+  steps.push({
+    id: "gateway-approver1",
+    name: "Approved?",
+    approver: "",
+    kind: "gateway",
+    status:
+      approver1Step?.status === "completed" ? "completed" : "pending",
+    order: 1.5,
+    // Index 0 is "Yes" branch, Index 1 is "No" branch
+    next: ["step-2-Approver1 Notification", "step-2-Rejected1"],
+  });
+
+  // 4) Inject Gateway 2 (After Approver2 split)
+  const approver2Step = steps.find((s) => s.id === "step-3-Approver2");
+  steps.push({
+    id: "gateway-approver2",
+    name: "Approved?",
+    approver: "",
+    kind: "gateway",
+    status:
+      approver2Step?.status === "completed" ? "completed" : "pending",
+    order: 3.5,
+    // Index 0 is "Yes" branch, Index 1 is "No" branch
+    next: ["step-4-Approver2 Notification", "step-4-RejectedTwo"],
+  });
+
+  // 5) Insert End Event
+  steps.push({
+    id: "end",
+    name: "End",
+    approver: "",
+    kind: "end",
+    status:
+      steps.some(
+        (s) => s.status === "completed" && s.next?.includes("end"),
+      )
+        ? "completed"
+        : "pending",
+    order: 99,
+    next: [],
+  });
+
+  // Make sure your "in-progress" defaults carry over seamlessly
   if (!steps.some((step) => step.status === "in-progress" || step.status === "rejected")) {
-    const firstPendingIndex = steps.findIndex((step) => step.status === "pending");
+    const firstPendingIndex = steps.findIndex(
+      (step) => step.status === "pending" && step.kind === "task",
+    );
     if (firstPendingIndex >= 0) {
-      steps[firstPendingIndex] = { ...steps[firstPendingIndex], status: "in-progress" };
+      steps[firstPendingIndex] = {
+        ...steps[firstPendingIndex],
+        status: "in-progress",
+      };
     }
   }
 

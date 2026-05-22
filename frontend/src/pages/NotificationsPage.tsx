@@ -128,6 +128,12 @@ export default function NotificationsPage() {
         isLoading={isLoading}
         onMarkRead={(id) => markReadMutation.mutate(id)}
         onOpenLink={(link) => navigate(link)}
+        onOpenWorkflow={(detail) => {
+          if (!detail.documentId) return;
+          navigate(`/notifications/workflow/${detail.documentId}`, {
+            state: { notification: detail },
+          });
+        }}
       />
     </div>
   );

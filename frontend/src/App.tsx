@@ -25,6 +25,7 @@ const GroupsPage = lazy(() => import("@/pages/GroupsPage"));
 const ProfilePage = lazy(() => import("@/pages/ProfilePage"));
 const WorkflowBuilderPage = lazy(() => import("@/pages/WorkflowBuilderPage"));
 const NotificationsPage = lazy(() => import("@/pages/NotificationsPage"));
+const NotificationWorkflowPage = lazy(() => import("@/pages/NotificationWorkflowPage"));
 const FolderPage = lazy(() => import("@/pages/FolderPage"));
 
 // ── Guards ────────────────────────────────────────────────────────────────────
@@ -256,6 +257,7 @@ export default function App() {
 
               {/* Notifications */}
               <Route path="notifications" element={<NotificationsPage />} />
+              <Route path="notifications/workflow/:documentId" element={<NotificationWorkflowPage />} />
 
               {/* Audit */}
               <Route path="audit"     element={<AuditPage />} />
