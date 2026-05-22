@@ -299,6 +299,10 @@ async function loadWorkflowData(documentId: string): Promise<{
           : taskStatuses.includes("completed")
             ? "completed"
             : "pending";
+      const statusDisplay =
+        group.items
+          .map((item) => item.task.status_display?.trim())
+          .find(Boolean) || latestActionForHistory(group.items.flatMap((item) => item.history))?.action_display?.trim();
 
       const approver =
         group.items.find((item) => item.task.assigned_to)?.task.assigned_to ||
@@ -342,6 +346,7 @@ async function loadWorkflowData(documentId: string): Promise<{
         name: group.name,
         approver: formatPerson(approver) || "Unassigned",
         status,
+        statusDisplay,
         completedAt: latestAction?.created_at
           ? new Date(latestAction.created_at).toLocaleDateString(undefined, {
               dateStyle: "medium",

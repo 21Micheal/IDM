@@ -19,6 +19,7 @@ type WorkflowTaskRecord = {
   step?: {
     name?: string;
     order?: number;
+    status_label?: string;
   };
   assigned_to?: {
     full_name?: string;
@@ -45,7 +46,39 @@ type WorkflowTaskRecord = {
   document_title?: string;
   uploaded_by_name?: string | null;
   created_at?: string;
+  acted_at?: string | null;
+  comment?: string;
   due_at?: string | null;
+};
+
+type WorkflowTemplateStepRecord = {
+  id?: string;
+  order: number;
+  name: string;
+  status_label?: string;
+  assignee_type?: string;
+  assignee_group_name?: string | null;
+  assignee_user_name?: string | null;
+  instructions?: string;
+};
+
+type WorkflowTemplateRecord = {
+  id: string;
+  name: string;
+  steps?: WorkflowTemplateStepRecord[];
+};
+
+type WorkflowInstanceRecord = {
+  id: string;
+  document?: string;
+  template?: string;
+  started_at?: string;
+  started_by?: {
+    full_name?: string;
+    first_name?: string;
+    last_name?: string;
+  };
+  tasks?: WorkflowTaskRecord[];
 };
 
 type TaskHistoryRecord = {
@@ -67,9 +100,26 @@ export async function loadWorkflowData(documentId: string): Promise<{
   submittedBy?: string;
   submittedDate?: string;
 }> {
-  let tasks = await workflowAPI
-    .listTasks({ document: documentId })
-    .then((response) => normalizeListResponse<WorkflowTaskRecord>(response.data));
+  const instances = await workflowAPI
+    .listInstances({ document: documentId })
+    .then((response) => normalizeListResponse<WorkflowInstanceRecord>(response.data))
+    .catch(() => []);
+  const instance = instances[0];
+
+  const template = instance?.template
+    ? await workflowAPI
+        .getTemplate(instance.template)
+        .then((response) => response.data as WorkflowTemplateRecord)
+        .catch(() => undefined)
+    : undefined;
+
+  let tasks = [...(instance?.tasks ?? [])];
+
+  if (tasks.length === 0) {
+    tasks = await workflowAPI
+      .listTasks({ document: documentId })
+      .then((response) => normalizeListResponse<WorkflowTaskRecord>(response.data));
+  }
 
   if (tasks.length === 0) {
     tasks = await workflowAPI
@@ -94,18 +144,19 @@ export async function loadWorkflowData(documentId: string): Promise<{
     history: histories[index] ?? [],
   }));
 
-  const meta = getWorkflowMeta(orderedTasks);
-  const steps = buildApproverWorkflow(tasksWithHistory);
+  const meta = getWorkflowMeta(orderedTasks, instance);
+  const steps = buildApproverWorkflow(tasksWithHistory, template?.steps ?? []);
 
   return {
     steps,
-    currentStep: steps.findIndex((step) => step.status === "in-progress"),
+    currentStep: steps.findIndex((step) => step.status === "in-progress" || step.status === "on-hold"),
     ...meta,
   };
 }
 
 function buildApproverWorkflow(
   tasksWithHistory: Array<{ task: WorkflowTaskRecord; history: TaskHistoryRecord[] }>,
+  templateSteps: WorkflowTemplateStepRecord[] = [],
 ): WorkflowStep[] {
   const grouped = tasksWithHistory.reduce((map, item) => {
     const order = item.task.step?.order ?? map.size + 1;
@@ -114,31 +165,52 @@ function buildApproverWorkflow(
     return map;
   }, new Map<number, Array<{ task: WorkflowTaskRecord; history: TaskHistoryRecord[] }>>());
 
-  const approvers = Array.from(grouped.entries())
-    .sort(([a], [b]) => a - b)
-    .map(([stepOrder, items], index) => {
+  const sourceSteps = templateSteps.length > 0
+    ? [...templateSteps].sort((a, b) => a.order - b.order)
+    : Array.from(grouped.keys())
+        .sort((a, b) => a - b)
+        .map<WorkflowTemplateStepRecord>((order) => ({
+          order,
+          name: grouped.get(order)?.[0]?.task.step?.name?.trim() || "",
+          status_label: grouped.get(order)?.[0]?.task.step?.status_label,
+          assignee_type: undefined,
+          assignee_group_name: undefined,
+          assignee_user_name: undefined,
+          instructions: undefined,
+        }));
+
+  const approvers = sourceSteps
+    .map((templateStep, index) => {
+      const stepOrder = templateStep.order;
+      const items = grouped.get(stepOrder) ?? [];
       const allHistory = items.flatMap((item) => item.history ?? []);
       const latestAction = latestActionForHistory(allHistory);
       const statuses = items.map((item) => mapTaskStatus(item.task.status, latestActionForHistory(item.history)?.action));
-      const status: WorkflowStep["status"] = statuses.includes("rejected")
-        ? "rejected"
-        : statuses.includes("in-progress")
-          ? "in-progress"
-          : statuses.includes("completed")
-            ? "completed"
-            : "pending";
+      const status = resolveStepStatus(statuses);
       const taskWithAssignee = items.find((item) => item.task.assigned_to) ?? items[0];
-      const rawName = items[0].task.step?.name?.trim() || `${ordinal(index + 1)} Approver`;
+      const rawName = templateStep.name?.trim() || items[0]?.task.step?.name?.trim() || `${ordinal(index + 1)} Approver`;
       const name = rawName || `${ordinal(index + 1)} Approver`;
+      const previousName = index > 0
+        ? sourceSteps[index - 1].name?.trim() || `${ordinal(index)} Approver`
+        : undefined;
 
       return {
         id: `approver-${stepOrder}`,
         name,
-        approver: formatPerson(taskWithAssignee.task.assigned_to) || "Unassigned",
+        approver:
+          formatPerson(taskWithAssignee?.task.assigned_to) ||
+          templateStep.assignee_user_name ||
+          templateStep.assignee_group_name ||
+          formatAssigneeType(templateStep.assignee_type) ||
+          "Unassigned",
         status,
-        completedAt: latestAction?.created_at,
-        comment: latestAction?.comment || undefined,
+        statusDisplay: status === "pending" && previousName
+          ? `Awaiting ${previousName} approval`
+          : templateStep.status_label,
+        completedAt: latestAction?.created_at || items.find((item) => item.task.acted_at)?.task.acted_at || undefined,
+        comment: latestAction?.comment || items.find((item) => item.task.comment)?.task.comment || undefined,
         order: stepOrder,
+        description: templateStep.instructions || `${ordinal(index + 1)} approval step`,
       };
     });
 
@@ -173,7 +245,8 @@ function buildApproverWorkflow(
       column,
       lane: 0,
       next,
-      description: `${ordinal(index + 1)} approval step`,
+      description: approver.description || `${ordinal(index + 1)} approval step`,
+      statusDisplay: approver.statusDisplay,
     });
 
     if (approver.status === "rejected") {
@@ -210,6 +283,15 @@ function buildApproverWorkflow(
   return steps;
 }
 
+function resolveStepStatus(statuses: WorkflowStep["status"][]): WorkflowStep["status"] {
+  if (statuses.includes("rejected")) return "rejected";
+  if (statuses.includes("returned")) return "returned";
+  if (statuses.includes("on-hold")) return "on-hold";
+  if (statuses.includes("in-progress")) return "in-progress";
+  if (statuses.length > 0 && statuses.every((status) => status === "completed")) return "completed";
+  return "pending";
+}
+
 function latestActionForHistory(history: TaskHistoryRecord[]) {
   return [...history]
     .reverse()
@@ -235,15 +317,16 @@ function ordinal(value: number) {
   }
 }
 
-function getWorkflowMeta(orderedTasks: WorkflowTaskRecord[]) {
+function getWorkflowMeta(orderedTasks: WorkflowTaskRecord[], instance?: WorkflowInstanceRecord) {
   const firstTask = orderedTasks[0];
   const document = firstTask?.workflow_instance?.document;
   const submittedBy =
     formatPerson(firstTask?.workflow_instance?.submitted_by) ||
+    formatPerson(instance?.started_by) ||
     formatPerson(document?.uploaded_by) ||
     firstTask?.uploaded_by_name ||
     undefined;
-  const submittedDate = firstTask?.workflow_instance?.created_at || document?.created_at || firstTask?.created_at;
+  const submittedDate = firstTask?.workflow_instance?.created_at || instance?.started_at || document?.created_at || firstTask?.created_at;
 
   return {
     documentTitle: firstTask?.document_title || document?.title,
@@ -257,8 +340,23 @@ function mapTaskStatus(taskStatus?: string, action?: string): WorkflowStep["stat
   const normalizedStatus = String(taskStatus ?? "").toLowerCase();
   if (normalizedAction === "approved" || normalizedStatus === "approved" || normalizedStatus === "completed") return "completed";
   if (normalizedAction === "rejected" || normalizedStatus === "rejected") return "rejected";
-  if (["in_progress", "held"].includes(normalizedStatus)) return "in-progress";
+  if (normalizedAction === "returned" || normalizedStatus === "returned") return "returned";
+  if (normalizedAction === "held" || normalizedStatus === "held") return "on-hold";
+  if (normalizedStatus === "in_progress") return "in-progress";
   return "pending";
+}
+
+function formatAssigneeType(assigneeType?: string) {
+  switch (assigneeType) {
+    case "group_all":
+      return "All group members";
+    case "group_any":
+      return "Any group member";
+    case "group_specific":
+      return "Specific approver";
+    default:
+      return "";
+  }
 }
 
 function formatPerson(person?: { full_name?: string; first_name?: string; last_name?: string } | null): string {

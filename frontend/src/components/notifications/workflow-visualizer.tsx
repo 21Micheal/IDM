@@ -39,7 +39,9 @@ export type WorkflowStatus =
   | "completed"
   | "pending"
   | "in-progress"
+  | "on-hold"
   | "rejected"
+  | "returned"
   | "skipped";
 
 export interface WorkflowStep {
@@ -47,6 +49,7 @@ export interface WorkflowStep {
   name: string;
   approver: string;
   status: WorkflowStatus;
+  statusDisplay?: string;
   completedAt?: string;
   comment?: string;
   order: number;
@@ -87,16 +90,28 @@ const TONE = {
     label: "Approved",
   },
   "in-progress": {
-    stroke: "#6f7f99",
-    strokeLight: "#a5afc1",
-    fill: "#f4f6f9",
-    fillDark: "#1e3a5f",
-    text: "#3d495f",
-    accent: "#7f8fa8",
-    badgeBg: "#edf1f6",
-    badgeText: "#3d495f",
-    badgeBorder: "#c0cad9",
+    stroke: "#6b7280",
+    strokeLight: "#a5b0c1",
+    fill: "#f6f7fb",
+    fillDark: "#2d4263",
+    text: "#475569",
+    accent: "#8b96ac",
+    badgeBg: "#f1f3f8",
+    badgeText: "#475569",
+    badgeBorder: "#d1d8e3",
     label: "In Progress",
+  },
+  "on-hold": {
+    stroke: "#9a8f70",
+    strokeLight: "#c9bea0",
+    fill: "#faf8f1",
+    fillDark: "#423813",
+    text: "#62583d",
+    accent: "#aa9d7b",
+    badgeBg: "#f4f0e4",
+    badgeText: "#62583d",
+    badgeBorder: "#d8cfb7",
+    label: "On Hold",
   },
   rejected: {
     stroke: "#9b7474",
@@ -109,6 +124,18 @@ const TONE = {
     badgeText: "#664242",
     badgeBorder: "#d4bbbb",
     label: "Rejected",
+  },
+  returned: {
+    stroke: "#9b866f",
+    strokeLight: "#c2b09d",
+    fill: "#faf7f3",
+    fillDark: "#45301f",
+    text: "#644d38",
+    accent: "#a98f76",
+    badgeBg: "#f4eee8",
+    badgeText: "#644d38",
+    badgeBorder: "#d7c5b4",
+    label: "Returned",
   },
   pending: {
     stroke: "#8f98a3",
@@ -149,6 +176,14 @@ const ROW_GAP = 80;       // vertical gap between branch rows
 const PAD_X = 48;         // left/top canvas padding
 const PAD_Y = 56;
 const STEP_TINTS = ["#f7f8f7", "#f5f7f9", "#f8f7f5", "#f7f6f8", "#f6f8f8"];
+const NODE_PALETTE = [
+  { fill: "#eef2ff", accent: "#818cf8" },
+  { fill: "#ecfdf5", accent: "#34d399" },
+  { fill: "#fffbeb", accent: "#f6ad55" },
+  { fill: "#fff1f2", accent: "#f9a8d4" },
+  { fill: "#f5f3ff", accent: "#c4b5fd" },
+  { fill: "#eff6ff", accent: "#60a5fa" },
+];
 
 /* ------------------------------------------------------------------ */
 /* Helpers                                                            */
@@ -176,16 +211,32 @@ function StatusIcon({ status, className }: { status: WorkflowStatus; className?:
   switch (status) {
     case "completed":   return <Check className={cls} />;
     case "in-progress": return <Loader2 className={clsx(cls, "animate-spin")} />;
+    case "on-hold":     return <Clock className={cls} />;
     case "rejected":    return <XCircle className={cls} />;
+    case "returned":    return <XCircle className={cls} />;
     case "skipped":     return <Minus className={cls} />;
     default:            return <Clock className={cls} />;
   }
 }
 
-function nodeFill(node: WorkflowStep) {
-  if (node.status !== "pending") return TONE[node.status].fill;
+function nodePalette(node: WorkflowStep) {
   const index = Math.max(0, Math.round(node.order) - 1);
-  return STEP_TINTS[index % STEP_TINTS.length];
+  return NODE_PALETTE[index % NODE_PALETTE.length];
+}
+
+function nodeFill(node: WorkflowStep) {
+  if (node.status === "pending") {
+    const { fill } = nodePalette(node);
+    return fill;
+  }
+  return TONE[node.status].fill;
+}
+
+function statusLabel(node: WorkflowStep) {
+  if (node.status === "in-progress") return "In progress";
+  if (node.status === "on-hold") return "On hold";
+  if (node.status === "pending") return node.statusDisplay ?? "Awaiting approval";
+  return TONE[node.status].label;
 }
 
 /* ------------------------------------------------------------------ */
@@ -426,10 +477,12 @@ function NodeShape({
   /* Task rectangles */
   const lx = node.x - NODE_W / 2;
   const ty2 = node.y - NODE_H / 2;
+  const palette = nodePalette(node);
   const shadow = hovered
     ? "drop-shadow(0 6px 16px rgba(0,0,0,0.14))"
     : "drop-shadow(0 2px 4px rgba(0,0,0,0.06))";
   const sw = node.status === "in-progress" ? 2.5 : 1.5;
+  const borderColor = selected ? tone.stroke : palette.accent;
 
   return (
     <g transform={`translate(${lx},${ty2})`} {...handlers} style={{ cursor: "pointer" }}>
@@ -439,13 +492,14 @@ function NodeShape({
         height={NODE_H}
         rx={10}
         fill={nodeFill(node)}
-        stroke={tone.stroke}
+        stroke={borderColor}
         strokeWidth={sw}
         style={{ filter: shadow, transition: "filter 0.15s" }}
       />
+      <rect x={0} y={0} width={NODE_W} height={24} rx={10} fill={palette.accent} opacity={0.08} />
 
       {/* Left accent bar */}
-      <rect width={7} height={NODE_H} rx={3} fill={tone.stroke} />
+      <rect width={7} height={NODE_H} rx={3} fill={palette.accent} />
 
       {/* Top-right status dot */}
       <circle cx={NODE_W - 16} cy={16} r={12} fill={tone.stroke} />
@@ -527,7 +581,7 @@ function NodeShape({
               letterSpacing: "0.02em",
             }}
           >
-            {tone.label}
+            {statusLabel(node)}
           </span>
           {node.completedAt && (
             <span style={{ color: "#94a3b8", fontVariantNumeric: "tabular-nums" }}>
@@ -759,7 +813,7 @@ export function WorkflowVisualizer({
   const hoveredStep = hoveredId ? steps.find((s) => s.id === hoveredId) : null;
   const selectedStep =
     (selectedStepId ? steps.find((s) => s.id === selectedStepId) : undefined) ||
-    steps.find((s) => s.status === "in-progress" && (!s.kind || s.kind === "task")) ||
+    steps.find((s) => (s.status === "in-progress" || s.status === "on-hold") && (!s.kind || s.kind === "task")) ||
     (typeof currentStep === "number" && currentStep >= 0 ? steps[currentStep] : undefined) ||
     steps.find((s) => !s.kind || s.kind === "task") ||
     steps[0];
@@ -1004,7 +1058,7 @@ export function WorkflowVisualizer({
                         borderColor: TONE[selectedStep.status].badgeBorder,
                       }}
                     >
-                      {TONE[selectedStep.status].label}
+                      {statusLabel(selectedStep)}
                     </span>
                   </div>
                   <div className="mt-1 flex flex-wrap items-center gap-x-4 gap-y-1 text-xs text-slate-600">

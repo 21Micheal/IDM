@@ -424,7 +424,8 @@ export const workflowAPI = {
   deleteRule: (id: string) => api.delete(`/workflows/rules/${id}/`),
 
   // Instances
-  listInstances: () => api.get("/workflows/instances/"),
+  listInstances: (params?: Record<string, unknown>) =>
+    api.get("/workflows/instances/", { params }),
   cancelInstance: (id: string) =>
     api.post(`/workflows/instances/${id}/cancel/`),
 

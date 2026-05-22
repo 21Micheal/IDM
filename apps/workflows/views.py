@@ -152,11 +152,23 @@ class WorkflowInstanceViewSet(viewsets.ReadOnlyModelViewSet):
     ordering         = ["-started_at"]
 
     def get_queryset(self):
-        return (
+        qs = (
             WorkflowInstance.objects
             .select_related("document", "template", "rule", "started_by")
             .prefetch_related("tasks__step__assignee_user", "tasks__assigned_to")
         )
+        if document_id := self.request.query_params.get("document") or self.request.query_params.get("document_id"):
+            qs = qs.filter(document_id=document_id)
+
+        user = self.request.user
+        if not user.has_admin_access:
+            qs = qs.filter(
+                models.Q(started_by=user) |
+                models.Q(document__uploaded_by=user) |
+                models.Q(tasks__assigned_to=user)
+            ).distinct()
+
+        return qs
 
     @action(detail=True, methods=["post"])
     def cancel(self, request, pk=None):
@@ -184,6 +196,16 @@ class WorkflowTaskViewSet(viewsets.ReadOnlyModelViewSet):
             "workflow_instance__document__uploaded_by",
             "workflow_instance__document__uploaded_by__department",
         )
+        if document_id := self.request.query_params.get("document") or self.request.query_params.get("document_id"):
+            qs = qs.filter(workflow_instance__document_id=document_id)
+            if user.has_admin_access:
+                return qs
+            return qs.filter(
+                models.Q(assigned_to=user) |
+                models.Q(workflow_instance__started_by=user) |
+                models.Q(workflow_instance__document__uploaded_by=user)
+            ).distinct()
+
         if user.has_admin_access:
             if s := self.request.query_params.get("status"):
                 qs = qs.filter(status=s)
