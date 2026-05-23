@@ -772,6 +772,27 @@ class DocumentBulkActionSerializer(serializers.Serializer):
             )
         return attrs
 
+
+class DocumentEmailSelectedSerializer(serializers.Serializer):
+    document_ids = serializers.ListField(
+        child=serializers.UUIDField(), min_length=1, max_length=100,
+    )
+    recipient_user_ids = serializers.ListField(
+        child=serializers.UUIDField(), required=False, allow_empty=True, default=list,
+    )
+    recipient_emails = serializers.ListField(
+        child=serializers.EmailField(), required=False, allow_empty=True, default=list,
+    )
+    attachment_mode = serializers.ChoiceField(
+        choices=["separate", "combined"], default="separate",
+    )
+    message = serializers.CharField(required=False, allow_blank=True, default="", max_length=2000)
+
+    def validate(self, attrs):
+        if not attrs.get("recipient_user_ids") and not attrs.get("recipient_emails"):
+            raise serializers.ValidationError("Select at least one recipient.")
+        return attrs
+
 class DocumentTypeWriteSerializer(serializers.ModelSerializer):
     """
     Write serializer — used for POST /documents/types/ and PATCH /documents/types/{id}/

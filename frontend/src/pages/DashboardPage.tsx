@@ -15,6 +15,7 @@ import { useEffect, useRef, useState, useMemo } from "react";
 import type { Document, DocumentSearchResponse, SearchHit, WorkflowTask } from "@/types";
 import { StatCard } from "@/components/dashboard/StatCard";
 import { useDebounce } from "@/hooks/useDebounce";
+import { AnalyticsDashboard } from "./AnalyticsDashboard";
 import { highlightSearchText, getPreferredHighlights } from "@/lib/search";
 import { QUERY_FIVE_MIN_STALE, QUERY_SHORT_STALE, QUERY_FOCUS_OFF } from "@/lib/reactQueryDefaults";
 import { formatDocumentFileType } from "@/lib/documentFormat";
@@ -534,6 +535,36 @@ export default function DashboardPage() {
     ...QUERY_FOCUS_OFF,
   });
 
+  // ── Analytics queries (manager view) ────────────────────────────────────
+  // Real endpoints - enabled only for admin users and after metrics are allowed
+  const { data: turnaroundData, isLoading: turnaroundLoading } = useQuery({
+    queryKey: ["analytics", "turnaround"],
+    queryFn: () => api.get("/analytics/approval-turnaround/").then((r) => r.data),
+    enabled: metricsEnabled && Boolean(user?.has_admin_access),
+    ...QUERY_FIVE_MIN_STALE,
+  });
+
+  const { data: slaData, isLoading: slaLoading } = useQuery({
+    queryKey: ["analytics", "sla-breach"],
+    queryFn: () => api.get("/analytics/sla-breach-rate/").then((r) => r.data),
+    enabled: metricsEnabled && Boolean(user?.has_admin_access),
+    ...QUERY_FIVE_MIN_STALE,
+  });
+
+  const { data: volumeData, isLoading: volumeLoading } = useQuery({
+    queryKey: ["analytics", "document-volume"],
+    queryFn: () => api.get("/analytics/document-volume/").then((r) => r.data),
+    enabled: metricsEnabled && Boolean(user?.has_admin_access),
+    ...QUERY_FIVE_MIN_STALE,
+  });
+
+  const { data: uploadersData, isLoading: uploadersLoading } = useQuery({
+    queryKey: ["analytics", "top-uploaders"],
+    queryFn: () => api.get("/analytics/top-uploaders/").then((r) => r.data),
+    enabled: metricsEnabled && Boolean(user?.has_admin_access),
+    ...QUERY_FIVE_MIN_STALE,
+  });
+
   // ── Computed Values ───────────────────────────────────────────────────────
 
   const recentDocsCount = recentDocs?.count ?? 0;
@@ -905,6 +936,17 @@ export default function DashboardPage() {
           href="/workflow"
         />
       </div>
+
+      {/* ── Analytics (manager view) ───────────────────────────────── */}
+      {user?.has_admin_access && (
+        <AnalyticsDashboard
+          turnaroundData={turnaroundData ?? []}
+          slaData={slaData ?? []}
+          volumeData={volumeData ?? []}
+          uploadersData={uploadersData ?? []}
+          isLoading={turnaroundLoading || slaLoading || volumeLoading || uploadersLoading}
+        />
+      )}
 
       {/* Recent Documents (wide) + Audit Trail w/ Storage (narrow) */}
       <div className="grid min-w-0 grid-cols-1 items-stretch gap-6 xl:grid-cols-3">

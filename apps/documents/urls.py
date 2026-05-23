@@ -31,6 +31,14 @@ router.register(r"favourites",   DocumentFavouriteViewSet,  basename="document-f
 router.register(r"",             DocumentViewSet,           basename="document")
 
 urlpatterns = [
+    # Collection actions on the empty-prefix DocumentViewSet must sit before
+    # router detail routes, otherwise names like "email_selected" can be read
+    # as a document pk by some route orderings.
+    path(
+        "email_selected/",
+        DocumentViewSet.as_view({"post": "email_selected"}),
+        name="document-email-selected",
+    ),
     # ── WebDAV ─────────────────────────────────────────────────────────────
     path(
         "webdav/<uuid:document_id>/",

@@ -1,14 +1,19 @@
 import hashlib
+import io
 import logging
 import mimetypes
 import secrets
+import zipfile
 from urllib.parse import quote as urlquote, urlparse, urlunparse
 
+from django.core.mail import EmailMessage
 from django.core.files.base import ContentFile
 from django.core.exceptions import ValidationError
 from django.http import HttpResponse
 from django.utils import timezone
 from django.db import transaction, models
+from django.db.models import Count
+from django.db.models.functions import TruncMonth
 from django.conf import settings
 
 from django.core.cache import cache
@@ -17,6 +22,7 @@ from django_filters.rest_framework import DjangoFilterBackend
 from rest_framework import viewsets, status, permissions
 from rest_framework.decorators import action
 from rest_framework.filters import SearchFilter, OrderingFilter
+from rest_framework.views import APIView
 from rest_framework.pagination import PageNumberPagination
 from rest_framework.parsers import MultiPartParser, FormParser, JSONParser
 from rest_framework.response import Response
@@ -35,8 +41,10 @@ from .serializers import (
     DocumentUploadSerializer, DocumentTypeSerializer, DocumentTypeWriteSerializer,
     DocumentVersionSerializer, DocumentCommentSerializer,
     DocumentMetadataEditSerializer, DocumentBulkActionSerializer,
+    DocumentEmailSelectedSerializer,
     TagSerializer,
 )
+from apps.accounts.models import User
 from .filters import DocumentFilter
 from .permissions import HasDocumentPermission
 from apps.audit.mixins import AuditMixin
@@ -141,6 +149,73 @@ class DocumentTypeViewSet(AuditMixin, viewsets.ModelViewSet):
     def perform_destroy(self, instance):
         instance.is_active = False
         instance.save(update_fields=["is_active"])
+
+
+class DocumentVolumeView(APIView):
+    """
+    Groups Document uploads by month + document_type.
+    Response shape: List[{ month, <DocType>: count, ... }]
+    """
+    permission_classes = [permissions.IsAdminUser]
+
+    def get(self, request):
+        qs = (
+            Document.objects
+            .annotate(month=TruncMonth("created_at"))
+            .values("month", type_name=models.F("document_type__name"))
+            .annotate(count=Count("id"))
+            .order_by("month", "type_name")
+        )
+
+        rows = {}
+        for row in qs:
+            key = row["month"].strftime("%b")
+            rows.setdefault(key, {"month": key})
+            rows[key][row["type_name"] or "Other"] = row["count"]
+
+        return Response(list(rows.values()))
+
+
+class TopUploadersView(APIView):
+    """
+    Ranks users by document upload count in the last 90 days.
+    Response shape: List[{ name, department, count, approved, pending }]
+    """
+    permission_classes = [permissions.IsAdminUser]
+
+    def get(self, request):
+        from datetime import timedelta
+        from django.utils import timezone
+
+        cutoff = timezone.now() - timedelta(days=90)
+
+        qs = (
+            Document.objects
+            .filter(created_at__gte=cutoff)
+            .values(
+                uploader_id=models.F("uploaded_by__id"),
+                uploader_name=models.F("uploaded_by__full_name"),
+                department=models.F("uploaded_by__department__name"),
+            )
+            .annotate(
+                count=Count("id"),
+                approved=Count("id", filter=models.Q(status="approved")),
+                pending=Count("id", filter=models.Q(status="pending_approval")),
+            )
+            .order_by("-count")[:10]
+        )
+
+        data = [
+            {
+                "name":       row["uploader_name"] or "Unknown",
+                "department": row["department"] or "—",
+                "count":      row["count"],
+                "approved":   row["approved"],
+                "pending":    row["pending"],
+            }
+            for row in qs
+        ]
+        return Response(data)
 
 
 # ── Document ViewSet ──────────────────────────────────────────────────────────
@@ -1282,6 +1357,143 @@ echo "✓ DocVault LibreOffice integration installed."
             {"succeeded": succeeded, "failed": len(results) - succeeded, "results": results},
             status=status.HTTP_200_OK if succeeded else status.HTTP_400_BAD_REQUEST,
         )
+
+    @action(detail=False, methods=["post"], url_path="email_selected")
+    def email_selected(self, request):
+        serializer = DocumentEmailSelectedSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+
+        doc_ids = serializer.validated_data["document_ids"]
+        attachment_mode = serializer.validated_data["attachment_mode"]
+        message = serializer.validated_data.get("message", "").strip()
+
+        recipient_users = list(
+            User.objects.filter(
+                id__in=serializer.validated_data.get("recipient_user_ids", []),
+                is_active=True,
+            )
+        )
+        recipients = {user.email.strip().lower() for user in recipient_users if user.email}
+        recipients.update(
+            email.strip().lower()
+            for email in serializer.validated_data.get("recipient_emails", [])
+            if email
+        )
+        recipients.discard("")
+
+        if not recipients:
+            return Response({"detail": "No valid recipient email addresses found."}, status=400)
+
+        documents = list(
+            Document.objects
+            .filter(id__in=doc_ids)
+            .select_related("document_type", "uploaded_by")
+        )
+        found_ids = {doc.id for doc in documents}
+        missing_ids = [str(doc_id) for doc_id in doc_ids if doc_id not in found_ids]
+
+        attachments = []
+        skipped = []
+        for doc in documents:
+            if not user_can_download_document(request.user, doc):
+                skipped.append({
+                    "id": str(doc.id),
+                    "title": doc.title,
+                    "detail": "Download not permitted.",
+                })
+                continue
+            try:
+                raw, content_type, filename = read_document_bytes(
+                    doc,
+                    version=None,
+                    use_preview=False,
+                )
+                attachments.append({
+                    "document": doc,
+                    "raw": raw,
+                    "content_type": content_type,
+                    "filename": filename,
+                })
+            except FileNotFoundError as exc:
+                skipped.append({
+                    "id": str(doc.id),
+                    "title": doc.title,
+                    "detail": str(exc),
+                })
+
+        if not attachments:
+            return Response({
+                "detail": "No selected documents could be attached.",
+                "missing": missing_ids,
+                "skipped": skipped,
+            }, status=400)
+
+        sender_name = request.user.get_full_name().strip() or request.user.email
+        subject = (
+            f"{sender_name} shared {attachments[0]['document'].title}"
+            if len(attachments) == 1
+            else f"{sender_name} shared {len(attachments)} documents"
+        )
+        attachment_lines = "\n".join(
+            f"- {item['document'].title} ({item['document'].reference_number})"
+            for item in attachments
+        )
+        body = (
+            f"{sender_name} shared document file(s) with you from IDM.\n\n"
+            f"{attachment_lines}\n"
+        )
+        if message:
+            body = f"{body}\nMessage:\n{message}\n"
+
+        email = EmailMessage(
+            subject=subject,
+            body=body,
+            from_email=settings.DEFAULT_FROM_EMAIL,
+            to=sorted(recipients),
+        )
+
+        if attachment_mode == "combined" and len(attachments) > 1:
+            archive = io.BytesIO()
+            used_names = set()
+            with zipfile.ZipFile(archive, "w", zipfile.ZIP_DEFLATED) as zf:
+                for item in attachments:
+                    name = item["filename"] or f"{item['document'].reference_number}.bin"
+                    base_name = name
+                    counter = 2
+                    while name in used_names:
+                        stem, dot, ext = base_name.rpartition(".")
+                        if dot:
+                            name = f"{stem}-{counter}.{ext}"
+                        else:
+                            name = f"{base_name}-{counter}"
+                        counter += 1
+                    used_names.add(name)
+                    zf.writestr(name, item["raw"])
+            archive.seek(0)
+            email.attach("documents.zip", archive.read(), "application/zip")
+        else:
+            for item in attachments:
+                email.attach(item["filename"], item["raw"], item["content_type"])
+
+        email.send(fail_silently=False)
+
+        for item in attachments:
+            self.record_audit(
+                "document.emailed",
+                item["document"],
+                {
+                    "recipients": sorted(recipients),
+                    "attachment_mode": attachment_mode,
+                    "bulk_action": True,
+                },
+            )
+
+        return Response({
+            "sent_to": sorted(recipients),
+            "attached": len(attachments),
+            "missing": missing_ids,
+            "skipped": skipped,
+        })
 
 
 class TagViewSet(viewsets.ModelViewSet):

@@ -288,6 +288,14 @@ export const documentsAPI = {
       comment,
     }),
 
+  emailSelected: (data: {
+    document_ids: string[];
+    recipient_user_ids?: string[];
+    recipient_emails?: string[];
+    attachment_mode: "separate" | "combined";
+    message?: string;
+  }) => api.post("/documents/email_selected/", data),
+
   reOcr: (id: string) =>
     api.post(`/documents/${id}/re_ocr/`),
 
