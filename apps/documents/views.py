@@ -1,14 +1,19 @@
 import hashlib
+import io
 import logging
 import mimetypes
 import secrets
+import zipfile
 from urllib.parse import quote as urlquote, urlparse, urlunparse
 
+from django.core.mail import EmailMessage
 from django.core.files.base import ContentFile
 from django.core.exceptions import ValidationError
 from django.http import HttpResponse
 from django.utils import timezone
 from django.db import transaction, models
+from django.db.models import Count
+from django.db.models.functions import TruncMonth
 from django.conf import settings
 
 from django.core.cache import cache
@@ -17,6 +22,7 @@ from django_filters.rest_framework import DjangoFilterBackend
 from rest_framework import viewsets, status, permissions
 from rest_framework.decorators import action
 from rest_framework.filters import SearchFilter, OrderingFilter
+from rest_framework.views import APIView
 from rest_framework.pagination import PageNumberPagination
 from rest_framework.parsers import MultiPartParser, FormParser, JSONParser
 from rest_framework.response import Response
@@ -26,6 +32,8 @@ from .models import (
     Document,
     DocumentType,
     DocumentVersion,
+    DocumentShare,
+    DocumentRelationship,
     Tag,
     DocumentStatus,
     PreviewStatus,
@@ -35,8 +43,12 @@ from .serializers import (
     DocumentUploadSerializer, DocumentTypeSerializer, DocumentTypeWriteSerializer,
     DocumentVersionSerializer, DocumentCommentSerializer,
     DocumentMetadataEditSerializer, DocumentBulkActionSerializer,
+    DocumentEmailSelectedSerializer, DocumentShareSelectedSerializer,
+    DocumentRelationshipSerializer, DocumentRelationshipWriteSerializer,
     TagSerializer,
 )
+from apps.accounts.models import User
+from apps.notifications.models import Notification
 from .filters import DocumentFilter
 from .permissions import HasDocumentPermission
 from apps.audit.mixins import AuditMixin
@@ -143,6 +155,73 @@ class DocumentTypeViewSet(AuditMixin, viewsets.ModelViewSet):
         instance.save(update_fields=["is_active"])
 
 
+class DocumentVolumeView(APIView):
+    """
+    Groups Document uploads by month + document_type.
+    Response shape: List[{ month, <DocType>: count, ... }]
+    """
+    permission_classes = [permissions.IsAdminUser]
+
+    def get(self, request):
+        qs = (
+            Document.objects
+            .annotate(month=TruncMonth("created_at"))
+            .values("month", type_name=models.F("document_type__name"))
+            .annotate(count=Count("id"))
+            .order_by("month", "type_name")
+        )
+
+        rows = {}
+        for row in qs:
+            key = row["month"].strftime("%b")
+            rows.setdefault(key, {"month": key})
+            rows[key][row["type_name"] or "Other"] = row["count"]
+
+        return Response(list(rows.values()))
+
+
+class TopUploadersView(APIView):
+    """
+    Ranks users by document upload count in the last 90 days.
+    Response shape: List[{ name, department, count, approved, pending }]
+    """
+    permission_classes = [permissions.IsAdminUser]
+
+    def get(self, request):
+        from datetime import timedelta
+        from django.utils import timezone
+
+        cutoff = timezone.now() - timedelta(days=90)
+
+        qs = (
+            Document.objects
+            .filter(created_at__gte=cutoff)
+            .values(
+                uploader_id=models.F("uploaded_by__id"),
+                uploader_name=models.F("uploaded_by__full_name"),
+                department=models.F("uploaded_by__department__name"),
+            )
+            .annotate(
+                count=Count("id"),
+                approved=Count("id", filter=models.Q(status="approved")),
+                pending=Count("id", filter=models.Q(status="pending_approval")),
+            )
+            .order_by("-count")[:10]
+        )
+
+        data = [
+            {
+                "name":       row["uploader_name"] or "Unknown",
+                "department": row["department"] or "—",
+                "count":      row["count"],
+                "approved":   row["approved"],
+                "pending":    row["pending"],
+            }
+            for row in qs
+        ]
+        return Response(data)
+
+
 # ── Document ViewSet ──────────────────────────────────────────────────────────
 
 class DocumentViewSet(AuditMixin, viewsets.ModelViewSet):
@@ -169,14 +248,22 @@ class DocumentViewSet(AuditMixin, viewsets.ModelViewSet):
         )
         if user.has_admin_access:
             return qs
-        
+
+        active_shared_docs = DocumentShare.objects.filter(
+            recipient=user,
+            revoked_at__isnull=True,
+        ).filter(
+            models.Q(expires_at__isnull=True) | models.Q(expires_at__gt=timezone.now())
+        ).values("document_id")
+
         # Include documents uploaded by the user OR documents with active workflow tasks assigned to them
         return qs.filter(
             models.Q(uploaded_by=user) | 
             models.Q(
                 workflow_instance__tasks__assigned_to=user,
                 workflow_instance__tasks__status__in=["pending", "in_progress", "held", "returned"],
-            )
+            ) |
+            models.Q(id__in=active_shared_docs)
         ).distinct()
 
     def get_serializer_class(self):
@@ -1282,6 +1369,337 @@ echo "✓ DocVault LibreOffice integration installed."
             {"succeeded": succeeded, "failed": len(results) - succeeded, "results": results},
             status=status.HTTP_200_OK if succeeded else status.HTTP_400_BAD_REQUEST,
         )
+
+    @action(detail=False, methods=["post"], url_path="email_selected")
+    def email_selected(self, request):
+        serializer = DocumentEmailSelectedSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+
+        doc_ids = serializer.validated_data["document_ids"]
+        attachment_mode = serializer.validated_data["attachment_mode"]
+        message = serializer.validated_data.get("message", "").strip()
+
+        recipient_users = list(
+            User.objects.filter(
+                id__in=serializer.validated_data.get("recipient_user_ids", []),
+                is_active=True,
+            )
+        )
+        recipients = {user.email.strip().lower() for user in recipient_users if user.email}
+        recipients.update(
+            email.strip().lower()
+            for email in serializer.validated_data.get("recipient_emails", [])
+            if email
+        )
+        recipients.discard("")
+
+        if not recipients:
+            return Response({"detail": "No valid recipient email addresses found."}, status=400)
+
+        documents = list(
+            Document.objects
+            .filter(id__in=doc_ids)
+            .select_related("document_type", "uploaded_by")
+        )
+        found_ids = {doc.id for doc in documents}
+        missing_ids = [str(doc_id) for doc_id in doc_ids if doc_id not in found_ids]
+
+        attachments = []
+        skipped = []
+        for doc in documents:
+            if not user_can_download_document(request.user, doc):
+                skipped.append({
+                    "id": str(doc.id),
+                    "title": doc.title,
+                    "detail": "Download not permitted.",
+                })
+                continue
+            try:
+                raw, content_type, filename = read_document_bytes(
+                    doc,
+                    version=None,
+                    use_preview=False,
+                )
+                attachments.append({
+                    "document": doc,
+                    "raw": raw,
+                    "content_type": content_type,
+                    "filename": filename,
+                })
+            except FileNotFoundError as exc:
+                skipped.append({
+                    "id": str(doc.id),
+                    "title": doc.title,
+                    "detail": str(exc),
+                })
+
+        if not attachments:
+            return Response({
+                "detail": "No selected documents could be attached.",
+                "missing": missing_ids,
+                "skipped": skipped,
+            }, status=400)
+
+        sender_name = request.user.get_full_name().strip() or request.user.email
+        subject = (
+            f"{sender_name} shared {attachments[0]['document'].title}"
+            if len(attachments) == 1
+            else f"{sender_name} shared {len(attachments)} documents"
+        )
+        attachment_lines = "\n".join(
+            f"- {item['document'].title} ({item['document'].reference_number})"
+            for item in attachments
+        )
+        body = (
+            f"{sender_name} shared document file(s) with you from IDM.\n\n"
+            f"{attachment_lines}\n"
+        )
+        if message:
+            body = f"{body}\nMessage:\n{message}\n"
+
+        email = EmailMessage(
+            subject=subject,
+            body=body,
+            from_email=settings.DEFAULT_FROM_EMAIL,
+            to=sorted(recipients),
+        )
+
+        if attachment_mode == "combined" and len(attachments) > 1:
+            archive = io.BytesIO()
+            used_names = set()
+            with zipfile.ZipFile(archive, "w", zipfile.ZIP_DEFLATED) as zf:
+                for item in attachments:
+                    name = item["filename"] or f"{item['document'].reference_number}.bin"
+                    base_name = name
+                    counter = 2
+                    while name in used_names:
+                        stem, dot, ext = base_name.rpartition(".")
+                        if dot:
+                            name = f"{stem}-{counter}.{ext}"
+                        else:
+                            name = f"{base_name}-{counter}"
+                        counter += 1
+                    used_names.add(name)
+                    zf.writestr(name, item["raw"])
+            archive.seek(0)
+            email.attach("documents.zip", archive.read(), "application/zip")
+        else:
+            for item in attachments:
+                email.attach(item["filename"], item["raw"], item["content_type"])
+
+        email.send(fail_silently=False)
+
+        for item in attachments:
+            self.record_audit(
+                "document.emailed",
+                item["document"],
+                {
+                    "recipients": sorted(recipients),
+                    "attachment_mode": attachment_mode,
+                    "bulk_action": True,
+                },
+            )
+
+        return Response({
+            "sent_to": sorted(recipients),
+            "attached": len(attachments),
+            "missing": missing_ids,
+            "skipped": skipped,
+        })
+
+    @action(detail=False, methods=["post"], url_path="share_selected")
+    def share_selected(self, request):
+        serializer = DocumentShareSelectedSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+
+        doc_ids = serializer.validated_data["document_ids"]
+        recipient_ids = serializer.validated_data["recipient_user_ids"]
+        access_level = serializer.validated_data["access_level"]
+        message = serializer.validated_data.get("message", "").strip()
+        expires_at = serializer.validated_data.get("expires_at")
+        notify_by_email = serializer.validated_data.get("notify_by_email", False)
+
+        recipients = list(User.objects.filter(id__in=recipient_ids, is_active=True))
+        recipients = [user for user in recipients if user.id != request.user.id]
+        if not recipients:
+            return Response({"detail": "Select at least one active recipient."}, status=400)
+
+        documents = list(
+            Document.objects
+            .filter(id__in=doc_ids)
+            .select_related("document_type", "uploaded_by")
+        )
+        found_ids = {doc.id for doc in documents}
+        missing_ids = [str(doc_id) for doc_id in doc_ids if doc_id not in found_ids]
+
+        shared = []
+        skipped = []
+        sender_name = request.user.get_full_name().strip() or request.user.email
+
+        with transaction.atomic():
+            for doc in documents:
+                if not user_can_view_document(request.user, doc):
+                    skipped.append({
+                        "id": str(doc.id),
+                        "title": doc.title,
+                        "detail": "View permission is required before sharing.",
+                    })
+                    continue
+
+                document_link = f"/documents/{doc.id}"
+                for recipient in recipients:
+                    share, created = DocumentShare.objects.update_or_create(
+                        document=doc,
+                        recipient=recipient,
+                        defaults={
+                            "shared_by": request.user,
+                            "access_level": access_level,
+                            "message": message,
+                            "expires_at": expires_at,
+                            "revoked_at": None,
+                        },
+                    )
+                    Notification.objects.create(
+                        recipient=recipient,
+                        type="document_shared",
+                        message=f"{sender_name} shared '{doc.title}' with you.",
+                        link=document_link,
+                    )
+                    shared.append({
+                        "document_id": str(doc.id),
+                        "recipient_id": str(recipient.id),
+                        "created": created,
+                        "share_id": str(share.id),
+                    })
+
+                self.record_audit(
+                    "document.shared",
+                    doc,
+                    {
+                        "recipients": [str(user.id) for user in recipients],
+                        "access_level": access_level,
+                        "expires_at": expires_at.isoformat() if expires_at else None,
+                        "bulk_action": True,
+                    },
+                )
+
+        if notify_by_email:
+            document_lines = "\n".join(
+                f"- {doc.title} ({doc.reference_number}): /documents/{doc.id}"
+                for doc in documents
+                if user_can_view_document(request.user, doc)
+            )
+            body = f"{sender_name} shared document(s) with you in IDM.\n\n{document_lines}\n"
+            if message:
+                body = f"{body}\nMessage:\n{message}\n"
+            for recipient in recipients:
+                if recipient.email:
+                    EmailMessage(
+                        subject=f"{sender_name} shared document(s) with you in IDM",
+                        body=body,
+                        from_email=settings.DEFAULT_FROM_EMAIL,
+                        to=[recipient.email],
+                    ).send(fail_silently=True)
+
+        return Response({
+            "shared": len(shared),
+            "recipients": len(recipients),
+            "missing": missing_ids,
+            "skipped": skipped,
+            "results": shared,
+        })
+
+    @action(detail=True, methods=["get", "post"], url_path="relationships")
+    def relationships(self, request, pk=None):
+        doc = self.get_object()
+
+        if request.method == "GET":
+            relationships = (
+                DocumentRelationship.objects
+                .filter(models.Q(source_document=doc) | models.Q(target_document=doc))
+                .select_related(
+                    "source_document",
+                    "source_document__document_type",
+                    "target_document",
+                    "target_document__document_type",
+                    "created_by",
+                )
+            )
+            visible_relationships = [
+                relationship for relationship in relationships
+                if user_can_view_document(request.user, relationship.source_document)
+                and user_can_view_document(request.user, relationship.target_document)
+            ]
+            serializer = DocumentRelationshipSerializer(
+                visible_relationships,
+                many=True,
+                context={**self.get_serializer_context(), "document_id": str(doc.id)},
+            )
+            return Response(serializer.data)
+
+        if not user_can_edit_document(request.user, doc):
+            return Response({"detail": "Edit permission is required to link documents."}, status=403)
+
+        serializer = DocumentRelationshipWriteSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        target_id = serializer.validated_data["target_document_id"]
+        if str(target_id) == str(doc.id):
+            return Response({"detail": "A document cannot be related to itself."}, status=400)
+
+        target = get_object_or_404(
+            Document.objects.select_related("document_type", "uploaded_by"),
+            id=target_id,
+        )
+        if not user_can_view_document(request.user, target):
+            return Response({"detail": "You do not have access to the selected related document."}, status=403)
+
+        relationship, created = DocumentRelationship.objects.get_or_create(
+            source_document=doc,
+            target_document=target,
+            relation_type=serializer.validated_data["relation_type"],
+            defaults={
+                "note": serializer.validated_data.get("note", "").strip(),
+                "created_by": request.user,
+            },
+        )
+        if not created:
+            return Response({"detail": "This relationship already exists."}, status=400)
+
+        self.record_audit(
+            "document.relationship_added",
+            doc,
+            {
+                "relationship_id": str(relationship.id),
+                "relation_type": relationship.relation_type,
+                "target_document_id": str(target.id),
+                "target_reference_number": target.reference_number,
+            },
+        )
+        response_serializer = DocumentRelationshipSerializer(
+            relationship,
+            context={**self.get_serializer_context(), "document_id": str(doc.id)},
+        )
+        return Response(response_serializer.data, status=status.HTTP_201_CREATED)
+
+    @action(detail=True, methods=["delete"], url_path=r"relationships/(?P<relationship_id>[^/.]+)")
+    def relationship_detail(self, request, pk=None, relationship_id=None):
+        doc = self.get_object()
+        if not user_can_edit_document(request.user, doc):
+            return Response({"detail": "Edit permission is required to unlink documents."}, status=403)
+        relationship = get_object_or_404(
+            DocumentRelationship,
+            models.Q(source_document=doc) | models.Q(target_document=doc),
+            id=relationship_id,
+        )
+        changes = {
+            "relationship_id": str(relationship.id),
+            "relation_type": relationship.relation_type,
+            "source_document_id": str(relationship.source_document_id),
+            "target_document_id": str(relationship.target_document_id),
+        }
+        relationship.delete()
+        self.record_audit("document.relationship_removed", doc, changes)
+        return Response(status=status.HTTP_204_NO_CONTENT)
 
 
 class TagViewSet(viewsets.ModelViewSet):

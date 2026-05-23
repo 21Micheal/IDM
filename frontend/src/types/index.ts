@@ -88,6 +88,32 @@ export interface Document {
   updated_at: string;
 }
 
+export type DocumentRelationType = "supports" | "references" | "supersedes" | "linked-to";
+
+export interface RelatedDocumentSummary {
+  id: string;
+  title: string;
+  reference_number: string;
+  status: DocumentStatus;
+  document_type_name?: string;
+  file_name?: string;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface DocumentRelationship {
+  id: string;
+  relation_type: DocumentRelationType;
+  relation_type_label: string;
+  direction: "outbound" | "inbound";
+  source_document: RelatedDocumentSummary;
+  target_document: RelatedDocumentSummary;
+  related_document: RelatedDocumentSummary;
+  note: string;
+  created_by: UserSummary;
+  created_at: string;
+}
+
 export interface DocumentComment {
   id: string;
   author: UserSummary;
@@ -166,7 +192,7 @@ export interface WorkflowTask {
 
 export interface Notification {
   id: string;
-  type: "task_assigned" | "workflow_complete" | "document_returned" | "document_held" | "hold_released" | "hold_expired" | "task_overdue" | "workflow_action";
+  type: "task_assigned" | "workflow_complete" | "document_returned" | "document_held" | "hold_released" | "hold_expired" | "task_overdue" | "workflow_action" | "document_shared";
   message: string;
   link: string;
   is_read: boolean;

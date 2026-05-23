@@ -11,7 +11,9 @@ export default defineConfig({
   },
   // PDF.js worker is a large binary — exclude from dep pre-bundling
   // so Vite handles it as a plain asset URL via import.meta.url
+  // Added 'recharts' to include to ensure Vite pre-bundles it correctly
   optimizeDeps: {
+    include: ["recharts"],
     exclude: ["pdfjs-dist"],
   },
   build: {
@@ -36,6 +38,9 @@ export default defineConfig({
             }
             if (id.includes("@tanstack/react-query")) {
               return "query-vendor";
+            }
+            if (id.includes("recharts") || id.includes("d3-")) {
+              return "charts-vendor";
             }
             if (
               id.includes("react-hook-form") ||

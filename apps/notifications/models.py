@@ -13,6 +13,7 @@ class Notification(models.Model):
         ("task_overdue", "Task Overdue"),
         ("workflow_action", "Workflow Action"),
         ("delegation", "Delegation"),
+        ("document_shared", "Document Shared"),
     ]
 
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)

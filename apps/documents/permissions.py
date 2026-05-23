@@ -115,11 +115,20 @@ class HasDocumentPermission(permissions.BasePermission):
 
         if required_action == GroupAction.VIEW.value:
             from apps.workflows.models import WorkflowTask
+            from apps.documents.models import DocumentShare
 
             if WorkflowTask.objects.filter(
                 assigned_to=request.user,
                 workflow_instance__document_id=getattr(obj, "id", None),
                 status__in=["pending", "in_progress", "held", "returned"],
+            ).exists():
+                return True
+            if DocumentShare.objects.filter(
+                document=obj,
+                recipient=request.user,
+                revoked_at__isnull=True,
+            ).filter(
+                Q(expires_at__isnull=True) | Q(expires_at__gt=timezone.now())
             ).exists():
                 return True
 

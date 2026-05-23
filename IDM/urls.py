@@ -4,6 +4,8 @@ from django.conf import settings
 from django.conf.urls.static import static
 from rest_framework_simplejwt.views import TokenRefreshView
 from apps.documents.storage_views import StorageStatsView
+from apps.documents.views import DocumentVolumeView, TopUploadersView
+from apps.workflows.views import ApprovalTurnaroundView, SlaBreachRateView
 
 urlpatterns = [
     path("admin/",              admin.site.urls),
@@ -31,6 +33,10 @@ urlpatterns = [
 
     # Storage stats
     path("api/v1/storage/stats/", StorageStatsView.as_view(), name="storage-stats"),
+    path("api/v1/analytics/approval-turnaround/", ApprovalTurnaroundView.as_view(), name="analytics-approval-turnaround"),
+    path("api/v1/analytics/sla-breach-rate/", SlaBreachRateView.as_view(), name="analytics-sla-breach-rate"),
+    path("api/v1/analytics/document-volume/", DocumentVolumeView.as_view(), name="analytics-document-volume"),
+    path("api/v1/analytics/top-uploaders/", TopUploadersView.as_view(), name="analytics-top-uploaders"),
 
     # JWT refresh
     path("api/v1/token/refresh/", TokenRefreshView.as_view(), name="token_refresh"),

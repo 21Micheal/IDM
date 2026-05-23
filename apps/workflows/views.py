@@ -9,11 +9,13 @@ Added actions on WorkflowTaskViewSet:
 """
 from django.db import models, transaction
 from django.db.models import Count
+from django.db.models.functions import TruncMonth
 from django.utils import timezone
 from rest_framework import viewsets, permissions, status
 from rest_framework.decorators import action
 from rest_framework.response import Response
 from rest_framework.filters import SearchFilter, OrderingFilter
+from rest_framework.views import APIView
 
 from .models import (
     WorkflowTemplate, WorkflowStep, WorkflowRule,
@@ -253,6 +255,87 @@ class WorkflowTaskViewSet(viewsets.ReadOnlyModelViewSet):
             .order_by("due_at")
         )
         return Response(WorkflowTaskSerializer(tasks, many=True).data)
+
+
+class ApprovalTurnaroundView(APIView):
+    """
+    Returns avg hours per WorkflowStep across completed WorkflowTask instances.
+    Response shape: List[{ step, avg_hours, sla_hours, completed }]
+    """
+    permission_classes = [permissions.IsAdminUser]
+
+    def get(self, request):
+        from datetime import timedelta
+
+        qs = (
+            WorkflowTask.objects
+            .filter(status="approved", acted_at__isnull=False)
+            .annotate(
+                duration_hours=models.ExpressionWrapper(
+                    (models.F("acted_at") - models.F("created_at")) / timedelta(hours=1),
+                    output_field=models.FloatField(),
+                )
+            )
+            .values(step_name=models.F("step__name"), sla_hours=models.F("step__sla_hours"))
+            .annotate(avg_hours=models.Avg("duration_hours"), completed=Count("id"))
+            .order_by("step__order")
+        )
+
+        data = [
+            {
+                "step":       row["step_name"],
+                "avg_hours":  round(row["avg_hours"] or 0, 1),
+                "sla_hours":  row["sla_hours"] or 24,
+                "completed":  row["completed"],
+            }
+            for row in qs
+        ]
+        return Response(data)
+
+
+class SlaBreachRateView(APIView):
+    """
+    Groups completed WorkflowTask by calendar month.
+    A task is "breached" when (completed_at - created_at) > step.sla_hours.
+    Response shape: List[{ month, total, breached, breach_rate }]
+    """
+    permission_classes = [permissions.IsAdminUser]
+
+    def get(self, request):
+        from datetime import timedelta
+
+        qs = (
+            WorkflowTask.objects
+            .filter(status__in=["approved", "rejected"], acted_at__isnull=False)
+            .annotate(
+                month=TruncMonth("acted_at"),
+                duration_hours=models.ExpressionWrapper(
+                    (models.F("acted_at") - models.F("created_at")) / timedelta(hours=1),
+                    output_field=models.FloatField(),
+                ),
+            )
+            .values("month")
+            .annotate(
+                total=Count("id"),
+                breached=Count(
+                    "id",
+                    filter=models.Q(duration_hours__gt=models.F("step__sla_hours")),
+                ),
+            )
+            .order_by("month")
+        )
+
+        data = [
+            {
+                "month":       row["month"].strftime("%b"),
+                "total":       row["total"],
+                "breached":    row["breached"],
+                "breach_rate": round(row["breached"] / row["total"] * 100, 1)
+                               if row["total"] else 0,
+            }
+            for row in qs
+        ]
+        return Response(data)
 
     # ── Approve ────────────────────────────────────────────────────────────
 

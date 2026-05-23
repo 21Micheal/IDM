@@ -30,11 +30,11 @@ import {
   ArrowLeft, Send, MessageSquare, ShieldCheck,
   Loader2, RotateCcw, Edit2, Lock, Info, Download,
   AlertTriangle, ScanLine, RefreshCw,
-  Printer, Trash2, X, Check
+  Printer, Trash2, X, Check, Link2, Plus, ExternalLink, Columns2
 } from "lucide-react";
 import { toast } from "@/components/ui/vault-toast";
 import { useAuthStore } from "@/store/authStore";
-import type { Document, MetadataField } from "@/types";
+import type { Document, DocumentRelationType, DocumentRelationship, MetadataField } from "@/types";
 import { clsx as cn } from "clsx";
 import { QUERY_SHORT_STALE } from "@/lib/reactQueryDefaults";
 import { formatDocumentFileType } from "@/lib/documentFormat";
@@ -162,6 +162,22 @@ function describeAuditEvent(event: string) {
   }
 }
 
+const RELATIONSHIP_OPTIONS: { value: DocumentRelationType; label: string; helper: string }[] = [
+  { value: "supports", label: "Supports", helper: "This document provides evidence for the selected document." },
+  { value: "references", label: "References", helper: "This document cites or depends on the selected document." },
+  { value: "supersedes", label: "Supersedes", helper: "This document replaces the selected document." },
+  { value: "linked-to", label: "Linked to", helper: "General business link between both records." },
+];
+
+function describeRelationship(relationship: DocumentRelationship) {
+  const label = relationship.relation_type_label || relationship.relation_type.replace(/-/g, " ");
+  if (relationship.direction === "outbound") return label;
+  if (relationship.relation_type === "supersedes") return "Superseded by";
+  if (relationship.relation_type === "supports") return "Supported by";
+  if (relationship.relation_type === "references") return "Referenced by";
+  return label;
+}
+
 function normalizeUrl(url: string | null | undefined): string | undefined {
   if (!url) return url ?? undefined;
   if (window.location.protocol === "https:" && url.startsWith("http://")) {
@@ -170,7 +186,7 @@ function normalizeUrl(url: string | null | undefined): string | undefined {
   return url;
 }
 
-type TabId = "workflow" | "attributes" | "properties" | "security" | "history" | "comments" | "audit" | "edit";
+type TabId = "workflow" | "attributes" | "relationships" | "properties" | "security" | "history" | "comments" | "audit" | "edit";
 
 type PaginatedResponse<T> = {
   count: number;
@@ -198,6 +214,11 @@ export default function DocumentDetailPage() {
   const [auditPage, setAuditPage] = useState(1);
   const [viewerLinks, setViewerLinks] = useState({ openInNewTabUrl: "", downloadHref: "" });
   const [workflowActionCompleted, setWorkflowActionCompleted] = useState(false);
+  const [relationshipSearch, setRelationshipSearch] = useState("");
+  const [relationshipTargetId, setRelationshipTargetId] = useState("");
+  const [relationshipType, setRelationshipType] = useState<DocumentRelationType>("references");
+  const [relationshipNote, setRelationshipNote] = useState("");
+  const [compareDocumentId, setCompareDocumentId] = useState<string | null>(null);
   const printFrameRef = useRef<HTMLIFrameElement | null>(null);
 
   const pollRef = useRef<ReturnType<typeof setInterval> | null>(null);
@@ -360,6 +381,32 @@ export default function DocumentDetailPage() {
   const activeTask = myTasks?.find((t: { document_id: string }) => t.document_id === id);
   const activeTaskInitializedRef = useRef(false);
 
+  const { data: relationships = [] } = useQuery<DocumentRelationship[]>({
+    queryKey: ["document-relationships", id],
+    queryFn: () => documentsAPI.relationships(id!).then((r) => r.data),
+    enabled: !!id,
+    ...QUERY_SHORT_STALE,
+  });
+
+  const { data: relationshipSearchData, isFetching: relationshipSearchLoading } = useQuery({
+    queryKey: ["documents", "relationship-search", relationshipSearch],
+    queryFn: () =>
+      documentsAPI.list({
+        search: relationshipSearch,
+        page_size: 8,
+        is_self_upload: false,
+      }).then((r) => r.data),
+    enabled: relationshipSearch.trim().length >= 2,
+    ...QUERY_SHORT_STALE,
+  });
+
+  const { data: compareDoc } = useQuery<Document>({
+    queryKey: ["document", compareDocumentId],
+    queryFn: () => documentsAPI.get(compareDocumentId!).then((r) => r.data),
+    enabled: !!compareDocumentId,
+    ...QUERY_SHORT_STALE,
+  });
+
   useEffect(() => {
     if (!activeTaskInitializedRef.current && activeTask) {
       activeTaskInitializedRef.current = true;
@@ -417,6 +464,37 @@ export default function DocumentDetailPage() {
     onError: () => toast.error("Could not queue OCR. Please try again."),
   });
 
+  const addRelationshipMutation = useMutation({
+    mutationFn: () =>
+      documentsAPI.addRelationship(id!, {
+        target_document_id: relationshipTargetId,
+        relation_type: relationshipType,
+        note: relationshipNote.trim(),
+      }),
+    onSuccess: () => {
+      toast.success("Document relationship added.");
+      setRelationshipSearch("");
+      setRelationshipTargetId("");
+      setRelationshipType("references");
+      setRelationshipNote("");
+      qc.invalidateQueries({ queryKey: ["document-relationships", id] });
+      qc.invalidateQueries({ queryKey: ["document-audit", id] });
+    },
+    onError: (err: any) => {
+      toast.error(err?.response?.data?.detail ?? "Could not link the selected document.");
+    },
+  });
+
+  const deleteRelationshipMutation = useMutation({
+    mutationFn: (relationshipId: string) => documentsAPI.deleteRelationship(id!, relationshipId),
+    onSuccess: () => {
+      toast.success("Document relationship removed.");
+      qc.invalidateQueries({ queryKey: ["document-relationships", id] });
+      qc.invalidateQueries({ queryKey: ["document-audit", id] });
+    },
+    onError: () => toast.error("Could not remove document relationship."),
+  });
+
   if (isLoading)
     return (
       <div className="flex items-center justify-center h-64">
@@ -426,6 +504,13 @@ export default function DocumentDetailPage() {
 
   if (!doc) return <p className="text-muted-foreground">Document not found.</p>;
 
+  const relationshipSearchResults = ((relationshipSearchData?.results ?? []) as Document[])
+    .filter((candidate) => candidate.id !== doc.id)
+    .filter((candidate) => !relationships.some((relationship) => (
+      relationship.related_document.id === candidate.id &&
+      relationship.relation_type === relationshipType
+    )));
+  const selectedRelationshipTarget = relationshipSearchResults.find((candidate) => candidate.id === relationshipTargetId);
   const isPersonal = Boolean((doc as any).is_self_upload);
   const isScanned = Boolean((doc as any).is_scanned);
   const personalTags = doc.personal_tags ?? [];
@@ -473,6 +558,7 @@ export default function DocumentDetailPage() {
   const tabs: { id: TabId; label: string; disabled?: boolean }[] = [
     ...(activeTask ? [{ id: "workflow" as const, label: "Workflow" }] : []),
     { id: "attributes", label: "Details" },
+    { id: "relationships", label: `Links (${relationships.length})` },
     { id: "properties", label: "Properties" },
     { id: "security", label: "Security" },
     { id: "history", label: `History (${sortedDocumentVersions.length})` },
@@ -684,10 +770,13 @@ export default function DocumentDetailPage() {
       </div>
 
       {/* Enterprise workspace: preview left, document intelligence right */}
-      <div className="grid grid-cols-1 items-start gap-4 p-4 pr-8 lg:grid-cols-12">
+      <div className={cn(
+        "grid grid-cols-1 items-start gap-4 p-4 pr-8 lg:grid-cols-12",
+        compareDoc && "xl:grid-cols-12",
+      )}>
 
         {/* Column 1: Document Viewer (Left) */}
-        <div className="space-y-4 lg:col-span-8">
+        <div className={cn("space-y-4", compareDoc ? "lg:col-span-8 xl:col-span-8" : "lg:col-span-8")}>
 
           {/* Active Notifications / Status Banners */}
           {isPersonal && (
@@ -732,19 +821,51 @@ export default function DocumentDetailPage() {
             </div>
           )}
 
-          <div className="border border-[#C8CDD2] bg-white shadow-sm">
-            <Suspense fallback={
-              <div className="flex min-h-[32rem] items-center justify-center bg-white">
-                <Loader2 className="h-8 w-8 animate-spin text-[#287EAD]" />
+          <div className={cn("grid gap-3", compareDoc && "xl:grid-cols-2")}>
+            <div className="border border-[#C8CDD2] bg-white shadow-sm">
+              <Suspense fallback={
+                <div className="flex min-h-[32rem] items-center justify-center bg-white">
+                  <Loader2 className="h-8 w-8 animate-spin text-[#287EAD]" />
+                </div>
+              }>
+                <DocumentViewer
+                  document={doc}
+                  submitSlot={null}
+                  hideUploadActionBar
+                  onPreviewLinksChange={handlePreviewLinksChange}
+                />
+              </Suspense>
+            </div>
+
+            {compareDoc && (
+              <div className="border border-[#C8CDD2] bg-white shadow-sm">
+                <div className="flex min-h-[44px] items-center justify-between gap-3 border-b border-[#C8CDD2] bg-[#F5F7F8] px-3 py-2">
+                  <div className="min-w-0">
+                    <p className="truncate text-sm font-bold text-[#1F2933]" title={compareDoc.title}>{compareDoc.title}</p>
+                    <p className="text-xs text-[#5E6870]">{compareDoc.reference_number} · {compareDoc.document_type?.name || compareDoc.document_type_name || "Document"}</p>
+                  </div>
+                  <button
+                    type="button"
+                    onClick={() => setCompareDocumentId(null)}
+                    className="shrink-0 p-1 text-[#5E6870] hover:text-[#1F2933]"
+                    title="Close concurrent preview"
+                  >
+                    <X className="h-4 w-4" />
+                  </button>
+                </div>
+                <Suspense fallback={
+                  <div className="flex min-h-[32rem] items-center justify-center bg-white">
+                    <Loader2 className="h-8 w-8 animate-spin text-[#287EAD]" />
+                  </div>
+                }>
+                  <DocumentViewer
+                    document={compareDoc}
+                    submitSlot={null}
+                    hideUploadActionBar
+                  />
+                </Suspense>
               </div>
-            }>
-              <DocumentViewer
-                document={doc}
-                submitSlot={null}
-                hideUploadActionBar
-                onPreviewLinksChange={handlePreviewLinksChange}
-              />
-            </Suspense>
+            )}
           </div>
         </div>
 
@@ -915,6 +1036,194 @@ export default function DocumentDetailPage() {
                   </div>
                 ) : (
                   <p className="py-2 text-sm text-muted-foreground">No metadata attributes found for this document type.</p>
+                )}
+              </div>
+            )}
+
+            {/* RELATIONSHIPS TAB */}
+            {activeTab === "relationships" && (
+              <div className="space-y-4 animate-fade-in">
+                <div className="border-b border-[#C8CDD2] pb-3">
+                  <p className="text-sm font-bold uppercase tracking-wider text-[#5E6870]">Document relationships</p>
+                  <p className="mt-1 text-sm text-[#5E6870]">
+                    Make procurement chains explicit: PO, invoice, GRN, contract, and supporting documents.
+                  </p>
+                </div>
+
+                <div className="space-y-2">
+                  {relationships.length === 0 ? (
+                    <div className="border border-[#C8CDD2] bg-[#F5F7F8] px-4 py-8 text-center text-sm text-[#5E6870]">
+                      No related documents linked yet.
+                    </div>
+                  ) : (
+                    <div className="divide-y divide-[#D3D7DA] border border-[#C8CDD2] bg-white">
+                      {relationships.map((relationship) => {
+                        const related = relationship.related_document;
+                        const isComparing = compareDocumentId === related.id;
+                        return (
+                          <div key={relationship.id} className="p-3 hover:bg-[#F5F7F8]">
+                            <div className="flex items-start justify-between gap-3">
+                              <div className="min-w-0">
+                                <div className="flex flex-wrap items-center gap-2">
+                                  <span className="border border-[#287EAD]/25 bg-[#EEF6FB] px-2 py-0.5 text-xs font-bold text-[#287EAD]">
+                                    {describeRelationship(relationship)}
+                                  </span>
+                                  <span className="text-xs font-semibold text-[#5E6870]">
+                                    {related.document_type_name || "Document"}
+                                  </span>
+                                </div>
+                                <p className="mt-2 truncate text-sm font-bold text-[#1F2933]" title={related.title}>
+                                  {related.title}
+                                </p>
+                                <p className="mt-1 text-xs font-mono text-[#5E6870]">{related.reference_number}</p>
+                                {relationship.note && (
+                                  <p className="mt-2 border-l-2 border-[#287EAD] bg-[#F5F7F8] px-2 py-1.5 text-sm text-[#5E6870]">
+                                    {relationship.note}
+                                  </p>
+                                )}
+                              </div>
+                              {canEdit && (
+                                <button
+                                  type="button"
+                                  onClick={() => deleteRelationshipMutation.mutate(relationship.id)}
+                                  disabled={deleteRelationshipMutation.isPending}
+                                  className="shrink-0 p-1 text-[#5E6870] hover:text-red-700 disabled:opacity-40"
+                                  title="Remove relationship"
+                                >
+                                  <X className="h-4 w-4" />
+                                </button>
+                              )}
+                            </div>
+                            <div className="mt-3 flex flex-wrap items-center gap-2">
+                              <button
+                                type="button"
+                                onClick={() => setCompareDocumentId(isComparing ? null : related.id)}
+                                className={cn(
+                                  "inline-flex items-center gap-1.5 border px-2.5 py-1.5 text-xs font-semibold",
+                                  isComparing
+                                    ? "border-[#287EAD] bg-[#EEF6FB] text-[#287EAD]"
+                                    : "border-[#C8CDD2] bg-white text-[#1F2933] hover:bg-[#EEF6FB] hover:text-[#287EAD]",
+                                )}
+                              >
+                                <Columns2 className="h-3.5 w-3.5" />
+                                {isComparing ? "Close alongside" : "View alongside"}
+                              </button>
+                              <button
+                                type="button"
+                                onClick={() => navigate(`/documents/${related.id}`)}
+                                className="inline-flex items-center gap-1.5 border border-[#C8CDD2] bg-white px-2.5 py-1.5 text-xs font-semibold text-[#1F2933] hover:bg-[#F5F7F8]"
+                              >
+                                <ExternalLink className="h-3.5 w-3.5" />
+                                Open
+                              </button>
+                            </div>
+                          </div>
+                        );
+                      })}
+                    </div>
+                  )}
+                </div>
+
+                {canEdit && (
+                  <div className="space-y-3 border border-[#C8CDD2] bg-[#F5F7F8] p-3">
+                    <div className="flex items-center gap-2">
+                      <Link2 className="h-4 w-4 text-[#287EAD]" />
+                      <p className="text-sm font-bold text-[#1F2933]">Link another document</p>
+                    </div>
+
+                    <div>
+                      <label className="text-sm font-semibold text-[#1F2933]">Relationship type</label>
+                      <select
+                        value={relationshipType}
+                        onChange={(event) => {
+                          setRelationshipType(event.target.value as DocumentRelationType);
+                          setRelationshipTargetId("");
+                        }}
+                        className="mt-2 h-9 w-full border border-[#AEB5BB] bg-white px-2 text-sm text-[#1F2933] focus:outline-none focus:ring-1 focus:ring-[#287EAD]"
+                      >
+                        {RELATIONSHIP_OPTIONS.map((option) => (
+                          <option key={option.value} value={option.value}>{option.label}</option>
+                        ))}
+                      </select>
+                      <p className="mt-1 text-xs text-[#5E6870]">
+                        {RELATIONSHIP_OPTIONS.find((option) => option.value === relationshipType)?.helper}
+                      </p>
+                    </div>
+
+                    <div>
+                      <label className="text-sm font-semibold text-[#1F2933]">Find document</label>
+                      <input
+                        value={relationshipSearch}
+                        onChange={(event) => {
+                          setRelationshipSearch(event.target.value);
+                          setRelationshipTargetId("");
+                        }}
+                        placeholder="Search title, reference, supplier, or text"
+                        className="mt-2 h-9 w-full border border-[#AEB5BB] bg-white px-3 text-sm text-[#1F2933] focus:outline-none focus:ring-1 focus:ring-[#287EAD]"
+                      />
+                    </div>
+
+                    {relationshipSearch.trim().length >= 2 && (
+                      <div className="max-h-52 overflow-y-auto border border-[#C8CDD2] bg-white">
+                        {relationshipSearchLoading ? (
+                          <div className="flex items-center gap-2 px-3 py-4 text-sm text-[#5E6870]">
+                            <Loader2 className="h-4 w-4 animate-spin" />
+                            Searching documents…
+                          </div>
+                        ) : relationshipSearchResults.length === 0 ? (
+                          <div className="px-3 py-4 text-center text-sm text-[#5E6870]">No eligible documents found.</div>
+                        ) : relationshipSearchResults.map((candidate) => (
+                          <label
+                            key={candidate.id}
+                            className={cn(
+                              "grid cursor-pointer grid-cols-[auto_1fr] gap-3 border-b border-[#D3D7DA] px-3 py-2 last:border-b-0 hover:bg-[#F5F7F8]",
+                              relationshipTargetId === candidate.id && "bg-[#EEF6FB]",
+                            )}
+                          >
+                            <input
+                              type="radio"
+                              name="relationship-target"
+                              checked={relationshipTargetId === candidate.id}
+                              onChange={() => setRelationshipTargetId(candidate.id)}
+                              className="mt-1"
+                            />
+                            <span className="min-w-0">
+                              <span className="block truncate text-sm font-semibold text-[#1F2933]">{candidate.title}</span>
+                              <span className="block truncate text-xs text-[#5E6870]">
+                                {candidate.reference_number} · {candidate.document_type_name || candidate.document_type?.name || "Document"}
+                              </span>
+                            </span>
+                          </label>
+                        ))}
+                      </div>
+                    )}
+
+                    <div>
+                      <label className="text-sm font-semibold text-[#1F2933]">Note</label>
+                      <textarea
+                        value={relationshipNote}
+                        onChange={(event) => setRelationshipNote(event.target.value)}
+                        rows={2}
+                        placeholder="Optional context for this link"
+                        className="mt-2 block w-full border border-[#AEB5BB] bg-white px-3 py-2 text-sm text-[#1F2933] focus:outline-none focus:ring-1 focus:ring-[#287EAD]"
+                      />
+                    </div>
+
+                    <div className="flex items-center justify-between gap-3">
+                      <span className="min-w-0 truncate text-xs text-[#5E6870]">
+                        {selectedRelationshipTarget ? selectedRelationshipTarget.reference_number : "Select a document to link"}
+                      </span>
+                      <button
+                        type="button"
+                        onClick={() => addRelationshipMutation.mutate()}
+                        disabled={!relationshipTargetId || addRelationshipMutation.isPending}
+                        className="inline-flex items-center gap-2 bg-[#287EAD] px-3 py-2 text-sm font-semibold text-white hover:bg-[#206D99] disabled:cursor-not-allowed disabled:opacity-50"
+                      >
+                        {addRelationshipMutation.isPending ? <Loader2 className="h-4 w-4 animate-spin" /> : <Plus className="h-4 w-4" />}
+                        Add link
+                      </button>
+                    </div>
+                  </div>
                 )}
               </div>
             )}

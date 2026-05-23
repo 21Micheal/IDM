@@ -277,6 +277,15 @@ export const documentsAPI = {
   auditTrail: (id: string, params?: Record<string, unknown>) =>
     api.get(`/documents/${id}/audit_trail/`, { params }),
 
+  relationships: (id: string) =>
+    api.get(`/documents/${id}/relationships/`),
+  addRelationship: (
+    id: string,
+    data: { target_document_id: string; relation_type: "supports" | "references" | "supersedes" | "linked-to"; note?: string }
+  ) => api.post(`/documents/${id}/relationships/`, data),
+  deleteRelationship: (id: string, relationshipId: string) =>
+    api.delete(`/documents/${id}/relationships/${relationshipId}/`),
+
   bulkAction: (
     documentIds: string[],
     action: "approve" | "reject" | "archive" | "void",
@@ -287,6 +296,23 @@ export const documentsAPI = {
       action,
       comment,
     }),
+
+  emailSelected: (data: {
+    document_ids: string[];
+    recipient_user_ids?: string[];
+    recipient_emails?: string[];
+    attachment_mode: "separate" | "combined";
+    message?: string;
+  }) => api.post("/documents/email_selected/", data),
+
+  shareSelected: (data: {
+    document_ids: string[];
+    recipient_user_ids: string[];
+    access_level: "view" | "download";
+    message?: string;
+    expires_at?: string | null;
+    notify_by_email?: boolean;
+  }) => api.post("/documents/share_selected/", data),
 
   reOcr: (id: string) =>
     api.post(`/documents/${id}/re_ocr/`),

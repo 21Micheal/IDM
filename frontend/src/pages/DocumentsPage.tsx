@@ -11,13 +11,13 @@
 import { useEffect, useMemo, useState } from "react";
 import { Link, useSearchParams } from "react-router-dom";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
-import { documentsAPI, documentTypesAPI, normalizeListResponse } from "@/services/api";
+import { documentsAPI, documentTypesAPI, normalizeListResponse, usersAPI } from "@/services/api";
 import {
   FileText, UploadCloud, Lock, LayoutList,
   Archive, Trash2, Loader2, CheckSquare, Square, X, CheckCircle, XCircle,
   Search as SearchIcon, SlidersHorizontal, Eye,
   Rows3, LayoutGrid, Plus,
-  List,
+  List, Mail, Send, Share2,
 } from "lucide-react";
 import { format } from "date-fns";
 import { cn } from "../lib/utils";
@@ -33,6 +33,19 @@ const PAGE_SIZE = 10;
 type BulkAction = "approve" | "reject" | "archive" | "void";
 
 const STATUS_OPTIONS = ["draft", "pending_approval", "approved", "rejected", "archived", "void"];
+
+type EmailAttachmentMode = "separate" | "combined";
+type ShareAccessLevel = "view" | "download";
+
+type EmailRecipientUser = {
+  id: string;
+  email: string;
+  first_name?: string;
+  last_name?: string;
+  full_name?: string;
+  job_description?: string;
+  department_name?: string | null;
+};
 
 // ── Bulk Toolbar ────────────────────────────────────────────────────────────
 function BulkToolbar({
@@ -213,8 +226,28 @@ function getPersonalDescription(doc: Document): string {
   return "";
 }
 
+function getUserDisplayName(user: EmailRecipientUser): string {
+  const fullName = user.full_name || [user.first_name, user.last_name].filter(Boolean).join(" ").trim();
+  return fullName || user.email;
+}
+
 function getDocumentTypeLabel(doc: Document): string {
   return doc.document_type_name || doc.document_type?.name || "";
+}
+
+function getDocumentStatusLabel(status: string): string {
+  return status
+    ? status.replace(/_/g, " ").replace(/\b\w/g, (char) => char.toUpperCase())
+    : "Unknown";
+}
+
+function getDocumentStatusTextClass(status: string): string {
+  const key = status?.toLowerCase?.().replace(/\s+/g, "_") ?? "";
+  if (["approved", "active", "enabled", "completed"].includes(key)) return "text-emerald-700";
+  if (["pending_review", "pending_approval", "on_hold", "returned"].includes(key)) return "text-amber-700";
+  if (["rejected", "void"].includes(key)) return "text-red-700";
+  if (key === "archived") return "text-sky-700";
+  return "text-[#5E6870]";
 }
 
 function formatInforDateTime(value?: string | null): string {
@@ -297,6 +330,19 @@ export default function DocumentsPage({ personalOnly = false }: DocumentsPagePro
   const [page, setPage] = useState(1);
   const [selectedIds, setSelectedIds] = useState<string[]>([]);
   const [showFilters, setShowFilters] = useState(false);
+  const [emailModalOpen, setEmailModalOpen] = useState(false);
+  const [emailRecipientIds, setEmailRecipientIds] = useState<string[]>([]);
+  const [emailRecipientSearch, setEmailRecipientSearch] = useState("");
+  const [emailExtraRecipients, setEmailExtraRecipients] = useState("");
+  const [emailAttachmentMode, setEmailAttachmentMode] = useState<EmailAttachmentMode>("separate");
+  const [emailMessage, setEmailMessage] = useState("");
+  const [shareModalOpen, setShareModalOpen] = useState(false);
+  const [shareRecipientIds, setShareRecipientIds] = useState<string[]>([]);
+  const [shareRecipientSearch, setShareRecipientSearch] = useState("");
+  const [shareAccessLevel, setShareAccessLevel] = useState<ShareAccessLevel>("view");
+  const [shareExpiresAt, setShareExpiresAt] = useState("");
+  const [shareNotifyByEmail, setShareNotifyByEmail] = useState(false);
+  const [shareMessage, setShareMessage] = useState("");
 
   // ── View mode (table / card / thumbnails) — Infor-style layout switcher ────
   type ViewMode = "table" | "card" | "thumbnails";
@@ -341,6 +387,14 @@ export default function DocumentsPage({ personalOnly = false }: DocumentsPagePro
     queryFn: () => documentTypesAPI.list().then((r) => r.data as unknown),
     select: (data) => normalizeListResponse(data),
     enabled: !isArchiveView && !personalOnly,
+    ...QUERY_FIVE_MIN_STALE,
+  });
+
+  const { data: usersData } = useQuery<unknown, Error, EmailRecipientUser[]>({
+    queryKey: ["users", "document-action-recipients"],
+    queryFn: () => usersAPI.list({ page_size: 500 }).then((r) => r.data as unknown),
+    select: (response) => normalizeListResponse(response) as EmailRecipientUser[],
+    enabled: emailModalOpen || shareModalOpen,
     ...QUERY_FIVE_MIN_STALE,
   });
 
@@ -435,6 +489,65 @@ export default function DocumentsPage({ personalOnly = false }: DocumentsPagePro
     onError: () => toast.error("Bulk action failed"),
   });
 
+  const emailSelectedMutation = useMutation({
+    mutationFn: () => {
+      const recipientEmails = emailExtraRecipients
+        .split(/[,\n;]/)
+        .map((email) => email.trim())
+        .filter(Boolean);
+
+      return documentsAPI.emailSelected({
+        document_ids: selectedIds,
+        recipient_user_ids: emailRecipientIds,
+        recipient_emails: recipientEmails,
+        attachment_mode: emailAttachmentMode,
+        message: emailMessage.trim(),
+      });
+    },
+    onSuccess: (response) => {
+      const attached = response.data?.attached ?? selectedIds.length;
+      toast.success(`${attached} document${attached === 1 ? "" : "s"} sent by email.`);
+      setEmailModalOpen(false);
+      setEmailRecipientIds([]);
+      setEmailRecipientSearch("");
+      setEmailExtraRecipients("");
+      setEmailAttachmentMode("separate");
+      setEmailMessage("");
+      setSelectedIds([]);
+    },
+    onError: (err: any) => {
+      toast.error(err?.response?.data?.detail ?? "Could not send selected documents.");
+    },
+  });
+
+  const shareSelectedMutation = useMutation({
+    mutationFn: () =>
+      documentsAPI.shareSelected({
+        document_ids: selectedIds,
+        recipient_user_ids: shareRecipientIds,
+        access_level: shareAccessLevel,
+        expires_at: shareExpiresAt ? new Date(shareExpiresAt).toISOString() : null,
+        notify_by_email: shareNotifyByEmail,
+        message: shareMessage.trim(),
+      }),
+    onSuccess: (response) => {
+      const sharedCount = response.data?.shared ?? selectedIds.length * shareRecipientIds.length;
+      toast.success(`${sharedCount} document share${sharedCount === 1 ? "" : "s"} created.`);
+      setShareModalOpen(false);
+      setShareRecipientIds([]);
+      setShareRecipientSearch("");
+      setShareAccessLevel("view");
+      setShareExpiresAt("");
+      setShareNotifyByEmail(false);
+      setShareMessage("");
+      setSelectedIds([]);
+      queryClient.invalidateQueries({ queryKey: ["documents"] });
+    },
+    onError: (err: any) => {
+      toast.error(err?.response?.data?.detail ?? "Could not share selected documents.");
+    },
+  });
+
 
   const toggleAll = () => {
     const pageIds = docs.map((d: Document) => d.id);
@@ -482,6 +595,34 @@ export default function DocumentsPage({ personalOnly = false }: DocumentsPagePro
   const activeFilterCount = personalOnly
     ? 0
     : [statusFilter, typeFilter, supplierFilter].filter(Boolean).length;
+
+  const filteredEmailUsers = (usersData ?? []).filter((user) => {
+    const query = emailRecipientSearch.trim().toLowerCase();
+    if (!query) return true;
+    return [
+      getUserDisplayName(user),
+      user.email,
+      user.job_description,
+      user.department_name ?? "",
+    ].some((value) => value?.toLowerCase().includes(query));
+  });
+
+  const extraRecipientCount = emailExtraRecipients
+    .split(/[,\n;]/)
+    .map((email) => email.trim())
+    .filter(Boolean).length;
+  const emailRecipientCount = emailRecipientIds.length + extraRecipientCount;
+
+  const filteredShareUsers = (usersData ?? []).filter((user) => {
+    const query = shareRecipientSearch.trim().toLowerCase();
+    if (!query) return true;
+    return [
+      getUserDisplayName(user),
+      user.email,
+      user.job_description,
+      user.department_name ?? "",
+    ].some((value) => value?.toLowerCase().includes(query));
+  });
 
   if (!isArchiveView && !personalOnly) {
     const matchingCount = data?.count ?? 0;
@@ -622,9 +763,51 @@ export default function DocumentsPage({ personalOnly = false }: DocumentsPagePro
                 </div>
               </div>
 
+              {selectedIds.length > 0 && (
+                <div className="flex min-h-[48px] shrink-0 flex-wrap items-center gap-3 border-b border-[#C8CDD2] bg-[#F5F7F8] px-5 py-2">
+                  <span className="font-semibold text-[#1F2933]">
+                    {selectedIds.length} selected
+                  </span>
+                  <button
+                    type="button"
+                    onClick={() => setShareModalOpen(true)}
+                    className="inline-flex items-center gap-2 border border-[#C8CDD2] bg-white px-3 py-1.5 text-sm font-semibold text-[#1F2933] hover:bg-[#EEF6FB] hover:text-[#287EAD]"
+                  >
+                    <Share2 className="h-4 w-4" />
+                    Share in app
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setEmailModalOpen(true)}
+                    className="inline-flex items-center gap-2 border border-[#C8CDD2] bg-white px-3 py-1.5 text-sm font-semibold text-[#1F2933] hover:bg-[#EEF6FB] hover:text-[#287EAD]"
+                  >
+                    <Mail className="h-4 w-4" />
+                    Send to email
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => bulkMutation.mutate({ action: "archive" })}
+                    disabled={!availableBulkActions.includes("archive") || bulkMutation.isPending}
+                    className="inline-flex items-center gap-2 border border-[#C8CDD2] bg-white px-3 py-1.5 text-sm font-semibold text-[#1F2933] hover:bg-[#EEF6FB] hover:text-[#287EAD] disabled:cursor-not-allowed disabled:opacity-40"
+                    title={availableBulkActions.includes("archive") ? "Archive selected documents" : "Only approved documents can be archived"}
+                  >
+                    {bulkMutation.isPending ? <Loader2 className="h-4 w-4 animate-spin" /> : <Archive className="h-4 w-4" />}
+                    Archive
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setSelectedIds([])}
+                    className="ml-auto inline-flex items-center gap-2 px-3 py-1.5 text-sm font-semibold text-[#5E6870] hover:text-[#1F2933]"
+                  >
+                    <X className="h-4 w-4" />
+                    Clear selection
+                  </button>
+                </div>
+              )}
+
               <div className="min-h-0 flex-1 overflow-auto bg-[#EDEDED]">
                 {effectiveView === "table" && (
-                  <table className="w-full min-w-[1080px] border-collapse bg-white text-sm">
+                  <table className="w-full min-w-[1160px] border-collapse bg-white text-sm">
                     <thead className="sticky top-0 z-[1]">
                       <tr className="h-[39px] border-b border-[#AEB5BB] bg-[#50545A] text-left text-xs font-semibold text-white">
                         <th className="w-[50px] border-r border-[#858A90] px-4 py-3" />
@@ -634,14 +817,15 @@ export default function DocumentsPage({ personalOnly = false }: DocumentsPagePro
                         <th className="border-r border-[#858A90] px-3 py-3">Status</th>
                         <th className="border-r border-[#858A90] px-3 py-3">Created By</th>
                         <th className="border-r border-[#858A90] px-3 py-3">Created Date</th>
-                        <th className="px-3 py-3">Modified Date</th>
+                        <th className="border-r border-[#858A90] px-3 py-3">Modified Date</th>
+                        <th className="w-[90px] px-3 py-3">View</th>
                       </tr>
                     </thead>
                     <tbody>
                       {isLoading ? (
                         Array.from({ length: 6 }).map((_, rowIndex) => (
                           <tr key={rowIndex} className="h-[44px] border-b border-[#D3D7DA]">
-                            {Array.from({ length: 8 }).map((_, cellIndex) => (
+                            {Array.from({ length: 9 }).map((_, cellIndex) => (
                               <td key={cellIndex} className="border-r border-[#D3D7DA] px-3">
                                 <div className="h-3 w-2/3 animate-pulse bg-[#E1E5E8]" />
                               </td>
@@ -650,7 +834,7 @@ export default function DocumentsPage({ personalOnly = false }: DocumentsPagePro
                         ))
                       ) : docs.length === 0 ? (
                         <tr>
-                          <td colSpan={8} className="py-20 text-center text-[#5E6870]">
+                          <td colSpan={9} className="py-20 text-center text-[#5E6870]">
                             No documents found
                           </td>
                         </tr>
@@ -688,13 +872,25 @@ export default function DocumentsPage({ personalOnly = false }: DocumentsPagePro
                               </td>
                               <td className="border-r border-[#D3D7DA] px-3">{typeLabel}</td>
                               <td className="border-r border-[#D3D7DA] px-3">
-                                <StatusBadge status={doc.status} />
+                                <span className={cn("font-semibold", getDocumentStatusTextClass(doc.status))}>
+                                  {getDocumentStatusLabel(doc.status)}
+                                </span>
                               </td>
                               <td className="border-r border-[#D3D7DA] px-3">
                                 {doc.uploaded_by?.full_name || doc.uploaded_by?.email || ""}
                               </td>
                               <td className="border-r border-[#D3D7DA] px-3">{formatInforDateTime(doc.created_at)}</td>
-                              <td className="px-3">{formatInforDateTime(doc.updated_at)}</td>
+                              <td className="border-r border-[#D3D7DA] px-3">{formatInforDateTime(doc.updated_at)}</td>
+                              <td className="px-3">
+                                <Link
+                                  to={`/documents/${doc.id}`}
+                                  onMouseEnter={preloadDocumentWorkspace}
+                                  onFocus={preloadDocumentWorkspace}
+                                  className="font-semibold text-[#2B86C5] hover:underline"
+                                >
+                                  View
+                                </Link>
+                              </td>
                             </tr>
                           );
                         })
@@ -758,7 +954,9 @@ export default function DocumentsPage({ personalOnly = false }: DocumentsPagePro
                               )}
                               <div className="mt-3">
                                 <p className="mb-1 text-[#5E6870]">Status</p>
-                                <StatusBadge status={doc.status} />
+                                <p className={cn("font-semibold", getDocumentStatusTextClass(doc.status))}>
+                                  {getDocumentStatusLabel(doc.status)}
+                                </p>
                               </div>
                               <p className="mt-3 text-[#5E6870]">Created By</p>
                               <p className="font-semibold">{doc.uploaded_by?.full_name || doc.uploaded_by?.email || ""}</p>
@@ -776,6 +974,15 @@ export default function DocumentsPage({ personalOnly = false }: DocumentsPagePro
                                   <p className="font-semibold">{formatInforDateTime(doc.updated_at)}</p>
                                 </>
                               )}
+                              <Link
+                                to={`/documents/${doc.id}`}
+                                onMouseEnter={preloadDocumentWorkspace}
+                                onFocus={preloadDocumentWorkspace}
+                                className="mt-5 inline-flex border border-[#C8CDD2] bg-white px-3 py-1.5 text-sm font-semibold text-[#2B86C5] hover:bg-[#F5F7F8] hover:underline"
+                              >
+                                <Eye className="mr-1.5 h-4 w-4" />
+                                View
+                              </Link>
                             </div>
                           </div>
                         );
@@ -785,7 +992,7 @@ export default function DocumentsPage({ personalOnly = false }: DocumentsPagePro
                 )}
 
                 {effectiveView === "thumbnails" && (
-                  <div className="grid auto-rows-max grid-cols-[repeat(auto-fill,172px)] gap-7 p-7">
+                  <div className="grid auto-rows-max grid-cols-[repeat(auto-fill,190px)] gap-7 p-7">
                     {isLoading ? (
                       Array.from({ length: 6 }).map((_, index) => (
                         <div key={index} className="h-[212px] animate-pulse border border-[#D3D7DA] bg-white" />
@@ -795,11 +1002,12 @@ export default function DocumentsPage({ personalOnly = false }: DocumentsPagePro
                     ) : (
                       docs.map((doc: Document) => {
                         const isSelected = selectedIds.includes(doc.id);
+                        const typeLabel = getDocumentTypeLabel(doc);
                         return (
                           <div
                             key={doc.id}
                             className={cn(
-                              "h-[212px] border border-[#C9CED3] bg-white",
+                              "min-h-[268px] border border-[#C9CED3] bg-white",
                               isSelected && "outline outline-2 outline-[#2B86C5]",
                             )}
                           >
@@ -828,6 +1036,23 @@ export default function DocumentsPage({ personalOnly = false }: DocumentsPagePro
                             >
                               <DocumentPreviewTile doc={doc} large />
                             </Link>
+                            <div className="space-y-1 px-3 py-2 text-xs">
+                              <p className="truncate text-[#5E6870]" title={typeLabel || "Unclassified"}>
+                                {typeLabel || "Unclassified"}
+                              </p>
+                              <p className={cn("font-semibold", getDocumentStatusTextClass(doc.status))}>
+                                {getDocumentStatusLabel(doc.status)}
+                              </p>
+                              <Link
+                                to={`/documents/${doc.id}`}
+                                onMouseEnter={preloadDocumentWorkspace}
+                                onFocus={preloadDocumentWorkspace}
+                                className="inline-flex items-center font-semibold text-[#2B86C5] hover:underline"
+                              >
+                                <Eye className="mr-1 h-3.5 w-3.5" />
+                                View
+                              </Link>
+                            </div>
                           </div>
                         );
                       })
@@ -891,6 +1116,343 @@ export default function DocumentsPage({ personalOnly = false }: DocumentsPagePro
             </section>
           </div>
         </div>
+
+        {shareModalOpen && (
+          <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-4">
+            <div className="w-full max-w-3xl border border-[#C8CDD2] bg-white shadow-2xl">
+              <div className="flex items-center justify-between border-b border-[#C8CDD2] bg-[#287EAD] px-5 py-3 text-white">
+                <div>
+                  <h2 className="text-base font-semibold">Share selected documents</h2>
+                  <p className="text-xs text-white/75">
+                    {selectedIds.length} document{selectedIds.length === 1 ? "" : "s"} selected
+                  </p>
+                </div>
+                <button
+                  type="button"
+                  onClick={() => setShareModalOpen(false)}
+                  className="p-1 text-white/75 hover:text-white"
+                  aria-label="Close share dialog"
+                >
+                  <X className="h-5 w-5" />
+                </button>
+              </div>
+
+              <div className="grid gap-5 p-5 md:grid-cols-[1.1fr_0.9fr]">
+                <div className="space-y-3">
+                  <div>
+                    <label className="text-sm font-semibold text-[#1F2933]">People</label>
+                    <div className="relative mt-2">
+                      <SearchIcon className="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-[#6E767D]" />
+                      <input
+                        value={shareRecipientSearch}
+                        onChange={(event) => setShareRecipientSearch(event.target.value)}
+                        placeholder="Search users by name, email, or department"
+                        className="h-9 w-full border border-[#AEB5BB] bg-white pl-9 pr-3 text-sm text-[#1F2933] focus:outline-none focus:ring-1 focus:ring-[#287EAD]"
+                      />
+                    </div>
+                  </div>
+
+                  <div className="max-h-72 overflow-y-auto border border-[#C8CDD2]">
+                    {filteredShareUsers.length === 0 ? (
+                      <div className="px-3 py-8 text-center text-sm text-[#5E6870]">
+                        No users found.
+                      </div>
+                    ) : (
+                      filteredShareUsers.map((user) => {
+                        const checked = shareRecipientIds.includes(user.id);
+                        return (
+                          <label
+                            key={user.id}
+                            className={cn(
+                              "grid cursor-pointer grid-cols-[auto_1fr] gap-3 border-b border-[#D3D7DA] px-3 py-2 last:border-b-0 hover:bg-[#F5F7F8]",
+                              checked && "bg-[#EEF6FB]",
+                            )}
+                          >
+                            <input
+                              type="checkbox"
+                              checked={checked}
+                              onChange={() => {
+                                setShareRecipientIds((prev) =>
+                                  prev.includes(user.id)
+                                    ? prev.filter((id) => id !== user.id)
+                                    : [...prev, user.id],
+                                );
+                              }}
+                              className="mt-1 h-3.5 w-3.5 border-[#AEB5BB]"
+                            />
+                            <span className="min-w-0">
+                              <span className="block truncate text-sm font-semibold text-[#1F2933]">
+                                {getUserDisplayName(user)}
+                              </span>
+                              <span className="block truncate text-xs text-[#5E6870]">
+                                {user.email}
+                                {user.department_name ? ` · ${user.department_name}` : ""}
+                              </span>
+                            </span>
+                          </label>
+                        );
+                      })
+                    )}
+                  </div>
+                </div>
+
+                <div className="space-y-4">
+                  <div>
+                    <label className="text-sm font-semibold text-[#1F2933]">Access</label>
+                    <div className="mt-2 space-y-2">
+                      <label className="flex cursor-pointer gap-3 border border-[#C8CDD2] bg-white p-3 hover:bg-[#F5F7F8]">
+                        <input
+                          type="radio"
+                          name="share-access"
+                          value="view"
+                          checked={shareAccessLevel === "view"}
+                          onChange={() => setShareAccessLevel("view")}
+                          className="mt-1"
+                        />
+                        <span>
+                          <span className="block text-sm font-semibold text-[#1F2933]">View only</span>
+                          <span className="text-xs text-[#5E6870]">Recipients can open the document in IDM.</span>
+                        </span>
+                      </label>
+                      <label className="flex cursor-pointer gap-3 border border-[#C8CDD2] bg-white p-3 hover:bg-[#F5F7F8]">
+                        <input
+                          type="radio"
+                          name="share-access"
+                          value="download"
+                          checked={shareAccessLevel === "download"}
+                          onChange={() => setShareAccessLevel("download")}
+                          className="mt-1"
+                        />
+                        <span>
+                          <span className="block text-sm font-semibold text-[#1F2933]">View and download</span>
+                          <span className="text-xs text-[#5E6870]">Recipients can also download the file.</span>
+                        </span>
+                      </label>
+                    </div>
+                  </div>
+
+                  <div>
+                    <label className="text-sm font-semibold text-[#1F2933]">Expiry</label>
+                    <input
+                      type="datetime-local"
+                      value={shareExpiresAt}
+                      onChange={(event) => setShareExpiresAt(event.target.value)}
+                      className="mt-2 h-9 w-full border border-[#AEB5BB] px-3 text-sm text-[#1F2933] focus:outline-none focus:ring-1 focus:ring-[#287EAD]"
+                    />
+                  </div>
+
+                  <label className="flex cursor-pointer items-center gap-2 text-sm font-semibold text-[#1F2933]">
+                    <input
+                      type="checkbox"
+                      checked={shareNotifyByEmail}
+                      onChange={(event) => setShareNotifyByEmail(event.target.checked)}
+                      className="h-3.5 w-3.5 border-[#AEB5BB]"
+                    />
+                    Also notify by email
+                  </label>
+
+                  <div>
+                    <label className="text-sm font-semibold text-[#1F2933]">Message</label>
+                    <textarea
+                      value={shareMessage}
+                      onChange={(event) => setShareMessage(event.target.value)}
+                      rows={4}
+                      placeholder="Optional note shown with the share notification"
+                      className="mt-2 block w-full border border-[#AEB5BB] px-3 py-2 text-sm text-[#1F2933] focus:outline-none focus:ring-1 focus:ring-[#287EAD]"
+                    />
+                  </div>
+
+                  <div className="border border-[#C8CDD2] bg-[#F5F7F8] px-3 py-2 text-sm text-[#5E6870]">
+                    {shareRecipientIds.length} recipient{shareRecipientIds.length === 1 ? "" : "s"} · {selectedIds.length} document{selectedIds.length === 1 ? "" : "s"}
+                  </div>
+                </div>
+              </div>
+
+              <div className="flex items-center justify-end gap-2 border-t border-[#C8CDD2] bg-[#F5F7F8] px-5 py-3">
+                <button
+                  type="button"
+                  onClick={() => setShareModalOpen(false)}
+                  className="border border-[#C8CDD2] bg-white px-4 py-2 text-sm font-semibold text-[#1F2933] hover:bg-[#EEF6FB]"
+                >
+                  Cancel
+                </button>
+                <button
+                  type="button"
+                  onClick={() => shareSelectedMutation.mutate()}
+                  disabled={shareSelectedMutation.isPending || selectedIds.length === 0 || shareRecipientIds.length === 0}
+                  className="inline-flex items-center gap-2 bg-[#287EAD] px-4 py-2 text-sm font-semibold text-white hover:bg-[#206D99] disabled:cursor-not-allowed disabled:opacity-50"
+                >
+                  {shareSelectedMutation.isPending ? <Loader2 className="h-4 w-4 animate-spin" /> : <Share2 className="h-4 w-4" />}
+                  Share
+                </button>
+              </div>
+            </div>
+          </div>
+        )}
+
+        {emailModalOpen && (
+          <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-4">
+            <div className="w-full max-w-3xl border border-[#C8CDD2] bg-white shadow-2xl">
+              <div className="flex items-center justify-between border-b border-[#C8CDD2] bg-[#287EAD] px-5 py-3 text-white">
+                <div>
+                  <h2 className="text-base font-semibold">Send selected documents</h2>
+                  <p className="text-xs text-white/75">
+                    {selectedIds.length} document{selectedIds.length === 1 ? "" : "s"} selected
+                  </p>
+                </div>
+                <button
+                  type="button"
+                  onClick={() => setEmailModalOpen(false)}
+                  className="p-1 text-white/75 hover:text-white"
+                  aria-label="Close email dialog"
+                >
+                  <X className="h-5 w-5" />
+                </button>
+              </div>
+
+              <div className="grid gap-5 p-5 md:grid-cols-[1.1fr_0.9fr]">
+                <div className="space-y-3">
+                  <div>
+                    <label className="text-sm font-semibold text-[#1F2933]">Recipients</label>
+                    <div className="relative mt-2">
+                      <SearchIcon className="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-[#6E767D]" />
+                      <input
+                        value={emailRecipientSearch}
+                        onChange={(event) => setEmailRecipientSearch(event.target.value)}
+                        placeholder="Search users by name, email, or department"
+                        className="h-9 w-full border border-[#AEB5BB] bg-white pl-9 pr-3 text-sm text-[#1F2933] focus:outline-none focus:ring-1 focus:ring-[#287EAD]"
+                      />
+                    </div>
+                  </div>
+
+                  <div className="max-h-64 overflow-y-auto border border-[#C8CDD2]">
+                    {filteredEmailUsers.length === 0 ? (
+                      <div className="px-3 py-8 text-center text-sm text-[#5E6870]">
+                        No users found.
+                      </div>
+                    ) : (
+                      filteredEmailUsers.map((user) => {
+                        const checked = emailRecipientIds.includes(user.id);
+                        return (
+                          <label
+                            key={user.id}
+                            className={cn(
+                              "grid cursor-pointer grid-cols-[auto_1fr] gap-3 border-b border-[#D3D7DA] px-3 py-2 last:border-b-0 hover:bg-[#F5F7F8]",
+                              checked && "bg-[#EEF6FB]",
+                            )}
+                          >
+                            <input
+                              type="checkbox"
+                              checked={checked}
+                              onChange={() => {
+                                setEmailRecipientIds((prev) =>
+                                  prev.includes(user.id)
+                                    ? prev.filter((id) => id !== user.id)
+                                    : [...prev, user.id],
+                                );
+                              }}
+                              className="mt-1 h-3.5 w-3.5 border-[#AEB5BB]"
+                            />
+                            <span className="min-w-0">
+                              <span className="block truncate text-sm font-semibold text-[#1F2933]">
+                                {getUserDisplayName(user)}
+                              </span>
+                              <span className="block truncate text-xs text-[#5E6870]">
+                                {user.email}
+                                {user.department_name ? ` · ${user.department_name}` : ""}
+                              </span>
+                            </span>
+                          </label>
+                        );
+                      })
+                    )}
+                  </div>
+
+                  <div>
+                    <label className="text-sm font-semibold text-[#1F2933]">Additional email addresses</label>
+                    <textarea
+                      value={emailExtraRecipients}
+                      onChange={(event) => setEmailExtraRecipients(event.target.value)}
+                      rows={2}
+                      placeholder="name@example.com, another@example.com"
+                      className="mt-2 block w-full border border-[#AEB5BB] px-3 py-2 text-sm text-[#1F2933] focus:outline-none focus:ring-1 focus:ring-[#287EAD]"
+                    />
+                  </div>
+                </div>
+
+                <div className="space-y-4">
+                  <div>
+                    <label className="text-sm font-semibold text-[#1F2933]">Attachment handling</label>
+                    <div className="mt-2 space-y-2">
+                      <label className="flex cursor-pointer gap-3 border border-[#C8CDD2] bg-white p-3 hover:bg-[#F5F7F8]">
+                        <input
+                          type="radio"
+                          name="attachment-mode"
+                          value="separate"
+                          checked={emailAttachmentMode === "separate"}
+                          onChange={() => setEmailAttachmentMode("separate")}
+                          className="mt-1"
+                        />
+                        <span>
+                          <span className="block text-sm font-semibold text-[#1F2933]">Separate attachments</span>
+                          <span className="text-xs text-[#5E6870]">Each selected document is attached individually.</span>
+                        </span>
+                      </label>
+                      <label className="flex cursor-pointer gap-3 border border-[#C8CDD2] bg-white p-3 hover:bg-[#F5F7F8]">
+                        <input
+                          type="radio"
+                          name="attachment-mode"
+                          value="combined"
+                          checked={emailAttachmentMode === "combined"}
+                          onChange={() => setEmailAttachmentMode("combined")}
+                          className="mt-1"
+                        />
+                        <span>
+                          <span className="block text-sm font-semibold text-[#1F2933]">One attachment</span>
+                          <span className="text-xs text-[#5E6870]">Multiple documents are sent together as a ZIP file.</span>
+                        </span>
+                      </label>
+                    </div>
+                  </div>
+
+                  <div>
+                    <label className="text-sm font-semibold text-[#1F2933]">Message</label>
+                    <textarea
+                      value={emailMessage}
+                      onChange={(event) => setEmailMessage(event.target.value)}
+                      rows={5}
+                      placeholder="Optional note to include in the email"
+                      className="mt-2 block w-full border border-[#AEB5BB] px-3 py-2 text-sm text-[#1F2933] focus:outline-none focus:ring-1 focus:ring-[#287EAD]"
+                    />
+                  </div>
+
+                  <div className="border border-[#C8CDD2] bg-[#F5F7F8] px-3 py-2 text-sm text-[#5E6870]">
+                    {emailRecipientCount} recipient{emailRecipientCount === 1 ? "" : "s"} · {selectedIds.length} document{selectedIds.length === 1 ? "" : "s"}
+                  </div>
+                </div>
+              </div>
+
+              <div className="flex items-center justify-end gap-2 border-t border-[#C8CDD2] bg-[#F5F7F8] px-5 py-3">
+                <button
+                  type="button"
+                  onClick={() => setEmailModalOpen(false)}
+                  className="border border-[#C8CDD2] bg-white px-4 py-2 text-sm font-semibold text-[#1F2933] hover:bg-[#EEF6FB]"
+                >
+                  Cancel
+                </button>
+                <button
+                  type="button"
+                  onClick={() => emailSelectedMutation.mutate()}
+                  disabled={emailSelectedMutation.isPending || selectedIds.length === 0 || emailRecipientCount === 0}
+                  className="inline-flex items-center gap-2 bg-[#287EAD] px-4 py-2 text-sm font-semibold text-white hover:bg-[#206D99] disabled:cursor-not-allowed disabled:opacity-50"
+                >
+                  {emailSelectedMutation.isPending ? <Loader2 className="h-4 w-4 animate-spin" /> : <Send className="h-4 w-4" />}
+                  Send email
+                </button>
+              </div>
+            </div>
+          </div>
+        )}
       </div>
     );
   }
