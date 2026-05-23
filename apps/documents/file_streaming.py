@@ -12,11 +12,13 @@ from typing import Any
 
 from django.core.files.storage import default_storage
 from django.core.signing import BadSignature, TimestampSigner
+from django.db import models
 from django.http import HttpResponse
+from django.utils import timezone
 from django.utils.http import content_disposition_header
 
 from apps.accounts.models import GroupAction, User
-from apps.documents.models import Document, DocumentVersion
+from apps.documents.models import Document, DocumentShare, DocumentVersion
 from apps.workflows.models import WorkflowTask
 
 SIGN_SALT = "idm.document-file"
@@ -41,6 +43,14 @@ def user_can_view_document(user: User, doc: Document) -> bool:
         status__in=["pending", "in_progress", "held", "returned"],
     ).exists():
         return True
+    if DocumentShare.objects.filter(
+        document=doc,
+        recipient=user,
+        revoked_at__isnull=True,
+    ).filter(
+        models.Q(expires_at__isnull=True) | models.Q(expires_at__gt=timezone.now())
+    ).exists():
+        return True
     perms = user.get_all_permissions_for_doctype(document_type_id)
     return GroupAction.VIEW.value in perms
 
@@ -52,6 +62,15 @@ def user_can_download_document(user: User, doc: Document) -> bool:
         return True
     if getattr(doc, "is_self_upload", False):
         return doc.uploaded_by_id == user.id or getattr(doc, "owned_by_id", None) == user.id
+    if DocumentShare.objects.filter(
+        document=doc,
+        recipient=user,
+        access_level=DocumentShare.AccessLevel.DOWNLOAD,
+        revoked_at__isnull=True,
+    ).filter(
+        models.Q(expires_at__isnull=True) | models.Q(expires_at__gt=timezone.now())
+    ).exists():
+        return True
     document_type_id = str(getattr(doc, "document_type_id", None) or "")
     if not document_type_id:
         return False

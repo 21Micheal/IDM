@@ -22,13 +22,14 @@ import logging
 from .models import (
     Document, DocumentType, MetadataField,
     DocumentVersion, DocumentComment, Tag, OCRStatus,
-    BulkUpload, BulkUploadStatus, DocumentStatus,
+    BulkUpload, BulkUploadStatus, DocumentStatus, DocumentShare, DocumentRelationship,
 )
 from apps.accounts.serializers import UserSummarySerializer
 from apps.accounts.models import GroupAction
 from apps.workflows.models import WorkflowTemplate, WorkflowTask
 from django.db import transaction, IntegrityError
 from django.db.models import Q
+from django.utils import timezone
 from django.utils.text import slugify
 import mimetypes
 from django.core.files.storage import default_storage
@@ -181,6 +182,50 @@ class DocumentCommentSerializer(serializers.ModelSerializer):
         read_only_fields = ["id", "author", "created_at", "updated_at"]
 
 
+class RelatedDocumentSummarySerializer(serializers.ModelSerializer):
+    document_type_name = serializers.CharField(source="document_type.name", read_only=True)
+
+    class Meta:
+        model = Document
+        fields = [
+            "id", "title", "reference_number", "status",
+            "document_type_name", "file_name", "created_at", "updated_at",
+        ]
+
+
+class DocumentRelationshipSerializer(serializers.ModelSerializer):
+    source_document = RelatedDocumentSummarySerializer(read_only=True)
+    target_document = RelatedDocumentSummarySerializer(read_only=True)
+    related_document = serializers.SerializerMethodField()
+    direction = serializers.SerializerMethodField()
+    relation_type_label = serializers.CharField(source="get_relation_type_display", read_only=True)
+    created_by = UserSummarySerializer(read_only=True)
+
+    class Meta:
+        model = DocumentRelationship
+        fields = [
+            "id", "relation_type", "relation_type_label", "direction",
+            "source_document", "target_document", "related_document",
+            "note", "created_by", "created_at",
+        ]
+
+    def _current_document_id(self):
+        return str(self.context.get("document_id") or "")
+
+    def get_direction(self, obj):
+        return "outbound" if str(obj.source_document_id) == self._current_document_id() else "inbound"
+
+    def get_related_document(self, obj):
+        related = obj.target_document if self.get_direction(obj) == "outbound" else obj.source_document
+        return RelatedDocumentSummarySerializer(related, context=self.context).data
+
+
+class DocumentRelationshipWriteSerializer(serializers.Serializer):
+    target_document_id = serializers.UUIDField()
+    relation_type = serializers.ChoiceField(choices=DocumentRelationship.RelationType.values)
+    note = serializers.CharField(required=False, allow_blank=True, default="", max_length=2000)
+
+
 class DocumentListSerializer(serializers.ModelSerializer):
     document_type_name = serializers.CharField(source="document_type.name", read_only=True)
     uploaded_by        = UserSummarySerializer(read_only=True)
@@ -196,6 +241,8 @@ class DocumentListSerializer(serializers.ModelSerializer):
     is_edit_locked     = serializers.SerializerMethodField()
     edit_locked_by_name = serializers.SerializerMethodField()
     available_bulk_actions = serializers.SerializerMethodField()
+    shared_with_me = serializers.SerializerMethodField()
+    share_access_level = serializers.SerializerMethodField()
 
     class Meta:
         model  = Document
@@ -211,7 +258,7 @@ class DocumentListSerializer(serializers.ModelSerializer):
             "preview_pdf", "preview_status",
             "edit_locked_by", "edit_locked_by_name", "edit_locked_at", "is_edit_locked",
             "current_version", "created_at", "updated_at",
-            "available_bulk_actions",
+            "available_bulk_actions", "shared_with_me", "share_access_level",
         ]
 
     def get_description(self, obj):
@@ -238,7 +285,35 @@ class DocumentListSerializer(serializers.ModelSerializer):
                 GroupAction.DOWNLOAD.value, GroupAction.COMMENT.value,
                 GroupAction.ARCHIVE.value,
             ]
+        share = self._get_active_share(obj, user)
+        if share:
+            actions = [GroupAction.VIEW.value]
+            if share.access_level == DocumentShare.AccessLevel.DOWNLOAD:
+                actions.append(GroupAction.DOWNLOAD.value)
+            return actions
         return sorted(user.get_all_permissions_for_doctype(str(obj.document_type_id)))
+
+    def _get_active_share(self, obj, user):
+        return DocumentShare.objects.filter(
+            document=obj,
+            recipient=user,
+            revoked_at__isnull=True,
+        ).filter(
+            Q(expires_at__isnull=True) | Q(expires_at__gt=timezone.now())
+        ).first()
+
+    def get_shared_with_me(self, obj):
+        request = self.context.get("request")
+        user = getattr(request, "user", None)
+        return bool(user and user.is_authenticated and self._get_active_share(obj, user))
+
+    def get_share_access_level(self, obj):
+        request = self.context.get("request")
+        user = getattr(request, "user", None)
+        if not user or not user.is_authenticated:
+            return None
+        share = self._get_active_share(obj, user)
+        return share.access_level if share else None
 
     def get_preview_pdf(self, obj):
         request = self.context.get("request")
@@ -311,6 +386,8 @@ class DocumentDetailSerializer(serializers.ModelSerializer):
     is_edit_locked = serializers.SerializerMethodField()
     edit_locked_by_name = serializers.SerializerMethodField()
     ocr_suggestions = serializers.SerializerMethodField()
+    shared_with_me = serializers.SerializerMethodField()
+    share_access_level = serializers.SerializerMethodField()
 
     class Meta:
         model  = Document
@@ -329,7 +406,7 @@ class DocumentDetailSerializer(serializers.ModelSerializer):
             "preview_pdf", "preview_status",
             "edit_locked_by", "edit_locked_by_name", "edit_locked_at", "is_edit_locked",
             "current_version", "versions", "comments", "permissions",
-            "created_at", "updated_at",
+            "created_at", "updated_at", "shared_with_me", "share_access_level",
         ]
         read_only_fields = [
             "id", "reference_number", "file", "file_name", "file_size", "file_mime_type",
@@ -365,7 +442,35 @@ class DocumentDetailSerializer(serializers.ModelSerializer):
                 GroupAction.DOWNLOAD.value, GroupAction.COMMENT.value,
                 GroupAction.ARCHIVE.value,
             ]
+        share = self._get_active_share(obj, user)
+        if share:
+            actions = [GroupAction.VIEW.value]
+            if share.access_level == DocumentShare.AccessLevel.DOWNLOAD:
+                actions.append(GroupAction.DOWNLOAD.value)
+            return actions
         return sorted(user.get_all_permissions_for_doctype(str(obj.document_type_id)))
+
+    def _get_active_share(self, obj, user):
+        return DocumentShare.objects.filter(
+            document=obj,
+            recipient=user,
+            revoked_at__isnull=True,
+        ).filter(
+            Q(expires_at__isnull=True) | Q(expires_at__gt=timezone.now())
+        ).first()
+
+    def get_shared_with_me(self, obj):
+        request = self.context.get("request")
+        user = getattr(request, "user", None)
+        return bool(user and user.is_authenticated and self._get_active_share(obj, user))
+
+    def get_share_access_level(self, obj):
+        request = self.context.get("request")
+        user = getattr(request, "user", None)
+        if not user or not user.is_authenticated:
+            return None
+        share = self._get_active_share(obj, user)
+        return share.access_level if share else None
 
     def get_preview_pdf(self, obj):
         request = self.context.get("request")
@@ -792,6 +897,32 @@ class DocumentEmailSelectedSerializer(serializers.Serializer):
         if not attrs.get("recipient_user_ids") and not attrs.get("recipient_emails"):
             raise serializers.ValidationError("Select at least one recipient.")
         return attrs
+
+
+class DocumentShareSelectedSerializer(serializers.Serializer):
+    document_ids = serializers.ListField(
+        child=serializers.UUIDField(), min_length=1, max_length=100,
+    )
+    recipient_user_ids = serializers.ListField(
+        child=serializers.UUIDField(), min_length=1, max_length=100,
+    )
+    access_level = serializers.ChoiceField(
+        choices=DocumentShare.AccessLevel.values,
+        default=DocumentShare.AccessLevel.VIEW,
+    )
+    message = serializers.CharField(required=False, allow_blank=True, default="", max_length=2000)
+    expires_at = serializers.DateTimeField(required=False, allow_null=True)
+    notify_by_email = serializers.BooleanField(required=False, default=False)
+
+    def validate_recipient_user_ids(self, value):
+        if len(set(value)) != len(value):
+            raise serializers.ValidationError("Recipient list contains duplicates.")
+        return value
+
+    def validate_expires_at(self, value):
+        if value is not None and value <= timezone.now():
+            raise serializers.ValidationError("Expiry must be in the future.")
+        return value
 
 class DocumentTypeWriteSerializer(serializers.ModelSerializer):
     """

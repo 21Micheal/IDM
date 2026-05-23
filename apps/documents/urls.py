@@ -39,6 +39,11 @@ urlpatterns = [
         DocumentViewSet.as_view({"post": "email_selected"}),
         name="document-email-selected",
     ),
+    path(
+        "share_selected/",
+        DocumentViewSet.as_view({"post": "share_selected"}),
+        name="document-share-selected",
+    ),
     # ── WebDAV ─────────────────────────────────────────────────────────────
     path(
         "webdav/<uuid:document_id>/",

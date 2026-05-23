@@ -350,6 +350,91 @@ class Document(models.Model):
         return True
 
 
+class DocumentShare(models.Model):
+    class AccessLevel(models.TextChoices):
+        VIEW = "view", "View only"
+        DOWNLOAD = "download", "View and download"
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    document = models.ForeignKey(Document, on_delete=models.CASCADE, related_name="shares")
+    shared_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.PROTECT,
+        related_name="document_shares_created",
+    )
+    recipient = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.CASCADE,
+        related_name="document_shares_received",
+    )
+    access_level = models.CharField(
+        max_length=20,
+        choices=AccessLevel.choices,
+        default=AccessLevel.VIEW,
+    )
+    message = models.TextField(blank=True)
+    expires_at = models.DateTimeField(null=True, blank=True)
+    revoked_at = models.DateTimeField(null=True, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ["-created_at"]
+        unique_together = [("document", "recipient")]
+        indexes = [
+            models.Index(fields=["recipient", "revoked_at", "expires_at"]),
+            models.Index(fields=["document", "revoked_at"]),
+        ]
+
+    @property
+    def is_active(self) -> bool:
+        if self.revoked_at:
+            return False
+        return self.expires_at is None or self.expires_at > timezone.now()
+
+
+class DocumentRelationship(models.Model):
+    class RelationType(models.TextChoices):
+        SUPPORTS = "supports", "Supports"
+        REFERENCES = "references", "References"
+        SUPERSEDES = "supersedes", "Supersedes"
+        LINKED_TO = "linked-to", "Linked to"
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    source_document = models.ForeignKey(
+        Document,
+        on_delete=models.CASCADE,
+        related_name="outgoing_relationships",
+    )
+    target_document = models.ForeignKey(
+        Document,
+        on_delete=models.CASCADE,
+        related_name="incoming_relationships",
+    )
+    relation_type = models.CharField(max_length=30, choices=RelationType.choices)
+    note = models.TextField(blank=True)
+    created_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.PROTECT,
+        related_name="document_relationships_created",
+    )
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        ordering = ["relation_type", "-created_at"]
+        unique_together = [("source_document", "target_document", "relation_type")]
+        indexes = [
+            models.Index(fields=["source_document", "relation_type"]),
+            models.Index(fields=["target_document", "relation_type"]),
+        ]
+
+    def __str__(self):
+        return (
+            f"{self.source_document.reference_number} "
+            f"{self.relation_type} {self.target_document.reference_number}"
+        )
+
+
 class DocumentVersion(models.Model):
     id             = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
     document       = models.ForeignKey(Document, on_delete=models.CASCADE, related_name="versions")

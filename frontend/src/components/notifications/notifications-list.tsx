@@ -13,6 +13,7 @@ import {
   PauseCircle,
   PlayCircle,
   RotateCcw,
+  Share2,
   XCircle,
 } from "lucide-react";
 import clsx from "clsx";
@@ -64,6 +65,13 @@ export function getNotificationConfig(type: string, message = "") {
   }
 
   switch (type) {
+    case "document_shared":
+      return {
+        icon: Share2,
+        color: "text-sky-700 bg-sky-50 border-sky-200",
+        label: "Shared Document",
+        category: "Shared with You",
+      };
     case "task_assigned":
       return {
         icon: ClipboardCheck,
@@ -153,6 +161,10 @@ export function inferNotificationPriority(notification: Notification): Priority 
   return "low";
 }
 
+function shouldOpenWorkflow(notification: Notification): boolean {
+  return notification.type !== "document_shared";
+}
+
 export function NotificationList({
   notifications,
   isLoading = false,
@@ -204,7 +216,7 @@ export function NotificationList({
     };
     if (!notification.is_read) onMarkRead?.(notification.id);
 
-    if (detail.documentId) {
+    if (detail.documentId && shouldOpenWorkflow(notification)) {
       onOpenWorkflow?.(detail);
       return;
     }

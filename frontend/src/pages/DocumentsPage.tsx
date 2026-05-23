@@ -17,7 +17,7 @@ import {
   Archive, Trash2, Loader2, CheckSquare, Square, X, CheckCircle, XCircle,
   Search as SearchIcon, SlidersHorizontal, Eye,
   Rows3, LayoutGrid, Plus,
-  List, Mail, Send,
+  List, Mail, Send, Share2,
 } from "lucide-react";
 import { format } from "date-fns";
 import { cn } from "../lib/utils";
@@ -35,6 +35,7 @@ type BulkAction = "approve" | "reject" | "archive" | "void";
 const STATUS_OPTIONS = ["draft", "pending_approval", "approved", "rejected", "archived", "void"];
 
 type EmailAttachmentMode = "separate" | "combined";
+type ShareAccessLevel = "view" | "download";
 
 type EmailRecipientUser = {
   id: string;
@@ -335,6 +336,13 @@ export default function DocumentsPage({ personalOnly = false }: DocumentsPagePro
   const [emailExtraRecipients, setEmailExtraRecipients] = useState("");
   const [emailAttachmentMode, setEmailAttachmentMode] = useState<EmailAttachmentMode>("separate");
   const [emailMessage, setEmailMessage] = useState("");
+  const [shareModalOpen, setShareModalOpen] = useState(false);
+  const [shareRecipientIds, setShareRecipientIds] = useState<string[]>([]);
+  const [shareRecipientSearch, setShareRecipientSearch] = useState("");
+  const [shareAccessLevel, setShareAccessLevel] = useState<ShareAccessLevel>("view");
+  const [shareExpiresAt, setShareExpiresAt] = useState("");
+  const [shareNotifyByEmail, setShareNotifyByEmail] = useState(false);
+  const [shareMessage, setShareMessage] = useState("");
 
   // ── View mode (table / card / thumbnails) — Infor-style layout switcher ────
   type ViewMode = "table" | "card" | "thumbnails";
@@ -383,10 +391,10 @@ export default function DocumentsPage({ personalOnly = false }: DocumentsPagePro
   });
 
   const { data: usersData } = useQuery<unknown, Error, EmailRecipientUser[]>({
-    queryKey: ["users", "email-recipients"],
+    queryKey: ["users", "document-action-recipients"],
     queryFn: () => usersAPI.list({ page_size: 500 }).then((r) => r.data as unknown),
     select: (response) => normalizeListResponse(response) as EmailRecipientUser[],
-    enabled: emailModalOpen,
+    enabled: emailModalOpen || shareModalOpen,
     ...QUERY_FIVE_MIN_STALE,
   });
 
@@ -512,6 +520,34 @@ export default function DocumentsPage({ personalOnly = false }: DocumentsPagePro
     },
   });
 
+  const shareSelectedMutation = useMutation({
+    mutationFn: () =>
+      documentsAPI.shareSelected({
+        document_ids: selectedIds,
+        recipient_user_ids: shareRecipientIds,
+        access_level: shareAccessLevel,
+        expires_at: shareExpiresAt ? new Date(shareExpiresAt).toISOString() : null,
+        notify_by_email: shareNotifyByEmail,
+        message: shareMessage.trim(),
+      }),
+    onSuccess: (response) => {
+      const sharedCount = response.data?.shared ?? selectedIds.length * shareRecipientIds.length;
+      toast.success(`${sharedCount} document share${sharedCount === 1 ? "" : "s"} created.`);
+      setShareModalOpen(false);
+      setShareRecipientIds([]);
+      setShareRecipientSearch("");
+      setShareAccessLevel("view");
+      setShareExpiresAt("");
+      setShareNotifyByEmail(false);
+      setShareMessage("");
+      setSelectedIds([]);
+      queryClient.invalidateQueries({ queryKey: ["documents"] });
+    },
+    onError: (err: any) => {
+      toast.error(err?.response?.data?.detail ?? "Could not share selected documents.");
+    },
+  });
+
 
   const toggleAll = () => {
     const pageIds = docs.map((d: Document) => d.id);
@@ -576,6 +612,17 @@ export default function DocumentsPage({ personalOnly = false }: DocumentsPagePro
     .map((email) => email.trim())
     .filter(Boolean).length;
   const emailRecipientCount = emailRecipientIds.length + extraRecipientCount;
+
+  const filteredShareUsers = (usersData ?? []).filter((user) => {
+    const query = shareRecipientSearch.trim().toLowerCase();
+    if (!query) return true;
+    return [
+      getUserDisplayName(user),
+      user.email,
+      user.job_description,
+      user.department_name ?? "",
+    ].some((value) => value?.toLowerCase().includes(query));
+  });
 
   if (!isArchiveView && !personalOnly) {
     const matchingCount = data?.count ?? 0;
@@ -721,6 +768,14 @@ export default function DocumentsPage({ personalOnly = false }: DocumentsPagePro
                   <span className="font-semibold text-[#1F2933]">
                     {selectedIds.length} selected
                   </span>
+                  <button
+                    type="button"
+                    onClick={() => setShareModalOpen(true)}
+                    className="inline-flex items-center gap-2 border border-[#C8CDD2] bg-white px-3 py-1.5 text-sm font-semibold text-[#1F2933] hover:bg-[#EEF6FB] hover:text-[#287EAD]"
+                  >
+                    <Share2 className="h-4 w-4" />
+                    Share in app
+                  </button>
                   <button
                     type="button"
                     onClick={() => setEmailModalOpen(true)}
@@ -1061,6 +1116,179 @@ export default function DocumentsPage({ personalOnly = false }: DocumentsPagePro
             </section>
           </div>
         </div>
+
+        {shareModalOpen && (
+          <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-4">
+            <div className="w-full max-w-3xl border border-[#C8CDD2] bg-white shadow-2xl">
+              <div className="flex items-center justify-between border-b border-[#C8CDD2] bg-[#287EAD] px-5 py-3 text-white">
+                <div>
+                  <h2 className="text-base font-semibold">Share selected documents</h2>
+                  <p className="text-xs text-white/75">
+                    {selectedIds.length} document{selectedIds.length === 1 ? "" : "s"} selected
+                  </p>
+                </div>
+                <button
+                  type="button"
+                  onClick={() => setShareModalOpen(false)}
+                  className="p-1 text-white/75 hover:text-white"
+                  aria-label="Close share dialog"
+                >
+                  <X className="h-5 w-5" />
+                </button>
+              </div>
+
+              <div className="grid gap-5 p-5 md:grid-cols-[1.1fr_0.9fr]">
+                <div className="space-y-3">
+                  <div>
+                    <label className="text-sm font-semibold text-[#1F2933]">People</label>
+                    <div className="relative mt-2">
+                      <SearchIcon className="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-[#6E767D]" />
+                      <input
+                        value={shareRecipientSearch}
+                        onChange={(event) => setShareRecipientSearch(event.target.value)}
+                        placeholder="Search users by name, email, or department"
+                        className="h-9 w-full border border-[#AEB5BB] bg-white pl-9 pr-3 text-sm text-[#1F2933] focus:outline-none focus:ring-1 focus:ring-[#287EAD]"
+                      />
+                    </div>
+                  </div>
+
+                  <div className="max-h-72 overflow-y-auto border border-[#C8CDD2]">
+                    {filteredShareUsers.length === 0 ? (
+                      <div className="px-3 py-8 text-center text-sm text-[#5E6870]">
+                        No users found.
+                      </div>
+                    ) : (
+                      filteredShareUsers.map((user) => {
+                        const checked = shareRecipientIds.includes(user.id);
+                        return (
+                          <label
+                            key={user.id}
+                            className={cn(
+                              "grid cursor-pointer grid-cols-[auto_1fr] gap-3 border-b border-[#D3D7DA] px-3 py-2 last:border-b-0 hover:bg-[#F5F7F8]",
+                              checked && "bg-[#EEF6FB]",
+                            )}
+                          >
+                            <input
+                              type="checkbox"
+                              checked={checked}
+                              onChange={() => {
+                                setShareRecipientIds((prev) =>
+                                  prev.includes(user.id)
+                                    ? prev.filter((id) => id !== user.id)
+                                    : [...prev, user.id],
+                                );
+                              }}
+                              className="mt-1 h-3.5 w-3.5 border-[#AEB5BB]"
+                            />
+                            <span className="min-w-0">
+                              <span className="block truncate text-sm font-semibold text-[#1F2933]">
+                                {getUserDisplayName(user)}
+                              </span>
+                              <span className="block truncate text-xs text-[#5E6870]">
+                                {user.email}
+                                {user.department_name ? ` · ${user.department_name}` : ""}
+                              </span>
+                            </span>
+                          </label>
+                        );
+                      })
+                    )}
+                  </div>
+                </div>
+
+                <div className="space-y-4">
+                  <div>
+                    <label className="text-sm font-semibold text-[#1F2933]">Access</label>
+                    <div className="mt-2 space-y-2">
+                      <label className="flex cursor-pointer gap-3 border border-[#C8CDD2] bg-white p-3 hover:bg-[#F5F7F8]">
+                        <input
+                          type="radio"
+                          name="share-access"
+                          value="view"
+                          checked={shareAccessLevel === "view"}
+                          onChange={() => setShareAccessLevel("view")}
+                          className="mt-1"
+                        />
+                        <span>
+                          <span className="block text-sm font-semibold text-[#1F2933]">View only</span>
+                          <span className="text-xs text-[#5E6870]">Recipients can open the document in IDM.</span>
+                        </span>
+                      </label>
+                      <label className="flex cursor-pointer gap-3 border border-[#C8CDD2] bg-white p-3 hover:bg-[#F5F7F8]">
+                        <input
+                          type="radio"
+                          name="share-access"
+                          value="download"
+                          checked={shareAccessLevel === "download"}
+                          onChange={() => setShareAccessLevel("download")}
+                          className="mt-1"
+                        />
+                        <span>
+                          <span className="block text-sm font-semibold text-[#1F2933]">View and download</span>
+                          <span className="text-xs text-[#5E6870]">Recipients can also download the file.</span>
+                        </span>
+                      </label>
+                    </div>
+                  </div>
+
+                  <div>
+                    <label className="text-sm font-semibold text-[#1F2933]">Expiry</label>
+                    <input
+                      type="datetime-local"
+                      value={shareExpiresAt}
+                      onChange={(event) => setShareExpiresAt(event.target.value)}
+                      className="mt-2 h-9 w-full border border-[#AEB5BB] px-3 text-sm text-[#1F2933] focus:outline-none focus:ring-1 focus:ring-[#287EAD]"
+                    />
+                  </div>
+
+                  <label className="flex cursor-pointer items-center gap-2 text-sm font-semibold text-[#1F2933]">
+                    <input
+                      type="checkbox"
+                      checked={shareNotifyByEmail}
+                      onChange={(event) => setShareNotifyByEmail(event.target.checked)}
+                      className="h-3.5 w-3.5 border-[#AEB5BB]"
+                    />
+                    Also notify by email
+                  </label>
+
+                  <div>
+                    <label className="text-sm font-semibold text-[#1F2933]">Message</label>
+                    <textarea
+                      value={shareMessage}
+                      onChange={(event) => setShareMessage(event.target.value)}
+                      rows={4}
+                      placeholder="Optional note shown with the share notification"
+                      className="mt-2 block w-full border border-[#AEB5BB] px-3 py-2 text-sm text-[#1F2933] focus:outline-none focus:ring-1 focus:ring-[#287EAD]"
+                    />
+                  </div>
+
+                  <div className="border border-[#C8CDD2] bg-[#F5F7F8] px-3 py-2 text-sm text-[#5E6870]">
+                    {shareRecipientIds.length} recipient{shareRecipientIds.length === 1 ? "" : "s"} · {selectedIds.length} document{selectedIds.length === 1 ? "" : "s"}
+                  </div>
+                </div>
+              </div>
+
+              <div className="flex items-center justify-end gap-2 border-t border-[#C8CDD2] bg-[#F5F7F8] px-5 py-3">
+                <button
+                  type="button"
+                  onClick={() => setShareModalOpen(false)}
+                  className="border border-[#C8CDD2] bg-white px-4 py-2 text-sm font-semibold text-[#1F2933] hover:bg-[#EEF6FB]"
+                >
+                  Cancel
+                </button>
+                <button
+                  type="button"
+                  onClick={() => shareSelectedMutation.mutate()}
+                  disabled={shareSelectedMutation.isPending || selectedIds.length === 0 || shareRecipientIds.length === 0}
+                  className="inline-flex items-center gap-2 bg-[#287EAD] px-4 py-2 text-sm font-semibold text-white hover:bg-[#206D99] disabled:cursor-not-allowed disabled:opacity-50"
+                >
+                  {shareSelectedMutation.isPending ? <Loader2 className="h-4 w-4 animate-spin" /> : <Share2 className="h-4 w-4" />}
+                  Share
+                </button>
+              </div>
+            </div>
+          </div>
+        )}
 
         {emailModalOpen && (
           <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-4">
