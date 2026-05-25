@@ -195,6 +195,22 @@ CELERY_TASK_ROUTES = {
     "apps.documents.tasks.extract_text": {"queue": "indexing"},
     "apps.documents.tasks.generate_document_preview": {"queue": "preview"},
 }
+WORKFLOW_SLA_WARNING_HOURS = env.int("WORKFLOW_SLA_WARNING_HOURS", default=4)
+WORKFLOW_HOLD_WARNING_HOURS = env.int("WORKFLOW_HOLD_WARNING_HOURS", default=2)
+CELERY_BEAT_SCHEDULE = {
+    "workflow-sla-warning-backstop": {
+        "task": "apps.workflows.tasks.notify_sla_warning_tasks",
+        "schedule": 15 * 60,
+    },
+    "workflow-overdue-escalation-backstop": {
+        "task": "apps.workflows.tasks.escalate_overdue_tasks",
+        "schedule": 15 * 60,
+    },
+    "workflow-hold-ending-backstop": {
+        "task": "apps.workflows.tasks.notify_hold_ending_tasks",
+        "schedule": 15 * 60,
+    },
+}
 
 # ── Elasticsearch ─────────────────────────────────────────────────────────────
 ELASTICSEARCH_DSL = {

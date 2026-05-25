@@ -16,7 +16,7 @@ import {
   Workflow, ShieldCheck, Settings, LogOut,
   Bell, Users, Building2, UserRoundCog, Shield,
   ChevronDown, ChevronRight, Archive, ScanLine, Loader2, UserCheck, Monitor, Lock, History,
-  BellRing, CircleUserRound,
+  BellRing, CircleUserRound, ClipboardCheck, Inbox, ArrowRight,
 } from "lucide-react";
 import { useAuthStore } from "../../store/authStore";
 import { useQuery } from "@tanstack/react-query";
@@ -30,6 +30,8 @@ import clsx from "clsx";
 const ChatLauncher = lazy(() =>
   import("@/components/chat/ChatLauncher").then((module) => ({ default: module.ChatLauncher })),
 );
+
+const TASK_NOTIFICATION_TYPES = new Set(["task_assigned", "task_sla_warning", "task_overdue"]);
 
 // ── Types (unchanged) ─────────────────────────────────────────────────────────
 
@@ -244,6 +246,177 @@ function ProfileMenu() {
   );
 }
 
+function NotificationsTray({
+  notifications,
+  tasks,
+}: {
+  notifications?: { id: string; type: string; message: string; link?: string; is_read: boolean; created_at: string }[];
+  tasks: unknown[];
+}) {
+  const navigate = useNavigate();
+  const [open, setOpen] = useState(false);
+  const noticeNotifications = (notifications ?? [])
+    .filter((notification) => !TASK_NOTIFICATION_TYPES.has(notification.type));
+  const taskAlertNotifications = (notifications ?? [])
+    .filter((notification) => TASK_NOTIFICATION_TYPES.has(notification.type));
+  const visibleNotifications = noticeNotifications.slice(0, 5);
+  const visibleTaskAlerts = taskAlertNotifications.slice(0, 3);
+  const noticeUnreadCount = noticeNotifications.filter((notification) => !notification.is_read).length;
+  const taskAlertUnreadCount = taskAlertNotifications.filter((notification) => !notification.is_read).length;
+  const visibleTasks = tasks.slice(0, 5) as {
+    id?: string;
+    document_title?: string;
+    document_ref?: string;
+    step?: { name?: string };
+    due_at?: string | null;
+    workflow_instance?: { document?: { title?: string; reference_number?: string } };
+  }[];
+  const attentionCount = noticeUnreadCount + taskAlertUnreadCount + tasks.length;
+
+  const openNotification = (notification: { link?: string }) => {
+    setOpen(false);
+    navigate(notification.link || "/notifications");
+  };
+
+  const openTasks = () => {
+    setOpen(false);
+    navigate("/workflow");
+  };
+
+  return (
+    <div className="relative">
+      <button
+        onClick={() => setOpen((value) => !value)}
+        className="relative flex h-9 w-9 items-center justify-center border border-[#C8CDD2] bg-white text-[#5E6870] transition-colors hover:bg-[#EEF6FB] hover:text-[#287EAD]"
+        title="Notifications and tasks"
+        aria-label="Open notifications and tasks tray"
+      >
+        <BellRing className="h-5 w-5" />
+        {attentionCount > 0 && (
+          <span className="absolute -right-1 -top-1 flex h-4 min-w-[16px] items-center justify-center bg-red-700 px-1 text-[9px] font-bold text-white">
+            {attentionCount > 9 ? "9+" : attentionCount}
+          </span>
+        )}
+      </button>
+
+      {open && (
+        <>
+          <div className="fixed inset-0 z-20" onClick={() => setOpen(false)} />
+          <div className="absolute right-0 top-11 z-30 w-[380px] overflow-hidden border border-[#C8CDD2] bg-white shadow-2xl">
+            <div className="border-b border-[#C8CDD2] bg-[#287EAD] px-4 py-3 text-white">
+              <p className="text-sm font-bold">Notifications & tasks</p>
+              <p className="mt-0.5 text-xs text-white/75">Separate updates from assigned work.</p>
+            </div>
+
+            <div className="grid grid-cols-2 border-b border-[#C8CDD2] bg-[#F5F7F8] text-sm">
+              <button
+                type="button"
+                onClick={() => { setOpen(false); navigate("/notifications"); }}
+                className="flex items-center justify-between border-r border-[#C8CDD2] px-4 py-3 text-left font-semibold text-[#1F2933] hover:bg-[#EEF6FB]"
+              >
+                <span className="inline-flex items-center gap-2">
+                  <Inbox className="h-4 w-4 text-[#287EAD]" />
+                  Notices
+                </span>
+                <span className="font-bold text-[#287EAD]">{noticeUnreadCount}</span>
+              </button>
+              <button
+                type="button"
+                onClick={openTasks}
+                className="flex items-center justify-between px-4 py-3 text-left font-semibold text-[#1F2933] hover:bg-[#EEF6FB]"
+              >
+                <span className="inline-flex items-center gap-2">
+                  <ClipboardCheck className="h-4 w-4 text-[#287EAD]" />
+                  Tasks
+                </span>
+                <span className="font-bold text-[#287EAD]">{tasks.length + taskAlertUnreadCount}</span>
+              </button>
+            </div>
+
+            <div className="grid max-h-[430px] grid-cols-1 divide-y divide-[#C8CDD2] overflow-y-auto">
+              <section className="p-3">
+                <div className="mb-2 flex items-center justify-between">
+                  <p className="text-xs font-bold uppercase tracking-wider text-[#5E6870]">Notifications</p>
+                  <button onClick={() => { setOpen(false); navigate("/notifications"); }} className="text-xs font-bold text-[#287EAD] hover:text-[#206D99]">
+                    View all
+                  </button>
+                </div>
+                {visibleNotifications.length === 0 ? (
+                  <div className="border border-dashed border-[#C8CDD2] bg-[#F5F7F8] px-3 py-5 text-center text-sm text-[#5E6870]">
+                    No unread updates.
+                  </div>
+                ) : (
+                  <div className="space-y-1">
+                    {visibleNotifications.map((notification) => (
+                      <button
+                        key={notification.id}
+                        type="button"
+                        onClick={() => openNotification(notification)}
+                        className="block w-full border border-transparent px-3 py-2 text-left hover:border-[#C8CDD2] hover:bg-[#F5F7F8]"
+                      >
+                        <p className="line-clamp-2 text-sm font-semibold text-[#1F2933]">{notification.message}</p>
+                        <p className="mt-1 text-xs text-[#5E6870]">
+                          {new Date(notification.created_at).toLocaleString(undefined, { dateStyle: "short", timeStyle: "short" })}
+                        </p>
+                      </button>
+                    ))}
+                  </div>
+                )}
+              </section>
+
+              <section className="p-3">
+                <div className="mb-2 flex items-center justify-between">
+                  <p className="text-xs font-bold uppercase tracking-wider text-[#5E6870]">Tasks</p>
+                  <button onClick={openTasks} className="inline-flex items-center gap-1 text-xs font-bold text-[#287EAD] hover:text-[#206D99]">
+                    Open queue <ArrowRight className="h-3.5 w-3.5" />
+                  </button>
+                </div>
+                {visibleTaskAlerts.length > 0 && (
+                  <div className="mb-2 space-y-1">
+                    {visibleTaskAlerts.map((notification) => (
+                      <button
+                        key={notification.id}
+                        type="button"
+                        onClick={() => openNotification(notification)}
+                        className="block w-full border border-amber-200 bg-amber-50 px-3 py-2 text-left hover:bg-amber-100"
+                      >
+                        <p className="line-clamp-2 text-sm font-bold text-amber-900">{notification.message}</p>
+                      </button>
+                    ))}
+                  </div>
+                )}
+                {visibleTasks.length === 0 ? (
+                  <div className="border border-dashed border-[#C8CDD2] bg-[#F5F7F8] px-3 py-5 text-center text-sm text-[#5E6870]">
+                    No active tasks.
+                  </div>
+                ) : (
+                  <div className="space-y-1">
+                    {visibleTasks.map((task, index) => {
+                      const title = task.document_title || task.workflow_instance?.document?.title || "Workflow task";
+                      const ref = task.document_ref || task.workflow_instance?.document?.reference_number || task.step?.name || "";
+                      return (
+                        <button
+                          key={task.id || `${title}-${index}`}
+                          type="button"
+                          onClick={openTasks}
+                          className="block w-full border border-[#C8CDD2] bg-white px-3 py-2 text-left hover:bg-[#EEF6FB]"
+                        >
+                          <p className="truncate text-sm font-bold text-[#1F2933]">{title}</p>
+                          <p className="mt-1 truncate text-xs text-[#5E6870]">{ref}</p>
+                        </button>
+                      );
+                    })}
+                  </div>
+                )}
+              </section>
+            </div>
+          </div>
+        </>
+      )}
+    </div>
+  );
+}
+
 function ContentFallback() {
   const [visible, setVisible] = useState(false);
   useEffect(() => {
@@ -328,8 +501,8 @@ export default function Layout() {
     ...QUERY_SHORT_STALE,
   });
 
-  const unread = (notifications as { is_read: boolean }[] | undefined)
-    ?.filter((n) => !n.is_read).length ?? 0;
+  const unread = (notifications as { is_read: boolean; type: string }[] | undefined)
+    ?.filter((n) => !n.is_read && !TASK_NOTIFICATION_TYPES.has(n.type)).length ?? 0;
 
   const pendingTasksCount = (myTasks as unknown[]).length;
 
@@ -468,18 +641,10 @@ export default function Layout() {
               <ChatLauncher />
             </Suspense>
           ) : null}
-          <button
-            onClick={() => navigate("/notifications")}
-            className="relative flex h-9 w-9 items-center justify-center border border-[#C8CDD2] bg-white text-[#5E6870] transition-colors hover:bg-[#EEF6FB] hover:text-[#287EAD]"
-            title="Notifications"
-          >
-            <BellRing className="h-5 w-5" />
-            {unread > 0 && (
-              <span className="absolute -right-1 -top-1 flex h-4 min-w-[16px] items-center justify-center bg-red-700 px-1 text-[9px] font-bold text-white">
-                {unread > 9 ? "9+" : unread}
-              </span>
-            )}
-          </button>
+          <NotificationsTray
+            notifications={notifications as any}
+            tasks={myTasks as unknown[]}
+          />
           <div className="mx-1 h-6 w-px bg-[#C8CDD2]" />
           <ProfileMenu />
         </header>

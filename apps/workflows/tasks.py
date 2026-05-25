@@ -40,8 +40,10 @@ def auto_release_hold(self, task_id: str) -> None:
         logger.info("auto_release_hold: task %s released", task_id)
 
         # Notify the assigned approver that their task is active again
-        from apps.notifications.tasks import notify_hold_auto_released
+        from apps.notifications.tasks import notify_hold_auto_released, notify_task_overdue
         notify_hold_auto_released.delay(task_id)
+        if task.due_at and task.due_at <= timezone.now():
+            notify_task_overdue.delay(task_id)
 
     except WorkflowError as exc:
         logger.warning("auto_release_hold: %s", exc)
@@ -65,3 +67,35 @@ def escalate_overdue_tasks() -> None:
             notify_task_overdue.delay(str(task.id))
         except Exception as exc:
             logger.warning("escalate_overdue: task %s error: %s", task.id, exc)
+
+
+@shared_task(queue="default")
+def notify_sla_warning_tasks() -> None:
+    """
+    Sends near-SLA notifications for active tasks approaching their due_at time.
+    Useful as a periodic backstop in addition to ETA tasks scheduled at creation.
+    """
+    from .services import WorkflowService
+    from apps.notifications.tasks import notify_task_sla_warning
+
+    for task in WorkflowService.get_sla_warning_tasks():
+        try:
+            notify_task_sla_warning.delay(str(task.id))
+        except Exception as exc:
+            logger.warning("notify_sla_warning_tasks: task %s error: %s", task.id, exc)
+
+
+@shared_task(queue="default")
+def notify_hold_ending_tasks() -> None:
+    """
+    Sends notifications for held tasks whose scheduled hold end is approaching.
+    Useful as a periodic backstop in addition to ETA tasks scheduled at hold time.
+    """
+    from .services import WorkflowService
+    from apps.notifications.tasks import notify_hold_ending
+
+    for task in WorkflowService.get_hold_ending_tasks():
+        try:
+            notify_hold_ending.delay(str(task.id))
+        except Exception as exc:
+            logger.warning("notify_hold_ending_tasks: task %s error: %s", task.id, exc)

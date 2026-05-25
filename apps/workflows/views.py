@@ -256,6 +256,123 @@ class WorkflowTaskViewSet(viewsets.ReadOnlyModelViewSet):
         )
         return Response(WorkflowTaskSerializer(tasks, many=True).data)
 
+    # ── Approve ────────────────────────────────────────────────────────────
+
+    @action(detail=True, methods=["post"])
+    def approve(self, request, pk=None):
+        task = self.get_object()
+        if not task.step.allow_approve:
+            return Response({"detail": "Approve is not permitted for this step."}, status=403)
+        self._check_permission(task, request.user)
+        try:
+            WorkflowService.approve(task, request.user, request.data.get("comment", ""))
+        except WorkflowError as exc:
+            return Response({"detail": str(exc)}, status=400)
+        return Response({"status": "approved"})
+
+    # ── Reject ─────────────────────────────────────────────────────────────
+
+    @action(detail=True, methods=["post"])
+    def reject(self, request, pk=None):
+        task    = self.get_object()
+        if not task.step.allow_reject:
+            return Response({"detail": "Reject is not permitted for this step."}, status=403)
+        comment = request.data.get("comment", "").strip()
+        if not comment:
+            return Response({"detail": "A rejection comment is required."}, status=400)
+        self._check_permission(task, request.user)
+        try:
+            WorkflowService.reject(task, request.user, comment)
+        except WorkflowError as exc:
+            return Response({"detail": str(exc)}, status=400)
+        return Response({"status": "rejected"})
+
+    # ── Return for review ──────────────────────────────────────────────────
+
+    @action(detail=True, methods=["post"], url_path="return_for_review")
+    def return_for_review(self, request, pk=None):
+        task      = self.get_object()
+        comment   = request.data.get("comment", "").strip()
+        return_to = request.data.get("return_to", "previous_step")
+
+        if not comment:
+            return Response(
+                {"detail": "A comment explaining what needs to be fixed is required."},
+                status=400,
+            )
+        if not task.step.allow_return:
+            return Response({"detail": "Send back is not permitted for this step."}, status=403)
+        self._check_permission(task, request.user)
+        try:
+            WorkflowService.return_for_review(task, request.user, comment, return_to)
+        except WorkflowError as exc:
+            return Response({"detail": str(exc)}, status=400)
+        return Response({"status": "returned", "return_to": return_to, "detail": "Document returned for review."})
+
+    # ── Hold ───────────────────────────────────────────────────────────────
+
+    @action(detail=True, methods=["post"])
+    def hold(self, request, pk=None):
+        task       = self.get_object()
+        comment    = request.data.get("comment", "").strip()
+        hold_hours = request.data.get("hold_hours", 24)
+
+        if not comment:
+            return Response({"detail": "A comment is required when placing on hold."}, status=400)
+
+        try:
+            hold_hours = int(hold_hours)
+        except (TypeError, ValueError):
+            return Response({"detail": "hold_hours must be a whole number."}, status=400)
+        if hold_hours <= 0:
+            return Response({"detail": "hold_hours must be greater than zero."}, status=400)
+
+        self._check_permission(task, request.user)
+        try:
+            WorkflowService.hold(task, request.user, comment, hold_hours)
+        except WorkflowError as exc:
+            return Response({"detail": str(exc)}, status=400)
+
+        return Response({
+            "status": "held",
+            "held_until": task.held_until,
+            "detail": "Task placed on hold until the scheduled release time.",
+        })
+
+    # ── Release hold ───────────────────────────────────────────────────────
+
+    @action(detail=True, methods=["post"], url_path="release_hold")
+    def release_hold(self, request, pk=None):
+        task = self.get_object()
+        self._check_permission(task, request.user)
+        try:
+            WorkflowService.release_hold(task, actor=request.user)
+        except WorkflowError as exc:
+            return Response({"detail": str(exc)}, status=400)
+        return Response({"status": "in_progress", "detail": "Hold released. Task is now active."})
+
+    # ── Task action history ────────────────────────────────────────────────
+
+    @action(detail=True, methods=["get"])
+    def history(self, request, pk=None):
+        task    = self.get_object()
+        actions = task.actions.select_related("actor").all()
+        return Response(WorkflowTaskActionSerializer(actions, many=True).data)
+
+    # ── Helper ─────────────────────────────────────────────────────────────
+
+    def _check_permission(self, task, user):
+        has_active_delegation = UserDelegation.objects.filter(
+            delegator=task.assigned_to,
+            delegate=user,
+            is_active=True,
+            starts_at__lte=timezone.now(),
+            ends_at__gte=timezone.now(),
+        ).exists()
+        if task.assigned_to != user and not user.has_admin_access and not has_active_delegation:
+            from rest_framework.exceptions import PermissionDenied
+            raise PermissionDenied("You are not authorised to action this task.")
+
 
 class ApprovalTurnaroundView(APIView):
     """
@@ -336,134 +453,3 @@ class SlaBreachRateView(APIView):
             for row in qs
         ]
         return Response(data)
-
-    # ── Approve ────────────────────────────────────────────────────────────
-
-    @action(detail=True, methods=["post"])
-    def approve(self, request, pk=None):
-        task = self.get_object()
-        if not task.step.allow_approve:
-            return Response({"detail": "Approve is not permitted for this step."}, status=403)
-        self._check_permission(task, request.user)
-        try:
-            WorkflowService.approve(task, request.user, request.data.get("comment", ""))
-        except WorkflowError as exc:
-            return Response({"detail": str(exc)}, status=400)
-        return Response({"status": "approved"})
-
-    # ── Reject ─────────────────────────────────────────────────────────────
-
-    @action(detail=True, methods=["post"])
-    def reject(self, request, pk=None):
-        task    = self.get_object()
-        if not task.step.allow_reject:
-            return Response({"detail": "Reject is not permitted for this step."}, status=403)
-        comment = request.data.get("comment", "").strip()
-        if not comment:
-            return Response({"detail": "A rejection comment is required."}, status=400)
-        self._check_permission(task, request.user)
-        try:
-            WorkflowService.reject(task, request.user, comment)
-        except WorkflowError as exc:
-            return Response({"detail": str(exc)}, status=400)
-        return Response({"status": "rejected"})
-
-    # ── Return for review ──────────────────────────────────────────────────
-
-    @action(detail=True, methods=["post"], url_path="return_for_review")
-    def return_for_review(self, request, pk=None):
-        """
-        POST {
-            "comment": "Please correct the supplier name",
-            "return_to": "previous_step"  // or "uploader", "same_step"
-        }
-        Returns the document for rework. Comment is mandatory.
-        return_to controls where the document goes:
-        - 'previous_step': Return to previous approver (default)
-        - 'uploader': Return to document uploader  
-        - 'same_step': Reassign within same step
-        """
-        task     = self.get_object()
-        comment  = request.data.get("comment", "").strip()
-        return_to = request.data.get("return_to", "previous_step")
-        
-        if not comment:
-            return Response(
-                {"detail": "A comment explaining what needs to be fixed is required."},
-                status=400,
-            )
-        if not task.step.allow_return:
-            return Response({"detail": "Send back is not permitted for this step."}, status=403)
-        self._check_permission(task, request.user)
-        try:
-            WorkflowService.return_for_review(task, request.user, comment, return_to)
-        except WorkflowError as exc:
-            return Response({"detail": str(exc)}, status=400)
-        return Response({"status": "returned", "return_to": return_to, "detail": "Document returned for review."})
-
-    # ── Hold ───────────────────────────────────────────────────────────────
-
-    @action(detail=True, methods=["post"])
-    def hold(self, request, pk=None):
-        """
-        POST { "comment": "Awaiting supplier clarification" }
-        Places the task on hold indefinitely until the approver manually releases it.
-        No auto-release - the approver must decide when to release.
-        """
-        task       = self.get_object()
-        comment    = request.data.get("comment", "").strip()
-
-        if not comment:
-            return Response({"detail": "A comment is required when placing on hold."}, status=400)
-
-        self._check_permission(task, request.user)
-        try:
-            WorkflowService.hold(task, request.user, comment)
-        except WorkflowError as exc:
-            return Response({"detail": str(exc)}, status=400)
-
-        return Response({
-            "status": "held",
-            "detail": "Task placed on hold. The approver must manually release when ready.",
-        })
-
-    # ── Release hold ───────────────────────────────────────────────────────
-
-    @action(detail=True, methods=["post"], url_path="release_hold")
-    def release_hold(self, request, pk=None):
-        """
-        POST {} — manually release a held task when ready to proceed.
-        """
-        task = self.get_object()
-        self._check_permission(task, request.user)
-        try:
-            WorkflowService.release_hold(task, actor=request.user)
-        except WorkflowError as exc:
-            return Response({"detail": str(exc)}, status=400)
-        return Response({"status": "in_progress", "detail": "Hold released. Task is now active."})
-
-    # ── Task action history ────────────────────────────────────────────────
-
-    @action(detail=True, methods=["get"])
-    def history(self, request, pk=None):
-        """
-        GET .../tasks/{id}/history/
-        Returns the full chronological action log for this task.
-        """
-        task    = self.get_object()
-        actions = task.actions.select_related("actor").all()
-        return Response(WorkflowTaskActionSerializer(actions, many=True).data)
-
-    # ── Helper ─────────────────────────────────────────────────────────────
-
-    def _check_permission(self, task, user):
-        has_active_delegation = UserDelegation.objects.filter(
-            delegator=task.assigned_to,
-            delegate=user,
-            is_active=True,
-            starts_at__lte=timezone.now(),
-            ends_at__gte=timezone.now(),
-        ).exists()
-        if task.assigned_to != user and not user.has_admin_access and not has_active_delegation:
-            from rest_framework.exceptions import PermissionDenied
-            raise PermissionDenied("You are not authorised to action this task.")
