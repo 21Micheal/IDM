@@ -109,6 +109,7 @@ class DocumentIndex(ESDocument):
     document_date = fields.DateField()
     due_date = fields.DateField()
     status = fields.KeywordField()
+    workflow_status = fields.KeywordField()
     extracted_text = fields.TextField(analyzer="english")
     metadata = fields.ObjectField()
     metadata_text = fields.TextField(analyzer="english")
@@ -162,6 +163,31 @@ class DocumentIndex(ESDocument):
 
     def prepare_current_version(self, instance):
         return int(instance.current_version or 1)
+
+    def prepare_workflow_status(self, instance):
+        from apps.documents.models import DocumentStatus
+
+        status = (instance.status or "").strip()
+        normalized = status.lower()
+        active_task_statuses = {"pending", "in_progress", "held", "returned"}
+        workflow = getattr(instance, "workflow_instance", None)
+
+        if workflow is not None:
+            tasks = getattr(workflow, "tasks", None)
+            if tasks is not None and any(getattr(task, "status", None) in active_task_statuses for task in tasks.all()):
+                if "review" in normalized:
+                    return DocumentStatus.PENDING_REVIEW
+                if any(keyword in normalized for keyword in ("approve", "approval", "sign-off", "sign off")):
+                    return DocumentStatus.PENDING_APPROVAL
+                return DocumentStatus.PENDING_APPROVAL
+
+        if normalized in {choice.value for choice in DocumentStatus}:
+            return normalized
+        if "review" in normalized:
+            return DocumentStatus.PENDING_REVIEW
+        if any(keyword in normalized for keyword in ("approve", "approval", "sign-off", "sign off")):
+            return DocumentStatus.PENDING_APPROVAL
+        return None
 
     def prepare_department(self, instance):
         if instance.department_id and instance.department:

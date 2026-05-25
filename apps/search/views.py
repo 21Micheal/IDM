@@ -271,7 +271,14 @@ class DocumentSearchView(APIView):
 
         if filters.get("status"):
             statuses = _as_list(filters["status"])
-            s = s.filter("terms", status=statuses)
+            s = s.filter(
+                "bool",
+                should=[
+                    Q("terms", status=statuses),
+                    Q("terms", workflow_status=statuses),
+                ],
+                minimum_should_match=1,
+            )
 
         if filters.get("file_mime_type"):
             mime_types = _as_list(filters["file_mime_type"])
@@ -361,9 +368,17 @@ class DocumentSearchView(APIView):
             source_highlights = _build_source_highlights(hit, search_text) if search_text else {}
             highlight_dict = {**highlight_dict, **source_highlights}
 
+            score = getattr(hit.meta, "score", 0)
+            if score is None:
+                score = 0
+            try:
+                score = round(score, 3)
+            except (TypeError, ValueError):
+                score = 0
+
             hits.append({
                 "id": hit.meta.id,
-                "score": round(getattr(hit.meta, "score", 0), 3),
+                "score": score,
                 "title": getattr(hit, "title", ""),
                 "reference_number": getattr(hit, "reference_number", ""),
                 "document_type": getattr(hit, "document_type", ""),
