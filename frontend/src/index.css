@@ -41,21 +41,20 @@
 
     --radius: 0.625rem;
 
-    --gradient-sidebar: linear-gradient(180deg, hsl(206 85% 28%) 0%, hsl(210 90% 18%) 100%);
+    --gradient-sidebar: linear-gradient(180deg, hsl(203 64% 42%) 0%, hsl(203 78% 34%) 100%);
     --gradient-accent: linear-gradient(135deg, hsl(4 78% 49%), hsl(8 80% 44%));
     --gradient-brand: linear-gradient(135deg, hsl(203 80% 42%) 0%, hsl(195 80% 38%) 100%);
     --shadow-elegant: 0 4px 24px -8px hsl(203 80% 25% / 0.22);
     --shadow-card: 0 1px 3px hsl(210 30% 15% / 0.06), 0 1px 2px hsl(210 30% 15% / 0.04);
 
-    /* Sidebar: uses red for active indicators */
-    --sidebar-background: 210 90% 18%;
-    --sidebar-foreground: 210 20% 80%;
-    --sidebar-primary: 4 78% 49%;
+    --sidebar-background: 210 18% 96%;
+    --sidebar-foreground: 210 12% 26%;
+    --sidebar-primary: 203 64% 42%;
     --sidebar-primary-foreground: 0 0% 100%;
-    --sidebar-accent: 206 70% 25%;
-    --sidebar-accent-foreground: 0 0% 100%;
-    --sidebar-border: 206 60% 28%;
-    --sidebar-ring: 4 78% 49%;
+    --sidebar-accent: 204 35% 91%;
+    --sidebar-accent-foreground: 210 18% 18%;
+    --sidebar-border: 210 16% 80%;
+    --sidebar-ring: 203 64% 42%;
   }
 
   .dark {
@@ -90,10 +89,9 @@
     --input: 210 25% 18%;
     --ring: 203 80% 52%;
 
-    /* Sidebar: uses red for active indicators */
-    --sidebar-background: 210 60% 10%;
+    --sidebar-background: 210 36% 10%;
     --sidebar-foreground: 210 15% 78%;
-    --sidebar-primary: 4 78% 55%;
+    --sidebar-primary: 203 80% 52%;
     --sidebar-primary-foreground: 0 0% 100%;
     --sidebar-accent: 206 50% 18%;
     --sidebar-accent-foreground: 0 0% 100%;
