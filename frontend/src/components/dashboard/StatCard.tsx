@@ -44,16 +44,13 @@ export const StatCard: React.FC<StatCardProps> = ({
 
   const cardContent = (
     <div
-      className="group h-full rounded-xl border border-border bg-card p-5 transition-all duration-300 hover:-translate-y-0.5"
-      style={{ boxShadow: 'var(--shadow-card)' }}
-      onMouseEnter={(e) => (e.currentTarget.style.boxShadow = 'var(--shadow-elegant)')}
-      onMouseLeave={(e) => (e.currentTarget.style.boxShadow = 'var(--shadow-card)')}
+      className="group h-full border border-[#C8CDD2] bg-white p-4 transition-colors duration-200 hover:bg-[#F5F7F8]"
     >
       <div className="flex min-h-[5.75rem] flex-col justify-between">
         <div className="flex items-start justify-between gap-4">
           <div
             className={cn(
-              "flex h-10 w-10 shrink-0 items-center justify-center rounded-lg transition-colors",
+              "flex h-10 w-10 shrink-0 items-center justify-center border transition-colors",
               iconWrapVariants[color],
             )}
           >
@@ -80,10 +77,10 @@ export const StatCard: React.FC<StatCardProps> = ({
         </div>
 
         <div>
-          <p className="text-3xl font-semibold leading-none tracking-tight text-foreground">
+          <p className="text-2xl font-bold leading-none tracking-tight text-[#1F2933]">
             {value}
           </p>
-          <p className="mt-2 text-sm font-medium text-muted-foreground">
+          <p className="mt-2 text-sm font-semibold text-[#5E6870]">
             {title}
           </p>
         </div>

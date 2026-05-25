@@ -16,6 +16,7 @@ import {
   Workflow, ShieldCheck, Settings, LogOut,
   Bell, Users, Building2, UserRoundCog, Shield,
   ChevronDown, ChevronRight, Archive, ScanLine, Loader2, UserCheck, Monitor, Lock, History,
+  BellRing, CircleUserRound,
 } from "lucide-react";
 import { useAuthStore } from "../../store/authStore";
 import { useQuery } from "@tanstack/react-query";
@@ -205,33 +206,33 @@ function ProfileMenu() {
     <div className="relative">
       <button
         onClick={() => setOpen(!open)}
-        className="flex h-9 w-9 items-center justify-center rounded-lg text-muted-foreground transition-colors hover:bg-muted hover:text-foreground"
+        className="flex h-9 w-9 items-center justify-center border border-[#C8CDD2] bg-white text-[#5E6870] transition-colors hover:bg-[#EEF6FB] hover:text-[#287EAD]"
         title="Profile"
         aria-label="Open profile menu"
       >
-        <UserRoundCog className="h-5 w-5" />
+        <CircleUserRound className="h-5 w-5" />
       </button>
 
       {open && (
         <>
           <div className="fixed inset-0 z-10" onClick={() => setOpen(false)} />
-          <div className="absolute right-0 top-11 z-20 w-56 bg-card rounded-xl shadow-lg border border-border py-1 overflow-hidden">
-            <div className="px-4 py-2.5 border-b border-border">
-              <p className="text-xs font-semibold text-foreground">
+          <div className="absolute right-0 top-11 z-20 w-56 overflow-hidden border border-[#C8CDD2] bg-white py-1 shadow-xl">
+            <div className="border-b border-[#C8CDD2] bg-[#F5F7F8] px-4 py-2.5">
+              <p className="text-xs font-semibold text-[#1F2933]">
                 {user?.first_name} {user?.last_name}
               </p>
-              <p className="text-[11px] text-muted-foreground">{user?.email}</p>
+              <p className="text-[11px] text-[#5E6870]">{user?.email}</p>
             </div>
             <button
               onClick={() => { setOpen(false); navigate("/profile"); }}
-              className="flex items-center gap-2 w-full px-4 py-2 text-sm text-foreground hover:bg-muted transition-colors"
+              className="flex w-full items-center gap-2 px-4 py-2 text-sm text-[#1F2933] transition-colors hover:bg-[#F5F7F8]"
             >
-              <UserRoundCog className="w-4 h-4 text-muted-foreground" />
+              <CircleUserRound className="w-4 h-4 text-[#5E6870]" />
               My profile
             </button>
             <button
               onClick={() => { logout(); navigate("/login"); }}
-              className="flex items-center gap-2 w-full px-4 py-2 text-sm text-destructive hover:bg-destructive/10 transition-colors"
+              className="flex w-full items-center gap-2 px-4 py-2 text-sm text-red-700 transition-colors hover:bg-red-50"
             >
               <LogOut className="w-4 h-4" />
               Sign out
@@ -461,10 +462,7 @@ export default function Layout() {
 
       {/* ── Main area (unchanged) ──────────────────────────────────── */}
       <div className="flex-1 flex flex-col min-w-0">
-        <header
-          className="h-14 bg-card border-b border-border flex items-center justify-end px-6 gap-3 flex-shrink-0"
-          style={{ boxShadow: "var(--shadow-card)" }}
-        >
+        <header className="flex h-14 flex-shrink-0 items-center justify-end gap-2 border-b border-[#C8CDD2] bg-white px-6">
           {idleReady ? (
             <Suspense fallback={null}>
               <ChatLauncher />
@@ -472,17 +470,17 @@ export default function Layout() {
           ) : null}
           <button
             onClick={() => navigate("/notifications")}
-            className="relative text-muted-foreground hover:text-foreground p-1.5 rounded-md hover:bg-muted transition-colors"
+            className="relative flex h-9 w-9 items-center justify-center border border-[#C8CDD2] bg-white text-[#5E6870] transition-colors hover:bg-[#EEF6FB] hover:text-[#287EAD]"
             title="Notifications"
           >
-            <Bell className="w-5 h-5" />
+            <BellRing className="h-5 w-5" />
             {unread > 0 && (
-              <span className="absolute -top-0.5 -right-0.5 bg-destructive text-destructive-foreground text-[9px] font-bold w-4 h-4 rounded-full flex items-center justify-center">
+              <span className="absolute -right-1 -top-1 flex h-4 min-w-[16px] items-center justify-center bg-red-700 px-1 text-[9px] font-bold text-white">
                 {unread > 9 ? "9+" : unread}
               </span>
             )}
           </button>
-          <div className="w-px h-6 bg-border" />
+          <div className="mx-1 h-6 w-px bg-[#C8CDD2]" />
           <ProfileMenu />
         </header>
 

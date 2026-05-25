@@ -6,16 +6,16 @@ import {
   GitBranch, ArrowRight, ChevronLeft, ChevronRight,
   Layers, Timer, ShieldCheck, ClipboardCheck,
   Calendar, FileText, Inbox, ListChecks, Loader2, Search, Sparkles,
-  Filter, X, Hourglass,
+  Filter, X, Hourglass, BarChart3, UploadCloud,
 } from "lucide-react";
 import { Link, useNavigate } from "react-router-dom";
 import { formatDistanceToNow } from "date-fns";
+import clsx from "clsx";
 import StatusBadge from "@/components/documents/StatusBadge";
 import { useEffect, useRef, useState, useMemo } from "react";
 import type { Document, DocumentSearchResponse, SearchHit, WorkflowTask } from "@/types";
 import { StatCard } from "@/components/dashboard/StatCard";
 import { useDebounce } from "@/hooks/useDebounce";
-import { AnalyticsDashboard } from "./AnalyticsDashboard";
 import { highlightSearchText, getPreferredHighlights } from "@/lib/search";
 import { QUERY_FIVE_MIN_STALE, QUERY_SHORT_STALE, QUERY_FOCUS_OFF } from "@/lib/reactQueryDefaults";
 import { formatDocumentFileType } from "@/lib/documentFormat";
@@ -166,6 +166,19 @@ function getDocumentDepartmentName(doc: Document) {
     doc.uploaded_by?.department_name ||
     "—"
   );
+}
+
+function getDashboardStatusLabel(status: string): string {
+  return status ? status.replace(/_/g, " ").replace(/\b\w/g, (char) => char.toUpperCase()) : "Unknown";
+}
+
+function getDashboardStatusClass(status: string): string {
+  const key = status?.toLowerCase?.().replace(/\s+/g, "_") ?? "";
+  if (["approved", "completed"].includes(key)) return "text-emerald-700";
+  if (["pending_review", "pending_approval"].includes(key)) return "text-amber-700";
+  if (["rejected", "void"].includes(key)) return "text-red-700";
+  if (key === "archived") return "text-sky-700";
+  return "text-[#3F474F]";
 }
 
 function formatStorageAmount(bytes: number) {
@@ -535,36 +548,6 @@ export default function DashboardPage() {
     ...QUERY_FOCUS_OFF,
   });
 
-  // ── Analytics queries (manager view) ────────────────────────────────────
-  // Real endpoints - enabled only for admin users and after metrics are allowed
-  const { data: turnaroundData, isLoading: turnaroundLoading } = useQuery({
-    queryKey: ["analytics", "turnaround"],
-    queryFn: () => api.get("/analytics/approval-turnaround/").then((r) => r.data),
-    enabled: metricsEnabled && Boolean(user?.has_admin_access),
-    ...QUERY_FIVE_MIN_STALE,
-  });
-
-  const { data: slaData, isLoading: slaLoading } = useQuery({
-    queryKey: ["analytics", "sla-breach"],
-    queryFn: () => api.get("/analytics/sla-breach-rate/").then((r) => r.data),
-    enabled: metricsEnabled && Boolean(user?.has_admin_access),
-    ...QUERY_FIVE_MIN_STALE,
-  });
-
-  const { data: volumeData, isLoading: volumeLoading } = useQuery({
-    queryKey: ["analytics", "document-volume"],
-    queryFn: () => api.get("/analytics/document-volume/").then((r) => r.data),
-    enabled: metricsEnabled && Boolean(user?.has_admin_access),
-    ...QUERY_FIVE_MIN_STALE,
-  });
-
-  const { data: uploadersData, isLoading: uploadersLoading } = useQuery({
-    queryKey: ["analytics", "top-uploaders"],
-    queryFn: () => api.get("/analytics/top-uploaders/").then((r) => r.data),
-    enabled: metricsEnabled && Boolean(user?.has_admin_access),
-    ...QUERY_FIVE_MIN_STALE,
-  });
-
   // ── Computed Values ───────────────────────────────────────────────────────
 
   const recentDocsCount = recentDocs?.count ?? 0;
@@ -636,12 +619,11 @@ export default function DashboardPage() {
   const visibleTasks = filteredTasks.slice(0, hasTaskFilters ? 8 : 4);
   const taskGridClass =
     visibleTasks.length === 1
-      ? "mt-5 grid grid-cols-1 gap-3 md:max-w-xl"
+      ? "mt-4 grid grid-cols-1 gap-3 md:max-w-xl"
       : visibleTasks.length === 2
-        ? "mt-5 grid grid-cols-1 gap-3 md:grid-cols-2"
-        : "mt-5 grid grid-cols-1 gap-3 md:grid-cols-2 xl:grid-cols-4";
+        ? "mt-4 grid grid-cols-1 gap-3 md:grid-cols-2"
+        : "mt-4 grid grid-cols-1 gap-3 md:grid-cols-2 xl:grid-cols-4";
   const activityCardStyle = {
-    boxShadow: "var(--shadow-card)",
     minHeight: "440px",
   };
 
@@ -685,33 +667,25 @@ export default function DashboardPage() {
   // ── Render ────────────────────────────────────────────────────────────────
 
   return (
-    <div className="min-h-full w-full space-y-6">
-      {/* Header */}
-      <div className="flex flex-col gap-4 xl:flex-row xl:items-end xl:justify-between">
-        <div className="space-y-2">
-          <p className="text-xs font-medium uppercase tracking-[0.32em] text-muted-foreground">
-            Workspace · {user?.first_name ? `Welcome, ${user.first_name}` : "East Africa"}
-          </p>
-          <div className="space-y-1">
-            <h1 className="text-3xl sm:text-4xl font-semibold tracking-tight text-foreground">
-              Document Operations
-            </h1>
-            <p className="max-w-2xl text-sm text-muted-foreground">
-              Review recent submissions, pending approvals, and activity across your repositories.
-            </p>
-          </div>
+    <div className="-m-6 min-h-[calc(100vh-3.5rem)] bg-[#EDEDED] text-[#1F2933]">
+      <div className="flex min-h-[69px] flex-col gap-3 bg-[#287EAD] px-5 py-3 text-white xl:flex-row xl:items-center xl:justify-between">
+        <div className="min-w-0">
+          <p className="text-[11px] font-semibold uppercase tracking-[0.2em] text-white/70">Operations workspace</p>
+          <h1 className="mt-1 text-xl font-semibold tracking-tight">
+            {user?.first_name ? `Welcome, ${user.first_name}` : "Document Operations"}
+          </h1>
         </div>
 
-        <div className="flex flex-col gap-3 sm:flex-row sm:items-start">
-          <div ref={dashboardSearchRef} className="relative w-full sm:w-96">
+        <div className="flex min-w-0 flex-1 flex-col gap-2 xl:max-w-3xl xl:flex-row xl:items-start">
+          <div ref={dashboardSearchRef} className="relative min-w-0 flex-1">
             <div className="relative">
-              <span className="pointer-events-none absolute left-4 top-1/2 -translate-y-1/2 text-muted-foreground">
+              <span className="pointer-events-none absolute left-3 top-1/2 -translate-y-1/2 text-[#5E6870]">
                 <Search className="w-4 h-4" />
               </span>
               <input
                 type="search"
                 placeholder="Search documents, metadata, content..."
-                className="input w-full pl-11 pr-4"
+                className="h-9 w-full border border-[#AEB5BB] bg-white pl-9 pr-3 text-sm text-[#1F2933] placeholder:text-[#6E767D] focus:outline-none focus:ring-1 focus:ring-white/70"
                 value={dashboardSearch}
                 onChange={(e) => setDashboardSearch(e.target.value)}
                 onFocus={() => setIsDashboardSearchFocused(true)}
@@ -748,25 +722,24 @@ export default function DashboardPage() {
 
             {showDashboardSearchPanel && (
               <div
-                className="absolute left-0 right-0 top-[calc(100%+0.5rem)] z-30 overflow-hidden rounded-xl border border-border bg-card"
-                style={{ boxShadow: "var(--shadow-card)" }}
+                className="absolute left-0 right-0 top-[calc(100%+0.5rem)] z-30 overflow-hidden border border-[#C8CDD2] bg-white text-[#1F2933] shadow-2xl"
               >
-                <div className="border-b border-border bg-muted/40 px-4 py-3">
+                <div className="border-b border-[#C8CDD2] bg-[#F5F7F8] px-4 py-3">
                   <div className="flex items-center justify-between gap-3">
                     <div>
-                      <p className="text-sm font-semibold text-foreground">Quick search</p>
-                      <p className="text-xs text-muted-foreground">
+                      <p className="text-sm font-semibold text-[#1F2933]">Quick search</p>
+                      <p className="text-xs text-[#5E6870]">
                         {dashboardSearch.trim().length < 2
                           ? "Type at least 2 characters to search across document text and metadata."
                           : "Open a document directly, or continue to advanced search for filters."}
                       </p>
                     </div>
-                    <Sparkles className="h-4 w-4 text-accent" />
+                    <Sparkles className="h-4 w-4 text-[#287EAD]" />
                   </div>
                 </div>
 
                 {dashboardSearch.trim().length < 2 ? (
-                  <div className="px-4 py-5 text-sm text-muted-foreground">
+                  <div className="px-4 py-5 text-sm text-[#5E6870]">
                     Keep typing to see live matches from Elasticsearch.
                   </div>
                 ) : isDashboardSearchLoading ? (
@@ -783,17 +756,17 @@ export default function DashboardPage() {
                           <button
                             key={hit.id}
                             type="button"
-                            className={`block w-full px-4 py-3 text-left transition-colors hover:bg-muted/40 ${
-                              activeDashboardResultIndex === index ? "bg-muted/50" : ""
+                            className={`block w-full px-4 py-3 text-left transition-colors hover:bg-[#F5F7F8] ${
+                              activeDashboardResultIndex === index ? "bg-[#EEF6FB]" : ""
                             }`}
                             onMouseEnter={() => setActiveDashboardResultIndex(index)}
                             onClick={() => handleDashboardResultOpen(hit)}
                           >
                             <div className="flex items-start justify-between gap-3">
                               <div className="min-w-0 flex-1">
-                                <div className="mb-1 flex flex-wrap items-center gap-2 text-xs text-muted-foreground">
+                                <div className="mb-1 flex flex-wrap items-center gap-2 text-xs text-[#5E6870]">
                                   <span
-                                    className="font-mono text-brand-600"
+                                    className="font-mono text-[#287EAD]"
                                     dangerouslySetInnerHTML={{
                                       __html: highlightSearchText(hit.reference_number, dashboardSearchTerm),
                                     }}
@@ -804,22 +777,22 @@ export default function DashboardPage() {
                                   <span>{formatDocumentFileType(hit.file_name, hit.file_mime_type)}</span>
                                 </div>
                                 <p
-                                  className="truncate text-sm font-semibold text-foreground"
+                                  className="truncate text-sm font-semibold text-[#1F2933]"
                                   dangerouslySetInnerHTML={{
                                     __html: highlightSearchText(String(hit.title || ""), dashboardSearchTerm),
                                   }}
                                 />
                                 {hit.supplier && (
                                   <p
-                                    className="mt-1 truncate text-xs text-muted-foreground"
+                                    className="mt-1 truncate text-xs text-[#5E6870]"
                                     dangerouslySetInnerHTML={{
                                       __html: highlightSearchText(hit.supplier, dashboardSearchTerm),
                                     }}
                                   />
                                 )}
                                 {preferredHighlights.length > 0 ? (
-                                  <div className="mt-2 rounded-md bg-muted/40 px-2.5 py-2">
-                                    <div className="line-clamp-3 text-xs leading-5 text-foreground space-y-2">
+                                  <div className="mt-2 bg-[#F5F7F8] px-2.5 py-2">
+                                    <div className="line-clamp-3 space-y-2 text-xs leading-5 text-[#1F2933]">
                                       {preferredHighlights.map(([field, snippet]) => (
                                         <div key={field} className="italic">
                                           <span
@@ -832,8 +805,8 @@ export default function DashboardPage() {
                                     </div>
                                   </div>
                                 ) : (
-                                  <div className="mt-2 rounded-md bg-muted/40 px-2.5 py-2">
-                                    <div className="line-clamp-3 text-xs leading-5 text-foreground italic">
+                                  <div className="mt-2 bg-[#F5F7F8] px-2.5 py-2">
+                                    <div className="line-clamp-3 text-xs italic leading-5 text-[#1F2933]">
                                       <span
                                         dangerouslySetInnerHTML={{
                                           __html: highlightSearchText(
@@ -853,19 +826,19 @@ export default function DashboardPage() {
                       })}
                     </div>
 
-                    <div className="flex items-center justify-between gap-3 border-t border-border bg-muted/30 px-4 py-3">
+                    <div className="flex items-center justify-between gap-3 border-t border-[#C8CDD2] bg-[#F5F7F8] px-4 py-3">
                       <div className="space-y-1">
-                        <p className="text-xs text-muted-foreground">
+                        <p className="text-xs text-[#5E6870]">
                           {dashboardResultsTotal} result{dashboardResultsTotal !== 1 ? "s" : ""} for "{dashboardSearchTerm}"
                         </p>
-                        <p className="text-[11px] text-muted-foreground">
+                        <p className="text-[11px] text-[#5E6870]">
                           {hasActiveDashboardSelection ? "Enter to open selected result" : "Arrow keys to browse"} • Esc to close
                         </p>
                       </div>
                       <button
                         type="button"
                         onClick={handleDashboardSearch}
-                        className="inline-flex items-center gap-2 text-sm font-semibold text-foreground transition-colors hover:text-accent"
+                        className="inline-flex items-center gap-2 text-sm font-semibold text-[#287EAD] transition-colors hover:text-[#206D99]"
                       >
                         Advanced search <ArrowRight className="h-4 w-4" />
                       </button>
@@ -873,14 +846,14 @@ export default function DashboardPage() {
                   </>
                 ) : (
                   <div className="px-4 py-5">
-                    <p className="text-sm font-medium text-foreground">No direct matches yet</p>
-                    <p className="mt-1 text-xs text-muted-foreground">
+                    <p className="text-sm font-medium text-[#1F2933]">No direct matches yet</p>
+                    <p className="mt-1 text-xs text-[#5E6870]">
                       Try a different keyword, or open advanced search to apply filters.
                     </p>
                     <button
                       type="button"
                       onClick={handleDashboardSearch}
-                      className="mt-3 inline-flex items-center gap-2 text-sm font-semibold text-foreground transition-colors hover:text-accent"
+                      className="mt-3 inline-flex items-center gap-2 text-sm font-semibold text-[#287EAD] transition-colors hover:text-[#206D99]"
                     >
                       Search everything <ArrowRight className="h-4 w-4" />
                     </button>
@@ -893,7 +866,7 @@ export default function DashboardPage() {
           <button
             type="button"
             onClick={handleDashboardSearch}
-            className="inline-flex items-center justify-center gap-2 rounded-lg border border-border bg-card px-4 py-2.5 text-sm font-semibold text-foreground transition-colors hover:bg-muted"
+            className="inline-flex h-9 items-center justify-center gap-2 border border-white/20 bg-[#206D99] px-4 text-sm font-semibold text-white transition-colors hover:bg-[#1B5F86]"
           >
             <Search className="w-4 h-4" />
             Search
@@ -901,66 +874,213 @@ export default function DashboardPage() {
         </div>
       </div>
 
-      {/* Key Metrics */}
-      <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 xl:grid-cols-4">
-        <StatCard
-          title="Total Documents"
-          value={totalDocuments}
-          icon={Layers}
-          color="primary"
-          trend={totalDocumentsTrend}
-          href="/documents"
-        />
-        <StatCard
-          title="Pending Approval"
-          value={pendingCount}
-          icon={Timer}
-          color="accent"
-          trend={pendingApprovalTrend}
-          href="/documents?status=pending_approval"
-        />
-        <StatCard
-          title="Approved Today"
-          value={approvedTodayCount}
-          icon={ShieldCheck}
-          color="primary"
-          trend={approvedTrend}
-          href="/documents?status=approved"
-        />
-        <StatCard
-          title="My Tasks"
-          value={myTasks.length}
-          icon={ClipboardCheck}
-          color="teal"
-          trend={tasksTrend}
-          href="/workflow"
-        />
-      </div>
+      <div className="space-y-4 p-4 pr-8">
+        <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 xl:grid-cols-4">
+          <StatCard
+            title="Total Documents"
+            value={totalDocuments}
+            icon={Layers}
+            color="primary"
+            trend={totalDocumentsTrend}
+            href="/documents"
+          />
+          <StatCard
+            title="Pending Approval"
+            value={pendingCount}
+            icon={Timer}
+            color="accent"
+            trend={pendingApprovalTrend}
+            href="/documents?status=pending_approval"
+          />
+          <StatCard
+            title="Approved Today"
+            value={approvedTodayCount}
+            icon={ShieldCheck}
+            color="primary"
+            trend={approvedTrend}
+            href="/documents?status=approved"
+          />
+          <StatCard
+            title="My Tasks"
+            value={myTasks.length}
+            icon={ClipboardCheck}
+            color="teal"
+            trend={tasksTrend}
+            href="/workflow"
+          />
+        </div>
 
-      {/* ── Analytics (manager view) ───────────────────────────────── */}
-      {user?.has_admin_access && (
-        <AnalyticsDashboard
-          turnaroundData={turnaroundData ?? []}
-          slaData={slaData ?? []}
-          volumeData={volumeData ?? []}
-          uploadersData={uploadersData ?? []}
-          isLoading={turnaroundLoading || slaLoading || volumeLoading || uploadersLoading}
-        />
-      )}
+        <div className="grid grid-cols-1 gap-3 xl:grid-cols-[1fr_360px]">
+          <section className="border border-[#C8CDD2] bg-white">
+            <div className="flex flex-wrap items-center justify-between gap-3 border-b border-[#C8CDD2] px-4 py-3">
+              <div>
+                <h2 className="text-sm font-bold text-[#1F2933]">Work queue</h2>
+                <p className="text-sm text-[#5E6870]">
+                  {tasksLoading
+                    ? "Checking tasks waiting for your attention."
+                    : hasOpenTasks
+                      ? hasTaskFilters
+                        ? `${filteredTasks.length} of ${allTasks.length} tasks match your filters.`
+                        : "Tasks waiting for your attention."
+                      : "All clear. No tasks need your attention right now."}
+                </p>
+              </div>
+              <div className="flex items-center gap-2">
+                <span className="inline-flex items-center gap-1.5 border border-[#287EAD]/25 bg-[#EEF6FB] px-2.5 py-1 text-xs font-bold text-[#287EAD]">
+                  <Inbox className="h-3.5 w-3.5" />
+                  {allTasks.length} open
+                </span>
+                <Link
+                  to="/workflow"
+                  className="inline-flex items-center gap-1 border border-[#C8CDD2] bg-white px-3 py-1.5 text-xs font-bold text-[#1F2933] hover:bg-[#F5F7F8]"
+                >
+                  View queue <ArrowRight className="h-3.5 w-3.5" />
+                </Link>
+              </div>
+            </div>
+
+            {hasOpenTasks && (
+              <div className="border-b border-[#C8CDD2] bg-[#F5F7F8] p-3">
+                <div className="grid grid-cols-1 gap-2 md:grid-cols-2 xl:grid-cols-6">
+                  <div className="relative xl:col-span-2">
+                    <Search className="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-[#5E6870]" />
+                    <input
+                      type="search"
+                      value={taskFilters.search}
+                      onChange={(e) => updateTaskFilter("search", e.target.value)}
+                      placeholder="Find title, reference, uploader..."
+                      className="h-9 w-full border border-[#AEB5BB] bg-white pl-9 pr-3 text-sm text-[#1F2933] focus:outline-none focus:ring-1 focus:ring-[#287EAD]"
+                    />
+                  </div>
+                  <select value={taskFilters.documentType} onChange={(e) => updateTaskFilter("documentType", e.target.value)} className="h-9 border border-[#AEB5BB] bg-white px-2 text-sm text-[#1F2933]">
+                    <option value="">All document types</option>
+                    {taskFilterOptions.documentTypes.map((option) => <option key={option.value} value={option.value}>{option.label} ({option.count})</option>)}
+                  </select>
+                  <select value={taskFilters.department} onChange={(e) => updateTaskFilter("department", e.target.value)} className="h-9 border border-[#AEB5BB] bg-white px-2 text-sm text-[#1F2933]">
+                    <option value="">All departments</option>
+                    {taskFilterOptions.departments.map((option) => <option key={option.value} value={option.value}>{option.label} ({option.count})</option>)}
+                  </select>
+                  <select value={taskFilters.fileFormat} onChange={(e) => updateTaskFilter("fileFormat", e.target.value)} className="h-9 border border-[#AEB5BB] bg-white px-2 text-sm text-[#1F2933]">
+                    <option value="">All formats</option>
+                    {taskFilterOptions.fileFormats.map((option) => <option key={option.value} value={option.value}>{option.label} ({option.count})</option>)}
+                  </select>
+                  <select value={taskFilters.urgency} onChange={(e) => updateTaskFilter("urgency", e.target.value as WorkflowTaskFilters["urgency"])} className="h-9 border border-[#AEB5BB] bg-white px-2 text-sm text-[#1F2933]">
+                    <option value="">Any urgency</option>
+                    <option value="overdue">Overdue</option>
+                    <option value="due_soon">Due in 24h</option>
+                    <option value="held">On hold</option>
+                  </select>
+                </div>
+                <div className="mt-2 flex flex-wrap items-center justify-between gap-2 text-xs text-[#5E6870]">
+                  <div className="inline-flex items-center gap-1.5">
+                    <Filter className="h-3.5 w-3.5" />
+                    <span>{filteredTasks.length} matching task{filteredTasks.length !== 1 ? "s" : ""}</span>
+                  </div>
+                  {hasTaskFilters && (
+                    <button type="button" onClick={clearTaskFilters} className="inline-flex items-center gap-1 font-bold text-[#287EAD] hover:text-[#206D99]">
+                      <X className="h-3.5 w-3.5" />
+                      Clear filters
+                    </button>
+                  )}
+                </div>
+              </div>
+            )}
+
+            <div className="p-4">
+              {tasksLoading ? (
+                <div className="flex items-center gap-2 border border-[#C8CDD2] bg-[#F5F7F8] p-4 text-sm text-[#5E6870]">
+                  <Loader2 className="h-4 w-4 animate-spin text-[#287EAD]" />
+                  Loading tasks...
+                </div>
+              ) : visibleTasks.length ? (
+                <div className={taskGridClass}>
+                  {visibleTasks.map((task: WorkflowTask) => {
+                    const documentId = getTaskDocumentId(task);
+                    const documentType = getTaskDocumentType(task);
+                    const documentFormat = getTaskDocumentFormat(task);
+                    const department = getTaskDepartment(task);
+                    const uploaderName = getTaskUploaderName(task);
+                    return (
+                      <Link
+                        key={task.id}
+                        to={documentId ? `/documents/${documentId}` : "/workflow"}
+                        className="block border border-[#C8CDD2] bg-white p-3 transition-colors hover:bg-[#F5F7F8]"
+                      >
+                        <div className="flex items-start gap-3">
+                          <div className="mt-0.5 border border-[#287EAD]/25 bg-[#EEF6FB] p-2 text-[#287EAD]">
+                            <Hourglass className="w-4 h-4" />
+                          </div>
+                          <div className="min-w-0 flex-1">
+                            <p className="truncate text-sm font-bold text-[#1F2933]">{getTaskDocumentTitle(task)}</p>
+                            <div className="mt-1 flex flex-wrap items-center gap-2 text-xs text-[#5E6870]">
+                              <span>{documentType}</span><span>•</span><span>{documentFormat}</span><span>•</span><span>{task.step?.name}</span>
+                            </div>
+                            <div className="mt-1 flex flex-wrap items-center gap-2 text-xs text-[#5E6870]">
+                              <span>{department}</span>
+                              {uploaderName && <><span>•</span><span>{uploaderName}</span></>}
+                            </div>
+                            <div className="mt-1"><TaskMetaInfo dueAt={task.due_at} /></div>
+                          </div>
+                        </div>
+                      </Link>
+                    );
+                  })}
+                </div>
+              ) : hasOpenTasks ? (
+                <div className="border border-dashed border-[#C8CDD2] bg-[#F5F7F8] px-4 py-5 text-sm text-[#5E6870]">No tasks match the selected filters.</div>
+              ) : (
+                <div className="flex items-center gap-3 border border-[#C8CDD2] bg-[#F5F7F8] p-4 text-sm text-[#5E6870]">
+                  <ListChecks className="h-5 w-5 text-[#287EAD]" />
+                  No active workflow tasks assigned to you.
+                </div>
+              )}
+            </div>
+          </section>
+
+          <section className="border border-[#C8CDD2] bg-white">
+            <div className="border-b border-[#C8CDD2] px-4 py-3">
+              <h2 className="text-sm font-bold text-[#1F2933]">Manager analytics</h2>
+              <p className="text-sm text-[#5E6870]">Dashboard stays operational; analytics now has a dedicated workspace.</p>
+            </div>
+            {user?.has_admin_access ? (
+              <div className="space-y-4 p-4">
+                <div className="grid grid-cols-2 gap-3">
+                  <div className="border border-[#C8CDD2] bg-[#F5F7F8] p-3">
+                    <BarChart3 className="h-5 w-5 text-[#287EAD]" />
+                    <p className="mt-3 text-xs font-semibold uppercase tracking-wider text-[#5E6870]">Approval health</p>
+                    <p className="mt-1 text-lg font-bold text-[#1F2933]">{pendingCount}</p>
+                  </div>
+                  <div className="border border-[#C8CDD2] bg-[#F5F7F8] p-3">
+                    <UploadCloud className="h-5 w-5 text-[#287EAD]" />
+                    <p className="mt-3 text-xs font-semibold uppercase tracking-wider text-[#5E6870]">Documents</p>
+                    <p className="mt-1 text-lg font-bold text-[#1F2933]">{totalDocuments}</p>
+                  </div>
+                </div>
+                <Link to="/analytics" className="inline-flex w-full items-center justify-center gap-2 bg-[#287EAD] px-4 py-2 text-sm font-bold text-white hover:bg-[#206D99]">
+                  Open analytics <ArrowRight className="h-4 w-4" />
+                </Link>
+              </div>
+            ) : (
+              <div className="p-4 text-sm text-[#5E6870]">
+                Analytics is available to managers and administrators.
+              </div>
+            )}
+          </section>
+        </div>
 
       {/* Recent Documents (wide) + Audit Trail w/ Storage (narrow) */}
-      <div className="grid min-w-0 grid-cols-1 items-stretch gap-6 xl:grid-cols-3">
+      <div className="grid min-w-0 grid-cols-1 items-stretch gap-3 xl:grid-cols-3">
         {/* Recent Documents — clean compact rows */}
         <section
-          className="flex min-w-0 flex-col overflow-hidden rounded-xl border border-border bg-card xl:col-span-2"
+          className="flex min-w-0 flex-col overflow-hidden border border-[#C8CDD2] bg-white xl:col-span-2"
           style={activityCardStyle}
         >
-          <div className="flex items-center justify-between border-b border-border px-5 py-4">
+          <div className="flex items-center justify-between border-b border-[#C8CDD2] px-4 py-3">
             <div>
-              <h2 className="text-sm font-semibold text-foreground">Recent Documents</h2>
-              <p className="text-xs text-muted-foreground">Latest activity across all repositories</p>
+              <h2 className="text-sm font-bold text-[#1F2933]">Recent documents</h2>
+              <p className="text-sm text-[#5E6870]">Latest activity across all repositories</p>
             </div>
-            <Link to="/documents" className="text-xs font-semibold text-foreground hover:text-accent transition-colors inline-flex items-center gap-1">
+            <Link to="/documents" className="inline-flex items-center gap-1 text-xs font-bold text-[#287EAD] transition-colors hover:text-[#206D99]">
               View all <ArrowRight className="w-3 h-3" />
             </Link>
           </div>
@@ -973,7 +1093,7 @@ export default function DashboardPage() {
             ) : recentDocs?.results?.length ? (
               <table className={`w-full table-fixed text-sm ${showAdminRecentColumns ? "min-w-[920px]" : "min-w-[640px]"}`}>
                 <thead>
-                  <tr className="text-left text-[11px] uppercase tracking-wider text-muted-foreground">
+                  <tr className="border-b border-[#AEB5BB] bg-[#50545A] text-left text-[11px] uppercase tracking-wider text-white">
                     <th className={`${showAdminRecentColumns ? "w-[32%]" : "w-[48%]"} px-5 py-3 font-medium`}>Name</th>
                     {showAdminRecentColumns && (
                       <>
@@ -990,18 +1110,18 @@ export default function DashboardPage() {
                   {recentDocs.results.map((doc: Document) => (
                     <tr
                       key={doc.id}
-                      className="border-t border-border transition hover:bg-muted/40 cursor-pointer"
+                      className="cursor-pointer border-t border-[#D3D7DA] transition hover:bg-[#F5F7F8]"
                       onClick={() => { preloadDocumentWorkspace(); navigate(`/documents/${doc.id}`); }}
                       onMouseEnter={preloadDocumentWorkspace}
                     >
                       <td className="max-w-0 px-5 py-3">
                         <div className="flex items-center gap-3 min-w-0">
-                          <div className="flex h-9 w-9 items-center justify-center rounded-md bg-primary/5 text-primary shrink-0">
+                          <div className="flex h-9 w-9 shrink-0 items-center justify-center border border-[#287EAD]/25 bg-[#EEF6FB] text-[#287EAD]">
                             <FileText className="h-4 w-4" />
                           </div>
                           <div className="min-w-0 flex-1">
-                            <p className="font-medium text-foreground truncate">{doc.title}</p>
-                            <p className="text-[11px] text-muted-foreground truncate">
+                            <p className="truncate font-semibold text-[#1F2933]">{doc.title}</p>
+                            <p className="truncate text-[11px] text-[#5E6870]">
                               {doc.reference_number} · {doc.document_type_name || doc.document_type?.name || "Unclassified"}
                             </p>
                           </div>
@@ -1009,25 +1129,25 @@ export default function DashboardPage() {
                       </td>
                       {showAdminRecentColumns && (
                         <>
-                          <td className="hidden max-w-0 px-5 py-3 text-xs text-foreground/80 lg:table-cell">
+                          <td className="hidden max-w-0 px-5 py-3 text-xs text-[#1F2933] lg:table-cell">
                             <span className="block truncate">{getDocumentOwnerName(doc)}</span>
                           </td>
-                          <td className="hidden max-w-0 px-5 py-3 text-xs text-muted-foreground xl:table-cell">
+                          <td className="hidden max-w-0 px-5 py-3 text-xs text-[#5E6870] xl:table-cell">
                             <span className="block truncate">{getDocumentDepartmentName(doc)}</span>
                           </td>
                         </>
                       )}
-                      <td className="hidden px-5 py-3 text-muted-foreground md:table-cell">
+                      <td className="hidden px-5 py-3 text-[#5E6870] md:table-cell">
                         <span className="block truncate">
                           {formatDocumentFileType(doc.file_name, doc.file_mime_type)}
                         </span>
                       </td>
                       <td className="px-5 py-3 align-middle">
-                        <div className="max-w-[180px] truncate inline-flex">
-                          <StatusBadge status={doc.status} />
-                        </div>
+                        <span className={clsx("font-semibold", getDashboardStatusClass(doc.status))}>
+                          {getDashboardStatusLabel(doc.status)}
+                        </span>
                       </td>
-                      <td className="hidden whitespace-nowrap px-5 py-3 text-muted-foreground md:table-cell">
+                      <td className="hidden whitespace-nowrap px-5 py-3 text-[#5E6870] md:table-cell">
                         {formatDistanceToNow(new Date(doc.updated_at), { addSuffix: true })}
                       </td>
                     </tr>
@@ -1046,8 +1166,8 @@ export default function DashboardPage() {
           </div>
 
           {recentDocsCount > RECENT_DOCS_PAGE_SIZE && (
-            <div className="shrink-0 flex items-center justify-between border-t border-border bg-muted/20 px-5 py-3">
-              <span className="text-xs text-muted-foreground">
+            <div className="flex shrink-0 items-center justify-between border-t border-[#C8CDD2] bg-[#F5F7F8] px-5 py-3">
+              <span className="text-xs text-[#5E6870]">
                 Page {recentDocsPage} of {recentDocsPages}
               </span>
               <div className="flex items-center gap-2">
@@ -1055,7 +1175,7 @@ export default function DashboardPage() {
                   type="button"
                   onClick={() => setRecentDocsPage((p) => Math.max(1, p - 1))}
                   disabled={recentDocsPage === 1}
-                  className="inline-flex items-center gap-1 rounded-lg border border-border bg-card px-3 py-1.5 text-xs font-medium text-foreground hover:bg-muted disabled:opacity-40 disabled:cursor-not-allowed"
+                  className="inline-flex items-center gap-1 border border-[#C8CDD2] bg-white px-3 py-1.5 text-xs font-semibold text-[#1F2933] hover:bg-[#EEF6FB] disabled:cursor-not-allowed disabled:opacity-40"
                 >
                   <ChevronLeft className="w-3.5 h-3.5" /> Prev
                 </button>
@@ -1063,7 +1183,7 @@ export default function DashboardPage() {
                   type="button"
                   onClick={() => setRecentDocsPage((p) => p + 1)}
                   disabled={recentDocsPage * RECENT_DOCS_PAGE_SIZE >= recentDocsCount}
-                  className="inline-flex items-center gap-1 rounded-lg border border-border bg-card px-3 py-1.5 text-xs font-medium text-foreground hover:bg-muted disabled:opacity-40 disabled:cursor-not-allowed"
+                  className="inline-flex items-center gap-1 border border-[#C8CDD2] bg-white px-3 py-1.5 text-xs font-semibold text-[#1F2933] hover:bg-[#EEF6FB] disabled:cursor-not-allowed disabled:opacity-40"
                 >
                   Next <ChevronRight className="w-3.5 h-3.5" />
                 </button>
@@ -1073,15 +1193,15 @@ export default function DashboardPage() {
         </section>
 
         {/* Audit Trail with Storage merged at bottom */}
-        <section className="flex min-w-0 flex-col overflow-hidden rounded-xl border border-border bg-card p-5" style={activityCardStyle}>
+        <section className="flex min-w-0 flex-col overflow-hidden border border-[#C8CDD2] bg-white p-4" style={activityCardStyle}>
           <div className="flex items-start justify-between">
             <div>
-              <h2 className="text-sm font-semibold text-foreground">
+              <h2 className="text-sm font-bold text-[#1F2933]">
                 {user?.has_admin_access ? "Audit Trail" : "Document Activity"}
               </h2>
-              <p className="text-xs text-muted-foreground">A plain-language feed of what just happened.</p>
+              <p className="text-sm text-[#5E6870]">A plain-language feed of what just happened.</p>
             </div>
-            <Link to="/audit" className="text-xs font-semibold text-foreground hover:text-accent transition-colors">
+            <Link to="/audit" className="text-xs font-bold text-[#287EAD] transition-colors hover:text-[#206D99]">
               View all
             </Link>
           </div>
@@ -1187,174 +1307,7 @@ export default function DashboardPage() {
         </section>
       </div>
 
-      {/* Pending tasks */}
-      {(tasksLoading || hasOpenTasks) && (
-        <div className="rounded-xl border border-border bg-card p-5" style={{ boxShadow: "var(--shadow-card)" }}>
-        <div className="flex flex-col gap-4 lg:flex-row lg:items-start lg:justify-between">
-          <div className="space-y-1 min-w-0">
-            <p className="text-sm font-semibold text-foreground">Pending tasks</p>
-            <p className="text-sm text-muted-foreground">
-              {tasksLoading
-                ? "Checking tasks waiting for your attention."
-                  : hasOpenTasks
-                  ? hasTaskFilters
-                    ? `${filteredTasks.length} of ${allTasks.length} tasks match your filters.`
-                    : "Tasks waiting for your attention."
-                  : "All clear. No tasks need your attention right now."}
-            </p>
-          </div>
-          <div className="flex shrink-0 items-center gap-2">
-            <div className="inline-flex items-center gap-1.5 rounded-full bg-teal/10 px-3 py-1 text-xs font-semibold text-teal">
-              <Inbox className="h-3.5 w-3.5" />
-              {allTasks.length} open
-            </div>
-            <Link
-              to="/workflow"
-              className="inline-flex items-center gap-1 rounded-lg border border-border bg-card px-3 py-1.5 text-xs font-semibold text-foreground transition-colors hover:bg-muted"
-            >
-              View queue <ArrowRight className="h-3.5 w-3.5" />
-            </Link>
-          </div>
-        </div>
-
-        {hasOpenTasks && (
-          <div className="mt-5 rounded-lg border border-border bg-muted/20 p-3">
-            <div className="grid grid-cols-1 gap-3 md:grid-cols-2 xl:grid-cols-6">
-              <div className="relative xl:col-span-2">
-                <Search className="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-muted-foreground" />
-                <input
-                  type="search"
-                  value={taskFilters.search}
-                  onChange={(e) => updateTaskFilter("search", e.target.value)}
-                  placeholder="Find title, reference, uploader..."
-                  className="input h-10 w-full pl-9 text-sm"
-                />
-              </div>
-              <select
-                value={taskFilters.documentType}
-                onChange={(e) => updateTaskFilter("documentType", e.target.value)}
-                className="input h-10 text-sm"
-              >
-                <option value="">All document types</option>
-                {taskFilterOptions.documentTypes.map((option) => (
-                  <option key={option.value} value={option.value}>
-                    {option.label} ({option.count})
-                  </option>
-                ))}
-              </select>
-              <select
-                value={taskFilters.department}
-                onChange={(e) => updateTaskFilter("department", e.target.value)}
-                className="input h-10 text-sm"
-              >
-                <option value="">All departments</option>
-                {taskFilterOptions.departments.map((option) => (
-                  <option key={option.value} value={option.value}>
-                    {option.label} ({option.count})
-                  </option>
-                ))}
-              </select>
-              <select
-                value={taskFilters.fileFormat}
-                onChange={(e) => updateTaskFilter("fileFormat", e.target.value)}
-                className="input h-10 text-sm"
-              >
-                <option value="">All formats</option>
-                {taskFilterOptions.fileFormats.map((option) => (
-                  <option key={option.value} value={option.value}>
-                    {option.label} ({option.count})
-                  </option>
-                ))}
-              </select>
-              <select
-                value={taskFilters.urgency}
-                onChange={(e) => updateTaskFilter("urgency", e.target.value as WorkflowTaskFilters["urgency"])}
-                className="input h-10 text-sm"
-              >
-                <option value="">Any urgency</option>
-                <option value="overdue">Overdue</option>
-                <option value="due_soon">Due in 24h</option>
-                <option value="held">On hold</option>
-              </select>
-            </div>
-            <div className="mt-3 flex flex-wrap items-center justify-between gap-2 text-xs text-muted-foreground">
-              <div className="inline-flex items-center gap-1.5">
-                <Filter className="h-3.5 w-3.5" />
-                <span>{filteredTasks.length} matching task{filteredTasks.length !== 1 ? "s" : ""}</span>
-              </div>
-              {hasTaskFilters && (
-                <button
-                  type="button"
-                  onClick={clearTaskFilters}
-                  className="inline-flex items-center gap-1 font-semibold text-foreground transition-colors hover:text-accent"
-                >
-                  <X className="h-3.5 w-3.5" />
-                  Clear filters
-                </button>
-              )}
-            </div>
-          </div>
-        )}
-
-        {tasksLoading ? (
-          <div className="mt-4 rounded-lg bg-muted/40 p-4 text-sm text-muted-foreground">
-            <div className="flex items-center gap-2">
-              <Loader2 className="h-4 w-4 animate-spin text-accent" />
-              Loading tasks...
-            </div>
-          </div>
-        ) : visibleTasks.length ? (
-          <div className={taskGridClass}>
-            {visibleTasks.map((task: WorkflowTask) => {
-              const documentId = getTaskDocumentId(task);
-              const documentType = getTaskDocumentType(task);
-              const documentFormat = getTaskDocumentFormat(task);
-              const department = getTaskDepartment(task);
-              const uploaderName = getTaskUploaderName(task);
-              return (
-                <Link
-                  key={task.id}
-                  to={documentId ? `/documents/${documentId}` : "/workflow"}
-                  className="block rounded-lg border border-border bg-muted/30 p-4 transition-colors hover:bg-muted/60"
-                >
-                  <div className="flex items-start gap-3">
-                    <div className="mt-0.5 rounded-md border border-accent/30 bg-accent/15 p-2 text-accent">
-                      <Hourglass className="w-4 h-4" />
-                    </div>
-                    <div className="min-w-0 flex-1">
-                      <p className="truncate text-sm font-semibold text-foreground">
-                        {getTaskDocumentTitle(task)}
-                      </p>
-                      <div className="mt-1 flex flex-wrap items-center gap-2 text-xs text-muted-foreground">
-                        <span>{documentType}</span>
-                        <span>•</span>
-                        <span>{documentFormat}</span>
-                        <span>•</span>
-                        <span>{task.step?.name}</span>
-                      </div>
-                      <div className="mt-1 flex flex-wrap items-center gap-2 text-xs text-muted-foreground">
-                        <span>{department}</span>
-                        {uploaderName && (
-                          <>
-                            <span>•</span>
-                            <span>{uploaderName}</span>
-                          </>
-                        )}
-                      </div>
-                      <div className="mt-1"><TaskMetaInfo dueAt={task.due_at} /></div>
-                    </div>
-                  </div>
-                </Link>
-              );
-            })}
-          </div>
-        ) : hasOpenTasks ? (
-          <div className="mt-4 rounded-lg border border-dashed border-border bg-muted/20 px-4 py-5 text-sm text-muted-foreground">
-            No tasks match the selected filters.
-          </div>
-        ) : null}
-        </div>
-      )}
+      </div>
     </div>
   );
 }

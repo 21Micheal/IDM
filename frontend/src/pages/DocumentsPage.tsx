@@ -807,13 +807,14 @@ export default function DocumentsPage({ personalOnly = false }: DocumentsPagePro
 
               <div className="min-h-0 flex-1 overflow-auto bg-[#EDEDED]">
                 {effectiveView === "table" && (
-                  <table className="w-full min-w-[1160px] border-collapse bg-white text-sm">
+                  <table className="w-full min-w-[1260px] border-collapse bg-white text-sm">
                     <thead className="sticky top-0 z-[1]">
                       <tr className="h-[39px] border-b border-[#AEB5BB] bg-[#50545A] text-left text-xs font-semibold text-white">
                         <th className="w-[50px] border-r border-[#858A90] px-4 py-3" />
                         <th className="w-[60px] border-r border-[#858A90] px-4 py-3" />
                         <th className="border-r border-[#858A90] px-3 py-3">Title</th>
                         <th className="border-r border-[#858A90] px-3 py-3">Document Type</th>
+                        <th className="border-r border-[#858A90] px-3 py-3">Format</th>
                         <th className="border-r border-[#858A90] px-3 py-3">Status</th>
                         <th className="border-r border-[#858A90] px-3 py-3">Created By</th>
                         <th className="border-r border-[#858A90] px-3 py-3">Created Date</th>
@@ -825,7 +826,7 @@ export default function DocumentsPage({ personalOnly = false }: DocumentsPagePro
                       {isLoading ? (
                         Array.from({ length: 6 }).map((_, rowIndex) => (
                           <tr key={rowIndex} className="h-[44px] border-b border-[#D3D7DA]">
-                            {Array.from({ length: 9 }).map((_, cellIndex) => (
+                            {Array.from({ length: 10 }).map((_, cellIndex) => (
                               <td key={cellIndex} className="border-r border-[#D3D7DA] px-3">
                                 <div className="h-3 w-2/3 animate-pulse bg-[#E1E5E8]" />
                               </td>
@@ -834,7 +835,7 @@ export default function DocumentsPage({ personalOnly = false }: DocumentsPagePro
                         ))
                       ) : docs.length === 0 ? (
                         <tr>
-                          <td colSpan={9} className="py-20 text-center text-[#5E6870]">
+                          <td colSpan={10} className="py-20 text-center text-[#5E6870]">
                             No documents found
                           </td>
                         </tr>
@@ -842,6 +843,7 @@ export default function DocumentsPage({ personalOnly = false }: DocumentsPagePro
                         docs.map((doc: Document) => {
                           const isSelected = selectedIds.includes(doc.id);
                           const typeLabel = getDocumentTypeLabel(doc);
+                          const formatLabel = formatDocumentFileType(doc.file_name, doc.file_mime_type);
 
                           return (
                             <tr
@@ -871,6 +873,9 @@ export default function DocumentsPage({ personalOnly = false }: DocumentsPagePro
                                 </Link>
                               </td>
                               <td className="border-r border-[#D3D7DA] px-3">{typeLabel}</td>
+                              <td className="border-r border-[#D3D7DA] px-3">
+                                <span className="font-semibold text-[#3F474F]">{formatLabel}</span>
+                              </td>
                               <td className="border-r border-[#D3D7DA] px-3">
                                 <span className={cn("font-semibold", getDocumentStatusTextClass(doc.status))}>
                                   {getDocumentStatusLabel(doc.status)}
@@ -918,6 +923,7 @@ export default function DocumentsPage({ personalOnly = false }: DocumentsPagePro
                       docs.map((doc: Document) => {
                         const isSelected = selectedIds.includes(doc.id);
                         const typeLabel = getDocumentTypeLabel(doc);
+                        const formatLabel = formatDocumentFileType(doc.file_name, doc.file_mime_type);
 
                         return (
                           <div key={doc.id} className="grid min-h-[154px] grid-cols-[42px_126px_minmax(360px,1fr)_minmax(260px,0.75fr)] gap-4 px-5 py-4">
@@ -952,6 +958,10 @@ export default function DocumentsPage({ personalOnly = false }: DocumentsPagePro
                                   <p className="font-semibold">{typeLabel}</p>
                                 </>
                               )}
+                              <div className="mt-3">
+                                <p className="mb-1 text-[#5E6870]">Format</p>
+                                <p className="font-semibold text-[#3F474F]">{formatLabel}</p>
+                              </div>
                               <div className="mt-3">
                                 <p className="mb-1 text-[#5E6870]">Status</p>
                                 <p className={cn("font-semibold", getDocumentStatusTextClass(doc.status))}>
@@ -1003,6 +1013,7 @@ export default function DocumentsPage({ personalOnly = false }: DocumentsPagePro
                       docs.map((doc: Document) => {
                         const isSelected = selectedIds.includes(doc.id);
                         const typeLabel = getDocumentTypeLabel(doc);
+                        const formatLabel = formatDocumentFileType(doc.file_name, doc.file_mime_type);
                         return (
                           <div
                             key={doc.id}
@@ -1040,6 +1051,7 @@ export default function DocumentsPage({ personalOnly = false }: DocumentsPagePro
                               <p className="truncate text-[#5E6870]" title={typeLabel || "Unclassified"}>
                                 {typeLabel || "Unclassified"}
                               </p>
+                              <p className="font-semibold text-[#3F474F]">{formatLabel}</p>
                               <p className={cn("font-semibold", getDocumentStatusTextClass(doc.status))}>
                                 {getDocumentStatusLabel(doc.status)}
                               </p>

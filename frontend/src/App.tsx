@@ -9,6 +9,7 @@ const Layout = lazy(() => import("@/components/shared/Layout"));
 const LoginPage = lazy(() => import("@/pages/LoginPage"));
 const ForceChangePasswordPage = lazy(() => import("@/pages/ForceChangePasswordPage"));
 const DashboardPage = lazy(() => import("@/pages/DashboardPage"));
+const AnalyticsDashboardPage = lazy(() => import("@/pages/AnalyticsDashboard"));
 const DocumentsPage = lazy(() => import("@/pages/DocumentsPage"));
 const DocumentDetailPage = lazy(() => import("@/pages/DocumentDetailPage"));
 const UploadPage = lazy(() => import("@/pages/UploadPage"));
@@ -238,6 +239,7 @@ export default function App() {
               }
             >
               <Route index element={<DashboardPage />} />
+              <Route path="analytics" element={<RequireAdmin><AnalyticsDashboardPage /></RequireAdmin>} />
 
               {/* Documents */}
               <Route path="documents"        element={<DocumentsPage />} />
