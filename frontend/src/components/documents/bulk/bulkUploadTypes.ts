@@ -60,6 +60,13 @@ export type BulkDocReviewState = {
   suggestedScores: Record<string, number>;
 };
 
+export type BulkLocalPreview = {
+  fileName: string;
+  url: string | null;
+  kind: "pdf" | "image" | "other";
+  size: number;
+};
+
 export type BulkReviewSubmitItem = {
   document_id: string;
   title?: string;

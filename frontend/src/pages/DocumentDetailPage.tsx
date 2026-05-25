@@ -14,18 +14,18 @@
  * • Preserved all business logic (locking, OCR polling, version restore, comments,
  *   workflow tasks, mutations) and inline editing.
  */
-import { Suspense, lazy, useState, useEffect, useRef, useCallback } from "react";
+import { Suspense, useState, useEffect, useRef, useCallback } from "react";
 import { useParams, useNavigate } from "react-router-dom";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { documentsAPI, workflowAPI } from "@/services/api";
-const DocumentViewer = lazy(() => import("@/components/documents/DocumentViewer"));
-const UploadVersionDrawer = lazy(() => import("@/components/documents/UploadVersionDrawer").then((module) => ({ default: module.UploadVersionDrawer })));
-const WorkflowVisualizer = lazy(() => import("@/components/notifications/workflow-visualizer").then((module) => ({ default: module.WorkflowVisualizer })));
+import DocumentViewer from "@/components/documents/DocumentViewer";
+import { UploadVersionDrawer } from "@/components/documents/UploadVersionDrawer";
+import { WorkflowVisualizer } from "@/components/notifications/workflow-visualizer";
 import StatusBadge from "@/components/documents/StatusBadge";
 import OcrStatusBadge from "@/components/documents/OcrStatusBadge";
 import { AddToFolderMenu } from "@/components/documents/AddToFolderMenu";
-const MetadataEditPanel = lazy(() => import("@/components/documents/MetadataEditPanel"));
-const WorkflowActionPanel = lazy(() => import("@/components/workflow/WorkflowActionPanel"));
+import MetadataEditPanel from "@/components/documents/MetadataEditPanel";
+import WorkflowActionPanel from "@/components/workflow/WorkflowActionPanel";
 import { format } from "date-fns";
 import {
   ArrowLeft, Send, MessageSquare, ShieldCheck,

@@ -16,7 +16,7 @@ import { deriveDocumentTypeConfig } from "@/lib/documentTypeConfig";
 import BulkUploadDropzone from "@/components/documents/bulk/BulkUploadDropzone";
 import BulkProcessingPanel from "@/components/documents/bulk/BulkProcessingPanel";
 import BulkReviewPanel from "@/components/documents/bulk/BulkReviewPanel";
-import type { BulkDocReviewState, BulkUploadBatch } from "@/components/documents/bulk/bulkUploadTypes";
+import type { BulkDocReviewState, BulkLocalPreview, BulkUploadBatch } from "@/components/documents/bulk/bulkUploadTypes";
 import {
   buildReviewStateFromBatchItem,
   reviewStateToSubmitItem,
@@ -37,6 +37,7 @@ export default function BulkScanPage() {
   const [uploadProgress, setUploadProgress] = useState(0);
   const [reviewStates, setReviewStates] = useState<BulkDocReviewState[]>([]);
   const [completedBatch, setCompletedBatch] = useState<BulkUploadBatch | null>(null);
+  const [localPreviews, setLocalPreviews] = useState<Record<string, BulkLocalPreview>>({});
 
   const { data: docTypes = [] } = useQuery<unknown, Error, DocumentType[]>({
     queryKey: ["document-types"],
@@ -50,6 +51,28 @@ export default function BulkScanPage() {
     [docTypes],
   );
   const selectedType = visibleDocTypes.find((t) => t.id === selectedTypeId);
+
+  useEffect(() => {
+    const next: Record<string, BulkLocalPreview> = {};
+    const urls: string[] = [];
+
+    for (const file of files) {
+      const kind = file.type === "application/pdf" ? "pdf" : file.type.startsWith("image/") ? "image" : "other";
+      const url = kind === "other" ? null : URL.createObjectURL(file);
+      if (url) urls.push(url);
+      next[file.name] = {
+        fileName: file.name,
+        url,
+        kind,
+        size: file.size,
+      };
+    }
+
+    setLocalPreviews(next);
+    return () => {
+      urls.forEach((url) => URL.revokeObjectURL(url));
+    };
+  }, [files]);
 
   const { data: polledBatch } = useQuery({
     queryKey: ["bulk-upload", batchId],
@@ -234,7 +257,7 @@ export default function BulkScanPage() {
       )}
 
       {stage === "processing" && activeBatch && (
-        <BulkProcessingPanel batch={activeBatch} uploadProgress={uploadProgress} />
+        <BulkProcessingPanel batch={activeBatch} uploadProgress={uploadProgress} previews={localPreviews} />
       )}
 
       {stage === "review" && selectedType && reviewStates.length > 0 && (
@@ -245,6 +268,7 @@ export default function BulkScanPage() {
             onChange={setReviewStates}
             onSubmit={() => reviewMutation.mutate()}
             isSubmitting={reviewMutation.isPending}
+            previews={localPreviews}
           />
         </div>
       )}
@@ -273,6 +297,7 @@ export default function BulkScanPage() {
                 setStage("select");
                 setBatchId(null);
                 setFiles([]);
+                setLocalPreviews({});
                 setReviewStates([]);
                 setCompletedBatch(null);
               }}

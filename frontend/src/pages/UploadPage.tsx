@@ -711,6 +711,77 @@ function SelectedFileDropHint({
   );
 }
 
+type CapturePreviewKind = "pdf" | "image" | "other";
+
+function getCapturePreviewKind(file: File | null | undefined): CapturePreviewKind {
+  if (!file) return "other";
+  if (file.type === "application/pdf") return "pdf";
+  if (file.type.startsWith("image/")) return "image";
+  return "other";
+}
+
+function CapturePreviewPane({
+  file,
+  previewUrl,
+  stateLabel,
+  progress,
+  compact = false,
+}: {
+  file: File | null;
+  previewUrl: string | null;
+  stateLabel?: string;
+  progress?: number;
+  compact?: boolean;
+}) {
+  const kind = getCapturePreviewKind(file);
+
+  return (
+    <div className="border border-[#C8CDD2] bg-white shadow-sm">
+      <div className="flex min-h-11 items-center justify-between gap-3 border-b border-[#C8CDD2] bg-[#F5F7F8] px-3 py-2">
+        <div className="min-w-0">
+          <p className="text-sm font-bold text-[#1F2933]">Document preview</p>
+          <p className="truncate text-xs text-[#5E6870]">{file?.name || "No file selected"}</p>
+        </div>
+        {stateLabel && (
+          <span className="shrink-0 border border-[#C8CDD2] bg-white px-2 py-1 text-[11px] font-semibold text-[#5E6870]">
+            {stateLabel}
+          </span>
+        )}
+      </div>
+
+      {progress !== undefined && progress > 0 && (
+        <div className="h-1.5 bg-[#E1E5E8]">
+          <div className="h-full bg-[#287EAD] transition-all" style={{ width: `${progress}%` }} />
+        </div>
+      )}
+
+      <div className={clsx("bg-[#EDEDED] p-3", compact ? "min-h-[26rem]" : "min-h-[38rem]")}>
+        {previewUrl && kind === "pdf" ? (
+          <iframe
+            src={previewUrl}
+            className={clsx("w-full border border-[#C8CDD2] bg-white", compact ? "h-[26rem]" : "h-[38rem]")}
+            title="PDF preview"
+          />
+        ) : previewUrl && kind === "image" ? (
+          <div className={clsx("flex items-center justify-center overflow-auto border border-[#C8CDD2] bg-white", compact ? "h-[26rem]" : "h-[38rem]")}>
+            <img src={previewUrl} alt="Document preview" className="max-h-full max-w-full object-contain" />
+          </div>
+        ) : (
+          <div className={clsx("flex flex-col items-center justify-center border border-dashed border-[#C8CDD2] bg-white text-center", compact ? "h-[26rem]" : "h-[38rem]")}>
+            {kind === "other" && file ? <File className="mb-3 h-12 w-12 text-[#5E6870]" /> : <Upload className="mb-3 h-12 w-12 text-[#5E6870]" />}
+            <p className="text-sm font-semibold text-[#1F2933]">
+              {file ? "Inline preview is not available for this format" : "Select a file to preview"}
+            </p>
+            <p className="mt-1 max-w-xs text-xs text-[#5E6870]">
+              PDF and image scans can be reviewed beside the extracted fields.
+            </p>
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
 // ── Main component ────────────────────────────────────────────────────────────
 
 interface UploadPageProps {
@@ -823,8 +894,8 @@ export default function UploadPage({ scanOnly = false }: UploadPageProps) {
     if (!currentTitle) {
       setValue("title", documentNameFromFile(droppedFile));
     }
-    // Create PDF preview URL if the file is a PDF
-    if (droppedFile.type === "application/pdf") {
+    // Create local preview URL for PDFs and image scans so capture review is not blind.
+    if (droppedFile.type === "application/pdf" || droppedFile.type.startsWith("image/")) {
       const url = URL.createObjectURL(droppedFile);
       setPdfPreviewUrl(url);
       return () => URL.revokeObjectURL(url);
@@ -1177,21 +1248,32 @@ export default function UploadPage({ scanOnly = false }: UploadPageProps) {
 
       {/* ── OCR wait / review / submitting ──────────────────────────────── */}
       {isOcrFlow && scanStage !== "idle" && scanStage !== "uploading" && (
-        <div className="border border-border bg-background" style={{ boxShadow: "var(--shadow-card)" }}>
-          {showOcrWait && (
-            <OcrWaitScreen
-              stage={scanStage as "ocr_pending" | "ocr_processing"}
-              fileName={droppedFile?.name ?? ""}
-              rawLines={ocrFields.raw_lines}
-              onSkip={() => {
-                setScanStage("ocr_done");
-                toast.info("Fill in the details manually and confirm.");
-              }}
+        <div className="grid gap-4 lg:grid-cols-12">
+          <div className="lg:col-span-7">
+            <CapturePreviewPane
+              file={droppedFile}
+              previewUrl={pdfPreviewUrl}
+              stateLabel={showOcrWait ? "OCR running" : showOcrFailed ? "Manual review" : "Review"}
+              compact={false}
             />
-          )}
+          </div>
 
-          {(showOcrReview || showOcrFailed) && (
-            <div className="rounded-2xl border border-border bg-white dark:bg-slate-950 p-6 max-w-[650px] mx-auto" style={{ boxShadow: "var(--shadow-card)" }}>
+          <div className="lg:col-span-5">
+            <div className="max-h-[calc(100vh-8rem)] overflow-y-auto border border-[#C8CDD2] bg-white shadow-sm">
+            {showOcrWait && (
+              <OcrWaitScreen
+                stage={scanStage as "ocr_pending" | "ocr_processing"}
+                fileName={droppedFile?.name ?? ""}
+                rawLines={ocrFields.raw_lines}
+                onSkip={() => {
+                  setScanStage("ocr_done");
+                  toast.info("Fill in the details manually and confirm.");
+                }}
+              />
+            )}
+
+            {(showOcrReview || showOcrFailed) && (
+            <div className="p-5">
               {/* Header */}
               <div className="flex items-start gap-3 mb-5">
                 {showOcrFailed ? (
@@ -1277,7 +1359,7 @@ export default function UploadPage({ scanOnly = false }: UploadPageProps) {
                 )}
 
                 {/* Actions */}
-                <div className="flex gap-3 pt-4 border-t border-border">
+                <div className="sticky bottom-0 z-10 -mx-5 -mb-5 flex gap-3 border-t border-border bg-white px-5 py-4">
                   <button
                     type="button"
                     onClick={onConfirmOcr}
@@ -1304,14 +1386,16 @@ export default function UploadPage({ scanOnly = false }: UploadPageProps) {
                 </div>
               </div>
             </div>
-          )}
+            )}
 
-          {scanStage === "submitting" && (
+            {scanStage === "submitting" && (
             <div className="flex flex-col items-center py-12 text-center">
               <Loader2 className="w-10 h-10 animate-spin text-teal mb-4" />
               <p className="text-foreground font-medium">Saving…</p>
             </div>
-          )}
+            )}
+            </div>
+          </div>
         </div>
       )}
 
@@ -1370,24 +1454,14 @@ export default function UploadPage({ scanOnly = false }: UploadPageProps) {
                 <input {...getInputProps()} />
                 {droppedFile ? (
                   <div className="flex w-full flex-col items-center">
-                    {pdfPreviewUrl && droppedFile.type === "application/pdf" ? (
-                      <div className="w-full flex justify-center">
-                        <iframe
-                          src={pdfPreviewUrl}
-                          className="h-[520px] max-w-[680px] w-full border border-border bg-card shadow-sm"
-                          title="PDF Preview"
-                        />
-                      </div>
-                    ) : (
-                      <div className={clsx(
-                        "mb-4 flex h-72 w-full items-center justify-center border border-border bg-card",
-                        isScanned ? "text-teal" : "text-primary",
-                      )}>
-                        {isScanned
-                          ? <ScanLine className="w-14 h-14" />
-                          : <File className="w-14 h-14" />}
-                      </div>
-                    )}
+                    <div className="w-full">
+                      <CapturePreviewPane
+                        file={droppedFile}
+                        previewUrl={pdfPreviewUrl}
+                        stateLabel={isScanned ? "Ready to scan" : "Ready"}
+                        compact
+                      />
+                    </div>
                     <SelectedFileDropHint
                       file={droppedFile}
                       isDragActive={isDragActive}
