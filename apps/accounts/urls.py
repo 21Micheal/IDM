@@ -2,7 +2,7 @@ from django.urls import path, include
 from rest_framework.routers import DefaultRouter
 from .views import (
     LoginView, VerifyOTPView, ResendOTPView,
-    MeView, ChangePasswordView, EnableMFAView,
+    MeView, ChangePasswordView, EnableMFAView, UserPreferencesView,
     UserViewSet, DepartmentViewSet, UserGroupViewSet, UserDelegationViewSet,
 )
 
@@ -20,6 +20,7 @@ urlpatterns = [
     path("auth/me/",              MeView.as_view(),            name="me"),
     path("auth/change-password/", ChangePasswordView.as_view(), name="change-password"),
     path("auth/mfa/",             EnableMFAView.as_view(),     name="toggle-mfa"),
+    path("auth/preferences/",     UserPreferencesView.as_view(), name="preferences"),
     # User, department & group management
     path("", include(router.urls)),
 ]

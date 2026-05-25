@@ -14,11 +14,12 @@ from rest_framework.response import Response
 from rest_framework.views import APIView
 from rest_framework_simplejwt.tokens import RefreshToken
 
-from .models import User, Department, EmailOTP, UserGroup, GroupAction, GroupPermission, UserGroupMembership, UserDelegation
+from .models import User, Department, EmailOTP, UserGroup, GroupAction, GroupPermission, UserGroupMembership, UserDelegation, UserPreference
 from .serializers import (
     UserSerializer, UserCreateSerializer, UserUpdateSerializer,
     DepartmentSerializer, UserSummarySerializer,
     UserGroupSerializer, GroupPermissionSerializer, UserGroupMembershipSerializer, UserDelegationSerializer,
+    UserPreferenceSerializer,
 )
 from apps.notifications.tasks import _create_notification, _send_email
 from .email_otp import send_otp_email
@@ -240,6 +241,23 @@ class EnableMFAView(APIView):
             ip_address=request.META.get("REMOTE_ADDR"),
         )
         return Response({"detail": f"Email OTP {state}.", "mfa_enabled": request.user.mfa_enabled})
+
+
+class UserPreferencesView(generics.RetrieveUpdateAPIView):
+    """Get or update the authenticated user's preferences."""
+    permission_classes = [permissions.IsAuthenticated]
+    serializer_class = UserPreferenceSerializer
+
+    def get_object(self):
+        preference, _ = UserPreference.objects.get_or_create(
+            user=self.request.user,
+            defaults={
+                "date_format": UserPreference.DateFormat.DD_MM_YYYY,
+                "time_format": UserPreference.TimeFormat.HOUR_12,
+                "default_page": UserPreference.DefaultPage.DASHBOARD,
+            }
+        )
+        return preference
 
 
 # ── User management ───────────────────────────────────────────────────────────

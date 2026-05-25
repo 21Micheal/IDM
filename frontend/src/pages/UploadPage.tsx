@@ -569,7 +569,7 @@ function useOcrPoller(
     poll();
     intervalRef.current = setInterval(poll, 3000);
     return () => { if (intervalRef.current) clearInterval(intervalRef.current); };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
+     
   }, [documentId, enabled]);
 }
 

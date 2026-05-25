@@ -585,7 +585,7 @@ function OfficeEditPanel({
       clearFailedConfirmation();
       if (s === "done") setPreviewProgress(100);
     }
-    // eslint-disable-next-line react-hooks/exhaustive-deps
+     
   }, [preview?.preview_status]);
 
   useEffect(() => () => {

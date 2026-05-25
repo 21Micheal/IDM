@@ -26,6 +26,7 @@ import {
   documentsAPI,
   notificationsAPI,
   workflowAPI,
+  profileAPI,
 } from "@/services/api";
 
 import { useAuthStore } from "@/store/authStore";
@@ -127,7 +128,22 @@ export default function LoginPage() {
 
     if (tokenData.must_change_password) {
       navigate("/change-password", { replace: true });
-    } else {
+      return;
+    }
+
+    // Determine landing page based on user preferences (only at login)
+    try {
+      const { data: prefs } = await profileAPI.getPreferences();
+      const defaultPage = prefs?.default_page || "dashboard";
+      const pageRoutes: Record<string, string> = {
+        dashboard: "/",
+        my_tasks: "/workflow",
+        all_documents: "/documents",
+      };
+      const target = pageRoutes[defaultPage] ?? "/";
+      navigate(target, { replace: true });
+    } catch (err) {
+      // fallback to dashboard on error
       navigate("/", { replace: true });
     }
   };

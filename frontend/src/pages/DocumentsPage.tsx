@@ -724,7 +724,7 @@ export default function DocumentsPage({ personalOnly = false }: DocumentsPagePro
                   type="button"
                   className="h-9 border border-[#B9C0C6] border-t-[#2B8DCB] border-t-2 bg-white px-4 text-sm text-[#2B86C5]"
                 >
-                  My Documents
+                  All Documents
                 </button>
               </div>
 
