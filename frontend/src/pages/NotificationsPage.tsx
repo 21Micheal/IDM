@@ -8,13 +8,14 @@ import { NotificationList, inferNotificationPriority } from "@/components/notifi
 import clsx from "clsx";
 
 type Filter = "unread" | "all" | "urgent";
+const TASK_NOTIFICATION_TYPES = new Set(["task_assigned", "task_sla_warning", "task_overdue"]);
 
 export default function NotificationsPage() {
   const qc = useQueryClient();
   const navigate = useNavigate();
   const [filter, setFilter] = useState<Filter>("unread");
 
-  const { data: notifications = [], isLoading } = useQuery<Notification[]>({
+  const { data: allNotifications = [], isLoading } = useQuery<Notification[]>({
     queryKey: ["notifications"],
     queryFn: () => notificationsAPI.list().then((r) => normalizeListResponse<Notification>(r.data)),
     staleTime: 30_000,
@@ -36,6 +37,10 @@ export default function NotificationsPage() {
     },
   });
 
+  const notifications = useMemo(
+    () => allNotifications.filter((notification) => !TASK_NOTIFICATION_TYPES.has(notification.type)),
+    [allNotifications],
+  );
   const unreadCount = notifications.filter((notification) => !notification.is_read).length;
   const urgentCount = notifications.filter((notification) => inferNotificationPriority(notification) === "high").length;
 
@@ -58,83 +63,77 @@ export default function NotificationsPage() {
   ];
 
   return (
-    <div className="mx-auto max-w-4xl px-4 py-6 sm:px-6">
-      {/* Header */}
-      <div className="mb-8 space-y-4">
-        <div className="flex items-start gap-4">
-          <div className="flex h-10 w-10 items-center justify-center rounded-lg border border-primary/20 bg-primary/10">
-            <Bell className="h-5 w-5 text-primary" />
+    <div className="-m-6 min-h-[calc(100vh-3.5rem)] bg-[#EDEDED]">
+      <div className="border-b border-[#206D99] bg-[#287EAD] px-6 py-4 text-white">
+        <div className="flex flex-col gap-3 lg:flex-row lg:items-center lg:justify-between">
+          <div className="flex items-center gap-3">
+            <div className="flex h-10 w-10 items-center justify-center border border-white/25 bg-white/10">
+              <Bell className="h-5 w-5 text-white" />
+            </div>
+            <div>
+              <h1 className="text-xl font-semibold">Notifications</h1>
+              <p className="mt-0.5 text-sm text-white/75">
+                Document updates, shared items, and operational alerts.
+              </p>
+            </div>
           </div>
-          <div>
-            <h1 className="text-2xl font-semibold text-foreground">Notifications</h1>
-            <p className="mt-1 text-sm text-muted-foreground">
-              Workflow requests, document updates, and time-sensitive alerts.
-            </p>
-          </div>
-        </div>
 
-        {/* Filters and Actions */}
-        <div className="flex flex-wrap items-center gap-2">
-          <div className="flex gap-1 rounded-lg border border-border bg-muted/30 p-1">
-            {filters.map((item) => (
-              <button
-                key={item.id}
-                type="button"
-                onClick={() => setFilter(item.id)}
-                className={clsx(
-                  "inline-flex items-center gap-1.5 rounded-md px-3 py-1.5 text-sm font-medium transition-colors",
-                  filter === item.id
-                    ? "bg-primary text-primary-foreground"
-                    : "text-muted-foreground hover:text-foreground",
-                )}
-              >
-                {item.label}
-                <span
+          <div className="flex flex-wrap items-center gap-2">
+            <div className="flex border border-white/25 bg-white/10">
+              {filters.map((item) => (
+                <button
+                  key={item.id}
+                  type="button"
+                  onClick={() => setFilter(item.id)}
                   className={clsx(
-                    "rounded-full px-1.5 py-0.5 text-[10px] font-medium",
-                    filter === item.id ? "bg-primary-foreground/20" : "bg-muted",
+                    "inline-flex items-center gap-2 border-r border-white/20 px-3 py-2 text-sm font-semibold last:border-r-0",
+                    filter === item.id ? "bg-white text-[#1F2933]" : "text-white hover:bg-white/15",
                   )}
                 >
-                  {item.count}
-                </span>
-              </button>
-            ))}
-          </div>
+                  {item.label}
+                  <span className={clsx("text-xs", filter === item.id ? "text-[#287EAD]" : "text-white/75")}>
+                    {item.count}
+                  </span>
+                </button>
+              ))}
+            </div>
 
-          <button
-            type="button"
-            onClick={() => markAllReadMutation.mutate()}
-            disabled={markAllReadMutation.isPending || unreadCount === 0}
-            className={clsx(
-              "inline-flex items-center gap-1.5 rounded-lg border border-border px-3 py-1.5 text-sm font-medium transition-colors",
-              markAllReadMutation.isPending || unreadCount === 0
-                ? "opacity-50 cursor-not-allowed text-muted-foreground"
-                : "hover:bg-muted text-foreground",
-            )}
-          >
-            {markAllReadMutation.isPending ? (
-              <Loader2 className="h-4 w-4 animate-spin" />
-            ) : (
-              <CheckCheck className="h-4 w-4" />
-            )}
-            Mark all read
-          </button>
+            <button
+              type="button"
+              onClick={() => markAllReadMutation.mutate()}
+              disabled={markAllReadMutation.isPending || unreadCount === 0}
+              className={clsx(
+                "inline-flex items-center gap-2 border border-white/25 px-3 py-2 text-sm font-semibold transition-colors",
+                markAllReadMutation.isPending || unreadCount === 0
+                  ? "cursor-not-allowed text-white/45"
+                  : "text-white hover:bg-white/15",
+              )}
+            >
+              {markAllReadMutation.isPending ? (
+                <Loader2 className="h-4 w-4 animate-spin" />
+              ) : (
+                <CheckCheck className="h-4 w-4" />
+              )}
+              Mark all read
+            </button>
+          </div>
         </div>
       </div>
 
-      {/* Notifications List */}
-      <NotificationList
-        notifications={visibleNotifications}
-        isLoading={isLoading}
-        onMarkRead={(id) => markReadMutation.mutate(id)}
-        onOpenLink={(link) => navigate(link)}
-        onOpenWorkflow={(detail) => {
-          if (!detail.documentId) return;
-          navigate(`/notifications/workflow/${detail.documentId}`, {
-            state: { notification: detail },
-          });
-        }}
-      />
+      <div className="p-4 pr-8">
+        <NotificationList
+          notifications={visibleNotifications}
+          isLoading={isLoading}
+          onMarkRead={(id) => markReadMutation.mutate(id)}
+          onOpenLink={(link) => navigate(link)}
+          onOpenWorkflow={(detail) => {
+            if (!detail.documentId) return;
+            navigate(`/notifications/workflow/${detail.documentId}`, {
+              state: { notification: detail },
+            });
+          }}
+        />
+      </div>
     </div>
   );
 }

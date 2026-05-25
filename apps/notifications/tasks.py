@@ -79,7 +79,7 @@ def notify_task_assigned(task_id: str) -> None:
     except WorkflowTask.DoesNotExist:
         return
 
-    if not task.assigned_to:
+    if task.status != "in_progress" or not task.assigned_to:
         return
 
     doc     = task.workflow_instance.document
@@ -302,6 +302,44 @@ def notify_hold_released(task_id: str) -> None:
 # ── Hold auto-released by Celery ──────────────────────────────────────────────
 
 @shared_task(queue="notifications")
+def notify_hold_ending(task_id: str) -> None:
+    """Notify the approver when a scheduled hold is approaching its end."""
+    from apps.workflows.models import WorkflowTask
+    try:
+        task = WorkflowTask.objects.select_related(
+            "assigned_to", "step",
+            "workflow_instance__document",
+        ).get(id=task_id)
+    except WorkflowTask.DoesNotExist:
+        return
+
+    if task.status != "held" or not task.held_until or not task.assigned_to:
+        return
+
+    doc  = task.workflow_instance.document
+    link = f"/documents/{doc.id}"
+    msg = (
+        f"Hold ending soon: '{doc.title}' ({doc.reference_number}) "
+        f"is scheduled to leave hold at {task.held_until.strftime('%d %b %Y %H:%M UTC')}."
+    )
+    created = _create_once(task.assigned_to, msg, link, "hold_ending")
+    if created:
+        _send_email(
+            task.assigned_to,
+            subject=f"DMS — Hold ending soon: {doc.reference_number}",
+            body=(
+                f"Hello {task.assigned_to.first_name},\n\n"
+                f"A hold you scheduled is approaching its end.\n\n"
+                f"  Document: {doc.title}\n"
+                f"  Reference: {doc.reference_number}\n"
+                f"  Step: {task.step.name}\n"
+                f"  Hold ends: {task.held_until.strftime('%d %b %Y %H:%M UTC')}\n\n"
+                f"Please log in to DMS if you need to action or extend the task.\n"
+            ),
+        )
+
+
+@shared_task(queue="notifications")
 def notify_hold_auto_released(task_id: str) -> None:
     """Notify the approver when Celery auto-releases their hold."""
     from apps.workflows.models import WorkflowTask
@@ -340,6 +378,43 @@ def notify_hold_auto_released(task_id: str) -> None:
 
 
 # ── Task overdue (SLA breach) ─────────────────────────────────────────────────
+
+@shared_task(queue="notifications")
+def notify_task_sla_warning(task_id: str) -> None:
+    """Notify an assignee when their active task is approaching its SLA deadline."""
+    from apps.workflows.models import WorkflowTask
+    try:
+        task = WorkflowTask.objects.select_related(
+            "assigned_to", "step", "workflow_instance__document"
+        ).get(id=task_id)
+    except WorkflowTask.DoesNotExist:
+        return
+
+    if task.status != "in_progress" or not task.assigned_to or not task.due_at:
+        return
+
+    doc  = task.workflow_instance.document
+    link = f"/documents/{doc.id}"
+    msg = (
+        f"SLA approaching: Your approval task for '{doc.title}' "
+        f"({doc.reference_number}) is due by {task.due_at.strftime('%d %b %Y %H:%M UTC')}."
+    )
+    created = _create_once(task.assigned_to, msg, link, "task_sla_warning")
+    if created:
+        _send_email(
+            task.assigned_to,
+            subject=f"DMS — SLA approaching: {doc.reference_number}",
+            body=(
+                f"Hello {task.assigned_to.first_name},\n\n"
+                f"An approval task is approaching its SLA deadline.\n\n"
+                f"  Document: {doc.title}\n"
+                f"  Reference: {doc.reference_number}\n"
+                f"  Step: {task.step.name}\n"
+                f"  Due by: {task.due_at.strftime('%d %b %Y %H:%M UTC')}\n\n"
+                f"Please log in to DMS to action this request.\n"
+            ),
+        )
+
 
 @shared_task(queue="notifications")
 def notify_task_overdue(task_id: str) -> None:

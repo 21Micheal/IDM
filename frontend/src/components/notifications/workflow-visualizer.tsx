@@ -697,13 +697,13 @@ function ProgressRing({ pct, size = 48 }: { pct: number; size?: number }) {
   const dash = (pct / 100) * circ;
   return (
     <svg width={size} height={size} className="shrink-0 -rotate-90">
-      <circle cx={size / 2} cy={size / 2} r={r} fill="none" stroke="#e2e8f0" strokeWidth={5} />
+      <circle cx={size / 2} cy={size / 2} r={r} fill="none" stroke="rgba(255,255,255,0.25)" strokeWidth={5} />
       <circle
         cx={size / 2}
         cy={size / 2}
         r={r}
         fill="none"
-        stroke="#6b7280"
+        stroke="#ffffff"
         strokeWidth={5}
         strokeLinecap="round"
         strokeDasharray={`${dash} ${circ}`}
@@ -717,7 +717,7 @@ function ProgressRing({ pct, size = 48 }: { pct: number; size?: number }) {
         style={{
           fontSize: 11,
           fontWeight: 700,
-          fill: "#0f172a",
+          fill: "#ffffff",
           transform: "rotate(90deg)",
           transformOrigin: "50% 50%",
           fontFamily: "inherit",
@@ -748,7 +748,7 @@ function SummaryCard({
 }) {
   return (
     <div
-      className={clsx("relative overflow-hidden rounded-xl border px-4 py-3", colorClass)}
+      className={clsx("relative overflow-hidden border px-4 py-3", colorClass)}
       style={{ borderColor }}
     >
       <div className="flex items-center justify-between">
@@ -769,7 +769,7 @@ function ZoomBtn({ onClick, children }: { onClick: () => void; children: React.R
     <button
       type="button"
       onClick={onClick}
-      className="inline-flex h-7 w-7 items-center justify-center rounded-md border border-slate-200 bg-white text-slate-500 shadow-sm transition hover:bg-slate-50 hover:text-slate-800 active:scale-95"
+      className="inline-flex h-7 w-7 items-center justify-center border border-[#C8CDD2] bg-white text-[#5E6870] shadow-sm transition hover:bg-[#EEF6FB] hover:text-[#287EAD] active:scale-95"
     >
       {children}
     </button>
@@ -821,8 +821,8 @@ export function WorkflowVisualizer({
   /* Loading */
   if (isLoading) {
     return (
-      <div className="flex h-64 items-center justify-center gap-2 rounded-xl border border-dashed border-slate-200 bg-slate-50 text-sm text-slate-400">
-        <Loader2 className="h-4 w-4 animate-spin" />
+      <div className="flex h-64 items-center justify-center gap-2 border border-dashed border-[#C8CDD2] bg-[#F5F7F8] text-sm text-[#5E6870]">
+        <Loader2 className="h-4 w-4 animate-spin text-[#287EAD]" />
         Loading workflow…
       </div>
     );
@@ -831,7 +831,7 @@ export function WorkflowVisualizer({
   /* Empty */
   if (!steps.length) {
     return (
-      <div className="flex h-40 items-center justify-center rounded-xl border border-dashed border-slate-200 bg-slate-50 text-sm text-slate-400">
+      <div className="flex h-40 items-center justify-center border border-dashed border-[#C8CDD2] bg-[#F5F7F8] text-sm text-[#5E6870]">
         No workflow steps to display.
       </div>
     );
@@ -840,27 +840,27 @@ export function WorkflowVisualizer({
   return (
     <div
       className={clsx(
-        "w-full overflow-hidden rounded-2xl border border-slate-200 bg-white shadow-sm",
-        fullPage && "flex h-full flex-col rounded-none border-slate-300 shadow-none"
+        "w-full overflow-hidden border border-[#C8CDD2] bg-white shadow-sm",
+        fullPage && "flex h-full flex-col border-[#C8CDD2] shadow-none"
       )}
     >
       {/* ── Header ──────────────────────────────────────────────── */}
-      <div className="flex flex-wrap items-center gap-4 border-b border-slate-200 bg-white px-6 py-4">
+      <div className="flex flex-wrap items-center gap-4 border-b border-[#206D99] bg-[#287EAD] px-5 py-4 text-white">
         {/* Icon */}
-        <div className="flex h-10 w-10 shrink-0 items-center justify-center rounded-md border border-slate-300 bg-white text-slate-700">
+        <div className="flex h-10 w-10 shrink-0 items-center justify-center border border-white/25 bg-white/10 text-white">
           <GitBranch className="h-5 w-5" />
         </div>
 
         {/* Title block */}
         <div className="min-w-0 flex-1">
-          <h3 className="truncate text-[15px] font-bold tracking-tight text-slate-900">
+          <h3 className="truncate text-[15px] font-bold tracking-tight text-white">
             {documentTitle ?? "Workflow Progress"}
           </h3>
-          <p className="mt-0.5 text-xs text-slate-500">
+          <p className="mt-0.5 text-xs text-white/75">
             {submittedBy && (
               <>
                 Submitted by{" "}
-                <span className="font-semibold text-slate-700">{submittedBy}</span>
+                <span className="font-semibold text-white">{submittedBy}</span>
               </>
             )}
             {submittedDate && (
@@ -872,8 +872,8 @@ export function WorkflowVisualizer({
         {/* Progress ring */}
         <div className="flex items-center gap-3">
           <div className="hidden text-right sm:block">
-            <p className="text-[10px] font-bold uppercase tracking-widest text-slate-400">Progress</p>
-            <p className="text-base font-black text-slate-800">
+            <p className="text-[10px] font-bold uppercase tracking-widest text-white/65">Progress</p>
+            <p className="text-base font-black text-white">
               {counts.completed}/{taskTotal} steps
             </p>
           </div>
@@ -882,13 +882,13 @@ export function WorkflowVisualizer({
       </div>
 
       {/* ── Diagram section ─────────────────────────────────────── */}
-      <div className="border-t border-slate-100">
+      <div className="border-t border-[#C8CDD2]">
         {/* Toolbar */}
-        <div className="flex items-center justify-between px-5 py-2">
+        <div className="flex items-center justify-between bg-[#F5F7F8] px-4 py-2">
           <button
             type="button"
             onClick={() => setDiagramOpen((v) => !v)}
-            className="inline-flex items-center gap-1.5 text-[11px] font-semibold uppercase tracking-widest text-slate-500 transition hover:text-slate-800"
+            className="inline-flex items-center gap-1.5 text-[11px] font-bold uppercase tracking-widest text-[#5E6870] transition hover:text-[#1F2933]"
           >
             {diagramOpen ? (
               <ChevronDown className="h-3.5 w-3.5" />
@@ -902,7 +902,7 @@ export function WorkflowVisualizer({
             <ZoomBtn onClick={() => setZoom((z) => Math.max(0.4, +(z - 0.1).toFixed(1)))}>
               <ZoomOut className="h-3.5 w-3.5" />
             </ZoomBtn>
-            <span className="w-10 text-center text-[11px] font-mono text-slate-500">
+            <span className="w-10 text-center font-mono text-[11px] text-[#5E6870]">
               {Math.round(zoom * 100)}%
             </span>
             <ZoomBtn onClick={() => setZoom((z) => Math.min(2.5, +(z + 0.1).toFixed(1)))}>
@@ -917,12 +917,12 @@ export function WorkflowVisualizer({
         {/* Canvas */}
         {diagramOpen && (
           <div
-            className="overflow-auto border-t border-slate-100"
+            className="overflow-auto border-t border-[#C8CDD2]"
             style={{
               background:
-                "radial-gradient(circle, rgba(15,23,42,0.045) 1px, transparent 1px)",
+                "radial-gradient(circle, rgba(31,41,51,0.06) 1px, transparent 1px)",
               backgroundSize: "20px 20px",
-              backgroundColor: "#f8fafc",
+              backgroundColor: "#EDEDED",
               maxHeight: fullPage ? undefined : 480,
             }}
           >
@@ -996,15 +996,15 @@ export function WorkflowVisualizer({
             {/* Hover tooltip */}
             {hoveredStep && (hoveredStep.comment || hoveredStep.description) && (
               <div
-                className="pointer-events-none absolute bottom-4 right-4 max-w-xs rounded-xl border border-slate-200 bg-white p-3 shadow-xl"
+                className="pointer-events-none absolute bottom-4 right-4 max-w-xs border border-[#C8CDD2] bg-white p-3 shadow-xl"
                 style={{ zIndex: 10 }}
               >
-                <p className="text-[11px] font-bold text-slate-700">{hoveredStep.name}</p>
+                <p className="text-[11px] font-bold text-[#1F2933]">{hoveredStep.name}</p>
                 {hoveredStep.description && (
-                  <p className="mt-0.5 text-[11px] text-slate-500">{hoveredStep.description}</p>
+                  <p className="mt-0.5 text-[11px] text-[#5E6870]">{hoveredStep.description}</p>
                 )}
                 {hoveredStep.comment && (
-                  <div className="mt-1.5 rounded-lg border border-slate-200 bg-slate-50 px-2 py-1.5 text-[11px] text-slate-700">
+                  <div className="mt-1.5 border border-[#C8CDD2] bg-[#F5F7F8] px-2 py-1.5 text-[11px] text-[#1F2933]">
                     <MessageSquare className="mr-1 inline h-3 w-3" />
                     {hoveredStep.comment}
                   </div>
@@ -1016,42 +1016,42 @@ export function WorkflowVisualizer({
       </div>
 
       {/* ── Step Details ────────────────────────────────────────── */}
-      <div className="border-t border-slate-100">
+      <div className="border-t border-[#C8CDD2]">
         <button
           type="button"
           onClick={() => setDetailsOpen((v) => !v)}
-          className="flex w-full items-center justify-between px-5 py-3 text-left transition hover:bg-slate-50"
+          className="flex w-full items-center justify-between bg-white px-4 py-3 text-left transition hover:bg-[#F5F7F8]"
         >
           <div className="flex items-center gap-2">
             {detailsOpen ? (
-              <ChevronDown className="h-3.5 w-3.5 text-slate-400" />
+              <ChevronDown className="h-3.5 w-3.5 text-[#5E6870]" />
             ) : (
-              <ChevronRight className="h-3.5 w-3.5 text-slate-400" />
+              <ChevronRight className="h-3.5 w-3.5 text-[#5E6870]" />
             )}
-            <span className="text-[11px] font-bold uppercase tracking-widest text-slate-500">
+            <span className="text-[11px] font-bold uppercase tracking-widest text-[#5E6870]">
               Step Details
             </span>
           </div>
-          <span className="rounded-full border border-slate-300 bg-slate-100 px-2.5 py-0.5 text-[11px] font-semibold text-slate-600">
+          <span className="border border-[#C8CDD2] bg-[#F5F7F8] px-2.5 py-0.5 text-[11px] font-semibold text-[#5E6870]">
             {selectedStep?.name ?? "No step selected"}
           </span>
         </button>
 
         {detailsOpen && selectedStep && (
-          <div className="px-5 pb-5">
-            <div className="rounded-xl border border-slate-200 bg-slate-50 p-4">
+          <div className="px-4 pb-4">
+            <div className="border border-[#C8CDD2] bg-[#F5F7F8] p-4">
               <div className="flex items-start gap-3">
                 <div
-                  className="flex h-9 w-9 shrink-0 items-center justify-center rounded-full text-white shadow-sm"
+                  className="flex h-9 w-9 shrink-0 items-center justify-center text-white shadow-sm"
                   style={{ background: TONE[selectedStep.status].stroke }}
                 >
                   <StatusIcon status={selectedStep.status} className="h-4 w-4" />
                 </div>
                 <div className="min-w-0 flex-1">
                   <div className="flex flex-wrap items-center gap-2">
-                    <h4 className="text-sm font-semibold text-slate-900">{selectedStep.name}</h4>
+                    <h4 className="text-sm font-semibold text-[#1F2933]">{selectedStep.name}</h4>
                     <span
-                      className="inline-flex items-center rounded-full border px-2 py-0.5 text-[10px] font-bold"
+                      className="inline-flex items-center border px-2 py-0.5 text-[10px] font-bold"
                       style={{
                         background: TONE[selectedStep.status].badgeBg,
                         color: TONE[selectedStep.status].badgeText,
@@ -1061,7 +1061,7 @@ export function WorkflowVisualizer({
                       {statusLabel(selectedStep)}
                     </span>
                   </div>
-                  <div className="mt-1 flex flex-wrap items-center gap-x-4 gap-y-1 text-xs text-slate-600">
+                  <div className="mt-1 flex flex-wrap items-center gap-x-4 gap-y-1 text-xs text-[#5E6870]">
                     <span className="inline-flex items-center gap-1">
                       <User className="h-3 w-3" />
                       {selectedStep.approver || "Unassigned"}
@@ -1074,11 +1074,11 @@ export function WorkflowVisualizer({
                     )}
                   </div>
                   {selectedStep.description && (
-                    <p className="mt-2 text-xs text-slate-600">{selectedStep.description}</p>
+                    <p className="mt-2 text-xs text-[#5E6870]">{selectedStep.description}</p>
                   )}
                   {selectedStep.comment && (
-                    <div className="mt-3 flex items-start gap-1.5 rounded-lg border border-slate-200 bg-white/80 px-2.5 py-2 text-xs text-slate-700">
-                      <MessageSquare className="mt-0.5 h-3 w-3 shrink-0 text-slate-500" />
+                    <div className="mt-3 flex items-start gap-1.5 border border-[#C8CDD2] bg-white px-2.5 py-2 text-xs text-[#1F2933]">
+                      <MessageSquare className="mt-0.5 h-3 w-3 shrink-0 text-[#5E6870]" />
                       <span>{selectedStep.comment}</span>
                     </div>
                   )}

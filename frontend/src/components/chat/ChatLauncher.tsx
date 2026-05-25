@@ -1,5 +1,5 @@
 import { Suspense, lazy, useEffect, useRef, useState } from "react";
-import { MessageSquareText, X } from "lucide-react";
+import { MessageCircleMore, X } from "lucide-react";
 import { chatAPI } from "@/services/api";
 import { chatWebSocket } from "@/services/chatWebSocket";
 import { vaultToast } from "@/components/ui/vault-toast";
@@ -147,24 +147,24 @@ export function ChatLauncher() {
         onClick={open ? handleClose : handleOpen}
         aria-label={open ? "Close chat" : "Open chat"}
         title={open ? "Close chat" : "Open chat"}
-        className="group relative flex h-8 w-8 items-center justify-center rounded-md border border-transparent text-muted-foreground transition-colors hover:bg-muted hover:text-foreground active:scale-95"
+        className="group relative flex h-9 w-9 items-center justify-center border border-[#C8CDD2] bg-white text-[#5E6870] transition-colors hover:bg-[#EEF6FB] hover:text-[#287EAD] active:scale-95"
       >
         {/* Animated accent ring on new message */}
         <span
-          className={`pointer-events-none absolute inset-0 rounded-md ring-2 ring-accent transition-opacity ${
+          className={`pointer-events-none absolute inset-0 ring-2 ring-[#287EAD] transition-opacity ${
             pulse ? "animate-ping opacity-70" : "opacity-0"
           }`}
         />
-        {open && <span className="absolute inset-x-1 bottom-0 h-0.5 rounded-full bg-accent" />}
+        {open && <span className="absolute inset-x-1 bottom-0 h-0.5 bg-[#287EAD]" />}
 
         {open ? (
           <X className="h-5 w-5" strokeWidth={2.25} />
         ) : (
-          <MessageSquareText className="h-5 w-5" strokeWidth={2.25} />
+          <MessageCircleMore className="h-5 w-5" strokeWidth={2.25} />
         )}
 
         {!open && unread > 0 && (
-          <span className="absolute -top-1 -right-1 inline-flex h-4 min-w-[16px] items-center justify-center rounded-full bg-destructive px-1 text-[9px] font-bold text-destructive-foreground ring-2 ring-background animate-pulse">
+          <span className="absolute -right-1 -top-1 inline-flex h-4 min-w-[16px] animate-pulse items-center justify-center bg-red-700 px-1 text-[9px] font-bold text-white">
             {unread > 99 ? "99+" : unread}
           </span>
         )}

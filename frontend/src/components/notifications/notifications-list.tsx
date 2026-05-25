@@ -79,6 +79,13 @@ export function getNotificationConfig(type: string, message = "") {
         label: "Approval Request",
         category: "Requires Approval",
       };
+    case "task_sla_warning":
+      return {
+        icon: Clock,
+        color: "text-amber-700 bg-amber-50 border-amber-200",
+        label: "SLA Approaching",
+        category: "Task Alert",
+      };
     case "workflow_complete":
       return {
         icon: CheckCircle,
@@ -106,6 +113,13 @@ export function getNotificationConfig(type: string, message = "") {
         color: "text-teal bg-teal/10 border-teal/20",
         label: "Hold Released",
         category: "Hold Released",
+      };
+    case "hold_ending":
+      return {
+        icon: Clock,
+        color: "text-amber-700 bg-amber-50 border-amber-200",
+        label: "Hold Ending Soon",
+        category: "Hold Alert",
       };
     case "hold_expired":
       return {
@@ -157,6 +171,7 @@ export function getNotificationConfig(type: string, message = "") {
 export function inferNotificationPriority(notification: Notification): Priority {
   const text = `${notification.type} ${notification.message}`.toLowerCase();
   if (text.includes("overdue") || text.includes("urgent") || text.includes("expired")) return "high";
+  if (text.includes("sla") || text.includes("deadline") || text.includes("due by")) return "medium";
   if (text.includes("assigned") || text.includes("returned") || text.includes("held")) return "medium";
   return "low";
 }
@@ -184,19 +199,19 @@ export function NotificationList({
   if (isLoading) {
     return (
       <div className="flex items-center justify-center py-20">
-        <Loader2 className="w-8 h-8 text-primary animate-spin" />
+        <Loader2 className="h-8 w-8 animate-spin text-[#287EAD]" />
       </div>
     );
   }
 
   if (sortedNotifications.length === 0) {
     return (
-      <div className="py-16 text-center">
-        <div className="mx-auto mb-4 flex h-12 w-12 items-center justify-center rounded-full bg-muted">
-          <Bell className="h-6 w-6 text-muted-foreground/50" />
+      <div className="border border-dashed border-[#C8CDD2] bg-[#F5F7F8] py-16 text-center">
+        <div className="mx-auto mb-4 flex h-12 w-12 items-center justify-center border border-[#C8CDD2] bg-white">
+          <Bell className="h-6 w-6 text-[#5E6870]" />
         </div>
-        <h3 className="text-sm font-semibold text-foreground">No notifications</h3>
-        <p className="mt-1 text-xs text-muted-foreground">You are all caught up with your tasks and updates.</p>
+        <h3 className="text-sm font-semibold text-[#1F2933]">No notifications</h3>
+        <p className="mt-1 text-xs text-[#5E6870]">You are all caught up with your updates.</p>
       </div>
     );
   }
@@ -227,7 +242,7 @@ export function NotificationList({
   };
 
   return (
-    <div className="space-y-2">
+    <div className="divide-y divide-[#D3D7DA] border border-[#C8CDD2] bg-white">
       {sortedNotifications.map((notification) => {
         const config = getNotificationConfig(notification.type, notification.message);
         const Icon = config.icon;
@@ -239,43 +254,43 @@ export function NotificationList({
             type="button"
             onClick={() => openNotification(notification)}
             className={clsx(
-              "group w-full rounded-lg border px-4 py-3 text-left transition-all hover:shadow-sm",
+              "group w-full px-4 py-3 text-left transition-colors hover:bg-[#F5F7F8]",
               notification.is_read
-                ? "border-border bg-transparent hover:bg-muted/30"
-                : "border-primary/30 bg-primary/5 hover:bg-primary/10",
+                ? "bg-white"
+                : "bg-[#EEF6FB]",
             )}
           >
             <div className="flex items-start gap-3">
-              <div className={clsx("flex h-8 w-8 flex-shrink-0 items-center justify-center rounded-md border text-sm", config.color)}>
+              <div className={clsx("flex h-8 w-8 flex-shrink-0 items-center justify-center border bg-white text-sm", config.color)}>
                 <Icon className="h-4 w-4" />
               </div>
 
               <div className="min-w-0 flex-1">
                 <div className="flex flex-wrap items-center gap-2">
-                  <span className="text-xs font-semibold uppercase tracking-wider text-muted-foreground">
+                  <span className="text-xs font-bold uppercase tracking-wider text-[#5E6870]">
                     {config.label}
                   </span>
                   {config.category && (
-                    <span className="rounded-full bg-muted/70 px-2 py-0.5 text-[10px] font-semibold uppercase tracking-wide text-muted-foreground">
+                    <span className="bg-[#F5F7F8] px-2 py-0.5 text-[10px] font-semibold uppercase tracking-wide text-[#5E6870]">
                       {config.category}
                     </span>
                   )}
-                  {!notification.is_read && <span className="h-1.5 w-1.5 rounded-full bg-primary" />}
+                  {!notification.is_read && <span className="h-1.5 w-1.5 bg-[#287EAD]" />}
                   <span
                     className={clsx(
-                      "rounded px-1.5 py-0.5 text-[10px] font-semibold uppercase",
-                      priority === "high" && "bg-destructive/15 text-destructive",
+                      "px-1.5 py-0.5 text-[10px] font-semibold uppercase",
+                      priority === "high" && "bg-red-50 text-red-700",
                       priority === "medium" && "bg-amber-100 text-amber-800 dark:bg-amber-900/30 dark:text-amber-400",
-                      priority === "low" && "bg-muted text-muted-foreground",
+                      priority === "low" && "bg-[#F5F7F8] text-[#5E6870]",
                     )}
                   >
                     {priority}
                   </span>
                 </div>
-                <p className={clsx("mt-1 text-sm leading-snug", notification.is_read ? "text-muted-foreground" : "font-medium text-foreground")}>
+                <p className={clsx("mt-1 text-sm leading-snug", notification.is_read ? "text-[#5E6870]" : "font-semibold text-[#1F2933]")}>
                   {notification.message}
                 </p>
-                <div className="mt-1.5 text-xs text-muted-foreground">
+                <div className="mt-1.5 text-xs text-[#5E6870]">
                   {new Date(notification.created_at).toLocaleString(undefined, {
                     dateStyle: "short",
                     timeStyle: "short",
@@ -283,7 +298,7 @@ export function NotificationList({
                 </div>
               </div>
 
-              <ChevronRight className="mt-1 h-4 w-4 flex-shrink-0 text-muted-foreground opacity-40 transition-all group-hover:opacity-100" />
+              <ChevronRight className="mt-1 h-4 w-4 flex-shrink-0 text-[#5E6870] opacity-40 transition-all group-hover:opacity-100" />
             </div>
           </button>
         );

@@ -192,7 +192,7 @@ export interface WorkflowTask {
 
 export interface Notification {
   id: string;
-  type: "task_assigned" | "workflow_complete" | "document_returned" | "document_held" | "hold_released" | "hold_expired" | "task_overdue" | "workflow_action" | "document_shared";
+  type: "task_assigned" | "workflow_complete" | "document_returned" | "document_held" | "hold_released" | "hold_ending" | "hold_expired" | "task_sla_warning" | "task_overdue" | "workflow_action" | "document_shared";
   message: string;
   link: string;
   is_read: boolean;

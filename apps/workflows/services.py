@@ -23,6 +23,7 @@ New methods:
 from django.db import transaction
 from django.db.models import Q
 from django.utils import timezone
+from django.conf import settings
 from datetime import timedelta
 from random import choice
 
@@ -264,16 +265,16 @@ class WorkflowService:
     @transaction.atomic
     def hold(task: WorkflowTask, actor, comment: str, hold_hours: int = None) -> None:
         """
-        Place the task on hold indefinitely.
-        Approver must manually release it when ready.
-        hold_hours parameter is ignored (kept for API compatibility).
+        Place the task on hold until a scheduled expiry time.
+        A warning and an automatic release are scheduled from held_until.
         """
         WorkflowService._assert_actionable(task)
 
-        # Note: No auto-release. Approver decides when to release.
+        held_until = timezone.now() + timedelta(hours=hold_hours or 24)
+
         task.status     = "held"
         task.comment    = comment
-        task.held_until = timezone.now()  # Mark when it was put on hold
+        task.held_until = held_until
         task.acted_at   = timezone.now()
         task.save(update_fields=["status", "comment", "held_until", "acted_at"])
 
@@ -297,12 +298,13 @@ class WorkflowService:
 
         # Notify uploader
         WorkflowService._notify_action(action, doc)
+        WorkflowService._schedule_hold_notifications(task)
 
     # ── Release hold ───────────────────────────────────────────────────────
 
     @staticmethod
     @transaction.atomic
-    def release_hold(task: WorkflowTask, actor) -> None:
+    def release_hold(task: WorkflowTask, actor=None, *, auto: bool = False) -> None:
         """
         Release a held task back to in_progress.
         Approver must explicitly release when ready.
@@ -314,10 +316,12 @@ class WorkflowService:
         task.held_until = None
         task.save(update_fields=["status", "held_until"])
 
-        action = WorkflowTaskAction.objects.create(
-            task=task, actor=actor, action="released",
-            comment="Manually released from hold",
-        )
+        action = None
+        if actor is not None:
+            action = WorkflowTaskAction.objects.create(
+                task=task, actor=actor, action="released",
+                comment="Manually released from hold",
+            )
 
         AuditLog.objects.create(
             event=AuditEvent.WORKFLOW_RELEASED,
@@ -325,7 +329,11 @@ class WorkflowService:
             object_type=task.workflow_instance.document.__class__.__name__,
             object_id=str(task.workflow_instance.document.pk),
             object_repr=str(task.workflow_instance.document)[:255],
-            changes={"task_id": str(task.id), "action": action.action, "comment": action.comment},
+            changes={
+                "task_id": str(task.id),
+                "action": "released",
+                "comment": "Automatically released from hold" if auto else "Manually released from hold",
+            },
         )
 
         # Restore document status to the step's label
@@ -334,8 +342,8 @@ class WorkflowService:
         doc.status = step.status_label
         doc.save(update_fields=["status", "updated_at"])
 
-        # Notify uploader
-        WorkflowService._notify_action(action, doc)
+        if action is not None:
+            WorkflowService._notify_action(action, doc)
 
     # ── Cancel ─────────────────────────────────────────────────────────────
 
@@ -401,6 +409,7 @@ class WorkflowService:
             from apps.notifications.tasks import notify_task_assigned
             for task in tasks:
                 notify_task_assigned.delay(str(task.id))
+                WorkflowService._schedule_task_sla_notifications(task)
         except Exception:
             pass
 
@@ -551,6 +560,57 @@ class WorkflowService:
             .filter(status="in_progress", due_at__lt=timezone.now())
             .select_related("workflow_instance__document", "step", "assigned_to")
         )
+
+    @staticmethod
+    def get_sla_warning_tasks():
+        warning_hours = getattr(settings, "WORKFLOW_SLA_WARNING_HOURS", 4)
+        window_end = timezone.now() + timedelta(hours=warning_hours)
+        return (
+            WorkflowTask.objects
+            .filter(status="in_progress", due_at__gt=timezone.now(), due_at__lte=window_end)
+            .select_related("workflow_instance__document", "step", "assigned_to")
+        )
+
+    @staticmethod
+    def get_hold_ending_tasks():
+        warning_hours = getattr(settings, "WORKFLOW_HOLD_WARNING_HOURS", 2)
+        window_end = timezone.now() + timedelta(hours=warning_hours)
+        return (
+            WorkflowTask.objects
+            .filter(status="held", held_until__gt=timezone.now(), held_until__lte=window_end)
+            .select_related("workflow_instance__document", "step", "assigned_to")
+        )
+
+    @staticmethod
+    def _schedule_task_sla_notifications(task: WorkflowTask) -> None:
+        if not task.due_at:
+            return
+        try:
+            from apps.notifications.tasks import notify_task_sla_warning, notify_task_overdue
+
+            warning_hours = getattr(settings, "WORKFLOW_SLA_WARNING_HOURS", 4)
+            warning_at = task.due_at - timedelta(hours=warning_hours)
+            if warning_at > timezone.now():
+                notify_task_sla_warning.apply_async(args=[str(task.id)], eta=warning_at)
+            notify_task_overdue.apply_async(args=[str(task.id)], eta=task.due_at)
+        except Exception:
+            pass
+
+    @staticmethod
+    def _schedule_hold_notifications(task: WorkflowTask) -> None:
+        if not task.held_until:
+            return
+        try:
+            from apps.notifications.tasks import notify_hold_ending
+            from apps.workflows.tasks import auto_release_hold
+
+            warning_hours = getattr(settings, "WORKFLOW_HOLD_WARNING_HOURS", 2)
+            warning_at = task.held_until - timedelta(hours=warning_hours)
+            if warning_at > timezone.now():
+                notify_hold_ending.apply_async(args=[str(task.id)], eta=warning_at)
+            auto_release_hold.apply_async(args=[str(task.id)], eta=task.held_until)
+        except Exception:
+            pass
 
     # ── Notifications ──────────────────────────────────────────────────────
 

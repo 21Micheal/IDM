@@ -20,6 +20,7 @@ import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { documentsAPI, workflowAPI } from "@/services/api";
 const DocumentViewer = lazy(() => import("@/components/documents/DocumentViewer"));
 const UploadVersionDrawer = lazy(() => import("@/components/documents/UploadVersionDrawer").then((module) => ({ default: module.UploadVersionDrawer })));
+const WorkflowVisualizer = lazy(() => import("@/components/notifications/workflow-visualizer").then((module) => ({ default: module.WorkflowVisualizer })));
 import StatusBadge from "@/components/documents/StatusBadge";
 import OcrStatusBadge from "@/components/documents/OcrStatusBadge";
 import { AddToFolderMenu } from "@/components/documents/AddToFolderMenu";
@@ -38,6 +39,7 @@ import type { Document, DocumentRelationType, DocumentRelationship, MetadataFiel
 import { clsx as cn } from "clsx";
 import { QUERY_SHORT_STALE } from "@/lib/reactQueryDefaults";
 import { formatDocumentFileType } from "@/lib/documentFormat";
+import { loadWorkflowData } from "@/components/notifications/workflow-data";
 
 import { StarButton } from "@/components/documents/StarButton";
 
@@ -407,6 +409,14 @@ export default function DocumentDetailPage() {
     ...QUERY_SHORT_STALE,
   });
 
+  const { data: workflowData, isLoading: workflowDataLoading } = useQuery({
+    queryKey: ["document-workflow", id],
+    queryFn: () => loadWorkflowData(id!),
+    enabled: !!id && !!doc && !(doc as any).is_self_upload,
+    ...QUERY_SHORT_STALE,
+  });
+  const workflowStepsCount = workflowData?.steps?.length ?? 0;
+
   useEffect(() => {
     if (!activeTaskInitializedRef.current && activeTask) {
       activeTaskInitializedRef.current = true;
@@ -415,10 +425,10 @@ export default function DocumentDetailPage() {
   }, [activeTask]);
 
   useEffect(() => {
-    if (!activeTask && activeTab === "workflow") {
+    if (!activeTask && activeTab === "workflow" && workflowStepsCount === 0) {
       setActiveTab("attributes");
     }
-  }, [activeTask, activeTab]);
+  }, [activeTask, activeTab, workflowStepsCount]);
 
   useEffect(() => {
     if (activeTask) {
@@ -554,9 +564,10 @@ export default function DocumentDetailPage() {
   const auditCount = auditLogs?.count ?? 0;
   const auditPages = Math.max(1, Math.ceil(auditCount / AUDIT_PAGE_SIZE));
   const sortedDocumentVersions = [...(doc.versions ?? [])].sort((a, b) => a.version_number - b.version_number);
+  const workflowAvailable = !isPersonal && (Boolean(activeTask) || workflowDataLoading || workflowStepsCount > 0);
 
   const tabs: { id: TabId; label: string; disabled?: boolean }[] = [
-    ...(activeTask ? [{ id: "workflow" as const, label: "Workflow" }] : []),
+    ...(workflowAvailable ? [{ id: "workflow" as const, label: "Workflow" }] : []),
     { id: "attributes", label: "Details" },
     { id: "relationships", label: `Links (${relationships.length})` },
     { id: "properties", label: "Properties" },
@@ -776,7 +787,10 @@ export default function DocumentDetailPage() {
       )}>
 
         {/* Column 1: Document Viewer (Left) */}
-        <div className={cn("space-y-4", compareDoc ? "lg:col-span-8 xl:col-span-8" : "lg:col-span-8")}>
+        <div className={cn(
+          "space-y-4",
+          compareDoc ? "lg:col-span-8 xl:col-span-8" : activeTab === "workflow" ? "lg:col-span-6" : "lg:col-span-8",
+        )}>
 
           {/* Active Notifications / Status Banners */}
           {isPersonal && (
@@ -870,7 +884,7 @@ export default function DocumentDetailPage() {
         </div>
 
         {/* Column 2: Details & Properties Tabs (Right) */}
-        <div className="space-y-3 lg:col-span-4">
+        <div className={cn("space-y-3", activeTab === "workflow" && !compareDoc ? "lg:col-span-6" : "lg:col-span-4")}>
 
           {/* Tab Selection Row */}
           <div className="border-b border-[#C8CDD2] bg-white px-3 pt-2">
@@ -901,17 +915,35 @@ export default function DocumentDetailPage() {
           <div className="min-h-[34rem] border border-[#C8CDD2] bg-white p-4 shadow-sm">
 
             {/* WORKFLOW TAB */}
-            {activeTab === "workflow" && activeTask && (
+            {activeTab === "workflow" && workflowAvailable && (
               <div className="space-y-4 animate-fade-in">
-                <div className="rounded-2xl border border-border bg-background p-4">
-                  <div className="mb-4 flex items-center justify-between gap-3">
-                    <h3 className="text-sm font-semibold text-foreground">Workflow task actions</h3>
-                    <span className="text-sm text-muted-foreground">Task controls</span>
+                <Suspense fallback={
+                  <div className="flex min-h-[18rem] items-center justify-center border border-[#C8CDD2] bg-[#F5F7F8] text-sm text-[#5E6870]">
+                    <Loader2 className="mr-2 h-4 w-4 animate-spin text-[#287EAD]" />
+                    Loading workflow map...
                   </div>
-                  <Suspense fallback={<div className="text-sm text-muted-foreground">Loading workflow actions…</div>}>
-                    <WorkflowActionPanel task={activeTask} documentId={id!} onCompleted={() => setWorkflowActionCompleted(true)} />
-                  </Suspense>
-                </div>
+                }>
+                  <WorkflowVisualizer
+                    steps={workflowData?.steps ?? []}
+                    currentStep={workflowData?.currentStep ?? -1}
+                    documentTitle={workflowData?.documentTitle || doc.title}
+                    submittedBy={workflowData?.submittedBy}
+                    submittedDate={workflowData?.submittedDate}
+                    isLoading={workflowDataLoading}
+                  />
+                </Suspense>
+
+                {activeTask && (
+                  <div className="border border-[#C8CDD2] bg-[#F5F7F8] p-4">
+                    <div className="mb-4 flex items-center justify-between gap-3 border-b border-[#C8CDD2] pb-3">
+                      <h3 className="text-sm font-bold text-[#1F2933]">Task actions</h3>
+                      <span className="text-xs font-semibold uppercase tracking-wider text-[#5E6870]">Current approver</span>
+                    </div>
+                    <Suspense fallback={<div className="text-sm text-muted-foreground">Loading workflow actions…</div>}>
+                      <WorkflowActionPanel task={activeTask} documentId={id!} onCompleted={() => setWorkflowActionCompleted(true)} />
+                    </Suspense>
+                  </div>
+                )}
               </div>
             )}
 

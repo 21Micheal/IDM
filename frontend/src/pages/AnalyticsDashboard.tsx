@@ -18,6 +18,11 @@
 //   GET /analytics/top-uploaders/         → UploaderItem[]
 
 import { useMemo, useState } from "react";
+import { Link } from "react-router-dom";
+import { useQuery } from "@tanstack/react-query";
+import { api } from "@/services/api";
+import { useAuthStore } from "@/store/authStore";
+import { QUERY_FIVE_MIN_STALE } from "@/lib/reactQueryDefaults";
 import {
   BarChart,
   Bar,
@@ -856,6 +861,72 @@ export function AnalyticsDashboard({
           </div>
         </>
       )}
+    </div>
+  );
+}
+
+export default function AnalyticsDashboardPage() {
+  const user = useAuthStore((state) => state.user);
+  const enabled = Boolean(user?.has_admin_access);
+
+  const { data: turnaroundData, isLoading: turnaroundLoading } = useQuery({
+    queryKey: ["analytics", "turnaround"],
+    queryFn: () => api.get("/analytics/approval-turnaround/").then((r) => r.data),
+    enabled,
+    ...QUERY_FIVE_MIN_STALE,
+  });
+
+  const { data: slaData, isLoading: slaLoading } = useQuery({
+    queryKey: ["analytics", "sla-breach"],
+    queryFn: () => api.get("/analytics/sla-breach-rate/").then((r) => r.data),
+    enabled,
+    ...QUERY_FIVE_MIN_STALE,
+  });
+
+  const { data: volumeData, isLoading: volumeLoading } = useQuery({
+    queryKey: ["analytics", "document-volume"],
+    queryFn: () => api.get("/analytics/document-volume/").then((r) => r.data),
+    enabled,
+    ...QUERY_FIVE_MIN_STALE,
+  });
+
+  const { data: uploadersData, isLoading: uploadersLoading } = useQuery({
+    queryKey: ["analytics", "top-uploaders"],
+    queryFn: () => api.get("/analytics/top-uploaders/").then((r) => r.data),
+    enabled,
+    ...QUERY_FIVE_MIN_STALE,
+  });
+
+  return (
+    <div className="-m-6 min-h-[calc(100vh-3.5rem)] bg-[#EDEDED] text-[#1F2933]">
+      <div className="flex min-h-[69px] flex-col gap-3 bg-[#287EAD] px-5 py-3 text-white lg:flex-row lg:items-center lg:justify-between">
+        <div>
+          <p className="text-[11px] font-semibold uppercase tracking-[0.2em] text-white/70">Manager workspace</p>
+          <h1 className="mt-1 text-xl font-semibold tracking-tight">Analytics</h1>
+        </div>
+        <Link
+          to="/"
+          className="inline-flex h-9 items-center justify-center border border-white/20 bg-[#206D99] px-4 text-sm font-semibold text-white hover:bg-[#1B5F86]"
+        >
+          Back to dashboard
+        </Link>
+      </div>
+
+      <div className="p-4 pr-8">
+        {enabled ? (
+          <AnalyticsDashboard
+            turnaroundData={turnaroundData ?? []}
+            slaData={slaData ?? []}
+            volumeData={volumeData ?? []}
+            uploadersData={uploadersData ?? []}
+            isLoading={turnaroundLoading || slaLoading || volumeLoading || uploadersLoading}
+          />
+        ) : (
+          <div className="border border-[#C8CDD2] bg-white p-6 text-sm text-[#5E6870]">
+            Analytics is available to managers and administrators.
+          </div>
+        )}
+      </div>
     </div>
   );
 }
