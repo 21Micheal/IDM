@@ -70,6 +70,11 @@ type ScanStage =
   | "ocr_failed"
   | "submitting";
 
+const PREVIEW_HEIGHT = "h-[clamp(34rem,calc(100vh-15rem),46rem)]";
+const PREVIEW_MIN_HEIGHT = "min-h-[clamp(34rem,calc(100vh-15rem),46rem)]";
+const COMPACT_PREVIEW_HEIGHT = "h-[30rem]";
+const COMPACT_PREVIEW_MIN_HEIGHT = "min-h-[30rem]";
+
 // ── Helpers ───────────────────────────────────────────────────────────────────
 
 const DOCUMENT_FIELD_KEYS = [
@@ -734,9 +739,12 @@ function CapturePreviewPane({
   compact?: boolean;
 }) {
   const kind = getCapturePreviewKind(file);
+  const previewHeight = compact ? COMPACT_PREVIEW_HEIGHT : PREVIEW_HEIGHT;
+  const previewMinHeight = compact ? COMPACT_PREVIEW_MIN_HEIGHT : PREVIEW_MIN_HEIGHT;
+  const pdfSrc = previewUrl ? `${previewUrl}#toolbar=1&navpanes=0&scrollbar=1&view=FitV` : null;
 
   return (
-    <div className="border border-[#C8CDD2] bg-white shadow-sm">
+    <div className="border border-[#C8CDD2] bg-white">
       <div className="flex min-h-11 items-center justify-between gap-3 border-b border-[#C8CDD2] bg-[#F5F7F8] px-3 py-2">
         <div className="min-w-0">
           <p className="text-sm font-bold text-[#1F2933]">Document preview</p>
@@ -755,19 +763,21 @@ function CapturePreviewPane({
         </div>
       )}
 
-      <div className={clsx("bg-[#EDEDED] p-3", compact ? "min-h-[32rem]" : "min-h-[calc(100vh-13rem)]")}>
-        {previewUrl && kind === "pdf" ? (
-          <iframe
-            src={previewUrl}
-            className={clsx("w-full border border-[#C8CDD2] bg-white", compact ? "h-[32rem]" : "h-[calc(100vh-13rem)]")}
-            title="PDF preview"
-          />
+      <div className={clsx("bg-[#EDEDED] p-3", previewMinHeight)}>
+        {pdfSrc && kind === "pdf" ? (
+          <div className={clsx("mx-auto w-full max-w-[920px] border border-[#C8CDD2] bg-white", previewHeight)}>
+            <iframe
+              src={pdfSrc}
+              className="h-full w-full bg-white"
+              title="PDF preview"
+            />
+          </div>
         ) : previewUrl && kind === "image" ? (
-          <div className={clsx("flex items-center justify-center overflow-auto border border-[#C8CDD2] bg-white", compact ? "h-[32rem]" : "h-[calc(100vh-13rem)]")}>
+          <div className={clsx("mx-auto flex w-full max-w-[920px] items-center justify-center overflow-auto border border-[#C8CDD2] bg-white", previewHeight)}>
             <img src={previewUrl} alt="Document preview" className="max-h-full max-w-full object-contain" />
           </div>
         ) : (
-          <div className={clsx("flex flex-col items-center justify-center border border-dashed border-[#C8CDD2] bg-white text-center", compact ? "h-[32rem]" : "h-[calc(100vh-13rem)]")}>
+          <div className={clsx("mx-auto flex w-full max-w-[920px] flex-col items-center justify-center border border-dashed border-[#C8CDD2] bg-white text-center", previewHeight)}>
             {kind === "other" && file ? <File className="mb-3 h-12 w-12 text-[#5E6870]" /> : <Upload className="mb-3 h-12 w-12 text-[#5E6870]" />}
             <p className="text-sm font-semibold text-[#1F2933]">
               {file ? "Inline preview is not available for this format" : "Select a file to preview"}
@@ -1232,24 +1242,24 @@ export default function UploadPage({ scanOnly = false }: UploadPageProps) {
   // ── Render ──────────────────────────────────────────────────────────────────
 
   return (
-    <div className="min-h-[calc(100vh-4rem)] bg-background px-4 py-5 sm:px-6 lg:px-8">
-      <div className="mb-5 border-b border-border pb-4 text-center">
-        <div className="mx-auto max-w-3xl">
-          <h1 className="text-2xl font-semibold text-foreground tracking-tight">
-            {scanOnly ? "Scan Document" : "Upload Document"}
-          </h1>
-          <p className="mt-1 text-sm text-muted-foreground">
-            {scanOnly
-              ? "Select a document type, attach your scanned file, and review OCR suggestions."
-              : "Select a document type, attach your file, then fill in the details."}
+    <div className="-m-6 min-h-[calc(100vh-3.5rem)] bg-[#EDEDED] text-[#1F2933]">
+      <div className="flex h-[69px] items-center justify-between gap-4 bg-[#287EAD] px-5 pr-8 text-white">
+        <div className="min-w-0">
+          <h1 className="text-lg font-semibold tracking-tight">{scanOnly ? "Scan Document" : "Upload Document"}</h1>
+          <p className="mt-0.5 text-xs text-white/75">
+            {scanOnly ? "Review the file beside OCR results before saving." : "Attach a file, preview it, then complete the document details."}
           </p>
+        </div>
+        <div className="hidden items-center gap-2 text-xs text-white/80 md:flex">
+          <span className="border border-white/30 px-2 py-1">{selectedType?.name || "No type selected"}</span>
+          <span className="border border-white/30 px-2 py-1">{droppedFile ? "File attached" : "Awaiting file"}</span>
         </div>
       </div>
 
       {/* ── OCR wait / review / submitting ──────────────────────────────── */}
       {isOcrFlow && scanStage !== "idle" && scanStage !== "uploading" && (
-        <div className="grid gap-4 lg:grid-cols-12">
-          <div className="lg:col-span-8">
+        <div className="grid gap-4 p-5 pr-8 lg:grid-cols-12">
+          <div className="lg:col-span-7 2xl:col-span-8">
             <CapturePreviewPane
               file={droppedFile}
               previewUrl={pdfPreviewUrl}
@@ -1258,8 +1268,8 @@ export default function UploadPage({ scanOnly = false }: UploadPageProps) {
             />
           </div>
 
-          <div className="lg:col-span-4">
-            <div className="max-h-[calc(100vh-9rem)] overflow-y-auto border border-[#C8CDD2] bg-white shadow-sm">
+          <div className="lg:col-span-5 2xl:col-span-4">
+            <div className="max-h-[calc(100vh-9rem)] overflow-y-auto border border-[#C8CDD2] bg-white">
             {showOcrWait && (
               <OcrWaitScreen
                 stage={scanStage as "ocr_pending" | "ocr_processing"}
@@ -1401,12 +1411,12 @@ export default function UploadPage({ scanOnly = false }: UploadPageProps) {
 
       {/* ── Main upload layout ─────────────────────────────────────────── */}
       {(scanStage === "idle" || scanStage === "uploading") && (
-        <div className="grid grid-cols-1 gap-6 xl:grid-cols-12 xl:px-0 xl:max-w-[1440px] xl:mx-auto">
+        <div className="grid grid-cols-1 gap-5 p-5 pr-8 xl:grid-cols-12">
           {/* Left column — controls */}
-          <div className={clsx(droppedFile ? "xl:col-span-3" : "xl:col-start-2 xl:col-span-5", "space-y-5")}>
+          <div className={clsx(droppedFile ? "xl:col-span-3" : "xl:col-start-2 xl:col-span-4", "space-y-4")}>
             {/* Step 1 — Document Type */}
-            <div className="border border-border bg-background p-5" style={{ boxShadow: "var(--shadow-card)" }}>
-              <h2 className="mb-4 flex items-center gap-2 text-sm font-semibold text-foreground">
+            <div className="border border-[#C8CDD2] bg-white p-4">
+              <h2 className="mb-3 flex items-center gap-2 text-sm font-semibold text-[#1F2933]">
                 <StepBadge n={1} active={!selectedTypeId} done={Boolean(selectedTypeId)} />
                 Document Type
               </h2>
@@ -1424,7 +1434,7 @@ export default function UploadPage({ scanOnly = false }: UploadPageProps) {
                 <p className="mt-3 text-xs text-muted-foreground">{selectedType.description}</p>
               )}
               {selectedType && (
-                <div className="mt-4 flex items-start gap-2 border border-primary/25 bg-primary/5 px-3 py-2 text-xs text-primary">
+                <div className="mt-4 flex items-start gap-2 border border-[#A7CDE3] bg-[#EEF6FB] px-3 py-2 text-xs text-[#287EAD]">
                   <Info className="w-4 h-4 flex-shrink-0 mt-0.5" />
                   <span>
                     {isSelfUpload
@@ -1436,8 +1446,8 @@ export default function UploadPage({ scanOnly = false }: UploadPageProps) {
             </div>
 
             {/* Step 2 — Attach File */}
-            <div className="border border-border bg-background p-5" style={{ boxShadow: "var(--shadow-card)" }}>
-              <h2 className="mb-4 flex items-center gap-2 text-sm font-semibold text-foreground">
+            <div className="border border-[#C8CDD2] bg-white p-4">
+              <h2 className="mb-3 flex items-center gap-2 text-sm font-semibold text-[#1F2933]">
                 <StepBadge n={2} active={Boolean(selectedTypeId) && !droppedFile} done={Boolean(droppedFile)} />
                 Attach File
               </h2>
@@ -1445,10 +1455,10 @@ export default function UploadPage({ scanOnly = false }: UploadPageProps) {
                 {...getRootProps()}
                 className={clsx(
                   "cursor-pointer border border-dashed p-5 text-center transition-all",
-                  isDragActive  ? "border-primary bg-primary/5"
+                  isDragActive  ? "border-[#287EAD] bg-[#EEF6FB]"
                   : droppedFile
-                    ? "border-border bg-background"
-                    : "border-border bg-muted/20 hover:border-primary/60 hover:bg-background",
+                    ? "border-[#C8CDD2] bg-[#F7F8F9]"
+                    : "border-[#C8CDD2] bg-[#F7F8F9] hover:border-[#287EAD] hover:bg-white",
                 )}
               >
                 <input {...getInputProps()} />
@@ -1475,12 +1485,12 @@ export default function UploadPage({ scanOnly = false }: UploadPageProps) {
             </div>
 
             {scanOnly && (
-              <div className="space-y-2 border border-teal/30 bg-background p-5" style={{ boxShadow: "var(--shadow-card)" }}>
+              <div className="space-y-2 border border-[#A7CDE3] bg-white p-4">
                 <h2 className="mb-2 flex items-center gap-2 text-sm font-semibold text-foreground">
                   <StepBadge n={3} active={Boolean(droppedFile)} />
                   Scan Mode (OCR)
                 </h2>
-                <div className="flex items-start gap-2 text-xs text-teal bg-teal/10 border border-teal/20 rounded-lg px-3 py-2">
+                <div className="flex items-start gap-2 border border-[#A7CDE3] bg-[#EEF6FB] px-3 py-2 text-xs text-[#287EAD]">
                   <Sparkles className="w-4 h-4 flex-shrink-0 mt-0.5" />
                   <span>
                     After upload, OCR runs in the background and pre-fills details for review.
@@ -1492,7 +1502,7 @@ export default function UploadPage({ scanOnly = false }: UploadPageProps) {
 
           {/* Centre column — document preview (visible when file selected) */}
           {droppedFile && (
-            <div className="xl:col-span-5">
+            <div className="xl:col-span-6">
               <CapturePreviewPane
                 file={droppedFile}
                 previewUrl={pdfPreviewUrl}
@@ -1503,14 +1513,13 @@ export default function UploadPage({ scanOnly = false }: UploadPageProps) {
           )}
 
           {/* Right column — form / OCR idle */}
-          <div className={clsx(droppedFile ? "xl:col-span-4" : "xl:col-start-8 xl:col-span-5")}>
+          <div className={clsx(droppedFile ? "xl:col-span-3" : "xl:col-start-7 xl:col-span-5")}>
             {showManualForm && (
               <div
                 className={clsx(
-                  "border bg-background max-w-[780px] w-full mx-auto",
-                  isSelfUpload ? "border-primary/40" : "border-border",
+                  "w-full border bg-white",
+                  isSelfUpload ? "border-[#A7CDE3]" : "border-[#C8CDD2]",
                 )}
-                style={{ boxShadow: "var(--shadow-card)" }}
               >
                 <DetailsTab />
                 <div className="p-5 sm:p-6">
@@ -1709,28 +1718,27 @@ export default function UploadPage({ scanOnly = false }: UploadPageProps) {
 
             {scanOnly && showOcrIdlePanel && (
               <div
-                className="bg-card rounded-2xl border border-teal/30 p-8 flex flex-col items-center text-center"
-                style={{ boxShadow: "var(--shadow-card)" }}
+                className="flex flex-col items-center border border-[#C8CDD2] bg-white p-6 text-center"
               >
-                <div className="w-16 h-16 rounded-2xl bg-teal/10 flex items-center justify-center mb-4">
-                  <ScanLine className="w-8 h-8 text-teal" />
+                <div className="mb-4 flex h-14 w-14 items-center justify-center bg-[#EEF6FB]">
+                  <ScanLine className="h-7 w-7 text-[#287EAD]" />
                 </div>
-                <h3 className="text-lg font-semibold text-foreground mb-2">OCR Scan Mode</h3>
-                <p className="text-sm text-muted-foreground max-w-sm mb-6">
+                <h3 className="mb-2 text-lg font-semibold text-[#1F2933]">OCR Scan Mode</h3>
+                <p className="mb-6 max-w-sm text-sm text-[#5E6870]">
                   Upload the file and the OCR pipeline will extract text automatically.
                   You'll then review and confirm the extracted details before saving.
                 </p>
-                <div className="w-full space-y-2 text-left rounded-xl bg-muted/40 border border-border p-4 mb-6 text-sm">
+                <div className="mb-6 w-full space-y-2 border border-[#C8CDD2] bg-[#F7F8F9] p-4 text-left text-sm">
                   {[
                     "Select document type and drop your file",
                     "Click Upload — OCR runs in the background",
                     "Review pre-filled details and confirm",
                   ].map((step, i) => (
                     <div key={i} className="flex items-center gap-3">
-                      <span className="w-5 h-5 rounded-full bg-teal/20 text-teal text-xs font-bold flex items-center justify-center flex-shrink-0">
+                      <span className="flex h-5 w-5 flex-shrink-0 items-center justify-center bg-[#DCEAF2] text-xs font-bold text-[#287EAD]">
                         {i + 1}
                       </span>
-                      <span className="text-foreground">{step}</span>
+                      <span className="text-[#1F2933]">{step}</span>
                     </div>
                   ))}
                 </div>
@@ -1741,9 +1749,9 @@ export default function UploadPage({ scanOnly = false }: UploadPageProps) {
                       <span>Uploading for OCR…</span>
                       <span className="font-semibold text-foreground">{uploadProgress}%</span>
                     </div>
-                    <div className="h-2.5 bg-muted rounded-full overflow-hidden">
+                    <div className="h-2.5 overflow-hidden bg-[#E1E5E8]">
                       <div
-                        className="h-full bg-teal transition-all duration-300"
+                        className="h-full bg-[#287EAD] transition-all duration-300"
                         style={{ width: `${uploadProgress}%` }}
                       />
                     </div>
@@ -1755,8 +1763,7 @@ export default function UploadPage({ scanOnly = false }: UploadPageProps) {
                     type="button"
                     onClick={handleSubmit(onUpload)}
                     disabled={uploadMutation.isPending || !droppedFile || !selectedTypeId}
-                    className="inline-flex items-center justify-center gap-2 rounded-xl bg-teal px-6 py-2.5 font-semibold text-teal-foreground hover:bg-teal/90 transition-all disabled:opacity-50 disabled:cursor-not-allowed"
-                    style={{ boxShadow: "var(--shadow-elegant)" }}
+                    className="inline-flex items-center justify-center gap-2 bg-[#287EAD] px-6 py-2.5 font-semibold text-white transition-all hover:bg-[#206D99] disabled:cursor-not-allowed disabled:opacity-50"
                   >
                     {uploadMutation.isPending ? (
                       <Loader2 className="w-5 h-5 animate-spin" />
@@ -1771,7 +1778,7 @@ export default function UploadPage({ scanOnly = false }: UploadPageProps) {
                   <button
                     type="button"
                     onClick={() => navigate("/documents")}
-                    className="px-6 py-3 rounded-xl font-semibold border border-border bg-card text-foreground hover:bg-muted transition-colors"
+                    className="border border-[#C8CDD2] bg-white px-6 py-3 font-semibold text-[#1F2933] transition-colors hover:bg-[#EEF3F7]"
                   >
                     Cancel
                   </button>

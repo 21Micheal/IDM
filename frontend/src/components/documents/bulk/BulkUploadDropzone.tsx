@@ -41,16 +41,16 @@ export default function BulkUploadDropzone({
       <div
         {...getRootProps()}
         className={clsx(
-          "border-2 border-dashed rounded-2xl p-8 text-center transition-all",
+          "border border-dashed p-8 text-center transition-all",
           disabled && "opacity-50 cursor-not-allowed",
           !disabled && "cursor-pointer",
-          isDragActive ? "border-teal bg-teal/5"
-            : files.length ? "border-teal/50 bg-teal/5"
-            : "border-border hover:border-teal/50 hover:bg-muted/40",
+          isDragActive ? "border-[#287EAD] bg-[#EEF6FB]"
+            : files.length ? "border-[#A7CDE3] bg-[#EEF6FB]"
+            : "border-[#C8CDD2] bg-[#F7F8F9] hover:border-[#287EAD] hover:bg-white",
         )}
       >
         <input {...getInputProps()} />
-        <div className="w-12 h-12 rounded-2xl bg-teal/15 text-teal mx-auto mb-3 flex items-center justify-center">
+        <div className="mx-auto mb-3 flex h-12 w-12 items-center justify-center bg-[#DCEAF2] text-[#287EAD]">
           {files.length ? <Files className="w-6 h-6" /> : <Upload className="w-6 h-6" />}
         </div>
         <p className="font-semibold text-foreground">
@@ -63,7 +63,7 @@ export default function BulkUploadDropzone({
       </div>
 
       {files.length > 0 && (
-        <div className="rounded-xl border border-border bg-muted/30 p-3 space-y-2 max-h-56 overflow-y-auto">
+        <div className="max-h-56 space-y-2 overflow-y-auto border border-[#C8CDD2] bg-[#F7F8F9] p-3">
           <div className="flex items-center justify-between text-xs text-muted-foreground px-1">
             <span>{files.length} file{files.length === 1 ? "" : "s"} selected</span>
             <span>{totalMb.toFixed(2)} MB total</span>
@@ -71,9 +71,9 @@ export default function BulkUploadDropzone({
           {files.map((file, index) => (
             <div
               key={`${file.name}-${file.size}-${index}`}
-              className="flex items-center gap-2 rounded-lg bg-card border border-border px-3 py-2"
+              className="flex items-center gap-2 border border-[#C8CDD2] bg-white px-3 py-2"
             >
-              <File className="w-4 h-4 text-teal flex-shrink-0" />
+              <File className="w-4 h-4 text-[#287EAD] flex-shrink-0" />
               <div className="min-w-0 flex-1">
                 <p className="text-sm font-medium text-foreground truncate">{file.name}</p>
                 <p className="text-xs text-muted-foreground">

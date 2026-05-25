@@ -1,6 +1,8 @@
 import { FileText, Loader2, ScanLine } from "lucide-react";
 import type { BulkLocalPreview, BulkUploadBatch } from "./bulkUploadTypes";
 
+const PREVIEW_HEIGHT = "h-[clamp(32rem,calc(100vh-17rem),44rem)]";
+
 type Props = {
   batch: BulkUploadBatch;
   uploadProgress?: number;
@@ -8,21 +10,25 @@ type Props = {
 };
 
 function ProcessingPreview({ preview }: { preview?: BulkLocalPreview }) {
+  const pdfSrc = preview?.url ? `${preview.url}#toolbar=1&navpanes=0&scrollbar=1&view=FitV` : null;
+
   return (
-    <div className="border border-[#C8CDD2] bg-white shadow-sm">
+    <div className="border border-[#C8CDD2] bg-white">
       <div className="border-b border-[#C8CDD2] bg-[#F5F7F8] px-3 py-2">
         <p className="text-sm font-bold text-[#1F2933]">Live document preview</p>
         <p className="truncate text-xs text-[#5E6870]">{preview?.fileName || "Waiting for first file"}</p>
       </div>
       <div className="bg-[#EDEDED] p-3">
-        {preview?.url && preview.kind === "pdf" ? (
-          <iframe src={preview.url} title="Processing preview" className="h-[30rem] w-full border border-[#C8CDD2] bg-white" />
+        {pdfSrc && preview?.kind === "pdf" ? (
+          <div className={`mx-auto w-full max-w-[920px] border border-[#C8CDD2] bg-white ${PREVIEW_HEIGHT}`}>
+            <iframe src={pdfSrc} title="Processing preview" className="h-full w-full bg-white" />
+          </div>
         ) : preview?.url && preview.kind === "image" ? (
-          <div className="flex h-[30rem] items-center justify-center overflow-auto border border-[#C8CDD2] bg-white">
+          <div className={`mx-auto flex w-full max-w-[920px] items-center justify-center overflow-auto border border-[#C8CDD2] bg-white ${PREVIEW_HEIGHT}`}>
             <img src={preview.url} alt="Processing preview" className="max-h-full max-w-full object-contain" />
           </div>
         ) : (
-          <div className="flex h-[30rem] flex-col items-center justify-center border border-dashed border-[#C8CDD2] bg-white text-center">
+          <div className={`mx-auto flex w-full max-w-[920px] flex-col items-center justify-center border border-dashed border-[#C8CDD2] bg-white text-center ${PREVIEW_HEIGHT}`}>
             <FileText className="mb-3 h-12 w-12 text-[#5E6870]" />
             <p className="text-sm font-semibold text-[#1F2933]">Preview unavailable for this format</p>
             <p className="mt-1 max-w-xs text-xs text-[#5E6870]">OCR continues in the background.</p>
@@ -48,12 +54,12 @@ export default function BulkProcessingPanel({ batch, uploadProgress, previews = 
 
   return (
     <div className="grid gap-4 lg:grid-cols-12">
-      <div className="lg:col-span-7">
+      <div className="lg:col-span-8">
         <ProcessingPreview preview={firstPreview} />
       </div>
-      <div className="border border-[#C8CDD2] bg-white p-8 text-center shadow-sm lg:col-span-5">
+      <div className="border border-[#C8CDD2] bg-white p-6 text-center lg:col-span-4">
         <div className="relative mx-auto mb-6 h-20 w-20">
-          <div className="absolute inset-0 bg-[#EEF6FB] animate-ping" />
+          <div className="absolute inset-0 animate-ping bg-[#EEF6FB]" />
           <div className="relative flex h-20 w-20 items-center justify-center bg-[#EEF6FB]">
             <ScanLine className="h-9 w-9 text-[#287EAD]" />
           </div>

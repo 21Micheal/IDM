@@ -177,22 +177,28 @@ export default function BulkScanPage() {
   const activeBatch = polledBatch ?? (createMutation.data as BulkUploadBatch | undefined);
 
   return (
-    <div className="max-w-7xl mx-auto py-8 px-4">
-      <div className="mb-8">
-        <h1 className="text-3xl font-bold text-foreground tracking-tight flex items-center gap-2">
-          <ScanLine className="w-8 h-8 text-teal" />
-          Bulk Scan
-        </h1>
-        <p className="text-muted-foreground mt-1">
-          Upload many documents of the same type. OCR runs on each file; you review metadata per document before submitting.
-        </p>
+    <div className="-m-6 min-h-[calc(100vh-3.5rem)] bg-[#EDEDED] text-[#1F2933]">
+      <div className="flex h-[69px] items-center justify-between gap-4 bg-[#287EAD] px-5 pr-8 text-white">
+        <div className="min-w-0">
+          <h1 className="flex items-center gap-2 text-lg font-semibold tracking-tight">
+            <ScanLine className="h-5 w-5" />
+            Bulk Scan
+          </h1>
+          <p className="mt-0.5 text-xs text-white/75">
+            Upload many documents of the same type. OCR runs on each file; you review metadata per document before submitting.
+          </p>
+        </div>
+        <div className="hidden items-center gap-2 text-xs text-white/80 md:flex">
+          <span className="border border-white/30 px-2 py-1">{selectedType?.name || "No type selected"}</span>
+          <span className="border border-white/30 px-2 py-1">{files.length} file{files.length === 1 ? "" : "s"}</span>
+        </div>
       </div>
 
       {stage === "select" && (
-        <div className="grid grid-cols-1 lg:grid-cols-12 gap-8">
-          <div className="lg:col-span-5 space-y-6">
-            <div className="bg-card rounded-2xl border border-border p-6" style={{ boxShadow: "var(--shadow-card)" }}>
-              <h2 className="font-semibold text-foreground mb-4">1. Document type</h2>
+        <div className="grid grid-cols-1 gap-5 p-5 pr-8 lg:grid-cols-12">
+          <div className="space-y-5 lg:col-span-4">
+            <div className="border border-[#C8CDD2] bg-white p-5">
+              <h2 className="mb-4 font-semibold text-[#1F2933]">1. Document type</h2>
               <select
                 value={selectedTypeId}
                 onChange={(e) => setSelectedTypeId(e.target.value)}
@@ -208,7 +214,7 @@ export default function BulkScanPage() {
               )}
             </div>
 
-            <div className="bg-card rounded-2xl border border-teal/30 p-4 flex items-start gap-2 text-xs text-teal bg-teal/10">
+            <div className="flex items-start gap-2 border border-[#A7CDE3] bg-[#EEF6FB] p-4 text-xs text-[#287EAD]">
               <Info className="w-4 h-4 flex-shrink-0 mt-0.5" />
               <span>
                 Each file gets its own metadata from OCR. You review and approve documents individually before the batch is submitted to workflow.
@@ -216,9 +222,9 @@ export default function BulkScanPage() {
             </div>
           </div>
 
-          <div className="lg:col-span-7 space-y-6">
-            <div className="bg-card rounded-2xl border border-border p-6" style={{ boxShadow: "var(--shadow-card)" }}>
-              <h2 className="font-semibold text-foreground mb-4">2. Files</h2>
+          <div className="space-y-5 lg:col-span-8">
+            <div className="border border-[#C8CDD2] bg-white p-5">
+              <h2 className="mb-4 font-semibold text-[#1F2933]">2. Files</h2>
               <BulkUploadDropzone
                 files={files}
                 onChange={setFiles}
@@ -231,8 +237,7 @@ export default function BulkScanPage() {
                 type="button"
                 onClick={onStartUpload}
                 disabled={createMutation.isPending || !selectedTypeId || files.length === 0}
-                className="flex-1 flex items-center justify-center gap-2 py-3 rounded-xl font-semibold bg-teal text-teal-foreground hover:bg-teal/90 disabled:opacity-50"
-                style={{ boxShadow: "var(--shadow-elegant)" }}
+                className="flex flex-1 items-center justify-center gap-2 bg-[#287EAD] py-3 font-semibold text-white hover:bg-[#206D99] disabled:opacity-50"
               >
                 {createMutation.isPending ? (
                   <Loader2 className="w-5 h-5 animate-spin" />
@@ -247,7 +252,7 @@ export default function BulkScanPage() {
               <button
                 type="button"
                 onClick={() => navigate("/documents")}
-                className="px-6 py-3 rounded-xl font-semibold border border-border bg-card hover:bg-muted"
+                className="border border-[#C8CDD2] bg-white px-6 py-3 font-semibold hover:bg-[#EEF3F7]"
               >
                 Cancel
               </button>
@@ -257,11 +262,13 @@ export default function BulkScanPage() {
       )}
 
       {stage === "processing" && activeBatch && (
-        <BulkProcessingPanel batch={activeBatch} uploadProgress={uploadProgress} previews={localPreviews} />
+        <div className="p-5 pr-8">
+          <BulkProcessingPanel batch={activeBatch} uploadProgress={uploadProgress} previews={localPreviews} />
+        </div>
       )}
 
       {stage === "review" && selectedType && reviewStates.length > 0 && (
-        <div className="bg-card rounded-2xl border border-border p-5" style={{ boxShadow: "var(--shadow-card)" }}>
+        <div className="p-5 pr-8">
           <BulkReviewPanel
             documentType={polledBatch?.document_type ?? selectedType}
             reviewStates={reviewStates}
@@ -274,10 +281,10 @@ export default function BulkScanPage() {
       )}
 
       {stage === "complete" && completedBatch && (
-        <div className="bg-card rounded-2xl border border-teal/30 p-10 text-center" style={{ boxShadow: "var(--shadow-card)" }}>
-          <CheckCircle className="w-14 h-14 text-teal mx-auto mb-4" />
-          <h2 className="text-2xl font-bold text-foreground mb-2">Batch complete</h2>
-          <p className="text-muted-foreground mb-6">
+        <div className="m-5 mr-8 border border-[#C8CDD2] bg-white p-10 text-center">
+          <CheckCircle className="mx-auto mb-4 h-14 w-14 text-[#287EAD]" />
+          <h2 className="mb-2 text-2xl font-bold text-[#1F2933]">Batch complete</h2>
+          <p className="mb-6 text-[#5E6870]">
             {completedBatch.approved_count} document{completedBatch.approved_count === 1 ? "" : "s"} submitted
             {completedBatch.rejected_count > 0 && (
               <> · {completedBatch.rejected_count} skipped</>
@@ -287,7 +294,7 @@ export default function BulkScanPage() {
             <button
               type="button"
               onClick={() => navigate("/documents")}
-              className="px-6 py-3 rounded-xl font-semibold bg-primary text-primary-foreground"
+              className="bg-[#287EAD] px-6 py-3 font-semibold text-white hover:bg-[#206D99]"
             >
               View documents
             </button>
@@ -301,7 +308,7 @@ export default function BulkScanPage() {
                 setReviewStates([]);
                 setCompletedBatch(null);
               }}
-              className="px-6 py-3 rounded-xl font-semibold border border-border bg-card hover:bg-muted"
+              className="border border-[#C8CDD2] bg-white px-6 py-3 font-semibold hover:bg-[#EEF3F7]"
             >
               Scan another batch
             </button>
@@ -311,13 +318,13 @@ export default function BulkScanPage() {
 
       {stage === "processing" && !activeBatch && createMutation.isPending && (
         <div className="flex flex-col items-center py-16">
-          <Loader2 className="w-10 h-10 animate-spin text-teal mb-4" />
-          <p className="text-foreground font-medium">Starting batch…</p>
+          <Loader2 className="mb-4 h-10 w-10 animate-spin text-[#287EAD]" />
+          <p className="font-medium text-[#1F2933]">Starting batch...</p>
         </div>
       )}
 
       {stage === "review" && reviewStates.length === 0 && (
-        <div className="flex items-center gap-2 text-amber-700 bg-amber-50 border border-amber-200 rounded-xl p-4">
+        <div className="m-5 mr-8 flex items-center gap-2 border border-amber-200 bg-amber-50 p-4 text-amber-700">
           <AlertCircle className="w-5 h-5" />
           No documents available for review.
         </div>
