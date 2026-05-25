@@ -755,19 +755,19 @@ function CapturePreviewPane({
         </div>
       )}
 
-      <div className={clsx("bg-[#EDEDED] p-3", compact ? "min-h-[26rem]" : "min-h-[38rem]")}>
+      <div className={clsx("bg-[#EDEDED] p-3", compact ? "min-h-[32rem]" : "min-h-[calc(100vh-13rem)]")}>
         {previewUrl && kind === "pdf" ? (
           <iframe
             src={previewUrl}
-            className={clsx("w-full border border-[#C8CDD2] bg-white", compact ? "h-[26rem]" : "h-[38rem]")}
+            className={clsx("w-full border border-[#C8CDD2] bg-white", compact ? "h-[32rem]" : "h-[calc(100vh-13rem)]")}
             title="PDF preview"
           />
         ) : previewUrl && kind === "image" ? (
-          <div className={clsx("flex items-center justify-center overflow-auto border border-[#C8CDD2] bg-white", compact ? "h-[26rem]" : "h-[38rem]")}>
+          <div className={clsx("flex items-center justify-center overflow-auto border border-[#C8CDD2] bg-white", compact ? "h-[32rem]" : "h-[calc(100vh-13rem)]")}>
             <img src={previewUrl} alt="Document preview" className="max-h-full max-w-full object-contain" />
           </div>
         ) : (
-          <div className={clsx("flex flex-col items-center justify-center border border-dashed border-[#C8CDD2] bg-white text-center", compact ? "h-[26rem]" : "h-[38rem]")}>
+          <div className={clsx("flex flex-col items-center justify-center border border-dashed border-[#C8CDD2] bg-white text-center", compact ? "h-[32rem]" : "h-[calc(100vh-13rem)]")}>
             {kind === "other" && file ? <File className="mb-3 h-12 w-12 text-[#5E6870]" /> : <Upload className="mb-3 h-12 w-12 text-[#5E6870]" />}
             <p className="text-sm font-semibold text-[#1F2933]">
               {file ? "Inline preview is not available for this format" : "Select a file to preview"}
@@ -1249,7 +1249,7 @@ export default function UploadPage({ scanOnly = false }: UploadPageProps) {
       {/* ── OCR wait / review / submitting ──────────────────────────────── */}
       {isOcrFlow && scanStage !== "idle" && scanStage !== "uploading" && (
         <div className="grid gap-4 lg:grid-cols-12">
-          <div className="lg:col-span-7">
+          <div className="lg:col-span-8">
             <CapturePreviewPane
               file={droppedFile}
               previewUrl={pdfPreviewUrl}
@@ -1258,8 +1258,8 @@ export default function UploadPage({ scanOnly = false }: UploadPageProps) {
             />
           </div>
 
-          <div className="lg:col-span-5">
-            <div className="max-h-[calc(100vh-8rem)] overflow-y-auto border border-[#C8CDD2] bg-white shadow-sm">
+          <div className="lg:col-span-4">
+            <div className="max-h-[calc(100vh-9rem)] overflow-y-auto border border-[#C8CDD2] bg-white shadow-sm">
             {showOcrWait && (
               <OcrWaitScreen
                 stage={scanStage as "ocr_pending" | "ocr_processing"}
@@ -1401,9 +1401,9 @@ export default function UploadPage({ scanOnly = false }: UploadPageProps) {
 
       {/* ── Main upload layout ─────────────────────────────────────────── */}
       {(scanStage === "idle" || scanStage === "uploading") && (
-        <div className="grid grid-cols-1 gap-8 xl:grid-cols-12 xl:justify-center xl:px-0 xl:max-w-[1360px] xl:mx-auto">
-          {/* Left column */}
-          <div className="xl:col-start-2 xl:col-span-5 space-y-5">
+        <div className="grid grid-cols-1 gap-6 xl:grid-cols-12 xl:px-0 xl:max-w-[1440px] xl:mx-auto">
+          {/* Left column — controls */}
+          <div className={clsx(droppedFile ? "xl:col-span-3" : "xl:col-start-2 xl:col-span-5", "space-y-5")}>
             {/* Step 1 — Document Type */}
             <div className="border border-border bg-background p-5" style={{ boxShadow: "var(--shadow-card)" }}>
               <h2 className="mb-4 flex items-center gap-2 text-sm font-semibold text-foreground">
@@ -1453,21 +1453,11 @@ export default function UploadPage({ scanOnly = false }: UploadPageProps) {
               >
                 <input {...getInputProps()} />
                 {droppedFile ? (
-                  <div className="flex w-full flex-col items-center">
-                    <div className="w-full">
-                      <CapturePreviewPane
-                        file={droppedFile}
-                        previewUrl={pdfPreviewUrl}
-                        stateLabel={isScanned ? "Ready to scan" : "Ready"}
-                        compact
-                      />
-                    </div>
-                    <SelectedFileDropHint
-                      file={droppedFile}
-                      isDragActive={isDragActive}
-                      onRemove={(e) => { e.stopPropagation(); setDroppedFile(null); setPdfPreviewUrl(null); }}
-                    />
-                  </div>
+                  <SelectedFileDropHint
+                    file={droppedFile}
+                    isDragActive={isDragActive}
+                    onRemove={(e) => { e.stopPropagation(); setDroppedFile(null); setPdfPreviewUrl(null); }}
+                  />
                 ) : (
                   <>
                     <div className="mx-auto mb-3 flex h-12 w-12 items-center justify-center text-muted-foreground">
@@ -1500,8 +1490,20 @@ export default function UploadPage({ scanOnly = false }: UploadPageProps) {
             )}
           </div>
 
-          {/* Right column */}
-          <div className={clsx("xl:col-start-8 xl:col-span-5", droppedFile ? "xl:mt-10" : "") }>
+          {/* Centre column — document preview (visible when file selected) */}
+          {droppedFile && (
+            <div className="xl:col-span-5">
+              <CapturePreviewPane
+                file={droppedFile}
+                previewUrl={pdfPreviewUrl}
+                stateLabel={isScanned ? "Ready to scan" : "Ready"}
+                compact={false}
+              />
+            </div>
+          )}
+
+          {/* Right column — form / OCR idle */}
+          <div className={clsx(droppedFile ? "xl:col-span-4" : "xl:col-start-8 xl:col-span-5")}>
             {showManualForm && (
               <div
                 className={clsx(

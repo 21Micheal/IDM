@@ -85,7 +85,7 @@ export default function BulkReviewPanel({
       </div>
 
       <div className="grid gap-4 xl:grid-cols-12">
-        <div className="space-y-3 xl:col-span-5">
+        <div className="space-y-3 xl:col-span-4">
           {reviewStates.map((state, index) => (
             <BulkDocumentReviewCard
               key={state.documentId}
@@ -98,7 +98,7 @@ export default function BulkReviewPanel({
           ))}
         </div>
 
-        <div className="xl:col-span-7">
+        <div className="xl:col-span-8">
           <div className="sticky top-4 border border-[#C8CDD2] bg-white shadow-sm">
             <div className="border-b border-[#C8CDD2] bg-[#F5F7F8] px-3 py-2">
               <p className="text-sm font-bold text-[#1F2933]">Review preview</p>
@@ -106,13 +106,13 @@ export default function BulkReviewPanel({
             </div>
             <div className="bg-[#EDEDED] p-3">
               {selectedPreview?.url && selectedPreview.kind === "pdf" ? (
-                <iframe src={selectedPreview.url} title="Bulk review preview" className="h-[38rem] w-full border border-[#C8CDD2] bg-white" />
+                <iframe src={selectedPreview.url} title="Bulk review preview" className="h-[calc(100vh-220px)] w-full border border-[#C8CDD2] bg-white" />
               ) : selectedPreview?.url && selectedPreview.kind === "image" ? (
-                <div className="flex h-[38rem] items-center justify-center overflow-auto border border-[#C8CDD2] bg-white">
+                <div className="flex h-[calc(100vh-220px)] items-center justify-center overflow-auto border border-[#C8CDD2] bg-white">
                   <img src={selectedPreview.url} alt="Bulk review preview" className="max-h-full max-w-full object-contain" />
                 </div>
               ) : (
-                <div className="flex h-[38rem] flex-col items-center justify-center border border-dashed border-[#C8CDD2] bg-white text-center">
+                <div className="flex h-[calc(100vh-220px)] flex-col items-center justify-center border border-dashed border-[#C8CDD2] bg-white text-center">
                   <FileText className="mb-3 h-12 w-12 text-[#5E6870]" />
                   <p className="text-sm font-semibold text-[#1F2933]">Preview unavailable for this format</p>
                   <p className="mt-1 max-w-xs text-xs text-[#5E6870]">Use the extracted fields on the left to complete review.</p>

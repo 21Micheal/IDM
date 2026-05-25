@@ -1,263 +1,615 @@
-import { useState, useEffect } from "react";
-import { useMutation } from "@tanstack/react-query";
-import { searchAPI } from "@/services/api";
-import { Search, Loader2, FileText, X } from "lucide-react";
-import { Link, useSearchParams } from "react-router-dom";
-import StatusBadge from "@/components/documents/StatusBadge";
+import { useEffect, useMemo, useState } from "react";
+import { useQuery } from "@tanstack/react-query";
 import { format } from "date-fns";
-import type { DocumentSearchResponse, SearchHit } from "@/types";
+import {
+  ChevronLeft,
+  ChevronRight,
+  Eye,
+  FileSearch,
+  FileText,
+  Loader2,
+  RotateCcw,
+  Search,
+  SlidersHorizontal,
+  X,
+} from "lucide-react";
+import { Link, useSearchParams } from "react-router-dom";
+
+import { documentTypesAPI, normalizeListResponse, searchAPI } from "@/services/api";
+import type { DocumentSearchResponse, DocumentStatus, DocumentType, SearchHit } from "@/types";
 import { useDebounce } from "@/hooks/useDebounce";
 import { getPreferredHighlights, highlightSearchText } from "@/lib/search";
 import { formatDocumentFileType } from "@/lib/documentFormat";
+import { QUERY_FIVE_MIN_STALE } from "@/lib/reactQueryDefaults";
+
+const PAGE_SIZE = 20;
+
+const STATUS_OPTIONS: DocumentStatus[] = [
+  "draft",
+  "pending_review",
+  "pending_approval",
+  "approved",
+  "rejected",
+  "archived",
+  "void",
+];
+
+const FORMAT_OPTIONS = [
+  { value: "pdf", label: "PDF", mimeTypes: ["application/pdf"] },
+  {
+    value: "word",
+    label: "Word",
+    mimeTypes: [
+      "application/msword",
+      "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+    ],
+  },
+  {
+    value: "spreadsheet",
+    label: "Spreadsheet",
+    mimeTypes: [
+      "application/vnd.ms-excel",
+      "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+      "text/csv",
+    ],
+  },
+  {
+    value: "presentation",
+    label: "Presentation",
+    mimeTypes: [
+      "application/vnd.ms-powerpoint",
+      "application/vnd.openxmlformats-officedocument.presentationml.presentation",
+    ],
+  },
+  {
+    value: "image",
+    label: "Image",
+    mimeTypes: ["image/png", "image/jpeg", "image/jpg", "image/tiff", "image/webp"],
+  },
+];
+
+const SORT_OPTIONS = [
+  { value: "", label: "Relevance" },
+  { value: "-created_at", label: "Newest" },
+  { value: "created_at", label: "Oldest" },
+  { value: "-document_date", label: "Document date desc" },
+  { value: "document_date", label: "Document date asc" },
+  { value: "-amount", label: "Amount desc" },
+  { value: "amount", label: "Amount asc" },
+  { value: "reference_number", label: "Reference" },
+];
+
+function statusLabel(status: string) {
+  return status.replace(/_/g, " ").replace(/\b\w/g, (letter) => letter.toUpperCase());
+}
+
+function statusClass(status: string) {
+  switch (status) {
+    case "approved":
+      return "text-[#0F7A3A]";
+    case "pending_approval":
+    case "pending_review":
+      return "text-[#9A5B00]";
+    case "rejected":
+      return "text-[#B42318]";
+    case "archived":
+      return "text-[#5E6870]";
+    case "void":
+      return "text-[#30363D]";
+    default:
+      return "text-[#287EAD]";
+  }
+}
+
+function formatDate(value: string | null) {
+  if (!value) return "-";
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return "-";
+  return format(date, "dd MMM yyyy");
+}
+
+function formatAmount(amount: number | null, currency?: string) {
+  if (amount == null) return "-";
+  try {
+    return amount.toLocaleString("en-US", {
+      style: "currency",
+      currency: currency || "USD",
+    });
+  } catch {
+    return `${currency ? `${currency} ` : ""}${amount.toLocaleString("en-US")}`;
+  }
+}
 
 export default function SearchPage() {
   const [searchParams, setSearchParams] = useSearchParams();
-  const [searchTerm, setSearchTerm] = useState("");
-  const [dateFrom, setDateFrom] = useState("");
-  const [dateTo, setDateTo] = useState("");
-  const [statusFilter, setStatusFilter] = useState("");
+  const [searchTerm, setSearchTerm] = useState(() => searchParams.get("q") ?? "");
+  const [dateFrom, setDateFrom] = useState(() => searchParams.get("date_from") ?? "");
+  const [dateTo, setDateTo] = useState(() => searchParams.get("date_to") ?? "");
+  const [statusFilter, setStatusFilter] = useState(() => searchParams.get("status") ?? "");
+  const [typeFilter, setTypeFilter] = useState(() => searchParams.get("document_type") ?? "");
+  const [supplierFilter, setSupplierFilter] = useState(() => searchParams.get("supplier") ?? "");
+  const [formatFilter, setFormatFilter] = useState(() => searchParams.get("format") ?? "");
+  const [currencyFilter, setCurrencyFilter] = useState(() => searchParams.get("currency") ?? "");
+  const [amountMin, setAmountMin] = useState(() => searchParams.get("amount_min") ?? "");
+  const [amountMax, setAmountMax] = useState(() => searchParams.get("amount_max") ?? "");
+  const [sort, setSort] = useState(() => searchParams.get("sort") ?? "");
   const [page, setPage] = useState(1);
 
   const debouncedSearchTerm = useDebounce(searchTerm, 350);
-
-  const searchMutation = useMutation({
-    mutationFn: (payload: Record<string, unknown>) =>
-      searchAPI.search(payload).then((r) => r.data as DocumentSearchResponse),
-  });
+  const debouncedSupplier = useDebounce(supplierFilter, 350);
+  const searchParamsString = searchParams.toString();
 
   useEffect(() => {
-    const query = searchParams.get("q") ?? "";
-    const nextDateFrom = searchParams.get("date_from") ?? "";
-    const nextDateTo = searchParams.get("date_to") ?? "";
-    const nextStatus = searchParams.get("status") ?? "";
-
-    setSearchTerm(query);
-    setDateFrom(nextDateFrom);
-    setDateTo(nextDateTo);
-    setStatusFilter(nextStatus);
+    const params = new URLSearchParams(searchParamsString);
+    setSearchTerm(params.get("q") ?? "");
+    setDateFrom(params.get("date_from") ?? "");
+    setDateTo(params.get("date_to") ?? "");
+    setStatusFilter(params.get("status") ?? "");
+    setTypeFilter(params.get("document_type") ?? "");
+    setSupplierFilter(params.get("supplier") ?? "");
+    setFormatFilter(params.get("format") ?? "");
+    setCurrencyFilter(params.get("currency") ?? "");
+    setAmountMin(params.get("amount_min") ?? "");
+    setAmountMax(params.get("amount_max") ?? "");
+    setSort(params.get("sort") ?? "");
     setPage(1);
-  }, [searchParams]);
+  }, [searchParamsString]);
 
-  const handleSearch = (newPage = 1) => {
-    setPage(newPage);
-    searchMutation.mutate({
+  const { data: documentTypes = [] } = useQuery<unknown, Error, DocumentType[]>({
+    queryKey: ["document-types", "search-filters"],
+    queryFn: () => documentTypesAPI.list().then((response) => response.data as unknown),
+    select: (data) => normalizeListResponse(data) as DocumentType[],
+    ...QUERY_FIVE_MIN_STALE,
+  });
+
+  const selectedFormat = FORMAT_OPTIONS.find((option) => option.value === formatFilter);
+  const hasActiveSearch = Boolean(
+    debouncedSearchTerm ||
+      statusFilter ||
+      typeFilter ||
+      debouncedSupplier ||
+      formatFilter ||
+      dateFrom ||
+      dateTo ||
+      currencyFilter ||
+      amountMin ||
+      amountMax,
+  );
+
+  const searchPayload = useMemo(
+    () => ({
       search: debouncedSearchTerm,
       filters: {
         ...(statusFilter && { status: statusFilter }),
+        ...(typeFilter && { document_type: typeFilter }),
+        ...(debouncedSupplier && { supplier: debouncedSupplier }),
+        ...(selectedFormat && { file_mime_type: selectedFormat.mimeTypes }),
         ...(dateFrom && { date_from: dateFrom }),
         ...(dateTo && { date_to: dateTo }),
+        ...(currencyFilter && { currency: currencyFilter }),
+        ...(amountMin && { amount_min: amountMin }),
+        ...(amountMax && { amount_max: amountMax }),
       },
-      page: newPage,
-      page_size: 20,
-    });
-  };
+      ...(sort && { ordering: sort }),
+      page,
+      page_size: PAGE_SIZE,
+    }),
+    [
+      amountMax,
+      amountMin,
+      currencyFilter,
+      dateFrom,
+      dateTo,
+      debouncedSearchTerm,
+      debouncedSupplier,
+      page,
+      selectedFormat,
+      sort,
+      statusFilter,
+      typeFilter,
+    ],
+  );
+
+  const searchQuery = useQuery({
+    queryKey: ["document-search", searchPayload],
+    queryFn: () => searchAPI.search(searchPayload).then((response) => response.data as DocumentSearchResponse),
+    enabled: hasActiveSearch,
+  });
 
   useEffect(() => {
     const nextParams = new URLSearchParams();
     if (debouncedSearchTerm) nextParams.set("q", debouncedSearchTerm);
     if (statusFilter) nextParams.set("status", statusFilter);
+    if (typeFilter) nextParams.set("document_type", typeFilter);
+    if (debouncedSupplier) nextParams.set("supplier", debouncedSupplier);
+    if (formatFilter) nextParams.set("format", formatFilter);
     if (dateFrom) nextParams.set("date_from", dateFrom);
     if (dateTo) nextParams.set("date_to", dateTo);
+    if (currencyFilter) nextParams.set("currency", currencyFilter);
+    if (amountMin) nextParams.set("amount_min", amountMin);
+    if (amountMax) nextParams.set("amount_max", amountMax);
+    if (sort) nextParams.set("sort", sort);
 
-    const currentParams = searchParams.toString();
-    const updatedParams = nextParams.toString();
-    if (currentParams !== updatedParams) {
+    if (searchParamsString !== nextParams.toString()) {
       setSearchParams(nextParams, { replace: true });
     }
-
-    if (debouncedSearchTerm || statusFilter || dateFrom || dateTo) {
-      handleSearch(1);
-    } else {
-      searchMutation.reset();
-    }
-  }, [debouncedSearchTerm, statusFilter, dateFrom, dateTo, searchParams, setSearchParams]);
+  }, [
+    amountMax,
+    amountMin,
+    currencyFilter,
+    dateFrom,
+    dateTo,
+    debouncedSearchTerm,
+    debouncedSupplier,
+    formatFilter,
+    searchParamsString,
+    setSearchParams,
+    sort,
+    statusFilter,
+    typeFilter,
+  ]);
 
   const clearFilters = () => {
     setSearchTerm("");
     setDateFrom("");
     setDateTo("");
     setStatusFilter("");
+    setTypeFilter("");
+    setSupplierFilter("");
+    setFormatFilter("");
+    setCurrencyFilter("");
+    setAmountMin("");
+    setAmountMax("");
+    setSort("");
     setPage(1);
   };
 
+  const data = searchQuery.data;
+  const totalPages = data ? Math.max(1, Math.ceil(data.total / PAGE_SIZE)) : 1;
+  const activeFilterCount = [
+    statusFilter,
+    typeFilter,
+    debouncedSupplier,
+    formatFilter,
+    dateFrom,
+    dateTo,
+    currencyFilter,
+    amountMin,
+    amountMax,
+  ].filter(Boolean).length;
+
   return (
-    <div className="max-w-5xl mx-auto py-10 px-6">
-      <div className="mb-10">
-        <h1 className="text-4xl font-bold text-gray-900">Search Documents</h1>
-        <p className="text-gray-500 mt-2 text-lg">
-          Full-text search with partial word matching
-        </p>
+    <div className="-m-6 min-h-[calc(100vh-3.5rem)] bg-[#EDEDED] text-[13px] text-[#1F2933]">
+      <div className="flex h-[69px] items-center gap-3 bg-[#287EAD] px-5 pr-8 text-white">
+        <div className="flex min-w-0 flex-1 items-center gap-3">
+          <div className="relative w-full max-w-[620px]">
+            <Search className="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-[#5E6870]" />
+            <input
+              value={searchTerm}
+              onChange={(event) => {
+                setSearchTerm(event.target.value);
+                setPage(1);
+              }}
+              placeholder="Search documents, references, suppliers, or content"
+              className="h-9 w-full border border-[#AEB5BB] bg-white pl-9 pr-9 text-sm text-[#1F2933] placeholder:text-[#6E767D] focus:outline-none focus:ring-1 focus:ring-white/70"
+              autoFocus
+            />
+            {searchTerm && (
+              <button
+                type="button"
+                onClick={() => setSearchTerm("")}
+                className="absolute right-2 top-1/2 -translate-y-1/2 p-1 text-[#5E6870] hover:text-[#1F2933]"
+                aria-label="Clear search text"
+              >
+                <X className="h-4 w-4" />
+              </button>
+            )}
+          </div>
+
+          <select
+            value={statusFilter}
+            onChange={(event) => {
+              setStatusFilter(event.target.value);
+              setPage(1);
+            }}
+            className="h-9 w-[155px] border border-[#AEB5BB] bg-white px-2 text-sm text-[#1F2933] focus:outline-none focus:ring-1 focus:ring-white/70"
+          >
+            <option value="">All statuses</option>
+            {STATUS_OPTIONS.map((status) => (
+              <option key={status} value={status}>
+                {statusLabel(status)}
+              </option>
+            ))}
+          </select>
+
+          <select
+            value={typeFilter}
+            onChange={(event) => {
+              setTypeFilter(event.target.value);
+              setPage(1);
+            }}
+            className="h-9 w-[170px] border border-[#AEB5BB] bg-white px-2 text-sm text-[#1F2933] focus:outline-none focus:ring-1 focus:ring-white/70"
+          >
+            <option value="">All types</option>
+            {documentTypes.map((type) => (
+              <option key={type.id} value={type.name}>
+                {type.name}
+              </option>
+            ))}
+          </select>
+
+          <select
+            value={formatFilter}
+            onChange={(event) => {
+              setFormatFilter(event.target.value);
+              setPage(1);
+            }}
+            className="h-9 w-[145px] border border-[#AEB5BB] bg-white px-2 text-sm text-[#1F2933] focus:outline-none focus:ring-1 focus:ring-white/70"
+          >
+            <option value="">All formats</option>
+            {FORMAT_OPTIONS.map((option) => (
+              <option key={option.value} value={option.value}>
+                {option.label}
+              </option>
+            ))}
+          </select>
+        </div>
+
+        <div className="flex items-center gap-2 text-white/85">
+          <SlidersHorizontal className="h-4 w-4" />
+          <span>{activeFilterCount} filters</span>
+        </div>
       </div>
 
-      <div className="card p-6 mb-8">
-        <div className="relative mb-6">
-          <Search className="absolute left-4 top-1/2 -translate-y-1/2 w-5 h-5 text-gray-400" />
-          <input
-            value={searchTerm}
-            onChange={(e) => setSearchTerm(e.target.value)}
-            className="input pl-11 text-lg"
-            placeholder="Search documents, references, suppliers, or content..."
-            autoFocus
-          />
-          {searchTerm && (
-            <button
-              onClick={() => setSearchTerm("")}
-              className="absolute right-4 top-1/2 -translate-y-1/2 text-gray-400 hover:text-gray-600 p-1"
-            >
-              <X className="w-5 h-5" />
-            </button>
-          )}
-        </div>
-
-        <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
-          <div>
-            <label className="label">Status</label>
+      <div className="px-5 pb-8 pr-8">
+        <section className="border-b border-[#C8CDD2] bg-[#F7F7F7] px-4 py-3">
+          <div className="grid gap-3 lg:grid-cols-[1fr_1fr_1fr_1fr_1fr_auto]">
+            <input
+              value={supplierFilter}
+              onChange={(event) => {
+                setSupplierFilter(event.target.value);
+                setPage(1);
+              }}
+              placeholder="Supplier"
+              className="h-9 border border-[#B7BEC5] bg-white px-3 text-sm focus:outline-none focus:ring-1 focus:ring-[#287EAD]"
+            />
+            <div className="grid grid-cols-2 gap-2">
+              <input
+                type="date"
+                value={dateFrom}
+                onChange={(event) => {
+                  setDateFrom(event.target.value);
+                  setPage(1);
+                }}
+                className="h-9 border border-[#B7BEC5] bg-white px-3 text-sm focus:outline-none focus:ring-1 focus:ring-[#287EAD]"
+                aria-label="From date"
+              />
+              <input
+                type="date"
+                value={dateTo}
+                onChange={(event) => {
+                  setDateTo(event.target.value);
+                  setPage(1);
+                }}
+                className="h-9 border border-[#B7BEC5] bg-white px-3 text-sm focus:outline-none focus:ring-1 focus:ring-[#287EAD]"
+                aria-label="To date"
+              />
+            </div>
+            <div className="grid grid-cols-2 gap-2">
+              <input
+                type="number"
+                min="0"
+                value={amountMin}
+                onChange={(event) => {
+                  setAmountMin(event.target.value);
+                  setPage(1);
+                }}
+                placeholder="Amount min"
+                className="h-9 border border-[#B7BEC5] bg-white px-3 text-sm focus:outline-none focus:ring-1 focus:ring-[#287EAD]"
+              />
+              <input
+                type="number"
+                min="0"
+                value={amountMax}
+                onChange={(event) => {
+                  setAmountMax(event.target.value);
+                  setPage(1);
+                }}
+                placeholder="Amount max"
+                className="h-9 border border-[#B7BEC5] bg-white px-3 text-sm focus:outline-none focus:ring-1 focus:ring-[#287EAD]"
+              />
+            </div>
+            <input
+              value={currencyFilter}
+              onChange={(event) => {
+                setCurrencyFilter(event.target.value.toUpperCase().slice(0, 3));
+                setPage(1);
+              }}
+              placeholder="Currency"
+              className="h-9 border border-[#B7BEC5] bg-white px-3 text-sm uppercase focus:outline-none focus:ring-1 focus:ring-[#287EAD]"
+            />
             <select
-              value={statusFilter}
-              onChange={(e) => setStatusFilter(e.target.value)}
-              className="input"
+              value={sort}
+              onChange={(event) => {
+                setSort(event.target.value);
+                setPage(1);
+              }}
+              className="h-9 border border-[#B7BEC5] bg-white px-3 text-sm focus:outline-none focus:ring-1 focus:ring-[#287EAD]"
             >
-              <option value="">Any status</option>
-              <option value="draft">Draft</option>
-              <option value="pending_approval">Pending Approval</option>
-              <option value="approved">Approved</option>
-              <option value="rejected">Rejected</option>
-              <option value="archived">Archived</option>
+              {SORT_OPTIONS.map((option) => (
+                <option key={option.value || "relevance"} value={option.value}>
+                  {option.label}
+                </option>
+              ))}
             </select>
-          </div>
-          <div>
-            <label className="label">From Date</label>
-            <input type="date" value={dateFrom} onChange={(e) => setDateFrom(e.target.value)} className="input" />
-          </div>
-          <div>
-            <label className="label">To Date</label>
-            <input type="date" value={dateTo} onChange={(e) => setDateTo(e.target.value)} className="input" />
-          </div>
-        </div>
-        {(searchTerm || statusFilter || dateFrom || dateTo) && (
-          <div className="mt-4 flex justify-end">
             <button
               type="button"
               onClick={clearFilters}
-              className="inline-flex items-center gap-2 text-sm text-muted-foreground hover:text-foreground"
+              disabled={!hasActiveSearch && !sort}
+              className="inline-flex h-9 items-center justify-center gap-2 border border-[#B7BEC5] bg-white px-3 text-sm text-[#3D454D] hover:bg-[#EEF3F7] disabled:cursor-not-allowed disabled:opacity-50"
             >
-              <X className="w-4 h-4" />
-              Clear filters
+              <RotateCcw className="h-4 w-4" />
+              Clear
             </button>
           </div>
-        )}
-      </div>
+        </section>
 
-      {searchMutation.data && (
-        <div className="space-y-6">
-          <div className="flex justify-between items-center">
-            <p className="text-sm text-gray-500">
-              {searchMutation.data.total} result{searchMutation.data.total !== 1 ? "s" : ""}
-              {searchTerm && <> for <span className="font-medium">"{searchTerm}"</span></>}
-            </p>
-            <p className="text-xs text-gray-400">Page {page}</p>
+        <section className="min-h-[calc(100vh-11.5rem)] border-x border-b border-[#C8CDD2] bg-[#EDEDED]">
+          <div className="flex h-[50px] items-center justify-between border-b border-[#C8CDD2] bg-white px-4">
+            <div className="flex items-center gap-3">
+              <button
+                type="button"
+                className="h-9 border border-[#B9C0C6] border-t-2 border-t-[#2B8DCB] bg-white px-4 text-sm font-medium text-[#2B86C5]"
+              >
+                Search Results
+              </button>
+              {data && (
+                <span className="border-l border-[#C8CDD2] pl-3 text-sm font-semibold">
+                  {data.total} matching document{data.total === 1 ? "" : "s"}
+                </span>
+              )}
+            </div>
+
+            {data && data.total > 0 && (
+              <div className="flex items-center gap-2 text-sm text-[#5E6870]">
+                <span>
+                  Page {page} of {totalPages}
+                </span>
+                <button
+                  type="button"
+                  onClick={() => setPage((current) => Math.max(1, current - 1))}
+                  disabled={page <= 1 || searchQuery.isFetching}
+                  className="border border-[#B7BEC5] bg-white p-1.5 text-[#3D454D] hover:bg-[#EEF3F7] disabled:opacity-40"
+                  aria-label="Previous page"
+                >
+                  <ChevronLeft className="h-4 w-4" />
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setPage((current) => Math.min(totalPages, current + 1))}
+                  disabled={page >= totalPages || searchQuery.isFetching}
+                  className="border border-[#B7BEC5] bg-white p-1.5 text-[#3D454D] hover:bg-[#EEF3F7] disabled:opacity-40"
+                  aria-label="Next page"
+                >
+                  <ChevronRight className="h-4 w-4" />
+                </button>
+              </div>
+            )}
           </div>
 
-          {searchMutation.data.results.length === 0 && (
-            <div className="card p-12 text-center">
-              <FileText className="w-12 h-12 text-gray-200 mx-auto mb-4" />
-              <p className="text-gray-500">No documents match your search criteria.</p>
+          {!hasActiveSearch && (
+            <div className="flex min-h-[24rem] items-center justify-center px-6">
+              <div className="max-w-md text-center">
+                <FileSearch className="mx-auto mb-4 h-12 w-12 text-[#8A949D]" />
+                <h2 className="text-lg font-semibold text-[#1F2933]">Search across your document library</h2>
+                <p className="mt-2 text-sm leading-6 text-[#5E6870]">
+                  Use full text, reference, supplier, status, type, format, date, and amount filters to narrow the result set.
+                </p>
+              </div>
             </div>
           )}
 
-          <div className="space-y-4">
-            {searchMutation.data.results.map((hit: SearchHit) => {
-              const preferredHighlights = getPreferredHighlights(hit, searchTerm);
+          {hasActiveSearch && searchQuery.isLoading && (
+            <div className="flex min-h-[24rem] items-center justify-center gap-3 text-[#5E6870]">
+              <Loader2 className="h-5 w-5 animate-spin" />
+              Searching documents
+            </div>
+          )}
 
-              return (
-                <Link
-                  key={hit.id}
-                  to={`/documents/${hit.id}`}
-                  className="card p-6 block hover:shadow-md transition-all group"
-                >
-                  <div className="flex items-start justify-between gap-6">
-                    <div className="flex-1 min-w-0">
-                      <div className="flex items-center gap-3 mb-2">
-                        <span className="font-mono text-xs text-brand-600 font-medium">
-                          {hit.reference_number}
-                        </span>
-                        <span className="text-xs text-gray-400">•</span>
-                        <span className="text-xs text-gray-500">{hit.document_type}</span>
-                        <span className="text-xs text-gray-400">•</span>
-                        <span className="rounded-md border border-gray-200 bg-gray-50 px-2 py-0.5 text-[11px] font-semibold text-gray-500">
-                          {formatDocumentFileType(hit.file_name, hit.file_mime_type)}
-                        </span>
+          {hasActiveSearch && searchQuery.isError && (
+            <div className="m-4 border border-[#D9A6A0] bg-[#FFF7F5] px-4 py-3 text-sm text-[#B42318]">
+              Search is temporarily unavailable.
+            </div>
+          )}
+
+          {data && data.results.length === 0 && (
+            <div className="flex min-h-[24rem] items-center justify-center px-6">
+              <div className="text-center">
+                <FileText className="mx-auto mb-4 h-12 w-12 text-[#A8B0B7]" />
+                <p className="text-sm text-[#5E6870]">No documents match your search criteria.</p>
+              </div>
+            </div>
+          )}
+
+          {data && data.results.length > 0 && (
+            <div className="divide-y divide-[#D1D5D9] bg-white">
+              {data.results.map((hit: SearchHit) => {
+                const preferredHighlights = getPreferredHighlights(hit, debouncedSearchTerm);
+                const title = hit.title || hit.file_name || hit.reference_number || "Untitled document";
+                const formatLabel = formatDocumentFileType(hit.file_name, hit.file_mime_type);
+
+                return (
+                  <div key={hit.id} className="grid grid-cols-[minmax(0,1fr)_180px_110px] gap-6 px-5 py-4 hover:bg-[#F7FAFC]">
+                    <div className="min-w-0">
+                      <div className="mb-2 flex flex-wrap items-center gap-x-3 gap-y-1 text-xs text-[#5E6870]">
+                        <span className="font-mono font-semibold text-[#287EAD]">{hit.reference_number || "-"}</span>
+                        <span>{hit.document_type || "Unclassified"}</span>
+                        <span>{formatLabel}</span>
+                        {hit.supplier && (
+                          <span
+                            dangerouslySetInnerHTML={{
+                              __html: highlightSearchText(hit.supplier, debouncedSearchTerm),
+                            }}
+                          />
+                        )}
                       </div>
 
-                      <h3 className="font-semibold text-lg text-gray-900 group-hover:text-brand-700 transition-colors line-clamp-2">
-                        <span
-                          dangerouslySetInnerHTML={{
-                            __html: highlightSearchText(hit.title, searchTerm),
-                          }}
-                        />
-                      </h3>
-
-                      {hit.supplier && (
-                        <p
-                          className="text-sm text-gray-600 mt-1"
-                          dangerouslySetInnerHTML={{
-                            __html: highlightSearchText(hit.supplier, searchTerm),
-                          }}
-                        />
-                      )}
+                      <Link to={`/documents/${hit.id}`} className="group inline-block max-w-full">
+                        <h3 className="truncate text-base font-semibold text-[#1F2933] group-hover:text-[#287EAD]">
+                          <span
+                            dangerouslySetInnerHTML={{
+                              __html: highlightSearchText(title, debouncedSearchTerm),
+                            }}
+                          />
+                        </h3>
+                      </Link>
 
                       {preferredHighlights.length > 0 && (
-                        <div className="mt-4 text-sm text-gray-600 border-l-2 border-brand-200 pl-4 space-y-3">
+                        <div className="mt-3 max-w-4xl space-y-2 border-l-2 border-[#A7CDE3] pl-3 text-sm leading-6 text-[#4B5560]">
                           {preferredHighlights.map(([field, snippet]) => (
-                            <div key={field} className="italic">
+                            <p key={field}>
                               <span
                                 dangerouslySetInnerHTML={{
-                                  __html: highlightSearchText(snippet, searchTerm),
+                                  __html: highlightSearchText(snippet, debouncedSearchTerm),
                                 }}
                               />
-                            </div>
+                            </p>
                           ))}
                         </div>
                       )}
                     </div>
 
-                    <div className="flex flex-col items-end gap-3 flex-shrink-0 text-right">
-                      <StatusBadge status={hit.status} />
-                      {hit.document_date && (
-                        <div className="text-xs text-gray-500">
-                          {format(new Date(hit.document_date), "dd MMM yyyy")}
-                        </div>
-                      )}
-                      {hit.amount && (
-                        <div className="font-medium text-gray-900">
-                          {hit.amount.toLocaleString("en-US", {
-                            style: "currency",
-                            currency: "USD",
-                          })}
-                        </div>
-                      )}
+                    <div className="space-y-2 text-sm">
+                      <div>
+                        <p className="text-xs uppercase text-[#6E767D]">Status</p>
+                        <p className={`font-semibold ${statusClass(hit.status)}`}>{statusLabel(hit.status)}</p>
+                      </div>
+                      <div>
+                        <p className="text-xs uppercase text-[#6E767D]">Document date</p>
+                        <p>{formatDate(hit.document_date)}</p>
+                      </div>
+                      <div>
+                        <p className="text-xs uppercase text-[#6E767D]">Amount</p>
+                        <p>{formatAmount(hit.amount, hit.currency)}</p>
+                      </div>
+                    </div>
+
+                    <div className="flex items-start justify-end">
+                      <Link
+                        to={`/documents/${hit.id}`}
+                        className="inline-flex h-8 items-center gap-2 border border-[#B7BEC5] bg-white px-3 text-sm text-[#287EAD] hover:bg-[#EEF3F7]"
+                      >
+                        <Eye className="h-4 w-4" />
+                        View
+                      </Link>
                     </div>
                   </div>
-                </Link>
-              );
-            })}
-          </div>
-
-          {searchMutation.data.total > page * 20 && (
-            <button
-              onClick={() => handleSearch(page + 1)}
-              disabled={searchMutation.isPending}
-              className="btn-secondary w-full py-3 mt-4"
-            >
-              {searchMutation.isPending ? (
-                <Loader2 className="w-4 h-4 animate-spin mx-auto" />
-              ) : (
-                "Load more results"
-              )}
-            </button>
+                );
+              })}
+            </div>
           )}
-        </div>
-      )}
+        </section>
+      </div>
     </div>
   );
 }

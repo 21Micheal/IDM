@@ -216,6 +216,7 @@ export interface SearchHit {
   file_mime_type?: string;
   supplier: string;
   amount: number | null;
+  currency?: string;
   status: DocumentStatus;
   document_date: string | null;
   highlights: Record<string, string>;

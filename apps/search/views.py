@@ -266,9 +266,19 @@ class DocumentSearchView(APIView):
         if filters.get("document_type"):
             s = s.filter("term", document_type=filters["document_type"])
 
+        if filters.get("supplier"):
+            s = s.query("match_phrase_prefix", supplier=filters["supplier"])
+
         if filters.get("status"):
             statuses = _as_list(filters["status"])
             s = s.filter("terms", status=statuses)
+
+        if filters.get("file_mime_type"):
+            mime_types = _as_list(filters["file_mime_type"])
+            s = s.filter("terms", file_mime_type=mime_types)
+
+        if filters.get("currency"):
+            s = s.filter("term", currency=str(filters["currency"]).upper())
 
         if filters.get("is_self_upload") is not None:
             is_self_upload = _parse_bool(filters.get("is_self_upload"))
@@ -299,7 +309,21 @@ class DocumentSearchView(APIView):
             personal_tags = _as_list(filters["personal_tags"])
             s = s.filter("terms", personal_tags=personal_tags)
 
-        if not search_text:
+        ordering = _as_text(data.get("ordering"))
+        sortable_fields = {
+            "created_at": "created_at",
+            "document_date": "document_date",
+            "amount": "amount",
+            "reference_number": "reference_number",
+            "status": "status",
+        }
+        if ordering:
+            sort_desc = ordering.startswith("-")
+            sort_key = ordering[1:] if sort_desc else ordering
+            sort_field = sortable_fields.get(sort_key)
+            if sort_field:
+                s = s.sort(f"-{sort_field}" if sort_desc else sort_field)
+        elif not search_text:
             s = s.sort("-created_at")
 
         start = (page - 1) * page_size
@@ -347,6 +371,7 @@ class DocumentSearchView(APIView):
                 "file_mime_type": getattr(hit, "file_mime_type", ""),
                 "supplier": getattr(hit, "supplier", ""),
                 "amount": getattr(hit, "amount", None),
+                "currency": getattr(hit, "currency", ""),
                 "status": getattr(hit, "status", ""),
                 "document_date": _es_value(getattr(hit, "document_date", None)),
                 "is_self_upload": getattr(hit, "is_self_upload", False),

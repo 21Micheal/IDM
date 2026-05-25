@@ -177,7 +177,7 @@ export default function BulkScanPage() {
   const activeBatch = polledBatch ?? (createMutation.data as BulkUploadBatch | undefined);
 
   return (
-    <div className="max-w-5xl mx-auto py-8">
+    <div className="max-w-7xl mx-auto py-8 px-4">
       <div className="mb-8">
         <h1 className="text-3xl font-bold text-foreground tracking-tight flex items-center gap-2">
           <ScanLine className="w-8 h-8 text-teal" />
@@ -261,7 +261,7 @@ export default function BulkScanPage() {
       )}
 
       {stage === "review" && selectedType && reviewStates.length > 0 && (
-        <div className="bg-card rounded-2xl border border-border p-8" style={{ boxShadow: "var(--shadow-card)" }}>
+        <div className="bg-card rounded-2xl border border-border p-5" style={{ boxShadow: "var(--shadow-card)" }}>
           <BulkReviewPanel
             documentType={polledBatch?.document_type ?? selectedType}
             reviewStates={reviewStates}
