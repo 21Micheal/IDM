@@ -1,261 +1,259 @@
 import { useState } from "react";
-import { useNavigate } from "react-router-dom";
-import { useQuery } from "@tanstack/react-query";
-import { workflowAPI } from "@/services/api";
+import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import { dmsSettingsAPI, type DmsSettings } from "@/services/api";
+import { toast } from "@/components/ui/vault-toast";
 import {
-  Plus, GitBranch,
-  Users, Building2, Shield, Settings, ChevronRight,
-  FileText, Database, Mail, Lock, Globe,
+  Copy, Archive, Droplets, ClipboardCheck, Loader2, RotateCcw, Save,
 } from "lucide-react";
 import clsx from "clsx";
-// ── Users tab ────────────────────────────────────────────────────────────────
 
-function UsersTab() {
-  const navigate = useNavigate();
-
-  const cards = [
-    {
-      icon: FileText,
-      title: "Document types",
-      description: "Define document categories, metadata fields, numbering, and upload schema rules.",
-      action: "Manage document types",
-      to: "/admin/document-types",
-    },
-    {
-      icon: Users,
-      title: "Users",
-      description: "Create and manage staff accounts, reset passwords, and capture job descriptions.",
-      action: "Manage users",
-      to: "/admin/users",
-    },
-    {
-      icon: Building2,
-      title: "Departments",
-      description: "Organise users into departments for document access scoping.",
-      action: "Manage departments",
-      to: "/admin/departments",
-    },
-    {
-      icon: Shield,
-      title: "Permission groups",
-      description: "Fine-grained per-document-type permissions. Users can be in multiple groups.",
-      action: "Manage groups",
-      to: "/admin/groups",
-    },
-  ];
-
-  return (
-    <div className="grid grid-cols-1 sm:grid-cols-2 xl:grid-cols-4 gap-5">
-      {cards.map(({ icon: Icon, title, description, action, to }) => (
-        <div
-          key={to}
-          className="card p-6 flex flex-col gap-4 hover:border-accent/40 transition-all"
-          style={{ boxShadow: "var(--shadow-card)" }}
-        >
-          <div className="w-11 h-11 rounded-xl flex items-center justify-center bg-accent/15 text-accent">
-            <Icon className="w-5 h-5" />
-          </div>
-          <div>
-            <h3 className="font-semibold text-foreground">{title}</h3>
-            <p className="text-sm text-muted-foreground mt-1">{description}</p>
-          </div>
-          <button
-            onClick={() => navigate(to)}
-            className="mt-auto flex items-center gap-1.5 text-sm font-semibold text-accent hover:text-accent/80"
-          >
-            {action} <ChevronRight className="w-4 h-4" />
-          </button>
-        </div>
-      ))}
-    </div>
-  );
-}
-
-// ── Workflow tab ──────────────────────────────────────────────────────────────
-
-function WorkflowTab() {
-  const navigate = useNavigate();
-  const { data: templates } = useQuery({
-    queryKey: ["workflow-templates"],
-    queryFn:  () => workflowAPI.listTemplates().then((r) => r.data.results ?? r.data),
+function SettingsTab() {
+  const qc = useQueryClient();
+  const { data, isLoading } = useQuery({
+    queryKey: ["dms-settings"],
+    queryFn: () => dmsSettingsAPI.get().then((r) => r.data),
   });
+  const [draft, setDraft] = useState<DmsSettings | null>(null);
+  const settings = draft ?? data ?? null;
+
+  const mutation = useMutation({
+    mutationFn: (payload: Partial<DmsSettings>) => dmsSettingsAPI.update(payload).then((r) => r.data),
+    onSuccess: (saved) => {
+      setDraft(saved);
+      qc.setQueryData(["dms-settings"], saved);
+      toast.success("DMS settings saved.");
+    },
+    onError: () => toast.error("Could not save DMS settings."),
+  });
+
+  const update = <K extends keyof DmsSettings>(key: K, value: DmsSettings[K]) => {
+    if (!settings) return;
+    setDraft({ ...settings, [key]: value });
+  };
+
+  const reset = () => setDraft(data ?? null);
+
+  const save = () => {
+    if (!settings) return;
+    mutation.mutate(settings);
+  };
+
+  const Toggle = ({
+    checked,
+    onChange,
+    label,
+    description,
+  }: {
+    checked: boolean;
+    onChange: (checked: boolean) => void;
+    label: string;
+    description: string;
+  }) => (
+    <label className="flex items-start justify-between gap-4 rounded-lg border border-border bg-card px-4 py-3">
+      <span>
+        <span className="block text-sm font-semibold text-foreground">{label}</span>
+        <span className="mt-0.5 block text-xs text-muted-foreground">{description}</span>
+      </span>
+      <button
+        type="button"
+        role="switch"
+        aria-checked={checked}
+        onClick={() => onChange(!checked)}
+        className={clsx(
+          "relative h-6 w-11 flex-shrink-0 rounded-full transition-colors focus:outline-none focus:ring-2 focus:ring-ring",
+          checked ? "bg-primary" : "bg-muted-foreground/30"
+        )}
+      >
+        <span
+          className={clsx(
+            "absolute top-0.5 h-5 w-5 rounded-full bg-white shadow transition-transform",
+            checked ? "translate-x-5" : "translate-x-0.5"
+          )}
+        />
+      </button>
+    </label>
+  );
+
+  if (isLoading || !settings) {
+    return (
+      <div className="flex h-48 items-center justify-center rounded-lg border border-border bg-card">
+        <Loader2 className="h-6 w-6 animate-spin text-accent" />
+      </div>
+    );
+  }
 
   return (
     <div className="space-y-5">
-      <div className="flex items-start justify-between">
+      <div className="flex flex-wrap items-center justify-between gap-3">
         <div>
-          <h2 className="font-semibold text-foreground">Workflow templates</h2>
+          <h2 className="font-semibold text-foreground">DMS behaviour</h2>
           <p className="text-sm text-muted-foreground mt-1">
-            {templates?.length ?? 0} template{templates?.length !== 1 ? "s" : ""} configured
+            Configure document handling rules that apply across uploads, previews, and lifecycle automation.
           </p>
         </div>
-        <button onClick={() => navigate("/workflow/builder")} className="btn-primary">
-          <GitBranch className="w-4 h-4" /> Open workflow builder
-        </button>
-      </div>
-
-      {templates?.length > 0 ? (
-        <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-4">
-          {templates.map((t: { id: string; name: string; step_count: number; description: string }) => (
-            <div key={t.id} className="card p-5 flex flex-col gap-3" style={{ boxShadow: "var(--shadow-card)" }}>
-              <div className="flex items-start gap-3">
-                <div className="w-9 h-9 rounded-lg bg-accent/15 flex items-center justify-center flex-shrink-0">
-                  <GitBranch className="w-4 h-4 text-accent" />
-                </div>
-                <div className="min-w-0">
-                  <p className="font-semibold text-foreground truncate">{t.name}</p>
-                  <p className="text-xs text-muted-foreground mt-0.5">
-                    {t.step_count} step{t.step_count !== 1 ? "s" : ""}
-                  </p>
-                </div>
-              </div>
-              {t.description && (
-                <p className="text-sm text-muted-foreground line-clamp-2">{t.description}</p>
-              )}
-              <button
-                onClick={() => navigate("/workflow/builder")}
-                className="text-xs text-accent hover:text-accent/80 flex items-center gap-1 mt-auto font-semibold"
-              >
-                Edit in builder <ChevronRight className="w-3.5 h-3.5" />
-              </button>
-            </div>
-          ))}
-        </div>
-      ) : (
-        <div className="card p-10 text-center">
-          <GitBranch className="w-10 h-10 text-muted-foreground/40 mx-auto mb-3" />
-          <p className="font-semibold text-foreground">No workflow templates yet</p>
-          <p className="text-sm text-muted-foreground mt-1">
-            Create approval chains and assign them to document types.
-          </p>
-          <button onClick={() => navigate("/workflow/builder")} className="btn-primary mt-4">
-            <Plus className="w-4 h-4" /> Open builder
+        <div className="flex items-center gap-2">
+          <button type="button" onClick={reset} className="btn-secondary" disabled={mutation.isPending}>
+            <RotateCcw className="h-4 w-4" /> Reset
+          </button>
+          <button type="button" onClick={save} className="btn-primary" disabled={mutation.isPending}>
+            {mutation.isPending ? <Loader2 className="h-4 w-4 animate-spin" /> : <Save className="h-4 w-4" />}
+            Save settings
           </button>
         </div>
-      )}
-    </div>
-  );
-}
-
-// ── Settings tab ──────────────────────────────────────────────────────────────
-
-function SettingsTab() {
-  const sections = [
-    {
-      icon: Mail,
-      title: "Email / notifications",
-      description: "SMTP configuration, email templates, notification triggers.",
-      status: "Configured via .env",
-      tone: "teal" as const,
-    },
-    {
-      icon: Database,
-      title: "Storage",
-      description: "Local filesystem storage. Configure S3 or Azure Blob via .env for production.",
-      status: "Local filesystem",
-      tone: "accent" as const,
-    },
-    {
-      icon: Globe,
-      title: "LDAP / Active Directory",
-      description: "Sync users from your organisation's directory server.",
-      status: "Not configured",
-      tone: "muted" as const,
-    },
-    {
-      icon: Lock,
-      title: "Security",
-      description: "JWT expiry, OTP lifetime, password strength policy, session management.",
-      status: "Configured via settings.py",
-      tone: "teal" as const,
-    },
-  ];
-
-  const toneClass = (t: "teal" | "accent" | "muted") =>
-    t === "teal"
-      ? "bg-[hsl(var(--teal))]/15 text-[hsl(var(--teal))]"
-      : t === "accent"
-        ? "bg-accent/15 text-accent"
-        : "bg-muted text-muted-foreground";
-
-  return (
-    <div className="space-y-4">
-      <div className="flex items-start gap-3 px-4 py-3 bg-accent/10 border border-accent/30 rounded-xl text-sm text-foreground">
-        <Settings className="w-4 h-4 mt-0.5 flex-shrink-0 text-accent" />
-        <span>
-          System settings are managed via environment variables and Django settings.
-          This panel shows the current configuration status.
-        </span>
       </div>
 
-      <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
-        {sections.map(({ icon: Icon, title, description, status, tone }) => (
-          <div key={title} className="card p-5 flex gap-4" style={{ boxShadow: "var(--shadow-card)" }}>
-            <div className="w-10 h-10 rounded-lg bg-muted flex items-center justify-center flex-shrink-0">
-              <Icon className="w-4 h-4 text-foreground" />
+      <div className="grid grid-cols-1 xl:grid-cols-2 gap-5">
+        <section className="card p-5 space-y-4">
+          <div className="flex items-start gap-3">
+            <div className="flex h-10 w-10 items-center justify-center rounded-lg bg-accent/10 text-accent">
+              <Droplets className="h-5 w-5" />
             </div>
-            <div className="flex-1 min-w-0">
-              <div className="flex items-start justify-between gap-2 flex-wrap">
-                <h3 className="font-semibold text-foreground text-sm">{title}</h3>
-                <span className={clsx("badge text-xs", toneClass(tone))}>{status}</span>
-              </div>
-              <p className="text-xs text-muted-foreground mt-1">{description}</p>
+            <div>
+              <h3 className="font-semibold text-foreground">Watermarks</h3>
+              <p className="text-sm text-muted-foreground">
+                Disabled by default. When enabled, view-only previews carry the configured watermark.
+              </p>
             </div>
           </div>
-        ))}
+          <Toggle
+            checked={settings.watermark_enabled}
+            onChange={(checked) => update("watermark_enabled", checked)}
+            label="Watermark view-only previews"
+            description="Show a watermark only when the viewer does not have download permission."
+          />
+          <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+            <label>
+              <span className="label">Watermark text</span>
+              <input
+                className="input"
+                value={settings.watermark_text}
+                onChange={(e) => update("watermark_text", e.target.value)}
+                placeholder="CONFIDENTIAL"
+              />
+            </label>
+            <label>
+              <span className="label">Position</span>
+              <select
+                className="input"
+                value={settings.watermark_position}
+                onChange={(e) => update("watermark_position", e.target.value as DmsSettings["watermark_position"])}
+              >
+                <option value="diagonal">Diagonal pattern</option>
+                <option value="center">Centered</option>
+                <option value="footer">Footer strip</option>
+              </select>
+            </label>
+          </div>
+          <label>
+            <span className="label">Opacity: {settings.watermark_opacity}%</span>
+            <input
+              type="range"
+              min={1}
+              max={80}
+              value={settings.watermark_opacity}
+              onChange={(e) => update("watermark_opacity", Number(e.target.value))}
+              className="w-full accent-primary"
+            />
+          </label>
+        </section>
+
+        <section className="card p-5 space-y-4">
+          <div className="flex items-start gap-3">
+            <div className="flex h-10 w-10 items-center justify-center rounded-lg bg-[hsl(var(--teal))]/10 text-[hsl(var(--teal))]">
+              <Copy className="h-5 w-5" />
+            </div>
+            <div>
+              <h3 className="font-semibold text-foreground">Duplicate uploads</h3>
+              <p className="text-sm text-muted-foreground">
+                Choose whether users may upload the same file checksum more than once.
+              </p>
+            </div>
+          </div>
+          <Toggle
+            checked={settings.allow_duplicate_uploads}
+            onChange={(checked) => update("allow_duplicate_uploads", checked)}
+            label="Allow duplicate uploads"
+            description="When off, duplicate files uploaded by the same user are blocked before storage."
+          />
+          <div className="rounded-lg border border-border bg-muted/40 px-4 py-3 text-sm text-muted-foreground">
+            Current mode:{" "}
+            <span className="font-semibold text-foreground">
+              {settings.allow_duplicate_uploads ? "duplicates allowed" : "duplicates blocked"}
+            </span>
+          </div>
+        </section>
+
+        <section className="card p-5 space-y-4">
+          <div className="flex items-start gap-3">
+            <div className="flex h-10 w-10 items-center justify-center rounded-lg bg-sky-500/10 text-sky-700">
+              <Archive className="h-5 w-5" />
+            </div>
+            <div>
+              <h3 className="font-semibold text-foreground">Automatic archiving</h3>
+              <p className="text-sm text-muted-foreground">
+                Approved documents can be moved to archive automatically after they have aged out.
+              </p>
+            </div>
+          </div>
+          <Toggle
+            checked={settings.auto_archive_enabled}
+            onChange={(checked) => update("auto_archive_enabled", checked)}
+            label="Enable automatic archiving"
+            description="A scheduled job checks approved documents every hour."
+          />
+          <label className="block">
+            <span className="label">Archive approved documents after</span>
+            <div className="flex items-center gap-2">
+              <input
+                type="number"
+                min={1}
+                className="input max-w-36"
+                value={settings.auto_archive_after_days}
+                onChange={(e) => update("auto_archive_after_days", Math.max(1, Number(e.target.value) || 1))}
+              />
+              <span className="text-sm text-muted-foreground">days since last update</span>
+            </div>
+          </label>
+        </section>
+
+        <section className="card p-5 space-y-4">
+          <div className="flex items-start gap-3">
+            <div className="flex h-10 w-10 items-center justify-center rounded-lg bg-emerald-500/10 text-emerald-700">
+              <ClipboardCheck className="h-5 w-5" />
+            </div>
+            <div>
+              <h3 className="font-semibold text-foreground">Upload governance</h3>
+              <p className="text-sm text-muted-foreground">
+                Lightweight rules for upload hygiene that can expand as the DMS grows.
+              </p>
+            </div>
+          </div>
+          <Toggle
+            checked={settings.require_metadata_on_upload}
+            onChange={(checked) => update("require_metadata_on_upload", checked)}
+            label="Require configured metadata"
+            description="Keep admin-defined required metadata checks active during uploads."
+          />
+          <div className="rounded-lg border border-border bg-muted/40 px-4 py-3 text-sm text-muted-foreground">
+            Required metadata is checked against each document type's admin-defined required fields.
+          </div>
+        </section>
       </div>
     </div>
   );
 }
 
-// ── Main AdminPage ─────────────────────────────────────────────────────────────
-
-const TABS = [
-  { id: "workflow", label: "Workflow templates", icon: GitBranch  },
-  { id: "users",    label: "Management",         icon: Users      },
-  { id: "settings", label: "Settings",           icon: Settings   },
-] as const;
-
-type TabId = typeof TABS[number]["id"];
-
 export default function AdminPage() {
-  const [activeTab, setActiveTab] = useState<TabId>("users");
-
   return (
     <div className="space-y-6">
-      {/* Page header */}
       <div>
-        <h1 className="text-2xl font-bold text-foreground tracking-tight">Administration</h1>
+        <h1 className="text-2xl font-bold text-foreground tracking-tight">DMS settings</h1>
         <p className="text-muted-foreground text-sm mt-1">
-          Manage document types, workflows, users, and system settings from one place.
+          Configure document handling rules, preview watermarks, upload policies, and lifecycle automation.
         </p>
       </div>
 
-      {/* Tab bar */}
-      <div className="border-b border-border">
-        <nav className="-mb-px flex gap-0 overflow-x-auto">
-          {TABS.map(({ id, label, icon: Icon }) => (
-            <button
-              key={id}
-              onClick={() => setActiveTab(id)}
-              className={clsx(
-                "flex items-center gap-2 px-4 py-2.5 text-sm font-medium border-b-2 transition-colors whitespace-nowrap",
-                activeTab === id
-                  ? "border-accent text-accent"
-                  : "border-transparent text-muted-foreground hover:text-foreground hover:border-border"
-              )}
-            >
-              <Icon className="w-4 h-4" />
-              {label}
-            </button>
-          ))}
-        </nav>
-      </div>
-
-      {/* Tab content */}
-      {activeTab === "workflow" && <WorkflowTab />}
-      {activeTab === "users"    && <UsersTab />}
-      {activeTab === "settings" && <SettingsTab />}
+      <SettingsTab />
     </div>
   );
 }

@@ -23,6 +23,7 @@ from .models import (
     Document, DocumentType, MetadataField,
     DocumentVersion, DocumentComment, Tag, OCRStatus,
     BulkUpload, BulkUploadStatus, DocumentStatus, DocumentShare, DocumentRelationship,
+    DMSSettings,
 )
 from apps.accounts.serializers import UserSummarySerializer
 from apps.accounts.models import GroupAction
@@ -117,6 +118,33 @@ class DocTypeColorSerializer(serializers.ModelSerializer):
         model = DocTypeColor
         fields = ["doc_type", "color"]
 
+
+class DMSSettingsSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = DMSSettings
+        fields = [
+            "watermark_enabled",
+            "watermark_text",
+            "watermark_opacity",
+            "watermark_position",
+            "watermark_apply_to_previews",
+            "allow_duplicate_uploads",
+            "auto_archive_enabled",
+            "auto_archive_after_days",
+            "require_metadata_on_upload",
+            "updated_at",
+        ]
+        read_only_fields = ["updated_at"]
+
+    def validate_watermark_opacity(self, value):
+        if value < 1 or value > 80:
+            raise serializers.ValidationError("Watermark opacity must be between 1 and 80.")
+        return value
+
+    def validate_auto_archive_after_days(self, value):
+        if value < 1:
+            raise serializers.ValidationError("Auto-archive age must be at least 1 day.")
+        return value
 
 class MetadataFieldSerializer(serializers.ModelSerializer):
     class Meta:
@@ -642,6 +670,8 @@ class DocumentUploadSerializer(serializers.ModelSerializer):
             return value
         if is_scanned:
             return value
+        if not DMSSettings.load().require_metadata_on_upload:
+            return value
         doc_type_id = self.initial_data.get("document_type_id")
         if not doc_type_id:
             return value
@@ -732,10 +762,13 @@ class DocumentUploadSerializer(serializers.ModelSerializer):
         checksum = sha256.hexdigest()
         validated_data["checksum"] = checksum
 
-        same_user_duplicate = _find_existing_document_for_checksum(
-            checksum,
-            uploaded_by=request.user,
-        )
+        dms_settings = DMSSettings.load()
+        same_user_duplicate = None
+        if not dms_settings.allow_duplicate_uploads:
+            same_user_duplicate = _find_existing_document_for_checksum(
+                checksum,
+                uploaded_by=request.user,
+            )
         if same_user_duplicate:
             raise serializers.ValidationError({
                 "file": (
@@ -765,11 +798,13 @@ class DocumentUploadSerializer(serializers.ModelSerializer):
 
         # Second pass to close races where this user uploads the same checksum
         # between the pre-create lookup and this row insert.
-        same_user_duplicate = _find_existing_document_for_checksum(
-            checksum,
-            exclude_document_id=doc.id,
-            uploaded_by=request.user,
-        )
+        same_user_duplicate = None
+        if not dms_settings.allow_duplicate_uploads:
+            same_user_duplicate = _find_existing_document_for_checksum(
+                checksum,
+                exclude_document_id=doc.id,
+                uploaded_by=request.user,
+            )
         if same_user_duplicate:
             previous_storage_name = doc.file.name
             doc.delete()

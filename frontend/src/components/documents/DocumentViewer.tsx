@@ -18,7 +18,7 @@
 
 import { lazy, Suspense, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { documentsAPI, api } from "../../services/api";
+import { documentsAPI, dmsSettingsAPI, api, type DmsSettings } from "../../services/api";
 import { useAuthStore } from "@/store/authStore";
 import { toast } from "@/components/ui/vault-toast";
 import {
@@ -128,6 +128,76 @@ function getFileExtension(name?: string): string {
   if (!name) return "";
   const idx = name.lastIndexOf(".");
   return idx >= 0 ? name.slice(idx).toLowerCase() : "";
+}
+
+function WatermarkOverlay({
+  settings,
+  canDownload,
+}: {
+  settings?: DmsSettings;
+  canDownload: boolean;
+}) {
+  if (canDownload || !settings?.watermark_enabled || !settings.watermark_apply_to_previews) return null;
+
+  const text = settings.watermark_text?.trim() || "CONFIDENTIAL";
+  const opacity = Math.max(0.01, Math.min(settings.watermark_opacity, 80) / 100);
+
+  if (settings.watermark_position === "footer") {
+    return (
+      <div className="pointer-events-none absolute inset-x-0 bottom-8 z-20 flex justify-center">
+        <span
+          className="border border-foreground/20 bg-white/60 px-8 py-2 text-sm font-bold uppercase tracking-[0.2em] text-foreground"
+          style={{ opacity }}
+        >
+          {text}
+        </span>
+      </div>
+    );
+  }
+
+  if (settings.watermark_position === "center") {
+    return (
+      <div className="pointer-events-none absolute inset-0 z-20 flex items-center justify-center overflow-hidden">
+        <span
+          className="select-none text-4xl font-bold uppercase tracking-[0.2em] text-foreground md:text-6xl"
+          style={{ opacity }}
+        >
+          {text}
+        </span>
+      </div>
+    );
+  }
+
+  return (
+    <div className="pointer-events-none absolute inset-0 z-20 grid grid-cols-2 place-items-center overflow-hidden md:grid-cols-3">
+      {Array.from({ length: 9 }).map((_, index) => (
+        <span
+          key={index}
+          className="select-none text-2xl font-bold uppercase tracking-[0.2em] text-foreground md:text-4xl"
+          style={{ opacity, transform: "rotate(-32deg)" }}
+        >
+          {text}
+        </span>
+      ))}
+    </div>
+  );
+}
+
+function WatermarkedPreview({
+  settings,
+  canDownload,
+  children,
+}: {
+  settings?: DmsSettings;
+  canDownload: boolean;
+  children: ReactNode;
+}) {
+  return (
+    <div className="relative">
+      {children}
+      <WatermarkOverlay settings={settings} canDownload={canDownload} />
+    </div>
+  );
 }
 
 // ── EditLockBanner ─────────────────────────────────────────────────────────────
@@ -1066,6 +1136,11 @@ export default function DocumentViewer({ document: doc, submitSlot, hideUploadAc
   const canUploadVersion = Boolean(doc.permissions?.includes("upload")) || Boolean(user?.has_admin_access);
   const canEdit          = Boolean(doc.permissions?.includes("edit")) || Boolean(user?.has_admin_access);
   const canDownload      = Boolean(doc.permissions?.includes("download")) || Boolean(user?.has_admin_access);
+  const { data: dmsSettings } = useQuery({
+    queryKey: ["dms-settings"],
+    queryFn: () => dmsSettingsAPI.get().then((r) => r.data),
+    staleTime: 60_000,
+  });
   const isOfficeByMime   = OFFICE_MIMES.has(doc.file_mime_type);
   const isOfficeByExt    = OFFICE_EXTENSIONS.has(getFileExtension(doc.file_name));
   const isOffice         = isOfficeByMime || isOfficeByExt;
@@ -1255,31 +1330,37 @@ export default function DocumentViewer({ document: doc, submitSlot, hideUploadAc
 
       {/* PDF (non-office) */}
       {preview.viewer === "pdfjs" && !isOffice && (
-        <PdfViewer
-          url={preview.url}
-          doc={doc}
-          canUploadVersion={canUploadVersion && !isLockedByOther}
-          onVersionUploaded={onVersionUploaded}
-        />
+        <WatermarkedPreview settings={dmsSettings} canDownload={canDownload}>
+          <PdfViewer
+            url={preview.url}
+            doc={doc}
+            canUploadVersion={canUploadVersion && !isLockedByOther}
+            onVersionUploaded={onVersionUploaded}
+          />
+        </WatermarkedPreview>
       )}
 
       {/* Office documents */}
       {isOffice && (
-        <OfficeEditPanel
-          doc={doc}
-          preview={preview}
-          refetchPreview={refetchPreview}
-          selectedVersionId={selectedVersionId}
-          canEditInEditor={canEdit}
-          onVersionUploaded={onVersionUploaded}
-          showHeaderOpenButton={false}
-          onOfficeEditActionChange={setOfficeEditAction}
-        />
+        <WatermarkedPreview settings={dmsSettings} canDownload={canDownload}>
+          <OfficeEditPanel
+            doc={doc}
+            preview={preview}
+            refetchPreview={refetchPreview}
+            selectedVersionId={selectedVersionId}
+            canEditInEditor={canEdit}
+            onVersionUploaded={onVersionUploaded}
+            showHeaderOpenButton={false}
+            onOfficeEditActionChange={setOfficeEditAction}
+          />
+        </WatermarkedPreview>
       )}
 
       {/* Images */}
       {isImage && !isOffice && preview.viewer !== "pdfjs" && (
-        <ImageViewer url={preview.url} />
+        <WatermarkedPreview settings={dmsSettings} canDownload={canDownload}>
+          <ImageViewer url={preview.url} />
+        </WatermarkedPreview>
       )}
 
       {/* Unsupported / download only */}

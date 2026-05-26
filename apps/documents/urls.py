@@ -12,7 +12,7 @@ Changes from previous version
 """
 from django.urls import path
 from rest_framework.routers import DefaultRouter
-from .views import DocumentViewSet, DocumentTypeViewSet, DocTypeColorView
+from .views import DocumentViewSet, DocumentTypeViewSet, DocTypeColorView, DMSSettingsView
 from .webdav import DocumentWebDAVView
 from .bulk_upload_views import BulkUploadViewSet
 from .folder_views import (
@@ -69,6 +69,11 @@ urlpatterns = [
         "doc-type-colors/",
         DocTypeColorView.as_view(),
         name="document-type-colors",
+    ),
+    path(
+        "settings/",
+        DMSSettingsView.as_view(),
+        name="document-settings",
     ),
     *router.urls,
 ]

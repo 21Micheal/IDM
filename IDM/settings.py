@@ -198,6 +198,7 @@ CELERY_TASK_ROUTES = {
     "apps.documents.tasks.ocr_document": {"queue": "ocr"},
     "apps.documents.tasks.extract_text": {"queue": "indexing"},
     "apps.documents.tasks.generate_document_preview": {"queue": "preview"},
+    "apps.documents.tasks.auto_archive_documents": {"queue": "default"},
 }
 WORKFLOW_SLA_WARNING_HOURS = env.int("WORKFLOW_SLA_WARNING_HOURS", default=4)
 WORKFLOW_HOLD_WARNING_HOURS = env.int("WORKFLOW_HOLD_WARNING_HOURS", default=2)
@@ -213,6 +214,10 @@ CELERY_BEAT_SCHEDULE = {
     "workflow-hold-ending-backstop": {
         "task": "apps.workflows.tasks.notify_hold_ending_tasks",
         "schedule": 15 * 60,
+    },
+    "documents-auto-archive": {
+        "task": "apps.documents.tasks.auto_archive_documents",
+        "schedule": 60 * 60,
     },
 }
 

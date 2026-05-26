@@ -67,6 +67,7 @@ import subprocess
 import time
 from pathlib import Path
 from tempfile import TemporaryDirectory
+from datetime import timedelta
 
 from celery import shared_task
 from django.core.files.base import ContentFile
@@ -1111,6 +1112,45 @@ def generate_document_version_preview(self, version_id: str):
         cache.delete(_version_preview_start_cache_key(version_id))
         cache.delete(processing_key)
         cache.set(status_key, PreviewStatus.FAILED, timeout=_PREVIEW_ERROR_TTL)
+
+
+@shared_task(queue="default")
+def auto_archive_documents() -> dict:
+    from apps.audit.models import AuditEvent
+    from apps.audit.utils import record_audit_event
+    from apps.documents.models import DMSSettings, Document, DocumentStatus
+
+    dms_settings = DMSSettings.load()
+    if not dms_settings.auto_archive_enabled:
+        return {"archived": 0, "enabled": False}
+
+    cutoff = timezone.now() - timedelta(days=dms_settings.auto_archive_after_days)
+    candidates = list(
+        Document.objects
+        .filter(status=DocumentStatus.APPROVED, updated_at__lte=cutoff)
+        .select_related("uploaded_by")[:500]
+    )
+
+    archived = 0
+    for doc in candidates:
+        doc.status = DocumentStatus.ARCHIVED
+        doc.save(update_fields=["status", "updated_at"])
+        record_audit_event(
+            AuditEvent.DOCUMENT_ARCHIVED,
+            actor=None,
+            obj=doc,
+            changes={
+                "source": "auto_archive",
+                "after_days": dms_settings.auto_archive_after_days,
+            },
+        )
+        archived += 1
+
+    return {
+        "archived": archived,
+        "enabled": True,
+        "after_days": dms_settings.auto_archive_after_days,
+    }
 
 
 # ─────────────────────────────────────────────────────────────────────────────

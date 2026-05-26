@@ -38,6 +38,7 @@ from .models import (
     DocumentRelationship,
     Tag,
     DocTypeColor,
+    DMSSettings,
     DocumentStatus,
     PreviewStatus,
 )
@@ -48,7 +49,7 @@ from .serializers import (
     DocumentMetadataEditSerializer, DocumentBulkActionSerializer,
     DocumentEmailSelectedSerializer, DocumentShareSelectedSerializer,
     DocumentRelationshipSerializer, DocumentRelationshipWriteSerializer,
-    TagSerializer, DocTypeColorSerializer,
+    TagSerializer, DocTypeColorSerializer, DMSSettingsSerializer,
 )
 from apps.accounts.models import User
 from apps.notifications.models import Notification
@@ -264,6 +265,27 @@ class DocTypeColorView(APIView):
         return Response(created, status=status.HTTP_200_OK)
 
 
+class DMSSettingsView(APIView):
+    permission_classes = [permissions.IsAuthenticated]
+
+    def get(self, request):
+        settings_obj = DMSSettings.load()
+        serializer = DMSSettingsSerializer(settings_obj)
+        return Response(serializer.data)
+
+    def patch(self, request):
+        if not request.user.has_admin_access:
+            return Response(
+                {"detail": "Administrator access is required."},
+                status=status.HTTP_403_FORBIDDEN,
+            )
+        settings_obj = DMSSettings.load()
+        serializer = DMSSettingsSerializer(settings_obj, data=request.data, partial=True)
+        serializer.is_valid(raise_exception=True)
+        serializer.save(updated_by=request.user)
+        return Response(serializer.data)
+
+
 # ── Document ViewSet ──────────────────────────────────────────────────────────
 
 class DocumentViewSet(AuditMixin, viewsets.ModelViewSet):
@@ -412,6 +434,7 @@ class DocumentViewSet(AuditMixin, viewsets.ModelViewSet):
 
     @action(detail=False, methods=["get"], url_path="duplicate-check")
     def duplicate_check(self, request):
+        dms_settings = DMSSettings.load()
         checksum = (request.query_params.get("checksum") or "").strip().lower()
         current_document_id = (request.query_params.get("document_id") or "").strip()
         if len(checksum) != 64 or any(c not in "0123456789abcdef" for c in checksum):
@@ -427,6 +450,13 @@ class DocumentViewSet(AuditMixin, viewsets.ModelViewSet):
                 identical_to_current = current_doc.checksum == checksum
             except (Document.DoesNotExist, ValidationError, ValueError):
                 identical_to_current = False
+
+        if dms_settings.allow_duplicate_uploads:
+            return Response({
+                "exists": False,
+                "identical_to_current": identical_to_current,
+                "duplicates_allowed": True,
+            })
 
         duplicate_doc = (
             Document.objects

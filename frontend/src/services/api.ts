@@ -50,6 +50,19 @@ export type OcrSuggestionsResponse = {
   } | null;
 };
 
+export type DmsSettings = {
+  watermark_enabled: boolean;
+  watermark_text: string;
+  watermark_opacity: number;
+  watermark_position: "diagonal" | "center" | "footer";
+  watermark_apply_to_previews: boolean;
+  allow_duplicate_uploads: boolean;
+  auto_archive_enabled: boolean;
+  auto_archive_after_days: number;
+  require_metadata_on_upload: boolean;
+  updated_at?: string;
+};
+
 export function normalizeListResponse<T>(payload: unknown): T[] {
   if (Array.isArray(payload)) return payload as T[];
   if (payload && typeof payload === "object" && Array.isArray((payload as { results?: unknown[] }).results)) {
@@ -233,6 +246,7 @@ export const documentsAPI = {
     api.get<{
       exists: boolean;
       identical_to_current?: boolean;
+      duplicates_allowed?: boolean;
       document_id?: string;
       reference_number?: string;
       uploaded_at?: string;
@@ -407,6 +421,12 @@ export const bulkUploadAPI = {
 
   review: (id: string, documents: Record<string, unknown>[]) =>
     api.post(`/documents/bulk-uploads/${id}/review/`, { documents }),
+};
+
+export const dmsSettingsAPI = {
+  get: () => api.get<DmsSettings>("/documents/settings/"),
+  update: (data: Partial<DmsSettings>) =>
+    api.patch<DmsSettings>("/documents/settings/", data),
 };
 
 export const documentTypesAPI = {
