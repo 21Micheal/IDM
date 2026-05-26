@@ -323,12 +323,24 @@ export default function DocumentDetailPage() {
   }, [ocrActive, previewActive, id, qc]);
 
   const prevOcrRef = useRef(ocrStatus);
+  const hasShownOcrCompleteRef = useRef(false);
+  
   useEffect(() => {
-    if (prevOcrRef.current !== "done" && ocrStatus === "done") {
+    // Initialize from localStorage to persist across page reloads
+    if (!hasShownOcrCompleteRef.current && id) {
+      const storageKey = `ocr-complete-shown-${id}`;
+      hasShownOcrCompleteRef.current = localStorage.getItem(storageKey) === "true";
+    }
+  }, [id]);
+  
+  useEffect(() => {
+    if (prevOcrRef.current !== "done" && ocrStatus === "done" && !hasShownOcrCompleteRef.current && id) {
       toast.success("OCR complete — document text is now searchable.");
+      hasShownOcrCompleteRef.current = true;
+      localStorage.setItem(`ocr-complete-shown-${id}`, "true");
     }
     prevOcrRef.current = ocrStatus;
-  }, [ocrStatus]);
+  }, [ocrStatus, id]);
 
   // Audit activities query
   const { data: auditLogs } = useQuery({

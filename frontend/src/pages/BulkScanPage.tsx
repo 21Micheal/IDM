@@ -4,7 +4,16 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import {
   ScanLine, Loader2, ArrowRight, Info, CheckCircle, AlertCircle,
 } from "lucide-react";
+import { documentsAPI } from "@/services/api";
 import { toast } from "@/components/ui/vault-toast";
+import {
+  Dialog,
+  DialogContent,
+  DialogHeader,
+  DialogTitle,
+  DialogDescription,
+  DialogFooter,
+} from "@/components/ui/dialog";
 import {
   bulkUploadAPI,
   documentTypesAPI,
@@ -26,6 +35,14 @@ type Stage = "select" | "processing" | "review" | "complete";
 
 const POLL_MS = 3000;
 
+async function calculateFileSha256(file: File): Promise<string> {
+  const buffer = await file.arrayBuffer();
+  const digest = await crypto.subtle.digest("SHA-256", buffer);
+  return Array.from(new Uint8Array(digest))
+    .map((b) => b.toString(16).padStart(2, "0"))
+    .join("");
+}
+
 export default function BulkScanPage() {
   const navigate = useNavigate();
   const queryClient = useQueryClient();
@@ -38,6 +55,10 @@ export default function BulkScanPage() {
   const [reviewStates, setReviewStates] = useState<BulkDocReviewState[]>([]);
   const [completedBatch, setCompletedBatch] = useState<BulkUploadBatch | null>(null);
   const [localPreviews, setLocalPreviews] = useState<Record<string, BulkLocalPreview>>({});
+  const [duplicateDialogOpen, setDuplicateDialogOpen] = useState(false);
+  const [duplicateFiles, setDuplicateFiles] = useState<File[]>([]);
+  const [pendingUploadFiles, setPendingUploadFiles] = useState<File[] | null>(null);
+  const [isCheckingDuplicates, setIsCheckingDuplicates] = useState(false);
 
   const { data: docTypes = [] } = useQuery<unknown, Error, DocumentType[]>({
     queryKey: ["document-types"],
@@ -104,14 +125,15 @@ export default function BulkScanPage() {
   }, [polledBatch]);
 
   const createMutation = useMutation({
-    mutationFn: async () => {
-      if (!selectedTypeId || files.length === 0) {
+    mutationFn: async (uploadFiles?: File[]) => {
+      const effectiveFiles = uploadFiles ?? files;
+      if (!selectedTypeId || effectiveFiles.length === 0) {
         throw new Error("Missing type or files");
       }
       const fd = new FormData();
       fd.append("document_type_id", selectedTypeId);
       fd.append("is_scanned", "true");
-      files.forEach((file) => fd.append("files", file));
+      effectiveFiles.forEach((file) => fd.append("files", file));
       const { data } = await bulkUploadAPI.create(fd, {
         onUploadProgress: (e) => {
           if (e.total) setUploadProgress(Math.round((e.loaded * 100) / e.total));
@@ -161,7 +183,12 @@ export default function BulkScanPage() {
     },
   });
 
-  const onStartUpload = useCallback(() => {
+  const uploadFiles = useCallback((uploadList: File[]) => {
+    setStage("processing");
+    createMutation.mutate(uploadList);
+  }, [createMutation]);
+
+  const onStartUpload = useCallback(async () => {
     if (!selectedTypeId) {
       toast.error("Please select a document type");
       return;
@@ -170,9 +197,48 @@ export default function BulkScanPage() {
       toast.error("Please add at least one file");
       return;
     }
-    setStage("processing");
-    createMutation.mutate();
-  }, [selectedTypeId, files, createMutation]);
+
+    setIsCheckingDuplicates(true);
+    try {
+      const checksums = await Promise.all(files.map((f) => calculateFileSha256(f)));
+      const checks = await Promise.all(checksums.map((cs) =>
+        documentsAPI.duplicateCheck(cs).then((r) => r.data).catch(() => null),
+      ));
+
+      const existingFiles = files.filter((_, i) => checks[i] && checks[i].exists);
+      const remainingFiles = files.filter((_, i) => !(checks[i] && checks[i].exists));
+
+      if (existingFiles.length > 0) {
+        setDuplicateFiles(existingFiles);
+        setPendingUploadFiles(remainingFiles);
+        setDuplicateDialogOpen(true);
+        return;
+      }
+    } catch {
+      // If the advisory duplicate check fails, fall back to normal upload flow.
+    } finally {
+      setIsCheckingDuplicates(false);
+    }
+
+    uploadFiles(files);
+  }, [selectedTypeId, files, uploadFiles]);
+
+  const confirmSkipDuplicates = useCallback(() => {
+    if (!pendingUploadFiles || pendingUploadFiles.length === 0) {
+      toast.error("No new files to upload after skipping duplicates.");
+      setDuplicateDialogOpen(false);
+      return;
+    }
+
+    setFiles(pendingUploadFiles);
+    uploadFiles(pendingUploadFiles);
+    setDuplicateDialogOpen(false);
+  }, [pendingUploadFiles, uploadFiles]);
+
+  const cancelDuplicateUpload = useCallback(() => {
+    toast.info("Upload cancelled.");
+    setDuplicateDialogOpen(false);
+  }, []);
 
   const activeBatch = polledBatch ?? (createMutation.data as BulkUploadBatch | undefined);
 
@@ -193,6 +259,61 @@ export default function BulkScanPage() {
           <span className="border border-white/30 px-2 py-1">{files.length} file{files.length === 1 ? "" : "s"}</span>
         </div>
       </div>
+
+      <Dialog open={duplicateDialogOpen} onOpenChange={setDuplicateDialogOpen}>
+        <DialogContent>
+          <DialogHeader>
+            <DialogTitle>Duplicate files detected</DialogTitle>
+            <DialogDescription>
+              Some files already exist in the system. If you continue, duplicate files will be skipped and only new files will be uploaded.
+            </DialogDescription>
+          </DialogHeader>
+
+          <div className="space-y-3">
+            <p className="text-sm text-[#475569]">
+              Found {duplicateFiles.length} duplicate file{duplicateFiles.length === 1 ? "" : "s"} out of {duplicateFiles.length + (pendingUploadFiles?.length ?? 0)} selected.
+              {pendingUploadFiles && pendingUploadFiles.length > 0 ? " Duplicate files will be skipped." : ""}
+            </p>
+            <div className="rounded-xl border border-[#C8CDD2] bg-[#F7F8F9] p-4 text-sm text-[#1F2933] max-h-48 overflow-y-auto">
+              <p className="mb-2 font-semibold">Files that already exist:</p>
+              <ul className="list-disc space-y-1 pl-5">
+                {duplicateFiles.slice(0, 10).map((file) => (
+                  <li key={`${file.name}-${file.size}`}>{file.name}</li>
+                ))}
+                {duplicateFiles.length > 10 && (
+                  <li className="text-muted-foreground">
+                    and {duplicateFiles.length - 10} more duplicate file{duplicateFiles.length - 10 === 1 ? "" : "s"}
+                  </li>
+                )}
+              </ul>
+            </div>
+            <p className="text-sm text-[#475569]">
+              {pendingUploadFiles && pendingUploadFiles.length === 0
+                ? "All selected files already exist, so no new files can be uploaded."
+                : `Skipping ${duplicateFiles.length} duplicate file${duplicateFiles.length === 1 ? "" : "s"}.`}
+            </p>
+          </div>
+
+          <DialogFooter className="mt-4 gap-2">
+            <button
+              type="button"
+              onClick={cancelDuplicateUpload}
+              className="btn-secondary"
+            >
+              Cancel
+            </button>
+            <button
+              type="button"
+              onClick={confirmSkipDuplicates}
+              className="btn-primary"
+            >
+              {pendingUploadFiles && pendingUploadFiles.length === 0
+                ? "Close"
+                : "Skip duplicates and continue"}
+            </button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
 
       {stage === "select" && (
         <div className="grid grid-cols-1 gap-5 p-5 pr-8 lg:grid-cols-12">
@@ -236,11 +357,14 @@ export default function BulkScanPage() {
               <button
                 type="button"
                 onClick={onStartUpload}
-                disabled={createMutation.isPending || !selectedTypeId || files.length === 0}
+                disabled={createMutation.isPending || isCheckingDuplicates || !selectedTypeId || files.length === 0}
                 className="flex flex-1 items-center justify-center gap-2 bg-[#287EAD] py-3 font-semibold text-white hover:bg-[#206D99] disabled:opacity-50"
               >
-                {createMutation.isPending ? (
-                  <Loader2 className="w-5 h-5 animate-spin" />
+                {createMutation.isPending || isCheckingDuplicates ? (
+                  <>
+                    <Loader2 className="w-5 h-5 animate-spin" />
+                    {isCheckingDuplicates ? "Checking files…" : "Uploading…"}
+                  </>
                 ) : (
                   <>
                     <ScanLine className="w-4 h-4" />
