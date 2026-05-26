@@ -205,7 +205,7 @@ function buildApproverWorkflow(
           "Unassigned",
         status,
         statusDisplay: status === "pending" && previousName
-          ? `Awaiting ${previousName} approval`
+          ? `Awaiting ${previousName}`
           : templateStep.status_label,
         completedAt: latestAction?.created_at || items.find((item) => item.task.acted_at)?.task.acted_at || undefined,
         comment: latestAction?.comment || items.find((item) => item.task.comment)?.task.comment || undefined,
