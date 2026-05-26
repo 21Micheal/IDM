@@ -29,15 +29,7 @@ from .serializers import (
 )
 from .services import WorkflowService, WorkflowError
 from apps.accounts.models import UserDelegation
-class IsGroupAdmin(permissions.BasePermission):
-    message = "Only administrators can perform this action."
-
-    def has_permission(self, request, view):
-        return (
-            request.user
-            and request.user.is_authenticated
-            and request.user.has_admin_access
-        )
+from apps.accounts.views import IsGroupAdmin
 
 
 # ── Templates ──────────────────────────────────────────────────────────────────
@@ -379,7 +371,7 @@ class ApprovalTurnaroundView(APIView):
     Returns avg hours per WorkflowStep across completed WorkflowTask instances.
     Response shape: List[{ step, avg_hours, sla_hours, completed }]
     """
-    permission_classes = [permissions.IsAdminUser]
+    permission_classes = [permissions.IsAuthenticated, IsGroupAdmin]
 
     def get(self, request):
         from datetime import timedelta
@@ -416,7 +408,7 @@ class SlaBreachRateView(APIView):
     A task is "breached" when (completed_at - created_at) > step.sla_hours.
     Response shape: List[{ month, total, breached, breach_rate }]
     """
-    permission_classes = [permissions.IsAdminUser]
+    permission_classes = [permissions.IsAuthenticated, IsGroupAdmin]
 
     def get(self, request):
         from datetime import timedelta

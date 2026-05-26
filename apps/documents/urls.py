@@ -12,7 +12,7 @@ Changes from previous version
 """
 from django.urls import path
 from rest_framework.routers import DefaultRouter
-from .views import DocumentViewSet, DocumentTypeViewSet
+from .views import DocumentViewSet, DocumentTypeViewSet, DocTypeColorView
 from .webdav import DocumentWebDAVView
 from .bulk_upload_views import BulkUploadViewSet
 from .folder_views import (
@@ -64,6 +64,11 @@ urlpatterns = [
         "webdav/<uuid:document_id>/<str:token>/<path:filename>",
         DocumentWebDAVView.as_view(),
         name="document-webdav",
+    ),
+    path(
+        "doc-type-colors/",
+        DocTypeColorView.as_view(),
+        name="document-type-colors",
     ),
     *router.urls,
 ]

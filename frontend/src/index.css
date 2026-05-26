@@ -171,4 +171,85 @@
   .badge {
     @apply inline-flex items-center rounded-full px-2.5 py-0.5 text-xs font-medium;
   }
+
+  .admin-shell {
+    min-height: calc(100vh - 3.5rem);
+    margin: -1.5rem;
+    padding: 1.25rem 2rem 2rem 1.25rem;
+    background: #ededed;
+    color: #1f2933;
+    font-size: 13px;
+  }
+
+  .admin-shell .card,
+  .admin-shell .bg-card {
+    background: #fff;
+    border-color: #c8cdd2;
+    box-shadow: none !important;
+  }
+
+  .admin-shell .card,
+  .admin-shell .rounded-2xl,
+  .admin-shell .rounded-xl,
+  .admin-shell .rounded-lg,
+  .admin-shell .rounded-md {
+    border-radius: 0 !important;
+  }
+
+  .admin-shell .btn-primary {
+    border-radius: 0;
+    background: #287ead;
+    color: #fff;
+    box-shadow: none;
+  }
+
+  .admin-shell .btn-primary:hover {
+    background: #206d99;
+  }
+
+  .admin-shell .btn-secondary {
+    border-radius: 0;
+    border-color: #c8cdd2;
+    background: #fff;
+    color: #1f2933;
+  }
+
+  .admin-shell .input {
+    border-radius: 0;
+    border-color: #b7bec5;
+    background: #fff;
+    box-shadow: none;
+  }
+
+  .admin-shell thead tr {
+    background: #f5f7f8 !important;
+  }
+
+  .admin-shell tbody tr:hover {
+    background: #f7fafc;
+  }
+
+  .admin-shell .badge {
+    border-radius: 0;
+  }
+
+  .admin-page-header {
+    margin-bottom: 1.25rem;
+    border: 1px solid #c8cdd2;
+    background: #fff;
+    padding: 1rem 1.25rem;
+  }
+
+  .admin-page-title {
+    color: #1f2933;
+    font-size: 1.25rem;
+    font-weight: 700;
+    letter-spacing: 0;
+  }
+
+  .admin-page-subtitle {
+    margin-top: 0.25rem;
+    color: #5e6870;
+    font-size: 0.875rem;
+  }
 }

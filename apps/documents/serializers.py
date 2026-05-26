@@ -111,6 +111,13 @@ class TagSerializer(serializers.ModelSerializer):
         fields = ["id", "name", "color"]
 
 
+class DocTypeColorSerializer(serializers.ModelSerializer):
+    class Meta:
+        from .models import DocTypeColor
+        model = DocTypeColor
+        fields = ["doc_type", "color"]
+
+
 class MetadataFieldSerializer(serializers.ModelSerializer):
     class Meta:
         model  = MetadataField
@@ -260,6 +267,7 @@ class DocumentListSerializer(serializers.ModelSerializer):
             "current_version", "created_at", "updated_at",
             "available_bulk_actions", "shared_with_me", "share_access_level",
         ]
+
 
     def get_description(self, obj):
         if not isinstance(obj.metadata, dict):

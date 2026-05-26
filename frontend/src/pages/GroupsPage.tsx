@@ -529,11 +529,11 @@ export default function GroupsPage() {
   });
 
   return (
-    <div className="max-w-6xl mx-auto">
-      <div className="flex items-end justify-between mb-8">
+    <div className="admin-shell">
+      <div className="admin-page-header flex items-end justify-between gap-4">
         <div>
-          <h1 className="text-3xl font-bold text-foreground tracking-tight">Permission groups</h1>
-          <p className="text-muted-foreground mt-1.5">
+          <h1 className="admin-page-title">Permission groups</h1>
+          <p className="admin-page-subtitle">
             Define fine-grained access control per document type.
           </p>
         </div>

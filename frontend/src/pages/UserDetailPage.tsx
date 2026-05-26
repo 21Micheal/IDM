@@ -176,7 +176,7 @@ export default function UserDetailPage() {
   const initials = `${user.first_name?.[0] ?? ""}${user.last_name?.[0] ?? ""}`.toUpperCase();
 
   return (
-    <div className="max-w-6xl mx-auto py-6 sm:py-8 space-y-6">
+    <div className="admin-shell space-y-5">
       {/* Back nav */}
       <button
         type="button"
@@ -187,7 +187,7 @@ export default function UserDetailPage() {
       </button>
 
       {/* Identity card — clean slate, no gradient */}
-      <div className="rounded-2xl border border-border bg-card shadow-sm overflow-hidden">
+      <div className="overflow-hidden border border-[#C8CDD2] bg-white">
         <div className="p-6 sm:p-8">
           <div className="flex flex-col sm:flex-row sm:items-start gap-6">
             {/* Avatar */}

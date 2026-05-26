@@ -1802,10 +1802,10 @@ export default function WorkflowBuilderPage() {
   const editorDocType = selectedDocType || creatingForDocType || null;
 
   return (
-    <div className="flex gap-6 h-[calc(100vh-7rem)] bg-muted/40 p-6">
+    <div className="admin-shell flex h-[calc(100vh-3.5rem)] gap-5 overflow-hidden">
       {/* Left Sidebar */}
-      <aside className="w-80 flex-shrink-0 flex flex-col bg-card rounded-2xl border border-border overflow-hidden">
-        <div className="p-4 border-b border-border">
+      <aside className="flex w-80 flex-shrink-0 flex-col overflow-hidden border border-[#C8CDD2] bg-white">
+        <div className="border-b border-[#C8CDD2] bg-[#F7F8F9] p-4">
           <div className="flex items-center justify-between mb-4">
             <h1 className="text-lg font-bold text-foreground">
               {sidebarTab === "doctypes" ? "Document Types" : "Templates"}
@@ -1949,7 +1949,7 @@ export default function WorkflowBuilderPage() {
       </aside>
 
       {/* Right Editor */}
-      <main className="flex-1 bg-card rounded-2xl border border-border p-6 overflow-hidden flex flex-col">
+      <main className="flex flex-1 flex-col overflow-hidden border border-[#C8CDD2] bg-white p-5">
         {!showEditor && (
           <div className="flex-1 flex flex-col items-center justify-center text-center">
             <div className="w-16 h-16 rounded-2xl bg-muted flex items-center justify-center mb-4">

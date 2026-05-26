@@ -357,11 +357,11 @@ export default function DepartmentsPage() {
   });
 
   return (
-    <div className="max-w-6xl mx-auto">
-      <div className="flex items-end justify-between mb-8">
+    <div className="admin-shell">
+      <div className="admin-page-header flex items-end justify-between gap-4">
         <div>
-          <h1 className="text-3xl font-bold text-foreground tracking-tight">Departments</h1>
-          <p className="text-muted-foreground mt-1.5">
+          <h1 className="admin-page-title">Departments</h1>
+          <p className="admin-page-subtitle">
             Manage departments and assign team members.
           </p>
         </div>

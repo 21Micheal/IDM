@@ -350,21 +350,21 @@ export default function UsersPage() {
   });
 
   return (
-    <div className="max-w-7xl mx-auto py-8 px-4">
-      <div className="flex items-start justify-between mb-8">
+    <div className="admin-shell">
+      <div className="admin-page-header flex items-start justify-between gap-4">
         <div>
           <div className="flex items-center gap-3 mb-2">
-            <div className="w-10 h-10 rounded-xl bg-primary/10 flex items-center justify-center">
-              <UsersIcon className="w-5 h-5 text-primary" />
+            <div className="flex h-10 w-10 items-center justify-center bg-[#EEF6FB]">
+              <UsersIcon className="h-5 w-5 text-[#287EAD]" />
             </div>
-            <h1 className="text-3xl font-bold tracking-tight text-foreground">User Management</h1>
+            <h1 className="admin-page-title">User Management</h1>
           </div>
-          <p className="text-muted-foreground">Manage team members, permissions, and access</p>
+          <p className="admin-page-subtitle">Manage team members, permissions, and access.</p>
         </div>
 
         <button
           onClick={() => setShowCreate(true)}
-          className="inline-flex items-center gap-2 bg-primary text-primary-foreground px-5 py-2.5 rounded-xl font-medium hover:bg-primary/90 transition-colors"
+          className="inline-flex items-center gap-2 bg-[#287EAD] px-5 py-2.5 font-medium text-white transition-colors hover:bg-[#206D99]"
         >
           <Plus className="w-4 h-4" />
           Add User

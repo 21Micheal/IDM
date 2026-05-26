@@ -12,8 +12,8 @@ from django.core.exceptions import ValidationError
 from django.http import HttpResponse
 from django.utils import timezone
 from django.db import transaction, models
-from django.db.models import Count
-from django.db.models.functions import TruncMonth
+from django.db.models import Count, Value
+from django.db.models.functions import TruncMonth, Concat
 from django.conf import settings
 
 from django.core.cache import cache
@@ -28,6 +28,8 @@ from rest_framework.parsers import MultiPartParser, FormParser, JSONParser
 from rest_framework.response import Response
 from rest_framework_simplejwt.tokens import AccessToken
 
+from apps.accounts.views import IsGroupAdmin
+
 from .models import (
     Document,
     DocumentType,
@@ -35,6 +37,7 @@ from .models import (
     DocumentShare,
     DocumentRelationship,
     Tag,
+    DocTypeColor,
     DocumentStatus,
     PreviewStatus,
 )
@@ -45,7 +48,7 @@ from .serializers import (
     DocumentMetadataEditSerializer, DocumentBulkActionSerializer,
     DocumentEmailSelectedSerializer, DocumentShareSelectedSerializer,
     DocumentRelationshipSerializer, DocumentRelationshipWriteSerializer,
-    TagSerializer,
+    TagSerializer, DocTypeColorSerializer,
 )
 from apps.accounts.models import User
 from apps.notifications.models import Notification
@@ -160,7 +163,7 @@ class DocumentVolumeView(APIView):
     Groups Document uploads by month + document_type.
     Response shape: List[{ month, <DocType>: count, ... }]
     """
-    permission_classes = [permissions.IsAdminUser]
+    permission_classes = [permissions.IsAuthenticated, IsGroupAdmin]
 
     def get(self, request):
         qs = (
@@ -185,7 +188,7 @@ class TopUploadersView(APIView):
     Ranks users by document upload count in the last 90 days.
     Response shape: List[{ name, department, count, approved, pending }]
     """
-    permission_classes = [permissions.IsAdminUser]
+    permission_classes = [permissions.IsAuthenticated, IsGroupAdmin]
 
     def get(self, request):
         from datetime import timedelta
@@ -196,11 +199,16 @@ class TopUploadersView(APIView):
         qs = (
             Document.objects
             .filter(created_at__gte=cutoff)
-            .values(
+            .annotate(
                 uploader_id=models.F("uploaded_by__id"),
-                uploader_name=models.F("uploaded_by__full_name"),
-                department=models.F("uploaded_by__department__name"),
+                uploader_name=Concat(
+                    models.F("uploaded_by__first_name"),
+                    Value(" "),
+                    models.F("uploaded_by__last_name"),
+                ),
+                department_name=models.F("uploaded_by__department__name"),
             )
+            .values("uploader_id", "uploader_name", "department_name")
             .annotate(
                 count=Count("id"),
                 approved=Count("id", filter=models.Q(status="approved")),
@@ -211,15 +219,49 @@ class TopUploadersView(APIView):
 
         data = [
             {
-                "name":       row["uploader_name"] or "Unknown",
-                "department": row["department"] or "—",
-                "count":      row["count"],
-                "approved":   row["approved"],
-                "pending":    row["pending"],
+                "name":       row.get("uploader_name") or "Unknown",
+                "department": row.get("department_name") or "—",
+                "count":      row.get("count"),
+                "approved":   row.get("approved"),
+                "pending":    row.get("pending"),
             }
             for row in qs
         ]
         return Response(data)
+
+
+class DocTypeColorView(APIView):
+    """CRUD for persisted document-type colours.
+
+    GET:  returns list of {doc_type, color}
+    POST: accepts { mappings: [{doc_type, color}, ...] } to upsert mappings
+    """
+    permission_classes = [permissions.IsAuthenticated, IsGroupAdmin]
+
+    def get(self, request):
+        qs = DocTypeColor.objects.all().order_by("doc_type")
+        serializer = DocTypeColorSerializer(qs, many=True)
+        return Response(serializer.data)
+
+    def post(self, request):
+        mappings = request.data.get("mappings") or request.data
+        if isinstance(mappings, dict):
+            # convert dict {doc_type: color} -> list
+            mappings = [{"doc_type": k, "color": v} for k, v in mappings.items()]
+
+        created = []
+        for item in mappings or []:
+            doc_type = item.get("doc_type")
+            color = item.get("color")
+            if not doc_type or not color:
+                continue
+            obj, _ = DocTypeColor.objects.update_or_create(
+                doc_type=doc_type,
+                defaults={"color": color, "created_by": request.user},
+            )
+            created.append({"doc_type": obj.doc_type, "color": obj.color})
+
+        return Response(created, status=status.HTTP_200_OK)
 
 
 # ── Document ViewSet ──────────────────────────────────────────────────────────

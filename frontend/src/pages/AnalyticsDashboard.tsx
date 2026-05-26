@@ -17,7 +17,7 @@
 //   GET /analytics/document-volume/       → VolumeItem[]
 //   GET /analytics/top-uploaders/         → UploaderItem[]
 
-import { useMemo, useState } from "react";
+import { useMemo, useState, useEffect } from "react";
 import { Link } from "react-router-dom";
 import { useQuery } from "@tanstack/react-query";
 import { api } from "@/services/api";
@@ -167,6 +167,28 @@ const DOC_TYPE_COLORS: Record<string, string> = {
   Policy:   "hsl(38,90%,50%)",
   Other:    "hsl(210,20%,68%)",
 };
+
+// Local persistence for user-customised doc-type colours
+const DOC_TYPE_COLORS_STORAGE_KEY = "analytics.docTypeColors.v1";
+
+function loadSavedDocTypeColors(): Record<string, string> {
+  try {
+    if (typeof window === "undefined") return {};
+    const raw = localStorage.getItem(DOC_TYPE_COLORS_STORAGE_KEY);
+    return raw ? JSON.parse(raw) : {};
+  } catch (e) {
+    return {};
+  }
+}
+
+function saveDocTypeColors(map: Record<string, string>) {
+  try {
+    if (typeof window === "undefined") return;
+    localStorage.setItem(DOC_TYPE_COLORS_STORAGE_KEY, JSON.stringify(map));
+  } catch (e) {
+    // ignore
+  }
+}
 
 /* ─────────────────────────────────────────────────────────────────────── */
 /* Shared UI atoms                                                          */
@@ -578,16 +600,100 @@ function DocumentVolumeChart({
     return data.slice(-n);
   }, [data, range]);
 
+  // Discover document types from the incoming data (fallback to static DOC_TYPES)
+  const docTypes = useMemo(() => {
+    const set = new Set<string>();
+    (data || []).forEach((row) => {
+      Object.keys(row || {}).forEach((k) => {
+        if (k !== "month") set.add(k);
+      });
+    });
+    // Prefer the static order for known types, then append any extras
+    const extras = Array.from(set).filter((k) => !DOC_TYPES.includes(k));
+    const ordered = DOC_TYPES.filter((t) => set.has(t)).concat(extras);
+    return ordered.length ? ordered : DOC_TYPES;
+  }, [data]);
+
+  // Build a color map for discovered types, preserving known colors
+  const docTypeColors = useMemo(() => {
+    const palette = [
+      "#147eb3",
+      "#3d3d8f",
+      "#1ba0b8",
+      "#b71c1c",
+      "#d0d6e8",
+      "#a78bfa",
+      "#3cb371",
+    ];
+    const persisted = loadSavedDocTypeColors();
+    const map: Record<string, string> = {};
+    docTypes.forEach((t, i) => {
+      if (persisted[t]) map[t] = persisted[t];
+      else if (DOC_TYPE_COLORS[t]) map[t] = DOC_TYPE_COLORS[t];
+      else map[t] = palette[i % palette.length];
+    });
+    return map;
+  }, [docTypes]);
+
+  // Saved colors in state so change reflects immediately in the UI
+  const [savedColors, setSavedColors] = useState<Record<string, string>>(() => loadSavedDocTypeColors());
+  const [editingType, setEditingType] = useState<string | null>(null);
+
+  function updateSavedColor(type: string, color: string) {
+    const next = { ...(savedColors || {}), [type]: color };
+    setSavedColors(next);
+    saveDocTypeColors(next);
+    // also persist to server for org-wide settings
+    try {
+      api.post("/documents/doc-type-colors/", { mappings: [{ doc_type: type, color }] });
+    } catch (e) {
+      // ignore network errors for now
+    }
+  }
+
+  // Load persisted mappings from server on mount and merge with local saved colors
+  useEffect(() => {
+    let mounted = true;
+    (async () => {
+      try {
+        const resp = await api.get("/documents/doc-type-colors/");
+        if (!mounted) return;
+        const payload = resp?.data || {};
+        // payload expected as { doc_type: color, ... } or list
+        const map: Record<string, string> = {};
+        if (Array.isArray(payload)) {
+          payload.forEach((item: any) => {
+            if (item.doc_type && item.color) map[item.doc_type] = item.color;
+          });
+        } else {
+          Object.assign(map, payload);
+        }
+        const merged = { ...(savedColors || {}), ...map };
+        setSavedColors(merged);
+        saveDocTypeColors(merged);
+      } catch (err) {
+        // ignore
+      }
+    })();
+    return () => { mounted = false; };
+  }, []);
+
+  // Normalize rows to guarantee each discovered doc type key exists and is numeric
+  const normalized = useMemo(() => {
+    return sliced.map((row) => {
+      const out: Record<string, any> = { month: row.month };
+      docTypes.forEach((t) => {
+        const raw = row[t] ?? row[t.toLowerCase()] ?? 0;
+        out[t] = Number(raw) || 0;
+      });
+      return out as VolumeItem;
+    });
+  }, [sliced, docTypes]);
+
   const totals = useMemo(
     () =>
-      DOC_TYPES.reduce(
-        (acc, t) => ({
-          ...acc,
-          [t]: sliced.reduce((s, row) => s + (Number(row[t]) || 0), 0),
-        }),
-        {} as Record<string, number>,
-      ),
-    [sliced],
+      docTypes.reduce((acc, t) => ({ ...acc, [t]: normalized.reduce((s, row) => s + (Number(row[t]) || 0), 0) }), {} as Record<string, number>),
+    [normalized, docTypes],
   );
 
   const grandTotal = Object.values(totals).reduce((s, v) => s + v, 0);
@@ -608,27 +714,51 @@ function DocumentVolumeChart({
       <div className="p-5">
         {/* Type legend strips */}
         <div className="mb-4 flex flex-wrap gap-2">
-          {DOC_TYPES.map((t) => (
+          {docTypes.map((t) => (
             <div
               key={t}
               className="flex items-center gap-1.5 rounded-full border border-border bg-card px-2.5 py-1 text-[11px] font-semibold"
             >
               <span
                 className="inline-block h-2 w-2 rounded-full"
-                style={{ background: DOC_TYPE_COLORS[t] }}
+                style={{ background: savedColors[t] ?? docTypeColors[t] }}
               />
               <span className="text-muted-foreground">{t}</span>
               <span className="text-foreground">{totals[t]}</span>
               <span className="text-muted-foreground">
                 ({grandTotal ? ((totals[t] / grandTotal) * 100).toFixed(0) : 0}%)
               </span>
+              <button
+                type="button"
+                onClick={() => setEditingType(editingType === t ? null : t)}
+                className="ml-2 text-xs text-muted-foreground hover:text-foreground"
+              >
+                edit
+              </button>
+              {editingType === t && (
+                <div className="ml-2 flex items-center gap-2">
+                  <input
+                    type="color"
+                    value={savedColors[t] ?? docTypeColors[t]}
+                    onChange={(e) => updateSavedColor(t, e.target.value)}
+                    className="h-6 w-10 rounded"
+                  />
+                  <button
+                    type="button"
+                    onClick={() => setEditingType(null)}
+                    className="text-xs text-muted-foreground hover:text-foreground"
+                  >
+                    done
+                  </button>
+                </div>
+              )}
             </div>
           ))}
         </div>
 
         <ResponsiveContainer width="100%" height={260}>
           <BarChart
-            data={sliced}
+            data={normalized}
             margin={{ left: -10, right: 8, top: 4, bottom: 0 }}
             barCategoryGap="30%"
           >
@@ -645,12 +775,12 @@ function DocumentVolumeChart({
               tick={{ fontSize: 11, fill: "hsl(210,12%,55%)" }}
             />
             <Tooltip content={<ChartTooltip />} />
-            {DOC_TYPES.map((t) => (
+            {docTypes.map((t) => (
               <Bar
                 key={t}
                 dataKey={t}
                 stackId="a"
-                fill={DOC_TYPE_COLORS[t]}
+                fill={savedColors[t] ?? docTypeColors[t]}
                 fillOpacity={0.88}
                 radius={t === "Other" ? [4, 4, 0, 0] : [0, 0, 0, 0]}
               />
