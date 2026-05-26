@@ -169,6 +169,10 @@ SERVE_MEDIA_PUBLIC = env.bool("SERVE_MEDIA_PUBLIC", default=False)
 STATIC_ROOT = BASE_DIR / "staticfiles"
 STATIC_URL = "/static/"
 
+# Default authentication always includes local Django auth.
+# If LDAP/AD is configured via LDAP_SERVER_URI, it will be enabled first.
+AUTHENTICATION_BACKENDS = ["django.contrib.auth.backends.ModelBackend"]
+
 # Switch to S3 by setting USE_S3=True in env
 if env.bool("USE_S3", default=False):
     DEFAULT_FILE_STORAGE = "storages.backends.s3boto3.S3Boto3Storage"

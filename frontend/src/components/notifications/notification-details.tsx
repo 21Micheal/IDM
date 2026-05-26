@@ -292,13 +292,18 @@ async function loadWorkflowData(documentId: string): Promise<{
           latestActionForHistory(item.history)?.action,
         ),
       );
+      const hasReturned = taskStatuses.includes("returned");
+      const hasCompleted = taskStatuses.includes("completed");
+      const hasPending = taskStatuses.includes("pending");
       const status = taskStatuses.includes("rejected")
         ? "rejected"
         : taskStatuses.includes("in-progress")
           ? "in-progress"
-          : taskStatuses.includes("completed")
+          : hasCompleted && !hasPending
             ? "completed"
-            : "pending";
+            : hasReturned
+              ? "returned"
+              : "pending";
       const statusDisplay =
         group.items
           .map((item) => item.task.status_display?.trim())
@@ -452,9 +457,11 @@ async function loadWorkflowData(documentId: string): Promise<{
 function mapTaskStatus(taskStatus?: string, action?: string): WorkflowStep["status"] {
   const normalizedAction = String(action ?? "").toLowerCase();
   const normalizedStatus = String(taskStatus ?? "").toLowerCase();
+  if (normalizedAction === "returned" || normalizedStatus === "returned") return "returned";
+  if (normalizedAction === "held" || normalizedStatus === "held") return "on-hold";
   if (normalizedAction === "approved" || normalizedStatus === "approved" || normalizedStatus === "completed") return "completed";
   if (normalizedAction === "rejected" || normalizedStatus === "rejected") return "rejected";
-  if (["in_progress", "held"].includes(normalizedStatus)) return "in-progress";
+  if (normalizedStatus === "in_progress") return "in-progress";
   return "pending";
 }
 

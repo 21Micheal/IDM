@@ -564,15 +564,15 @@ export default function DocumentDetailPage() {
 
   const canSubmit =
     !isPersonal &&
-    (doc.status === "draft" || doc.status === "rejected") &&
-    canApprove;
+    (["draft", "rejected", "returned"].includes(doc.status)) &&
+    (canApprove || doc.uploaded_by?.id === user?.id);
 
   const canArchiveNow =
     canArchive &&
     !["archived", "void"].includes(doc.status) &&
     (isPersonal || doc.status === "approved");
 
-  const isDraftOrRejected = doc.status === "draft" || doc.status === "rejected";
+  const isDraftOrRejected = ["draft", "rejected", "returned"].includes(doc.status);
   const auditCount = auditLogs?.count ?? 0;
   const auditPages = Math.max(1, Math.ceil(auditCount / AUDIT_PAGE_SIZE));
   const sortedDocumentVersions = [...(doc.versions ?? [])].sort((a, b) => a.version_number - b.version_number);
@@ -713,15 +713,15 @@ export default function DocumentDetailPage() {
               onClick={() => submitMutation.mutate()}
               disabled={submitMutation.isPending}
               className="flex h-8 items-center gap-1 px-2 transition-colors hover:bg-white/10 hover:text-white disabled:opacity-50"
-              title="Submit for approval workflow"
+              title={doc.status === "returned" ? "Resubmit to resume approval" : "Submit for approval workflow"}
             >
               {submitMutation.isPending ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <Send className="w-3.5 h-3.5" />}
-              <span>Start workflow</span>
+              <span>{doc.status === "returned" ? "Resubmit" : "Start workflow"}</span>
             </button>
           ) : (
             <button disabled className="hidden h-8 cursor-not-allowed items-center gap-1 px-2 opacity-40 sm:flex" title="Not eligible for submission">
               <Send className="w-3.5 h-3.5" />
-              <span>Start workflow</span>
+              <span>{doc.status === "returned" ? "Resubmit" : "Start workflow"}</span>
             </button>
           )}
 

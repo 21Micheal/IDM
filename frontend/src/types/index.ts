@@ -41,6 +41,7 @@ export type DocumentStatus =
   | "draft"
   | "pending_review"
   | "pending_approval"
+  | "returned"
   | "approved"
   | "rejected"
   | "archived"

@@ -285,10 +285,15 @@ function buildApproverWorkflow(
 
 function resolveStepStatus(statuses: WorkflowStep["status"][]): WorkflowStep["status"] {
   if (statuses.includes("rejected")) return "rejected";
-  if (statuses.includes("returned")) return "returned";
   if (statuses.includes("on-hold")) return "on-hold";
   if (statuses.includes("in-progress")) return "in-progress";
-  if (statuses.length > 0 && statuses.every((status) => status === "completed")) return "completed";
+
+  const hasReturned = statuses.includes("returned");
+  const hasCompleted = statuses.includes("completed");
+  const hasPending = statuses.includes("pending");
+
+  if (hasCompleted && !hasPending) return "completed";
+  if (hasReturned) return "returned";
   return "pending";
 }
 

@@ -19,7 +19,7 @@ import {
   BellRing, CircleUserRound, ClipboardCheck, Inbox, ArrowRight,
 } from "lucide-react";
 import { useAuthStore } from "../../store/authStore";
-import { useQuery } from "@tanstack/react-query";
+import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { notificationsAPI, workflowAPI } from "../../services/api";
 import { FlaxemLogo } from "./FlaxemLogo";
 import { QUERY_SHORT_STALE } from "@/lib/reactQueryDefaults";
@@ -204,6 +204,17 @@ function ProfileMenu() {
   const navigate = useNavigate();
   const [open, setOpen] = useState(false);
 
+  useEffect(() => {
+    if (!open) return;
+    const handleKeyDown = (event: KeyboardEvent) => {
+      if (event.key === "Escape" || event.key === "Esc") {
+        setOpen(false);
+      }
+    };
+    window.addEventListener("keydown", handleKeyDown);
+    return () => window.removeEventListener("keydown", handleKeyDown);
+  }, [open]);
+
   return (
     <div className="relative">
       <button
@@ -254,13 +265,50 @@ function NotificationsTray({
   tasks: unknown[];
 }) {
   const navigate = useNavigate();
+  const queryClient = useQueryClient();
   const [open, setOpen] = useState(false);
+  const markReadMutation = useMutation({
+    mutationFn: (id: string) => notificationsAPI.markRead(id),
+    onMutate: async (id: string) => {
+      await queryClient.cancelQueries({ queryKey: ["notifications"] });
+      const previousNotifications = queryClient.getQueryData<{ id: string; type: string; message: string; link?: string; is_read: boolean; created_at: string }[]>(["notifications"]);
+      if (previousNotifications) {
+        queryClient.setQueryData(["notifications"], previousNotifications.map((notification) =>
+          notification.id === id ? { ...notification, is_read: true } : notification,
+        ));
+      }
+      return { previousNotifications };
+    },
+    onError: (_err, _id, context) => {
+      if (context?.previousNotifications) {
+        queryClient.setQueryData(["notifications"], context.previousNotifications);
+      }
+    },
+    onSettled: () => {
+      queryClient.invalidateQueries({ queryKey: ["notifications"] });
+      queryClient.invalidateQueries({ queryKey: ["notifications", "unread-count"] });
+    },
+  });
+  useEffect(() => {
+    if (!open) return;
+    const handleKeyDown = (event: KeyboardEvent) => {
+      if (event.key === "Escape" || event.key === "Esc") {
+        setOpen(false);
+      }
+    };
+    window.addEventListener("keydown", handleKeyDown);
+    return () => window.removeEventListener("keydown", handleKeyDown);
+  }, [open]);
   const noticeNotifications = (notifications ?? [])
     .filter((notification) => !TASK_NOTIFICATION_TYPES.has(notification.type));
   const taskAlertNotifications = (notifications ?? [])
     .filter((notification) => TASK_NOTIFICATION_TYPES.has(notification.type));
-  const visibleNotifications = noticeNotifications.slice(0, 5);
-  const visibleTaskAlerts = taskAlertNotifications.slice(0, 3);
+  const visibleNotifications = noticeNotifications
+    .filter((notification) => !notification.is_read)
+    .slice(0, 5);
+  const visibleTaskAlerts = taskAlertNotifications
+    .filter((notification) => !notification.is_read)
+    .slice(0, 3);
   const noticeUnreadCount = noticeNotifications.filter((notification) => !notification.is_read).length;
   const taskAlertUnreadCount = taskAlertNotifications.filter((notification) => !notification.is_read).length;
   const visibleTasks = tasks.slice(0, 5) as {
@@ -273,8 +321,22 @@ function NotificationsTray({
   }[];
   const attentionCount = noticeUnreadCount + taskAlertUnreadCount + tasks.length;
 
-  const openNotification = (notification: { link?: string }) => {
+  useEffect(() => {
+    if (!open) return;
+    const handleKeyDown = (event: KeyboardEvent) => {
+      if (event.key === "Escape" || event.key === "Esc") {
+        setOpen(false);
+      }
+    };
+    window.addEventListener("keydown", handleKeyDown);
+    return () => window.removeEventListener("keydown", handleKeyDown);
+  }, [open]);
+
+  const openNotification = (notification: { id: string; link?: string; is_read: boolean }) => {
     setOpen(false);
+    if (!notification.is_read) {
+      markReadMutation.mutate(notification.id);
+    }
     navigate(notification.link || "/notifications");
   };
 

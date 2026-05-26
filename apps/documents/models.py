@@ -155,6 +155,7 @@ class DocumentStatus(models.TextChoices):
     DRAFT            = "draft",            "Draft"
     PENDING_REVIEW   = "pending_review",   "Pending Review"
     PENDING_APPROVAL = "pending_approval", "Pending Approval"
+    RETURNED         = "returned",        "Returned for Review"
     APPROVED         = "approved",         "Approved"
     REJECTED         = "rejected",         "Rejected"
     ARCHIVED         = "archived",         "Archived"

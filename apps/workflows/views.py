@@ -293,7 +293,7 @@ class WorkflowTaskViewSet(viewsets.ReadOnlyModelViewSet):
     def return_for_review(self, request, pk=None):
         task      = self.get_object()
         comment   = request.data.get("comment", "").strip()
-        return_to = request.data.get("return_to", "previous_step")
+        return_to = request.data.get("return_to", "uploader")
 
         if not comment:
             return Response(

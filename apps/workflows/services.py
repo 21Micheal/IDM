@@ -90,6 +90,8 @@ class WorkflowService:
             document=document, status="in_progress"
         ).first()
         if existing:
+            if not WorkflowService._has_active_step_tasks(existing, existing.current_step_order):
+                WorkflowService._activate_step(existing, order=existing.current_step_order)
             return existing
 
         template = WorkflowService.resolve_template(document)
@@ -189,18 +191,18 @@ class WorkflowService:
     @staticmethod
     @transaction.atomic
     def return_for_review(
-        task: WorkflowTask, actor, comment: str, return_to: str = "previous_step"
+        task: WorkflowTask, actor, comment: str, return_to: str = "uploader"
     ) -> None:
         """
         Return the document for review with choice of destination.
         
         return_to choices:
-        - 'previous_step': Return to the previous approver (default)
-        - 'uploader': Return to document uploader to resubmit
+        - 'previous_step': Return to the previous approver
+        - 'uploader': Return to document uploader to resubmit (default)
         - 'same_step': Reassign to another user in the same step
         
         If current step order > 1 AND return_to='previous_step' → step back.
-        If step order == 1 OR return_to='uploader' → cancel workflow; document returns to DRAFT.
+        Otherwise, keep the workflow active so resubmission resumes the current step.
         """
         WorkflowService._assert_actionable(task)
         if not comment.strip():
@@ -247,13 +249,9 @@ class WorkflowService:
             WorkflowService._activate_step(instance, order=prev_order)
 
         else:
-            # Return to uploader OR at step 1 with previous_step option
-            # Either way, cancel the workflow so uploader can fix and resubmit
-            instance.status       = "cancelled"
-            instance.completed_at = timezone.now()
-            instance.save(update_fields=["status", "completed_at"])
-
-            doc.status = "Returned for Review"
+            # Return to uploader OR step 1 / uploader preference
+            # Keep the workflow active so the uploader can resubmit at the current step.
+            doc.status = DocumentStatus.RETURNED
             doc.save(update_fields=["status", "updated_at"])
 
         # Notify uploader and document owner of the return
