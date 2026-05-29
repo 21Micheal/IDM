@@ -2,8 +2,9 @@ from django.contrib.auth.password_validation import validate_password
 from django.core.exceptions import ValidationError as DjangoValidationError
 from django.utils.crypto import get_random_string
 from rest_framework import serializers
+import base64
 from django.utils import timezone
-from .models import User, Department, UserGroup, GroupPermission, UserGroupMembership, UserDelegation
+from .models import User, Department, UserGroup, GroupPermission, UserGroupMembership, UserDelegation, UserPreference, UserSignature
 
 
 class DepartmentSerializer(serializers.ModelSerializer):
@@ -121,6 +122,36 @@ class UserSerializer(serializers.ModelSerializer):
 
     def get_has_admin_access(self, obj):
         return obj.has_admin_access
+
+
+class UserSignatureSerializer(serializers.ModelSerializer):
+    image_url = serializers.SerializerMethodField()
+    image_data = serializers.SerializerMethodField()
+
+    class Meta:
+        model = UserSignature
+        fields = ["id", "method", "typed_name", "image_url", "image_data", "created_at", "updated_at"]
+        read_only_fields = ["id", "image_url", "created_at", "updated_at"]
+
+    def get_image_url(self, obj):
+        request = self.context.get("request")
+        if not request:
+            return None
+        return request.build_absolute_uri(f"/api/v1/auth/signature/image/{obj.id}/")
+
+    def get_image_data(self, obj):
+        try:
+            obj.image.open("rb")
+            raw = obj.image.read()
+        except Exception:
+            return None
+        finally:
+            try:
+                obj.image.close()
+            except Exception:
+                pass
+        content_type = "image/jpeg" if obj.image.name.lower().endswith((".jpg", ".jpeg")) else "image/png"
+        return f"data:{content_type};base64,{base64.b64encode(raw).decode('ascii')}"
 
 
 class UserCreateSerializer(serializers.ModelSerializer):
@@ -297,6 +328,15 @@ class UserDelegationSerializer(serializers.ModelSerializer):
         source="delegate",
         write_only=True,
     )
+    document_type_name = serializers.CharField(
+        source="document_type.name", read_only=True, default=None
+    )
+    document_type_id = serializers.UUIDField(
+        write_only=True,
+        required=False,
+        allow_null=True,
+        help_text="Filter delegation to specific document type. Null means all tasks."
+    )
     comment = serializers.CharField(required=False, allow_blank=False)
     is_current = serializers.BooleanField(read_only=True)
 
@@ -311,11 +351,14 @@ class UserDelegationSerializer(serializers.ModelSerializer):
             "starts_at",
             "ends_at",
             "comment",
+            "document_type",
+            "document_type_name",
+            "document_type_id",
             "is_active",
             "is_current",
             "created_at",
         ]
-        read_only_fields = ["id", "delegator", "delegate", "is_current", "created_at"]
+        read_only_fields = ["id", "delegator", "delegate", "document_type", "document_type_name", "is_current", "created_at"]
 
     def validate(self, attrs):
         comment = attrs.get("comment")
@@ -336,4 +379,34 @@ class UserDelegationSerializer(serializers.ModelSerializer):
         if ends_at and ends_at <= timezone.now():
             raise serializers.ValidationError("Delegation end time must be in the future.")
 
+        # Handle document_type_id conversion
+        document_type_id = attrs.get("document_type_id")
+        if document_type_id is not None:
+            from apps.documents.models import DocumentType
+            try:
+                document_type = DocumentType.objects.get(id=document_type_id, is_active=True)
+                attrs["document_type"] = document_type
+            except DocumentType.DoesNotExist:
+                raise serializers.ValidationError({"document_type_id": "Invalid document type."})
+        else:
+            attrs["document_type"] = None
+
         return attrs
+
+
+class UserPreferenceSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = UserPreference
+        fields = [
+            "user",
+            "date_format",
+            "time_format",
+            "default_page",
+            "notify_document_approvals",
+            "notify_document_rejected",
+            "notify_task_assignments",
+            "notify_system_announcements",
+            "created_at",
+            "updated_at",
+        ]
+        read_only_fields = ["user", "created_at", "updated_at"]

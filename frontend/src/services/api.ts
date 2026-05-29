@@ -50,6 +50,20 @@ export type OcrSuggestionsResponse = {
   } | null;
 };
 
+export type DmsSettings = {
+  watermark_enabled: boolean;
+  watermark_text: string;
+  watermark_opacity: number;
+  watermark_position: "diagonal" | "center" | "footer";
+  watermark_apply_to_previews: boolean;
+  allow_duplicate_uploads: boolean;
+  signed_file_urls_enabled: boolean;
+  auto_archive_enabled: boolean;
+  auto_archive_after_days: number;
+  require_metadata_on_upload: boolean;
+  updated_at?: string;
+};
+
 export function normalizeListResponse<T>(payload: unknown): T[] {
   if (Array.isArray(payload)) return payload as T[];
   if (payload && typeof payload === "object" && Array.isArray((payload as { results?: unknown[] }).results)) {
@@ -233,6 +247,7 @@ export const documentsAPI = {
     api.get<{
       exists: boolean;
       identical_to_current?: boolean;
+      duplicates_allowed?: boolean;
       document_id?: string;
       reference_number?: string;
       uploaded_at?: string;
@@ -409,6 +424,12 @@ export const bulkUploadAPI = {
     api.post(`/documents/bulk-uploads/${id}/review/`, { documents }),
 };
 
+export const dmsSettingsAPI = {
+  get: () => api.get<DmsSettings>("/documents/settings/"),
+  update: (data: Partial<DmsSettings>) =>
+    api.patch<DmsSettings>("/documents/settings/", data),
+};
+
 export const documentTypesAPI = {
   list: () => api.get("/documents/types/"),
   get: (id: string) => api.get(`/documents/types/${id}/`),
@@ -459,8 +480,15 @@ export const workflowAPI = {
   myTasks: () => api.get("/workflows/tasks/my_tasks/"),
   listTasks: (params?: Record<string, unknown>) =>
     api.get("/workflows/tasks/", { params }),
-  approveTask: (id: string, comment = "") =>
-    api.post(`/workflows/tasks/${id}/approve/`, { comment }),
+  approveTask: (
+    id: string,
+    comment = "",
+    signaturePlacement?: { page_number: number; x_percent: number; y_percent: number; width_percent?: number },
+  ) =>
+    api.post(`/workflows/tasks/${id}/approve/`, {
+      comment,
+      ...(signaturePlacement ? { signature_placement: signaturePlacement } : {}),
+    }),
   rejectTask: (id: string, comment: string) =>
     api.post(`/workflows/tasks/${id}/reject/`, { comment }),
   returnForReview: (id: string, comment: string) =>
@@ -537,14 +565,30 @@ export const profileAPI = {
   // MFA is now default, but we keep toggle for admin flexibility
   toggleMFA: (enable = true) => api.post("/auth/mfa/", { enable }),
   listDelegations: () => api.get("/delegations/"),
-  createDelegation: (data: { delegate_id: string; starts_at: string; ends_at: string; comment: string }) =>
+  createDelegation: (data: { delegate_id: string; starts_at: string; ends_at: string; comment: string; document_type_id?: string | null }) =>
     api.post("/delegations/", data),
   updateDelegation: (
     id: string,
-    data: Partial<{ delegate_id: string; starts_at: string; ends_at: string; comment: string; is_active: boolean }>,
+    data: Partial<{ delegate_id: string; starts_at: string; ends_at: string; comment: string; is_active: boolean; document_type_id?: string | null }>,
   ) => api.patch(`/delegations/${id}/`, data),
   deleteDelegation: (id: string) => api.delete(`/delegations/${id}/`),
   delegationCandidates: () => api.get("/delegations/candidates/"),
+  getPreferences: () => api.get("/auth/preferences/"),
+  updatePreferences: (data: {
+    date_format?: string;
+    time_format?: string;
+    default_page?: string;
+    notify_document_approvals?: boolean;
+    notify_document_rejected?: boolean;
+    notify_task_assignments?: boolean;
+    notify_system_announcements?: boolean;
+  }) => api.patch("/auth/preferences/", data),
+  getSignature: () => api.get("/auth/signature/"),
+  saveSignature: (formData: FormData) =>
+    api.post("/auth/signature/", formData, {
+      headers: { "Content-Type": undefined },
+    }),
+  deleteSignature: () => api.delete("/auth/signature/"),
 };
 
 export const groupsAPI = {

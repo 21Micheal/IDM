@@ -196,16 +196,14 @@ export default function AuditPage() {
   }, [data]);
 
   return (
-    <div className="max-w-7xl mx-auto py-10 px-6">
+    <div className="-m-6 min-h-[calc(100vh-3.5rem)] bg-[#EDEDED] text-[#1F2933]">
       {/* Header */}
-      <div className="flex flex-wrap items-end justify-between gap-4 mb-8">
-        <div>
-          <div className="flex items-center gap-3 mb-2">
-            <div className="w-11 h-11 rounded-xl bg-gradient-to-br from-primary/15 to-primary/5 ring-1 ring-primary/20 flex items-center justify-center">
-              <ShieldCheck className="w-5 h-5 text-primary" />
-            </div>
-            <div className="flex items-center gap-2">
-              <h1 className="text-3xl font-bold text-foreground tracking-tight">
+      <div className="flex h-[69px] items-center justify-between gap-4 bg-[#287EAD] px-5 pr-8 text-white">
+        <div className="min-w-0">
+          <div className="flex items-center gap-3">
+            <ShieldCheck className="h-5 w-5" />
+            <div className="flex min-w-0 items-center gap-2">
+              <h1 className="truncate text-lg font-semibold tracking-tight">
                 {user?.has_admin_access ? "Audit Trail" : "Document Activity"}
               </h1>
               <span
@@ -215,17 +213,17 @@ export default function AuditPage() {
                     : "A plain-language feed of recent actions on documents you uploaded or own (approvals, views, uploads)."
                 }
               >
-                <Info className="w-4 h-4 text-muted-foreground" />
+                <Info className="h-4 w-4 text-white/75" />
               </span>
             </div>
             {!isLoading && data?.count !== undefined && (
-              <span className="ml-1 inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full bg-muted text-xs font-medium text-muted-foreground">
+              <span className="ml-1 inline-flex items-center gap-1.5 border border-white/30 px-2.5 py-1 text-xs font-medium text-white/85">
                 <Activity className="w-3 h-3" />
                 {data.count.toLocaleString()} {data.count === 1 ? "event" : "events"}
               </span>
             )}
           </div>
-          <p className="text-muted-foreground text-sm max-w-2xl">
+          <p className="mt-0.5 max-w-2xl text-xs text-white/75">
             {user?.has_admin_access
               ? "Immutable record of all system activities and changes."
               : "A simple feed of recent actions on your documents — approvals, views, and uploads."}
@@ -233,7 +231,7 @@ export default function AuditPage() {
         </div>
 
         {user?.has_admin_access && (
-          <button onClick={exportAudit} className="btn-secondary flex items-center gap-2">
+          <button onClick={exportAudit} className="flex items-center gap-2 border border-white/40 bg-white px-3 py-2 text-sm font-semibold text-[#287EAD] hover:bg-[#EEF6FB]">
             <Download className="w-4 h-4" />
             Export CSV
           </button>
@@ -241,14 +239,15 @@ export default function AuditPage() {
       </div>
 
       {/* Filters: full controls for admins, simplified note for regular users */}
+      <div className="p-5 pr-8">
       {user?.has_admin_access ? (
-        <div className="card p-6 mb-6">
+        <div className="mb-5 border border-[#C8CDD2] bg-white p-4">
           <div className="flex items-center justify-between mb-5">
             <div className="flex items-center gap-2 text-sm">
               <Filter className="w-4 h-4 text-muted-foreground" />
               <span className="font-medium text-foreground">Filters</span>
               {activeFilterCount > 0 && (
-                <span className="ml-1 px-2 py-0.5 rounded-full bg-primary/10 text-primary text-xs font-medium">
+                <span className="ml-1 bg-[#DCEAF2] px-2 py-0.5 text-xs font-medium text-[#287EAD]">
                   {activeFilterCount} active
                 </span>
               )}
@@ -329,7 +328,7 @@ export default function AuditPage() {
           </div>
         </div>
       ) : (
-        <div className="card p-4 mb-6 text-sm text-muted-foreground flex items-center gap-2">
+        <div className="mb-5 flex items-center gap-2 border border-[#C8CDD2] bg-white p-4 text-sm text-[#5E6870]">
           <Calendar className="w-4 h-4 text-muted-foreground" />
           Showing recent activity on your documents (last 30 days). Use the Dashboard for a quick overview.
         </div>
@@ -337,7 +336,7 @@ export default function AuditPage() {
 
       {/* Audit Table / Simple Feed for non-admin users */}
       {user?.has_admin_access ? (
-        <div className="card overflow-hidden">
+        <div className="overflow-hidden border border-[#C8CDD2] bg-white">
           <div className="overflow-x-auto">
             <table className="w-full text-sm">
               <thead>
@@ -583,6 +582,7 @@ export default function AuditPage() {
           )}
         </div>
       )}
+      </div>
     </div>
   );
 }

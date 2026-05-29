@@ -29,15 +29,7 @@ from .serializers import (
 )
 from .services import WorkflowService, WorkflowError
 from apps.accounts.models import UserDelegation
-class IsGroupAdmin(permissions.BasePermission):
-    message = "Only administrators can perform this action."
-
-    def has_permission(self, request, view):
-        return (
-            request.user
-            and request.user.is_authenticated
-            and request.user.has_admin_access
-        )
+from apps.accounts.views import IsGroupAdmin
 
 
 # ── Templates ──────────────────────────────────────────────────────────────────
@@ -265,7 +257,13 @@ class WorkflowTaskViewSet(viewsets.ReadOnlyModelViewSet):
             return Response({"detail": "Approve is not permitted for this step."}, status=403)
         self._check_permission(task, request.user)
         try:
-            WorkflowService.approve(task, request.user, request.data.get("comment", ""))
+            WorkflowService.approve(
+                task,
+                request.user,
+                request.data.get("comment", ""),
+                request=request,
+                signature_placement=request.data.get("signature_placement"),
+            )
         except WorkflowError as exc:
             return Response({"detail": str(exc)}, status=400)
         return Response({"status": "approved"})
@@ -293,7 +291,7 @@ class WorkflowTaskViewSet(viewsets.ReadOnlyModelViewSet):
     def return_for_review(self, request, pk=None):
         task      = self.get_object()
         comment   = request.data.get("comment", "").strip()
-        return_to = request.data.get("return_to", "previous_step")
+        return_to = request.data.get("return_to", "uploader")
 
         if not comment:
             return Response(
@@ -379,7 +377,7 @@ class ApprovalTurnaroundView(APIView):
     Returns avg hours per WorkflowStep across completed WorkflowTask instances.
     Response shape: List[{ step, avg_hours, sla_hours, completed }]
     """
-    permission_classes = [permissions.IsAdminUser]
+    permission_classes = [permissions.IsAuthenticated, IsGroupAdmin]
 
     def get(self, request):
         from datetime import timedelta
@@ -416,7 +414,7 @@ class SlaBreachRateView(APIView):
     A task is "breached" when (completed_at - created_at) > step.sla_hours.
     Response shape: List[{ month, total, breached, breach_rate }]
     """
-    permission_classes = [permissions.IsAdminUser]
+    permission_classes = [permissions.IsAuthenticated, IsGroupAdmin]
 
     def get(self, request):
         from datetime import timedelta

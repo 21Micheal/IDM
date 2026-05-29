@@ -7,11 +7,12 @@ Added is_self_upload BooleanFilter so clients can request only personal
 docs (is_self_upload=true) or only workflow docs (is_self_upload=false).
 """
 import django_filters
+from django.db import models
 from .models import Document, DocumentStatus
 
 
 class DocumentFilter(django_filters.FilterSet):
-    status        = django_filters.MultipleChoiceFilter(choices=DocumentStatus.choices)
+    status        = django_filters.CharFilter(method="filter_status")
     document_type = django_filters.UUIDFilter(field_name="document_type__id")
     supplier      = django_filters.CharFilter(lookup_expr="icontains")
     date_from     = django_filters.DateFilter(field_name="document_date", lookup_expr="gte")
@@ -44,3 +45,20 @@ class DocumentFilter(django_filters.FilterSet):
         if not value:
             return queryset
         return queryset.filter(is_self_upload=True, metadata__personal_tags__contains=[value])
+
+    def filter_status(self, queryset, name, value):
+        values = [item.strip() for item in str(value).split(",") if item.strip()]
+        if not values:
+            return queryset
+
+        active_task_statuses = ["pending", "in_progress", "held", "returned"]
+        combined = models.Q()
+
+        for status in values:
+            if status in (DocumentStatus.PENDING_APPROVAL, DocumentStatus.PENDING_REVIEW):
+                combined |= models.Q(status=status)
+                combined |= models.Q(workflow_instance__tasks__status__in=active_task_statuses)
+            else:
+                combined |= models.Q(status=status)
+
+        return queryset.filter(combined).distinct()

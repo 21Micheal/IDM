@@ -18,7 +18,7 @@
 
 import { lazy, Suspense, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { documentsAPI, api } from "../../services/api";
+import { documentsAPI, dmsSettingsAPI, api, type DmsSettings } from "../../services/api";
 import { useAuthStore } from "@/store/authStore";
 import { toast } from "@/components/ui/vault-toast";
 import {
@@ -128,6 +128,76 @@ function getFileExtension(name?: string): string {
   if (!name) return "";
   const idx = name.lastIndexOf(".");
   return idx >= 0 ? name.slice(idx).toLowerCase() : "";
+}
+
+function WatermarkOverlay({
+  settings,
+  canDownload,
+}: {
+  settings?: DmsSettings;
+  canDownload: boolean;
+}) {
+  if (canDownload || !settings?.watermark_enabled || !settings.watermark_apply_to_previews) return null;
+
+  const text = settings.watermark_text?.trim() || "CONFIDENTIAL";
+  const opacity = Math.max(0.01, Math.min(settings.watermark_opacity, 80) / 100);
+
+  if (settings.watermark_position === "footer") {
+    return (
+      <div className="pointer-events-none absolute inset-x-0 bottom-8 z-20 flex justify-center">
+        <span
+          className="border border-foreground/20 bg-white/60 px-8 py-2 text-sm font-bold uppercase tracking-[0.2em] text-foreground"
+          style={{ opacity }}
+        >
+          {text}
+        </span>
+      </div>
+    );
+  }
+
+  if (settings.watermark_position === "center") {
+    return (
+      <div className="pointer-events-none absolute inset-0 z-20 flex items-center justify-center overflow-hidden">
+        <span
+          className="select-none text-4xl font-bold uppercase tracking-[0.2em] text-foreground md:text-6xl"
+          style={{ opacity }}
+        >
+          {text}
+        </span>
+      </div>
+    );
+  }
+
+  return (
+    <div className="pointer-events-none absolute inset-0 z-20 grid grid-cols-2 place-items-center overflow-hidden md:grid-cols-3">
+      {Array.from({ length: 9 }).map((_, index) => (
+        <span
+          key={index}
+          className="select-none text-2xl font-bold uppercase tracking-[0.2em] text-foreground md:text-4xl"
+          style={{ opacity, transform: "rotate(-32deg)" }}
+        >
+          {text}
+        </span>
+      ))}
+    </div>
+  );
+}
+
+function WatermarkedPreview({
+  settings,
+  canDownload,
+  children,
+}: {
+  settings?: DmsSettings;
+  canDownload: boolean;
+  children: ReactNode;
+}) {
+  return (
+    <div className="relative">
+      {children}
+      <WatermarkOverlay settings={settings} canDownload={canDownload} />
+    </div>
+  );
 }
 
 // ── EditLockBanner ─────────────────────────────────────────────────────────────
@@ -585,7 +655,7 @@ function OfficeEditPanel({
       clearFailedConfirmation();
       if (s === "done") setPreviewProgress(100);
     }
-    // eslint-disable-next-line react-hooks/exhaustive-deps
+     
   }, [preview?.preview_status]);
 
   useEffect(() => () => {
@@ -970,7 +1040,11 @@ interface Props {
   /**
    * Inform the page when the current preview links become available.
    */
-  onPreviewLinksChange?: (links: { openInNewTabUrl: string; downloadHref: string }) => void;
+  onPreviewLinksChange?: (links: {
+    openInNewTabUrl: string;
+    downloadHref: string;
+    signedFileUrlsEnabled: boolean;
+  }) => void;
 }
 
 export default function DocumentViewer({ document: doc, submitSlot, hideUploadActionBar, onPreviewLinksChange }: Props) {
@@ -1066,6 +1140,11 @@ export default function DocumentViewer({ document: doc, submitSlot, hideUploadAc
   const canUploadVersion = Boolean(doc.permissions?.includes("upload")) || Boolean(user?.has_admin_access);
   const canEdit          = Boolean(doc.permissions?.includes("edit")) || Boolean(user?.has_admin_access);
   const canDownload      = Boolean(doc.permissions?.includes("download")) || Boolean(user?.has_admin_access);
+  const { data: dmsSettings } = useQuery({
+    queryKey: ["dms-settings"],
+    queryFn: () => dmsSettingsAPI.get().then((r) => r.data),
+    staleTime: 60_000,
+  });
   const isOfficeByMime   = OFFICE_MIMES.has(doc.file_mime_type);
   const isOfficeByExt    = OFFICE_EXTENSIONS.has(getFileExtension(doc.file_name));
   const isOffice         = isOfficeByMime || isOfficeByExt;
@@ -1139,14 +1218,34 @@ export default function DocumentViewer({ document: doc, submitSlot, hideUploadAc
 
   const openInNewTabUrl = canDownload && preview ? (normalizeUrl(preview.url ?? "") ?? "") : "";
   const downloadHref = canDownload && preview ? (normalizeUrl(preview.raw_url ?? "") ?? "") : "";
+  const downloadViaAuthenticatedRequest = async () => {
+    if (!downloadHref) return;
+    try {
+      const res = await api.get(downloadHref, { responseType: "blob" });
+      const blobUrl = URL.createObjectURL(new Blob([res.data]));
+      const link = document.createElement("a");
+      link.href = blobUrl;
+      link.download = doc.file_name || "document";
+      document.body.appendChild(link);
+      link.click();
+      link.remove();
+      window.setTimeout(() => URL.revokeObjectURL(blobUrl), 1000);
+    } catch {
+      toast.error("Could not download this file.");
+    }
+  };
 
   const selectedVersion = selectedVersionId
     ? sortedVersions.find((version) => version.id === selectedVersionId) ?? null
     : null;
 
   useEffect(() => {
-    onPreviewLinksChangeRef.current?.({ openInNewTabUrl, downloadHref });
-  }, [openInNewTabUrl, downloadHref]);
+    onPreviewLinksChangeRef.current?.({
+      openInNewTabUrl,
+      downloadHref,
+      signedFileUrlsEnabled: Boolean(preview?.signed_file_urls_enabled),
+    });
+  }, [openInNewTabUrl, downloadHref, preview?.signed_file_urls_enabled]);
 
   if (isLoading)
     return (
@@ -1255,31 +1354,37 @@ export default function DocumentViewer({ document: doc, submitSlot, hideUploadAc
 
       {/* PDF (non-office) */}
       {preview.viewer === "pdfjs" && !isOffice && (
-        <PdfViewer
-          url={preview.url}
-          doc={doc}
-          canUploadVersion={canUploadVersion && !isLockedByOther}
-          onVersionUploaded={onVersionUploaded}
-        />
+        <WatermarkedPreview settings={dmsSettings} canDownload={canDownload}>
+          <PdfViewer
+            url={preview.url}
+            doc={doc}
+            canUploadVersion={canUploadVersion && !isLockedByOther}
+            onVersionUploaded={onVersionUploaded}
+          />
+        </WatermarkedPreview>
       )}
 
       {/* Office documents */}
       {isOffice && (
-        <OfficeEditPanel
-          doc={doc}
-          preview={preview}
-          refetchPreview={refetchPreview}
-          selectedVersionId={selectedVersionId}
-          canEditInEditor={canEdit}
-          onVersionUploaded={onVersionUploaded}
-          showHeaderOpenButton={false}
-          onOfficeEditActionChange={setOfficeEditAction}
-        />
+        <WatermarkedPreview settings={dmsSettings} canDownload={canDownload}>
+          <OfficeEditPanel
+            doc={doc}
+            preview={preview}
+            refetchPreview={refetchPreview}
+            selectedVersionId={selectedVersionId}
+            canEditInEditor={canEdit}
+            onVersionUploaded={onVersionUploaded}
+            showHeaderOpenButton={false}
+            onOfficeEditActionChange={setOfficeEditAction}
+          />
+        </WatermarkedPreview>
       )}
 
       {/* Images */}
       {isImage && !isOffice && preview.viewer !== "pdfjs" && (
-        <ImageViewer url={preview.url} />
+        <WatermarkedPreview settings={dmsSettings} canDownload={canDownload}>
+          <ImageViewer url={preview.url} />
+        </WatermarkedPreview>
       )}
 
       {/* Unsupported / download only */}
@@ -1287,7 +1392,7 @@ export default function DocumentViewer({ document: doc, submitSlot, hideUploadAc
         <div className="border-2 border-dashed border-[#C8CDD2] p-10 text-center">
           <Download className="w-12 h-12 text-muted-foreground mx-auto mb-4" />
           <p className="text-foreground/80 mb-4">Preview not available for this file type.</p>
-          {canDownload && preview.url && (
+          {canDownload && preview.url && preview.signed_file_urls_enabled && (
           <a
             href={preview.url}
             download
@@ -1295,6 +1400,15 @@ export default function DocumentViewer({ document: doc, submitSlot, hideUploadAc
           >
             <Download className="w-4 h-4" /> Download file
           </a>
+          )}
+          {canDownload && preview.url && !preview.signed_file_urls_enabled && (
+            <button
+              type="button"
+              onClick={downloadViaAuthenticatedRequest}
+              className="btn-primary inline-flex items-center gap-2"
+            >
+              <Download className="w-4 h-4" /> Download file
+            </button>
           )}
           {!canDownload && (
             <p className="text-sm text-muted-foreground">You do not have permission to download this file.</p>

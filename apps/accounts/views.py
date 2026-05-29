@@ -7,18 +7,21 @@ from django.core.exceptions import ValidationError as DjangoValidationError
 from django.utils.crypto import get_random_string
 from django.utils import timezone
 from django.db.models import Q
+from django.http import FileResponse, Http404
 
 from rest_framework import generics, status, permissions, viewsets, filters, exceptions
 from rest_framework.decorators import action
+from rest_framework.parsers import MultiPartParser, FormParser
 from rest_framework.response import Response
 from rest_framework.views import APIView
 from rest_framework_simplejwt.tokens import RefreshToken
 
-from .models import User, Department, EmailOTP, UserGroup, GroupAction, GroupPermission, UserGroupMembership, UserDelegation
+from .models import User, Department, EmailOTP, UserGroup, GroupAction, GroupPermission, UserGroupMembership, UserDelegation, UserPreference, UserSignature
 from .serializers import (
     UserSerializer, UserCreateSerializer, UserUpdateSerializer,
     DepartmentSerializer, UserSummarySerializer,
     UserGroupSerializer, GroupPermissionSerializer, UserGroupMembershipSerializer, UserDelegationSerializer,
+    UserPreferenceSerializer, UserSignatureSerializer,
 )
 from apps.notifications.tasks import _create_notification, _send_email
 from .email_otp import send_otp_email
@@ -240,6 +243,96 @@ class EnableMFAView(APIView):
             ip_address=request.META.get("REMOTE_ADDR"),
         )
         return Response({"detail": f"Email OTP {state}.", "mfa_enabled": request.user.mfa_enabled})
+
+
+class UserPreferencesView(generics.RetrieveUpdateAPIView):
+    """Get or update the authenticated user's preferences."""
+    permission_classes = [permissions.IsAuthenticated]
+    serializer_class = UserPreferenceSerializer
+
+    def get_object(self):
+        preference, _ = UserPreference.objects.get_or_create(
+            user=self.request.user,
+            defaults={
+                "date_format": UserPreference.DateFormat.DD_MM_YYYY,
+                "time_format": UserPreference.TimeFormat.HOUR_12,
+                "default_page": UserPreference.DefaultPage.DASHBOARD,
+            }
+        )
+        return preference
+
+
+class UserSignatureView(APIView):
+    permission_classes = [permissions.IsAuthenticated]
+    parser_classes = [MultiPartParser, FormParser]
+
+    def get(self, request):
+        signature = request.user.signatures.filter(is_active=True).order_by("-created_at").first()
+        if not signature:
+            return Response({"signature": None})
+        return Response({
+            "signature": UserSignatureSerializer(signature, context={"request": request}).data
+        })
+
+    def post(self, request):
+        image = request.FILES.get("image")
+        method = request.data.get("method", "")
+        typed_name = request.data.get("typed_name", "")
+        if method not in UserSignature.Method.values:
+            return Response({"detail": "Invalid signature method."}, status=400)
+        if not image:
+            return Response({"detail": "Signature image is required."}, status=400)
+        if getattr(image, "content_type", "") not in {"image/png", "image/jpeg", "image/jpg"}:
+            return Response({"detail": "Signature must be a PNG or JPG image."}, status=400)
+        if image.size > 2 * 1024 * 1024:
+            return Response({"detail": "Signature image must be 2 MB or smaller."}, status=400)
+
+        request.user.signatures.filter(is_active=True).update(is_active=False)
+        signature = UserSignature.objects.create(
+            user=request.user,
+            image=image,
+            method=method,
+            typed_name=typed_name[:160],
+            is_active=True,
+        )
+        AuditLog.objects.create(
+            event=AuditEvent.PERMISSION_CHANGED,
+            actor=request.user,
+            object_type="UserSignature",
+            object_id=str(signature.id),
+            object_repr=f"Signature for {request.user.email}",
+            changes={"method": method},
+            ip_address=request.META.get("REMOTE_ADDR"),
+            user_agent=request.META.get("HTTP_USER_AGENT", "")[:500],
+        )
+        return Response(UserSignatureSerializer(signature, context={"request": request}).data, status=201)
+
+    def delete(self, request):
+        request.user.signatures.filter(is_active=True).update(is_active=False)
+        return Response(status=204)
+
+
+class UserSignatureImageView(APIView):
+    permission_classes = [permissions.IsAuthenticated]
+
+    def get(self, request, signature_id):
+        signature = UserSignature.objects.filter(id=signature_id, is_active=True).select_related("user").first()
+        if not signature:
+            raise Http404
+
+        can_view = signature.user_id == request.user.id
+        if not can_view:
+            can_view = signature.document_signatures.filter(
+                document__workflow_instance__tasks__assigned_to=request.user
+            ).exists()
+        if not can_view and not request.user.has_admin_access:
+            return Response({"detail": "Not found."}, status=404)
+
+        try:
+            signature.image.open("rb")
+        except Exception:
+            raise Http404
+        return FileResponse(signature.image, content_type="image/png")
 
 
 # ── User management ───────────────────────────────────────────────────────────

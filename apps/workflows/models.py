@@ -104,6 +104,10 @@ class WorkflowStep(models.Model):
     allow_approve  = models.BooleanField(default=True, help_text="Approver can approve at this step")
     allow_reject   = models.BooleanField(default=True, help_text="Approver can reject at this step")
     allow_return   = models.BooleanField(default=True, help_text="Approver can send back for review at this step")
+    requires_signature = models.BooleanField(
+        default=False,
+        help_text="Approving this step must stamp the approver's saved e-signature onto the document.",
+    )
     instructions   = models.TextField(blank=True)
     created_at     = models.DateTimeField(auto_now_add=True, null=True)
     updated_at     = models.DateTimeField(auto_now=True)
@@ -283,6 +287,47 @@ class WorkflowTaskAction(models.Model):
 
     def __str__(self):
         return f"{self.task} → {self.action} by {self.actor.email}"
+
+
+class DocumentSignature(models.Model):
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    document = models.ForeignKey(
+        "documents.Document", on_delete=models.CASCADE, related_name="signatures"
+    )
+    task = models.OneToOneField(
+        WorkflowTask, on_delete=models.PROTECT, related_name="document_signature"
+    )
+    action = models.OneToOneField(
+        WorkflowTaskAction, on_delete=models.PROTECT, related_name="document_signature"
+    )
+    signer = models.ForeignKey(
+        settings.AUTH_USER_MODEL, on_delete=models.PROTECT, related_name="document_signatures"
+    )
+    source_signature = models.ForeignKey(
+        "accounts.UserSignature", null=True, on_delete=models.SET_NULL, related_name="document_signatures"
+    )
+    signed_version = models.ForeignKey(
+        "documents.DocumentVersion", null=True, on_delete=models.SET_NULL, related_name="signatures"
+    )
+    page_number = models.PositiveIntegerField(default=1)
+    x = models.FloatField(default=0)
+    y = models.FloatField(default=0)
+    width = models.FloatField(default=180)
+    height = models.FloatField(default=72)
+    ip_address = models.GenericIPAddressField(null=True, blank=True)
+    user_agent = models.TextField(blank=True)
+    checksum = models.CharField(max_length=64, blank=True)
+    signed_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        ordering = ["signed_at"]
+        indexes = [
+            models.Index(fields=["document", "signed_at"]),
+            models.Index(fields=["signer", "signed_at"]),
+        ]
+
+    def __str__(self):
+        return f"{self.document_id} signed by {self.signer_id}"
 
 
 class WorkflowTaskActionNotification(models.Model):

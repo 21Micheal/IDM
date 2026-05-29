@@ -5,9 +5,10 @@ import React from 'react';
 interface FlaxemLogoProps {
   className?: string;
   variant?: 'light' | 'dark';
+  compact?: boolean;
 }
 
-export const FlaxemLogo: React.FC<FlaxemLogoProps> = ({ className = "h-10 w-auto", variant = 'light' }) => {
+export const FlaxemLogo: React.FC<FlaxemLogoProps> = ({ className = "h-10 w-auto", variant = 'light', compact = false }) => {
   return (
     <div className={`flex items-center gap-2 ${className}`}>
       {/* FSE Logo - Blue and Red */}
@@ -28,17 +29,18 @@ export const FlaxemLogo: React.FC<FlaxemLogoProps> = ({ className = "h-10 w-auto
         <path d="M32 32L44 24H48L40 32H32Z" fill="#FF2E2E"/>
       </svg>
       
-      {/* Text: Flaxem | DMS */}
-      <div className="flex flex-col">
-        <span className={`text-sm font-bold tracking-tight ${
-          variant === 'light' ? 'text-white' : 'text-slate-900'
-        }`}>
-          Flaxem
-        </span>
-        <span className="text-xs font-semibold tracking-wide text-red-600">
-          | DMS
-        </span>
-      </div>
+      {!compact && (
+        <div className="flex flex-col leading-none">
+          <span className={`text-sm font-bold tracking-tight ${
+            variant === 'light' ? 'text-white' : 'text-slate-900'
+          }`}>
+            Flaxem
+          </span>
+          <span className="mt-1 text-[11px] font-semibold tracking-wide text-red-600">
+            | DMS
+          </span>
+        </div>
+      )}
     </div>
   );
 };

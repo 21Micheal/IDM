@@ -8,7 +8,7 @@ from django.contrib.auth import get_user_model
 from rest_framework.authentication import BaseAuthentication
 from rest_framework.exceptions import AuthenticationFailed
 
-from .file_streaming import unsign_file_payload, verify_file_query_matches_payload
+from .file_streaming import signed_file_urls_enabled, unsign_file_payload, verify_file_query_matches_payload
 
 User = get_user_model()
 
@@ -26,6 +26,8 @@ class DocumentFileSignatureAuthentication(BaseAuthentication):
 
         sig = (request.query_params.get("sig") or "").strip()
         if not sig:
+            return None
+        if not signed_file_urls_enabled():
             return None
 
         try:

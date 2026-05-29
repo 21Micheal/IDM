@@ -12,8 +12,8 @@ from django.core.exceptions import ValidationError
 from django.http import HttpResponse
 from django.utils import timezone
 from django.db import transaction, models
-from django.db.models import Count
-from django.db.models.functions import TruncMonth
+from django.db.models import Count, Value
+from django.db.models.functions import TruncMonth, Concat
 from django.conf import settings
 
 from django.core.cache import cache
@@ -28,6 +28,8 @@ from rest_framework.parsers import MultiPartParser, FormParser, JSONParser
 from rest_framework.response import Response
 from rest_framework_simplejwt.tokens import AccessToken
 
+from apps.accounts.views import IsGroupAdmin
+
 from .models import (
     Document,
     DocumentType,
@@ -35,6 +37,8 @@ from .models import (
     DocumentShare,
     DocumentRelationship,
     Tag,
+    DocTypeColor,
+    DMSSettings,
     DocumentStatus,
     PreviewStatus,
 )
@@ -45,7 +49,7 @@ from .serializers import (
     DocumentMetadataEditSerializer, DocumentBulkActionSerializer,
     DocumentEmailSelectedSerializer, DocumentShareSelectedSerializer,
     DocumentRelationshipSerializer, DocumentRelationshipWriteSerializer,
-    TagSerializer,
+    TagSerializer, DocTypeColorSerializer, DMSSettingsSerializer,
 )
 from apps.accounts.models import User
 from apps.notifications.models import Notification
@@ -59,6 +63,7 @@ from .file_streaming import (
     build_absolute_document_file_url,
     build_http_file_response,
     read_document_bytes,
+    signed_file_urls_enabled,
     unsign_file_payload,
     user_can_download_document,
     user_can_edit_document,
@@ -160,7 +165,7 @@ class DocumentVolumeView(APIView):
     Groups Document uploads by month + document_type.
     Response shape: List[{ month, <DocType>: count, ... }]
     """
-    permission_classes = [permissions.IsAdminUser]
+    permission_classes = [permissions.IsAuthenticated, IsGroupAdmin]
 
     def get(self, request):
         qs = (
@@ -185,7 +190,7 @@ class TopUploadersView(APIView):
     Ranks users by document upload count in the last 90 days.
     Response shape: List[{ name, department, count, approved, pending }]
     """
-    permission_classes = [permissions.IsAdminUser]
+    permission_classes = [permissions.IsAuthenticated, IsGroupAdmin]
 
     def get(self, request):
         from datetime import timedelta
@@ -196,11 +201,16 @@ class TopUploadersView(APIView):
         qs = (
             Document.objects
             .filter(created_at__gte=cutoff)
-            .values(
+            .annotate(
                 uploader_id=models.F("uploaded_by__id"),
-                uploader_name=models.F("uploaded_by__full_name"),
-                department=models.F("uploaded_by__department__name"),
+                uploader_name=Concat(
+                    models.F("uploaded_by__first_name"),
+                    Value(" "),
+                    models.F("uploaded_by__last_name"),
+                ),
+                department_name=models.F("uploaded_by__department__name"),
             )
+            .values("uploader_id", "uploader_name", "department_name")
             .annotate(
                 count=Count("id"),
                 approved=Count("id", filter=models.Q(status="approved")),
@@ -211,15 +221,70 @@ class TopUploadersView(APIView):
 
         data = [
             {
-                "name":       row["uploader_name"] or "Unknown",
-                "department": row["department"] or "—",
-                "count":      row["count"],
-                "approved":   row["approved"],
-                "pending":    row["pending"],
+                "name":       row.get("uploader_name") or "Unknown",
+                "department": row.get("department_name") or "—",
+                "count":      row.get("count"),
+                "approved":   row.get("approved"),
+                "pending":    row.get("pending"),
             }
             for row in qs
         ]
         return Response(data)
+
+
+class DocTypeColorView(APIView):
+    """CRUD for persisted document-type colours.
+
+    GET:  returns list of {doc_type, color}
+    POST: accepts { mappings: [{doc_type, color}, ...] } to upsert mappings
+    """
+    permission_classes = [permissions.IsAuthenticated, IsGroupAdmin]
+
+    def get(self, request):
+        qs = DocTypeColor.objects.all().order_by("doc_type")
+        serializer = DocTypeColorSerializer(qs, many=True)
+        return Response(serializer.data)
+
+    def post(self, request):
+        mappings = request.data.get("mappings") or request.data
+        if isinstance(mappings, dict):
+            # convert dict {doc_type: color} -> list
+            mappings = [{"doc_type": k, "color": v} for k, v in mappings.items()]
+
+        created = []
+        for item in mappings or []:
+            doc_type = item.get("doc_type")
+            color = item.get("color")
+            if not doc_type or not color:
+                continue
+            obj, _ = DocTypeColor.objects.update_or_create(
+                doc_type=doc_type,
+                defaults={"color": color, "created_by": request.user},
+            )
+            created.append({"doc_type": obj.doc_type, "color": obj.color})
+
+        return Response(created, status=status.HTTP_200_OK)
+
+
+class DMSSettingsView(APIView):
+    permission_classes = [permissions.IsAuthenticated]
+
+    def get(self, request):
+        settings_obj = DMSSettings.load()
+        serializer = DMSSettingsSerializer(settings_obj)
+        return Response(serializer.data)
+
+    def patch(self, request):
+        if not request.user.has_admin_access:
+            return Response(
+                {"detail": "Administrator access is required."},
+                status=status.HTTP_403_FORBIDDEN,
+            )
+        settings_obj = DMSSettings.load()
+        serializer = DMSSettingsSerializer(settings_obj, data=request.data, partial=True)
+        serializer.is_valid(raise_exception=True)
+        serializer.save(updated_by=request.user)
+        return Response(serializer.data)
 
 
 # ── Document ViewSet ──────────────────────────────────────────────────────────
@@ -370,6 +435,7 @@ class DocumentViewSet(AuditMixin, viewsets.ModelViewSet):
 
     @action(detail=False, methods=["get"], url_path="duplicate-check")
     def duplicate_check(self, request):
+        dms_settings = DMSSettings.load()
         checksum = (request.query_params.get("checksum") or "").strip().lower()
         current_document_id = (request.query_params.get("document_id") or "").strip()
         if len(checksum) != 64 or any(c not in "0123456789abcdef" for c in checksum):
@@ -385,6 +451,13 @@ class DocumentViewSet(AuditMixin, viewsets.ModelViewSet):
                 identical_to_current = current_doc.checksum == checksum
             except (Document.DoesNotExist, ValidationError, ValueError):
                 identical_to_current = False
+
+        if dms_settings.allow_duplicate_uploads:
+            return Response({
+                "exists": False,
+                "identical_to_current": identical_to_current,
+                "duplicates_allowed": True,
+            })
 
         duplicate_doc = (
             Document.objects
@@ -418,9 +491,14 @@ class DocumentViewSet(AuditMixin, viewsets.ModelViewSet):
     @action(detail=True, methods=["post"])
     def submit(self, request, pk=None):
         doc = self.get_object()
-        if doc.status not in (DocumentStatus.DRAFT, DocumentStatus.REJECTED):
+        if doc.status not in (
+            DocumentStatus.DRAFT,
+            DocumentStatus.REJECTED,
+            DocumentStatus.RETURNED,
+            "Returned for Review",
+        ):
             return Response(
-                {"detail": "Only draft or rejected documents can be submitted."},
+                {"detail": "Only draft, rejected or returned documents can be submitted."},
                 status=status.HTTP_400_BAD_REQUEST,
             )
         from apps.workflows.services import WorkflowService, WorkflowError
@@ -448,9 +526,14 @@ class DocumentViewSet(AuditMixin, viewsets.ModelViewSet):
     @action(detail=True, methods=["patch"])
     def edit_metadata(self, request, pk=None):
         doc = self.get_object()
-        if doc.status not in (DocumentStatus.DRAFT, DocumentStatus.REJECTED):
+        if doc.status not in (
+            DocumentStatus.DRAFT,
+            DocumentStatus.REJECTED,
+            DocumentStatus.RETURNED,
+            "Returned for Review",
+        ):
             return Response(
-                {"detail": "Metadata can only be edited on draft or rejected documents."},
+                {"detail": "Metadata can only be edited on draft, rejected or returned documents."},
                 status=status.HTTP_400_BAD_REQUEST,
             )
         serializer = DocumentMetadataEditSerializer(
@@ -632,6 +715,7 @@ class DocumentViewSet(AuditMixin, viewsets.ModelViewSet):
     def preview_url(self, request, pk=None):
         doc = self.get_object()
         can_dl = user_can_download_document(request.user, doc)
+        signed_urls_enabled = signed_file_urls_enabled()
         version_id = request.query_params.get("version_id")
         version = None
         if version_id:
@@ -660,6 +744,7 @@ class DocumentViewSet(AuditMixin, viewsets.ModelViewSet):
                     "viewer": "pdfjs",
                     "url": inline_link(vid, False),
                     "raw_url": raw_link(vid, False),
+                    "signed_file_urls_enabled": signed_urls_enabled,
                     "preview_status": "done",
                 })
             if mime.startswith("image/"):
@@ -667,6 +752,7 @@ class DocumentViewSet(AuditMixin, viewsets.ModelViewSet):
                     "viewer": "image",
                     "url": inline_link(vid, False),
                     "raw_url": raw_link(vid, False),
+                    "signed_file_urls_enabled": signed_urls_enabled,
                     "preview_status": "done",
                 })
             if mime in (
@@ -712,6 +798,7 @@ class DocumentViewSet(AuditMixin, viewsets.ModelViewSet):
                     "viewer": viewer,
                     "url": url,
                     "raw_url": raw_link(vid, False),
+                    "signed_file_urls_enabled": signed_urls_enabled,
                     "preview_status": preview_status,
                     "preview_error": preview_error,
                 })
@@ -720,6 +807,7 @@ class DocumentViewSet(AuditMixin, viewsets.ModelViewSet):
                 "viewer": "download",
                 "url": raw_link(vid, False),
                 "raw_url": raw_link(vid, False),
+                "signed_file_urls_enabled": signed_urls_enabled,
                 "preview_status": "done",
             })
 
@@ -733,6 +821,7 @@ class DocumentViewSet(AuditMixin, viewsets.ModelViewSet):
                 "viewer": "pdfjs",
                 "url": inline_link("", False),
                 "raw_url": raw_link("", False),
+                "signed_file_urls_enabled": signed_urls_enabled,
                 "preview_status": "done",
             })
 
@@ -741,6 +830,7 @@ class DocumentViewSet(AuditMixin, viewsets.ModelViewSet):
                 "viewer": "image",
                 "url": inline_link("", False),
                 "raw_url": raw_link("", False),
+                "signed_file_urls_enabled": signed_urls_enabled,
                 "preview_status": "done",
             })
 
@@ -762,6 +852,7 @@ class DocumentViewSet(AuditMixin, viewsets.ModelViewSet):
                 "viewer": viewer,
                 "url": url,
                 "raw_url": raw_link("", False),
+                "signed_file_urls_enabled": signed_urls_enabled,
                 "preview_status": preview_status,
                 "preview_error": preview_error,
             })
@@ -770,6 +861,7 @@ class DocumentViewSet(AuditMixin, viewsets.ModelViewSet):
             "viewer": "download",
             "url": raw_link("", False),
             "raw_url": raw_link("", False),
+            "signed_file_urls_enabled": signed_urls_enabled,
             "preview_status": "done",
         })
 
@@ -784,6 +876,8 @@ class DocumentViewSet(AuditMixin, viewsets.ModelViewSet):
         doc = self.get_object()
         sig = (request.query_params.get("sig") or "").strip()
         if sig:
+            if not signed_file_urls_enabled():
+                return Response({"detail": "Signed file links are disabled."}, status=403)
             try:
                 payload = unsign_file_payload(sig)
             except Exception:

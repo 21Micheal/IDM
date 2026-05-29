@@ -41,6 +41,7 @@ export type DocumentStatus =
   | "draft"
   | "pending_review"
   | "pending_approval"
+  | "returned"
   | "approved"
   | "rejected"
   | "archived"
@@ -188,6 +189,7 @@ export interface WorkflowTask {
   due_at: string | null;
   held_until?: string | null;
   status_display?: string;
+  requires_signature?: boolean;
 }
 
 export interface Notification {
@@ -216,6 +218,7 @@ export interface SearchHit {
   file_mime_type?: string;
   supplier: string;
   amount: number | null;
+  currency?: string;
   status: DocumentStatus;
   document_date: string | null;
   highlights: Record<string, string>;
@@ -230,6 +233,7 @@ export interface DocumentPreviewResponse {
   viewer: "pdfjs" | "image" | "processing" | "download";
   url: string | null;
   raw_url?: string | null;
+  signed_file_urls_enabled?: boolean;
   preview_status?: "pending" | "processing" | "done" | "failed" | "";
   preview_error?: string;
 }

@@ -1,9 +1,11 @@
-import { useMemo } from "react";
-import { CheckCircle, Loader2, ArrowRight, Sparkles } from "lucide-react";
+import { useEffect, useMemo, useState } from "react";
+import { CheckCircle, Loader2, ArrowRight, Sparkles, FileText } from "lucide-react";
 import type { DocumentType } from "@/types";
-import type { BulkDocReviewState } from "./bulkUploadTypes";
+import type { BulkDocReviewState, BulkLocalPreview } from "./bulkUploadTypes";
 import { countReviewDecisions } from "./bulkUploadUtils";
 import BulkDocumentReviewCard from "./BulkDocumentReviewCard";
+
+const REVIEW_PREVIEW_HEIGHT = "h-[clamp(34rem,calc(100vh-16rem),46rem)]";
 
 type Props = {
   documentType: DocumentType;
@@ -11,6 +13,7 @@ type Props = {
   onChange: (states: BulkDocReviewState[]) => void;
   onSubmit: () => void;
   isSubmitting: boolean;
+  previews?: Record<string, BulkLocalPreview>;
 };
 
 export default function BulkReviewPanel({
@@ -19,8 +22,19 @@ export default function BulkReviewPanel({
   onChange,
   onSubmit,
   isSubmitting,
+  previews = {},
 }: Props) {
   const counts = useMemo(() => countReviewDecisions(reviewStates), [reviewStates]);
+  const [selectedDocumentId, setSelectedDocumentId] = useState(reviewStates[0]?.documentId ?? "");
+  const selectedState = reviewStates.find((state) => state.documentId === selectedDocumentId) ?? reviewStates[0];
+  const selectedPreview = selectedState ? previews[selectedState.fileName] : undefined;
+  const pdfSrc = selectedPreview?.url ? `${selectedPreview.url}#toolbar=1&navpanes=0&scrollbar=1&view=FitV` : null;
+
+  useEffect(() => {
+    if (!selectedDocumentId && reviewStates[0]) {
+      setSelectedDocumentId(reviewStates[0].documentId);
+    }
+  }, [reviewStates, selectedDocumentId]);
 
   const updateAt = (index: number, next: BulkDocReviewState) => {
     const copy = [...reviewStates];
@@ -37,15 +51,15 @@ export default function BulkReviewPanel({
   };
 
   return (
-    <div className="space-y-6">
-      <div className="flex flex-col sm:flex-row sm:items-center gap-4">
+    <div className="space-y-4">
+      <div className="flex flex-col gap-4 border border-[#C8CDD2] bg-white p-4 sm:flex-row sm:items-center">
         <div className="flex items-center gap-3">
-          <div className="w-10 h-10 rounded-xl bg-teal/15 flex items-center justify-center">
-            <Sparkles className="w-5 h-5 text-teal" />
+          <div className="flex h-10 w-10 items-center justify-center bg-[#EEF6FB]">
+            <Sparkles className="h-5 w-5 text-[#287EAD]" />
           </div>
           <div>
-            <h2 className="text-xl font-bold text-foreground">Review each document</h2>
-            <p className="text-sm text-muted-foreground">
+            <h2 className="text-xl font-bold text-[#1F2933]">Review each document</h2>
+            <p className="text-sm text-[#5E6870]">
               OCR pre-filled fields per file — expand to verify, then submit the batch.
             </p>
           </div>
@@ -62,35 +76,64 @@ export default function BulkReviewPanel({
       </div>
 
       <div className="flex flex-wrap gap-3 text-sm">
-        <span className="rounded-full bg-teal/15 text-teal px-3 py-1 font-semibold">
+        <span className="bg-[#DCEAF2] px-3 py-1 font-semibold text-[#287EAD]">
           {counts.approved} to submit
         </span>
-        <span className="rounded-full bg-muted text-muted-foreground px-3 py-1 font-semibold">
+        <span className="bg-white px-3 py-1 font-semibold text-[#5E6870]">
           {counts.rejected} skipped
         </span>
-        <span className="rounded-full bg-muted text-muted-foreground px-3 py-1">
+        <span className="bg-white px-3 py-1 text-[#5E6870]">
           {reviewStates.length} total
         </span>
       </div>
 
-      <div className="space-y-3">
-        {reviewStates.map((state, index) => (
-          <BulkDocumentReviewCard
-            key={state.documentId}
-            state={state}
-            documentType={documentType}
-            onChange={(next) => updateAt(index, next)}
-          />
-        ))}
+      <div className="grid gap-4 xl:grid-cols-12">
+        <div className="max-h-[calc(100vh-13rem)] space-y-3 overflow-y-auto pr-1 xl:col-span-4">
+          {reviewStates.map((state, index) => (
+            <BulkDocumentReviewCard
+              key={state.documentId}
+              state={state}
+              documentType={documentType}
+              selected={selectedState?.documentId === state.documentId}
+              onSelect={() => setSelectedDocumentId(state.documentId)}
+              onChange={(next) => updateAt(index, next)}
+            />
+          ))}
+        </div>
+
+        <div className="xl:col-span-8">
+          <div className="sticky top-4 border border-[#C8CDD2] bg-white">
+            <div className="border-b border-[#C8CDD2] bg-[#F5F7F8] px-3 py-2">
+              <p className="text-sm font-bold text-[#1F2933]">Review preview</p>
+              <p className="truncate text-xs text-[#5E6870]">{selectedState?.fileName || "Select a document"}</p>
+            </div>
+            <div className="bg-[#EDEDED] p-3">
+              {pdfSrc && selectedPreview?.kind === "pdf" ? (
+                <div className={`mx-auto w-full max-w-[920px] border border-[#C8CDD2] bg-white ${REVIEW_PREVIEW_HEIGHT}`}>
+                  <iframe src={pdfSrc} title="Bulk review preview" className="h-full w-full bg-white" />
+                </div>
+              ) : selectedPreview?.url && selectedPreview.kind === "image" ? (
+                <div className={`mx-auto flex w-full max-w-[920px] items-center justify-center overflow-auto border border-[#C8CDD2] bg-white ${REVIEW_PREVIEW_HEIGHT}`}>
+                  <img src={selectedPreview.url} alt="Bulk review preview" className="max-h-full max-w-full object-contain" />
+                </div>
+              ) : (
+                <div className={`mx-auto flex w-full max-w-[920px] flex-col items-center justify-center border border-dashed border-[#C8CDD2] bg-white text-center ${REVIEW_PREVIEW_HEIGHT}`}>
+                  <FileText className="mb-3 h-12 w-12 text-[#5E6870]" />
+                  <p className="text-sm font-semibold text-[#1F2933]">Preview unavailable for this format</p>
+                  <p className="mt-1 max-w-xs text-xs text-[#5E6870]">Use the extracted fields on the left to complete review.</p>
+                </div>
+              )}
+            </div>
+          </div>
+        </div>
       </div>
 
-      <div className="flex gap-4 pt-4 border-t border-border">
+      <div className="flex gap-4 border-t border-[#C8CDD2] pt-4">
         <button
           type="button"
           onClick={onSubmit}
           disabled={isSubmitting || reviewStates.length === 0}
-          className="flex-1 flex items-center justify-center gap-2 text-base py-3 rounded-xl font-semibold bg-teal text-teal-foreground hover:bg-teal/90 transition-all disabled:opacity-50"
-          style={{ boxShadow: "var(--shadow-elegant)" }}
+          className="flex flex-1 items-center justify-center gap-2 bg-[#287EAD] py-3 text-base font-semibold text-white transition-all hover:bg-[#206D99] disabled:opacity-50"
         >
           {isSubmitting ? (
             <Loader2 className="w-5 h-5 animate-spin" />

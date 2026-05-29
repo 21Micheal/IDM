@@ -1,13 +1,3 @@
-/**
- * pages/DocumentsPage.tsx
- *
- * Indigo Vault redesign:
- *  - Semantic HSL tokens throughout
- *  - StatusBadge with dot+pill color coding
- *  - Reusable workflow/all and personal-only document library modes
- *  - Workflow filters stay out of the personal document library
- */
-
 import { useEffect, useMemo, useState } from "react";
 import { Link, useSearchParams } from "react-router-dom";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
@@ -724,7 +714,7 @@ export default function DocumentsPage({ personalOnly = false }: DocumentsPagePro
                   type="button"
                   className="h-9 border border-[#B9C0C6] border-t-[#2B8DCB] border-t-2 bg-white px-4 text-sm text-[#2B86C5]"
                 >
-                  My Documents
+                  All Documents
                 </button>
               </div>
 
@@ -926,11 +916,27 @@ export default function DocumentsPage({ personalOnly = false }: DocumentsPagePro
                         const formatLabel = formatDocumentFileType(doc.file_name, doc.file_mime_type);
 
                         return (
-                          <div key={doc.id} className="grid min-h-[154px] grid-cols-[42px_126px_minmax(360px,1fr)_minmax(260px,0.75fr)] gap-4 px-5 py-4">
+                          <div
+                            key={doc.id}
+                            role="button"
+                            tabIndex={0}
+                            onClick={() => toggleOne(doc.id)}
+                            onKeyDown={(event) => {
+                              if (event.key === "Enter" || event.key === " ") {
+                                event.preventDefault();
+                                toggleOne(doc.id);
+                              }
+                            }}
+                            className={cn(
+                              "grid min-h-[118px] cursor-pointer grid-cols-[34px_96px_minmax(280px,1fr)_minmax(190px,0.55fr)] gap-3 px-4 py-3 transition-colors hover:bg-[#F4F8FB] hover:shadow-[inset_3px_0_0_#2B86C5]",
+                              isSelected && "bg-[#E6F1FB] shadow-[inset_3px_0_0_#2B86C5]",
+                            )}
+                          >
                             <div className="pt-1">
                               <input
                                 type="checkbox"
                                 checked={isSelected}
+                                onClick={(event) => event.stopPropagation()}
                                 onChange={() => toggleOne(doc.id)}
                                 className="h-3.5 w-3.5 border-[#AEB5BB]"
                               />
@@ -939,56 +945,55 @@ export default function DocumentsPage({ personalOnly = false }: DocumentsPagePro
                               to={`/documents/${doc.id}`}
                               onMouseEnter={preloadDocumentWorkspace}
                               onFocus={preloadDocumentWorkspace}
-                              className="h-[123px] w-[89px] border border-[#D3D7DA] bg-white"
+                              onClick={(event) => event.stopPropagation()}
+                              className="h-[92px] w-[68px] border border-[#D3D7DA] bg-white"
                             >
                               <DocumentPreviewTile doc={doc} />
                             </Link>
-                            <div className="min-w-0">
+                            <div className="min-w-0 text-sm">
                               <Link
                                 to={`/documents/${doc.id}`}
                                 onMouseEnter={preloadDocumentWorkspace}
                                 onFocus={preloadDocumentWorkspace}
-                                className="mb-1 block text-base font-semibold text-[#2B86C5] hover:underline"
+                                onClick={(event) => event.stopPropagation()}
+                                className="block truncate text-base font-semibold text-[#2B86C5] hover:underline"
                               >
                                 {doc.title}
                               </Link>
-                              {typeLabel && (
-                                <>
-                                  <p className="mt-2 text-[#5E6870]">Document Type</p>
-                                  <p className="font-semibold">{typeLabel}</p>
-                                </>
-                              )}
-                              <div className="mt-3">
-                                <p className="mb-1 text-[#5E6870]">Format</p>
-                                <p className="font-semibold text-[#3F474F]">{formatLabel}</p>
+                              <div className="mt-1 flex flex-wrap items-center gap-2 text-xs text-[#5E6870]">
+                                {typeLabel && <span className="font-semibold text-[#3F474F]">{typeLabel}</span>}
+                                <span className="border border-[#D3D7DA] bg-[#F5F7F8] px-1.5 py-0.5 font-semibold uppercase text-[#3F474F]">
+                                  {formatLabel}
+                                </span>
                               </div>
-                              <div className="mt-3">
-                                <p className="mb-1 text-[#5E6870]">Status</p>
+                              <div className="mt-2">
                                 <p className={cn("font-semibold", getDocumentStatusTextClass(doc.status))}>
                                   {getDocumentStatusLabel(doc.status)}
                                 </p>
                               </div>
-                              <p className="mt-3 text-[#5E6870]">Created By</p>
-                              <p className="font-semibold">{doc.uploaded_by?.full_name || doc.uploaded_by?.email || ""}</p>
+                              <p className="mt-2 truncate text-[#5E6870]">
+                                Created by <span className="font-semibold text-[#1F2933]">{doc.uploaded_by?.full_name || doc.uploaded_by?.email || ""}</span>
+                              </p>
                             </div>
-                            <div className="pt-7">
+                            <div className="pt-1 text-sm">
                               {formatInforDateTime(doc.created_at) && (
-                                <>
-                                  <p className="mt-3 text-[#5E6870]">Created Date</p>
+                                <div>
+                                  <p className="text-[#5E6870]">Created</p>
                                   <p className="font-semibold">{formatInforDateTime(doc.created_at)}</p>
-                                </>
+                                </div>
                               )}
                               {formatInforDateTime(doc.updated_at) && (
-                                <>
-                                  <p className="mt-3 text-[#5E6870]">Modified Date</p>
+                                <div className="mt-2">
+                                  <p className="text-[#5E6870]">Modified</p>
                                   <p className="font-semibold">{formatInforDateTime(doc.updated_at)}</p>
-                                </>
+                                </div>
                               )}
                               <Link
                                 to={`/documents/${doc.id}`}
                                 onMouseEnter={preloadDocumentWorkspace}
                                 onFocus={preloadDocumentWorkspace}
-                                className="mt-5 inline-flex border border-[#C8CDD2] bg-white px-3 py-1.5 text-sm font-semibold text-[#2B86C5] hover:bg-[#F5F7F8] hover:underline"
+                                onClick={(event) => event.stopPropagation()}
+                                className="mt-3 inline-flex border border-[#C8CDD2] bg-white px-3 py-1.5 text-sm font-semibold text-[#2B86C5] hover:bg-[#F5F7F8] hover:underline"
                               >
                                 <Eye className="mr-1.5 h-4 w-4" />
                                 View
@@ -1941,17 +1946,34 @@ export default function DocumentsPage({ personalOnly = false }: DocumentsPagePro
               docs.map((doc: Document) => {
                 const isSelected = selectedIds.includes(doc.id);
                 const personalDescription = getPersonalDescription(doc);
+                const formatLabel = formatDocumentFileType(doc.file_name, doc.file_mime_type);
                 return (
                   <div
                     key={doc.id}
+                    role={selectionEnabled ? "button" : undefined}
+                    tabIndex={selectionEnabled ? 0 : undefined}
+                    onClick={() => {
+                      if (selectionEnabled) toggleOne(doc.id);
+                    }}
+                    onKeyDown={(event) => {
+                      if (!selectionEnabled) return;
+                      if (event.key === "Enter" || event.key === " ") {
+                        event.preventDefault();
+                        toggleOne(doc.id);
+                      }
+                    }}
                     className={cn(
-                      "flex items-start gap-4 px-5 py-4 hover:bg-[#F4F6F8] transition-colors group",
-                      isSelected && "bg-[#E6F1FB]",
+                      "group flex items-start gap-3 px-4 py-3 transition-colors hover:bg-[#F4F8FB] hover:shadow-[inset_3px_0_0_#2B86C5]",
+                      selectionEnabled && "cursor-pointer",
+                      isSelected && "bg-[#E6F1FB] shadow-[inset_3px_0_0_#2B86C5]",
                     )}
                   >
                     {selectionEnabled && (
                       <button
-                        onClick={() => toggleOne(doc.id)}
+                        onClick={(event) => {
+                          event.stopPropagation();
+                          toggleOne(doc.id);
+                        }}
                         className={cn(
                           "mt-1 transition-all",
                           isSelected ? "text-accent opacity-100" : "text-muted-foreground opacity-0 group-hover:opacity-100"
@@ -1966,43 +1988,38 @@ export default function DocumentsPage({ personalOnly = false }: DocumentsPagePro
                       to={`/documents/${doc.id}`}
                       onMouseEnter={preloadDocumentWorkspace}
                       onFocus={preloadDocumentWorkspace}
-                      className="h-24 w-20 flex-shrink-0 rounded-md border border-border bg-muted/30 flex items-center justify-center text-muted-foreground hover:border-accent/40 hover:text-accent transition-colors"
+                      onClick={(event) => event.stopPropagation()}
+                      className="flex h-20 w-16 flex-shrink-0 items-center justify-center border border-border bg-muted/30 text-muted-foreground transition-colors hover:border-accent/40 hover:text-accent"
                     >
-                      <FileText className="w-8 h-8" />
+                      <FileText className="h-7 w-7" />
                     </Link>
 
-                    <div className="flex-1 min-w-0 space-y-3">
+                    <div className="min-w-0 flex-1 space-y-2">
                       {/* Title + reference */}
                       <div>
                         <Link
                           to={`/documents/${doc.id}`}
                           onMouseEnter={preloadDocumentWorkspace}
                           onFocus={preloadDocumentWorkspace}
-                          className="text-[#1E2B3A] group-hover:text-[#0072CE] font-semibold truncate block transition-colors"
+                          onClick={(event) => event.stopPropagation()}
+                          className="block truncate font-semibold text-[#1E2B3A] transition-colors group-hover:text-[#0072CE]"
                         >
                           {doc.title}
                         </Link>
-                        <span className="mt-1 inline-block font-mono text-[11px] bg-[#F4F6F8] text-[#1E2B3A] px-2 py-0.5 rounded-sm border border-[#D6DBE0]">
-                          {doc.reference_number}
-                        </span>
+                        <div className="mt-1 flex flex-wrap items-center gap-2 text-[11px]">
+                          <span className="border border-[#D6DBE0] bg-[#F4F6F8] px-2 py-0.5 font-mono text-[#1E2B3A]">
+                            {doc.reference_number}
+                          </span>
+                          <span className="font-semibold uppercase text-[#3F474F]">{formatLabel}</span>
+                          {!personalOnly && !isArchiveView && (
+                            <span className={cn("font-semibold", getDocumentStatusTextClass(doc.status))}>
+                              {getDocumentStatusLabel(doc.status)}
+                            </span>
+                          )}
+                        </div>
                       </div>
 
-                      {/* Blocked metadata grid — File Format & Status are their own blocks */}
-                      <div className="grid grid-cols-2 md:grid-cols-4 gap-x-6 gap-y-3 text-xs">
-                        <div>
-                          <div className="text-[10px] font-semibold uppercase tracking-widest text-[#5A6470] mb-1">File format</div>
-                          <span className="inline-flex items-center rounded-sm border border-[#D6DBE0] bg-[#F4F6F8] px-2 py-0.5 text-[10px] font-semibold uppercase text-[#1E2B3A] tracking-wide">
-                            {formatDocumentFileType(doc.file_name, doc.file_mime_type)}
-                          </span>
-                        </div>
-
-                        {!personalOnly && !isArchiveView && (
-                          <div>
-                            <div className="text-[10px] font-semibold uppercase tracking-widest text-[#5A6470] mb-1">Status</div>
-                            <StatusBadge status={doc.status} />
-                          </div>
-                        )}
-
+                      <div className="grid grid-cols-2 gap-x-5 gap-y-2 text-xs md:grid-cols-3">
                         <div>
                           <div className="text-[10px] font-semibold uppercase tracking-widest text-[#5A6470] mb-1">Uploaded</div>
                           <div className="text-[#1E2B3A]">{format(new Date(doc.created_at), "dd MMM yyyy")}</div>
@@ -2030,7 +2047,8 @@ export default function DocumentsPage({ personalOnly = false }: DocumentsPagePro
                         to={`/documents/${doc.id}`}
                         onMouseEnter={preloadDocumentWorkspace}
                         onFocus={preloadDocumentWorkspace}
-                        className="inline-flex items-center gap-1.5 rounded-md border border-border bg-card px-2.5 py-1.5 text-xs font-medium text-foreground hover:border-accent/40 hover:bg-accent/10 hover:text-accent transition-colors"
+                        onClick={(event) => event.stopPropagation()}
+                        className="inline-flex items-center gap-1.5 border border-border bg-card px-2.5 py-1.5 text-xs font-medium text-foreground transition-colors hover:border-accent/40 hover:bg-accent/10 hover:text-accent"
                       >
                         <Eye className="w-3.5 h-3.5" /> View
                       </Link>

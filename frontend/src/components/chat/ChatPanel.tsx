@@ -263,7 +263,7 @@ export function ChatPanel({ onClose, initialRoomId, onActiveRoomChange }: ChatPa
   // ── Deep-link via initialRoomId ───────────────────────────────────────────
   useEffect(() => {
     if (initialRoomId) loadRoom(initialRoomId);
-    // eslint-disable-next-line react-hooks/exhaustive-deps
+     
   }, [initialRoomId]);
 
   // ── Auto-scroll on new message ────────────────────────────────────────────

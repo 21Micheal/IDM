@@ -4,15 +4,16 @@ import { useSearchParams } from "react-router-dom";
 import { useForm } from "react-hook-form";
 import { zodResolver } from "@hookform/resolvers/zod";
 import { z } from "zod";
-import { profileAPI } from "@/services/api";
+import { profileAPI, documentTypesAPI } from "@/services/api";
+import SignaturePanel from "@/components/profile/SignaturePanel";
 import { useAuthStore } from "@/store/authStore";
 import {
   Shield, Key, Smartphone,
-  Loader2, Eye, EyeOff, AlertTriangle, UserCircle,
+  Loader2, Eye, EyeOff, AlertTriangle,
   Building2, Mail, Briefcase, ShieldCheck,
-  Calendar, UserCheck, Clock, Ban,
+  Calendar, UserCheck,
   ChevronRight, Settings, Users, ArrowLeftRight,
-  Bell, Monitor, Globe,
+  Bell, Monitor, Globe, FileSignature,
 } from "lucide-react";
 import { toast } from "@/components/ui/vault-toast";
 import clsx from "clsx";
@@ -26,7 +27,7 @@ const pwSchema = z.object({
   path: ["confirm_password"],
 });
 type PwForm = z.infer<typeof pwSchema>;
-type DelegationForm = { delegate_id: string; starts_at: string; ends_at: string; comment: string };
+type DelegationForm = { delegate_id: string; starts_at: string; ends_at: string; comment: string; document_type_id: string | null };
 
 interface Delegation {
   id: string;
@@ -34,6 +35,7 @@ interface Delegation {
   starts_at: string;
   ends_at: string;
   comment: string;
+  document_type_name?: string | null;
   is_active: boolean;
   is_current: boolean;
 }
@@ -44,7 +46,23 @@ interface UserOption {
   email: string;
 }
 
-type ProfileTab = "settings" | "security" | "delegation" | "preferences";
+interface DocumentTypeOption {
+  id: string;
+  name: string;
+  code: string;
+}
+
+interface UserPreferences {
+  date_format: string;
+  time_format: string;
+  default_page: string;
+  notify_document_approvals: boolean;
+  notify_document_rejected: boolean;
+  notify_task_assignments: boolean;
+  notify_system_announcements: boolean;
+}
+
+type ProfileTab = "settings" | "security" | "signature" | "delegation" | "preferences";
 
 export default function ProfilePage() {
   const [searchParams] = useSearchParams();
@@ -58,12 +76,13 @@ export default function ProfilePage() {
     starts_at: "",
     ends_at: "",
     comment: "",
+    document_type_id: null,
   });
 
   // Handle URL parameter for tab navigation
   useEffect(() => {
     const tabParam = searchParams.get("tab") as ProfileTab;
-    if (tabParam && ["settings", "security", "delegation", "preferences"].includes(tabParam)) {
+    if (tabParam && ["settings", "security", "signature", "delegation", "preferences"].includes(tabParam)) {
       setActiveTab(tabParam);
     }
   }, [searchParams]);
@@ -111,15 +130,49 @@ export default function ProfilePage() {
     enabled: Boolean(user),
   });
 
+  const { data: documentTypes = [] } = useQuery<DocumentTypeOption[]>({
+    queryKey: ["documentTypes"],
+    queryFn: () => documentTypesAPI.list().then((r) => r.data.results ?? r.data),
+    enabled: Boolean(user),
+  });
+
+  const { data: preferences, isLoading: preferencesLoading } = useQuery<UserPreferences>({
+    queryKey: ["preferences"],
+    queryFn: () => profileAPI.getPreferences().then((r) => r.data),
+    enabled: Boolean(user),
+  });
+
   const createDelegationMutation = useMutation({
     mutationFn: () => profileAPI.createDelegation(delegationForm),
     onSuccess: () => {
       toast.success("Delegation created");
-      setDelegationForm({ delegate_id: "", starts_at: "", ends_at: "", comment: "" });
+      setDelegationForm({ delegate_id: "", starts_at: "", ends_at: "", comment: "", document_type_id: null });
       qc.invalidateQueries({ queryKey: ["delegations"] });
     },
     onError: (err: { response?: { data?: { detail?: string } } }) =>
       toast.error(err?.response?.data?.detail || "Failed to create delegation"),
+  });
+
+  const updatePreferencesMutation = useMutation({
+    mutationFn: (data: Partial<UserPreferences>) => profileAPI.updatePreferences(data),
+    onMutate: async (newData: Partial<UserPreferences>) => {
+      await qc.cancelQueries({ queryKey: ["preferences"] });
+      const previous = qc.getQueryData<UserPreferences>(["preferences"]);
+      qc.setQueryData<UserPreferences>(["preferences"], (old) => ({ ...(old ?? {}), ...newData } as UserPreferences));
+      return { previous };
+    },
+    onError: (err, newData, context: any) => {
+      toast.error("Failed to update preferences");
+      if (context?.previous) {
+        qc.setQueryData(["preferences"], context.previous);
+      }
+    },
+    onSettled: () => {
+      qc.invalidateQueries({ queryKey: ["preferences"] });
+    },
+    onSuccess: () => {
+      toast.success("Preferences updated");
+    },
   });
 
   const disableDelegationMutation = useMutation({
@@ -134,6 +187,7 @@ export default function ProfilePage() {
   const tabs = [
     { id: "settings" as const, label: "Settings", icon: Settings, description: "Account & password" },
     { id: "security" as const, label: "Security", icon: ShieldCheck, description: "MFA & authentication" },
+    { id: "signature" as const, label: "Signature", icon: FileSignature, description: "E-signature" },
     { id: "delegation" as const, label: "Delegation", icon: UserCheck, description: "Out of office tasks" },
     { id: "preferences" as const, label: "Preferences", icon: Monitor, description: "Display & notifications" },
   ];
@@ -141,7 +195,7 @@ export default function ProfilePage() {
   if (!user) return null;
 
   return (
-    <div className="max-w-6xl mx-auto py-6 px-4 space-y-6">
+    <div className={clsx("mx-auto py-6 px-4 space-y-6", activeTab === "signature" ? "max-w-7xl" : "max-w-6xl")}>
       {/* Page Header */}
       <div className="flex items-center justify-between">
         <div>
@@ -151,8 +205,13 @@ export default function ProfilePage() {
       </div>
 
       <div className="grid grid-cols-12 gap-6">
-        {/* Left Column - User Info */}
-        <div className="col-span-12 lg:col-span-4 space-y-4">
+        {/* Left Column - User Info (fully hidden on signature tab so right column takes full width) */}
+        <div className={clsx(
+          "space-y-4",
+          activeTab === "signature"
+            ? "hidden"
+            : "col-span-12 lg:col-span-4"
+        )}>
           {/* Profile Card - Unifi Style */}
           <div className="card overflow-hidden">
             {/* Profile Header with Accent */}
@@ -231,15 +290,6 @@ export default function ProfilePage() {
                         )} />
                         {user.mfa_enabled ? "Enabled" : "Not enabled"}
                       </span>
-                      {!user.mfa_enabled && (
-                        <button
-                          onClick={() => toggleMFAMutation.mutate(true)}
-                          disabled={toggleMFAMutation.isPending}
-                          className="text-xs text-primary hover:underline font-medium"
-                        >
-                          {toggleMFAMutation.isPending ? "Updating..." : "Enable"}
-                        </button>
-                      )}
                     </div>
                   </div>
                 </div>
@@ -256,6 +306,7 @@ export default function ProfilePage() {
             {[
               { icon: Key, label: "Change Password", action: () => { setActiveTab("settings"); setShowPasswordForm(true); }, color: "text-amber-500" },
               { icon: Shield, label: "Security Settings", action: () => setActiveTab("security"), color: "text-blue-500" },
+              { icon: FileSignature, label: "E-Signature", action: () => setActiveTab("signature"), color: "text-teal-500" },
               { icon: UserCheck, label: "Manage Delegations", action: () => setActiveTab("delegation"), color: "text-emerald-500" },
               { icon: Bell, label: "Notification Preferences", action: () => setActiveTab("preferences"), color: "text-violet-500" },
             ].map((item, i) => (
@@ -272,8 +323,8 @@ export default function ProfilePage() {
           </div>
         </div>
 
-        {/* Right Column - Main Content */}
-        <div className="col-span-12 lg:col-span-8">
+        {/* Right Column - Main Content (full width on signature tab) */}
+        <div className={clsx("col-span-12", activeTab === "signature" ? "lg:col-span-12" : "lg:col-span-8")}>
           {/* Tab Navigation */}
           <div className="card mb-4">
             <div className="flex border-b border-border">
@@ -452,18 +503,13 @@ export default function ProfilePage() {
                     </div>
 
                     <button
-                      onClick={() => !user.mfa_enabled && toggleMFAMutation.mutate(true)}
-                      disabled={toggleMFAMutation.isPending || user.mfa_enabled}
+                      disabled={true}
                       className={clsx(
                         "px-6 py-2.5 rounded-xl text-sm font-medium transition-all flex items-center gap-2",
-                        user.mfa_enabled
-                          ? "border-2 border-muted text-muted-foreground opacity-50 cursor-not-allowed"
-                          : "bg-primary text-primary-foreground hover:bg-primary/90"
+                        "border-2 border-muted text-muted-foreground opacity-50 cursor-not-allowed"
                       )}
                     >
-                      {toggleMFAMutation.isPending ? (
-                        <Loader2 className="w-4 h-4 animate-spin" />
-                      ) : user.mfa_enabled ? (
+                      {user.mfa_enabled ? (
                         <>
                           <Shield className="w-4 h-4" />
                           MFA Enabled
@@ -471,7 +517,7 @@ export default function ProfilePage() {
                       ) : (
                         <>
                           <Shield className="w-4 h-4" />
-                          Enable MFA
+                          MFA Disabled
                         </>
                       )}
                     </button>
@@ -479,6 +525,9 @@ export default function ProfilePage() {
                 </div>
               </div>
             )}
+
+            {activeTab === "signature" && <SignaturePanel />}
+
 
             {/* Delegation Tab */}
             {activeTab === "delegation" && (
@@ -510,6 +559,25 @@ export default function ProfilePage() {
                           </option>
                         ))}
                       </select>
+                    </div>
+
+                    <div>
+                      <label className="label">Document Type Filter</label>
+                      <select
+                        className="input"
+                        value={delegationForm.document_type_id || ""}
+                        onChange={(e) => setDelegationForm((s) => ({ ...s, document_type_id: e.target.value || null }))}
+                      >
+                        <option value="">All Tasks</option>
+                        {documentTypes.map((dt) => (
+                          <option key={dt.id} value={dt.id}>
+                            {dt.name} ({dt.code})
+                          </option>
+                        ))}
+                      </select>
+                      <p className="text-xs text-muted-foreground mt-1">
+                        Leave empty to delegate all tasks, or select a specific document type
+                      </p>
                     </div>
 
                     <div className="grid grid-cols-2 gap-3">
@@ -606,6 +674,14 @@ export default function ProfilePage() {
                                   {new Date(delegation.starts_at).toLocaleDateString()} - {new Date(delegation.ends_at).toLocaleDateString()}
                                 </span>
                               </div>
+                              {delegation.document_type_name && (
+                                <div className="flex items-center gap-2 mt-1">
+                                  <Globe className="w-3.5 h-3.5 text-muted-foreground" />
+                                  <span className="text-xs text-muted-foreground">
+                                    {delegation.document_type_name}
+                                  </span>
+                                </div>
+                              )}
                               {delegation.comment && (
                                 <p className="text-sm text-muted-foreground mt-2">{delegation.comment}</p>
                               )}
@@ -665,10 +741,15 @@ export default function ProfilePage() {
                         <p className="font-medium text-foreground">Date format</p>
                         <p className="text-sm text-muted-foreground">Choose how dates are displayed</p>
                       </div>
-                      <select className="input w-auto">
-                        <option>DD/MM/YYYY</option>
-                        <option>MM/DD/YYYY</option>
-                        <option>YYYY-MM-DD</option>
+                      <select
+                        className="input w-auto"
+                        value={preferences?.date_format || "DD/MM/YYYY"}
+                        onChange={(e) => updatePreferencesMutation.mutate({ date_format: e.target.value })}
+                        disabled={preferencesLoading || updatePreferencesMutation.isPending}
+                      >
+                        <option value="DD/MM/YYYY">DD/MM/YYYY</option>
+                        <option value="MM/DD/YYYY">MM/DD/YYYY</option>
+                        <option value="YYYY-MM-DD">YYYY-MM-DD</option>
                       </select>
                     </div>
 
@@ -677,9 +758,14 @@ export default function ProfilePage() {
                         <p className="font-medium text-foreground">Time format</p>
                         <p className="text-sm text-muted-foreground">12-hour or 24-hour clock</p>
                       </div>
-                      <select className="input w-auto">
-                        <option>12-hour</option>
-                        <option>24-hour</option>
+                      <select
+                        className="input w-auto"
+                        value={preferences?.time_format || "12-hour"}
+                        onChange={(e) => updatePreferencesMutation.mutate({ time_format: e.target.value })}
+                        disabled={preferencesLoading || updatePreferencesMutation.isPending}
+                      >
+                        <option value="12-hour">12-hour</option>
+                        <option value="24-hour">24-hour</option>
                       </select>
                     </div>
 
@@ -688,10 +774,15 @@ export default function ProfilePage() {
                         <p className="font-medium text-foreground">On launch, go to</p>
                         <p className="text-sm text-muted-foreground">Default page when you log in</p>
                       </div>
-                      <select className="input w-auto">
-                        <option>Dashboard</option>
-                        <option>My Tasks</option>
-                        <option>All Documents</option>
+                      <select
+                        className="input w-auto"
+                        value={preferences?.default_page || "dashboard"}
+                        onChange={(e) => updatePreferencesMutation.mutate({ default_page: e.target.value })}
+                        disabled={preferencesLoading || updatePreferencesMutation.isPending}
+                      >
+                        <option value="dashboard">Dashboard</option>
+                        <option value="my_tasks">My Tasks</option>
+                        <option value="all_documents">All Documents</option>
                       </select>
                     </div>
                   </div>
@@ -711,18 +802,28 @@ export default function ProfilePage() {
 
                   <div className="space-y-4">
                     {[
-                      { label: "Document approvals", description: "When a document requires your approval" },
-                      { label: "Document rejected", description: "When your document is rejected" },
-                      { label: "Task assignments", description: "When a task is assigned to you" },
-                      { label: "System announcements", description: "Important system updates and news" },
-                    ].map((item, index) => (
-                      <div key={index} className="flex items-center justify-between py-3 border-b border-border last:border-0">
+                      { label: "Document approvals", description: "When a document requires your approval", key: "notify_document_approvals" },
+                      { label: "Document rejected", description: "When your document is rejected", key: "notify_document_rejected" },
+                      { label: "Task assignments", description: "When a task is assigned to you", key: "notify_task_assignments" },
+                      { label: "System announcements", description: "Important system updates and news", key: "notify_system_announcements" },
+                    ].map((item) => (
+                      <div key={item.key} className="flex items-center justify-between py-3 border-b border-border last:border-0">
                         <div>
                           <p className="font-medium text-foreground">{item.label}</p>
                           <p className="text-sm text-muted-foreground">{item.description}</p>
                         </div>
                         <label className="relative inline-flex items-center cursor-pointer">
-                          <input type="checkbox" className="sr-only peer" defaultChecked />
+                          <input
+                            type="checkbox"
+                            className="sr-only peer"
+                            checked={
+                              preferences?.[item.key as keyof UserPreferences] === undefined
+                                ? true
+                                : !!preferences?.[item.key as keyof UserPreferences]
+                            }
+                            onChange={(e) => updatePreferencesMutation.mutate({ [item.key]: e.target.checked })}
+                            disabled={preferencesLoading || updatePreferencesMutation.isPending}
+                          />
                           <div className="w-11 h-6 bg-muted rounded-full peer peer-checked:bg-primary peer-checked:after:translate-x-full after:content-[''] after:absolute after:top-0.5 after:left-[2px] after:bg-white after:rounded-full after:h-5 after:w-5 after:transition-all"></div>
                         </label>
                       </div>

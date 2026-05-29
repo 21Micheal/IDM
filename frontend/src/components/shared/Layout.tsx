@@ -19,7 +19,7 @@ import {
   BellRing, CircleUserRound, ClipboardCheck, Inbox, ArrowRight,
 } from "lucide-react";
 import { useAuthStore } from "../../store/authStore";
-import { useQuery } from "@tanstack/react-query";
+import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { notificationsAPI, workflowAPI } from "../../services/api";
 import { FlaxemLogo } from "./FlaxemLogo";
 import { QUERY_SHORT_STALE } from "@/lib/reactQueryDefaults";
@@ -115,7 +115,7 @@ const adminNav: NavLeaf[] = [
   { to: "/admin/settings",    icon: Settings,  label: "Settings",    allowedRoles: ["admin"] },
 ];
 
-// ── SidebarGroup (unchanged from original) ────────────────────────────────────
+// ── SidebarGroup ──────────────────────────────────────────────────────────────
 
 function SidebarGroup({
   group,
@@ -139,25 +139,25 @@ function SidebarGroup({
   if (visibleChildren.length === 0) return null;
 
   return (
-    <div>
+    <div className="nav-section-item">
       <button
         onClick={() => setOpen(!open)}
         className={clsx(
-          "w-full flex items-center gap-3 px-3 py-2 rounded-lg text-sm font-medium transition-colors",
+          "group flex w-full items-center gap-3 border-l-2 px-3 py-2 text-sm font-semibold transition-colors",
           isGroupActive
-            ? "bg-sidebar-accent text-sidebar-accent-foreground"
-            : "text-sidebar-foreground hover:bg-sidebar-accent/50"
+            ? "border-[#287EAD] bg-[#E9F3F8] text-[#1F2933]"
+            : "border-transparent text-[#3D454D] hover:border-[#9ABFD4] hover:bg-[#EEF3F7] hover:text-[#1F2933]"
         )}
       >
-        <group.icon className="w-4 h-4 flex-shrink-0" />
+        <group.icon className={clsx("h-4 w-4 flex-shrink-0", isGroupActive ? "text-[#287EAD]" : "text-[#6E767D] group-hover:text-[#287EAD]")} />
         <span className="flex-1 text-left">{group.label}</span>
         {open
-          ? <ChevronDown className="w-3.5 h-3.5 flex-shrink-0 opacity-60" />
-          : <ChevronRight className="w-3.5 h-3.5 flex-shrink-0 opacity-60" />}
+          ? <ChevronDown className="h-3.5 w-3.5 flex-shrink-0 text-[#6E767D]" />
+          : <ChevronRight className="h-3.5 w-3.5 flex-shrink-0 text-[#6E767D]" />}
       </button>
 
       {open && (
-        <div className="mt-0.5 ml-4 pl-3 border-l-2 border-white/10 space-y-0.5">
+        <div className="ml-5 border-l border-[#CDD3D8] py-1">
           {visibleChildren.map(({ to, icon: Icon, label, exact }) => {
             const badgeValue = to === "/workflow" ? taskCount : undefined;
             const target = navTarget(to);
@@ -174,17 +174,17 @@ function SidebarGroup({
                 onFocus={() => onWarmRoute?.(to)}
                 className={() =>
                   clsx(
-                    "flex items-center gap-2.5 px-3 py-1.5 rounded-lg text-sm transition-all duration-200",
+                    "group flex items-center gap-2.5 border-l-2 px-3 py-1.5 text-sm transition-colors",
                     isChildActive
-                      ? "bg-sidebar-primary text-sidebar-primary-foreground shadow-sm"
-                      : "text-sidebar-foreground hover:bg-sidebar-accent/50"
+                      ? "border-[#287EAD] bg-white text-[#1F2933]"
+                      : "border-transparent text-[#4B5560] hover:border-[#A7CDE3] hover:bg-[#F5F7F8] hover:text-[#1F2933]"
                   )
                 }
               >
-                <Icon className="w-3.5 h-3.5 flex-shrink-0" />
+                <Icon className={clsx("h-3.5 w-3.5 flex-shrink-0", isChildActive ? "text-[#287EAD]" : "text-[#7C8790] group-hover:text-[#287EAD]")} />
                 <span className="flex-1">{label}</span>
                 {badgeValue ? (
-                  <span className="ml-auto inline-flex items-center justify-center rounded-full bg-sidebar-ring px-2 py-0.5 text-[10px] font-bold text-white shadow-sm">
+                  <span className="ml-auto inline-flex min-w-[1.25rem] items-center justify-center bg-[#287EAD] px-1.5 py-0.5 text-[10px] font-bold text-white">
                     {badgeValue}
                   </span>
                 ) : null}
@@ -203,6 +203,17 @@ function ProfileMenu() {
   const { user, logout } = useAuthStore();
   const navigate = useNavigate();
   const [open, setOpen] = useState(false);
+
+  useEffect(() => {
+    if (!open) return;
+    const handleKeyDown = (event: KeyboardEvent) => {
+      if (event.key === "Escape" || event.key === "Esc") {
+        setOpen(false);
+      }
+    };
+    window.addEventListener("keydown", handleKeyDown);
+    return () => window.removeEventListener("keydown", handleKeyDown);
+  }, [open]);
 
   return (
     <div className="relative">
@@ -254,13 +265,50 @@ function NotificationsTray({
   tasks: unknown[];
 }) {
   const navigate = useNavigate();
+  const queryClient = useQueryClient();
   const [open, setOpen] = useState(false);
+  const markReadMutation = useMutation({
+    mutationFn: (id: string) => notificationsAPI.markRead(id),
+    onMutate: async (id: string) => {
+      await queryClient.cancelQueries({ queryKey: ["notifications"] });
+      const previousNotifications = queryClient.getQueryData<{ id: string; type: string; message: string; link?: string; is_read: boolean; created_at: string }[]>(["notifications"]);
+      if (previousNotifications) {
+        queryClient.setQueryData(["notifications"], previousNotifications.map((notification) =>
+          notification.id === id ? { ...notification, is_read: true } : notification,
+        ));
+      }
+      return { previousNotifications };
+    },
+    onError: (_err, _id, context) => {
+      if (context?.previousNotifications) {
+        queryClient.setQueryData(["notifications"], context.previousNotifications);
+      }
+    },
+    onSettled: () => {
+      queryClient.invalidateQueries({ queryKey: ["notifications"] });
+      queryClient.invalidateQueries({ queryKey: ["notifications", "unread-count"] });
+    },
+  });
+  useEffect(() => {
+    if (!open) return;
+    const handleKeyDown = (event: KeyboardEvent) => {
+      if (event.key === "Escape" || event.key === "Esc") {
+        setOpen(false);
+      }
+    };
+    window.addEventListener("keydown", handleKeyDown);
+    return () => window.removeEventListener("keydown", handleKeyDown);
+  }, [open]);
   const noticeNotifications = (notifications ?? [])
     .filter((notification) => !TASK_NOTIFICATION_TYPES.has(notification.type));
   const taskAlertNotifications = (notifications ?? [])
     .filter((notification) => TASK_NOTIFICATION_TYPES.has(notification.type));
-  const visibleNotifications = noticeNotifications.slice(0, 5);
-  const visibleTaskAlerts = taskAlertNotifications.slice(0, 3);
+  const visibleNotifications = noticeNotifications
+    .filter((notification) => !notification.is_read)
+    .slice(0, 5);
+  const visibleTaskAlerts = taskAlertNotifications
+    .filter((notification) => !notification.is_read)
+    .slice(0, 3);
   const noticeUnreadCount = noticeNotifications.filter((notification) => !notification.is_read).length;
   const taskAlertUnreadCount = taskAlertNotifications.filter((notification) => !notification.is_read).length;
   const visibleTasks = tasks.slice(0, 5) as {
@@ -273,8 +321,22 @@ function NotificationsTray({
   }[];
   const attentionCount = noticeUnreadCount + taskAlertUnreadCount + tasks.length;
 
-  const openNotification = (notification: { link?: string }) => {
+  useEffect(() => {
+    if (!open) return;
+    const handleKeyDown = (event: KeyboardEvent) => {
+      if (event.key === "Escape" || event.key === "Esc") {
+        setOpen(false);
+      }
+    };
+    window.addEventListener("keydown", handleKeyDown);
+    return () => window.removeEventListener("keydown", handleKeyDown);
+  }, [open]);
+
+  const openNotification = (notification: { id: string; link?: string; is_read: boolean }) => {
     setOpen(false);
+    if (!notification.is_read) {
+      markReadMutation.mutate(notification.id);
+    }
     navigate(notification.link || "/notifications");
   };
 
@@ -425,7 +487,7 @@ function ContentFallback() {
   }, []);
   if (!visible) return null;
   return (
-    <div className="flex min-h-[18rem] items-center justify-center rounded-xl border border-border bg-card">
+    <div className="flex min-h-[18rem] items-center justify-center border border-border bg-card">
       <div className="flex items-center gap-2 text-sm text-muted-foreground">
         <Loader2 className="h-4 w-4 animate-spin" />
         <span>Loading page...</span>
@@ -439,16 +501,16 @@ function SidebarProfile() {
   const initials = `${user?.first_name?.[0] ?? ""}${user?.last_name?.[0] ?? ""}` || "U";
 
   return (
-    <div className="border-t border-sidebar-border/70 bg-black/10 p-3">
-      <div className="flex items-center gap-3 rounded-lg px-2 py-2">
-        <div className="flex h-9 w-9 shrink-0 items-center justify-center rounded-full bg-white/12 text-xs font-bold text-white ring-1 ring-white/15">
+    <div className="border-t border-[#C8CDD2] bg-[#F7F8F9] p-3">
+      <div className="flex items-center gap-3 border border-[#D7DCE0] bg-white px-2 py-2">
+        <div className="flex h-9 w-9 shrink-0 items-center justify-center bg-[#287EAD] text-xs font-bold text-white">
           {initials}
         </div>
         <div className="min-w-0">
-          <p className="truncate text-sm font-semibold text-white">
+          <p className="truncate text-sm font-semibold text-[#1F2933]">
             {user?.first_name} {user?.last_name}
           </p>
-          <p className="truncate text-[11px] capitalize text-sidebar-foreground/70">
+          <p className="truncate text-[11px] capitalize text-[#5E6870]">
             {user?.job_description || "Staff"}
           </p>
         </div>
@@ -525,18 +587,19 @@ export default function Layout() {
 
       {/* ── Sidebar ────────────────────────────────────────────────────── */}
       <aside
-        className="w-64 flex-shrink-0 text-sidebar-foreground flex flex-col shadow-2xl"
-        style={{ background: "var(--gradient-sidebar)" }}
+        className="flex w-[270px] flex-shrink-0 flex-col border-r border-[#C8CDD2] bg-[#F2F3F4] text-[#1F2933]"
       >
         {/* Logo */}
-        <div className="h-16 flex items-center px-4 border-b border-sidebar-border/60 bg-black/10">
-          <FlaxemLogo variant="light" />
+        <div className="flex h-[69px] items-center border-b border-[#206D99] bg-[#287EAD] px-4">
+          <div className="flex items-center gap-3">
+            <FlaxemLogo variant="light" />
+          </div>
         </div>
 
         {/* Nav — scrollable, two sections split by a divider */}
         <nav className="flex-1 overflow-y-auto">
           {/* ── Primary nav ─────────────────────────────────────────────── */}
-          <div className="px-3 py-4 space-y-0.5">
+          <div className="space-y-0.5 px-2 py-3">
             {mainNav.map((entry) => {
               if (isGroup(entry)) {
                 if (entry.allowedRoles && !hasAdminAccess) return null;
@@ -562,27 +625,31 @@ export default function Layout() {
                   onFocus={() => warmRoute(to)}
                   className={({ isActive }) =>
                     clsx(
-                      "flex items-center gap-3 px-3 py-2 rounded-lg text-sm font-medium transition-all duration-200",
+                      "group flex items-center gap-3 border-l-2 px-3 py-2 text-sm font-semibold transition-colors",
                       isActive
-                        ? "bg-sidebar-primary text-sidebar-primary-foreground shadow-md ring-1 ring-white/10"
-                        : "text-sidebar-foreground hover:bg-sidebar-accent/50"
+                        ? "border-[#287EAD] bg-white text-[#1F2933]"
+                        : "border-transparent text-[#3D454D] hover:border-[#9ABFD4] hover:bg-[#EEF3F7] hover:text-[#1F2933]"
                     )
                   }
                 >
-                  <Icon className="w-4 h-4 flex-shrink-0" />
-                  <span className="flex-1">{label}</span>
-                  {badgeValue ? (
-                    <span className="inline-flex items-center justify-center rounded-full bg-sidebar-ring px-2 py-0.5 text-[10px] font-bold text-white shadow-sm">
-                      {badgeValue}
-                    </span>
-                  ) : null}
+                  {({ isActive }) => (
+                    <>
+                      <Icon className={clsx("h-4 w-4 flex-shrink-0", isActive ? "text-[#287EAD]" : "text-[#6E767D] group-hover:text-[#287EAD]")} />
+                      <span className="flex-1">{label}</span>
+                      {badgeValue ? (
+                        <span className="inline-flex min-w-[1.25rem] items-center justify-center bg-[#287EAD] px-1.5 py-0.5 text-[10px] font-bold text-white">
+                          {badgeValue}
+                        </span>
+                      ) : null}
+                    </>
+                  )}
                 </NavLink>
               );
             })}
           </div>
 
           {/* ── Folder tree section ─────────────────────────────────────── */}
-          <div className="border-t border-sidebar-border/40 pb-2">
+          <div className="border-t border-[#C8CDD2] pb-2">
             {/*
               FolderTree manages its own "My Folders" section header + the
               Favourites system folder.  Loaded lazily after idle so it doesn't
@@ -601,9 +668,9 @@ export default function Layout() {
 
           {/* ── Administration section ──────────────────────────────────── */}
           {visibleAdmin.length > 0 && (
-            <div className="border-t border-sidebar-border/40 px-3 py-4 space-y-0.5">
-              <div className="pt-0 pb-1 px-0">
-                <p className="text-[10px] font-semibold uppercase tracking-widest text-sidebar-foreground/60">
+            <div className="space-y-0.5 border-t border-[#C8CDD2] px-2 py-3">
+              <div className="px-3 pb-1 pt-0">
+                <p className="text-[10px] font-bold uppercase tracking-widest text-[#6E767D]">
                   Administration
                 </p>
               </div>
@@ -615,15 +682,19 @@ export default function Layout() {
                   onFocus={() => warmRoute(to)}
                   className={({ isActive }) =>
                     clsx(
-                      "flex items-center gap-3 px-3 py-2 rounded-lg text-sm font-medium transition-colors",
+                      "group flex items-center gap-3 border-l-2 px-3 py-2 text-sm font-semibold transition-colors",
                       isActive
-                        ? "bg-sidebar-primary text-sidebar-primary-foreground shadow-md"
-                        : "text-sidebar-foreground hover:bg-sidebar-accent/50"
+                        ? "border-[#287EAD] bg-white text-[#1F2933]"
+                        : "border-transparent text-[#3D454D] hover:border-[#9ABFD4] hover:bg-[#EEF3F7] hover:text-[#1F2933]"
                     )
                   }
                 >
-                  <Icon className="w-4 h-4 flex-shrink-0" />
-                  {label}
+                  {({ isActive }) => (
+                    <>
+                      <Icon className={clsx("h-4 w-4 flex-shrink-0", isActive ? "text-[#287EAD]" : "text-[#6E767D] group-hover:text-[#287EAD]")} />
+                      <span>{label}</span>
+                    </>
+                  )}
                 </NavLink>
               ))}
             </div>

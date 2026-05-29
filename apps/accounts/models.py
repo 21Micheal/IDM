@@ -16,6 +16,7 @@ from django.db.models import Q
 from datetime import timedelta
 import uuid
 import random
+import os
 
 
 # ── Choices ───────────────────────────────────────────────────────────────────
@@ -191,6 +192,38 @@ class User(AbstractBaseUser, PermissionsMixin):
         return self.get_group_permissions_for_doctype(document_type_id)
 
 
+def signature_upload_path(instance, filename):
+    ext = os.path.splitext(filename or "")[1].lower()
+    if ext not in {".png", ".jpg", ".jpeg"}:
+        ext = ".png"
+    return os.path.join("signatures", str(instance.user_id), f"{uuid.uuid4()}{ext}")
+
+
+class UserSignature(models.Model):
+    class Method(models.TextChoices):
+        DRAW = "draw", "Drawn"
+        TYPE = "type", "Typed"
+        UPLOAD = "upload", "Uploaded"
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    user = models.ForeignKey(User, on_delete=models.CASCADE, related_name="signatures")
+    image = models.ImageField(upload_to=signature_upload_path)
+    method = models.CharField(max_length=20, choices=Method.choices)
+    typed_name = models.CharField(max_length=160, blank=True)
+    is_active = models.BooleanField(default=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ["-created_at"]
+        indexes = [
+            models.Index(fields=["user", "is_active"]),
+        ]
+
+    def __str__(self):
+        return f"Signature for {self.user.email} ({self.method})"
+
+
 class UserDelegation(models.Model):
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
     delegator = models.ForeignKey(
@@ -203,6 +236,14 @@ class UserDelegation(models.Model):
     ends_at = models.DateTimeField()
     is_active = models.BooleanField(default=True)
     comment = models.TextField(blank=True, default="")
+    document_type = models.ForeignKey(
+        "documents.DocumentType",
+        null=True,
+        blank=True,
+        on_delete=models.SET_NULL,
+        related_name="delegations",
+        help_text="If null, delegates all tasks. If set, delegates only tasks for this document type."
+    )
     created_by = models.ForeignKey(
         User, null=True, blank=True, on_delete=models.SET_NULL, related_name="created_delegations"
     )
@@ -461,3 +502,55 @@ class UserGroupMembership(models.Model):
     @property
     def is_active(self):
         return self.expires_at is None or self.expires_at > timezone.now()
+
+
+class UserPreference(models.Model):
+    """
+    User display and notification preferences.
+    """
+    class DateFormat(models.TextChoices):
+        DD_MM_YYYY = "DD/MM/YYYY", "DD/MM/YYYY"
+        MM_DD_YYYY = "MM/DD/YYYY", "MM/DD/YYYY"
+        YYYY_MM_DD = "YYYY-MM-DD", "YYYY-MM-DD"
+
+    class TimeFormat(models.TextChoices):
+        HOUR_12 = "12-hour", "12-hour"
+        HOUR_24 = "24-hour", "24-hour"
+
+    class DefaultPage(models.TextChoices):
+        DASHBOARD = "dashboard", "Dashboard"
+        MY_TASKS = "my_tasks", "My Tasks"
+        ALL_DOCUMENTS = "all_documents", "All Documents"
+
+    user = models.OneToOneField(
+        User, on_delete=models.CASCADE, related_name="preferences", primary_key=True
+    )
+    date_format = models.CharField(
+        max_length=20,
+        choices=DateFormat.choices,
+        default=DateFormat.DD_MM_YYYY,
+    )
+    time_format = models.CharField(
+        max_length=20,
+        choices=TimeFormat.choices,
+        default=TimeFormat.HOUR_12,
+    )
+    default_page = models.CharField(
+        max_length=50,
+        choices=DefaultPage.choices,
+        default=DefaultPage.DASHBOARD,
+    )
+    # Email notification preferences
+    notify_document_approvals = models.BooleanField(default=True)
+    notify_document_rejected = models.BooleanField(default=True)
+    notify_task_assignments = models.BooleanField(default=True)
+    notify_system_announcements = models.BooleanField(default=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        verbose_name = "User Preference"
+        verbose_name_plural = "User Preferences"
+
+    def __str__(self):
+        return f"Preferences for {self.user.email}"

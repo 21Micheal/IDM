@@ -12,6 +12,7 @@ import {
   User, UsersRound, Users,
   Edit3, Play, Flag,
   ZoomIn, ZoomOut, Maximize2, Move,
+  FileSignature,
 } from "lucide-react";
 import { toast } from "@/components/ui/vault-toast";
 import clsx from "clsx";
@@ -34,6 +35,7 @@ interface WorkflowStep {
   allow_approve: boolean;
   allow_reject: boolean;
   allow_return: boolean;
+  requires_signature: boolean;
   instructions: string;
 }
 
@@ -147,6 +149,7 @@ function normalizeStep(step: WorkflowStep): WorkflowStep {
     assignee_type: normalizeAssigneeType(step.assignee_type),
     assignee_group: isUuidLike(step.assignee_group) ? step.assignee_group : null,
     assignee_user: isUuidLike(step.assignee_user) ? step.assignee_user : null,
+    requires_signature: Boolean(step.requires_signature),
   };
 }
 
@@ -199,7 +202,7 @@ function blankStep(): WorkflowStep {
   return {
     order: 0, name: "", status_label: "Pending Approval",
     assignee_type: "group_any", assignee_group: null, assignee_user: null,
-    sla_hours: 48, allow_resubmit: true, allow_approve: true, allow_reject: true, allow_return: true, instructions: "",
+    sla_hours: 48, allow_resubmit: true, allow_approve: true, allow_reject: true, allow_return: true, requires_signature: false, instructions: "",
   };
 }
 
@@ -468,7 +471,7 @@ function StepEditPanel({
           <div className="space-y-2">
             <button
               type="button"
-              onClick={() => onChange({ allow_approve: !step.allow_approve })}
+              onClick={() => onChange({ allow_approve: !step.allow_approve, requires_signature: step.allow_approve ? false : step.requires_signature })}
               className={clsx(
                 "w-full flex items-center justify-between px-4 py-2.5 rounded-xl border transition-all",
                 step.allow_approve
@@ -479,6 +482,25 @@ function StepEditPanel({
               <span className="text-xs font-semibold">Allow Approval</span>
               <div className={clsx("w-8 h-4 rounded-full relative transition-colors", step.allow_approve ? "bg-teal" : "bg-muted-foreground/30")}>
                 <div className={clsx("absolute top-0.5 w-3 h-3 rounded-full bg-white transition-transform", step.allow_approve ? "translate-x-4" : "translate-x-0.5")} />
+              </div>
+            </button>
+
+            <button
+              type="button"
+              onClick={() => onChange({ requires_signature: !step.requires_signature, allow_approve: true })}
+              className={clsx(
+                "w-full flex items-center justify-between px-4 py-2.5 rounded-xl border transition-all",
+                step.requires_signature
+                  ? "bg-primary/5 border-primary/30 text-primary shadow-sm"
+                  : "bg-muted/30 border-border text-muted-foreground"
+              )}
+            >
+              <span className="text-xs font-semibold flex items-center gap-2">
+                <FileSignature className="w-4 h-4" />
+                Require E-Signature
+              </span>
+              <div className={clsx("w-8 h-4 rounded-full relative transition-colors", step.requires_signature ? "bg-primary" : "bg-muted-foreground/30")}>
+                <div className={clsx("absolute top-0.5 w-3 h-3 rounded-full bg-white transition-transform", step.requires_signature ? "translate-x-4" : "translate-x-0.5")} />
               </div>
             </button>
 
@@ -1346,6 +1368,9 @@ function TemplateEditor({
       if (!s.allow_approve && !s.allow_reject && !s.allow_return) {
         toast.error(`"${s.name}" must have at least one approver action enabled`); return;
       }
+      if (s.requires_signature && !s.allow_approve) {
+        toast.error(`"${s.name}" requires approval before it can require a signature`); return;
+      }
     }
 
     saveMutation.mutate({
@@ -1802,10 +1827,10 @@ export default function WorkflowBuilderPage() {
   const editorDocType = selectedDocType || creatingForDocType || null;
 
   return (
-    <div className="flex gap-6 h-[calc(100vh-7rem)] bg-muted/40 p-6">
+    <div className="admin-shell flex h-[calc(100vh-3.5rem)] gap-5 overflow-hidden">
       {/* Left Sidebar */}
-      <aside className="w-80 flex-shrink-0 flex flex-col bg-card rounded-2xl border border-border overflow-hidden">
-        <div className="p-4 border-b border-border">
+      <aside className="flex w-80 flex-shrink-0 flex-col overflow-hidden border border-[#C8CDD2] bg-white">
+        <div className="border-b border-[#C8CDD2] bg-[#F7F8F9] p-4">
           <div className="flex items-center justify-between mb-4">
             <h1 className="text-lg font-bold text-foreground">
               {sidebarTab === "doctypes" ? "Document Types" : "Templates"}
@@ -1949,7 +1974,7 @@ export default function WorkflowBuilderPage() {
       </aside>
 
       {/* Right Editor */}
-      <main className="flex-1 bg-card rounded-2xl border border-border p-6 overflow-hidden flex flex-col">
+      <main className="flex flex-1 flex-col overflow-hidden border border-[#C8CDD2] bg-white p-5">
         {!showEditor && (
           <div className="flex-1 flex flex-col items-center justify-center text-center">
             <div className="w-16 h-16 rounded-2xl bg-muted flex items-center justify-center mb-4">

@@ -4,7 +4,16 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import {
   ScanLine, Loader2, ArrowRight, Info, CheckCircle, AlertCircle,
 } from "lucide-react";
+import { documentsAPI } from "@/services/api";
 import { toast } from "@/components/ui/vault-toast";
+import {
+  Dialog,
+  DialogContent,
+  DialogHeader,
+  DialogTitle,
+  DialogDescription,
+  DialogFooter,
+} from "@/components/ui/dialog";
 import {
   bulkUploadAPI,
   documentTypesAPI,
@@ -16,7 +25,7 @@ import { deriveDocumentTypeConfig } from "@/lib/documentTypeConfig";
 import BulkUploadDropzone from "@/components/documents/bulk/BulkUploadDropzone";
 import BulkProcessingPanel from "@/components/documents/bulk/BulkProcessingPanel";
 import BulkReviewPanel from "@/components/documents/bulk/BulkReviewPanel";
-import type { BulkDocReviewState, BulkUploadBatch } from "@/components/documents/bulk/bulkUploadTypes";
+import type { BulkDocReviewState, BulkLocalPreview, BulkUploadBatch } from "@/components/documents/bulk/bulkUploadTypes";
 import {
   buildReviewStateFromBatchItem,
   reviewStateToSubmitItem,
@@ -25,6 +34,14 @@ import {
 type Stage = "select" | "processing" | "review" | "complete";
 
 const POLL_MS = 3000;
+
+async function calculateFileSha256(file: File): Promise<string> {
+  const buffer = await file.arrayBuffer();
+  const digest = await crypto.subtle.digest("SHA-256", buffer);
+  return Array.from(new Uint8Array(digest))
+    .map((b) => b.toString(16).padStart(2, "0"))
+    .join("");
+}
 
 export default function BulkScanPage() {
   const navigate = useNavigate();
@@ -37,6 +54,11 @@ export default function BulkScanPage() {
   const [uploadProgress, setUploadProgress] = useState(0);
   const [reviewStates, setReviewStates] = useState<BulkDocReviewState[]>([]);
   const [completedBatch, setCompletedBatch] = useState<BulkUploadBatch | null>(null);
+  const [localPreviews, setLocalPreviews] = useState<Record<string, BulkLocalPreview>>({});
+  const [duplicateDialogOpen, setDuplicateDialogOpen] = useState(false);
+  const [duplicateFiles, setDuplicateFiles] = useState<File[]>([]);
+  const [pendingUploadFiles, setPendingUploadFiles] = useState<File[] | null>(null);
+  const [isCheckingDuplicates, setIsCheckingDuplicates] = useState(false);
 
   const { data: docTypes = [] } = useQuery<unknown, Error, DocumentType[]>({
     queryKey: ["document-types"],
@@ -50,6 +72,28 @@ export default function BulkScanPage() {
     [docTypes],
   );
   const selectedType = visibleDocTypes.find((t) => t.id === selectedTypeId);
+
+  useEffect(() => {
+    const next: Record<string, BulkLocalPreview> = {};
+    const urls: string[] = [];
+
+    for (const file of files) {
+      const kind = file.type === "application/pdf" ? "pdf" : file.type.startsWith("image/") ? "image" : "other";
+      const url = kind === "other" ? null : URL.createObjectURL(file);
+      if (url) urls.push(url);
+      next[file.name] = {
+        fileName: file.name,
+        url,
+        kind,
+        size: file.size,
+      };
+    }
+
+    setLocalPreviews(next);
+    return () => {
+      urls.forEach((url) => URL.revokeObjectURL(url));
+    };
+  }, [files]);
 
   const { data: polledBatch } = useQuery({
     queryKey: ["bulk-upload", batchId],
@@ -81,14 +125,15 @@ export default function BulkScanPage() {
   }, [polledBatch]);
 
   const createMutation = useMutation({
-    mutationFn: async () => {
-      if (!selectedTypeId || files.length === 0) {
+    mutationFn: async (uploadFiles?: File[]) => {
+      const effectiveFiles = uploadFiles ?? files;
+      if (!selectedTypeId || effectiveFiles.length === 0) {
         throw new Error("Missing type or files");
       }
       const fd = new FormData();
       fd.append("document_type_id", selectedTypeId);
       fd.append("is_scanned", "true");
-      files.forEach((file) => fd.append("files", file));
+      effectiveFiles.forEach((file) => fd.append("files", file));
       const { data } = await bulkUploadAPI.create(fd, {
         onUploadProgress: (e) => {
           if (e.total) setUploadProgress(Math.round((e.loaded * 100) / e.total));
@@ -138,7 +183,12 @@ export default function BulkScanPage() {
     },
   });
 
-  const onStartUpload = useCallback(() => {
+  const uploadFiles = useCallback((uploadList: File[]) => {
+    setStage("processing");
+    createMutation.mutate(uploadList);
+  }, [createMutation]);
+
+  const onStartUpload = useCallback(async () => {
     if (!selectedTypeId) {
       toast.error("Please select a document type");
       return;
@@ -147,29 +197,129 @@ export default function BulkScanPage() {
       toast.error("Please add at least one file");
       return;
     }
-    setStage("processing");
-    createMutation.mutate();
-  }, [selectedTypeId, files, createMutation]);
+
+    setIsCheckingDuplicates(true);
+    try {
+      const checksums = await Promise.all(files.map((f) => calculateFileSha256(f)));
+      const checks = await Promise.all(checksums.map((cs) =>
+        documentsAPI.duplicateCheck(cs).then((r) => r.data).catch(() => null),
+      ));
+
+      const existingFiles = files.filter((_, i) => checks[i] && checks[i].exists);
+      const remainingFiles = files.filter((_, i) => !(checks[i] && checks[i].exists));
+
+      if (existingFiles.length > 0) {
+        setDuplicateFiles(existingFiles);
+        setPendingUploadFiles(remainingFiles);
+        setDuplicateDialogOpen(true);
+        return;
+      }
+    } catch {
+      // If the advisory duplicate check fails, fall back to normal upload flow.
+    } finally {
+      setIsCheckingDuplicates(false);
+    }
+
+    uploadFiles(files);
+  }, [selectedTypeId, files, uploadFiles]);
+
+  const confirmSkipDuplicates = useCallback(() => {
+    if (!pendingUploadFiles || pendingUploadFiles.length === 0) {
+      toast.error("No new files to upload after skipping duplicates.");
+      setDuplicateDialogOpen(false);
+      return;
+    }
+
+    setFiles(pendingUploadFiles);
+    uploadFiles(pendingUploadFiles);
+    setDuplicateDialogOpen(false);
+  }, [pendingUploadFiles, uploadFiles]);
+
+  const cancelDuplicateUpload = useCallback(() => {
+    toast.info("Upload cancelled.");
+    setDuplicateDialogOpen(false);
+  }, []);
 
   const activeBatch = polledBatch ?? (createMutation.data as BulkUploadBatch | undefined);
 
   return (
-    <div className="max-w-5xl mx-auto py-8">
-      <div className="mb-8">
-        <h1 className="text-3xl font-bold text-foreground tracking-tight flex items-center gap-2">
-          <ScanLine className="w-8 h-8 text-teal" />
-          Bulk Scan
-        </h1>
-        <p className="text-muted-foreground mt-1">
-          Upload many documents of the same type. OCR runs on each file; you review metadata per document before submitting.
-        </p>
+    <div className="-m-6 min-h-[calc(100vh-3.5rem)] bg-[#EDEDED] text-[#1F2933]">
+      <div className="flex h-[69px] items-center justify-between gap-4 bg-[#287EAD] px-5 pr-8 text-white">
+        <div className="min-w-0">
+          <h1 className="flex items-center gap-2 text-lg font-semibold tracking-tight">
+            <ScanLine className="h-5 w-5" />
+            Bulk Scan
+          </h1>
+          <p className="mt-0.5 text-xs text-white/75">
+            Upload many documents of the same type. OCR runs on each file; you review metadata per document before submitting.
+          </p>
+        </div>
+        <div className="hidden items-center gap-2 text-xs text-white/80 md:flex">
+          <span className="border border-white/30 px-2 py-1">{selectedType?.name || "No type selected"}</span>
+          <span className="border border-white/30 px-2 py-1">{files.length} file{files.length === 1 ? "" : "s"}</span>
+        </div>
       </div>
 
+      <Dialog open={duplicateDialogOpen} onOpenChange={setDuplicateDialogOpen}>
+        <DialogContent>
+          <DialogHeader>
+            <DialogTitle>Duplicate files detected</DialogTitle>
+            <DialogDescription>
+              Some files already exist in the system. If you continue, duplicate files will be skipped and only new files will be uploaded.
+            </DialogDescription>
+          </DialogHeader>
+
+          <div className="space-y-3">
+            <p className="text-sm text-[#475569]">
+              Found {duplicateFiles.length} duplicate file{duplicateFiles.length === 1 ? "" : "s"} out of {duplicateFiles.length + (pendingUploadFiles?.length ?? 0)} selected.
+              {pendingUploadFiles && pendingUploadFiles.length > 0 ? " Duplicate files will be skipped." : ""}
+            </p>
+            <div className="rounded-xl border border-[#C8CDD2] bg-[#F7F8F9] p-4 text-sm text-[#1F2933] max-h-48 overflow-y-auto">
+              <p className="mb-2 font-semibold">Files that already exist:</p>
+              <ul className="list-disc space-y-1 pl-5">
+                {duplicateFiles.slice(0, 10).map((file) => (
+                  <li key={`${file.name}-${file.size}`}>{file.name}</li>
+                ))}
+                {duplicateFiles.length > 10 && (
+                  <li className="text-muted-foreground">
+                    and {duplicateFiles.length - 10} more duplicate file{duplicateFiles.length - 10 === 1 ? "" : "s"}
+                  </li>
+                )}
+              </ul>
+            </div>
+            <p className="text-sm text-[#475569]">
+              {pendingUploadFiles && pendingUploadFiles.length === 0
+                ? "All selected files already exist, so no new files can be uploaded."
+                : `Skipping ${duplicateFiles.length} duplicate file${duplicateFiles.length === 1 ? "" : "s"}.`}
+            </p>
+          </div>
+
+          <DialogFooter className="mt-4 gap-2">
+            <button
+              type="button"
+              onClick={cancelDuplicateUpload}
+              className="btn-secondary"
+            >
+              Cancel
+            </button>
+            <button
+              type="button"
+              onClick={confirmSkipDuplicates}
+              className="btn-primary"
+            >
+              {pendingUploadFiles && pendingUploadFiles.length === 0
+                ? "Close"
+                : "Skip duplicates and continue"}
+            </button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
       {stage === "select" && (
-        <div className="grid grid-cols-1 lg:grid-cols-12 gap-8">
-          <div className="lg:col-span-5 space-y-6">
-            <div className="bg-card rounded-2xl border border-border p-6" style={{ boxShadow: "var(--shadow-card)" }}>
-              <h2 className="font-semibold text-foreground mb-4">1. Document type</h2>
+        <div className="grid grid-cols-1 gap-5 p-5 pr-8 lg:grid-cols-12">
+          <div className="space-y-5 lg:col-span-4">
+            <div className="border border-[#C8CDD2] bg-white p-5">
+              <h2 className="mb-4 font-semibold text-[#1F2933]">1. Document type</h2>
               <select
                 value={selectedTypeId}
                 onChange={(e) => setSelectedTypeId(e.target.value)}
@@ -185,7 +335,7 @@ export default function BulkScanPage() {
               )}
             </div>
 
-            <div className="bg-card rounded-2xl border border-teal/30 p-4 flex items-start gap-2 text-xs text-teal bg-teal/10">
+            <div className="flex items-start gap-2 border border-[#A7CDE3] bg-[#EEF6FB] p-4 text-xs text-[#287EAD]">
               <Info className="w-4 h-4 flex-shrink-0 mt-0.5" />
               <span>
                 Each file gets its own metadata from OCR. You review and approve documents individually before the batch is submitted to workflow.
@@ -193,9 +343,9 @@ export default function BulkScanPage() {
             </div>
           </div>
 
-          <div className="lg:col-span-7 space-y-6">
-            <div className="bg-card rounded-2xl border border-border p-6" style={{ boxShadow: "var(--shadow-card)" }}>
-              <h2 className="font-semibold text-foreground mb-4">2. Files</h2>
+          <div className="space-y-5 lg:col-span-8">
+            <div className="border border-[#C8CDD2] bg-white p-5">
+              <h2 className="mb-4 font-semibold text-[#1F2933]">2. Files</h2>
               <BulkUploadDropzone
                 files={files}
                 onChange={setFiles}
@@ -207,12 +357,14 @@ export default function BulkScanPage() {
               <button
                 type="button"
                 onClick={onStartUpload}
-                disabled={createMutation.isPending || !selectedTypeId || files.length === 0}
-                className="flex-1 flex items-center justify-center gap-2 py-3 rounded-xl font-semibold bg-teal text-teal-foreground hover:bg-teal/90 disabled:opacity-50"
-                style={{ boxShadow: "var(--shadow-elegant)" }}
+                disabled={createMutation.isPending || isCheckingDuplicates || !selectedTypeId || files.length === 0}
+                className="flex flex-1 items-center justify-center gap-2 bg-[#287EAD] py-3 font-semibold text-white hover:bg-[#206D99] disabled:opacity-50"
               >
-                {createMutation.isPending ? (
-                  <Loader2 className="w-5 h-5 animate-spin" />
+                {createMutation.isPending || isCheckingDuplicates ? (
+                  <>
+                    <Loader2 className="w-5 h-5 animate-spin" />
+                    {isCheckingDuplicates ? "Checking files…" : "Uploading…"}
+                  </>
                 ) : (
                   <>
                     <ScanLine className="w-4 h-4" />
@@ -224,7 +376,7 @@ export default function BulkScanPage() {
               <button
                 type="button"
                 onClick={() => navigate("/documents")}
-                className="px-6 py-3 rounded-xl font-semibold border border-border bg-card hover:bg-muted"
+                className="border border-[#C8CDD2] bg-white px-6 py-3 font-semibold hover:bg-[#EEF3F7]"
               >
                 Cancel
               </button>
@@ -234,26 +386,29 @@ export default function BulkScanPage() {
       )}
 
       {stage === "processing" && activeBatch && (
-        <BulkProcessingPanel batch={activeBatch} uploadProgress={uploadProgress} />
+        <div className="p-5 pr-8">
+          <BulkProcessingPanel batch={activeBatch} uploadProgress={uploadProgress} previews={localPreviews} />
+        </div>
       )}
 
       {stage === "review" && selectedType && reviewStates.length > 0 && (
-        <div className="bg-card rounded-2xl border border-border p-8" style={{ boxShadow: "var(--shadow-card)" }}>
+        <div className="p-5 pr-8">
           <BulkReviewPanel
             documentType={polledBatch?.document_type ?? selectedType}
             reviewStates={reviewStates}
             onChange={setReviewStates}
             onSubmit={() => reviewMutation.mutate()}
             isSubmitting={reviewMutation.isPending}
+            previews={localPreviews}
           />
         </div>
       )}
 
       {stage === "complete" && completedBatch && (
-        <div className="bg-card rounded-2xl border border-teal/30 p-10 text-center" style={{ boxShadow: "var(--shadow-card)" }}>
-          <CheckCircle className="w-14 h-14 text-teal mx-auto mb-4" />
-          <h2 className="text-2xl font-bold text-foreground mb-2">Batch complete</h2>
-          <p className="text-muted-foreground mb-6">
+        <div className="m-5 mr-8 border border-[#C8CDD2] bg-white p-10 text-center">
+          <CheckCircle className="mx-auto mb-4 h-14 w-14 text-[#287EAD]" />
+          <h2 className="mb-2 text-2xl font-bold text-[#1F2933]">Batch complete</h2>
+          <p className="mb-6 text-[#5E6870]">
             {completedBatch.approved_count} document{completedBatch.approved_count === 1 ? "" : "s"} submitted
             {completedBatch.rejected_count > 0 && (
               <> · {completedBatch.rejected_count} skipped</>
@@ -263,7 +418,7 @@ export default function BulkScanPage() {
             <button
               type="button"
               onClick={() => navigate("/documents")}
-              className="px-6 py-3 rounded-xl font-semibold bg-primary text-primary-foreground"
+              className="bg-[#287EAD] px-6 py-3 font-semibold text-white hover:bg-[#206D99]"
             >
               View documents
             </button>
@@ -273,10 +428,11 @@ export default function BulkScanPage() {
                 setStage("select");
                 setBatchId(null);
                 setFiles([]);
+                setLocalPreviews({});
                 setReviewStates([]);
                 setCompletedBatch(null);
               }}
-              className="px-6 py-3 rounded-xl font-semibold border border-border bg-card hover:bg-muted"
+              className="border border-[#C8CDD2] bg-white px-6 py-3 font-semibold hover:bg-[#EEF3F7]"
             >
               Scan another batch
             </button>
@@ -286,13 +442,13 @@ export default function BulkScanPage() {
 
       {stage === "processing" && !activeBatch && createMutation.isPending && (
         <div className="flex flex-col items-center py-16">
-          <Loader2 className="w-10 h-10 animate-spin text-teal mb-4" />
-          <p className="text-foreground font-medium">Starting batch…</p>
+          <Loader2 className="mb-4 h-10 w-10 animate-spin text-[#287EAD]" />
+          <p className="font-medium text-[#1F2933]">Starting batch...</p>
         </div>
       )}
 
       {stage === "review" && reviewStates.length === 0 && (
-        <div className="flex items-center gap-2 text-amber-700 bg-amber-50 border border-amber-200 rounded-xl p-4">
+        <div className="m-5 mr-8 flex items-center gap-2 border border-amber-200 bg-amber-50 p-4 text-amber-700">
           <AlertCircle className="w-5 h-5" />
           No documents available for review.
         </div>

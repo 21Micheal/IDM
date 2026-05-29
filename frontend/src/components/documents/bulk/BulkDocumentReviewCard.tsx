@@ -9,6 +9,8 @@ type Props = {
   state: BulkDocReviewState;
   documentType: DocumentType;
   onChange: (next: BulkDocReviewState) => void;
+  selected?: boolean;
+  onSelect?: () => void;
 };
 
 function FieldInput({
@@ -48,7 +50,7 @@ function metadataFieldsForType(documentType: DocumentType): MetadataField[] {
   return [...(documentType.metadata_fields ?? [])].sort((a, b) => a.order - b.order);
 }
 
-export default function BulkDocumentReviewCard({ state, documentType, onChange }: Props) {
+export default function BulkDocumentReviewCard({ state, documentType, onChange, selected = false, onSelect }: Props) {
   const fields = metadataFieldsForType(documentType);
   const setValue = (key: string, value: string) => {
     onChange({ ...state, values: { ...state.values, [key]: value } });
@@ -59,13 +61,16 @@ export default function BulkDocumentReviewCard({ state, documentType, onChange }
   return (
     <div
       className={clsx(
-        "rounded-xl border bg-card overflow-hidden transition-colors",
-        state.rejected ? "border-destructive/40 opacity-80" : "border-border",
+        "border bg-card overflow-hidden transition-colors",
+        state.rejected ? "border-destructive/40 opacity-80" : selected ? "border-[#287EAD]" : "border-border",
       )}
     >
       <button
         type="button"
-        onClick={() => onChange({ ...state, expanded: !state.expanded })}
+        onClick={() => {
+          onSelect?.();
+          onChange({ ...state, expanded: !state.expanded });
+        }}
         className="w-full flex items-center gap-3 px-4 py-3 text-left hover:bg-muted/40"
       >
         <ChevronRight

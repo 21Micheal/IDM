@@ -138,6 +138,83 @@ class Tag(models.Model):
         return self.name
 
 
+class DocTypeColor(models.Model):
+    """Persisted mapping of document type name -> hex colour for analytics UI.
+
+    A single row per `(doc_type)` is simple and avoids JSON migrations. Admins can
+    create/update these via the API.
+    """
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    doc_type = models.CharField(max_length=120, db_index=True)
+    color = models.CharField(max_length=32)
+    created_by = models.ForeignKey(settings.AUTH_USER_MODEL, null=True, on_delete=models.SET_NULL)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        unique_together = ("doc_type",)
+
+    def __str__(self):
+        return f"{self.doc_type} -> {self.color}"
+
+
+class DMSSettings(models.Model):
+    class WatermarkPosition(models.TextChoices):
+        DIAGONAL = "diagonal", "Diagonal"
+        CENTER = "center", "Center"
+        FOOTER = "footer", "Footer"
+
+    id = models.PositiveSmallIntegerField(primary_key=True, default=1, editable=False)
+    watermark_enabled = models.BooleanField(default=False)
+    watermark_text = models.CharField(max_length=120, default="CONFIDENTIAL", blank=True)
+    watermark_opacity = models.PositiveSmallIntegerField(default=15)
+    watermark_position = models.CharField(
+        max_length=20,
+        choices=WatermarkPosition.choices,
+        default=WatermarkPosition.DIAGONAL,
+    )
+    watermark_apply_to_previews = models.BooleanField(default=True)
+
+    allow_duplicate_uploads = models.BooleanField(default=False)
+    signed_file_urls_enabled = models.BooleanField(
+        default=False,
+        help_text="Issue short-lived signed file URLs for browser contexts that cannot send Authorization headers.",
+    )
+
+    auto_archive_enabled = models.BooleanField(default=False)
+    auto_archive_after_days = models.PositiveIntegerField(default=365)
+
+    require_metadata_on_upload = models.BooleanField(default=True)
+
+    updated_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        null=True,
+        blank=True,
+        on_delete=models.SET_NULL,
+        related_name="dms_settings_updates",
+    )
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        verbose_name = "DMS settings"
+        verbose_name_plural = "DMS settings"
+
+    def save(self, *args, **kwargs):
+        self.id = 1
+        if self.watermark_opacity > 80:
+            self.watermark_opacity = 80
+        if self.auto_archive_after_days < 1:
+            self.auto_archive_after_days = 1
+        super().save(*args, **kwargs)
+
+    @classmethod
+    def load(cls) -> "DMSSettings":
+        obj, _ = cls.objects.get_or_create(pk=1)
+        return obj
+
+    def __str__(self):
+        return "DMS settings"
+
+
 def document_upload_path(instance, filename):
     from django.utils import timezone
     year = timezone.now().year
@@ -155,6 +232,7 @@ class DocumentStatus(models.TextChoices):
     DRAFT            = "draft",            "Draft"
     PENDING_REVIEW   = "pending_review",   "Pending Review"
     PENDING_APPROVAL = "pending_approval", "Pending Approval"
+    RETURNED         = "returned",        "Returned for Review"
     APPROVED         = "approved",         "Approved"
     REJECTED         = "rejected",         "Rejected"
     ARCHIVED         = "archived",         "Archived"

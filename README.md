@@ -5,7 +5,8 @@
 ```bash
 # 1. Clone and configure
 cp .env.example .env
-# Edit .env — at minimum change SECRET_KEY and passwords
+# Edit .env — at minimum change SECRET_KEY and passwords.
+# For server deployment, set MEDIA_ROOT to the production filesystem path and configure LDAP_SERVER_URI if Active Directory should be enabled.
 
 # 2. Start all services
 docker compose up --build

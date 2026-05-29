@@ -18,11 +18,15 @@ from django.utils import timezone
 from django.utils.http import content_disposition_header
 
 from apps.accounts.models import GroupAction, User
-from apps.documents.models import Document, DocumentShare, DocumentVersion
+from apps.documents.models import DMSSettings, Document, DocumentShare, DocumentVersion
 from apps.workflows.models import WorkflowTask
 
 SIGN_SALT = "idm.document-file"
 SIGN_MAX_AGE = 30 * 60  # 30 minutes
+
+
+def signed_file_urls_enabled() -> bool:
+    return DMSSettings.load().signed_file_urls_enabled
 
 
 def user_can_view_document(user: User, doc: Document) -> bool:
@@ -210,26 +214,29 @@ def build_absolute_document_file_url(
     use_preview: bool = False,
     disposition: str = "inline",
 ) -> str:
-    """Signed URL for GET .../documents/{id}/file/ (works in <img> without Bearer)."""
+    """URL for GET .../documents/{id}/file/.
+
+    When signed file URLs are disabled, callers receive the same endpoint
+    without a query signature and must send normal Authorization headers.
+    """
     from django.urls import reverse
     from urllib.parse import urlencode
 
     disp = disposition if disposition in ("inline", "attachment") else "inline"
-    payload = build_file_signature_payload(
-        user_id=str(request.user.id),
-        document_id=str(doc.id),
-        version_id=version_id or "",
-        use_preview=use_preview,
-        disposition=disp,
-    )
-    sig = sign_file_payload(payload)
-    q = urlencode(
-        {
-            "version_id": version_id or "",
-            "use_preview": "1" if use_preview else "0",
-            "disposition": disp,
-            "sig": sig,
-        }
-    )
+    params = {
+        "version_id": version_id or "",
+        "use_preview": "1" if use_preview else "0",
+        "disposition": disp,
+    }
+    if signed_file_urls_enabled():
+        payload = build_file_signature_payload(
+            user_id=str(request.user.id),
+            document_id=str(doc.id),
+            version_id=version_id or "",
+            use_preview=use_preview,
+            disposition=disp,
+        )
+        params["sig"] = sign_file_payload(payload)
+    q = urlencode(params)
     rel = reverse("document-file", kwargs={"pk": str(doc.id)})
     return request.build_absolute_uri(f"{rel}?{q}")
