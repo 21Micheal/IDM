@@ -16,6 +16,7 @@ from django.db.models import Q
 from datetime import timedelta
 import uuid
 import random
+import os
 
 
 # ── Choices ───────────────────────────────────────────────────────────────────
@@ -189,6 +190,38 @@ class User(AbstractBaseUser, PermissionsMixin):
         Both require an active, non-expired group membership.
         """
         return self.get_group_permissions_for_doctype(document_type_id)
+
+
+def signature_upload_path(instance, filename):
+    ext = os.path.splitext(filename or "")[1].lower()
+    if ext not in {".png", ".jpg", ".jpeg"}:
+        ext = ".png"
+    return os.path.join("signatures", str(instance.user_id), f"{uuid.uuid4()}{ext}")
+
+
+class UserSignature(models.Model):
+    class Method(models.TextChoices):
+        DRAW = "draw", "Drawn"
+        TYPE = "type", "Typed"
+        UPLOAD = "upload", "Uploaded"
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    user = models.ForeignKey(User, on_delete=models.CASCADE, related_name="signatures")
+    image = models.ImageField(upload_to=signature_upload_path)
+    method = models.CharField(max_length=20, choices=Method.choices)
+    typed_name = models.CharField(max_length=160, blank=True)
+    is_active = models.BooleanField(default=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ["-created_at"]
+        indexes = [
+            models.Index(fields=["user", "is_active"]),
+        ]
+
+    def __str__(self):
+        return f"Signature for {self.user.email} ({self.method})"
 
 
 class UserDelegation(models.Model):

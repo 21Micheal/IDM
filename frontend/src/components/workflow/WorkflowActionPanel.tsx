@@ -11,16 +11,26 @@
  *   ⏸ Hold         (requires comment + duration — auto-releases)
  *   ▶ Release hold (only shown when task is currently held)
  */
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { documentsAPI, workflowAPI } from "@/services/api";
+import { documentsAPI, profileAPI, workflowAPI } from "@/services/api";
 import {
   CheckCircle, XCircle, RotateCcw, PauseCircle,
   PlayCircle, Loader2, Clock, ChevronDown, History,
+  FileSignature,
 } from "lucide-react";
 import { toast } from "@/components/ui/vault-toast";
+import { useAuthStore } from "@/store/authStore";
 import { formatDistanceToNow, format } from "date-fns";
 import clsx from "clsx";
+import type { PDFDocumentProxy } from "pdfjs-dist";
+
+const pdfWorkerPath = new URL("pdfjs-dist/build/pdf.worker.min.mjs", import.meta.url).toString();
+const pdfjsImportPromise = import("pdfjs-dist");
+
+async function getPdfjsLib() {
+  return pdfjsImportPromise;
+}
 
 // ── Types ─────────────────────────────────────────────────────────────────────
 interface WorkflowTask {
@@ -28,10 +38,12 @@ interface WorkflowTask {
   status:         string;
   status_display: string;
   step:           { name: string; order: number; instructions: string; allow_approve: boolean; allow_reject: boolean; allow_return: boolean };
+  requires_signature?: boolean;
   assigned_to?:   { id: string; full_name: string };
   due_at?:        string;
   held_until?:    string;
   document_ref:   string;
+  document_title?: string;
 }
 
 interface TaskAction {
@@ -51,6 +63,7 @@ interface Props {
 }
 
 type WorkflowActionKind = "approve" | "reject" | "return" | "hold" | "release";
+type SignaturePlacement = { page_number: number; x_percent: number; y_percent: number; width_percent?: number };
 
 // ── Action colour map ─────────────────────────────────────────────────────────
 const ACTION_STYLES: Record<string, string> = {
@@ -118,6 +131,253 @@ function TaskHistoryDrawer({ taskId }: { taskId: string }) {
   );
 }
 
+function SignaturePlacementModal({
+  task,
+  documentId,
+  comment,
+  onCancel,
+  onConfirm,
+  isSubmitting,
+}: {
+  task: WorkflowTask;
+  documentId: string;
+  comment: string;
+  onCancel: () => void;
+  onConfirm: (placement: SignaturePlacement) => void;
+  isSubmitting: boolean;
+}) {
+  const token = useAuthStore((s) => s.accessToken);
+  const canvasHostRef = useState<HTMLDivElement | null>(null);
+  const [hostEl, setHostEl] = canvasHostRef;
+  const [pdfDoc, setPdfDoc] = useState<PDFDocumentProxy | null>(null);
+  const [currentPage, setCurrentPage] = useState(1);
+  const [totalPages, setTotalPages] = useState(0);
+  const [scale, setScale] = useState(1.2);
+  const [pageSize, setPageSize] = useState({ width: 0, height: 0 });
+  const [pos, setPos] = useState({ x: 62, y: 72 });
+  const [dragging, setDragging] = useState(false);
+  const [error, setError] = useState("");
+
+  const { data: preview } = useQuery({
+    queryKey: ["signature-placement-preview", documentId],
+    queryFn: () => documentsAPI.previewUrl(documentId).then((r) => r.data),
+  });
+
+  const { data: savedSignature } = useQuery<any>({
+    queryKey: ["profile-signature"],
+    queryFn: () => profileAPI.getSignature().then((r) => r.data.signature ?? null),
+  });
+
+  useEffect(() => {
+    let cancelled = false;
+    let loadingTask: { promise: Promise<PDFDocumentProxy>; destroy?: () => void } | null = null;
+
+    setPdfDoc(null);
+    setTotalPages(0);
+    setPageSize({ width: 0, height: 0 });
+
+    const previewUrl = preview?.url;
+    if (!previewUrl || preview.viewer !== "pdfjs") return;
+
+    getPdfjsLib()
+      .then((pdfjsLib) => {
+        if (cancelled) return Promise.reject(new Error("cancelled"));
+        pdfjsLib.GlobalWorkerOptions.workerSrc = pdfWorkerPath;
+        loadingTask = pdfjsLib.getDocument({
+          url: previewUrl,
+          withCredentials: true,
+          httpHeaders: token ? { Authorization: `Bearer ${token}` } : {},
+        });
+        return loadingTask.promise;
+      })
+      .then((loaded) => {
+        if (cancelled) return;
+        setPdfDoc(loaded);
+        setTotalPages(loaded.numPages);
+        setCurrentPage(1);
+      })
+      .catch((err) => {
+        if (!cancelled && err?.message !== "cancelled") {
+          setError("Failed to load PDF for signing.");
+        }
+      });
+
+    return () => {
+      cancelled = true;
+      loadingTask?.destroy?.();
+    };
+  }, [preview?.url, preview?.viewer, token]);
+
+  useEffect(() => {
+    if (!pdfDoc || !hostEl) return;
+
+    let cancelled = false;
+    let renderTask: { promise: Promise<void>; cancel?: () => void } | null = null;
+
+    hostEl.innerHTML = "";
+    setPageSize({ width: 0, height: 0 });
+
+    pdfDoc.getPage(currentPage).then((page) => {
+      if (cancelled) return;
+      const viewport = page.getViewport({ scale });
+      const canvas = document.createElement("canvas");
+      canvas.width = viewport.width;
+      canvas.height = viewport.height;
+      canvas.className = "block shadow-sm bg-white";
+      hostEl.innerHTML = "";
+      hostEl.appendChild(canvas);
+      setPageSize({ width: viewport.width, height: viewport.height });
+      renderTask = page.render({ canvasContext: canvas.getContext("2d")!, viewport });
+      renderTask.promise.catch((err) => {
+        if (!cancelled && err?.name !== "RenderingCancelledException") {
+          setError("Failed to render PDF page.");
+        }
+      });
+    });
+
+    return () => {
+      cancelled = true;
+      renderTask?.cancel?.();
+    };
+  }, [pdfDoc, hostEl, currentPage, scale]);
+
+  const clampPosition = (nextX: number, nextY: number) => {
+    setPos({
+      x: Math.max(0, Math.min(76, nextX)),
+      y: Math.max(0, Math.min(90, nextY)),
+    });
+  };
+
+  const startDrag = (event: React.PointerEvent<HTMLDivElement>) => {
+    event.currentTarget.setPointerCapture(event.pointerId);
+    setDragging(true);
+  };
+
+  const onDrag = (event: React.PointerEvent<HTMLDivElement>) => {
+    if (!dragging || !hostEl || !pageSize.width || !pageSize.height) return;
+    const rect = hostEl.getBoundingClientRect();
+    const x = ((event.clientX - rect.left) / rect.width) * 100 - 12;
+    const y = ((event.clientY - rect.top) / rect.height) * 100 - 4;
+    clampPosition(x, y);
+  };
+
+  const confirm = () => {
+    if (preview?.viewer !== "pdfjs") {
+      setError("Only PDF documents can be signed.");
+      return;
+    }
+    onConfirm({
+      page_number: currentPage,
+      x_percent: Number(pos.x.toFixed(3)),
+      y_percent: Number(pos.y.toFixed(3)),
+      width_percent: 24,
+    });
+  };
+
+  return (
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/55 p-4">
+      <div className="flex max-h-[92vh] w-full max-w-6xl flex-col overflow-hidden rounded-xl bg-background shadow-2xl">
+        <div className="flex items-center justify-between gap-4 border-b border-border px-5 py-4">
+          <div>
+            <h3 className="text-base font-semibold text-foreground">Place signature</h3>
+            <p className="text-xs text-muted-foreground">
+              Drag your signature to the signing line, then confirm.
+            </p>
+          </div>
+          <button onClick={onCancel} className="btn-secondary text-sm">Cancel</button>
+        </div>
+
+        <div className="grid min-h-0 flex-1 grid-cols-1 lg:grid-cols-[1fr_320px]">
+          <div className="min-h-0 overflow-auto bg-[#EDEDED] p-4">
+            <div className="mb-3 flex items-center justify-between rounded-lg border border-border bg-background px-3 py-2">
+              <div className="flex items-center gap-2">
+                <button
+                  onClick={() => setCurrentPage((p) => Math.max(1, p - 1))}
+                  disabled={currentPage <= 1}
+                  className="btn-secondary px-2 py-1"
+                >
+                  ‹
+                </button>
+                <span className="text-sm text-foreground">Page {currentPage} of {totalPages || "..."}</span>
+                <button
+                  onClick={() => setCurrentPage((p) => Math.min(totalPages, p + 1))}
+                  disabled={!totalPages || currentPage >= totalPages}
+                  className="btn-secondary px-2 py-1"
+                >
+                  ›
+                </button>
+              </div>
+              <div className="flex items-center gap-2">
+                <button onClick={() => setScale((s) => Math.max(0.7, s - 0.1))} className="btn-secondary px-2 py-1">-</button>
+                <span className="w-12 text-center text-xs text-muted-foreground">{Math.round(scale * 100)}%</span>
+                <button onClick={() => setScale((s) => Math.min(2, s + 0.1))} className="btn-secondary px-2 py-1">+</button>
+              </div>
+            </div>
+
+            <div className="relative mx-auto w-fit">
+              <div ref={setHostEl} className="relative" />
+              {pageSize.width > 0 && (
+                <div
+                  role="button"
+                  tabIndex={0}
+                  onPointerDown={startDrag}
+                  onPointerMove={onDrag}
+                  onPointerUp={() => setDragging(false)}
+                  onPointerCancel={() => setDragging(false)}
+                  className={clsx(
+                    "absolute z-10 flex cursor-grab items-center justify-center rounded border-2 border-primary bg-primary/10 shadow-sm backdrop-blur-sm",
+                    dragging && "cursor-grabbing ring-4 ring-primary/20"
+                  )}
+                  style={{
+                    left: `${pos.x}%`,
+                    top: `${pos.y}%`,
+                    width: "24%",
+                    height: "8%",
+                  }}
+                >
+                  {savedSignature?.image_data ? (
+                    <img src={savedSignature.image_data} alt="" className="max-h-full max-w-full object-contain" />
+                  ) : (
+                    <span className="text-xs font-semibold text-primary">Signature</span>
+                  )}
+                </div>
+              )}
+            </div>
+          </div>
+
+          <div className="space-y-4 border-t border-border p-5 lg:border-l lg:border-t-0">
+            <div className="rounded-lg border border-border bg-muted/20 p-4">
+              <p className="text-sm font-semibold text-foreground">Confirmation</p>
+              <p className="mt-2 text-sm text-muted-foreground">
+                You are signing <span className="font-medium text-foreground">{task.document_title || "this document"}</span>{" "}
+                <span className="font-medium text-foreground">{task.document_ref}</span>.
+              </p>
+              <p className="mt-2 text-sm text-muted-foreground">
+                Your signature will be embedded on page {currentPage}. This action is recorded and cannot be undone.
+              </p>
+              {comment && (
+                <p className="mt-2 text-xs text-muted-foreground">Approval note: {comment}</p>
+              )}
+            </div>
+            {error && <p className="text-sm text-destructive">{error}</p>}
+            <button
+              onClick={confirm}
+              disabled={isSubmitting || !pageSize.width}
+              className="w-full btn-primary justify-center"
+            >
+              {isSubmitting && <Loader2 className="h-4 w-4 animate-spin" />}
+              Confirm signature and approve
+            </button>
+            <button onClick={onCancel} className="w-full btn-secondary justify-center">
+              Back to approval
+            </button>
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+}
+
 // ── Main panel ────────────────────────────────────────────────────────────────
 export default function WorkflowActionPanel({ task, documentId, onCompleted }: Props) {
   const qc = useQueryClient();
@@ -125,6 +385,7 @@ export default function WorkflowActionPanel({ task, documentId, onCompleted }: P
   const [activeAction, setActiveAction] = useState<
     "approve" | "reject" | "return" | "hold" | null
   >(null);
+  const [showSignaturePlacement, setShowSignaturePlacement] = useState(false);
   const [optimisticAction, setOptimisticAction] = useState<WorkflowActionKind | null>(null);
   const [comment, setComment]   = useState("");
   const [holdHours, setHoldHours] = useState(24);
@@ -209,7 +470,7 @@ export default function WorkflowActionPanel({ task, documentId, onCompleted }: P
   };
 
   const approveMutation = useMutation({
-    mutationFn: () => workflowAPI.approveTask(task.id, comment),
+    mutationFn: (placement?: SignaturePlacement) => workflowAPI.approveTask(task.id, comment, placement),
     onMutate: () => beginOptimisticAction("approve"),
     onSuccess: () => { toast.success("Document approved"); completeAction(); },
     onError:   (e: { response?: { data?: { detail?: string } } }) =>
@@ -262,6 +523,14 @@ export default function WorkflowActionPanel({ task, documentId, onCompleted }: P
 
   const resetForm = () => { setComment(""); setHoldHours(24); setActiveAction(null); };
 
+  const beginApproval = () => {
+    if (task.requires_signature) {
+      setShowSignaturePlacement(true);
+      return;
+    }
+    approveMutation.mutate(undefined);
+  };
+
   if (optimisticAction === "approve" || optimisticAction === "reject" || optimisticAction === "return") {
     return (
       <div className="rounded-2xl border border-border bg-background p-4">
@@ -275,6 +544,16 @@ export default function WorkflowActionPanel({ task, documentId, onCompleted }: P
 
   return (
     <div className="rounded-2xl border border-border bg-background p-4 space-y-4">
+      {showSignaturePlacement && (
+        <SignaturePlacementModal
+          task={task}
+          documentId={documentId}
+          comment={comment}
+          onCancel={() => setShowSignaturePlacement(false)}
+          onConfirm={(placement) => approveMutation.mutate(placement)}
+          isSubmitting={approveMutation.isPending}
+        />
+      )}
       {/* Panel header */}
       <div className="flex items-start justify-between gap-3">
         <div>
@@ -308,6 +587,13 @@ export default function WorkflowActionPanel({ task, documentId, onCompleted }: P
         <div className="text-xs text-muted-foreground bg-muted/20 rounded-lg px-3 py-2 border border-border">
           <span className="font-medium text-foreground">Instructions: </span>
           {task.step.instructions}
+        </div>
+      )}
+
+      {task.requires_signature && (
+        <div className="flex items-start gap-2 text-xs text-primary bg-primary/5 rounded-lg px-3 py-2 border border-primary/20">
+          <FileSignature className="w-4 h-4 mt-0.5 flex-shrink-0" />
+          <span>Approval will apply your saved e-signature to a new signed PDF version.</span>
         </div>
       )}
 
@@ -369,6 +655,12 @@ export default function WorkflowActionPanel({ task, documentId, onCompleted }: P
       {activeAction === "approve" && (
         <div className="space-y-3 border border-border rounded-xl p-4 bg-muted/15">
           <p className="text-sm font-medium text-foreground">Approve document</p>
+          {task.requires_signature && (
+            <div className="flex items-start gap-2 text-xs text-primary bg-primary/5 rounded-lg px-3 py-2 border border-primary/20">
+              <FileSignature className="w-4 h-4 mt-0.5 flex-shrink-0" />
+              <span>Your saved signature will be stamped onto the PDF when you confirm.</span>
+            </div>
+          )}
           <div>
             <label className="label text-xs">Comment (optional)</label>
             <textarea
@@ -382,7 +674,7 @@ export default function WorkflowActionPanel({ task, documentId, onCompleted }: P
           </div>
           <div className="flex gap-2">
             <button
-              onClick={() => approveMutation.mutate()}
+              onClick={beginApproval}
               disabled={anyPending}
               className="flex items-center gap-1.5 px-4 py-2 rounded-lg border border-primary/30 bg-primary/10 text-primary text-sm font-medium hover:bg-primary/15 disabled:opacity-50"
             >

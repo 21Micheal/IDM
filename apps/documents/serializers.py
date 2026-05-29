@@ -28,6 +28,7 @@ from .models import (
 from apps.accounts.serializers import UserSummarySerializer
 from apps.accounts.models import GroupAction
 from apps.workflows.models import WorkflowTemplate, WorkflowTask
+from apps.workflows.serializers import DocumentSignatureSerializer
 from django.db import transaction, IntegrityError
 from django.db.models import Q
 from django.utils import timezone
@@ -425,6 +426,7 @@ class DocumentDetailSerializer(serializers.ModelSerializer):
     ocr_suggestions = serializers.SerializerMethodField()
     shared_with_me = serializers.SerializerMethodField()
     share_access_level = serializers.SerializerMethodField()
+    signatures = serializers.SerializerMethodField()
 
     class Meta:
         model  = Document
@@ -443,7 +445,7 @@ class DocumentDetailSerializer(serializers.ModelSerializer):
             "preview_pdf", "preview_status",
             "edit_locked_by", "edit_locked_by_name", "edit_locked_at", "is_edit_locked",
             "current_version", "versions", "comments", "permissions",
-            "created_at", "updated_at", "shared_with_me", "share_access_level",
+            "created_at", "updated_at", "shared_with_me", "share_access_level", "signatures",
         ]
         read_only_fields = [
             "id", "reference_number", "file", "file_name", "file_size", "file_mime_type",
@@ -453,6 +455,13 @@ class DocumentDetailSerializer(serializers.ModelSerializer):
             "edit_locked_by", "edit_locked_by_name", "edit_locked_at", "is_edit_locked",
             "current_version", "created_at", "updated_at",
         ]
+
+    def get_signatures(self, obj):
+        return DocumentSignatureSerializer(
+            obj.signatures.select_related("signer", "task__step", "signed_version").all(),
+            many=True,
+            context=self.context,
+        ).data
 
     def get_comments(self, obj):
         request = self.context.get("request")

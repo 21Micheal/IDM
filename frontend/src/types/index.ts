@@ -189,6 +189,7 @@ export interface WorkflowTask {
   due_at: string | null;
   held_until?: string | null;
   status_display?: string;
+  requires_signature?: boolean;
 }
 
 export interface Notification {

@@ -5,6 +5,7 @@ import { useForm } from "react-hook-form";
 import { zodResolver } from "@hookform/resolvers/zod";
 import { z } from "zod";
 import { profileAPI, documentTypesAPI } from "@/services/api";
+import SignaturePanel from "@/components/profile/SignaturePanel";
 import { useAuthStore } from "@/store/authStore";
 import {
   Shield, Key, Smartphone,
@@ -12,7 +13,7 @@ import {
   Building2, Mail, Briefcase, ShieldCheck,
   Calendar, UserCheck,
   ChevronRight, Settings, Users, ArrowLeftRight,
-  Bell, Monitor, Globe,
+  Bell, Monitor, Globe, FileSignature,
 } from "lucide-react";
 import { toast } from "@/components/ui/vault-toast";
 import clsx from "clsx";
@@ -61,7 +62,7 @@ interface UserPreferences {
   notify_system_announcements: boolean;
 }
 
-type ProfileTab = "settings" | "security" | "delegation" | "preferences";
+type ProfileTab = "settings" | "security" | "signature" | "delegation" | "preferences";
 
 export default function ProfilePage() {
   const [searchParams] = useSearchParams();
@@ -81,7 +82,7 @@ export default function ProfilePage() {
   // Handle URL parameter for tab navigation
   useEffect(() => {
     const tabParam = searchParams.get("tab") as ProfileTab;
-    if (tabParam && ["settings", "security", "delegation", "preferences"].includes(tabParam)) {
+    if (tabParam && ["settings", "security", "signature", "delegation", "preferences"].includes(tabParam)) {
       setActiveTab(tabParam);
     }
   }, [searchParams]);
@@ -186,6 +187,7 @@ export default function ProfilePage() {
   const tabs = [
     { id: "settings" as const, label: "Settings", icon: Settings, description: "Account & password" },
     { id: "security" as const, label: "Security", icon: ShieldCheck, description: "MFA & authentication" },
+    { id: "signature" as const, label: "Signature", icon: FileSignature, description: "E-signature" },
     { id: "delegation" as const, label: "Delegation", icon: UserCheck, description: "Out of office tasks" },
     { id: "preferences" as const, label: "Preferences", icon: Monitor, description: "Display & notifications" },
   ];
@@ -193,7 +195,7 @@ export default function ProfilePage() {
   if (!user) return null;
 
   return (
-    <div className="max-w-6xl mx-auto py-6 px-4 space-y-6">
+    <div className={clsx("mx-auto py-6 px-4 space-y-6", activeTab === "signature" ? "max-w-7xl" : "max-w-6xl")}>
       {/* Page Header */}
       <div className="flex items-center justify-between">
         <div>
@@ -203,8 +205,13 @@ export default function ProfilePage() {
       </div>
 
       <div className="grid grid-cols-12 gap-6">
-        {/* Left Column - User Info */}
-        <div className="col-span-12 lg:col-span-4 space-y-4">
+        {/* Left Column - User Info (fully hidden on signature tab so right column takes full width) */}
+        <div className={clsx(
+          "space-y-4",
+          activeTab === "signature"
+            ? "hidden"
+            : "col-span-12 lg:col-span-4"
+        )}>
           {/* Profile Card - Unifi Style */}
           <div className="card overflow-hidden">
             {/* Profile Header with Accent */}
@@ -299,6 +306,7 @@ export default function ProfilePage() {
             {[
               { icon: Key, label: "Change Password", action: () => { setActiveTab("settings"); setShowPasswordForm(true); }, color: "text-amber-500" },
               { icon: Shield, label: "Security Settings", action: () => setActiveTab("security"), color: "text-blue-500" },
+              { icon: FileSignature, label: "E-Signature", action: () => setActiveTab("signature"), color: "text-teal-500" },
               { icon: UserCheck, label: "Manage Delegations", action: () => setActiveTab("delegation"), color: "text-emerald-500" },
               { icon: Bell, label: "Notification Preferences", action: () => setActiveTab("preferences"), color: "text-violet-500" },
             ].map((item, i) => (
@@ -315,8 +323,8 @@ export default function ProfilePage() {
           </div>
         </div>
 
-        {/* Right Column - Main Content */}
-        <div className="col-span-12 lg:col-span-8">
+        {/* Right Column - Main Content (full width on signature tab) */}
+        <div className={clsx("col-span-12", activeTab === "signature" ? "lg:col-span-12" : "lg:col-span-8")}>
           {/* Tab Navigation */}
           <div className="card mb-4">
             <div className="flex border-b border-border">
@@ -517,6 +525,9 @@ export default function ProfilePage() {
                 </div>
               </div>
             )}
+
+            {activeTab === "signature" && <SignaturePanel />}
+
 
             {/* Delegation Tab */}
             {activeTab === "delegation" && (

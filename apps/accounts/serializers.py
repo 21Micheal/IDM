@@ -2,8 +2,9 @@ from django.contrib.auth.password_validation import validate_password
 from django.core.exceptions import ValidationError as DjangoValidationError
 from django.utils.crypto import get_random_string
 from rest_framework import serializers
+import base64
 from django.utils import timezone
-from .models import User, Department, UserGroup, GroupPermission, UserGroupMembership, UserDelegation, UserPreference
+from .models import User, Department, UserGroup, GroupPermission, UserGroupMembership, UserDelegation, UserPreference, UserSignature
 
 
 class DepartmentSerializer(serializers.ModelSerializer):
@@ -121,6 +122,36 @@ class UserSerializer(serializers.ModelSerializer):
 
     def get_has_admin_access(self, obj):
         return obj.has_admin_access
+
+
+class UserSignatureSerializer(serializers.ModelSerializer):
+    image_url = serializers.SerializerMethodField()
+    image_data = serializers.SerializerMethodField()
+
+    class Meta:
+        model = UserSignature
+        fields = ["id", "method", "typed_name", "image_url", "image_data", "created_at", "updated_at"]
+        read_only_fields = ["id", "image_url", "created_at", "updated_at"]
+
+    def get_image_url(self, obj):
+        request = self.context.get("request")
+        if not request:
+            return None
+        return request.build_absolute_uri(f"/api/v1/auth/signature/image/{obj.id}/")
+
+    def get_image_data(self, obj):
+        try:
+            obj.image.open("rb")
+            raw = obj.image.read()
+        except Exception:
+            return None
+        finally:
+            try:
+                obj.image.close()
+            except Exception:
+                pass
+        content_type = "image/jpeg" if obj.image.name.lower().endswith((".jpg", ".jpeg")) else "image/png"
+        return f"data:{content_type};base64,{base64.b64encode(raw).decode('ascii')}"
 
 
 class UserCreateSerializer(serializers.ModelSerializer):

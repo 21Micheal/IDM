@@ -480,8 +480,15 @@ export const workflowAPI = {
   myTasks: () => api.get("/workflows/tasks/my_tasks/"),
   listTasks: (params?: Record<string, unknown>) =>
     api.get("/workflows/tasks/", { params }),
-  approveTask: (id: string, comment = "") =>
-    api.post(`/workflows/tasks/${id}/approve/`, { comment }),
+  approveTask: (
+    id: string,
+    comment = "",
+    signaturePlacement?: { page_number: number; x_percent: number; y_percent: number; width_percent?: number },
+  ) =>
+    api.post(`/workflows/tasks/${id}/approve/`, {
+      comment,
+      ...(signaturePlacement ? { signature_placement: signaturePlacement } : {}),
+    }),
   rejectTask: (id: string, comment: string) =>
     api.post(`/workflows/tasks/${id}/reject/`, { comment }),
   returnForReview: (id: string, comment: string) =>
@@ -576,6 +583,12 @@ export const profileAPI = {
     notify_task_assignments?: boolean;
     notify_system_announcements?: boolean;
   }) => api.patch("/auth/preferences/", data),
+  getSignature: () => api.get("/auth/signature/"),
+  saveSignature: (formData: FormData) =>
+    api.post("/auth/signature/", formData, {
+      headers: { "Content-Type": undefined },
+    }),
+  deleteSignature: () => api.delete("/auth/signature/"),
 };
 
 export const groupsAPI = {

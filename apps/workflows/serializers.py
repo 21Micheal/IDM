@@ -12,7 +12,7 @@ import uuid
 
 from .models import (
     WorkflowTemplate, WorkflowStep, WorkflowRule,
-    WorkflowInstance, WorkflowTask, WorkflowTaskAction,
+    WorkflowInstance, WorkflowTask, WorkflowTaskAction, DocumentSignature,
 )
 from apps.accounts.models import UserGroup
 from apps.accounts.serializers import UserSummarySerializer
@@ -88,6 +88,7 @@ class WorkflowStepSerializer(serializers.ModelSerializer):
             "assignee_user", "assignee_user_name",
             "sla_hours", "allow_resubmit",
             "allow_approve", "allow_reject", "allow_return",
+            "requires_signature",
             "instructions",
         ]
 
@@ -141,6 +142,7 @@ class WorkflowStepWriteSerializer(serializers.ModelSerializer):
             "assignee_type", "assignee_group", "assignee_user",
             "sla_hours", "allow_resubmit",
             "allow_approve", "allow_reject", "allow_return",
+            "requires_signature",
             "instructions",
         ]
         extra_kwargs = {
@@ -191,9 +193,14 @@ class WorkflowStepWriteSerializer(serializers.ModelSerializer):
         allow_approve = attrs.get("allow_approve", getattr(self.instance, "allow_approve", True))
         allow_reject  = attrs.get("allow_reject",  getattr(self.instance, "allow_reject",  True))
         allow_return  = attrs.get("allow_return",  getattr(self.instance, "allow_return",  True))
+        requires_signature = attrs.get("requires_signature", getattr(self.instance, "requires_signature", False))
         if not any([allow_approve, allow_reject, allow_return]):
             raise serializers.ValidationError(
                 {"allow_approve": "At least one approver action (approve, reject, or send back) must be enabled."}
+            )
+        if requires_signature and not allow_approve:
+            raise serializers.ValidationError(
+                {"requires_signature": "A signature can only be required when approval is allowed."}
             )
 
         return attrs
@@ -417,6 +424,19 @@ class WorkflowTaskActionSerializer(serializers.ModelSerializer):
         ]
 
 
+class DocumentSignatureSerializer(serializers.ModelSerializer):
+    signer = UserSummarySerializer(read_only=True)
+    step_name = serializers.CharField(source="task.step.name", read_only=True)
+    signed_version_number = serializers.IntegerField(source="signed_version.version_number", read_only=True)
+
+    class Meta:
+        model = DocumentSignature
+        fields = [
+            "id", "signer", "step_name", "signed_version", "signed_version_number",
+            "page_number", "checksum", "signed_at",
+        ]
+
+
 class WorkflowTaskSerializer(serializers.ModelSerializer):
     step           = WorkflowStepSerializer(read_only=True)
     assigned_to    = UserSummarySerializer(read_only=True)
@@ -430,6 +450,7 @@ class WorkflowTaskSerializer(serializers.ModelSerializer):
     file_name = serializers.CharField(source="workflow_instance.document.file_name", read_only=True)
     file_mime_type = serializers.CharField(source="workflow_instance.document.file_mime_type", read_only=True)
     status_display = serializers.CharField(source="get_status_display", read_only=True)
+    requires_signature = serializers.BooleanField(source="step.requires_signature", read_only=True)
 
     def get_uploaded_by_name(self, obj):
         uploader = obj.workflow_instance.document.uploaded_by
@@ -440,6 +461,7 @@ class WorkflowTaskSerializer(serializers.ModelSerializer):
         fields = [
             "id", "step", "assigned_to",
             "status", "status_display",
+            "requires_signature",
             "comment", "held_until",
             "due_at", "acted_at",
             "document_id", "document_ref", "document_title", "document_type_name",

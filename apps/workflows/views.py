@@ -257,7 +257,13 @@ class WorkflowTaskViewSet(viewsets.ReadOnlyModelViewSet):
             return Response({"detail": "Approve is not permitted for this step."}, status=403)
         self._check_permission(task, request.user)
         try:
-            WorkflowService.approve(task, request.user, request.data.get("comment", ""))
+            WorkflowService.approve(
+                task,
+                request.user,
+                request.data.get("comment", ""),
+                request=request,
+                signature_placement=request.data.get("signature_placement"),
+            )
         except WorkflowError as exc:
             return Response({"detail": str(exc)}, status=400)
         return Response({"status": "approved"})
