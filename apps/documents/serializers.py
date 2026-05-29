@@ -129,6 +129,7 @@ class DMSSettingsSerializer(serializers.ModelSerializer):
             "watermark_position",
             "watermark_apply_to_previews",
             "allow_duplicate_uploads",
+            "signed_file_urls_enabled",
             "auto_archive_enabled",
             "auto_archive_after_days",
             "require_metadata_on_upload",

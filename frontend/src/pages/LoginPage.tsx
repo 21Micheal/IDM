@@ -256,14 +256,14 @@ export default function LoginPage() {
                     </button>
                   </div>
 
-                  <div className="pt-2">
+                  {/* <div className="pt-2">
                     <button
                       type="button"
                       className="text-[13px] text-[#1175c6] hover:underline"
                     >
                       Forgot password?
                     </button>
-                  </div>
+                  </div> */}
                 </form>
               </>
             ) : (

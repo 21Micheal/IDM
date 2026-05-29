@@ -4,6 +4,7 @@ import { dmsSettingsAPI, type DmsSettings } from "@/services/api";
 import { toast } from "@/components/ui/vault-toast";
 import {
   Copy, Archive, Droplets, ClipboardCheck, Loader2, RotateCcw, Save,
+  Link2,
 } from "lucide-react";
 import clsx from "clsx";
 
@@ -155,6 +156,29 @@ function SettingsTab() {
               className="w-full accent-primary"
             />
           </label>
+        </section>
+
+        <section className="card p-5 space-y-4">
+          <div className="flex items-start gap-3">
+            <div className="flex h-10 w-10 items-center justify-center rounded-lg bg-violet-500/10 text-violet-700">
+              <Link2 className="h-5 w-5" />
+            </div>
+            <div>
+              <h3 className="font-semibold text-foreground">Signed file links</h3>
+              <p className="text-sm text-muted-foreground">
+                Disabled by default. Enable only when browser-native file links are required.
+              </p>
+            </div>
+          </div>
+          <Toggle
+            checked={settings.signed_file_urls_enabled}
+            onChange={(checked) => update("signed_file_urls_enabled", checked)}
+            label="Issue signed file URLs"
+            description="Create short-lived query links for previews, printing, and direct downloads."
+          />
+          <div className="rounded-lg border border-border bg-muted/40 px-4 py-3 text-sm text-muted-foreground">
+            When off, file access uses the normal authenticated API request instead of a URL token.
+          </div>
         </section>
 
         <section className="card p-5 space-y-4">

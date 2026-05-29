@@ -1,10 +1,3 @@
-// @ts-nocheck
-/**
- * UserDetailPage.tsx
- *
- * Admin view of a single user — restyled with Flaxem IDM design language.
- * All data fetching, mutations, and business logic preserved exactly.
- */
 import { useEffect, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useNavigate, useParams } from "react-router-dom";

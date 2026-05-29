@@ -1,13 +1,3 @@
-/**
- * pages/DocumentsPage.tsx
- *
- * Indigo Vault redesign:
- *  - Semantic HSL tokens throughout
- *  - StatusBadge with dot+pill color coding
- *  - Reusable workflow/all and personal-only document library modes
- *  - Workflow filters stay out of the personal document library
- */
-
 import { useEffect, useMemo, useState } from "react";
 import { Link, useSearchParams } from "react-router-dom";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";

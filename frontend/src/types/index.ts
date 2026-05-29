@@ -232,6 +232,7 @@ export interface DocumentPreviewResponse {
   viewer: "pdfjs" | "image" | "processing" | "download";
   url: string | null;
   raw_url?: string | null;
+  signed_file_urls_enabled?: boolean;
   preview_status?: "pending" | "processing" | "done" | "failed" | "";
   preview_error?: string;
 }

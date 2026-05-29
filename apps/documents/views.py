@@ -63,6 +63,7 @@ from .file_streaming import (
     build_absolute_document_file_url,
     build_http_file_response,
     read_document_bytes,
+    signed_file_urls_enabled,
     unsign_file_payload,
     user_can_download_document,
     user_can_edit_document,
@@ -714,6 +715,7 @@ class DocumentViewSet(AuditMixin, viewsets.ModelViewSet):
     def preview_url(self, request, pk=None):
         doc = self.get_object()
         can_dl = user_can_download_document(request.user, doc)
+        signed_urls_enabled = signed_file_urls_enabled()
         version_id = request.query_params.get("version_id")
         version = None
         if version_id:
@@ -742,6 +744,7 @@ class DocumentViewSet(AuditMixin, viewsets.ModelViewSet):
                     "viewer": "pdfjs",
                     "url": inline_link(vid, False),
                     "raw_url": raw_link(vid, False),
+                    "signed_file_urls_enabled": signed_urls_enabled,
                     "preview_status": "done",
                 })
             if mime.startswith("image/"):
@@ -749,6 +752,7 @@ class DocumentViewSet(AuditMixin, viewsets.ModelViewSet):
                     "viewer": "image",
                     "url": inline_link(vid, False),
                     "raw_url": raw_link(vid, False),
+                    "signed_file_urls_enabled": signed_urls_enabled,
                     "preview_status": "done",
                 })
             if mime in (
@@ -794,6 +798,7 @@ class DocumentViewSet(AuditMixin, viewsets.ModelViewSet):
                     "viewer": viewer,
                     "url": url,
                     "raw_url": raw_link(vid, False),
+                    "signed_file_urls_enabled": signed_urls_enabled,
                     "preview_status": preview_status,
                     "preview_error": preview_error,
                 })
@@ -802,6 +807,7 @@ class DocumentViewSet(AuditMixin, viewsets.ModelViewSet):
                 "viewer": "download",
                 "url": raw_link(vid, False),
                 "raw_url": raw_link(vid, False),
+                "signed_file_urls_enabled": signed_urls_enabled,
                 "preview_status": "done",
             })
 
@@ -815,6 +821,7 @@ class DocumentViewSet(AuditMixin, viewsets.ModelViewSet):
                 "viewer": "pdfjs",
                 "url": inline_link("", False),
                 "raw_url": raw_link("", False),
+                "signed_file_urls_enabled": signed_urls_enabled,
                 "preview_status": "done",
             })
 
@@ -823,6 +830,7 @@ class DocumentViewSet(AuditMixin, viewsets.ModelViewSet):
                 "viewer": "image",
                 "url": inline_link("", False),
                 "raw_url": raw_link("", False),
+                "signed_file_urls_enabled": signed_urls_enabled,
                 "preview_status": "done",
             })
 
@@ -844,6 +852,7 @@ class DocumentViewSet(AuditMixin, viewsets.ModelViewSet):
                 "viewer": viewer,
                 "url": url,
                 "raw_url": raw_link("", False),
+                "signed_file_urls_enabled": signed_urls_enabled,
                 "preview_status": preview_status,
                 "preview_error": preview_error,
             })
@@ -852,6 +861,7 @@ class DocumentViewSet(AuditMixin, viewsets.ModelViewSet):
             "viewer": "download",
             "url": raw_link("", False),
             "raw_url": raw_link("", False),
+            "signed_file_urls_enabled": signed_urls_enabled,
             "preview_status": "done",
         })
 
@@ -866,6 +876,8 @@ class DocumentViewSet(AuditMixin, viewsets.ModelViewSet):
         doc = self.get_object()
         sig = (request.query_params.get("sig") or "").strip()
         if sig:
+            if not signed_file_urls_enabled():
+                return Response({"detail": "Signed file links are disabled."}, status=403)
             try:
                 payload = unsign_file_payload(sig)
             except Exception:

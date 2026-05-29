@@ -1,23 +1,7 @@
-/**
- * pages/DocumentDetailPage.tsx
- *
- * Infor DMS layout refresh:
- * ─────────────────────────
- * • Standardized enterprise 2-panel layout:
- *   - Column 1: Document Viewer / Preview (Left)
- *   - Column 2: Details & Tabs (Right)
- * • Blue command bar showing document identity and primary document actions.
- * • Migrated Document Activities into the Left Panel's tabs under "Audit trail" tab.
- * • Removed Checkout, Save, Save as new document, and top Recently Modified tabs.
- * • Removed AddToFolder / Document Storage bottom card.
- * • Removed Checked Out By and Checked Out Date from Properties tab.
- * • Preserved all business logic (locking, OCR polling, version restore, comments,
- *   workflow tasks, mutations) and inline editing.
- */
 import { Suspense, useState, useEffect, useRef, useCallback } from "react";
 import { useParams, useNavigate } from "react-router-dom";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
-import { documentsAPI, workflowAPI } from "@/services/api";
+import { api, documentsAPI, workflowAPI } from "@/services/api";
 import DocumentViewer from "@/components/documents/DocumentViewer";
 import { UploadVersionDrawer } from "@/components/documents/UploadVersionDrawer";
 import { WorkflowVisualizer } from "@/components/notifications/workflow-visualizer";
@@ -214,7 +198,11 @@ export default function DocumentDetailPage() {
   const [comment, setComment] = useState("");
   const [confirmRestoreId, setConfirmRestoreId] = useState<string | null>(null);
   const [auditPage, setAuditPage] = useState(1);
-  const [viewerLinks, setViewerLinks] = useState({ openInNewTabUrl: "", downloadHref: "" });
+  const [viewerLinks, setViewerLinks] = useState({
+    openInNewTabUrl: "",
+    downloadHref: "",
+    signedFileUrlsEnabled: false,
+  });
   const [workflowActionCompleted, setWorkflowActionCompleted] = useState(false);
   const [relationshipSearch, setRelationshipSearch] = useState("");
   const [relationshipTargetId, setRelationshipTargetId] = useState("");
@@ -298,7 +286,11 @@ export default function DocumentDetailPage() {
     qc.invalidateQueries({ queryKey: ["document-preview", id] });
   }, [id, qc]);
 
-  const handlePreviewLinksChange = useCallback((links: { openInNewTabUrl: string; downloadHref: string }) => {
+  const handlePreviewLinksChange = useCallback((links: {
+    openInNewTabUrl: string;
+    downloadHref: string;
+    signedFileUrlsEnabled: boolean;
+  }) => {
     setViewerLinks(links);
   }, []);
 
@@ -597,6 +589,38 @@ export default function DocumentDetailPage() {
     setActiveTab(tab.id);
   };
 
+  const downloadBlobFromUrl = async (url: string, fallbackName: string) => {
+    const res = await api.get(url, { responseType: "blob" });
+    const disposition = String(res.headers?.["content-disposition"] ?? "");
+    const match = disposition.match(/filename\*?=(?:UTF-8'')?["']?([^"';]+)["']?/i);
+    const filename = match?.[1] ? decodeURIComponent(match[1]) : fallbackName;
+    const blobUrl = URL.createObjectURL(new Blob([res.data]));
+    const link = document.createElement("a");
+    link.href = blobUrl;
+    link.download = filename;
+    document.body.appendChild(link);
+    link.click();
+    link.remove();
+    window.setTimeout(() => URL.revokeObjectURL(blobUrl), 1000);
+  };
+
+  const handleDownloadDocument = async () => {
+    if (!canDownload || !viewerLinks.downloadHref) return;
+    try {
+      await downloadBlobFromUrl(viewerLinks.downloadHref, doc?.file_name || "document");
+    } catch {
+      toast.error("Could not download this document.");
+    }
+  };
+
+  const getPrintableUrl = async (url: string) => {
+    if (viewerLinks.signedFileUrlsEnabled) return url;
+    const res = await api.get(url, { responseType: "blob" });
+    return URL.createObjectURL(new Blob([res.data], {
+      type: String(res.headers?.["content-type"] ?? "application/pdf"),
+    }));
+  };
+
   const handlePrintDocument = async () => {
     if (!canDownload || !doc.id) return;
     const printUrl = viewerLinks.openInNewTabUrl || viewerLinks.downloadHref;
@@ -606,17 +630,27 @@ export default function DocumentDetailPage() {
     }
 
     documentsAPI.filePrintEvent(doc.id).catch(() => {});
+    let printableUrl = printUrl;
+    let revokePrintableUrl = false;
+
+    try {
+      printableUrl = await getPrintableUrl(printUrl);
+      revokePrintableUrl = printableUrl !== printUrl;
+    } catch {
+      toast.error("Could not prepare the document for printing.");
+      return;
+    }
 
     const frame = printFrameRef.current;
     if (!frame) {
-      window.open(printUrl, "_blank", "noopener,noreferrer");
+      window.open(printableUrl, "_blank", "noopener,noreferrer");
       return;
     }
 
     let printed = false;
     const fallback = window.setTimeout(() => {
       if (printed) return;
-      window.open(printUrl, "_blank", "noopener,noreferrer");
+      window.open(printableUrl, "_blank", "noopener,noreferrer");
       toast.info("Opened the document in a new tab for printing.");
     }, 1800);
 
@@ -626,11 +660,14 @@ export default function DocumentDetailPage() {
         frame.contentWindow?.print();
         printed = true;
         window.clearTimeout(fallback);
+        if (revokePrintableUrl) {
+          window.setTimeout(() => URL.revokeObjectURL(printableUrl), 5000);
+        }
       } catch {
-        window.open(printUrl, "_blank", "noopener,noreferrer");
+        window.open(printableUrl, "_blank", "noopener,noreferrer");
       }
     };
-    frame.src = printUrl;
+    frame.src = printableUrl;
   };
 
   // Grouping function for Infor DMS style Date grouping header
@@ -741,7 +778,7 @@ export default function DocumentDetailPage() {
 
           <div className="mx-1 hidden h-5 w-px bg-white/20 sm:block" />
 
-          {canDownload && viewerLinks.downloadHref ? (
+          {canDownload && viewerLinks.downloadHref && viewerLinks.signedFileUrlsEnabled ? (
             <a
               href={viewerLinks.downloadHref}
               download
@@ -751,6 +788,16 @@ export default function DocumentDetailPage() {
               <Download className="w-3.5 h-3.5" />
               <span>Download</span>
             </a>
+          ) : canDownload && viewerLinks.downloadHref ? (
+            <button
+              type="button"
+              onClick={handleDownloadDocument}
+              className="flex h-8 items-center gap-1 px-2 transition-colors hover:bg-white/10 hover:text-white"
+              title="Download current document"
+            >
+              <Download className="w-3.5 h-3.5" />
+              <span>Download</span>
+            </button>
           ) : (
             <button
               disabled
@@ -1376,7 +1423,7 @@ export default function DocumentDetailPage() {
                             )}
 
                             <div className="flex items-center gap-2">
-                              {canDownload && v.file_url && (
+                              {canDownload && v.file_url && v.file_url.includes("sig=") && (
                                 <a
                                   href={v.file_url}
                                   download={v.file_name}
@@ -1385,6 +1432,18 @@ export default function DocumentDetailPage() {
                                 >
                                   <Download className="h-3.5 w-3.5" /> Download
                                 </a>
+                              )}
+                              {canDownload && v.file_url && !v.file_url.includes("sig=") && (
+                                <button
+                                  type="button"
+                                  onClick={() => downloadBlobFromUrl(v.file_url!, v.file_name || "version").catch(() => {
+                                    toast.error("Could not download this version.");
+                                  })}
+                                  title="Download this version"
+                                  className="inline-flex items-center gap-1 border border-[#C8CDD2] bg-white px-2.5 py-1.5 text-xs font-semibold text-[#1F2933] hover:bg-[#F5F7F8]"
+                                >
+                                  <Download className="h-3.5 w-3.5" /> Download
+                                </button>
                               )}
                               {!isCurrent && canRestoreVersion && (
                                 awaitConfirm ? (

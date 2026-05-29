@@ -1040,7 +1040,11 @@ interface Props {
   /**
    * Inform the page when the current preview links become available.
    */
-  onPreviewLinksChange?: (links: { openInNewTabUrl: string; downloadHref: string }) => void;
+  onPreviewLinksChange?: (links: {
+    openInNewTabUrl: string;
+    downloadHref: string;
+    signedFileUrlsEnabled: boolean;
+  }) => void;
 }
 
 export default function DocumentViewer({ document: doc, submitSlot, hideUploadActionBar, onPreviewLinksChange }: Props) {
@@ -1214,14 +1218,34 @@ export default function DocumentViewer({ document: doc, submitSlot, hideUploadAc
 
   const openInNewTabUrl = canDownload && preview ? (normalizeUrl(preview.url ?? "") ?? "") : "";
   const downloadHref = canDownload && preview ? (normalizeUrl(preview.raw_url ?? "") ?? "") : "";
+  const downloadViaAuthenticatedRequest = async () => {
+    if (!downloadHref) return;
+    try {
+      const res = await api.get(downloadHref, { responseType: "blob" });
+      const blobUrl = URL.createObjectURL(new Blob([res.data]));
+      const link = document.createElement("a");
+      link.href = blobUrl;
+      link.download = doc.file_name || "document";
+      document.body.appendChild(link);
+      link.click();
+      link.remove();
+      window.setTimeout(() => URL.revokeObjectURL(blobUrl), 1000);
+    } catch {
+      toast.error("Could not download this file.");
+    }
+  };
 
   const selectedVersion = selectedVersionId
     ? sortedVersions.find((version) => version.id === selectedVersionId) ?? null
     : null;
 
   useEffect(() => {
-    onPreviewLinksChangeRef.current?.({ openInNewTabUrl, downloadHref });
-  }, [openInNewTabUrl, downloadHref]);
+    onPreviewLinksChangeRef.current?.({
+      openInNewTabUrl,
+      downloadHref,
+      signedFileUrlsEnabled: Boolean(preview?.signed_file_urls_enabled),
+    });
+  }, [openInNewTabUrl, downloadHref, preview?.signed_file_urls_enabled]);
 
   if (isLoading)
     return (
@@ -1368,7 +1392,7 @@ export default function DocumentViewer({ document: doc, submitSlot, hideUploadAc
         <div className="border-2 border-dashed border-[#C8CDD2] p-10 text-center">
           <Download className="w-12 h-12 text-muted-foreground mx-auto mb-4" />
           <p className="text-foreground/80 mb-4">Preview not available for this file type.</p>
-          {canDownload && preview.url && (
+          {canDownload && preview.url && preview.signed_file_urls_enabled && (
           <a
             href={preview.url}
             download
@@ -1376,6 +1400,15 @@ export default function DocumentViewer({ document: doc, submitSlot, hideUploadAc
           >
             <Download className="w-4 h-4" /> Download file
           </a>
+          )}
+          {canDownload && preview.url && !preview.signed_file_urls_enabled && (
+            <button
+              type="button"
+              onClick={downloadViaAuthenticatedRequest}
+              className="btn-primary inline-flex items-center gap-2"
+            >
+              <Download className="w-4 h-4" /> Download file
+            </button>
           )}
           {!canDownload && (
             <p className="text-sm text-muted-foreground">You do not have permission to download this file.</p>

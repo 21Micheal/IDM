@@ -1,4 +1,4 @@
-// DashboardPage.tsx — Production Enterprise DMS
+// DashboardPage.tsx 
 import { useQuery } from "@tanstack/react-query";
 import { api, documentsAPI, searchAPI, workflowAPI } from "@/services/api";
 import { useAuthStore } from "@/store/authStore";
@@ -1040,7 +1040,7 @@ export default function DashboardPage() {
           <section className="border border-[#C8CDD2] bg-white">
             <div className="border-b border-[#C8CDD2] px-4 py-3">
               <h2 className="text-sm font-bold text-[#1F2933]">Manager analytics</h2>
-              <p className="text-sm text-[#5E6870]">Dashboard stays operational; analytics now has a dedicated workspace.</p>
+              <p className="text-sm text-[#5E6870]">Dashboard stays operational; analytics available for managers.</p>
             </div>
             {user?.has_admin_access ? (
               <div className="space-y-4 p-4">

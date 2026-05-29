@@ -7,15 +7,6 @@
 //   3. Document Volume by Type per Month (StackedBarChart)
 //   4. Top Uploaders — leaderboard with relative bar (custom)
 //
-// Usage in DashboardPage.tsx (after the StatCard grid, before the 2-col section):
-//   import { AnalyticsDashboard } from "@/components/dashboard/AnalyticsDashboard";
-//   <AnalyticsDashboard />
-//
-// Backend integration notes (replace mock hooks with real useQuery calls):
-//   GET /analytics/approval-turnaround/   → ApprovalTurnaroundItem[]
-//   GET /analytics/sla-breach-rate/       → SlaBreachItem[]
-//   GET /analytics/document-volume/       → VolumeItem[]
-//   GET /analytics/top-uploaders/         → UploaderItem[]
 
 import { useMemo, useState, useEffect } from "react";
 import { Link } from "react-router-dom";
