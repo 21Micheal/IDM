@@ -2,6 +2,7 @@
 ViewSet for bulk scan upload batches.
 """
 import logging
+import json
 
 from django.shortcuts import get_object_or_404
 from rest_framework import permissions, status, viewsets
@@ -13,7 +14,11 @@ from apps.accounts.models import GroupAction
 from apps.audit.models import AuditEvent
 from apps.audit.utils import record_audit_event
 
-from .bulk_upload import create_bulk_upload_documents, sync_bulk_upload_status
+from .bulk_upload import (
+    create_bulk_upload_documents,
+    get_unclassified_bulk_document_type,
+    sync_bulk_upload_status,
+)
 from .models import BulkUpload, BulkUploadStatus, DocumentType
 
 logger = logging.getLogger(__name__)
@@ -65,11 +70,22 @@ class BulkUploadViewSet(viewsets.GenericViewSet):
                     if files:
                         break
 
+        shared_metadata = request.data.get("shared_metadata") or {}
+        if isinstance(shared_metadata, str):
+            try:
+                shared_metadata = json.loads(shared_metadata) if shared_metadata.strip() else {}
+            except json.JSONDecodeError:
+                shared_metadata = {}
+
         data = {
-            "document_type_id": request.data.get("document_type_id"),
+            "related_set": request.data.get("related_set", "false"),
+            "shared_metadata": shared_metadata,
             "is_scanned": request.data.get("is_scanned", "true"),
             "files": files,
         }
+        document_type_id = request.data.get("document_type_id")
+        if document_type_id not in (None, ""):
+            data["document_type_id"] = document_type_id
         if not files:
             logger.warning(
                 "Bulk upload create request contained no files. request.FILES keys=%s, content_type=%s, data_keys=%s, content_length=%s",
@@ -111,17 +127,29 @@ class BulkUploadViewSet(viewsets.GenericViewSet):
         serializer = BulkUploadCreateSerializer(data=data)
         serializer.is_valid(raise_exception=True)
         files = serializer.validated_data["files"]
-        document_type = serializer.validated_data["document_type"]
-        if not self._user_can_upload_type(document_type):
+        is_related_set = serializer.validated_data.get("related_set", False)
+        document_type = (
+            get_unclassified_bulk_document_type()
+            if is_related_set
+            else serializer.validated_data["document_type"]
+        )
+        if not is_related_set and not self._user_can_upload_type(document_type):
             return Response(
                 {"detail": "You do not have upload permission for this document type."},
                 status=status.HTTP_403_FORBIDDEN,
             )
 
         is_scanned = serializer.validated_data.get("is_scanned", True)
+        shared_metadata = serializer.validated_data.get("shared_metadata") or {}
         bulk_upload = BulkUpload.objects.create(
             document_type=document_type,
             uploaded_by=request.user,
+            mode=(
+                BulkUpload.Mode.RELATED_SET
+                if is_related_set
+                else BulkUpload.Mode.SAME_TYPE
+            ),
+            shared_metadata=shared_metadata,
             status=BulkUploadStatus.PENDING,
             total_files=len(files),
         )
@@ -134,6 +162,7 @@ class BulkUploadViewSet(viewsets.GenericViewSet):
             files=files,
             request=request,
             is_scanned=is_scanned,
+            shared_metadata=shared_metadata,
         )
 
         out = BulkUploadDetailSerializer(bulk_upload, context={"request": request})

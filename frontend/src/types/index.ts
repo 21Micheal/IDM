@@ -91,6 +91,19 @@ export interface Document {
 
 export type DocumentRelationType = "supports" | "references" | "supersedes" | "linked-to";
 
+export interface DocumentRelationshipSuggestion {
+  target_document_id: string;
+  target_title: string;
+  target_reference_number: string;
+  target_document_type: string;
+  relation_type: DocumentRelationType;
+  matched_reference: string;
+  matched_purchase_order_number?: string;
+  reason?: string;
+  auto_created?: boolean;
+  relationship_id?: string | null;
+}
+
 export interface RelatedDocumentSummary {
   id: string;
   title: string;

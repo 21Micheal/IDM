@@ -246,6 +246,7 @@ export default function App() {
               <Route path="personal-documents" element={<DocumentsPage personalOnly />} />
               <Route path="documents/upload" element={<UploadPage />} />
               <Route path="documents/scan"   element={<UploadPage scanOnly />} />
+              <Route path="documents/bulk-upload" element={<BulkScanPage scanMode={false} />} />
               <Route path="documents/bulk-scan" element={<BulkScanPage />} />
               <Route path="documents/:id"    element={<DocumentDetailPage />} />
               <Route path="documents/folders/:folderId" element={<FolderPage />} />

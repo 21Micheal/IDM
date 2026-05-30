@@ -35,6 +35,10 @@ type Stage = "select" | "processing" | "review" | "complete";
 
 const POLL_MS = 3000;
 
+type BulkScanPageProps = {
+  scanMode?: boolean;
+};
+
 async function calculateFileSha256(file: File): Promise<string> {
   const buffer = await file.arrayBuffer();
   const digest = await crypto.subtle.digest("SHA-256", buffer);
@@ -43,12 +47,13 @@ async function calculateFileSha256(file: File): Promise<string> {
     .join("");
 }
 
-export default function BulkScanPage() {
+export default function BulkScanPage({ scanMode = true }: BulkScanPageProps) {
   const navigate = useNavigate();
   const queryClient = useQueryClient();
 
   const [stage, setStage] = useState<Stage>("select");
   const [selectedTypeId, setSelectedTypeId] = useState("");
+  const [isRelatedSet, setIsRelatedSet] = useState(false);
   const [files, setFiles] = useState<File[]>([]);
   const [batchId, setBatchId] = useState<string | null>(null);
   const [uploadProgress, setUploadProgress] = useState(0);
@@ -68,7 +73,7 @@ export default function BulkScanPage() {
   });
 
   const visibleDocTypes = useMemo(
-    () => docTypes.filter((type) => !deriveDocumentTypeConfig(type).isPersonalType),
+    () => docTypes.filter((type) => !deriveDocumentTypeConfig(type).isPersonalType && type.code !== "UNCLASS"),
     [docTypes],
   );
   const selectedType = visibleDocTypes.find((t) => t.id === selectedTypeId);
@@ -112,27 +117,33 @@ export default function BulkScanPage() {
     if (!polledBatch) return;
     if (polledBatch.status === "review") {
       const states = polledBatch.documents.map((doc) =>
-        buildReviewStateFromBatchItem(doc, polledBatch.document_type),
+        buildReviewStateFromBatchItem(
+          doc,
+          doc.document_type ?? polledBatch.document_type,
+          visibleDocTypes,
+          polledBatch.mode === "related_set",
+        ),
       );
       setReviewStates(states);
       setStage("review");
-      toast.success("OCR complete — review each document's details.");
+      toast.success(scanMode ? "OCR complete — review each document's details." : "Batch ready — review each document's details.");
     } else if (polledBatch.status === "failed") {
       setStage("select");
       setBatchId(null);
       toast.error("Bulk upload failed. Check your files and try again.");
     }
-  }, [polledBatch]);
+  }, [polledBatch, scanMode, visibleDocTypes]);
 
   const createMutation = useMutation({
     mutationFn: async (uploadFiles?: File[]) => {
       const effectiveFiles = uploadFiles ?? files;
-      if (!selectedTypeId || effectiveFiles.length === 0) {
+      if ((!selectedTypeId && !isRelatedSet) || effectiveFiles.length === 0) {
         throw new Error("Missing type or files");
       }
       const fd = new FormData();
-      fd.append("document_type_id", selectedTypeId);
-      fd.append("is_scanned", "true");
+      if (!isRelatedSet) fd.append("document_type_id", selectedTypeId);
+      fd.append("related_set", isRelatedSet ? "true" : "false");
+      fd.append("is_scanned", scanMode ? "true" : "false");
       effectiveFiles.forEach((file) => fd.append("files", file));
       const { data } = await bulkUploadAPI.create(fd, {
         onUploadProgress: (e) => {
@@ -146,7 +157,12 @@ export default function BulkScanPage() {
       setBatchId(data.id);
       if (data.status === "review") {
         const states = data.documents.map((doc) =>
-          buildReviewStateFromBatchItem(doc, data.document_type),
+          buildReviewStateFromBatchItem(
+            doc,
+            doc.document_type ?? data.document_type,
+            visibleDocTypes,
+            data.mode === "related_set",
+          ),
         );
         setReviewStates(states);
         setStage("review");
@@ -189,7 +205,7 @@ export default function BulkScanPage() {
   }, [createMutation]);
 
   const onStartUpload = useCallback(async () => {
-    if (!selectedTypeId) {
+    if (!selectedTypeId && !isRelatedSet) {
       toast.error("Please select a document type");
       return;
     }
@@ -221,7 +237,7 @@ export default function BulkScanPage() {
     }
 
     uploadFiles(files);
-  }, [selectedTypeId, files, uploadFiles]);
+  }, [selectedTypeId, isRelatedSet, files, uploadFiles]);
 
   const confirmSkipDuplicates = useCallback(() => {
     if (!pendingUploadFiles || pendingUploadFiles.length === 0) {
@@ -248,14 +264,18 @@ export default function BulkScanPage() {
         <div className="min-w-0">
           <h1 className="flex items-center gap-2 text-lg font-semibold tracking-tight">
             <ScanLine className="h-5 w-5" />
-            Bulk Scan
+            {scanMode ? "Bulk Scan" : "Bulk Upload"}
           </h1>
           <p className="mt-0.5 text-xs text-white/75">
-            Upload many documents of the same type. OCR runs on each file; you review metadata per document before submitting.
+            {scanMode
+              ? "Upload same-type batches or related procurement sets. OCR runs per file before review."
+              : "Upload several files, preview each one, then choose its type and details during review."}
           </p>
         </div>
         <div className="hidden items-center gap-2 text-xs text-white/80 md:flex">
-          <span className="border border-white/30 px-2 py-1">{selectedType?.name || "No type selected"}</span>
+          <span className="border border-white/30 px-2 py-1">
+            {isRelatedSet ? "Related set" : selectedType?.name || "No type selected"}
+          </span>
           <span className="border border-white/30 px-2 py-1">{files.length} file{files.length === 1 ? "" : "s"}</span>
         </div>
       </div>
@@ -319,18 +339,46 @@ export default function BulkScanPage() {
         <div className="grid grid-cols-1 gap-5 p-5 pr-8 lg:grid-cols-12">
           <div className="space-y-5 lg:col-span-4">
             <div className="border border-[#C8CDD2] bg-white p-5">
-              <h2 className="mb-4 font-semibold text-[#1F2933]">1. Document type</h2>
+              <h2 className="mb-4 font-semibold text-[#1F2933]">1. Batch mode</h2>
+              <label className="mb-4 flex cursor-pointer items-start gap-3 border border-[#C8CDD2] bg-[#F7F8F9] p-3">
+                <input
+                  type="checkbox"
+                  checked={isRelatedSet}
+                  onChange={(event) => {
+                    setIsRelatedSet(event.target.checked);
+                    if (event.target.checked) setSelectedTypeId("");
+                  }}
+                  className="mt-1"
+                />
+                <span>
+                  <span className="block text-sm font-bold text-[#1F2933]">Upload related documents</span>
+                  <span className="mt-1 block text-xs text-[#5E6870]">
+                    Use this for PO, invoice, GRN, and support files in one packet. You will confirm each file's document type during review.
+                  </span>
+                </span>
+              </label>
               <select
                 value={selectedTypeId}
                 onChange={(e) => setSelectedTypeId(e.target.value)}
-                className="input w-full"
+                disabled={isRelatedSet}
+                className="input w-full disabled:bg-[#EEF3F7] disabled:text-[#7A858E]"
               >
-                <option value="">— Choose document type —</option>
+                <option value="">
+                  {isRelatedSet
+                    ? scanMode ? "Auto classify during review" : "Choose type during review"
+                    : "— Choose document type —"}
+                </option>
                 {visibleDocTypes.map((t) => (
                   <option key={t.id} value={t.id}>{t.name}</option>
                 ))}
               </select>
-              {selectedType?.description && (
+              {isRelatedSet ? (
+                <p className="mt-3 border-t border-[#D3D7DA] pt-3 text-xs text-[#5E6870]">
+                  {scanMode
+                    ? "OCR will classify each file and extract supplier, PO reference, amount, and dates during review."
+                    : "After upload, select each file to see its preview, then choose its type and fill the fields."}
+                </p>
+              ) : selectedType?.description && (
                 <p className="mt-3 text-xs text-muted-foreground">{selectedType.description}</p>
               )}
             </div>
@@ -338,7 +386,13 @@ export default function BulkScanPage() {
             <div className="flex items-start gap-2 border border-[#A7CDE3] bg-[#EEF6FB] p-4 text-xs text-[#287EAD]">
               <Info className="w-4 h-4 flex-shrink-0 mt-0.5" />
               <span>
-                Each file gets its own metadata from OCR. You review and approve documents individually before the batch is submitted to workflow.
+                {isRelatedSet
+                  ? scanMode
+                    ? "Related sets are classified one document at a time. Confirm the suggested type and fields before the system links matching PO references."
+                    : "Related uploads are reviewed one document at a time. The system links matching PO references after you confirm the details."
+                  : scanMode
+                    ? "Each file gets its own metadata from OCR. You review and approve documents individually before the batch is submitted to workflow."
+                    : "Each file is reviewed with its preview. Fill the details before the batch is submitted to workflow."}
               </span>
             </div>
           </div>
@@ -357,7 +411,7 @@ export default function BulkScanPage() {
               <button
                 type="button"
                 onClick={onStartUpload}
-                disabled={createMutation.isPending || isCheckingDuplicates || !selectedTypeId || files.length === 0}
+                disabled={createMutation.isPending || isCheckingDuplicates || (!selectedTypeId && !isRelatedSet) || files.length === 0}
                 className="flex flex-1 items-center justify-center gap-2 bg-[#287EAD] py-3 font-semibold text-white hover:bg-[#206D99] disabled:opacity-50"
               >
                 {createMutation.isPending || isCheckingDuplicates ? (
@@ -368,7 +422,9 @@ export default function BulkScanPage() {
                 ) : (
                   <>
                     <ScanLine className="w-4 h-4" />
-                    Upload &amp; scan batch
+                    {isRelatedSet
+                      ? scanMode ? "Upload & classify set" : "Upload related set"
+                      : scanMode ? "Upload & scan batch" : "Upload batch"}
                     <ArrowRight className="w-4 h-4" />
                   </>
                 )}
@@ -387,14 +443,22 @@ export default function BulkScanPage() {
 
       {stage === "processing" && activeBatch && (
         <div className="p-5 pr-8">
-          <BulkProcessingPanel batch={activeBatch} uploadProgress={uploadProgress} previews={localPreviews} />
+          <BulkProcessingPanel
+            batch={activeBatch}
+            uploadProgress={uploadProgress}
+            previews={localPreviews}
+            scanMode={scanMode}
+          />
         </div>
       )}
 
-      {stage === "review" && selectedType && reviewStates.length > 0 && (
+      {stage === "review" && (selectedType || isRelatedSet || polledBatch?.document_type) && reviewStates.length > 0 && (
         <div className="p-5 pr-8">
           <BulkReviewPanel
-            documentType={polledBatch?.document_type ?? selectedType}
+            documentType={polledBatch?.document_type ?? selectedType ?? visibleDocTypes[0]}
+            documentTypes={visibleDocTypes}
+            isRelatedSet={isRelatedSet || polledBatch?.mode === "related_set"}
+            scanMode={scanMode}
             reviewStates={reviewStates}
             onChange={setReviewStates}
             onSubmit={() => reviewMutation.mutate()}
@@ -434,7 +498,7 @@ export default function BulkScanPage() {
               }}
               className="border border-[#C8CDD2] bg-white px-6 py-3 font-semibold hover:bg-[#EEF3F7]"
             >
-              Scan another batch
+              {scanMode ? "Scan another batch" : "Upload another batch"}
             </button>
           </div>
         </div>

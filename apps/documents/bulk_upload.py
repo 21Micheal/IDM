@@ -6,14 +6,30 @@ from __future__ import annotations
 import logging
 import os
 
-from django.db import transaction
-
-from .models import BulkUpload, BulkUploadStatus, Document, OCRStatus
+from .models import BulkUpload, BulkUploadStatus, Document, DocumentType, OCRStatus
 from .serializers import DocumentUploadSerializer
 from apps.audit.models import AuditEvent
 from apps.audit.utils import record_audit_event
 
 logger = logging.getLogger(__name__)
+
+UNCLASSIFIED_BULK_DOCUMENT_TYPE_CODE = "UNCLASS"
+
+
+def get_unclassified_bulk_document_type() -> DocumentType:
+    doc_type, _ = DocumentType.objects.get_or_create(
+        code=UNCLASSIFIED_BULK_DOCUMENT_TYPE_CODE,
+        defaults={
+            "name": "Unclassified document",
+            "reference_prefix": "MIX",
+            "reference_padding": 5,
+            "description": "Temporary type used while OCR classifies related bulk uploads.",
+            "icon": "file-question",
+            "metadata_mode": DocumentType.MetadataMode.USER_DEFINED,
+            "is_active": True,
+        },
+    )
+    return doc_type
 
 
 def document_title_from_filename(filename: str) -> str:
@@ -46,7 +62,7 @@ def serialize_bulk_document(doc: Document) -> dict:
     public_metadata = {
         key: value
         for key, value in meta.items()
-        if key not in ("ocr_suggestions", "ocr_quality")
+        if key not in ("ocr_suggestions", "ocr_quality", "relationship_suggestions")
     }
 
     return {
@@ -54,6 +70,15 @@ def serialize_bulk_document(doc: Document) -> dict:
         "reference_number": doc.reference_number,
         "title": doc.title,
         "file_name": doc.file_name,
+        "document_type": {
+            "id": str(doc.document_type_id),
+            "name": doc.document_type.name,
+            "code": doc.document_type.code,
+            "reference_prefix": doc.document_type.reference_prefix,
+            "description": doc.document_type.description,
+            "icon": doc.document_type.icon,
+            "metadata_fields": [],
+        },
         "ocr_status": doc.ocr_status or "",
         "ocr_suggestions": suggestions,
         "metadata": public_metadata,
@@ -85,6 +110,7 @@ def sync_bulk_upload_status(bulk_upload: BulkUpload) -> BulkUpload:
             return bulk_upload
 
         pending = docs.filter(
+            is_scanned=True,
             ocr_status__in=[OCRStatus.PENDING, OCRStatus.PROCESSING, ""]
         ).exists()
         if not pending:
@@ -94,13 +120,13 @@ def sync_bulk_upload_status(bulk_upload: BulkUpload) -> BulkUpload:
     return bulk_upload
 
 
-@transaction.atomic
 def create_bulk_upload_documents(
     *,
     bulk_upload: BulkUpload,
     files,
     request,
     is_scanned: bool = True,
+    shared_metadata: dict | None = None,
 ) -> BulkUpload:
     """
     Upload each file as a draft document linked to the batch.
@@ -111,6 +137,7 @@ def create_bulk_upload_documents(
 
     for upload in files:
         title = document_title_from_filename(upload.name)
+        metadata = dict(shared_metadata or {})
         payload = {
             "title": title,
             "document_type_id": str(bulk_upload.document_type_id),
@@ -118,6 +145,8 @@ def create_bulk_upload_documents(
             "is_scanned": is_scanned,
             "is_self_upload": False,
         }
+        if metadata:
+            payload["metadata"] = metadata
         serializer = DocumentUploadSerializer(data=payload, context={"request": request})
         try:
             if not serializer.is_valid():

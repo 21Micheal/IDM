@@ -120,7 +120,7 @@ def _delete_storage_file(name: str) -> None:
 class DocumentTypeViewSet(AuditMixin, viewsets.ModelViewSet):
     queryset = DocumentType.objects.prefetch_related(
         "metadata_fields"
-    ).filter(is_active=True).exclude(code="PERSONAL")
+    ).filter(is_active=True).exclude(code__in=["PERSONAL", "UNCLASS"])
 
     def get_serializer_class(self):
         if self.action in ("create", "update", "partial_update"):
@@ -302,6 +302,7 @@ class DocumentViewSet(AuditMixin, viewsets.ModelViewSet):
         user = self.request.user
         qs   = (
             Document.objects
+            .exclude(document_type__code="UNCLASS")
             .select_related(
                 "document_type",
                 "uploaded_by",

@@ -171,9 +171,9 @@ RETURN SHAPE:
 }, indent=2)}
 
 STRICT RULES:
-1. Set any field to null if not clearly present. Never guess or invent values.
-2. A weak, partial, blurry, or guessed value is not a value. Return null for that field instead.
-3. Do not use overall confidence to justify speculative fields. confidence describes the extraction as a whole; individual missing fields must remain null.
+1. Extract every visible labelled field that is present on the document, even if overall scan quality is only medium.
+2. Set a field to null only when it is not visible, not labelled/identifiable, or truly unreadable. Do not omit visible labels such as PO Number, Supplier, Transaction Reference, Invoice Date, Delivery Date, or GRN Date.
+3. Do not guess hidden values, but do return a visible candidate value when the nearby label identifies the field. Use low_quality_warning/confidence to flag uncertainty instead of dropping visible fields.
 4. account_code requires an explicit nearby account/customer/GL/cost-centre label. If the document lacks that label, account_code must be null.
 5. Do not reuse reference_number, po_reference, vendor_code, vat_number, kra_pin, bank_details, phone numbers, addresses, or line-item codes as account_code.
 6. Also fill custom_fields using the exact admin field keys shown above.

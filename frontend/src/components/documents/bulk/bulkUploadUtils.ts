@@ -37,6 +37,8 @@ function parseOcrFields(item: BulkUploadDocumentItem): OcrFields {
 export function buildReviewStateFromBatchItem(
   item: BulkUploadDocumentItem,
   documentType: DocumentType,
+  documentTypes: DocumentType[] = [documentType],
+  isRelatedSet = false,
 ): BulkDocReviewState {
   const values: Record<string, string> = {
     title: item.title || documentNameFromFileName(item.file_name),
@@ -56,6 +58,10 @@ export function buildReviewStateFromBatchItem(
 
   const suggestedScores: Record<string, number> = {};
   const ocrFields = parseOcrFields(item);
+  const detectedDocumentType = ocrFields.document_type ? String(ocrFields.document_type).trim() : "";
+  const resolvedDocumentType = isRelatedSet
+    ? resolveDocumentType(detectedDocumentType || item.file_name, documentTypes)
+    : documentType;
 
   const fill = (key: string, value: string | number | undefined, score = 4) => {
     if (value == null) return;
@@ -75,21 +81,7 @@ export function buildReviewStateFromBatchItem(
   fill("description", ocrFields.description ? String(ocrFields.description) : undefined);
   fill("uom", ocrFields.uom ? String(ocrFields.uom) : undefined);
 
-  if (documentType.metadata_fields?.length) {
-    const matches = applyOcrToFields(documentType.metadata_fields, ocrFields);
-    for (const { field, match } of matches) {
-      const metadataKey = getMetadataFieldKey(field);
-      if (!metadataKey) continue;
-      const path = DIRECT_KEYS.has(metadataKey)
-        ? metadataKey
-        : `metadata.${metadataKey}`;
-      const existing = suggestedScores[path] ?? 0;
-      if (match.score > existing) {
-        values[path] = match.value;
-        suggestedScores[path] = match.score;
-      }
-    }
-  }
+  applyOcrValuesToDocumentType(values, suggestedScores, ocrFields, resolvedDocumentType ?? documentType);
 
   return {
     documentId: item.document_id,
@@ -101,7 +93,71 @@ export function buildReviewStateFromBatchItem(
     expanded: false,
     values,
     suggestedScores,
+    ocrFields,
+    documentTypeId: isRelatedSet
+      ? (resolvedDocumentType?.id ?? "")
+      : (item.document_type?.id ?? documentType.id),
+    detectedDocumentType,
   };
+}
+
+export function applyOcrValuesToDocumentType(
+  values: Record<string, string>,
+  suggestedScores: Record<string, number>,
+  ocrFields: OcrFields | undefined,
+  documentType: DocumentType,
+) {
+  if (!ocrFields || !documentType.metadata_fields?.length) return;
+
+  const matches = applyOcrToFields(documentType.metadata_fields, ocrFields);
+  for (const { field, match } of matches) {
+    const metadataKey = getMetadataFieldKey(field);
+    if (!metadataKey) continue;
+    const path = DIRECT_KEYS.has(metadataKey)
+      ? metadataKey
+      : `metadata.${metadataKey}`;
+    const existing = suggestedScores[path] ?? 0;
+    if (match.score > existing || !String(values[path] ?? "").trim()) {
+      values[path] = match.value;
+      suggestedScores[path] = match.score;
+    }
+  }
+}
+
+export function resolveDocumentType(label: string, documentTypes: DocumentType[]): DocumentType | undefined {
+  const normalized = expandDocumentTypeAliases(normalizeTypeLabel(label));
+  if (!normalized) return undefined;
+  return documentTypes
+    .filter((type) => type.code !== "UNCLASS")
+    .map((type) => {
+      const haystack = expandDocumentTypeAliases(normalizeTypeLabel(`${type.name} ${type.code} ${type.description ?? ""}`));
+      const typeName = expandDocumentTypeAliases(normalizeTypeLabel(type.name));
+      let score = 0;
+      if (haystack.includes(normalized) || normalized.includes(typeName)) score += 5;
+      for (const token of normalized.split(" ").filter((part) => part.length > 2)) {
+        if (haystack.includes(token)) score += 1;
+      }
+      return { type, score };
+    })
+    .filter((candidate) => candidate.score > 0)
+    .sort((a, b) => b.score - a.score)[0]?.type;
+}
+
+function expandDocumentTypeAliases(value: string) {
+  return value
+    .replace(/\bpo\b/g, "purchase order po")
+    .replace(/\blpo\b/g, "local purchase order lpo")
+    .replace(/\bgrn\b/g, "goods received note goods receipt grn")
+    .replace(/\bdn\b/g, "delivery note dn");
+}
+
+function normalizeTypeLabel(value: string) {
+  return value
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, " ")
+    .replace(/\b(doc|document|file|tax)\b/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
 }
 
 export function reviewStateToSubmitItem(state: BulkDocReviewState): BulkReviewSubmitItem {
@@ -111,6 +167,9 @@ export function reviewStateToSubmitItem(state: BulkDocReviewState): BulkReviewSu
     approved: state.approved,
     rejected: state.rejected,
   };
+  if (state.documentTypeId) {
+    item.document_type_id = state.documentTypeId;
+  }
 
   for (const [key, raw] of Object.entries(state.values)) {
     const value = String(raw ?? "").trim();

@@ -9,6 +9,9 @@ const REVIEW_PREVIEW_HEIGHT = "h-[clamp(34rem,calc(100vh-16rem),46rem)]";
 
 type Props = {
   documentType: DocumentType;
+  documentTypes?: DocumentType[];
+  isRelatedSet?: boolean;
+  scanMode?: boolean;
   reviewStates: BulkDocReviewState[];
   onChange: (states: BulkDocReviewState[]) => void;
   onSubmit: () => void;
@@ -18,6 +21,9 @@ type Props = {
 
 export default function BulkReviewPanel({
   documentType,
+  documentTypes = [documentType],
+  isRelatedSet = false,
+  scanMode = true,
   reviewStates,
   onChange,
   onSubmit,
@@ -25,6 +31,10 @@ export default function BulkReviewPanel({
   previews = {},
 }: Props) {
   const counts = useMemo(() => countReviewDecisions(reviewStates), [reviewStates]);
+  const missingTypeCount = useMemo(
+    () => reviewStates.filter((state) => state.approved && isRelatedSet && !state.documentTypeId).length,
+    [isRelatedSet, reviewStates],
+  );
   const [selectedDocumentId, setSelectedDocumentId] = useState(reviewStates[0]?.documentId ?? "");
   const selectedState = reviewStates.find((state) => state.documentId === selectedDocumentId) ?? reviewStates[0];
   const selectedPreview = selectedState ? previews[selectedState.fileName] : undefined;
@@ -60,7 +70,11 @@ export default function BulkReviewPanel({
           <div>
             <h2 className="text-xl font-bold text-[#1F2933]">Review each document</h2>
             <p className="text-sm text-[#5E6870]">
-              OCR pre-filled fields per file — expand to verify, then submit the batch.
+              {scanMode && isRelatedSet
+                ? "OCR pre-filled fields and suggested document types per file — verify each document before submitting."
+                : scanMode
+                  ? "OCR pre-filled fields per file — expand to verify, then submit the batch."
+                  : "Select a document to view its preview, choose its type, then fill the metadata before submitting."}
             </p>
           </div>
         </div>
@@ -85,6 +99,11 @@ export default function BulkReviewPanel({
         <span className="bg-white px-3 py-1 text-[#5E6870]">
           {reviewStates.length} total
         </span>
+        {missingTypeCount > 0 && (
+          <span className="bg-amber-50 px-3 py-1 font-semibold text-amber-700">
+            {missingTypeCount} need document type
+          </span>
+        )}
       </div>
 
       <div className="grid gap-4 xl:grid-cols-12">
@@ -93,7 +112,10 @@ export default function BulkReviewPanel({
             <BulkDocumentReviewCard
               key={state.documentId}
               state={state}
-              documentType={documentType}
+              documentType={documentTypes.find((type) => type.id === state.documentTypeId) ?? documentType}
+              documentTypes={documentTypes}
+              isRelatedSet={isRelatedSet}
+              scanMode={scanMode}
               selected={selectedState?.documentId === state.documentId}
               onSelect={() => setSelectedDocumentId(state.documentId)}
               onChange={(next) => updateAt(index, next)}
@@ -132,7 +154,7 @@ export default function BulkReviewPanel({
         <button
           type="button"
           onClick={onSubmit}
-          disabled={isSubmitting || reviewStates.length === 0}
+          disabled={isSubmitting || reviewStates.length === 0 || missingTypeCount > 0}
           className="flex flex-1 items-center justify-center gap-2 bg-[#287EAD] py-3 text-base font-semibold text-white transition-all hover:bg-[#206D99] disabled:opacity-50"
         >
           {isSubmitting ? (

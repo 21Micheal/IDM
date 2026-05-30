@@ -2,12 +2,15 @@ import { ChevronRight, Sparkles, CheckCircle, XCircle, AlertCircle } from "lucid
 import clsx from "clsx";
 import type { DocumentType, MetadataField } from "@/types";
 import type { BulkDocReviewState } from "./bulkUploadTypes";
-import { getMetadataFieldKey } from "./bulkUploadUtils";
+import { applyOcrValuesToDocumentType, getMetadataFieldKey } from "./bulkUploadUtils";
 import OcrStatusBadge from "@/components/documents/OcrStatusBadge";
 
 type Props = {
   state: BulkDocReviewState;
   documentType: DocumentType;
+  documentTypes?: DocumentType[];
+  isRelatedSet?: boolean;
+  scanMode?: boolean;
   onChange: (next: BulkDocReviewState) => void;
   selected?: boolean;
   onSelect?: () => void;
@@ -50,13 +53,38 @@ function metadataFieldsForType(documentType: DocumentType): MetadataField[] {
   return [...(documentType.metadata_fields ?? [])].sort((a, b) => a.order - b.order);
 }
 
-export default function BulkDocumentReviewCard({ state, documentType, onChange, selected = false, onSelect }: Props) {
-  const fields = metadataFieldsForType(documentType);
+export default function BulkDocumentReviewCard({
+  state,
+  documentType,
+  documentTypes = [documentType],
+  isRelatedSet = false,
+  scanMode = true,
+  onChange,
+  selected = false,
+  onSelect,
+}: Props) {
+  const selectedType = documentTypes.find((type) => type.id === state.documentTypeId) ?? documentType;
+  const fields = metadataFieldsForType(selectedType);
   const setValue = (key: string, value: string) => {
     onChange({ ...state, values: { ...state.values, [key]: value } });
   };
 
   const isSuggested = (key: string) => state.suggestedScores[key] !== undefined;
+
+  const changeDocumentType = (documentTypeId: string) => {
+    const nextType = documentTypes.find((type) => type.id === documentTypeId);
+    const nextValues = { ...state.values };
+    const nextSuggestedScores = { ...state.suggestedScores };
+    if (nextType) {
+      applyOcrValuesToDocumentType(nextValues, nextSuggestedScores, state.ocrFields, nextType);
+    }
+    onChange({
+      ...state,
+      documentTypeId,
+      values: nextValues,
+      suggestedScores: nextSuggestedScores,
+    });
+  };
 
   return (
     <div
@@ -80,16 +108,18 @@ export default function BulkDocumentReviewCard({ state, documentType, onChange, 
           <p className="font-semibold text-foreground truncate">{state.fileName}</p>
           <p className="text-xs text-muted-foreground font-mono">{state.referenceNumber}</p>
         </div>
-        <OcrStatusBadge
-          status={
-            state.ocrStatus === "pending"
-            || state.ocrStatus === "processing"
-            || state.ocrStatus === "done"
-            || state.ocrStatus === "failed"
-              ? state.ocrStatus
-              : null
-          }
-        />
+        {scanMode && (
+          <OcrStatusBadge
+            status={
+              state.ocrStatus === "pending"
+              || state.ocrStatus === "processing"
+              || state.ocrStatus === "done"
+              || state.ocrStatus === "failed"
+                ? state.ocrStatus
+                : null
+            }
+          />
+        )}
         {state.approved && !state.rejected && (
           <CheckCircle className="w-4 h-4 text-teal flex-shrink-0" />
         )}
@@ -100,7 +130,7 @@ export default function BulkDocumentReviewCard({ state, documentType, onChange, 
 
       {state.expanded && (
         <div className="px-4 pb-4 pt-1 border-t border-border space-y-4">
-          {state.ocrStatus === "failed" && (
+          {scanMode && state.ocrStatus === "failed" && (
             <div className="flex items-start gap-2 text-xs text-amber-700 bg-amber-50 border border-amber-200 rounded-lg px-3 py-2">
               <AlertCircle className="w-4 h-4 flex-shrink-0 mt-0.5" />
               OCR could not extract text — fill in fields manually.
@@ -136,6 +166,26 @@ export default function BulkDocumentReviewCard({ state, documentType, onChange, 
 
           {!state.rejected && (
             <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+              {isRelatedSet && (
+                <div className="md:col-span-2">
+                  <label className="label">Document type</label>
+                  <select
+                    className="input"
+                    value={state.documentTypeId ?? ""}
+                    onChange={(e) => changeDocumentType(e.target.value)}
+                  >
+                    <option value="">Select document type…</option>
+                    {documentTypes.map((type) => (
+                      <option key={type.id} value={type.id}>{type.name}</option>
+                    ))}
+                  </select>
+                  {state.detectedDocumentType && (
+                    <p className="mt-1 text-xs text-[#5E6870]">
+                      OCR detected: {state.detectedDocumentType}
+                    </p>
+                  )}
+                </div>
+              )}
               <FieldInput
                 label="Title"
                 value={state.values.title ?? ""}

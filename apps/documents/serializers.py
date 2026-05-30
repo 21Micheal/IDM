@@ -34,6 +34,7 @@ from django.db.models import Q
 from django.utils import timezone
 from django.utils.text import slugify
 import mimetypes
+import uuid
 from django.core.files.storage import default_storage
 from apps.search.utils import summarize_bulk_index_error
 from .file_streaming import build_absolute_document_file_url, user_can_download_document
@@ -43,6 +44,23 @@ DOCUMENT_COLUMN_METADATA_KEYS = {
     "title", "supplier", "amount", "currency", "document_date", "due_date",
 }
 logger = logging.getLogger(__name__)
+
+
+def _generate_unique_reference(doc_type: DocumentType) -> str:
+    if doc_type.code == "UNCLASS":
+        while True:
+            candidate = f"{doc_type.reference_prefix}-{uuid.uuid4().hex[:12].upper()}"
+            if not Document.objects.filter(reference_number=candidate).exists():
+                return candidate
+
+    candidate = doc_type.next_reference()
+    if not Document.objects.filter(reference_number=candidate).exists():
+        return candidate
+
+    while True:
+        fallback = f"{doc_type.reference_prefix}-{uuid.uuid4().hex[:8].upper()}"
+        if not Document.objects.filter(reference_number=fallback).exists():
+            return fallback
 
 def _find_existing_document_for_checksum(
     checksum: str,
@@ -623,6 +641,17 @@ class DocumentMetadataEditSerializer(serializers.ModelSerializer):
         except Exception:
             logger.exception("Failed to queue async reindex for document %s", instance.id)
 
+        try:
+            from .relationship_suggestions import refresh_po_relationship_suggestions
+
+            refresh_po_relationship_suggestions(
+                instance,
+                actor=getattr(self.context.get("request"), "user", None),
+                auto_create_same_batch=bool(instance.bulk_upload_id),
+            )
+        except Exception:
+            logger.exception("Failed to refresh relationship suggestions for document %s", instance.id)
+
         return instance
 
 
@@ -732,7 +761,7 @@ class DocumentUploadSerializer(serializers.ModelSerializer):
         doc_type   = validated_data["document_type"]
         is_scanned = validated_data.get("is_scanned", False)
 
-        validated_data["reference_number"] = doc_type.next_reference()
+        validated_data["reference_number"] = _generate_unique_reference(doc_type)
 
         validated_data["file_name"]   = upload.name
         validated_data["file_size"]   = upload.size
@@ -859,6 +888,13 @@ class DocumentUploadSerializer(serializers.ModelSerializer):
             change_summary = "Initial upload",
             created_by     = request.user,
         )
+
+        try:
+            from .relationship_suggestions import refresh_po_relationship_suggestions
+
+            refresh_po_relationship_suggestions(doc, actor=request.user)
+        except Exception:
+            logger.exception("Failed to refresh relationship suggestions for document %s", doc.id)
 
         # ── Task routing ─────────────────────────────────────────────────────
         if is_scanned:
@@ -1209,6 +1245,8 @@ class BulkUploadSerializer(serializers.ModelSerializer):
             "id",
             "document_type",
             "document_type_id",
+            "mode",
+            "shared_metadata",
             "uploaded_by",
             "status",
             "total_files",
@@ -1225,6 +1263,8 @@ class BulkUploadSerializer(serializers.ModelSerializer):
         read_only_fields = [
             "id",
             "uploaded_by",
+            "mode",
+            "shared_metadata",
             "status",
             "total_files",
             "successful_uploads",
@@ -1248,7 +1288,10 @@ class BulkUploadCreateSerializer(serializers.Serializer):
     document_type_id = serializers.PrimaryKeyRelatedField(
         queryset=DocumentType.objects.filter(is_active=True),
         source="document_type",
+        required=False,
     )
+    related_set = serializers.BooleanField(default=False)
+    shared_metadata = serializers.DictField(required=False)
     files = serializers.ListField(
         child=serializers.FileField(),
         min_length=1,
@@ -1267,7 +1310,13 @@ class BulkUploadCreateSerializer(serializers.Serializer):
         return bool(value)
 
     def validate(self, attrs):
-        document_type = attrs["document_type"]
+        if attrs.get("related_set") and not attrs.get("document_type"):
+            return attrs
+        document_type = attrs.get("document_type")
+        if not document_type:
+            raise serializers.ValidationError(
+                {"document_type_id": "Document type is required unless this is a related document set."}
+            )
         if document_type.is_personal_type:
             raise serializers.ValidationError(
                 {"document_type_id": "Bulk upload is not supported for personal document types."}
@@ -1281,6 +1330,7 @@ class BulkUploadDocumentReadSerializer(serializers.Serializer):
     reference_number = serializers.CharField()
     title = serializers.CharField()
     file_name = serializers.CharField()
+    document_type = DocumentTypeSerializer()
     ocr_status = serializers.CharField()
     ocr_suggestions = serializers.DictField(required=False, allow_null=True)
     metadata = serializers.DictField(required=False)
@@ -1325,6 +1375,7 @@ class BulkUploadDetailSerializer(BulkUploadSerializer):
 class BulkUploadReviewItemSerializer(serializers.Serializer):
     """One document decision in the bulk review submit payload."""
     document_id = serializers.UUIDField()
+    document_type_id = serializers.UUIDField(required=False)
     title = serializers.CharField(required=False, allow_blank=True)
     supplier = serializers.CharField(required=False, allow_blank=True)
     amount = serializers.CharField(required=False, allow_blank=True)
@@ -1397,6 +1448,42 @@ class BulkUploadReviewSerializer(serializers.Serializer):
                 continue
 
             edit_payload: dict = {}
+            reference_changed = False
+            if item.get("document_type_id"):
+                try:
+                    next_doc_type = DocumentType.objects.get(
+                        id=item["document_type_id"],
+                        is_active=True,
+                    )
+                except DocumentType.DoesNotExist:
+                    raise serializers.ValidationError(
+                        {"document_type_id": "Selected document type does not exist."}
+                    )
+                if next_doc_type.is_personal_type:
+                    raise serializers.ValidationError(
+                        {"document_type_id": "Personal document types cannot be used in bulk review."}
+                    )
+                if next_doc_type.code == "UNCLASS":
+                    raise serializers.ValidationError(
+                        {"document_type_id": "Select the real document type before submitting."}
+                    )
+                user = request.user
+                if not user.has_admin_access:
+                    perms = user.get_all_permissions_for_doctype(next_doc_type.id)
+                    if GroupAction.UPLOAD.value not in perms:
+                        raise serializers.ValidationError(
+                            {"document_type_id": f"You do not have upload permission for {next_doc_type.name}."}
+                        )
+                previous_doc_type = doc.document_type
+                doc.document_type = next_doc_type
+                if previous_doc_type.code == "UNCLASS":
+                    doc.reference_number = _generate_unique_reference(next_doc_type)
+                    reference_changed = True
+            elif bulk_upload.mode == BulkUpload.Mode.RELATED_SET:
+                raise serializers.ValidationError(
+                    {"document_type_id": "Select a document type for each related document."}
+                )
+
             for field in ("title", "supplier", "currency", "document_date", "due_date"):
                 if field in item and item[field]:
                     edit_payload[field] = item[field]
@@ -1421,6 +1508,23 @@ class BulkUploadReviewSerializer(serializers.Serializer):
                 editor.is_valid(raise_exception=True)
                 editor.save()
                 doc.refresh_from_db()
+            elif item.get("document_type_id"):
+                update_fields = ["document_type", "updated_at"]
+                if reference_changed:
+                    update_fields.append("reference_number")
+                doc.save(update_fields=update_fields)
+                doc.refresh_from_db()
+
+            try:
+                from .relationship_suggestions import refresh_po_relationship_suggestions
+
+                refresh_po_relationship_suggestions(
+                    doc,
+                    actor=request.user,
+                    auto_create_same_batch=True,
+                )
+            except Exception:
+                logger.exception("Failed to refresh bulk relationship suggestions for document %s", doc.id)
 
             if doc.document_type.workflow_template_id:
                 try:
@@ -1429,6 +1533,26 @@ class BulkUploadReviewSerializer(serializers.Serializer):
                     workflow_errors.append(f"{doc.reference_number}: {exc}")
 
             approved_count += 1
+
+        try:
+            from .relationship_suggestions import (
+                cleanup_duplicate_auto_po_relationships,
+                cleanup_unclassified_relationships,
+                refresh_po_relationship_suggestions,
+            )
+
+            cleanup_unclassified_relationships(bulk_upload_id=bulk_upload.id)
+            cleanup_duplicate_auto_po_relationships(bulk_upload_id=bulk_upload.id)
+
+            for doc in bulk_upload.documents.exclude(status=DocumentStatus.VOID):
+                refresh_po_relationship_suggestions(
+                    doc,
+                    actor=request.user,
+                    auto_create_same_batch=True,
+                )
+            cleanup_duplicate_auto_po_relationships(bulk_upload_id=bulk_upload.id)
+        except Exception:
+            logger.exception("Failed to refresh final bulk relationship suggestions for %s", bulk_upload.id)
 
         bulk_upload.approved_count = approved_count
         bulk_upload.rejected_count = rejected_count

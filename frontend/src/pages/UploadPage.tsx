@@ -1256,6 +1256,24 @@ export default function UploadPage({ scanOnly = false }: UploadPageProps) {
         </div>
       </div>
 
+      {!scanOnly && scanStage === "idle" && (
+        <div className="border-b border-[#C8CDD2] bg-white px-5 py-3 pr-8">
+          <div className="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
+            <p className="text-sm text-[#5E6870]">
+              Uploading a PO, invoice, GRN, or support files together?
+            </p>
+            <button
+              type="button"
+              onClick={() => navigate("/documents/bulk-upload")}
+              className="inline-flex items-center justify-center gap-2 border border-[#287EAD] bg-white px-3 py-2 text-sm font-semibold text-[#287EAD] hover:bg-[#EEF6FB]"
+            >
+              <Upload className="h-4 w-4" />
+              Upload related batch
+            </button>
+          </div>
+        </div>
+      )}
+
       {/* ── OCR wait / review / submitting ──────────────────────────────── */}
       {isOcrFlow && scanStage !== "idle" && scanStage !== "uploading" && (
         <div className="grid gap-4 p-5 pr-8 lg:grid-cols-12">

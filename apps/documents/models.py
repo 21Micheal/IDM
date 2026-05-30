@@ -758,6 +758,10 @@ class BulkUploadStatus(models.TextChoices):
 
 
 class BulkUpload(models.Model):
+    class Mode(models.TextChoices):
+        SAME_TYPE = "same_type", "Same document type"
+        RELATED_SET = "related_set", "Related document set"
+
     """
     Tracks a batch upload operation for multiple documents.
     
@@ -771,6 +775,13 @@ class BulkUpload(models.Model):
     uploaded_by = models.ForeignKey(
         settings.AUTH_USER_MODEL, on_delete=models.PROTECT, related_name="bulk_uploads"
     )
+    mode = models.CharField(
+        max_length=20,
+        choices=Mode.choices,
+        default=Mode.SAME_TYPE,
+        db_index=True,
+    )
+    shared_metadata = models.JSONField(default=dict, blank=True)
     status = models.CharField(
         max_length=20,
         choices=BulkUploadStatus.choices,
