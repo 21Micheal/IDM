@@ -677,28 +677,40 @@ class UserGroupViewSet(viewsets.ModelViewSet):
 
     @action(detail=True, methods=["post"])
     def set_permissions(self, request, pk=None):
+        from apps.accounts.models import AccessStage
+        from apps.documents.access import ACCESS_STAGE_KEYS
+
         group = self.get_object()
         perms = request.data.get("permissions", [])
 
-        valid_actions = {c[0] for c in GroupPermission._meta.get_field("action").choices}
+        valid_actions = {
+            c[0] for c in GroupPermission._meta.get_field("action").choices
+            if c[0] != GroupAction.ADMIN.value
+        }
+        valid_stages = {stage for stage in ACCESS_STAGE_KEYS if stage != AccessStage.ANY.value}
         errors = []
         for i, p in enumerate(perms):
             if p.get("action") not in valid_actions:
                 errors.append(f"Item {i}: invalid action '{p.get('action')}'")
+            if not p.get("document_type_id"):
+                errors.append(f"Item {i}: document_type_id is required")
+            stage = p.get("stage")
+            if stage not in valid_stages:
+                errors.append(f"Item {i}: invalid stage '{stage}'")
         if errors:
             return Response({"detail": errors}, status=400)
 
         from django.db import transaction
         with transaction.atomic():
-            GroupPermission.objects.filter(group=group).exclude(action=GroupAction.ADMIN.value).delete()
+            GroupPermission.objects.filter(group=group).delete()
             created = []
             for p in perms:
-                dt_id = p.get("document_type_id") or None
-                if p["action"] == GroupAction.ADMIN.value:
-                    continue
+                dt_id = p.get("document_type_id")
+                stage = p.get("stage")
                 obj = GroupPermission.objects.create(
                     group=group,
                     document_type_id=dt_id,
+                    stage=stage,
                     action=p["action"],
                 )
                 created.append(obj)
@@ -707,34 +719,10 @@ class UserGroupViewSet(viewsets.ModelViewSet):
 
     @action(detail=True, methods=["post"])
     def set_admin_access(self, request, pk=None):
-        group = self.get_object()
-        enabled = bool(request.data.get("enabled"))
-
-        if group.name == UserGroup.HOD_GROUP_NAME:
-            return Response({"detail": "The HOD group cannot be granted administrator access."}, status=400)
-
-        if group.name == UserGroup.ADMIN_GROUP_NAME and not enabled:
-            return Response({"detail": "The Administrators group must keep administrator access."}, status=400)
-
-        from django.db import transaction
-        with transaction.atomic():
-            GroupPermission.objects.filter(
-                group=group,
-                document_type__isnull=True,
-                action=GroupAction.ADMIN.value,
-            ).delete()
-            if enabled:
-                GroupPermission.objects.create(
-                    group=group,
-                    document_type=None,
-                    action=GroupAction.ADMIN.value,
-                )
-
-        group.refresh_from_db()
-        return Response({
-            "id": str(group.id),
-            "has_admin_access": group.has_admin_access,
-        })
+        return Response(
+            {"detail": "Administrator access is managed on user accounts, not groups."},
+            status=410,
+        )
 
     @action(detail=True, methods=["get"])
     def members(self, request, pk=None):

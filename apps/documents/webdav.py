@@ -34,13 +34,11 @@ from django.views.decorators.csrf import csrf_exempt
 from rest_framework_simplejwt.exceptions import InvalidToken, TokenError
 from rest_framework_simplejwt.tokens import AccessToken
 
+from .file_streaming import user_can_edit_document
 from .models import Document, DocumentVersion
 from apps.accounts.models import User
 
 logger = logging.getLogger(__name__)
-
-from .models import Document, DocumentVersion
-from apps.accounts.models import User
 
 # In-process WebDAV protocol-level lock store (per-session, not application lock)
 _PROTOCOL_LOCKS: dict[str, dict] = {}
@@ -183,6 +181,8 @@ class DocumentWebDAVView(View):
         """
         if not user:
             return False
+        if action == "edit":
+            return user_can_edit_document(user, doc)
         if user.has_admin_access:
             return True
         if getattr(doc, "is_self_upload", False) and (
@@ -190,7 +190,10 @@ class DocumentWebDAVView(View):
         ):
             return True
 
-        permissions = user.get_all_permissions_for_doctype(str(doc.document_type_id))
+        permissions = user.get_all_permissions_for_doctype(
+            str(doc.document_type_id),
+            document=doc,
+        )
         if action == "view":
             return bool(permissions)
         return action in permissions

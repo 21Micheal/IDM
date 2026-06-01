@@ -153,6 +153,8 @@ class DMSSettingsSerializer(serializers.ModelSerializer):
             "auto_archive_enabled",
             "auto_archive_after_days",
             "require_metadata_on_upload",
+            "bulk_scan_submit_for_approval",
+            "access_stages",
             "updated_at",
         ]
         read_only_fields = ["updated_at"]
@@ -217,6 +219,7 @@ class DocumentTypeSerializer(serializers.ModelSerializer):
             "id", "name", "code", "reference_prefix", "reference_padding",
             "description", "icon", "is_active",
             "is_personal_type", "metadata_mode",
+            "access_policy",
             "workflow_template", "workflow_template_name",
             "metadata_fields",
             "relationship_rules",
@@ -368,7 +371,8 @@ class DocumentListSerializer(serializers.ModelSerializer):
             if share.access_level == DocumentShare.AccessLevel.DOWNLOAD:
                 actions.append(GroupAction.DOWNLOAD.value)
             return actions
-        return sorted(user.get_all_permissions_for_doctype(str(obj.document_type_id)))
+        from apps.documents.access import effective_permissions_for_user
+        return effective_permissions_for_user(user, obj)
 
     def _get_active_share(self, obj, user):
         return DocumentShare.objects.filter(
@@ -562,7 +566,8 @@ class DocumentDetailSerializer(serializers.ModelSerializer):
             if share.access_level == DocumentShare.AccessLevel.DOWNLOAD:
                 actions.append(GroupAction.DOWNLOAD.value)
             return actions
-        return sorted(user.get_all_permissions_for_doctype(str(obj.document_type_id)))
+        from apps.documents.access import effective_permissions_for_user
+        return effective_permissions_for_user(user, obj)
 
     def _get_active_share(self, obj, user):
         return DocumentShare.objects.filter(
@@ -1077,6 +1082,7 @@ class DocumentTypeWriteSerializer(serializers.ModelSerializer):
             "name", "code", "reference_prefix", "reference_padding",
             "description", "icon", "is_active",
             "is_personal_type", "metadata_mode",
+            "access_policy",
             "workflow_template",
             "metadata_fields",
             "relationship_rules",
@@ -1517,13 +1523,10 @@ class BulkUploadReviewSerializer(serializers.Serializer):
 
     @transaction.atomic
     def save(self):
-        from apps.workflows.services import WorkflowService, WorkflowError
-
         bulk_upload = self.context["bulk_upload"]
         request = self.context["request"]
         approved_count = 0
         rejected_count = 0
-        workflow_errors: list[str] = []
 
         for item in self.validated_data["documents"]:
             doc = Document.objects.select_for_update().get(
@@ -1559,7 +1562,11 @@ class BulkUploadReviewSerializer(serializers.Serializer):
                     )
                 user = request.user
                 if not user.has_admin_access:
-                    perms = user.get_all_permissions_for_doctype(next_doc_type.id)
+                    from apps.documents.access import ACCESS_STAGE_CREATION
+                    perms = user.get_all_permissions_for_doctype(
+                        str(next_doc_type.id),
+                        stage=ACCESS_STAGE_CREATION,
+                    )
                     if GroupAction.UPLOAD.value not in perms:
                         raise serializers.ValidationError(
                             {"document_type_id": f"You do not have upload permission for {next_doc_type.name}."}
@@ -1616,12 +1623,6 @@ class BulkUploadReviewSerializer(serializers.Serializer):
             except Exception:
                 logger.exception("Failed to refresh bulk relationship suggestions for document %s", doc.id)
 
-            if doc.document_type.workflow_template_id:
-                try:
-                    WorkflowService.start(doc, request.user)
-                except WorkflowError as exc:
-                    workflow_errors.append(f"{doc.reference_number}: {exc}")
-
             approved_count += 1
 
         try:
@@ -1655,8 +1656,5 @@ class BulkUploadReviewSerializer(serializers.Serializer):
                 "updated_at",
             ]
         )
-
-        if workflow_errors:
-            raise serializers.ValidationError({"workflow": workflow_errors})
 
         return bulk_upload

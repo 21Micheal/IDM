@@ -62,6 +62,11 @@ class DocumentType(models.Model):
         choices=MetadataMode.choices,
         default=MetadataMode.ADMIN_DEFINED,
     )
+    access_policy = models.JSONField(
+        default=dict,
+        blank=True,
+        help_text="Lifecycle outcome policies: on_approved, on_rejected, on_archived.",
+    )
 
     is_active  = models.BooleanField(default=True)
     created_by = models.ForeignKey(
@@ -254,6 +259,15 @@ class DMSSettings(models.Model):
     auto_archive_after_days = models.PositiveIntegerField(default=365)
 
     require_metadata_on_upload = models.BooleanField(default=True)
+    bulk_scan_submit_for_approval = models.BooleanField(
+        default=False,
+        help_text="When enabled, reviewed bulk scan documents are immediately submitted to approval workflows.",
+    )
+    access_stages = models.JSONField(
+        default=list,
+        blank=True,
+        help_text="Admin-configurable document access stages used by group permissions.",
+    )
 
     updated_by = models.ForeignKey(
         settings.AUTH_USER_MODEL,

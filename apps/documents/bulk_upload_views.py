@@ -58,7 +58,11 @@ class BulkUploadViewSet(viewsets.GenericViewSet):
         user = self.request.user
         if user.has_admin_access:
             return True
-        perms = user.get_all_permissions_for_doctype(document_type.id)
+        from apps.documents.access import ACCESS_STAGE_CREATION
+        perms = user.get_all_permissions_for_doctype(
+            str(document_type.id),
+            stage=ACCESS_STAGE_CREATION,
+        )
         return GroupAction.UPLOAD.value in perms
 
     def create(self, request, *args, **kwargs):

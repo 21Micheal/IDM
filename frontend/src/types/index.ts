@@ -1,3 +1,14 @@
+export interface DocumentTypeAccessPolicyOutcome {
+  set_status: string;
+  allow_edit: boolean;
+}
+
+export interface DocumentTypeAccessPolicy {
+  on_approved?: DocumentTypeAccessPolicyOutcome;
+  on_rejected?: DocumentTypeAccessPolicyOutcome;
+  on_archived?: DocumentTypeAccessPolicyOutcome;
+}
+
 export interface DocumentType {
   id: string;
   name: string;
@@ -9,6 +20,7 @@ export interface DocumentType {
   is_active?: boolean;
   is_personal_type?: boolean;
   metadata_mode?: "admin_defined" | "user_defined";
+  access_policy?: DocumentTypeAccessPolicy;
   workflow_template?: string | null;
   workflow_template_name?: string | null;
   metadata_fields: MetadataField[];

@@ -18,6 +18,7 @@ from django.utils import timezone
 from django.utils.http import content_disposition_header
 
 from apps.accounts.models import GroupAction, User
+from apps.documents.access import document_allows_edit
 from apps.documents.models import DMSSettings, Document, DocumentShare, DocumentVersion
 from apps.workflows.models import WorkflowTask
 
@@ -55,7 +56,7 @@ def user_can_view_document(user: User, doc: Document) -> bool:
         models.Q(expires_at__isnull=True) | models.Q(expires_at__gt=timezone.now())
     ).exists():
         return True
-    perms = user.get_all_permissions_for_doctype(document_type_id)
+    perms = user.get_all_permissions_for_doctype(document_type_id, document=doc)
     return GroupAction.VIEW.value in perms
 
 
@@ -78,7 +79,7 @@ def user_can_download_document(user: User, doc: Document) -> bool:
     document_type_id = str(getattr(doc, "document_type_id", None) or "")
     if not document_type_id:
         return False
-    perms = user.get_all_permissions_for_doctype(document_type_id)
+    perms = user.get_all_permissions_for_doctype(document_type_id, document=doc)
     return GroupAction.DOWNLOAD.value in perms
 
 
@@ -89,10 +90,12 @@ def user_can_edit_document(user: User, doc: Document) -> bool:
         return True
     if getattr(doc, "is_self_upload", False):
         return doc.uploaded_by_id == user.id or getattr(doc, "owned_by_id", None) == user.id
+    if not document_allows_edit(doc, user=user):
+        return False
     document_type_id = str(getattr(doc, "document_type_id", None) or "")
     if not document_type_id:
         return False
-    perms = user.get_all_permissions_for_doctype(document_type_id)
+    perms = user.get_all_permissions_for_doctype(document_type_id, document=doc)
     return GroupAction.EDIT.value in perms
 
 

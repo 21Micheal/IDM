@@ -552,11 +552,10 @@ class WorkflowService:
         instance.completed_at = timezone.now()
         instance.save(update_fields=["status", "completed_at"])
 
-        doc        = instance.document
-        doc.status = (
-            DocumentStatus.APPROVED if outcome == "approved"
-            else DocumentStatus.REJECTED
-        )
+        from apps.documents.access import outcome_status_for
+
+        doc = instance.document
+        doc.status = outcome_status_for(doc.document_type, outcome)
         doc.save(update_fields=["status", "updated_at"])
 
         try:

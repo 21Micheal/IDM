@@ -257,7 +257,7 @@ class GroupPermissionSerializer(serializers.ModelSerializer):
 
     class Meta:
         model  = GroupPermission
-        fields = ["id", "document_type", "document_type_name", "action"]
+        fields = ["id", "document_type", "document_type_name", "stage", "action"]
 
 
 class UserGroupMembershipSerializer(serializers.ModelSerializer):

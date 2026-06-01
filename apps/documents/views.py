@@ -515,13 +515,15 @@ class DocumentViewSet(AuditMixin, viewsets.ModelViewSet):
 
     @action(detail=True, methods=["post"])
     def archive(self, request, pk=None):
+        from apps.documents.access import outcome_status_for
+
         doc = self.get_object()
         if doc.status != DocumentStatus.APPROVED:
             return Response(
                 {"detail": "Only approved documents can be archived."},
                 status=status.HTTP_400_BAD_REQUEST,
             )
-        doc.status = DocumentStatus.ARCHIVED
+        doc.status = outcome_status_for(doc.document_type, "archived")
         doc.save(update_fields=["status", "updated_at"])
         self.record_audit("document.archived", doc)
         return Response({"status": "archived"})
@@ -529,14 +531,17 @@ class DocumentViewSet(AuditMixin, viewsets.ModelViewSet):
     @action(detail=True, methods=["patch"])
     def edit_metadata(self, request, pk=None):
         doc = self.get_object()
-        if doc.status not in (
-            DocumentStatus.DRAFT,
-            DocumentStatus.REJECTED,
-            DocumentStatus.RETURNED,
-            "Returned for Review",
-        ):
+        from apps.documents.access import document_allows_edit
+        from apps.documents.file_streaming import user_can_edit_document
+
+        if not user_can_edit_document(request.user, doc):
             return Response(
-                {"detail": "Metadata can only be edited on draft, rejected or returned documents."},
+                {"detail": "You do not have permission to edit this document."},
+                status=status.HTTP_403_FORBIDDEN,
+            )
+        if not document_allows_edit(doc, user=request.user):
+            return Response(
+                {"detail": "This document cannot be edited in its current status."},
                 status=status.HTTP_400_BAD_REQUEST,
             )
         serializer = DocumentMetadataEditSerializer(

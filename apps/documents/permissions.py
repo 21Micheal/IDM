@@ -68,8 +68,10 @@ class HasDocumentPermission(permissions.BasePermission):
             )
             if not document_type_id:
                 return False
+            from apps.documents.access import ACCESS_STAGE_CREATION
             user_perms = request.user.get_all_permissions_for_doctype(
-                str(document_type_id)
+                str(document_type_id),
+                stage=ACCESS_STAGE_CREATION,
             )
             return GroupAction.UPLOAD.value in user_perms
 
@@ -132,8 +134,30 @@ class HasDocumentPermission(permissions.BasePermission):
             ).exists():
                 return True
 
-        user_perms = request.user.get_all_permissions_for_doctype(document_type_id)
-        return required_action in user_perms
+        user_perms = request.user.get_all_permissions_for_doctype(
+            document_type_id,
+            document=obj,
+        )
+        if required_action in user_perms:
+            allowed = True
+        elif (
+            required_action == GroupAction.SUBMIT.value
+            and GroupAction.APPROVE.value in user_perms
+        ):
+            # Legacy: submit was previously gated by approve permission.
+            allowed = True
+        else:
+            return False
+
+        if required_action in (
+            GroupAction.EDIT.value,
+            GroupAction.UPLOAD.value,
+        ):
+            from apps.documents.access import document_allows_edit
+            if not document_allows_edit(obj, user=request.user):
+                return False
+
+        return allowed
 
     # ── Helpers ────────────────────────────────────────────────────────────
 
@@ -165,9 +189,9 @@ class HasDocumentPermission(permissions.BasePermission):
             "partial_update":  GroupAction.EDIT.value,
             "update":          GroupAction.EDIT.value,
             "edit_metadata":   GroupAction.EDIT.value,
-            "upload_version":  GroupAction.UPLOAD.value,
-            "restore_version": GroupAction.UPLOAD.value,
-            "submit":          GroupAction.APPROVE.value,
+            "upload_version":  GroupAction.EDIT.value,
+            "restore_version": GroupAction.EDIT.value,
+            "submit":          GroupAction.SUBMIT.value,
             "archive":         GroupAction.ARCHIVE.value,
             "destroy":         GroupAction.DELETE.value,
             "bulk_action":     GroupAction.VIEW.value,

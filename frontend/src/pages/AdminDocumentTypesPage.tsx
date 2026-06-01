@@ -606,11 +606,33 @@ export default function AdminDocumentTypesPage() {
               )}
 
               {activeTab === "security" && (
-                <section className="max-w-3xl border border-[#C8CDD2] bg-white p-6">
-                  <p className="text-sm font-semibold text-[#1F2933]">Access control</p>
-                  <p className="mt-2 text-sm text-[#5E6870]">
-                    ACL configuration will live here later. This implementation keeps permissions unchanged.
-                  </p>
+                <section className="max-w-4xl space-y-4">
+                  <div className="border border-[#C8CDD2] bg-white p-6">
+                    <p className="text-sm font-semibold text-[#1F2933]">Security model</p>
+                    <p className="mt-2 text-sm text-[#5E6870]">
+                      Access rights are granted in Permission groups. This document type only
+                      determines which lifecycle stages are available for those grants.
+                    </p>
+                  </div>
+                  <div className="grid gap-4 md:grid-cols-3">
+                    {[
+                      { title: "Creation", statuses: "Draft, Returned", actions: "Upload, edit, submit, comment" },
+                      { title: "For approval", statuses: "Pending approval", actions: "View, comment, approve" },
+                      { title: "After approval", statuses: "Approved, Rejected, Archived", actions: "View, download, archive" },
+                    ].map((stage) => (
+                      <div key={stage.title} className="border border-[#C8CDD2] bg-white p-4">
+                        <p className="text-sm font-semibold text-[#1F2933]">{stage.title}</p>
+                        <p className="mt-2 text-xs font-semibold uppercase tracking-wide text-[#5E6870]">Statuses</p>
+                        <p className="mt-1 text-sm text-[#1F2933]">{stage.statuses}</p>
+                        <p className="mt-3 text-xs font-semibold uppercase tracking-wide text-[#5E6870]">Typical grants</p>
+                        <p className="mt-1 text-sm text-[#1F2933]">{stage.actions}</p>
+                      </div>
+                    ))}
+                  </div>
+                  <div className="border border-[#A7CDE3] bg-[#EEF6FB] p-4 text-sm text-[#287EAD]">
+                    Configure who receives these rights in <span className="font-semibold">Admin → Groups</span>.
+                    Rules are explicit per document type and stage, so permissions do not overlap.
+                  </div>
                 </section>
               )}
             </form>
