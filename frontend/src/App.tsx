@@ -13,7 +13,6 @@ const AnalyticsDashboardPage = lazy(() => import("@/pages/AnalyticsDashboard"));
 const DocumentsPage = lazy(() => import("@/pages/DocumentsPage"));
 const DocumentDetailPage = lazy(() => import("@/pages/DocumentDetailPage"));
 const UploadPage = lazy(() => import("@/pages/UploadPage"));
-const BulkScanPage = lazy(() => import("@/pages/BulkScanPage"));
 const SearchPage = lazy(() => import("@/pages/SearchPage"));
 const WorkflowPage = lazy(() => import("@/pages/WorkflowPage"));
 const AdminPage = lazy(() => import("@/pages/AdminPage"));
@@ -246,8 +245,8 @@ export default function App() {
               <Route path="personal-documents" element={<DocumentsPage personalOnly />} />
               <Route path="documents/upload" element={<UploadPage />} />
               <Route path="documents/scan"   element={<UploadPage scanOnly />} />
-              <Route path="documents/bulk-upload" element={<BulkScanPage scanMode={false} />} />
-              <Route path="documents/bulk-scan" element={<BulkScanPage />} />
+              <Route path="documents/bulk-upload" element={<Navigate to="/documents/upload?mode=bulk" replace />} />
+              <Route path="documents/bulk-scan" element={<Navigate to="/documents/scan?mode=bulk" replace />} />
               <Route path="documents/:id"    element={<DocumentDetailPage />} />
               <Route path="documents/folders/:folderId" element={<FolderPage />} />
 

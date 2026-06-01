@@ -1,5 +1,5 @@
 import { useState, useCallback, useEffect, useMemo, useRef, type MouseEvent, type ReactNode } from "react";
-import { useNavigate } from "react-router-dom";
+import { useLocation, useNavigate } from "react-router-dom";
 import { useDropzone } from "react-dropzone";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import {
@@ -22,6 +22,7 @@ import clsx from "clsx";
 import { QUERY_FIVE_MIN_STALE } from "@/lib/reactQueryDefaults";
 import { deriveDocumentTypeConfig } from "@/lib/documentTypeConfig";
 import { applyOcrToFields, sanitizeOcrFields, type OcrFields } from "@/lib/ocrFieldMatcher";
+import BulkScanPage from "@/pages/BulkScanPage";
 
 // ── Types ─────────────────────────────────────────────────────────────────────
 
@@ -800,6 +801,7 @@ interface UploadPageProps {
 
 export default function UploadPage({ scanOnly = false }: UploadPageProps) {
   const navigate     = useNavigate();
+  const location     = useLocation();
   const queryClient  = useQueryClient();
 
   const [droppedFile,      setDroppedFile]      = useState<File | null>(null);
@@ -807,6 +809,7 @@ export default function UploadPage({ scanOnly = false }: UploadPageProps) {
   const [uploadProgress,   setUploadProgress]   = useState(0);
   const [isScanned,        setIsScanned]         = useState(scanOnly);
   const [pdfPreviewUrl,    setPdfPreviewUrl]     = useState<string | null>(null);
+  const [bulkMode,         setBulkMode]          = useState(() => new URLSearchParams(location.search).get("mode") === "bulk");
 
   const [scanStage,        setScanStage]         = useState<ScanStage>("idle");
   const [uploadedDocId,    setUploadedDocId]     = useState<string | null>(null);
@@ -915,6 +918,10 @@ export default function UploadPage({ scanOnly = false }: UploadPageProps) {
   }, [droppedFile, getValues, setValue]);
 
   useEffect(() => { clearErrors(); }, [isSelfUpload, isScanned, clearErrors]);
+
+  useEffect(() => {
+    setBulkMode(new URLSearchParams(location.search).get("mode") === "bulk");
+  }, [location.search]);
 
   useEffect(() => {
     setIsScanned(scanOnly);
@@ -1241,6 +1248,18 @@ export default function UploadPage({ scanOnly = false }: UploadPageProps) {
 
   // ── Render ──────────────────────────────────────────────────────────────────
 
+  if (bulkMode) {
+    return (
+      <BulkScanPage
+        scanMode={scanOnly}
+        onSingleMode={() => {
+          setBulkMode(false);
+          navigate(scanOnly ? "/documents/scan" : "/documents/upload", { replace: true });
+        }}
+      />
+    );
+  }
+
   return (
     <div className="-m-6 min-h-[calc(100vh-3.5rem)] bg-[#EDEDED] text-[#1F2933]">
       <div className="flex h-[69px] items-center justify-between gap-4 bg-[#287EAD] px-5 pr-8 text-white">
@@ -1250,29 +1269,25 @@ export default function UploadPage({ scanOnly = false }: UploadPageProps) {
             {scanOnly ? "Review the file beside OCR results before saving." : "Attach a file, preview it, then complete the document details."}
           </p>
         </div>
-        <div className="hidden items-center gap-2 text-xs text-white/80 md:flex">
+        <div className="hidden items-center gap-3 text-xs text-white/80 md:flex">
+          <label className="inline-flex cursor-pointer items-center gap-2 border border-white/30 px-2.5 py-1.5 font-semibold">
+            <input
+              type="checkbox"
+              checked={bulkMode}
+              onChange={(event) => {
+                setBulkMode(event.target.checked);
+                if (event.target.checked) {
+                  navigate(`${scanOnly ? "/documents/scan" : "/documents/upload"}?mode=bulk`, { replace: true });
+                }
+              }}
+              className="h-3.5 w-3.5"
+            />
+            Bulk mode
+          </label>
           <span className="border border-white/30 px-2 py-1">{selectedType?.name || "No type selected"}</span>
           <span className="border border-white/30 px-2 py-1">{droppedFile ? "File attached" : "Awaiting file"}</span>
         </div>
       </div>
-
-      {!scanOnly && scanStage === "idle" && (
-        <div className="border-b border-[#C8CDD2] bg-white px-5 py-3 pr-8">
-          <div className="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
-            <p className="text-sm text-[#5E6870]">
-              Uploading a PO, invoice, GRN, or support files together?
-            </p>
-            <button
-              type="button"
-              onClick={() => navigate("/documents/bulk-upload")}
-              className="inline-flex items-center justify-center gap-2 border border-[#287EAD] bg-white px-3 py-2 text-sm font-semibold text-[#287EAD] hover:bg-[#EEF6FB]"
-            >
-              <Upload className="h-4 w-4" />
-              Upload related batch
-            </button>
-          </div>
-        </div>
-      )}
 
       {/* ── OCR wait / review / submitting ──────────────────────────────── */}
       {isOcrFlow && scanStage !== "idle" && scanStage !== "uploading" && (
@@ -1431,13 +1446,26 @@ export default function UploadPage({ scanOnly = false }: UploadPageProps) {
       {(scanStage === "idle" || scanStage === "uploading") && (
         <div className="grid grid-cols-1 gap-5 p-5 pr-8 xl:grid-cols-12">
           {/* Left column — controls */}
-          <div className={clsx(droppedFile ? "xl:col-span-3" : "xl:col-start-2 xl:col-span-4", "space-y-4")}>
+          <div className={clsx(droppedFile ? "order-2 xl:col-span-3" : "xl:col-start-2 xl:col-span-4", "space-y-4")}>
             {/* Step 1 — Document Type */}
             <div className="border border-[#C8CDD2] bg-white p-4">
               <h2 className="mb-3 flex items-center gap-2 text-sm font-semibold text-[#1F2933]">
                 <StepBadge n={1} active={!selectedTypeId} done={Boolean(selectedTypeId)} />
                 Document Type
               </h2>
+              <label className="mb-3 flex cursor-pointer items-center gap-2 border border-[#D3D7DA] bg-[#F7F8F9] px-3 py-2 text-sm text-[#1F2933] md:hidden">
+                <input
+                  type="checkbox"
+                  checked={bulkMode}
+                  onChange={(event) => {
+                    setBulkMode(event.target.checked);
+                    if (event.target.checked) {
+                      navigate(`${scanOnly ? "/documents/scan" : "/documents/upload"}?mode=bulk`, { replace: true });
+                    }
+                  }}
+                />
+                Use bulk mode
+              </label>
               <select
                 value={selectedTypeId}
                 onChange={(e) => setSelectedTypeId(e.target.value)}
@@ -1520,7 +1548,7 @@ export default function UploadPage({ scanOnly = false }: UploadPageProps) {
 
           {/* Centre column — document preview (visible when file selected) */}
           {droppedFile && (
-            <div className="xl:col-span-6">
+            <div className="order-1 xl:col-span-6">
               <CapturePreviewPane
                 file={droppedFile}
                 previewUrl={pdfPreviewUrl}
@@ -1531,7 +1559,7 @@ export default function UploadPage({ scanOnly = false }: UploadPageProps) {
           )}
 
           {/* Right column — form / OCR idle */}
-          <div className={clsx(droppedFile ? "xl:col-span-3" : "xl:col-start-7 xl:col-span-5")}>
+          <div className={clsx(droppedFile ? "order-3 xl:col-span-3" : "xl:col-start-7 xl:col-span-5")}>
             {showManualForm && (
               <div
                 className={clsx(
@@ -1704,12 +1732,12 @@ export default function UploadPage({ scanOnly = false }: UploadPageProps) {
                   </div>
                   )}
 
-                  <div className="mt-6 flex gap-4 border-t border-border pt-6">
+                  <div className="mt-6 flex flex-wrap gap-3 border-t border-border pt-5">
                   <button
                     type="button"
                     onClick={handleSubmit(onUpload)}
                     disabled={uploadMutation.isPending || !droppedFile}
-                    className="inline-flex items-center justify-center gap-2 rounded-sm bg-primary px-6 py-2.5 text-base font-semibold text-primary-foreground transition-all hover:bg-primary/90 disabled:cursor-not-allowed disabled:opacity-50"
+                    className="inline-flex items-center justify-center gap-2 rounded-sm bg-primary px-4 py-2 text-sm font-semibold text-primary-foreground transition-all hover:bg-primary/90 disabled:cursor-not-allowed disabled:opacity-50"
                     style={{ boxShadow: "var(--shadow-elegant)" }}
                   >
                     {uploadMutation.isPending ? (
@@ -1725,7 +1753,7 @@ export default function UploadPage({ scanOnly = false }: UploadPageProps) {
                   <button
                     type="button"
                     onClick={() => navigate("/documents")}
-                    className="rounded-sm border border-border bg-card px-8 py-3 font-semibold text-foreground transition-colors hover:bg-muted"
+                    className="rounded-sm border border-border bg-card px-4 py-2 text-sm font-semibold text-foreground transition-colors hover:bg-muted"
                   >
                     Cancel
                   </button>
@@ -1776,12 +1804,12 @@ export default function UploadPage({ scanOnly = false }: UploadPageProps) {
                   </div>
                 )}
 
-                <div className="flex gap-4 w-full">
+                <div className="flex flex-wrap gap-3 w-full">
                   <button
                     type="button"
                     onClick={handleSubmit(onUpload)}
                     disabled={uploadMutation.isPending || !droppedFile || !selectedTypeId}
-                    className="inline-flex items-center justify-center gap-2 bg-[#287EAD] px-6 py-2.5 font-semibold text-white transition-all hover:bg-[#206D99] disabled:cursor-not-allowed disabled:opacity-50"
+                    className="inline-flex items-center justify-center gap-2 bg-[#287EAD] px-4 py-2 text-sm font-semibold text-white transition-all hover:bg-[#206D99] disabled:cursor-not-allowed disabled:opacity-50"
                   >
                     {uploadMutation.isPending ? (
                       <Loader2 className="w-5 h-5 animate-spin" />
@@ -1796,7 +1824,7 @@ export default function UploadPage({ scanOnly = false }: UploadPageProps) {
                   <button
                     type="button"
                     onClick={() => navigate("/documents")}
-                    className="border border-[#C8CDD2] bg-white px-6 py-3 font-semibold text-[#1F2933] transition-colors hover:bg-[#EEF3F7]"
+                    className="border border-[#C8CDD2] bg-white px-4 py-2 text-sm font-semibold text-[#1F2933] transition-colors hover:bg-[#EEF3F7]"
                   >
                     Cancel
                   </button>

@@ -119,7 +119,9 @@ def _delete_storage_file(name: str) -> None:
 
 class DocumentTypeViewSet(AuditMixin, viewsets.ModelViewSet):
     queryset = DocumentType.objects.prefetch_related(
-        "metadata_fields"
+        "metadata_fields",
+        "outgoing_relationship_rules",
+        "outgoing_relationship_rules__target_document_type",
     ).filter(is_active=True).exclude(code__in=["PERSONAL", "UNCLASS"])
 
     def get_serializer_class(self):
@@ -1724,6 +1726,17 @@ echo "✓ DocVault LibreOffice integration installed."
                 relationship for relationship in relationships
                 if user_can_view_document(request.user, relationship.source_document)
                 and user_can_view_document(request.user, relationship.target_document)
+                and (
+                    request.user.has_admin_access
+                    or (
+                        relationship.source_document.uploaded_by_id == request.user.id
+                        or getattr(relationship.source_document, "owned_by_id", None) == request.user.id
+                    )
+                    and (
+                        relationship.target_document.uploaded_by_id == request.user.id
+                        or getattr(relationship.target_document, "owned_by_id", None) == request.user.id
+                    )
+                )
             ]
             serializer = DocumentRelationshipSerializer(
                 visible_relationships,
@@ -1747,6 +1760,15 @@ echo "✓ DocVault LibreOffice integration installed."
         )
         if not user_can_view_document(request.user, target):
             return Response({"detail": "You do not have access to the selected related document."}, status=403)
+        if (
+            not request.user.has_admin_access
+            and target.uploaded_by_id != request.user.id
+            and getattr(target, "owned_by_id", None) != request.user.id
+        ):
+            return Response(
+                {"detail": "You can only link documents that belong to you."},
+                status=403,
+            )
 
         relationship, created = DocumentRelationship.objects.get_or_create(
             source_document=doc,

@@ -111,23 +111,7 @@ export default function BulkReviewPanel({
       </div>
 
       <div className="grid gap-4 xl:grid-cols-12">
-        <div className="max-h-[calc(100vh-13rem)] space-y-3 overflow-y-auto pr-1 xl:col-span-4">
-          {reviewStates.map((state, index) => (
-            <BulkDocumentReviewCard
-              key={state.documentId}
-              state={state}
-              documentType={documentTypes.find((type) => type.id === state.documentTypeId) ?? documentType}
-              documentTypes={documentTypes}
-              isRelatedSet={isRelatedSet}
-              scanMode={scanMode}
-              selected={selectedState?.documentId === state.documentId}
-              onSelect={() => setSelectedDocumentId(state.documentId)}
-              onChange={(next) => updateAt(index, next)}
-            />
-          ))}
-        </div>
-
-        <div className="xl:col-span-8">
+        <div className="xl:col-span-7 2xl:col-span-8">
           <div className="sticky top-4 border border-[#C8CDD2] bg-white">
             <div className="border-b border-[#C8CDD2] bg-[#F5F7F8] px-3 py-2">
               <p className="text-sm font-bold text-[#1F2933]">Review preview</p>
@@ -152,14 +136,30 @@ export default function BulkReviewPanel({
             </div>
           </div>
         </div>
+
+        <div className="max-h-[calc(100vh-13rem)] space-y-3 overflow-y-auto pr-1 xl:col-span-5 2xl:col-span-4">
+          {reviewStates.map((state, index) => (
+            <BulkDocumentReviewCard
+              key={state.documentId}
+              state={state}
+              documentType={documentTypes.find((type) => type.id === state.documentTypeId) ?? documentType}
+              documentTypes={documentTypes}
+              isRelatedSet={isRelatedSet}
+              scanMode={scanMode}
+              selected={selectedState?.documentId === state.documentId}
+              onSelect={() => setSelectedDocumentId(state.documentId)}
+              onChange={(next) => updateAt(index, next)}
+            />
+          ))}
+        </div>
       </div>
 
-      <div className="flex flex-col gap-3 border-t border-[#C8CDD2] pt-4 sm:flex-row">
+      <div className="flex flex-col gap-3 border-t border-[#C8CDD2] pt-4 sm:flex-row sm:justify-end">
         <button
           type="button"
           onClick={onCancel}
           disabled={isCancelling || isSubmitting}
-          className="flex flex-1 items-center justify-center gap-2 border border-[#C8CDD2] bg-white py-3 text-base font-semibold text-[#1F2933] transition-all hover:bg-[#F7F8F9] disabled:opacity-50"
+          className="inline-flex items-center justify-center gap-2 border border-[#C8CDD2] bg-white px-4 py-2 text-sm font-semibold text-[#1F2933] transition-all hover:bg-[#F7F8F9] disabled:opacity-50"
         >
           {isCancelling ? (
             <Loader2 className="w-5 h-5 animate-spin" />
@@ -171,7 +171,7 @@ export default function BulkReviewPanel({
           type="button"
           onClick={onSubmit}
           disabled={isSubmitting || isCancelling || reviewStates.length === 0 || missingTypeCount > 0}
-          className="flex flex-1 items-center justify-center gap-2 bg-[#287EAD] py-3 text-base font-semibold text-white transition-all hover:bg-[#206D99] disabled:opacity-50"
+          className="inline-flex items-center justify-center gap-2 bg-[#287EAD] px-4 py-2 text-sm font-semibold text-white transition-all hover:bg-[#206D99] disabled:opacity-50"
         >
           {isSubmitting ? (
             <Loader2 className="w-5 h-5 animate-spin" />

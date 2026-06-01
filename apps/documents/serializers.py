@@ -23,6 +23,7 @@ from .models import (
     Document, DocumentType, MetadataField,
     DocumentVersion, DocumentComment, Tag, OCRStatus,
     BulkUpload, BulkUploadStatus, DocumentStatus, DocumentShare, DocumentRelationship,
+    DocumentRelationshipRule,
     DMSSettings,
 )
 from apps.accounts.serializers import UserSummarySerializer
@@ -185,8 +186,27 @@ class MetadataFieldWriteSerializer(serializers.ModelSerializer):
         ]
 
 
+class DocumentRelationshipRuleSerializer(serializers.ModelSerializer):
+    target_document_type_name = serializers.CharField(source="target_document_type.name", read_only=True)
+    target_document_type_code = serializers.CharField(source="target_document_type.code", read_only=True)
+
+    class Meta:
+        model = DocumentRelationshipRule
+        fields = [
+            "id", "source_document_type", "target_document_type",
+            "target_document_type_name", "target_document_type_code",
+            "relation_type", "source_field_key", "target_field_key",
+            "match_operator", "description", "is_active", "require_confirmation",
+            "created_at", "updated_at",
+        ]
+        read_only_fields = ["id", "source_document_type", "created_at", "updated_at"]
+
+
 class DocumentTypeSerializer(serializers.ModelSerializer):
     metadata_fields        = MetadataFieldSerializer(many=True, read_only=True)
+    relationship_rules     = DocumentRelationshipRuleSerializer(
+        source="outgoing_relationship_rules", many=True, read_only=True
+    )
     workflow_template_name = serializers.CharField(
         source="workflow_template.name", read_only=True, default=None
     )
@@ -199,6 +219,7 @@ class DocumentTypeSerializer(serializers.ModelSerializer):
             "is_personal_type", "metadata_mode",
             "workflow_template", "workflow_template_name",
             "metadata_fields",
+            "relationship_rules",
         ]
 
 
@@ -473,6 +494,35 @@ class DocumentDetailSerializer(serializers.ModelSerializer):
             "edit_locked_by", "edit_locked_by_name", "edit_locked_at", "is_edit_locked",
             "current_version", "created_at", "updated_at",
         ]
+
+    def to_representation(self, instance):
+        data = super().to_representation(instance)
+        request = self.context.get("request")
+        user = getattr(request, "user", None)
+        metadata = data.get("metadata")
+        suggestions = metadata.get("relationship_suggestions") if isinstance(metadata, dict) else None
+        if (
+            user
+            and user.is_authenticated
+            and not getattr(user, "has_admin_access", False)
+            and isinstance(suggestions, list)
+        ):
+            target_ids = [
+                item.get("target_document_id")
+                for item in suggestions
+                if isinstance(item, dict) and item.get("target_document_id")
+            ]
+            visible_target_ids = set(
+                str(item)
+                for item in Document.objects.filter(id__in=target_ids)
+                .filter(Q(uploaded_by=user) | Q(owned_by=user))
+                .values_list("id", flat=True)
+            )
+            metadata["relationship_suggestions"] = [
+                item for item in suggestions
+                if isinstance(item, dict) and str(item.get("target_document_id")) in visible_target_ids
+            ]
+        return data
 
     def get_signatures(self, obj):
         return DocumentSignatureSerializer(
@@ -1019,6 +1069,7 @@ class DocumentTypeWriteSerializer(serializers.ModelSerializer):
     Accepts nested metadata_fields and replaces them atomically.
     """
     metadata_fields = MetadataFieldWriteSerializer(many=True, required=False, default=list)
+    relationship_rules = DocumentRelationshipRuleSerializer(many=True, required=False, default=list)
 
     class Meta:
         model  = DocumentType
@@ -1028,6 +1079,7 @@ class DocumentTypeWriteSerializer(serializers.ModelSerializer):
             "is_personal_type", "metadata_mode",
             "workflow_template",
             "metadata_fields",
+            "relationship_rules",
         ]
         extra_kwargs = {
             "name":              {"validators": []},
@@ -1137,6 +1189,28 @@ class DocumentTypeWriteSerializer(serializers.ModelSerializer):
 
         return value
 
+    def validate_relationship_rules(self, value):
+        current_doc_type_id = getattr(self.instance, "id", None)
+        seen = set()
+        for idx, rule in enumerate(value):
+            target_type = rule.get("target_document_type")
+            source_key = slugify(str(rule.get("source_field_key", "")).strip().lower()).replace("-", "_")
+            target_key = slugify(str(rule.get("target_field_key", "")).strip().lower()).replace("-", "_")
+            relation_type = rule.get("relation_type")
+            if not target_type:
+                raise serializers.ValidationError({idx: "Target document type is required."})
+            if current_doc_type_id and str(target_type.id) == str(current_doc_type_id):
+                raise serializers.ValidationError({idx: "A relationship rule must target a different document type."})
+            if not source_key or not target_key:
+                raise serializers.ValidationError({idx: "Source and target reference fields are required."})
+            key = (str(target_type.id), relation_type, source_key, target_key)
+            if key in seen:
+                raise serializers.ValidationError({idx: "Duplicate relationship rule."})
+            seen.add(key)
+            rule["source_field_key"] = source_key
+            rule["target_field_key"] = target_key
+        return value
+
     def validate_workflow_template(self, value):
         if value is None:
             return value
@@ -1176,9 +1250,20 @@ class DocumentTypeWriteSerializer(serializers.ModelSerializer):
             document_type=doc_type
         )
 
+    def _save_relationship_rules(self, doc_type: DocumentType, rules_data: list) -> None:
+        doc_type.outgoing_relationship_rules.all().delete()
+        for rule_data in rules_data:
+            rule_data = dict(rule_data)
+            rule_data.pop("source_document_type", None)
+            DocumentRelationshipRule.objects.create(
+                source_document_type=doc_type,
+                **rule_data,
+            )
+
     @transaction.atomic
     def create(self, validated_data: dict) -> DocumentType:
         fields_data = validated_data.pop("metadata_fields", [])
+        rules_data = validated_data.pop("relationship_rules", [])
         if validated_data.get("metadata_mode") == DocumentType.MetadataMode.USER_DEFINED:
             fields_data = []
         restorable = self._find_restorable_instance(
@@ -1191,12 +1276,14 @@ class DocumentTypeWriteSerializer(serializers.ModelSerializer):
         else:
             doc_type = DocumentType.objects.create(**validated_data)
         self._save_metadata_fields(doc_type, fields_data)
+        self._save_relationship_rules(doc_type, rules_data)
         self._sync_workflow_template(doc_type)
         return doc_type
 
     @transaction.atomic
     def update(self, instance: DocumentType, validated_data: dict) -> DocumentType:
         fields_data = validated_data.pop("metadata_fields", None)
+        rules_data = validated_data.pop("relationship_rules", None)
         next_metadata_mode = validated_data.get("metadata_mode", instance.metadata_mode)
 
         self._apply_validated_data(instance, validated_data)
@@ -1209,6 +1296,9 @@ class DocumentTypeWriteSerializer(serializers.ModelSerializer):
                 self._save_metadata_fields(instance, fields_data)
         elif next_metadata_mode == DocumentType.MetadataMode.USER_DEFINED:
             self._save_metadata_fields(instance, [])
+
+        if rules_data is not None:
+            self._save_relationship_rules(instance, rules_data)
 
         return instance
 

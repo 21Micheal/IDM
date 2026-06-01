@@ -129,6 +129,76 @@ class MetadataField(models.Model):
         return f"{self.document_type.code}:{self.key}"
 
 
+class DocumentRelationshipRule(models.Model):
+    class MatchOperator(models.TextChoices):
+        EQUALS = "equals", "Equals"
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    source_document_type = models.ForeignKey(
+        DocumentType,
+        on_delete=models.CASCADE,
+        related_name="outgoing_relationship_rules",
+    )
+    target_document_type = models.ForeignKey(
+        DocumentType,
+        on_delete=models.CASCADE,
+        related_name="incoming_relationship_rules",
+    )
+    relation_type = models.CharField(
+        max_length=30,
+        choices=[
+            ("supports", "Supports"),
+            ("references", "References"),
+            ("supersedes", "Supersedes"),
+            ("linked-to", "Linked to"),
+        ],
+        default="references",
+    )
+    source_field_key = models.CharField(
+        max_length=100,
+        help_text="Field on the source document, for example po_number or transaction_reference.",
+    )
+    target_field_key = models.CharField(
+        max_length=100,
+        help_text="Field on the target document to compare with the source field.",
+    )
+    match_operator = models.CharField(
+        max_length=30,
+        choices=MatchOperator.choices,
+        default=MatchOperator.EQUALS,
+    )
+    description = models.CharField(max_length=255, blank=True)
+    is_active = models.BooleanField(default=True)
+    require_confirmation = models.BooleanField(
+        default=True,
+        help_text="When true, matches are suggested for user confirmation instead of created automatically.",
+    )
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ["source_document_type__name", "target_document_type__name", "source_field_key"]
+        unique_together = [
+            (
+                "source_document_type",
+                "target_document_type",
+                "relation_type",
+                "source_field_key",
+                "target_field_key",
+            )
+        ]
+        indexes = [
+            models.Index(fields=["source_document_type", "is_active"]),
+            models.Index(fields=["target_document_type", "is_active"]),
+        ]
+
+    def __str__(self):
+        return (
+            f"{self.source_document_type.code}.{self.source_field_key} "
+            f"{self.match_operator} {self.target_document_type.code}.{self.target_field_key}"
+        )
+
+
 class Tag(models.Model):
     id    = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
     name  = models.CharField(max_length=60, unique=True)

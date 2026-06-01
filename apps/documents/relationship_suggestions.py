@@ -4,9 +4,10 @@ import logging
 import re
 from typing import Any
 
+from django.db import models
 from django.db.models import Q
 
-from .models import Document, DocumentRelationship
+from .models import Document, DocumentRelationship, DocumentRelationshipRule
 
 logger = logging.getLogger(__name__)
 
@@ -110,10 +111,12 @@ def is_purchase_order_document(doc: Document) -> bool:
 
 
 def is_po_referencing_document(doc: Document) -> bool:
-    text = _document_text(doc)
-    if any(term in text for term in ("invoice", "grn", "goods received", "goods receipt", "delivery note")):
+    if getattr(doc, "document_type_id", None) and DocumentRelationshipRule.objects.filter(
+        source_document_type_id=doc.document_type_id,
+        is_active=True,
+    ).exists():
         return True
-    return bool(get_document_po_references(doc))
+    return False
 
 
 def get_document_po_references(doc: Document) -> list[str]:
@@ -122,6 +125,29 @@ def get_document_po_references(doc: Document) -> list[str]:
 
 def get_purchase_order_numbers(doc: Document) -> list[str]:
     return _collect_values(doc, OWN_REFERENCE_KEYS, include_system_reference=True)
+
+
+def _rule_field_keys(field_key: str, *, doc: Document, is_target: bool) -> set[str]:
+    normalized = _normalize_metadata_key(field_key)
+    keys = {normalized}
+    if normalized in {"po_number", "po_no", "purchase_order_number", "purchase_order_ref", "purchase_order_reference", "lpo_number", "lpo_no"}:
+        if is_purchase_order_document(doc) or is_target:
+            keys |= OWN_REFERENCE_KEYS
+        else:
+            keys |= PO_REFERENCE_KEYS
+    if normalized in {"transaction_reference", "transaction_number", "payment_reference", "payment_ref"}:
+        keys |= {"transaction_ref"}
+    if normalized in {"invoice_number", "grn_number", "receipt_number", "document_number", "reference_no"}:
+        keys |= {"reference_number"}
+    return keys
+
+
+def _collect_rule_values(doc: Document, field_key: str, *, is_target: bool) -> list[str]:
+    return _collect_values(
+        doc,
+        _rule_field_keys(field_key, doc=doc, is_target=is_target),
+        include_system_reference=is_target and _normalize_metadata_key(field_key) in OWN_REFERENCE_KEYS,
+    )
 
 
 def _candidate_purchase_orders(doc: Document):
@@ -160,7 +186,95 @@ def _candidate_purchase_orders(doc: Document):
     return [candidate for candidate in candidates if is_purchase_order_document(candidate)]
 
 
-def _suggestions_for_referencing_document(doc: Document) -> list[dict[str, Any]]:
+def _actor_for_scope(doc: Document, actor=None):
+    return actor if getattr(actor, "is_authenticated", False) else getattr(doc, "uploaded_by", None)
+
+
+def _scope_candidates_for_actor(qs, *, source: Document, actor=None):
+    actor = _actor_for_scope(source, actor)
+    if not actor:
+        return qs.none()
+    if getattr(actor, "has_admin_access", False):
+        return qs
+    return qs.filter(Q(uploaded_by=actor) | Q(owned_by=actor))
+
+
+def _suggestions_for_referencing_document(doc: Document, *, actor=None) -> list[dict[str, Any]]:
+    suggestions: list[dict[str, Any]] = []
+    seen_targets: set[str] = set()
+    rules = list(
+        DocumentRelationshipRule.objects
+        .select_related("target_document_type")
+        .filter(source_document_type=doc.document_type, is_active=True)
+    )
+    if not rules:
+        return []
+
+    for rule in rules:
+        source_values = _collect_rule_values(doc, rule.source_field_key, is_target=False)
+        normalized_sources = {
+            normalize_business_reference(value): value
+            for value in source_values
+            if normalize_business_reference(value)
+        }
+        if not normalized_sources:
+            continue
+
+        candidates = (
+            Document.objects
+            .select_related("document_type", "uploaded_by")
+            .exclude(id=doc.id)
+            .exclude(status="void")
+            .exclude(document_type__code="UNCLASS")
+            .filter(document_type=rule.target_document_type, is_self_upload=False)
+        )
+        candidates = _scope_candidates_for_actor(candidates, source=doc, actor=actor)
+        if doc.bulk_upload_id:
+            candidates = candidates.order_by(
+                models.Case(
+                    models.When(bulk_upload_id=doc.bulk_upload_id, then=0),
+                    default=1,
+                    output_field=models.IntegerField(),
+                ),
+                "-created_at",
+            )
+        else:
+            candidates = candidates.order_by("-created_at")
+
+        for candidate in candidates[:500]:
+            target_values = _collect_rule_values(candidate, rule.target_field_key, is_target=True)
+            for target_value in target_values:
+                normalized = normalize_business_reference(target_value)
+                if not normalized or normalized not in normalized_sources:
+                    continue
+                target_id = str(candidate.id)
+                seen_key = f"{target_id}:{rule.relation_type}:{normalized}"
+                if seen_key in seen_targets:
+                    continue
+                seen_targets.add(seen_key)
+                suggestions.append(
+                    {
+                        "target_document_id": target_id,
+                        "target_title": candidate.title,
+                        "target_reference_number": candidate.reference_number,
+                        "target_document_type": getattr(candidate.document_type, "name", "") or "Document",
+                        "relation_type": rule.relation_type,
+                        "matched_reference": normalized_sources[normalized],
+                        "matched_purchase_order_number": target_value,
+                        "matched_source_field": rule.source_field_key,
+                        "matched_target_field": rule.target_field_key,
+                        "relationship_rule_id": str(rule.id),
+                        "reason": rule.description or f"{rule.source_field_key} matched {rule.target_document_type.name} {rule.target_field_key}.",
+                        "auto_created": False,
+                        "relationship_id": None,
+                    }
+                )
+                break
+
+    return suggestions
+
+
+def _legacy_po_suggestions(doc: Document) -> list[dict[str, Any]]:
     references = get_document_po_references(doc)
     normalized_references = {
         normalize_business_reference(reference): reference
@@ -195,6 +309,9 @@ def _suggestions_for_referencing_document(doc: Document) -> list[dict[str, Any]]
                     "relation_type": DocumentRelationship.RelationType.REFERENCES,
                     "matched_reference": normalized_references[normalized],
                     "matched_purchase_order_number": candidate_ref,
+                    "matched_source_field": "po_reference",
+                    "matched_target_field": "po_number",
+                    "relationship_rule_id": None,
                     "reason": "PO reference matched a purchase order number.",
                     "auto_created": False,
                     "relationship_id": None,
@@ -222,7 +339,7 @@ def _create_relationship_from_suggestion(
     relationship, _ = DocumentRelationship.objects.get_or_create(
         source_document=source,
         target_document=target,
-        relation_type=DocumentRelationship.RelationType.REFERENCES,
+        relation_type=suggestion.get("relation_type") or DocumentRelationship.RelationType.REFERENCES,
         defaults={
             "note": f"{AUTO_MATCH_NOTE_PREFIX} {suggestion.get('matched_reference')}.",
             "created_by": created_by or source.uploaded_by,
@@ -347,17 +464,10 @@ def refresh_po_relationship_suggestions(
             Document.objects.filter(id=doc.id).update(metadata=metadata)
         return []
 
-    suggestions = _suggestions_for_referencing_document(doc)
+    suggestions = _suggestions_for_referencing_document(doc, actor=actor)
     refreshed: list[dict[str, Any]] = []
     for suggestion in suggestions:
-        should_auto_create = (
-            auto_create_same_batch
-            and doc.bulk_upload_id
-            and Document.objects.filter(
-                id=suggestion["target_document_id"],
-                bulk_upload_id=doc.bulk_upload_id,
-            ).exists()
-        )
+        should_auto_create = False
         refreshed.append(
             _create_relationship_from_suggestion(
                 source=doc,

@@ -37,6 +37,7 @@ const POLL_MS = 3000;
 
 type BulkScanPageProps = {
   scanMode?: boolean;
+  onSingleMode?: () => void;
 };
 
 async function calculateFileSha256(file: File): Promise<string> {
@@ -47,7 +48,7 @@ async function calculateFileSha256(file: File): Promise<string> {
     .join("");
 }
 
-export default function BulkScanPage({ scanMode = true }: BulkScanPageProps) {
+export default function BulkScanPage({ scanMode = true, onSingleMode }: BulkScanPageProps) {
   const navigate = useNavigate();
   const queryClient = useQueryClient();
 
@@ -292,7 +293,20 @@ export default function BulkScanPage({ scanMode = true }: BulkScanPageProps) {
               : "Upload several files, preview each one, then choose its type and details during review."}
           </p>
         </div>
-        <div className="hidden items-center gap-2 text-xs text-white/80 md:flex">
+        <div className="hidden items-center gap-3 text-xs text-white/80 md:flex">
+          {onSingleMode && (
+            <label className="inline-flex cursor-pointer items-center gap-2 border border-white/30 px-2.5 py-1.5 font-semibold">
+              <input
+                type="checkbox"
+                checked
+                onChange={(event) => {
+                  if (!event.target.checked) onSingleMode();
+                }}
+                className="h-3.5 w-3.5"
+              />
+              Bulk mode
+            </label>
+          )}
           <span className="border border-white/30 px-2 py-1">
             {isRelatedSet ? "Related set" : selectedType?.name || "No type selected"}
           </span>
@@ -360,7 +374,19 @@ export default function BulkScanPage({ scanMode = true }: BulkScanPageProps) {
           <div className="space-y-5 lg:col-span-4">
             <div className="border border-[#C8CDD2] bg-white p-5">
               <h2 className="mb-4 font-semibold text-[#1F2933]">1. Batch mode</h2>
-              <label className="mb-4 flex cursor-pointer items-start gap-3 border border-[#C8CDD2] bg-[#F7F8F9] p-3">
+              {onSingleMode && (
+                <label className="mb-3 flex cursor-pointer items-center gap-2 border border-[#D3D7DA] bg-[#F7F8F9] px-3 py-2 text-sm text-[#1F2933] md:hidden">
+                  <input
+                    type="checkbox"
+                    checked
+                    onChange={(event) => {
+                      if (!event.target.checked) onSingleMode();
+                    }}
+                  />
+                  Use bulk mode
+                </label>
+              )}
+              <label className="mb-4 flex cursor-pointer items-center gap-2 text-sm text-[#1F2933]">
                 <input
                   type="checkbox"
                   checked={isRelatedSet}
@@ -368,15 +394,14 @@ export default function BulkScanPage({ scanMode = true }: BulkScanPageProps) {
                     setIsRelatedSet(event.target.checked);
                     if (event.target.checked) setSelectedTypeId("");
                   }}
-                  className="mt-1"
                 />
-                <span>
-                  <span className="block text-sm font-bold text-[#1F2933]">Upload related documents</span>
-                  <span className="mt-1 block text-xs text-[#5E6870]">
-                    Use this for PO, invoice, GRN, and support files in one packet. You will confirm each file's document type during review.
-                  </span>
-                </span>
+                Related document set
               </label>
+              {isRelatedSet && (
+                <p className="mb-3 border border-[#A7CDE3] bg-[#EEF6FB] px-3 py-2 text-xs text-[#287EAD]">
+                  Use this for PO, invoice, GRN, and support files in one packet. Each document type is confirmed during review.
+                </p>
+              )}
               <select
                 value={selectedTypeId}
                 onChange={(e) => setSelectedTypeId(e.target.value)}
@@ -427,12 +452,12 @@ export default function BulkScanPage({ scanMode = true }: BulkScanPageProps) {
               />
             </div>
 
-            <div className="flex gap-4">
+            <div className="flex flex-wrap gap-3">
               <button
                 type="button"
                 onClick={onStartUpload}
                 disabled={createMutation.isPending || isCheckingDuplicates || (!selectedTypeId && !isRelatedSet) || files.length === 0}
-                className="flex flex-1 items-center justify-center gap-2 bg-[#287EAD] py-3 font-semibold text-white hover:bg-[#206D99] disabled:opacity-50"
+                className="inline-flex items-center justify-center gap-2 bg-[#287EAD] px-4 py-2 text-sm font-semibold text-white hover:bg-[#206D99] disabled:opacity-50"
               >
                 {createMutation.isPending || isCheckingDuplicates ? (
                   <>
@@ -452,7 +477,7 @@ export default function BulkScanPage({ scanMode = true }: BulkScanPageProps) {
               <button
                 type="button"
                 onClick={() => navigate("/documents")}
-                className="border border-[#C8CDD2] bg-white px-6 py-3 font-semibold hover:bg-[#EEF3F7]"
+                className="border border-[#C8CDD2] bg-white px-4 py-2 text-sm font-semibold hover:bg-[#EEF3F7]"
               >
                 Cancel
               </button>
