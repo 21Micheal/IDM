@@ -15,7 +15,9 @@ type Props = {
   reviewStates: BulkDocReviewState[];
   onChange: (states: BulkDocReviewState[]) => void;
   onSubmit: () => void;
+  onCancel: () => void;
   isSubmitting: boolean;
+  isCancelling: boolean;
   previews?: Record<string, BulkLocalPreview>;
 };
 
@@ -27,7 +29,9 @@ export default function BulkReviewPanel({
   reviewStates,
   onChange,
   onSubmit,
+  onCancel,
   isSubmitting,
+  isCancelling,
   previews = {},
 }: Props) {
   const counts = useMemo(() => countReviewDecisions(reviewStates), [reviewStates]);
@@ -150,11 +154,23 @@ export default function BulkReviewPanel({
         </div>
       </div>
 
-      <div className="flex gap-4 border-t border-[#C8CDD2] pt-4">
+      <div className="flex flex-col gap-3 border-t border-[#C8CDD2] pt-4 sm:flex-row">
+        <button
+          type="button"
+          onClick={onCancel}
+          disabled={isCancelling || isSubmitting}
+          className="flex flex-1 items-center justify-center gap-2 border border-[#C8CDD2] bg-white py-3 text-base font-semibold text-[#1F2933] transition-all hover:bg-[#F7F8F9] disabled:opacity-50"
+        >
+          {isCancelling ? (
+            <Loader2 className="w-5 h-5 animate-spin" />
+          ) : (
+            "Cancel review"
+          )}
+        </button>
         <button
           type="button"
           onClick={onSubmit}
-          disabled={isSubmitting || reviewStates.length === 0 || missingTypeCount > 0}
+          disabled={isSubmitting || isCancelling || reviewStates.length === 0 || missingTypeCount > 0}
           className="flex flex-1 items-center justify-center gap-2 bg-[#287EAD] py-3 text-base font-semibold text-white transition-all hover:bg-[#206D99] disabled:opacity-50"
         >
           {isSubmitting ? (

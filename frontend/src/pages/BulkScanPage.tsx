@@ -199,6 +199,26 @@ export default function BulkScanPage({ scanMode = true }: BulkScanPageProps) {
     },
   });
 
+  const cancelMutation = useMutation({
+    mutationFn: async () => {
+      if (!batchId) throw new Error("No batch");
+      const { data } = await bulkUploadAPI.cancel(batchId);
+      return data as BulkUploadBatch;
+    },
+    onSuccess: () => {
+      setStage("select");
+      setBatchId(null);
+      setFiles([]);
+      setReviewStates([]);
+      setCompletedBatch(null);
+      setLocalPreviews({});
+      toast.success("Review canceled and draft batch discarded.");
+    },
+    onError: () => {
+      toast.error("Could not cancel the review. Please try again.");
+    },
+  });
+
   const uploadFiles = useCallback((uploadList: File[]) => {
     setStage("processing");
     createMutation.mutate(uploadList);
@@ -462,7 +482,13 @@ export default function BulkScanPage({ scanMode = true }: BulkScanPageProps) {
             reviewStates={reviewStates}
             onChange={setReviewStates}
             onSubmit={() => reviewMutation.mutate()}
+            onCancel={() => {
+              if (window.confirm("Cancel this review and discard the draft batch?")) {
+                cancelMutation.mutate();
+              }
+            }}
             isSubmitting={reviewMutation.isPending}
+            isCancelling={cancelMutation.isPending}
             previews={localPreviews}
           />
         </div>

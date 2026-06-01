@@ -323,9 +323,9 @@ def refresh_po_relationship_suggestions(
     """
     Refresh assisted PO link suggestions for invoices/GRNs.
 
-    Exact same-batch matches can be auto-linked, which covers bulk uploads where
-    a PO, invoice, and GRN arrive together. Cross-batch matches remain
-    suggestions so users can confirm the relationship in the detail page.
+    Matches are presented as suggested PO links so users can confirm the
+    relationship in the detail page. Cross-batch matches remain suggestions
+    in all cases, and bulk scan review does not auto-create same-batch links.
     """
     try:
         doc = Document.objects.select_related("document_type", "uploaded_by").get(id=doc.id)

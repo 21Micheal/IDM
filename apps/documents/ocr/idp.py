@@ -78,7 +78,7 @@ logger = logging.getLogger(__name__)
 # ── Field extraction prompt ────────────────────────────────────────────────────
 # Versioned so we can A/B test prompt changes without code deploys.
 
-_PROMPT_VERSION = "4"
+_PROMPT_VERSION = "5"
 
 _SYSTEM_PROMPT = """You are a precise document field extraction engine for an enterprise document management system. Your job is to extract structured data from business documents with high accuracy.
 
@@ -92,7 +92,7 @@ _STANDARD_FIELDS: dict[str, str] = {
     "document_type": "Exact document type as it appears, e.g. Invoice, Tax Invoice, Purchase Order, Receipt, Contract, Delivery Note, Quotation, Credit Note, Debit Note, Utility Bill, or Statement.",
     "title": "A clean document title for a document management system. Combine supplier, document type, and reference when possible. Max 120 chars. Do not use address lines or column headers.",
     "supplier": "Company or person ISSUING the document: seller, vendor, supplier, or service provider. Not the bill-to party.",
-    "reference_number": "Primary identifier belonging to this document: invoice number, PO number, order reference, contract number, receipt number, or delivery number. Strip leading #.",
+    "reference_number": "Primary identifier belonging to this document itself: invoice number for an invoice, GRN/goods receipt number for a goods receipt, PO/order number for a purchase order, contract number for a contract, receipt number for a receipt, or delivery number for a delivery note. Strip leading #.",
     "account_code": "Only an explicit account/customer/GL/cost-centre code labelled on the document. Return null unless a nearby label such as Account Code, Account No, Customer Code, GL Code, Cost Centre, or Supplier Account clearly identifies it. Do not infer this from invoice numbers, PO numbers, vendor names, addresses, tax IDs, phone numbers, bank accounts, or arbitrary alphanumeric strings.",
     "document_date": "Issue/invoice/document date in YYYY-MM-DD. If only month and year are present, use the first day of that month.",
     "due_date": "Payment due date, expiry date, or required-by date in YYYY-MM-DD.",
@@ -102,8 +102,8 @@ _STANDARD_FIELDS: dict[str, str] = {
     "subtotal": "Pre-tax subtotal/net amount as a plain decimal number.",
     "payment_terms": "Payment terms text, e.g. Net 30, Due on receipt.",
     "payment_method": "Payment method if specified: Cash, Cheque, Bank Transfer, M-PESA, Wire Transfer, Card, etc.",
-    "transaction_ref": "Payment transaction reference, M-PESA code, cheque number, card/wire/reference number.",
-    "po_reference": "Purchase order reference number if this document references a separate PO.",
+    "transaction_ref": "Payment transaction reference only: M-PESA code, cheque number, card/wire/payment/confirmation number. Do not use invoice numbers, GRN numbers, or PO numbers here unless the nearby label explicitly says transaction/payment/confirmation.",
+    "po_reference": "Purchase order reference number when this document references a PO. On invoices, GRNs, delivery notes, and receipts, a visible label like PO Number or PO Ref belongs here, not in reference_number.",
     "vendor_code": "Vendor or supplier ID code assigned by the buyer.",
     "approved_by": "Name of the person who approved or authorized this document.",
     "kra_pin": "Kenya Revenue Authority PIN, e.g. P051234567A.",
@@ -185,6 +185,8 @@ STRICT RULES:
 12. For select fields, use one of the configured options when the document clearly supports it; otherwise null.
 13. For blurry, skewed, cropped, or otherwise poor-quality scans, set low_quality_warning to true.
 14. confidence must be "high", "medium", or "low".
+15. For invoices and GRNs, keep the document's own number in reference_number and the PO Number/PO Ref in po_reference. Do not swap them.
+16. transaction_ref is only for payment/transaction identifiers. A PO Number is not a transaction_ref.
 
 Return ONLY the JSON object. Nothing else."""
 

@@ -1521,7 +1521,7 @@ class BulkUploadReviewSerializer(serializers.Serializer):
                 refresh_po_relationship_suggestions(
                     doc,
                     actor=request.user,
-                    auto_create_same_batch=True,
+                    auto_create_same_batch=False,
                 )
             except Exception:
                 logger.exception("Failed to refresh bulk relationship suggestions for document %s", doc.id)
@@ -1548,7 +1548,7 @@ class BulkUploadReviewSerializer(serializers.Serializer):
                 refresh_po_relationship_suggestions(
                     doc,
                     actor=request.user,
-                    auto_create_same_batch=True,
+                    auto_create_same_batch=False,
                 )
             cleanup_duplicate_auto_po_relationships(bulk_upload_id=bulk_upload.id)
         except Exception:

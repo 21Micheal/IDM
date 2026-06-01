@@ -4,6 +4,7 @@ ViewSet for bulk scan upload batches.
 import logging
 import json
 
+from django.db import transaction
 from django.shortcuts import get_object_or_404
 from rest_framework import permissions, status, viewsets
 from rest_framework.decorators import action
@@ -19,7 +20,7 @@ from .bulk_upload import (
     get_unclassified_bulk_document_type,
     sync_bulk_upload_status,
 )
-from .models import BulkUpload, BulkUploadStatus, DocumentType
+from .models import BulkUpload, BulkUploadStatus, DocumentType, DocumentStatus
 
 logger = logging.getLogger(__name__)
 from .serializers import (
@@ -209,3 +210,29 @@ class BulkUploadViewSet(viewsets.GenericViewSet):
             )
         out = BulkUploadDetailSerializer(bulk_upload, context={"request": request})
         return Response(out.data)
+
+    @action(detail=True, methods=["post"], parser_classes=[JSONParser])
+    def cancel(self, request, pk=None):
+        bulk_upload = get_object_or_404(self.get_queryset(), pk=pk)
+        if bulk_upload.status not in (
+            BulkUploadStatus.UPLOADING,
+            BulkUploadStatus.PROCESSING,
+            BulkUploadStatus.REVIEW,
+        ):
+            return Response(
+                {
+                    "detail": (
+                        "This batch cannot be canceled in its current state. "
+                        f"Current status: {bulk_upload.status}."
+                    )
+                },
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        with transaction.atomic():
+            documents = list(bulk_upload.documents.all())
+            for doc in documents:
+                doc.delete()
+            bulk_upload.delete()
+
+        return Response(status=status.HTTP_204_NO_CONTENT)

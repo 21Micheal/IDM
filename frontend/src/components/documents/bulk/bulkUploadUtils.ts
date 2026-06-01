@@ -18,6 +18,27 @@ const DIRECT_KEYS = new Set([
   "uom",
 ]);
 
+const DOCUMENT_REFERENCE_ALIASES: Record<string, Array<keyof OcrFields>> = {
+  invoice_number: ["reference_number"],
+  invoice_no: ["reference_number"],
+  inv_number: ["reference_number"],
+  inv_no: ["reference_number"],
+  grn_number: ["reference_number"],
+  grn_no: ["reference_number"],
+  goods_receipt_number: ["reference_number"],
+  receipt_number: ["reference_number"],
+  receipt_no: ["reference_number"],
+  reference_number: ["reference_number"],
+  reference_no: ["reference_number"],
+  document_number: ["reference_number"],
+  document_no: ["reference_number"],
+  transaction_reference: ["transaction_ref", "reference_number"],
+  transaction_number: ["transaction_ref", "reference_number"],
+  transaction_ref: ["transaction_ref"],
+  payment_reference: ["transaction_ref"],
+  payment_ref: ["transaction_ref"],
+};
+
 export function getMetadataFieldKey(field: MetadataField): string {
   return (field.key ?? field.field_key ?? "") as string;
 }
@@ -109,6 +130,18 @@ export function applyOcrValuesToDocumentType(
 ) {
   if (!ocrFields || !documentType.metadata_fields?.length) return;
 
+  for (const field of documentType.metadata_fields) {
+    const metadataKey = getMetadataFieldKey(field);
+    if (!metadataKey) continue;
+    const path = DIRECT_KEYS.has(metadataKey)
+      ? metadataKey
+      : `metadata.${metadataKey}`;
+    const exact = getContextualOcrValueForField(field, ocrFields, documentType);
+    if (!exact) continue;
+    values[path] = exact;
+    suggestedScores[path] = 4;
+  }
+
   const matches = applyOcrToFields(documentType.metadata_fields, ocrFields);
   for (const { field, match } of matches) {
     const metadataKey = getMetadataFieldKey(field);
@@ -122,6 +155,57 @@ export function applyOcrValuesToDocumentType(
       suggestedScores[path] = match.score;
     }
   }
+}
+
+function getContextualOcrValueForField(
+  field: MetadataField,
+  ocrFields: OcrFields,
+  documentType: DocumentType,
+): string | undefined {
+  const key = normalizeFieldIdentifier(getMetadataFieldKey(field));
+  const label = normalizeFieldIdentifier(field.label ?? "");
+  const candidates = new Set([key, label].filter(Boolean));
+
+  const aliases: Array<keyof OcrFields> = [];
+  const asksForPoNumber = [...candidates].some((candidate) =>
+    /^(po|lpo|purchase_order)_(number|no|ref|reference)$/.test(candidate)
+    || candidate === "purchase_order"
+  );
+
+  if (asksForPoNumber) {
+    aliases.push(
+      ...(isPurchaseOrderType(documentType)
+        ? (["reference_number", "po_reference"] as Array<keyof OcrFields>)
+        : (["po_reference"] as Array<keyof OcrFields>)),
+    );
+  }
+
+  for (const candidate of candidates) {
+    aliases.push(...(DOCUMENT_REFERENCE_ALIASES[candidate] ?? []));
+    if (candidate in ocrFields) {
+      aliases.push(candidate as keyof OcrFields);
+    }
+  }
+
+  for (const alias of aliases) {
+    const value = ocrFields[alias];
+    if (value == null || Array.isArray(value) || typeof value === "object") continue;
+    const scalar = String(value).trim();
+    if (scalar) return scalar;
+  }
+  return undefined;
+}
+
+function normalizeFieldIdentifier(value: string) {
+  return value
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, "_")
+    .replace(/^_+|_+$/g, "");
+}
+
+function isPurchaseOrderType(documentType: DocumentType) {
+  const haystack = `${documentType.name} ${documentType.code} ${documentType.description ?? ""}`.toLowerCase();
+  return /\b(po|lpo)\b/.test(haystack) || haystack.includes("purchase order");
 }
 
 export function resolveDocumentType(label: string, documentTypes: DocumentType[]): DocumentType | undefined {

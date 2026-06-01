@@ -422,6 +422,8 @@ export const bulkUploadAPI = {
 
   review: (id: string, documents: Record<string, unknown>[]) =>
     api.post(`/documents/bulk-uploads/${id}/review/`, { documents }),
+
+  cancel: (id: string) => api.post(`/documents/bulk-uploads/${id}/cancel/`),
 };
 
 export const dmsSettingsAPI = {

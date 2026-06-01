@@ -339,7 +339,7 @@ def ocr_document(self, document_id: str):
             refresh_po_relationship_suggestions(
                 doc,
                 actor=doc.uploaded_by,
-                auto_create_same_batch=bool(doc.bulk_upload_id),
+                auto_create_same_batch=False,
             )
         except Exception:
             logger.exception("ocr_document: failed to refresh relationship suggestions for %s", document_id)
