@@ -203,6 +203,16 @@ def effective_permissions_for_user(user, document: Document) -> list[str]:
             GroupAction.COMMENT.value,
             GroupAction.ARCHIVE.value,
         ]
+    
+    # CRITICAL FIX: When a document is returned for review, only the uploader
+    # should have creation-stage permissions. Approvers who returned it should
+    # not retain creation rights even if their group grants them.
+    status_lower = (document.status or "").strip().lower()
+    if status_lower == "returned" and document.uploaded_by_id != user.id:
+        # Non-uploaders only get VIEW permission on returned documents
+        # They cannot edit, upload, submit, or delete
+        return [GroupAction.VIEW.value]
+    
     perms = user.get_all_permissions_for_doctype(
         str(document.document_type_id),
         document=document,
