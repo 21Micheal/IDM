@@ -10,11 +10,11 @@ import {
   type Path,
   type UseFormRegister,
 } from "react-hook-form";
-import { documentsAPI, documentTypesAPI, normalizeListResponse } from "@/services/api";
+import { documentsAPI, documentTypesAPI, normalizeListResponse, templatesAPI } from "@/services/api";
 import {
   Upload, File, X, Loader2, ArrowRight, CheckCircle, Plus, Lock,
   Info, ScanLine, Sparkles, AlertCircle, ChevronRight, ShieldAlert,
-  Cpu, List, FileText, Tags,
+  Cpu, List, FileText, Tags, LayoutTemplate, Wand2,
 } from "lucide-react";
 import { toast } from "@/components/ui/vault-toast";
 import type { DocumentType, MetadataField } from "@/types";
@@ -29,6 +29,18 @@ import BulkScanPage from "@/pages/BulkScanPage";
 type PersonalTagField      = { value: string };
 type PersonalMetadataField = { key: string; value: string };
 type OcrLineItem = Record<string, string | number | null | undefined>;
+
+type DocumentTemplateOption = {
+  id: string;
+  name: string;
+  description?: string;
+  type: "built" | "uploaded";
+  document_type?: string;
+  document_type_id?: string;
+  file_name?: string;
+  placeholders?: string[];
+  sections?: unknown[];
+};
 
 type UploadFormValues = {
   title:         string;
@@ -810,6 +822,8 @@ export default function UploadPage({ scanOnly = false }: UploadPageProps) {
   const [isScanned,        setIsScanned]         = useState(scanOnly);
   const [pdfPreviewUrl,    setPdfPreviewUrl]     = useState<string | null>(null);
   const [bulkMode,         setBulkMode]          = useState(() => new URLSearchParams(location.search).get("mode") === "bulk");
+  const [useTemplate,      setUseTemplate]       = useState(false);
+  const [selectedTemplateId, setSelectedTemplateId] = useState("");
 
   const [scanStage,        setScanStage]         = useState<ScanStage>("idle");
   const [uploadedDocId,    setUploadedDocId]     = useState<string | null>(null);
@@ -865,6 +879,19 @@ export default function UploadPage({ scanOnly = false }: UploadPageProps) {
   const typeConfig   = deriveDocumentTypeConfig(selectedType);
   const isSelfUpload = typeConfig.isPersonalType;
   const metadataMode = typeConfig.metadataMode;
+  const canUseTemplate = !scanOnly && !isSelfUpload && Boolean(selectedTypeId);
+
+  const { data: typeTemplates = [] } = useQuery<unknown, Error, DocumentTemplateOption[]>({
+    queryKey: ["templates", "document-type", selectedTypeId],
+    queryFn: () => templatesAPI.list({ document_type_id: selectedTypeId }).then((r) => r.data as unknown),
+    select: (data) => normalizeListResponse<DocumentTemplateOption>(data).map((template) => ({
+      ...template,
+      document_type_id: template.document_type_id || template.document_type,
+    })),
+    enabled: canUseTemplate && useTemplate,
+    ...QUERY_FIVE_MIN_STALE,
+  });
+  const selectedTemplate = typeTemplates.find((template) => template.id === selectedTemplateId) ?? null;
 
   const isOcrFlow      = isScanned && !isSelfUpload;
   const showManualForm = !isOcrFlow && Boolean(selectedTypeId) && scanStage === "idle";
@@ -898,8 +925,17 @@ export default function UploadPage({ scanOnly = false }: UploadPageProps) {
       });
       setUploadProgress(0);
       setShowPersonalExtras(false);
+      setUseTemplate(false);
+      setSelectedTemplateId("");
     }
   }, [selectedTypeId, reset]);
+
+  useEffect(() => {
+    if (!canUseTemplate && useTemplate) {
+      setUseTemplate(false);
+      setSelectedTemplateId("");
+    }
+  }, [canUseTemplate, useTemplate]);
 
   useEffect(() => {
     if (!droppedFile) return;
@@ -1109,11 +1145,57 @@ export default function UploadPage({ scanOnly = false }: UploadPageProps) {
     },
   });
 
+  const createFromTemplateMutation = useMutation({
+    mutationFn: (payload: {
+      templateId: string;
+      title: string;
+      documentTypeId: string;
+      values: Record<string, unknown>;
+    }) =>
+      templatesAPI.fillTemplate({
+        template_id: payload.templateId,
+        values: payload.values,
+        output_format: "docx",
+        title: payload.title,
+        document_type_id: payload.documentTypeId,
+        draft_from_template: true,
+      }),
+    onSuccess: ({ data }) => {
+      queryClient.invalidateQueries({ queryKey: ["documents"] });
+      toast.success("Draft document created from template.");
+      navigate(`/documents/${data.document_id}`);
+    },
+    onError: (err: any) => {
+      const data = err?.response?.data;
+      const message = data?.detail || data?.document_type_id || "Could not create document from template.";
+      toast.error(Array.isArray(message) ? message.join(", ") : String(message));
+    },
+  });
+
   // ── Submit handlers ─────────────────────────────────────────────────────────
 
   const onUpload = async (values: Record<string, unknown>) => {
-    if (!droppedFile)    { toast.error("Please select a file");          return; }
     if (!selectedTypeId) { toast.error("Please select a document type"); return; }
+    if (useTemplate) {
+      if (!selectedTemplate) {
+        toast.error("Please select a template");
+        return;
+      }
+      const documentValues = documentValuesFromForm(values);
+      const adminMetadata = values.metadata ? metadataWithoutDocumentFields(values.metadata) : {};
+      const title = documentValues.title || selectedTemplate.name;
+      createFromTemplateMutation.mutate({
+        templateId: selectedTemplate.id,
+        title,
+        documentTypeId: selectedTypeId,
+        values: {
+          ...adminMetadata,
+          ...documentValues,
+        },
+      });
+      return;
+    }
+    if (!droppedFile)    { toast.error("Please select a file");          return; }
 
     const personalTags = (Array.isArray(values.personal_tags) ? values.personal_tags : [])
       .map((tag) => {
@@ -1285,7 +1367,9 @@ export default function UploadPage({ scanOnly = false }: UploadPageProps) {
             Bulk mode
           </label>
           <span className="border border-white/30 px-2 py-1">{selectedType?.name || "No type selected"}</span>
-          <span className="border border-white/30 px-2 py-1">{droppedFile ? "File attached" : "Awaiting file"}</span>
+          <span className="border border-white/30 px-2 py-1">
+            {useTemplate ? (selectedTemplate ? "Template selected" : "Awaiting template") : droppedFile ? "File attached" : "Awaiting file"}
+          </span>
         </div>
       </div>
 
@@ -1446,7 +1530,7 @@ export default function UploadPage({ scanOnly = false }: UploadPageProps) {
       {(scanStage === "idle" || scanStage === "uploading") && (
         <div className="grid grid-cols-1 gap-5 p-5 pr-8 xl:grid-cols-12">
           {/* Left column — controls */}
-          <div className={clsx(droppedFile ? "order-2 xl:col-span-3" : "xl:col-start-2 xl:col-span-4", "space-y-4")}>
+          <div className={clsx(droppedFile ? "order-2 xl:col-span-3" : useTemplate ? "xl:col-span-4" : "xl:col-start-2 xl:col-span-4", "space-y-4")}>
             {/* Step 1 — Document Type */}
             <div className="border border-[#C8CDD2] bg-white p-4">
               <h2 className="mb-3 flex items-center gap-2 text-sm font-semibold text-[#1F2933]">
@@ -1489,9 +1573,50 @@ export default function UploadPage({ scanOnly = false }: UploadPageProps) {
                   </span>
                 </div>
               )}
+              {canUseTemplate && (
+                <div className="mt-4 border border-[#C8CDD2] bg-[#F7F8F9] p-3">
+                  <label className="flex cursor-pointer items-center gap-2 text-sm font-semibold text-[#1F2933]">
+                    <input
+                      type="checkbox"
+                      checked={useTemplate}
+                      onChange={(event) => {
+                        setUseTemplate(event.target.checked);
+                        if (!event.target.checked) setSelectedTemplateId("");
+                      }}
+                    />
+                    <LayoutTemplate className="h-4 w-4 text-[#287EAD]" />
+                    Use template
+                  </label>
+                  {useTemplate && (
+                    <div className="mt-3 space-y-2">
+                      <select
+                        value={selectedTemplateId}
+                        onChange={(event) => setSelectedTemplateId(event.target.value)}
+                        className="input w-full"
+                      >
+                        <option value="">Select template</option>
+                        {typeTemplates.map((template) => (
+                          <option key={template.id} value={template.id}>
+                            {template.name} ({template.type === "uploaded" ? "Office" : "Builder"})
+                          </option>
+                        ))}
+                      </select>
+                      {typeTemplates.length === 0 && (
+                        <p className="text-xs text-[#5E6870]">No active templates are configured for this document type.</p>
+                      )}
+                      {selectedTemplate && (
+                        <p className="text-xs text-[#5E6870]">
+                          {selectedTemplate.description || "A draft document will be created from this template for editing."}
+                        </p>
+                      )}
+                    </div>
+                  )}
+                </div>
+              )}
             </div>
 
             {/* Step 2 — Attach File */}
+            {!useTemplate && (
             <div className="border border-[#C8CDD2] bg-white p-4">
               <h2 className="mb-3 flex items-center gap-2 text-sm font-semibold text-[#1F2933]">
                 <StepBadge n={2} active={Boolean(selectedTypeId) && !droppedFile} done={Boolean(droppedFile)} />
@@ -1529,6 +1654,7 @@ export default function UploadPage({ scanOnly = false }: UploadPageProps) {
                 )}
               </div>
             </div>
+            )}
 
             {scanOnly && (
               <div className="space-y-2 border border-[#A7CDE3] bg-white p-4">
@@ -1557,9 +1683,32 @@ export default function UploadPage({ scanOnly = false }: UploadPageProps) {
               />
             </div>
           )}
+          {useTemplate && !droppedFile && (
+            <div className="order-1 xl:col-span-5">
+              <div className={clsx("border border-[#C8CDD2] bg-[#F7F8F9]", PREVIEW_MIN_HEIGHT)}>
+                <div className="border-b border-[#C8CDD2] bg-white px-4 py-3">
+                  <p className="text-sm font-semibold text-[#1F2933]">Template source</p>
+                  <p className="mt-0.5 text-xs text-[#5E6870]">{selectedTemplate?.name || "Select a template"}</p>
+                </div>
+                <div className="flex h-full min-h-[30rem] flex-col items-center justify-center px-8 text-center">
+                  <div className="mb-4 flex h-16 w-16 items-center justify-center border border-[#A7CDE3] bg-[#EEF6FB] text-[#287EAD]">
+                    <LayoutTemplate className="h-8 w-8" />
+                  </div>
+                  <p className="text-base font-semibold text-[#1F2933]">
+                    {selectedTemplate ? "A draft document will be generated" : "Choose a template for this document type"}
+                  </p>
+                  <p className="mt-2 max-w-md text-sm text-[#5E6870]">
+                    {selectedTemplate
+                      ? "After creation, open the document and use the normal editor to complete or adjust the generated file."
+                      : "Templates are maintained by admins and scoped to the selected document type."}
+                  </p>
+                </div>
+              </div>
+            </div>
+          )}
 
           {/* Right column — form / OCR idle */}
-          <div className={clsx(droppedFile ? "order-3 xl:col-span-3" : "xl:col-start-7 xl:col-span-5")}>
+          <div className={clsx(droppedFile ? "order-3 xl:col-span-3" : useTemplate ? "order-3 xl:col-span-3" : "xl:col-start-7 xl:col-span-5")}>
             {showManualForm && (
               <div
                 className={clsx(
@@ -1736,16 +1885,16 @@ export default function UploadPage({ scanOnly = false }: UploadPageProps) {
                   <button
                     type="button"
                     onClick={handleSubmit(onUpload)}
-                    disabled={uploadMutation.isPending || !droppedFile}
+                    disabled={uploadMutation.isPending || createFromTemplateMutation.isPending || (!useTemplate && !droppedFile) || (useTemplate && !selectedTemplate)}
                     className="inline-flex items-center justify-center gap-2 rounded-sm bg-primary px-4 py-2 text-sm font-semibold text-primary-foreground transition-all hover:bg-primary/90 disabled:cursor-not-allowed disabled:opacity-50"
                     style={{ boxShadow: "var(--shadow-elegant)" }}
                   >
-                    {uploadMutation.isPending ? (
+                    {uploadMutation.isPending || createFromTemplateMutation.isPending ? (
                       <Loader2 className="w-5 h-5 animate-spin" />
                     ) : (
                       <>
-                        {isSelfUpload ? <Lock className="w-4 h-4" /> : <Upload className="w-4 h-4" />}
-                        {isSelfUpload ? "Save Personal Document" : "Upload Document"}
+                        {useTemplate ? <Wand2 className="w-4 h-4" /> : isSelfUpload ? <Lock className="w-4 h-4" /> : <Upload className="w-4 h-4" />}
+                        {useTemplate ? "Create Draft" : isSelfUpload ? "Save Personal Document" : "Upload Document"}
                         <ArrowRight className="w-4 h-4" />
                       </>
                     )}

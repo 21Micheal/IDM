@@ -27,6 +27,7 @@ const WorkflowBuilderPage = lazy(() => import("@/pages/WorkflowBuilderPage"));
 const NotificationsPage = lazy(() => import("@/pages/NotificationsPage"));
 const NotificationWorkflowPage = lazy(() => import("@/pages/NotificationWorkflowPage"));
 const FolderPage = lazy(() => import("@/pages/FolderPage"));
+const TemplatesPage = lazy(() => import("@/pages/TemplatesPage"));
 
 // ── Guards ────────────────────────────────────────────────────────────────────
 
@@ -250,6 +251,8 @@ export default function App() {
               <Route path="documents/:id"    element={<DocumentDetailPage />} />
               <Route path="documents/folders/:folderId" element={<FolderPage />} />
 
+              <Route path="templates" element={<Navigate to="/admin/templates" replace />} />
+
               {/* Search */}
               <Route path="search"    element={<SearchPage />} />
 
@@ -272,6 +275,7 @@ export default function App() {
               <Route path="admin/users/:id"       element={<RequireAdmin><UserDetailPage /></RequireAdmin>} />
               <Route path="admin/settings"        element={<RequireAdmin><AdminPage /></RequireAdmin>} />
               <Route path="admin/document-types"  element={<RequireAdmin><AdminDocumentTypesPage /></RequireAdmin>} />
+              <Route path="admin/templates"       element={<RequireAdmin><TemplatesPage /></RequireAdmin>} />
               <Route path="admin/departments"     element={<RequireAdmin><DepartmentsPage /></RequireAdmin>} />
               <Route path="admin/groups"          element={<RequireAdmin><GroupsPage /></RequireAdmin>} />
             </Route>
