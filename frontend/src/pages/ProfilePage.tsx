@@ -62,7 +62,7 @@ interface UserPreferences {
   notify_system_announcements: boolean;
 }
 
-type ProfileTab = "settings" | "security" | "signature" | "delegation" | "preferences";
+type ProfileTab = "settings" | "signature" | "delegation" | "preferences";
 
 export default function ProfilePage() {
   const [searchParams] = useSearchParams();
@@ -81,9 +81,14 @@ export default function ProfilePage() {
 
   // Handle URL parameter for tab navigation
   useEffect(() => {
-    const tabParam = searchParams.get("tab") as ProfileTab;
-    if (tabParam && ["settings", "security", "signature", "delegation", "preferences"].includes(tabParam)) {
-      setActiveTab(tabParam);
+    const tabParam = searchParams.get("tab");
+    if (!tabParam) return;
+    if (tabParam === "security") {
+      setActiveTab("settings");
+      return;
+    }
+    if (["settings", "signature", "delegation", "preferences"].includes(tabParam)) {
+      setActiveTab(tabParam as ProfileTab);
     }
   }, [searchParams]);
 
@@ -185,10 +190,9 @@ export default function ProfilePage() {
   });
 
   const tabs = [
-    { id: "settings" as const, label: "Settings", icon: Settings, description: "Account & password" },
-    { id: "security" as const, label: "Security", icon: ShieldCheck, description: "MFA & authentication" },
-    { id: "signature" as const, label: "Signature", icon: FileSignature, description: "E-signature" },
+    { id: "settings" as const, label: "Settings", icon: Settings, description: "Account, password & security" },
     { id: "delegation" as const, label: "Delegation", icon: UserCheck, description: "Out of office tasks" },
+    { id: "signature" as const, label: "Signature", icon: FileSignature, description: "E-signature" },
     { id: "preferences" as const, label: "Preferences", icon: Monitor, description: "Display & notifications" },
   ];
 
@@ -305,7 +309,7 @@ export default function ProfilePage() {
             </h3>
             {[
               { icon: Key, label: "Change Password", action: () => { setActiveTab("settings"); setShowPasswordForm(true); }, color: "text-amber-500" },
-              { icon: Shield, label: "Security Settings", action: () => setActiveTab("security"), color: "text-blue-500" },
+              { icon: Shield, label: "Security Settings", action: () => setActiveTab("settings"), color: "text-blue-500" },
               { icon: FileSignature, label: "E-Signature", action: () => setActiveTab("signature"), color: "text-teal-500" },
               { icon: UserCheck, label: "Manage Delegations", action: () => setActiveTab("delegation"), color: "text-emerald-500" },
               { icon: Bell, label: "Notification Preferences", action: () => setActiveTab("preferences"), color: "text-violet-500" },
@@ -356,171 +360,170 @@ export default function ProfilePage() {
           <div className="space-y-4">
             {/* Settings Tab */}
             {activeTab === "settings" && (
-              <div className="card p-6">
-                <div className="flex items-center gap-3 mb-6">
-                  <div className="w-10 h-10 rounded-lg bg-amber-100 flex items-center justify-center">
-                    <Key className="w-5 h-5 text-amber-600" />
-                  </div>
-                  <div>
-                    <h3 className="text-lg font-semibold text-foreground">Change Password</h3>
-                    <p className="text-sm text-muted-foreground">Update your account password</p>
-                  </div>
-                </div>
-
-                {!showPasswordForm ? (
-                  <div className="text-center py-8">
-                    <Key className="w-16 h-16 text-muted-foreground/20 mx-auto mb-4" />
-                    <p className="text-sm text-muted-foreground mb-4">Keep your account secure with a strong password</p>
-                    <button
-                      onClick={() => setShowPasswordForm(true)}
-                      className="btn-primary"
-                    >
-                      Change password
-                    </button>
-                  </div>
-                ) : (
-                  <form
-                    onSubmit={handleSubmit((v) => changePasswordMutation.mutate(v))}
-                    className="space-y-4"
-                  >
+              <div className="space-y-4">
+                <div className="card p-6">
+                  <div className="flex items-center gap-3 mb-6">
+                    <div className="w-10 h-10 rounded-lg bg-amber-100 flex items-center justify-center">
+                      <Key className="w-5 h-5 text-amber-600" />
+                    </div>
                     <div>
-                      <label className="label">Current password</label>
-                      <div className="relative">
-                        <input
-                          {...register("old_password")}
-                          type={showPw ? "text" : "password"}
-                          className="input pr-10"
-                          placeholder="Enter current password"
-                          autoComplete="current-password"
-                        />
-                        <button
-                          type="button"
-                          onClick={() => setShowPw(!showPw)}
-                          className="absolute right-3 top-1/2 -translate-y-1/2 text-muted-foreground hover:text-foreground"
-                        >
-                          {showPw ? <EyeOff className="w-4 h-4" /> : <Eye className="w-4 h-4" />}
-                        </button>
-                      </div>
-                      {errors.old_password && (
-                        <p className="text-destructive text-xs mt-1">{errors.old_password.message}</p>
-                      )}
+                      <h3 className="text-lg font-semibold text-foreground">Change Password</h3>
+                      <p className="text-sm text-muted-foreground">Update your account password</p>
                     </div>
+                  </div>
 
-                    <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
-                      <div>
-                        <label className="label">New password</label>
-                        <input
-                          {...register("new_password")}
-                          type={showPw ? "text" : "password"}
-                          className="input"
-                          placeholder="Min 8 characters"
-                          autoComplete="new-password"
-                        />
-                        {errors.new_password && (
-                          <p className="text-destructive text-xs mt-1">{errors.new_password.message}</p>
-                        )}
-                      </div>
-                      <div>
-                        <label className="label">Confirm new password</label>
-                        <input
-                          {...register("confirm_password")}
-                          type={showPw ? "text" : "password"}
-                          className="input"
-                          placeholder="Repeat new password"
-                          autoComplete="new-password"
-                        />
-                        {errors.confirm_password && (
-                          <p className="text-destructive text-xs mt-1">{errors.confirm_password.message}</p>
-                        )}
-                      </div>
-                    </div>
-
-                    <div className="flex items-center gap-3 pt-2">
+                  {!showPasswordForm ? (
+                    <div className="text-center py-8">
+                      <Key className="w-16 h-16 text-muted-foreground/20 mx-auto mb-4" />
+                      <p className="text-sm text-muted-foreground mb-4">Keep your account secure with a strong password</p>
                       <button
-                        type="submit"
-                        disabled={changePasswordMutation.isPending}
+                        onClick={() => setShowPasswordForm(true)}
                         className="btn-primary"
                       >
-                        {changePasswordMutation.isPending && <Loader2 className="w-4 h-4 animate-spin" />}
-                        Update password
-                      </button>
-                      <button
-                        type="button"
-                        onClick={() => {
-                          setShowPasswordForm(false);
-                          reset();
-                        }}
-                        className="btn-secondary"
-                      >
-                        Cancel
+                        Change password
                       </button>
                     </div>
-                  </form>
-                )}
-              </div>
-            )}
+                  ) : (
+                    <form
+                      onSubmit={handleSubmit((v) => changePasswordMutation.mutate(v))}
+                      className="space-y-4"
+                    >
+                      <div>
+                        <label className="label">Current password</label>
+                        <div className="relative">
+                          <input
+                            {...register("old_password")}
+                            type={showPw ? "text" : "password"}
+                            className="input pr-10"
+                            placeholder="Enter current password"
+                            autoComplete="current-password"
+                          />
+                          <button
+                            type="button"
+                            onClick={() => setShowPw(!showPw)}
+                            className="absolute right-3 top-1/2 -translate-y-1/2 text-muted-foreground hover:text-foreground"
+                          >
+                            {showPw ? <EyeOff className="w-4 h-4" /> : <Eye className="w-4 h-4" />}
+                          </button>
+                        </div>
+                        {errors.old_password && (
+                          <p className="text-destructive text-xs mt-1">{errors.old_password.message}</p>
+                        )}
+                      </div>
 
-            {/* Security Tab */}
-            {activeTab === "security" && (
-              <div className="card p-6">
-                <div className="flex items-center gap-3 mb-6">
-                  <div className="w-10 h-10 rounded-lg bg-blue-100 flex items-center justify-center">
-                    <ShieldCheck className="w-5 h-5 text-blue-600" />
-                  </div>
-                  <div>
-                    <h3 className="text-lg font-semibold text-foreground">Two-Factor Authentication</h3>
-                    <p className="text-sm text-muted-foreground">Add an extra layer of security to your account</p>
-                  </div>
-                </div>
-
-                <div className={clsx(
-                  "rounded-xl border-2 p-6",
-                  user.mfa_enabled ? "border-teal/30 bg-teal/[0.03]" : "border-border bg-muted/[0.3]"
-                )}>
-                  <div className="flex items-start justify-between">
-                    <div className="flex-1">
-                      <div className="flex items-center gap-3 mb-3">
-                        <Smartphone className={clsx(
-                          "w-6 h-6",
-                          user.mfa_enabled ? "text-teal" : "text-muted-foreground"
-                        )} />
+                      <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
                         <div>
-                          <p className="font-semibold text-foreground">Email OTP Authentication</p>
-                          <p className="text-sm text-muted-foreground mt-0.5">
-                            One-time passwords sent to your email during login
-                          </p>
+                          <label className="label">New password</label>
+                          <input
+                            {...register("new_password")}
+                            type={showPw ? "text" : "password"}
+                            className="input"
+                            placeholder="Min 8 characters"
+                            autoComplete="new-password"
+                          />
+                          {errors.new_password && (
+                            <p className="text-destructive text-xs mt-1">{errors.new_password.message}</p>
+                          )}
+                        </div>
+                        <div>
+                          <label className="label">Confirm new password</label>
+                          <input
+                            {...register("confirm_password")}
+                            type={showPw ? "text" : "password"}
+                            className="input"
+                            placeholder="Repeat new password"
+                            autoComplete="new-password"
+                          />
+                          {errors.confirm_password && (
+                            <p className="text-destructive text-xs mt-1">{errors.confirm_password.message}</p>
+                          )}
                         </div>
                       </div>
 
-                      {user.mfa_enabled && (
-                        <div className="flex items-start gap-2 mt-4 p-3 bg-amber-50 border border-amber-200 rounded-lg">
-                          <AlertTriangle className="w-4 h-4 text-amber-600 mt-0.5 flex-shrink-0" />
-                          <p className="text-sm text-amber-700">
-                            Disabling MFA reduces your account security. Only do this if you're switching authentication methods.
-                          </p>
-                        </div>
-                      )}
-                    </div>
+                      <div className="flex items-center gap-3 pt-2">
+                        <button
+                          type="submit"
+                          disabled={changePasswordMutation.isPending}
+                          className="btn-primary"
+                        >
+                          {changePasswordMutation.isPending && <Loader2 className="w-4 h-4 animate-spin" />}
+                          Update password
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => {
+                            setShowPasswordForm(false);
+                            reset();
+                          }}
+                          className="btn-secondary"
+                        >
+                          Cancel
+                        </button>
+                      </div>
+                    </form>
+                  )}
+                </div>
 
-                    <button
-                      disabled={true}
-                      className={clsx(
-                        "px-6 py-2.5 rounded-xl text-sm font-medium transition-all flex items-center gap-2",
-                        "border-2 border-muted text-muted-foreground opacity-50 cursor-not-allowed"
-                      )}
-                    >
-                      {user.mfa_enabled ? (
-                        <>
-                          <Shield className="w-4 h-4" />
-                          MFA Enabled
-                        </>
-                      ) : (
-                        <>
-                          <Shield className="w-4 h-4" />
-                          MFA Disabled
-                        </>
-                      )}
-                    </button>
+                <div className="card p-6">
+                  <div className="flex items-center gap-3 mb-6">
+                    <div className="w-10 h-10 rounded-lg bg-blue-100 flex items-center justify-center">
+                      <ShieldCheck className="w-5 h-5 text-blue-600" />
+                    </div>
+                    <div>
+                      <h3 className="text-lg font-semibold text-foreground">Two-Factor Authentication</h3>
+                      <p className="text-sm text-muted-foreground">Add an extra layer of security to your account</p>
+                    </div>
+                  </div>
+
+                  <div className={clsx(
+                    "rounded-xl border-2 p-6",
+                    user.mfa_enabled ? "border-teal/30 bg-teal/[0.03]" : "border-border bg-muted/[0.3]"
+                  )}>
+                    <div className="flex items-start justify-between">
+                      <div className="flex-1">
+                        <div className="flex items-center gap-3 mb-3">
+                          <Smartphone className={clsx(
+                            "w-6 h-6",
+                            user.mfa_enabled ? "text-teal" : "text-muted-foreground"
+                          )} />
+                          <div>
+                            <p className="font-semibold text-foreground">Email OTP Authentication</p>
+                            <p className="text-sm text-muted-foreground mt-0.5">
+                              One-time passwords sent to your email during login
+                            </p>
+                          </div>
+                        </div>
+
+                        {user.mfa_enabled && (
+                          <div className="flex items-start gap-2 mt-4 p-3 bg-amber-50 border border-amber-200 rounded-lg">
+                            <AlertTriangle className="w-4 h-4 text-amber-600 mt-0.5 flex-shrink-0" />
+                            <p className="text-sm text-amber-700">
+                              Disabling MFA reduces your account security. Only do this if you're switching authentication methods.
+                            </p>
+                          </div>
+                        )}
+                      </div>
+
+                      <button
+                        disabled={true}
+                        className={clsx(
+                          "px-6 py-2.5 rounded-xl text-sm font-medium transition-all flex items-center gap-2",
+                          "border-2 border-muted text-muted-foreground opacity-50 cursor-not-allowed"
+                        )}
+                      >
+                        {user.mfa_enabled ? (
+                          <>
+                            <Shield className="w-4 h-4" />
+                            MFA Enabled
+                          </>
+                        ) : (
+                          <>
+                            <Shield className="w-4 h-4" />
+                            MFA Disabled
+                          </>
+                        )}
+                      </button>
+                    </div>
                   </div>
                 </div>
               </div>

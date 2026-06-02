@@ -534,7 +534,45 @@ export default function DocumentDetailPage() {
       </div>
     );
 
-  if (!doc) return <p className="text-muted-foreground">Document not found.</p>;
+  if (!doc) {
+    const goBack = () => {
+      if (window.history.length > 1) {
+        navigate(-1);
+      } else {
+        navigate("/documents");
+      }
+    };
+
+    return (
+      <div className="mx-auto mt-10 max-w-xl rounded-xl border border-slate-200 bg-white p-8 text-slate-900 shadow-sm">
+        <div className="flex items-start gap-3">
+          <AlertTriangle className="mt-1 h-6 w-6 text-amber-500" />
+          <div>
+            <h2 className="text-xl font-semibold">Document not found</h2>
+            <p className="mt-2 text-sm text-slate-600">
+              The requested document is no longer available from this page. You can go back to where you came from, or continue to the document list.
+            </p>
+          </div>
+        </div>
+        <div className="mt-6 flex flex-col gap-3 sm:flex-row">
+          <button
+            type="button"
+            onClick={goBack}
+            className="inline-flex items-center justify-center rounded-md bg-[#287EAD] px-4 py-2 text-sm font-semibold text-white transition hover:bg-[#246d9c]"
+          >
+            <ArrowLeft className="mr-2 h-4 w-4" /> Go back
+          </button>
+          <button
+            type="button"
+            onClick={() => navigate("/documents")}
+            className="inline-flex items-center justify-center rounded-md border border-slate-200 bg-white px-4 py-2 text-sm font-semibold text-slate-700 transition hover:bg-slate-50"
+          >
+            Document list
+          </button>
+        </div>
+      </div>
+    );
+  }
 
   const relationshipSearchResults = ((relationshipSearchData?.results ?? []) as Document[])
     .filter((candidate) => candidate.id !== doc.id)

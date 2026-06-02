@@ -16,7 +16,7 @@ import {
   Workflow, ShieldCheck, Settings, LogOut,
   Bell, Users, Building2, UserRoundCog, Shield,
   ChevronDown, ChevronRight, Archive, ScanLine, Loader2, UserCheck, Monitor, Lock, History,
-  BellRing, CircleUserRound, ClipboardCheck, Inbox, ArrowRight,
+  BellRing, CircleUserRound, ClipboardCheck, Inbox, ArrowRight, FileSignature,
 } from "lucide-react";
 import { useAuthStore } from "../../store/authStore";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
@@ -99,8 +99,8 @@ const mainNav: NavEntry[] = [
     prefix: "/profile",
     children: [
       { to: "/profile?tab=settings", icon: Settings, label: "Settings" },
-      { to: "/profile?tab=security", icon: ShieldCheck, label: "Security" },
       { to: "/profile?tab=delegation", icon: UserCheck, label: "Delegation" },
+      { to: "/profile?tab=signature", icon: FileSignature, label: "E-Signature" },
       { to: "/profile?tab=preferences", icon: Monitor, label: "Preferences" },
     ],
   } as NavGroup,

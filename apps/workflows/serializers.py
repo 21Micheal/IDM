@@ -415,11 +415,13 @@ class WorkflowTaskActionSerializer(serializers.ModelSerializer):
     """Serializes the immutable action history log for a task."""
     actor             = UserSummarySerializer(read_only=True)
     action_display    = serializers.CharField(source="get_action_display", read_only=True)
+    return_to         = serializers.CharField(read_only=True)
+    return_to_display = serializers.CharField(source="get_return_to_display", read_only=True)
 
     class Meta:
         model  = WorkflowTaskAction
         fields = [
-            "id", "action", "action_display",
+            "id", "action", "action_display", "return_to", "return_to_display",
             "actor", "comment", "hold_hours", "created_at",
         ]
 

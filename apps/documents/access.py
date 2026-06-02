@@ -79,21 +79,29 @@ def _document_has_active_workflow(document: Document) -> bool:
 def resolve_access_stage(document: Document) -> str:
     """
     Map a document to a lifecycle stage for permission checks.
+    Strictly follows admin-configured access stage mappings, with a critical safety check:
+    returned documents default to CREATION stage unless explicitly configured otherwise.
+    This ensures returned documents can be edited by uploaders but NOT approvers.
     """
+    status = (document.status or "").strip()
+    status_lower = status.lower()
+
+    # Use admin-configured mapping for this status
+    stage = _status_to_stage_map().get(status_lower)
+    if stage is not None:
+        return stage
+
+    # Safety check: returned documents should be CREATION (editable by uploader)
+    # unless explicitly configured otherwise by admin.
+    # This prevents approvers from being able to edit returned documents.
+    if status_lower in ("returned",) or status in LEGACY_EDITABLE_STATUSES:
+        return ACCESS_STAGE_CREATION
+
+    # If no explicit mapping exists and document has active workflow, use approval stage
     if _document_has_active_workflow(document):
         return ACCESS_STAGE_APPROVAL
 
-    status = (document.status or "").strip()
-    status_lower = status.lower()
-    stage = _status_to_stage_map().get(status_lower)
-    if stage:
-        return stage
-
-    if status_lower in ("draft", "pending_review", "returned") or status in LEGACY_EDITABLE_STATUSES:
-        return ACCESS_STAGE_CREATION
-    if status_lower in ("approved", "rejected", "archived", "void"):
-        return ACCESS_STAGE_AFTER_APPROVAL
-
+    # Default to creation stage for unmapped statuses
     return ACCESS_STAGE_CREATION
 
 
@@ -116,14 +124,50 @@ def document_allows_edit(document: Document, *, user=None) -> bool:
     groups grant EDIT for a concrete document type and lifecycle stage, and only
     the creation stage allows edits. This keeps metadata edits and Office editor
     saves on the same rule path.
+
+    CRITICAL: If the document has an active workflow, the user must have an
+    active task assigned to them. Once the workflow progresses past their step,
+    they lose edit access even if they have creation-stage permissions. This
+    ensures users cannot edit documents while the workflow is being actioned
+    by someone else at a different step.
     """
     if user is not None and getattr(user, "has_admin_access", False):
         return True
 
-    if _document_has_active_workflow(document):
+    # Allow edits when the resolved access stage is creation. This covers
+    # documents that are marked as "returned" and ensures uploaders can
+    # modify and resubmit without cancelling the workflow instance.
+    if resolve_access_stage(document) != ACCESS_STAGE_CREATION:
         return False
 
-    return resolve_access_stage(document) == ACCESS_STAGE_CREATION
+    # If document has an active workflow and a user is specified,
+    # verify that the user has an active task assigned to them.
+    # This prevents users from editing when the workflow has progressed
+    # past their step.
+    #
+    # EXCEPTION: Returned documents are exempt. When a document is returned
+    # to the uploader for rework, they should be able to edit it without
+    # needing an active task. The workflow remains active so resubmission
+    # resumes at the same step.
+    if user is not None and _document_has_active_workflow(document):
+        status_lower = (document.status or "").strip().lower()
+        
+        # Allow uploader to edit returned documents without active task
+        if status_lower == "returned":
+            return True
+
+        from apps.workflows.models import WorkflowTask
+
+        has_active_task = WorkflowTask.objects.filter(
+            assigned_to=user,
+            workflow_instance__document_id=document.id,
+            status__in=["in_progress"],
+        ).exists()
+
+        if not has_active_task:
+            return False
+
+    return True
 
 
 def filter_permissions_for_document(user, document: Document, permissions: set[str]) -> set[str]:

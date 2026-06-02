@@ -115,6 +115,13 @@ class HasDocumentPermission(permissions.BasePermission):
         ):
             return True
 
+        # Owners may also submit their own documents (e.g. after a return)
+        if required_action == GroupAction.SUBMIT.value and (
+            getattr(obj, "uploaded_by_id", None) == request.user.id
+            or getattr(obj, "owned_by_id", None) == request.user.id
+        ):
+            return True
+
         if required_action == GroupAction.VIEW.value:
             from apps.workflows.models import WorkflowTask
             from apps.documents.models import DocumentShare

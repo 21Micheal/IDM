@@ -20,6 +20,8 @@ New methods:
     - Document status → step.status_label
     - Fires notify_hold_released (unless auto=True, which is silent)
 """
+import logging
+
 from django.db import transaction
 from django.db.models import Q
 from django.utils import timezone
@@ -38,6 +40,11 @@ from .models import (
 from apps.documents.models import Document, DocumentStatus, DocumentVersion
 from apps.accounts.models import User
 from apps.audit.models import AuditEvent, AuditLog
+from apps.search.indexing import schedule_document_search_pipeline
+from apps.search.utils import summarize_bulk_index_error
+from elasticsearch.helpers import BulkIndexError
+
+logger = logging.getLogger(__name__)
 
 
 class WorkflowError(Exception):
@@ -254,7 +261,7 @@ class WorkflowService:
             # Step back to previous approver
             prev_order = current_order - 1
             doc.status = f"Returned to Step {prev_order}"
-            doc.save(update_fields=["status", "updated_at"])
+            WorkflowService._save_document(doc, update_fields=["status", "updated_at"])
 
             instance.current_step_order = prev_order
             instance.save(update_fields=["current_step_order"])
@@ -266,7 +273,7 @@ class WorkflowService:
             # Return to uploader OR step 1 / uploader preference
             # Keep the workflow active so the uploader can resubmit at the current step.
             doc.status = DocumentStatus.RETURNED
-            doc.save(update_fields=["status", "updated_at"])
+            WorkflowService._save_document(doc, update_fields=["status", "updated_at"])
 
         # Notify uploader and document owner of the return
         WorkflowService._notify_action(action, doc)
@@ -297,7 +304,7 @@ class WorkflowService:
 
         doc        = task.workflow_instance.document
         doc.status = "On Hold"
-        doc.save(update_fields=["status", "updated_at"])
+        WorkflowService._save_document(doc, update_fields=["status", "updated_at"])
 
         AuditLog.objects.create(
             event=AuditEvent.WORKFLOW_HELD,
@@ -351,8 +358,7 @@ class WorkflowService:
         # Restore document status to the step's label
         step = task.step
         doc  = task.workflow_instance.document
-        doc.status = step.status_label
-        doc.save(update_fields=["status", "updated_at"])
+        WorkflowService._save_document(doc, update_fields=["status", "updated_at"])
 
         if action is not None:
             WorkflowService._notify_action(action, doc)
@@ -372,7 +378,7 @@ class WorkflowService:
 
         doc        = instance.document
         doc.status = DocumentStatus.DRAFT
-        doc.save(update_fields=["status", "updated_at"])
+        WorkflowService._save_document(doc, update_fields=["status", "updated_at"])
         AuditLog.objects.create(
             event=AuditEvent.WORKFLOW_CANCELLED,
             actor=actor,
@@ -412,7 +418,7 @@ class WorkflowService:
 
         doc        = instance.document
         doc.status = step.status_label
-        doc.save(update_fields=["status", "updated_at"])
+        WorkflowService._save_document(doc, update_fields=["status", "updated_at"])
 
         instance.current_step_order = order
         instance.save(update_fields=["current_step_order"])
@@ -493,6 +499,28 @@ class WorkflowService:
             )
 
     @staticmethod
+    def _save_document(document: Document, update_fields=None) -> None:
+        try:
+            document.save(update_fields=update_fields)
+        except BulkIndexError as exc:
+            logger.warning(
+                "Workflow document save succeeded but realtime indexing failed for %s: %s",
+                document.id,
+                summarize_bulk_index_error(exc),
+            )
+            try:
+                schedule_document_search_pipeline(
+                    str(document.id),
+                    reextract_content=False,
+                    index_immediately=True,
+                )
+            except Exception:
+                logger.exception(
+                    "Failed to queue async reindex for document %s after workflow save error",
+                    document.id,
+                )
+
+    @staticmethod
     def _has_active_step_tasks(instance: WorkflowInstance, order: int) -> bool:
         return instance.tasks.filter(
             step__order=order,
@@ -556,7 +584,7 @@ class WorkflowService:
 
         doc = instance.document
         doc.status = outcome_status_for(doc.document_type, outcome)
-        doc.save(update_fields=["status", "updated_at"])
+        WorkflowService._save_document(doc, update_fields=["status", "updated_at"])
 
         try:
             from apps.notifications.tasks import notify_workflow_complete
