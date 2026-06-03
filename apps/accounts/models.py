@@ -361,6 +361,13 @@ class UserGroup(models.Model):
     created_by  = models.ForeignKey(
         User, null=True, on_delete=models.SET_NULL, related_name="created_groups"
     )
+    head        = models.ForeignKey(
+        User,
+        null=True,
+        blank=True,
+        on_delete=models.SET_NULL,
+        related_name="headed_groups",
+    )
     created_at  = models.DateTimeField(auto_now_add=True)
     updated_at  = models.DateTimeField(auto_now=True)
 

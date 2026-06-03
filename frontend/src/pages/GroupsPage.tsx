@@ -254,6 +254,11 @@ function GroupDetail({
     queryFn: () => groupsAPI.members(group.id).then((r) => r.data),
   });
 
+  const { data: groupDetail } = useQuery<any>({
+    queryKey: ["group", group.id],
+    queryFn: () => groupsAPI.get(group.id).then((r) => r.data),
+  });
+
   const { data: allUsers = [] } = useQuery<User[]>({
     queryKey: ["users-search", userSearch],
     queryFn: () => usersAPI.list({
@@ -303,7 +308,20 @@ function GroupDetail({
     onError: () => toast.error("Failed to remove member"),
   });
 
+  const setHeadMutation = useMutation({
+    mutationFn: (headId: string | null) =>
+      groupsAPI.update(group.id, { head_id: headId }).then((r) => r.data),
+    onSuccess: (_data, headId) => {
+      toast.success(headId === null ? "Group approver cleared" : "Group approver updated");
+      qc.invalidateQueries({ queryKey: ["groups"] });
+      qc.invalidateQueries({ queryKey: ["group", group.id] });
+      qc.invalidateQueries({ queryKey: ["group-members", group.id] });
+    },
+    onError: (err: any) => toast.error(err?.response?.data?.head_id?.[0] || "Failed to update group approver"),
+  });
+
   const memberIds = new Set(members?.map((m) => m.user.id) ?? []);
+  const currentHead = groupDetail?.head ?? null;
 
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-foreground/40 backdrop-blur-sm p-4">
@@ -392,6 +410,33 @@ function GroupDetail({
               {/* Current Members */}
               <div>
                 <h3 className="font-semibold text-base text-foreground mb-4">Current members</h3>
+                <div className="mb-6">
+                  <h4 className="text-sm font-semibold text-foreground mb-2">Designated approver</h4>
+                  {currentHead ? (
+                    <div className="flex items-center gap-4 p-4 bg-accent/10 border border-accent/30 rounded-xl">
+                      <div className="w-10 h-10 rounded-full bg-accent/20 flex items-center justify-center text-accent text-sm font-bold flex-shrink-0">
+                        {currentHead.full_name.split(" ").map((n: string) => n[0]).join("").slice(0, 2)}
+                      </div>
+                      <div className="flex-1 min-w-0">
+                        <p className="font-medium text-foreground text-sm">{currentHead.full_name}</p>
+                        <p className="text-xs text-muted-foreground">{currentHead.email}</p>
+                      </div>
+                      <div className="flex items-center gap-2">
+                        <span className="badge bg-accent/15 text-accent text-xs">Approver</span>
+                        <button
+                          type="button"
+                          onClick={() => setHeadMutation.mutate(null)}
+                          disabled={setHeadMutation.isPending}
+                          className="text-xs font-semibold text-muted-foreground hover:text-destructive transition-colors"
+                        >
+                          Clear approver
+                        </button>
+                      </div>
+                    </div>
+                  ) : (
+                    <div className="border border-dashed border-border rounded-xl p-4 text-sm text-muted-foreground">No approver set for this group.</div>
+                  )}
+                </div>
                 <div className="space-y-2">
                   {members?.map((m) => (
                     <div key={m.id} className="flex items-center gap-4 p-4 bg-card border border-border rounded-xl hover:border-accent/40 transition-colors group">
@@ -412,12 +457,22 @@ function GroupDetail({
                           </span>
                         )}
                         {!isHodGroup && (
-                          <button
-                            onClick={() => removeMemberMutation.mutate(m.user.id)}
-                            className="opacity-0 group-hover:opacity-100 text-destructive hover:bg-destructive/10 p-2 rounded-lg transition-all"
-                          >
-                            <X className="w-4 h-4" />
-                          </button>
+                          <>
+                            <button
+                              onClick={() => removeMemberMutation.mutate(m.user.id)}
+                              className="opacity-0 group-hover:opacity-100 text-destructive hover:bg-destructive/10 p-2 rounded-lg transition-all"
+                            >
+                              <X className="w-4 h-4" />
+                            </button>
+                            {currentHead?.id !== m.user.id && (
+                              <button
+                                onClick={() => setHeadMutation.mutate(m.user.id)}
+                                className="ml-2 opacity-0 group-hover:opacity-100 text-accent hover:bg-accent/10 p-2 rounded-lg transition-all text-xs"
+                              >
+                                Set as approver
+                              </button>
+                            )}
+                          </>
                         )}
                       </div>
                     </div>
@@ -465,13 +520,15 @@ function GroupDetail({
                         <span className="badge text-xs bg-muted text-muted-foreground">
                           {u.job_description || "Staff"}
                         </span>
-                        <button
-                          onClick={() => addMemberMutation.mutate(u.id)}
-                          disabled={addMemberMutation.isPending}
-                          className="btn-primary text-xs px-4 py-2"
-                        >
-                          <UserPlus className="w-3.5 h-3.5" /> Add
-                        </button>
+                        <div className="flex items-center gap-2">
+                          <button
+                            onClick={() => addMemberMutation.mutate(u.id)}
+                            disabled={addMemberMutation.isPending}
+                            className="btn-primary text-xs px-4 py-2"
+                          >
+                            <UserPlus className="w-3.5 h-3.5" /> Add
+                          </button>
+                        </div>
                       </div>
                     ))}
                 </div>

@@ -598,7 +598,7 @@ export const groupsAPI = {
   get: (id: string) => api.get(`/groups/${id}/`),
   create: (data: { name: string; description?: string }) =>
     api.post("/groups/", data),
-  update: (id: string, data: { name?: string; description?: string }) =>
+  update: (id: string, data: { name?: string; description?: string; head_id?: string | null }) =>
     api.patch(`/groups/${id}/`, data),
   delete: (id: string) => api.delete(`/groups/${id}/`),
   setPermissions: (

@@ -280,8 +280,21 @@ function StepEditPanel({
       const raw: GroupMembershipApiItem[] = r.data?.results ?? r.data ?? [];
       return raw.map((item) => item?.user ?? item).filter((u): u is AppUser => Boolean(u?.id && u?.email));
     },
-    enabled: !!step.assignee_group && needsGroupMember,
+    enabled: !!step.assignee_group,
   });
+
+  const { data: groupDetail } = useQuery<any>({
+    queryKey: ["group", step.assignee_group],
+    queryFn: () => groupsAPI.get(step.assignee_group!).then((r) => r.data),
+    enabled: !!step.assignee_group,
+  });
+
+  const effectiveGroupMembers = useMemo(() => {
+    const head = groupDetail?.head as AppUser | undefined;
+    if (!head || !head.id) return groupMembers;
+    if (groupMembers.some((u) => u.id === head.id)) return groupMembers;
+    return [head, ...groupMembers];
+  }, [groupDetail?.head, groupMembers]);
 
   const color = getGroupColor(step.assignee_group);
 
@@ -301,6 +314,16 @@ function StepEditPanel({
     step.assignee_user,
     step.assignee_user_name,
   ]);
+
+  // Default specific assignee to group's designated approver if present
+  useEffect(() => {
+    if (step.assignee_type !== "group_specific") return;
+    if (step.assignee_user) return; // explicit user already set
+    const head = groupDetail?.head;
+    if (head && head.id) {
+      onChange({ assignee_user: head.id, assignee_user_name: head.full_name });
+    }
+  }, [step.assignee_type, step.assignee_user, groupDetail?.head, onChange]);
 
   return (
     <aside className="w-[420px] flex-shrink-0 flex flex-col bg-card border border-border rounded-xl shadow-elegant overflow-hidden">
@@ -430,7 +453,7 @@ function StepEditPanel({
                 className={inp}
               >
                 <option value="">{membersLoading ? "Loading members..." : "Select member"}</option>
-                {groupMembers.map(u => (
+                {effectiveGroupMembers.map(u => (
                   <option key={u.id} value={u.id}>{u.full_name}</option>
                 ))}
               </select>
