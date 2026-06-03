@@ -201,18 +201,23 @@ function CreateDocTypeQuickModal({
         </div>
 
         <div className="p-5 space-y-4">
+
+          {/* Display name */}
           <div className="space-y-1.5">
             <label className="text-xs font-semibold uppercase tracking-wider text-[#5E6870]">
-              Name <span className="text-red-400 normal-case font-normal">*</span>
+              Display name <span className="text-red-400 normal-case font-normal">*</span>
             </label>
             <input
               value={dname}
               onChange={(e) => { setDname(e.target.value); setCode(toDocTypeCode(e.target.value)); }}
-              placeholder="e.g. Payment Voucher"
+              placeholder="e.g. Supplier Invoice"
               autoFocus
               className={iCls}
             />
+            <p className="text-[10px] text-[#8C969E]">Human-readable name shown throughout the system</p>
           </div>
+
+          {/* Code */}
           <div className="space-y-1.5">
             <label className="text-xs font-semibold uppercase tracking-wider text-[#5E6870]">
               Code <span className="text-red-400 normal-case font-normal">*</span>
@@ -220,10 +225,13 @@ function CreateDocTypeQuickModal({
             <input
               value={code}
               onChange={(e) => setCode(e.target.value.toUpperCase().replace(/[^A-Z0-9_]/g, ""))}
-              placeholder="PAYMENT_VOUCHER"
+              placeholder="e.g. INV"
               className={cn(iCls, "font-mono")}
             />
+            <p className="text-[10px] text-[#8C969E]">Unique short system identifier — editable, auto-filled from name</p>
           </div>
+
+          {/* Reference prefix */}
           <div className="space-y-1.5">
             <label className="text-xs font-semibold uppercase tracking-wider text-[#5E6870]">
               Reference prefix <span className="text-red-400 normal-case font-normal">*</span>
@@ -231,15 +239,17 @@ function CreateDocTypeQuickModal({
             <input
               value={refPrefix}
               onChange={(e) => setRefPrefix(e.target.value.toUpperCase().replace(/\s+/g, "").replace(/[^A-Z0-9]/g, ""))}
-              placeholder="e.g. PO"
-              className={cn(iCls, "font-mono tracking-widest")}
+              placeholder="e.g. INV"
+              className={cn(iCls, "font-mono tracking-widest uppercase")}
             />
-            <p className="text-[10px] text-[#5E6870]">
-              Short prefix for auto-generated document IDs — e.g.{" "}
-              <span className="font-mono font-semibold">PO</span> → <span className="font-mono">PO-00001</span>,{" "}
-              <span className="font-mono font-semibold">INV</span> → <span className="font-mono">INV-00001</span>
+            <p className="text-[10px] text-[#8C969E]">
+              Prefix for auto-generated document IDs —{" "}
+              <span className="font-mono font-semibold">INV</span> → <span className="font-mono">INV-00001</span>,{" "}
+              <span className="font-mono font-semibold">PO</span> → <span className="font-mono">PO-00001</span>
             </p>
           </div>
+
+          {/* Reference padding */}
           <div className="space-y-1.5">
             <label className="text-xs font-semibold uppercase tracking-wider text-[#5E6870]">Reference padding</label>
             <input
@@ -247,10 +257,13 @@ function CreateDocTypeQuickModal({
               onChange={(e) => setRefPadding(Math.max(3, Math.min(8, Number(e.target.value))))}
               className={iCls}
             />
+            <p className="text-[10px] text-[#8C969E]">Digits in the numeric part of IDs (3–8) — 5 → 00001 · 4 → 0001</p>
           </div>
+
+          {/* Description */}
           <div className="space-y-1.5">
             <label className="text-xs font-semibold uppercase tracking-wider text-[#5E6870]">
-              Description <span className="normal-case font-normal text-zinc-600">(optional)</span>
+              Description <span className="normal-case font-normal text-[#8C969E]">(optional)</span>
             </label>
             <textarea
               value={desc}

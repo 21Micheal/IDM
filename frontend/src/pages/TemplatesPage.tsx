@@ -173,52 +173,69 @@ function CreateDocTypeModal({
         </div>
 
         <div className="space-y-4 p-5">
+
+          {/* Display name */}
           <div>
-            <label className="block text-xs font-semibold text-slate-600 mb-1.5">Name <span className="text-red-500">*</span></label>
+            <label className="block text-xs font-semibold uppercase tracking-wider text-[#5E6870] mb-1.5">
+              Display name <span className="text-red-500 normal-case font-normal">*</span>
+            </label>
             <input
               value={name}
               onChange={(e) => { setName(e.target.value); setCode(toDocTypeCode(e.target.value)); }}
-              placeholder="e.g. Payment Voucher"
+              placeholder="e.g. Supplier Invoice"
               autoFocus
               className={iCls}
             />
+            <p className="mt-1.5 text-[11px] text-[#8C969E]">Human-readable name shown throughout the system</p>
           </div>
+
+          {/* Code */}
           <div>
-            <label className="block text-xs font-semibold text-slate-600 mb-1.5">Code <span className="text-red-500">*</span></label>
+            <label className="block text-xs font-semibold uppercase tracking-wider text-[#5E6870] mb-1.5">
+              Code <span className="text-red-500 normal-case font-normal">*</span>
+            </label>
             <input
               value={code}
               onChange={(e) => setCode(e.target.value.toUpperCase().replace(/[^A-Z0-9_]/g, ""))}
-              placeholder="PAYMENT_VOUCHER"
-              className={`${iCls} font-mono text-xs`}
+              placeholder="e.g. INV"
+              className={`${iCls} font-mono`}
             />
-            <p className="text-[11px] text-slate-400 mt-1">Auto-generated from name · uppercase + underscores only</p>
+            <p className="mt-1.5 text-[11px] text-[#8C969E]">Unique short system identifier — auto-filled from name, editable</p>
           </div>
+
+          {/* Reference prefix */}
           <div>
-            <label className="block text-xs font-semibold text-slate-600 mb-1.5">Reference prefix <span className="text-red-500">*</span></label>
+            <label className="block text-xs font-semibold uppercase tracking-wider text-[#5E6870] mb-1.5">
+              Reference prefix <span className="text-red-500 normal-case font-normal">*</span>
+            </label>
             <input
               value={refPrefix}
               onChange={(e) => setRefPrefix(e.target.value.toUpperCase().replace(/\s+/g, "").replace(/[^A-Z0-9]/g, ""))}
-              placeholder="e.g. PO"
-              className={`${iCls} font-mono tracking-widest`}
+              placeholder="e.g. INV"
+              className={`${iCls} font-mono tracking-widest uppercase`}
             />
-            <p className="text-[11px] text-slate-400 mt-1">
-              Short prefix for auto-generated document IDs — e.g.{" "}
-              <code className="bg-slate-100 px-1 rounded font-mono">PO</code> → <code className="bg-slate-100 px-1 rounded font-mono">PO-00001</code>,{" "}
-              <code className="bg-slate-100 px-1 rounded font-mono">INV</code> → <code className="bg-slate-100 px-1 rounded font-mono">INV-00001</code>
+            <p className="mt-1.5 text-[11px] text-[#8C969E]">
+              Prefix for auto-generated document IDs —{" "}
+              <span className="font-mono font-semibold">INV</span> → <span className="font-mono">INV-00001</span>,{" "}
+              <span className="font-mono font-semibold">PO</span> → <span className="font-mono">PO-00001</span>
             </p>
           </div>
+
+          {/* Reference padding */}
           <div>
-            <label className="block text-xs font-semibold text-slate-600 mb-1.5">Reference padding</label>
+            <label className="block text-xs font-semibold uppercase tracking-wider text-[#5E6870] mb-1.5">Reference padding</label>
             <input
               type="number" min={3} max={8} value={refPadding}
               onChange={(e) => setRefPadding(Math.max(3, Math.min(8, Number(e.target.value))))}
               className={iCls}
             />
-            <p className="text-[11px] text-slate-400 mt-1">Zero-padded digit count in reference numbers (3–8)</p>
+            <p className="mt-1.5 text-[11px] text-[#8C969E]">Digits in the numeric part of IDs (3–8) — 5 → 00001 · 4 → 0001</p>
           </div>
+
+          {/* Description */}
           <div>
-            <label className="block text-xs font-semibold text-slate-600 mb-1.5">
-              Description <span className="font-normal text-slate-400">(optional)</span>
+            <label className="block text-xs font-semibold uppercase tracking-wider text-[#5E6870] mb-1.5">
+              Description <span className="normal-case font-normal text-[#8C969E]">(optional)</span>
             </label>
             <textarea
               value={description}

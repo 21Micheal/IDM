@@ -430,19 +430,55 @@ export default function AdminDocumentTypesPage() {
               {activeTab === "general" && (
                 <section className="max-w-5xl space-y-6 bg-[#EEF0F2] px-4 py-3">
                   <div className="grid max-w-3xl grid-cols-[220px_1fr] gap-x-6 gap-y-4 text-sm">
+
+                    {/* Display name ─ what users see everywhere */}
                     <label className="pt-2 text-[#5E6870]">Display name</label>
-                    <input {...form.register("name", { required: true })} className={inputCls} placeholder="Supplier Invoice" />
-                    <label className="pt-2 text-[#5E6870]">Name</label>
-                    <input {...form.register("code", { required: true })} className={inputCls} placeholder="SUPPLIER_INVOICE" />
-                    <label className="pt-2 text-[#5E6870]">Document title</label>
-                    <select {...form.register("reference_prefix", { required: true })} className={inputCls}>
-                      <option value="">Select title field</option>
-                      {fieldOptions({ ...(selectedType ?? {} as DocumentType), metadata_fields: form.watch("metadata_fields") as any }).map((field) => (
-                        <option key={field.key} value={field.key}>{field.label}</option>
-                      ))}
-                    </select>
+                    <div>
+                      <input
+                        {...form.register("name", { required: true })}
+                        className={inputCls}
+                        placeholder="e.g. Supplier Invoice"
+                      />
+                      <p className="mt-1.5 text-xs text-[#8C969E]">Human-readable name shown throughout the system</p>
+                    </div>
+
+                    {/* Code ─ short machine identifier */}
+                    <label className="pt-2 text-[#5E6870]">Code</label>
+                    <div>
+                      <input
+                        {...form.register("code", { required: true })}
+                        className={cn(inputCls, "font-mono")}
+                        placeholder="e.g. INV"
+                      />
+                      <p className="mt-1.5 text-xs text-[#8C969E]">Unique short system identifier used in logs and file storage paths</p>
+                    </div>
+
+                    {/* Reference prefix ─ prefix for auto-generated IDs */}
+                    <label className="pt-2 text-[#5E6870]">Reference prefix</label>
+                    <div>
+                      <input
+                        {...form.register("reference_prefix", { required: true })}
+                        className={cn(inputCls, "font-mono tracking-widest uppercase")}
+                        placeholder="e.g. INV"
+                      />
+                      <p className="mt-1.5 text-xs text-[#8C969E]">
+                        Prefix used when generating document IDs —{" "}
+                        <span className="font-mono font-semibold">INV</span> → <span className="font-mono">INV-00001</span>,{" "}
+                        <span className="font-mono">INV-00002</span> …
+                      </p>
+                    </div>
+
+                    {/* Reference padding ─ zero-padding width */}
                     <label className="pt-2 text-[#5E6870]">Reference padding</label>
-                    <input {...form.register("reference_padding", { valueAsNumber: true })} type="number" min={3} max={8} className={inputCls} />
+                    <div>
+                      <input
+                        {...form.register("reference_padding", { valueAsNumber: true })}
+                        type="number" min={3} max={8}
+                        className={inputCls}
+                      />
+                      <p className="mt-1.5 text-xs text-[#8C969E]">Digits in the numeric part of IDs (3–8) — 5 → 00001 · 4 → 0001</p>
+                    </div>
+
                     <label className="pt-2 text-[#5E6870]">Description</label>
                     <textarea {...form.register("description")} rows={3} className={textAreaCls} />
                   </div>
