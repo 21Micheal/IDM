@@ -18,6 +18,27 @@ const DIRECT_KEYS = new Set([
   "uom",
 ]);
 
+const DOCUMENT_REFERENCE_ALIASES: Record<string, Array<keyof OcrFields>> = {
+  invoice_number: ["reference_number"],
+  invoice_no: ["reference_number"],
+  inv_number: ["reference_number"],
+  inv_no: ["reference_number"],
+  grn_number: ["reference_number"],
+  grn_no: ["reference_number"],
+  goods_receipt_number: ["reference_number"],
+  receipt_number: ["reference_number"],
+  receipt_no: ["reference_number"],
+  reference_number: ["reference_number"],
+  reference_no: ["reference_number"],
+  document_number: ["reference_number"],
+  document_no: ["reference_number"],
+  transaction_reference: ["transaction_ref", "reference_number"],
+  transaction_number: ["transaction_ref", "reference_number"],
+  transaction_ref: ["transaction_ref"],
+  payment_reference: ["transaction_ref"],
+  payment_ref: ["transaction_ref"],
+};
+
 export function getMetadataFieldKey(field: MetadataField): string {
   return (field.key ?? field.field_key ?? "") as string;
 }
@@ -37,6 +58,8 @@ function parseOcrFields(item: BulkUploadDocumentItem): OcrFields {
 export function buildReviewStateFromBatchItem(
   item: BulkUploadDocumentItem,
   documentType: DocumentType,
+  documentTypes: DocumentType[] = [documentType],
+  isRelatedSet = false,
 ): BulkDocReviewState {
   const values: Record<string, string> = {
     title: item.title || documentNameFromFileName(item.file_name),
@@ -56,6 +79,10 @@ export function buildReviewStateFromBatchItem(
 
   const suggestedScores: Record<string, number> = {};
   const ocrFields = parseOcrFields(item);
+  const detectedDocumentType = ocrFields.document_type ? String(ocrFields.document_type).trim() : "";
+  const resolvedDocumentType = isRelatedSet
+    ? resolveDocumentType(detectedDocumentType || item.file_name, documentTypes)
+    : documentType;
 
   const fill = (key: string, value: string | number | undefined, score = 4) => {
     if (value == null) return;
@@ -75,21 +102,7 @@ export function buildReviewStateFromBatchItem(
   fill("description", ocrFields.description ? String(ocrFields.description) : undefined);
   fill("uom", ocrFields.uom ? String(ocrFields.uom) : undefined);
 
-  if (documentType.metadata_fields?.length) {
-    const matches = applyOcrToFields(documentType.metadata_fields, ocrFields);
-    for (const { field, match } of matches) {
-      const metadataKey = getMetadataFieldKey(field);
-      if (!metadataKey) continue;
-      const path = DIRECT_KEYS.has(metadataKey)
-        ? metadataKey
-        : `metadata.${metadataKey}`;
-      const existing = suggestedScores[path] ?? 0;
-      if (match.score > existing) {
-        values[path] = match.value;
-        suggestedScores[path] = match.score;
-      }
-    }
-  }
+  applyOcrValuesToDocumentType(values, suggestedScores, ocrFields, resolvedDocumentType ?? documentType);
 
   return {
     documentId: item.document_id,
@@ -101,7 +114,134 @@ export function buildReviewStateFromBatchItem(
     expanded: false,
     values,
     suggestedScores,
+    ocrFields,
+    documentTypeId: isRelatedSet
+      ? (resolvedDocumentType?.id ?? "")
+      : (item.document_type?.id ?? documentType.id),
+    detectedDocumentType,
   };
+}
+
+export function applyOcrValuesToDocumentType(
+  values: Record<string, string>,
+  suggestedScores: Record<string, number>,
+  ocrFields: OcrFields | undefined,
+  documentType: DocumentType,
+) {
+  if (!ocrFields || !documentType.metadata_fields?.length) return;
+
+  for (const field of documentType.metadata_fields) {
+    const metadataKey = getMetadataFieldKey(field);
+    if (!metadataKey) continue;
+    const path = DIRECT_KEYS.has(metadataKey)
+      ? metadataKey
+      : `metadata.${metadataKey}`;
+    const exact = getContextualOcrValueForField(field, ocrFields, documentType);
+    if (!exact) continue;
+    values[path] = exact;
+    suggestedScores[path] = 4;
+  }
+
+  const matches = applyOcrToFields(documentType.metadata_fields, ocrFields);
+  for (const { field, match } of matches) {
+    const metadataKey = getMetadataFieldKey(field);
+    if (!metadataKey) continue;
+    const path = DIRECT_KEYS.has(metadataKey)
+      ? metadataKey
+      : `metadata.${metadataKey}`;
+    const existing = suggestedScores[path] ?? 0;
+    if (match.score > existing || !String(values[path] ?? "").trim()) {
+      values[path] = match.value;
+      suggestedScores[path] = match.score;
+    }
+  }
+}
+
+function getContextualOcrValueForField(
+  field: MetadataField,
+  ocrFields: OcrFields,
+  documentType: DocumentType,
+): string | undefined {
+  const key = normalizeFieldIdentifier(getMetadataFieldKey(field));
+  const label = normalizeFieldIdentifier(field.label ?? "");
+  const candidates = new Set([key, label].filter(Boolean));
+
+  const aliases: Array<keyof OcrFields> = [];
+  const asksForPoNumber = [...candidates].some((candidate) =>
+    /^(po|lpo|purchase_order)_(number|no|ref|reference)$/.test(candidate)
+    || candidate === "purchase_order"
+  );
+
+  if (asksForPoNumber) {
+    aliases.push(
+      ...(isPurchaseOrderType(documentType)
+        ? (["reference_number", "po_reference"] as Array<keyof OcrFields>)
+        : (["po_reference"] as Array<keyof OcrFields>)),
+    );
+  }
+
+  for (const candidate of candidates) {
+    aliases.push(...(DOCUMENT_REFERENCE_ALIASES[candidate] ?? []));
+    if (candidate in ocrFields) {
+      aliases.push(candidate as keyof OcrFields);
+    }
+  }
+
+  for (const alias of aliases) {
+    const value = ocrFields[alias];
+    if (value == null || Array.isArray(value) || typeof value === "object") continue;
+    const scalar = String(value).trim();
+    if (scalar) return scalar;
+  }
+  return undefined;
+}
+
+function normalizeFieldIdentifier(value: string) {
+  return value
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, "_")
+    .replace(/^_+|_+$/g, "");
+}
+
+function isPurchaseOrderType(documentType: DocumentType) {
+  const haystack = `${documentType.name} ${documentType.code} ${documentType.description ?? ""}`.toLowerCase();
+  return /\b(po|lpo)\b/.test(haystack) || haystack.includes("purchase order");
+}
+
+export function resolveDocumentType(label: string, documentTypes: DocumentType[]): DocumentType | undefined {
+  const normalized = expandDocumentTypeAliases(normalizeTypeLabel(label));
+  if (!normalized) return undefined;
+  return documentTypes
+    .filter((type) => type.code !== "UNCLASS")
+    .map((type) => {
+      const haystack = expandDocumentTypeAliases(normalizeTypeLabel(`${type.name} ${type.code} ${type.description ?? ""}`));
+      const typeName = expandDocumentTypeAliases(normalizeTypeLabel(type.name));
+      let score = 0;
+      if (haystack.includes(normalized) || normalized.includes(typeName)) score += 5;
+      for (const token of normalized.split(" ").filter((part) => part.length > 2)) {
+        if (haystack.includes(token)) score += 1;
+      }
+      return { type, score };
+    })
+    .filter((candidate) => candidate.score > 0)
+    .sort((a, b) => b.score - a.score)[0]?.type;
+}
+
+function expandDocumentTypeAliases(value: string) {
+  return value
+    .replace(/\bpo\b/g, "purchase order po")
+    .replace(/\blpo\b/g, "local purchase order lpo")
+    .replace(/\bgrn\b/g, "goods received note goods receipt grn")
+    .replace(/\bdn\b/g, "delivery note dn");
+}
+
+function normalizeTypeLabel(value: string) {
+  return value
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, " ")
+    .replace(/\b(doc|document|file|tax)\b/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
 }
 
 export function reviewStateToSubmitItem(state: BulkDocReviewState): BulkReviewSubmitItem {
@@ -111,6 +251,9 @@ export function reviewStateToSubmitItem(state: BulkDocReviewState): BulkReviewSu
     approved: state.approved,
     rejected: state.rejected,
   };
+  if (state.documentTypeId) {
+    item.document_type_id = state.documentTypeId;
+  }
 
   for (const [key, raw] of Object.entries(state.values)) {
     const value = String(raw ?? "").trim();

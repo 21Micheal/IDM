@@ -80,6 +80,7 @@ INSTALLED_APPS = [
     "apps.search.apps.SearchConfig",
     "apps.notifications",
     "apps.chat",
+    "apps.templates_engine",
 ]
 
 MIDDLEWARE = [

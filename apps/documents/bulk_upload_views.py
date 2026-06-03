@@ -2,7 +2,9 @@
 ViewSet for bulk scan upload batches.
 """
 import logging
+import json
 
+from django.db import transaction
 from django.shortcuts import get_object_or_404
 from rest_framework import permissions, status, viewsets
 from rest_framework.decorators import action
@@ -13,8 +15,12 @@ from apps.accounts.models import GroupAction
 from apps.audit.models import AuditEvent
 from apps.audit.utils import record_audit_event
 
-from .bulk_upload import create_bulk_upload_documents, sync_bulk_upload_status
-from .models import BulkUpload, BulkUploadStatus, DocumentType
+from .bulk_upload import (
+    create_bulk_upload_documents,
+    get_unclassified_bulk_document_type,
+    sync_bulk_upload_status,
+)
+from .models import BulkUpload, BulkUploadStatus, DocumentType, DocumentStatus
 
 logger = logging.getLogger(__name__)
 from .serializers import (
@@ -52,7 +58,11 @@ class BulkUploadViewSet(viewsets.GenericViewSet):
         user = self.request.user
         if user.has_admin_access:
             return True
-        perms = user.get_all_permissions_for_doctype(document_type.id)
+        from apps.documents.access import ACCESS_STAGE_CREATION
+        perms = user.get_all_permissions_for_doctype(
+            str(document_type.id),
+            stage=ACCESS_STAGE_CREATION,
+        )
         return GroupAction.UPLOAD.value in perms
 
     def create(self, request, *args, **kwargs):
@@ -65,11 +75,22 @@ class BulkUploadViewSet(viewsets.GenericViewSet):
                     if files:
                         break
 
+        shared_metadata = request.data.get("shared_metadata") or {}
+        if isinstance(shared_metadata, str):
+            try:
+                shared_metadata = json.loads(shared_metadata) if shared_metadata.strip() else {}
+            except json.JSONDecodeError:
+                shared_metadata = {}
+
         data = {
-            "document_type_id": request.data.get("document_type_id"),
+            "related_set": request.data.get("related_set", "false"),
+            "shared_metadata": shared_metadata,
             "is_scanned": request.data.get("is_scanned", "true"),
             "files": files,
         }
+        document_type_id = request.data.get("document_type_id")
+        if document_type_id not in (None, ""):
+            data["document_type_id"] = document_type_id
         if not files:
             logger.warning(
                 "Bulk upload create request contained no files. request.FILES keys=%s, content_type=%s, data_keys=%s, content_length=%s",
@@ -111,17 +132,29 @@ class BulkUploadViewSet(viewsets.GenericViewSet):
         serializer = BulkUploadCreateSerializer(data=data)
         serializer.is_valid(raise_exception=True)
         files = serializer.validated_data["files"]
-        document_type = serializer.validated_data["document_type"]
-        if not self._user_can_upload_type(document_type):
+        is_related_set = serializer.validated_data.get("related_set", False)
+        document_type = (
+            get_unclassified_bulk_document_type()
+            if is_related_set
+            else serializer.validated_data["document_type"]
+        )
+        if not is_related_set and not self._user_can_upload_type(document_type):
             return Response(
                 {"detail": "You do not have upload permission for this document type."},
                 status=status.HTTP_403_FORBIDDEN,
             )
 
         is_scanned = serializer.validated_data.get("is_scanned", True)
+        shared_metadata = serializer.validated_data.get("shared_metadata") or {}
         bulk_upload = BulkUpload.objects.create(
             document_type=document_type,
             uploaded_by=request.user,
+            mode=(
+                BulkUpload.Mode.RELATED_SET
+                if is_related_set
+                else BulkUpload.Mode.SAME_TYPE
+            ),
+            shared_metadata=shared_metadata,
             status=BulkUploadStatus.PENDING,
             total_files=len(files),
         )
@@ -134,6 +167,7 @@ class BulkUploadViewSet(viewsets.GenericViewSet):
             files=files,
             request=request,
             is_scanned=is_scanned,
+            shared_metadata=shared_metadata,
         )
 
         out = BulkUploadDetailSerializer(bulk_upload, context={"request": request})
@@ -180,3 +214,29 @@ class BulkUploadViewSet(viewsets.GenericViewSet):
             )
         out = BulkUploadDetailSerializer(bulk_upload, context={"request": request})
         return Response(out.data)
+
+    @action(detail=True, methods=["post"], parser_classes=[JSONParser])
+    def cancel(self, request, pk=None):
+        bulk_upload = get_object_or_404(self.get_queryset(), pk=pk)
+        if bulk_upload.status not in (
+            BulkUploadStatus.UPLOADING,
+            BulkUploadStatus.PROCESSING,
+            BulkUploadStatus.REVIEW,
+        ):
+            return Response(
+                {
+                    "detail": (
+                        "This batch cannot be canceled in its current state. "
+                        f"Current status: {bulk_upload.status}."
+                    )
+                },
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        with transaction.atomic():
+            documents = list(bulk_upload.documents.all())
+            for doc in documents:
+                doc.delete()
+            bulk_upload.delete()
+
+        return Response(status=status.HTTP_204_NO_CONTENT)

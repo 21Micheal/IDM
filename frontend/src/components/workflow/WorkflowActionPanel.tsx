@@ -47,13 +47,15 @@ interface WorkflowTask {
 }
 
 interface TaskAction {
-  id:             string;
-  action:         string;
-  action_display: string;
-  actor:          { full_name: string };
-  comment:        string;
-  hold_hours?:    number;
-  created_at:     string;
+  id:               string;
+  action:           string;
+  action_display:   string;
+  actor:            { full_name: string };
+  comment:          string;
+  hold_hours?:      number;
+  return_to?:       string;
+  return_to_display?: string;
+  created_at:       string;
 }
 
 interface Props {
@@ -75,56 +77,125 @@ const ACTION_STYLES: Record<string, string> = {
 };
 
 // ── History drawer ────────────────────────────────────────────────────────────
-function TaskHistoryDrawer({ taskId }: { taskId: string }) {
+function TaskHistoryDrawer({ taskId, task, currentUserId }: { taskId: string; task: WorkflowTask; currentUserId: string }) {
   const [open, setOpen] = useState(false);
 
-  const { data: actions } = useQuery<TaskAction[]>({
+  const { data: actions, isLoading } = useQuery<TaskAction[]>({
     queryKey: ["task-history", taskId],
     queryFn:  () => workflowAPI.taskHistory(taskId).then((r) => r.data),
-    enabled:  open,
   });
+
+  // Filter for critical actions relevant to current step
+  const criticalActions = actions?.filter(a => {
+    // Always show returned actions (especially if by current user)
+    if (a.action === "returned") return true;
+    // Show held/released actions
+    if (a.action === "held" || a.action === "released") return true;
+    // Show rejected actions
+    if (a.action === "rejected") return true;
+    // Show approved actions (most recent completion)
+    if (a.action === "approved") return true;
+    return false;
+  }) || [];
+
+  // Check if current user had previously returned this document
+  const previousReturnByCurrentUser = actions?.find(a =>
+    a.action === "returned" && a.actor.full_name === task.assigned_to?.full_name
+  );
+
+  // Only show drawer button if there's critical history or if it's been opened
+  const hasCriticalHistory = criticalActions.length > 0;
+  
+  if (!hasCriticalHistory && !open && !previousReturnByCurrentUser) {
+    return null;
+  }
 
   return (
     <div>
+      {/* Show alert if current user had previously returned this document */}
+      {previousReturnByCurrentUser && (
+        <div className="mb-3 flex items-start gap-2 px-3 py-2.5 rounded-lg border border-amber-200 bg-amber-50 text-xs">
+          <RotateCcw className="w-4 h-4 text-amber-600 mt-0.5 flex-shrink-0" />
+          <div className="flex-1">
+            <p className="font-semibold text-amber-800">You previously returned this document</p>
+            <p className="mt-1 text-amber-700">
+              {previousReturnByCurrentUser.comment?.trim() || "No reason provided."}
+            </p>
+            <p className="mt-1 text-[11px] text-amber-600">
+              {format(new Date(previousReturnByCurrentUser.created_at), "dd MMM HH:mm")}
+            </p>
+          </div>
+        </div>
+      )}
+
       <button
         onClick={() => setOpen(!open)}
         className="flex items-center gap-1.5 text-xs text-gray-500 hover:text-gray-700 transition-colors"
       >
         <History className="w-3.5 h-3.5" />
         Action history
+        {criticalActions.length > 0 && (
+          <span className="rounded-full bg-gray-100 px-1.5 py-0.5 text-[10px] font-medium text-gray-600">
+            {criticalActions.length}
+          </span>
+        )}
         <ChevronDown className={clsx("w-3.5 h-3.5 transition-transform", open && "rotate-180")} />
       </button>
 
       {open && (
         <div className="mt-3 space-y-2">
-          {!actions?.length && (
-            <p className="text-xs text-gray-400 py-2">No actions recorded yet.</p>
-          )}
-          {actions?.map((a) => (
-            <div
-              key={a.id}
-              className={clsx(
-                "flex items-start gap-3 px-3 py-2.5 rounded-lg border text-xs",
-                ACTION_STYLES[a.action] ?? "bg-gray-50 text-gray-600 border-gray-200"
-              )}
-            >
-              <div className="flex-1 min-w-0">
-                <div className="flex items-center gap-2 flex-wrap">
-                  <span className="font-semibold">{a.action_display}</span>
-                  <span className="text-opacity-70">by {a.actor.full_name}</span>
-                  {a.hold_hours && (
-                    <span className="opacity-70">for {a.hold_hours}h</span>
-                  )}
-                </div>
-                {a.comment && (
-                  <p className="mt-1 opacity-80 line-clamp-2">{a.comment}</p>
-                )}
-              </div>
-              <span className="flex-shrink-0 opacity-60 whitespace-nowrap">
-                {format(new Date(a.created_at), "dd MMM HH:mm")}
-              </span>
+          {isLoading && (
+            <div className="flex items-center gap-2 text-xs text-gray-500 py-2">
+              <Loader2 className="w-3 h-3 animate-spin" />
+              Loading history...
             </div>
-          ))}
+          )}
+          {!isLoading && !hasCriticalHistory && (
+            <p className="text-xs text-gray-400 py-2">No critical actions recorded.</p>
+          )}
+          {criticalActions.map((a) => {
+        const extraDetail = a.action === "returned" && a.return_to_display
+          ? `Returned to ${a.return_to_display}`
+          : a.action === "held" && a.hold_hours
+            ? `Held for ${a.hold_hours}h`
+            : undefined;
+
+        const isCurrentUserAction = a.actor.full_name === task.assigned_to?.full_name;
+
+        return (
+          <div
+            key={a.id}
+            className={clsx(
+              "flex items-start gap-3 px-3 py-2.5 rounded-lg border text-xs",
+              ACTION_STYLES[a.action] ?? "bg-gray-50 text-gray-600 border-gray-200",
+              isCurrentUserAction && "ring-2 ring-offset-1 ring-amber-300"
+            )}
+          >
+            <div className="flex-1 min-w-0">
+              <div className="flex flex-wrap items-center gap-2">
+                <span className="font-semibold">{a.action_display}</span>
+                {isCurrentUserAction && (
+                  <span className="rounded-full bg-amber-100 px-2 py-0.5 text-[10px] font-medium uppercase tracking-[0.02em] text-amber-700">
+                    Your action
+                  </span>
+                )}
+                {extraDetail && (
+                  <span className="rounded-full bg-white/80 px-2 py-0.5 text-[11px] font-medium uppercase tracking-[0.02em] text-slate-600 ring-1 ring-slate-200">
+                    {extraDetail}
+                  </span>
+                )}
+                <span className="text-opacity-70">by {a.actor.full_name}</span>
+              </div>
+              <p className="mt-1 text-sm leading-5 text-slate-700">
+                {a.comment?.trim() || "No details provided."}
+              </p>
+            </div>
+            <span className="flex-shrink-0 text-right text-[11px] text-slate-500 whitespace-nowrap">
+              {format(new Date(a.created_at), "dd MMM HH:mm")}
+            </span>
+          </div>
+        );
+      })}
         </div>
       )}
     </div>
@@ -381,6 +452,7 @@ function SignaturePlacementModal({
 // ── Main panel ────────────────────────────────────────────────────────────────
 export default function WorkflowActionPanel({ task, documentId, onCompleted }: Props) {
   const qc = useQueryClient();
+  const currentUser = useAuthStore((s) => s.user);
 
   const [activeAction, setActiveAction] = useState<
     "approve" | "reject" | "return" | "hold" | null
@@ -836,7 +908,7 @@ export default function WorkflowActionPanel({ task, documentId, onCompleted }: P
 
       {/* Action history */}
       <div className="border-t border-border pt-3">
-        <TaskHistoryDrawer taskId={task.id} />
+        <TaskHistoryDrawer taskId={task.id} task={task} currentUserId={currentUser?.id || ""} />
       </div>
     </div>
   );

@@ -422,6 +422,8 @@ export const bulkUploadAPI = {
 
   review: (id: string, documents: Record<string, unknown>[]) =>
     api.post(`/documents/bulk-uploads/${id}/review/`, { documents }),
+
+  cancel: (id: string) => api.post(`/documents/bulk-uploads/${id}/cancel/`),
 };
 
 export const dmsSettingsAPI = {
@@ -601,10 +603,8 @@ export const groupsAPI = {
   delete: (id: string) => api.delete(`/groups/${id}/`),
   setPermissions: (
     id: string,
-    permissions: { document_type_id: string | null; action: string }[]
+    permissions: { document_type_id: string; stage: string; action: string }[]
   ) => api.post(`/groups/${id}/set_permissions/`, { permissions }),
-  setAdminAccess: (id: string, enabled: boolean) =>
-    api.post(`/groups/${id}/set_admin_access/`, { enabled }),
   members: (id: string) => api.get(`/groups/${id}/members/`),
   addMember: (id: string, userId: string, expiresAt?: string) =>
     api.post(`/groups/${id}/add_member/`, {
@@ -613,6 +613,97 @@ export const groupsAPI = {
     }),
   removeMember: (id: string, userId: string) =>
     api.post(`/groups/${id}/remove_member/`, { user_id: userId }),
+};
+
+// ── Templates API ───────────────────────────────────────────────────────────────
+
+export type TemplateCategory =
+  | "finance" | "hr" | "procurement" | "legal" | "operations" | "admin" | "other";
+
+export type TemplateUsageRecord = {
+  id: string;
+  document_id: string;
+  document_title: string;
+  used_by: { id: string; full_name: string };
+  output_format: "pdf" | "docx";
+  created_at: string;
+};
+
+export const templatesAPI = {
+  /**
+   * GET /templates/
+   * Optional params: document_type_id, type ("built"|"uploaded"), search
+   */
+  list: (params?: Record<string, unknown>) =>
+    api.get("/templates/", { params }),
+
+  /** GET /templates/{id}/ */
+  get: (id: string) => api.get(`/templates/${id}/`),
+
+  /**
+   * POST /templates/
+   * Accepts either:
+   *   a) JSON body  { name, description, type: "built", document_type, tags, sections: [...] }
+   *   b) FormData   with file + name + description + type: "uploaded" + document_type
+   *      Backend auto-detects {{placeholders}} in the DOCX/XLSX
+   */
+  create: (data: unknown) =>
+    api.post("/templates/", data, data instanceof FormData ? { headers: { "Content-Type": undefined } } : undefined),
+
+  /** PATCH /templates/{id}/ — update name, description, sections, category, tags */
+  update: (id: string, data: unknown) =>
+    api.patch(`/templates/${id}/`, data),
+
+  /** DELETE /templates/{id}/ — soft delete (sets is_active=false) */
+  delete: (id: string) => api.delete(`/templates/${id}/`),
+
+  /**
+   * POST /templates/{id}/duplicate/
+   * Creates a copy of the template owned by the current user.
+   * Response: the new template object.
+   */
+  duplicate: (id: string) =>
+    api.post(`/templates/${id}/duplicate/`),
+
+  /**
+   * POST /templates/{id}/fill/
+   * Fills a template with user-supplied values and creates a Document.
+   *
+   * Body:
+   * {
+   *   template_id:       string,
+   *   values:            Record<string, unknown>,  // field_key → value
+   *   output_format:     "pdf" | "docx",
+   *   title:             string,
+   *   document_type_id?: string,
+   * }
+   *
+   * Response: { document_id: string }
+   */
+  fillTemplate: (payload: {
+    template_id: string;
+    values: Record<string, unknown>;
+    output_format: "pdf" | "docx";
+    title: string;
+    document_type_id?: string;
+    draft_from_template?: boolean;
+  }) => api.post(`/templates/${payload.template_id}/fill/`, payload),
+
+  /**
+   * GET /templates/{id}/placeholders/
+   * For uploaded templates — returns auto-detected {{placeholder}} keys.
+   * Response: { placeholders: string[] }
+   */
+  getPlaceholders: (id: string) =>
+    api.get<{ placeholders: string[] }>(`/templates/${id}/placeholders/`),
+
+  /**
+   * GET /templates/{id}/usages/
+   * Returns the 20 most recent usage records for a template.
+   * Response: TemplateUsageRecord[]
+   */
+  getUsages: (id: string) =>
+    api.get<TemplateUsageRecord[]>(`/templates/${id}/usages/`),
 };
 
 // ── Chat API ─────────────────────────────────────────────────────────────────────

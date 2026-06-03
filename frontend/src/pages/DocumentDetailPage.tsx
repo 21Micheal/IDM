@@ -19,7 +19,7 @@ import {
 } from "lucide-react";
 import { toast } from "@/components/ui/vault-toast";
 import { useAuthStore } from "@/store/authStore";
-import type { Document, DocumentRelationType, DocumentRelationship, MetadataField } from "@/types";
+import type { Document, DocumentRelationType, DocumentRelationship, DocumentRelationshipSuggestion, MetadataField } from "@/types";
 import { clsx as cn } from "clsx";
 import { QUERY_SHORT_STALE } from "@/lib/reactQueryDefaults";
 import { formatDocumentFileType } from "@/lib/documentFormat";
@@ -499,6 +499,24 @@ export default function DocumentDetailPage() {
     },
   });
 
+  const confirmRelationshipSuggestionMutation = useMutation({
+    mutationFn: (suggestion: DocumentRelationshipSuggestion) =>
+      documentsAPI.addRelationship(id!, {
+        target_document_id: suggestion.target_document_id,
+        relation_type: suggestion.relation_type,
+        note: `Matched PO reference ${suggestion.matched_reference}.`,
+      }),
+    onSuccess: () => {
+      toast.success("Suggested PO link confirmed.");
+      qc.invalidateQueries({ queryKey: ["document", id] });
+      qc.invalidateQueries({ queryKey: ["document-relationships", id] });
+      qc.invalidateQueries({ queryKey: ["document-audit", id] });
+    },
+    onError: (err: any) => {
+      toast.error(err?.response?.data?.detail ?? "Could not confirm the suggested link.");
+    },
+  });
+
   const deleteRelationshipMutation = useMutation({
     mutationFn: (relationshipId: string) => documentsAPI.deleteRelationship(id!, relationshipId),
     onSuccess: () => {
@@ -516,7 +534,45 @@ export default function DocumentDetailPage() {
       </div>
     );
 
-  if (!doc) return <p className="text-muted-foreground">Document not found.</p>;
+  if (!doc) {
+    const goBack = () => {
+      if (window.history.length > 1) {
+        navigate(-1);
+      } else {
+        navigate("/documents");
+      }
+    };
+
+    return (
+      <div className="mx-auto mt-10 max-w-xl rounded-xl border border-slate-200 bg-white p-8 text-slate-900 shadow-sm">
+        <div className="flex items-start gap-3">
+          <AlertTriangle className="mt-1 h-6 w-6 text-amber-500" />
+          <div>
+            <h2 className="text-xl font-semibold">Document not found</h2>
+            <p className="mt-2 text-sm text-slate-600">
+              The requested document is no longer available from this page. You can go back to where you came from, or continue to the document list.
+            </p>
+          </div>
+        </div>
+        <div className="mt-6 flex flex-col gap-3 sm:flex-row">
+          <button
+            type="button"
+            onClick={goBack}
+            className="inline-flex items-center justify-center rounded-md bg-[#287EAD] px-4 py-2 text-sm font-semibold text-white transition hover:bg-[#246d9c]"
+          >
+            <ArrowLeft className="mr-2 h-4 w-4" /> Go back
+          </button>
+          <button
+            type="button"
+            onClick={() => navigate("/documents")}
+            className="inline-flex items-center justify-center rounded-md border border-slate-200 bg-white px-4 py-2 text-sm font-semibold text-slate-700 transition hover:bg-slate-50"
+          >
+            Document list
+          </button>
+        </div>
+      </div>
+    );
+  }
 
   const relationshipSearchResults = ((relationshipSearchData?.results ?? []) as Document[])
     .filter((candidate) => candidate.id !== doc.id)
@@ -524,6 +580,19 @@ export default function DocumentDetailPage() {
       relationship.related_document.id === candidate.id &&
       relationship.relation_type === relationshipType
     )));
+  const relationshipSuggestions = (
+    Array.isArray(doc.metadata?.relationship_suggestions)
+      ? doc.metadata.relationship_suggestions
+      : []
+  ) as DocumentRelationshipSuggestion[];
+  const pendingRelationshipSuggestions = relationshipSuggestions.filter((suggestion) => (
+    !suggestion.auto_created &&
+    suggestion.target_document_id &&
+    !relationships.some((relationship) => (
+      relationship.related_document.id === suggestion.target_document_id &&
+      relationship.relation_type === suggestion.relation_type
+    ))
+  ));
   const selectedRelationshipTarget = relationshipSearchResults.find((candidate) => candidate.id === relationshipTargetId);
   const isPersonal = Boolean((doc as any).is_self_upload);
   const isScanned = Boolean((doc as any).is_scanned);
@@ -573,7 +642,7 @@ export default function DocumentDetailPage() {
   const tabs: { id: TabId; label: string; disabled?: boolean }[] = [
     ...(workflowAvailable ? [{ id: "workflow" as const, label: "Workflow" }] : []),
     { id: "attributes", label: "Details" },
-    { id: "relationships", label: `Links (${relationships.length})` },
+    { id: "relationships", label: `Links (${relationships.length}${pendingRelationshipSuggestions.length ? ` + ${pendingRelationshipSuggestions.length}` : ""})` },
     { id: "properties", label: "Properties" },
     { id: "security", label: "Security" },
     { id: "history", label: `History (${sortedDocumentVersions.length})` },
@@ -1140,6 +1209,57 @@ export default function DocumentDetailPage() {
                     Make procurement chains explicit: PO, invoice, GRN, contract, and supporting documents.
                   </p>
                 </div>
+
+                {pendingRelationshipSuggestions.length > 0 && (
+                  <div className="border border-[#A7C9DC] bg-[#F1F8FC]">
+                    <div className="border-b border-[#C8CDD2] px-3 py-2">
+                      <p className="text-sm font-bold text-[#1F2933]">Suggested PO links</p>
+                      <p className="mt-0.5 text-xs text-[#5E6870]">
+                        Exact PO references were found in this document. Confirm the links that belong in the procurement chain.
+                      </p>
+                    </div>
+                    <div className="divide-y divide-[#D3D7DA] bg-white">
+                      {pendingRelationshipSuggestions.map((suggestion) => (
+                        <div
+                          key={`${suggestion.target_document_id}-${suggestion.relation_type}`}
+                          className="flex flex-col gap-3 px-3 py-3 sm:flex-row sm:items-center sm:justify-between"
+                        >
+                          <div className="min-w-0">
+                            <div className="flex flex-wrap items-center gap-2">
+                              <span className="text-xs font-bold uppercase tracking-wide text-[#287EAD]">
+                                {suggestion.relation_type.replace("-", " ")}
+                              </span>
+                              <span className="text-xs text-[#5E6870]">
+                                Matched PO {suggestion.matched_reference}
+                              </span>
+                            </div>
+                            <p className="mt-1 truncate text-sm font-bold text-[#1F2933]" title={suggestion.target_title}>
+                              {suggestion.target_title}
+                            </p>
+                            <p className="mt-0.5 truncate text-xs text-[#5E6870]">
+                              {suggestion.target_reference_number} · {suggestion.target_document_type}
+                            </p>
+                          </div>
+                          {canEdit && (
+                            <button
+                              type="button"
+                              onClick={() => confirmRelationshipSuggestionMutation.mutate(suggestion)}
+                              disabled={confirmRelationshipSuggestionMutation.isPending}
+                              className="inline-flex shrink-0 items-center justify-center gap-2 border border-[#287EAD] bg-[#287EAD] px-3 py-2 text-sm font-semibold text-white hover:bg-[#206D99] disabled:cursor-not-allowed disabled:opacity-50"
+                            >
+                              {confirmRelationshipSuggestionMutation.isPending ? (
+                                <Loader2 className="h-4 w-4 animate-spin" />
+                              ) : (
+                                <Check className="h-4 w-4" />
+                              )}
+                              Confirm link
+                            </button>
+                          )}
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+                )}
 
                 <div className="space-y-2">
                   {relationships.length === 0 ? (

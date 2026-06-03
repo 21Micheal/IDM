@@ -10,16 +10,31 @@ import clsx from "clsx";
 
 // ── Types ─────────────────────────────────────────────────────────────────────
 interface DocType   { id: string; name: string; code: string }
-interface GroupPerm { id: string; document_type: string | null; document_type_name: string | null; action: string }
+interface GroupPerm {
+  id: string;
+  document_type: string | null;
+  document_type_name: string | null;
+  stage: string;
+  action: string;
+}
 interface Member    { id: string; user: { id: string; full_name: string; email: string; job_description?: string }; expires_at: string | null; is_active: boolean }
 interface Group     { id: string; name: string; description: string; permissions: GroupPerm[]; member_count: number; has_admin_access: boolean }
 interface User      { id: string; full_name: string; email: string; job_description?: string }
 
 const HOD_GROUP_NAME = "HOD";
 
+const PERMISSION_STAGES = [
+  { value: "creation", label: "Creation", description: "Draft, upload, and resubmit" },
+  { value: "approval", label: "For approval", description: "While workflow is in progress" },
+  { value: "after_approval", label: "After approval", description: "Approved, rejected, or archived" },
+] as const;
+
+type PermissionStage = (typeof PERMISSION_STAGES)[number]["value"];
+
 const ALL_ACTIONS = [
   { value: "view",     label: "View",     description: "Open and read documents" },
   { value: "upload",   label: "Upload",   description: "Add new documents" },
+  { value: "submit",   label: "Submit",   description: "Submit draft documents for approval" },
   { value: "edit",     label: "Edit",     description: "Update document metadata" },
   { value: "download", label: "Download", description: "Download file copies" },
   { value: "comment",  label: "Comment",  description: "Add comments" },
@@ -27,6 +42,31 @@ const ALL_ACTIONS = [
   { value: "archive",  label: "Archive",  description: "Move to archive" },
   { value: "delete",   label: "Delete",   description: "Void / delete documents" },
 ];
+
+function emptyMatrix(docTypes: DocType[]): Record<string, Set<string>> {
+  const matrix: Record<string, Set<string>> = {};
+  docTypes.forEach((dt) => { matrix[dt.id] = new Set(); });
+  return matrix;
+}
+
+function buildStageMatrices(group: Group, docTypes: DocType[]): Record<PermissionStage, Record<string, Set<string>>> {
+  const stages = PERMISSION_STAGES.reduce((acc, stage) => {
+    acc[stage.value] = emptyMatrix(docTypes);
+    return acc;
+  }, {} as Record<PermissionStage, Record<string, Set<string>>>);
+
+  group.permissions.forEach((p) => {
+    if (p.action === "admin") return;
+    const stage = (p.stage || "any") as PermissionStage;
+    if (!stages[stage]) return;
+    if (!p.document_type) return;
+    const key = p.document_type;
+    if (!stages[stage][key]) stages[stage][key] = new Set();
+    stages[stage][key].add(p.action);
+  });
+
+  return stages;
+}
 
 // ── Permission Matrix ────────────────────────────────────────────────────────
 function PermissionMatrix({
@@ -37,48 +77,50 @@ function PermissionMatrix({
 }: {
   group: Group;
   docTypes: DocType[];
-  onSave: (perms: { document_type_id: string | null; action: string }[]) => void;
+  onSave: (perms: { document_type_id: string; stage: string; action: string }[]) => void;
   isSaving: boolean;
 }) {
-  const init: Record<string, Set<string>> = { "__all__": new Set() };
-  docTypes.forEach((dt) => { init[dt.id] = new Set(); });
-  group.permissions.forEach((p) => {
-    if (p.action === "admin") return;
-    const key = p.document_type ?? "__all__";
-    if (!init[key]) init[key] = new Set();
-    init[key].add(p.action);
-  });
+  const [activeStage, setActiveStage] = useState<PermissionStage>("creation");
+  const [matrices, setMatrices] = useState(() => buildStageMatrices(group, docTypes));
 
-  const [matrix, setMatrix] = useState<Record<string, Set<string>>>(init);
+  useEffect(() => {
+    setMatrices(buildStageMatrices(group, docTypes));
+  }, [group.id, group.permissions, docTypes]);
+
+  const matrix = matrices[activeStage] ?? emptyMatrix(docTypes);
 
   const toggle = (dtKey: string, action: string) => {
-    setMatrix((prev) => {
-      const next = { ...prev };
-      const set = new Set(prev[dtKey] ?? []);
+    setMatrices((prev) => {
+      const stageMatrix = { ...(prev[activeStage] ?? emptyMatrix(docTypes)) };
+      const set = new Set(stageMatrix[dtKey] ?? []);
       set.has(action) ? set.delete(action) : set.add(action);
-      next[dtKey] = set;
-      return next;
+      stageMatrix[dtKey] = set;
+      return { ...prev, [activeStage]: stageMatrix };
     });
   };
 
   const toggleAll = (dtKey: string) => {
-    setMatrix((prev) => {
-      const current = prev[dtKey] ?? new Set();
-      const next = { ...prev };
-      next[dtKey] = current.size === ALL_ACTIONS.length
+    setMatrices((prev) => {
+      const stageMatrix = { ...(prev[activeStage] ?? emptyMatrix(docTypes)) };
+      const current = stageMatrix[dtKey] ?? new Set();
+      stageMatrix[dtKey] = current.size === ALL_ACTIONS.length
         ? new Set()
         : new Set(ALL_ACTIONS.map((a) => a.value));
-      return next;
+      return { ...prev, [activeStage]: stageMatrix };
     });
   };
 
   const handleSave = () => {
-    const perms: { document_type_id: string | null; action: string }[] = [];
-    Object.entries(matrix).forEach(([key, actions]) => {
-      actions.forEach((action) => {
-        perms.push({
-          document_type_id: key === "__all__" ? null : key,
-          action,
+    const perms: { document_type_id: string; stage: string; action: string }[] = [];
+    PERMISSION_STAGES.forEach(({ value: stage }) => {
+      const stageMatrix = matrices[stage] ?? emptyMatrix(docTypes);
+      Object.entries(stageMatrix).forEach(([key, actions]) => {
+        actions.forEach((action) => {
+          perms.push({
+            document_type_id: key,
+            stage,
+            action,
+          });
         });
       });
     });
@@ -86,7 +128,6 @@ function PermissionMatrix({
   };
 
   const rows = [
-    { key: "__all__", label: "All document types", sublabel: "Wildcard — applies when no specific rule exists" },
     ...docTypes.map((dt) => ({ key: dt.id, label: dt.name, sublabel: `${dt.code}-XXXXX` })),
   ];
 
@@ -95,10 +136,32 @@ function PermissionMatrix({
       <div className="flex items-center gap-3 text-sm text-foreground bg-accent/10 border border-accent/30 rounded-xl p-4">
         <Info className="w-5 h-5 flex-shrink-0 text-accent" />
         <span>
-          Select the actions members of this group can perform for each document type.
-          "All document types" acts as a fallback.
+          Configure explicit permissions per document type and lifecycle stage. No wildcard
+          stage or all-type grants are used, so rules do not overlap.
         </span>
       </div>
+
+      <div className="flex flex-wrap gap-2">
+        {PERMISSION_STAGES.map((stage) => (
+          <button
+            key={stage.value}
+            type="button"
+            title={stage.description}
+            onClick={() => setActiveStage(stage.value)}
+            className={clsx(
+              "px-4 py-2 rounded-lg text-sm font-medium border transition-colors",
+              activeStage === stage.value
+                ? "bg-accent text-accent-foreground border-accent"
+                : "bg-card text-foreground border-border hover:border-accent/50"
+            )}
+          >
+            {stage.label}
+          </button>
+        ))}
+      </div>
+      <p className="text-xs text-muted-foreground -mt-2">
+        {PERMISSION_STAGES.find((s) => s.value === activeStage)?.description}
+      </p>
 
       <div className="overflow-x-auto rounded-xl border border-border">
         <table className="w-full text-sm min-w-[900px]">
@@ -114,10 +177,10 @@ function PermissionMatrix({
             </tr>
           </thead>
           <tbody className="divide-y divide-border bg-card">
-            {rows.map(({ key, label, sublabel }, idx) => (
-              <tr key={key} className={clsx("hover:bg-muted/40 transition-colors", idx === 0 && "bg-accent/5")}>
+            {rows.map(({ key, label, sublabel }) => (
+              <tr key={key} className="hover:bg-muted/40 transition-colors">
                 <td className="px-6 py-3.5">
-                  <p className={clsx("font-medium text-sm", idx === 0 ? "text-accent" : "text-foreground")}>
+                  <p className="font-medium text-sm text-foreground">
                     {label}
                   </p>
                   <p className="text-xs text-muted-foreground mt-0.5">{sublabel}</p>
@@ -183,13 +246,8 @@ function GroupDetail({
   const qc = useQueryClient();
   const [tab, setTab] = useState<"permissions" | "members">("permissions");
   const [userSearch, setUserSearch] = useState("");
-  const [adminAccess, setAdminAccess] = useState(group.has_admin_access);
   const isHodGroup = group.name === HOD_GROUP_NAME;
-  const isBuiltInGroup = group.has_admin_access || isHodGroup;
-
-  useEffect(() => {
-    setAdminAccess(group.has_admin_access);
-  }, [group.id, group.has_admin_access]);
+  const isBuiltInGroup = isHodGroup;
 
   const { data: members = [] } = useQuery<Member[]>({
     queryKey: ["group-members", group.id],
@@ -206,28 +264,13 @@ function GroupDetail({
   });
 
   const setPermsMutation = useMutation({
-    mutationFn: (perms: { document_type_id: string | null; action: string }[]) =>
+    mutationFn: (perms: { document_type_id: string; stage: string; action: string }[]) =>
       groupsAPI.setPermissions(group.id, perms),
     onSuccess: () => {
       toast.success("Permissions saved successfully");
       qc.invalidateQueries({ queryKey: ["groups"] });
     },
     onError: () => toast.error("Failed to save permissions"),
-  });
-
-  const adminAccessMutation = useMutation({
-    mutationFn: (enabled: boolean) => groupsAPI.setAdminAccess(group.id, enabled),
-    onMutate: (enabled) => {
-      setAdminAccess(enabled);
-    },
-    onSuccess: () => {
-      toast.success("Administrator access updated");
-      qc.invalidateQueries({ queryKey: ["groups"] });
-    },
-    onError: () => {
-      setAdminAccess(group.has_admin_access);
-      toast.error("Failed to update administrator access");
-    },
   });
 
   const deleteMutation = useMutation({
@@ -276,11 +319,6 @@ function GroupDetail({
             </div>
             <div>
               <h2 className="font-semibold text-xl text-foreground tracking-tight">{group.name}</h2>
-              {group.has_admin_access && (
-                <p className="text-xs font-semibold uppercase tracking-widest text-accent mt-1">
-                  System administrator group
-                </p>
-              )}
               {isHodGroup && (
                 <p className="text-xs font-semibold uppercase tracking-widest text-accent mt-1">
                   Synced from department heads
@@ -340,39 +378,6 @@ function GroupDetail({
         <div className="flex-1 overflow-y-auto p-8 bg-background">
           {tab === "permissions" && (
             <div className="space-y-6">
-              <div className="rounded-2xl border border-border bg-card p-5 flex items-center justify-between gap-4">
-                <div>
-                  <p className="font-semibold text-foreground">Administrator access</p>
-                  <p className="text-sm text-muted-foreground mt-1">
-                    Give this group full admin privileges for the application.
-                  </p>
-                </div>
-                <button
-                  type="button"
-                  onClick={() => adminAccessMutation.mutate(!adminAccess)}
-                  disabled={adminAccessMutation.isPending || isHodGroup}
-                  className={clsx(
-                    "inline-flex items-center gap-3 rounded-full border px-4 py-2 text-sm font-semibold transition-colors",
-                    adminAccess
-                      ? "bg-accent/15 border-accent text-accent"
-                      : "bg-muted border-border text-muted-foreground hover:text-foreground",
-                    isHodGroup && "opacity-60 cursor-not-allowed"
-                  )}
-                  aria-pressed={adminAccess}
-                >
-                  <span className={clsx(
-                    "relative inline-flex h-5 w-9 rounded-full transition-colors",
-                    adminAccess ? "bg-accent" : "bg-border"
-                  )}>
-                    <span className={clsx(
-                      "absolute top-0.5 h-4 w-4 rounded-full bg-white shadow transition-transform",
-                      adminAccess ? "translate-x-4" : "translate-x-0.5"
-                    )} />
-                  </span>
-                  {adminAccess ? "Enabled" : "Disabled"}
-                </button>
-              </div>
-
               <PermissionMatrix
                 group={group}
                 docTypes={docTypes}
@@ -493,8 +498,6 @@ export default function GroupsPage() {
     queryFn: () => groupsAPI.list().then((r) => r.data.results ?? r.data),
   });
   const orderedGroups = [...groups].sort((a, b) => {
-    if (a.has_admin_access && !b.has_admin_access) return -1;
-    if (!a.has_admin_access && b.has_admin_access) return 1;
     return a.name.localeCompare(b.name);
   });
 
@@ -598,7 +601,7 @@ export default function GroupsPage() {
         {orderedGroups?.map((group) => {
           const ruleCount = group.permissions.filter((p) => p.action !== "admin").length;
           const isHodGroup = group.name === HOD_GROUP_NAME;
-          const isSystemGroup = group.has_admin_access || isHodGroup;
+          const isSystemGroup = isHodGroup;
 
           return (
             <div
@@ -616,11 +619,6 @@ export default function GroupsPage() {
                     <h3 className="font-semibold text-lg text-foreground group-hover:text-accent transition-colors">
                       {group.name}
                     </h3>
-                    {group.has_admin_access && (
-                      <span className="inline-flex items-center rounded-full bg-accent/15 px-2.5 py-1 text-[11px] font-semibold text-accent mt-2">
-                        System administrator group
-                      </span>
-                    )}
                     {isHodGroup && (
                       <span className="inline-flex items-center rounded-full bg-accent/15 px-2.5 py-1 text-[11px] font-semibold text-accent mt-2">
                         Synced from department heads

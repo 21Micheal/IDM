@@ -16,7 +16,7 @@ import {
   Workflow, ShieldCheck, Settings, LogOut,
   Bell, Users, Building2, UserRoundCog, Shield,
   ChevronDown, ChevronRight, Archive, ScanLine, Loader2, UserCheck, Monitor, Lock, History,
-  BellRing, CircleUserRound, ClipboardCheck, Inbox, ArrowRight,
+  BellRing, CircleUserRound, ClipboardCheck, Inbox, ArrowRight, FileSignature, LayoutTemplate,
 } from "lucide-react";
 import { useAuthStore } from "../../store/authStore";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
@@ -79,7 +79,6 @@ const mainNav: NavEntry[] = [
       { to: "/documents?status=archived", icon: Archive,  label: "Archived" },
       { to: "/documents/upload",          icon: Upload,   label: "Upload" },
       { to: "/documents/scan",            icon: ScanLine, label: "Scan" },
-      { to: "/documents/bulk-scan",      icon: ScanLine, label: "Bulk scan" },
       { to: "/search",                    icon: Search,   label: "Search" },
     ],
   } as NavGroup,
@@ -100,8 +99,8 @@ const mainNav: NavEntry[] = [
     prefix: "/profile",
     children: [
       { to: "/profile?tab=settings", icon: Settings, label: "Settings" },
-      { to: "/profile?tab=security", icon: ShieldCheck, label: "Security" },
       { to: "/profile?tab=delegation", icon: UserCheck, label: "Delegation" },
+      { to: "/profile?tab=signature", icon: FileSignature, label: "E-Signature" },
       { to: "/profile?tab=preferences", icon: Monitor, label: "Preferences" },
     ],
   } as NavGroup,
@@ -109,6 +108,7 @@ const mainNav: NavEntry[] = [
 
 const adminNav: NavLeaf[] = [
   { to: "/admin/document-types", icon: FileText,  label: "Document types", allowedRoles: ["admin"] },
+  { to: "/admin/templates",      icon: LayoutTemplate, label: "Templates", allowedRoles: ["admin"] },
   { to: "/admin/users",       icon: Users,     label: "Users",       allowedRoles: ["admin"] },
   { to: "/admin/departments", icon: Building2, label: "Departments", allowedRoles: ["admin"] },
   { to: "/admin/groups",      icon: Shield,    label: "Groups",      allowedRoles: ["admin"] },

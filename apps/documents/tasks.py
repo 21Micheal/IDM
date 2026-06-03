@@ -332,6 +332,18 @@ def ocr_document(self, document_id: str):
             logger.exception("ocr_document: failed to promote suggested fields to top-level for %s", document_id)
 
         Document.objects.filter(id=document_id).update(**update_kwargs)
+        try:
+            from .relationship_suggestions import refresh_po_relationship_suggestions
+
+            doc.refresh_from_db()
+            refresh_po_relationship_suggestions(
+                doc,
+                actor=doc.uploaded_by,
+                auto_create_same_batch=False,
+            )
+        except Exception:
+            logger.exception("ocr_document: failed to refresh relationship suggestions for %s", document_id)
+
         from apps.audit.models import AuditEvent
         from apps.audit.utils import record_audit_event
 

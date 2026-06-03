@@ -119,8 +119,10 @@ def _delete_storage_file(name: str) -> None:
 
 class DocumentTypeViewSet(AuditMixin, viewsets.ModelViewSet):
     queryset = DocumentType.objects.prefetch_related(
-        "metadata_fields"
-    ).filter(is_active=True).exclude(code="PERSONAL")
+        "metadata_fields",
+        "outgoing_relationship_rules",
+        "outgoing_relationship_rules__target_document_type",
+    ).filter(is_active=True).exclude(code__in=["PERSONAL", "UNCLASS"])
 
     def get_serializer_class(self):
         if self.action in ("create", "update", "partial_update"):
@@ -302,6 +304,7 @@ class DocumentViewSet(AuditMixin, viewsets.ModelViewSet):
         user = self.request.user
         qs   = (
             Document.objects
+            .exclude(document_type__code="UNCLASS")
             .select_related(
                 "document_type",
                 "uploaded_by",
@@ -512,13 +515,15 @@ class DocumentViewSet(AuditMixin, viewsets.ModelViewSet):
 
     @action(detail=True, methods=["post"])
     def archive(self, request, pk=None):
+        from apps.documents.access import outcome_status_for
+
         doc = self.get_object()
         if doc.status != DocumentStatus.APPROVED:
             return Response(
                 {"detail": "Only approved documents can be archived."},
                 status=status.HTTP_400_BAD_REQUEST,
             )
-        doc.status = DocumentStatus.ARCHIVED
+        doc.status = outcome_status_for(doc.document_type, "archived")
         doc.save(update_fields=["status", "updated_at"])
         self.record_audit("document.archived", doc)
         return Response({"status": "archived"})
@@ -526,14 +531,17 @@ class DocumentViewSet(AuditMixin, viewsets.ModelViewSet):
     @action(detail=True, methods=["patch"])
     def edit_metadata(self, request, pk=None):
         doc = self.get_object()
-        if doc.status not in (
-            DocumentStatus.DRAFT,
-            DocumentStatus.REJECTED,
-            DocumentStatus.RETURNED,
-            "Returned for Review",
-        ):
+        from apps.documents.access import document_allows_edit
+        from apps.documents.file_streaming import user_can_edit_document
+
+        if not user_can_edit_document(request.user, doc):
             return Response(
-                {"detail": "Metadata can only be edited on draft, rejected or returned documents."},
+                {"detail": "You do not have permission to edit this document."},
+                status=status.HTTP_403_FORBIDDEN,
+            )
+        if not document_allows_edit(doc, user=request.user):
+            return Response(
+                {"detail": "This document cannot be edited in its current status."},
                 status=status.HTTP_400_BAD_REQUEST,
             )
         serializer = DocumentMetadataEditSerializer(
@@ -1723,6 +1731,17 @@ echo "✓ DocVault LibreOffice integration installed."
                 relationship for relationship in relationships
                 if user_can_view_document(request.user, relationship.source_document)
                 and user_can_view_document(request.user, relationship.target_document)
+                and (
+                    request.user.has_admin_access
+                    or (
+                        relationship.source_document.uploaded_by_id == request.user.id
+                        or getattr(relationship.source_document, "owned_by_id", None) == request.user.id
+                    )
+                    and (
+                        relationship.target_document.uploaded_by_id == request.user.id
+                        or getattr(relationship.target_document, "owned_by_id", None) == request.user.id
+                    )
+                )
             ]
             serializer = DocumentRelationshipSerializer(
                 visible_relationships,
@@ -1746,6 +1765,15 @@ echo "✓ DocVault LibreOffice integration installed."
         )
         if not user_can_view_document(request.user, target):
             return Response({"detail": "You do not have access to the selected related document."}, status=403)
+        if (
+            not request.user.has_admin_access
+            and target.uploaded_by_id != request.user.id
+            and getattr(target, "owned_by_id", None) != request.user.id
+        ):
+            return Response(
+                {"detail": "You can only link documents that belong to you."},
+                status=403,
+            )
 
         relationship, created = DocumentRelationship.objects.get_or_create(
             source_document=doc,

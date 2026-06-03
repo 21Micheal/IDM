@@ -19,6 +19,7 @@ export type BulkUploadDocumentItem = {
   reference_number: string;
   title: string;
   file_name: string;
+  document_type?: DocumentType;
   ocr_status: string;
   ocr_suggestions?: BulkOcrSuggestions;
   metadata?: Record<string, unknown>;
@@ -33,6 +34,8 @@ export type BulkUploadBatch = {
   id: string;
   status: BulkUploadStatus;
   document_type: DocumentType;
+  mode?: "same_type" | "related_set";
+  shared_metadata?: Record<string, unknown>;
   total_files: number;
   successful_uploads: number;
   failed_uploads: number;
@@ -58,6 +61,9 @@ export type BulkDocReviewState = {
   expanded: boolean;
   values: Record<string, string>;
   suggestedScores: Record<string, number>;
+  ocrFields?: OcrFields;
+  documentTypeId?: string;
+  detectedDocumentType?: string;
 };
 
 export type BulkLocalPreview = {
@@ -69,6 +75,7 @@ export type BulkLocalPreview = {
 
 export type BulkReviewSubmitItem = {
   document_id: string;
+  document_type_id?: string;
   title?: string;
   supplier?: string;
   amount?: string;

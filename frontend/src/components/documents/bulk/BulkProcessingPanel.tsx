@@ -7,9 +7,10 @@ type Props = {
   batch: BulkUploadBatch;
   uploadProgress?: number;
   previews?: Record<string, BulkLocalPreview>;
+  scanMode?: boolean;
 };
 
-function ProcessingPreview({ preview }: { preview?: BulkLocalPreview }) {
+function ProcessingPreview({ preview, scanMode }: { preview?: BulkLocalPreview; scanMode: boolean }) {
   const pdfSrc = preview?.url ? `${preview.url}#toolbar=1&navpanes=0&scrollbar=1&view=FitV` : null;
 
   return (
@@ -31,7 +32,9 @@ function ProcessingPreview({ preview }: { preview?: BulkLocalPreview }) {
           <div className={`mx-auto flex w-full max-w-[920px] flex-col items-center justify-center border border-dashed border-[#C8CDD2] bg-white text-center ${PREVIEW_HEIGHT}`}>
             <FileText className="mb-3 h-12 w-12 text-[#5E6870]" />
             <p className="text-sm font-semibold text-[#1F2933]">Preview unavailable for this format</p>
-            <p className="mt-1 max-w-xs text-xs text-[#5E6870]">OCR continues in the background.</p>
+            <p className="mt-1 max-w-xs text-xs text-[#5E6870]">
+              {scanMode ? "OCR continues in the background." : "You can complete its metadata during review."}
+            </p>
           </div>
         )}
       </div>
@@ -39,7 +42,7 @@ function ProcessingPreview({ preview }: { preview?: BulkLocalPreview }) {
   );
 }
 
-export default function BulkProcessingPanel({ batch, uploadProgress, previews = {} }: Props) {
+export default function BulkProcessingPanel({ batch, uploadProgress, previews = {}, scanMode = true }: Props) {
   const ocr = batch.ocr_progress;
   const ocrDone = (ocr?.done ?? 0) + (ocr?.failed ?? 0);
   const ocrTotal = ocr?.total ?? batch.successful_uploads;
@@ -48,14 +51,14 @@ export default function BulkProcessingPanel({ batch, uploadProgress, previews = 
 
   const statusLabel =
     batch.status === "uploading" ? "Uploading files…"
-    : batch.status === "processing" ? "Running OCR on each document…"
+    : batch.status === "processing" ? scanMode ? "Running OCR on each document…" : "Preparing documents for review…"
     : batch.status === "pending" ? "Preparing batch…"
     : "Processing…";
 
   return (
     <div className="grid gap-4 lg:grid-cols-12">
       <div className="lg:col-span-8">
-        <ProcessingPreview preview={firstPreview} />
+        <ProcessingPreview preview={firstPreview} scanMode={scanMode} />
       </div>
       <div className="border border-[#C8CDD2] bg-white p-6 text-center lg:col-span-4">
         <div className="relative mx-auto mb-6 h-20 w-20">
@@ -84,7 +87,7 @@ export default function BulkProcessingPanel({ batch, uploadProgress, previews = 
         </div>
       )}
 
-      {batch.status === "processing" && ocrTotal > 0 && (
+      {scanMode && batch.status === "processing" && ocrTotal > 0 && (
         <div className="mx-auto mb-6 max-w-md">
           <div className="mb-1.5 flex justify-between text-xs text-[#5E6870]">
             <span>OCR progress</span>
@@ -105,7 +108,9 @@ export default function BulkProcessingPanel({ batch, uploadProgress, previews = 
       )}
 
         <p className="text-sm text-[#5E6870]">
-          You will review and confirm metadata for each document when OCR finishes.
+          {scanMode
+            ? "You will review and confirm metadata for each document when OCR finishes."
+            : "You will review each document beside its preview once upload preparation completes."}
         </p>
       </div>
     </div>

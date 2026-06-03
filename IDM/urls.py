@@ -31,6 +31,9 @@ urlpatterns = [
     # Chat system
     path("api/v1/chat/", include("apps.chat.urls")),
 
+    # Templates engine
+    path("api/v1/templates/", include("apps.templates_engine.urls")),
+
     # Storage stats
     path("api/v1/storage/stats/", StorageStatsView.as_view(), name="storage-stats"),
     path("api/v1/analytics/approval-turnaround/", ApprovalTurnaroundView.as_view(), name="analytics-approval-turnaround"),

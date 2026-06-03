@@ -139,15 +139,22 @@ class User(AbstractBaseUser, PermissionsMixin):
             | Q(group__memberships__expires_at__gt=now)
         )
 
-    def get_group_permissions_for_doctype(self, document_type_id: str | None = None) -> set[str]:
+    def get_group_permissions_for_doctype(
+        self,
+        document_type_id: str | None = None,
+        *,
+        stage: str | None = None,
+    ) -> set[str]:
         """
         Return all GroupAction values granted to this user by active group memberships.
-        If `document_type_id` is provided, include both explicit permissions for that
-        document type and wildcard permissions that apply to all types.
+        Permissions are intentionally exact: one document type, one lifecycle
+        stage. This avoids overlapping wildcard grants and keeps stage-based
+        access auditable.
         """
+        if document_type_id is None or stage in (None, AccessStage.ANY.value):
+            return set()
         qs = GroupPermission.objects.filter(self._active_group_permissions_q())
-        if document_type_id is not None:
-            qs = qs.filter(Q(document_type_id=document_type_id) | Q(document_type__isnull=True))
+        qs = qs.filter(document_type_id=document_type_id, stage=stage)
         return set(
             qs.exclude(action=GroupAction.ADMIN.value)
               .values_list("action", flat=True)
@@ -157,19 +164,9 @@ class User(AbstractBaseUser, PermissionsMixin):
     @property
     def has_admin_access(self) -> bool:
         """
-        Group-based admin access.
-
-        A user is considered an admin only when one of their active groups has an
-        explicit wildcard administrator permission. Superusers retain emergency access.
+        Application administration is user-level, not group-granted.
         """
-        if self.is_superuser:
-            return True
-
-        return GroupPermission.objects.filter(
-            self._active_group_permissions_q(),
-            document_type__isnull=True,
-            action=GroupAction.ADMIN.value,
-        ).exists()
+        return bool(self.is_superuser or self.is_staff)
 
     # Convenience helpers
     @property
@@ -179,7 +176,13 @@ class User(AbstractBaseUser, PermissionsMixin):
     @property
     def is_auditor(self): return self.has_admin_access
 
-    def get_all_permissions_for_doctype(self, document_type_id: str) -> set[str]:
+    def get_all_permissions_for_doctype(
+        self,
+        document_type_id: str,
+        *,
+        stage: str | None = None,
+        document=None,
+    ) -> set[str]:
         """
         Return the set of GroupAction values this user has for `document_type_id`.
 
@@ -187,9 +190,12 @@ class User(AbstractBaseUser, PermissionsMixin):
           - Explicit permissions tied to this document type
           - Wildcard permissions (document_type IS NULL) that apply to every type
 
-        Both require an active, non-expired group membership.
+        When `document` is provided, permissions are resolved for its lifecycle stage.
         """
-        return self.get_group_permissions_for_doctype(document_type_id)
+        if document is not None:
+            from apps.documents.access import resolve_access_stage
+            stage = resolve_access_stage(document)
+        return self.get_group_permissions_for_doctype(document_type_id, stage=stage)
 
 
 def signature_upload_path(instance, filename):
@@ -322,12 +328,20 @@ class GroupAction(models.TextChoices):
     ADMIN    = "admin",    "Administrator access"
     VIEW     = "view",     "View documents"
     UPLOAD   = "upload",   "Upload documents"
+    SUBMIT   = "submit",   "Submit for approval"
     EDIT     = "edit",     "Edit metadata"
     DELETE   = "delete",   "Delete / void documents"
     APPROVE  = "approve",  "Approve in workflow"
     DOWNLOAD = "download", "Download files"
     COMMENT  = "comment",  "Add comments"
     ARCHIVE  = "archive",  "Archive documents"
+
+
+class AccessStage(models.TextChoices):
+    ANY            = "any",             "All stages"
+    CREATION       = "creation",        "Creation"
+    APPROVAL       = "approval",        "For approval"
+    AFTER_APPROVAL = "after_approval",    "After approval"
 
 
 class UserGroup(models.Model):
@@ -358,10 +372,7 @@ class UserGroup(models.Model):
 
     @property
     def has_admin_access(self) -> bool:
-        return any(
-            permission.document_type_id is None and permission.action == GroupAction.ADMIN.value
-            for permission in self.permissions.all()
-        )
+        return False
 
     @property
     def is_hod_group(self) -> bool:
@@ -388,12 +399,6 @@ class UserGroup(models.Model):
         if updates:
             cls.objects.filter(pk=group.pk).update(**updates)
             group.refresh_from_db()
-
-        GroupPermission.objects.get_or_create(
-            group=group,
-            document_type=None,
-            action=GroupAction.ADMIN.value,
-        )
 
         superusers = User.objects.filter(is_superuser=True, is_active=True)
         for user in superusers:
@@ -452,9 +457,9 @@ class UserGroup(models.Model):
 
 class GroupPermission(models.Model):
     """
-    One row = one (group, document_type, action) tuple.
+    One row = one (group, document_type, stage, action) tuple.
     The set of rows for a group defines exactly what its members can do
-    with each document type.
+    with each document type at each lifecycle stage.
     """
     id            = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
     group         = models.ForeignKey(
@@ -467,15 +472,22 @@ class GroupPermission(models.Model):
         on_delete=models.CASCADE,
         related_name="group_permissions",
     )
+    stage = models.CharField(
+        max_length=50,
+        choices=AccessStage.choices,
+        default=AccessStage.ANY.value,
+        db_index=True,
+        help_text="Document lifecycle stage this permission applies to. 'any' applies to all stages.",
+    )
     action        = models.CharField(max_length=20, choices=GroupAction.choices)
 
     class Meta:
-        unique_together = [("group", "document_type", "action")]
-        ordering        = ["group", "document_type", "action"]
+        unique_together = [("group", "document_type", "stage", "action")]
+        ordering        = ["group", "document_type", "stage", "action"]
 
     def __str__(self):
         dt = self.document_type.name if self.document_type else "*"
-        return f"{self.group.name} → {dt} → {self.action}"
+        return f"{self.group.name} → {dt} → {self.stage} → {self.action}"
 
 
 class UserGroupMembership(models.Model):

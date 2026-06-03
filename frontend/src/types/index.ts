@@ -1,3 +1,14 @@
+export interface DocumentTypeAccessPolicyOutcome {
+  set_status: string;
+  allow_edit: boolean;
+}
+
+export interface DocumentTypeAccessPolicy {
+  on_approved?: DocumentTypeAccessPolicyOutcome;
+  on_rejected?: DocumentTypeAccessPolicyOutcome;
+  on_archived?: DocumentTypeAccessPolicyOutcome;
+}
+
 export interface DocumentType {
   id: string;
   name: string;
@@ -9,9 +20,11 @@ export interface DocumentType {
   is_active?: boolean;
   is_personal_type?: boolean;
   metadata_mode?: "admin_defined" | "user_defined";
+  access_policy?: DocumentTypeAccessPolicy;
   workflow_template?: string | null;
   workflow_template_name?: string | null;
   metadata_fields: MetadataField[];
+  relationship_rules?: DocumentRelationshipRule[];
   is_scanned?: boolean;
   ocr_status?: "pending" | "processing" | "done" | "failed" | "";
   preview_pdf?: string | null;
@@ -90,6 +103,37 @@ export interface Document {
 }
 
 export type DocumentRelationType = "supports" | "references" | "supersedes" | "linked-to";
+
+export interface DocumentRelationshipRule {
+  id?: string;
+  source_document_type?: string;
+  target_document_type: string;
+  target_document_type_name?: string;
+  target_document_type_code?: string;
+  relation_type: DocumentRelationType;
+  source_field_key: string;
+  target_field_key: string;
+  match_operator: "equals";
+  description?: string;
+  is_active: boolean;
+  require_confirmation: boolean;
+}
+
+export interface DocumentRelationshipSuggestion {
+  target_document_id: string;
+  target_title: string;
+  target_reference_number: string;
+  target_document_type: string;
+  relation_type: DocumentRelationType;
+  matched_reference: string;
+  matched_purchase_order_number?: string;
+  matched_source_field?: string;
+  matched_target_field?: string;
+  relationship_rule_id?: string | null;
+  reason?: string;
+  auto_created?: boolean;
+  relationship_id?: string | null;
+}
 
 export interface RelatedDocumentSummary {
   id: string;

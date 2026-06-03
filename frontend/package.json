@@ -11,6 +11,7 @@
     "test:search": "mkdir -p node_modules/.cache && esbuild src/lib/search.test.ts --bundle --platform=node --format=esm --outfile=node_modules/.cache/search.test.mjs && node --test node_modules/.cache/search.test.mjs"
   },
   "dependencies": {
+    "@dnd-kit/core": "^6.3.1",
     "@hookform/resolvers": "^3.3.4",
     "@radix-ui/react-dialog": "^1.1.15",
     "@tanstack/react-query": "^5.28.0",
@@ -19,7 +20,6 @@
     "clsx": "^2.1.0",
     "date-fns": "^3.6.0",
     "lucide-react": "^0.363.0",
-    "recharts": "^2.5.0",
     "pdfjs-dist": "^4.10.38",
     "react": "^18.2.0",
     "react-dom": "^18.2.0",
@@ -27,6 +27,8 @@
     "react-hook-form": "^7.51.1",
     "react-router-dom": "^6.22.3",
     "react-toastify": "^10.0.5",
+    "recharts": "^2.5.0",
+    "sonner": "^2.0.7",
     "tailwind-merge": "^2.2.2",
     "zod": "^3.22.4",
     "zustand": "^4.5.2"

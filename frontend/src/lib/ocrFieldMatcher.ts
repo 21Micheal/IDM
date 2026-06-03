@@ -375,6 +375,7 @@ function scoreMatch(
   const accountish = /account|acct|gl|ledger|billing|client|customer|project|cost|code/.test(fieldKey) ||
     fieldLabel.toLowerCase().includes("account") ||
     fieldLabel.toLowerCase().includes("code");
+  const combinedFieldText = `${fieldKey} ${fieldLabel}`.toLowerCase();
 
   // Pass 1: exact key match
   if (fieldKey === ocrKey) return 4;
@@ -402,6 +403,20 @@ function scoreMatch(
   const labelSim = jaccard(fieldLabelTokens, ocrKeyTokens);
   const keySim   = jaccard(fieldKeyTokens,   ocrKeyTokens);
   const maxSim   = Math.max(labelSim, keySim);
+
+  // "reference" is too broad on procurement documents. Without this guard,
+  // Transaction Reference can steal PO Number/PO Reference when the OCR output
+  // has no explicit payment transaction reference.
+  if (
+    /transaction|payment|mpesa|cheque|wire|confirmation/.test(combinedFieldText) &&
+    !/transaction|payment|mpesa|cheque|wire|confirmation/.test(ocrKey)
+  ) {
+    return 0;
+  }
+
+  if (/\bpo\b|purchase_order|purchase order|lpo/.test(combinedFieldText) && ocrKey === "reference_number") {
+    return 0;
+  }
 
   // FIX: lower threshold to 0.25 for short field names (≤ 2 meaningful tokens)
   // to avoid missing obvious single-token matches like "payee" ↔ "supplier".

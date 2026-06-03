@@ -23,6 +23,7 @@ from .models import (
     Document, DocumentType, MetadataField,
     DocumentVersion, DocumentComment, Tag, OCRStatus,
     BulkUpload, BulkUploadStatus, DocumentStatus, DocumentShare, DocumentRelationship,
+    DocumentRelationshipRule,
     DMSSettings,
 )
 from apps.accounts.serializers import UserSummarySerializer
@@ -34,6 +35,7 @@ from django.db.models import Q
 from django.utils import timezone
 from django.utils.text import slugify
 import mimetypes
+import uuid
 from django.core.files.storage import default_storage
 from apps.search.utils import summarize_bulk_index_error
 from .file_streaming import build_absolute_document_file_url, user_can_download_document
@@ -43,6 +45,23 @@ DOCUMENT_COLUMN_METADATA_KEYS = {
     "title", "supplier", "amount", "currency", "document_date", "due_date",
 }
 logger = logging.getLogger(__name__)
+
+
+def _generate_unique_reference(doc_type: DocumentType) -> str:
+    if doc_type.code == "UNCLASS":
+        while True:
+            candidate = f"{doc_type.reference_prefix}-{uuid.uuid4().hex[:12].upper()}"
+            if not Document.objects.filter(reference_number=candidate).exists():
+                return candidate
+
+    candidate = doc_type.next_reference()
+    if not Document.objects.filter(reference_number=candidate).exists():
+        return candidate
+
+    while True:
+        fallback = f"{doc_type.reference_prefix}-{uuid.uuid4().hex[:8].upper()}"
+        if not Document.objects.filter(reference_number=fallback).exists():
+            return fallback
 
 def _find_existing_document_for_checksum(
     checksum: str,
@@ -134,6 +153,8 @@ class DMSSettingsSerializer(serializers.ModelSerializer):
             "auto_archive_enabled",
             "auto_archive_after_days",
             "require_metadata_on_upload",
+            "bulk_scan_submit_for_approval",
+            "access_stages",
             "updated_at",
         ]
         read_only_fields = ["updated_at"]
@@ -167,8 +188,27 @@ class MetadataFieldWriteSerializer(serializers.ModelSerializer):
         ]
 
 
+class DocumentRelationshipRuleSerializer(serializers.ModelSerializer):
+    target_document_type_name = serializers.CharField(source="target_document_type.name", read_only=True)
+    target_document_type_code = serializers.CharField(source="target_document_type.code", read_only=True)
+
+    class Meta:
+        model = DocumentRelationshipRule
+        fields = [
+            "id", "source_document_type", "target_document_type",
+            "target_document_type_name", "target_document_type_code",
+            "relation_type", "source_field_key", "target_field_key",
+            "match_operator", "description", "is_active", "require_confirmation",
+            "created_at", "updated_at",
+        ]
+        read_only_fields = ["id", "source_document_type", "created_at", "updated_at"]
+
+
 class DocumentTypeSerializer(serializers.ModelSerializer):
     metadata_fields        = MetadataFieldSerializer(many=True, read_only=True)
+    relationship_rules     = DocumentRelationshipRuleSerializer(
+        source="outgoing_relationship_rules", many=True, read_only=True
+    )
     workflow_template_name = serializers.CharField(
         source="workflow_template.name", read_only=True, default=None
     )
@@ -179,8 +219,10 @@ class DocumentTypeSerializer(serializers.ModelSerializer):
             "id", "name", "code", "reference_prefix", "reference_padding",
             "description", "icon", "is_active",
             "is_personal_type", "metadata_mode",
+            "access_policy",
             "workflow_template", "workflow_template_name",
             "metadata_fields",
+            "relationship_rules",
         ]
 
 
@@ -329,7 +371,8 @@ class DocumentListSerializer(serializers.ModelSerializer):
             if share.access_level == DocumentShare.AccessLevel.DOWNLOAD:
                 actions.append(GroupAction.DOWNLOAD.value)
             return actions
-        return sorted(user.get_all_permissions_for_doctype(str(obj.document_type_id)))
+        from apps.documents.access import effective_permissions_for_user
+        return effective_permissions_for_user(user, obj)
 
     def _get_active_share(self, obj, user):
         return DocumentShare.objects.filter(
@@ -456,6 +499,35 @@ class DocumentDetailSerializer(serializers.ModelSerializer):
             "current_version", "created_at", "updated_at",
         ]
 
+    def to_representation(self, instance):
+        data = super().to_representation(instance)
+        request = self.context.get("request")
+        user = getattr(request, "user", None)
+        metadata = data.get("metadata")
+        suggestions = metadata.get("relationship_suggestions") if isinstance(metadata, dict) else None
+        if (
+            user
+            and user.is_authenticated
+            and not getattr(user, "has_admin_access", False)
+            and isinstance(suggestions, list)
+        ):
+            target_ids = [
+                item.get("target_document_id")
+                for item in suggestions
+                if isinstance(item, dict) and item.get("target_document_id")
+            ]
+            visible_target_ids = set(
+                str(item)
+                for item in Document.objects.filter(id__in=target_ids)
+                .filter(Q(uploaded_by=user) | Q(owned_by=user))
+                .values_list("id", flat=True)
+            )
+            metadata["relationship_suggestions"] = [
+                item for item in suggestions
+                if isinstance(item, dict) and str(item.get("target_document_id")) in visible_target_ids
+            ]
+        return data
+
     def get_signatures(self, obj):
         return DocumentSignatureSerializer(
             obj.signatures.select_related("signer", "task__step", "signed_version").all(),
@@ -494,7 +566,8 @@ class DocumentDetailSerializer(serializers.ModelSerializer):
             if share.access_level == DocumentShare.AccessLevel.DOWNLOAD:
                 actions.append(GroupAction.DOWNLOAD.value)
             return actions
-        return sorted(user.get_all_permissions_for_doctype(str(obj.document_type_id)))
+        from apps.documents.access import effective_permissions_for_user
+        return effective_permissions_for_user(user, obj)
 
     def _get_active_share(self, obj, user):
         return DocumentShare.objects.filter(
@@ -623,6 +696,17 @@ class DocumentMetadataEditSerializer(serializers.ModelSerializer):
         except Exception:
             logger.exception("Failed to queue async reindex for document %s", instance.id)
 
+        try:
+            from .relationship_suggestions import refresh_po_relationship_suggestions
+
+            refresh_po_relationship_suggestions(
+                instance,
+                actor=getattr(self.context.get("request"), "user", None),
+                auto_create_same_batch=bool(instance.bulk_upload_id),
+            )
+        except Exception:
+            logger.exception("Failed to refresh relationship suggestions for document %s", instance.id)
+
         return instance
 
 
@@ -732,7 +816,7 @@ class DocumentUploadSerializer(serializers.ModelSerializer):
         doc_type   = validated_data["document_type"]
         is_scanned = validated_data.get("is_scanned", False)
 
-        validated_data["reference_number"] = doc_type.next_reference()
+        validated_data["reference_number"] = _generate_unique_reference(doc_type)
 
         validated_data["file_name"]   = upload.name
         validated_data["file_size"]   = upload.size
@@ -860,6 +944,13 @@ class DocumentUploadSerializer(serializers.ModelSerializer):
             created_by     = request.user,
         )
 
+        try:
+            from .relationship_suggestions import refresh_po_relationship_suggestions
+
+            refresh_po_relationship_suggestions(doc, actor=request.user)
+        except Exception:
+            logger.exception("Failed to refresh relationship suggestions for document %s", doc.id)
+
         # ── Task routing ─────────────────────────────────────────────────────
         if is_scanned:
             # Confirmed scan: go straight to OCR, skip extract_text hop
@@ -983,6 +1074,7 @@ class DocumentTypeWriteSerializer(serializers.ModelSerializer):
     Accepts nested metadata_fields and replaces them atomically.
     """
     metadata_fields = MetadataFieldWriteSerializer(many=True, required=False, default=list)
+    relationship_rules = DocumentRelationshipRuleSerializer(many=True, required=False, default=list)
 
     class Meta:
         model  = DocumentType
@@ -990,8 +1082,10 @@ class DocumentTypeWriteSerializer(serializers.ModelSerializer):
             "name", "code", "reference_prefix", "reference_padding",
             "description", "icon", "is_active",
             "is_personal_type", "metadata_mode",
+            "access_policy",
             "workflow_template",
             "metadata_fields",
+            "relationship_rules",
         ]
         extra_kwargs = {
             "name":              {"validators": []},
@@ -1101,6 +1195,28 @@ class DocumentTypeWriteSerializer(serializers.ModelSerializer):
 
         return value
 
+    def validate_relationship_rules(self, value):
+        current_doc_type_id = getattr(self.instance, "id", None)
+        seen = set()
+        for idx, rule in enumerate(value):
+            target_type = rule.get("target_document_type")
+            source_key = slugify(str(rule.get("source_field_key", "")).strip().lower()).replace("-", "_")
+            target_key = slugify(str(rule.get("target_field_key", "")).strip().lower()).replace("-", "_")
+            relation_type = rule.get("relation_type")
+            if not target_type:
+                raise serializers.ValidationError({idx: "Target document type is required."})
+            if current_doc_type_id and str(target_type.id) == str(current_doc_type_id):
+                raise serializers.ValidationError({idx: "A relationship rule must target a different document type."})
+            if not source_key or not target_key:
+                raise serializers.ValidationError({idx: "Source and target reference fields are required."})
+            key = (str(target_type.id), relation_type, source_key, target_key)
+            if key in seen:
+                raise serializers.ValidationError({idx: "Duplicate relationship rule."})
+            seen.add(key)
+            rule["source_field_key"] = source_key
+            rule["target_field_key"] = target_key
+        return value
+
     def validate_workflow_template(self, value):
         if value is None:
             return value
@@ -1140,9 +1256,20 @@ class DocumentTypeWriteSerializer(serializers.ModelSerializer):
             document_type=doc_type
         )
 
+    def _save_relationship_rules(self, doc_type: DocumentType, rules_data: list) -> None:
+        doc_type.outgoing_relationship_rules.all().delete()
+        for rule_data in rules_data:
+            rule_data = dict(rule_data)
+            rule_data.pop("source_document_type", None)
+            DocumentRelationshipRule.objects.create(
+                source_document_type=doc_type,
+                **rule_data,
+            )
+
     @transaction.atomic
     def create(self, validated_data: dict) -> DocumentType:
         fields_data = validated_data.pop("metadata_fields", [])
+        rules_data = validated_data.pop("relationship_rules", [])
         if validated_data.get("metadata_mode") == DocumentType.MetadataMode.USER_DEFINED:
             fields_data = []
         restorable = self._find_restorable_instance(
@@ -1155,12 +1282,14 @@ class DocumentTypeWriteSerializer(serializers.ModelSerializer):
         else:
             doc_type = DocumentType.objects.create(**validated_data)
         self._save_metadata_fields(doc_type, fields_data)
+        self._save_relationship_rules(doc_type, rules_data)
         self._sync_workflow_template(doc_type)
         return doc_type
 
     @transaction.atomic
     def update(self, instance: DocumentType, validated_data: dict) -> DocumentType:
         fields_data = validated_data.pop("metadata_fields", None)
+        rules_data = validated_data.pop("relationship_rules", None)
         next_metadata_mode = validated_data.get("metadata_mode", instance.metadata_mode)
 
         self._apply_validated_data(instance, validated_data)
@@ -1173,6 +1302,9 @@ class DocumentTypeWriteSerializer(serializers.ModelSerializer):
                 self._save_metadata_fields(instance, fields_data)
         elif next_metadata_mode == DocumentType.MetadataMode.USER_DEFINED:
             self._save_metadata_fields(instance, [])
+
+        if rules_data is not None:
+            self._save_relationship_rules(instance, rules_data)
 
         return instance
 
@@ -1209,6 +1341,8 @@ class BulkUploadSerializer(serializers.ModelSerializer):
             "id",
             "document_type",
             "document_type_id",
+            "mode",
+            "shared_metadata",
             "uploaded_by",
             "status",
             "total_files",
@@ -1225,6 +1359,8 @@ class BulkUploadSerializer(serializers.ModelSerializer):
         read_only_fields = [
             "id",
             "uploaded_by",
+            "mode",
+            "shared_metadata",
             "status",
             "total_files",
             "successful_uploads",
@@ -1248,7 +1384,10 @@ class BulkUploadCreateSerializer(serializers.Serializer):
     document_type_id = serializers.PrimaryKeyRelatedField(
         queryset=DocumentType.objects.filter(is_active=True),
         source="document_type",
+        required=False,
     )
+    related_set = serializers.BooleanField(default=False)
+    shared_metadata = serializers.DictField(required=False)
     files = serializers.ListField(
         child=serializers.FileField(),
         min_length=1,
@@ -1267,7 +1406,13 @@ class BulkUploadCreateSerializer(serializers.Serializer):
         return bool(value)
 
     def validate(self, attrs):
-        document_type = attrs["document_type"]
+        if attrs.get("related_set") and not attrs.get("document_type"):
+            return attrs
+        document_type = attrs.get("document_type")
+        if not document_type:
+            raise serializers.ValidationError(
+                {"document_type_id": "Document type is required unless this is a related document set."}
+            )
         if document_type.is_personal_type:
             raise serializers.ValidationError(
                 {"document_type_id": "Bulk upload is not supported for personal document types."}
@@ -1281,6 +1426,7 @@ class BulkUploadDocumentReadSerializer(serializers.Serializer):
     reference_number = serializers.CharField()
     title = serializers.CharField()
     file_name = serializers.CharField()
+    document_type = DocumentTypeSerializer()
     ocr_status = serializers.CharField()
     ocr_suggestions = serializers.DictField(required=False, allow_null=True)
     metadata = serializers.DictField(required=False)
@@ -1325,6 +1471,7 @@ class BulkUploadDetailSerializer(BulkUploadSerializer):
 class BulkUploadReviewItemSerializer(serializers.Serializer):
     """One document decision in the bulk review submit payload."""
     document_id = serializers.UUIDField()
+    document_type_id = serializers.UUIDField(required=False)
     title = serializers.CharField(required=False, allow_blank=True)
     supplier = serializers.CharField(required=False, allow_blank=True)
     amount = serializers.CharField(required=False, allow_blank=True)
@@ -1376,13 +1523,10 @@ class BulkUploadReviewSerializer(serializers.Serializer):
 
     @transaction.atomic
     def save(self):
-        from apps.workflows.services import WorkflowService, WorkflowError
-
         bulk_upload = self.context["bulk_upload"]
         request = self.context["request"]
         approved_count = 0
         rejected_count = 0
-        workflow_errors: list[str] = []
 
         for item in self.validated_data["documents"]:
             doc = Document.objects.select_for_update().get(
@@ -1397,6 +1541,46 @@ class BulkUploadReviewSerializer(serializers.Serializer):
                 continue
 
             edit_payload: dict = {}
+            reference_changed = False
+            if item.get("document_type_id"):
+                try:
+                    next_doc_type = DocumentType.objects.get(
+                        id=item["document_type_id"],
+                        is_active=True,
+                    )
+                except DocumentType.DoesNotExist:
+                    raise serializers.ValidationError(
+                        {"document_type_id": "Selected document type does not exist."}
+                    )
+                if next_doc_type.is_personal_type:
+                    raise serializers.ValidationError(
+                        {"document_type_id": "Personal document types cannot be used in bulk review."}
+                    )
+                if next_doc_type.code == "UNCLASS":
+                    raise serializers.ValidationError(
+                        {"document_type_id": "Select the real document type before submitting."}
+                    )
+                user = request.user
+                if not user.has_admin_access:
+                    from apps.documents.access import ACCESS_STAGE_CREATION
+                    perms = user.get_all_permissions_for_doctype(
+                        str(next_doc_type.id),
+                        stage=ACCESS_STAGE_CREATION,
+                    )
+                    if GroupAction.UPLOAD.value not in perms:
+                        raise serializers.ValidationError(
+                            {"document_type_id": f"You do not have upload permission for {next_doc_type.name}."}
+                        )
+                previous_doc_type = doc.document_type
+                doc.document_type = next_doc_type
+                if previous_doc_type.code == "UNCLASS":
+                    doc.reference_number = _generate_unique_reference(next_doc_type)
+                    reference_changed = True
+            elif bulk_upload.mode == BulkUpload.Mode.RELATED_SET:
+                raise serializers.ValidationError(
+                    {"document_type_id": "Select a document type for each related document."}
+                )
+
             for field in ("title", "supplier", "currency", "document_date", "due_date"):
                 if field in item and item[field]:
                     edit_payload[field] = item[field]
@@ -1421,14 +1605,45 @@ class BulkUploadReviewSerializer(serializers.Serializer):
                 editor.is_valid(raise_exception=True)
                 editor.save()
                 doc.refresh_from_db()
+            elif item.get("document_type_id"):
+                update_fields = ["document_type", "updated_at"]
+                if reference_changed:
+                    update_fields.append("reference_number")
+                doc.save(update_fields=update_fields)
+                doc.refresh_from_db()
 
-            if doc.document_type.workflow_template_id:
-                try:
-                    WorkflowService.start(doc, request.user)
-                except WorkflowError as exc:
-                    workflow_errors.append(f"{doc.reference_number}: {exc}")
+            try:
+                from .relationship_suggestions import refresh_po_relationship_suggestions
+
+                refresh_po_relationship_suggestions(
+                    doc,
+                    actor=request.user,
+                    auto_create_same_batch=False,
+                )
+            except Exception:
+                logger.exception("Failed to refresh bulk relationship suggestions for document %s", doc.id)
 
             approved_count += 1
+
+        try:
+            from .relationship_suggestions import (
+                cleanup_duplicate_auto_po_relationships,
+                cleanup_unclassified_relationships,
+                refresh_po_relationship_suggestions,
+            )
+
+            cleanup_unclassified_relationships(bulk_upload_id=bulk_upload.id)
+            cleanup_duplicate_auto_po_relationships(bulk_upload_id=bulk_upload.id)
+
+            for doc in bulk_upload.documents.exclude(status=DocumentStatus.VOID):
+                refresh_po_relationship_suggestions(
+                    doc,
+                    actor=request.user,
+                    auto_create_same_batch=False,
+                )
+            cleanup_duplicate_auto_po_relationships(bulk_upload_id=bulk_upload.id)
+        except Exception:
+            logger.exception("Failed to refresh final bulk relationship suggestions for %s", bulk_upload.id)
 
         bulk_upload.approved_count = approved_count
         bulk_upload.rejected_count = rejected_count
@@ -1441,8 +1656,5 @@ class BulkUploadReviewSerializer(serializers.Serializer):
                 "updated_at",
             ]
         )
-
-        if workflow_errors:
-            raise serializers.ValidationError({"workflow": workflow_errors})
 
         return bulk_upload

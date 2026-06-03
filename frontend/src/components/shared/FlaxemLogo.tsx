@@ -30,13 +30,13 @@ export const FlaxemLogo: React.FC<FlaxemLogoProps> = ({ className = "h-10 w-auto
       </svg>
       
       {!compact && (
-        <div className="flex flex-col leading-none">
-          <span className={`text-sm font-bold tracking-tight ${
+        <div className="flex items-baseline gap-1.5 leading-none">
+          <span className={`text-base font-bold tracking-tight ${
             variant === 'light' ? 'text-white' : 'text-slate-900'
           }`}>
-            Flaxem
+            FSE
           </span>
-          <span className="mt-1 text-[11px] font-semibold tracking-wide text-red-600">
+          <span className="text-[13px] font-semibold tracking-wide text-red-600">
             | DMS
           </span>
         </div>
