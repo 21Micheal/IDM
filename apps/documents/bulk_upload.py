@@ -6,6 +6,8 @@ from __future__ import annotations
 import logging
 import os
 
+from elasticsearch.helpers import BulkIndexError
+
 from .models import BulkUpload, BulkUploadStatus, Document, DocumentType, OCRStatus
 from .serializers import DocumentUploadSerializer
 from apps.audit.models import AuditEvent
@@ -160,11 +162,23 @@ def create_bulk_upload_documents(
                 bulk_upload.save(update_fields=["failed_uploads", "updated_at"])
                 continue
             doc = serializer.save()
-            doc.bulk_upload = bulk_upload
-            doc.save(update_fields=["bulk_upload"])
+            # Use a bare UPDATE so Django's post_save signal (and the
+            # synchronous django-elasticsearch-dsl indexing it triggers)
+            # is not fired again for this field-only change.  The document
+            # was already indexed (or attempted) inside serializer.save().
+            Document.objects.filter(id=doc.id).update(bulk_upload=bulk_upload)
             tag_ids = list(bulk_upload.common_tags.values_list("id", flat=True))
             if tag_ids:
-                doc.tags.add(*tag_ids)
+                try:
+                    doc.tags.add(*tag_ids)
+                except BulkIndexError as exc:
+                    # ES is read-only (e.g. disk flood-stage).  Tags are saved
+                    # in the DB; indexing will catch up once ES recovers.
+                    logger.warning(
+                        "Tags saved for document %s but realtime indexing failed: %s",
+                        doc.id,
+                        exc,
+                    )
             bulk_upload.successful_uploads += 1
             bulk_upload.save(update_fields=["successful_uploads", "updated_at"])
             record_audit_event(
