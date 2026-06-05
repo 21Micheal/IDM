@@ -161,6 +161,101 @@ class DocumentTypeViewSet(AuditMixin, viewsets.ModelViewSet):
         instance.is_active = False
         instance.save(update_fields=["is_active"])
 
+    @action(detail=True, methods=["post"], url_path="duplicate",
+            permission_classes=[permissions.IsAuthenticated, permissions.IsAdminUser])
+    def duplicate(self, request, pk=None):
+        """
+        Deep-clone a document type (metadata fields + relationship rules).
+
+        Body (all optional):
+            { "name": "…", "code": "…" }
+
+        Returns the new DocumentType (HTTP 201).
+        """
+        import re
+
+        source = self.get_object()
+
+        # ── Derive defaults ──────────────────────────────────────────────────
+        raw_name = (request.data.get("name") or "").strip()
+        raw_code = (request.data.get("code") or "").strip().upper()
+
+        new_name = raw_name or f"Copy of {source.name}"
+        if not raw_code:
+            base = re.sub(r"[^A-Z0-9]", "_", source.code.upper())
+            new_code = (base + "_COPY")[:20]
+        else:
+            new_code = raw_code[:20]
+
+        # ── Validate uniqueness ──────────────────────────────────────────────
+        errors = {}
+        if DocumentType.objects.filter(name=new_name, is_active=True).exists():
+            errors["name"] = [f'A document type named "{new_name}" already exists.']
+        if DocumentType.objects.filter(code=new_code, is_active=True).exists():
+            errors["code"] = [f'The code "{new_code}" is already in use.']
+        if errors:
+            return Response(errors, status=status.HTTP_400_BAD_REQUEST)
+
+        # ── Deep-clone inside a transaction ──────────────────────────────────
+        from .models import MetadataField, DocumentRelationshipRule as RelRule
+
+        with transaction.atomic():
+            new_type = DocumentType.objects.create(
+                name=new_name,
+                code=new_code,
+                description=source.description or "",
+                reference_prefix=source.reference_prefix or new_code,
+                reference_padding=source.reference_padding,
+                title_field=source.title_field or "filename",
+                is_personal_type=source.is_personal_type,
+                metadata_mode=source.metadata_mode,
+                is_active=True,
+                created_by=request.user,
+            )
+
+            # Copy metadata fields
+            src_fields = list(
+                source.metadata_fields.all().order_by("order")
+            )
+            MetadataField.objects.bulk_create([
+                MetadataField(
+                    document_type=new_type,
+                    label=f.label,
+                    key=f.key,
+                    field_type=f.field_type,
+                    is_required=f.is_required,
+                    help_text=f.help_text or "",
+                    order=f.order,
+                    select_options=list(f.select_options or []),
+                )
+                for f in src_fields
+            ])
+
+            # Copy relationship rules (keep the same target types)
+            src_rules = list(
+                source.outgoing_relationship_rules.all()
+            )
+            RelRule.objects.bulk_create([
+                RelRule(
+                    source_document_type=new_type,
+                    target_document_type=r.target_document_type,
+                    relation_type=r.relation_type,
+                    source_field_key=r.source_field_key,
+                    target_field_key=r.target_field_key,
+                    match_operator=r.match_operator,
+                    description=r.description or "",
+                    is_active=r.is_active,
+                    require_confirmation=r.require_confirmation,
+                )
+                for r in src_rules
+            ])
+
+        new_type.refresh_from_db()
+        serializer = DocumentTypeSerializer(
+            new_type, context=self.get_serializer_context()
+        )
+        return Response(serializer.data, status=status.HTTP_201_CREATED)
+
 
 class DocumentVolumeView(APIView):
     """
@@ -314,25 +409,30 @@ class DocumentViewSet(AuditMixin, viewsets.ModelViewSet):
             )
             .prefetch_related("tags", "versions", "workflow_instance__tasks__step")
         )
-        if user.has_admin_access:
-            return qs
+        if not user.has_admin_access:
+            active_shared_docs = DocumentShare.objects.filter(
+                recipient=user,
+                revoked_at__isnull=True,
+            ).filter(
+                models.Q(expires_at__isnull=True) | models.Q(expires_at__gt=timezone.now())
+            ).values("document_id")
 
-        active_shared_docs = DocumentShare.objects.filter(
-            recipient=user,
-            revoked_at__isnull=True,
-        ).filter(
-            models.Q(expires_at__isnull=True) | models.Q(expires_at__gt=timezone.now())
-        ).values("document_id")
+            # Include documents uploaded by the user OR documents with active workflow tasks assigned to them
+            qs = qs.filter(
+                models.Q(uploaded_by=user) |
+                models.Q(
+                    workflow_instance__tasks__assigned_to=user,
+                    workflow_instance__tasks__status__in=["pending", "in_progress", "held", "returned"],
+                ) |
+                models.Q(id__in=active_shared_docs)
+            ).distinct()
 
-        # Include documents uploaded by the user OR documents with active workflow tasks assigned to them
-        return qs.filter(
-            models.Q(uploaded_by=user) | 
-            models.Q(
-                workflow_instance__tasks__assigned_to=user,
-                workflow_instance__tasks__status__in=["pending", "in_progress", "held", "returned"],
-            ) |
-            models.Q(id__in=active_shared_docs)
-        ).distinct()
+        # Trash visibility: the list shows either live docs or Trash (?trash=true).
+        # Detail/restore/purge actions can reach trashed docs so they remain operable.
+        if self.action == "list":
+            trash = str(self.request.query_params.get("trash", "")).lower() in ("true", "1", "yes")
+            qs = qs.filter(deleted_at__isnull=not trash)
+        return qs
 
     def get_serializer_class(self):
         if self.action == "list":
@@ -486,10 +586,59 @@ class DocumentViewSet(AuditMixin, viewsets.ModelViewSet):
             "uploaded_by": duplicate_doc.uploaded_by.get_full_name().strip() or duplicate_doc.uploaded_by.email,
         })
 
-    def perform_destroy(self, instance):
-        instance.status = DocumentStatus.VOID
-        instance.save(update_fields=["status", "updated_at"])
-        self.record_audit("document.deleted", instance)
+    # Statuses that a user may delete to Trash (pre-approval / creation stage).
+    TRASHABLE_STATUSES = {
+        DocumentStatus.DRAFT, DocumentStatus.RETURNED, DocumentStatus.REJECTED,
+    }
+
+    def _can_manage_trash(self, doc, user) -> bool:
+        return bool(user.has_admin_access or doc.uploaded_by_id == user.id)
+
+    def destroy(self, request, *args, **kwargs):
+        """Move a document to Trash (soft delete) rather than removing it."""
+        doc = self.get_object()
+        if doc.deleted_at:
+            return Response({"detail": "Document is already in Trash."}, status=400)
+        if doc.status not in self.TRASHABLE_STATUSES:
+            return Response(
+                {"detail": "Only draft, returned, or rejected documents can be moved to Trash."},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        # Bare UPDATE avoids re-triggering the synchronous search-index signal.
+        Document.objects.filter(id=doc.id).update(
+            deleted_at=timezone.now(), deleted_by=request.user, updated_at=timezone.now()
+        )
+        self.record_audit("document.deleted", doc, {"trashed": True})
+        return Response(status=status.HTTP_204_NO_CONTENT)
+
+    @action(detail=True, methods=["post"], permission_classes=[permissions.IsAuthenticated])
+    def restore(self, request, pk=None):
+        """Restore a document from Trash."""
+        doc = self.get_object()
+        if not doc.deleted_at:
+            return Response({"detail": "Document is not in Trash."}, status=400)
+        if not self._can_manage_trash(doc, request.user):
+            return Response({"detail": "Not permitted."}, status=status.HTTP_403_FORBIDDEN)
+        Document.objects.filter(id=doc.id).update(
+            deleted_at=None, deleted_by=None, updated_at=timezone.now()
+        )
+        self.record_audit("document.restored", doc)
+        doc.refresh_from_db()
+        return Response(DocumentDetailSerializer(doc, context={"request": request}).data)
+
+    @action(detail=True, methods=["post"], permission_classes=[permissions.IsAuthenticated])
+    def purge(self, request, pk=None):
+        """Permanently delete a document that is in Trash."""
+        doc = self.get_object()
+        if not doc.deleted_at:
+            return Response(
+                {"detail": "Only documents in Trash can be permanently deleted."}, status=400
+            )
+        if not self._can_manage_trash(doc, request.user):
+            return Response({"detail": "Not permitted."}, status=status.HTTP_403_FORBIDDEN)
+        self.record_audit("document.purged", doc, {"reference": doc.reference_number})
+        doc.hard_delete()
+        return Response(status=status.HTTP_204_NO_CONTENT)
 
     @action(detail=True, methods=["post"])
     def submit(self, request, pk=None):
@@ -629,7 +778,7 @@ class DocumentViewSet(AuditMixin, viewsets.ModelViewSet):
         """
         from types import SimpleNamespace
         from django.core.files.base import ContentFile
-        from elasticsearch.helpers import BulkIndexError
+        from apps.search.utils import SEARCH_INDEX_EXCEPTIONS
         from apps.documents.access import document_allows_edit
         from apps.documents.file_streaming import user_can_edit_document
         from apps.templates_engine.tasks import generate_built_pdf
@@ -688,7 +837,7 @@ class DocumentViewSet(AuditMixin, viewsets.ModelViewSet):
         doc.preview_pdf = ""
         try:
             doc.save()
-        except BulkIndexError:
+        except SEARCH_INDEX_EXCEPTIONS:
             # ES read-only (disk flood-stage). The row is committed; indexing will
             # catch up. Don't fail the edit.
             logger.warning("Form document %s saved but realtime indexing failed.", doc.id)
@@ -1543,6 +1692,31 @@ echo "✓ DocVault LibreOffice integration installed."
                     doc.status = DocumentStatus.VOID
                     doc.save(update_fields=["status", "updated_at"])
                     self.record_audit(AuditEvent.DOCUMENT_DELETED, doc, {"bulk_action": True, "comment": comment})
+                elif act == "trash":
+                    if doc.deleted_at:
+                        raise ValueError("Already in Trash.")
+                    if doc.status not in self.TRASHABLE_STATUSES:
+                        raise ValueError("Only draft, returned, or rejected documents can be moved to Trash.")
+                    Document.objects.filter(id=doc.id).update(
+                        deleted_at=timezone.now(), deleted_by=request.user, updated_at=timezone.now()
+                    )
+                    self.record_audit("document.deleted", doc, {"bulk_action": True, "trashed": True})
+                elif act == "restore":
+                    if not doc.deleted_at:
+                        raise ValueError("Document is not in Trash.")
+                    if not self._can_manage_trash(doc, request.user):
+                        raise ValueError("Not permitted.")
+                    Document.objects.filter(id=doc.id).update(
+                        deleted_at=None, deleted_by=None, updated_at=timezone.now()
+                    )
+                    self.record_audit("document.restored", doc, {"bulk_action": True})
+                elif act == "purge":
+                    if not doc.deleted_at:
+                        raise ValueError("Only documents in Trash can be permanently deleted.")
+                    if not self._can_manage_trash(doc, request.user):
+                        raise ValueError("Not permitted.")
+                    self.record_audit("document.purged", doc, {"bulk_action": True, "reference": doc.reference_number})
+                    doc.hard_delete()
                 results.append({"id": str(doc_id), "success": True})
             except (WorkflowError, ValueError, AttributeError) as exc:
                 results.append({"id": str(doc_id), "success": False, "detail": str(exc)})
@@ -1584,37 +1758,14 @@ echo "✓ DocVault LibreOffice integration installed."
             .filter(id__in=doc_ids)
             .select_related("document_type", "uploaded_by")
         )
+        # Preserve the caller's order — it controls stitching order.
+        order = {str(doc_id): idx for idx, doc_id in enumerate(doc_ids)}
+        documents.sort(key=lambda d: order.get(str(d.id), len(order)))
         found_ids = {doc.id for doc in documents}
         missing_ids = [str(doc_id) for doc_id in doc_ids if doc_id not in found_ids]
 
-        attachments = []
-        skipped = []
-        for doc in documents:
-            if not user_can_download_document(request.user, doc):
-                skipped.append({
-                    "id": str(doc.id),
-                    "title": doc.title,
-                    "detail": "Download not permitted.",
-                })
-                continue
-            try:
-                raw, content_type, filename = read_document_bytes(
-                    doc,
-                    version=None,
-                    use_preview=False,
-                )
-                attachments.append({
-                    "document": doc,
-                    "raw": raw,
-                    "content_type": content_type,
-                    "filename": filename,
-                })
-            except FileNotFoundError as exc:
-                skipped.append({
-                    "id": str(doc.id),
-                    "title": doc.title,
-                    "detail": str(exc),
-                })
+        from .bundling import collect_document_files, stitch_items_to_pdf
+        attachments, skipped = collect_document_files(documents, request.user)
 
         if not attachments:
             return Response({
@@ -1647,25 +1798,16 @@ echo "✓ DocVault LibreOffice integration installed."
             to=sorted(recipients),
         )
 
+        # "combined" = stitch documents into ONE merged PDF (in the chosen order).
         if attachment_mode == "combined" and len(attachments) > 1:
-            archive = io.BytesIO()
-            used_names = set()
-            with zipfile.ZipFile(archive, "w", zipfile.ZIP_DEFLATED) as zf:
+            stitched_pdf, stitch_skipped = stitch_items_to_pdf(attachments)
+            skipped.extend(stitch_skipped)
+            if stitched_pdf:
+                email.attach("documents.pdf", stitched_pdf, "application/pdf")
+            else:
+                # Nothing could be stitched — fall back to individual attachments.
                 for item in attachments:
-                    name = item["filename"] or f"{item['document'].reference_number}.bin"
-                    base_name = name
-                    counter = 2
-                    while name in used_names:
-                        stem, dot, ext = base_name.rpartition(".")
-                        if dot:
-                            name = f"{stem}-{counter}.{ext}"
-                        else:
-                            name = f"{base_name}-{counter}"
-                        counter += 1
-                    used_names.add(name)
-                    zf.writestr(name, item["raw"])
-            archive.seek(0)
-            email.attach("documents.zip", archive.read(), "application/zip")
+                    email.attach(item["filename"], item["raw"], item["content_type"])
         else:
             for item in attachments:
                 email.attach(item["filename"], item["raw"], item["content_type"])
@@ -1689,6 +1831,40 @@ echo "✓ DocVault LibreOffice integration installed."
             "missing": missing_ids,
             "skipped": skipped,
         })
+
+    @action(detail=False, methods=["post"], url_path="download_selected")
+    def download_selected(self, request):
+        """Bulk-download the selected documents as a single ZIP file."""
+        from django.http import HttpResponse
+        from .bundling import collect_document_files, zip_items
+
+        doc_ids = request.data.get("document_ids") or []
+        if not isinstance(doc_ids, list) or not doc_ids:
+            return Response({"detail": "No documents selected."}, status=400)
+        if len(doc_ids) > 100:
+            return Response({"detail": "Select at most 100 documents."}, status=400)
+
+        documents = list(
+            Document.objects.filter(id__in=doc_ids).select_related("document_type", "uploaded_by")
+        )
+        order = {str(doc_id): idx for idx, doc_id in enumerate(doc_ids)}
+        documents.sort(key=lambda d: order.get(str(d.id), len(order)))
+
+        items, skipped = collect_document_files(documents, request.user)
+        if not items:
+            return Response(
+                {"detail": "No selected documents could be downloaded.", "skipped": skipped},
+                status=400,
+            )
+
+        zip_bytes = zip_items(items)
+        for item in items:
+            self.record_audit("document.downloaded", item["document"], {"bulk_action": True, "via": "zip"})
+
+        response = HttpResponse(zip_bytes, content_type="application/zip")
+        response["Content-Disposition"] = 'attachment; filename="documents.zip"'
+        response["X-Skipped-Count"] = str(len(skipped))
+        return response
 
     @action(detail=False, methods=["post"], url_path="share_selected")
     def share_selected(self, request):

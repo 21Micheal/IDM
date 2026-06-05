@@ -1165,6 +1165,47 @@ def auto_archive_documents() -> dict:
     }
 
 
+@shared_task(queue="default")
+def empty_trash() -> dict:
+    """Permanently delete documents that have been in Trash beyond the retention period."""
+    from apps.audit.utils import record_audit_event
+    from apps.documents.models import DMSSettings, Document
+
+    dms_settings = DMSSettings.load()
+    if not dms_settings.trash_auto_empty_enabled:
+        return {"purged": 0, "enabled": False}
+
+    cutoff = timezone.now() - timedelta(days=dms_settings.trash_retention_days)
+    candidates = list(
+        Document.objects
+        .filter(deleted_at__isnull=False, deleted_at__lte=cutoff)
+        .select_related("uploaded_by")[:500]
+    )
+
+    purged = 0
+    for doc in candidates:
+        ref = doc.reference_number
+        doc_id = str(doc.id)
+        try:
+            record_audit_event(
+                "document.purged",
+                actor=None,
+                obj=doc,
+                changes={"source": "empty_trash", "reference": ref,
+                         "retention_days": dms_settings.trash_retention_days},
+            )
+            doc.hard_delete()
+            purged += 1
+        except Exception:
+            logger.exception("empty_trash: failed purging document %s", doc_id)
+
+    return {
+        "purged": purged,
+        "enabled": True,
+        "retention_days": dms_settings.trash_retention_days,
+    }
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 # Helpers
 # ─────────────────────────────────────────────────────────────────────────────

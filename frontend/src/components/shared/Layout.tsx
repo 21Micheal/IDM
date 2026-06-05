@@ -15,7 +15,7 @@ import {
   LayoutDashboard, FileText, Upload, Search,
   Workflow, ShieldCheck, Settings, LogOut,
   Bell, Users, Building2, UserRoundCog, Shield,
-  ChevronDown, ChevronRight, Archive, ScanLine, Loader2, UserCheck, Monitor, Lock, History,
+  ChevronDown, ChevronRight, Archive, ScanLine, Loader2, UserCheck, Monitor, Lock, History, Trash2,
   BellRing, CircleUserRound, ClipboardCheck, Inbox, ArrowRight, FileSignature, LayoutTemplate,
 } from "lucide-react";
 import { useAuthStore } from "../../store/authStore";
@@ -79,6 +79,7 @@ const mainNav: NavEntry[] = [
       { to: "/documents?status=archived", icon: Archive,  label: "Archived" },
       { to: "/documents/upload",          icon: Upload,   label: "Upload" },
       { to: "/documents/scan",            icon: ScanLine, label: "Scan" },
+      { to: "/documents/trash",           icon: Trash2,   label: "Trash" },
       { to: "/search",                    icon: Search,   label: "Search" },
     ],
   } as NavGroup,

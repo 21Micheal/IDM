@@ -60,6 +60,8 @@ export type DmsSettings = {
   signed_file_urls_enabled: boolean;
   auto_archive_enabled: boolean;
   auto_archive_after_days: number;
+  trash_auto_empty_enabled: boolean;
+  trash_retention_days: number;
   require_metadata_on_upload: boolean;
   updated_at?: string;
 };
@@ -269,7 +271,12 @@ export const documentsAPI = {
   updateForm: (id: string, values: Record<string, unknown>) =>
     api.post(`/documents/${id}/update_form/`, { values }),
 
+  /** Move a (draft/returned/rejected) document to Trash (soft delete). */
   delete: (id: string) => api.delete(`/documents/${id}/`),
+  /** Restore a document from Trash. */
+  restore: (id: string) => api.post(`/documents/${id}/restore/`),
+  /** Permanently delete a document that is in Trash. */
+  purge: (id: string) => api.post(`/documents/${id}/purge/`),
   submit: (id: string) => api.post(`/documents/${id}/submit/`),
   archive: (id: string) => api.post(`/documents/${id}/archive/`),
 
@@ -307,7 +314,7 @@ export const documentsAPI = {
 
   bulkAction: (
     documentIds: string[],
-    action: "approve" | "reject" | "archive" | "void",
+    action: "approve" | "reject" | "archive" | "void" | "trash" | "restore" | "purge",
     comment = ""
   ) =>
     api.post("/documents/bulk_action/", {
@@ -323,6 +330,10 @@ export const documentsAPI = {
     attachment_mode: "separate" | "combined";
     message?: string;
   }) => api.post("/documents/email_selected/", data),
+
+  /** Bulk-download selected documents as a single ZIP (returns a Blob). */
+  downloadSelected: (documentIds: string[]) =>
+    api.post("/documents/download_selected/", { document_ids: documentIds }, { responseType: "blob" }),
 
   shareSelected: (data: {
     document_ids: string[];
@@ -443,6 +454,9 @@ export const documentTypesAPI = {
   update: (id: string, data: unknown) =>
     api.patch(`/documents/types/${id}/`, data),
   delete: (id: string) => api.delete(`/documents/types/${id}/`),
+  /** Deep-clone a document type (fields + rules). Returns the new type. */
+  duplicate: (id: string, data: { name: string; code: string }) =>
+    api.post(`/documents/types/${id}/duplicate/`, data),
 };
 
 export const searchAPI = {

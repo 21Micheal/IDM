@@ -200,6 +200,7 @@ CELERY_TASK_ROUTES = {
     "apps.documents.tasks.extract_text": {"queue": "indexing"},
     "apps.documents.tasks.generate_document_preview": {"queue": "preview"},
     "apps.documents.tasks.auto_archive_documents": {"queue": "default"},
+    "apps.documents.tasks.empty_trash": {"queue": "default"},
 }
 WORKFLOW_SLA_WARNING_HOURS = env.int("WORKFLOW_SLA_WARNING_HOURS", default=4)
 WORKFLOW_HOLD_WARNING_HOURS = env.int("WORKFLOW_HOLD_WARNING_HOURS", default=2)
@@ -218,6 +219,10 @@ CELERY_BEAT_SCHEDULE = {
     },
     "documents-auto-archive": {
         "task": "apps.documents.tasks.auto_archive_documents",
+        "schedule": 60 * 60,
+    },
+    "documents-empty-trash": {
+        "task": "apps.documents.tasks.empty_trash",
         "schedule": 60 * 60,
     },
 }

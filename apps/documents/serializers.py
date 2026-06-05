@@ -37,7 +37,7 @@ from django.utils.text import slugify
 import mimetypes
 import uuid
 from django.core.files.storage import default_storage
-from apps.search.utils import summarize_bulk_index_error
+from apps.search.utils import summarize_bulk_index_error, SEARCH_INDEX_EXCEPTIONS
 from .file_streaming import build_absolute_document_file_url, user_can_download_document
 
 PERSONAL_DOCUMENT_TYPE_CODE = "PERSONAL"
@@ -188,12 +188,19 @@ class DMSSettingsSerializer(serializers.ModelSerializer):
             "signed_file_urls_enabled",
             "auto_archive_enabled",
             "auto_archive_after_days",
+            "trash_auto_empty_enabled",
+            "trash_retention_days",
             "require_metadata_on_upload",
             "bulk_scan_submit_for_approval",
             "access_stages",
             "updated_at",
         ]
         read_only_fields = ["updated_at"]
+
+    def validate_trash_retention_days(self, value):
+        if value < 1:
+            raise serializers.ValidationError("Trash retention must be at least 1 day.")
+        return value
 
     def validate_watermark_opacity(self, value):
         if value < 1 or value > 80:
@@ -359,6 +366,7 @@ class DocumentListSerializer(serializers.ModelSerializer):
     available_bulk_actions = serializers.SerializerMethodField()
     shared_with_me = serializers.SerializerMethodField()
     share_access_level = serializers.SerializerMethodField()
+    deleted_by_name = serializers.SerializerMethodField()
 
     class Meta:
         model  = Document
@@ -374,8 +382,12 @@ class DocumentListSerializer(serializers.ModelSerializer):
             "preview_pdf", "preview_status",
             "edit_locked_by", "edit_locked_by_name", "edit_locked_at", "is_edit_locked",
             "current_version", "created_at", "updated_at",
+            "deleted_at", "deleted_by_name",
             "available_bulk_actions", "shared_with_me", "share_access_level",
         ]
+
+    def get_deleted_by_name(self, obj):
+        return obj.deleted_by.get_full_name() if obj.deleted_by else None
 
 
     def get_description(self, obj):
@@ -476,11 +488,27 @@ class DocumentListSerializer(serializers.ModelSerializer):
         if obj.status == "approved":
             actions.append("archive")
 
-        # Void action - for most statuses except archived/void
-        if obj.status not in ["archived", "void"]:
+        # Delete to Trash - creation-stage documents the user is allowed to delete.
+        trashable = obj.status in {"draft", "returned", "rejected"}
+        can_delete = self._user_can_delete(obj, user)
+        if trashable and can_delete:
+            actions.append("trash")
+
+        # Void - other non-terminal statuses (kept as the admin terminal action).
+        # Suppressed where we already offered "trash" so users don't see two
+        # delete-like actions for the same document.
+        if obj.status not in ["archived", "void"] and not (trashable and can_delete):
             actions.append("void")
 
         return actions
+
+    def _user_can_delete(self, obj, user) -> bool:
+        if user.has_admin_access:
+            return True
+        if obj.is_self_upload and obj.uploaded_by_id == user.id:
+            return True
+        from apps.documents.access import effective_permissions_for_user
+        return GroupAction.DELETE.value in effective_permissions_for_user(user, obj)
 
 
 class DocumentDetailSerializer(serializers.ModelSerializer):
@@ -688,7 +716,6 @@ class DocumentMetadataEditSerializer(serializers.ModelSerializer):
         ]
 
     def update(self, instance, validated_data):
-        from elasticsearch.helpers import BulkIndexError
 
         tags = validated_data.pop("tags", None)
         personal_tags = validated_data.pop("personal_tags", None)
@@ -703,7 +730,7 @@ class DocumentMetadataEditSerializer(serializers.ModelSerializer):
 
         try:
             instance.save()
-        except BulkIndexError as exc:
+        except SEARCH_INDEX_EXCEPTIONS as exc:
             # The DB save has already succeeded at this point; django-elasticsearch-dsl
             # raised while trying to mirror the row into Elasticsearch in post_save.
             logger.warning(
@@ -715,7 +742,7 @@ class DocumentMetadataEditSerializer(serializers.ModelSerializer):
         if tags is not None:
             try:
                 instance.tags.set(tags)
-            except BulkIndexError as exc:
+            except SEARCH_INDEX_EXCEPTIONS as exc:
                 logger.warning(
                     "Metadata tags saved for %s but realtime indexing failed: %s",
                     instance.id,
@@ -834,7 +861,6 @@ class DocumentUploadSerializer(serializers.ModelSerializer):
     def create(self, validated_data):
         import hashlib
         import magic as python_magic
-        from elasticsearch.helpers import BulkIndexError
 
         tags          = validated_data.pop("tags", [])
         personal_tags = validated_data.pop("personal_tags", None)
@@ -922,7 +948,7 @@ class DocumentUploadSerializer(serializers.ModelSerializer):
 
         try:
             doc = super().create(validated_data)
-        except BulkIndexError as exc:
+        except SEARCH_INDEX_EXCEPTIONS as exc:
             logger.warning(
                 "Document saved for reference %s but realtime indexing failed: %s",
                 validated_data["reference_number"],
@@ -967,7 +993,7 @@ class DocumentUploadSerializer(serializers.ModelSerializer):
 
         try:
             doc.tags.set(tags)
-        except BulkIndexError as exc:
+        except SEARCH_INDEX_EXCEPTIONS as exc:
             logger.warning(
                 "Document tags saved for %s but realtime indexing failed: %s",
                 doc.id,
@@ -1053,7 +1079,7 @@ class DocumentBulkActionSerializer(serializers.Serializer):
     document_ids = serializers.ListField(
         child=serializers.UUIDField(), min_length=1, max_length=100,
     )
-    action  = serializers.ChoiceField(choices=["approve", "reject", "archive", "void"])
+    action  = serializers.ChoiceField(choices=["approve", "reject", "archive", "void", "trash", "restore", "purge"])
     comment = serializers.CharField(required=False, allow_blank=True, default="")
 
     def validate(self, attrs):

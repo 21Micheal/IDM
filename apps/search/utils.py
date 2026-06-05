@@ -5,6 +5,46 @@ from __future__ import annotations
 from typing import Any
 
 
+def _build_search_index_exceptions() -> tuple:
+    """
+    All Elasticsearch/transport errors that the synchronous index signal can raise
+    during a document write — whether ES is read-only (BulkIndexError),
+    unreachable (ConnectionError), timing out, or returning an API error.
+
+    Document writes catch these so persistence never fails just because search
+    indexing did; indexing catches up later (signals re-fire / reindex job).
+    """
+    collected: list[type] = []
+    try:
+        from elasticsearch.helpers import BulkIndexError
+        collected.append(BulkIndexError)
+    except Exception:  # pragma: no cover - import guard
+        pass
+    try:
+        # elastic_transport is the transport layer for elasticsearch>=8; ConnectionError
+        # and ConnectionTimeout subclass TransportError.
+        from elastic_transport import TransportError
+        collected.append(TransportError)
+    except Exception:  # pragma: no cover
+        pass
+    try:
+        # API-level errors (and, on older clients, the common base class).
+        from elasticsearch import ApiError
+        collected.append(ApiError)
+    except Exception:  # pragma: no cover
+        pass
+    try:
+        from elasticsearch.exceptions import ElasticsearchException
+        collected.append(ElasticsearchException)
+    except Exception:  # pragma: no cover
+        pass
+    return tuple(dict.fromkeys(collected)) or (Exception,)
+
+
+# Tuple usable directly in `except SEARCH_INDEX_EXCEPTIONS:` clauses.
+SEARCH_INDEX_EXCEPTIONS = _build_search_index_exceptions()
+
+
 def summarize_bulk_index_error(exc: Exception) -> str:
     """
     Return a concise, operator-friendly summary for BulkIndexError payloads.

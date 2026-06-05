@@ -6,7 +6,7 @@ from __future__ import annotations
 import logging
 import os
 
-from elasticsearch.helpers import BulkIndexError
+from apps.search.utils import SEARCH_INDEX_EXCEPTIONS
 
 from .models import BulkUpload, BulkUploadStatus, Document, DocumentType, OCRStatus
 from .serializers import DocumentUploadSerializer
@@ -171,7 +171,7 @@ def create_bulk_upload_documents(
             if tag_ids:
                 try:
                     doc.tags.add(*tag_ids)
-                except BulkIndexError as exc:
+                except SEARCH_INDEX_EXCEPTIONS as exc:
                     # ES is read-only (e.g. disk flood-stage).  Tags are saved
                     # in the DB; indexing will catch up once ES recovers.
                     logger.warning(

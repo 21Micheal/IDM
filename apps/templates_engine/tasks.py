@@ -5,7 +5,7 @@ import os
 import re
 import logging
 
-from elasticsearch.helpers import BulkIndexError
+from apps.search.utils import SEARCH_INDEX_EXCEPTIONS
 
 logger = logging.getLogger(__name__)
 
@@ -406,10 +406,14 @@ def generate_document_from_template_sync(template, values, fmt, title, user, typ
         is_self_upload=False,
         status=DocumentStatus.DRAFT,
         metadata=doc_metadata,
+        # A template-generated document is the starting point, not a user version.
+        # It stays unversioned (v0 → shows as "—") until the user first edits it,
+        # at which point the first save becomes version 1.
+        current_version=0,
     )
     try:
         doc = Document.objects.create(**create_kwargs)
-    except BulkIndexError:
+    except SEARCH_INDEX_EXCEPTIONS:
         # Elasticsearch is read-only (e.g. disk flood-stage). The row is already
         # committed; fetch it so document creation still succeeds. Indexing will
         # catch up once ES recovers.
@@ -418,6 +422,7 @@ def generate_document_from_template_sync(template, values, fmt, title, user, typ
             reference_number,
         )
         doc = Document.objects.get(reference_number=reference_number)
+
     if doc.is_office_doc():
         try:
             from apps.documents.tasks import generate_document_preview

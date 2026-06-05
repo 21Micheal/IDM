@@ -4,7 +4,7 @@ import { dmsSettingsAPI, type DmsSettings } from "@/services/api";
 import { toast } from "@/components/ui/vault-toast";
 import {
   Copy, Archive, Droplets, ClipboardCheck, Loader2, RotateCcw, Save,
-  Link2,
+  Link2, Trash2,
 } from "lucide-react";
 import clsx from "clsx";
 
@@ -238,6 +238,42 @@ function SettingsTab() {
               <span className="text-sm text-muted-foreground">days since last update</span>
             </div>
           </label>
+        </section>
+
+        <section className="card p-5 space-y-4">
+          <div className="flex items-start gap-3">
+            <div className="flex h-10 w-10 items-center justify-center rounded-lg bg-rose-500/10 text-rose-700">
+              <Trash2 className="h-5 w-5" />
+            </div>
+            <div>
+              <h3 className="font-semibold text-foreground">Trash auto-empty</h3>
+              <p className="text-sm text-muted-foreground">
+                Permanently delete documents that have stayed in Trash beyond the retention period.
+              </p>
+            </div>
+          </div>
+          <Toggle
+            checked={settings.trash_auto_empty_enabled}
+            onChange={(checked) => update("trash_auto_empty_enabled", checked)}
+            label="Automatically empty Trash"
+            description="A scheduled job permanently removes documents left in Trash too long."
+          />
+          <label className="block">
+            <span className="label">Empty documents from Trash after</span>
+            <div className="flex items-center gap-2">
+              <input
+                type="number"
+                min={1}
+                className="input max-w-36"
+                value={settings.trash_retention_days}
+                onChange={(e) => update("trash_retention_days", Math.max(1, Number(e.target.value) || 1))}
+              />
+              <span className="text-sm text-muted-foreground">days in Trash</span>
+            </div>
+          </label>
+          <div className="rounded-lg border border-border bg-muted/40 px-4 py-3 text-sm text-muted-foreground">
+            Permanent deletion cannot be undone. Restore anything worth keeping before it ages out.
+          </div>
         </section>
 
         <section className="card p-5 space-y-4">

@@ -17,6 +17,8 @@ class AuditEvent(models.TextChoices):
     DOCUMENT_PRINTED = "document.printed", "Document Print Requested"
     DOCUMENT_UPDATED = "document.updated", "Document Updated"
     DOCUMENT_DELETED = "document.deleted", "Document Deleted"
+    DOCUMENT_RESTORED = "document.restored", "Document Restored from Trash"
+    DOCUMENT_PURGED = "document.purged", "Document Permanently Deleted"
     DOCUMENT_SUBMITTED = "document.submitted", "Submitted for Approval"
     DOCUMENT_BULK_UPLOADED = "document.bulk_uploaded", "Document Bulk Uploaded"
     DOCUMENT_BULK_REVIEWED = "document.bulk_reviewed", "Bulk Upload Reviewed"

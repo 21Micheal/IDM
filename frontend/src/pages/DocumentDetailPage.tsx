@@ -1,4 +1,4 @@
-import { Suspense, useState, useEffect, useRef, useCallback } from "react";
+import { Suspense, useState, useEffect, useRef, useCallback, useMemo } from "react";
 import { useParams, useNavigate } from "react-router-dom";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { api, documentsAPI, workflowAPI } from "@/services/api";
@@ -16,7 +16,7 @@ import {
   ArrowLeft, Send, MessageSquare, ShieldCheck,
   Loader2, RotateCcw, Edit2, Lock, Info, Download,
   AlertTriangle, ScanLine, RefreshCw,
-  Printer, Trash2, X, Check, Link2, Plus, ExternalLink, Columns2, Eye, EyeOff
+  Printer, Trash2, X, Check, Link2, Plus, ExternalLink, Columns2, Eye, EyeOff, Archive
 } from "lucide-react";
 import { toast } from "@/components/ui/vault-toast";
 import { useAuthStore } from "@/store/authStore";
@@ -493,6 +493,17 @@ export default function DocumentDetailPage() {
       toast.error(err?.response?.data?.detail || "Could not update the form."),
   });
 
+  const deleteMutation = useMutation({
+    mutationFn: () => documentsAPI.delete(id!),
+    onSuccess: () => {
+      toast.success("Moved to Trash.");
+      qc.invalidateQueries({ queryKey: ["documents"] });
+      navigate("/documents");
+    },
+    onError: (err: any) =>
+      toast.error(err?.response?.data?.detail || "Could not delete document."),
+  });
+
   const addRelationshipMutation = useMutation({
     mutationFn: () =>
       documentsAPI.addRelationship(id!, {
@@ -541,6 +552,31 @@ export default function DocumentDetailPage() {
     },
     onError: () => toast.error("Could not remove document relationship."),
   });
+  // Keep derived hooks/values above early returns so hook order remains stable
+  const relationshipSearchResults = useMemo<Document[]>(() => {
+    const raw = (relationshipSearchData?.results ?? []) as Document[];
+    const filtered = raw.filter((candidate) => {
+      if (!doc?.id) return false;
+      if (candidate.id === doc.id) return false;
+      if (candidate.is_self_upload) return false;
+      // Remove candidates that are already related with the same relation type
+      if (relationships.some((relationship) => (
+        relationship.related_document.id === candidate.id &&
+        relationship.relation_type === relationshipType
+      ))) return false;
+
+      // If a search term exists, ensure candidate matches it in title, reference, or supplier
+      const q = relationshipSearch.trim().toLowerCase();
+      if (q.length >= 2) {
+        const hay = [candidate.title, candidate.reference_number, candidate.supplier, candidate.document_type_name]
+          .filter(Boolean).join(" ").toLowerCase();
+        if (!hay.includes(q)) return false;
+      }
+
+      return true;
+    });
+    return filtered;
+  }, [relationshipSearchData, doc?.id, relationships, relationshipType, relationshipSearch]);
 
   if (isLoading)
     return (
@@ -589,12 +625,7 @@ export default function DocumentDetailPage() {
     );
   }
 
-  const relationshipSearchResults = ((relationshipSearchData?.results ?? []) as Document[])
-    .filter((candidate) => candidate.id !== doc.id)
-    .filter((candidate) => !relationships.some((relationship) => (
-      relationship.related_document.id === candidate.id &&
-      relationship.relation_type === relationshipType
-    )));
+  
   const relationshipSuggestions = (
     Array.isArray(doc.metadata?.relationship_suggestions)
       ? doc.metadata.relationship_suggestions
@@ -665,6 +696,10 @@ export default function DocumentDetailPage() {
     (isPersonal || doc.status === "approved");
 
   const isDraftOrRejected = ["draft", "rejected", "returned"].includes(doc.status);
+  // Delete to Trash: creation-stage documents the user is allowed to delete.
+  const canDelete = (hasAdminAccess || permissions.includes("delete"))
+    && ["draft", "returned", "rejected"].includes(doc.status)
+    && !doc.deleted_at;
   const auditCount = auditLogs?.count ?? 0;
   const auditPages = Math.max(1, Math.ceil(auditCount / AUDIT_PAGE_SIZE));
   const sortedDocumentVersions = [...(doc.versions ?? [])].sort((a, b) => a.version_number - b.version_number);
@@ -932,7 +967,21 @@ export default function DocumentDetailPage() {
               className="flex h-8 items-center gap-1 px-2 transition-colors hover:bg-white/10 hover:text-white disabled:opacity-50"
               title="Archive document"
             >
-              {archiveMutation.isPending ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <Trash2 className="w-3.5 h-3.5" />}
+              {archiveMutation.isPending ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <Archive className="w-3.5 h-3.5" />}
+              <span className="sr-only sm:not-sr-only">Archive</span>
+            </button>
+          )}
+
+          {canDelete && (
+            <button
+              onClick={() => {
+                if (window.confirm("Move this document to Trash? You can restore it later.")) deleteMutation.mutate();
+              }}
+              disabled={deleteMutation.isPending}
+              className="flex h-8 items-center gap-1 px-2 transition-colors hover:bg-white/10 hover:text-white disabled:opacity-50"
+              title="Move to Trash"
+            >
+              {deleteMutation.isPending ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <Trash2 className="w-3.5 h-3.5" />}
               <span className="sr-only sm:not-sr-only">Delete</span>
             </button>
           )}

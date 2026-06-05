@@ -11,6 +11,7 @@ const ForceChangePasswordPage = lazy(() => import("@/pages/ForceChangePasswordPa
 const DashboardPage = lazy(() => import("@/pages/DashboardPage"));
 const AnalyticsDashboardPage = lazy(() => import("@/pages/AnalyticsDashboard"));
 const DocumentsPage = lazy(() => import("@/pages/DocumentsPage"));
+const TrashPage = lazy(() => import("@/pages/TrashPage"));
 const DocumentDetailPage = lazy(() => import("@/pages/DocumentDetailPage"));
 const UploadPage = lazy(() => import("@/pages/UploadPage"));
 const SearchPage = lazy(() => import("@/pages/SearchPage"));
@@ -243,6 +244,7 @@ export default function App() {
 
               {/* Documents */}
               <Route path="documents"        element={<DocumentsPage />} />
+              <Route path="documents/trash"  element={<TrashPage />} />
               <Route path="personal-documents" element={<DocumentsPage personalOnly />} />
               <Route path="documents/upload" element={<UploadPage />} />
               <Route path="documents/scan"   element={<UploadPage scanOnly />} />

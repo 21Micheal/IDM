@@ -20,6 +20,7 @@ import { highlightSearchText, getPreferredHighlights } from "@/lib/search";
 import { QUERY_FIVE_MIN_STALE, QUERY_SHORT_STALE, QUERY_FOCUS_OFF } from "@/lib/reactQueryDefaults";
 import { formatDocumentFileType } from "@/lib/documentFormat";
 import { preloadDocumentWorkspace } from "@/lib/routePreload";
+import statusUtils from "@/lib/status";
 import {
   DEFAULT_WORKFLOW_TASK_FILTERS,
   buildWorkflowTaskFilterOptions,
@@ -378,7 +379,7 @@ export default function DashboardPage() {
   // ── Queries ───────────────────────────────────────────────────────────────
 
   const { data: recentDocs, isLoading: docsLoading } = useQuery({
-    queryKey: ["documents", "recent", recentDocsPage],
+          queryKey: ["documents", "recent", recentDocsPage],
     queryFn: () =>
       documentsAPI.list({
         page: recentDocsPage,
@@ -550,7 +551,30 @@ export default function DashboardPage() {
 
   // ── Computed Values ───────────────────────────────────────────────────────
 
-  const recentDocsCount = recentDocs?.count ?? 0;
+  // Allow strict client-side filtering of the recent documents view when
+  // URL query params are present (e.g. coming from /documents?status=...).
+  const urlSearchParams = useMemo(() => new URLSearchParams(window.location.search), []);
+  const urlStatus = urlSearchParams.get("status") || "";
+  const urlDocType = urlSearchParams.get("document_type") || "";
+
+  const recentDocsDisplay = useMemo(() => {
+    if (!recentDocs) return recentDocs;
+    if (!urlStatus && !urlDocType) return recentDocs;
+        const filtered = recentDocs.results.filter((doc: Document) => {
+          if (urlStatus && !statusUtils.statusMatchesFilter(doc.status, urlStatus)) return false;
+          if (urlDocType) {
+            const docTypeName =
+              typeof (doc as any).document_type === "string"
+                ? (doc as any).document_type
+                : (doc as any).document_type?.name ?? String((doc as any).document_type ?? "");
+            if (docTypeName !== urlDocType) return false;
+          }
+          return true;
+        });
+    return { ...recentDocs, results: filtered, count: filtered.length } as PaginatedResponse<Document>;
+  }, [recentDocs, urlStatus, urlDocType]);
+
+  const recentDocsCount = recentDocsDisplay?.count ?? 0;
   const recentAuditCount = recentAudit?.count ?? 0;
   const recentDocsPages = Math.max(1, Math.ceil(recentDocsCount / RECENT_DOCS_PAGE_SIZE));
   const recentAuditPages = Math.max(1, Math.ceil(recentAuditCount / RECENT_AUDIT_PAGE_SIZE));
@@ -1107,7 +1131,7 @@ export default function DashboardPage() {
                   </tr>
                 </thead>
                 <tbody>
-                  {recentDocs.results.map((doc: Document) => (
+                  {recentDocsDisplay?.results.map((doc: Document) => (
                     <tr
                       key={doc.id}
                       className="cursor-pointer border-t border-[#D3D7DA] transition hover:bg-[#F5F7F8]"

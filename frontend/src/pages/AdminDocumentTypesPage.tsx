@@ -161,6 +161,11 @@ export default function AdminDocumentTypesPage() {
   const [activeTab, setActiveTab] = useState<TabId>("general");
   const [search, setSearch] = useState("");
 
+  // ── Duplicate dialog state ────────────────────────────────────────────────
+  const [duplicateDialogOpen, setDuplicateDialogOpen] = useState(false);
+  const [duplicateName, setDuplicateName] = useState("");
+  const [duplicateCode, setDuplicateCode] = useState("");
+
   const { data: types = [], isLoading } = useQuery<unknown, Error, DocumentType[]>({
     queryKey: ["document-types"],
     queryFn: () => documentApi.types().then((response) => response.data as unknown),
@@ -231,6 +236,35 @@ export default function AdminDocumentTypesPage() {
     },
     onError: (err: any) => toast.error(err?.response?.data?.detail || "Failed to delete document type."),
   });
+
+  const duplicateMutation = useMutation({
+    mutationFn: ({ id, name, code }: { id: string; name: string; code: string }) =>
+      documentTypesAPI.duplicate(id, { name, code }),
+    onSuccess: (response) => {
+      const newType = response.data as DocumentType;
+      toast.success(`Document type "${newType.name}" created as a duplicate.`);
+      qc.invalidateQueries({ queryKey: ["document-types"] });
+      setDuplicateDialogOpen(false);
+      // Auto-open the new type for editing once the list refreshes
+      setTimeout(() => openEdit(newType), 300);
+    },
+    onError: (err: any) => {
+      const data = err?.response?.data;
+      const message = data
+        ? Object.entries(data).map(([field, msgs]) =>
+            `${field}: ${Array.isArray(msgs) ? msgs.join(", ") : String(msgs)}`
+          ).join(" | ")
+        : "Failed to duplicate document type.";
+      toast.error(message);
+    },
+  });
+
+  const openDuplicateDialog = (type: DocumentType) => {
+    const baseCode = type.code.toUpperCase().replace(/[^A-Z0-9]/g, "_");
+    setDuplicateName(`Copy of ${type.name}`);
+    setDuplicateCode(`${baseCode}_COPY`.slice(0, 20));
+    setDuplicateDialogOpen(true);
+  };
 
   const openNew = () => {
     form.reset({
@@ -307,6 +341,7 @@ export default function AdminDocumentTypesPage() {
   ];
 
   return (
+    <>
     <div className="min-h-[calc(100vh-4rem)] bg-[#EEF0F2]">
       <div className="border-b border-[#1E6F99] bg-[#287EAD] px-6 py-4 text-white">
         <div className="flex items-center justify-between gap-4">
@@ -390,8 +425,12 @@ export default function AdminDocumentTypesPage() {
                 <div className="flex items-center gap-2 text-sm">
                   {editingId !== "new" && selectedType && (
                     <>
-                      <button type="button" className="inline-flex items-center gap-1.5 px-2 py-1 text-[#5E6870] hover:text-[#287EAD]">
-                        <Copy className="h-4 w-4" /> Copy
+                      <button
+                        type="button"
+                        onClick={() => openDuplicateDialog(selectedType)}
+                        className="inline-flex items-center gap-1.5 px-2 py-1 text-[#5E6870] hover:text-[#287EAD]"
+                      >
+                        <Copy className="h-4 w-4" /> Duplicate
                       </button>
                       <button
                         type="button"
@@ -693,5 +732,92 @@ export default function AdminDocumentTypesPage() {
         </main>
       </div>
     </div>
+
+    {/* ── Duplicate document type dialog ─────────────────────────────────── */}
+    {duplicateDialogOpen && selectedType && (
+      <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 backdrop-blur-sm">
+        <div className="w-full max-w-md border border-[#C8CDD2] bg-white shadow-xl">
+          {/* Header */}
+          <div className="flex items-center justify-between border-b border-[#C8CDD2] bg-[#287EAD] px-5 py-3">
+            <div className="flex items-center gap-2 text-white">
+              <Copy className="h-4 w-4" />
+              <span className="text-sm font-semibold">Duplicate document type</span>
+            </div>
+            <button
+              type="button"
+              onClick={() => setDuplicateDialogOpen(false)}
+              className="text-white/70 hover:text-white"
+            >
+              <X className="h-4 w-4" />
+            </button>
+          </div>
+
+          {/* Body */}
+          <div className="space-y-4 p-5 text-sm">
+            <p className="text-[#5E6870]">
+              A full copy of <span className="font-semibold text-[#1F2933]">{selectedType.name}</span> will be
+              created — including all attributes and relationship rules.
+              Adjust the name and code below before confirming.
+            </p>
+
+            <div className="space-y-3">
+              <div>
+                <label className="mb-1 block text-xs font-medium text-[#5E6870]">New name</label>
+                <input
+                  value={duplicateName}
+                  onChange={(e) => setDuplicateName(e.target.value)}
+                  className={inputCls}
+                  placeholder="e.g. Copy of Supplier Invoice"
+                  autoFocus
+                />
+              </div>
+              <div>
+                <label className="mb-1 block text-xs font-medium text-[#5E6870]">Code</label>
+                <input
+                  value={duplicateCode}
+                  onChange={(e) => setDuplicateCode(e.target.value.toUpperCase().replace(/[^A-Z0-9_]/g, "").slice(0, 20))}
+                  className={`${inputCls} font-mono tracking-widest uppercase`}
+                  placeholder="e.g. INV_COPY"
+                  maxLength={20}
+                />
+                <p className="mt-1 text-xs text-[#8C969E]">Unique short identifier — max 20 characters, A–Z, 0–9, underscore.</p>
+              </div>
+            </div>
+          </div>
+
+          {/* Footer */}
+          <div className="flex items-center justify-end gap-2 border-t border-[#C8CDD2] px-5 py-3">
+            <button
+              type="button"
+              onClick={() => setDuplicateDialogOpen(false)}
+              disabled={duplicateMutation.isPending}
+              className="px-4 py-2 text-sm text-[#5E6870] hover:text-[#1F2933] disabled:opacity-50"
+            >
+              Cancel
+            </button>
+            <button
+              type="button"
+              disabled={!duplicateName.trim() || !duplicateCode.trim() || duplicateMutation.isPending}
+              onClick={() =>
+                duplicateMutation.mutate({
+                  id: selectedType.id,
+                  name: duplicateName.trim(),
+                  code: duplicateCode.trim(),
+                })
+              }
+              className="inline-flex items-center gap-2 bg-[#287EAD] px-4 py-2 text-sm font-medium text-white hover:bg-[#1E6F99] disabled:opacity-50"
+            >
+              {duplicateMutation.isPending ? (
+                <Loader2 className="h-4 w-4 animate-spin" />
+              ) : (
+                <Copy className="h-4 w-4" />
+              )}
+              Duplicate
+            </button>
+          </div>
+        </div>
+      </div>
+    )}
+    </>
   );
 }

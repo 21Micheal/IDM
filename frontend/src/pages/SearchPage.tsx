@@ -1,4 +1,5 @@
 import { useEffect, useMemo, useState } from "react";
+import statusUtils from "@/lib/status";
 import { useQuery } from "@tanstack/react-query";
 import { format } from "date-fns";
 import {
@@ -264,8 +265,71 @@ export default function SearchPage() {
     setPage(1);
   };
 
-  const data = searchQuery.data;
-  const totalPages = data ? Math.max(1, Math.ceil(data.total / PAGE_SIZE)) : 1;
+  // Use the raw data from the search query but apply a strict client-side filter
+  // so UI never shows results that don't exactly match the active filters.
+  const rawData = searchQuery.data;
+
+  function hitMatchesFilters(hit: SearchHit) {
+    if (!hit) return false;
+
+    if (statusFilter && !statusUtils.statusMatchesFilter(hit.status, statusFilter)) return false;
+    if (typeFilter && hit.document_type !== typeFilter) return false;
+
+    if (debouncedSupplier) {
+      const supplier = (hit.supplier || "").toLowerCase();
+      if (!supplier.includes(debouncedSupplier.toLowerCase())) return false;
+    }
+
+    if (selectedFormat && hit.file_mime_type) {
+      // Ensure the hit's mime type matches one of the selected format mime types.
+      if (!selectedFormat.mimeTypes.includes(hit.file_mime_type)) return false;
+    }
+
+    if (dateFrom) {
+      const hitDate = hit.document_date ? new Date(hit.document_date) : null;
+      const fromDate = new Date(dateFrom + "T00:00:00");
+      if (!hitDate || isNaN(hitDate.getTime()) || hitDate < fromDate) return false;
+    }
+
+    if (dateTo) {
+      const hitDate = hit.document_date ? new Date(hit.document_date) : null;
+      const toDate = new Date(dateTo + "T23:59:59");
+      if (!hitDate || isNaN(hitDate.getTime()) || hitDate > toDate) return false;
+    }
+
+    if (currencyFilter && hit.currency !== currencyFilter) return false;
+
+    if (amountMin) {
+      const min = Number(amountMin);
+      if (!Number.isNaN(min) && (hit.amount == null || Number(hit.amount) < min)) return false;
+    }
+
+    if (amountMax) {
+      const max = Number(amountMax);
+      if (!Number.isNaN(max) && (hit.amount == null || Number(hit.amount) > max)) return false;
+    }
+
+    return true;
+  }
+
+  const filteredData: DocumentSearchResponse | null = useMemo(() => {
+    if (!rawData) return null;
+    const results = (rawData.results || []).filter((hit) => hitMatchesFilters(hit));
+    return { ...rawData, results, total: results.length } as DocumentSearchResponse;
+  }, [
+    rawData,
+    statusFilter,
+    typeFilter,
+    debouncedSupplier,
+    selectedFormat,
+    dateFrom,
+    dateTo,
+    currencyFilter,
+    amountMin,
+    amountMax,
+  ]);
+
+  const totalPages = filteredData ? Math.max(1, Math.ceil(filteredData.total / PAGE_SIZE)) : 1;
   const activeFilterCount = [
     statusFilter,
     typeFilter,
@@ -463,14 +527,14 @@ export default function SearchPage() {
               >
                 Search Results
               </button>
-              {data && (
+              {filteredData && (
                 <span className="border-l border-[#C8CDD2] pl-3 text-sm font-semibold">
-                  {data.total} matching document{data.total === 1 ? "" : "s"}
+                  {filteredData.total} matching document{filteredData.total === 1 ? "" : "s"}
                 </span>
               )}
             </div>
 
-            {data && data.total > 0 && (
+            {filteredData && filteredData.total > 0 && (
               <div className="flex items-center gap-2 text-sm text-[#5E6870]">
                 <span>
                   Page {page} of {totalPages}
@@ -522,7 +586,7 @@ export default function SearchPage() {
             </div>
           )}
 
-          {data && data.results.length === 0 && (
+          {filteredData && filteredData.results.length === 0 && (
             <div className="flex min-h-[24rem] items-center justify-center px-6">
               <div className="text-center">
                 <FileText className="mx-auto mb-4 h-12 w-12 text-[#A8B0B7]" />
@@ -531,9 +595,9 @@ export default function SearchPage() {
             </div>
           )}
 
-          {data && data.results.length > 0 && (
+          {filteredData && filteredData.results.length > 0 && (
             <div className="divide-y divide-[#D1D5D9] bg-white">
-              {data.results.map((hit: SearchHit) => {
+              {filteredData.results.map((hit: SearchHit) => {
                 const preferredHighlights = getPreferredHighlights(hit, debouncedSearchTerm);
                 const title = hit.title || hit.file_name || hit.reference_number || "Untitled document";
                 const formatLabel = formatDocumentFileType(hit.file_name, hit.file_mime_type);
