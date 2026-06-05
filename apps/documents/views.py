@@ -618,6 +618,87 @@ class DocumentViewSet(AuditMixin, viewsets.ModelViewSet):
 
         return Response(DocumentVersionSerializer(version).data, status=201)
 
+    @action(detail=True, methods=["post"], url_path="update_form")
+    def update_form(self, request, pk=None):
+        """
+        Re-fill a built-template form document in-app and regenerate its PDF view.
+
+        Built templates are interactive forms whose data lives on the document
+        (metadata.form). This edits the values in place — no external editor — and
+        regenerates the PDF as a new version.
+        """
+        from types import SimpleNamespace
+        from django.core.files.base import ContentFile
+        from elasticsearch.helpers import BulkIndexError
+        from apps.documents.access import document_allows_edit
+        from apps.documents.file_streaming import user_can_edit_document
+        from apps.templates_engine.tasks import generate_built_pdf
+
+        doc = self.get_object()
+        form = (doc.metadata or {}).get("form")
+        if not form or not isinstance(form, dict):
+            return Response({"detail": "This document is not an in-app form."}, status=400)
+        if not user_can_edit_document(request.user, doc):
+            return Response(
+                {"detail": "You do not have permission to edit this document."},
+                status=status.HTTP_403_FORBIDDEN,
+            )
+        if not document_allows_edit(doc, user=request.user):
+            return Response(
+                {"detail": "This document cannot be edited in its current status."},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        values = request.data.get("values")
+        if not isinstance(values, dict):
+            return Response({"detail": "values must be an object."}, status=400)
+
+        sections = form.get("sections") or []
+        shim = SimpleNamespace(name=doc.title, sections=sections)
+        try:
+            content = generate_built_pdf(shim, values)
+        except Exception as exc:
+            logger.exception("update_form: regeneration failed for %s", doc.id)
+            return Response({"detail": f"Could not regenerate the form: {exc}"}, status=400)
+
+        filename = doc.file_name if (doc.file_name or "").lower().endswith(".pdf") else f"{doc.title}.pdf"
+        checksum = hashlib.sha256(content).hexdigest()
+        new_version = doc.current_version + 1
+
+        DocumentVersion.objects.create(
+            document=doc, version_number=new_version,
+            file=ContentFile(content, name=filename), file_name=filename,
+            file_size=len(content), checksum=checksum,
+            change_summary="Form updated", created_by=request.user,
+        )
+
+        meta = dict(doc.metadata or {})
+        meta_form = dict(meta.get("form") or {})
+        meta_form["values"] = values
+        meta["form"] = meta_form
+
+        doc.file = ContentFile(content, name=filename)
+        doc.file_name = filename
+        doc.file_size = len(content)
+        doc.file_mime_type = "application/pdf"
+        doc.checksum = checksum
+        doc.current_version = new_version
+        doc.metadata = meta
+        doc.preview_status = ""
+        doc.preview_pdf = ""
+        try:
+            doc.save()
+        except BulkIndexError:
+            # ES read-only (disk flood-stage). The row is committed; indexing will
+            # catch up. Don't fail the edit.
+            logger.warning("Form document %s saved but realtime indexing failed.", doc.id)
+
+        self.record_audit("document.updated", doc, {"version": new_version, "form": True})
+        from apps.search.indexing import schedule_document_search_pipeline
+
+        schedule_document_search_pipeline(str(doc.id), reextract_content=True, index_immediately=True)
+        return Response(DocumentDetailSerializer(doc, context={"request": request}).data)
+
     @action(detail=True, methods=["post"])
     def restore_version(self, request, pk=None):
         doc = self.get_object()

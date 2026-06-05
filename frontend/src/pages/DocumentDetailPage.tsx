@@ -9,13 +9,14 @@ import StatusBadge from "@/components/documents/StatusBadge";
 import OcrStatusBadge from "@/components/documents/OcrStatusBadge";
 import { AddToFolderMenu } from "@/components/documents/AddToFolderMenu";
 import MetadataEditPanel from "@/components/documents/MetadataEditPanel";
+import TemplateForm, { requiredFieldLabels } from "@/components/templates/TemplateForm";
 import WorkflowActionPanel from "@/components/workflow/WorkflowActionPanel";
 import { format } from "date-fns";
 import {
   ArrowLeft, Send, MessageSquare, ShieldCheck,
   Loader2, RotateCcw, Edit2, Lock, Info, Download,
   AlertTriangle, ScanLine, RefreshCw,
-  Printer, Trash2, X, Check, Link2, Plus, ExternalLink, Columns2
+  Printer, Trash2, X, Check, Link2, Plus, ExternalLink, Columns2, Eye, EyeOff
 } from "lucide-react";
 import { toast } from "@/components/ui/vault-toast";
 import { useAuthStore } from "@/store/authStore";
@@ -195,6 +196,9 @@ export default function DocumentDetailPage() {
   const user = useAuthStore((s) => s.user);
 
   const [activeTab, setActiveTab] = useState<TabId>("attributes");
+  const [formEditing, setFormEditing] = useState(false);
+  const [formValues, setFormValues] = useState<Record<string, unknown>>({});
+  const [showFormPdf, setShowFormPdf] = useState(false);
   const [comment, setComment] = useState("");
   const [confirmRestoreId, setConfirmRestoreId] = useState<string | null>(null);
   const [auditPage, setAuditPage] = useState(1);
@@ -478,6 +482,17 @@ export default function DocumentDetailPage() {
     onError: () => toast.error("Could not queue OCR. Please try again."),
   });
 
+  const updateFormMutation = useMutation({
+    mutationFn: () => documentsAPI.updateForm(id!, formValues),
+    onSuccess: () => {
+      toast.success("Form updated.");
+      setFormEditing(false);
+      qc.invalidateQueries({ queryKey: ["document", id] });
+    },
+    onError: (err: any) =>
+      toast.error(err?.response?.data?.detail || "Could not update the form."),
+  });
+
   const addRelationshipMutation = useMutation({
     mutationFn: () =>
       documentsAPI.addRelationship(id!, {
@@ -614,6 +629,22 @@ export default function DocumentDetailPage() {
   const canViewDocument = hasAdminAccess || permissions.includes("view");
   const canEdit = hasAdminAccess || permissions.includes("edit");
   const canComment = hasAdminAccess || permissions.includes("comment");
+
+  // In-app form (built-template document): schema + values live on metadata.form.
+  const formData = (doc.metadata as Record<string, any> | undefined)?.form as
+    | { sections?: unknown[]; values?: Record<string, unknown> }
+    | undefined;
+  const isFormDocument = Boolean(formData?.sections);
+  const formDocEditable = canEdit && ["draft", "returned"].includes(doc.status);
+  const startFormEdit = () => {
+    setFormValues({ ...(formData?.values ?? {}) });
+    setFormEditing(true);
+  };
+  const saveForm = () => {
+    const missing = requiredFieldLabels(formData?.sections ?? [], formValues);
+    if (missing.length) { toast.error(`Please fill in: ${missing.join(", ")}`); return; }
+    updateFormMutation.mutate();
+  };
   const canApprove = hasAdminAccess || permissions.includes("approve");
   const canArchive = hasAdminAccess || permissions.includes("archive");
   const canRestoreVersion = hasAdminAccess || permissions.includes("upload");
@@ -963,7 +994,74 @@ export default function DocumentDetailPage() {
             </div>
           )}
 
-          <div className={cn("grid gap-3", compareDoc && "xl:grid-cols-2")}>
+          {/* In-app form (built-template document) — the form is the document; PDF below is its view */}
+          {isFormDocument && (
+            <div className="border border-[#C8CDD2] bg-white shadow-sm">
+              <div className="flex items-center justify-between gap-3 border-b border-[#C8CDD2] bg-[#F5F7F8] px-4 py-2.5">
+                <div className="flex items-center gap-2 min-w-0">
+                  <p className="text-sm font-bold text-[#1F2933]">Form</p>
+                  <span className="text-xs text-[#5E6870]">{formEditing ? "Editing — fill and save" : "Filled in-app"}</span>
+                </div>
+                <div className="flex items-center gap-2">
+                  {!formEditing && (
+                    <button
+                      type="button"
+                      onClick={() => setShowFormPdf((s) => !s)}
+                      className="inline-flex items-center gap-1.5 border border-[#AEB5BB] bg-white px-2.5 py-1.5 text-xs font-semibold text-[#1F2933] hover:bg-[#F3F5F6]"
+                    >
+                      {showFormPdf ? <EyeOff className="h-3.5 w-3.5" /> : <Eye className="h-3.5 w-3.5" />}
+                      {showFormPdf ? "Hide PDF" : "View PDF"}
+                    </button>
+                  )}
+                  {!formEditing && formDocEditable && (
+                    <button
+                      type="button"
+                      onClick={startFormEdit}
+                      className="inline-flex items-center gap-1.5 border border-[#287EAD] px-2.5 py-1.5 text-xs font-semibold text-[#287EAD] hover:bg-[#EEF6FB]"
+                    >
+                      <Edit2 className="h-3.5 w-3.5" /> Edit form
+                    </button>
+                  )}
+                  {formEditing && (
+                    <>
+                      <button
+                        type="button"
+                        onClick={() => setFormEditing(false)}
+                        disabled={updateFormMutation.isPending}
+                        className="inline-flex items-center gap-1.5 border border-[#AEB5BB] bg-white px-2.5 py-1.5 text-xs font-semibold text-[#1F2933] hover:bg-[#F3F5F6] disabled:opacity-50"
+                      >
+                        <X className="h-3.5 w-3.5" /> Cancel
+                      </button>
+                      <button
+                        type="button"
+                        onClick={saveForm}
+                        disabled={updateFormMutation.isPending}
+                        className="inline-flex items-center gap-1.5 bg-[#287EAD] px-3 py-1.5 text-xs font-semibold text-white hover:bg-[#1E6F99] disabled:opacity-50"
+                      >
+                        {updateFormMutation.isPending ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Check className="h-3.5 w-3.5" />}
+                        Save form
+                      </button>
+                    </>
+                  )}
+                </div>
+              </div>
+              <div className="p-5">
+                <TemplateForm
+                  sections={formData?.sections ?? []}
+                  values={formEditing ? formValues : (formData?.values ?? {})}
+                  onChange={(k, v) => setFormValues((prev) => ({ ...prev, [k]: v }))}
+                  readOnly={!formEditing}
+                />
+              </div>
+            </div>
+          )}
+
+          <div className={cn(
+            "grid gap-3",
+            compareDoc && "xl:grid-cols-2",
+            // For form documents the form is primary; the PDF is on-demand.
+            isFormDocument && !showFormPdf && "hidden",
+          )}>
             <div className="border border-[#C8CDD2] bg-white shadow-sm">
               <Suspense fallback={
                 <div className="flex min-h-[32rem] items-center justify-center bg-white">

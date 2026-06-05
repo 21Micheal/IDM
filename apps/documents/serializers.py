@@ -63,6 +63,42 @@ def _generate_unique_reference(doc_type: DocumentType) -> str:
         if not Document.objects.filter(reference_number=fallback).exists():
             return fallback
 
+
+def _document_title_stem(file_name: str) -> str:
+    """Filename without its extension or any leading path."""
+    base = (file_name or "").rsplit("/", 1)[-1].rsplit("\\", 1)[-1]
+    if "." in base:
+        stem = base.rsplit(".", 1)[0]
+        return stem or base
+    return base
+
+
+def _resolve_document_title(doc_type, validated_data: dict, file_name: str) -> str:
+    """
+    Decide a document's title from its document type's `title_field` policy.
+
+      - "filename" (default): keep the submitted title (the upload form prefills it
+        from the file name and lets the user edit it), falling back to the stem.
+      - "title": use the user-typed Document Name.
+      - any other column/metadata key: auto-name from that field's value when present,
+        otherwise fall back to the submitted title, then the file name.
+    """
+    source = (getattr(doc_type, "title_field", "") or "filename").strip()
+    typed = (validated_data.get("title") or "").strip()
+    stem = _document_title_stem(file_name)
+
+    if source in ("", "filename", "title"):
+        return typed or stem or "Document"
+
+    if source in DOCUMENT_COLUMN_METADATA_KEYS:
+        value = validated_data.get(source)
+    else:
+        metadata = validated_data.get("metadata") or {}
+        value = metadata.get(source) if isinstance(metadata, dict) else None
+
+    value = "" if value is None else str(value).strip()
+    return value or typed or stem or "Document"
+
 def _find_existing_document_for_checksum(
     checksum: str,
     exclude_document_id=None,
@@ -217,6 +253,7 @@ class DocumentTypeSerializer(serializers.ModelSerializer):
         model  = DocumentType
         fields = [
             "id", "name", "code", "reference_prefix", "reference_padding",
+            "title_field",
             "description", "icon", "is_active",
             "is_personal_type", "metadata_mode",
             "access_policy",
@@ -822,6 +859,11 @@ class DocumentUploadSerializer(serializers.ModelSerializer):
         validated_data["file_size"]   = upload.size
         validated_data["uploaded_by"] = request.user
 
+        # Name the document per its type's title_field policy (default: filename)
+        validated_data["title"] = _resolve_document_title(
+            doc_type, validated_data, upload.name
+        )
+
         # MIME detection
         try:
             detected_mime = python_magic.from_buffer(
@@ -1080,6 +1122,7 @@ class DocumentTypeWriteSerializer(serializers.ModelSerializer):
         model  = DocumentType
         fields = [
             "name", "code", "reference_prefix", "reference_padding",
+            "title_field",
             "description", "icon", "is_active",
             "is_personal_type", "metadata_mode",
             "access_policy",
@@ -1092,6 +1135,7 @@ class DocumentTypeWriteSerializer(serializers.ModelSerializer):
             "code":              {"validators": []},
             "icon":              {"required": False, "allow_blank": True},
             "description":       {"required": False, "allow_blank": True},
+            "title_field":       {"required": False, "allow_blank": True},
             "is_personal_type":  {"required": False},
             "metadata_mode":     {"required": False},
             "workflow_template": {"required": False, "allow_null": True},

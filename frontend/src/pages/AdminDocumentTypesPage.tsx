@@ -79,6 +79,7 @@ interface DocTypeForm {
   code: string;
   reference_prefix: string;
   reference_padding: number;
+  title_field: string;
   description: string;
   is_personal_type: boolean;
   metadata_mode: "admin_defined" | "user_defined";
@@ -111,6 +112,7 @@ function buildPayload(values: DocTypeForm) {
     code: values.code,
     reference_prefix: values.reference_prefix,
     reference_padding: values.reference_padding,
+    title_field: values.title_field || "filename",
     description: applyDocumentTypeConfigToDescription(values.description, {
       isPersonalType: isPersonal,
       metadataMode,
@@ -168,6 +170,7 @@ export default function AdminDocumentTypesPage() {
   const form = useForm<DocTypeForm>({
     defaultValues: {
       name: "", code: "", reference_prefix: "", reference_padding: 5,
+      title_field: "filename",
       description: "", is_personal_type: false, metadata_mode: "admin_defined",
       metadata_fields: [], relationship_rules: [],
     },
@@ -232,6 +235,7 @@ export default function AdminDocumentTypesPage() {
   const openNew = () => {
     form.reset({
       name: "", code: "", reference_prefix: "", reference_padding: 5,
+      title_field: "filename",
       description: "", is_personal_type: false, metadata_mode: "admin_defined",
       metadata_fields: coreDefaultFields(), relationship_rules: [],
     });
@@ -246,6 +250,7 @@ export default function AdminDocumentTypesPage() {
       code: type.code,
       reference_prefix: type.reference_prefix,
       reference_padding: type.reference_padding ?? 5,
+      title_field: type.title_field || "filename",
       description: stripTypeConfigMarkers(type.description ?? ""),
       is_personal_type: config.isPersonalType,
       metadata_mode: config.metadataMode,
@@ -477,6 +482,18 @@ export default function AdminDocumentTypesPage() {
                         className={inputCls}
                       />
                       <p className="mt-1.5 text-xs text-[#8C969E]">Digits in the numeric part of IDs (3–8) — 5 → 00001 · 4 → 0001</p>
+                    </div>
+
+                    {/* Document title ─ which source names documents of this type */}
+                    <label className="pt-2 text-[#5E6870]">Document title</label>
+                    <div>
+                      <select {...form.register("title_field")} className={inputCls}>
+                        <option value="filename">File name (default)</option>
+                        {fieldOptions({ ...(selectedType ?? {} as DocumentType), metadata_fields: form.watch("metadata_fields") as any }).map((field) => (
+                          <option key={field.key} value={field.key}>{field.label}</option>
+                        ))}
+                      </select>
+                      <p className="mt-1.5 text-xs text-[#8C969E]">How documents of this type are named — by default the uploaded file name; or pick a field like Document Name, Supplier, or Reference Number</p>
                     </div>
 
                     <label className="pt-2 text-[#5E6870]">Description</label>

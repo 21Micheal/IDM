@@ -30,6 +30,7 @@ interface WorkflowStep {
   assignee_group_name?: string;
   assignee_user: string | null;
   assignee_user_name?: string;
+  assignee_user_auto?: boolean;
   sla_hours: number;
   allow_resubmit: boolean;
   allow_approve: boolean;
@@ -207,7 +208,7 @@ function blankStep(): WorkflowStep {
 }
 
 function stepToPayload(step: WorkflowStep): Partial<WorkflowStep> {
-  const { assignee_user_name, assignee_group_name, ...rest } = normalizeStep(step) as any;
+  const { assignee_user_name, assignee_group_name, assignee_user_auto, ...rest } = normalizeStep(step) as any;
   // Ensure assignee_user is only sent for types that allow it
   if (rest.assignee_type !== "group_specific") {
     rest.assignee_user = null;
@@ -318,12 +319,14 @@ function StepEditPanel({
   // Default specific assignee to group's designated approver if present
   useEffect(() => {
     if (step.assignee_type !== "group_specific") return;
+    // Only auto-assign if there's no explicit user and the user hasn't manually cleared autos
     if (step.assignee_user) return; // explicit user already set
+    if (step.assignee_user_auto === false) return; // user explicitly chose someone before
     const head = groupDetail?.head;
     if (head && head.id) {
-      onChange({ assignee_user: head.id, assignee_user_name: head.full_name });
+      onChange({ assignee_user: head.id, assignee_user_name: head.full_name, assignee_user_auto: true });
     }
-  }, [step.assignee_type, step.assignee_user, groupDetail?.head, onChange]);
+  }, [step.assignee_type, step.assignee_user, step.assignee_user_auto, groupDetail?.head, onChange]);
 
   return (
     <aside className="w-[420px] flex-shrink-0 flex flex-col bg-card border border-border rounded-xl shadow-elegant overflow-hidden">
@@ -390,18 +393,20 @@ function StepEditPanel({
             <Label required>Approver group</Label>
             <select
               value={step.assignee_group ?? ""}
-              onChange={e => {
-                const id = e.target.value || null;
-                const g = groups.find(x => x.id === id);
-                const isHod = isHodGroupName(g?.name);
-                onChange({
-                  assignee_group: id,
-                  assignee_group_name: g?.name,
-                  assignee_type: isHod ? "group_any" : step.assignee_type,
-                  assignee_user: null,
-                  assignee_user_name: undefined,
-                });
-              }}
+                onChange={e => {
+                  const id = e.target.value || null;
+                  const g = groups.find(x => x.id === id);
+                  const isHod = isHodGroupName(g?.name);
+                  // Clear any existing specific user when switching groups and reset auto flag
+                  onChange({
+                    assignee_group: id,
+                    assignee_group_name: g?.name,
+                    assignee_type: isHod ? "group_any" : step.assignee_type,
+                    assignee_user: null,
+                    assignee_user_name: undefined,
+                    assignee_user_auto: undefined,
+                  });
+                }}
               className={inp}
             >
               <option value="">Select group</option>
@@ -415,16 +420,17 @@ function StepEditPanel({
 
           <div>
             <Label required>Assignment mode</Label>
-            <select
-              value={step.assignee_type}
-              onChange={e => {
-                const next = e.target.value as AssigneeType;
-                onChange({
-                  assignee_type: next,
-                  assignee_user: next === "group_specific" ? step.assignee_user : null,
-                  assignee_user_name: next === "group_specific" ? step.assignee_user_name : undefined,
-                });
-              }}
+              <select
+                value={step.assignee_type}
+                onChange={e => {
+                  const next = e.target.value as AssigneeType;
+                  onChange({
+                    assignee_type: next,
+                    assignee_user: next === "group_specific" ? step.assignee_user : null,
+                    assignee_user_name: next === "group_specific" ? step.assignee_user_name : undefined,
+                    assignee_user_auto: next === "group_specific" ? step.assignee_user_auto : undefined,
+                  });
+                }}
               disabled={isHodGroupSelected}
               className={inp}
             >
@@ -445,10 +451,11 @@ function StepEditPanel({
               <select
                 value={step.assignee_user ?? ""}
                 onChange={e => {
-                  const id = e.target.value || null;
-                  const u = groupMembers.find(x => x.id === id);
-                  onChange({ assignee_user: id, assignee_user_name: u?.full_name });
-                }}
+                    const id = e.target.value || null;
+                    const u = groupMembers.find(x => x.id === id);
+                    // Manual selection should prevent future auto-overwrites
+                    onChange({ assignee_user: id, assignee_user_name: u?.full_name, assignee_user_auto: false });
+                  }}
                 disabled={!step.assignee_group || membersLoading}
                 className={inp}
               >
@@ -805,6 +812,7 @@ function FlowchartEditor({
         <button onClick={fitView} title="Fit to view" className="p-1.5 rounded hover:bg-muted">
           <Maximize2 className="w-4 h-4 text-muted-foreground" />
         </button>
+
       </div>
 
       <div className="absolute top-3 left-3 z-10 flex items-center gap-2 bg-card border border-border rounded-lg shadow-sm px-3 py-1.5">

@@ -265,6 +265,10 @@ export const documentsAPI = {
   editMetadata: (id: string, data: Record<string, unknown>) =>
     api.patch(`/documents/${id}/edit_metadata/`, data),
 
+  /** Re-fill a built-template form document in-app; regenerates its PDF view. */
+  updateForm: (id: string, values: Record<string, unknown>) =>
+    api.post(`/documents/${id}/update_form/`, { values }),
+
   delete: (id: string) => api.delete(`/documents/${id}/`),
   submit: (id: string) => api.post(`/documents/${id}/submit/`),
   archive: (id: string) => api.post(`/documents/${id}/archive/`),
@@ -650,9 +654,9 @@ export const templatesAPI = {
   create: (data: unknown) =>
     api.post("/templates/", data, data instanceof FormData ? { headers: { "Content-Type": undefined } } : undefined),
 
-  /** PATCH /templates/{id}/ — update name, description, sections, category, tags */
+  /** PATCH /templates/{id}/ — update name, description, sections, category, tags, or replace the Office file (FormData) */
   update: (id: string, data: unknown) =>
-    api.patch(`/templates/${id}/`, data),
+    api.patch(`/templates/${id}/`, data, data instanceof FormData ? { headers: { "Content-Type": undefined } } : undefined),
 
   /** DELETE /templates/{id}/ — soft delete (sets is_active=false) */
   delete: (id: string) => api.delete(`/templates/${id}/`),

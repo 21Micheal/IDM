@@ -23,6 +23,8 @@ import { QUERY_FIVE_MIN_STALE } from "@/lib/reactQueryDefaults";
 import { deriveDocumentTypeConfig } from "@/lib/documentTypeConfig";
 import { applyOcrToFields, sanitizeOcrFields, type OcrFields } from "@/lib/ocrFieldMatcher";
 import BulkScanPage from "@/pages/BulkScanPage";
+import TemplatePreview from "@/components/templates/TemplatePreview";
+import TemplateForm, { requiredFieldLabels } from "@/components/templates/TemplateForm";
 
 // ── Types ─────────────────────────────────────────────────────────────────────
 
@@ -695,6 +697,63 @@ function InforFieldRow({
   );
 }
 
+function TemplateFillSection({ template, register, values, onChange }: {
+  template: DocumentTemplateOption;
+  register: UseFormRegister<UploadFormValues>;
+  values: Record<string, unknown>;
+  onChange: (key: string, val: unknown) => void;
+}) {
+  const placeholders = template.placeholders ?? [];
+  const humanize = (key: string) =>
+    key.replace(/_/g, " ").replace(/\b\w/g, (c) => c.toUpperCase());
+
+  return (
+    <div className="space-y-6">
+      <InforFieldRow label="Document name">
+        <input {...register("title")} className="input" placeholder={template.name} />
+      </InforFieldRow>
+
+      {template.type === "uploaded" ? (
+        placeholders.length > 0 ? (
+          <div>
+            <p className="mb-3 text-xs font-semibold uppercase tracking-wider text-muted-foreground">
+              Fill template fields
+            </p>
+            <div className="grid gap-4 sm:grid-cols-2">
+              {placeholders.map((key) => (
+                <div key={key}>
+                  <label className="mb-1.5 block text-xs font-semibold text-foreground">
+                    {humanize(key)}
+                    <span className="ml-2 font-mono text-[10px] font-normal text-muted-foreground">{`{{${key}}}`}</span>
+                  </label>
+                  <input
+                    value={String(values[key] ?? "")}
+                    onChange={(e) => onChange(key, e.target.value)}
+                    className="input"
+                    placeholder={`Enter ${humanize(key).toLowerCase()}`}
+                  />
+                </div>
+              ))}
+            </div>
+          </div>
+        ) : (
+          <p className="text-sm text-muted-foreground">
+            This template has no placeholders — a copy of the file is created for you to edit after capture.
+          </p>
+        )
+      ) : (
+        // Built templates are interactive forms — filled in-app, never in an external editor.
+        <div>
+          <p className="mb-3 text-xs font-semibold uppercase tracking-wider text-muted-foreground">
+            Fill in the form
+          </p>
+          <TemplateForm sections={template.sections ?? []} values={values} onChange={onChange} />
+        </div>
+      )}
+    </div>
+  );
+}
+
 function SelectedFileDropHint({
   file,
   isDragActive,
@@ -892,6 +951,11 @@ export default function UploadPage({ scanOnly = false }: UploadPageProps) {
     ...QUERY_FIVE_MIN_STALE,
   });
   const selectedTemplate = typeTemplates.find((template) => template.id === selectedTemplateId) ?? null;
+
+  // Values for the selected template: Office {{placeholders}} (strings) or a built
+  // form's field values (strings, booleans, table-row arrays). Filled in-app.
+  const [templateValues, setTemplateValues] = useState<Record<string, unknown>>({});
+  useEffect(() => { setTemplateValues({}); }, [selectedTemplateId]);
 
   const isOcrFlow      = isScanned && !isSelfUpload;
   const showManualForm = !isOcrFlow && Boolean(selectedTypeId) && scanStage === "idle";
@@ -1151,18 +1215,20 @@ export default function UploadPage({ scanOnly = false }: UploadPageProps) {
       title: string;
       documentTypeId: string;
       values: Record<string, unknown>;
+      draftFromTemplate: boolean;
+      outputFormat: "pdf" | "docx";
     }) =>
       templatesAPI.fillTemplate({
         template_id: payload.templateId,
         values: payload.values,
-        output_format: "docx",
+        output_format: payload.outputFormat,
         title: payload.title,
         document_type_id: payload.documentTypeId,
-        draft_from_template: true,
+        draft_from_template: payload.draftFromTemplate,
       }),
     onSuccess: ({ data }) => {
       queryClient.invalidateQueries({ queryKey: ["documents"] });
-      toast.success("Draft document created from template.");
+      toast.success("Document created from template.");
       navigate(`/documents/${data.document_id}`);
     },
     onError: (err: any) => {
@@ -1182,16 +1248,27 @@ export default function UploadPage({ scanOnly = false }: UploadPageProps) {
         return;
       }
       const documentValues = documentValuesFromForm(values);
-      const adminMetadata = values.metadata ? metadataWithoutDocumentFields(values.metadata) : {};
       const title = documentValues.title || selectedTemplate.name;
+      const isUploaded = selectedTemplate.type === "uploaded";
+
+      // Built forms are filled in-app — enforce required fields before creating.
+      if (!isUploaded) {
+        const missing = requiredFieldLabels(selectedTemplate.sections ?? [], templateValues);
+        if (missing.length) {
+          toast.error(`Please fill in: ${missing.join(", ")}`);
+          return;
+        }
+      }
+
       createFromTemplateMutation.mutate({
         templateId: selectedTemplate.id,
         title,
         documentTypeId: selectedTypeId,
-        values: {
-          ...adminMetadata,
-          ...documentValues,
-        },
+        // Both Office placeholders and built form fields are filled in-app.
+        values: templateValues,
+        draftFromTemplate: false,
+        // Office → editable Office file; built form → PDF rendering (a view of the data).
+        outputFormat: isUploaded ? "docx" : "pdf",
       });
       return;
     }
@@ -1685,24 +1762,38 @@ export default function UploadPage({ scanOnly = false }: UploadPageProps) {
           )}
           {useTemplate && !droppedFile && (
             <div className="order-1 xl:col-span-5">
-              <div className={clsx("border border-[#C8CDD2] bg-[#F7F8F9]", PREVIEW_MIN_HEIGHT)}>
+              <div className={clsx("flex flex-col border border-[#C8CDD2] bg-[#F7F8F9]", PREVIEW_MIN_HEIGHT)}>
                 <div className="border-b border-[#C8CDD2] bg-white px-4 py-3">
                   <p className="text-sm font-semibold text-[#1F2933]">Template source</p>
                   <p className="mt-0.5 text-xs text-[#5E6870]">{selectedTemplate?.name || "Select a template"}</p>
                 </div>
-                <div className="flex h-full min-h-[30rem] flex-col items-center justify-center px-8 text-center">
-                  <div className="mb-4 flex h-16 w-16 items-center justify-center border border-[#A7CDE3] bg-[#EEF6FB] text-[#287EAD]">
-                    <LayoutTemplate className="h-8 w-8" />
+                {selectedTemplate ? (
+                  <div className="flex-1 overflow-y-auto p-5">
+                    <TemplatePreview
+                      template={{
+                        name: selectedTemplate.name,
+                        type: selectedTemplate.type,
+                        description: selectedTemplate.description,
+                        file_name: selectedTemplate.file_name,
+                        placeholders: selectedTemplate.placeholders,
+                        sections: selectedTemplate.sections,
+                      }}
+                    />
+                    <p className="mt-5 border-t border-[#E3E7EA] pt-3 text-xs text-[#5E6870]">
+                      A draft document will be generated from this template. After creation, open it and use the normal editor to complete or adjust it.
+                    </p>
                   </div>
-                  <p className="text-base font-semibold text-[#1F2933]">
-                    {selectedTemplate ? "A draft document will be generated" : "Choose a template for this document type"}
-                  </p>
-                  <p className="mt-2 max-w-md text-sm text-[#5E6870]">
-                    {selectedTemplate
-                      ? "After creation, open the document and use the normal editor to complete or adjust the generated file."
-                      : "Templates are maintained by admins and scoped to the selected document type."}
-                  </p>
-                </div>
+                ) : (
+                  <div className="flex h-full min-h-[30rem] flex-col items-center justify-center px-8 text-center">
+                    <div className="mb-4 flex h-16 w-16 items-center justify-center border border-[#A7CDE3] bg-[#EEF6FB] text-[#287EAD]">
+                      <LayoutTemplate className="h-8 w-8" />
+                    </div>
+                    <p className="text-base font-semibold text-[#1F2933]">Choose a template for this document type</p>
+                    <p className="mt-2 max-w-md text-sm text-[#5E6870]">
+                      Templates are maintained by admins and scoped to the selected document type.
+                    </p>
+                  </div>
+                )}
               </div>
             </div>
           )}
@@ -1730,6 +1821,15 @@ export default function UploadPage({ scanOnly = false }: UploadPageProps) {
                     )}
                   </div>
 
+                  {useTemplate && selectedTemplate ? (
+                    <TemplateFillSection
+                      template={selectedTemplate}
+                      register={register}
+                      values={templateValues}
+                      onChange={(key, val) => setTemplateValues((prev) => ({ ...prev, [key]: val }))}
+                    />
+                  ) : (
+                  <>
                   {hasMetadata && (
                     <div className="mb-8">
                       <div className="grid gap-2 border-b border-border/70 py-3 sm:grid-cols-[minmax(160px,0.55fr)_minmax(0,1fr)]">
@@ -1865,6 +1965,8 @@ export default function UploadPage({ scanOnly = false }: UploadPageProps) {
                     </>
                     )}
                   </div>
+                  </>
+                  )}
 
                   {uploadMutation.isPending && uploadProgress > 0 && (
                     <div className="mt-6">
@@ -1894,7 +1996,9 @@ export default function UploadPage({ scanOnly = false }: UploadPageProps) {
                     ) : (
                       <>
                         {useTemplate ? <Wand2 className="w-4 h-4" /> : isSelfUpload ? <Lock className="w-4 h-4" /> : <Upload className="w-4 h-4" />}
-                        {useTemplate ? "Create Draft" : isSelfUpload ? "Save Personal Document" : "Upload Document"}
+                        {useTemplate
+                          ? "Create Document"
+                          : isSelfUpload ? "Save Personal Document" : "Upload Document"}
                         <ArrowRight className="w-4 h-4" />
                       </>
                     )}

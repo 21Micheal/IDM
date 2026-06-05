@@ -15,6 +15,7 @@ export interface DocumentType {
   code: string;
   reference_prefix: string;
   reference_padding?: number;
+  title_field?: string;
   description: string;
   icon: string;
   is_active?: boolean;

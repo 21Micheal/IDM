@@ -46,6 +46,16 @@ class DocumentType(models.Model):
     code             = models.CharField(max_length=20, unique=True)
     reference_prefix = models.CharField(max_length=10)
     reference_padding = models.PositiveSmallIntegerField(default=5)
+    title_field      = models.CharField(
+        max_length=100,
+        blank=True,
+        default="filename",
+        help_text=(
+            "Source whose value names documents of this type. Use 'filename' (default) "
+            "to name documents after the uploaded file, or a field key such as "
+            "title, supplier, or reference_number."
+        ),
+    )
     description      = models.TextField(blank=True)
     icon             = models.CharField(max_length=60, blank=True)
 

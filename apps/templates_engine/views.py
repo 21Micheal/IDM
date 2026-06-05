@@ -98,6 +98,20 @@ class DocumentTemplateViewSet(viewsets.ModelViewSet):
             placeholders=placeholders,
         )
 
+    def perform_update(self, serializer):
+        # When the Office file is replaced, re-detect its placeholders and
+        # refresh the stored file name. Metadata-only edits leave the file alone.
+        file = self.request.FILES.get("file")
+        if file:
+            try:
+                placeholders = extract_placeholders(file)
+                file.seek(0)
+            except Exception as e:
+                raise ValidationError({"file": f"Could not parse template file: {e}"})
+            serializer.save(file_name=file.name, placeholders=placeholders)
+        else:
+            serializer.save()
+
     def perform_destroy(self, instance):
         # Soft delete
         instance.is_active = False

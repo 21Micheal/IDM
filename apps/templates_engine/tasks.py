@@ -3,6 +3,11 @@ from pathlib import Path
 import tempfile
 import os
 import re
+import logging
+
+from elasticsearch.helpers import BulkIndexError
+
+logger = logging.getLogger(__name__)
 
 
 # ─── Helpers ────────────────────────────────────────────────────────────────
@@ -374,9 +379,22 @@ def generate_document_from_template_sync(template, values, fmt, title, user, typ
                 content_type = "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
 
     checksum = hashlib.sha256(content).hexdigest()
-    doc = Document.objects.create(
+    reference_number = _generate_unique_reference(template.document_type)
+
+    doc_metadata = {"template_id": str(template.id), "template_name": template.name}
+    if template.type == "built":
+        # Built templates are interactive forms: store the schema snapshot + the
+        # entered values so the document IS the filled form and can be re-rendered
+        # / edited in-app (no external editor). The generated file is just a view.
+        doc_metadata["form"] = {
+            "template_id": str(template.id),
+            "sections": template.sections,
+            "values": values,
+        }
+
+    create_kwargs = dict(
         title=title,
-        reference_number=_generate_unique_reference(template.document_type),
+        reference_number=reference_number,
         file=ContentFile(content, name=filename),
         file_name=filename,
         file_size=len(content),
@@ -387,8 +405,19 @@ def generate_document_from_template_sync(template, values, fmt, title, user, typ
         document_type_id=type_id,
         is_self_upload=False,
         status=DocumentStatus.DRAFT,
-        metadata={"template_id": str(template.id), "template_name": template.name},
+        metadata=doc_metadata,
     )
+    try:
+        doc = Document.objects.create(**create_kwargs)
+    except BulkIndexError:
+        # Elasticsearch is read-only (e.g. disk flood-stage). The row is already
+        # committed; fetch it so document creation still succeeds. Indexing will
+        # catch up once ES recovers.
+        logger.warning(
+            "Template document %s saved but realtime indexing failed (ES read-only).",
+            reference_number,
+        )
+        doc = Document.objects.get(reference_number=reference_number)
     if doc.is_office_doc():
         try:
             from apps.documents.tasks import generate_document_preview
