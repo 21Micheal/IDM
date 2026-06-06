@@ -620,6 +620,8 @@ export const groupsAPI = {
   update: (id: string, data: { name?: string; description?: string; head_id?: string | null }) =>
     api.patch(`/groups/${id}/`, data),
   delete: (id: string) => api.delete(`/groups/${id}/`),
+  duplicate: (id: string, data: { name: string; description?: string }) =>
+    api.post(`/groups/${id}/duplicate/`, data),
   setPermissions: (
     id: string,
     permissions: { document_type_id: string; stage: string; action: string }[]

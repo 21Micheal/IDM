@@ -3,7 +3,7 @@ import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { groupsAPI, documentTypesAPI, usersAPI, normalizeListResponse, dmsSettingsAPI } from "@/services/api";
 import {
   Plus, Users, Shield, ChevronRight, X, Loader2,
-  Check, UserPlus, Settings2, Info, Trash2,
+  Check, UserPlus, Settings2, Info, Trash2, Copy,
 } from "lucide-react";
 import { toast } from "@/components/ui/vault-toast";
 import clsx from "clsx";
@@ -21,7 +21,11 @@ interface Member    { id: string; user: { id: string; full_name: string; email: 
 interface Group     { id: string; name: string; description: string; permissions: GroupPerm[]; member_count: number; has_admin_access: boolean }
 interface User      { id: string; full_name: string; email: string; job_description?: string }
 
+const ADMIN_GROUP_NAME = "Administrators";
 const HOD_GROUP_NAME = "HOD";
+
+/** Names of system-managed groups that cannot be duplicated or deleted. */
+const SYSTEM_GROUPS = new Set([ADMIN_GROUP_NAME, HOD_GROUP_NAME]);
 
 const PERMISSION_STAGES = [
   { value: "creation", label: "Creation", description: "Draft, upload, and resubmit" },
@@ -79,7 +83,97 @@ function buildStageMatrices(
   return stages;
 }
 
-// ── Permission Matrix ────────────────────────────────────────────────────────
+// ── Duplicate Group Modal ─────────────────────────────────────────────────────
+function DuplicateGroupModal({
+  group,
+  onClose,
+  onDuplicated,
+}: {
+  group: Group;
+  onClose: () => void;
+  onDuplicated: (newGroup: Group) => void;
+}) {
+  const [name, setName] = useState(`${group.name} (Copy)`);
+  const [desc, setDesc] = useState(group.description);
+
+  const mutation = useMutation({
+    mutationFn: () => groupsAPI.duplicate(group.id, { name: name.trim(), description: desc.trim() }),
+    onSuccess: (res) => {
+      toast.success(`Group "${name.trim()}" created with ${group.permissions.filter(p => p.action !== "admin").length} permission rule(s) copied.`);
+      onDuplicated(res.data as Group);
+    },
+    onError: (err: any) =>
+      toast.error(err?.response?.data?.detail || "Failed to duplicate group."),
+  });
+
+  return (
+    <div className="fixed inset-0 z-[60] flex items-center justify-center bg-foreground/40 backdrop-blur-sm p-4">
+      <div className="w-full max-w-md bg-card rounded-2xl overflow-hidden border border-border"
+           style={{ boxShadow: "var(--shadow-elegant)" }}>
+        {/* Header */}
+        <div className="flex items-center justify-between px-6 py-5 border-b border-border">
+          <div className="flex items-center gap-3">
+            <div className="w-9 h-9 rounded-xl bg-accent/15 flex items-center justify-center flex-shrink-0">
+              <Copy className="w-4 h-4 text-accent" />
+            </div>
+            <div>
+              <h2 className="font-semibold text-base text-foreground">Duplicate group</h2>
+              <p className="text-xs text-muted-foreground">Copies name, description and all permission rules.</p>
+            </div>
+          </div>
+          <button onClick={onClose} className="p-1.5 text-muted-foreground hover:text-foreground rounded-lg hover:bg-muted transition-colors">
+            <X className="w-4 h-4" />
+          </button>
+        </div>
+
+        {/* Source badge */}
+        <div className="mx-6 mt-5 flex items-center gap-2 rounded-xl border border-border bg-muted/40 px-4 py-3">
+          <Shield className="w-4 h-4 text-accent flex-shrink-0" />
+          <div className="min-w-0">
+            <p className="text-xs text-muted-foreground">Duplicating</p>
+            <p className="text-sm font-semibold text-foreground truncate">{group.name}</p>
+          </div>
+        </div>
+
+        {/* Form */}
+        <div className="space-y-4 p-6">
+          <div>
+            <label className="label">New group name <span className="text-destructive">*</span></label>
+            <input
+              value={name}
+              onChange={(e) => setName(e.target.value)}
+              className="input"
+              placeholder="e.g. Finance Team (Copy)"
+              autoFocus
+              onKeyDown={(e) => e.key === "Enter" && name.trim() && mutation.mutate()}
+            />
+          </div>
+          <div>
+            <label className="label">Description</label>
+            <input
+              value={desc}
+              onChange={(e) => setDesc(e.target.value)}
+              className="input"
+              placeholder="Optional description…"
+            />
+          </div>
+          <div className="flex gap-3 pt-1">
+            <button
+              onClick={() => mutation.mutate()}
+              disabled={!name.trim() || mutation.isPending}
+              className="btn-primary flex-1 justify-center"
+            >
+              {mutation.isPending && <Loader2 className="w-4 h-4 animate-spin" />}
+              Duplicate group
+            </button>
+            <button onClick={onClose} className="btn-secondary px-6">Cancel</button>
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+}
+
 function PermissionMatrix({
   group,
   docTypes,
@@ -576,6 +670,7 @@ export default function GroupsPage() {
   const [showCreate, setShowCreate] = useState(false);
   const [newName, setNewName] = useState("");
   const [newDesc, setNewDesc] = useState("");
+  const [duplicatingGroup, setDuplicatingGroup] = useState<Group | null>(null);
 
   const { data: groups = [], isLoading } = useQuery<Group[]>({
     queryKey: ["groups"],
@@ -684,8 +779,8 @@ export default function GroupsPage() {
 
         {orderedGroups?.map((group) => {
           const ruleCount = group.permissions.filter((p) => p.action !== "admin").length;
+          const isSystemGroup = SYSTEM_GROUPS.has(group.name);
           const isHodGroup = group.name === HOD_GROUP_NAME;
-          const isSystemGroup = isHodGroup;
 
           return (
             <div
@@ -724,7 +819,20 @@ export default function GroupsPage() {
                     <Settings2 className="w-4 h-4" /> {ruleCount} rules
                   </span>
                 </div>
-                <div className="flex items-center gap-2">
+                <div className="flex items-center gap-1">
+                  {!isSystemGroup && (
+                    <button
+                      type="button"
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        setDuplicatingGroup(group);
+                      }}
+                      className="p-2 rounded-lg text-muted-foreground hover:text-accent hover:bg-accent/10 transition-colors opacity-0 group-hover:opacity-100"
+                      title="Duplicate group"
+                    >
+                      <Copy className="w-4 h-4" />
+                    </button>
+                  )}
                   {!isSystemGroup && (
                     <button
                       type="button"
@@ -735,7 +843,7 @@ export default function GroupsPage() {
                         }
                       }}
                       disabled={deleteGroupMutation.isPending}
-                      className="p-2 rounded-lg text-muted-foreground hover:text-destructive hover:bg-destructive/10 transition-colors"
+                      className="p-2 rounded-lg text-muted-foreground hover:text-destructive hover:bg-destructive/10 transition-colors opacity-0 group-hover:opacity-100"
                       title="Delete group"
                     >
                       <Trash2 className="w-4 h-4" />
@@ -771,6 +879,19 @@ export default function GroupsPage() {
           group={selectedGroup}
           docTypes={docTypes ?? []}
           onClose={() => setSelected(null)}
+        />
+      )}
+
+      {/* Duplicate Modal */}
+      {duplicatingGroup && (
+        <DuplicateGroupModal
+          group={duplicatingGroup}
+          onClose={() => setDuplicatingGroup(null)}
+          onDuplicated={(newGroup) => {
+            setDuplicatingGroup(null);
+            qc.invalidateQueries({ queryKey: ["groups"] });
+            setSelected(newGroup);
+          }}
         />
       )}
     </div>
