@@ -12,7 +12,7 @@ import {
   User, UsersRound, Users,
   Edit3, Play, Flag,
   ZoomIn, ZoomOut, Maximize2, Move,
-  FileSignature,
+  FileSignature, Copy,
 } from "lucide-react";
 import { toast } from "@/components/ui/vault-toast";
 import clsx from "clsx";
@@ -1297,12 +1297,14 @@ function TemplateEditor({
   template,
   docType = null,
   onSaved,
+  onDuplicate,
   allTemplates,
   docTypes,
 }: {
   template: WorkflowTemplate | null;
   docType?: DocumentType | null;
   onSaved: (t: WorkflowTemplate, isNew: boolean) => void;
+  onDuplicate?: () => void;
   allTemplates?: WorkflowTemplate[];
   docTypes?: DocumentType[];
 }) {
@@ -1514,6 +1516,16 @@ function TemplateEditor({
           {isDirty && (
             <span className="text-[11px] text-accent bg-accent/20 px-2 py-1 rounded-md">Unsaved</span>
           )}
+          {template && onDuplicate && (
+            <button
+              onClick={onDuplicate}
+              title="Duplicate this workflow template"
+              className="btn-secondary text-sm"
+            >
+              <Copy className="w-4 h-4" />
+              Duplicate
+            </button>
+          )}
           <button onClick={handleSave} disabled={saveMutation.isPending} className="btn-primary text-sm">
             {saveMutation.isPending ? <Loader2 className="w-4 h-4 animate-spin" /> : <Save className="w-4 h-4" />}
             Save
@@ -1555,6 +1567,153 @@ function TemplateEditor({
           )}
         </div>
       )}
+    </div>
+  );
+}
+
+// ── Duplicate Template Modal ─────────────────────────────────────────────────
+function DuplicateTemplateModal({
+  template,
+  docTypes,
+  onClose,
+  onDuplicated,
+}: {
+  template: WorkflowTemplate;
+  docTypes: DocumentType[];
+  onClose: () => void;
+  onDuplicated: (newTemplate: WorkflowTemplate) => void;
+}) {
+  const [newName, setNewName] = useState(`${template.name} (copy)`);
+  const [selectedDocTypeId, setSelectedDocTypeId] = useState<string | null>(
+    template.document_type ?? null
+  );
+
+  const activeDocTypes = useMemo(
+    () => docTypes.filter((d) => d.is_active),
+    [docTypes]
+  );
+
+  const duplicateMutation = useMutation({
+    mutationFn: () =>
+      workflowAPI.duplicateTemplate(template.id, newName.trim() || undefined),
+    onSuccess: async ({ data }) => {
+      let cloned = normalizeTemplate(data as WorkflowTemplate);
+      // If user chose a different doc type, patch it now
+      if (selectedDocTypeId && selectedDocTypeId !== template.document_type) {
+        try {
+          const patchRes = await workflowAPI.updateTemplate(cloned.id, {
+            name: cloned.name,
+            description: cloned.description,
+            document_type: selectedDocTypeId,
+            is_active: true,
+            steps: (cloned.steps ?? []).map(stepToPayload),
+          });
+          cloned = normalizeTemplate(patchRes.data as WorkflowTemplate);
+        } catch {
+          toast.warning("Duplicated, but could not update document type");
+        }
+      }
+      toast.success(`"${cloned.name}" created`);
+      onDuplicated(cloned);
+    },
+    onError: (err: any) => {
+      const message = formatApiError(err?.response?.data) || "Duplication failed";
+      toast.error(message);
+    },
+  });
+
+  const handleSubmit = (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!newName.trim()) { toast.error("Name is required"); return; }
+    duplicateMutation.mutate();
+  };
+
+  return (
+    <div
+      className="fixed inset-0 bg-black/50 flex items-center justify-center z-50 p-4"
+      onClick={onClose}
+    >
+      <div
+        className="bg-card rounded-2xl w-full max-w-md shadow-2xl"
+        onClick={(e) => e.stopPropagation()}
+      >
+        {/* Header */}
+        <div className="flex items-center justify-between p-5 border-b border-border">
+          <div className="flex items-center gap-3">
+            <div className="w-9 h-9 rounded-xl bg-accent/15 flex items-center justify-center">
+              <Copy className="w-4 h-4 text-accent" />
+            </div>
+            <div>
+              <h2 className="text-sm font-bold text-foreground">Duplicate workflow</h2>
+              <p className="text-xs text-muted-foreground mt-0.5">
+                Creates a full copy with all approval steps
+              </p>
+            </div>
+          </div>
+          <button
+            onClick={onClose}
+            className="p-1.5 hover:bg-muted rounded-lg transition-colors"
+          >
+            <X className="w-4 h-4 text-muted-foreground" />
+          </button>
+        </div>
+
+        {/* Source info */}
+        <div className="mx-5 mt-4 rounded-xl border border-border bg-muted/40 px-4 py-3">
+          <p className="text-[11px] font-medium uppercase tracking-wide text-muted-foreground mb-1">Source template</p>
+          <p className="text-sm font-semibold text-foreground">{template.name}</p>
+          <p className="text-xs text-muted-foreground mt-0.5">
+            {template.step_count ?? template.steps?.length ?? 0} steps
+            {template.document_type_name ? ` · ${template.document_type_name}` : ""}
+          </p>
+        </div>
+
+        {/* Form */}
+        <form onSubmit={handleSubmit} className="p-5 space-y-4">
+          <div>
+            <Label required>New template name</Label>
+            <input
+              value={newName}
+              onChange={(e) => setNewName(e.target.value)}
+              className="input"
+              placeholder="e.g. Purchase Order Workflow v2"
+              autoFocus
+            />
+          </div>
+
+          <div>
+            <Label required>Document type</Label>
+            <select
+              value={selectedDocTypeId ?? ""}
+              onChange={(e) => setSelectedDocTypeId(e.target.value || null)}
+              className="input"
+            >
+              <option value="">Select document type</option>
+              {activeDocTypes.map((d) => (
+                <option key={d.id} value={d.id}>{d.name}</option>
+              ))}
+            </select>
+            <p className="text-[11px] text-muted-foreground mt-1">
+              The duplicate can be assigned to a different document type.
+            </p>
+          </div>
+
+          <div className="flex gap-2 pt-1">
+            <button
+              type="submit"
+              disabled={duplicateMutation.isPending}
+              className="btn-primary flex-1"
+            >
+              {duplicateMutation.isPending
+                ? <><Loader2 className="w-4 h-4 animate-spin" /> Duplicating…</>
+                : <><Copy className="w-4 h-4" /> Duplicate</>}
+            </button>
+            <button type="button" onClick={onClose} className="btn-secondary">
+              Cancel
+            </button>
+          </div>
+        </form>
+      </div>
     </div>
   );
 }
@@ -1713,6 +1872,7 @@ export default function WorkflowBuilderPage() {
   const [search, setSearch] = useState("");
   const [showDetailModal, setShowDetailModal] = useState<DocumentType | null>(null);
   const [creatingForDocType, setCreatingForDocType] = useState<DocumentType | null>(null);
+  const [duplicatingTemplate, setDuplicatingTemplate] = useState<WorkflowTemplate | null>(null);
 
   const { data: docTypes, isLoading: dtLoading } = useQuery<unknown, Error, DocumentType[]>({
     queryKey: ["document-types"],
@@ -1968,25 +2128,36 @@ export default function WorkflowBuilderPage() {
                   {group.templates.map((t) => {
                     const isSelected = editingTemplateId === t.id;
                     return (
-                      <button
-                        key={t.id}
-                        onClick={() => handleTemplateClick(t)}
-                        className={clsx(
-                          "w-full text-left rounded-xl p-3 transition-all border",
-                          isSelected ? "bg-accent/10 border-accent/40" : "bg-card border-border hover:border-foreground/20"
-                        )}
-                      >
-                        <div className="flex items-start gap-2.5">
-                          <LayoutTemplate className="w-5 h-5 text-muted-foreground mt-0.5" />
-                          <div className="flex-1 min-w-0">
-                            <p className="font-semibold text-sm text-foreground truncate">{t.name}</p>
-                            <p className="text-xs text-muted-foreground mt-0.5">
-                              {t.step_count} step{t.step_count !== 1 ? 's' : ''}
-                              {t.description ? ` · ${t.description}` : ""}
-                            </p>
+                      <div key={t.id} className="relative group/item">
+                        <button
+                          onClick={() => handleTemplateClick(t)}
+                          className={clsx(
+                            "w-full text-left rounded-xl p-3 pr-10 transition-all border",
+                            isSelected ? "bg-accent/10 border-accent/40" : "bg-card border-border hover:border-foreground/20"
+                          )}
+                        >
+                          <div className="flex items-start gap-2.5">
+                            <LayoutTemplate className="w-5 h-5 text-muted-foreground mt-0.5" />
+                            <div className="flex-1 min-w-0">
+                              <p className="font-semibold text-sm text-foreground truncate">{t.name}</p>
+                              <p className="text-xs text-muted-foreground mt-0.5">
+                                {t.step_count} step{t.step_count !== 1 ? 's' : ''}
+                                {t.description ? ` · ${t.description}` : ""}
+                              </p>
+                            </div>
                           </div>
-                        </div>
-                      </button>
+                        </button>
+                        <button
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            setDuplicatingTemplate(t);
+                          }}
+                          title="Duplicate workflow"
+                          className="absolute right-2 top-1/2 -translate-y-1/2 p-1.5 rounded-lg border border-border bg-card opacity-0 group-hover/item:opacity-100 hover:bg-accent/10 hover:border-accent/40 hover:text-accent transition-all"
+                        >
+                          <Copy className="w-3.5 h-3.5 text-muted-foreground" />
+                        </button>
+                      </div>
                     );
                   })}
                 </div>
@@ -2029,6 +2200,7 @@ export default function WorkflowBuilderPage() {
                 docType={editorDocType}
                 template={currentTemplate}
                 onSaved={handleSaved}
+                onDuplicate={currentTemplate ? () => setDuplicatingTemplate(currentTemplate) : undefined}
                 allTemplates={resolvedTemplates}
                 docTypes={docTypesArray}
               />
@@ -2048,6 +2220,24 @@ export default function WorkflowBuilderPage() {
           }}
           templates={resolvedTemplates}
           isLoading={templatesLoading}
+        />
+      )}
+
+      {duplicatingTemplate && (
+        <DuplicateTemplateModal
+          template={duplicatingTemplate}
+          docTypes={docTypesArray}
+          onClose={() => setDuplicatingTemplate(null)}
+          onDuplicated={(newTemplate) => {
+            setDuplicatingTemplate(null);
+            qc.invalidateQueries({ queryKey: ["workflow-templates"] });
+            qc.invalidateQueries({ queryKey: ["document-types"] });
+            // Navigate to the newly created template
+            setEditingTemplateId(newTemplate.id);
+            setSelectedDocType(null);
+            setCreatingForDocType(null);
+            setSidebarTab("templates");
+          }}
         />
       )}
     </div>
