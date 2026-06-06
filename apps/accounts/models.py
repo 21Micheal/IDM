@@ -146,15 +146,26 @@ class User(AbstractBaseUser, PermissionsMixin):
         stage: str | None = None,
     ) -> set[str]:
         """
-        Return all GroupAction values granted to this user by active group memberships.
-        Permissions are intentionally exact: one document type, one lifecycle
-        stage. This avoids overlapping wildcard grants and keeps stage-based
-        access auditable.
+        Return all GroupAction values granted to this user by active group
+        memberships for a document type.
+
+        Stage semantics:
+          - A permission saved at stage "any" ("all stages") is a WILDCARD that
+            applies to every lifecycle stage. (Previously these silently never
+            applied, so rules set at the "any" stage did nothing.)
+          - A specific-stage query (e.g. "creation") returns rows for that stage
+            PLUS any "any" wildcards.
+          - A stage-agnostic query (None / "any") — used by global single-stage
+            mode — returns the org's "all stages" config.
         """
-        if document_type_id is None or stage in (None, AccessStage.ANY.value):
+        if document_type_id is None:
             return set()
         qs = GroupPermission.objects.filter(self._active_group_permissions_q())
-        qs = qs.filter(document_type_id=document_type_id, stage=stage)
+        qs = qs.filter(document_type_id=document_type_id)
+        if stage in (None, AccessStage.ANY.value):
+            qs = qs.filter(stage=AccessStage.ANY.value)
+        else:
+            qs = qs.filter(Q(stage=stage) | Q(stage=AccessStage.ANY.value))
         return set(
             qs.exclude(action=GroupAction.ADMIN.value)
               .values_list("action", flat=True)
@@ -190,9 +201,14 @@ class User(AbstractBaseUser, PermissionsMixin):
           - Explicit permissions tied to this document type
           - Wildcard permissions (document_type IS NULL) that apply to every type
 
-        When `document` is provided, permissions are resolved for its lifecycle stage.
+        When `document` is provided, permissions are resolved for its lifecycle
+        stage — unless the org runs in global single-stage mode, in which case one
+        configuration ("any") applies across the whole lifecycle.
         """
-        if document is not None:
+        from apps.documents.access import permission_stage_is_global
+        if permission_stage_is_global():
+            stage = AccessStage.ANY.value
+        elif document is not None:
             from apps.documents.access import resolve_access_stage
             stage = resolve_access_stage(document)
         return self.get_group_permissions_for_doctype(document_type_id, stage=stage)

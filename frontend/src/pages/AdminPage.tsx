@@ -4,7 +4,7 @@ import { dmsSettingsAPI, type DmsSettings } from "@/services/api";
 import { toast } from "@/components/ui/vault-toast";
 import {
   Copy, Archive, Droplets, ClipboardCheck, Loader2, RotateCcw, Save,
-  Link2, Trash2,
+  Link2, Trash2, ShieldCheck,
 } from "lucide-react";
 import clsx from "clsx";
 
@@ -273,6 +273,30 @@ function SettingsTab() {
           </label>
           <div className="rounded-lg border border-border bg-muted/40 px-4 py-3 text-sm text-muted-foreground">
             Permanent deletion cannot be undone. Restore anything worth keeping before it ages out.
+          </div>
+        </section>
+
+        <section className="card p-5 space-y-4">
+          <div className="flex items-start gap-3">
+            <div className="flex h-10 w-10 items-center justify-center rounded-lg bg-[#287EAD]/10 text-[#287EAD]">
+              <ShieldCheck className="h-5 w-5" />
+            </div>
+            <div>
+              <h3 className="font-semibold text-foreground">Permission stages (RBAC)</h3>
+              <p className="text-sm text-muted-foreground">
+                Choose whether group permissions are configured per lifecycle stage or with one global configuration.
+              </p>
+            </div>
+          </div>
+          <Toggle
+            checked={settings.rbac_single_stage}
+            onChange={(checked) => update("rbac_single_stage", checked)}
+            label="Single global stage"
+            description="When on, one permission set applies across the entire lifecycle and the stage selector is hidden in Groups."
+          />
+          <div className="rounded-lg border border-border bg-muted/40 px-4 py-3 text-sm text-muted-foreground">
+            Default (off) is stage-based: separate permissions for Creation, For approval, and After approval.
+            Switching modes changes how existing rules are read — reconfigure group permissions after changing this.
           </div>
         </section>
 

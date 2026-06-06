@@ -273,6 +273,11 @@ class DMSSettings(models.Model):
     trash_auto_empty_enabled = models.BooleanField(default=False)
     trash_retention_days = models.PositiveIntegerField(default=30)
 
+    # RBAC: when True, group permissions use a single global configuration that
+    # applies across the whole document lifecycle (stage selection is hidden).
+    # When False (default), permissions are configured per lifecycle stage.
+    rbac_single_stage = models.BooleanField(default=False)
+
     require_metadata_on_upload = models.BooleanField(default=True)
     bulk_scan_submit_for_approval = models.BooleanField(
         default=False,

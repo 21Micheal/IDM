@@ -1,6 +1,6 @@
 import { useEffect, useState } from "react";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
-import { groupsAPI, documentTypesAPI, usersAPI, normalizeListResponse } from "@/services/api";
+import { groupsAPI, documentTypesAPI, usersAPI, normalizeListResponse, dmsSettingsAPI } from "@/services/api";
 import {
   Plus, Users, Shield, ChevronRight, X, Loader2,
   Check, UserPlus, Settings2, Info, Trash2,
@@ -29,7 +29,12 @@ const PERMISSION_STAGES = [
   { value: "after_approval", label: "After approval", description: "Approved, rejected, or archived" },
 ] as const;
 
-type PermissionStage = (typeof PERMISSION_STAGES)[number]["value"];
+// Used when the org runs RBAC in global single-stage mode.
+const GLOBAL_STAGE = [
+  { value: "any", label: "All stages", description: "One configuration applied across the entire document lifecycle" },
+] as const;
+
+type PermissionStage = string;
 
 const ALL_ACTIONS = [
   { value: "view",     label: "View",     description: "Open and read documents" },
@@ -49,20 +54,26 @@ function emptyMatrix(docTypes: DocType[]): Record<string, Set<string>> {
   return matrix;
 }
 
-function buildStageMatrices(group: Group, docTypes: DocType[]): Record<PermissionStage, Record<string, Set<string>>> {
-  const stages = PERMISSION_STAGES.reduce((acc, stage) => {
+function buildStageMatrices(
+  group: Group,
+  docTypes: DocType[],
+  singleStage: boolean,
+): Record<PermissionStage, Record<string, Set<string>>> {
+  const stageList = singleStage ? GLOBAL_STAGE : PERMISSION_STAGES;
+  const stages = stageList.reduce((acc, stage) => {
     acc[stage.value] = emptyMatrix(docTypes);
     return acc;
   }, {} as Record<PermissionStage, Record<string, Set<string>>>);
 
   group.permissions.forEach((p) => {
-    if (p.action === "admin") return;
-    const stage = (p.stage || "any") as PermissionStage;
+    if (p.action === "admin" || !p.document_type) return;
+    const stage = p.stage || "any";
+    // Each mode shows only the permissions it manages, matching how the backend
+    // resolves them: global mode reads the "any" config; stage mode reads per-stage.
+    if (singleStage ? stage !== "any" : stage === "any") return;
     if (!stages[stage]) return;
-    if (!p.document_type) return;
-    const key = p.document_type;
-    if (!stages[stage][key]) stages[stage][key] = new Set();
-    stages[stage][key].add(p.action);
+    if (!stages[stage][p.document_type]) stages[stage][p.document_type] = new Set();
+    stages[stage][p.document_type].add(p.action);
   });
 
   return stages;
@@ -72,20 +83,24 @@ function buildStageMatrices(group: Group, docTypes: DocType[]): Record<Permissio
 function PermissionMatrix({
   group,
   docTypes,
+  singleStage,
   onSave,
   isSaving,
 }: {
   group: Group;
   docTypes: DocType[];
+  singleStage: boolean;
   onSave: (perms: { document_type_id: string; stage: string; action: string }[]) => void;
   isSaving: boolean;
 }) {
-  const [activeStage, setActiveStage] = useState<PermissionStage>("creation");
-  const [matrices, setMatrices] = useState(() => buildStageMatrices(group, docTypes));
+  const stageList = singleStage ? GLOBAL_STAGE : PERMISSION_STAGES;
+  const [activeStage, setActiveStage] = useState<PermissionStage>(stageList[0].value);
+  const [matrices, setMatrices] = useState(() => buildStageMatrices(group, docTypes, singleStage));
 
   useEffect(() => {
-    setMatrices(buildStageMatrices(group, docTypes));
-  }, [group.id, group.permissions, docTypes]);
+    setActiveStage(stageList[0].value);
+    setMatrices(buildStageMatrices(group, docTypes, singleStage));
+  }, [group.id, group.permissions, docTypes, singleStage]);
 
   const matrix = matrices[activeStage] ?? emptyMatrix(docTypes);
 
@@ -112,7 +127,7 @@ function PermissionMatrix({
 
   const handleSave = () => {
     const perms: { document_type_id: string; stage: string; action: string }[] = [];
-    PERMISSION_STAGES.forEach(({ value: stage }) => {
+    stageList.forEach(({ value: stage }) => {
       const stageMatrix = matrices[stage] ?? emptyMatrix(docTypes);
       Object.entries(stageMatrix).forEach(([key, actions]) => {
         actions.forEach((action) => {
@@ -133,35 +148,40 @@ function PermissionMatrix({
 
   return (
     <div className="space-y-6">
-      <div className="flex items-center gap-3 text-sm text-foreground bg-accent/10 border border-accent/30 rounded-xl p-4">
-        <Info className="w-5 h-5 flex-shrink-0 text-accent" />
+      <div className="flex items-center gap-3 text-sm text-foreground bg-[#287EAD]/10 border border-[#287EAD]/30 rounded-xl p-4">
+        <Info className="w-5 h-5 flex-shrink-0 text-[#287EAD]" />
         <span>
-          Configure explicit permissions per document type and lifecycle stage. No wildcard
-          stage or all-type grants are used, so rules do not overlap.
+          {singleStage
+            ? "One configuration applies across the entire document lifecycle (single-stage mode is on in DMS settings)."
+            : "Configure explicit permissions per document type and lifecycle stage. Rules at one stage apply only to that stage."}
         </span>
       </div>
 
-      <div className="flex flex-wrap gap-2">
-        {PERMISSION_STAGES.map((stage) => (
-          <button
-            key={stage.value}
-            type="button"
-            title={stage.description}
-            onClick={() => setActiveStage(stage.value)}
-            className={clsx(
-              "px-4 py-2 rounded-lg text-sm font-medium border transition-colors",
-              activeStage === stage.value
-                ? "bg-accent text-accent-foreground border-accent"
-                : "bg-card text-foreground border-border hover:border-accent/50"
-            )}
-          >
-            {stage.label}
-          </button>
-        ))}
-      </div>
-      <p className="text-xs text-muted-foreground -mt-2">
-        {PERMISSION_STAGES.find((s) => s.value === activeStage)?.description}
-      </p>
+      {!singleStage && (
+        <>
+          <div className="flex flex-wrap gap-2">
+            {PERMISSION_STAGES.map((stage) => (
+              <button
+                key={stage.value}
+                type="button"
+                title={stage.description}
+                onClick={() => setActiveStage(stage.value)}
+                className={clsx(
+                  "px-4 py-2 rounded-lg text-sm font-medium border transition-colors",
+                  activeStage === stage.value
+                    ? "bg-[#287EAD] text-white border-[#287EAD]"
+                    : "bg-card text-foreground border-border hover:border-[#287EAD]/50"
+                )}
+              >
+                {stage.label}
+              </button>
+            ))}
+          </div>
+          <p className="text-xs text-muted-foreground -mt-2">
+            {PERMISSION_STAGES.find((s) => s.value === activeStage)?.description}
+          </p>
+        </>
+      )}
 
       <div className="overflow-x-auto rounded-xl border border-border">
         <table className="w-full text-sm min-w-[900px]">
@@ -195,11 +215,11 @@ function PermissionMatrix({
                         className={clsx(
                           "w-6 h-6 rounded-md border-2 flex items-center justify-center mx-auto transition-all",
                           checked
-                            ? "bg-accent border-accent"
-                            : "border-border hover:border-accent/60"
+                            ? "bg-[#287EAD] border-[#287EAD]"
+                            : "border-border hover:border-[#287EAD]/60"
                         )}
                       >
-                        {checked && <Check className="w-4 h-4 text-accent-foreground" strokeWidth={3} />}
+                        {checked && <Check className="w-4 h-4 text-white" strokeWidth={3} />}
                       </button>
                     </td>
                   );
@@ -208,7 +228,7 @@ function PermissionMatrix({
                   <button
                     type="button"
                     onClick={() => toggleAll(key)}
-                    className="text-xs font-semibold text-accent hover:text-accent/80 hover:underline"
+                    className="text-xs font-semibold text-[#287EAD] hover:text-[#287EAD]/80 hover:underline"
                   >
                     {(matrix[key]?.size ?? 0) === ALL_ACTIONS.length ? "Clear" : "Select all"}
                   </button>
@@ -248,6 +268,12 @@ function GroupDetail({
   const [userSearch, setUserSearch] = useState("");
   const isHodGroup = group.name === HOD_GROUP_NAME;
   const isBuiltInGroup = isHodGroup;
+
+  const { data: dms } = useQuery({
+    queryKey: ["dms-settings"],
+    queryFn: () => dmsSettingsAPI.get().then((r) => r.data),
+  });
+  const singleStage = Boolean(dms?.rbac_single_stage);
 
   const { data: members = [] } = useQuery<Member[]>({
     queryKey: ["group-members", group.id],
@@ -399,6 +425,7 @@ function GroupDetail({
               <PermissionMatrix
                 group={group}
                 docTypes={docTypes}
+                singleStage={singleStage}
                 onSave={(perms) => setPermsMutation.mutate(perms)}
                 isSaving={setPermsMutation.isPending}
               />

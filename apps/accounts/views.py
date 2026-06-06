@@ -687,7 +687,8 @@ class UserGroupViewSet(viewsets.ModelViewSet):
             c[0] for c in GroupPermission._meta.get_field("action").choices
             if c[0] != GroupAction.ADMIN.value
         }
-        valid_stages = {stage for stage in ACCESS_STAGE_KEYS if stage != AccessStage.ANY.value}
+        # "any" is allowed — it is the global single-stage configuration.
+        valid_stages = set(ACCESS_STAGE_KEYS)
         errors = []
         for i, p in enumerate(perms):
             if p.get("action") not in valid_actions:

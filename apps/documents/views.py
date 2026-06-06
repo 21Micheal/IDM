@@ -643,14 +643,15 @@ class DocumentViewSet(AuditMixin, viewsets.ModelViewSet):
     @action(detail=True, methods=["post"])
     def submit(self, request, pk=None):
         doc = self.get_object()
+        # Rejection is terminal — it ends the workflow. Only draft and returned
+        # (sent back to the uploader for rework) documents can be (re)submitted.
         if doc.status not in (
             DocumentStatus.DRAFT,
-            DocumentStatus.REJECTED,
             DocumentStatus.RETURNED,
             "Returned for Review",
         ):
             return Response(
-                {"detail": "Only draft, rejected or returned documents can be submitted."},
+                {"detail": "Only draft or returned documents can be submitted. Rejected documents are final."},
                 status=status.HTTP_400_BAD_REQUEST,
             )
         from apps.workflows.services import WorkflowService, WorkflowError

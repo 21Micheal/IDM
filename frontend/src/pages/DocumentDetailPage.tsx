@@ -685,9 +685,12 @@ export default function DocumentDetailPage() {
   const ocrQuality = getOcrQuality(doc.metadata);
   const isLockedByOther = Boolean(doc.is_edit_locked && doc.edit_locked_by !== user?.id);
 
+  // Rejection is terminal: rejected documents cannot restart the workflow.
+  // Returned documents go back to the uploader to edit and resubmit (resumes
+  // the exact step it was at).
   const canSubmit =
     !isPersonal &&
-    (["draft", "rejected", "returned"].includes(doc.status)) &&
+    (["draft", "returned"].includes(doc.status)) &&
     (canApprove || doc.uploaded_by?.id === user?.id);
 
   const canArchiveNow =

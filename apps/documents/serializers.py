@@ -190,6 +190,7 @@ class DMSSettingsSerializer(serializers.ModelSerializer):
             "auto_archive_after_days",
             "trash_auto_empty_enabled",
             "trash_retention_days",
+            "rbac_single_stage",
             "require_metadata_on_upload",
             "bulk_scan_submit_for_approval",
             "access_stages",

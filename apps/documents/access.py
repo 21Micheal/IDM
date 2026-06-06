@@ -57,6 +57,14 @@ def get_access_stages() -> list[dict[str, Any]]:
     return stages if stages else list(DEFAULT_ACCESS_STAGES)
 
 
+def permission_stage_is_global() -> bool:
+    """
+    True when RBAC runs in single-stage mode — one permission configuration
+    ("any") applies across the entire document lifecycle instead of per stage.
+    """
+    return bool(DMSSettings.load().rbac_single_stage)
+
+
 def _status_to_stage_map() -> dict[str, str]:
     mapping: dict[str, str] = {}
     for stage_def in get_access_stages():

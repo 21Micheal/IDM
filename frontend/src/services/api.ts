@@ -62,6 +62,7 @@ export type DmsSettings = {
   auto_archive_after_days: number;
   trash_auto_empty_enabled: boolean;
   trash_retention_days: number;
+  rbac_single_stage: boolean;
   require_metadata_on_upload: boolean;
   updated_at?: string;
 };
