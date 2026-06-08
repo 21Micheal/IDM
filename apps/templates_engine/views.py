@@ -2,8 +2,13 @@ from rest_framework import viewsets, status
 from rest_framework.decorators import action
 from rest_framework.response import Response
 from rest_framework.exceptions import ValidationError
+from rest_framework.parsers import JSONParser, MultiPartParser, FormParser
 from django.db.models import F
+from django.core.files.storage import default_storage
+from django.utils.text import get_valid_filename
 from rest_framework import permissions
+import json
+import uuid
 from .models import DocumentTemplate, TemplateUsage
 from .serializers import DocumentTemplateSerializer
 from .tasks import generate_document_from_template_sync
@@ -52,6 +57,7 @@ def extract_placeholders(file):
 class DocumentTemplateViewSet(viewsets.ModelViewSet):
     serializer_class = DocumentTemplateSerializer
     queryset = DocumentTemplate.objects.all()
+    parser_classes = [JSONParser, MultiPartParser, FormParser]
 
     def get_permissions(self):
         if self.action in ("create", "update", "partial_update", "destroy", "duplicate"):
@@ -146,6 +152,29 @@ class DocumentTemplateViewSet(viewsets.ModelViewSet):
     def fill(self, request, pk=None):
         template = self.get_object()
         values = request.data.get("values", {})
+        if isinstance(values, str):
+            try:
+                values = json.loads(values) if values.strip() else {}
+            except json.JSONDecodeError:
+                raise ValidationError({"values": "values must be valid JSON."})
+        if values is None:
+            values = {}
+        if not isinstance(values, dict):
+            raise ValidationError({"values": "values must be an object."})
+
+        form_files = []
+        for key, file in request.FILES.items():
+            field_key = key
+            if field_key.startswith("attachment_"):
+                field_key = field_key[len("attachment_"):]
+            elif field_key.startswith("attachments."):
+                field_key = field_key[len("attachments."):]
+            form_files.append((field_key, file))
+
+        generation_values = dict(values)
+        for field_key, file in form_files:
+            generation_values[field_key] = file.name
+
         fmt = request.data.get("output_format", "pdf")
         title = request.data.get("title", template.name)
         type_id = request.data.get("document_type_id") or str(template.document_type_id or "")
@@ -169,7 +198,7 @@ class DocumentTemplateViewSet(viewsets.ModelViewSet):
                 for f in section.get("fields", [])
                 if f.get("required") and f.get("type") not in ("divider", "heading")
             ]
-            missing = [f["label"] for f in all_fields if not values.get(f["key"])]
+            missing = [f["label"] for f in all_fields if not generation_values.get(f["key"])]
             if missing:
                 raise ValidationError(
                     {"values": f"Required fields missing: {', '.join(missing)}"}
@@ -177,10 +206,39 @@ class DocumentTemplateViewSet(viewsets.ModelViewSet):
 
         try:
             doc = generate_document_from_template_sync(
-                template, values, fmt, title.strip(), request.user, type_id
+                template, generation_values, fmt, title.strip(), request.user, type_id
             )
         except Exception as e:
             raise ValidationError({"detail": f"Document generation failed: {e}"})
+
+        if form_files:
+            meta = dict(doc.metadata or {})
+            meta_form = dict(meta.get("form") or {})
+            form_values = dict(generation_values)
+            attachments = dict(meta_form.get("attachments") or {})
+
+            for field_key, file in form_files:
+                safe_name = get_valid_filename(file.name)
+                storage_path = default_storage.save(
+                    f"documents/{doc.id}/form_attachments/{uuid.uuid4().hex}_{safe_name}",
+                    file,
+                )
+                descriptor = {
+                    "type": "file",
+                    "field_key": field_key,
+                    "name": file.name,
+                    "size": getattr(file, "size", 0),
+                    "content_type": getattr(file, "content_type", "") or "",
+                    "storage_path": storage_path,
+                }
+                attachments[field_key] = descriptor
+                form_values[field_key] = descriptor
+
+            meta_form["values"] = form_values
+            meta_form["attachments"] = attachments
+            meta["form"] = meta_form
+            doc.metadata = meta
+            doc.save(update_fields=["metadata", "updated_at"])
 
         # Increment use count atomically
         DocumentTemplate.objects.filter(id=template.id).update(
@@ -190,7 +248,7 @@ class DocumentTemplateViewSet(viewsets.ModelViewSet):
             template=template,
             document=doc,
             used_by=request.user,
-            values=values,
+            values=generation_values,
             output_format=fmt,
         )
 

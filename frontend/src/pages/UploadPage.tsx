@@ -25,6 +25,7 @@ import { applyOcrToFields, sanitizeOcrFields, type OcrFields } from "@/lib/ocrFi
 import BulkScanPage from "@/pages/BulkScanPage";
 import TemplatePreview from "@/components/templates/TemplatePreview";
 import TemplateForm, { requiredFieldLabels } from "@/components/templates/TemplateForm";
+import BuiltTemplateFormModal from "@/components/templates/BuiltTemplateFormModal";
 
 // ── Types ─────────────────────────────────────────────────────────────────────
 
@@ -956,6 +957,10 @@ export default function UploadPage({ scanOnly = false }: UploadPageProps) {
   // form's field values (strings, booleans, table-row arrays). Filled in-app.
   const [templateValues, setTemplateValues] = useState<Record<string, unknown>>({});
   useEffect(() => { setTemplateValues({}); }, [selectedTemplateId]);
+  const [showBuiltForm, setShowBuiltForm] = useState(false);
+  useEffect(() => { setShowBuiltForm(false); }, [selectedTemplateId]);
+
+  const isBuiltTemplate = selectedTemplate?.type === "built";
 
   const isOcrFlow      = isScanned && !isSelfUpload;
   const showManualForm = !isOcrFlow && Boolean(selectedTypeId) && scanStage === "idle";
@@ -1247,28 +1252,25 @@ export default function UploadPage({ scanOnly = false }: UploadPageProps) {
         toast.error("Please select a template");
         return;
       }
-      const documentValues = documentValuesFromForm(values);
-      const title = documentValues.title || selectedTemplate.name;
       const isUploaded = selectedTemplate.type === "uploaded";
 
-      // Built forms are filled in-app — enforce required fields before creating.
+      // Built templates are filled via the full-screen modal — guard against
+      // accidentally reaching this path without going through it.
       if (!isUploaded) {
-        const missing = requiredFieldLabels(selectedTemplate.sections ?? [], templateValues);
-        if (missing.length) {
-          toast.error(`Please fill in: ${missing.join(", ")}`);
-          return;
-        }
+        setShowBuiltForm(true);
+        return;
       }
+
+      const documentValues = documentValuesFromForm(values);
+      const title = documentValues.title || selectedTemplate.name;
 
       createFromTemplateMutation.mutate({
         templateId: selectedTemplate.id,
         title,
         documentTypeId: selectedTypeId,
-        // Both Office placeholders and built form fields are filled in-app.
         values: templateValues,
         draftFromTemplate: false,
-        // Office → editable Office file; built form → PDF rendering (a view of the data).
-        outputFormat: isUploaded ? "docx" : "pdf",
+        outputFormat: "docx",
       });
       return;
     }
@@ -1420,6 +1422,7 @@ export default function UploadPage({ scanOnly = false }: UploadPageProps) {
   }
 
   return (
+    <>
     <div className="-m-6 min-h-[calc(100vh-3.5rem)] bg-[#EDEDED] text-[#1F2933]">
       <div className="flex h-[69px] items-center justify-between gap-4 bg-[#287EAD] px-5 pr-8 text-white">
         <div className="min-w-0">
@@ -1760,13 +1763,30 @@ export default function UploadPage({ scanOnly = false }: UploadPageProps) {
               />
             </div>
           )}
+          {/* Centre column — template preview (built template selected) */}
           {useTemplate && !droppedFile && (
             <div className="order-1 xl:col-span-5">
-              <div className={clsx("flex flex-col border border-[#C8CDD2] bg-[#F7F8F9]", PREVIEW_MIN_HEIGHT)}>
-                <div className="border-b border-[#C8CDD2] bg-white px-4 py-3">
-                  <p className="text-sm font-semibold text-[#1F2933]">Template source</p>
-                  <p className="mt-0.5 text-xs text-[#5E6870]">{selectedTemplate?.name || "Select a template"}</p>
+              <div className={clsx("flex flex-col border border-[#C8CDD2] bg-white", PREVIEW_MIN_HEIGHT)}>
+                {/* Header */}
+                <div className="flex items-center justify-between border-b border-[#C8CDD2] bg-[#F3F5F6] px-4 py-3">
+                  <div className="min-w-0">
+                    <p className="text-xs font-semibold uppercase tracking-wider text-[#5E6870]">Template source</p>
+                    <p className="mt-0.5 text-sm font-bold text-[#1F2933] truncate">
+                      {selectedTemplate?.name || "Select a template"}
+                    </p>
+                  </div>
+                  {selectedTemplate && (
+                    <span className={clsx(
+                      "flex-shrink-0 rounded px-2 py-0.5 text-[10px] font-semibold uppercase tracking-wider border",
+                      isBuiltTemplate
+                        ? "bg-[#EEF6FB] text-[#287EAD] border-[#287EAD]/30"
+                        : "bg-amber-50 text-amber-700 border-amber-200",
+                    )}>
+                      {isBuiltTemplate ? "Builder" : "Office"}
+                    </span>
+                  )}
                 </div>
+
                 {selectedTemplate ? (
                   <div className="flex-1 overflow-y-auto p-5">
                     <TemplatePreview
@@ -1779,8 +1799,12 @@ export default function UploadPage({ scanOnly = false }: UploadPageProps) {
                         sections: selectedTemplate.sections,
                       }}
                     />
+
+                    {/* Footer note */}
                     <p className="mt-5 border-t border-[#E3E7EA] pt-3 text-xs text-[#5E6870]">
-                      A draft document will be generated from this template. After creation, open it and use the normal editor to complete or adjust it.
+                      {isBuiltTemplate
+                        ? "Click \"Fill & Create Document\" to open the full form and complete all fields."
+                        : "A draft Office document will be created from this template for editing."}
                     </p>
                   </div>
                 ) : (
@@ -1821,13 +1845,65 @@ export default function UploadPage({ scanOnly = false }: UploadPageProps) {
                     )}
                   </div>
 
+                  {/* Built template: metadata fields persist, CTA appended below */}
                   {useTemplate && selectedTemplate ? (
-                    <TemplateFillSection
-                      template={selectedTemplate}
-                      register={register}
-                      values={templateValues}
-                      onChange={(key, val) => setTemplateValues((prev) => ({ ...prev, [key]: val }))}
-                    />
+                    isBuiltTemplate ? (
+                      <>
+                        {/* Document type metadata fields — same as normal upload */}
+                        {hasMetadata && (
+                          <div className="mb-6">
+                            <div className="grid gap-2 border-b border-border/70 py-3 sm:grid-cols-[minmax(160px,0.55fr)_minmax(0,1fr)]">
+                              <span className="text-sm text-muted-foreground">Document Type</span>
+                              <span className="text-sm text-foreground">{selectedType?.name}</span>
+                            </div>
+                            <div>
+                              {[...selectedType!.metadata_fields]
+                                .sort((a, b) => a.order - b.order)
+                                .map((field) => (
+                                  <DynamicField
+                                    key={field.id}
+                                    field={field}
+                                    register={register}
+                                    control={control}
+                                    errors={errors as Record<string, unknown>}
+                                    enforceRequired={!relaxReq}
+                                    suggestionScore={undefined}
+                                    name={getUploadFieldName(field)}
+                                  />
+                                ))}
+                            </div>
+                          </div>
+                        )}
+
+                        {/* Document title + single launch button */}
+                        <div className="space-y-3 border-t border-border/60 pt-5">
+                          <div className="space-y-1.5">
+                            <label className="block text-xs font-semibold uppercase tracking-wider text-[#5E6870]">Document title</label>
+                            <input
+                              {...register("title")}
+                              className="input w-full"
+                              placeholder={selectedTemplate.name}
+                            />
+                          </div>
+                          <button
+                            type="button"
+                            onClick={() => setShowBuiltForm(true)}
+                            className="flex w-full items-center justify-center gap-2 rounded border border-[#287EAD] bg-[#287EAD] px-4 py-2.5 text-sm font-semibold text-white hover:bg-[#1E6F99] transition-colors"
+                          >
+                            <Wand2 className="h-4 w-4" />
+                            Fill &amp; Create Document
+                          </button>
+                        </div>
+                      </>
+                    ) : (
+                      // Office templates — keep the existing TemplateFillSection
+                      <TemplateFillSection
+                        template={selectedTemplate}
+                        register={register}
+                        values={templateValues}
+                        onChange={(key, val) => setTemplateValues((prev) => ({ ...prev, [key]: val }))}
+                      />
+                    )
                   ) : (
                   <>
                   {hasMetadata && (
@@ -2104,5 +2180,17 @@ export default function UploadPage({ scanOnly = false }: UploadPageProps) {
         </div>
       )}
     </div>
+
+    {/* ── Built template form modal ─────────────────────────────────────────── */}
+    {showBuiltForm && selectedTemplate && (
+      <BuiltTemplateFormModal
+        template={selectedTemplate}
+        documentTypeId={selectedTypeId}
+        documentTypeName={selectedType?.name}
+        initialTitle={getValues("title")}
+        onClose={() => setShowBuiltForm(false)}
+      />
+    )}
+    </>
   );
 }

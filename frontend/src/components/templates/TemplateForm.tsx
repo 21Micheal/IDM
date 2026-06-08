@@ -13,8 +13,10 @@
  */
 import { useState, useEffect, useRef } from "react";
 import { useForm, Controller } from "react-hook-form";
-import { AlertCircle, Pencil, Paperclip, Plus, Trash2 } from "lucide-react";
+import { AlertCircle, Download, Loader2, Pencil, Paperclip, Plus, Trash2, X } from "lucide-react";
 import type { ReactNode } from "react";
+import { documentsAPI } from "@/services/api";
+import { toast } from "@/components/ui/vault-toast";
 
 // ── Types ─────────────────────────────────────────────────────────────────────
 
@@ -49,6 +51,26 @@ type Field = {
 type Section = { id?: string; title?: string; description?: string; fields?: Field[] };
 
 export type TemplateFormValues = Record<string, unknown>;
+
+type AttachmentValue = {
+  type?: string;
+  field_key?: string;
+  name?: string;
+  size?: number;
+  content_type?: string;
+  storage_path?: string;
+};
+
+function isAttachmentValue(value: unknown): value is AttachmentValue {
+  return Boolean(value && typeof value === "object" && "storage_path" in value);
+}
+
+function formatFileSize(size?: number) {
+  if (!size) return "";
+  if (size < 1024) return `${size} B`;
+  if (size < 1024 * 1024) return `${(size / 1024).toFixed(1)} KB`;
+  return `${(size / (1024 * 1024)).toFixed(1)} MB`;
+}
 
 // ── Conditional visibility ────────────────────────────────────────────────────
 
@@ -209,6 +231,190 @@ function TableField({ field, value, onChange, readOnly }: {
   );
 }
 
+// ── File / Image attach field ──────────────────────────────────────────────────
+
+function FileAttachField({ label, fieldKey, imageOnly, disabled, value, documentId, onChangeCb }: {
+  label: string;
+  fieldKey: string;
+  imageOnly?: boolean;
+  disabled?: boolean;
+  value?: unknown;
+  documentId?: string;
+  onChangeCb: (key: string, val: unknown) => void;
+}) {
+  const [file, setFile] = useState<File | null>(null);
+  const [downloading, setDownloading] = useState(false);
+  const inputRef = useRef<HTMLInputElement>(null);
+  const descriptor = isAttachmentValue(value) ? value : null;
+
+  const pick = (f: File | null) => {
+    setFile(f);
+    onChangeCb(fieldKey, f ?? undefined);
+  };
+
+  const downloadAttachment = async () => {
+    if (!documentId || !descriptor) return;
+    setDownloading(true);
+    try {
+      const response = await documentsAPI.downloadFormAttachment(documentId, fieldKey);
+      const blob = new Blob([response.data], { type: descriptor.content_type || response.data?.type || "application/octet-stream" });
+      const url = URL.createObjectURL(blob);
+      const anchor = document.createElement("a");
+      anchor.href = url;
+      anchor.download = descriptor.name || label || "attachment";
+      document.body.appendChild(anchor);
+      anchor.click();
+      anchor.remove();
+      URL.revokeObjectURL(url);
+    } catch {
+      toast.error("Could not download this attachment.");
+    } finally {
+      setDownloading(false);
+    }
+  };
+
+  return (
+    <div>
+      {disabled && descriptor ? (
+        <div className="flex items-center gap-2 rounded-lg border border-border bg-muted/20 px-3 py-2.5">
+          <Paperclip className="h-4 w-4 flex-shrink-0 text-primary" />
+          <span className="min-w-0 flex-1 truncate text-xs text-foreground">{descriptor.name || label}</span>
+          {descriptor.size ? (
+            <span className="flex-shrink-0 text-[10px] text-muted-foreground">{formatFileSize(descriptor.size)}</span>
+          ) : null}
+          {documentId && (
+            <button
+              type="button"
+              onClick={downloadAttachment}
+              disabled={downloading}
+              className="flex-shrink-0 rounded border border-border bg-white px-2 py-1 text-[11px] font-semibold text-primary hover:bg-muted disabled:opacity-50"
+            >
+              {downloading ? <Loader2 className="h-3 w-3 animate-spin" /> : <Download className="h-3 w-3" />}
+            </button>
+          )}
+        </div>
+      ) : file ? (
+        <div className="flex items-center gap-2 rounded-lg border border-border bg-muted/20 px-3 py-2.5">
+          <Paperclip className="h-4 w-4 flex-shrink-0 text-primary" />
+          <span className="min-w-0 flex-1 truncate text-xs text-foreground">{file.name}</span>
+          <span className="flex-shrink-0 text-[10px] text-muted-foreground">
+            {(file.size / 1024).toFixed(0)} KB
+          </span>
+          {!disabled && (
+            <button type="button" onClick={() => pick(null)}
+              className="flex-shrink-0 rounded p-0.5 text-muted-foreground hover:text-red-500">
+              <X className="h-3.5 w-3.5" />
+            </button>
+          )}
+        </div>
+      ) : (
+        <label className={`flex cursor-pointer flex-col items-center gap-2 rounded-lg border-2 border-dashed
+          border-border bg-muted/20 py-5 text-xs text-muted-foreground transition-colors
+          hover:border-primary/50 hover:text-foreground ${disabled ? "pointer-events-none opacity-50" : ""}`}>
+          <Paperclip className="h-5 w-5" />
+          <span>Click to {imageOnly ? "upload image" : "attach file"}</span>
+          <input
+            ref={inputRef}
+            type="file"
+            accept={imageOnly ? "image/*" : undefined}
+            disabled={disabled}
+            className="sr-only"
+            onChange={(e) => pick(e.target.files?.[0] ?? null)}
+          />
+        </label>
+      )}
+    </div>
+  );
+}
+
+// ── Signature pad field ────────────────────────────────────────────────────────
+
+function SignatureField({ fieldKey, disabled, onChangeCb }: {
+  fieldKey: string;
+  disabled?: boolean;
+  onChangeCb: (key: string, val: unknown) => void;
+}) {
+  const canvasRef = useRef<HTMLCanvasElement>(null);
+  const [drawing, setDrawing] = useState(false);
+  const [signed, setSigned] = useState(false);
+
+  const getPos = (e: React.MouseEvent<HTMLCanvasElement> | React.TouchEvent<HTMLCanvasElement>) => {
+    const rect = canvasRef.current!.getBoundingClientRect();
+    if ("touches" in e) {
+      return { x: e.touches[0].clientX - rect.left, y: e.touches[0].clientY - rect.top };
+    }
+    return { x: (e as React.MouseEvent).clientX - rect.left, y: (e as React.MouseEvent).clientY - rect.top };
+  };
+
+  const startDraw = (e: React.MouseEvent<HTMLCanvasElement> | React.TouchEvent<HTMLCanvasElement>) => {
+    if (disabled) return;
+    const ctx = canvasRef.current!.getContext("2d")!;
+    const { x, y } = getPos(e);
+    ctx.beginPath();
+    ctx.moveTo(x, y);
+    setDrawing(true);
+  };
+
+  const draw = (e: React.MouseEvent<HTMLCanvasElement> | React.TouchEvent<HTMLCanvasElement>) => {
+    if (!drawing || disabled) return;
+    e.preventDefault();
+    const ctx = canvasRef.current!.getContext("2d")!;
+    ctx.lineWidth = 1.8;
+    ctx.lineCap = "round";
+    ctx.strokeStyle = "#0f172a";
+    const { x, y } = getPos(e);
+    ctx.lineTo(x, y);
+    ctx.stroke();
+    setSigned(true);
+  };
+
+  const endDraw = () => {
+    if (!drawing) return;
+    setDrawing(false);
+    const dataUrl = canvasRef.current!.toDataURL("image/png");
+    onChangeCb(fieldKey, dataUrl);
+  };
+
+  const clear = () => {
+    const canvas = canvasRef.current!;
+    canvas.getContext("2d")!.clearRect(0, 0, canvas.width, canvas.height);
+    setSigned(false);
+    onChangeCb(fieldKey, undefined);
+  };
+
+  return (
+    <div className="relative">
+      <canvas
+        ref={canvasRef}
+        width={600}
+        height={120}
+        className={`w-full rounded-lg border-2 ${signed ? "border-primary/40" : "border-dashed border-border"}
+          bg-white touch-none ${disabled ? "opacity-50" : "cursor-crosshair"}`}
+        style={{ height: 120 }}
+        onMouseDown={startDraw}
+        onMouseMove={draw}
+        onMouseUp={endDraw}
+        onMouseLeave={endDraw}
+        onTouchStart={startDraw}
+        onTouchMove={draw}
+        onTouchEnd={endDraw}
+      />
+      {!signed && (
+        <div className="pointer-events-none absolute inset-0 flex items-center justify-center gap-1.5 text-xs text-muted-foreground">
+          <Pencil className="h-3.5 w-3.5" /> Sign here
+        </div>
+      )}
+      {signed && !disabled && (
+        <button type="button" onClick={clear}
+          className="absolute right-2 top-2 flex items-center gap-1 rounded px-1.5 py-0.5 text-[10px]
+            font-semibold text-muted-foreground hover:text-red-500 hover:bg-red-50 transition-colors">
+          <X className="h-3 w-3" /> Clear
+        </button>
+      )}
+    </div>
+  );
+}
+
 // ── Single form field ─────────────────────────────────────────────────────────
 
 const inp = "input";
@@ -298,9 +504,11 @@ function FormField({ field, control, errors, onChangeCb, readOnly, allValues }: 
     return (
       <div style={style}>
         {labelEl}
-        <div className="flex h-16 items-center justify-center rounded-lg border-2 border-dashed border-border text-sm text-muted-foreground">
-          <Pencil className="mr-2 h-4 w-4" /> Click to sign
-        </div>
+        <SignatureField
+          fieldKey={key}
+          disabled={dis}
+          onChangeCb={onChangeCb}
+        />
       </div>
     );
   }
@@ -308,13 +516,15 @@ function FormField({ field, control, errors, onChangeCb, readOnly, allValues }: 
     return (
       <div style={style}>
         {labelEl}
-        <div className="flex items-center justify-center rounded-lg border-2 border-dashed border-border bg-muted/20 p-4">
-          <label className="flex cursor-pointer flex-col items-center gap-1.5 text-xs text-muted-foreground hover:text-foreground transition-colors">
-            <Paperclip className="h-5 w-5" />
-            <span>Click to {type === "image" ? "upload image" : "attach file"}</span>
-            <input type="file" accept={type === "image" ? "image/*" : undefined} disabled={dis} className="sr-only" onChange={() => {}} />
-          </label>
-        </div>
+        <FileAttachField
+          label={label}
+          fieldKey={key}
+          imageOnly={type === "image"}
+          disabled={dis}
+          value={allValues[key]}
+          documentId={(allValues.__document_id as string | undefined)}
+          onChangeCb={onChangeCb}
+        />
       </div>
     );
   }
@@ -439,11 +649,12 @@ function FormField({ field, control, errors, onChangeCb, readOnly, allValues }: 
 
 // ── Main export ───────────────────────────────────────────────────────────────
 
-export default function TemplateForm({ sections, values, onChange, readOnly = false }: {
+export default function TemplateForm({ sections, values, onChange, readOnly = false, documentId }: {
   sections: unknown[];
   values: TemplateFormValues;
   onChange: (key: string, value: unknown) => void;
   readOnly?: boolean;
+  documentId?: string;
 }) {
   const list = (Array.isArray(sections) ? sections : []) as Section[];
   const allFields = list.flatMap((s) => s.fields ?? []);
@@ -467,7 +678,7 @@ export default function TemplateForm({ sections, values, onChange, readOnly = fa
   }, [sectionsKey]);
 
   // Keep a live snapshot of form values for conditional visibility
-  const liveValues = watch();
+  const liveValues = { ...values, ...(watch() as TemplateFormValues), __document_id: documentId };
 
   if (list.length === 0) {
     return <p className="text-sm text-muted-foreground">This form has no fields.</p>;

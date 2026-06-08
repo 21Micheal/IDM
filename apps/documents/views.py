@@ -8,6 +8,7 @@ from urllib.parse import quote as urlquote, urlparse, urlunparse
 
 from django.core.mail import EmailMessage
 from django.core.files.base import ContentFile
+from django.core.files.storage import default_storage
 from django.core.exceptions import ValidationError
 from django.http import HttpResponse
 from django.utils import timezone
@@ -848,6 +849,41 @@ class DocumentViewSet(AuditMixin, viewsets.ModelViewSet):
 
         schedule_document_search_pipeline(str(doc.id), reextract_content=True, index_immediately=True)
         return Response(DocumentDetailSerializer(doc, context={"request": request}).data)
+
+    @action(detail=True, methods=["get"], url_path=r"form_attachment/(?P<field_key>[^/.]+)")
+    def form_attachment(self, request, pk=None, field_key=None):
+        doc = self.get_object()
+        if not user_can_view_document(request.user, doc):
+            return Response(
+                {"detail": "You do not have permission to view this document."},
+                status=status.HTTP_403_FORBIDDEN,
+            )
+
+        form = (doc.metadata or {}).get("form")
+        if not isinstance(form, dict):
+            return Response({"detail": "This document has no form attachments."}, status=404)
+
+        attachments = form.get("attachments") if isinstance(form.get("attachments"), dict) else {}
+        descriptor = attachments.get(field_key)
+        if not descriptor:
+            values = form.get("values") if isinstance(form.get("values"), dict) else {}
+            candidate = values.get(field_key)
+            descriptor = candidate if isinstance(candidate, dict) else None
+        if not descriptor or not descriptor.get("storage_path"):
+            return Response({"detail": "Attachment not found."}, status=404)
+
+        storage_path = descriptor["storage_path"]
+        if not default_storage.exists(storage_path):
+            return Response({"detail": "Attachment file is missing."}, status=404)
+
+        with default_storage.open(storage_path, "rb") as fh:
+            raw = fh.read()
+        return build_http_file_response(
+            raw=raw,
+            content_type=descriptor.get("content_type") or mimetypes.guess_type(descriptor.get("name") or "")[0] or "application/octet-stream",
+            download_name=descriptor.get("name") or "attachment",
+            disposition="attachment" if user_can_download_document(request.user, doc) else "inline",
+        )
 
     @action(detail=True, methods=["post"])
     def restore_version(self, request, pk=None):

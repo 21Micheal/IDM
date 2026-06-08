@@ -1103,6 +1103,7 @@ export default function DocumentDetailPage() {
                   values={formEditing ? formValues : (formData?.values ?? {})}
                   onChange={(k, v) => setFormValues((prev) => ({ ...prev, [k]: v }))}
                   readOnly={!formEditing}
+                  documentId={doc.id}
                 />
               </div>
             </div>

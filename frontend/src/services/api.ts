@@ -272,6 +272,11 @@ export const documentsAPI = {
   updateForm: (id: string, values: Record<string, unknown>) =>
     api.post(`/documents/${id}/update_form/`, { values }),
 
+  downloadFormAttachment: (id: string, fieldKey: string) =>
+    api.get(`/documents/${id}/form_attachment/${encodeURIComponent(fieldKey)}/`, {
+      responseType: "blob",
+    }),
+
   /** Move a (draft/returned/rejected) document to Trash (soft delete). */
   delete: (id: string) => api.delete(`/documents/${id}/`),
   /** Restore a document from Trash. */
@@ -710,6 +715,34 @@ export const templatesAPI = {
     draft_from_template?: boolean;
   }) => api.post(`/templates/${payload.template_id}/fill/`, payload),
 
+  fillTemplateWithAttachments: (payload: {
+    template_id: string;
+    values: Record<string, unknown>;
+    output_format: "pdf" | "docx";
+    title: string;
+    document_type_id?: string;
+    draft_from_template?: boolean;
+    attachments: Array<{ fieldKey: string; file: File }>;
+  }) => {
+    const fd = new FormData();
+    fd.append("values", JSON.stringify(payload.values));
+    fd.append("output_format", payload.output_format);
+    fd.append("title", payload.title);
+    if (payload.document_type_id) fd.append("document_type_id", payload.document_type_id);
+    fd.append("draft_from_template", String(Boolean(payload.draft_from_template)));
+    for (const { fieldKey, file } of payload.attachments) {
+      fd.append(`attachment_${fieldKey}`, file, file.name);
+    }
+    return api.post(`/templates/${payload.template_id}/fill/`, fd, {
+      headers: { "Content-Type": undefined },
+    });
+  },
+
+  /**
+   * POST /documents/{id}/upload_version/
+   * Upload a file as a named form attachment after a built-template document is created.
+   * Sends multipart FormData: file + field_key (used as the change_summary label).
+   */
   /**
    * GET /templates/{id}/placeholders/
    * For uploaded templates — returns auto-detected {{placeholder}} keys.

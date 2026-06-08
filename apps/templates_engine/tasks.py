@@ -4,10 +4,56 @@ import tempfile
 import os
 import re
 import logging
+from decimal import Decimal, InvalidOperation
 
 from apps.search.utils import SEARCH_INDEX_EXCEPTIONS
 
 logger = logging.getLogger(__name__)
+
+
+STANDARD_DOCUMENT_FIELDS = {"title", "supplier", "amount", "currency", "document_date", "due_date"}
+
+
+def _stringish(value):
+    if value is None:
+        return ""
+    if isinstance(value, (str, int, float, Decimal)):
+        return str(value)
+    return ""
+
+
+def _form_values_for_metadata(values: dict) -> dict:
+    metadata = {}
+    for key, value in (values or {}).items():
+        if key in STANDARD_DOCUMENT_FIELDS:
+            continue
+        if isinstance(value, dict) and value.get("storage_path"):
+            continue
+        metadata[key] = value
+    return metadata
+
+
+def _document_field_kwargs(values: dict) -> dict:
+    fields = {}
+    for key in ("supplier", "currency", "document_date", "due_date"):
+        value = _stringish((values or {}).get(key)).strip()
+        if value:
+            fields[key] = value
+    amount = _stringish((values or {}).get("amount")).replace(",", "").strip()
+    if amount:
+        try:
+            fields["amount"] = Decimal(amount)
+        except (InvalidOperation, ValueError):
+            pass
+    return fields
+
+
+def _display_value(value):
+    if isinstance(value, dict) and value.get("storage_path"):
+        return value.get("name") or "Attached file"
+    if isinstance(value, (list, dict)):
+        return str(value)
+    return value
 
 
 # ─── Helpers ────────────────────────────────────────────────────────────────
@@ -103,7 +149,7 @@ def generate_built_pdf(template, values) -> bytes:
             ftype = field.get("type", "text")
             key = field.get("key", "")
             label = field.get("label", "")
-            value = values.get(key, "")
+            value = _display_value(values.get(key, ""))
 
             if ftype == "divider":
                 story.append(HRFlowable(width="100%", thickness=0.5, color=colors.HexColor("#e2e8f0")))
@@ -187,7 +233,7 @@ def generate_built_docx(template, values) -> bytes:
             ftype = field.get("type", "text")
             key = field.get("key", "")
             label = field.get("label", "")
-            value = values.get(key, "")
+            value = _display_value(values.get(key, ""))
 
             if ftype == "divider":
                 p = doc.add_paragraph()
@@ -381,7 +427,11 @@ def generate_document_from_template_sync(template, values, fmt, title, user, typ
     checksum = hashlib.sha256(content).hexdigest()
     reference_number = _generate_unique_reference(template.document_type)
 
-    doc_metadata = {"template_id": str(template.id), "template_name": template.name}
+    doc_metadata = {
+        "template_id": str(template.id),
+        "template_name": template.name,
+        **_form_values_for_metadata(values),
+    }
     if template.type == "built":
         # Built templates are interactive forms: store the schema snapshot + the
         # entered values so the document IS the filled form and can be re-rendered
@@ -406,6 +456,7 @@ def generate_document_from_template_sync(template, values, fmt, title, user, typ
         is_self_upload=False,
         status=DocumentStatus.DRAFT,
         metadata=doc_metadata,
+        **_document_field_kwargs(values),
         # A template-generated document is the starting point, not a user version.
         # It stays unversioned (v0 → shows as "—") until the user first edits it,
         # at which point the first save becomes version 1.
