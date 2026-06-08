@@ -43,6 +43,7 @@ type Props = {
   documentTypeId: string;
   documentTypeName?: string;
   initialTitle?: string;
+  initialValues?: Record<string, unknown>;
   onClose: () => void;
 };
 
@@ -79,6 +80,7 @@ export default function BuiltTemplateFormModal({
   template,
   documentTypeId,
   initialTitle,
+  initialValues = {},
   onClose,
 }: Props) {
   const navigate = useNavigate();
@@ -88,7 +90,7 @@ export default function BuiltTemplateFormModal({
   const [title, setTitle] = useState(
     (initialTitle ?? "").trim() || template.name
   );
-  const [values, setValues] = useState<Record<string, unknown>>({});
+  const [values, setValues] = useState<Record<string, unknown>>(() => initialValues);
   const [uploadingFiles, setUploadingFiles] = useState(false);
 
   const sections = (template.sections ?? []) as Array<{ title?: string; fields?: unknown[] }>;

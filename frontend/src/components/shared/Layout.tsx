@@ -85,14 +85,10 @@ const mainNav: NavEntry[] = [
   } as NavGroup,
   { to: "/personal-documents", icon: Lock, label: "Personal documents" } as NavLeaf,
   {
+    to: "/workflow",
     icon: Workflow,
-    label: "Workflow",
-    prefix: "/workflow",
-    children: [
-      { to: "/workflow",         icon: Workflow, label: "My tasks" },
-      { to: "/workflow/builder", icon: Settings,  label: "Builder", allowedRoles: ["admin"] },
-    ],
-  } as NavGroup,
+    label: "My tasks",
+  } as NavLeaf,
   { to: "/audit", icon: History, label: "Audit trail" } as NavLeaf,
   {
     icon: UserRoundCog,
@@ -114,6 +110,7 @@ const adminNav: NavLeaf[] = [
   { to: "/admin/departments", icon: Building2, label: "Departments", allowedRoles: ["admin"] },
   { to: "/admin/groups",      icon: Shield,    label: "Groups",      allowedRoles: ["admin"] },
   { to: "/admin/settings",    icon: Settings,  label: "Settings",    allowedRoles: ["admin"] },
+  { to: "/workflow/builder", icon: Settings, label: "Workflow Builder", allowedRoles: ["admin"] },
 ];
 
 // ── SidebarGroup ──────────────────────────────────────────────────────────────
@@ -185,7 +182,12 @@ function SidebarGroup({
                 <Icon className={clsx("h-3.5 w-3.5 flex-shrink-0", isChildActive ? "text-[#287EAD]" : "text-[#7C8790] group-hover:text-[#287EAD]")} />
                 <span className="flex-1">{label}</span>
                 {badgeValue ? (
-                  <span className="ml-auto inline-flex min-w-[1.25rem] items-center justify-center bg-[#287EAD] px-1.5 py-0.5 text-[10px] font-bold text-white">
+                  <span
+                    className={clsx(
+                      "ml-auto inline-flex min-w-[1.25rem] items-center justify-center px-1.5 py-0.5 text-[10px] font-bold text-white",
+                      to === "/workflow" ? "bg-red-700" : "bg-[#287EAD]"
+                    )}
+                  >
                     {badgeValue}
                   </span>
                 ) : null}
@@ -616,7 +618,7 @@ export default function Layout() {
               }
               const { to, icon: Icon, label, exact, allowedRoles } = entry;
               if (allowedRoles && !hasAdminAccess) return null;
-              const badgeValue = to === "/notifications" ? unread : undefined;
+              const badgeValue = to === "/notifications" ? unread : to === "/workflow" ? pendingTasksCount : undefined;
               return (
                 <NavLink
                   key={to}
@@ -637,11 +639,16 @@ export default function Layout() {
                     <>
                       <Icon className={clsx("h-4 w-4 flex-shrink-0", isActive ? "text-[#287EAD]" : "text-[#6E767D] group-hover:text-[#287EAD]")} />
                       <span className="flex-1">{label}</span>
-                      {badgeValue ? (
-                        <span className="inline-flex min-w-[1.25rem] items-center justify-center bg-[#287EAD] px-1.5 py-0.5 text-[10px] font-bold text-white">
-                          {badgeValue}
-                        </span>
-                      ) : null}
+                          {badgeValue ? (
+                            <span
+                              className={clsx(
+                                "inline-flex min-w-[1.25rem] items-center justify-center px-1.5 py-0.5 text-[10px] font-bold text-white",
+                                to === "/workflow" ? "bg-red-700" : "bg-[#287EAD]"
+                              )}
+                            >
+                              {badgeValue}
+                            </span>
+                          ) : null}
                     </>
                   )}
                 </NavLink>

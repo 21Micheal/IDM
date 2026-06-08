@@ -24,7 +24,7 @@ import { deriveDocumentTypeConfig } from "@/lib/documentTypeConfig";
 import { applyOcrToFields, sanitizeOcrFields, type OcrFields } from "@/lib/ocrFieldMatcher";
 import BulkScanPage from "@/pages/BulkScanPage";
 import TemplatePreview from "@/components/templates/TemplatePreview";
-import TemplateForm, { requiredFieldLabels } from "@/components/templates/TemplateForm";
+import TemplateForm from "@/components/templates/TemplateForm";
 import BuiltTemplateFormModal from "@/components/templates/BuiltTemplateFormModal";
 
 // ── Types ─────────────────────────────────────────────────────────────────────
@@ -161,6 +161,18 @@ function metadataWithoutDocumentFields(metadata: unknown): Record<string, unknow
     },
     {},
   );
+}
+
+function templateBaseValuesFromForm(values: Record<string, unknown>): Record<string, unknown> {
+  const documentValues = documentValuesFromForm(values);
+  const metadata = metadataWithoutDocumentFields(values.metadata);
+  const baseValues: Record<string, unknown> = { ...metadata };
+
+  for (const [key, value] of Object.entries(documentValues)) {
+    if (value) baseValues[key] = value;
+  }
+
+  return baseValues;
 }
 
 async function calculateFileSha256(file: File): Promise<string> {
@@ -1263,12 +1275,16 @@ export default function UploadPage({ scanOnly = false }: UploadPageProps) {
 
       const documentValues = documentValuesFromForm(values);
       const title = documentValues.title || selectedTemplate.name;
+      const creationValues = {
+        ...templateBaseValuesFromForm(values),
+        ...templateValues,
+      };
 
       createFromTemplateMutation.mutate({
         templateId: selectedTemplate.id,
         title,
         documentTypeId: selectedTypeId,
-        values: templateValues,
+        values: creationValues,
         draftFromTemplate: false,
         outputFormat: "docx",
       });
@@ -2188,6 +2204,7 @@ export default function UploadPage({ scanOnly = false }: UploadPageProps) {
         documentTypeId={selectedTypeId}
         documentTypeName={selectedType?.name}
         initialTitle={getValues("title")}
+        initialValues={templateBaseValuesFromForm(getValues() as Record<string, unknown>)}
         onClose={() => setShowBuiltForm(false)}
       />
     )}

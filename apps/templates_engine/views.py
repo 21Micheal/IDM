@@ -14,6 +14,14 @@ from .serializers import DocumentTemplateSerializer
 from .tasks import generate_document_from_template_sync
 
 
+def _request_bool(value) -> bool:
+    if isinstance(value, bool):
+        return value
+    if value is None:
+        return False
+    return str(value).strip().lower() in {"1", "true", "yes", "on"}
+
+
 def extract_placeholders(file):
     """
     Scan a DOCX/XLSX for {{key}} patterns and return the unique keys.
@@ -178,7 +186,7 @@ class DocumentTemplateViewSet(viewsets.ModelViewSet):
         fmt = request.data.get("output_format", "pdf")
         title = request.data.get("title", template.name)
         type_id = request.data.get("document_type_id") or str(template.document_type_id or "")
-        draft_from_template = bool(request.data.get("draft_from_template"))
+        draft_from_template = _request_bool(request.data.get("draft_from_template"))
 
         if not title or not title.strip():
             raise ValidationError({"title": "Document title is required."})
