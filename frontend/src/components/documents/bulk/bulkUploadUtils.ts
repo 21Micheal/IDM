@@ -84,6 +84,16 @@ export function buildReviewStateFromBatchItem(
     ? resolveDocumentType(detectedDocumentType || item.file_name, documentTypes)
     : documentType;
 
+  // The document type embedded in the batch item can carry an empty
+  // metadata_fields list, which would make applyOcrValuesToDocumentType skip
+  // every admin field (reference numbers, etc.). Prefer the full type from the
+  // live document-types list, matching what the review form renders.
+  const targetTypeId = resolvedDocumentType?.id ?? item.document_type?.id ?? documentType.id;
+  const fullDocumentType =
+    documentTypes.find(
+      (type) => type.id === targetTypeId && (type.metadata_fields?.length ?? 0) > 0,
+    ) ?? resolvedDocumentType ?? documentType;
+
   const fill = (key: string, value: string | number | undefined, score = 4) => {
     if (value == null) return;
     const strValue = String(value);
@@ -102,7 +112,7 @@ export function buildReviewStateFromBatchItem(
   fill("description", ocrFields.description ? String(ocrFields.description) : undefined);
   fill("uom", ocrFields.uom ? String(ocrFields.uom) : undefined);
 
-  applyOcrValuesToDocumentType(values, suggestedScores, ocrFields, resolvedDocumentType ?? documentType);
+  applyOcrValuesToDocumentType(values, suggestedScores, ocrFields, fullDocumentType);
 
   return {
     documentId: item.document_id,

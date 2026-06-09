@@ -42,6 +42,17 @@ def document_title_from_filename(filename: str) -> str:
     return base
 
 
+def _serialize_metadata_fields(document_type: DocumentType) -> list[dict]:
+    """Return the document type's admin metadata fields in the shape the
+    frontend OCR matcher and review form expect (mirrors
+    ``MetadataFieldSerializer``). Without this, bulk review cannot auto-fill
+    or render admin-configured fields (reference numbers, etc.)."""
+    from .serializers import MetadataFieldSerializer
+
+    fields = document_type.metadata_fields.all().order_by("order")
+    return MetadataFieldSerializer(fields, many=True).data
+
+
 def serialize_bulk_document(doc: Document) -> dict:
     meta = dict(doc.metadata or {})
     suggestions = None
@@ -79,7 +90,7 @@ def serialize_bulk_document(doc: Document) -> dict:
             "reference_prefix": doc.document_type.reference_prefix,
             "description": doc.document_type.description,
             "icon": doc.document_type.icon,
-            "metadata_fields": [],
+            "metadata_fields": _serialize_metadata_fields(doc.document_type),
         },
         "ocr_status": doc.ocr_status or "",
         "ocr_suggestions": suggestions,
