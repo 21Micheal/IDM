@@ -203,12 +203,14 @@ class DocumentTemplateViewSet(viewsets.ModelViewSet):
         if fmt not in ("pdf", "docx"):
             raise ValidationError({"output_format": "Must be 'pdf' or 'docx'."})
 
-        # Validate required fields for built templates
+        # Validate required fields for built templates. Auto-fill (formula) fields
+        # are skipped — the server fills them authoritatively on create.
         if template.type == "built" and not draft_from_template:
             all_fields = [
                 f for section in template.sections
                 for f in section.get("fields", [])
                 if f.get("required") and f.get("type") not in ("divider", "heading")
+                and not f.get("formula")
             ]
             missing = [f["label"] for f in all_fields if not generation_values.get(f["key"])]
             if missing:
@@ -226,12 +228,15 @@ class DocumentTemplateViewSet(viewsets.ModelViewSet):
         if request.FILES:
             # Persist uploaded files (simple fields + table file cells) and write
             # their descriptors into the form values. They are form attachments
-            # on metadata.form — never document versions.
-            form_values, attachments = apply_form_attachments(
-                doc.id, values, request.FILES.items()
-            )
+            # on metadata.form — never document versions. Start from the values the
+            # generator stored (formula-frozen + reference-reconciled), not the
+            # pre-processed request copy.
             meta = dict(doc.metadata or {})
             meta_form = dict(meta.get("form") or {})
+            base_values = meta_form.get("values") if isinstance(meta_form.get("values"), dict) else values
+            form_values, attachments = apply_form_attachments(
+                doc.id, base_values, request.FILES.items()
+            )
             meta_form["values"] = form_values
             if attachments:
                 meta_form["attachments"] = attachments

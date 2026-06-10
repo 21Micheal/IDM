@@ -53,6 +53,7 @@ import {
 } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { documentTypesAPI } from "@/services/api";
+import { FORMULA_OPTIONS } from "@/components/templates/formulas";
 
 /* ============================================================
  * Types
@@ -124,6 +125,7 @@ export interface TemplateField {
   currencySymbol?: string;
   dateFormat?: string;
   referenceSource?: string;
+  formula?: string;            // auto-fill formula, e.g. "current_user", "now"
   readonly?: boolean;
   hidden?: boolean;
   visibleWhen?: ConditionalRule | null;
@@ -211,6 +213,11 @@ const REFERENCE_SOURCE_OPTIONS = [
   { value: "documents",      label: "Documents" },
   { value: "document_types", label: "Document types" },
 ];
+
+// Field types that can carry an auto-fill formula (scalar inputs).
+const FORMULA_FIELD_TYPES = new Set<string>([
+  "text", "textarea", "email", "phone", "number", "date", "datetime", "time",
+]);
 
 /* ============================================================
  * Quick "create document type" modal — unchanged from v2
@@ -1369,6 +1376,13 @@ function FieldEditor({ field, onUpdate, allFields }: {
             <InspectorRow label="Reference source">
               <select className={inputCls} value={field.referenceSource ?? (field.type === "user" ? "users" : "documents")} onChange={(e) => onUpdate({ referenceSource: e.target.value })}>
                 {REFERENCE_SOURCE_OPTIONS.map((o) => <option key={o.value} value={o.value}>{o.label}</option>)}
+              </select>
+            </InspectorRow>
+          )}
+          {FORMULA_FIELD_TYPES.has(field.type) && (
+            <InspectorRow label="Auto-fill" hint="Fill this field automatically — the user won't type it.">
+              <select className={inputCls} value={field.formula ?? ""} onChange={(e) => onUpdate({ formula: e.target.value || undefined })}>
+                {FORMULA_OPTIONS.map((o) => <option key={o.value} value={o.value}>{o.label}</option>)}
               </select>
             </InspectorRow>
           )}

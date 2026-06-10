@@ -25,6 +25,9 @@ import {
   referenceLabel,
   type ReferenceValue,
 } from "@/components/templates/referenceSources";
+import { resolveFormula, evaluateFormula, formulaLabel } from "@/components/templates/formulas";
+import { useAuthStore } from "@/store/authStore";
+import { Sparkles } from "lucide-react";
 
 // ── Types ─────────────────────────────────────────────────────────────────────
 
@@ -53,6 +56,7 @@ type Field = {
   currencySymbol?: string; referenceSource?: string; tooltip?: string; regex?: string;
   min?: number; max?: number; minLength?: number; maxLength?: number;
   defaultValue?: string; readonly?: boolean; hidden?: boolean;
+  formula?: string;
   visibleWhen?: VisibleWhen | null;
 };
 
@@ -603,14 +607,35 @@ function FileAttachField({ label, fieldKey, imageOnly, disabled, value, document
 
 // ── Signature pad field ────────────────────────────────────────────────────────
 
-function SignatureField({ fieldKey, disabled, onChangeCb }: {
+function SignatureField({ fieldKey, disabled, value, onChangeCb }: {
   fieldKey: string;
   disabled?: boolean;
+  value?: unknown;
   onChangeCb: (key: string, val: unknown) => void;
 }) {
   const canvasRef = useRef<HTMLCanvasElement>(null);
+  const loadedRef = useRef<string | null>(null);
   const [drawing, setDrawing] = useState(false);
   const [signed, setSigned] = useState(false);
+
+  // Render an existing signature (stored as a PNG data URL) onto the canvas —
+  // so it shows in read-only/approval view and when re-editing the form.
+  useEffect(() => {
+    const canvas = canvasRef.current;
+    const ctx = canvas?.getContext("2d");
+    if (!canvas || !ctx) return;
+    const v = typeof value === "string" ? value : "";
+    if (v.startsWith("data:image") && loadedRef.current !== v) {
+      loadedRef.current = v;
+      const img = new Image();
+      img.onload = () => {
+        ctx.clearRect(0, 0, canvas.width, canvas.height);
+        ctx.drawImage(img, 0, 0, canvas.width, canvas.height);
+        setSigned(true);
+      };
+      img.src = v;
+    }
+  }, [value]);
 
   const getPos = (e: React.MouseEvent<HTMLCanvasElement> | React.TouchEvent<HTMLCanvasElement>) => {
     const rect = canvasRef.current!.getBoundingClientRect();
@@ -646,12 +671,14 @@ function SignatureField({ fieldKey, disabled, onChangeCb }: {
     if (!drawing) return;
     setDrawing(false);
     const dataUrl = canvasRef.current!.toDataURL("image/png");
+    loadedRef.current = dataUrl; // our own stroke — don't reload it as an image
     onChangeCb(fieldKey, dataUrl);
   };
 
   const clear = () => {
     const canvas = canvasRef.current!;
     canvas.getContext("2d")!.clearRect(0, 0, canvas.width, canvas.height);
+    loadedRef.current = null;
     setSigned(false);
     onChangeCb(fieldKey, undefined);
   };
@@ -733,6 +760,26 @@ function FormField({ field, control, errors, onChangeCb, readOnly, allValues }: 
     />
   );
 
+  // Auto-fill (formula) fields: read-only, value is computed (client preview /
+  // server-authoritative). Rendered the same way whether filling or approving.
+  if (resolveFormula(field.formula)) {
+    const shown = referenceLabel(allValues[key]);
+    return (
+      <div style={style}>
+        <label className="mb-1.5 block text-xs font-semibold text-foreground">
+          {label}
+          {field.required && <span className="ml-1 text-red-500">*</span>}
+          <span className="ml-2 inline-flex items-center gap-1 rounded bg-primary/10 px-1.5 py-0.5 align-middle text-[10px] font-medium text-primary">
+            <Sparkles className="h-2.5 w-2.5" /> Auto · {formulaLabel(field.formula)}
+          </span>
+        </label>
+        <div className={`${inp} flex items-center bg-muted/40 text-muted-foreground`}>
+          {shown || <span className="italic">Filled automatically on save</span>}
+        </div>
+      </div>
+    );
+  }
+
   // Validation rules
   const rules: Record<string, any> = {};
   if (field.required && !readOnly && type !== "boolean" && type !== "checkbox")
@@ -783,6 +830,7 @@ function FormField({ field, control, errors, onChangeCb, readOnly, allValues }: 
         <SignatureField
           fieldKey={key}
           disabled={dis}
+          value={allValues[key]}
           onChangeCb={onChangeCb}
         />
       </div>
@@ -953,6 +1001,25 @@ export default function TemplateForm({ sections, values, onChange, readOnly = fa
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [sectionsKey]);
 
+  const currentUser = useAuthStore((s) => s.user);
+
+  // Auto-fill formula fields with a client preview while filling a NEW form.
+  // The server finalizes authoritative values on create; an existing document
+  // keeps its frozen values, so we skip when editing/viewing one (documentId set).
+  useEffect(() => {
+    if (readOnly || documentId) return;
+    for (const f of allFields) {
+      const k = f.key ?? f.id ?? "";
+      if (!k || !resolveFormula(f.formula)) continue;
+      const current = values[k];
+      const isEmpty = current == null || (typeof current === "string" && current.trim() === "");
+      if (!isEmpty) continue;
+      const computed = evaluateFormula(f.formula, { user: currentUser, now: new Date() });
+      if (computed) onChange(k, computed);
+    }
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [sectionsKey, currentUser, readOnly, documentId]);
+
   // Keep a live snapshot of form values for conditional visibility
   const liveValues = { ...values, ...(watch() as TemplateFormValues), __document_id: documentId };
 
@@ -1007,11 +1074,16 @@ export default function TemplateForm({ sections, values, onChange, readOnly = fa
 /** Returns labels of required fields that are missing or fail basic validation. */
 export function requiredFieldLabels(sections: unknown[], values: TemplateFormValues): string[] {
   const list = (Array.isArray(sections) ? sections : []) as Section[];
+  const allFields = list.flatMap((s) => s.fields ?? []);
   const missing: string[] = [];
   for (const s of list) {
     for (const f of s.fields ?? []) {
       const type = f.type ?? "text";
       if (type === "divider" || type === "heading") continue;
+      // Formula fields auto-fill (and the server finalizes them); never block on them.
+      if (resolveFormula(f.formula)) continue;
+      // Don't require a field the user can't see (hidden / conditionally hidden).
+      if (f.hidden || !evalVisible(f, values, allFields)) continue;
       const key = f.key ?? "";
       const v   = values[key];
       if (f.required) {

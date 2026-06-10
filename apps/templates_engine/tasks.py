@@ -56,6 +56,18 @@ def _display_value(value):
     return value
 
 
+def _decode_data_url_image(value):
+    """Decode a ``data:image/...;base64,...`` URL (e.g. a signature) to raw
+    bytes, or return None. Prevents dumping a giant base64 string into the doc."""
+    if not isinstance(value, str) or not value.startswith("data:image"):
+        return None
+    try:
+        import base64
+        return base64.b64decode(value.split(",", 1)[1])
+    except Exception:
+        return None
+
+
 # ─── Helpers ────────────────────────────────────────────────────────────────
 
 def _replace_placeholder_in_paragraph(para, values: dict):
@@ -193,6 +205,24 @@ def generate_built_pdf(template, values) -> bytes:
                     story.append(Spacer(1, 6))
                 continue
 
+            if ftype == "signature":
+                story.append(Paragraph(label, label_style))
+                raw = _decode_data_url_image(value)
+                if raw:
+                    from reportlab.platypus import Image as RLImage
+                    try:
+                        img = RLImage(BytesIO(raw))
+                        iw, ih = (img.imageWidth or 1), (img.imageHeight or 1)
+                        w = min(60 * mm, doc.width)
+                        img.drawWidth, img.drawHeight = w, w * ih / iw
+                        story.append(img)
+                    except Exception:
+                        story.append(Paragraph("[signature]", value_style))
+                else:
+                    story.append(Paragraph("—", value_style))
+                story.append(Spacer(1, 6))
+                continue
+
             # Default field
             story.append(Paragraph(label, label_style))
             story.append(Paragraph(str(value) if value else "—", value_style))
@@ -276,6 +306,20 @@ def generate_built_docx(template, values) -> bytes:
                         for i, col in enumerate(cols):
                             row_cells[i].text = str(row_data.get(col["key"], ""))
                     doc.add_paragraph()
+                continue
+
+            if ftype == "signature":
+                p = doc.add_paragraph()
+                run_label = p.add_run(f"{label}: ")
+                run_label.bold = True
+                run_label.font.color.rgb = RGBColor(0x47, 0x55, 0x69)
+                raw = _decode_data_url_image(value)
+                if raw:
+                    try:
+                        from docx.shared import Inches
+                        doc.add_picture(BytesIO(raw), width=Inches(2))
+                    except Exception:
+                        doc.add_paragraph("[signature]")
                 continue
 
             p = doc.add_paragraph()
@@ -388,12 +432,21 @@ def generate_document_from_template_sync(template, values, fmt, title, user, typ
     from apps.documents.models import Document, DocumentStatus
     from apps.documents.serializers import _generate_unique_reference
     from apps.documents.form_attachments import descriptors_to_names
+    from apps.documents.form_formulas import apply_formulas
     from django.core.files.base import ContentFile
     import hashlib
 
     is_xlsx = template.file_name.endswith((".xlsx", ".xls")) if template.file_name else False
 
+    # Reserve the reference up front so a `reference_number` formula can use it.
+    reference_number = _generate_unique_reference(template.document_type)
+
     if template.type == "built":
+        # Freeze auto-fill formula values authoritatively (creator, submit time,
+        # assigned reference) into the stored form values.
+        values = apply_formulas(
+            values, template.sections, user=user, reference_number=reference_number
+        )
         # The stored form.values keeps structured attachment descriptors and
         # reference {id,label} objects; the rendered file shows display strings.
         render_values = descriptors_to_names(values)
@@ -429,7 +482,6 @@ def generate_document_from_template_sync(template, values, fmt, title, user, typ
                 content_type = "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
 
     checksum = hashlib.sha256(content).hexdigest()
-    reference_number = _generate_unique_reference(template.document_type)
 
     doc_metadata = {
         "template_id": str(template.id),
