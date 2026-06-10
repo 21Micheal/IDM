@@ -23,6 +23,7 @@ import { useMutation, useQueryClient } from "@tanstack/react-query";
 import { templatesAPI } from "@/services/api";
 import { requiredFieldLabels } from "@/components/templates/TemplateForm";
 import TemplateForm from "@/components/templates/TemplateForm";
+import { collectFormAttachments } from "@/components/templates/formAttachments";
 import { toast } from "@/components/ui/vault-toast";
 import { X, Loader2, CheckCircle, FileText, LayoutTemplate, Paperclip } from "lucide-react";
 
@@ -46,33 +47,6 @@ type Props = {
   initialValues?: Record<string, unknown>;
   onClose: () => void;
 };
-
-// ── Helpers ───────────────────────────────────────────────────────────────────
-
-/**
- * Split form values into:
- *   jsonValues  — safe to serialize as JSON (primitives, arrays, objects)
- *   fileEntries — [fieldKey, File] pairs that must be uploaded separately
- */
-function splitValues(values: Record<string, unknown>): {
-  jsonValues: Record<string, unknown>;
-  fileEntries: Array<[string, File]>;
-} {
-  const jsonValues: Record<string, unknown> = {};
-  const fileEntries: Array<[string, File]> = [];
-
-  for (const [key, val] of Object.entries(values)) {
-    if (val instanceof File) {
-      fileEntries.push([key, val]);
-      // Store filename as a placeholder so the PDF can still label the field
-      jsonValues[key] = val.name;
-    } else {
-      jsonValues[key] = val;
-    }
-  }
-
-  return { jsonValues, fileEntries };
-}
 
 // ── Main modal ────────────────────────────────────────────────────────────────
 
@@ -98,10 +72,10 @@ export default function BuiltTemplateFormModal({
 
   const createMutation = useMutation({
     mutationFn: async () => {
-      const { jsonValues, fileEntries } = splitValues(values);
+      const { jsonValues, attachments } = collectFormAttachments(values);
 
-      setUploadingFiles(fileEntries.length > 0);
-      const request = fileEntries.length > 0
+      setUploadingFiles(attachments.length > 0);
+      const request = attachments.length > 0
         ? templatesAPI.fillTemplateWithAttachments({
             template_id: template.id,
             values: jsonValues,
@@ -109,7 +83,7 @@ export default function BuiltTemplateFormModal({
             title: title.trim() || template.name,
             document_type_id: documentTypeId,
             draft_from_template: false,
-            attachments: fileEntries.map(([fieldKey, file]) => ({ fieldKey, file })),
+            attachments,
           })
         : templatesAPI.fillTemplate({
             template_id: template.id,
@@ -141,12 +115,10 @@ export default function BuiltTemplateFormModal({
       toast.error("Please enter a document title.");
       return;
     }
-    // Validate required fields — skip File fields (they're already captured)
-    const nonFileValues: Record<string, unknown> = {};
-    for (const [k, v] of Object.entries(values)) {
-      nonFileValues[k] = v instanceof File ? v.name : v;
-    }
-    const missing = requiredFieldLabels(template.sections ?? [], nonFileValues);
+    // Validate required fields — File fields become filename placeholders so a
+    // picked file counts as filled.
+    const { jsonValues } = collectFormAttachments(values);
+    const missing = requiredFieldLabels(template.sections ?? [], jsonValues);
     if (missing.length) {
       toast.error(`Please fill in: ${missing.join(", ")}`);
       return;
@@ -154,8 +126,8 @@ export default function BuiltTemplateFormModal({
     createMutation.mutate();
   };
 
-  // Count pending file attachments for status display
-  const fileCount = Object.values(values).filter((v) => v instanceof File).length;
+  // Count pending file attachments (simple fields + table cells) for the badge.
+  const fileCount = collectFormAttachments(values).attachments.length;
 
   return (
     <div className="fixed inset-0 z-50 flex flex-col bg-[#EDEDED]">

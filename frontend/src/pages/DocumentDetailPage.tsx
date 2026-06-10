@@ -10,6 +10,7 @@ import OcrStatusBadge from "@/components/documents/OcrStatusBadge";
 import { AddToFolderMenu } from "@/components/documents/AddToFolderMenu";
 import MetadataEditPanel from "@/components/documents/MetadataEditPanel";
 import TemplateForm, { requiredFieldLabels } from "@/components/templates/TemplateForm";
+import { collectFormAttachments } from "@/components/templates/formAttachments";
 import WorkflowActionPanel from "@/components/workflow/WorkflowActionPanel";
 import { format } from "date-fns";
 import {
@@ -483,7 +484,13 @@ export default function DocumentDetailPage() {
   });
 
   const updateFormMutation = useMutation({
-    mutationFn: () => documentsAPI.updateForm(id!, formValues),
+    mutationFn: () => {
+      // Split newly picked files (simple fields + table file cells) out of the
+      // form values; they upload as attachments. Existing attachment descriptors
+      // stay in the JSON values so the backend preserves them.
+      const { jsonValues, attachments } = collectFormAttachments(formValues);
+      return documentsAPI.updateForm(id!, jsonValues, attachments);
+    },
     onSuccess: () => {
       toast.success("Form updated.");
       setFormEditing(false);

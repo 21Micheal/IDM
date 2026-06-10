@@ -281,9 +281,28 @@ export const documentsAPI = {
   editMetadata: (id: string, data: Record<string, unknown>) =>
     api.patch(`/documents/${id}/edit_metadata/`, data),
 
-  /** Re-fill a built-template form document in-app; regenerates its PDF view. */
-  updateForm: (id: string, values: Record<string, unknown>) =>
-    api.post(`/documents/${id}/update_form/`, { values }),
+  /**
+   * Re-fill a built-template form document in-app; regenerates its PDF view.
+   * Newly attached files are sent as multipart form attachments (stored on the
+   * document's metadata.form, not as new document versions).
+   */
+  updateForm: (
+    id: string,
+    values: Record<string, unknown>,
+    attachments: Array<{ field: string; file: File }> = [],
+  ) => {
+    if (attachments.length === 0) {
+      return api.post(`/documents/${id}/update_form/`, { values });
+    }
+    const fd = new FormData();
+    fd.append("values", JSON.stringify(values));
+    for (const { field, file } of attachments) {
+      fd.append(field, file, file.name);
+    }
+    return api.post(`/documents/${id}/update_form/`, fd, {
+      headers: { "Content-Type": undefined },
+    });
+  },
 
   downloadFormAttachment: (id: string, fieldKey: string) =>
     api.get(`/documents/${id}/form_attachment/${encodeURIComponent(fieldKey)}/`, {
@@ -735,7 +754,7 @@ export const templatesAPI = {
     title: string;
     document_type_id?: string;
     draft_from_template?: boolean;
-    attachments: Array<{ fieldKey: string; file: File }>;
+    attachments: Array<{ field: string; file: File }>;
   }) => {
     const fd = new FormData();
     fd.append("values", JSON.stringify(payload.values));
@@ -743,8 +762,8 @@ export const templatesAPI = {
     fd.append("title", payload.title);
     if (payload.document_type_id) fd.append("document_type_id", payload.document_type_id);
     fd.append("draft_from_template", String(Boolean(payload.draft_from_template)));
-    for (const { fieldKey, file } of payload.attachments) {
-      fd.append(`attachment_${fieldKey}`, file, file.name);
+    for (const { field, file } of payload.attachments) {
+      fd.append(field, file, file.name);
     }
     return api.post(`/templates/${payload.template_id}/fill/`, fd, {
       headers: { "Content-Type": undefined },

@@ -12,11 +12,19 @@
  *  - Same public API as v1 — callers (UploadPage, DocumentDetailPage) need zero changes
  */
 import { useState, useEffect, useRef } from "react";
+import { createPortal } from "react-dom";
 import { useForm, Controller } from "react-hook-form";
-import { AlertCircle, Download, Loader2, Pencil, Paperclip, Plus, Trash2, X } from "lucide-react";
+import { useQuery } from "@tanstack/react-query";
+import { AlertCircle, ChevronDown, Download, ExternalLink, Loader2, Pencil, Paperclip, Plus, Search, Trash2, X } from "lucide-react";
 import type { ReactNode } from "react";
 import { documentsAPI } from "@/services/api";
 import { toast } from "@/components/ui/vault-toast";
+import {
+  resolveSource,
+  isReferenceValue,
+  referenceLabel,
+  type ReferenceValue,
+} from "@/components/templates/referenceSources";
 
 // ── Types ─────────────────────────────────────────────────────────────────────
 
@@ -28,7 +36,7 @@ type Column = {
   id?: string; key?: string; label?: string; required?: boolean;
   type?: ColType | string; options?: string[]; currencySymbol?: string;
   tooltip?: string; additionalText?: string; readonly?: boolean; hidden?: boolean;
-  defaultValue?: string;
+  defaultValue?: string; referenceSource?: string;
 };
 
 type VisibleWhen = {
@@ -72,6 +80,162 @@ function formatFileSize(size?: number) {
   return `${(size / (1024 * 1024)).toFixed(1)} MB`;
 }
 
+// ── Reference / user picker ─────────────────────────────────────────────────────
+
+/**
+ * Searchable picker backed by a real backend source (users, groups, departments,
+ * documents, document types). Stores `{ id, label, source }`. In read-only mode
+ * it renders the stored label (documents link to the target).
+ */
+function ReferencePicker({ source, value, onChange, disabled, compact }: {
+  source?: string;
+  value: unknown;
+  onChange: (v: ReferenceValue | undefined) => void;
+  disabled?: boolean;
+  compact?: boolean;
+}) {
+  const resolved = resolveSource(source);
+  const selected = isReferenceValue(value) ? value : null;
+  const [open, setOpen] = useState(false);
+  const [search, setSearch] = useState("");
+  const [debounced, setDebounced] = useState("");
+  const [coords, setCoords] = useState<{ top: number; left: number; width: number } | null>(null);
+  const boxRef = useRef<HTMLDivElement>(null);
+  const panelRef = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    const t = setTimeout(() => setDebounced(search.trim()), 250);
+    return () => clearTimeout(t);
+  }, [search]);
+
+  // Position the (portalled) dropdown under the trigger; reposition on
+  // scroll/resize. The portal escapes the form section's `overflow-hidden`
+  // (and the table's horizontal scroll) so results are never clipped.
+  useEffect(() => {
+    if (!open) return;
+    const place = () => {
+      const r = boxRef.current?.getBoundingClientRect();
+      if (r) setCoords({ top: r.bottom + 4, left: r.left, width: r.width });
+    };
+    place();
+    window.addEventListener("scroll", place, true);
+    window.addEventListener("resize", place);
+    return () => {
+      window.removeEventListener("scroll", place, true);
+      window.removeEventListener("resize", place);
+    };
+  }, [open]);
+
+  // Close on outside click (trigger and the portalled panel both count as inside).
+  useEffect(() => {
+    if (!open) return;
+    const onDoc = (e: MouseEvent) => {
+      const t = e.target as Node;
+      if (boxRef.current?.contains(t) || panelRef.current?.contains(t)) return;
+      setOpen(false);
+    };
+    document.addEventListener("mousedown", onDoc);
+    return () => document.removeEventListener("mousedown", onDoc);
+  }, [open]);
+
+  const { data: options = [], isFetching } = useQuery({
+    queryKey: ["reference-source", resolved?.key, resolved?.serverSearch ? debounced : ""],
+    queryFn: () => resolved!.fetch(debounced),
+    enabled: open && Boolean(resolved),
+    staleTime: 30_000,
+  });
+
+  // Client-side filter for sources without server search.
+  const visibleOptions = resolved?.serverSearch
+    ? options
+    : options.filter((o) => o.label.toLowerCase().includes(debounced.toLowerCase()));
+
+  // Read-only: show the stored label (documents become a link).
+  if (disabled) {
+    const label = referenceLabel(value);
+    if (!label) return <span className="text-xs text-muted-foreground">—</span>;
+    if (resolved?.key === "documents" && selected?.id) {
+      return (
+        <a href={`/documents/${selected.id}`} target="_blank" rel="noreferrer"
+          className="inline-flex items-center gap-1 text-xs text-primary hover:underline">
+          {label}<ExternalLink className="h-3 w-3" />
+        </a>
+      );
+    }
+    return <span className="text-sm text-foreground">{label}</span>;
+  }
+
+  // No known source — degrade to a plain text input so the form never breaks.
+  if (!resolved) {
+    return (
+      <input
+        type="text"
+        value={referenceLabel(value)}
+        disabled={disabled}
+        className={compact ? "w-full bg-transparent py-0.5 text-sm outline-none" : "input"}
+        onChange={(e) => onChange(e.target.value ? { id: "", label: e.target.value, source } : undefined)}
+      />
+    );
+  }
+
+  const triggerCls = compact
+    ? "flex w-full items-center justify-between gap-1 bg-transparent py-0.5 text-sm outline-none text-foreground"
+    : "input flex items-center justify-between gap-2";
+
+  return (
+    <div className="relative" ref={boxRef}>
+      <button type="button" disabled={disabled} className={triggerCls}
+        onClick={() => setOpen((o) => !o)}>
+        <span className={selected ? "truncate text-foreground" : "truncate text-muted-foreground"}>
+          {selected ? selected.label : `Select ${resolved.key.replace(/_/g, " ")}…`}
+        </span>
+        <span className="flex flex-shrink-0 items-center gap-1">
+          {selected && (
+            <X className="h-3.5 w-3.5 text-muted-foreground hover:text-red-500"
+              onClick={(e) => { e.stopPropagation(); onChange(undefined); }} />
+          )}
+          <ChevronDown className="h-3.5 w-3.5 text-muted-foreground" />
+        </span>
+      </button>
+
+      {open && coords && createPortal(
+        <div ref={panelRef}
+          style={{ position: "fixed", top: coords.top, left: coords.left, width: Math.max(coords.width, 192) }}
+          className="z-[100] rounded-md border border-border bg-card shadow-lg">
+          <div className="flex items-center gap-1.5 border-b border-border px-2 py-1.5">
+            <Search className="h-3.5 w-3.5 flex-shrink-0 text-muted-foreground" />
+            <input autoFocus value={search} onChange={(e) => setSearch(e.target.value)}
+              placeholder="Search…"
+              className="w-full bg-transparent text-sm outline-none placeholder:text-muted-foreground" />
+          </div>
+          <div className="max-h-56 overflow-y-auto py-1">
+            {isFetching && (
+              <div className="flex items-center gap-2 px-3 py-2 text-xs text-muted-foreground">
+                <Loader2 className="h-3 w-3 animate-spin" /> Loading…
+              </div>
+            )}
+            {!isFetching && visibleOptions.length === 0 && (
+              <div className="px-3 py-2 text-xs text-muted-foreground">No matches.</div>
+            )}
+            {visibleOptions.map((opt) => (
+              <button key={opt.id} type="button"
+                className="block w-full truncate px-3 py-1.5 text-left text-sm text-foreground hover:bg-muted/60"
+                onClick={() => {
+                  onChange({ id: opt.id, label: opt.label, source: resolved.key });
+                  setOpen(false);
+                  setSearch("");
+                }}>
+                {opt.label}
+              </button>
+            ))}
+          </div>
+        </div>,
+        document.body,
+      )}
+    </div>
+  );
+}
+
 // ── Conditional visibility ────────────────────────────────────────────────────
 
 function evalVisible(field: Field, values: TemplateFormValues, allFields: Field[]): boolean {
@@ -92,82 +256,171 @@ function evalVisible(field: Field, values: TemplateFormValues, allFields: Field[
 
 // ── Table column cell ─────────────────────────────────────────────────────────
 
-function TableColInput({ col, value, onChange, readOnly }: {
-  col: Column; value: string; onChange: (v: string) => void; readOnly?: boolean;
+function TableFileCell({ value, onChange, disabled, documentId, attachmentKey }: {
+  value: unknown;
+  onChange: (v: unknown) => void;
+  disabled?: boolean;
+  documentId?: string;
+  attachmentKey?: string;
+}) {
+  const [downloading, setDownloading] = useState(false);
+  const descriptor = isAttachmentValue(value) ? value : null;
+  const file = value instanceof File ? value : null;
+
+  const download = async () => {
+    if (!documentId || !attachmentKey || !descriptor) return;
+    setDownloading(true);
+    try {
+      const response = await documentsAPI.downloadFormAttachment(documentId, attachmentKey);
+      const blob = new Blob([response.data], {
+        type: descriptor.content_type || response.data?.type || "application/octet-stream",
+      });
+      const url = URL.createObjectURL(blob);
+      const anchor = document.createElement("a");
+      anchor.href = url;
+      anchor.download = descriptor.name || "attachment";
+      document.body.appendChild(anchor);
+      anchor.click();
+      anchor.remove();
+      URL.revokeObjectURL(url);
+    } catch {
+      toast.error("Could not download this attachment.");
+    } finally {
+      setDownloading(false);
+    }
+  };
+
+  if (file) {
+    return (
+      <div className="flex items-center gap-1 text-xs text-foreground">
+        <Paperclip className="h-3 w-3 flex-shrink-0 text-primary" />
+        <span className="min-w-0 truncate" title={file.name}>{file.name}</span>
+        {!disabled && (
+          <button type="button" onClick={() => onChange(undefined)}
+            className="flex-shrink-0 text-muted-foreground hover:text-red-500">
+            <X className="h-3 w-3" />
+          </button>
+        )}
+      </div>
+    );
+  }
+
+  if (descriptor) {
+    return (
+      <div className="flex items-center gap-1.5 text-xs text-foreground">
+        <Paperclip className="h-3 w-3 flex-shrink-0 text-primary" />
+        <span className="min-w-0 truncate" title={descriptor.name}>{descriptor.name}</span>
+        {documentId && attachmentKey && (
+          <button type="button" onClick={download} disabled={downloading}
+            className="flex-shrink-0 text-primary hover:text-primary/80 disabled:opacity-50">
+            {downloading ? <Loader2 className="h-3 w-3 animate-spin" /> : <Download className="h-3 w-3" />}
+          </button>
+        )}
+        {!disabled && (
+          <label className="flex-shrink-0 cursor-pointer text-[10px] font-semibold text-primary hover:underline">
+            Replace
+            <input type="file" className="sr-only"
+              onChange={(e) => onChange(e.target.files?.[0] ?? undefined)} />
+          </label>
+        )}
+      </div>
+    );
+  }
+
+  return (
+    <input type="file" disabled={disabled} className="text-xs w-full"
+      onChange={(e) => onChange(e.target.files?.[0] ?? undefined)} />
+  );
+}
+
+function TableColInput({ col, value, onChange, readOnly, documentId, attachmentKey }: {
+  col: Column; value: unknown; onChange: (v: unknown) => void; readOnly?: boolean;
+  documentId?: string; attachmentKey?: string;
 }) {
   const base = "w-full bg-transparent py-0.5 text-sm outline-none text-foreground placeholder:text-muted-foreground/50";
   if (col.hidden) return null;
   const type = (col.type ?? "text") as ColType;
   const dis = readOnly || col.readonly;
 
+  if (type === "file") {
+    return (
+      <TableFileCell value={value} onChange={onChange} disabled={dis}
+        documentId={documentId} attachmentKey={attachmentKey} />
+    );
+  }
+
+  const sval = typeof value === "string" ? value : value == null ? "" : String(value);
+
   switch (type) {
     case "select":
       return (
-        <select value={value} onChange={(e) => onChange(e.target.value)} disabled={dis} className={base}>
+        <select value={sval} onChange={(e) => onChange(e.target.value)} disabled={dis} className={base}>
           <option value="">—</option>
           {(col.options ?? []).map((o) => <option key={o} value={o}>{o}</option>)}
         </select>
       );
     case "boolean":
-      return <input type="checkbox" checked={value === "true"} disabled={dis} onChange={(e) => onChange(e.target.checked ? "true" : "false")} className="h-4 w-4 accent-primary" />;
+      return <input type="checkbox" checked={sval === "true"} disabled={dis} onChange={(e) => onChange(e.target.checked ? "true" : "false")} className="h-4 w-4 accent-primary" />;
     case "textarea":
-      return <textarea rows={1} value={value} disabled={dis} onChange={(e) => onChange(e.target.value)} className={`${base} resize-none`} />;
+      return <textarea rows={1} value={sval} disabled={dis} onChange={(e) => onChange(e.target.value)} className={`${base} resize-none`} />;
     case "currency":
       return (
         <div className="flex items-center gap-1">
           <span className="text-[10px] text-muted-foreground flex-shrink-0">{col.currencySymbol ?? "KSh"}</span>
-          <input type="number" step="0.01" value={value} disabled={dis} onChange={(e) => onChange(e.target.value)} className={base} placeholder="0.00" />
+          <input type="number" step="0.01" value={sval} disabled={dis} onChange={(e) => onChange(e.target.value)} className={base} placeholder="0.00" />
         </div>
       );
     case "number":
-      return <input type="number" value={value} disabled={dis} onChange={(e) => onChange(e.target.value)} className={base} />;
+      return <input type="number" value={sval} disabled={dis} onChange={(e) => onChange(e.target.value)} className={base} />;
     case "date":
-      return <input type="date" value={value} disabled={dis} onChange={(e) => onChange(e.target.value)} className={base} />;
+      return <input type="date" value={sval} disabled={dis} onChange={(e) => onChange(e.target.value)} className={base} />;
     case "datetime":
-      return <input type="datetime-local" value={value} disabled={dis} onChange={(e) => onChange(e.target.value)} className={base} />;
+      return <input type="datetime-local" value={sval} disabled={dis} onChange={(e) => onChange(e.target.value)} className={base} />;
     case "time":
-      return <input type="time" value={value} disabled={dis} onChange={(e) => onChange(e.target.value)} className={base} />;
+      return <input type="time" value={sval} disabled={dis} onChange={(e) => onChange(e.target.value)} className={base} />;
     case "email":
-      return <input type="email" value={value} disabled={dis} onChange={(e) => onChange(e.target.value)} className={base} />;
+      return <input type="email" value={sval} disabled={dis} onChange={(e) => onChange(e.target.value)} className={base} />;
     case "phone":
-      return <input type="tel" value={value} disabled={dis} onChange={(e) => onChange(e.target.value)} className={base} />;
+      return <input type="tel" value={sval} disabled={dis} onChange={(e) => onChange(e.target.value)} className={base} />;
     case "reference":
     case "user":
       return (
-        <select value={value} onChange={(e) => onChange(e.target.value)} disabled={dis} className={base}>
-          <option value="">Select…</option>
-          <option value="sample-1">Sample 1</option>
-          <option value="sample-2">Sample 2</option>
-        </select>
+        <ReferencePicker
+          source={col.referenceSource ?? (type === "user" ? "users" : "documents")}
+          value={value}
+          onChange={onChange}
+          disabled={dis}
+          compact
+        />
       );
-    case "file":
-      return <input type="file" disabled={dis} className="text-xs w-full" onChange={() => {}} />;
     default:
-      return <input type="text" value={value} disabled={dis} onChange={(e) => onChange(e.target.value)} className={base} />;
+      return <input type="text" value={sval} disabled={dis} onChange={(e) => onChange(e.target.value)} className={base} />;
   }
 }
 
 // ── Table field ───────────────────────────────────────────────────────────────
 
-function TableField({ field, value, onChange, readOnly }: {
+function TableField({ field, value, onChange, readOnly, tableKey, documentId }: {
   field: Field;
-  value: Record<string, string>[];
-  onChange: (rows: Record<string, string>[]) => void;
+  value: Record<string, unknown>[];
+  onChange: (rows: Record<string, unknown>[]) => void;
   readOnly?: boolean;
+  tableKey: string;
+  documentId?: string;
 }) {
   const cols = (field.columns ?? []).filter((c) => !c.hidden);
-  const emptyRow = (): Record<string, string> => {
-    const r: Record<string, string> = {};
+  const emptyRow = (): Record<string, unknown> => {
+    const r: Record<string, unknown> = {};
     cols.forEach((c) => { if (c.defaultValue && c.key) r[c.key] = c.defaultValue; });
     return r;
   };
-  const [rows, setRows] = useState<Record<string, string>[]>(() =>
+  const [rows, setRows] = useState<Record<string, unknown>[]>(() =>
     Array.isArray(value) && value.length > 0
       ? value
       : Array.from({ length: field.minRows ?? 1 }, emptyRow)
   );
 
-  const update = (ri: number, key: string, val: string) => {
+  const update = (ri: number, key: string, val: unknown) => {
     const next = rows.map((r, i) => i === ri ? { ...r, [key]: val } : r);
     setRows(next); onChange(next);
   };
@@ -204,7 +457,14 @@ function TableField({ field, value, onChange, readOnly }: {
                   const key = col.key ?? `col_${ci}`;
                   return (
                     <td key={col.id ?? ci} className="px-2 py-1.5 border-r border-border/30 last:border-0">
-                      <TableColInput col={col} value={row[key] ?? ""} onChange={(v) => update(ri, key, v)} readOnly={readOnly} />
+                      <TableColInput
+                        col={col}
+                        value={row[key] ?? ""}
+                        onChange={(v) => update(ri, key, v)}
+                        readOnly={readOnly}
+                        documentId={documentId}
+                        attachmentKey={`${tableKey}~${ri}~${key}`}
+                      />
                     </td>
                   );
                 })}
@@ -275,7 +535,10 @@ function FileAttachField({ label, fieldKey, imageOnly, disabled, value, document
 
   return (
     <div>
-      {disabled && descriptor ? (
+      {!file && descriptor ? (
+        // An attachment is already saved on the form. Show it (with download),
+        // and — when editing — allow replacing it without losing the existing
+        // file if the user leaves it untouched.
         <div className="flex items-center gap-2 rounded-lg border border-border bg-muted/20 px-3 py-2.5">
           <Paperclip className="h-4 w-4 flex-shrink-0 text-primary" />
           <span className="min-w-0 flex-1 truncate text-xs text-foreground">{descriptor.name || label}</span>
@@ -291,6 +554,17 @@ function FileAttachField({ label, fieldKey, imageOnly, disabled, value, document
             >
               {downloading ? <Loader2 className="h-3 w-3 animate-spin" /> : <Download className="h-3 w-3" />}
             </button>
+          )}
+          {!disabled && (
+            <label className="flex-shrink-0 cursor-pointer rounded border border-border bg-white px-2 py-1 text-[11px] font-semibold text-primary hover:bg-muted">
+              Replace
+              <input
+                type="file"
+                accept={imageOnly ? "image/*" : undefined}
+                className="sr-only"
+                onChange={(e) => pick(e.target.files?.[0] ?? null)}
+              />
+            </label>
           )}
         </div>
       ) : file ? (
@@ -451,9 +725,11 @@ function FormField({ field, control, errors, onChangeCb, readOnly, allValues }: 
   if (type === "table") return (
     <TableField
       field={field}
-      value={Array.isArray(allValues[key]) ? (allValues[key] as Record<string, string>[]) : []}
+      value={Array.isArray(allValues[key]) ? (allValues[key] as Record<string, unknown>[]) : []}
       onChange={(rows) => onChangeCb(key, rows)}
       readOnly={readOnly}
+      tableKey={key}
+      documentId={allValues.__document_id as string | undefined}
     />
   );
 
@@ -605,12 +881,12 @@ function FormField({ field, control, errors, onChangeCb, readOnly, allValues }: 
     case "user":
       control_el = (
         <Controller control={control} name={key} rules={rules} render={({ field: f }) => (
-          <select {...f} value={String(f.value ?? "")} disabled={dis} className={inp}
-            onChange={(e) => { f.onChange(e.target.value); onChangeCb(key, e.target.value); }}>
-            <option value="">Select {field.referenceSource ?? "…"}</option>
-            <option value="sample-1">Sample 1</option>
-            <option value="sample-2">Sample 2</option>
-          </select>
+          <ReferencePicker
+            source={field.referenceSource ?? (type === "user" ? "users" : "documents")}
+            value={f.value}
+            disabled={dis}
+            onChange={(v) => { f.onChange(v); onChangeCb(key, v); }}
+          />
         )} />
       );
       break;
@@ -684,8 +960,11 @@ export default function TemplateForm({ sections, values, onChange, readOnly = fa
     return <p className="text-sm text-muted-foreground">This form has no fields.</p>;
   }
 
+  // Read-only mode: every editing control is individually `disabled`, so we must
+  // NOT blanket the form in `pointer-events-none` — that would also block the
+  // attachment download buttons (the approver needs to open attachments).
   return (
-    <div className={`space-y-6 ${readOnly ? "pointer-events-none opacity-90" : ""}`}>
+    <div className="space-y-6">
       {list.map((section, si) => {
         const visibleFields = (section.fields ?? []).filter((f) =>
           evalVisible(f, liveValues as TemplateFormValues, allFields)

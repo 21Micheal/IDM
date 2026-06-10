@@ -202,6 +202,16 @@ function toDocTypeCode(name: string) {
   return name.toUpperCase().trim().replace(/\s+/g, "_").replace(/[^A-Z0-9_]/g, "").replace(/_+/g, "_").replace(/^_|_$/g, "");
 }
 
+// Reference/user picker sources — must match the keys in
+// frontend/src/components/templates/referenceSources.ts.
+const REFERENCE_SOURCE_OPTIONS = [
+  { value: "users",          label: "Users" },
+  { value: "groups",         label: "Groups" },
+  { value: "departments",    label: "Departments" },
+  { value: "documents",      label: "Documents" },
+  { value: "document_types", label: "Document types" },
+];
+
 /* ============================================================
  * Quick "create document type" modal — unchanged from v2
  * ============================================================ */
@@ -370,20 +380,15 @@ function newField(type: FieldType): TemplateField {
     required: false,
   };
   if (type === "table") {
-    base.minRows = 2;
+    // Start with a minimal, generic table. The builder lets the user rename
+    // these, change their types, and add columns (including a file column for
+    // per-row attachments). Avoid imposing a domain-specific stub.
+    base.minRows = 1;
     base.columns = [
-      newColumn("select",   "Expense Category"),
-      newColumn("text",     "Other Category"),
-      newColumn("number",   "Days"),
-      newColumn("currency", "DSA Amount"),
+      newColumn("text",     "Item"),
+      newColumn("text",     "Description"),
       newColumn("currency", "Amount"),
-      newColumn("currency", "Actual Amount"),
-      newColumn("text",     "Warning"),
-      newColumn("textarea", "Note"),
-      newColumn("file",     "Attachments"),
     ];
-    // pre-seed common option list for the first dropdown
-    if (base.columns[0]) base.columns[0].options = ["Hotel", "Transport", "Meal", "Air Ticket", "Others"];
   }
   return base;
 }
@@ -1127,7 +1132,11 @@ function ColumnConfigModal({
                 <Row label="Date format"><input className={cn(iCls, "font-mono")} value={draft.dateFormat ?? "YYYY-MM-DD"} onChange={(e) => set({ dateFormat: e.target.value })} /></Row>
               )}
               {(draft.type === "reference" || draft.type === "user") && (
-                <Row label="Reference source"><input className={iCls} value={draft.referenceSource ?? ""} onChange={(e) => set({ referenceSource: e.target.value })} placeholder="users, documents, departments…" /></Row>
+                <Row label="Reference source">
+                  <select className={iCls} value={draft.referenceSource ?? (draft.type === "user" ? "users" : "documents")} onChange={(e) => set({ referenceSource: e.target.value })}>
+                    {REFERENCE_SOURCE_OPTIONS.map((o) => <option key={o.value} value={o.value}>{o.label}</option>)}
+                  </select>
+                </Row>
               )}
               <div className="flex items-center gap-6 pt-2">
                 <label className="flex items-center gap-2 text-sm text-[#1F2933]">
@@ -1358,7 +1367,9 @@ function FieldEditor({ field, onUpdate, allFields }: {
           )}
           {(field.type === "reference" || field.type === "user") && (
             <InspectorRow label="Reference source">
-              <input className={inputCls} value={field.referenceSource ?? ""} onChange={(e) => onUpdate({ referenceSource: e.target.value })} placeholder="users, documents, departments…" />
+              <select className={inputCls} value={field.referenceSource ?? (field.type === "user" ? "users" : "documents")} onChange={(e) => onUpdate({ referenceSource: e.target.value })}>
+                {REFERENCE_SOURCE_OPTIONS.map((o) => <option key={o.value} value={o.value}>{o.label}</option>)}
+              </select>
             </InspectorRow>
           )}
         </>
@@ -1565,11 +1576,10 @@ function PreviewColumnInput({ col, value, onChange }: { col: TableColumn; value:
     case "reference":
     case "user":
       return (
-        <select value={value} onChange={(e) => onChange(e.target.value)} disabled={col.readonly} className={base}>
-          <option value="">Select {col.referenceSource ?? "…"}</option>
-          <option value="sample-1">Sample 1</option>
-          <option value="sample-2">Sample 2</option>
-        </select>
+        <div className={cn(base, "flex items-center justify-between gap-1 text-muted-foreground")}>
+          <span className="truncate">Pick {col.referenceSource ?? (col.type === "user" ? "user" : "record")}…</span>
+          <Link2 className="h-3 w-3 flex-shrink-0" />
+        </div>
       );
     case "file":
       return <input type="file" disabled={col.readonly} className="text-xs" />;
@@ -1757,11 +1767,10 @@ function PreviewField({ field, register, errors }: {
     case "reference":
     case "user":
       control = (
-        <select {...reg} className={previewInputCls} disabled={field.readonly}>
-          <option value="">Select {field.referenceSource ?? "…"}</option>
-          <option value="sample-1">Sample 1</option>
-          <option value="sample-2">Sample 2</option>
-        </select>
+        <div className={cn(previewInputCls, "flex items-center justify-between gap-2 text-[#5E6870]")}>
+          <span className="truncate">Pick {field.referenceSource ?? (field.type === "user" ? "user" : "record")}…</span>
+          <Link2 className="h-3.5 w-3.5 flex-shrink-0" />
+        </div>
       );
       break;
     case "file":

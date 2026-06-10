@@ -800,14 +800,59 @@ class DocumentViewSet(AuditMixin, viewsets.ModelViewSet):
                 status=status.HTTP_400_BAD_REQUEST,
             )
 
+        import json
+        from apps.documents.form_attachments import (
+            apply_form_attachments,
+            default_reference_resolver,
+            descriptors_to_names,
+            is_attachment_descriptor,
+            rebuild_attachments,
+            reconcile_references,
+        )
+
         values = request.data.get("values")
+        if isinstance(values, str):
+            # Multipart submissions (with attachments) carry values as JSON text.
+            try:
+                values = json.loads(values) if values.strip() else {}
+            except json.JSONDecodeError:
+                return Response({"detail": "values must be valid JSON."}, status=400)
         if not isinstance(values, dict):
             return Response({"detail": "values must be an object."}, status=400)
 
+        meta = dict(doc.metadata or {})
+        meta_form = dict(meta.get("form") or {})
+
+        # Carry forward descriptors for attachment fields the client echoed back
+        # as placeholders (it doesn't re-upload files it didn't change).
+        prior_values = meta_form.get("values") if isinstance(meta_form.get("values"), dict) else {}
+        prior_attachments = rebuild_attachments(prior_values)
+
+        # Persist any newly uploaded files (simple fields + table cells) and
+        # write their descriptors into values. These are form attachments stored
+        # on metadata.form — NOT new document versions.
+        values, attachments = apply_form_attachments(doc.id, values, request.FILES.items())
+
+        # Re-anchor a prior simple-field descriptor the client replaced with a
+        # placeholder. (Table cells round-trip in the submitted values, so the
+        # rebuild above already preserves them.)
+        for key, descriptor in prior_attachments.items():
+            if "~" in key or key in attachments:
+                continue
+            if not is_attachment_descriptor(values.get(key)):
+                values[key] = descriptor
+                attachments[key] = descriptor
+
         sections = form.get("sections") or []
+
+        # Re-derive picked reference/user labels server-side from their ids.
+        values = reconcile_references(values, sections, default_reference_resolver)
+
+        # The regenerated PDF view shows display strings, not structured dicts.
+        render_values = descriptors_to_names(values)
         shim = SimpleNamespace(name=doc.title, sections=sections)
         try:
-            content = generate_built_pdf(shim, values)
+            content = generate_built_pdf(shim, render_values)
         except Exception as exc:
             logger.exception("update_form: regeneration failed for %s", doc.id)
             return Response({"detail": f"Could not regenerate the form: {exc}"}, status=400)
@@ -823,9 +868,9 @@ class DocumentViewSet(AuditMixin, viewsets.ModelViewSet):
             change_summary="Form updated", created_by=request.user,
         )
 
-        meta = dict(doc.metadata or {})
-        meta_form = dict(meta.get("form") or {})
         meta_form["values"] = values
+        if attachments:
+            meta_form["attachments"] = attachments
         meta["form"] = meta_form
 
         doc.file = ContentFile(content, name=filename)

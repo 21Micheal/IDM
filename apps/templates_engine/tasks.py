@@ -387,18 +387,22 @@ def generate_document_from_template_sync(template, values, fmt, title, user, typ
     """Generate a document from a template synchronously."""
     from apps.documents.models import Document, DocumentStatus
     from apps.documents.serializers import _generate_unique_reference
+    from apps.documents.form_attachments import descriptors_to_names
     from django.core.files.base import ContentFile
     import hashlib
 
     is_xlsx = template.file_name.endswith((".xlsx", ".xls")) if template.file_name else False
 
     if template.type == "built":
+        # The stored form.values keeps structured attachment descriptors and
+        # reference {id,label} objects; the rendered file shows display strings.
+        render_values = descriptors_to_names(values)
         if fmt == "pdf":
-            content = generate_built_pdf(template, values)
+            content = generate_built_pdf(template, render_values)
             filename = f"{title}.pdf"
             content_type = "application/pdf"
         else:
-            content = generate_built_docx(template, values)
+            content = generate_built_docx(template, render_values)
             filename = f"{title}.docx"
             content_type = "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
 

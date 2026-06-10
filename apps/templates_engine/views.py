@@ -4,11 +4,8 @@ from rest_framework.response import Response
 from rest_framework.exceptions import ValidationError
 from rest_framework.parsers import JSONParser, MultiPartParser, FormParser
 from django.db.models import F
-from django.core.files.storage import default_storage
-from django.utils.text import get_valid_filename
 from rest_framework import permissions
 import json
-import uuid
 from .models import DocumentTemplate, TemplateUsage
 from .serializers import DocumentTemplateSerializer
 from .tasks import generate_document_from_template_sync
@@ -170,18 +167,25 @@ class DocumentTemplateViewSet(viewsets.ModelViewSet):
         if not isinstance(values, dict):
             raise ValidationError({"values": "values must be an object."})
 
-        form_files = []
-        for key, file in request.FILES.items():
-            field_key = key
-            if field_key.startswith("attachment_"):
-                field_key = field_key[len("attachment_"):]
-            elif field_key.startswith("attachments."):
-                field_key = field_key[len("attachments."):]
-            form_files.append((field_key, file))
+        from apps.documents.form_attachments import (
+            apply_form_attachments,
+            descriptors_to_names,
+            default_reference_resolver,
+            reconcile_references,
+        )
+        from apps.documents.models import Document
+        from apps.search.utils import SEARCH_INDEX_EXCEPTIONS
 
-        generation_values = dict(values)
-        for field_key, file in form_files:
-            generation_values[field_key] = file.name
+        # Re-derive picked reference/user labels server-side from their ids so the
+        # stored values are trustworthy (a stale/spoofed client label can't persist).
+        values = reconcile_references(values, template.sections, default_reference_resolver)
+
+        # `values` already carries filename placeholders for any file fields
+        # (simple fields or file columns inside a table); the actual files arrive
+        # as multipart uploads and are attached after the document is created.
+        # `generation_values` is a display-string copy for validation/usage; the
+        # generator stores the structured `values` and renders from its own copy.
+        generation_values = descriptors_to_names(values)
 
         fmt = request.data.get("output_format", "pdf")
         title = request.data.get("title", template.name)
@@ -214,39 +218,31 @@ class DocumentTemplateViewSet(viewsets.ModelViewSet):
 
         try:
             doc = generate_document_from_template_sync(
-                template, generation_values, fmt, title.strip(), request.user, type_id
+                template, values, fmt, title.strip(), request.user, type_id
             )
         except Exception as e:
             raise ValidationError({"detail": f"Document generation failed: {e}"})
 
-        if form_files:
+        if request.FILES:
+            # Persist uploaded files (simple fields + table file cells) and write
+            # their descriptors into the form values. They are form attachments
+            # on metadata.form — never document versions.
+            form_values, attachments = apply_form_attachments(
+                doc.id, values, request.FILES.items()
+            )
             meta = dict(doc.metadata or {})
             meta_form = dict(meta.get("form") or {})
-            form_values = dict(generation_values)
-            attachments = dict(meta_form.get("attachments") or {})
-
-            for field_key, file in form_files:
-                safe_name = get_valid_filename(file.name)
-                storage_path = default_storage.save(
-                    f"documents/{doc.id}/form_attachments/{uuid.uuid4().hex}_{safe_name}",
-                    file,
-                )
-                descriptor = {
-                    "type": "file",
-                    "field_key": field_key,
-                    "name": file.name,
-                    "size": getattr(file, "size", 0),
-                    "content_type": getattr(file, "content_type", "") or "",
-                    "storage_path": storage_path,
-                }
-                attachments[field_key] = descriptor
-                form_values[field_key] = descriptor
-
             meta_form["values"] = form_values
-            meta_form["attachments"] = attachments
+            if attachments:
+                meta_form["attachments"] = attachments
             meta["form"] = meta_form
             doc.metadata = meta
-            doc.save(update_fields=["metadata", "updated_at"])
+            try:
+                doc.save(update_fields=["metadata", "updated_at"])
+            except SEARCH_INDEX_EXCEPTIONS:
+                # ES indexing failed (e.g. read-only or a transient mapping
+                # issue). The row is committed; don't fail document creation.
+                Document.objects.filter(pk=doc.pk).update(metadata=meta)
 
         # Increment use count atomically
         DocumentTemplate.objects.filter(id=template.id).update(
