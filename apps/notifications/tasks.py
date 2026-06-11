@@ -427,7 +427,11 @@ def notify_task_overdue(task_id: str) -> None:
     except WorkflowTask.DoesNotExist:
         return
 
-    if not task.assigned_to:
+    # Only an active task can be overdue. A task that has been approved/rejected/
+    # returned (or is on hold) must NOT trigger an overdue alert — the ETA-based
+    # message scheduled at task creation still fires after the task is actioned,
+    # so we re-check the live status here (mirrors notify_task_sla_warning).
+    if task.status != "in_progress" or not task.assigned_to:
         return
 
     doc  = task.workflow_instance.document
@@ -452,6 +456,58 @@ def notify_task_overdue(task_id: str) -> None:
                 f"Please log in to DMS immediately.\n"
             ),
         )
+
+
+# ── Clear resolved task notifications ──────────────────────────────────────────
+
+# Actionable task notifications that should disappear once the assignee no longer
+# has an open task on the document (it was approved/rejected/returned/skipped).
+ACTIONABLE_TASK_NOTIFICATION_TYPES = [
+    "task_assigned",
+    "task_sla_warning",
+    "task_overdue",
+    "hold_ending",
+    "hold_expired",
+]
+
+
+def clear_resolved_task_notifications_now(task_id: str) -> int:
+    """When a task leaves an assignee's queue, delete their now-stale actionable
+    notifications for that document — but only if they have no other open task on
+    it — so the notification tray matches reality. Safe to call synchronously
+    inside the workflow action transaction. Returns the number deleted."""
+    from apps.workflows.models import WorkflowTask
+    from apps.notifications.models import Notification
+
+    try:
+        task = WorkflowTask.objects.select_related("workflow_instance").get(id=task_id)
+    except WorkflowTask.DoesNotExist:
+        return 0
+
+    assignee_id = task.assigned_to_id
+    if not assignee_id:
+        return 0
+    document_id = task.workflow_instance.document_id
+
+    still_active = WorkflowTask.objects.filter(
+        assigned_to_id=assignee_id,
+        workflow_instance__document_id=document_id,
+        status__in=["in_progress", "held"],
+    ).exists()
+    if still_active:
+        return 0
+
+    deleted, _ = Notification.objects.filter(
+        recipient_id=assignee_id,
+        type__in=ACTIONABLE_TASK_NOTIFICATION_TYPES,
+        link=f"/documents/{document_id}",
+    ).delete()
+    return deleted
+
+
+@shared_task(queue="notifications")
+def clear_resolved_task_notifications(task_id: str) -> None:
+    clear_resolved_task_notifications_now(task_id)
 
 
 # ── Workflow action (approve, reject, held, released, returned) ────────────────

@@ -532,7 +532,17 @@ class WorkflowService:
         qs = instance.tasks.filter(status__in=["in_progress", "held"])
         if step_order is not None:
             qs = qs.filter(step__order=step_order)
+        skipped_ids = list(qs.values_list("id", flat=True))
         qs.update(status="skipped", acted_at=timezone.now())
+        # A peer in a group step actioned it — clear the skipped members' stale
+        # task notifications so they disappear from those members' trays too.
+        if skipped_ids:
+            try:
+                from apps.notifications.tasks import clear_resolved_task_notifications_now
+                for tid in skipped_ids:
+                    clear_resolved_task_notifications_now(str(tid))
+            except Exception:
+                pass
 
     @staticmethod
     def _advance_step(instance: WorkflowInstance, order: int) -> None:
@@ -839,3 +849,14 @@ class WorkflowService:
             notify_workflow_action.delay(str(action.id), [str(u.id) for u in notify_users])
         except Exception:
             pass
+
+        # Once a task is resolved (approved/rejected/returned), drop the actor's
+        # now-stale "action required"/SLA notifications for this document so they
+        # disappear from the tray. Done synchronously so the client's immediate
+        # post-action refetch already reflects it.
+        if action.action in ("approved", "rejected", "returned"):
+            try:
+                from apps.notifications.tasks import clear_resolved_task_notifications_now
+                clear_resolved_task_notifications_now(str(action.task_id))
+            except Exception:
+                pass
