@@ -654,14 +654,14 @@ export const groupsAPI = {
   get: (id: string) => api.get(`/groups/${id}/`),
   create: (data: { name: string; description?: string }) =>
     api.post("/groups/", data),
-  update: (id: string, data: { name?: string; description?: string; head_id?: string | null }) =>
+  update: (id: string, data: { name?: string; description?: string; head_id?: string | null; sees_all_documents?: boolean }) =>
     api.patch(`/groups/${id}/`, data),
   delete: (id: string) => api.delete(`/groups/${id}/`),
   duplicate: (id: string, data: { name: string; description?: string }) =>
     api.post(`/groups/${id}/duplicate/`, data),
   setPermissions: (
     id: string,
-    permissions: { document_type_id: string; stage: string; action: string }[]
+    permissions: { document_type_id: string | null; stage: string; action: string }[]
   ) => api.post(`/groups/${id}/set_permissions/`, { permissions }),
   members: (id: string) => api.get(`/groups/${id}/members/`),
   addMember: (id: string, userId: string, expiresAt?: string) =>

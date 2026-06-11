@@ -12,6 +12,7 @@ Changes from previous version:
 from django.contrib.auth.models import AbstractBaseUser, BaseUserManager, PermissionsMixin
 from django.db import models
 from django.utils import timezone
+from django.utils.functional import cached_property
 from django.db.models import Q
 from datetime import timedelta
 import uuid
@@ -161,7 +162,11 @@ class User(AbstractBaseUser, PermissionsMixin):
         if document_type_id is None:
             return set()
         qs = GroupPermission.objects.filter(self._active_group_permissions_q())
-        qs = qs.filter(document_type_id=document_type_id)
+        # Include this document type's explicit rows PLUS global wildcard rows
+        # (document_type IS NULL) — the "fallback" configuration that applies to
+        # every document type. The Groups UI keeps these mutually exclusive
+        # (either a global fallback or per-type rules), so they don't double up.
+        qs = qs.filter(Q(document_type_id=document_type_id) | Q(document_type__isnull=True))
         if stage in (None, AccessStage.ANY.value):
             qs = qs.filter(stage=AccessStage.ANY.value)
         else:
@@ -178,6 +183,24 @@ class User(AbstractBaseUser, PermissionsMixin):
         Application administration is user-level, not group-granted.
         """
         return bool(self.is_superuser or self.is_staff)
+
+    @cached_property
+    def sees_all_documents(self) -> bool:
+        """
+        True if the user belongs to any active group flagged `sees_all_documents`.
+        Such users are treated as *involved* with every document (full visibility
+        and view), while what they can DO is still governed by group permissions.
+        Cached per instance to avoid repeated queries during list serialization.
+        """
+        if self.has_admin_access:
+            return True
+        now = timezone.now()
+        return self.group_memberships.filter(
+            group__is_active=True,
+            group__sees_all_documents=True,
+        ).filter(
+            Q(expires_at__isnull=True) | Q(expires_at__gt=now)
+        ).exists()
 
     # Convenience helpers
     @property
@@ -374,6 +397,10 @@ class UserGroup(models.Model):
     name        = models.CharField(max_length=120, unique=True)
     description = models.TextField(blank=True)
     is_active   = models.BooleanField(default=True)
+    # Members of a `sees_all_documents` group are treated as involved with every
+    # document — full visibility/view across all types (e.g. auditors). What they
+    # can DO is still governed by this group's per-type permissions.
+    sees_all_documents = models.BooleanField(default=False)
     created_by  = models.ForeignKey(
         User, null=True, on_delete=models.SET_NULL, related_name="created_groups"
     )

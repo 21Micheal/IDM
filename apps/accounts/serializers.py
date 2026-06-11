@@ -295,7 +295,7 @@ class UserGroupSerializer(serializers.ModelSerializer):
     class Meta:
         model  = UserGroup
         fields = [
-            "id", "name", "description", "is_active",
+            "id", "name", "description", "is_active", "sees_all_documents",
             "permissions", "has_admin_access", "member_count", "created_by", "created_at",
             "head", "head_id",
         ]

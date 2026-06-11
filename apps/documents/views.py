@@ -410,7 +410,9 @@ class DocumentViewSet(AuditMixin, viewsets.ModelViewSet):
             )
             .prefetch_related("tags", "versions", "workflow_instance__tasks__step")
         )
-        if not user.has_admin_access:
+        # A "sees all documents" group (e.g. auditors) gets full visibility; what
+        # they can DO is still governed by the object-level permission checks.
+        if not user.has_admin_access and not user.sees_all_documents:
             active_shared_docs = DocumentShare.objects.filter(
                 recipient=user,
                 revoked_at__isnull=True,
@@ -418,13 +420,15 @@ class DocumentViewSet(AuditMixin, viewsets.ModelViewSet):
                 models.Q(expires_at__isnull=True) | models.Q(expires_at__gt=timezone.now())
             ).values("document_id")
 
-            # Include documents uploaded by the user OR documents with active workflow tasks assigned to them
+            # Access is scoped to INVOLVEMENT: a user sees a document only if they
+            # uploaded/own it, have ever been assigned a workflow task on it, or it
+            # was shared with them. Group permissions gate what they can DO with
+            # those documents (object level); they don't grant blanket visibility
+            # of every document of a type.
             qs = qs.filter(
                 models.Q(uploaded_by=user) |
-                models.Q(
-                    workflow_instance__tasks__assigned_to=user,
-                    workflow_instance__tasks__status__in=["pending", "in_progress", "held", "returned"],
-                ) |
+                models.Q(owned_by=user) |
+                models.Q(workflow_instance__tasks__assigned_to=user) |
                 models.Q(id__in=active_shared_docs)
             ).distinct()
 

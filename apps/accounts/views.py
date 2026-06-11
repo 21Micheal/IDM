@@ -679,6 +679,7 @@ class UserGroupViewSet(viewsets.ModelViewSet):
     def set_permissions(self, request, pk=None):
         from apps.accounts.models import AccessStage
         from apps.documents.access import ACCESS_STAGE_KEYS
+        from apps.documents.models import DocumentType
 
         group = self.get_object()
         perms = request.data.get("permissions", [])
@@ -689,12 +690,18 @@ class UserGroupViewSet(viewsets.ModelViewSet):
         }
         # "any" is allowed — it is the global single-stage configuration.
         valid_stages = set(ACCESS_STAGE_KEYS)
+        # A null/absent document_type_id is the global fallback ("all document
+        # types") wildcard, so it is allowed here.
+        valid_doctype_ids = set(
+            str(x) for x in DocumentType.objects.values_list("id", flat=True)
+        )
         errors = []
         for i, p in enumerate(perms):
             if p.get("action") not in valid_actions:
                 errors.append(f"Item {i}: invalid action '{p.get('action')}'")
-            if not p.get("document_type_id"):
-                errors.append(f"Item {i}: document_type_id is required")
+            dt_id = p.get("document_type_id")
+            if dt_id and str(dt_id) not in valid_doctype_ids:
+                errors.append(f"Item {i}: unknown document_type_id '{dt_id}'")
             stage = p.get("stage")
             if stage not in valid_stages:
                 errors.append(f"Item {i}: invalid stage '{stage}'")

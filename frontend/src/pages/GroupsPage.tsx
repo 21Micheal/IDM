@@ -18,7 +18,7 @@ interface GroupPerm {
   action: string;
 }
 interface Member    { id: string; user: { id: string; full_name: string; email: string; job_description?: string }; expires_at: string | null; is_active: boolean }
-interface Group     { id: string; name: string; description: string; permissions: GroupPerm[]; member_count: number; has_admin_access: boolean }
+interface Group     { id: string; name: string; description: string; permissions: GroupPerm[]; member_count: number; has_admin_access: boolean; sees_all_documents: boolean }
 interface User      { id: string; full_name: string; email: string; job_description?: string }
 
 const ADMIN_GROUP_NAME = "Administrators";
@@ -52,8 +52,12 @@ const ALL_ACTIONS = [
   { value: "delete",   label: "Delete",   description: "Void / delete documents" },
 ];
 
+// Sentinel row key for the "fallback" configuration that applies to every
+// document type (stored on the backend as a permission with document_type = null).
+const GLOBAL_DT_KEY = "__all_document_types__";
+
 function emptyMatrix(docTypes: DocType[]): Record<string, Set<string>> {
-  const matrix: Record<string, Set<string>> = {};
+  const matrix: Record<string, Set<string>> = { [GLOBAL_DT_KEY]: new Set() };
   docTypes.forEach((dt) => { matrix[dt.id] = new Set(); });
   return matrix;
 }
@@ -70,17 +74,24 @@ function buildStageMatrices(
   }, {} as Record<PermissionStage, Record<string, Set<string>>>);
 
   group.permissions.forEach((p) => {
-    if (p.action === "admin" || !p.document_type) return;
+    if (p.action === "admin") return;
     const stage = p.stage || "any";
     // Each mode shows only the permissions it manages, matching how the backend
     // resolves them: global mode reads the "any" config; stage mode reads per-stage.
     if (singleStage ? stage !== "any" : stage === "any") return;
     if (!stages[stage]) return;
-    if (!stages[stage][p.document_type]) stages[stage][p.document_type] = new Set();
-    stages[stage][p.document_type].add(p.action);
+    // A null document_type is the global fallback row.
+    const dtKey = p.document_type ?? GLOBAL_DT_KEY;
+    if (!stages[stage][dtKey]) stages[stage][dtKey] = new Set();
+    stages[stage][dtKey].add(p.action);
   });
 
   return stages;
+}
+
+/** Whether the group currently has any global-fallback (null document_type) rules. */
+function groupUsesGlobalFallback(group: Group): boolean {
+  return group.permissions.some((p) => p.action !== "admin" && !p.document_type);
 }
 
 // ── Duplicate Group Modal ─────────────────────────────────────────────────────
@@ -184,16 +195,18 @@ function PermissionMatrix({
   group: Group;
   docTypes: DocType[];
   singleStage: boolean;
-  onSave: (perms: { document_type_id: string; stage: string; action: string }[]) => void;
+  onSave: (perms: { document_type_id: string | null; stage: string; action: string }[]) => void;
   isSaving: boolean;
 }) {
   const stageList = singleStage ? GLOBAL_STAGE : PERMISSION_STAGES;
   const [activeStage, setActiveStage] = useState<PermissionStage>(stageList[0].value);
   const [matrices, setMatrices] = useState(() => buildStageMatrices(group, docTypes, singleStage));
+  const [useGlobal, setUseGlobal] = useState(() => groupUsesGlobalFallback(group));
 
   useEffect(() => {
     setActiveStage(stageList[0].value);
     setMatrices(buildStageMatrices(group, docTypes, singleStage));
+    setUseGlobal(groupUsesGlobalFallback(group));
   }, [group.id, group.permissions, docTypes, singleStage]);
 
   const matrix = matrices[activeStage] ?? emptyMatrix(docTypes);
@@ -220,13 +233,17 @@ function PermissionMatrix({
   };
 
   const handleSave = () => {
-    const perms: { document_type_id: string; stage: string; action: string }[] = [];
+    const perms: { document_type_id: string | null; stage: string; action: string }[] = [];
     stageList.forEach(({ value: stage }) => {
       const stageMatrix = matrices[stage] ?? emptyMatrix(docTypes);
       Object.entries(stageMatrix).forEach(([key, actions]) => {
+        const isGlobalRow = key === GLOBAL_DT_KEY;
+        // Mutually exclusive: in global-fallback mode save only the fallback row;
+        // otherwise save only the per-document-type rows.
+        if (useGlobal !== isGlobalRow) return;
         actions.forEach((action) => {
           perms.push({
-            document_type_id: key,
+            document_type_id: isGlobalRow ? null : key,
             stage,
             action,
           });
@@ -240,6 +257,30 @@ function PermissionMatrix({
     ...docTypes.map((dt) => ({ key: dt.id, label: dt.name, sublabel: `${dt.code}-XXXXX` })),
   ];
 
+  // Renders one action checkbox cell, inactive (greyed, non-interactive) when
+  // the row's mode isn't the one in use.
+  const renderCheck = (rowKey: string, action: string, disabled: boolean) => {
+    const checked = matrix[rowKey]?.has(action) ?? false;
+    return (
+      <td key={action} className="px-4 py-3.5 text-center">
+        <button
+          type="button"
+          disabled={disabled}
+          onClick={() => toggle(rowKey, action)}
+          className={clsx(
+            "w-6 h-6 rounded-md border-2 flex items-center justify-center mx-auto transition-all",
+            checked
+              ? "bg-[#287EAD] border-[#287EAD]"
+              : "border-border hover:border-[#287EAD]/60",
+            disabled && "opacity-40 cursor-not-allowed hover:border-border",
+          )}
+        >
+          {checked && <Check className="w-4 h-4 text-white" strokeWidth={3} />}
+        </button>
+      </td>
+    );
+  };
+
   return (
     <div className="space-y-6">
       <div className="flex items-center gap-3 text-sm text-foreground bg-[#287EAD]/10 border border-[#287EAD]/30 rounded-xl p-4">
@@ -250,6 +291,23 @@ function PermissionMatrix({
             : "Configure explicit permissions per document type and lifecycle stage. Rules at one stage apply only to that stage."}
         </span>
       </div>
+
+      {/* Fallback (all document types) toggle */}
+      <label className="flex items-start gap-3 rounded-xl border border-border bg-card p-4 cursor-pointer">
+        <input
+          type="checkbox"
+          checked={useGlobal}
+          onChange={(e) => setUseGlobal(e.target.checked)}
+          className="mt-0.5 h-4 w-4 accent-[#287EAD]"
+        />
+        <div>
+          <p className="text-sm font-semibold text-foreground">Use one configuration for all document types</p>
+          <p className="text-xs text-muted-foreground mt-0.5">
+            Set access once and apply it to every document type. The per-document-type
+            rows below are disabled while this is on — use this <span className="font-medium">or</span> per-type rules, not both.
+          </p>
+        </div>
+      </label>
 
       {!singleStage && (
         <>
@@ -291,38 +349,51 @@ function PermissionMatrix({
             </tr>
           </thead>
           <tbody className="divide-y divide-border bg-card">
+            {/* Fallback row — applies to every document type */}
+            <tr className={clsx(
+              "border-b-2 border-[#287EAD]/30 bg-[#287EAD]/5 transition-opacity",
+              !useGlobal && "opacity-50",
+            )}>
+              <td className="px-6 py-3.5">
+                <p className="font-semibold text-sm text-[#287EAD]">All document types</p>
+                <p className="text-xs text-muted-foreground mt-0.5">Fallback for every type</p>
+              </td>
+              {ALL_ACTIONS.map((a) => renderCheck(GLOBAL_DT_KEY, a.value, !useGlobal))}
+              <td className="px-6 py-3.5 text-center">
+                <button
+                  type="button"
+                  disabled={!useGlobal}
+                  onClick={() => toggleAll(GLOBAL_DT_KEY)}
+                  className={clsx(
+                    "text-xs font-semibold text-[#287EAD] hover:text-[#287EAD]/80 hover:underline",
+                    !useGlobal && "opacity-40 cursor-not-allowed no-underline hover:no-underline",
+                  )}
+                >
+                  {(matrix[GLOBAL_DT_KEY]?.size ?? 0) === ALL_ACTIONS.length ? "Clear" : "Select all"}
+                </button>
+              </td>
+            </tr>
             {rows.map(({ key, label, sublabel }) => (
-              <tr key={key} className="hover:bg-muted/40 transition-colors">
+              <tr key={key} className={clsx(
+                "hover:bg-muted/40 transition-colors",
+                useGlobal && "opacity-50",
+              )}>
                 <td className="px-6 py-3.5">
                   <p className="font-medium text-sm text-foreground">
                     {label}
                   </p>
                   <p className="text-xs text-muted-foreground mt-0.5">{sublabel}</p>
                 </td>
-                {ALL_ACTIONS.map((a) => {
-                  const checked = matrix[key]?.has(a.value) ?? false;
-                  return (
-                    <td key={a.value} className="px-4 py-3.5 text-center">
-                      <button
-                        type="button"
-                        onClick={() => toggle(key, a.value)}
-                        className={clsx(
-                          "w-6 h-6 rounded-md border-2 flex items-center justify-center mx-auto transition-all",
-                          checked
-                            ? "bg-[#287EAD] border-[#287EAD]"
-                            : "border-border hover:border-[#287EAD]/60"
-                        )}
-                      >
-                        {checked && <Check className="w-4 h-4 text-white" strokeWidth={3} />}
-                      </button>
-                    </td>
-                  );
-                })}
+                {ALL_ACTIONS.map((a) => renderCheck(key, a.value, useGlobal))}
                 <td className="px-6 py-3.5 text-center">
                   <button
                     type="button"
+                    disabled={useGlobal}
                     onClick={() => toggleAll(key)}
-                    className="text-xs font-semibold text-[#287EAD] hover:text-[#287EAD]/80 hover:underline"
+                    className={clsx(
+                      "text-xs font-semibold text-[#287EAD] hover:text-[#287EAD]/80 hover:underline",
+                      useGlobal && "opacity-40 cursor-not-allowed no-underline hover:no-underline",
+                    )}
                   >
                     {(matrix[key]?.size ?? 0) === ALL_ACTIONS.length ? "Clear" : "Select all"}
                   </button>
@@ -389,13 +460,25 @@ function GroupDetail({
   });
 
   const setPermsMutation = useMutation({
-    mutationFn: (perms: { document_type_id: string; stage: string; action: string }[]) =>
+    mutationFn: (perms: { document_type_id: string | null; stage: string; action: string }[]) =>
       groupsAPI.setPermissions(group.id, perms),
     onSuccess: () => {
       toast.success("Permissions saved successfully");
       qc.invalidateQueries({ queryKey: ["groups"] });
     },
     onError: () => toast.error("Failed to save permissions"),
+  });
+
+  const setSeesAllMutation = useMutation({
+    mutationFn: (value: boolean) => groupsAPI.update(group.id, { sees_all_documents: value }),
+    onSuccess: (_d, value) => {
+      toast.success(value
+        ? "This group can now see all documents."
+        : "Document visibility for this group is back to involvement-only.");
+      qc.invalidateQueries({ queryKey: ["groups"] });
+      qc.invalidateQueries({ queryKey: ["group", group.id] });
+    },
+    onError: () => toast.error("Failed to update document visibility"),
   });
 
   const deleteMutation = useMutation({
@@ -516,6 +599,25 @@ function GroupDetail({
         <div className="flex-1 overflow-y-auto p-8 bg-background">
           {tab === "permissions" && (
             <div className="space-y-6">
+              {/* Sees-all-documents (auditor) toggle */}
+              <label className="flex items-start gap-3 rounded-xl border border-border bg-card p-4 cursor-pointer">
+                <input
+                  type="checkbox"
+                  checked={Boolean(groupDetail?.sees_all_documents ?? group.sees_all_documents)}
+                  disabled={setSeesAllMutation.isPending}
+                  onChange={(e) => setSeesAllMutation.mutate(e.target.checked)}
+                  className="mt-0.5 h-4 w-4 accent-[#287EAD]"
+                />
+                <div>
+                  <p className="text-sm font-semibold text-foreground">This group can see all documents</p>
+                  <p className="text-xs text-muted-foreground mt-0.5">
+                    Members get full visibility of every document (e.g. auditors), bypassing the
+                    involvement rule. What they can <span className="font-medium">do</span> with each
+                    document is still governed by the permissions below.
+                  </p>
+                </div>
+              </label>
+
               <PermissionMatrix
                 group={group}
                 docTypes={docTypes}

@@ -108,38 +108,24 @@ class HasDocumentPermission(permissions.BasePermission):
         if required_action is None:
             return True
 
-        # Owners get VIEW-level reads without explicit group membership.
-        if required_action == GroupAction.VIEW.value and (
+        # Involvement gate: a non-admin may only act on a document they're
+        # involved with (own / assigned a workflow task / shared with). Group
+        # permissions then decide *what* they can do — they do NOT grant blanket
+        # access to every document of a type.
+        from apps.documents.file_streaming import user_is_involved_with_document
+        if not user_is_involved_with_document(request.user, obj):
+            return False
+
+        is_owner = (
             getattr(obj, "uploaded_by_id", None) == request.user.id
             or getattr(obj, "owned_by_id", None) == request.user.id
-        ):
-            return True
+        )
 
-        # Owners may also submit their own documents (e.g. after a return)
-        if required_action == GroupAction.SUBMIT.value and (
-            getattr(obj, "uploaded_by_id", None) == request.user.id
-            or getattr(obj, "owned_by_id", None) == request.user.id
-        ):
-            return True
-
+        # Involved users can always read; owners can also submit (e.g. after a return).
         if required_action == GroupAction.VIEW.value:
-            from apps.workflows.models import WorkflowTask
-            from apps.documents.models import DocumentShare
-
-            if WorkflowTask.objects.filter(
-                assigned_to=request.user,
-                workflow_instance__document_id=getattr(obj, "id", None),
-                status__in=["pending", "in_progress", "held", "returned"],
-            ).exists():
-                return True
-            if DocumentShare.objects.filter(
-                document=obj,
-                recipient=request.user,
-                revoked_at__isnull=True,
-            ).filter(
-                Q(expires_at__isnull=True) | Q(expires_at__gt=timezone.now())
-            ).exists():
-                return True
+            return True
+        if required_action == GroupAction.SUBMIT.value and is_owner:
+            return True
 
         user_perms = request.user.get_all_permissions_for_doctype(
             document_type_id,
