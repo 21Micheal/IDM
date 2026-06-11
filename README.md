@@ -95,3 +95,6 @@ docker compose restart backend celery_worker
 | POST   | /api/v1/workflows/tasks/{id}/approve/ | Approve a workflow task       |
 | POST   | /api/v1/workflows/tasks/{id}/reject/  | Reject a workflow task        |
 | GET    | /api/v1/audit/                        | System-wide audit trail       |
+
+Notes:
+- The `status` query parameter on `GET /api/v1/documents/` accepts comma-separated values. A generic `status=pending` (or any value starting with `pending`) will match documents whose status contains `pending` (e.g. `pending_cfo_approval`) and will also include documents that have active workflow tasks (task statuses such as `pending`, `in_progress`, `held`, `returned`).

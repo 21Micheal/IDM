@@ -13,9 +13,9 @@ import { Suspense, lazy, useEffect, useRef, useState } from "react";
 import { Outlet, NavLink, useNavigate, useLocation } from "react-router-dom";
 import {
   LayoutDashboard, FileText, Upload, Search,
-  Workflow, ShieldCheck, Settings, LogOut,
+  Workflow, Settings, LogOut,
   Bell, Users, Building2, UserRoundCog, Shield,
-  ChevronDown, ChevronRight, Archive, ScanLine, Loader2, UserCheck, Monitor, Lock, History,
+  ChevronDown, ChevronRight, Archive, ScanLine, Loader2, UserCheck, Monitor, Lock, History, Trash2,
   BellRing, CircleUserRound, ClipboardCheck, Inbox, ArrowRight, FileSignature, LayoutTemplate,
 } from "lucide-react";
 import { useAuthStore } from "../../store/authStore";
@@ -79,19 +79,16 @@ const mainNav: NavEntry[] = [
       { to: "/documents?status=archived", icon: Archive,  label: "Archived" },
       { to: "/documents/upload",          icon: Upload,   label: "Upload" },
       { to: "/documents/scan",            icon: ScanLine, label: "Scan" },
+      { to: "/documents/trash",           icon: Trash2,   label: "Trash" },
       { to: "/search",                    icon: Search,   label: "Search" },
     ],
   } as NavGroup,
   { to: "/personal-documents", icon: Lock, label: "Personal documents" } as NavLeaf,
   {
+    to: "/workflow",
     icon: Workflow,
-    label: "Workflow",
-    prefix: "/workflow",
-    children: [
-      { to: "/workflow",         icon: Workflow, label: "My tasks" },
-      { to: "/workflow/builder", icon: Settings,  label: "Builder", allowedRoles: ["admin"] },
-    ],
-  } as NavGroup,
+    label: "My tasks",
+  } as NavLeaf,
   { to: "/audit", icon: History, label: "Audit trail" } as NavLeaf,
   {
     icon: UserRoundCog,
@@ -113,6 +110,7 @@ const adminNav: NavLeaf[] = [
   { to: "/admin/departments", icon: Building2, label: "Departments", allowedRoles: ["admin"] },
   { to: "/admin/groups",      icon: Shield,    label: "Groups",      allowedRoles: ["admin"] },
   { to: "/admin/settings",    icon: Settings,  label: "Settings",    allowedRoles: ["admin"] },
+  { to: "/workflow/builder", icon: Settings, label: "Workflow Builder", allowedRoles: ["admin"] },
 ];
 
 // ── SidebarGroup ──────────────────────────────────────────────────────────────
@@ -184,7 +182,12 @@ function SidebarGroup({
                 <Icon className={clsx("h-3.5 w-3.5 flex-shrink-0", isChildActive ? "text-[#287EAD]" : "text-[#7C8790] group-hover:text-[#287EAD]")} />
                 <span className="flex-1">{label}</span>
                 {badgeValue ? (
-                  <span className="ml-auto inline-flex min-w-[1.25rem] items-center justify-center bg-[#287EAD] px-1.5 py-0.5 text-[10px] font-bold text-white">
+                  <span
+                    className={clsx(
+                      "ml-auto inline-flex min-w-[1.25rem] items-center justify-center px-1.5 py-0.5 text-[10px] font-bold text-white",
+                      to === "/workflow" ? "bg-red-700" : "bg-[#287EAD]"
+                    )}
+                  >
                     {badgeValue}
                   </span>
                 ) : null}
@@ -201,7 +204,8 @@ function SidebarGroup({
 
 function ProfileMenu() {
   const { user, logout } = useAuthStore();
-  const navigate = useNavigate();
+  const _navigate = useNavigate();
+  void _navigate;
   const [open, setOpen] = useState(false);
 
   useEffect(() => {
@@ -237,14 +241,14 @@ function ProfileMenu() {
               <p className="text-[11px] text-[#5E6870]">{user?.email}</p>
             </div>
             <button
-              onClick={() => { setOpen(false); navigate("/profile"); }}
+              onClick={() => { setOpen(false); _navigate("/profile"); }}
               className="flex w-full items-center gap-2 px-4 py-2 text-sm text-[#1F2933] transition-colors hover:bg-[#F5F7F8]"
             >
               <CircleUserRound className="w-4 h-4 text-[#5E6870]" />
               My profile
             </button>
             <button
-              onClick={() => { logout(); navigate("/login"); }}
+              onClick={() => { logout(); _navigate("/login"); }}
               className="flex w-full items-center gap-2 px-4 py-2 text-sm text-red-700 transition-colors hover:bg-red-50"
             >
               <LogOut className="w-4 h-4" />
@@ -264,7 +268,8 @@ function NotificationsTray({
   notifications?: { id: string; type: string; message: string; link?: string; is_read: boolean; created_at: string }[];
   tasks: unknown[];
 }) {
-  const navigate = useNavigate();
+  const _navigate = useNavigate();
+  void _navigate;
   const queryClient = useQueryClient();
   const [open, setOpen] = useState(false);
   const markReadMutation = useMutation({
@@ -337,12 +342,12 @@ function NotificationsTray({
     if (!notification.is_read) {
       markReadMutation.mutate(notification.id);
     }
-    navigate(notification.link || "/notifications");
+    _navigate(notification.link || "/notifications");
   };
 
   const openTasks = () => {
     setOpen(false);
-    navigate("/workflow");
+    _navigate("/workflow");
   };
 
   return (
@@ -373,7 +378,7 @@ function NotificationsTray({
             <div className="grid grid-cols-2 border-b border-[#C8CDD2] bg-[#F5F7F8] text-sm">
               <button
                 type="button"
-                onClick={() => { setOpen(false); navigate("/notifications"); }}
+                onClick={() => { setOpen(false); _navigate("/notifications"); }}
                 className="flex items-center justify-between border-r border-[#C8CDD2] px-4 py-3 text-left font-semibold text-[#1F2933] hover:bg-[#EEF6FB]"
               >
                 <span className="inline-flex items-center gap-2">
@@ -399,7 +404,7 @@ function NotificationsTray({
               <section className="p-3">
                 <div className="mb-2 flex items-center justify-between">
                   <p className="text-xs font-bold uppercase tracking-wider text-[#5E6870]">Notifications</p>
-                  <button onClick={() => { setOpen(false); navigate("/notifications"); }} className="text-xs font-bold text-[#287EAD] hover:text-[#206D99]">
+                  <button onClick={() => { setOpen(false); _navigate("/notifications"); }} className="text-xs font-bold text-[#287EAD] hover:text-[#206D99]">
                     View all
                   </button>
                 </div>
@@ -523,13 +528,15 @@ function SidebarProfile() {
 
 export default function Layout() {
   const { user } = useAuthStore();
-  const navigate = useNavigate();
+  const _navigate = useNavigate();
+  void _navigate;
   const location = useLocation();
   const mainRef = useRef<HTMLElement | null>(null);
   const hasAdminAccess = Boolean(user?.has_admin_access);
   const [idleReady, setIdleReady] = useState(false);
   // ── NEW: folder panel toggle ──────────────────────────────────────────────
-  const [foldersExpanded, setFoldersExpanded] = useState(true);
+  const [_foldersExpanded, _setFoldersExpanded] = useState(true);
+  void _foldersExpanded; void _setFoldersExpanded;
 
   useEffect(() => {
     let fallbackTimer: ReturnType<typeof setTimeout> | null = null;
@@ -615,7 +622,7 @@ export default function Layout() {
               }
               const { to, icon: Icon, label, exact, allowedRoles } = entry;
               if (allowedRoles && !hasAdminAccess) return null;
-              const badgeValue = to === "/notifications" ? unread : undefined;
+              const badgeValue = to === "/notifications" ? unread : to === "/workflow" ? pendingTasksCount : undefined;
               return (
                 <NavLink
                   key={to}
@@ -636,11 +643,16 @@ export default function Layout() {
                     <>
                       <Icon className={clsx("h-4 w-4 flex-shrink-0", isActive ? "text-[#287EAD]" : "text-[#6E767D] group-hover:text-[#287EAD]")} />
                       <span className="flex-1">{label}</span>
-                      {badgeValue ? (
-                        <span className="inline-flex min-w-[1.25rem] items-center justify-center bg-[#287EAD] px-1.5 py-0.5 text-[10px] font-bold text-white">
-                          {badgeValue}
-                        </span>
-                      ) : null}
+                          {badgeValue ? (
+                            <span
+                              className={clsx(
+                                "inline-flex min-w-[1.25rem] items-center justify-center px-1.5 py-0.5 text-[10px] font-bold text-white",
+                                to === "/workflow" ? "bg-red-700" : "bg-[#287EAD]"
+                              )}
+                            >
+                              {badgeValue}
+                            </span>
+                          ) : null}
                     </>
                   )}
                 </NavLink>

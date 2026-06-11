@@ -282,15 +282,24 @@ class UserGroupSerializer(serializers.ModelSerializer):
     permissions  = GroupPermissionSerializer(many=True, read_only=True)
     member_count = serializers.SerializerMethodField()
     created_by   = UserSummarySerializer(read_only=True)
+    head         = UserSummarySerializer(read_only=True)
+    head_id      = serializers.PrimaryKeyRelatedField(
+        queryset=User.objects.filter(is_active=True),
+        source="head",
+        write_only=True,
+        required=False,
+        allow_null=True,
+    )
     has_admin_access = serializers.SerializerMethodField()
 
     class Meta:
         model  = UserGroup
         fields = [
-            "id", "name", "description", "is_active",
+            "id", "name", "description", "is_active", "sees_all_documents",
             "permissions", "has_admin_access", "member_count", "created_by", "created_at",
+            "head", "head_id",
         ]
-        read_only_fields = ["id", "created_by", "created_at"]
+        read_only_fields = ["id", "created_by", "created_at", "head"]
 
     def get_member_count(self, obj):
         return obj.memberships.count()

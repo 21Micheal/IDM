@@ -3,6 +3,69 @@ from pathlib import Path
 import tempfile
 import os
 import re
+import logging
+from decimal import Decimal, InvalidOperation
+
+from apps.search.utils import SEARCH_INDEX_EXCEPTIONS
+
+logger = logging.getLogger(__name__)
+
+
+STANDARD_DOCUMENT_FIELDS = {"title", "supplier", "amount", "currency", "document_date", "due_date"}
+
+
+def _stringish(value):
+    if value is None:
+        return ""
+    if isinstance(value, (str, int, float, Decimal)):
+        return str(value)
+    return ""
+
+
+def _form_values_for_metadata(values: dict) -> dict:
+    metadata = {}
+    for key, value in (values or {}).items():
+        if key in STANDARD_DOCUMENT_FIELDS:
+            continue
+        if isinstance(value, dict) and value.get("storage_path"):
+            continue
+        metadata[key] = value
+    return metadata
+
+
+def _document_field_kwargs(values: dict) -> dict:
+    fields = {}
+    for key in ("supplier", "currency", "document_date", "due_date"):
+        value = _stringish((values or {}).get(key)).strip()
+        if value:
+            fields[key] = value
+    amount = _stringish((values or {}).get("amount")).replace(",", "").strip()
+    if amount:
+        try:
+            fields["amount"] = Decimal(amount)
+        except (InvalidOperation, ValueError):
+            pass
+    return fields
+
+
+def _display_value(value):
+    if isinstance(value, dict) and value.get("storage_path"):
+        return value.get("name") or "Attached file"
+    if isinstance(value, (list, dict)):
+        return str(value)
+    return value
+
+
+def _decode_data_url_image(value):
+    """Decode a ``data:image/...;base64,...`` URL (e.g. a signature) to raw
+    bytes, or return None. Prevents dumping a giant base64 string into the doc."""
+    if not isinstance(value, str) or not value.startswith("data:image"):
+        return None
+    try:
+        import base64
+        return base64.b64decode(value.split(",", 1)[1])
+    except Exception:
+        return None
 
 
 # ─── Helpers ────────────────────────────────────────────────────────────────
@@ -98,7 +161,7 @@ def generate_built_pdf(template, values) -> bytes:
             ftype = field.get("type", "text")
             key = field.get("key", "")
             label = field.get("label", "")
-            value = values.get(key, "")
+            value = _display_value(values.get(key, ""))
 
             if ftype == "divider":
                 story.append(HRFlowable(width="100%", thickness=0.5, color=colors.HexColor("#e2e8f0")))
@@ -142,6 +205,24 @@ def generate_built_pdf(template, values) -> bytes:
                     story.append(Spacer(1, 6))
                 continue
 
+            if ftype == "signature":
+                story.append(Paragraph(label, label_style))
+                raw = _decode_data_url_image(value)
+                if raw:
+                    from reportlab.platypus import Image as RLImage
+                    try:
+                        img = RLImage(BytesIO(raw))
+                        iw, ih = (img.imageWidth or 1), (img.imageHeight or 1)
+                        w = min(60 * mm, doc.width)
+                        img.drawWidth, img.drawHeight = w, w * ih / iw
+                        story.append(img)
+                    except Exception:
+                        story.append(Paragraph("[signature]", value_style))
+                else:
+                    story.append(Paragraph("—", value_style))
+                story.append(Spacer(1, 6))
+                continue
+
             # Default field
             story.append(Paragraph(label, label_style))
             story.append(Paragraph(str(value) if value else "—", value_style))
@@ -182,7 +263,7 @@ def generate_built_docx(template, values) -> bytes:
             ftype = field.get("type", "text")
             key = field.get("key", "")
             label = field.get("label", "")
-            value = values.get(key, "")
+            value = _display_value(values.get(key, ""))
 
             if ftype == "divider":
                 p = doc.add_paragraph()
@@ -225,6 +306,20 @@ def generate_built_docx(template, values) -> bytes:
                         for i, col in enumerate(cols):
                             row_cells[i].text = str(row_data.get(col["key"], ""))
                     doc.add_paragraph()
+                continue
+
+            if ftype == "signature":
+                p = doc.add_paragraph()
+                run_label = p.add_run(f"{label}: ")
+                run_label.bold = True
+                run_label.font.color.rgb = RGBColor(0x47, 0x55, 0x69)
+                raw = _decode_data_url_image(value)
+                if raw:
+                    try:
+                        from docx.shared import Inches
+                        doc.add_picture(BytesIO(raw), width=Inches(2))
+                    except Exception:
+                        doc.add_paragraph("[signature]")
                 continue
 
             p = doc.add_paragraph()
@@ -336,18 +431,31 @@ def generate_document_from_template_sync(template, values, fmt, title, user, typ
     """Generate a document from a template synchronously."""
     from apps.documents.models import Document, DocumentStatus
     from apps.documents.serializers import _generate_unique_reference
+    from apps.documents.form_attachments import descriptors_to_names
+    from apps.documents.form_formulas import apply_formulas
     from django.core.files.base import ContentFile
     import hashlib
 
     is_xlsx = template.file_name.endswith((".xlsx", ".xls")) if template.file_name else False
 
+    # Reserve the reference up front so a `reference_number` formula can use it.
+    reference_number = _generate_unique_reference(template.document_type)
+
     if template.type == "built":
+        # Freeze auto-fill formula values authoritatively (creator, submit time,
+        # assigned reference) into the stored form values.
+        values = apply_formulas(
+            values, template.sections, user=user, reference_number=reference_number
+        )
+        # The stored form.values keeps structured attachment descriptors and
+        # reference {id,label} objects; the rendered file shows display strings.
+        render_values = descriptors_to_names(values)
         if fmt == "pdf":
-            content = generate_built_pdf(template, values)
+            content = generate_built_pdf(template, render_values)
             filename = f"{title}.pdf"
             content_type = "application/pdf"
         else:
-            content = generate_built_docx(template, values)
+            content = generate_built_docx(template, render_values)
             filename = f"{title}.docx"
             content_type = "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
 
@@ -374,9 +482,25 @@ def generate_document_from_template_sync(template, values, fmt, title, user, typ
                 content_type = "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
 
     checksum = hashlib.sha256(content).hexdigest()
-    doc = Document.objects.create(
+
+    doc_metadata = {
+        "template_id": str(template.id),
+        "template_name": template.name,
+        **_form_values_for_metadata(values),
+    }
+    if template.type == "built":
+        # Built templates are interactive forms: store the schema snapshot + the
+        # entered values so the document IS the filled form and can be re-rendered
+        # / edited in-app (no external editor). The generated file is just a view.
+        doc_metadata["form"] = {
+            "template_id": str(template.id),
+            "sections": template.sections,
+            "values": values,
+        }
+
+    create_kwargs = dict(
         title=title,
-        reference_number=_generate_unique_reference(template.document_type),
+        reference_number=reference_number,
         file=ContentFile(content, name=filename),
         file_name=filename,
         file_size=len(content),
@@ -387,8 +511,25 @@ def generate_document_from_template_sync(template, values, fmt, title, user, typ
         document_type_id=type_id,
         is_self_upload=False,
         status=DocumentStatus.DRAFT,
-        metadata={"template_id": str(template.id), "template_name": template.name},
+        metadata=doc_metadata,
+        **_document_field_kwargs(values),
+        # A template-generated document is the starting point, not a user version.
+        # It stays unversioned (v0 → shows as "—") until the user first edits it,
+        # at which point the first save becomes version 1.
+        current_version=0,
     )
+    try:
+        doc = Document.objects.create(**create_kwargs)
+    except SEARCH_INDEX_EXCEPTIONS:
+        # Elasticsearch is read-only (e.g. disk flood-stage). The row is already
+        # committed; fetch it so document creation still succeeds. Indexing will
+        # catch up once ES recovers.
+        logger.warning(
+            "Template document %s saved but realtime indexing failed (ES read-only).",
+            reference_number,
+        )
+        doc = Document.objects.get(reference_number=reference_number)
+
     if doc.is_office_doc():
         try:
             from apps.documents.tasks import generate_document_preview

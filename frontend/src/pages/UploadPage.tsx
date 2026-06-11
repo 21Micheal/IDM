@@ -23,6 +23,9 @@ import { QUERY_FIVE_MIN_STALE } from "@/lib/reactQueryDefaults";
 import { deriveDocumentTypeConfig } from "@/lib/documentTypeConfig";
 import { applyOcrToFields, sanitizeOcrFields, type OcrFields } from "@/lib/ocrFieldMatcher";
 import BulkScanPage from "@/pages/BulkScanPage";
+import TemplatePreview from "@/components/templates/TemplatePreview";
+import TemplateForm from "@/components/templates/TemplateForm";
+import BuiltTemplateFormModal from "@/components/templates/BuiltTemplateFormModal";
 
 // ── Types ─────────────────────────────────────────────────────────────────────
 
@@ -158,6 +161,18 @@ function metadataWithoutDocumentFields(metadata: unknown): Record<string, unknow
     },
     {},
   );
+}
+
+function templateBaseValuesFromForm(values: Record<string, unknown>): Record<string, unknown> {
+  const documentValues = documentValuesFromForm(values);
+  const metadata = metadataWithoutDocumentFields(values.metadata);
+  const baseValues: Record<string, unknown> = { ...metadata };
+
+  for (const [key, value] of Object.entries(documentValues)) {
+    if (value) baseValues[key] = value;
+  }
+
+  return baseValues;
 }
 
 async function calculateFileSha256(file: File): Promise<string> {
@@ -695,6 +710,63 @@ function InforFieldRow({
   );
 }
 
+function TemplateFillSection({ template, register, values, onChange }: {
+  template: DocumentTemplateOption;
+  register: UseFormRegister<UploadFormValues>;
+  values: Record<string, unknown>;
+  onChange: (key: string, val: unknown) => void;
+}) {
+  const placeholders = template.placeholders ?? [];
+  const humanize = (key: string) =>
+    key.replace(/_/g, " ").replace(/\b\w/g, (c) => c.toUpperCase());
+
+  return (
+    <div className="space-y-6">
+      <InforFieldRow label="Document name">
+        <input {...register("title")} className="input" placeholder={template.name} />
+      </InforFieldRow>
+
+      {template.type === "uploaded" ? (
+        placeholders.length > 0 ? (
+          <div>
+            <p className="mb-3 text-xs font-semibold uppercase tracking-wider text-muted-foreground">
+              Fill template fields
+            </p>
+            <div className="grid gap-4 sm:grid-cols-2">
+              {placeholders.map((key) => (
+                <div key={key}>
+                  <label className="mb-1.5 block text-xs font-semibold text-foreground">
+                    {humanize(key)}
+                    <span className="ml-2 font-mono text-[10px] font-normal text-muted-foreground">{`{{${key}}}`}</span>
+                  </label>
+                  <input
+                    value={String(values[key] ?? "")}
+                    onChange={(e) => onChange(key, e.target.value)}
+                    className="input"
+                    placeholder={`Enter ${humanize(key).toLowerCase()}`}
+                  />
+                </div>
+              ))}
+            </div>
+          </div>
+        ) : (
+          <p className="text-sm text-muted-foreground">
+            This template has no placeholders — a copy of the file is created for you to edit after capture.
+          </p>
+        )
+      ) : (
+        // Built templates are interactive forms — filled in-app, never in an external editor.
+        <div>
+          <p className="mb-3 text-xs font-semibold uppercase tracking-wider text-muted-foreground">
+            Fill in the form
+          </p>
+          <TemplateForm sections={template.sections ?? []} values={values} onChange={onChange} />
+        </div>
+      )}
+    </div>
+  );
+}
+
 function SelectedFileDropHint({
   file,
   isDragActive,
@@ -892,6 +964,15 @@ export default function UploadPage({ scanOnly = false }: UploadPageProps) {
     ...QUERY_FIVE_MIN_STALE,
   });
   const selectedTemplate = typeTemplates.find((template) => template.id === selectedTemplateId) ?? null;
+
+  // Values for the selected template: Office {{placeholders}} (strings) or a built
+  // form's field values (strings, booleans, table-row arrays). Filled in-app.
+  const [templateValues, setTemplateValues] = useState<Record<string, unknown>>({});
+  useEffect(() => { setTemplateValues({}); }, [selectedTemplateId]);
+  const [showBuiltForm, setShowBuiltForm] = useState(false);
+  useEffect(() => { setShowBuiltForm(false); }, [selectedTemplateId]);
+
+  const isBuiltTemplate = selectedTemplate?.type === "built";
 
   const isOcrFlow      = isScanned && !isSelfUpload;
   const showManualForm = !isOcrFlow && Boolean(selectedTypeId) && scanStage === "idle";
@@ -1151,18 +1232,20 @@ export default function UploadPage({ scanOnly = false }: UploadPageProps) {
       title: string;
       documentTypeId: string;
       values: Record<string, unknown>;
+      draftFromTemplate: boolean;
+      outputFormat: "pdf" | "docx";
     }) =>
       templatesAPI.fillTemplate({
         template_id: payload.templateId,
         values: payload.values,
-        output_format: "docx",
+        output_format: payload.outputFormat,
         title: payload.title,
         document_type_id: payload.documentTypeId,
-        draft_from_template: true,
+        draft_from_template: payload.draftFromTemplate,
       }),
     onSuccess: ({ data }) => {
       queryClient.invalidateQueries({ queryKey: ["documents"] });
-      toast.success("Draft document created from template.");
+      toast.success("Document created from template.");
       navigate(`/documents/${data.document_id}`);
     },
     onError: (err: any) => {
@@ -1181,17 +1264,29 @@ export default function UploadPage({ scanOnly = false }: UploadPageProps) {
         toast.error("Please select a template");
         return;
       }
+      const isUploaded = selectedTemplate.type === "uploaded";
+
+      // Built templates are filled via the full-screen modal — guard against
+      // accidentally reaching this path without going through it.
+      if (!isUploaded) {
+        setShowBuiltForm(true);
+        return;
+      }
+
       const documentValues = documentValuesFromForm(values);
-      const adminMetadata = values.metadata ? metadataWithoutDocumentFields(values.metadata) : {};
       const title = documentValues.title || selectedTemplate.name;
+      const creationValues = {
+        ...templateBaseValuesFromForm(values),
+        ...templateValues,
+      };
+
       createFromTemplateMutation.mutate({
         templateId: selectedTemplate.id,
         title,
         documentTypeId: selectedTypeId,
-        values: {
-          ...adminMetadata,
-          ...documentValues,
-        },
+        values: creationValues,
+        draftFromTemplate: false,
+        outputFormat: "docx",
       });
       return;
     }
@@ -1343,6 +1438,7 @@ export default function UploadPage({ scanOnly = false }: UploadPageProps) {
   }
 
   return (
+    <>
     <div className="-m-6 min-h-[calc(100vh-3.5rem)] bg-[#EDEDED] text-[#1F2933]">
       <div className="flex h-[69px] items-center justify-between gap-4 bg-[#287EAD] px-5 pr-8 text-white">
         <div className="min-w-0">
@@ -1683,26 +1779,61 @@ export default function UploadPage({ scanOnly = false }: UploadPageProps) {
               />
             </div>
           )}
+          {/* Centre column — template preview (built template selected) */}
           {useTemplate && !droppedFile && (
             <div className="order-1 xl:col-span-5">
-              <div className={clsx("border border-[#C8CDD2] bg-[#F7F8F9]", PREVIEW_MIN_HEIGHT)}>
-                <div className="border-b border-[#C8CDD2] bg-white px-4 py-3">
-                  <p className="text-sm font-semibold text-[#1F2933]">Template source</p>
-                  <p className="mt-0.5 text-xs text-[#5E6870]">{selectedTemplate?.name || "Select a template"}</p>
-                </div>
-                <div className="flex h-full min-h-[30rem] flex-col items-center justify-center px-8 text-center">
-                  <div className="mb-4 flex h-16 w-16 items-center justify-center border border-[#A7CDE3] bg-[#EEF6FB] text-[#287EAD]">
-                    <LayoutTemplate className="h-8 w-8" />
+              <div className={clsx("flex flex-col border border-[#C8CDD2] bg-white", PREVIEW_MIN_HEIGHT)}>
+                {/* Header */}
+                <div className="flex items-center justify-between border-b border-[#C8CDD2] bg-[#F3F5F6] px-4 py-3">
+                  <div className="min-w-0">
+                    <p className="text-xs font-semibold uppercase tracking-wider text-[#5E6870]">Template source</p>
+                    <p className="mt-0.5 text-sm font-bold text-[#1F2933] truncate">
+                      {selectedTemplate?.name || "Select a template"}
+                    </p>
                   </div>
-                  <p className="text-base font-semibold text-[#1F2933]">
-                    {selectedTemplate ? "A draft document will be generated" : "Choose a template for this document type"}
-                  </p>
-                  <p className="mt-2 max-w-md text-sm text-[#5E6870]">
-                    {selectedTemplate
-                      ? "After creation, open the document and use the normal editor to complete or adjust the generated file."
-                      : "Templates are maintained by admins and scoped to the selected document type."}
-                  </p>
+                  {selectedTemplate && (
+                    <span className={clsx(
+                      "flex-shrink-0 rounded px-2 py-0.5 text-[10px] font-semibold uppercase tracking-wider border",
+                      isBuiltTemplate
+                        ? "bg-[#EEF6FB] text-[#287EAD] border-[#287EAD]/30"
+                        : "bg-amber-50 text-amber-700 border-amber-200",
+                    )}>
+                      {isBuiltTemplate ? "Builder" : "Office"}
+                    </span>
+                  )}
                 </div>
+
+                {selectedTemplate ? (
+                  <div className="flex-1 overflow-y-auto p-5">
+                    <TemplatePreview
+                      template={{
+                        name: selectedTemplate.name,
+                        type: selectedTemplate.type,
+                        description: selectedTemplate.description,
+                        file_name: selectedTemplate.file_name,
+                        placeholders: selectedTemplate.placeholders,
+                        sections: selectedTemplate.sections,
+                      }}
+                    />
+
+                    {/* Footer note */}
+                    <p className="mt-5 border-t border-[#E3E7EA] pt-3 text-xs text-[#5E6870]">
+                      {isBuiltTemplate
+                        ? "Click \"Fill & Create Document\" to open the full form and complete all fields."
+                        : "A draft Office document will be created from this template for editing."}
+                    </p>
+                  </div>
+                ) : (
+                  <div className="flex h-full min-h-[30rem] flex-col items-center justify-center px-8 text-center">
+                    <div className="mb-4 flex h-16 w-16 items-center justify-center border border-[#A7CDE3] bg-[#EEF6FB] text-[#287EAD]">
+                      <LayoutTemplate className="h-8 w-8" />
+                    </div>
+                    <p className="text-base font-semibold text-[#1F2933]">Choose a template for this document type</p>
+                    <p className="mt-2 max-w-md text-sm text-[#5E6870]">
+                      Templates are maintained by admins and scoped to the selected document type.
+                    </p>
+                  </div>
+                )}
               </div>
             </div>
           )}
@@ -1730,6 +1861,67 @@ export default function UploadPage({ scanOnly = false }: UploadPageProps) {
                     )}
                   </div>
 
+                  {/* Built template: metadata fields persist, CTA appended below */}
+                  {useTemplate && selectedTemplate ? (
+                    isBuiltTemplate ? (
+                      <>
+                        {/* Document type metadata fields — same as normal upload */}
+                        {hasMetadata && (
+                          <div className="mb-6">
+                            <div className="grid gap-2 border-b border-border/70 py-3 sm:grid-cols-[minmax(160px,0.55fr)_minmax(0,1fr)]">
+                              <span className="text-sm text-muted-foreground">Document Type</span>
+                              <span className="text-sm text-foreground">{selectedType?.name}</span>
+                            </div>
+                            <div>
+                              {[...selectedType!.metadata_fields]
+                                .sort((a, b) => a.order - b.order)
+                                .map((field) => (
+                                  <DynamicField
+                                    key={field.id}
+                                    field={field}
+                                    register={register}
+                                    control={control}
+                                    errors={errors as Record<string, unknown>}
+                                    enforceRequired={!relaxReq}
+                                    suggestionScore={undefined}
+                                    name={getUploadFieldName(field)}
+                                  />
+                                ))}
+                            </div>
+                          </div>
+                        )}
+
+                        {/* Document title + single launch button */}
+                        <div className="space-y-3 border-t border-border/60 pt-5">
+                          <div className="space-y-1.5">
+                            <label className="block text-xs font-semibold uppercase tracking-wider text-[#5E6870]">Document title</label>
+                            <input
+                              {...register("title")}
+                              className="input w-full"
+                              placeholder={selectedTemplate.name}
+                            />
+                          </div>
+                          <button
+                            type="button"
+                            onClick={() => setShowBuiltForm(true)}
+                            className="flex w-full items-center justify-center gap-2 rounded border border-[#287EAD] bg-[#287EAD] px-4 py-2.5 text-sm font-semibold text-white hover:bg-[#1E6F99] transition-colors"
+                          >
+                            <Wand2 className="h-4 w-4" />
+                            Fill &amp; Create Document
+                          </button>
+                        </div>
+                      </>
+                    ) : (
+                      // Office templates — keep the existing TemplateFillSection
+                      <TemplateFillSection
+                        template={selectedTemplate}
+                        register={register}
+                        values={templateValues}
+                        onChange={(key, val) => setTemplateValues((prev) => ({ ...prev, [key]: val }))}
+                      />
+                    )
+                  ) : (
+                  <>
                   {hasMetadata && (
                     <div className="mb-8">
                       <div className="grid gap-2 border-b border-border/70 py-3 sm:grid-cols-[minmax(160px,0.55fr)_minmax(0,1fr)]">
@@ -1865,6 +2057,8 @@ export default function UploadPage({ scanOnly = false }: UploadPageProps) {
                     </>
                     )}
                   </div>
+                  </>
+                  )}
 
                   {uploadMutation.isPending && uploadProgress > 0 && (
                     <div className="mt-6">
@@ -1894,7 +2088,9 @@ export default function UploadPage({ scanOnly = false }: UploadPageProps) {
                     ) : (
                       <>
                         {useTemplate ? <Wand2 className="w-4 h-4" /> : isSelfUpload ? <Lock className="w-4 h-4" /> : <Upload className="w-4 h-4" />}
-                        {useTemplate ? "Create Draft" : isSelfUpload ? "Save Personal Document" : "Upload Document"}
+                        {useTemplate
+                          ? "Create Document"
+                          : isSelfUpload ? "Save Personal Document" : "Upload Document"}
                         <ArrowRight className="w-4 h-4" />
                       </>
                     )}
@@ -2000,5 +2196,18 @@ export default function UploadPage({ scanOnly = false }: UploadPageProps) {
         </div>
       )}
     </div>
+
+    {/* ── Built template form modal ─────────────────────────────────────────── */}
+    {showBuiltForm && selectedTemplate && (
+      <BuiltTemplateFormModal
+        template={selectedTemplate}
+        documentTypeId={selectedTypeId}
+        documentTypeName={selectedType?.name}
+        initialTitle={getValues("title")}
+        initialValues={templateBaseValuesFromForm(getValues() as Record<string, unknown>)}
+        onClose={() => setShowBuiltForm(false)}
+      />
+    )}
+    </>
   );
 }

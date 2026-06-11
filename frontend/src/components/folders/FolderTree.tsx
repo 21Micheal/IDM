@@ -22,7 +22,7 @@ import {
   Star, Folder, FolderOpen, FolderPlus,
   ChevronRight, ChevronDown,
   MoreHorizontal, Pencil, Trash2, Plus,
-  Check, X,
+ 
 } from "lucide-react";
 import clsx from "clsx";
 import { foldersAPI } from "@/services/foldersApi";
@@ -30,15 +30,7 @@ import type { DocumentFolder } from "../../types";
 
 // ─── Constants ────────────────────────────────────────────────────────────────
 
-const ICON_MAP: Record<string, React.ElementType> = {
-  star:   Star,
-  folder: Folder,
-};
-
-const PRESET_COLORS = [
-  "#6366f1", "#f59e0b", "#10b981", "#3b82f6",
-  "#ef4444", "#8b5cf6", "#ec4899", "#14b8a6",
-];
+// NOTE: removed unused icon map and preset colors to satisfy lint
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
@@ -49,20 +41,18 @@ interface FolderNodeProps {
   onSelect: (id: string) => void;
 }
 
-interface ContextMenuState {
-  folderId: string;
-  x: number;
-  y: number;
-}
+// ContextMenuState removed (not used)
 
 // ─── Hooks ────────────────────────────────────────────────────────────────────
 
 function useFolderMutations() {
-  const qc = useQueryClient();
+  const _qc = useQueryClient();
+
+  void _qc;
 
   const invalidate = () => {
-    qc.invalidateQueries({ queryKey: ["folders", "tree"] });
-    qc.invalidateQueries({ queryKey: ["folders"] });
+    _qc.invalidateQueries({ queryKey: ["folders", "tree"] });
+    _qc.invalidateQueries({ queryKey: ["folders"] });
   };
 
   const createFolder = useMutation({
@@ -92,29 +82,7 @@ function useFolderMutations() {
 
 // ─── ColorPicker ─────────────────────────────────────────────────────────────
 
-function ColorDot({
-  color,
-  selected,
-  onClick,
-}: {
-  color: string;
-  selected: boolean;
-  onClick: () => void;
-}) {
-  return (
-    <button
-      type="button"
-      onClick={onClick}
-      className="relative w-5 h-5 rounded-full ring-offset-1 transition-transform hover:scale-110"
-      style={{ backgroundColor: color }}
-      title={color}
-    >
-      {selected && (
-        <Check className="absolute inset-0 m-auto w-3 h-3 text-white drop-shadow" />
-      )}
-    </button>
-  );
-}
+// ColorDot component removed (unused)
 
 // ─── Inline edit input ────────────────────────────────────────────────────────
 
@@ -375,7 +343,8 @@ export interface FolderTreeProps {
 
 export function FolderTree({ activeFolderId = null, onFolderSelect }: FolderTreeProps) {
   const navigate = useNavigate();
-  const qc = useQueryClient();
+  const _qc = useQueryClient();
+  void _qc;
   const [addingRoot, setAddingRoot] = useState(false);
   const { createFolder } = useFolderMutations();
 

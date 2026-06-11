@@ -2,7 +2,7 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import {
-  FileSignature, PenLine, Type as TypeIcon, Upload, Eraser, Undo2,
+  FileSignature, PenLine, Type as TypeIcon, Upload, Undo2,
   Loader2, Shield, CheckCircle2, Trash2, Download, Image as ImageIcon,
   Info, ZoomIn, RotateCcw, Sparkles, Lock, Clock, User,
 } from "lucide-react";
@@ -120,10 +120,9 @@ export default function SignaturePanel() {
     // Also run immediately in case the element is already laid out
     sizeAndRedraw();
     return () => ro.disconnect();
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [mode]);
 
-  useEffect(() => { redraw(); /* eslint-disable-next-line */ }, [strokes, showGuide, color]);
+  useEffect(() => { redraw(); }, [strokes, showGuide, color]);
 
   const commitStrokes = (next: Stroke[]) => {
     strokesRef.current = next;
@@ -323,10 +322,12 @@ export default function SignaturePanel() {
     return false;
   }, [mode, strokes, typedSignature, uploadedFile, consent]);
 
-  const hasContent =
+  const _hasContent =
     (mode === "draw" && strokes.length > 0) ||
     (mode === "type" && typedSignature.trim().length > 0) ||
     (mode === "upload" && !!uploadedPreview);
+
+  void _hasContent;
 
   /* ---------- UI ---------- */
   return (

@@ -1,4 +1,5 @@
 import { useEffect, useMemo, useState } from "react";
+import statusUtils from "@/lib/status";
 import { Link, useSearchParams } from "react-router-dom";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { documentsAPI, documentTypesAPI, normalizeListResponse, usersAPI } from "@/services/api";
@@ -7,7 +8,7 @@ import {
   Archive, Trash2, Loader2, CheckSquare, Square, X, CheckCircle, XCircle,
   Search as SearchIcon, SlidersHorizontal, Eye,
   Rows3, LayoutGrid, Plus,
-  List, Mail, Send, Share2,
+  List, Mail, Send, Share2, Download, ArrowUp, ArrowDown,
 } from "lucide-react";
 import { format } from "date-fns";
 import { cn } from "../lib/utils";
@@ -20,7 +21,7 @@ import { formatDocumentFileType } from "@/lib/documentFormat";
 import { preloadDocumentWorkspace } from "@/lib/routePreload";
 
 const PAGE_SIZE = 10;
-type BulkAction = "approve" | "reject" | "archive" | "void";
+type BulkAction = "approve" | "reject" | "archive" | "void" | "trash";
 
 const STATUS_OPTIONS = ["draft", "pending_approval", "approved", "rejected", "archived", "void"];
 
@@ -92,6 +93,20 @@ function BulkToolbar({
               className="inline-flex items-center gap-2 px-4 py-1.5 text-sm font-medium bg-primary text-primary-foreground rounded-lg hover:opacity-90 disabled:opacity-50 transition-opacity"
             >
               <Archive className="w-4 h-4" /> Archive
+            </button>
+          )}
+
+          {availableActions.includes("trash") && (
+            <button
+              onClick={() => {
+                if (confirm(`Move ${selectedIds.length} document${selectedIds.length === 1 ? "" : "s"} to Trash? You can restore them later.`)) {
+                  onAction("trash");
+                }
+              }}
+              disabled={isLoading}
+              className="inline-flex items-center gap-2 px-4 py-1.5 text-sm font-medium bg-destructive text-destructive-foreground rounded-lg hover:opacity-90 disabled:opacity-50 transition-opacity"
+            >
+              <Trash2 className="w-4 h-4" /> Delete
             </button>
           )}
 
@@ -316,7 +331,8 @@ export default function DocumentsPage({ personalOnly = false }: DocumentsPagePro
   const [supplierFilter, setSupplierFilter] = useState("");
   const [personalTagFilter, setPersonalTagFilter] = useState("");
   const [sort, setSort] = useState<"created_at" | "document_date" | "amount" | "title" | "reference_number">("created_at");
-  const [sortDir, setSortDir] = useState<"asc" | "desc">("desc");
+  const [sortDir, _setSortDir] = useState<"asc" | "desc">("desc");
+  void _setSortDir;
   const [page, setPage] = useState(1);
   const [selectedIds, setSelectedIds] = useState<string[]>([]);
   const [showFilters, setShowFilters] = useState(false);
@@ -325,6 +341,8 @@ export default function DocumentsPage({ personalOnly = false }: DocumentsPagePro
   const [emailRecipientSearch, setEmailRecipientSearch] = useState("");
   const [emailExtraRecipients, setEmailExtraRecipients] = useState("");
   const [emailAttachmentMode, setEmailAttachmentMode] = useState<EmailAttachmentMode>("separate");
+  // Order in which documents are stitched into the merged PDF ("combined" mode).
+  const [emailDocOrder, setEmailDocOrder] = useState<string[]>([]);
   const [emailMessage, setEmailMessage] = useState("");
   const [shareModalOpen, setShareModalOpen] = useState(false);
   const [shareRecipientIds, setShareRecipientIds] = useState<string[]>([]);
@@ -410,7 +428,34 @@ export default function DocumentsPage({ personalOnly = false }: DocumentsPagePro
     refetchOnMount: personalOnly ? "always" : true,
   });
 
-  const docs = data?.results ?? [];
+  const rawDocs = data?.results ?? [];
+
+  function docMatchesFilters(doc: Document) {
+    if (statusFilter && !statusUtils.statusMatchesFilter(doc.status, statusFilter)) return false;
+
+    if (typeFilter) {
+      const docTypeId = typeof (doc as any).document_type === "string"
+        ? (doc as any).document_type
+        : (doc as any).document_type?.id ?? String((doc as any).document_type ?? "");
+      if (docTypeId !== typeFilter) return false;
+    }
+
+    if (supplierFilter) {
+      const supplier = (doc.supplier || "").toLowerCase();
+      if (!supplier.includes(supplierFilter.toLowerCase())) return false;
+    }
+
+    if (personalTagFilter) {
+      const tags: string[] = (doc.personal_tags ?? []).map(String);
+      if (!tags.includes(personalTagFilter)) return false;
+    }
+
+    return true;
+  }
+
+  const filteredResults = useMemo(() => rawDocs.filter(docMatchesFilters), [rawDocs, statusFilter, typeFilter, supplierFilter, personalTagFilter]);
+
+  const docs = filteredResults;
   const supplierOptions = useMemo<string[]>(() => {
     const currentPageSuppliers = docs
       .map((doc: Document) => doc.supplier as string | null | undefined)
@@ -462,17 +507,20 @@ export default function DocumentsPage({ personalOnly = false }: DocumentsPagePro
   const deleteMutation = useMutation({
     mutationFn: (id: string) => documentsAPI.delete(id),
     onSuccess: () => {
-      toast.success("Document deleted.");
+      toast.success(personalOnly ? "Document deleted." : "Moved to Trash.");
       queryClient.invalidateQueries({ queryKey: ["documents"] });
     },
-    onError: () => toast.error("Could not delete document."),
+    onError: (err: any) =>
+      toast.error(err?.response?.data?.detail || "Could not delete document."),
   });
+
+  const TRASHABLE_STATUSES = ["draft", "returned", "rejected"];
 
   const bulkMutation = useMutation({
     mutationFn: ({ action, comment }: { action: BulkAction; comment?: string }) =>
       documentsAPI.bulkAction(selectedIds, action, comment),
-    onSuccess: () => {
-      toast.success("Bulk action completed successfully");
+    onSuccess: (_data, variables) => {
+      toast.success(variables.action === "trash" ? "Moved to Trash." : "Bulk action completed successfully");
       setSelectedIds([]);
       queryClient.invalidateQueries({ queryKey: ["documents"] });
     },
@@ -487,7 +535,8 @@ export default function DocumentsPage({ personalOnly = false }: DocumentsPagePro
         .filter(Boolean);
 
       return documentsAPI.emailSelected({
-        document_ids: selectedIds,
+        // Stitching honours the chosen order; separate attachments use selection order.
+        document_ids: emailAttachmentMode === "combined" && emailDocOrder.length ? emailDocOrder : selectedIds,
         recipient_user_ids: emailRecipientIds,
         recipient_emails: recipientEmails,
         attachment_mode: emailAttachmentMode,
@@ -509,6 +558,43 @@ export default function DocumentsPage({ personalOnly = false }: DocumentsPagePro
       toast.error(err?.response?.data?.detail ?? "Could not send selected documents.");
     },
   });
+
+  const downloadSelectedMutation = useMutation({
+    mutationFn: () => documentsAPI.downloadSelected(selectedIds),
+    onSuccess: (response) => {
+      const blob = new Blob([response.data], { type: "application/zip" });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement("a");
+      a.href = url;
+      a.download = "documents.zip";
+      document.body.appendChild(a);
+      a.click();
+      a.remove();
+      URL.revokeObjectURL(url);
+      toast.success(`Downloaded ${selectedIds.length} document${selectedIds.length === 1 ? "" : "s"} as ZIP.`);
+    },
+    onError: () => toast.error("Could not download the selected documents."),
+  });
+
+  // Keep the stitch order aligned with the current selection while the email modal is open.
+  useEffect(() => {
+    if (!emailModalOpen) return;
+    setEmailDocOrder((prev) => {
+      const kept = prev.filter((docId) => selectedIds.includes(docId));
+      const added = selectedIds.filter((docId) => !kept.includes(docId));
+      return [...kept, ...added];
+    });
+  }, [emailModalOpen, selectedIds]);
+
+  const moveStitchDoc = (index: number, dir: -1 | 1) => {
+    setEmailDocOrder((prev) => {
+      const next = [...prev];
+      const target = index + dir;
+      if (target < 0 || target >= next.length) return prev;
+      [next[index], next[target]] = [next[target], next[index]];
+      return next;
+    });
+  };
 
   const shareSelectedMutation = useMutation({
     mutationFn: () =>
@@ -575,7 +661,7 @@ export default function DocumentsPage({ personalOnly = false }: DocumentsPagePro
         .reduce((commonActions: BulkAction[], doc: Document) => {
           const docActions = doc.available_bulk_actions || [];
           return commonActions.filter(action => docActions.includes(action));
-        }, ["approve", "reject", "archive", "void"] as BulkAction[])
+        }, ["approve", "reject", "archive", "void", "trash"] as BulkAction[])
     : [];
 
   const totalCols = personalOnly
@@ -615,7 +701,8 @@ export default function DocumentsPage({ personalOnly = false }: DocumentsPagePro
   });
 
   if (!isArchiveView && !personalOnly) {
-    const matchingCount = data?.count ?? 0;
+    // Show the client-side filtered total so UI reflects exact active filters
+    const matchingCount = docs.length;
 
     return (
       <div className="-m-6 flex h-[calc(100vh-3.5rem)] min-h-[42rem] overflow-hidden bg-[#EDEDED] text-[13px] text-[#1F2933]">
@@ -776,6 +863,16 @@ export default function DocumentsPage({ personalOnly = false }: DocumentsPagePro
                   </button>
                   <button
                     type="button"
+                    onClick={() => downloadSelectedMutation.mutate()}
+                    disabled={downloadSelectedMutation.isPending}
+                    className="inline-flex items-center gap-2 border border-[#C8CDD2] bg-white px-3 py-1.5 text-sm font-semibold text-[#1F2933] hover:bg-[#EEF6FB] hover:text-[#287EAD] disabled:cursor-not-allowed disabled:opacity-40"
+                    title="Download selected documents as a ZIP"
+                  >
+                    {downloadSelectedMutation.isPending ? <Loader2 className="h-4 w-4 animate-spin" /> : <Download className="h-4 w-4" />}
+                    Download (ZIP)
+                  </button>
+                  <button
+                    type="button"
                     onClick={() => bulkMutation.mutate({ action: "archive" })}
                     disabled={!availableBulkActions.includes("archive") || bulkMutation.isPending}
                     className="inline-flex items-center gap-2 border border-[#C8CDD2] bg-white px-3 py-1.5 text-sm font-semibold text-[#1F2933] hover:bg-[#EEF6FB] hover:text-[#287EAD] disabled:cursor-not-allowed disabled:opacity-40"
@@ -784,6 +881,22 @@ export default function DocumentsPage({ personalOnly = false }: DocumentsPagePro
                     {bulkMutation.isPending ? <Loader2 className="h-4 w-4 animate-spin" /> : <Archive className="h-4 w-4" />}
                     Archive
                   </button>
+                  {availableBulkActions.includes("trash") && (
+                    <button
+                      type="button"
+                      onClick={() => {
+                        if (window.confirm(`Move ${selectedIds.length} document${selectedIds.length === 1 ? "" : "s"} to Trash? You can restore ${selectedIds.length === 1 ? "it" : "them"} later.`)) {
+                          bulkMutation.mutate({ action: "trash" });
+                        }
+                      }}
+                      disabled={bulkMutation.isPending}
+                      className="inline-flex items-center gap-2 border border-red-300 bg-white px-3 py-1.5 text-sm font-semibold text-red-600 hover:bg-red-50 disabled:cursor-not-allowed disabled:opacity-40"
+                      title="Move selected documents to Trash"
+                    >
+                      {bulkMutation.isPending ? <Loader2 className="h-4 w-4 animate-spin" /> : <Trash2 className="h-4 w-4" />}
+                      Delete
+                    </button>
+                  )}
                   <button
                     type="button"
                     onClick={() => setSelectedIds([])}
@@ -1425,11 +1538,38 @@ export default function DocumentsPage({ personalOnly = false }: DocumentsPagePro
                           className="mt-1"
                         />
                         <span>
-                          <span className="block text-sm font-semibold text-[#1F2933]">One attachment</span>
-                          <span className="text-xs text-[#5E6870]">Multiple documents are sent together as a ZIP file.</span>
+                          <span className="block text-sm font-semibold text-[#1F2933]">Stitch into one PDF</span>
+                          <span className="text-xs text-[#5E6870]">Selected documents are merged into a single PDF in the order below.</span>
                         </span>
                       </label>
                     </div>
+
+                    {emailAttachmentMode === "combined" && emailDocOrder.length > 1 && (
+                      <div className="mt-2 border border-[#C8CDD2] bg-[#F9FAFB] p-2">
+                        <p className="mb-2 text-xs font-semibold uppercase tracking-wide text-[#5E6870]">
+                          Merge order — top appears first
+                        </p>
+                        <ul className="space-y-1">
+                          {emailDocOrder.map((docId, idx) => {
+                            const d = docs.find((x: Document) => x.id === docId);
+                            return (
+                              <li key={docId} className="flex items-center gap-2 border border-[#E3E7EA] bg-white px-2 py-1.5 text-sm">
+                                <span className="w-5 flex-shrink-0 text-center text-xs font-semibold text-[#5E6870]">{idx + 1}</span>
+                                <span className="flex-1 truncate text-[#1F2933]" title={d?.title}>{d?.title ?? docId}</span>
+                                <button type="button" onClick={() => moveStitchDoc(idx, -1)} disabled={idx === 0}
+                                        className="p-1 text-[#5E6870] hover:text-[#287EAD] disabled:opacity-30" title="Move up">
+                                  <ArrowUp className="h-3.5 w-3.5" />
+                                </button>
+                                <button type="button" onClick={() => moveStitchDoc(idx, 1)} disabled={idx === emailDocOrder.length - 1}
+                                        className="p-1 text-[#5E6870] hover:text-[#287EAD] disabled:opacity-30" title="Move down">
+                                  <ArrowDown className="h-3.5 w-3.5" />
+                                </button>
+                              </li>
+                            );
+                          })}
+                        </ul>
+                      </div>
+                    )}
                   </div>
 
                   <div>
@@ -1903,6 +2043,19 @@ export default function DocumentsPage({ personalOnly = false }: DocumentsPagePro
                               title="Delete"
                               onClick={() => {
                                 if (window.confirm("Delete this personal document? This cannot be undone.")) deleteMutation.mutate(doc.id);
+                              }}
+                              className="p-1.5 rounded-md text-muted-foreground hover:bg-destructive/10 hover:text-destructive transition-colors"
+                            >
+                              <Trash2 className="w-4 h-4" />
+                            </button>
+                          )}
+                          {!personalOnly && !isArchiveView
+                            && TRASHABLE_STATUSES.includes(doc.status)
+                            && (doc.permissions?.includes("delete") ?? false) && (
+                            <button
+                              title="Move to Trash"
+                              onClick={() => {
+                                if (window.confirm("Move this document to Trash? You can restore it later.")) deleteMutation.mutate(doc.id);
                               }}
                               className="p-1.5 rounded-md text-muted-foreground hover:bg-destructive/10 hover:text-destructive transition-colors"
                             >

@@ -11,7 +11,7 @@ from django_elasticsearch_dsl import Document as ESDocument, Index, fields
 document_index = Index("dms_documents")
 document_index.settings(number_of_shards=1, number_of_replicas=1)
 
-_METADATA_SKIP_KEYS = frozenset({"ocr_suggestions", "ocr_quality"})
+_METADATA_SKIP_KEYS = frozenset({"ocr_suggestions", "ocr_quality", "form"})
 
 
 def _normalize_es_value(value):
@@ -62,35 +62,82 @@ def _normalize_personal_tags(value) -> list[str]:
     return tags
 
 
-def _prepare_metadata_for_index(metadata):
-    """
-    Normalize document metadata for Elasticsearch.
-
-    OCR suggestions are kept in the database for the UI, but they are not
-    needed for search and can be large/nested enough to trip index mapping
-    conflicts.
-    """
+def _full_normalized_metadata(metadata) -> dict:
+    """Normalize metadata and drop keys that should never be indexed (OCR
+    suggestions, and the structured `form` snapshot — its scalar values are
+    already mirrored to top-level metadata keys)."""
     if not isinstance(metadata, dict):
         return {}
-
     normalized = _normalize_es_value(metadata)
-    if isinstance(normalized, dict):
-        for key in _METADATA_SKIP_KEYS:
-            normalized.pop(key, None)
-    return normalized if isinstance(normalized, dict) else {}
+    if not isinstance(normalized, dict):
+        return {}
+    for key in _METADATA_SKIP_KEYS:
+        normalized.pop(key, None)
+    return normalized
+
+
+def _index_safe_metadata(normalized: dict) -> dict:
+    """Keep only scalar values and lists of scalars for the `metadata`
+    ObjectField. Structured values (dicts, or lists containing objects — e.g. a
+    table field whose cell is a string in one row and a file descriptor in
+    another) are excluded to avoid Elasticsearch dynamic-mapping conflicts. The
+    text content of those values is still searchable via `metadata_text`."""
+    safe: dict = {}
+    for key, value in (normalized or {}).items():
+        if isinstance(value, str):
+            safe[key] = value
+        elif isinstance(value, list):
+            scalars = [item for item in value if isinstance(item, str)]
+            if scalars:
+                safe[key] = scalars
+    return safe
+
+
+def _prepare_metadata_for_index(metadata):
+    """Normalize document metadata for the Elasticsearch `metadata` object,
+    keeping it conflict-free (scalars + scalar lists only)."""
+    return _index_safe_metadata(_full_normalized_metadata(metadata))
+
+
+def _collect_search_text(value, parts: list[str]) -> None:
+    """Recursively gather scalar text from any metadata value for full-text
+    search. Attachment descriptors contribute only their file name."""
+    if value is None:
+        return
+    if isinstance(value, str):
+        text = value.strip()
+        if text:
+            parts.append(text)
+    elif isinstance(value, dict):
+        if value.get("storage_path"):  # attachment descriptor — name only
+            name = value.get("name")
+            if name and str(name).strip():
+                parts.append(str(name).strip())
+            return
+        if "label" in value and "id" in value:  # reference value — label only
+            label = value.get("label")
+            if label and str(label).strip():
+                parts.append(str(label).strip())
+            return
+        for item in value.values():
+            _collect_search_text(item, parts)
+    elif isinstance(value, (list, tuple, set)):
+        for item in value:
+            _collect_search_text(item, parts)
+    else:
+        text = str(value).strip()
+        if text:
+            parts.append(text)
 
 
 def _metadata_search_text(metadata: dict) -> str:
-    """Flatten scalar metadata values into one searchable string."""
+    """Flatten all metadata values (including nested form/table values) into one
+    searchable string."""
     parts: list[str] = []
     for key, value in (metadata or {}).items():
-        if key in _METADATA_SKIP_KEYS or key == "personal_tags":
+        if key == "personal_tags":
             continue
-        normalized = _normalize_es_value(value)
-        if isinstance(normalized, str) and normalized.strip():
-            parts.append(normalized.strip())
-        elif isinstance(normalized, list):
-            parts.extend(str(item).strip() for item in normalized if str(item).strip())
+        _collect_search_text(value, parts)
     return " ".join(parts)
 
 
@@ -153,7 +200,9 @@ class DocumentIndex(ESDocument):
         return _prepare_metadata_for_index(instance.metadata)
 
     def prepare_metadata_text(self, instance):
-        meta = _prepare_metadata_for_index(instance.metadata)
+        # Flatten the full (normalized) metadata for search — including nested
+        # form/table values that are excluded from the structured object.
+        meta = _full_normalized_metadata(instance.metadata)
         parts = [_metadata_search_text(meta)]
         parts.extend(self.prepare_personal_tags(instance))
         return " ".join(part for part in parts if part)

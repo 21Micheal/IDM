@@ -620,7 +620,7 @@ class UserGroupViewSet(viewsets.ModelViewSet):
 
     def get_permissions(self):
         if self.action in ("create", "update", "partial_update", "destroy",
-                           "add_member", "remove_member", "set_permissions"):
+                           "add_member", "remove_member", "set_permissions", "duplicate"):
             return [permissions.IsAuthenticated(), IsGroupAdmin()]
         return [permissions.IsAuthenticated()]
 
@@ -679,6 +679,7 @@ class UserGroupViewSet(viewsets.ModelViewSet):
     def set_permissions(self, request, pk=None):
         from apps.accounts.models import AccessStage
         from apps.documents.access import ACCESS_STAGE_KEYS
+        from apps.documents.models import DocumentType
 
         group = self.get_object()
         perms = request.data.get("permissions", [])
@@ -687,13 +688,20 @@ class UserGroupViewSet(viewsets.ModelViewSet):
             c[0] for c in GroupPermission._meta.get_field("action").choices
             if c[0] != GroupAction.ADMIN.value
         }
-        valid_stages = {stage for stage in ACCESS_STAGE_KEYS if stage != AccessStage.ANY.value}
+        # "any" is allowed — it is the global single-stage configuration.
+        valid_stages = set(ACCESS_STAGE_KEYS)
+        # A null/absent document_type_id is the global fallback ("all document
+        # types") wildcard, so it is allowed here.
+        valid_doctype_ids = set(
+            str(x) for x in DocumentType.objects.values_list("id", flat=True)
+        )
         errors = []
         for i, p in enumerate(perms):
             if p.get("action") not in valid_actions:
                 errors.append(f"Item {i}: invalid action '{p.get('action')}'")
-            if not p.get("document_type_id"):
-                errors.append(f"Item {i}: document_type_id is required")
+            dt_id = p.get("document_type_id")
+            if dt_id and str(dt_id) not in valid_doctype_ids:
+                errors.append(f"Item {i}: unknown document_type_id '{dt_id}'")
             stage = p.get("stage")
             if stage not in valid_stages:
                 errors.append(f"Item {i}: invalid stage '{stage}'")
@@ -729,6 +737,52 @@ class UserGroupViewSet(viewsets.ModelViewSet):
         group       = self.get_object()
         memberships = group.memberships.select_related("user", "added_by").all()
         return Response(UserGroupMembershipSerializer(memberships, many=True).data)
+
+    @action(detail=True, methods=["post"])
+    def duplicate(self, request, pk=None):
+        """Deep-clone a group (name, description, permissions). Blocked for system groups."""
+        original = self.get_object()
+        if original.name in (UserGroup.ADMIN_GROUP_NAME, UserGroup.HOD_GROUP_NAME):
+            return Response(
+                {"detail": f"The '{original.name}' group cannot be duplicated."},
+                status=400,
+            )
+
+        new_name = (request.data.get("name") or f"{original.name} (Copy)").strip()
+        if not new_name:
+            return Response({"detail": "name is required."}, status=400)
+        if UserGroup.objects.filter(name=new_name, is_active=True).exists():
+            return Response({"detail": f"A group named '{new_name}' already exists."}, status=400)
+
+        from django.db import transaction
+        with transaction.atomic():
+            copy = UserGroup.objects.create(
+                name=new_name,
+                description=request.data.get("description", original.description),
+                created_by=request.user,
+            )
+            perms = [
+                GroupPermission(
+                    group=copy,
+                    document_type=p.document_type,
+                    stage=p.stage,
+                    action=p.action,
+                )
+                for p in original.permissions.all()
+            ]
+            GroupPermission.objects.bulk_create(perms)
+
+        AuditLog.objects.create(
+            event=AuditEvent.PERMISSION_CHANGED,
+            actor=request.user,
+            object_type="UserGroup",
+            object_id=str(copy.id),
+            object_repr=copy.name,
+            changes={"action": "duplicated_from", "source_id": str(original.id), "source_name": original.name},
+            ip_address=request.META.get("REMOTE_ADDR"),
+        )
+
+        return Response(self.get_serializer(copy).data, status=201)
 
 
 class UserDelegationViewSet(viewsets.ModelViewSet):

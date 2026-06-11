@@ -2,11 +2,21 @@ from rest_framework import viewsets, status
 from rest_framework.decorators import action
 from rest_framework.response import Response
 from rest_framework.exceptions import ValidationError
+from rest_framework.parsers import JSONParser, MultiPartParser, FormParser
 from django.db.models import F
 from rest_framework import permissions
+import json
 from .models import DocumentTemplate, TemplateUsage
 from .serializers import DocumentTemplateSerializer
 from .tasks import generate_document_from_template_sync
+
+
+def _request_bool(value) -> bool:
+    if isinstance(value, bool):
+        return value
+    if value is None:
+        return False
+    return str(value).strip().lower() in {"1", "true", "yes", "on"}
 
 
 def extract_placeholders(file):
@@ -52,6 +62,7 @@ def extract_placeholders(file):
 class DocumentTemplateViewSet(viewsets.ModelViewSet):
     serializer_class = DocumentTemplateSerializer
     queryset = DocumentTemplate.objects.all()
+    parser_classes = [JSONParser, MultiPartParser, FormParser]
 
     def get_permissions(self):
         if self.action in ("create", "update", "partial_update", "destroy", "duplicate"):
@@ -98,6 +109,20 @@ class DocumentTemplateViewSet(viewsets.ModelViewSet):
             placeholders=placeholders,
         )
 
+    def perform_update(self, serializer):
+        # When the Office file is replaced, re-detect its placeholders and
+        # refresh the stored file name. Metadata-only edits leave the file alone.
+        file = self.request.FILES.get("file")
+        if file:
+            try:
+                placeholders = extract_placeholders(file)
+                file.seek(0)
+            except Exception as e:
+                raise ValidationError({"file": f"Could not parse template file: {e}"})
+            serializer.save(file_name=file.name, placeholders=placeholders)
+        else:
+            serializer.save()
+
     def perform_destroy(self, instance):
         # Soft delete
         instance.is_active = False
@@ -132,10 +157,40 @@ class DocumentTemplateViewSet(viewsets.ModelViewSet):
     def fill(self, request, pk=None):
         template = self.get_object()
         values = request.data.get("values", {})
+        if isinstance(values, str):
+            try:
+                values = json.loads(values) if values.strip() else {}
+            except json.JSONDecodeError:
+                raise ValidationError({"values": "values must be valid JSON."})
+        if values is None:
+            values = {}
+        if not isinstance(values, dict):
+            raise ValidationError({"values": "values must be an object."})
+
+        from apps.documents.form_attachments import (
+            apply_form_attachments,
+            descriptors_to_names,
+            default_reference_resolver,
+            reconcile_references,
+        )
+        from apps.documents.models import Document
+        from apps.search.utils import SEARCH_INDEX_EXCEPTIONS
+
+        # Re-derive picked reference/user labels server-side from their ids so the
+        # stored values are trustworthy (a stale/spoofed client label can't persist).
+        values = reconcile_references(values, template.sections, default_reference_resolver)
+
+        # `values` already carries filename placeholders for any file fields
+        # (simple fields or file columns inside a table); the actual files arrive
+        # as multipart uploads and are attached after the document is created.
+        # `generation_values` is a display-string copy for validation/usage; the
+        # generator stores the structured `values` and renders from its own copy.
+        generation_values = descriptors_to_names(values)
+
         fmt = request.data.get("output_format", "pdf")
         title = request.data.get("title", template.name)
         type_id = request.data.get("document_type_id") or str(template.document_type_id or "")
-        draft_from_template = bool(request.data.get("draft_from_template"))
+        draft_from_template = _request_bool(request.data.get("draft_from_template"))
 
         if not title or not title.strip():
             raise ValidationError({"title": "Document title is required."})
@@ -148,14 +203,16 @@ class DocumentTemplateViewSet(viewsets.ModelViewSet):
         if fmt not in ("pdf", "docx"):
             raise ValidationError({"output_format": "Must be 'pdf' or 'docx'."})
 
-        # Validate required fields for built templates
+        # Validate required fields for built templates. Auto-fill (formula) fields
+        # are skipped — the server fills them authoritatively on create.
         if template.type == "built" and not draft_from_template:
             all_fields = [
                 f for section in template.sections
                 for f in section.get("fields", [])
                 if f.get("required") and f.get("type") not in ("divider", "heading")
+                and not f.get("formula")
             ]
-            missing = [f["label"] for f in all_fields if not values.get(f["key"])]
+            missing = [f["label"] for f in all_fields if not generation_values.get(f["key"])]
             if missing:
                 raise ValidationError(
                     {"values": f"Required fields missing: {', '.join(missing)}"}
@@ -168,6 +225,30 @@ class DocumentTemplateViewSet(viewsets.ModelViewSet):
         except Exception as e:
             raise ValidationError({"detail": f"Document generation failed: {e}"})
 
+        if request.FILES:
+            # Persist uploaded files (simple fields + table file cells) and write
+            # their descriptors into the form values. They are form attachments
+            # on metadata.form — never document versions. Start from the values the
+            # generator stored (formula-frozen + reference-reconciled), not the
+            # pre-processed request copy.
+            meta = dict(doc.metadata or {})
+            meta_form = dict(meta.get("form") or {})
+            base_values = meta_form.get("values") if isinstance(meta_form.get("values"), dict) else values
+            form_values, attachments = apply_form_attachments(
+                doc.id, base_values, request.FILES.items()
+            )
+            meta_form["values"] = form_values
+            if attachments:
+                meta_form["attachments"] = attachments
+            meta["form"] = meta_form
+            doc.metadata = meta
+            try:
+                doc.save(update_fields=["metadata", "updated_at"])
+            except SEARCH_INDEX_EXCEPTIONS:
+                # ES indexing failed (e.g. read-only or a transient mapping
+                # issue). The row is committed; don't fail document creation.
+                Document.objects.filter(pk=doc.pk).update(metadata=meta)
+
         # Increment use count atomically
         DocumentTemplate.objects.filter(id=template.id).update(
             use_count=F("use_count") + 1
@@ -176,7 +257,7 @@ class DocumentTemplateViewSet(viewsets.ModelViewSet):
             template=template,
             document=doc,
             used_by=request.user,
-            values=values,
+            values=generation_values,
             output_format=fmt,
         )
 

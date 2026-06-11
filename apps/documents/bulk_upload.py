@@ -6,7 +6,7 @@ from __future__ import annotations
 import logging
 import os
 
-from elasticsearch.helpers import BulkIndexError
+from apps.search.utils import SEARCH_INDEX_EXCEPTIONS
 
 from .models import BulkUpload, BulkUploadStatus, Document, DocumentType, OCRStatus
 from .serializers import DocumentUploadSerializer
@@ -40,6 +40,17 @@ def document_title_from_filename(filename: str) -> str:
         stem = base.rsplit(".", 1)[0]
         return stem or base
     return base
+
+
+def _serialize_metadata_fields(document_type: DocumentType) -> list[dict]:
+    """Return the document type's admin metadata fields in the shape the
+    frontend OCR matcher and review form expect (mirrors
+    ``MetadataFieldSerializer``). Without this, bulk review cannot auto-fill
+    or render admin-configured fields (reference numbers, etc.)."""
+    from .serializers import MetadataFieldSerializer
+
+    fields = document_type.metadata_fields.all().order_by("order")
+    return MetadataFieldSerializer(fields, many=True).data
 
 
 def serialize_bulk_document(doc: Document) -> dict:
@@ -79,7 +90,7 @@ def serialize_bulk_document(doc: Document) -> dict:
             "reference_prefix": doc.document_type.reference_prefix,
             "description": doc.document_type.description,
             "icon": doc.document_type.icon,
-            "metadata_fields": [],
+            "metadata_fields": _serialize_metadata_fields(doc.document_type),
         },
         "ocr_status": doc.ocr_status or "",
         "ocr_suggestions": suggestions,
@@ -171,7 +182,7 @@ def create_bulk_upload_documents(
             if tag_ids:
                 try:
                     doc.tags.add(*tag_ids)
-                except BulkIndexError as exc:
+                except SEARCH_INDEX_EXCEPTIONS as exc:
                     # ES is read-only (e.g. disk flood-stage).  Tags are saved
                     # in the DB; indexing will catch up once ES recovers.
                     logger.warning(

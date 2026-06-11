@@ -79,6 +79,7 @@ interface DocTypeForm {
   code: string;
   reference_prefix: string;
   reference_padding: number;
+  title_field: string;
   description: string;
   is_personal_type: boolean;
   metadata_mode: "admin_defined" | "user_defined";
@@ -111,6 +112,7 @@ function buildPayload(values: DocTypeForm) {
     code: values.code,
     reference_prefix: values.reference_prefix,
     reference_padding: values.reference_padding,
+    title_field: values.title_field || "filename",
     description: applyDocumentTypeConfigToDescription(values.description, {
       isPersonalType: isPersonal,
       metadataMode,
@@ -159,6 +161,11 @@ export default function AdminDocumentTypesPage() {
   const [activeTab, setActiveTab] = useState<TabId>("general");
   const [search, setSearch] = useState("");
 
+  // ── Duplicate dialog state ────────────────────────────────────────────────
+  const [duplicateDialogOpen, setDuplicateDialogOpen] = useState(false);
+  const [duplicateName, setDuplicateName] = useState("");
+  const [duplicateCode, setDuplicateCode] = useState("");
+
   const { data: types = [], isLoading } = useQuery<unknown, Error, DocumentType[]>({
     queryKey: ["document-types"],
     queryFn: () => documentApi.types().then((response) => response.data as unknown),
@@ -168,6 +175,7 @@ export default function AdminDocumentTypesPage() {
   const form = useForm<DocTypeForm>({
     defaultValues: {
       name: "", code: "", reference_prefix: "", reference_padding: 5,
+      title_field: "filename",
       description: "", is_personal_type: false, metadata_mode: "admin_defined",
       metadata_fields: [], relationship_rules: [],
     },
@@ -229,9 +237,39 @@ export default function AdminDocumentTypesPage() {
     onError: (err: any) => toast.error(err?.response?.data?.detail || "Failed to delete document type."),
   });
 
+  const duplicateMutation = useMutation({
+    mutationFn: ({ id, name, code }: { id: string; name: string; code: string }) =>
+      documentTypesAPI.duplicate(id, { name, code }),
+    onSuccess: (response) => {
+      const newType = response.data as DocumentType;
+      toast.success(`Document type "${newType.name}" created as a duplicate.`);
+      qc.invalidateQueries({ queryKey: ["document-types"] });
+      setDuplicateDialogOpen(false);
+      // Auto-open the new type for editing once the list refreshes
+      setTimeout(() => openEdit(newType), 300);
+    },
+    onError: (err: any) => {
+      const data = err?.response?.data;
+      const message = data
+        ? Object.entries(data).map(([field, msgs]) =>
+            `${field}: ${Array.isArray(msgs) ? msgs.join(", ") : String(msgs)}`
+          ).join(" | ")
+        : "Failed to duplicate document type.";
+      toast.error(message);
+    },
+  });
+
+  const openDuplicateDialog = (type: DocumentType) => {
+    const baseCode = type.code.toUpperCase().replace(/[^A-Z0-9]/g, "_");
+    setDuplicateName(`Copy of ${type.name}`);
+    setDuplicateCode(`${baseCode}_COPY`.slice(0, 20));
+    setDuplicateDialogOpen(true);
+  };
+
   const openNew = () => {
     form.reset({
       name: "", code: "", reference_prefix: "", reference_padding: 5,
+      title_field: "filename",
       description: "", is_personal_type: false, metadata_mode: "admin_defined",
       metadata_fields: coreDefaultFields(), relationship_rules: [],
     });
@@ -246,6 +284,7 @@ export default function AdminDocumentTypesPage() {
       code: type.code,
       reference_prefix: type.reference_prefix,
       reference_padding: type.reference_padding ?? 5,
+      title_field: type.title_field || "filename",
       description: stripTypeConfigMarkers(type.description ?? ""),
       is_personal_type: config.isPersonalType,
       metadata_mode: config.metadataMode,
@@ -302,6 +341,7 @@ export default function AdminDocumentTypesPage() {
   ];
 
   return (
+    <>
     <div className="min-h-[calc(100vh-4rem)] bg-[#EEF0F2]">
       <div className="border-b border-[#1E6F99] bg-[#287EAD] px-6 py-4 text-white">
         <div className="flex items-center justify-between gap-4">
@@ -385,8 +425,12 @@ export default function AdminDocumentTypesPage() {
                 <div className="flex items-center gap-2 text-sm">
                   {editingId !== "new" && selectedType && (
                     <>
-                      <button type="button" className="inline-flex items-center gap-1.5 px-2 py-1 text-[#5E6870] hover:text-[#287EAD]">
-                        <Copy className="h-4 w-4" /> Copy
+                      <button
+                        type="button"
+                        onClick={() => openDuplicateDialog(selectedType)}
+                        className="inline-flex items-center gap-1.5 px-2 py-1 text-[#5E6870] hover:text-[#287EAD]"
+                      >
+                        <Copy className="h-4 w-4" /> Duplicate
                       </button>
                       <button
                         type="button"
@@ -430,19 +474,67 @@ export default function AdminDocumentTypesPage() {
               {activeTab === "general" && (
                 <section className="max-w-5xl space-y-6 bg-[#EEF0F2] px-4 py-3">
                   <div className="grid max-w-3xl grid-cols-[220px_1fr] gap-x-6 gap-y-4 text-sm">
+
+                    {/* Display name ─ what users see everywhere */}
                     <label className="pt-2 text-[#5E6870]">Display name</label>
-                    <input {...form.register("name", { required: true })} className={inputCls} placeholder="Supplier Invoice" />
-                    <label className="pt-2 text-[#5E6870]">Name</label>
-                    <input {...form.register("code", { required: true })} className={inputCls} placeholder="SUPPLIER_INVOICE" />
-                    <label className="pt-2 text-[#5E6870]">Document title</label>
-                    <select {...form.register("reference_prefix", { required: true })} className={inputCls}>
-                      <option value="">Select title field</option>
-                      {fieldOptions({ ...(selectedType ?? {} as DocumentType), metadata_fields: form.watch("metadata_fields") as any }).map((field) => (
-                        <option key={field.key} value={field.key}>{field.label}</option>
-                      ))}
-                    </select>
+                    <div>
+                      <input
+                        {...form.register("name", { required: true })}
+                        className={inputCls}
+                        placeholder="e.g. Supplier Invoice"
+                      />
+                      <p className="mt-1.5 text-xs text-[#8C969E]">Human-readable name shown throughout the system</p>
+                    </div>
+
+                    {/* Code ─ short machine identifier */}
+                    <label className="pt-2 text-[#5E6870]">Code</label>
+                    <div>
+                      <input
+                        {...form.register("code", { required: true })}
+                        className={cn(inputCls, "font-mono")}
+                        placeholder="e.g. INV"
+                      />
+                      <p className="mt-1.5 text-xs text-[#8C969E]">Unique short system identifier used in logs and file storage paths</p>
+                    </div>
+
+                    {/* Reference prefix ─ prefix for auto-generated IDs */}
+                    <label className="pt-2 text-[#5E6870]">Reference prefix</label>
+                    <div>
+                      <input
+                        {...form.register("reference_prefix", { required: true })}
+                        className={cn(inputCls, "font-mono tracking-widest uppercase")}
+                        placeholder="e.g. INV"
+                      />
+                      <p className="mt-1.5 text-xs text-[#8C969E]">
+                        Prefix used when generating document IDs —{" "}
+                        <span className="font-mono font-semibold">INV</span> → <span className="font-mono">INV-00001</span>,{" "}
+                        <span className="font-mono">INV-00002</span> …
+                      </p>
+                    </div>
+
+                    {/* Reference padding ─ zero-padding width */}
                     <label className="pt-2 text-[#5E6870]">Reference padding</label>
-                    <input {...form.register("reference_padding", { valueAsNumber: true })} type="number" min={3} max={8} className={inputCls} />
+                    <div>
+                      <input
+                        {...form.register("reference_padding", { valueAsNumber: true })}
+                        type="number" min={3} max={8}
+                        className={inputCls}
+                      />
+                      <p className="mt-1.5 text-xs text-[#8C969E]">Digits in the numeric part of IDs (3–8) — 5 → 00001 · 4 → 0001</p>
+                    </div>
+
+                    {/* Document title ─ which source names documents of this type */}
+                    <label className="pt-2 text-[#5E6870]">Document title</label>
+                    <div>
+                      <select {...form.register("title_field")} className={inputCls}>
+                        <option value="filename">File name (default)</option>
+                        {fieldOptions({ ...(selectedType ?? {} as DocumentType), metadata_fields: form.watch("metadata_fields") as any }).map((field) => (
+                          <option key={field.key} value={field.key}>{field.label}</option>
+                        ))}
+                      </select>
+                      <p className="mt-1.5 text-xs text-[#8C969E]">How documents of this type are named — by default the uploaded file name; or pick a field like Document Name, Supplier, or Reference Number</p>
+                    </div>
+
                     <label className="pt-2 text-[#5E6870]">Description</label>
                     <textarea {...form.register("description")} rows={3} className={textAreaCls} />
                   </div>
@@ -640,5 +732,92 @@ export default function AdminDocumentTypesPage() {
         </main>
       </div>
     </div>
+
+    {/* ── Duplicate document type dialog ─────────────────────────────────── */}
+    {duplicateDialogOpen && selectedType && (
+      <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 backdrop-blur-sm">
+        <div className="w-full max-w-md border border-[#C8CDD2] bg-white shadow-xl">
+          {/* Header */}
+          <div className="flex items-center justify-between border-b border-[#C8CDD2] bg-[#287EAD] px-5 py-3">
+            <div className="flex items-center gap-2 text-white">
+              <Copy className="h-4 w-4" />
+              <span className="text-sm font-semibold">Duplicate document type</span>
+            </div>
+            <button
+              type="button"
+              onClick={() => setDuplicateDialogOpen(false)}
+              className="text-white/70 hover:text-white"
+            >
+              <X className="h-4 w-4" />
+            </button>
+          </div>
+
+          {/* Body */}
+          <div className="space-y-4 p-5 text-sm">
+            <p className="text-[#5E6870]">
+              A full copy of <span className="font-semibold text-[#1F2933]">{selectedType.name}</span> will be
+              created — including all attributes and relationship rules.
+              Adjust the name and code below before confirming.
+            </p>
+
+            <div className="space-y-3">
+              <div>
+                <label className="mb-1 block text-xs font-medium text-[#5E6870]">New name</label>
+                <input
+                  value={duplicateName}
+                  onChange={(e) => setDuplicateName(e.target.value)}
+                  className={inputCls}
+                  placeholder="e.g. Copy of Supplier Invoice"
+                  autoFocus
+                />
+              </div>
+              <div>
+                <label className="mb-1 block text-xs font-medium text-[#5E6870]">Code</label>
+                <input
+                  value={duplicateCode}
+                  onChange={(e) => setDuplicateCode(e.target.value.toUpperCase().replace(/[^A-Z0-9_]/g, "").slice(0, 20))}
+                  className={`${inputCls} font-mono tracking-widest uppercase`}
+                  placeholder="e.g. INV_COPY"
+                  maxLength={20}
+                />
+                <p className="mt-1 text-xs text-[#8C969E]">Unique short identifier — max 20 characters, A–Z, 0–9, underscore.</p>
+              </div>
+            </div>
+          </div>
+
+          {/* Footer */}
+          <div className="flex items-center justify-end gap-2 border-t border-[#C8CDD2] px-5 py-3">
+            <button
+              type="button"
+              onClick={() => setDuplicateDialogOpen(false)}
+              disabled={duplicateMutation.isPending}
+              className="px-4 py-2 text-sm text-[#5E6870] hover:text-[#1F2933] disabled:opacity-50"
+            >
+              Cancel
+            </button>
+            <button
+              type="button"
+              disabled={!duplicateName.trim() || !duplicateCode.trim() || duplicateMutation.isPending}
+              onClick={() =>
+                duplicateMutation.mutate({
+                  id: selectedType.id,
+                  name: duplicateName.trim(),
+                  code: duplicateCode.trim(),
+                })
+              }
+              className="inline-flex items-center gap-2 bg-[#287EAD] px-4 py-2 text-sm font-medium text-white hover:bg-[#1E6F99] disabled:opacity-50"
+            >
+              {duplicateMutation.isPending ? (
+                <Loader2 className="h-4 w-4 animate-spin" />
+              ) : (
+                <Copy className="h-4 w-4" />
+              )}
+              Duplicate
+            </button>
+          </div>
+        </div>
+      </div>
+    )}
+    </>
   );
 }

@@ -54,9 +54,13 @@ class DocumentFilter(django_filters.FilterSet):
         active_task_statuses = ["pending", "in_progress", "held", "returned"]
         combined = models.Q()
 
+        # Accept generic "pending" filters as matching any status containing
+        # the word "pending" (e.g. custom names like "pending_cfo_approval")
+        # and also include documents that have active workflow tasks.
         for status in values:
-            if status in (DocumentStatus.PENDING_APPROVAL, DocumentStatus.PENDING_REVIEW):
-                combined |= models.Q(status=status)
+            s_lower = (status or "").lower()
+            if s_lower.startswith("pending"):
+                combined |= models.Q(status__icontains="pending")
                 combined |= models.Q(workflow_instance__tasks__status__in=active_task_statuses)
             else:
                 combined |= models.Q(status=status)

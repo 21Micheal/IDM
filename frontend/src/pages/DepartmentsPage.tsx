@@ -8,7 +8,6 @@ import {
   Plus, Trash2, Loader2, Building2, X, UserPlus, Users, Check, Crown,
 } from "lucide-react";
 import { toast } from "@/components/ui/vault-toast";
-import clsx from "clsx";
 
 interface Department {
   id: string;

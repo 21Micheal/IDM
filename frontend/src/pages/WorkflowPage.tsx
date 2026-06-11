@@ -1,8 +1,9 @@
-import { useQuery } from "@tanstack/react-query";
-import { workflowAPI } from "@/services/api";
+import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
+import { workflowAPI, notificationsAPI, normalizeListResponse } from "@/services/api";
 import { useNavigate } from "react-router-dom";
 import { CheckCircle, Clock, Filter, GitBranch, Loader2, Search, X } from "lucide-react";
 import { formatDistanceToNow } from "date-fns";
+import type { Notification } from "@/types";
 import { useMemo, useState } from "react";
 import type { WorkflowTask } from "@/types";
 import {
@@ -29,6 +30,35 @@ export default function WorkflowPage() {
     queryFn: () => workflowAPI.myTasks().then((r) => r.data.results ?? r.data),
     refetchInterval: 30_000,
   });
+
+  const queryClient = useQueryClient();
+  const { data: notifications = [] } = useQuery<Notification[]>({
+    queryKey: ["notifications"],
+    queryFn: () => notificationsAPI.list().then((r) => normalizeListResponse<Notification>(r.data)),
+    staleTime: 30_000,
+  });
+
+  const markReadMutation = useMutation({
+    mutationFn: (id: string) => notificationsAPI.markRead(id),
+    onMutate: async (id: string) => {
+      await queryClient.cancelQueries({ queryKey: ["notifications"] });
+      const previous = queryClient.getQueryData<Notification[]>(["notifications"]);
+      if (previous) {
+        queryClient.setQueryData(["notifications"], previous.map((n) => n.id === id ? { ...n, is_read: true } : n));
+      }
+      return { previous };
+    },
+    onError: (_err, _id, context) => {
+      if (context?.previous) queryClient.setQueryData(["notifications"], context.previous);
+    },
+    onSettled: () => {
+      queryClient.invalidateQueries({ queryKey: ["notifications"] });
+    },
+  });
+
+  const TASK_NOTIFICATION_TYPES = new Set(["task_assigned", "task_sla_warning", "task_overdue"]);
+  const taskAlertNotifications = (notifications ?? []).filter((n) => TASK_NOTIFICATION_TYPES.has(n.type));
+  const visibleTaskAlerts = taskAlertNotifications.filter((n) => !n.is_read).slice(0, 5);
 
   const allTasks = tasks ?? [];
   const filterOptions = useMemo(() => buildWorkflowTaskFilterOptions(allTasks), [allTasks]);
@@ -173,6 +203,30 @@ export default function WorkflowPage() {
       )}
 
       <div className="space-y-2">
+        {visibleTaskAlerts.length > 0 && (
+          <section className="border border-amber-200 bg-amber-50 p-4">
+            <div className="mb-2 flex items-center justify-between">
+              <p className="text-sm font-bold text-amber-900">Task alerts</p>
+              <p className="text-xs text-amber-900">{taskAlertNotifications.length} total</p>
+            </div>
+            <div className="space-y-2">
+              {visibleTaskAlerts.map((notification) => (
+                <button
+                  key={notification.id}
+                  type="button"
+                  onClick={() => {
+                    if (!notification.is_read) markReadMutation.mutate(notification.id);
+                    navigate(notification.link || "/workflow");
+                  }}
+                  className="block w-full border border-amber-200 bg-amber-50 px-3 py-2 text-left hover:bg-amber-100"
+                >
+                  <p className="line-clamp-2 text-sm font-bold text-amber-900">{notification.message}</p>
+                  <p className="mt-1 text-xs text-amber-800">{new Date(notification.created_at).toLocaleString()}</p>
+                </button>
+              ))}
+            </div>
+          </section>
+        )}
         {!isLoading && allTasks.length > 0 && filteredTasks.length === 0 && (
           <div className="border border-[#C8CDD2] bg-white p-8 text-center">
             <p className="font-semibold text-[#1F2933]">No matching tasks</p>

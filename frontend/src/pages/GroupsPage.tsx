@@ -1,9 +1,9 @@
 import { useEffect, useState } from "react";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
-import { groupsAPI, documentTypesAPI, usersAPI, normalizeListResponse } from "@/services/api";
+import { groupsAPI, documentTypesAPI, usersAPI, normalizeListResponse, dmsSettingsAPI } from "@/services/api";
 import {
   Plus, Users, Shield, ChevronRight, X, Loader2,
-  Check, UserPlus, Settings2, Info, Trash2,
+  Check, UserPlus, Settings2, Info, Trash2, Copy,
 } from "lucide-react";
 import { toast } from "@/components/ui/vault-toast";
 import clsx from "clsx";
@@ -18,10 +18,14 @@ interface GroupPerm {
   action: string;
 }
 interface Member    { id: string; user: { id: string; full_name: string; email: string; job_description?: string }; expires_at: string | null; is_active: boolean }
-interface Group     { id: string; name: string; description: string; permissions: GroupPerm[]; member_count: number; has_admin_access: boolean }
+interface Group     { id: string; name: string; description: string; permissions: GroupPerm[]; member_count: number; has_admin_access: boolean; sees_all_documents: boolean }
 interface User      { id: string; full_name: string; email: string; job_description?: string }
 
+const ADMIN_GROUP_NAME = "Administrators";
 const HOD_GROUP_NAME = "HOD";
+
+/** Names of system-managed groups that cannot be duplicated or deleted. */
+const SYSTEM_GROUPS = new Set([ADMIN_GROUP_NAME, HOD_GROUP_NAME]);
 
 const PERMISSION_STAGES = [
   { value: "creation", label: "Creation", description: "Draft, upload, and resubmit" },
@@ -29,7 +33,12 @@ const PERMISSION_STAGES = [
   { value: "after_approval", label: "After approval", description: "Approved, rejected, or archived" },
 ] as const;
 
-type PermissionStage = (typeof PERMISSION_STAGES)[number]["value"];
+// Used when the org runs RBAC in global single-stage mode.
+const GLOBAL_STAGE = [
+  { value: "any", label: "All stages", description: "One configuration applied across the entire document lifecycle" },
+] as const;
+
+type PermissionStage = string;
 
 const ALL_ACTIONS = [
   { value: "view",     label: "View",     description: "Open and read documents" },
@@ -43,49 +52,162 @@ const ALL_ACTIONS = [
   { value: "delete",   label: "Delete",   description: "Void / delete documents" },
 ];
 
+// Sentinel row key for the "fallback" configuration that applies to every
+// document type (stored on the backend as a permission with document_type = null).
+const GLOBAL_DT_KEY = "__all_document_types__";
+
 function emptyMatrix(docTypes: DocType[]): Record<string, Set<string>> {
-  const matrix: Record<string, Set<string>> = {};
+  const matrix: Record<string, Set<string>> = { [GLOBAL_DT_KEY]: new Set() };
   docTypes.forEach((dt) => { matrix[dt.id] = new Set(); });
   return matrix;
 }
 
-function buildStageMatrices(group: Group, docTypes: DocType[]): Record<PermissionStage, Record<string, Set<string>>> {
-  const stages = PERMISSION_STAGES.reduce((acc, stage) => {
+function buildStageMatrices(
+  group: Group,
+  docTypes: DocType[],
+  singleStage: boolean,
+): Record<PermissionStage, Record<string, Set<string>>> {
+  const stageList = singleStage ? GLOBAL_STAGE : PERMISSION_STAGES;
+  const stages = stageList.reduce((acc, stage) => {
     acc[stage.value] = emptyMatrix(docTypes);
     return acc;
   }, {} as Record<PermissionStage, Record<string, Set<string>>>);
 
   group.permissions.forEach((p) => {
     if (p.action === "admin") return;
-    const stage = (p.stage || "any") as PermissionStage;
+    const stage = p.stage || "any";
+    // Each mode shows only the permissions it manages, matching how the backend
+    // resolves them: global mode reads the "any" config; stage mode reads per-stage.
+    if (singleStage ? stage !== "any" : stage === "any") return;
     if (!stages[stage]) return;
-    if (!p.document_type) return;
-    const key = p.document_type;
-    if (!stages[stage][key]) stages[stage][key] = new Set();
-    stages[stage][key].add(p.action);
+    // A null document_type is the global fallback row.
+    const dtKey = p.document_type ?? GLOBAL_DT_KEY;
+    if (!stages[stage][dtKey]) stages[stage][dtKey] = new Set();
+    stages[stage][dtKey].add(p.action);
   });
 
   return stages;
 }
 
-// ── Permission Matrix ────────────────────────────────────────────────────────
+/** Whether the group currently has any global-fallback (null document_type) rules. */
+function groupUsesGlobalFallback(group: Group): boolean {
+  return group.permissions.some((p) => p.action !== "admin" && !p.document_type);
+}
+
+// ── Duplicate Group Modal ─────────────────────────────────────────────────────
+function DuplicateGroupModal({
+  group,
+  onClose,
+  onDuplicated,
+}: {
+  group: Group;
+  onClose: () => void;
+  onDuplicated: (newGroup: Group) => void;
+}) {
+  const [name, setName] = useState(`${group.name} (Copy)`);
+  const [desc, setDesc] = useState(group.description);
+
+  const mutation = useMutation({
+    mutationFn: () => groupsAPI.duplicate(group.id, { name: name.trim(), description: desc.trim() }),
+    onSuccess: (res) => {
+      toast.success(`Group "${name.trim()}" created with ${group.permissions.filter(p => p.action !== "admin").length} permission rule(s) copied.`);
+      onDuplicated(res.data as Group);
+    },
+    onError: (err: any) =>
+      toast.error(err?.response?.data?.detail || "Failed to duplicate group."),
+  });
+
+  return (
+    <div className="fixed inset-0 z-[60] flex items-center justify-center bg-foreground/40 backdrop-blur-sm p-4">
+      <div className="w-full max-w-md bg-card rounded-2xl overflow-hidden border border-border"
+           style={{ boxShadow: "var(--shadow-elegant)" }}>
+        {/* Header */}
+        <div className="flex items-center justify-between px-6 py-5 border-b border-border">
+          <div className="flex items-center gap-3">
+            <div className="w-9 h-9 rounded-xl bg-accent/15 flex items-center justify-center flex-shrink-0">
+              <Copy className="w-4 h-4 text-accent" />
+            </div>
+            <div>
+              <h2 className="font-semibold text-base text-foreground">Duplicate group</h2>
+              <p className="text-xs text-muted-foreground">Copies name, description and all permission rules.</p>
+            </div>
+          </div>
+          <button onClick={onClose} className="p-1.5 text-muted-foreground hover:text-foreground rounded-lg hover:bg-muted transition-colors">
+            <X className="w-4 h-4" />
+          </button>
+        </div>
+
+        {/* Source badge */}
+        <div className="mx-6 mt-5 flex items-center gap-2 rounded-xl border border-border bg-muted/40 px-4 py-3">
+          <Shield className="w-4 h-4 text-accent flex-shrink-0" />
+          <div className="min-w-0">
+            <p className="text-xs text-muted-foreground">Duplicating</p>
+            <p className="text-sm font-semibold text-foreground truncate">{group.name}</p>
+          </div>
+        </div>
+
+        {/* Form */}
+        <div className="space-y-4 p-6">
+          <div>
+            <label className="label">New group name <span className="text-destructive">*</span></label>
+            <input
+              value={name}
+              onChange={(e) => setName(e.target.value)}
+              className="input"
+              placeholder="e.g. Finance Team (Copy)"
+              autoFocus
+              onKeyDown={(e) => e.key === "Enter" && name.trim() && mutation.mutate()}
+            />
+          </div>
+          <div>
+            <label className="label">Description</label>
+            <input
+              value={desc}
+              onChange={(e) => setDesc(e.target.value)}
+              className="input"
+              placeholder="Optional description…"
+            />
+          </div>
+          <div className="flex gap-3 pt-1">
+            <button
+              onClick={() => mutation.mutate()}
+              disabled={!name.trim() || mutation.isPending}
+              className="btn-primary flex-1 justify-center"
+            >
+              {mutation.isPending && <Loader2 className="w-4 h-4 animate-spin" />}
+              Duplicate group
+            </button>
+            <button onClick={onClose} className="btn-secondary px-6">Cancel</button>
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+}
+
 function PermissionMatrix({
   group,
   docTypes,
+  singleStage,
   onSave,
   isSaving,
 }: {
   group: Group;
   docTypes: DocType[];
-  onSave: (perms: { document_type_id: string; stage: string; action: string }[]) => void;
+  singleStage: boolean;
+  onSave: (perms: { document_type_id: string | null; stage: string; action: string }[]) => void;
   isSaving: boolean;
 }) {
-  const [activeStage, setActiveStage] = useState<PermissionStage>("creation");
-  const [matrices, setMatrices] = useState(() => buildStageMatrices(group, docTypes));
+  const stageList = singleStage ? GLOBAL_STAGE : PERMISSION_STAGES;
+  const [activeStage, setActiveStage] = useState<PermissionStage>(stageList[0].value);
+  const [matrices, setMatrices] = useState(() => buildStageMatrices(group, docTypes, singleStage));
+  const [useGlobal, setUseGlobal] = useState(() => groupUsesGlobalFallback(group));
 
   useEffect(() => {
-    setMatrices(buildStageMatrices(group, docTypes));
-  }, [group.id, group.permissions, docTypes]);
+    setActiveStage(stageList[0].value);
+    setMatrices(buildStageMatrices(group, docTypes, singleStage));
+    setUseGlobal(groupUsesGlobalFallback(group));
+  }, [group.id, group.permissions, docTypes, singleStage]);
 
   const matrix = matrices[activeStage] ?? emptyMatrix(docTypes);
 
@@ -111,13 +233,17 @@ function PermissionMatrix({
   };
 
   const handleSave = () => {
-    const perms: { document_type_id: string; stage: string; action: string }[] = [];
-    PERMISSION_STAGES.forEach(({ value: stage }) => {
+    const perms: { document_type_id: string | null; stage: string; action: string }[] = [];
+    stageList.forEach(({ value: stage }) => {
       const stageMatrix = matrices[stage] ?? emptyMatrix(docTypes);
       Object.entries(stageMatrix).forEach(([key, actions]) => {
+        const isGlobalRow = key === GLOBAL_DT_KEY;
+        // Mutually exclusive: in global-fallback mode save only the fallback row;
+        // otherwise save only the per-document-type rows.
+        if (useGlobal !== isGlobalRow) return;
         actions.forEach((action) => {
           perms.push({
-            document_type_id: key,
+            document_type_id: isGlobalRow ? null : key,
             stage,
             action,
           });
@@ -131,37 +257,83 @@ function PermissionMatrix({
     ...docTypes.map((dt) => ({ key: dt.id, label: dt.name, sublabel: `${dt.code}-XXXXX` })),
   ];
 
+  // Renders one action checkbox cell, inactive (greyed, non-interactive) when
+  // the row's mode isn't the one in use.
+  const renderCheck = (rowKey: string, action: string, disabled: boolean) => {
+    const checked = matrix[rowKey]?.has(action) ?? false;
+    return (
+      <td key={action} className="px-4 py-3.5 text-center">
+        <button
+          type="button"
+          disabled={disabled}
+          onClick={() => toggle(rowKey, action)}
+          className={clsx(
+            "w-6 h-6 rounded-md border-2 flex items-center justify-center mx-auto transition-all",
+            checked
+              ? "bg-[#287EAD] border-[#287EAD]"
+              : "border-border hover:border-[#287EAD]/60",
+            disabled && "opacity-40 cursor-not-allowed hover:border-border",
+          )}
+        >
+          {checked && <Check className="w-4 h-4 text-white" strokeWidth={3} />}
+        </button>
+      </td>
+    );
+  };
+
   return (
     <div className="space-y-6">
-      <div className="flex items-center gap-3 text-sm text-foreground bg-accent/10 border border-accent/30 rounded-xl p-4">
-        <Info className="w-5 h-5 flex-shrink-0 text-accent" />
+      <div className="flex items-center gap-3 text-sm text-foreground bg-[#287EAD]/10 border border-[#287EAD]/30 rounded-xl p-4">
+        <Info className="w-5 h-5 flex-shrink-0 text-[#287EAD]" />
         <span>
-          Configure explicit permissions per document type and lifecycle stage. No wildcard
-          stage or all-type grants are used, so rules do not overlap.
+          {singleStage
+            ? "One configuration applies across the entire document lifecycle (single-stage mode is on in DMS settings)."
+            : "Configure explicit permissions per document type and lifecycle stage. Rules at one stage apply only to that stage."}
         </span>
       </div>
 
-      <div className="flex flex-wrap gap-2">
-        {PERMISSION_STAGES.map((stage) => (
-          <button
-            key={stage.value}
-            type="button"
-            title={stage.description}
-            onClick={() => setActiveStage(stage.value)}
-            className={clsx(
-              "px-4 py-2 rounded-lg text-sm font-medium border transition-colors",
-              activeStage === stage.value
-                ? "bg-accent text-accent-foreground border-accent"
-                : "bg-card text-foreground border-border hover:border-accent/50"
-            )}
-          >
-            {stage.label}
-          </button>
-        ))}
-      </div>
-      <p className="text-xs text-muted-foreground -mt-2">
-        {PERMISSION_STAGES.find((s) => s.value === activeStage)?.description}
-      </p>
+      {/* Fallback (all document types) toggle */}
+      <label className="flex items-start gap-3 rounded-xl border border-border bg-card p-4 cursor-pointer">
+        <input
+          type="checkbox"
+          checked={useGlobal}
+          onChange={(e) => setUseGlobal(e.target.checked)}
+          className="mt-0.5 h-4 w-4 accent-[#287EAD]"
+        />
+        <div>
+          <p className="text-sm font-semibold text-foreground">Use one configuration for all document types</p>
+          <p className="text-xs text-muted-foreground mt-0.5">
+            Set access once and apply it to every document type. The per-document-type
+            rows below are disabled while this is on — use this <span className="font-medium">or</span> per-type rules, not both.
+          </p>
+        </div>
+      </label>
+
+      {!singleStage && (
+        <>
+          <div className="flex flex-wrap gap-2">
+            {PERMISSION_STAGES.map((stage) => (
+              <button
+                key={stage.value}
+                type="button"
+                title={stage.description}
+                onClick={() => setActiveStage(stage.value)}
+                className={clsx(
+                  "px-4 py-2 rounded-lg text-sm font-medium border transition-colors",
+                  activeStage === stage.value
+                    ? "bg-[#287EAD] text-white border-[#287EAD]"
+                    : "bg-card text-foreground border-border hover:border-[#287EAD]/50"
+                )}
+              >
+                {stage.label}
+              </button>
+            ))}
+          </div>
+          <p className="text-xs text-muted-foreground -mt-2">
+            {PERMISSION_STAGES.find((s) => s.value === activeStage)?.description}
+          </p>
+        </>
+      )}
 
       <div className="overflow-x-auto rounded-xl border border-border">
         <table className="w-full text-sm min-w-[900px]">
@@ -177,38 +349,51 @@ function PermissionMatrix({
             </tr>
           </thead>
           <tbody className="divide-y divide-border bg-card">
+            {/* Fallback row — applies to every document type */}
+            <tr className={clsx(
+              "border-b-2 border-[#287EAD]/30 bg-[#287EAD]/5 transition-opacity",
+              !useGlobal && "opacity-50",
+            )}>
+              <td className="px-6 py-3.5">
+                <p className="font-semibold text-sm text-[#287EAD]">All document types</p>
+                <p className="text-xs text-muted-foreground mt-0.5">Fallback for every type</p>
+              </td>
+              {ALL_ACTIONS.map((a) => renderCheck(GLOBAL_DT_KEY, a.value, !useGlobal))}
+              <td className="px-6 py-3.5 text-center">
+                <button
+                  type="button"
+                  disabled={!useGlobal}
+                  onClick={() => toggleAll(GLOBAL_DT_KEY)}
+                  className={clsx(
+                    "text-xs font-semibold text-[#287EAD] hover:text-[#287EAD]/80 hover:underline",
+                    !useGlobal && "opacity-40 cursor-not-allowed no-underline hover:no-underline",
+                  )}
+                >
+                  {(matrix[GLOBAL_DT_KEY]?.size ?? 0) === ALL_ACTIONS.length ? "Clear" : "Select all"}
+                </button>
+              </td>
+            </tr>
             {rows.map(({ key, label, sublabel }) => (
-              <tr key={key} className="hover:bg-muted/40 transition-colors">
+              <tr key={key} className={clsx(
+                "hover:bg-muted/40 transition-colors",
+                useGlobal && "opacity-50",
+              )}>
                 <td className="px-6 py-3.5">
                   <p className="font-medium text-sm text-foreground">
                     {label}
                   </p>
                   <p className="text-xs text-muted-foreground mt-0.5">{sublabel}</p>
                 </td>
-                {ALL_ACTIONS.map((a) => {
-                  const checked = matrix[key]?.has(a.value) ?? false;
-                  return (
-                    <td key={a.value} className="px-4 py-3.5 text-center">
-                      <button
-                        type="button"
-                        onClick={() => toggle(key, a.value)}
-                        className={clsx(
-                          "w-6 h-6 rounded-md border-2 flex items-center justify-center mx-auto transition-all",
-                          checked
-                            ? "bg-accent border-accent"
-                            : "border-border hover:border-accent/60"
-                        )}
-                      >
-                        {checked && <Check className="w-4 h-4 text-accent-foreground" strokeWidth={3} />}
-                      </button>
-                    </td>
-                  );
-                })}
+                {ALL_ACTIONS.map((a) => renderCheck(key, a.value, useGlobal))}
                 <td className="px-6 py-3.5 text-center">
                   <button
                     type="button"
+                    disabled={useGlobal}
                     onClick={() => toggleAll(key)}
-                    className="text-xs font-semibold text-accent hover:text-accent/80 hover:underline"
+                    className={clsx(
+                      "text-xs font-semibold text-[#287EAD] hover:text-[#287EAD]/80 hover:underline",
+                      useGlobal && "opacity-40 cursor-not-allowed no-underline hover:no-underline",
+                    )}
                   >
                     {(matrix[key]?.size ?? 0) === ALL_ACTIONS.length ? "Clear" : "Select all"}
                   </button>
@@ -249,9 +434,20 @@ function GroupDetail({
   const isHodGroup = group.name === HOD_GROUP_NAME;
   const isBuiltInGroup = isHodGroup;
 
+  const { data: dms } = useQuery({
+    queryKey: ["dms-settings"],
+    queryFn: () => dmsSettingsAPI.get().then((r) => r.data),
+  });
+  const singleStage = Boolean(dms?.rbac_single_stage);
+
   const { data: members = [] } = useQuery<Member[]>({
     queryKey: ["group-members", group.id],
     queryFn: () => groupsAPI.members(group.id).then((r) => r.data),
+  });
+
+  const { data: groupDetail } = useQuery<any>({
+    queryKey: ["group", group.id],
+    queryFn: () => groupsAPI.get(group.id).then((r) => r.data),
   });
 
   const { data: allUsers = [] } = useQuery<User[]>({
@@ -264,13 +460,25 @@ function GroupDetail({
   });
 
   const setPermsMutation = useMutation({
-    mutationFn: (perms: { document_type_id: string; stage: string; action: string }[]) =>
+    mutationFn: (perms: { document_type_id: string | null; stage: string; action: string }[]) =>
       groupsAPI.setPermissions(group.id, perms),
     onSuccess: () => {
       toast.success("Permissions saved successfully");
       qc.invalidateQueries({ queryKey: ["groups"] });
     },
     onError: () => toast.error("Failed to save permissions"),
+  });
+
+  const setSeesAllMutation = useMutation({
+    mutationFn: (value: boolean) => groupsAPI.update(group.id, { sees_all_documents: value }),
+    onSuccess: (_d, value) => {
+      toast.success(value
+        ? "This group can now see all documents."
+        : "Document visibility for this group is back to involvement-only.");
+      qc.invalidateQueries({ queryKey: ["groups"] });
+      qc.invalidateQueries({ queryKey: ["group", group.id] });
+    },
+    onError: () => toast.error("Failed to update document visibility"),
   });
 
   const deleteMutation = useMutation({
@@ -303,7 +511,20 @@ function GroupDetail({
     onError: () => toast.error("Failed to remove member"),
   });
 
+  const setHeadMutation = useMutation({
+    mutationFn: (headId: string | null) =>
+      groupsAPI.update(group.id, { head_id: headId }).then((r) => r.data),
+    onSuccess: (_data, headId) => {
+      toast.success(headId === null ? "Group approver cleared" : "Group approver updated");
+      qc.invalidateQueries({ queryKey: ["groups"] });
+      qc.invalidateQueries({ queryKey: ["group", group.id] });
+      qc.invalidateQueries({ queryKey: ["group-members", group.id] });
+    },
+    onError: (err: any) => toast.error(err?.response?.data?.head_id?.[0] || "Failed to update group approver"),
+  });
+
   const memberIds = new Set(members?.map((m) => m.user.id) ?? []);
+  const currentHead = groupDetail?.head ?? null;
 
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-foreground/40 backdrop-blur-sm p-4">
@@ -378,9 +599,29 @@ function GroupDetail({
         <div className="flex-1 overflow-y-auto p-8 bg-background">
           {tab === "permissions" && (
             <div className="space-y-6">
+              {/* Sees-all-documents (auditor) toggle */}
+              <label className="flex items-start gap-3 rounded-xl border border-border bg-card p-4 cursor-pointer">
+                <input
+                  type="checkbox"
+                  checked={Boolean(groupDetail?.sees_all_documents ?? group.sees_all_documents)}
+                  disabled={setSeesAllMutation.isPending}
+                  onChange={(e) => setSeesAllMutation.mutate(e.target.checked)}
+                  className="mt-0.5 h-4 w-4 accent-[#287EAD]"
+                />
+                <div>
+                  <p className="text-sm font-semibold text-foreground">This group can see all documents</p>
+                  <p className="text-xs text-muted-foreground mt-0.5">
+                    Members get full visibility of every document (e.g. auditors), bypassing the
+                    involvement rule. What they can <span className="font-medium">do</span> with each
+                    document is still governed by the permissions below.
+                  </p>
+                </div>
+              </label>
+
               <PermissionMatrix
                 group={group}
                 docTypes={docTypes}
+                singleStage={singleStage}
                 onSave={(perms) => setPermsMutation.mutate(perms)}
                 isSaving={setPermsMutation.isPending}
               />
@@ -392,6 +633,33 @@ function GroupDetail({
               {/* Current Members */}
               <div>
                 <h3 className="font-semibold text-base text-foreground mb-4">Current members</h3>
+                <div className="mb-6">
+                  <h4 className="text-sm font-semibold text-foreground mb-2">Designated approver</h4>
+                  {currentHead ? (
+                    <div className="flex items-center gap-4 p-4 bg-accent/10 border border-accent/30 rounded-xl">
+                      <div className="w-10 h-10 rounded-full bg-accent/20 flex items-center justify-center text-accent text-sm font-bold flex-shrink-0">
+                        {currentHead.full_name.split(" ").map((n: string) => n[0]).join("").slice(0, 2)}
+                      </div>
+                      <div className="flex-1 min-w-0">
+                        <p className="font-medium text-foreground text-sm">{currentHead.full_name}</p>
+                        <p className="text-xs text-muted-foreground">{currentHead.email}</p>
+                      </div>
+                      <div className="flex items-center gap-2">
+                        <span className="badge bg-accent/15 text-accent text-xs">Approver</span>
+                        <button
+                          type="button"
+                          onClick={() => setHeadMutation.mutate(null)}
+                          disabled={setHeadMutation.isPending}
+                          className="text-xs font-semibold text-muted-foreground hover:text-destructive transition-colors"
+                        >
+                          Clear approver
+                        </button>
+                      </div>
+                    </div>
+                  ) : (
+                    <div className="border border-dashed border-border rounded-xl p-4 text-sm text-muted-foreground">No approver set for this group.</div>
+                  )}
+                </div>
                 <div className="space-y-2">
                   {members?.map((m) => (
                     <div key={m.id} className="flex items-center gap-4 p-4 bg-card border border-border rounded-xl hover:border-accent/40 transition-colors group">
@@ -412,12 +680,22 @@ function GroupDetail({
                           </span>
                         )}
                         {!isHodGroup && (
-                          <button
-                            onClick={() => removeMemberMutation.mutate(m.user.id)}
-                            className="opacity-0 group-hover:opacity-100 text-destructive hover:bg-destructive/10 p-2 rounded-lg transition-all"
-                          >
-                            <X className="w-4 h-4" />
-                          </button>
+                          <>
+                            <button
+                              onClick={() => removeMemberMutation.mutate(m.user.id)}
+                              className="opacity-0 group-hover:opacity-100 text-destructive hover:bg-destructive/10 p-2 rounded-lg transition-all"
+                            >
+                              <X className="w-4 h-4" />
+                            </button>
+                            {currentHead?.id !== m.user.id && (
+                              <button
+                                onClick={() => setHeadMutation.mutate(m.user.id)}
+                                className="ml-2 opacity-0 group-hover:opacity-100 text-accent hover:bg-accent/10 p-2 rounded-lg transition-all text-xs"
+                              >
+                                Set as approver
+                              </button>
+                            )}
+                          </>
                         )}
                       </div>
                     </div>
@@ -465,13 +743,15 @@ function GroupDetail({
                         <span className="badge text-xs bg-muted text-muted-foreground">
                           {u.job_description || "Staff"}
                         </span>
-                        <button
-                          onClick={() => addMemberMutation.mutate(u.id)}
-                          disabled={addMemberMutation.isPending}
-                          className="btn-primary text-xs px-4 py-2"
-                        >
-                          <UserPlus className="w-3.5 h-3.5" /> Add
-                        </button>
+                        <div className="flex items-center gap-2">
+                          <button
+                            onClick={() => addMemberMutation.mutate(u.id)}
+                            disabled={addMemberMutation.isPending}
+                            className="btn-primary text-xs px-4 py-2"
+                          >
+                            <UserPlus className="w-3.5 h-3.5" /> Add
+                          </button>
+                        </div>
                       </div>
                     ))}
                 </div>
@@ -492,6 +772,7 @@ export default function GroupsPage() {
   const [showCreate, setShowCreate] = useState(false);
   const [newName, setNewName] = useState("");
   const [newDesc, setNewDesc] = useState("");
+  const [duplicatingGroup, setDuplicatingGroup] = useState<Group | null>(null);
 
   const { data: groups = [], isLoading } = useQuery<Group[]>({
     queryKey: ["groups"],
@@ -600,8 +881,8 @@ export default function GroupsPage() {
 
         {orderedGroups?.map((group) => {
           const ruleCount = group.permissions.filter((p) => p.action !== "admin").length;
+          const isSystemGroup = SYSTEM_GROUPS.has(group.name);
           const isHodGroup = group.name === HOD_GROUP_NAME;
-          const isSystemGroup = isHodGroup;
 
           return (
             <div
@@ -640,7 +921,20 @@ export default function GroupsPage() {
                     <Settings2 className="w-4 h-4" /> {ruleCount} rules
                   </span>
                 </div>
-                <div className="flex items-center gap-2">
+                <div className="flex items-center gap-1">
+                  {!isSystemGroup && (
+                    <button
+                      type="button"
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        setDuplicatingGroup(group);
+                      }}
+                      className="p-2 rounded-lg text-muted-foreground hover:text-accent hover:bg-accent/10 transition-colors opacity-0 group-hover:opacity-100"
+                      title="Duplicate group"
+                    >
+                      <Copy className="w-4 h-4" />
+                    </button>
+                  )}
                   {!isSystemGroup && (
                     <button
                       type="button"
@@ -651,7 +945,7 @@ export default function GroupsPage() {
                         }
                       }}
                       disabled={deleteGroupMutation.isPending}
-                      className="p-2 rounded-lg text-muted-foreground hover:text-destructive hover:bg-destructive/10 transition-colors"
+                      className="p-2 rounded-lg text-muted-foreground hover:text-destructive hover:bg-destructive/10 transition-colors opacity-0 group-hover:opacity-100"
                       title="Delete group"
                     >
                       <Trash2 className="w-4 h-4" />
@@ -687,6 +981,19 @@ export default function GroupsPage() {
           group={selectedGroup}
           docTypes={docTypes ?? []}
           onClose={() => setSelected(null)}
+        />
+      )}
+
+      {/* Duplicate Modal */}
+      {duplicatingGroup && (
+        <DuplicateGroupModal
+          group={duplicatingGroup}
+          onClose={() => setDuplicatingGroup(null)}
+          onDuplicated={(newGroup) => {
+            setDuplicatingGroup(null);
+            qc.invalidateQueries({ queryKey: ["groups"] });
+            setSelected(newGroup);
+          }}
         />
       )}
     </div>

@@ -10,15 +10,15 @@
  *   - "Add documents" search modal
  */
 
-import { useState, useRef } from "react";
+import { useState } from "react";
 import { useParams, useNavigate, Link } from "react-router-dom";
 import {
   useQuery, useMutation, useQueryClient,
 } from "@tanstack/react-query";
 import {
-  Folder, FolderOpen, Star, FileText, ArrowLeft,
+  Folder, FolderOpen, Star, FileText,
   Plus, Trash2, Search, X, Loader2, ExternalLink,
-  ChevronRight, MoreHorizontal, FolderPlus,
+  ChevronRight, MoreHorizontal,
 } from "lucide-react";
 import { formatDistanceToNow } from "date-fns";
 import clsx from "clsx";

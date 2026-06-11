@@ -60,6 +60,9 @@ export type DmsSettings = {
   signed_file_urls_enabled: boolean;
   auto_archive_enabled: boolean;
   auto_archive_after_days: number;
+  trash_auto_empty_enabled: boolean;
+  trash_retention_days: number;
+  rbac_single_stage: boolean;
   require_metadata_on_upload: boolean;
   updated_at?: string;
 };
@@ -80,36 +83,50 @@ function normalizeApiBase(rawBase: string): string {
 
 function resolveApiBaseUrl(): string {
   const rawApiUrl = import.meta.env.VITE_API_URL?.trim();
-  console.log('Raw VITE_API_URL from import.meta.env:', rawApiUrl);
+  if (import.meta.env.DEV) {
+    console.warn('Raw VITE_API_URL from import.meta.env:', rawApiUrl);
+  }
   
   if (!rawApiUrl) {
-    console.log('No VITE_API_URL found, using default /api/v1');
+    if (import.meta.env.DEV) {
+      console.warn('No VITE_API_URL found, using default /api/v1');
+    }
     return "/api/v1";
   }
 
   const normalized = normalizeApiBase(rawApiUrl);
-  console.log('Normalized API URL:', normalized);
+  if (import.meta.env.DEV) {
+    console.warn('Normalized API URL:', normalized);
+  }
 
   if (typeof window !== "undefined") {
     try {
       const parsed = new URL(normalized, window.location.origin);
       if (parsed.protocol === "http:" || parsed.protocol === "https:") {
         const finalUrl = parsed.href.replace(/\/+$|\/$/, "");
-        console.log('Final resolved API URL:', finalUrl);
+        if (import.meta.env.DEV) {
+          console.warn('Final resolved API URL:', finalUrl);
+        }
         return finalUrl;
       }
     } catch (error) {
-      console.log('URL parsing failed, falling back to /api/v1', error);
+      if (import.meta.env.DEV) {
+        console.warn('URL parsing failed, falling back to /api/v1', error);
+      }
       // fall back to proxy-friendly relative API path
     }
   }
 
-  console.log('Using fallback /api/v1');
+  if (import.meta.env.DEV) {
+    console.warn('Using fallback /api/v1');
+  }
   return "/api/v1";
 }
 
 export const apiBaseUrl = resolveApiBaseUrl();
-console.log('API Base URL resolved to:', apiBaseUrl);
+if (import.meta.env.DEV) {
+  console.warn('API Base URL resolved to:', apiBaseUrl);
+}
 
 export const api = axios.create({
   baseURL: apiBaseUrl,
@@ -154,6 +171,19 @@ api.interceptors.request.use((config: InternalAxiosRequestConfig) => {
 
   const token = authState.accessToken;
   if (token) config.headers.Authorization = `Bearer ${token}`;
+  if (config.data instanceof FormData) {
+    const headers = config.headers as unknown as {
+      delete?: (key: string) => void;
+      [key: string]: unknown;
+    };
+    if (typeof headers.delete === "function") {
+      headers.delete("Content-Type");
+      headers.delete("content-type");
+    } else {
+      delete headers["Content-Type"];
+      delete headers["content-type"];
+    }
+  }
   return config;
 });
 
@@ -265,7 +295,40 @@ export const documentsAPI = {
   editMetadata: (id: string, data: Record<string, unknown>) =>
     api.patch(`/documents/${id}/edit_metadata/`, data),
 
+  /**
+   * Re-fill a built-template form document in-app; regenerates its PDF view.
+   * Newly attached files are sent as multipart form attachments (stored on the
+   * document's metadata.form, not as new document versions).
+   */
+  updateForm: (
+    id: string,
+    values: Record<string, unknown>,
+    attachments: Array<{ field: string; file: File }> = [],
+  ) => {
+    if (attachments.length === 0) {
+      return api.post(`/documents/${id}/update_form/`, { values });
+    }
+    const fd = new FormData();
+    fd.append("values", JSON.stringify(values));
+    for (const { field, file } of attachments) {
+      fd.append(field, file, file.name);
+    }
+    return api.post(`/documents/${id}/update_form/`, fd, {
+      headers: { "Content-Type": undefined },
+    });
+  },
+
+  downloadFormAttachment: (id: string, fieldKey: string) =>
+    api.get(`/documents/${id}/form_attachment/${encodeURIComponent(fieldKey)}/`, {
+      responseType: "blob",
+    }),
+
+  /** Move a (draft/returned/rejected) document to Trash (soft delete). */
   delete: (id: string) => api.delete(`/documents/${id}/`),
+  /** Restore a document from Trash. */
+  restore: (id: string) => api.post(`/documents/${id}/restore/`),
+  /** Permanently delete a document that is in Trash. */
+  purge: (id: string) => api.post(`/documents/${id}/purge/`),
   submit: (id: string) => api.post(`/documents/${id}/submit/`),
   archive: (id: string) => api.post(`/documents/${id}/archive/`),
 
@@ -303,7 +366,7 @@ export const documentsAPI = {
 
   bulkAction: (
     documentIds: string[],
-    action: "approve" | "reject" | "archive" | "void",
+    action: "approve" | "reject" | "archive" | "void" | "trash" | "restore" | "purge",
     comment = ""
   ) =>
     api.post("/documents/bulk_action/", {
@@ -319,6 +382,10 @@ export const documentsAPI = {
     attachment_mode: "separate" | "combined";
     message?: string;
   }) => api.post("/documents/email_selected/", data),
+
+  /** Bulk-download selected documents as a single ZIP (returns a Blob). */
+  downloadSelected: (documentIds: string[]) =>
+    api.post("/documents/download_selected/", { document_ids: documentIds }, { responseType: "blob" }),
 
   shareSelected: (data: {
     document_ids: string[];
@@ -439,6 +506,9 @@ export const documentTypesAPI = {
   update: (id: string, data: unknown) =>
     api.patch(`/documents/types/${id}/`, data),
   delete: (id: string) => api.delete(`/documents/types/${id}/`),
+  /** Deep-clone a document type (fields + rules). Returns the new type. */
+  duplicate: (id: string, data: { name: string; code: string }) =>
+    api.post(`/documents/types/${id}/duplicate/`, data),
 };
 
 export const searchAPI = {
@@ -598,12 +668,14 @@ export const groupsAPI = {
   get: (id: string) => api.get(`/groups/${id}/`),
   create: (data: { name: string; description?: string }) =>
     api.post("/groups/", data),
-  update: (id: string, data: { name?: string; description?: string }) =>
+  update: (id: string, data: { name?: string; description?: string; head_id?: string | null; sees_all_documents?: boolean }) =>
     api.patch(`/groups/${id}/`, data),
   delete: (id: string) => api.delete(`/groups/${id}/`),
+  duplicate: (id: string, data: { name: string; description?: string }) =>
+    api.post(`/groups/${id}/duplicate/`, data),
   setPermissions: (
     id: string,
-    permissions: { document_type_id: string; stage: string; action: string }[]
+    permissions: { document_type_id: string | null; stage: string; action: string }[]
   ) => api.post(`/groups/${id}/set_permissions/`, { permissions }),
   members: (id: string) => api.get(`/groups/${id}/members/`),
   addMember: (id: string, userId: string, expiresAt?: string) =>
@@ -650,9 +722,9 @@ export const templatesAPI = {
   create: (data: unknown) =>
     api.post("/templates/", data, data instanceof FormData ? { headers: { "Content-Type": undefined } } : undefined),
 
-  /** PATCH /templates/{id}/ — update name, description, sections, category, tags */
+  /** PATCH /templates/{id}/ — update name, description, sections, category, tags, or replace the Office file (FormData) */
   update: (id: string, data: unknown) =>
-    api.patch(`/templates/${id}/`, data),
+    api.patch(`/templates/${id}/`, data, data instanceof FormData ? { headers: { "Content-Type": undefined } } : undefined),
 
   /** DELETE /templates/{id}/ — soft delete (sets is_active=false) */
   delete: (id: string) => api.delete(`/templates/${id}/`),
@@ -689,6 +761,34 @@ export const templatesAPI = {
     draft_from_template?: boolean;
   }) => api.post(`/templates/${payload.template_id}/fill/`, payload),
 
+  fillTemplateWithAttachments: (payload: {
+    template_id: string;
+    values: Record<string, unknown>;
+    output_format: "pdf" | "docx";
+    title: string;
+    document_type_id?: string;
+    draft_from_template?: boolean;
+    attachments: Array<{ field: string; file: File }>;
+  }) => {
+    const fd = new FormData();
+    fd.append("values", JSON.stringify(payload.values));
+    fd.append("output_format", payload.output_format);
+    fd.append("title", payload.title);
+    if (payload.document_type_id) fd.append("document_type_id", payload.document_type_id);
+    fd.append("draft_from_template", String(Boolean(payload.draft_from_template)));
+    for (const { field, file } of payload.attachments) {
+      fd.append(field, file, file.name);
+    }
+    return api.post(`/templates/${payload.template_id}/fill/`, fd, {
+      headers: { "Content-Type": undefined },
+    });
+  },
+
+  /**
+   * POST /documents/{id}/upload_version/
+   * Upload a file as a named form attachment after a built-template document is created.
+   * Sends multipart FormData: file + field_key (used as the change_summary label).
+   */
   /**
    * GET /templates/{id}/placeholders/
    * For uploaded templates — returns auto-detected {{placeholder}} keys.

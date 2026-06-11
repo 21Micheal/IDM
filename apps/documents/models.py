@@ -46,6 +46,16 @@ class DocumentType(models.Model):
     code             = models.CharField(max_length=20, unique=True)
     reference_prefix = models.CharField(max_length=10)
     reference_padding = models.PositiveSmallIntegerField(default=5)
+    title_field      = models.CharField(
+        max_length=100,
+        blank=True,
+        default="filename",
+        help_text=(
+            "Source whose value names documents of this type. Use 'filename' (default) "
+            "to name documents after the uploaded file, or a field key such as "
+            "title, supplier, or reference_number."
+        ),
+    )
     description      = models.TextField(blank=True)
     icon             = models.CharField(max_length=60, blank=True)
 
@@ -258,6 +268,16 @@ class DMSSettings(models.Model):
     auto_archive_enabled = models.BooleanField(default=False)
     auto_archive_after_days = models.PositiveIntegerField(default=365)
 
+    # Trash: automatically empty (permanently delete) documents that have sat in
+    # Trash longer than the retention period.
+    trash_auto_empty_enabled = models.BooleanField(default=False)
+    trash_retention_days = models.PositiveIntegerField(default=30)
+
+    # RBAC: when True, group permissions use a single global configuration that
+    # applies across the whole document lifecycle (stage selection is hidden).
+    # When False (default), permissions are configured per lifecycle stage.
+    rbac_single_stage = models.BooleanField(default=False)
+
     require_metadata_on_upload = models.BooleanField(default=True)
     bulk_scan_submit_for_approval = models.BooleanField(
         default=False,
@@ -288,6 +308,8 @@ class DMSSettings(models.Model):
             self.watermark_opacity = 80
         if self.auto_archive_after_days < 1:
             self.auto_archive_after_days = 1
+        if self.trash_retention_days < 1:
+            self.trash_retention_days = 1
         super().save(*args, **kwargs)
 
     @classmethod
@@ -345,6 +367,14 @@ class Document(models.Model):
         DocumentType, on_delete=models.PROTECT, related_name="documents"
     )
     status           = models.CharField(max_length=80, default=DocumentStatus.DRAFT, db_index=True)
+    # Soft delete ("Trash"). A non-null deleted_at means the document is in Trash:
+    # hidden from normal lists, restorable, and permanently removed by the
+    # empty-trash job after the configured retention period.
+    deleted_at       = models.DateTimeField(null=True, blank=True, db_index=True)
+    deleted_by       = models.ForeignKey(
+        settings.AUTH_USER_MODEL, null=True, blank=True,
+        on_delete=models.SET_NULL, related_name="trashed_documents",
+    )
     supplier         = models.CharField(max_length=255, blank=True, db_index=True)
     amount           = models.DecimalField(max_digits=18, decimal_places=2, null=True, blank=True)
     currency         = models.CharField(max_length=3, default="USD")
@@ -447,6 +477,23 @@ class Document(models.Model):
 
     def __str__(self):
         return f"[{self.reference_number}] {self.title}"
+
+    def hard_delete(self):
+        """Permanently remove the document, its versions, and their stored files."""
+        import logging as _logging
+        _log = _logging.getLogger(__name__)
+        try:
+            for version in self.versions.all():
+                if version.file:
+                    version.file.delete(save=False)
+        except Exception:
+            _log.exception("hard_delete: failed clearing version files for %s", self.id)
+        try:
+            if self.file:
+                self.file.delete(save=False)
+        except Exception:
+            _log.exception("hard_delete: failed clearing file for %s", self.id)
+        self.delete()
 
     def get_file_extension(self):
         return os.path.splitext(self.file_name)[1].lower()

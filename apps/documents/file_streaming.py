@@ -30,22 +30,22 @@ def signed_file_urls_enabled() -> bool:
     return DMSSettings.load().signed_file_urls_enabled
 
 
-def user_can_view_document(user: User, doc: Document) -> bool:
-    if not user or not user.is_authenticated:
+def user_is_involved_with_document(user: User, doc: Document) -> bool:
+    """Access is scoped to **involvement**: a non-admin may only reach a workflow
+    document if they uploaded/own it, have ever been assigned a workflow task on
+    it, or hold an active (non-revoked, unexpired) share. Group permissions then
+    decide *what* they can do with documents they're involved in — they do NOT
+    grant blanket access to every document of a type."""
+    if not user or not getattr(user, "is_authenticated", False):
         return False
-    if user.has_admin_access:
+    # Members of a "sees all documents" group are involved with everything.
+    if getattr(user, "sees_all_documents", False):
         return True
-    if getattr(doc, "is_self_upload", False):
-        return doc.uploaded_by_id == user.id or getattr(doc, "owned_by_id", None) == user.id
-    document_type_id = str(getattr(doc, "document_type_id", None) or "")
-    if not document_type_id:
-        return False
     if doc.uploaded_by_id == user.id or getattr(doc, "owned_by_id", None) == user.id:
         return True
     if WorkflowTask.objects.filter(
         assigned_to=user,
         workflow_instance__document_id=doc.id,
-        status__in=["pending", "in_progress", "held", "returned"],
     ).exists():
         return True
     if DocumentShare.objects.filter(
@@ -56,8 +56,20 @@ def user_can_view_document(user: User, doc: Document) -> bool:
         models.Q(expires_at__isnull=True) | models.Q(expires_at__gt=timezone.now())
     ).exists():
         return True
-    perms = user.get_all_permissions_for_doctype(document_type_id, document=doc)
-    return GroupAction.VIEW.value in perms
+    return False
+
+
+def user_can_view_document(user: User, doc: Document) -> bool:
+    if not user or not user.is_authenticated:
+        return False
+    if user.has_admin_access:
+        return True
+    if getattr(doc, "is_self_upload", False):
+        return doc.uploaded_by_id == user.id or getattr(doc, "owned_by_id", None) == user.id
+    if not str(getattr(doc, "document_type_id", None) or ""):
+        return False
+    # Involvement is the sole gate for viewing a workflow document.
+    return user_is_involved_with_document(user, doc)
 
 
 def user_can_download_document(user: User, doc: Document) -> bool:
@@ -67,6 +79,7 @@ def user_can_download_document(user: User, doc: Document) -> bool:
         return True
     if getattr(doc, "is_self_upload", False):
         return doc.uploaded_by_id == user.id or getattr(doc, "owned_by_id", None) == user.id
+    # A download-level share grants download on its own.
     if DocumentShare.objects.filter(
         document=doc,
         recipient=user,
@@ -78,6 +91,9 @@ def user_can_download_document(user: User, doc: Document) -> bool:
         return True
     document_type_id = str(getattr(doc, "document_type_id", None) or "")
     if not document_type_id:
+        return False
+    # Must be involved AND have DOWNLOAD on the type.
+    if not user_is_involved_with_document(user, doc):
         return False
     perms = user.get_all_permissions_for_doctype(document_type_id, document=doc)
     return GroupAction.DOWNLOAD.value in perms
@@ -94,6 +110,9 @@ def user_can_edit_document(user: User, doc: Document) -> bool:
         return False
     document_type_id = str(getattr(doc, "document_type_id", None) or "")
     if not document_type_id:
+        return False
+    # Must be involved AND have EDIT on the type.
+    if not user_is_involved_with_document(user, doc):
         return False
     perms = user.get_all_permissions_for_doctype(document_type_id, document=doc)
     return GroupAction.EDIT.value in perms

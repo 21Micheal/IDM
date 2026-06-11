@@ -12,6 +12,7 @@ Changes from previous version:
 from django.contrib.auth.models import AbstractBaseUser, BaseUserManager, PermissionsMixin
 from django.db import models
 from django.utils import timezone
+from django.utils.functional import cached_property
 from django.db.models import Q
 from datetime import timedelta
 import uuid
@@ -146,15 +147,30 @@ class User(AbstractBaseUser, PermissionsMixin):
         stage: str | None = None,
     ) -> set[str]:
         """
-        Return all GroupAction values granted to this user by active group memberships.
-        Permissions are intentionally exact: one document type, one lifecycle
-        stage. This avoids overlapping wildcard grants and keeps stage-based
-        access auditable.
+        Return all GroupAction values granted to this user by active group
+        memberships for a document type.
+
+        Stage semantics:
+          - A permission saved at stage "any" ("all stages") is a WILDCARD that
+            applies to every lifecycle stage. (Previously these silently never
+            applied, so rules set at the "any" stage did nothing.)
+          - A specific-stage query (e.g. "creation") returns rows for that stage
+            PLUS any "any" wildcards.
+          - A stage-agnostic query (None / "any") — used by global single-stage
+            mode — returns the org's "all stages" config.
         """
-        if document_type_id is None or stage in (None, AccessStage.ANY.value):
+        if document_type_id is None:
             return set()
         qs = GroupPermission.objects.filter(self._active_group_permissions_q())
-        qs = qs.filter(document_type_id=document_type_id, stage=stage)
+        # Include this document type's explicit rows PLUS global wildcard rows
+        # (document_type IS NULL) — the "fallback" configuration that applies to
+        # every document type. The Groups UI keeps these mutually exclusive
+        # (either a global fallback or per-type rules), so they don't double up.
+        qs = qs.filter(Q(document_type_id=document_type_id) | Q(document_type__isnull=True))
+        if stage in (None, AccessStage.ANY.value):
+            qs = qs.filter(stage=AccessStage.ANY.value)
+        else:
+            qs = qs.filter(Q(stage=stage) | Q(stage=AccessStage.ANY.value))
         return set(
             qs.exclude(action=GroupAction.ADMIN.value)
               .values_list("action", flat=True)
@@ -167,6 +183,24 @@ class User(AbstractBaseUser, PermissionsMixin):
         Application administration is user-level, not group-granted.
         """
         return bool(self.is_superuser or self.is_staff)
+
+    @cached_property
+    def sees_all_documents(self) -> bool:
+        """
+        True if the user belongs to any active group flagged `sees_all_documents`.
+        Such users are treated as *involved* with every document (full visibility
+        and view), while what they can DO is still governed by group permissions.
+        Cached per instance to avoid repeated queries during list serialization.
+        """
+        if self.has_admin_access:
+            return True
+        now = timezone.now()
+        return self.group_memberships.filter(
+            group__is_active=True,
+            group__sees_all_documents=True,
+        ).filter(
+            Q(expires_at__isnull=True) | Q(expires_at__gt=now)
+        ).exists()
 
     # Convenience helpers
     @property
@@ -190,9 +224,14 @@ class User(AbstractBaseUser, PermissionsMixin):
           - Explicit permissions tied to this document type
           - Wildcard permissions (document_type IS NULL) that apply to every type
 
-        When `document` is provided, permissions are resolved for its lifecycle stage.
+        When `document` is provided, permissions are resolved for its lifecycle
+        stage — unless the org runs in global single-stage mode, in which case one
+        configuration ("any") applies across the whole lifecycle.
         """
-        if document is not None:
+        from apps.documents.access import permission_stage_is_global
+        if permission_stage_is_global():
+            stage = AccessStage.ANY.value
+        elif document is not None:
             from apps.documents.access import resolve_access_stage
             stage = resolve_access_stage(document)
         return self.get_group_permissions_for_doctype(document_type_id, stage=stage)
@@ -358,8 +397,19 @@ class UserGroup(models.Model):
     name        = models.CharField(max_length=120, unique=True)
     description = models.TextField(blank=True)
     is_active   = models.BooleanField(default=True)
+    # Members of a `sees_all_documents` group are treated as involved with every
+    # document — full visibility/view across all types (e.g. auditors). What they
+    # can DO is still governed by this group's per-type permissions.
+    sees_all_documents = models.BooleanField(default=False)
     created_by  = models.ForeignKey(
         User, null=True, on_delete=models.SET_NULL, related_name="created_groups"
+    )
+    head        = models.ForeignKey(
+        User,
+        null=True,
+        blank=True,
+        on_delete=models.SET_NULL,
+        related_name="headed_groups",
     )
     created_at  = models.DateTimeField(auto_now_add=True)
     updated_at  = models.DateTimeField(auto_now=True)

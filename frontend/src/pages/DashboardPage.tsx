@@ -20,6 +20,7 @@ import { highlightSearchText, getPreferredHighlights } from "@/lib/search";
 import { QUERY_FIVE_MIN_STALE, QUERY_SHORT_STALE, QUERY_FOCUS_OFF } from "@/lib/reactQueryDefaults";
 import { formatDocumentFileType } from "@/lib/documentFormat";
 import { preloadDocumentWorkspace } from "@/lib/routePreload";
+import statusUtils from "@/lib/status";
 import {
   DEFAULT_WORKFLOW_TASK_FILTERS,
   buildWorkflowTaskFilterOptions,
@@ -37,6 +38,8 @@ import {
 const RECENT_DOCS_PAGE_SIZE = 5;
 const RECENT_AUDIT_PAGE_SIZE = 5;
 const TREND_WINDOW_DAYS = 30;
+const PERCENT_TREND_MIN_BASELINE = 20;
+const PERCENT_TREND_MAX_ABS = 100;
 
 type PaginatedResponse<T> = {
   count: number;
@@ -90,6 +93,7 @@ function getDashboardTrendWindow() {
 
   return {
     today: toDateParam(today),
+    yesterday: toDateParam(addDays(today, -1)),
     currentFrom: toDateParam(addDays(today, -(TREND_WINDOW_DAYS - 1))),
     currentTo: toDateParam(today),
     previousFrom: toDateParam(addDays(today, -(TREND_WINDOW_DAYS * 2 - 1))),
@@ -109,6 +113,7 @@ function buildTrend(
   positiveWhenIncrease: boolean,
   label: string,
 ): StatTrend {
+  const delta = current - previous;
   const direction =
     current > previous ? "up" : current < previous ? "down" : "flat";
   const isPositive =
@@ -127,15 +132,29 @@ function buildTrend(
   if (previous === 0) {
     return {
       value: current,
-      isPositive: true,
+      isPositive,
       direction: "up",
       suffix: " new",
       label,
     };
   }
 
+  const percentChange = getPercentChange(current, previous);
+  if (
+    previous < PERCENT_TREND_MIN_BASELINE ||
+    Math.abs(percentChange) > PERCENT_TREND_MAX_ABS
+  ) {
+    return {
+      value: Math.abs(delta),
+      isPositive,
+      direction,
+      suffix: Math.abs(delta) === 1 ? " doc" : " docs",
+      label,
+    };
+  }
+
   return {
-    value: getPercentChange(current, previous),
+    value: Math.abs(percentChange),
     isPositive,
     direction,
     label,
@@ -378,7 +397,7 @@ export default function DashboardPage() {
   // ── Queries ───────────────────────────────────────────────────────────────
 
   const { data: recentDocs, isLoading: docsLoading } = useQuery({
-    queryKey: ["documents", "recent", recentDocsPage],
+          queryKey: ["documents", "recent", recentDocsPage],
     queryFn: () =>
       documentsAPI.list({
         page: recentDocsPage,
@@ -415,6 +434,21 @@ export default function DashboardPage() {
         status: "approved",
         is_self_upload: false,
         approved_from: trendWindow.today,
+        page: 1,
+        page_size: 1,
+      }).then((r) => r.data.count ?? 0),
+    enabled: metricsEnabled,
+    ...QUERY_FIVE_MIN_STALE,
+  });
+
+  const { data: approvedYesterdayCount = 0 } = useQuery({
+    queryKey: ["documents", "approved", "yesterday-count", trendWindow.yesterday],
+    queryFn: () =>
+      documentsAPI.list({
+        status: "approved",
+        is_self_upload: false,
+        approved_from: trendWindow.yesterday,
+        approved_to: trendWindow.yesterday,
         page: 1,
         page_size: 1,
       }).then((r) => r.data.count ?? 0),
@@ -478,36 +512,6 @@ export default function DashboardPage() {
     ...QUERY_FIVE_MIN_STALE,
   });
 
-  const { data: approvedThisPeriod = 0 } = useQuery({
-    queryKey: ["documents", "approved", "approved-count", trendWindow.currentFrom, trendWindow.currentTo],
-    queryFn: () =>
-      documentsAPI.list({
-        status: "approved",
-        is_self_upload: false,
-        approved_from: trendWindow.currentFrom,
-        approved_to: trendWindow.currentTo,
-        page: 1,
-        page_size: 1,
-      }).then((r) => r.data.count ?? 0),
-    enabled: metricsEnabled,
-    ...QUERY_FIVE_MIN_STALE,
-  });
-
-  const { data: approvedPreviousPeriod = 0 } = useQuery({
-    queryKey: ["documents", "approved", "approved-count", trendWindow.previousFrom, trendWindow.previousTo],
-    queryFn: () =>
-      documentsAPI.list({
-        status: "approved",
-        is_self_upload: false,
-        approved_from: trendWindow.previousFrom,
-        approved_to: trendWindow.previousTo,
-        page: 1,
-        page_size: 1,
-      }).then((r) => r.data.count ?? 0),
-    enabled: metricsEnabled,
-    ...QUERY_FIVE_MIN_STALE,
-  });
-
   const { data: myTasks = [], isLoading: tasksLoading } = useQuery({
     queryKey: ["workflow", "my-tasks"],
     queryFn: () => workflowAPI.myTasks().then((r) => r.data.results ?? r.data),
@@ -550,7 +554,30 @@ export default function DashboardPage() {
 
   // ── Computed Values ───────────────────────────────────────────────────────
 
-  const recentDocsCount = recentDocs?.count ?? 0;
+  // Allow strict client-side filtering of the recent documents view when
+  // URL query params are present (e.g. coming from /documents?status=...).
+  const urlSearchParams = useMemo(() => new URLSearchParams(window.location.search), []);
+  const urlStatus = urlSearchParams.get("status") || "";
+  const urlDocType = urlSearchParams.get("document_type") || "";
+
+  const recentDocsDisplay = useMemo(() => {
+    if (!recentDocs) return recentDocs;
+    if (!urlStatus && !urlDocType) return recentDocs;
+        const filtered = recentDocs.results.filter((doc: Document) => {
+          if (urlStatus && !statusUtils.statusMatchesFilter(doc.status, urlStatus)) return false;
+          if (urlDocType) {
+            const docTypeName =
+              typeof (doc as any).document_type === "string"
+                ? (doc as any).document_type
+                : (doc as any).document_type?.name ?? String((doc as any).document_type ?? "");
+            if (docTypeName !== urlDocType) return false;
+          }
+          return true;
+        });
+    return { ...recentDocs, results: filtered, count: filtered.length } as PaginatedResponse<Document>;
+  }, [recentDocs, urlStatus, urlDocType]);
+
+  const recentDocsCount = recentDocsDisplay?.count ?? 0;
   const recentAuditCount = recentAudit?.count ?? 0;
   const recentDocsPages = Math.max(1, Math.ceil(recentDocsCount / RECENT_DOCS_PAGE_SIZE));
   const recentAuditPages = Math.max(1, Math.ceil(recentAuditCount / RECENT_AUDIT_PAGE_SIZE));
@@ -594,10 +621,10 @@ export default function DashboardPage() {
     `Pending approvals created in the last ${TREND_WINDOW_DAYS} days vs previous ${TREND_WINDOW_DAYS} days`,
   );
   const approvedTrend = buildTrend(
-    approvedThisPeriod,
-    approvedPreviousPeriod,
+    approvedTodayCount,
+    approvedYesterdayCount,
     true,
-    `Documents approved in the last ${TREND_WINDOW_DAYS} days vs previous ${TREND_WINDOW_DAYS} days`,
+    "Documents approved today vs yesterday",
   );
   const dueSoonTaskCount = countDueSoonTasks(allTasks);
   const tasksTrend: StatTrend | undefined =
@@ -1107,7 +1134,7 @@ export default function DashboardPage() {
                   </tr>
                 </thead>
                 <tbody>
-                  {recentDocs.results.map((doc: Document) => (
+                  {recentDocsDisplay?.results.map((doc: Document) => (
                     <tr
                       key={doc.id}
                       className="cursor-pointer border-t border-[#D3D7DA] transition hover:bg-[#F5F7F8]"

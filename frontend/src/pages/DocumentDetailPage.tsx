@@ -1,21 +1,23 @@
-import { Suspense, useState, useEffect, useRef, useCallback } from "react";
+import { Suspense, useState, useEffect, useRef, useCallback, useMemo } from "react";
 import { useParams, useNavigate } from "react-router-dom";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { api, documentsAPI, workflowAPI } from "@/services/api";
 import DocumentViewer from "@/components/documents/DocumentViewer";
 import { UploadVersionDrawer } from "@/components/documents/UploadVersionDrawer";
 import { WorkflowVisualizer } from "@/components/notifications/workflow-visualizer";
-import StatusBadge from "@/components/documents/StatusBadge";
+// StatusBadge not used in this file
 import OcrStatusBadge from "@/components/documents/OcrStatusBadge";
 import { AddToFolderMenu } from "@/components/documents/AddToFolderMenu";
 import MetadataEditPanel from "@/components/documents/MetadataEditPanel";
+import TemplateForm, { requiredFieldLabels } from "@/components/templates/TemplateForm";
+import { collectFormAttachments } from "@/components/templates/formAttachments";
 import WorkflowActionPanel from "@/components/workflow/WorkflowActionPanel";
 import { format } from "date-fns";
 import {
   ArrowLeft, Send, MessageSquare, ShieldCheck,
   Loader2, RotateCcw, Edit2, Lock, Info, Download,
   AlertTriangle, ScanLine, RefreshCw,
-  Printer, Trash2, X, Check, Link2, Plus, ExternalLink, Columns2
+  Printer, Trash2, X, Check, Link2, Plus, ExternalLink, Columns2, Eye, EyeOff, Archive
 } from "lucide-react";
 import { toast } from "@/components/ui/vault-toast";
 import { useAuthStore } from "@/store/authStore";
@@ -195,6 +197,9 @@ export default function DocumentDetailPage() {
   const user = useAuthStore((s) => s.user);
 
   const [activeTab, setActiveTab] = useState<TabId>("attributes");
+  const [formEditing, setFormEditing] = useState(false);
+  const [formValues, setFormValues] = useState<Record<string, unknown>>({});
+  const [showFormPdf, setShowFormPdf] = useState(false);
   const [comment, setComment] = useState("");
   const [confirmRestoreId, setConfirmRestoreId] = useState<string | null>(null);
   const [auditPage, setAuditPage] = useState(1);
@@ -478,6 +483,34 @@ export default function DocumentDetailPage() {
     onError: () => toast.error("Could not queue OCR. Please try again."),
   });
 
+  const updateFormMutation = useMutation({
+    mutationFn: () => {
+      // Split newly picked files (simple fields + table file cells) out of the
+      // form values; they upload as attachments. Existing attachment descriptors
+      // stay in the JSON values so the backend preserves them.
+      const { jsonValues, attachments } = collectFormAttachments(formValues);
+      return documentsAPI.updateForm(id!, jsonValues, attachments);
+    },
+    onSuccess: () => {
+      toast.success("Form updated.");
+      setFormEditing(false);
+      qc.invalidateQueries({ queryKey: ["document", id] });
+    },
+    onError: (err: any) =>
+      toast.error(err?.response?.data?.detail || "Could not update the form."),
+  });
+
+  const deleteMutation = useMutation({
+    mutationFn: () => documentsAPI.delete(id!),
+    onSuccess: () => {
+      toast.success("Moved to Trash.");
+      qc.invalidateQueries({ queryKey: ["documents"] });
+      navigate("/documents");
+    },
+    onError: (err: any) =>
+      toast.error(err?.response?.data?.detail || "Could not delete document."),
+  });
+
   const addRelationshipMutation = useMutation({
     mutationFn: () =>
       documentsAPI.addRelationship(id!, {
@@ -526,6 +559,31 @@ export default function DocumentDetailPage() {
     },
     onError: () => toast.error("Could not remove document relationship."),
   });
+  // Keep derived hooks/values above early returns so hook order remains stable
+  const relationshipSearchResults = useMemo<Document[]>(() => {
+    const raw = (relationshipSearchData?.results ?? []) as Document[];
+    const filtered = raw.filter((candidate) => {
+      if (!doc?.id) return false;
+      if (candidate.id === doc.id) return false;
+      if (candidate.is_self_upload) return false;
+      // Remove candidates that are already related with the same relation type
+      if (relationships.some((relationship) => (
+        relationship.related_document.id === candidate.id &&
+        relationship.relation_type === relationshipType
+      ))) return false;
+
+      // If a search term exists, ensure candidate matches it in title, reference, or supplier
+      const q = relationshipSearch.trim().toLowerCase();
+      if (q.length >= 2) {
+        const hay = [candidate.title, candidate.reference_number, candidate.supplier, candidate.document_type_name]
+          .filter(Boolean).join(" ").toLowerCase();
+        if (!hay.includes(q)) return false;
+      }
+
+      return true;
+    });
+    return filtered;
+  }, [relationshipSearchData, doc?.id, relationships, relationshipType, relationshipSearch]);
 
   if (isLoading)
     return (
@@ -574,12 +632,7 @@ export default function DocumentDetailPage() {
     );
   }
 
-  const relationshipSearchResults = ((relationshipSearchData?.results ?? []) as Document[])
-    .filter((candidate) => candidate.id !== doc.id)
-    .filter((candidate) => !relationships.some((relationship) => (
-      relationship.related_document.id === candidate.id &&
-      relationship.relation_type === relationshipType
-    )));
+  
   const relationshipSuggestions = (
     Array.isArray(doc.metadata?.relationship_suggestions)
       ? doc.metadata.relationship_suggestions
@@ -614,6 +667,22 @@ export default function DocumentDetailPage() {
   const canViewDocument = hasAdminAccess || permissions.includes("view");
   const canEdit = hasAdminAccess || permissions.includes("edit");
   const canComment = hasAdminAccess || permissions.includes("comment");
+
+  // In-app form (built-template document): schema + values live on metadata.form.
+  const formData = (doc.metadata as Record<string, any> | undefined)?.form as
+    | { sections?: unknown[]; values?: Record<string, unknown> }
+    | undefined;
+  const isFormDocument = Boolean(formData?.sections);
+  const formDocEditable = canEdit && ["draft", "returned"].includes(doc.status);
+  const startFormEdit = () => {
+    setFormValues({ ...(formData?.values ?? {}) });
+    setFormEditing(true);
+  };
+  const saveForm = () => {
+    const missing = requiredFieldLabels(formData?.sections ?? [], formValues);
+    if (missing.length) { toast.error(`Please fill in: ${missing.join(", ")}`); return; }
+    updateFormMutation.mutate();
+  };
   const canApprove = hasAdminAccess || permissions.includes("approve");
   const canArchive = hasAdminAccess || permissions.includes("archive");
   const canRestoreVersion = hasAdminAccess || permissions.includes("upload");
@@ -623,9 +692,12 @@ export default function DocumentDetailPage() {
   const ocrQuality = getOcrQuality(doc.metadata);
   const isLockedByOther = Boolean(doc.is_edit_locked && doc.edit_locked_by !== user?.id);
 
+  // Rejection is terminal: rejected documents cannot restart the workflow.
+  // Returned documents go back to the uploader to edit and resubmit (resumes
+  // the exact step it was at).
   const canSubmit =
     !isPersonal &&
-    (["draft", "rejected", "returned"].includes(doc.status)) &&
+    (["draft", "returned"].includes(doc.status)) &&
     (canApprove || doc.uploaded_by?.id === user?.id);
 
   const canArchiveNow =
@@ -634,6 +706,10 @@ export default function DocumentDetailPage() {
     (isPersonal || doc.status === "approved");
 
   const isDraftOrRejected = ["draft", "rejected", "returned"].includes(doc.status);
+  // Delete to Trash: creation-stage documents the user is allowed to delete.
+  const canDelete = (hasAdminAccess || permissions.includes("delete"))
+    && ["draft", "returned", "rejected"].includes(doc.status)
+    && !doc.deleted_at;
   const auditCount = auditLogs?.count ?? 0;
   const auditPages = Math.max(1, Math.ceil(auditCount / AUDIT_PAGE_SIZE));
   const sortedDocumentVersions = [...(doc.versions ?? [])].sort((a, b) => a.version_number - b.version_number);
@@ -901,7 +977,21 @@ export default function DocumentDetailPage() {
               className="flex h-8 items-center gap-1 px-2 transition-colors hover:bg-white/10 hover:text-white disabled:opacity-50"
               title="Archive document"
             >
-              {archiveMutation.isPending ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <Trash2 className="w-3.5 h-3.5" />}
+              {archiveMutation.isPending ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <Archive className="w-3.5 h-3.5" />}
+              <span className="sr-only sm:not-sr-only">Archive</span>
+            </button>
+          )}
+
+          {canDelete && (
+            <button
+              onClick={() => {
+                if (window.confirm("Move this document to Trash? You can restore it later.")) deleteMutation.mutate();
+              }}
+              disabled={deleteMutation.isPending}
+              className="flex h-8 items-center gap-1 px-2 transition-colors hover:bg-white/10 hover:text-white disabled:opacity-50"
+              title="Move to Trash"
+            >
+              {deleteMutation.isPending ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <Trash2 className="w-3.5 h-3.5" />}
               <span className="sr-only sm:not-sr-only">Delete</span>
             </button>
           )}
@@ -963,7 +1053,75 @@ export default function DocumentDetailPage() {
             </div>
           )}
 
-          <div className={cn("grid gap-3", compareDoc && "xl:grid-cols-2")}>
+          {/* In-app form (built-template document) — the form is the document; PDF below is its view */}
+          {isFormDocument && (
+            <div className="border border-[#C8CDD2] bg-white shadow-sm">
+              <div className="flex items-center justify-between gap-3 border-b border-[#C8CDD2] bg-[#F5F7F8] px-4 py-2.5">
+                <div className="flex items-center gap-2 min-w-0">
+                  <p className="text-sm font-bold text-[#1F2933]">Form</p>
+                  <span className="text-xs text-[#5E6870]">{formEditing ? "Editing — fill and save" : "Filled in-app"}</span>
+                </div>
+                <div className="flex items-center gap-2">
+                  {!formEditing && (
+                    <button
+                      type="button"
+                      onClick={() => setShowFormPdf((s) => !s)}
+                      className="inline-flex items-center gap-1.5 border border-[#AEB5BB] bg-white px-2.5 py-1.5 text-xs font-semibold text-[#1F2933] hover:bg-[#F3F5F6]"
+                    >
+                      {showFormPdf ? <EyeOff className="h-3.5 w-3.5" /> : <Eye className="h-3.5 w-3.5" />}
+                      {showFormPdf ? "Hide PDF" : "View PDF"}
+                    </button>
+                  )}
+                  {!formEditing && formDocEditable && (
+                    <button
+                      type="button"
+                      onClick={startFormEdit}
+                      className="inline-flex items-center gap-1.5 border border-[#287EAD] px-2.5 py-1.5 text-xs font-semibold text-[#287EAD] hover:bg-[#EEF6FB]"
+                    >
+                      <Edit2 className="h-3.5 w-3.5" /> Edit form
+                    </button>
+                  )}
+                  {formEditing && (
+                    <>
+                      <button
+                        type="button"
+                        onClick={() => setFormEditing(false)}
+                        disabled={updateFormMutation.isPending}
+                        className="inline-flex items-center gap-1.5 border border-[#AEB5BB] bg-white px-2.5 py-1.5 text-xs font-semibold text-[#1F2933] hover:bg-[#F3F5F6] disabled:opacity-50"
+                      >
+                        <X className="h-3.5 w-3.5" /> Cancel
+                      </button>
+                      <button
+                        type="button"
+                        onClick={saveForm}
+                        disabled={updateFormMutation.isPending}
+                        className="inline-flex items-center gap-1.5 bg-[#287EAD] px-3 py-1.5 text-xs font-semibold text-white hover:bg-[#1E6F99] disabled:opacity-50"
+                      >
+                        {updateFormMutation.isPending ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Check className="h-3.5 w-3.5" />}
+                        Save form
+                      </button>
+                    </>
+                  )}
+                </div>
+              </div>
+              <div className="p-5">
+                <TemplateForm
+                  sections={formData?.sections ?? []}
+                  values={formEditing ? formValues : (formData?.values ?? {})}
+                  onChange={(k, v) => setFormValues((prev) => ({ ...prev, [k]: v }))}
+                  readOnly={!formEditing}
+                  documentId={doc.id}
+                />
+              </div>
+            </div>
+          )}
+
+          <div className={cn(
+            "grid gap-3",
+            compareDoc && "xl:grid-cols-2",
+            // For form documents the form is primary; the PDF is on-demand.
+            isFormDocument && !showFormPdf && "hidden",
+          )}>
             <div className="border border-[#C8CDD2] bg-white shadow-sm">
               <Suspense fallback={
                 <div className="flex min-h-[32rem] items-center justify-center bg-white">

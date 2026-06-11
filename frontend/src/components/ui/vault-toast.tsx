@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState, type ReactNode } from "react";
+import { useEffect, useState, type ReactNode } from "react";
 import {
   CheckCircle2,
   AlertTriangle,
@@ -11,13 +11,12 @@ import {
 import { cn } from "@/lib/utils";
 
 /**
- * Indigo Vault — app-native custom toast system.
+ * App-native custom toast system.
  *
- *  - Dark "vault header" strip with the app's sidebar gradient
- *  - Tone-coded left rail (success / error / warning / info / default)
- *  - Animated SVG progress ring around the icon (acts as auto-close timer)
- *  - Monospace "vault stamp" timestamp
- *  - Optional action button styled like the app's primary button
+ *  - Compact enterprise notification cards
+ *  - Tone-coded left rail and icon treatment
+ *  - Quiet bottom progress line for auto-close timing
+ *  - Optional action button styled like the DMS command surfaces
  */
 
 type Tone = "success" | "error" | "warning" | "info" | "default";
@@ -25,62 +24,67 @@ type Tone = "success" | "error" | "warning" | "info" | "default";
 const TONE_CONFIG: Record<
   Tone,
   {
-    rail: string; // background of the left rail
-    ring: string; // stroke color for the progress ring (raw hsl ref)
+    rail: string;
+    progress: string;
     iconBg: string;
     iconColor: string;
+    border: string;
+    header: string;
     label: string;
     Icon: typeof CheckCircle2;
   }
 > = {
   success: {
-    rail: "bg-teal",
-    ring: "hsl(var(--teal))",
-    iconBg: "bg-teal/15",
-    iconColor: "text-teal",
-    label: "Confirmed",
+    rail: "bg-[#16836B]",
+    progress: "bg-[#16836B]",
+    iconBg: "bg-[#E8F5F1]",
+    iconColor: "text-[#16836B]",
+    border: "border-[#BFDCD3]",
+    header: "text-[#16836B]",
+    label: "Success",
     Icon: CheckCircle2,
   },
   error: {
-    rail: "bg-destructive",
-    ring: "hsl(var(--destructive))",
-    iconBg: "bg-destructive/15",
-    iconColor: "text-destructive",
+    rail: "bg-[#B42318]",
+    progress: "bg-[#B42318]",
+    iconBg: "bg-[#FCEEEE]",
+    iconColor: "text-[#B42318]",
+    border: "border-[#E6B8B4]",
+    header: "text-[#B42318]",
     label: "Action failed",
     Icon: XCircle,
   },
   warning: {
-    rail: "bg-accent",
-    ring: "hsl(var(--accent))",
-    iconBg: "bg-accent/20",
-    iconColor: "text-accent",
-    label: "Heads up",
+    rail: "bg-[#A15C00]",
+    progress: "bg-[#A15C00]",
+    iconBg: "bg-[#FFF3DA]",
+    iconColor: "text-[#A15C00]",
+    border: "border-[#E7C68E]",
+    header: "text-[#A15C00]",
+    label: "Attention",
     Icon: AlertTriangle,
   },
   info: {
-    rail: "bg-primary",
-    ring: "hsl(var(--primary))",
-    iconBg: "bg-primary/10",
-    iconColor: "text-primary",
+    rail: "bg-[#287EAD]",
+    progress: "bg-[#287EAD]",
+    iconBg: "bg-[#EEF6FB]",
+    iconColor: "text-[#287EAD]",
+    border: "border-[#A7CDE3]",
+    header: "text-[#287EAD]",
     label: "Notice",
     Icon: Info,
   },
   default: {
-    rail: "bg-muted-foreground",
-    ring: "hsl(var(--muted-foreground))",
-    iconBg: "bg-muted",
-    iconColor: "text-foreground",
-    label: "Vault",
+    rail: "bg-[#5E6870]",
+    progress: "bg-[#5E6870]",
+    iconBg: "bg-[#F1F3F4]",
+    iconColor: "text-[#3F474F]",
+    border: "border-[#C8CDD2]",
+    header: "text-[#3F474F]",
+    label: "Notification",
     Icon: ShieldCheck,
   },
 };
-
-function formatStamp(d: Date) {
-  const hh = String(d.getHours()).padStart(2, "0");
-  const mm = String(d.getMinutes()).padStart(2, "0");
-  const ss = String(d.getSeconds()).padStart(2, "0");
-  return `${hh}:${mm}:${ss}`;
-}
 
 interface VaultToastCardProps {
   id: string | number;
@@ -93,27 +97,25 @@ interface VaultToastCardProps {
   action?: { label: string; onClick: () => void };
 }
 
-function ProgressRing({
+function ToastProgress({
   duration,
-  color,
   loading,
+  progressClass,
 }: {
   duration: number;
-  color: string;
   loading?: boolean;
+  progressClass: string;
 }) {
-  const RADIUS = 18;
-  const CIRC = 2 * Math.PI * RADIUS;
-  const [offset, setOffset] = useState(0);
+  const [progress, setProgress] = useState(0);
 
   useEffect(() => {
-    if (loading) return;
+    if (loading || !Number.isFinite(duration) || duration <= 0) return;
     const start = performance.now();
     let raf = 0;
     const tick = (now: number) => {
       const elapsed = now - start;
       const pct = Math.min(elapsed / duration, 1);
-      setOffset(CIRC * pct);
+      setProgress(pct);
       if (pct < 1) raf = requestAnimationFrame(tick);
     };
     raf = requestAnimationFrame(tick);
@@ -121,35 +123,12 @@ function ProgressRing({
   }, [duration, loading]);
 
   return (
-    <svg
-      className="absolute inset-0 -rotate-90"
-      viewBox="0 0 44 44"
-      width={44}
-      height={44}
-    >
-      <circle
-        cx={22}
-        cy={22}
-        r={RADIUS}
-        fill="none"
-        stroke="hsl(var(--border))"
-        strokeWidth={2}
+    <div className="absolute inset-x-0 bottom-0 h-0.5 bg-[#E1E5E8]">
+      <div
+        className={cn("h-full transition-[width] duration-75 ease-linear", progressClass)}
+        style={{ width: loading ? "100%" : `${Math.max(0, 100 - progress * 100)}%` }}
       />
-      {!loading && (
-        <circle
-          cx={22}
-          cy={22}
-          r={RADIUS}
-          fill="none"
-          stroke={color}
-          strokeWidth={2}
-          strokeLinecap="round"
-          strokeDasharray={CIRC}
-          strokeDashoffset={offset}
-          style={{ transition: "stroke-dashoffset 80ms linear" }}
-        />
-      )}
-    </svg>
+    </div>
   );
 }
 
@@ -165,7 +144,6 @@ function VaultToastCard({
 }: VaultToastCardProps) {
   const cfg = TONE_CONFIG[tone];
   const Icon = cfg.Icon;
-  const stampRef = useRef(formatStamp(new Date()));
 
   useEffect(() => {
     if (loading || !Number.isFinite(duration) || duration <= 0) return;
@@ -179,65 +157,46 @@ function VaultToastCard({
     <div
       role="status"
       className={cn(
-        "group pointer-events-auto relative flex w-[380px] max-w-[92vw] overflow-hidden",
-        "rounded-xl border border-border bg-card text-card-foreground",
-        "shadow-[0_10px_40px_-12px_hsl(222_47%_13%/0.35)]",
+        "group pointer-events-auto relative flex w-[390px] max-w-[92vw] overflow-hidden",
+        "border bg-white text-[#1F2933]",
+        cfg.border,
+        "shadow-[0_18px_42px_-24px_rgba(31,41,51,0.55)]",
         "animate-in slide-in-from-right-4 fade-in-0 duration-300",
       )}
     >
       {/* Tone rail */}
       <div className={cn("w-1 shrink-0", cfg.rail)} />
 
-      <div className="flex flex-1 flex-col">
-        {/* Vault header strip */}
-        <div
-          className="flex items-center justify-between px-3 py-1.5 text-[10px] font-semibold uppercase tracking-[0.14em] text-sidebar-foreground"
-          style={{ background: "var(--gradient-sidebar)" }}
-        >
-          <span className="flex items-center gap-1.5">
-            <span
-              className={cn("h-1.5 w-1.5 rounded-full", cfg.rail)}
-              aria-hidden
-            />
-            {cfg.label}
-          </span>
-          <span className="font-mono text-[10px] tracking-wider text-sidebar-foreground/70">
-            VLT · {stampRef.current}
-          </span>
-        </div>
-
+      <div className="relative flex flex-1 flex-col">
         {/* Body */}
-        <div className="flex items-start gap-3 px-3 py-3">
-          {/* Icon with progress ring */}
-          <div className="relative h-11 w-11 shrink-0">
-            <ProgressRing
-              duration={duration}
-              color={cfg.ring}
-              loading={loading}
-            />
-            <div
-              className={cn(
-                "absolute inset-[5px] flex items-center justify-center rounded-full",
-                cfg.iconBg,
-              )}
-            >
-              {loading ? (
-                <Loader2
-                  className={cn("h-4 w-4 animate-spin", cfg.iconColor)}
-                />
-              ) : (
-                <Icon className={cn("h-4 w-4", cfg.iconColor)} />
-              )}
-            </div>
+        <div className="flex items-start gap-3 px-4 py-3.5 pb-4">
+          <div
+            className={cn(
+              "flex h-9 w-9 shrink-0 items-center justify-center border",
+              cfg.iconBg,
+              cfg.border,
+            )}
+          >
+            {loading ? (
+              <Loader2 className={cn("h-4 w-4 animate-spin", cfg.iconColor)} />
+            ) : (
+              <Icon className={cn("h-4 w-4", cfg.iconColor)} />
+            )}
           </div>
 
-          {/* Text */}
-          <div className="min-w-0 flex-1 pt-0.5">
-            <p className="text-sm font-semibold leading-snug text-foreground">
+          <div className="min-w-0 flex-1">
+            <div className="mb-1 flex items-center gap-2">
+              <span className={cn("text-[11px] font-semibold uppercase tracking-wider", cfg.header)}>
+                {loading ? "Processing" : cfg.label}
+              </span>
+              <span className="h-1 w-1 rounded-full bg-[#C8CDD2]" />
+              <span className="text-[11px] font-medium text-[#7A858E]">DMS</span>
+            </div>
+            <p className="text-sm font-semibold leading-snug text-[#1F2933]">
               {title}
             </p>
             {description && (
-              <p className="mt-0.5 text-[13px] leading-snug text-muted-foreground">
+              <p className="mt-1 text-[13px] leading-snug text-[#5E6870]">
                 {description}
               </p>
             )}
@@ -248,22 +207,33 @@ function VaultToastCard({
                   action.onClick();
                   onDismiss();
                 }}
-                className="mt-2 inline-flex items-center gap-1.5 rounded-md bg-primary px-2.5 py-1 text-xs font-medium text-primary-foreground transition-colors hover:bg-primary/90"
+                className="mt-3 inline-flex items-center border border-[#287EAD] bg-white px-2.5 py-1.5 text-xs font-semibold text-[#287EAD] transition-colors hover:bg-[#EEF6FB]"
               >
                 {action.label}
               </button>
             )}
           </div>
 
-          {/* Close */}
           <button
             type="button"
             onClick={onDismiss}
             aria-label="Dismiss notification"
-            className="-mr-1 -mt-1 flex h-6 w-6 shrink-0 items-center justify-center rounded-md text-muted-foreground opacity-0 transition-all hover:bg-muted hover:text-foreground group-hover:opacity-100"
+            className="-mr-1 -mt-1 flex h-7 w-7 shrink-0 items-center justify-center text-[#7A858E] opacity-0 transition-all hover:bg-[#F3F5F6] hover:text-[#1F2933] group-hover:opacity-100"
           >
-            <X className="h-3.5 w-3.5" />
+            <X className="h-4 w-4" />
           </button>
+        </div>
+
+        <div className="absolute inset-x-0 bottom-0 h-0.5">
+          <ToastProgress duration={duration} loading={loading} progressClass={cfg.progress} />
+          {loading && (
+            <div
+              className={cn(
+                "h-full w-1/2 animate-pulse",
+                cfg.progress,
+              )}
+            />
+          )}
         </div>
       </div>
     </div>

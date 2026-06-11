@@ -28,7 +28,10 @@ class DocumentTemplateSerializer(serializers.ModelSerializer):
             "use_count", "is_active",
             "created_by", "created_at", "updated_at",
         ]
-        read_only_fields = ["id", "use_count", "created_by", "created_at", "updated_at"]
+        # is_active is server-managed (created active, soft-deleted via destroy).
+        # Keeping it read-only also avoids the DRF multipart quirk where an absent
+        # BooleanField is parsed as False — which previously deactivated uploads.
+        read_only_fields = ["id", "use_count", "is_active", "created_by", "created_at", "updated_at"]
 
     def validate_sections(self, value):
         """Ensure sections is a list of dicts with required keys."""

@@ -12,7 +12,7 @@ import {
   User, UsersRound, Users,
   Edit3, Play, Flag,
   ZoomIn, ZoomOut, Maximize2, Move,
-  FileSignature,
+  FileSignature, Copy,
 } from "lucide-react";
 import { toast } from "@/components/ui/vault-toast";
 import clsx from "clsx";
@@ -30,6 +30,7 @@ interface WorkflowStep {
   assignee_group_name?: string;
   assignee_user: string | null;
   assignee_user_name?: string;
+  assignee_user_auto?: boolean;
   sla_hours: number;
   allow_resubmit: boolean;
   allow_approve: boolean;
@@ -207,7 +208,8 @@ function blankStep(): WorkflowStep {
 }
 
 function stepToPayload(step: WorkflowStep): Partial<WorkflowStep> {
-  const { assignee_user_name, assignee_group_name, ...rest } = normalizeStep(step) as any;
+  const { assignee_user_name: _assignee_user_name, assignee_group_name: _assignee_group_name, assignee_user_auto: _assignee_user_auto, ...rest } = normalizeStep(step) as any;
+  void _assignee_user_name; void _assignee_group_name; void _assignee_user_auto;
   // Ensure assignee_user is only sent for types that allow it
   if (rest.assignee_type !== "group_specific") {
     rest.assignee_user = null;
@@ -251,6 +253,66 @@ function Label({ children, required }: { children: React.ReactNode; required?: b
   );
 }
 
+type RuleFormValues = { amount_min: string; amount_max: string; currency: string; label: string };
+
+// Shared amount-range fields used by both the create and edit rule forms.
+function RuleFormFields({ values, onChange }: {
+  values: RuleFormValues;
+  onChange: (patch: Partial<RuleFormValues>) => void;
+}) {
+  return (
+    <div className="grid grid-cols-2 gap-3">
+      <div>
+        <Label required>Minimum amount</Label>
+        <input
+          type="number" min={0} step="0.01"
+          value={values.amount_min}
+          onChange={e => onChange({ amount_min: e.target.value })}
+          className={inp}
+          placeholder="0"
+        />
+        <p className="text-[11px] text-muted-foreground mt-1">
+          Starts matching from {formatMoney(Number(values.amount_min || 0), values.currency)}
+        </p>
+      </div>
+      <div>
+        <Label>Maximum amount</Label>
+        <input
+          type="number" min={0} step="0.01"
+          value={values.amount_max}
+          onChange={e => onChange({ amount_max: e.target.value })}
+          className={inp}
+          placeholder="Leave blank for no upper limit"
+        />
+        <p className="text-[11px] text-muted-foreground mt-1">
+          {values.amount_max
+            ? `Stops at ${formatMoney(Number(values.amount_max), values.currency)}`
+            : "Leave blank to cover everything above the minimum"}
+        </p>
+      </div>
+      <div>
+        <Label>Currency</Label>
+        <select
+          value={values.currency}
+          onChange={e => onChange({ currency: e.target.value })}
+          className={inp}
+        >
+          {CURRENCIES.map(c => <option key={c} value={c}>{c}</option>)}
+        </select>
+      </div>
+      <div className="col-span-2">
+        <Label>Label (optional)</Label>
+        <input
+          value={values.label}
+          onChange={e => onChange({ label: e.target.value })}
+          className={inp}
+          placeholder="e.g., High-value transactions"
+        />
+      </div>
+    </div>
+  );
+}
+
 // ── Step Edit Side Panel ──────────────────────────────────────────────────────
 function StepEditPanel({
   step,
@@ -280,8 +342,21 @@ function StepEditPanel({
       const raw: GroupMembershipApiItem[] = r.data?.results ?? r.data ?? [];
       return raw.map((item) => item?.user ?? item).filter((u): u is AppUser => Boolean(u?.id && u?.email));
     },
-    enabled: !!step.assignee_group && needsGroupMember,
+    enabled: !!step.assignee_group,
   });
+
+  const { data: groupDetail } = useQuery<any>({
+    queryKey: ["group", step.assignee_group],
+    queryFn: () => groupsAPI.get(step.assignee_group!).then((r) => r.data),
+    enabled: !!step.assignee_group,
+  });
+
+  const effectiveGroupMembers = useMemo(() => {
+    const head = groupDetail?.head as AppUser | undefined;
+    if (!head || !head.id) return groupMembers;
+    if (groupMembers.some((u) => u.id === head.id)) return groupMembers;
+    return [head, ...groupMembers];
+  }, [groupDetail?.head, groupMembers]);
 
   const color = getGroupColor(step.assignee_group);
 
@@ -301,6 +376,18 @@ function StepEditPanel({
     step.assignee_user,
     step.assignee_user_name,
   ]);
+
+  // Default specific assignee to group's designated approver if present
+  useEffect(() => {
+    if (step.assignee_type !== "group_specific") return;
+    // Only auto-assign if there's no explicit user and the user hasn't manually cleared autos
+    if (step.assignee_user) return; // explicit user already set
+    if (step.assignee_user_auto === false) return; // user explicitly chose someone before
+    const head = groupDetail?.head;
+    if (head && head.id) {
+      onChange({ assignee_user: head.id, assignee_user_name: head.full_name, assignee_user_auto: true });
+    }
+  }, [step.assignee_type, step.assignee_user, step.assignee_user_auto, groupDetail?.head, onChange]);
 
   return (
     <aside className="w-[420px] flex-shrink-0 flex flex-col bg-card border border-border rounded-xl shadow-elegant overflow-hidden">
@@ -367,18 +454,20 @@ function StepEditPanel({
             <Label required>Approver group</Label>
             <select
               value={step.assignee_group ?? ""}
-              onChange={e => {
-                const id = e.target.value || null;
-                const g = groups.find(x => x.id === id);
-                const isHod = isHodGroupName(g?.name);
-                onChange({
-                  assignee_group: id,
-                  assignee_group_name: g?.name,
-                  assignee_type: isHod ? "group_any" : step.assignee_type,
-                  assignee_user: null,
-                  assignee_user_name: undefined,
-                });
-              }}
+                onChange={e => {
+                  const id = e.target.value || null;
+                  const g = groups.find(x => x.id === id);
+                  const isHod = isHodGroupName(g?.name);
+                  // Clear any existing specific user when switching groups and reset auto flag
+                  onChange({
+                    assignee_group: id,
+                    assignee_group_name: g?.name,
+                    assignee_type: isHod ? "group_any" : step.assignee_type,
+                    assignee_user: null,
+                    assignee_user_name: undefined,
+                    assignee_user_auto: undefined,
+                  });
+                }}
               className={inp}
             >
               <option value="">Select group</option>
@@ -392,16 +481,17 @@ function StepEditPanel({
 
           <div>
             <Label required>Assignment mode</Label>
-            <select
-              value={step.assignee_type}
-              onChange={e => {
-                const next = e.target.value as AssigneeType;
-                onChange({
-                  assignee_type: next,
-                  assignee_user: next === "group_specific" ? step.assignee_user : null,
-                  assignee_user_name: next === "group_specific" ? step.assignee_user_name : undefined,
-                });
-              }}
+              <select
+                value={step.assignee_type}
+                onChange={e => {
+                  const next = e.target.value as AssigneeType;
+                  onChange({
+                    assignee_type: next,
+                    assignee_user: next === "group_specific" ? step.assignee_user : null,
+                    assignee_user_name: next === "group_specific" ? step.assignee_user_name : undefined,
+                    assignee_user_auto: next === "group_specific" ? step.assignee_user_auto : undefined,
+                  });
+                }}
               disabled={isHodGroupSelected}
               className={inp}
             >
@@ -422,15 +512,16 @@ function StepEditPanel({
               <select
                 value={step.assignee_user ?? ""}
                 onChange={e => {
-                  const id = e.target.value || null;
-                  const u = groupMembers.find(x => x.id === id);
-                  onChange({ assignee_user: id, assignee_user_name: u?.full_name });
-                }}
+                    const id = e.target.value || null;
+                    const u = groupMembers.find(x => x.id === id);
+                    // Manual selection should prevent future auto-overwrites
+                    onChange({ assignee_user: id, assignee_user_name: u?.full_name, assignee_user_auto: false });
+                  }}
                 disabled={!step.assignee_group || membersLoading}
                 className={inp}
               >
                 <option value="">{membersLoading ? "Loading members..." : "Select member"}</option>
-                {groupMembers.map(u => (
+                {effectiveGroupMembers.map(u => (
                   <option key={u.id} value={u.id}>{u.full_name}</option>
                 ))}
               </select>
@@ -572,10 +663,10 @@ function defaultPositions(stepCount: number): NodePos[] {
 
 function FlowchartEditor({
   steps,
-  groups,
+  groups: _groups,
   selectedIndex,
   onSelectIndex,
-  onStepsChange,
+  onStepsChange: _onStepsChange,
   onAddStep,
 }: {
   steps: WorkflowStep[];
@@ -583,8 +674,7 @@ function FlowchartEditor({
   selectedIndex: number | null;
   onSelectIndex: (i: number | null) => void;
   onStepsChange: (steps: WorkflowStep[]) => void;
-  onAddStep: () => void;
-}) {
+  onAddStep: () => void;}) {
   const wrapperRef = useRef<HTMLDivElement>(null);
 
   // Pan / zoom transform
@@ -751,7 +841,8 @@ function FlowchartEditor({
   const bounds = useMemo(() => {
     const validNodes = positions.slice(0, steps.length).filter(Boolean) as NodePos[];
     const xs = validNodes.map(p => p.x);
-    const ys = validNodes.map(p => p.y);
+    const _ys = validNodes.map(p => p.y);
+    void _ys;
     const minX = Math.min(-ANCHOR_W, ...xs.map(x => x - NODE_W / 2)) - 200;
     const maxX = Math.max(ANCHOR_W, ...xs.map(x => x + NODE_W / 2)) + 200;
     const minY = -ANCHOR_H - 200;
@@ -782,6 +873,7 @@ function FlowchartEditor({
         <button onClick={fitView} title="Fit to view" className="p-1.5 rounded hover:bg-muted">
           <Maximize2 className="w-4 h-4 text-muted-foreground" />
         </button>
+
       </div>
 
       <div className="absolute top-3 left-3 z-10 flex items-center gap-2 bg-card border border-border rounded-lg shadow-sm px-3 py-1.5">
@@ -1073,10 +1165,62 @@ function RoutingRulesPanel({ template }: {
     onError: () => toast.error("Failed to remove rule"),
   });
 
+  // ── Inline rule editing ──────────────────────────────────────────────────
+  const [editingId, setEditingId] = useState<string | null>(null);
+  const [editForm, setEditForm] = useState<RuleFormValues>({
+    amount_min: "0", amount_max: "", currency: "USD", label: "",
+  });
+
+  const startEdit = (rule: WorkflowRule) => {
+    setShowAdd(false);
+    setEditingId(rule.id);
+    setEditForm({
+      amount_min: String(rule.amount_min ?? "0"),
+      amount_max: rule.amount_max == null ? "" : String(rule.amount_max),
+      currency: rule.currency,
+      label: rule.label ?? "",
+    });
+  };
+
+  const updateRule = useMutation({
+    mutationFn: () => workflowAPI.updateRule(editingId as string, {
+      amount_min: editForm.amount_min || "0",
+      amount_max: editForm.amount_max || null,
+      currency: editForm.currency,
+      label: editForm.label,
+    }),
+    onSuccess: () => {
+      toast.success("Rule updated");
+      qc.invalidateQueries({ queryKey: ["workflow-rules", templateId] });
+      setEditingId(null);
+    },
+    onError: (err: any) => {
+      const message = formatApiError(err?.response?.data) || "Failed to update rule";
+      toast.error(message);
+    },
+  });
+
+  const handleUpdateRule = () => {
+    if (editForm.amount_min.trim() === "") {
+      toast.error("Minimum amount is required");
+      return;
+    }
+    updateRule.mutate();
+  };
+
   const sortedRules = useMemo(
     () => [...(rules ?? [])].sort((a, b) => Number(a.amount_min) - Number(b.amount_min)),
     [rules]
   );
+
+  // Default a new rule's currency to the existing rules' currency so a doc type's
+  // rules stay in one currency (mixed currencies switch routing to strict
+  // currency matching). Routing is otherwise amount-based.
+  const openAddRule = () => {
+    const existingCurrency = rules?.[0]?.currency;
+    if (existingCurrency) setForm((f) => ({ ...f, currency: existingCurrency }));
+    setShowAdd(true);
+  };
 
   const handleCreateRule = () => {
     if (!templateId) {
@@ -1108,7 +1252,7 @@ function RoutingRulesPanel({ template }: {
           </p>
         </div>
         {!showAdd && hasDocumentType && (
-          <button onClick={() => setShowAdd(true)} className="btn-primary text-xs px-3 py-1.5">
+          <button onClick={openAddRule} className="btn-primary text-xs px-3 py-1.5">
             <Plus className="w-3.5 h-3.5" /> Add rule
           </button>
         )}
@@ -1134,59 +1278,7 @@ function RoutingRulesPanel({ template }: {
           <p className="text-xs text-muted-foreground">
             Applies to <span className="font-medium text-foreground">{template.document_type_name}</span> documents only.
           </p>
-          <div className="grid grid-cols-2 gap-3">
-            <div>
-              <Label required>Minimum amount</Label>
-              <input
-                type="number"
-                min={0}
-                step="0.01"
-                value={form.amount_min}
-                onChange={e => setForm(f => ({ ...f, amount_min: e.target.value }))}
-                className={inp}
-                placeholder="0"
-              />
-              <p className="text-[11px] text-muted-foreground mt-1">
-                Starts matching from {formatMoney(Number(form.amount_min || 0), form.currency)}
-              </p>
-            </div>
-            <div>
-              <Label>Maximum amount</Label>
-              <input
-                type="number"
-                min={0}
-                step="0.01"
-                value={form.amount_max}
-                onChange={e => setForm(f => ({ ...f, amount_max: e.target.value }))}
-                className={inp}
-                placeholder="Leave blank for no upper limit"
-              />
-              <p className="text-[11px] text-muted-foreground mt-1">
-                {form.amount_max
-                  ? `Stops at ${formatMoney(Number(form.amount_max), form.currency)}`
-                  : "Leave blank to cover everything above the minimum"}
-              </p>
-            </div>
-            <div>
-              <Label>Currency</Label>
-              <select
-                value={form.currency}
-                onChange={e => setForm(f => ({ ...f, currency: e.target.value }))}
-                className={inp}
-              >
-                {CURRENCIES.map(c => <option key={c} value={c}>{c}</option>)}
-              </select>
-            </div>
-            <div className="col-span-2">
-              <Label>Label (optional)</Label>
-              <input
-                value={form.label}
-                onChange={e => setForm(f => ({ ...f, label: e.target.value }))}
-                className={inp}
-                placeholder="e.g., High-value transactions"
-              />
-            </div>
-          </div>
+          <RuleFormFields values={form} onChange={(p) => setForm(f => ({ ...f, ...p }))} />
           <div className="flex gap-2 pt-2">
             <button
               onClick={handleCreateRule}
@@ -1215,7 +1307,7 @@ function RoutingRulesPanel({ template }: {
           <p className="text-xs text-muted-foreground mt-1 max-w-md mx-auto">
             Add amount ranges to send matching {template.document_type_name?.toLowerCase() ?? "documents"} to this template.
           </p>
-          <button onClick={() => setShowAdd(true)} className="btn-secondary text-xs mt-4">
+          <button onClick={openAddRule} className="btn-secondary text-xs mt-4">
             <Plus className="w-3.5 h-3.5" /> Add your first rule
           </button>
         </div>
@@ -1224,6 +1316,31 @@ function RoutingRulesPanel({ template }: {
       {sortedRules.length > 0 && (
         <div className="space-y-3">
           {sortedRules.map((rule, idx) => {
+            if (editingId === rule.id) {
+              return (
+                <div key={rule.id} className="rounded-xl border-2 border-accent/40 bg-accent/5 p-4 space-y-3">
+                  <div className="flex items-center justify-between">
+                    <h4 className="text-sm font-semibold text-foreground">Edit routing rule</h4>
+                    <button onClick={() => setEditingId(null)} className="p-1 rounded hover:bg-muted">
+                      <X className="w-4 h-4 text-muted-foreground" />
+                    </button>
+                  </div>
+                  <RuleFormFields values={editForm} onChange={(p) => setEditForm(f => ({ ...f, ...p }))} />
+                  <div className="flex gap-2 pt-2">
+                    <button
+                      onClick={handleUpdateRule}
+                      disabled={updateRule.isPending}
+                      className="btn-primary text-xs"
+                    >
+                      {updateRule.isPending && <Loader2 className="w-3 h-3 animate-spin" />} Save changes
+                    </button>
+                    <button onClick={() => setEditingId(null)} className="btn-secondary text-xs">
+                      Cancel
+                    </button>
+                  </div>
+                </div>
+              );
+            }
             return (
               <div key={rule.id} className="rounded-xl border border-border bg-card px-4 py-3 group hover:border-foreground/20 transition-colors">
                 <div className="flex items-start gap-3">
@@ -1243,14 +1360,23 @@ function RoutingRulesPanel({ template }: {
                       Matching {rule.document_type_name.toLowerCase()} documents will use this template.
                     </p>
                   </div>
-                  <button
-                    onClick={() => deleteRule.mutate(rule.id)}
-                    disabled={deleteRule.isPending}
-                    title="Remove rule"
-                    className="opacity-0 group-hover:opacity-100 p-1.5 text-muted-foreground hover:text-destructive rounded-lg hover:bg-destructive/10 transition-colors"
-                  >
-                    <Trash2 className="w-4 h-4" />
-                  </button>
+                  <div className="flex items-center gap-1 opacity-0 group-hover:opacity-100 transition-opacity">
+                    <button
+                      onClick={() => startEdit(rule)}
+                      title="Edit rule"
+                      className="p-1.5 text-muted-foreground hover:text-accent rounded-lg hover:bg-accent/10 transition-colors"
+                    >
+                      <Edit3 className="w-4 h-4" />
+                    </button>
+                    <button
+                      onClick={() => deleteRule.mutate(rule.id)}
+                      disabled={deleteRule.isPending}
+                      title="Remove rule"
+                      className="p-1.5 text-muted-foreground hover:text-destructive rounded-lg hover:bg-destructive/10 transition-colors"
+                    >
+                      <Trash2 className="w-4 h-4" />
+                    </button>
+                  </div>
                 </div>
               </div>
             );
@@ -1266,12 +1392,14 @@ function TemplateEditor({
   template,
   docType = null,
   onSaved,
-  allTemplates,
+  onDuplicate,
+  allTemplates: _allTemplates,
   docTypes,
 }: {
   template: WorkflowTemplate | null;
   docType?: DocumentType | null;
   onSaved: (t: WorkflowTemplate, isNew: boolean) => void;
+  onDuplicate?: () => void;
   allTemplates?: WorkflowTemplate[];
   docTypes?: DocumentType[];
 }) {
@@ -1483,6 +1611,16 @@ function TemplateEditor({
           {isDirty && (
             <span className="text-[11px] text-accent bg-accent/20 px-2 py-1 rounded-md">Unsaved</span>
           )}
+          {template && onDuplicate && (
+            <button
+              onClick={onDuplicate}
+              title="Duplicate this workflow template"
+              className="btn-secondary text-sm"
+            >
+              <Copy className="w-4 h-4" />
+              Duplicate
+            </button>
+          )}
           <button onClick={handleSave} disabled={saveMutation.isPending} className="btn-primary text-sm">
             {saveMutation.isPending ? <Loader2 className="w-4 h-4 animate-spin" /> : <Save className="w-4 h-4" />}
             Save
@@ -1524,6 +1662,153 @@ function TemplateEditor({
           )}
         </div>
       )}
+    </div>
+  );
+}
+
+// ── Duplicate Template Modal ─────────────────────────────────────────────────
+function DuplicateTemplateModal({
+  template,
+  docTypes,
+  onClose,
+  onDuplicated,
+}: {
+  template: WorkflowTemplate;
+  docTypes: DocumentType[];
+  onClose: () => void;
+  onDuplicated: (newTemplate: WorkflowTemplate) => void;
+}) {
+  const [newName, setNewName] = useState(`${template.name} (copy)`);
+  const [selectedDocTypeId, setSelectedDocTypeId] = useState<string | null>(
+    template.document_type ?? null
+  );
+
+  const activeDocTypes = useMemo(
+    () => docTypes.filter((d) => d.is_active),
+    [docTypes]
+  );
+
+  const duplicateMutation = useMutation({
+    mutationFn: () =>
+      workflowAPI.duplicateTemplate(template.id, newName.trim() || undefined),
+    onSuccess: async ({ data }) => {
+      let cloned = normalizeTemplate(data as WorkflowTemplate);
+      // If user chose a different doc type, patch it now
+      if (selectedDocTypeId && selectedDocTypeId !== template.document_type) {
+        try {
+          const patchRes = await workflowAPI.updateTemplate(cloned.id, {
+            name: cloned.name,
+            description: cloned.description,
+            document_type: selectedDocTypeId,
+            is_active: true,
+            steps: (cloned.steps ?? []).map(stepToPayload),
+          });
+          cloned = normalizeTemplate(patchRes.data as WorkflowTemplate);
+        } catch {
+          toast.warning("Duplicated, but could not update document type");
+        }
+      }
+      toast.success(`"${cloned.name}" created`);
+      onDuplicated(cloned);
+    },
+    onError: (err: any) => {
+      const message = formatApiError(err?.response?.data) || "Duplication failed";
+      toast.error(message);
+    },
+  });
+
+  const handleSubmit = (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!newName.trim()) { toast.error("Name is required"); return; }
+    duplicateMutation.mutate();
+  };
+
+  return (
+    <div
+      className="fixed inset-0 bg-black/50 flex items-center justify-center z-50 p-4"
+      onClick={onClose}
+    >
+      <div
+        className="bg-card rounded-2xl w-full max-w-md shadow-2xl"
+        onClick={(e) => e.stopPropagation()}
+      >
+        {/* Header */}
+        <div className="flex items-center justify-between p-5 border-b border-border">
+          <div className="flex items-center gap-3">
+            <div className="w-9 h-9 rounded-xl bg-accent/15 flex items-center justify-center">
+              <Copy className="w-4 h-4 text-accent" />
+            </div>
+            <div>
+              <h2 className="text-sm font-bold text-foreground">Duplicate workflow</h2>
+              <p className="text-xs text-muted-foreground mt-0.5">
+                Creates a full copy with all approval steps
+              </p>
+            </div>
+          </div>
+          <button
+            onClick={onClose}
+            className="p-1.5 hover:bg-muted rounded-lg transition-colors"
+          >
+            <X className="w-4 h-4 text-muted-foreground" />
+          </button>
+        </div>
+
+        {/* Source info */}
+        <div className="mx-5 mt-4 rounded-xl border border-border bg-muted/40 px-4 py-3">
+          <p className="text-[11px] font-medium uppercase tracking-wide text-muted-foreground mb-1">Source template</p>
+          <p className="text-sm font-semibold text-foreground">{template.name}</p>
+          <p className="text-xs text-muted-foreground mt-0.5">
+            {template.step_count ?? template.steps?.length ?? 0} steps
+            {template.document_type_name ? ` · ${template.document_type_name}` : ""}
+          </p>
+        </div>
+
+        {/* Form */}
+        <form onSubmit={handleSubmit} className="p-5 space-y-4">
+          <div>
+            <Label required>New template name</Label>
+            <input
+              value={newName}
+              onChange={(e) => setNewName(e.target.value)}
+              className="input"
+              placeholder="e.g. Purchase Order Workflow v2"
+              autoFocus
+            />
+          </div>
+
+          <div>
+            <Label required>Document type</Label>
+            <select
+              value={selectedDocTypeId ?? ""}
+              onChange={(e) => setSelectedDocTypeId(e.target.value || null)}
+              className="input"
+            >
+              <option value="">Select document type</option>
+              {activeDocTypes.map((d) => (
+                <option key={d.id} value={d.id}>{d.name}</option>
+              ))}
+            </select>
+            <p className="text-[11px] text-muted-foreground mt-1">
+              The duplicate can be assigned to a different document type.
+            </p>
+          </div>
+
+          <div className="flex gap-2 pt-1">
+            <button
+              type="submit"
+              disabled={duplicateMutation.isPending}
+              className="btn-primary flex-1"
+            >
+              {duplicateMutation.isPending
+                ? <><Loader2 className="w-4 h-4 animate-spin" /> Duplicating…</>
+                : <><Copy className="w-4 h-4" /> Duplicate</>}
+            </button>
+            <button type="button" onClick={onClose} className="btn-secondary">
+              Cancel
+            </button>
+          </div>
+        </form>
+      </div>
     </div>
   );
 }
@@ -1682,12 +1967,14 @@ export default function WorkflowBuilderPage() {
   const [search, setSearch] = useState("");
   const [showDetailModal, setShowDetailModal] = useState<DocumentType | null>(null);
   const [creatingForDocType, setCreatingForDocType] = useState<DocumentType | null>(null);
+  const [duplicatingTemplate, setDuplicatingTemplate] = useState<WorkflowTemplate | null>(null);
 
-  const { data: docTypes, isLoading: dtLoading } = useQuery<unknown, Error, DocumentType[]>({
+  const { data: docTypes, isLoading: _dtLoading } = useQuery<unknown, Error, DocumentType[]>({
     queryKey: ["document-types"],
     queryFn: () => documentTypesAPI.list().then((r) => r.data as unknown),
     select: (data) => normalizeListResponse<DocumentType>(data),
   });
+  void _dtLoading;
 
   const { data: allTemplates, isLoading: templatesLoading } = useQuery<WorkflowTemplate[]>({
     queryKey: ["workflow-templates"],
@@ -1937,25 +2224,36 @@ export default function WorkflowBuilderPage() {
                   {group.templates.map((t) => {
                     const isSelected = editingTemplateId === t.id;
                     return (
-                      <button
-                        key={t.id}
-                        onClick={() => handleTemplateClick(t)}
-                        className={clsx(
-                          "w-full text-left rounded-xl p-3 transition-all border",
-                          isSelected ? "bg-accent/10 border-accent/40" : "bg-card border-border hover:border-foreground/20"
-                        )}
-                      >
-                        <div className="flex items-start gap-2.5">
-                          <LayoutTemplate className="w-5 h-5 text-muted-foreground mt-0.5" />
-                          <div className="flex-1 min-w-0">
-                            <p className="font-semibold text-sm text-foreground truncate">{t.name}</p>
-                            <p className="text-xs text-muted-foreground mt-0.5">
-                              {t.step_count} step{t.step_count !== 1 ? 's' : ''}
-                              {t.description ? ` · ${t.description}` : ""}
-                            </p>
+                      <div key={t.id} className="relative group/item">
+                        <button
+                          onClick={() => handleTemplateClick(t)}
+                          className={clsx(
+                            "w-full text-left rounded-xl p-3 pr-10 transition-all border",
+                            isSelected ? "bg-accent/10 border-accent/40" : "bg-card border-border hover:border-foreground/20"
+                          )}
+                        >
+                          <div className="flex items-start gap-2.5">
+                            <LayoutTemplate className="w-5 h-5 text-muted-foreground mt-0.5" />
+                            <div className="flex-1 min-w-0">
+                              <p className="font-semibold text-sm text-foreground truncate">{t.name}</p>
+                              <p className="text-xs text-muted-foreground mt-0.5">
+                                {t.step_count} step{t.step_count !== 1 ? 's' : ''}
+                                {t.description ? ` · ${t.description}` : ""}
+                              </p>
+                            </div>
                           </div>
-                        </div>
-                      </button>
+                        </button>
+                        <button
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            setDuplicatingTemplate(t);
+                          }}
+                          title="Duplicate workflow"
+                          className="absolute right-2 top-1/2 -translate-y-1/2 p-1.5 rounded-lg border border-border bg-card opacity-0 group-hover/item:opacity-100 hover:bg-accent/10 hover:border-accent/40 hover:text-accent transition-all"
+                        >
+                          <Copy className="w-3.5 h-3.5 text-muted-foreground" />
+                        </button>
+                      </div>
                     );
                   })}
                 </div>
@@ -1998,6 +2296,7 @@ export default function WorkflowBuilderPage() {
                 docType={editorDocType}
                 template={currentTemplate}
                 onSaved={handleSaved}
+                onDuplicate={currentTemplate ? () => setDuplicatingTemplate(currentTemplate) : undefined}
                 allTemplates={resolvedTemplates}
                 docTypes={docTypesArray}
               />
@@ -2017,6 +2316,24 @@ export default function WorkflowBuilderPage() {
           }}
           templates={resolvedTemplates}
           isLoading={templatesLoading}
+        />
+      )}
+
+      {duplicatingTemplate && (
+        <DuplicateTemplateModal
+          template={duplicatingTemplate}
+          docTypes={docTypesArray}
+          onClose={() => setDuplicatingTemplate(null)}
+          onDuplicated={(newTemplate) => {
+            setDuplicatingTemplate(null);
+            qc.invalidateQueries({ queryKey: ["workflow-templates"] });
+            qc.invalidateQueries({ queryKey: ["document-types"] });
+            // Navigate to the newly created template
+            setEditingTemplateId(newTemplate.id);
+            setSelectedDocType(null);
+            setCreatingForDocType(null);
+            setSidebarTab("templates");
+          }}
         />
       )}
     </div>

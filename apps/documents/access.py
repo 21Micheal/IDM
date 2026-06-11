@@ -57,6 +57,14 @@ def get_access_stages() -> list[dict[str, Any]]:
     return stages if stages else list(DEFAULT_ACCESS_STAGES)
 
 
+def permission_stage_is_global() -> bool:
+    """
+    True when RBAC runs in single-stage mode — one permission configuration
+    ("any") applies across the entire document lifecycle instead of per stage.
+    """
+    return bool(DMSSettings.load().rbac_single_stage)
+
+
 def _status_to_stage_map() -> dict[str, str]:
     mapping: dict[str, str] = {}
     for stage_def in get_access_stages():
@@ -204,6 +212,12 @@ def effective_permissions_for_user(user, document: Document) -> list[str]:
             GroupAction.ARCHIVE.value,
         ]
     
+    # Access is scoped to involvement: a user with no involvement in this
+    # document has no permissions on it, regardless of group grants on the type.
+    from apps.documents.file_streaming import user_is_involved_with_document
+    if not user_is_involved_with_document(user, document):
+        return []
+
     # CRITICAL FIX: When a document is returned for review, only the uploader
     # should have creation-stage permissions. Approvers who returned it should
     # not retain creation rights even if their group grants them.
@@ -212,12 +226,15 @@ def effective_permissions_for_user(user, document: Document) -> list[str]:
         # Non-uploaders only get VIEW permission on returned documents
         # They cannot edit, upload, submit, or delete
         return [GroupAction.VIEW.value]
-    
+
     perms = user.get_all_permissions_for_doctype(
         str(document.document_type_id),
         document=document,
     )
     perms = filter_permissions_for_document(user, document, perms)
+    # Involvement implies the ability to view (the access gates allow it), even
+    # if the group's action set doesn't explicitly include VIEW.
+    perms = set(perms) | {GroupAction.VIEW.value}
     return sorted(perms)
 
 

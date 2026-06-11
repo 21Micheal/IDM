@@ -110,7 +110,7 @@ export default function ProfilePage() {
     },
   });
 
-  const toggleMFAMutation = useMutation({
+  const _toggleMFAMutation = useMutation({
     mutationFn: (enable: boolean) => profileAPI.toggleMFA(enable),
     onSuccess: () => {
       toast.success("MFA settings updated");
@@ -122,6 +122,7 @@ export default function ProfilePage() {
     },
     onError: () => toast.error("Failed to update MFA"),
   });
+  void _toggleMFAMutation;
 
   const { data: delegations = [] } = useQuery<Delegation[]>({
     queryKey: ["delegations", "mine"],

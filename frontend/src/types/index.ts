@@ -15,6 +15,7 @@ export interface DocumentType {
   code: string;
   reference_prefix: string;
   reference_padding?: number;
+  title_field?: string;
   description: string;
   icon: string;
   is_active?: boolean;
@@ -98,6 +99,8 @@ export interface Document {
   versions: DocumentVersion[];
   comments?: DocumentComment[];
   available_bulk_actions?: string[];
+  deleted_at?: string | null;
+  deleted_by_name?: string | null;
   created_at: string;
   updated_at: string;
 }
