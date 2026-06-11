@@ -998,7 +998,6 @@ export default function TemplateForm({ sections, values, onChange, readOnly = fa
       prevKeyRef.current = sectionsKey;
       reset({});
     }
-  // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [sectionsKey]);
 
   const currentUser = useAuthStore((s) => s.user);
@@ -1017,7 +1016,6 @@ export default function TemplateForm({ sections, values, onChange, readOnly = fa
       const computed = evaluateFormula(f.formula, { user: currentUser, now: new Date() });
       if (computed) onChange(k, computed);
     }
-  // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [sectionsKey, currentUser, readOnly, documentId]);
 
   // Keep a live snapshot of form values for conditional visibility

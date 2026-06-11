@@ -26,10 +26,9 @@ import clsx from "clsx";
 import type { PDFDocumentProxy } from "pdfjs-dist";
 
 const pdfWorkerPath = new URL("pdfjs-dist/build/pdf.worker.min.mjs", import.meta.url).toString();
-const pdfjsImportPromise = import("pdfjs-dist");
 
-async function getPdfjsLib() {
-  return pdfjsImportPromise;
+function getPdfjsLib() {
+  return import("pdfjs-dist");
 }
 
 // ── Types ─────────────────────────────────────────────────────────────────────
@@ -77,7 +76,7 @@ const ACTION_STYLES: Record<string, string> = {
 };
 
 // ── History drawer ────────────────────────────────────────────────────────────
-function TaskHistoryDrawer({ taskId, task, currentUserId }: { taskId: string; task: WorkflowTask; currentUserId: string }) {
+function TaskHistoryDrawer({ taskId, task, currentUserId: _currentUserId }: { taskId: string; task: WorkflowTask; currentUserId: string }) {
   const [open, setOpen] = useState(false);
 
   const { data: actions, isLoading } = useQuery<TaskAction[]>({
@@ -589,7 +588,8 @@ export default function WorkflowActionPanel({ task, documentId, onCompleted }: P
 
   const isHeld     = task.status === "held";
   const isActive   = task.status === "in_progress";
-  const isActionable = isHeld || isActive;
+  const _isActionable = isHeld || isActive;
+  void _isActionable;
   const anyPending = approveMutation.isPending || rejectMutation.isPending ||
                      returnMutation.isPending  || holdMutation.isPending;
 

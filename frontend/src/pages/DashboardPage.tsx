@@ -38,6 +38,8 @@ import {
 const RECENT_DOCS_PAGE_SIZE = 5;
 const RECENT_AUDIT_PAGE_SIZE = 5;
 const TREND_WINDOW_DAYS = 30;
+const PERCENT_TREND_MIN_BASELINE = 20;
+const PERCENT_TREND_MAX_ABS = 100;
 
 type PaginatedResponse<T> = {
   count: number;
@@ -91,6 +93,7 @@ function getDashboardTrendWindow() {
 
   return {
     today: toDateParam(today),
+    yesterday: toDateParam(addDays(today, -1)),
     currentFrom: toDateParam(addDays(today, -(TREND_WINDOW_DAYS - 1))),
     currentTo: toDateParam(today),
     previousFrom: toDateParam(addDays(today, -(TREND_WINDOW_DAYS * 2 - 1))),
@@ -110,6 +113,7 @@ function buildTrend(
   positiveWhenIncrease: boolean,
   label: string,
 ): StatTrend {
+  const delta = current - previous;
   const direction =
     current > previous ? "up" : current < previous ? "down" : "flat";
   const isPositive =
@@ -128,15 +132,29 @@ function buildTrend(
   if (previous === 0) {
     return {
       value: current,
-      isPositive: true,
+      isPositive,
       direction: "up",
       suffix: " new",
       label,
     };
   }
 
+  const percentChange = getPercentChange(current, previous);
+  if (
+    previous < PERCENT_TREND_MIN_BASELINE ||
+    Math.abs(percentChange) > PERCENT_TREND_MAX_ABS
+  ) {
+    return {
+      value: Math.abs(delta),
+      isPositive,
+      direction,
+      suffix: Math.abs(delta) === 1 ? " doc" : " docs",
+      label,
+    };
+  }
+
   return {
-    value: getPercentChange(current, previous),
+    value: Math.abs(percentChange),
     isPositive,
     direction,
     label,
@@ -423,6 +441,21 @@ export default function DashboardPage() {
     ...QUERY_FIVE_MIN_STALE,
   });
 
+  const { data: approvedYesterdayCount = 0 } = useQuery({
+    queryKey: ["documents", "approved", "yesterday-count", trendWindow.yesterday],
+    queryFn: () =>
+      documentsAPI.list({
+        status: "approved",
+        is_self_upload: false,
+        approved_from: trendWindow.yesterday,
+        approved_to: trendWindow.yesterday,
+        page: 1,
+        page_size: 1,
+      }).then((r) => r.data.count ?? 0),
+    enabled: metricsEnabled,
+    ...QUERY_FIVE_MIN_STALE,
+  });
+
   const { data: documentsCreatedThisPeriod = 0 } = useQuery({
     queryKey: ["documents", "created-count", trendWindow.currentFrom, trendWindow.currentTo],
     queryFn: () =>
@@ -472,36 +505,6 @@ export default function DashboardPage() {
         is_self_upload: false,
         created_from: trendWindow.previousFrom,
         created_to: trendWindow.previousTo,
-        page: 1,
-        page_size: 1,
-      }).then((r) => r.data.count ?? 0),
-    enabled: metricsEnabled,
-    ...QUERY_FIVE_MIN_STALE,
-  });
-
-  const { data: approvedThisPeriod = 0 } = useQuery({
-    queryKey: ["documents", "approved", "approved-count", trendWindow.currentFrom, trendWindow.currentTo],
-    queryFn: () =>
-      documentsAPI.list({
-        status: "approved",
-        is_self_upload: false,
-        approved_from: trendWindow.currentFrom,
-        approved_to: trendWindow.currentTo,
-        page: 1,
-        page_size: 1,
-      }).then((r) => r.data.count ?? 0),
-    enabled: metricsEnabled,
-    ...QUERY_FIVE_MIN_STALE,
-  });
-
-  const { data: approvedPreviousPeriod = 0 } = useQuery({
-    queryKey: ["documents", "approved", "approved-count", trendWindow.previousFrom, trendWindow.previousTo],
-    queryFn: () =>
-      documentsAPI.list({
-        status: "approved",
-        is_self_upload: false,
-        approved_from: trendWindow.previousFrom,
-        approved_to: trendWindow.previousTo,
         page: 1,
         page_size: 1,
       }).then((r) => r.data.count ?? 0),
@@ -618,10 +621,10 @@ export default function DashboardPage() {
     `Pending approvals created in the last ${TREND_WINDOW_DAYS} days vs previous ${TREND_WINDOW_DAYS} days`,
   );
   const approvedTrend = buildTrend(
-    approvedThisPeriod,
-    approvedPreviousPeriod,
+    approvedTodayCount,
+    approvedYesterdayCount,
     true,
-    `Documents approved in the last ${TREND_WINDOW_DAYS} days vs previous ${TREND_WINDOW_DAYS} days`,
+    "Documents approved today vs yesterday",
   );
   const dueSoonTaskCount = countDueSoonTasks(allTasks);
   const tasksTrend: StatTrend | undefined =

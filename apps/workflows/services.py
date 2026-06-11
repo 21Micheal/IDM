@@ -56,41 +56,66 @@ class WorkflowService:
     # ── Rule / template resolution ─────────────────────────────────────────
 
     @staticmethod
-    def resolve_template(document) -> WorkflowTemplate:
+    def _resolve_routing(document):
+        """Pick the (rule, template) for a document by amount threshold.
+
+        Currency handling: amounts in different currencies aren't comparable, so
+        currency only acts as a discriminator when a document type actually has
+        rules in more than one currency. For the common single-currency setup
+        (every rule shares one currency), routing is purely amount-based — so a
+        rule's currency that doesn't happen to match the document's (e.g. rules
+        left at the default USD while documents are KES) no longer silently
+        defeats threshold routing and forces the primary fallback.
+        """
         doc_type = document.document_type
         amount   = document.amount or 0
-        currency = (document.currency or "USD").upper()
+        currency = (document.currency or "").upper()
 
-        matching_rule = (
-            WorkflowRule.objects
-            .filter(
-                document_type=doc_type,
-                template__document_type=doc_type,
-                currency=currency,
-                is_active=True,
-            )
-            .filter(amount_min__lte=amount)
-            .filter(Q(amount_max__isnull=True) | Q(amount_max__gte=amount))
+        type_rules = WorkflowRule.objects.filter(
+            document_type=doc_type,
+            template__document_type=doc_type,
+            is_active=True,
+        )
+
+        amount_q = Q(amount_min__lte=amount) & (
+            Q(amount_max__isnull=True) | Q(amount_max__gte=amount)
+        )
+
+        rule_currencies = {
+            (c or "").upper() for c in type_rules.values_list("currency", flat=True)
+        }
+        candidates = type_rules.filter(amount_q)
+        # Only enforce currency when the type genuinely mixes currencies AND the
+        # document declares one; otherwise match on amount alone.
+        if len(rule_currencies) > 1 and currency:
+            candidates = candidates.filter(currency=currency)
+
+        rule = (
+            candidates
             .order_by("-amount_min", "amount_max")
             .select_related("template")
             .first()
         )
+        if rule:
+            return rule, rule.template
 
-        if matching_rule:
-            return matching_rule.template
-
+        primary = doc_type.workflow_template
         if (
-            doc_type.workflow_template
-            and doc_type.workflow_template.is_active
-            and doc_type.workflow_template.document_type_id == doc_type.id
+            primary
+            and primary.is_active
+            and primary.document_type_id == doc_type.id
         ):
-            return doc_type.workflow_template
+            return None, primary
 
         raise WorkflowError(
             f"No workflow template is configured for document type "
             f"'{doc_type.name}'. "
             f"Go to Admin → Workflow Builder and assign a template."
         )
+
+    @staticmethod
+    def resolve_template(document) -> WorkflowTemplate:
+        return WorkflowService._resolve_routing(document)[1]
 
     # ── Start ──────────────────────────────────────────────────────────────
 
@@ -105,20 +130,7 @@ class WorkflowService:
                 WorkflowService._activate_step(existing, order=existing.current_step_order)
             return existing
 
-        template = WorkflowService.resolve_template(document)
-        rule     = (
-            WorkflowRule.objects
-            .filter(
-                document_type=document.document_type,
-                template__document_type=document.document_type,
-                currency=(document.currency or "USD").upper(),
-                is_active=True,
-                amount_min__lte=document.amount or 0,
-            )
-            .filter(Q(amount_max__isnull=True) | Q(amount_max__gte=document.amount or 0))
-            .order_by("-amount_min", "amount_max")
-            .first()
-        )
+        rule, template = WorkflowService._resolve_routing(document)
 
         instance = WorkflowInstance.objects.create(
             document=document,

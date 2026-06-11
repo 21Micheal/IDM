@@ -13,16 +13,15 @@
 import { useMemo, useState, useCallback } from "react";
 import {
   Check,
-  CheckCircle2,
   ChevronDown,
   ChevronRight,
   Clock,
-  FileText,
+  
   GitBranch,
   Loader2,
   MessageSquare,
   Minus,
-  Plus,
+  
   RotateCcw,
   User,
   XCircle,
@@ -76,7 +75,18 @@ interface WorkflowVisualizerProps {
 /* Design tokens                                                      */
 /* ------------------------------------------------------------------ */
 
-const TONE = {
+const TONE: Record<WorkflowStatus, {
+  stroke: string;
+  strokeLight: string;
+  fill: string;
+  fillDark: string;
+  text: string;
+  accent: string;
+  badgeBg: string;
+  badgeText: string;
+  badgeBorder: string;
+  label: string;
+}> = {
   completed: {
     stroke: "#6f8f80",
     strokeLight: "#9fb8ad",
@@ -125,6 +135,18 @@ const TONE = {
     badgeBorder: "#d4bbbb",
     label: "Rejected",
   },
+  skipped: {
+    stroke: "#8f98a3",
+    strokeLight: "#c4cad1",
+    fill: "#f8f9fa",
+    fillDark: "#1e293b",
+    text: "#56616d",
+    accent: "#9aa3ad",
+    badgeBg: "#f1f5f9",
+    badgeText: "#56616d",
+    badgeBorder: "#d2d7dd",
+    label: "Skipped",
+  },
   returned: {
     stroke: "#9b866f",
     strokeLight: "#c2b09d",
@@ -149,23 +171,7 @@ const TONE = {
     badgeBorder: "#d2d7dd",
     label: "Pending",
   },
-  skipped: {
-    stroke: "#9ca3af",
-    strokeLight: "#d1d5db",
-    fill: "#ffffff",
-    fillDark: "#111827",
-    text: "#4b5563",
-    accent: "#9ca3af",
-    badgeBg: "#f3f4f6",
-    badgeText: "#6b7280",
-    badgeBorder: "#d1d5db",
-    label: "Skipped",
-  },
-} as const;
-
-/* ------------------------------------------------------------------ */
-/* Geometry constants                                                 */
-/* ------------------------------------------------------------------ */
+};
 
 const NODE_W = 220;
 const NODE_H = 100;
@@ -175,7 +181,7 @@ const COL_GAP = 72;       // horizontal gap between nodes
 const ROW_GAP = 80;       // vertical gap between branch rows
 const PAD_X = 48;         // left/top canvas padding
 const PAD_Y = 56;
-const STEP_TINTS = ["#f7f8f7", "#f5f7f9", "#f8f7f5", "#f7f6f8", "#f6f8f8"];
+// STEP_TINTS removed (unused)
 const NODE_PALETTE = [
   { fill: "#eef2ff", accent: "#818cf8" },
   { fill: "#ecfdf5", accent: "#34d399" },
@@ -733,32 +739,7 @@ function ProgressRing({ pct, size = 48 }: { pct: number; size?: number }) {
 /* Summary card                                                       */
 /* ------------------------------------------------------------------ */
 
-function SummaryCard({
-  label,
-  value,
-  icon,
-  colorClass,
-  borderColor,
-}: {
-  label: string;
-  value: number;
-  icon: React.ReactNode;
-  colorClass: string;
-  borderColor: string;
-}) {
-  return (
-    <div
-      className={clsx("relative overflow-hidden border px-4 py-3", colorClass)}
-      style={{ borderColor }}
-    >
-      <div className="flex items-center justify-between">
-        <span className="text-[10px] font-bold uppercase tracking-widest opacity-70">{label}</span>
-        <span className="opacity-60">{icon}</span>
-      </div>
-      <div className="mt-1 text-3xl font-black tabular-nums">{value}</div>
-    </div>
-  );
-}
+// SummaryCard removed (unused)
 
 /* ------------------------------------------------------------------ */
 /* Zoom button                                                        */

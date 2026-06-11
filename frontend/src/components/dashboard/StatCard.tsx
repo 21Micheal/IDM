@@ -26,6 +26,12 @@ const iconWrapVariants: Record<NonNullable<StatCardProps['color']>, string> = {
   secondary: 'bg-primary/7 text-primary',
 };
 
+function formatTrendValue(value: number) {
+  const magnitude = Math.abs(value);
+  if (!Number.isFinite(magnitude)) return '0';
+  return Number.isInteger(magnitude) ? String(magnitude) : magnitude.toFixed(1);
+}
+
 export const StatCard: React.FC<StatCardProps> = ({
   title,
   value,
@@ -69,7 +75,7 @@ export const StatCard: React.FC<StatCardProps> = ({
               <TrendIcon className="h-3.5 w-3.5" />
               <span>
                 {trendDirection === 'up' ? '+' : trendDirection === 'down' ? '-' : ''}
-                {trend.value}
+                {formatTrendValue(trend.value)}
                 {trend.suffix ?? '%'}
               </span>
             </div>

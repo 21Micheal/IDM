@@ -49,7 +49,7 @@ import {
   Image as ImageIcon, Table2, Heading, Minus, ChevronUp,
   ChevronDown, AlertCircle, Tag, Layers, ArrowRight,
   ChevronRight, X, Loader2, Sliders, Link2, User as UserIcon,
-  Sigma, Wrench, Eye as EyeIcon, EyeOff,
+  Wrench,
 } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { documentTypesAPI } from "@/services/api";
@@ -2196,7 +2196,6 @@ export default function TemplateBuilderV2({ initial, onSave, onCancel, isSaving,
       setLastAutoSavedAt(Date.now());
     }, 1200);
     return () => { if (autoSaveTimer.current) clearTimeout(autoSaveTimer.current); };
-  // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [template, autoSave]);
 
   /* Configure modal data */

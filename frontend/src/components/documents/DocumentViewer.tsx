@@ -62,9 +62,8 @@ const pdfWorkerPath = new URL(
   import.meta.url
 ).toString();
 
-const pdfjsImportPromise = import("pdfjs-dist");
-async function getPdfjsLib() {
-  return pdfjsImportPromise;
+function getPdfjsLib() {
+  return import("pdfjs-dist");
 }
 
 // ── Constants ──────────────────────────────────────────────────────────────────
@@ -251,7 +250,8 @@ function EditLockBanner({
 
 function PdfViewer({
   url,
-  doc,
+  // doc is not used inside PdfViewer; prefix with underscore to satisfy lint
+  doc: _doc,
   canUploadVersion,
   onVersionUploaded,
 }: {

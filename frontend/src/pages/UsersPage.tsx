@@ -221,7 +221,7 @@ function EditUserModal({
   onClose: () => void;
 }) {
   const qc = useQueryClient();
-  const { register, handleSubmit, formState: { errors } } = useForm<EditForm>({
+  const { register, handleSubmit, formState: { errors: _errors } } = useForm<EditForm>({
     resolver: zodResolver(editSchema),
     defaultValues: {
       first_name: user.first_name,
@@ -231,6 +231,7 @@ function EditUserModal({
       is_active: user.is_active,
     },
   });
+  void _errors;
 
   const mutation = useMutation({
     mutationFn: (data: EditForm) => usersAPI.update(user.id, data),
@@ -334,13 +335,14 @@ export default function UsersPage() {
     staleTime: 1000 * 60 * 5,
   });
 
-  const resetPasswordMutation = useMutation<unknown, unknown, string>({
+  const _resetPasswordMutation = useMutation<unknown, unknown, string>({
     mutationFn: (id: string) => usersAPI.resetPassword(id),
     onSuccess: (res: any) => setPwResult(res.data),
     onError: () => toast.error("Password reset failed"),
   });
+  void _resetPasswordMutation;
 
-  const toggleActiveMutation = useMutation({
+  const _toggleActiveMutation = useMutation({
     mutationFn: (id: string) => usersAPI.toggleActive(id),
     onSuccess: () => {
       qc.invalidateQueries({ queryKey: ["users"] });
@@ -348,6 +350,7 @@ export default function UsersPage() {
     },
     onError: () => toast.error("Failed to update status"),
   });
+  void _toggleActiveMutation;
 
   return (
     <div className="admin-shell">

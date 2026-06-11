@@ -83,36 +83,50 @@ function normalizeApiBase(rawBase: string): string {
 
 function resolveApiBaseUrl(): string {
   const rawApiUrl = import.meta.env.VITE_API_URL?.trim();
-  console.log('Raw VITE_API_URL from import.meta.env:', rawApiUrl);
+  if (import.meta.env.DEV) {
+    console.warn('Raw VITE_API_URL from import.meta.env:', rawApiUrl);
+  }
   
   if (!rawApiUrl) {
-    console.log('No VITE_API_URL found, using default /api/v1');
+    if (import.meta.env.DEV) {
+      console.warn('No VITE_API_URL found, using default /api/v1');
+    }
     return "/api/v1";
   }
 
   const normalized = normalizeApiBase(rawApiUrl);
-  console.log('Normalized API URL:', normalized);
+  if (import.meta.env.DEV) {
+    console.warn('Normalized API URL:', normalized);
+  }
 
   if (typeof window !== "undefined") {
     try {
       const parsed = new URL(normalized, window.location.origin);
       if (parsed.protocol === "http:" || parsed.protocol === "https:") {
         const finalUrl = parsed.href.replace(/\/+$|\/$/, "");
-        console.log('Final resolved API URL:', finalUrl);
+        if (import.meta.env.DEV) {
+          console.warn('Final resolved API URL:', finalUrl);
+        }
         return finalUrl;
       }
     } catch (error) {
-      console.log('URL parsing failed, falling back to /api/v1', error);
+      if (import.meta.env.DEV) {
+        console.warn('URL parsing failed, falling back to /api/v1', error);
+      }
       // fall back to proxy-friendly relative API path
     }
   }
 
-  console.log('Using fallback /api/v1');
+  if (import.meta.env.DEV) {
+    console.warn('Using fallback /api/v1');
+  }
   return "/api/v1";
 }
 
 export const apiBaseUrl = resolveApiBaseUrl();
-console.log('API Base URL resolved to:', apiBaseUrl);
+if (import.meta.env.DEV) {
+  console.warn('API Base URL resolved to:', apiBaseUrl);
+}
 
 export const api = axios.create({
   baseURL: apiBaseUrl,

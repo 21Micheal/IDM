@@ -398,10 +398,14 @@ class WorkflowRuleSerializer(serializers.ModelSerializer):
             .exclude(pk=getattr(self.instance, "pk", None))
         )
         for rule in overlaps:
+            other_min = rule.amount_min
             other_max = rule.amount_max
-            overlaps_lower = amount_max is None or other_max is None or amount_max >= rule.amount_min
-            overlaps_upper = other_max is None or other_max >= amount_min
-            if overlaps_lower and overlaps_upper:
+            # Two ranges [amount_min, amount_max] and [other_min, other_max]
+            # (None = unbounded above) overlap iff each begins at or before the
+            # other ends: amount_min <= other_max AND other_min <= amount_max.
+            a_reaches_b = other_max is None or amount_min <= other_max
+            b_reaches_a = amount_max is None or other_min <= amount_max
+            if a_reaches_b and b_reaches_a:
                 raise serializers.ValidationError(
                     {"amount_min": f"This amount range overlaps with rule '{rule.label or rule.template.name}'."}
                 )

@@ -5,7 +5,7 @@ import { api, documentsAPI, workflowAPI } from "@/services/api";
 import DocumentViewer from "@/components/documents/DocumentViewer";
 import { UploadVersionDrawer } from "@/components/documents/UploadVersionDrawer";
 import { WorkflowVisualizer } from "@/components/notifications/workflow-visualizer";
-import StatusBadge from "@/components/documents/StatusBadge";
+// StatusBadge not used in this file
 import OcrStatusBadge from "@/components/documents/OcrStatusBadge";
 import { AddToFolderMenu } from "@/components/documents/AddToFolderMenu";
 import MetadataEditPanel from "@/components/documents/MetadataEditPanel";

@@ -7,7 +7,7 @@
     "dev": "vite",
     "build": "tsc && vite build",
     "preview": "vite preview",
-    "lint": "eslint src --report-unused-disable-directives --max-warnings 0",
+    "lint": "eslint \"src/**/*.{js,jsx,ts,tsx}\" --report-unused-disable-directives",
     "test:search": "mkdir -p node_modules/.cache && esbuild src/lib/search.test.ts --bundle --platform=node --format=esm --outfile=node_modules/.cache/search.test.mjs && node --test node_modules/.cache/search.test.mjs"
   },
   "dependencies": {

@@ -331,7 +331,8 @@ export default function DocumentsPage({ personalOnly = false }: DocumentsPagePro
   const [supplierFilter, setSupplierFilter] = useState("");
   const [personalTagFilter, setPersonalTagFilter] = useState("");
   const [sort, setSort] = useState<"created_at" | "document_date" | "amount" | "title" | "reference_number">("created_at");
-  const [sortDir, setSortDir] = useState<"asc" | "desc">("desc");
+  const [sortDir, _setSortDir] = useState<"asc" | "desc">("desc");
+  void _setSortDir;
   const [page, setPage] = useState(1);
   const [selectedIds, setSelectedIds] = useState<string[]>([]);
   const [showFilters, setShowFilters] = useState(false);

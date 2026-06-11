@@ -97,7 +97,9 @@ export class ChatWebSocketService {
     this.currentRoomId = roomId;
 
     socket.onopen = () => {
-      console.log(`Connected to chat room: ${roomId}`);
+      if (import.meta.env.DEV) {
+        console.warn(`Connected to chat room: ${roomId}`);
+      }
       this.reconnectAttempts = 0;
     };
 
@@ -124,7 +126,9 @@ export class ChatWebSocketService {
 
     socket.onclose = (event) => {
       if (this.chatSocket !== socket) return;
-      console.log(`Chat room connection closed: ${roomId}`);
+      if (import.meta.env.DEV) {
+        console.warn(`Chat room connection closed: ${roomId}`);
+      }
       this.currentRoomId = null;
       
       // Attempt to reconnect if not intentionally closed
@@ -155,7 +159,9 @@ export class ChatWebSocketService {
     this.notificationSocket = socket;
 
     socket.onopen = () => {
-      console.log('Connected to chat notifications');
+      if (import.meta.env.DEV) {
+        console.warn('Connected to chat notifications');
+      }
       this.notificationReconnectAttempts = 0;
     };
 
@@ -173,7 +179,9 @@ export class ChatWebSocketService {
 
     socket.onclose = (event) => {
       if (this.notificationSocket !== socket) return;
-      console.log('Notification connection closed');
+      if (import.meta.env.DEV) {
+        console.warn('Notification connection closed');
+      }
       this.notificationSocket = null;
       
       // Attempt to reconnect only when consumers exist and within cap.

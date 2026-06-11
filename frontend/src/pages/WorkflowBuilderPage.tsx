@@ -208,7 +208,8 @@ function blankStep(): WorkflowStep {
 }
 
 function stepToPayload(step: WorkflowStep): Partial<WorkflowStep> {
-  const { assignee_user_name, assignee_group_name, assignee_user_auto, ...rest } = normalizeStep(step) as any;
+  const { assignee_user_name: _assignee_user_name, assignee_group_name: _assignee_group_name, assignee_user_auto: _assignee_user_auto, ...rest } = normalizeStep(step) as any;
+  void _assignee_user_name; void _assignee_group_name; void _assignee_user_auto;
   // Ensure assignee_user is only sent for types that allow it
   if (rest.assignee_type !== "group_specific") {
     rest.assignee_user = null;
@@ -249,6 +250,66 @@ function Label({ children, required }: { children: React.ReactNode; required?: b
     <label className="block text-xs font-medium text-foreground mb-1.5">
       {children}{required && <span className="text-destructive ml-0.5">*</span>}
     </label>
+  );
+}
+
+type RuleFormValues = { amount_min: string; amount_max: string; currency: string; label: string };
+
+// Shared amount-range fields used by both the create and edit rule forms.
+function RuleFormFields({ values, onChange }: {
+  values: RuleFormValues;
+  onChange: (patch: Partial<RuleFormValues>) => void;
+}) {
+  return (
+    <div className="grid grid-cols-2 gap-3">
+      <div>
+        <Label required>Minimum amount</Label>
+        <input
+          type="number" min={0} step="0.01"
+          value={values.amount_min}
+          onChange={e => onChange({ amount_min: e.target.value })}
+          className={inp}
+          placeholder="0"
+        />
+        <p className="text-[11px] text-muted-foreground mt-1">
+          Starts matching from {formatMoney(Number(values.amount_min || 0), values.currency)}
+        </p>
+      </div>
+      <div>
+        <Label>Maximum amount</Label>
+        <input
+          type="number" min={0} step="0.01"
+          value={values.amount_max}
+          onChange={e => onChange({ amount_max: e.target.value })}
+          className={inp}
+          placeholder="Leave blank for no upper limit"
+        />
+        <p className="text-[11px] text-muted-foreground mt-1">
+          {values.amount_max
+            ? `Stops at ${formatMoney(Number(values.amount_max), values.currency)}`
+            : "Leave blank to cover everything above the minimum"}
+        </p>
+      </div>
+      <div>
+        <Label>Currency</Label>
+        <select
+          value={values.currency}
+          onChange={e => onChange({ currency: e.target.value })}
+          className={inp}
+        >
+          {CURRENCIES.map(c => <option key={c} value={c}>{c}</option>)}
+        </select>
+      </div>
+      <div className="col-span-2">
+        <Label>Label (optional)</Label>
+        <input
+          value={values.label}
+          onChange={e => onChange({ label: e.target.value })}
+          className={inp}
+          placeholder="e.g., High-value transactions"
+        />
+      </div>
+    </div>
   );
 }
 
@@ -602,10 +663,10 @@ function defaultPositions(stepCount: number): NodePos[] {
 
 function FlowchartEditor({
   steps,
-  groups,
+  groups: _groups,
   selectedIndex,
   onSelectIndex,
-  onStepsChange,
+  onStepsChange: _onStepsChange,
   onAddStep,
 }: {
   steps: WorkflowStep[];
@@ -613,8 +674,7 @@ function FlowchartEditor({
   selectedIndex: number | null;
   onSelectIndex: (i: number | null) => void;
   onStepsChange: (steps: WorkflowStep[]) => void;
-  onAddStep: () => void;
-}) {
+  onAddStep: () => void;}) {
   const wrapperRef = useRef<HTMLDivElement>(null);
 
   // Pan / zoom transform
@@ -781,7 +841,8 @@ function FlowchartEditor({
   const bounds = useMemo(() => {
     const validNodes = positions.slice(0, steps.length).filter(Boolean) as NodePos[];
     const xs = validNodes.map(p => p.x);
-    const ys = validNodes.map(p => p.y);
+    const _ys = validNodes.map(p => p.y);
+    void _ys;
     const minX = Math.min(-ANCHOR_W, ...xs.map(x => x - NODE_W / 2)) - 200;
     const maxX = Math.max(ANCHOR_W, ...xs.map(x => x + NODE_W / 2)) + 200;
     const minY = -ANCHOR_H - 200;
@@ -1104,10 +1165,62 @@ function RoutingRulesPanel({ template }: {
     onError: () => toast.error("Failed to remove rule"),
   });
 
+  // ── Inline rule editing ──────────────────────────────────────────────────
+  const [editingId, setEditingId] = useState<string | null>(null);
+  const [editForm, setEditForm] = useState<RuleFormValues>({
+    amount_min: "0", amount_max: "", currency: "USD", label: "",
+  });
+
+  const startEdit = (rule: WorkflowRule) => {
+    setShowAdd(false);
+    setEditingId(rule.id);
+    setEditForm({
+      amount_min: String(rule.amount_min ?? "0"),
+      amount_max: rule.amount_max == null ? "" : String(rule.amount_max),
+      currency: rule.currency,
+      label: rule.label ?? "",
+    });
+  };
+
+  const updateRule = useMutation({
+    mutationFn: () => workflowAPI.updateRule(editingId as string, {
+      amount_min: editForm.amount_min || "0",
+      amount_max: editForm.amount_max || null,
+      currency: editForm.currency,
+      label: editForm.label,
+    }),
+    onSuccess: () => {
+      toast.success("Rule updated");
+      qc.invalidateQueries({ queryKey: ["workflow-rules", templateId] });
+      setEditingId(null);
+    },
+    onError: (err: any) => {
+      const message = formatApiError(err?.response?.data) || "Failed to update rule";
+      toast.error(message);
+    },
+  });
+
+  const handleUpdateRule = () => {
+    if (editForm.amount_min.trim() === "") {
+      toast.error("Minimum amount is required");
+      return;
+    }
+    updateRule.mutate();
+  };
+
   const sortedRules = useMemo(
     () => [...(rules ?? [])].sort((a, b) => Number(a.amount_min) - Number(b.amount_min)),
     [rules]
   );
+
+  // Default a new rule's currency to the existing rules' currency so a doc type's
+  // rules stay in one currency (mixed currencies switch routing to strict
+  // currency matching). Routing is otherwise amount-based.
+  const openAddRule = () => {
+    const existingCurrency = rules?.[0]?.currency;
+    if (existingCurrency) setForm((f) => ({ ...f, currency: existingCurrency }));
+    setShowAdd(true);
+  };
 
   const handleCreateRule = () => {
     if (!templateId) {
@@ -1139,7 +1252,7 @@ function RoutingRulesPanel({ template }: {
           </p>
         </div>
         {!showAdd && hasDocumentType && (
-          <button onClick={() => setShowAdd(true)} className="btn-primary text-xs px-3 py-1.5">
+          <button onClick={openAddRule} className="btn-primary text-xs px-3 py-1.5">
             <Plus className="w-3.5 h-3.5" /> Add rule
           </button>
         )}
@@ -1165,59 +1278,7 @@ function RoutingRulesPanel({ template }: {
           <p className="text-xs text-muted-foreground">
             Applies to <span className="font-medium text-foreground">{template.document_type_name}</span> documents only.
           </p>
-          <div className="grid grid-cols-2 gap-3">
-            <div>
-              <Label required>Minimum amount</Label>
-              <input
-                type="number"
-                min={0}
-                step="0.01"
-                value={form.amount_min}
-                onChange={e => setForm(f => ({ ...f, amount_min: e.target.value }))}
-                className={inp}
-                placeholder="0"
-              />
-              <p className="text-[11px] text-muted-foreground mt-1">
-                Starts matching from {formatMoney(Number(form.amount_min || 0), form.currency)}
-              </p>
-            </div>
-            <div>
-              <Label>Maximum amount</Label>
-              <input
-                type="number"
-                min={0}
-                step="0.01"
-                value={form.amount_max}
-                onChange={e => setForm(f => ({ ...f, amount_max: e.target.value }))}
-                className={inp}
-                placeholder="Leave blank for no upper limit"
-              />
-              <p className="text-[11px] text-muted-foreground mt-1">
-                {form.amount_max
-                  ? `Stops at ${formatMoney(Number(form.amount_max), form.currency)}`
-                  : "Leave blank to cover everything above the minimum"}
-              </p>
-            </div>
-            <div>
-              <Label>Currency</Label>
-              <select
-                value={form.currency}
-                onChange={e => setForm(f => ({ ...f, currency: e.target.value }))}
-                className={inp}
-              >
-                {CURRENCIES.map(c => <option key={c} value={c}>{c}</option>)}
-              </select>
-            </div>
-            <div className="col-span-2">
-              <Label>Label (optional)</Label>
-              <input
-                value={form.label}
-                onChange={e => setForm(f => ({ ...f, label: e.target.value }))}
-                className={inp}
-                placeholder="e.g., High-value transactions"
-              />
-            </div>
-          </div>
+          <RuleFormFields values={form} onChange={(p) => setForm(f => ({ ...f, ...p }))} />
           <div className="flex gap-2 pt-2">
             <button
               onClick={handleCreateRule}
@@ -1246,7 +1307,7 @@ function RoutingRulesPanel({ template }: {
           <p className="text-xs text-muted-foreground mt-1 max-w-md mx-auto">
             Add amount ranges to send matching {template.document_type_name?.toLowerCase() ?? "documents"} to this template.
           </p>
-          <button onClick={() => setShowAdd(true)} className="btn-secondary text-xs mt-4">
+          <button onClick={openAddRule} className="btn-secondary text-xs mt-4">
             <Plus className="w-3.5 h-3.5" /> Add your first rule
           </button>
         </div>
@@ -1255,6 +1316,31 @@ function RoutingRulesPanel({ template }: {
       {sortedRules.length > 0 && (
         <div className="space-y-3">
           {sortedRules.map((rule, idx) => {
+            if (editingId === rule.id) {
+              return (
+                <div key={rule.id} className="rounded-xl border-2 border-accent/40 bg-accent/5 p-4 space-y-3">
+                  <div className="flex items-center justify-between">
+                    <h4 className="text-sm font-semibold text-foreground">Edit routing rule</h4>
+                    <button onClick={() => setEditingId(null)} className="p-1 rounded hover:bg-muted">
+                      <X className="w-4 h-4 text-muted-foreground" />
+                    </button>
+                  </div>
+                  <RuleFormFields values={editForm} onChange={(p) => setEditForm(f => ({ ...f, ...p }))} />
+                  <div className="flex gap-2 pt-2">
+                    <button
+                      onClick={handleUpdateRule}
+                      disabled={updateRule.isPending}
+                      className="btn-primary text-xs"
+                    >
+                      {updateRule.isPending && <Loader2 className="w-3 h-3 animate-spin" />} Save changes
+                    </button>
+                    <button onClick={() => setEditingId(null)} className="btn-secondary text-xs">
+                      Cancel
+                    </button>
+                  </div>
+                </div>
+              );
+            }
             return (
               <div key={rule.id} className="rounded-xl border border-border bg-card px-4 py-3 group hover:border-foreground/20 transition-colors">
                 <div className="flex items-start gap-3">
@@ -1274,14 +1360,23 @@ function RoutingRulesPanel({ template }: {
                       Matching {rule.document_type_name.toLowerCase()} documents will use this template.
                     </p>
                   </div>
-                  <button
-                    onClick={() => deleteRule.mutate(rule.id)}
-                    disabled={deleteRule.isPending}
-                    title="Remove rule"
-                    className="opacity-0 group-hover:opacity-100 p-1.5 text-muted-foreground hover:text-destructive rounded-lg hover:bg-destructive/10 transition-colors"
-                  >
-                    <Trash2 className="w-4 h-4" />
-                  </button>
+                  <div className="flex items-center gap-1 opacity-0 group-hover:opacity-100 transition-opacity">
+                    <button
+                      onClick={() => startEdit(rule)}
+                      title="Edit rule"
+                      className="p-1.5 text-muted-foreground hover:text-accent rounded-lg hover:bg-accent/10 transition-colors"
+                    >
+                      <Edit3 className="w-4 h-4" />
+                    </button>
+                    <button
+                      onClick={() => deleteRule.mutate(rule.id)}
+                      disabled={deleteRule.isPending}
+                      title="Remove rule"
+                      className="p-1.5 text-muted-foreground hover:text-destructive rounded-lg hover:bg-destructive/10 transition-colors"
+                    >
+                      <Trash2 className="w-4 h-4" />
+                    </button>
+                  </div>
                 </div>
               </div>
             );
@@ -1298,7 +1393,7 @@ function TemplateEditor({
   docType = null,
   onSaved,
   onDuplicate,
-  allTemplates,
+  allTemplates: _allTemplates,
   docTypes,
 }: {
   template: WorkflowTemplate | null;
@@ -1874,11 +1969,12 @@ export default function WorkflowBuilderPage() {
   const [creatingForDocType, setCreatingForDocType] = useState<DocumentType | null>(null);
   const [duplicatingTemplate, setDuplicatingTemplate] = useState<WorkflowTemplate | null>(null);
 
-  const { data: docTypes, isLoading: dtLoading } = useQuery<unknown, Error, DocumentType[]>({
+  const { data: docTypes, isLoading: _dtLoading } = useQuery<unknown, Error, DocumentType[]>({
     queryKey: ["document-types"],
     queryFn: () => documentTypesAPI.list().then((r) => r.data as unknown),
     select: (data) => normalizeListResponse<DocumentType>(data),
   });
+  void _dtLoading;
 
   const { data: allTemplates, isLoading: templatesLoading } = useQuery<WorkflowTemplate[]>({
     queryKey: ["workflow-templates"],
