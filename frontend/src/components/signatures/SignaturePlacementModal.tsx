@@ -11,6 +11,7 @@ import { Loader2 } from "lucide-react";
 import clsx from "clsx";
 import { documentsAPI, profileAPI } from "@/services/api";
 import { useAuthStore } from "@/store/authStore";
+import SignaturePanel from "@/components/profile/SignaturePanel";
 import type { PDFDocumentProxy } from "pdfjs-dist";
 
 const pdfWorkerPath = new URL("pdfjs-dist/build/pdf.worker.min.mjs", import.meta.url).toString();
@@ -58,10 +59,14 @@ export default function SignaturePlacementModal({
     queryFn: () => documentsAPI.previewUrl(documentId).then((r) => r.data),
   });
 
-  const { data: savedSignature } = useQuery<any>({
+  const { data: savedSignature, isLoading: signatureLoading } = useQuery<any>({
     queryKey: ["profile-signature"],
     queryFn: () => profileAPI.getSignature().then((r) => r.data.signature ?? null),
   });
+  // No saved e-signature yet → show the adopt-signature step first. The moment
+  // SignaturePanel saves one it invalidates ["profile-signature"], this refetches,
+  // and the dialog advances to placement automatically.
+  const needsSignature = !signatureLoading && !savedSignature?.image_data;
 
   useEffect(() => {
     let cancelled = false;
@@ -157,12 +162,27 @@ export default function SignaturePlacementModal({
       <div className="flex max-h-[92vh] w-full max-w-6xl flex-col overflow-hidden rounded-xl bg-background shadow-2xl">
         <div className="flex items-center justify-between gap-4 border-b border-border px-5 py-4">
           <div>
-            <h3 className="text-base font-semibold text-foreground">Place signature</h3>
-            <p className="text-xs text-muted-foreground">Drag your signature to the signing line, then confirm.</p>
+            <h3 className="text-base font-semibold text-foreground">
+              {needsSignature ? "Set up your signature" : "Place signature"}
+            </h3>
+            <p className="text-xs text-muted-foreground">
+              {needsSignature
+                ? "You don't have a signature yet — create one to sign this document. It's saved for next time."
+                : "Drag your signature to the signing line, then confirm."}
+            </p>
           </div>
           <button onClick={onCancel} className="btn-secondary text-sm">Cancel</button>
         </div>
 
+        {signatureLoading ? (
+          <div className="flex min-h-0 flex-1 items-center justify-center p-10">
+            <Loader2 className="h-6 w-6 animate-spin text-primary" />
+          </div>
+        ) : needsSignature ? (
+          <div className="min-h-0 flex-1 overflow-auto p-5">
+            <SignaturePanel />
+          </div>
+        ) : (
         <div className="grid min-h-0 flex-1 grid-cols-1 lg:grid-cols-[1fr_320px]">
           <div className="min-h-0 overflow-auto bg-[#EDEDED] p-4">
             <div className="mb-3 flex items-center justify-between rounded-lg border border-border bg-background px-3 py-2">
@@ -216,11 +236,6 @@ export default function SignaturePlacementModal({
               </p>
               {note && <p className="mt-2 text-xs text-muted-foreground">{note}</p>}
             </div>
-            {!savedSignature?.image_data && (
-              <p className="text-xs text-amber-600">
-                You don't have a saved e-signature yet. Add one in Profile → E-Signature first.
-              </p>
-            )}
             {error && <p className="text-sm text-destructive">{error}</p>}
             <button onClick={confirm} disabled={isSubmitting || !pageSize.width} className="w-full btn-primary justify-center">
               {isSubmitting && <Loader2 className="h-4 w-4 animate-spin" />}
@@ -229,6 +244,7 @@ export default function SignaturePlacementModal({
             <button onClick={onCancel} className="w-full btn-secondary justify-center">Back</button>
           </div>
         </div>
+        )}
       </div>
     </div>
   );
