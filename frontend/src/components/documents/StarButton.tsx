@@ -21,6 +21,7 @@ interface StarButtonProps {
   size?: "sm" | "md";
   showLabel?: boolean;
   className?: string;
+  variant?: "default" | "command";
 }
 
 export function StarButton({
@@ -28,6 +29,7 @@ export function StarButton({
   size = "md",
   showLabel = false,
   className,
+  variant = "default",
 }: StarButtonProps) {
   const qc        = useQueryClient();
   const cacheKey  = ["favourite-check", documentId];
@@ -77,6 +79,7 @@ export function StarButton({
   const iconSize = size === "sm" ? "w-3.5 h-3.5" : "w-4 h-4";
   const btnSize  = size === "sm" ? "p-1" : "p-1.5";
   const label = starred ? "Remove favourite" : "Add to favourites";
+  const isCommandVariant = variant === "command";
 
   return (
     <button
@@ -90,16 +93,22 @@ export function StarButton({
       }}
       disabled={toggle.isPending}
       className={clsx(
-        showLabel
-          ? "inline-flex items-center gap-2 rounded-lg border border-border bg-card px-3 py-2 text-sm font-medium"
-          : btnSize,
+        isCommandVariant
+          ? "inline-flex items-center gap-1"
+          : showLabel
+            ? "inline-flex items-center gap-2 rounded-lg border border-border bg-card px-3 py-2 text-sm font-medium"
+            : btnSize,
         "transition-all",
-        starred
-          ? "text-amber-400 hover:text-amber-500"
-          : "text-muted-foreground hover:text-amber-400",
-        showLabel
-          ? "hover:border-amber-200 hover:bg-amber-50 dark:hover:bg-amber-900/20"
-          : "rounded-lg hover:bg-amber-50 dark:hover:bg-amber-900/20",
+        !isCommandVariant && (
+          starred
+            ? "text-amber-400 hover:text-amber-500"
+            : "text-muted-foreground hover:text-amber-400"
+        ),
+        !isCommandVariant && (
+          showLabel
+            ? "hover:border-amber-200 hover:bg-amber-50 dark:hover:bg-amber-900/20"
+            : "rounded-lg hover:bg-amber-50 dark:hover:bg-amber-900/20"
+        ),
         className,
       )}
     >

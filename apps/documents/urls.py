@@ -20,6 +20,7 @@ from .folder_views import (
     DocumentFolderItemViewSet,
     DocumentFavouriteViewSet,
 )
+from .signature_views import SignatureRequestViewSet
 
 router = DefaultRouter()
 router.register(r"bulk-uploads", BulkUploadViewSet, basename="bulk-upload")
@@ -27,6 +28,7 @@ router.register(r"types",        DocumentTypeViewSet,       basename="document-t
 router.register(r"folders",      DocumentFolderViewSet,     basename="document-folder")
 router.register(r"folder-items", DocumentFolderItemViewSet, basename="folder-item")
 router.register(r"favourites",   DocumentFavouriteViewSet,  basename="document-favourite")
+router.register(r"signature-requests", SignatureRequestViewSet, basename="signature-request")
 # Register documents last so its empty-prefix doesn't shadow the others
 router.register(r"",             DocumentViewSet,           basename="document")
 

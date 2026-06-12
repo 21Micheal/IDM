@@ -14,6 +14,7 @@ const DocumentsPage = lazy(() => import("@/pages/DocumentsPage"));
 const TrashPage = lazy(() => import("@/pages/TrashPage"));
 const DocumentDetailPage = lazy(() => import("@/pages/DocumentDetailPage"));
 const UploadPage = lazy(() => import("@/pages/UploadPage"));
+const RequestSignaturePage = lazy(() => import("@/pages/RequestSignaturePage"));
 const SearchPage = lazy(() => import("@/pages/SearchPage"));
 const WorkflowPage = lazy(() => import("@/pages/WorkflowPage"));
 const AdminPage = lazy(() => import("@/pages/AdminPage"));
@@ -252,6 +253,7 @@ export default function App() {
               <Route path="documents/bulk-scan" element={<Navigate to="/documents/scan?mode=bulk" replace />} />
               <Route path="documents/:id"    element={<DocumentDetailPage />} />
               <Route path="documents/folders/:folderId" element={<FolderPage />} />
+              <Route path="request-signature" element={<RequestSignaturePage />} />
 
               <Route path="templates" element={<Navigate to="/admin/templates" replace />} />
 

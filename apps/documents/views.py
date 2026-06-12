@@ -429,6 +429,7 @@ class DocumentViewSet(AuditMixin, viewsets.ModelViewSet):
                 models.Q(uploaded_by=user) |
                 models.Q(owned_by=user) |
                 models.Q(workflow_instance__tasks__assigned_to=user) |
+                models.Q(signature_request__signers__signer=user) |
                 models.Q(id__in=active_shared_docs)
             ).distinct()
 

@@ -21,6 +21,8 @@ interface UploadVersionDrawerProps {
   triggerLabel?: string;
   /** Optional className applied to the trigger button. */
   triggerClassName?: string;
+  /** Optional className applied to the trigger icon. */
+  triggerIconClassName?: string;
 }
 
 type DuplicateCheckResult = {
@@ -54,6 +56,7 @@ export function UploadVersionDrawer({
   onVersionUploaded,
   triggerLabel,
   triggerClassName,
+  triggerIconClassName,
 }: UploadVersionDrawerProps) {
   const [open, setOpen] = useState(false);
   const [file, setFile] = useState<File | null>(null);
@@ -206,7 +209,7 @@ export function UploadVersionDrawer({
         onClick={() => setOpen(true)}
         className={triggerClassName ?? "btn-secondary"}
       >
-        <Upload className="w-4 h-4" />
+        <Upload className={triggerIconClassName ?? "w-4 h-4"} />
         {triggerLabel ?? "Upload new version"}
       </button>
 

@@ -225,6 +225,10 @@ CELERY_BEAT_SCHEDULE = {
         "task": "apps.documents.tasks.empty_trash",
         "schedule": 60 * 60,
     },
+    "signature-pending-reminders": {
+        "task": "apps.notifications.tasks.remind_pending_signatures",
+        "schedule": 24 * 60 * 60,
+    },
 }
 
 # ── Elasticsearch ─────────────────────────────────────────────────────────────

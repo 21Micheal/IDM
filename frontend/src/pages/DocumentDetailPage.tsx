@@ -12,6 +12,7 @@ import MetadataEditPanel from "@/components/documents/MetadataEditPanel";
 import TemplateForm, { requiredFieldLabels } from "@/components/templates/TemplateForm";
 import { collectFormAttachments } from "@/components/templates/formAttachments";
 import WorkflowActionPanel from "@/components/workflow/WorkflowActionPanel";
+import SignatureRequestPanel from "@/components/signatures/SignatureRequestPanel";
 import { format } from "date-fns";
 import {
   ArrowLeft, Send, MessageSquare, ShieldCheck,
@@ -704,6 +705,8 @@ export default function DocumentDetailPage() {
     canArchive &&
     !["archived", "void"].includes(doc.status) &&
     (isPersonal || doc.status === "approved");
+  const commandActionClass = "flex h-8 items-center gap-1 px-2 text-white/80 transition-colors hover:bg-white/10 hover:text-white disabled:cursor-not-allowed disabled:opacity-40";
+  const commandActionDisabledClass = "flex h-8 cursor-not-allowed items-center gap-1 px-2 text-white/80 opacity-40";
 
   const isDraftOrRejected = ["draft", "rejected", "returned"].includes(doc.status);
   // Delete to Trash: creation-stage documents the user is allowed to delete.
@@ -894,14 +897,14 @@ export default function DocumentDetailPage() {
             <button
               onClick={() => submitMutation.mutate()}
               disabled={submitMutation.isPending}
-              className="flex h-8 items-center gap-1 px-2 transition-colors hover:bg-white/10 hover:text-white disabled:opacity-50"
+              className={commandActionClass}
               title={doc.status === "returned" ? "Resubmit to resume approval" : "Submit for approval workflow"}
             >
               {submitMutation.isPending ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <Send className="w-3.5 h-3.5" />}
               <span>{doc.status === "returned" ? "Resubmit" : "Start workflow"}</span>
             </button>
           ) : (
-            <button disabled className="hidden h-8 cursor-not-allowed items-center gap-1 px-2 opacity-40 sm:flex" title="Not eligible for submission">
+            <button disabled className={cn(commandActionDisabledClass, "hidden sm:flex")} title="Not eligible for submission">
               <Send className="w-3.5 h-3.5" />
               <span>{doc.status === "returned" ? "Resubmit" : "Start workflow"}</span>
             </button>
@@ -910,14 +913,16 @@ export default function DocumentDetailPage() {
           <AddToFolderMenu
             documentId={doc.id}
             showLabel
-            className="text-white/80 hover:text-white"
+            triggerClassName={commandActionClass}
           />
 
           <div className="flex items-center" title="Favourite document">
             <StarButton
               documentId={doc.id}
               showLabel
-              className="border-white/20 bg-white/10 px-2.5 py-1 text-xs font-semibold text-white hover:bg-white/15"
+              size="sm"
+              variant="command"
+              className={commandActionClass}
             />
           </div>
 
@@ -927,7 +932,7 @@ export default function DocumentDetailPage() {
             <a
               href={viewerLinks.downloadHref}
               download
-              className="flex h-8 items-center gap-1 px-2 transition-colors hover:bg-white/10 hover:text-white"
+              className={commandActionClass}
               title="Download current document"
             >
               <Download className="w-3.5 h-3.5" />
@@ -937,7 +942,7 @@ export default function DocumentDetailPage() {
             <button
               type="button"
               onClick={handleDownloadDocument}
-              className="flex h-8 items-center gap-1 px-2 transition-colors hover:bg-white/10 hover:text-white"
+              className={commandActionClass}
               title="Download current document"
             >
               <Download className="w-3.5 h-3.5" />
@@ -946,7 +951,7 @@ export default function DocumentDetailPage() {
           ) : (
             <button
               disabled
-              className="flex h-8 cursor-not-allowed items-center gap-1 px-2 opacity-40"
+              className={commandActionDisabledClass}
               title={canDownload ? "Preview not ready yet" : "Download permission required"}
             >
               <Download className="w-3.5 h-3.5" />
@@ -957,7 +962,7 @@ export default function DocumentDetailPage() {
           <button
             onClick={handlePrintDocument}
             disabled={!canDownload || (!viewerLinks.openInNewTabUrl && !viewerLinks.downloadHref)}
-            className="flex h-8 items-center gap-1 px-2 transition-colors hover:bg-white/10 hover:text-white disabled:cursor-not-allowed disabled:opacity-40"
+            className={commandActionClass}
             title={canDownload ? "Print document" : "Print permission required"}
           >
             <Printer className="w-3.5 h-3.5" />
@@ -966,7 +971,13 @@ export default function DocumentDetailPage() {
 
           {canUploadVersion && !isLockedByOther && (
             <Suspense fallback={<span className="inline-flex items-center gap-1 px-2 py-1 rounded bg-muted/10 text-xs text-muted-foreground">Loading…</span>}>
-              <UploadVersionDrawer documentId={doc.id} currentVersion={doc.current_version} onVersionUploaded={handleVersionUploaded} />
+              <UploadVersionDrawer
+                documentId={doc.id}
+                currentVersion={doc.current_version}
+                onVersionUploaded={handleVersionUploaded}
+                triggerClassName={commandActionClass}
+                triggerIconClassName="w-3.5 h-3.5"
+              />
             </Suspense>
           )}
 
@@ -974,7 +985,7 @@ export default function DocumentDetailPage() {
             <button
               onClick={() => archiveMutation.mutate()}
               disabled={archiveMutation.isPending}
-              className="flex h-8 items-center gap-1 px-2 transition-colors hover:bg-white/10 hover:text-white disabled:opacity-50"
+              className={commandActionClass}
               title="Archive document"
             >
               {archiveMutation.isPending ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <Archive className="w-3.5 h-3.5" />}
@@ -1951,6 +1962,14 @@ export default function DocumentDetailPage() {
             )}
 
           </div>
+
+          {/* Ad-hoc signature request panel — below the details so the document
+              preview on the left stays uninterrupted. */}
+          {(doc.document_type?.code === "SIGREQ" || doc.document_type_name === "Signature request") && (
+            <Suspense fallback={null}>
+              <SignatureRequestPanel documentId={id!} />
+            </Suspense>
+          )}
         </div>
 
       </div>

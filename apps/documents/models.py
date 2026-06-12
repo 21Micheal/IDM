@@ -335,14 +335,16 @@ def document_upload_path(instance, filename):
 
 
 class DocumentStatus(models.TextChoices):
-    DRAFT            = "draft",            "Draft"
-    PENDING_REVIEW   = "pending_review",   "Pending Review"
-    PENDING_APPROVAL = "pending_approval", "Pending Approval"
-    RETURNED         = "returned",        "Returned for Review"
-    APPROVED         = "approved",         "Approved"
-    REJECTED         = "rejected",         "Rejected"
-    ARCHIVED         = "archived",         "Archived"
-    VOID             = "void",             "Void"
+    DRAFT             = "draft",             "Draft"
+    PENDING_REVIEW    = "pending_review",    "Pending Review"
+    PENDING_APPROVAL  = "pending_approval",  "Pending Approval"
+    RETURNED          = "returned",         "Returned for Review"
+    APPROVED          = "approved",          "Approved"
+    REJECTED          = "rejected",          "Rejected"
+    ARCHIVED          = "archived",          "Archived"
+    VOID              = "void",              "Void"
+    PENDING_SIGNATURE = "pending_signature", "Pending Signature"
+    SIGNED            = "signed",            "Signed"
 
 
 class OCRStatus(models.TextChoices):
@@ -956,3 +958,98 @@ def _sync_favourite_to_folder_on_delete(sender, instance, **kwargs):
         ).delete()
     except DocumentFolder.DoesNotExist:
         pass
+
+
+# ── Ad-hoc signature requests ──────────────────────────────────────────────────
+
+SIGNATURE_REQUEST_DOCUMENT_TYPE_CODE = "SIGREQ"
+
+
+def get_signature_request_document_type() -> "DocumentType":
+    """A hidden system document type for ad-hoc signature-request documents, so
+    the uploader never has to pick a type. Mirrors the bulk UNCLASS pattern."""
+    doc_type, _ = DocumentType.objects.get_or_create(
+        code=SIGNATURE_REQUEST_DOCUMENT_TYPE_CODE,
+        defaults={
+            "name": "Signature request",
+            "reference_prefix": "SIG",
+            "reference_padding": 5,
+            "description": "System type for ad-hoc 'Request signature' documents.",
+            "icon": "file-signature",
+            "metadata_mode": DocumentType.MetadataMode.USER_DEFINED,
+            "is_active": True,
+        },
+    )
+    return doc_type
+
+
+class SignatureRequest(models.Model):
+    class Status(models.TextChoices):
+        PENDING   = "pending",   "Pending signatures"
+        COMPLETED = "completed", "Fully signed"
+        DECLINED  = "declined",  "Declined"
+        CANCELLED = "cancelled", "Cancelled"
+
+    id           = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    document     = models.OneToOneField(
+        Document, on_delete=models.CASCADE, related_name="signature_request"
+    )
+    requested_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL, on_delete=models.CASCADE, related_name="signature_requests"
+    )
+    ordered      = models.BooleanField(
+        default=False,
+        help_text="If true, signers sign sequentially by order; otherwise any order.",
+    )
+    message      = models.TextField(blank=True)
+    status       = models.CharField(
+        max_length=20, choices=Status.choices, default=Status.PENDING, db_index=True
+    )
+    created_at   = models.DateTimeField(auto_now_add=True)
+    completed_at = models.DateTimeField(null=True, blank=True)
+
+    class Meta:
+        ordering = ["-created_at"]
+
+    def __str__(self):
+        return f"Signature request for {self.document_id} ({self.status})"
+
+    def current_pending_signers(self):
+        """Signers who can sign right now: for ordered requests, only the lowest
+        outstanding order; for unordered, every pending signer."""
+        pending = self.signers.filter(status=SignatureRequestSigner.Status.PENDING).order_by("order")
+        if not self.ordered:
+            return list(pending)
+        first = pending.first()
+        if not first:
+            return []
+        return list(pending.filter(order=first.order))
+
+
+class SignatureRequestSigner(models.Model):
+    class Status(models.TextChoices):
+        PENDING  = "pending",  "Pending"
+        SIGNED   = "signed",   "Signed"
+        DECLINED = "declined", "Declined"
+
+    id            = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    request       = models.ForeignKey(
+        SignatureRequest, on_delete=models.CASCADE, related_name="signers"
+    )
+    signer        = models.ForeignKey(
+        settings.AUTH_USER_MODEL, on_delete=models.CASCADE, related_name="signature_assignments"
+    )
+    order         = models.PositiveSmallIntegerField(default=0)
+    status        = models.CharField(
+        max_length=20, choices=Status.choices, default=Status.PENDING, db_index=True
+    )
+    signed_at     = models.DateTimeField(null=True, blank=True)
+    decline_reason = models.TextField(blank=True)
+    placement     = models.JSONField(null=True, blank=True)
+
+    class Meta:
+        ordering        = ["order", "id"]
+        unique_together = [("request", "signer")]
+
+    def __str__(self):
+        return f"{self.signer_id} → {self.request_id} ({self.status})"
