@@ -715,6 +715,13 @@ class DocumentViewSet(AuditMixin, viewsets.ModelViewSet):
         if not file:
             return Response({"detail": "No file provided."}, status=400)
 
+        dt = doc.document_type
+        if dt and file.size > dt.max_file_size_bytes:
+            return Response(
+                {"detail": f"File is too large. The limit for {dt.name} is {dt.max_file_size_mb} MB."},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
         sha256 = hashlib.sha256()
         for chunk in file.chunks():
             sha256.update(chunk)

@@ -974,6 +974,7 @@ export default function DocumentDetailPage() {
               <UploadVersionDrawer
                 documentId={doc.id}
                 currentVersion={doc.current_version}
+                maxSizeMb={doc.document_type?.max_file_size_mb}
                 onVersionUploaded={handleVersionUploaded}
                 triggerClassName={commandActionClass}
                 triggerIconClassName="w-3.5 h-3.5"

@@ -1,6 +1,9 @@
 import { useState, useCallback, useEffect, useMemo, useRef, type MouseEvent, type ReactNode } from "react";
 import { useLocation, useNavigate } from "react-router-dom";
-import { useDropzone } from "react-dropzone";
+import { useDropzone, type FileRejection } from "react-dropzone";
+import {
+  ACCEPTED_UPLOAD_FORMATS, SUPPORTED_FORMATS_LABEL, mbToBytes, formatBytes,
+} from "@/lib/uploadFormats";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import {
   useForm,
@@ -1166,22 +1169,30 @@ export default function UploadPage({ scanOnly = false }: UploadPageProps) {
 
   // ── Dropzone ────────────────────────────────────────────────────────────────
 
+  const maxSizeBytes = mbToBytes(selectedType?.max_file_size_mb);
+
   const onDrop = useCallback((accepted: File[]) => {
     const file = accepted[0];
     if (file) setDroppedFile(file);
   }, []);
 
+  const onDropRejected = useCallback((rejections: FileRejection[]) => {
+    const err = rejections[0]?.errors?.[0];
+    if (err?.code === "file-too-large") {
+      toast.error(`File is too large. The maximum is ${formatBytes(maxSizeBytes)}.`);
+    } else if (err?.code === "file-invalid-type") {
+      toast.error(`Unsupported format. Allowed: ${SUPPORTED_FORMATS_LABEL}.`);
+    } else if (err) {
+      toast.error(err.message);
+    }
+  }, [maxSizeBytes]);
+
   const { getRootProps, getInputProps, isDragActive } = useDropzone({
     onDrop,
+    onDropRejected,
     maxFiles: 1,
-    accept: {
-      "application/pdf": [".pdf"],
-      "application/vnd.openxmlformats-officedocument.wordprocessingml.document": [".docx"],
-      "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet": [".xlsx"],
-      "application/msword": [".doc"],
-      "application/vnd.openxmlformats-officedocument.presentationml.presentation": [".pptx"],
-      "image/*": [".png", ".jpg", ".jpeg", ".tiff", ".bmp", ".webp"],
-    },
+    maxSize: maxSizeBytes,
+    accept: ACCEPTED_UPLOAD_FORMATS,
   });
 
   // ── Mutations ───────────────────────────────────────────────────────────────
@@ -1744,7 +1755,10 @@ export default function UploadPage({ scanOnly = false }: UploadPageProps) {
                       {isDragActive ? "Drop here" : "Click here or drag and drop to add file"}
                     </p>
                     <p className="text-xs text-muted-foreground mt-3">
-                      PDF · DOCX · XLSX · PPTX · DOC · PNG · JPG · TIFF
+                      {SUPPORTED_FORMATS_LABEL}
+                    </p>
+                    <p className="text-[11px] text-muted-foreground mt-1">
+                      Max {formatBytes(maxSizeBytes)}{selectedType ? ` for ${selectedType.name}` : ""}
                     </p>
                   </>
                 )}

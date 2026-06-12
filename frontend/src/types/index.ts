@@ -21,6 +21,7 @@ export interface DocumentType {
   is_active?: boolean;
   is_personal_type?: boolean;
   metadata_mode?: "admin_defined" | "user_defined";
+  max_file_size_mb?: number;
   access_policy?: DocumentTypeAccessPolicy;
   workflow_template?: string | null;
   workflow_template_name?: string | null;

@@ -5,6 +5,9 @@ import { toast } from "@/components/ui/vault-toast";
 
 import { documentsAPI } from "@/services/api";
 import {
+  ACCEPTED_UPLOAD_FORMATS, SUPPORTED_FORMATS_LABEL, mbToBytes, formatBytes,
+} from "@/lib/uploadFormats";
+import {
   Dialog,
   DialogContent,
   DialogHeader,
@@ -16,6 +19,8 @@ interface UploadVersionDrawerProps {
   documentId: string;
   currentVersion: number;
   accept?: Record<string, string[]>;
+  /** Max upload size (MB) for this document's type; enforced + shown. */
+  maxSizeMb?: number;
   onVersionUploaded: () => void;
   /** Optional override for the trigger button label. */
   triggerLabel?: string;
@@ -53,6 +58,7 @@ export function UploadVersionDrawer({
   documentId,
   currentVersion,
   accept,
+  maxSizeMb,
   onVersionUploaded,
   triggerLabel,
   triggerClassName,
@@ -68,15 +74,8 @@ export function UploadVersionDrawer({
   const duplicateCheckRunRef = useRef(0);
   const duplicateCheckResultRef = useRef<DuplicateCheckResult | null>(null);
 
-  const acceptMap = accept ?? {
-    "application/pdf": [".pdf"],
-    "application/vnd.openxmlformats-officedocument.wordprocessingml.document": [".docx"],
-    "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet": [".xlsx"],
-    "application/vnd.openxmlformats-officedocument.presentationml.presentation": [".pptx"],
-    "application/msword": [".doc"],
-    "application/vnd.ms-excel": [".xls"],
-    "application/vnd.ms-powerpoint": [".ppt"],
-  };
+  const acceptMap = useMemo(() => accept ?? ACCEPTED_UPLOAD_FORMATS, [accept]);
+  const maxBytes = mbToBytes(maxSizeMb);
   const acceptAttr = useMemo(
     () => Object.entries(acceptMap).flatMap(([mime, extensions]) => [mime, ...extensions]).join(","),
     [acceptMap]
@@ -93,6 +92,14 @@ export function UploadVersionDrawer({
   }, []);
 
   const setSelectedFile = useCallback(async (nextFile: File | null) => {
+    // Validate format + size (drag-drop bypasses the input's accept filter).
+    if (nextFile) {
+      const name = nextFile.name.toLowerCase();
+      const exts = Object.values(acceptMap).flat();
+      const okType = Object.keys(acceptMap).includes(nextFile.type) || exts.some((e) => name.endsWith(e));
+      if (!okType) { toast.error(`Unsupported format. Allowed: ${SUPPORTED_FORMATS_LABEL}.`); return; }
+      if (nextFile.size > maxBytes) { toast.error(`File is too large. The maximum is ${formatBytes(maxBytes)}.`); return; }
+    }
     const checkRun = duplicateCheckRunRef.current + 1;
     duplicateCheckRunRef.current = checkRun;
     duplicateCheckResultRef.current = null;
@@ -125,7 +132,7 @@ export function UploadVersionDrawer({
         setIsCheckingDuplicate(false);
       }
     }
-  }, [documentId]);
+  }, [documentId, acceptMap, maxBytes]);
 
   // Reset whenever the dialog closes.
   useEffect(() => {
@@ -297,7 +304,10 @@ export function UploadVersionDrawer({
                     Click to choose a file or drop it here
                   </p>
                   <p className="text-xs text-muted-foreground mt-1">
-                    PDF, Word, Excel, and PowerPoint files are supported.
+                    {SUPPORTED_FORMATS_LABEL}.
+                  </p>
+                  <p className="text-[11px] text-muted-foreground mt-1">
+                    Max {formatBytes(maxBytes)}.
                   </p>
                 </>
               )}

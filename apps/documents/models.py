@@ -67,6 +67,10 @@ class DocumentType(models.Model):
         help_text="Primary approval workflow for this document type.",
     )
     is_personal_type = models.BooleanField(default=False)
+    max_file_size_mb = models.PositiveSmallIntegerField(
+        default=25,
+        help_text="Maximum upload size (in MB) for documents of this type, including new versions.",
+    )
     metadata_mode    = models.CharField(
         max_length=32,
         choices=MetadataMode.choices,
@@ -91,6 +95,10 @@ class DocumentType(models.Model):
 
     def __str__(self):
         return self.name
+
+    @property
+    def max_file_size_bytes(self) -> int:
+        return (self.max_file_size_mb or 25) * 1024 * 1024
 
     def next_reference(self):
         from apps.documents.models import Document

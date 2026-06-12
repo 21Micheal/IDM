@@ -83,6 +83,7 @@ interface DocTypeForm {
   description: string;
   is_personal_type: boolean;
   metadata_mode: "admin_defined" | "user_defined";
+  max_file_size_mb: number;
   metadata_fields: MetadataFieldForm[];
   relationship_rules: RelationshipRuleForm[];
 }
@@ -119,6 +120,7 @@ function buildPayload(values: DocTypeForm) {
     }),
     is_personal_type: isPersonal,
     metadata_mode: metadataMode,
+    max_file_size_mb: values.max_file_size_mb || 25,
     metadata_fields: metadataMode === "admin_defined"
       ? values.metadata_fields.map((field, index) => ({
           label: field.label,
@@ -177,6 +179,7 @@ export default function AdminDocumentTypesPage() {
       name: "", code: "", reference_prefix: "", reference_padding: 5,
       title_field: "filename",
       description: "", is_personal_type: false, metadata_mode: "admin_defined",
+      max_file_size_mb: 25,
       metadata_fields: [], relationship_rules: [],
     },
   });
@@ -288,6 +291,7 @@ export default function AdminDocumentTypesPage() {
       description: stripTypeConfigMarkers(type.description ?? ""),
       is_personal_type: config.isPersonalType,
       metadata_mode: config.metadataMode,
+      max_file_size_mb: type.max_file_size_mb ?? 25,
       metadata_fields: (type.metadata_fields ?? []).map((field) => ({
         label: field.label,
         field_key: field.key ?? field.field_key,
@@ -521,6 +525,17 @@ export default function AdminDocumentTypesPage() {
                         className={inputCls}
                       />
                       <p className="mt-1.5 text-xs text-[#8C969E]">Digits in the numeric part of IDs (3–8) — 5 → 00001 · 4 → 0001</p>
+                    </div>
+
+                    {/* Max file size ─ per document type */}
+                    <label className="pt-2 text-[#5E6870]">Max file size (MB)</label>
+                    <div>
+                      <input
+                        {...form.register("max_file_size_mb", { valueAsNumber: true })}
+                        type="number" min={1} max={500}
+                        className={inputCls}
+                      />
+                      <p className="mt-1.5 text-xs text-[#8C969E]">Largest upload allowed for this type (including new versions). Default 25 MB.</p>
                     </div>
 
                     {/* Document title ─ which source names documents of this type */}
