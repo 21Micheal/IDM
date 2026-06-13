@@ -30,6 +30,7 @@ from .serializers import (
 from .services import WorkflowService, WorkflowError
 from apps.accounts.models import UserDelegation
 from apps.accounts.views import IsGroupAdmin
+from apps.documents.analytics import IsAnalyticsViewer
 
 
 # ── Templates ──────────────────────────────────────────────────────────────────
@@ -374,23 +375,22 @@ class WorkflowTaskViewSet(viewsets.ReadOnlyModelViewSet):
 
 class ApprovalTurnaroundView(APIView):
     """
-    Returns avg hours per WorkflowStep across completed WorkflowTask instances.
+    Returns avg hours per WorkflowStep across tasks completed in the selected
+    window (shared analytics filters apply).
     Response shape: List[{ step, avg_hours, sla_hours, completed }]
     """
-    permission_classes = [permissions.IsAuthenticated, IsGroupAdmin]
+    permission_classes = [permissions.IsAuthenticated, IsAnalyticsViewer]
 
     def get(self, request):
-        from datetime import timedelta
+        from apps.documents.analytics import (
+            parse_analytics_filters, org_tasks_qs, duration_hours_expr,
+        )
+        f = parse_analytics_filters(request)
 
         qs = (
-            WorkflowTask.objects
-            .filter(status="approved", acted_at__isnull=False)
-            .annotate(
-                duration_hours=models.ExpressionWrapper(
-                    (models.F("acted_at") - models.F("created_at")) / timedelta(hours=1),
-                    output_field=models.FloatField(),
-                )
-            )
+            org_tasks_qs(f)
+            .filter(status="approved", acted_at__gte=f.start)
+            .annotate(duration_hours=duration_hours_expr())
             .values(step_name=models.F("step__name"), sla_hours=models.F("step__sla_hours"))
             .annotate(avg_hours=models.Avg("duration_hours"), completed=Count("id"))
             .order_by("step__order")
@@ -410,25 +410,24 @@ class ApprovalTurnaroundView(APIView):
 
 class SlaBreachRateView(APIView):
     """
-    Groups completed WorkflowTask by calendar month.
-    A task is "breached" when (completed_at - created_at) > step.sla_hours.
+    Groups completed WorkflowTask by calendar month within the selected window.
+    A task is "breached" when (acted_at - created_at) > step.sla_hours.
+    Months are year-safe ("Jan 2026") and zero-filled.
     Response shape: List[{ month, total, breached, breach_rate }]
     """
-    permission_classes = [permissions.IsAuthenticated, IsGroupAdmin]
+    permission_classes = [permissions.IsAuthenticated, IsAnalyticsViewer]
 
     def get(self, request):
-        from datetime import timedelta
+        from apps.documents.analytics import (
+            parse_analytics_filters, org_tasks_qs, duration_hours_expr,
+            month_key, month_axis,
+        )
+        f = parse_analytics_filters(request)
 
         qs = (
-            WorkflowTask.objects
-            .filter(status__in=["approved", "rejected"], acted_at__isnull=False)
-            .annotate(
-                month=TruncMonth("acted_at"),
-                duration_hours=models.ExpressionWrapper(
-                    (models.F("acted_at") - models.F("created_at")) / timedelta(hours=1),
-                    output_field=models.FloatField(),
-                ),
-            )
+            org_tasks_qs(f)
+            .filter(acted_at__gte=f.start)
+            .annotate(month=TruncMonth("acted_at"), duration_hours=duration_hours_expr())
             .values("month")
             .annotate(
                 total=Count("id"),
@@ -440,14 +439,17 @@ class SlaBreachRateView(APIView):
             .order_by("month")
         )
 
-        data = [
-            {
-                "month":       row["month"].strftime("%b"),
+        rows: dict[str, dict] = {
+            label: {"month": label, "total": 0, "breached": 0, "breach_rate": 0}
+            for label in month_axis(f)
+        }
+        for row in qs:
+            key = month_key(row["month"])
+            rows[key] = {
+                "month":       key,
                 "total":       row["total"],
                 "breached":    row["breached"],
                 "breach_rate": round(row["breached"] / row["total"] * 100, 1)
                                if row["total"] else 0,
             }
-            for row in qs
-        ]
-        return Response(data)
+        return Response(list(rows.values()))

@@ -6,6 +6,9 @@ from rest_framework_simplejwt.views import TokenRefreshView
 from apps.documents.storage_views import StorageStatsView
 from apps.documents.views import DocumentVolumeView, TopUploadersView
 from apps.workflows.views import ApprovalTurnaroundView, SlaBreachRateView
+from apps.documents.analytics import (
+    AnalyticsOverviewView, StatusDistributionView, DepartmentActivityView,
+)
 
 urlpatterns = [
     path("admin/",              admin.site.urls),
@@ -40,6 +43,9 @@ urlpatterns = [
     path("api/v1/analytics/sla-breach-rate/", SlaBreachRateView.as_view(), name="analytics-sla-breach-rate"),
     path("api/v1/analytics/document-volume/", DocumentVolumeView.as_view(), name="analytics-document-volume"),
     path("api/v1/analytics/top-uploaders/", TopUploadersView.as_view(), name="analytics-top-uploaders"),
+    path("api/v1/analytics/overview/", AnalyticsOverviewView.as_view(), name="analytics-overview"),
+    path("api/v1/analytics/status-distribution/", StatusDistributionView.as_view(), name="analytics-status-distribution"),
+    path("api/v1/analytics/department-activity/", DepartmentActivityView.as_view(), name="analytics-department-activity"),
 
     # JWT refresh
     path("api/v1/token/refresh/", TokenRefreshView.as_view(), name="token_refresh"),

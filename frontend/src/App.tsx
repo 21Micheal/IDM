@@ -110,6 +110,15 @@ function RequireAdmin({ children }: { children: React.ReactNode }) {
   return <>{children}</>;
 }
 
+/** Analytics is open to admins and department heads (HOD group members). */
+function RequireAnalytics({ children }: { children: React.ReactNode }) {
+  const user = useAuthStore((s) => s.user);
+  if (!user) return <Navigate to="/login" replace />;
+  const allowed = user.has_admin_access || (user.group_names ?? []).includes("HOD");
+  if (!allowed) return <Navigate to="/" replace />;
+  return <>{children}</>;
+}
+
 const ROUTE_FALLBACK_CONTENT = [
   {
     match: (pathname: string) => pathname === "/login",
@@ -241,7 +250,7 @@ export default function App() {
               }
             >
               <Route index element={<DashboardPage />} />
-              <Route path="analytics" element={<RequireAdmin><AnalyticsDashboardPage /></RequireAdmin>} />
+              <Route path="analytics" element={<RequireAnalytics><AnalyticsDashboardPage /></RequireAnalytics>} />
 
               {/* Documents */}
               <Route path="documents"        element={<DocumentsPage />} />

@@ -1,1021 +1,477 @@
 // AnalyticsDashboard.tsx
-// Manager-grade analytics section for the Flaxem DMS dashboard.
+// Enterprise analytics workspace for the Flaxem DMS.
 //
-// Charts:
-//   1. Approval Turnaround — avg hours per workflow step (BarChart)
-//   2. SLA Breach Rate — % breached per month (AreaChart + reference line)
-//   3. Document Volume by Type per Month (StackedBarChart)
-//   4. Top Uploaders — leaderboard with relative bar (custom)
-//
+//  • Global filters: period (3/6/12m) · department · document type — server-side.
+//  • Executive KPI row with period-over-period trends (/analytics/overview).
+//  • Six cards: SLA breach trend, status distribution, approval turnaround,
+//    department activity, document volume by type, top uploaders.
+//  • Per-card states (skeleton / empty / error+retry) and CSV export.
+//  Access: admins + HOD (department heads).
 
 import { useMemo, useState, useEffect } from "react";
 import { Link } from "react-router-dom";
-import { useQuery } from "@tanstack/react-query";
-import { api } from "@/services/api";
-import { useAuthStore } from "@/store/authStore";
+import { useQuery, type UseQueryResult } from "@tanstack/react-query";
+import { api, departmentsAPI, documentTypesAPI, normalizeListResponse } from "@/services/api";
 import { QUERY_FIVE_MIN_STALE } from "@/lib/reactQueryDefaults";
+import { exportCsv } from "@/lib/exportCsv";
+import { StatCard } from "@/components/dashboard/StatCard";
+import type { DocumentType } from "@/types";
 import {
-  BarChart,
-  Bar,
-  AreaChart,
-  Area,
-  XAxis,
-  YAxis,
-  CartesianGrid,
-  Tooltip,
-  Legend,
-  ResponsiveContainer,
-  ReferenceLine,
-  Cell,
-  LabelList,
+  BarChart, Bar, AreaChart, Area, PieChart, Pie,
+  XAxis, YAxis, CartesianGrid, Tooltip, Legend, ResponsiveContainer,
+  ReferenceLine, Cell, LabelList,
 } from "recharts";
 import {
-  AlertTriangle,
-  BarChart2,
-  ChevronDown,
-  Clock,
-  FileBarChart,
-  Loader2,
-  TrendingDown,
-  TrendingUp,
-  Users,
+  AlertTriangle, Clock, FileBarChart, FileText, CheckCircle2, Hourglass,
+  Users, Building2, PieChart as PieIcon, Download, Loader2, RefreshCw, Inbox, ShieldCheck,
 } from "lucide-react";
 
-/* ─────────────────────────────────────────────────────────────────────── */
-/* Types                                                                    */
-/* ─────────────────────────────────────────────────────────────────────── */
-
-export interface ApprovalTurnaroundItem {
-  step: string;          // e.g. "HOD Review"
-  avg_hours: number;
-  sla_hours: number;     // SLA target
-  completed: number;     // sample size
+/* ── Types ─────────────────────────────────────────────────────────────────── */
+type Metric = { current: number | null; previous: number | null; delta_pct: number | null };
+interface Overview {
+  period: { months: number; start: string; end: string };
+  documents: Metric;
+  approved: Metric;
+  rejected: Metric;
+  pending_now: number;
+  avg_turnaround_hours: Metric;
+  sla_compliance: Metric;
+  active_uploaders: Metric;
 }
+interface TurnaroundItem { step: string; avg_hours: number; sla_hours: number; completed: number }
+interface SlaItem { month: string; total: number; breached: number; breach_rate: number }
+interface VolumeItem { month: string; [docType: string]: number | string }
+interface UploaderItem { name: string; department: string; count: number; approved: number; pending: number; rejected: number }
+interface StatusItem { status: string; label: string; count: number }
+interface DeptItem { department: string; uploads: number; approved: number; pending: number; rejected: number }
 
-export interface SlaBreachItem {
-  month: string;         // "Jan 2025"
-  total: number;
-  breached: number;
-  breach_rate: number;   // 0–100
-}
+type Period = 3 | 6 | 12;
+interface Filters { months: Period; department: string; document_type: string }
 
-export interface VolumeItem {
-  month: string;         // "Jan 2025"
-  [docType: string]: number | string; // doc type keys + "month"
-}
-
-export interface UploaderItem {
-  name: string;
-  department: string;
-  count: number;
-  approved: number;
-  pending: number;
-}
-
-type AnalyticsRange = "3m" | "6m" | "12m";
-
-/* ─────────────────────────────────────────────────────────────────────── */
-/* Mock data — replace with real useQuery hooks                             */
-/* ─────────────────────────────────────────────────────────────────────── */
-
-const MOCK_TURNAROUND: ApprovalTurnaroundItem[] = [
-  { step: "Initial Review",   avg_hours: 6.2,  sla_hours: 8,  completed: 142 },
-  { step: "HOD Review",       avg_hours: 18.5, sla_hours: 16, completed: 118 },
-  { step: "Finance Check",    avg_hours: 11.3, sla_hours: 12, completed: 95  },
-  { step: "Legal Sign-Off",   avg_hours: 29.1, sla_hours: 24, completed: 72  },
-  { step: "CEO Approval",     avg_hours: 9.8,  sla_hours: 12, completed: 61  },
-  { step: "Archive",          avg_hours: 1.2,  sla_hours: 4,  completed: 58  },
-];
-
-const MOCK_SLA: SlaBreachItem[] = [
-  { month: "Jan",  total: 108, breached: 9,  breach_rate: 8.3  },
-  { month: "Feb",  total: 122, breached: 14, breach_rate: 11.5 },
-  { month: "Mar",  total: 145, breached: 11, breach_rate: 7.6  },
-  { month: "Apr",  total: 131, breached: 22, breach_rate: 16.8 },
-  { month: "May",  total: 153, breached: 19, breach_rate: 12.4 },
-  { month: "Jun",  total: 161, breached: 16, breach_rate: 9.9  },
-  { month: "Jul",  total: 147, breached: 28, breach_rate: 19.0 },
-  { month: "Aug",  total: 168, breached: 21, breach_rate: 12.5 },
-  { month: "Sep",  total: 175, breached: 17, breach_rate: 9.7  },
-  { month: "Oct",  total: 182, breached: 13, breach_rate: 7.1  },
-  { month: "Nov",  total: 156, breached: 18, breach_rate: 11.5 },
-  { month: "Dec",  total: 134, breached: 24, breach_rate: 17.9 },
-];
-
-const MOCK_VOLUME: VolumeItem[] = [
-  { month: "Jan", Invoice: 34, Contract: 18, Report: 27, Policy: 12, Other: 17 },
-  { month: "Feb", Invoice: 42, Contract: 21, Report: 31, Policy: 9,  Other: 19 },
-  { month: "Mar", Invoice: 38, Contract: 25, Report: 28, Policy: 15, Other: 39 },
-  { month: "Apr", Invoice: 51, Contract: 19, Report: 22, Policy: 11, Other: 28 },
-  { month: "May", Invoice: 47, Contract: 30, Report: 36, Policy: 18, Other: 22 },
-  { month: "Jun", Invoice: 55, Contract: 27, Report: 33, Policy: 14, Other: 32 },
-  { month: "Jul", Invoice: 49, Contract: 22, Report: 29, Policy: 16, Other: 31 },
-  { month: "Aug", Invoice: 61, Contract: 35, Report: 38, Policy: 20, Other: 14 },
-  { month: "Sep", Invoice: 58, Contract: 31, Report: 42, Policy: 13, Other: 31 },
-  { month: "Oct", Invoice: 67, Contract: 28, Report: 35, Policy: 22, Other: 30 },
-  { month: "Nov", Invoice: 53, Contract: 24, Report: 31, Policy: 17, Other: 31 },
-  { month: "Dec", Invoice: 45, Contract: 20, Report: 27, Policy: 10, Other: 32 },
-];
-
-const MOCK_UPLOADERS: UploaderItem[] = [
-  { name: "Amina Ochieng",    department: "Finance",    count: 87, approved: 74, pending: 13 },
-  { name: "David Kariuki",    department: "Legal",      count: 73, approved: 65, pending: 8  },
-  { name: "Fatuma Hassan",    department: "Procurement",count: 61, approved: 51, pending: 10 },
-  { name: "John Mwangi",      department: "HR",         count: 58, approved: 50, pending: 8  },
-  { name: "Grace Njeri",      department: "Operations", count: 52, approved: 44, pending: 8  },
-  { name: "Peter Otieno",     department: "Finance",    count: 49, approved: 41, pending: 8  },
-  { name: "Zainab Ali",       department: "Legal",      count: 44, approved: 39, pending: 5  },
-  { name: "Brian Mutua",      department: "IT",         count: 38, approved: 30, pending: 8  },
-];
-
-/* ─────────────────────────────────────────────────────────────────────── */
-/* Palette — aligned with index.css brand tokens                           */
-/* ─────────────────────────────────────────────────────────────────────── */
-
-// Primary blue: hsl(203 80% 42%) ≈ #147eb3
-// Accent indigo: hsl(240 40% 35%) ≈ #3d3d8f
-// Teal: hsl(195 75% 45%) ≈ #1ba0b8
-// Destructive: hsl(0 84% 38%) ≈ #b71c1c
-
+/* ── Palette ───────────────────────────────────────────────────────────────── */
 const BRAND = {
-  primary:     "hsl(203,80%,42%)",
-  primaryLight:"hsl(203,80%,80%)",
-  accent:      "hsl(240,40%,50%)",
-  teal:        "hsl(195,75%,45%)",
-  tealLight:   "hsl(195,75%,82%)",
-  danger:      "hsl(0,84%,46%)",
-  dangerLight: "hsl(0,84%,88%)",
-  warning:     "hsl(38,90%,50%)",
-  neutral:     "hsl(210,20%,88%)",
-  muted:       "hsl(210,12%,55%)",
+  primary: "hsl(203,80%,42%)",
+  accent: "hsl(240,40%,50%)",
+  teal: "hsl(195,75%,45%)",
+  danger: "hsl(0,84%,46%)",
+  warning: "hsl(38,90%,50%)",
+  neutral: "hsl(210,20%,82%)",
+  muted: "hsl(210,12%,55%)",
 };
-
-const DOC_TYPE_COLORS: Record<string, string> = {
-  Invoice:  "hsl(203,80%,42%)",
-  Contract: "hsl(240,40%,50%)",
-  Report:   "hsl(195,75%,45%)",
-  Policy:   "hsl(38,90%,50%)",
-  Other:    "hsl(210,20%,68%)",
+const STATUS_COLORS: Record<string, string> = {
+  draft: "hsl(210,16%,70%)",
+  pending_review: "hsl(38,90%,50%)",
+  pending_approval: "hsl(203,80%,42%)",
+  returned: "hsl(28,85%,55%)",
+  approved: "hsl(150,55%,42%)",
+  rejected: "hsl(0,84%,46%)",
+  archived: "hsl(240,20%,60%)",
+  void: "hsl(0,0%,55%)",
+  pending_signature: "hsl(265,55%,58%)",
+  signed: "hsl(170,60%,40%)",
 };
+const VOLUME_PALETTE = ["#147eb3", "#3d3d8f", "#1ba0b8", "#e0992a", "#8b5cf6", "#3cb371", "#b71c1c", "#94a3b8"];
 
-// Local persistence for user-customised doc-type colours
 const DOC_TYPE_COLORS_STORAGE_KEY = "analytics.docTypeColors.v1";
-
 function loadSavedDocTypeColors(): Record<string, string> {
-  try {
-    if (typeof window === "undefined") return {};
-    const raw = localStorage.getItem(DOC_TYPE_COLORS_STORAGE_KEY);
-    return raw ? JSON.parse(raw) : {};
-  } catch (e) {
-    return {};
-  }
+  try { const raw = localStorage.getItem(DOC_TYPE_COLORS_STORAGE_KEY); return raw ? JSON.parse(raw) : {}; }
+  catch { return {}; }
 }
-
 function saveDocTypeColors(map: Record<string, string>) {
-  try {
-    if (typeof window === "undefined") return;
-    localStorage.setItem(DOC_TYPE_COLORS_STORAGE_KEY, JSON.stringify(map));
-  } catch (e) {
-    // ignore
-  }
+  try { localStorage.setItem(DOC_TYPE_COLORS_STORAGE_KEY, JSON.stringify(map)); } catch { /* ignore */ }
 }
 
-/* ─────────────────────────────────────────────────────────────────────── */
-/* Shared UI atoms                                                          */
-/* ─────────────────────────────────────────────────────────────────────── */
+const SYSTEM_TYPE_CODES = ["UNCLASS", "SIGREQ", "PERSONAL"];
 
-function SectionHeader({
-  icon: Icon,
-  title,
-  subtitle,
-  children,
+/* ── Generic chart query hook ──────────────────────────────────────────────── */
+function useAnalytics<T>(name: string, path: string, filters: Filters): UseQueryResult<T> {
+  const params: Record<string, string | number> = { months: filters.months };
+  if (filters.department) params.department = filters.department;
+  if (filters.document_type) params.document_type = filters.document_type;
+  return useQuery<T>({
+    queryKey: ["analytics", name, filters],
+    queryFn: () => api.get(`/analytics/${path}/`, { params }).then((r) => r.data),
+    ...QUERY_FIVE_MIN_STALE,
+  });
+}
+
+/* ── Shared UI ─────────────────────────────────────────────────────────────── */
+function ChartTooltip({ active, payload, label, formatter }: {
+  active?: boolean; payload?: any[]; label?: string; formatter?: (name: string, value: number) => string;
+}) {
+  if (!active || !payload?.length) return null;
+  return (
+    <div className="rounded-xl border border-border bg-card px-3 py-2.5 text-xs shadow-lg" style={{ minWidth: 150 }}>
+      {label && <p className="mb-1.5 border-b border-border pb-1 font-semibold text-foreground">{label}</p>}
+      {payload.map((p, i) => (
+        <div key={i} className="flex items-center justify-between gap-4 py-0.5">
+          <span className="flex items-center gap-1.5 text-muted-foreground">
+            <span className="inline-block h-2 w-2 rounded-full" style={{ background: p.color ?? p.fill ?? p.payload?.fill }} />
+            {p.name}
+          </span>
+          <span className="font-semibold text-foreground">{formatter ? formatter(p.name, p.value) : p.value}</span>
+        </div>
+      ))}
+    </div>
+  );
+}
+
+function ChartCard<T>({
+  icon: Icon, title, subtitle, query, exportRows, exportName, headerExtra, children,
 }: {
   icon: React.ElementType;
   title: string;
   subtitle: string;
-  children?: React.ReactNode;
+  query: UseQueryResult<T>;
+  exportRows?: (data: T) => Array<Record<string, unknown>>;
+  exportName?: string;
+  headerExtra?: React.ReactNode;
+  children: (data: T) => React.ReactNode;
 }) {
+  const { data, isLoading, isError, refetch, isFetching } = query;
+  const rows = data && exportRows ? exportRows(data) : [];
+  const isEmpty = !isLoading && !isError && Array.isArray(data) && (data as any[]).length === 0;
+
   return (
-    <div className="flex flex-wrap items-start justify-between gap-3 border-b border-border px-5 py-4">
-      <div className="flex items-center gap-3">
-        <div
-          className="flex h-9 w-9 shrink-0 items-center justify-center rounded-lg text-primary-foreground"
-          style={{ background: BRAND.primary }}
-        >
-          <Icon className="h-4 w-4" />
+    <div className="flex flex-col overflow-hidden rounded-xl border border-border bg-card" style={{ boxShadow: "var(--shadow-card)" }}>
+      <div className="flex flex-wrap items-start justify-between gap-3 border-b border-border px-5 py-4">
+        <div className="flex items-center gap-3">
+          <div className="flex h-9 w-9 shrink-0 items-center justify-center rounded-lg text-white" style={{ background: BRAND.primary }}>
+            <Icon className="h-4 w-4" />
+          </div>
+          <div>
+            <h3 className="text-sm font-semibold text-foreground">{title}</h3>
+            <p className="text-xs text-muted-foreground">{subtitle}</p>
+          </div>
         </div>
-        <div>
-          <h3 className="text-sm font-semibold text-foreground">{title}</h3>
-          <p className="text-xs text-muted-foreground">{subtitle}</p>
+        <div className="flex items-center gap-2">
+          {headerExtra}
+          {isFetching && !isLoading && <Loader2 className="h-3.5 w-3.5 animate-spin text-muted-foreground" />}
+          {exportRows && exportName && (
+            <button
+              type="button"
+              onClick={() => data && exportCsv(exportName, exportRows(data))}
+              disabled={!data || rows.length === 0}
+              title="Export CSV"
+              className="rounded-md border border-border bg-card p-1.5 text-muted-foreground transition hover:text-foreground disabled:opacity-40"
+            >
+              <Download className="h-3.5 w-3.5" />
+            </button>
+          )}
         </div>
       </div>
-      {children && <div className="flex items-center gap-2">{children}</div>}
-    </div>
-  );
-}
 
-function RangeToggle({
-  value,
-  onChange,
-}: {
-  value: AnalyticsRange;
-  onChange: (r: AnalyticsRange) => void;
-}) {
-  const options: AnalyticsRange[] = ["3m", "6m", "12m"];
-  return (
-    <div className="inline-flex rounded-lg border border-border bg-muted/40 p-0.5">
-      {options.map((opt) => (
-        <button
-          key={opt}
-          type="button"
-          onClick={() => onChange(opt)}
-          className={`rounded-md px-3 py-1 text-[11px] font-semibold uppercase tracking-wide transition-all ${
-            value === opt
-              ? "bg-card text-foreground shadow-sm"
-              : "text-muted-foreground hover:text-foreground"
-          }`}
-        >
-          {opt}
-        </button>
-      ))}
-    </div>
-  );
-}
-
-function KpiChip({
-  label,
-  value,
-  positive,
-  icon: Icon,
-}: {
-  label: string;
-  value: string;
-  positive: boolean;
-  icon: React.ElementType;
-}) {
-  return (
-    <div className="flex items-center gap-2 rounded-lg border border-border bg-card px-3 py-2 text-xs">
-      <Icon
-        className="h-3.5 w-3.5 shrink-0"
-        style={{ color: positive ? BRAND.teal : BRAND.danger }}
-      />
-      <span className="text-muted-foreground">{label}:</span>
-      <span
-        className="font-bold"
-        style={{ color: positive ? BRAND.teal : BRAND.danger }}
-      >
-        {value}
-      </span>
-    </div>
-  );
-}
-
-/* Custom tooltip — styled to match the Flaxem card aesthetic */
-function ChartTooltip({
-  active,
-  payload,
-  label,
-  formatter,
-}: {
-  active?: boolean;
-  payload?: any[];
-  label?: string;
-  formatter?: (name: string, value: number) => string;
-}) {
-  if (!active || !payload?.length) return null;
-  return (
-    <div
-      className="rounded-xl border border-border bg-card px-3 py-2.5 text-xs shadow-lg"
-      style={{ minWidth: 140 }}
-    >
-      {label && (
-        <p className="mb-1.5 font-semibold text-foreground border-b border-border pb-1">
-          {label}
-        </p>
-      )}
-      {payload.map((p, i) => (
-        <div key={i} className="flex items-center justify-between gap-4">
-          <span className="flex items-center gap-1.5 text-muted-foreground">
-            <span
-              className="inline-block h-2 w-2 rounded-full"
-              style={{ background: p.color ?? p.fill }}
-            />
-            {p.name}
-          </span>
-          <span className="font-semibold text-foreground">
-            {formatter ? formatter(p.name, p.value) : p.value}
-          </span>
-        </div>
-      ))}
-    </div>
-  );
-}
-
-/* ─────────────────────────────────────────────────────────────────────── */
-/* Chart 1 — Approval Turnaround                                           */
-/* ─────────────────────────────────────────────────────────────────────── */
-
-function ApprovalTurnaroundChart({ data }: { data: ApprovalTurnaroundItem[] }) {
-  const avgOverall = data.length
-    ? (data.reduce((s, d) => s + d.avg_hours, 0) / data.length).toFixed(1)
-    : "—";
-
-  const breachCount = data.filter((d) => d.avg_hours > d.sla_hours).length;
-
-  return (
-    <div
-      className="overflow-hidden rounded-xl border border-border bg-card"
-      style={{ boxShadow: "var(--shadow-card)" }}
-    >
-      <SectionHeader
-        icon={Clock}
-        title="Approval Turnaround"
-        subtitle="Average hours per workflow step vs SLA target"
-      >
-        <KpiChip
-          label="Avg"
-          value={`${avgOverall}h`}
-          positive={Number(avgOverall) < 16}
-          icon={Clock}
-        />
-        {breachCount > 0 && (
-          <KpiChip
-            label="Breaching"
-            value={`${breachCount} steps`}
-            positive={false}
-            icon={AlertTriangle}
-          />
+      <div className="flex-1 p-5">
+        {isLoading ? (
+          <div className="h-[260px] animate-pulse rounded-lg bg-muted/50" />
+        ) : isError ? (
+          <div className="flex h-[260px] flex-col items-center justify-center gap-3 text-sm text-muted-foreground">
+            <AlertTriangle className="h-6 w-6 text-destructive" />
+            Could not load this chart.
+            <button onClick={() => refetch()} className="inline-flex items-center gap-1.5 rounded-md border border-border px-3 py-1.5 text-xs font-semibold text-foreground hover:bg-muted">
+              <RefreshCw className="h-3.5 w-3.5" /> Retry
+            </button>
+          </div>
+        ) : isEmpty ? (
+          <div className="flex h-[260px] flex-col items-center justify-center gap-2 text-sm text-muted-foreground">
+            <Inbox className="h-7 w-7 opacity-40" />
+            No data for the selected filters.
+          </div>
+        ) : (
+          children(data as T)
         )}
-      </SectionHeader>
-
-      <div className="p-5">
-        <ResponsiveContainer width="100%" height={260}>
-          <BarChart
-            data={data}
-            layout="vertical"
-            margin={{ left: 0, right: 40, top: 4, bottom: 4 }}
-            barCategoryGap="28%"
-          >
-            <CartesianGrid
-              horizontal={false}
-              strokeDasharray="3 3"
-              stroke="hsl(210,20%,91%)"
-            />
-            <XAxis
-              type="number"
-              tickLine={false}
-              axisLine={false}
-              tick={{ fontSize: 11, fill: "hsl(210,12%,55%)" }}
-              tickFormatter={(v: number) => `${v}h`}
-            />
-            <YAxis
-              type="category"
-              dataKey="step"
-              width={108}
-              tickLine={false}
-              axisLine={false}
-              tick={{ fontSize: 11, fill: "hsl(210,12%,45%)", fontWeight: 500 }}
-            />
-            <Tooltip
-              content={
-                <ChartTooltip formatter={(_name: string, val: number) => `${val}h`} />
-              }
-            />
-            <Bar dataKey="avg_hours" name="Avg Hours" radius={[0, 4, 4, 0]} maxBarSize={22}>
-              {data.map((entry, index) => (
-                <Cell
-                  key={index}
-                  fill={entry.avg_hours > entry.sla_hours ? BRAND.danger : BRAND.primary}
-                  fillOpacity={0.88}
-                />
-              ))}
-              <LabelList
-                dataKey="avg_hours"
-                position="right"
-                formatter={(v: number) => `${v}h`}
-                style={{ fontSize: 11, fontWeight: 600, fill: "hsl(222,30%,20%)" }}
-              />
-            </Bar>
-            {/* SLA reference markers rendered as a scatter would overlap — */}
-            {/* instead we show SLA as a second narrow bar for comparison.   */}
-            <Bar
-              dataKey="sla_hours"
-              name="SLA Target"
-              radius={[0, 4, 4, 0]}
-              maxBarSize={8}
-              fill={BRAND.neutral}
-              fillOpacity={0.6}
-            />
-            <Legend
-              iconType="circle"
-              iconSize={8}
-              wrapperStyle={{ fontSize: 11, paddingTop: 8 }}
-              formatter={(value) =>
-                value === "avg_hours" ? "Actual avg" : "SLA target"
-              }
-            />
-          </BarChart>
-        </ResponsiveContainer>
-
-        <p className="mt-2 text-[11px] text-muted-foreground">
-          Red bars indicate steps exceeding their SLA target.{" "}
-          <span className="font-medium text-foreground">
-            {breachCount} of {data.length} steps
-          </span>{" "}
-          are currently breaching.
-        </p>
       </div>
     </div>
   );
 }
 
-/* ─────────────────────────────────────────────────────────────────────── */
-/* Chart 2 — SLA Breach Rate                                               */
-/* ─────────────────────────────────────────────────────────────────────── */
-
-function SlaBreachRateChart({
-  data,
-  range,
-  onRangeChange,
-}: {
-  data: SlaBreachItem[];
-  range: AnalyticsRange;
-  onRangeChange: (r: AnalyticsRange) => void;
-}) {
-  const sliced = useMemo(() => {
-    const n = range === "3m" ? 3 : range === "6m" ? 6 : 12;
-    return data.slice(-n);
-  }, [data, range]);
-
-  const avg = sliced.length
-    ? (sliced.reduce((s, d) => s + d.breach_rate, 0) / sliced.length).toFixed(1)
-    : "—";
-
-  const trend = sliced.length >= 2
-    ? sliced[sliced.length - 1].breach_rate - sliced[0].breach_rate
-    : 0;
-
-  return (
-    <div
-      className="overflow-hidden rounded-xl border border-border bg-card"
-      style={{ boxShadow: "var(--shadow-card)" }}
-    >
-      <SectionHeader
-        icon={AlertTriangle}
-        title="SLA Breach Rate"
-        subtitle="% of workflow instances that exceeded SLA per month"
-      >
-        <RangeToggle value={range} onChange={onRangeChange} />
-      </SectionHeader>
-
-      <div className="p-5">
-        {/* KPI strip */}
-        <div className="mb-4 flex flex-wrap gap-3">
-          <div className="rounded-lg border border-border bg-muted/30 px-4 py-2.5 text-center">
-            <p className="text-[10px] font-bold uppercase tracking-widest text-muted-foreground">Avg Rate</p>
-            <p
-              className="mt-0.5 text-2xl font-black tabular-nums"
-              style={{ color: Number(avg) > 10 ? BRAND.danger : BRAND.teal }}
-            >
-              {avg}%
-            </p>
-          </div>
-          <div className="rounded-lg border border-border bg-muted/30 px-4 py-2.5 text-center">
-            <p className="text-[10px] font-bold uppercase tracking-widest text-muted-foreground">Trend</p>
-            <div className="mt-0.5 flex items-center justify-center gap-1">
-              {trend > 0 ? (
-                <TrendingUp className="h-5 w-5" style={{ color: BRAND.danger }} />
-              ) : (
-                <TrendingDown className="h-5 w-5" style={{ color: BRAND.teal }} />
-              )}
-              <span
-                className="text-2xl font-black tabular-nums"
-                style={{ color: trend > 0 ? BRAND.danger : BRAND.teal }}
-              >
-                {Math.abs(trend).toFixed(1)}%
-              </span>
-            </div>
-          </div>
-          <div className="rounded-lg border border-border bg-muted/30 px-4 py-2.5 text-center">
-            <p className="text-[10px] font-bold uppercase tracking-widest text-muted-foreground">Total Breaches</p>
-            <p className="mt-0.5 text-2xl font-black tabular-nums text-foreground">
-              {sliced.reduce((s, d) => s + d.breached, 0)}
-            </p>
-          </div>
-        </div>
-
-        <ResponsiveContainer width="100%" height={230}>
-          <AreaChart
-            data={sliced}
-            margin={{ left: -10, right: 8, top: 4, bottom: 0 }}
-          >
-            <defs>
-              <linearGradient id="slaGradient" x1="0" y1="0" x2="0" y2="1">
-                <stop offset="5%"  stopColor={BRAND.danger} stopOpacity={0.22} />
-                <stop offset="95%" stopColor={BRAND.danger} stopOpacity={0} />
-              </linearGradient>
-            </defs>
-            <CartesianGrid strokeDasharray="3 3" stroke="hsl(210,20%,91%)" />
-            <XAxis
-              dataKey="month"
-              tickLine={false}
-              axisLine={false}
-              tick={{ fontSize: 11, fill: "hsl(210,12%,55%)" }}
-            />
-            <YAxis
-              tickLine={false}
-              axisLine={false}
-              tick={{ fontSize: 11, fill: "hsl(210,12%,55%)" }}
-              tickFormatter={(v: number) => `${v}%`}
-              domain={[0, "dataMax + 5"]}
-            />
-            <Tooltip
-              content={
-                <ChartTooltip
-                  formatter={(name: string, val: number) =>
-                    name === "breach_rate" ? `${val}%` : String(val)
-                  }
-                />
-              }
-            />
-            <ReferenceLine
-              y={10}
-              stroke={BRAND.warning}
-              strokeDasharray="5 3"
-              label={{
-                value: "10% target",
-                position: "right",
-                fontSize: 10,
-                fill: BRAND.warning,
-              }}
-            />
-            <Area
-              type="monotone"
-              dataKey="breach_rate"
-              name="Breach Rate"
-              stroke={BRAND.danger}
-              strokeWidth={2.5}
-              fill="url(#slaGradient)"
-              dot={{ r: 3, fill: BRAND.danger, strokeWidth: 0 }}
-              activeDot={{ r: 5 }}
-            />
-          </AreaChart>
-        </ResponsiveContainer>
-
-        <p className="mt-2 text-[11px] text-muted-foreground">
-          Dashed line shows the 10% SLA breach target. Values above it require process review.
-        </p>
-      </div>
-    </div>
-  );
-}
-
-/* ─────────────────────────────────────────────────────────────────────── */
-/* Chart 3 — Document Volume by Type                                       */
-/* ─────────────────────────────────────────────────────────────────────── */
-
-const DOC_TYPES = ["Invoice", "Contract", "Report", "Policy", "Other"];
-
-function DocumentVolumeChart({
-  data,
-  range,
-  onRangeChange,
-}: {
-  data: VolumeItem[];
-  range: AnalyticsRange;
-  onRangeChange: (r: AnalyticsRange) => void;
-}) {
-  const sliced = useMemo(() => {
-    const n = range === "3m" ? 3 : range === "6m" ? 6 : 12;
-    return data.slice(-n);
-  }, [data, range]);
-
-  // Discover document types from the incoming data (fallback to static DOC_TYPES)
-  const docTypes = useMemo(() => {
-    const set = new Set<string>();
-    (data || []).forEach((row) => {
-      Object.keys(row || {}).forEach((k) => {
-        if (k !== "month") set.add(k);
-      });
-    });
-    // Prefer the static order for known types, then append any extras
-    const extras = Array.from(set).filter((k) => !DOC_TYPES.includes(k));
-    const ordered = DOC_TYPES.filter((t) => set.has(t)).concat(extras);
-    return ordered.length ? ordered : DOC_TYPES;
-  }, [data]);
-
-  // Build a color map for discovered types, preserving known colors
-  const docTypeColors = useMemo(() => {
-    const palette = [
-      "#147eb3",
-      "#3d3d8f",
-      "#1ba0b8",
-      "#b71c1c",
-      "#d0d6e8",
-      "#a78bfa",
-      "#3cb371",
-    ];
-    const persisted = loadSavedDocTypeColors();
-    const map: Record<string, string> = {};
-    docTypes.forEach((t, i) => {
-      if (persisted[t]) map[t] = persisted[t];
-      else if (DOC_TYPE_COLORS[t]) map[t] = DOC_TYPE_COLORS[t];
-      else map[t] = palette[i % palette.length];
-    });
-    return map;
-  }, [docTypes]);
-
-  // Saved colors in state so change reflects immediately in the UI
-  const [savedColors, setSavedColors] = useState<Record<string, string>>(() => loadSavedDocTypeColors());
-  const [editingType, setEditingType] = useState<string | null>(null);
-
-  function updateSavedColor(type: string, color: string) {
-    const next = { ...(savedColors || {}), [type]: color };
-    setSavedColors(next);
-    saveDocTypeColors(next);
-    // also persist to server for org-wide settings
-    try {
-      api.post("/documents/doc-type-colors/", { mappings: [{ doc_type: type, color }] });
-    } catch (e) {
-      // ignore network errors for now
-    }
-  }
-
-  // Load persisted mappings from server on mount and merge with local saved colors
-  useEffect(() => {
-    let mounted = true;
-    (async () => {
-      try {
-        const resp = await api.get("/documents/doc-type-colors/");
-        if (!mounted) return;
-        const payload = resp?.data || {};
-        // payload expected as { doc_type: color, ... } or list
-        const map: Record<string, string> = {};
-        if (Array.isArray(payload)) {
-          payload.forEach((item: any) => {
-            if (item.doc_type && item.color) map[item.doc_type] = item.color;
-          });
-        } else {
-          Object.assign(map, payload);
-        }
-        const merged = { ...(savedColors || {}), ...map };
-        setSavedColors(merged);
-        saveDocTypeColors(merged);
-      } catch (err) {
-        // ignore
-      }
-    })();
-    return () => { mounted = false; };
-  }, []);
-
-  // Normalize rows to guarantee each discovered doc type key exists and is numeric
-  const normalized = useMemo(() => {
-    return sliced.map((row) => {
-      const out: Record<string, any> = { month: row.month };
-      docTypes.forEach((t) => {
-        const raw = row[t] ?? row[t.toLowerCase()] ?? 0;
-        out[t] = Number(raw) || 0;
-      });
-      return out as VolumeItem;
-    });
-  }, [sliced, docTypes]);
-
-  const totals = useMemo(
-    () =>
-      docTypes.reduce((acc, t) => ({ ...acc, [t]: normalized.reduce((s, row) => s + (Number(row[t]) || 0), 0) }), {} as Record<string, number>),
-    [normalized, docTypes],
-  );
-
-  const grandTotal = Object.values(totals).reduce((s, v) => s + v, 0);
-
-  return (
-    <div
-      className="overflow-hidden rounded-xl border border-border bg-card"
-      style={{ boxShadow: "var(--shadow-card)" }}
-    >
-      <SectionHeader
-        icon={FileBarChart}
-        title="Document Volume by Type"
-        subtitle="Monthly upload breakdown across document categories"
-      >
-        <RangeToggle value={range} onChange={onRangeChange} />
-      </SectionHeader>
-
-      <div className="p-5">
-        {/* Type legend strips */}
-        <div className="mb-4 flex flex-wrap gap-2">
-          {docTypes.map((t) => (
-            <div
-              key={t}
-              className="flex items-center gap-1.5 rounded-full border border-border bg-card px-2.5 py-1 text-[11px] font-semibold"
-            >
-              <span
-                className="inline-block h-2 w-2 rounded-full"
-                style={{ background: savedColors[t] ?? docTypeColors[t] }}
-              />
-              <span className="text-muted-foreground">{t}</span>
-              <span className="text-foreground">{totals[t]}</span>
-              <span className="text-muted-foreground">
-                ({grandTotal ? ((totals[t] / grandTotal) * 100).toFixed(0) : 0}%)
-              </span>
-              <button
-                type="button"
-                onClick={() => setEditingType(editingType === t ? null : t)}
-                className="ml-2 text-xs text-muted-foreground hover:text-foreground"
-              >
-                edit
-              </button>
-              {editingType === t && (
-                <div className="ml-2 flex items-center gap-2">
-                  <input
-                    type="color"
-                    value={savedColors[t] ?? docTypeColors[t]}
-                    onChange={(e) => updateSavedColor(t, e.target.value)}
-                    className="h-6 w-10 rounded"
-                  />
-                  <button
-                    type="button"
-                    onClick={() => setEditingType(null)}
-                    className="text-xs text-muted-foreground hover:text-foreground"
-                  >
-                    done
-                  </button>
-                </div>
-              )}
-            </div>
-          ))}
-        </div>
-
-        <ResponsiveContainer width="100%" height={260}>
-          <BarChart
-            data={normalized}
-            margin={{ left: -10, right: 8, top: 4, bottom: 0 }}
-            barCategoryGap="30%"
-          >
-            <CartesianGrid strokeDasharray="3 3" stroke="hsl(210,20%,91%)" vertical={false} />
-            <XAxis
-              dataKey="month"
-              tickLine={false}
-              axisLine={false}
-              tick={{ fontSize: 11, fill: "hsl(210,12%,55%)" }}
-            />
-            <YAxis
-              tickLine={false}
-              axisLine={false}
-              tick={{ fontSize: 11, fill: "hsl(210,12%,55%)" }}
-            />
-            <Tooltip content={<ChartTooltip />} />
-            {docTypes.map((t) => (
-              <Bar
-                key={t}
-                dataKey={t}
-                stackId="a"
-                fill={savedColors[t] ?? docTypeColors[t]}
-                fillOpacity={0.88}
-                radius={t === "Other" ? [4, 4, 0, 0] : [0, 0, 0, 0]}
-              />
-            ))}
-          </BarChart>
-        </ResponsiveContainer>
-      </div>
-    </div>
-  );
-}
-
-/* ─────────────────────────────────────────────────────────────────────── */
-/* Chart 4 — Top Uploaders                                                 */
-/* ─────────────────────────────────────────────────────────────────────── */
-
-function TopUploadersChart({ data }: { data: UploaderItem[] }) {
-  const max = Math.max(...data.map((d) => d.count), 1);
-
-  const DEPT_COLORS: Record<string, string> = {
-    Finance:     BRAND.primary,
-    Legal:       BRAND.accent,
-    Procurement: BRAND.teal,
-    HR:          "hsl(38,90%,50%)",
-    Operations:  "hsl(160,60%,40%)",
-    IT:          "hsl(270,50%,55%)",
+/* ── KPI row ───────────────────────────────────────────────────────────────── */
+function kpiTrend(m: Metric | undefined, higherIsBetter: boolean) {
+  if (!m || m.delta_pct === null || m.delta_pct === undefined) return undefined;
+  const up = m.delta_pct >= 0;
+  return {
+    value: Math.abs(m.delta_pct),
+    isPositive: higherIsBetter ? up : !up,
+    direction: (m.delta_pct === 0 ? "flat" : up ? "up" : "down") as "up" | "down" | "flat",
+    suffix: "%",
+    label: "vs prev period",
   };
-
-  return (
-    <div
-      className="overflow-hidden rounded-xl border border-border bg-card"
-      style={{ boxShadow: "var(--shadow-card)" }}
-    >
-      <SectionHeader
-        icon={Users}
-        title="Top Uploaders"
-        subtitle="Staff ranked by document submissions this period"
-      >
-        <span className="rounded-full bg-primary/8 px-3 py-1 text-[11px] font-bold text-primary">
-          {data.length} staff
-        </span>
-      </SectionHeader>
-
-      <div className="divide-y divide-border">
-        {data.map((person, i) => {
-          const approvedPct = person.count
-            ? Math.round((person.approved / person.count) * 100)
-            : 0;
-          const barWidth = Math.round((person.count / max) * 100);
-          const deptColor = DEPT_COLORS[person.department] ?? BRAND.muted;
-
-          return (
-            <div key={person.name} className="flex items-center gap-4 px-5 py-3">
-              {/* Rank */}
-              <span
-                className="w-6 shrink-0 text-center text-[13px] font-black tabular-nums"
-                style={{
-                  color: i === 0 ? "hsl(38,90%,45%)" : i < 3 ? BRAND.primary : "hsl(210,12%,60%)",
-                }}
-              >
-                {i + 1}
-              </span>
-
-              {/* Avatar initials */}
-              <div
-                className="flex h-8 w-8 shrink-0 items-center justify-center rounded-full text-[11px] font-black text-white"
-                style={{ background: deptColor }}
-              >
-                {person.name
-                  .split(" ")
-                  .map((n) => n[0])
-                  .join("")
-                  .slice(0, 2)
-                  .toUpperCase()}
-              </div>
-
-              {/* Name + dept + bar */}
-              <div className="min-w-0 flex-1">
-                <div className="flex items-center justify-between gap-2">
-                  <p className="truncate text-sm font-semibold text-foreground">
-                    {person.name}
-                  </p>
-                  <span className="shrink-0 text-sm font-black tabular-nums text-foreground">
-                    {person.count}
-                  </span>
-                </div>
-                <div className="mt-0.5 flex items-center gap-2">
-                  <span className="text-[11px] text-muted-foreground">{person.department}</span>
-                  <span className="text-[10px] text-muted-foreground">·</span>
-                  <span
-                    className="text-[11px] font-medium"
-                    style={{ color: approvedPct >= 80 ? BRAND.teal : BRAND.warning }}
-                  >
-                    {approvedPct}% approved
-                  </span>
-                </div>
-                {/* Progress bar */}
-                <div className="mt-1.5 h-1.5 w-full overflow-hidden rounded-full bg-muted">
-                  <div
-                    className="h-full rounded-full transition-all duration-500"
-                    style={{
-                      width: `${barWidth}%`,
-                      background: deptColor,
-                      opacity: 0.75,
-                    }}
-                  />
-                </div>
-              </div>
-            </div>
-          );
-        })}
-      </div>
-
-      <div className="border-t border-border bg-muted/30 px-5 py-2.5">
-        <p className="text-[11px] text-muted-foreground">
-          Showing top {data.length} uploaders. Approval rate reflects approved / total submissions.
-        </p>
-      </div>
-    </div>
-  );
 }
+const fmt = (v: number | null | undefined, suffix = "") =>
+  v === null || v === undefined ? "—" : `${Math.round(v * 10) / 10}${suffix}`;
 
-/* ─────────────────────────────────────────────────────────────────────── */
-/* Main export                                                              */
-/* ─────────────────────────────────────────────────────────────────────── */
-
-interface AnalyticsDashboardProps {
-  /**
-   * Replace these with real data from useQuery in production.
-   * Signatures match the mock data structures above.
-   */
-  turnaroundData?: ApprovalTurnaroundItem[];
-  slaData?: SlaBreachItem[];
-  volumeData?: VolumeItem[];
-  uploadersData?: UploaderItem[];
-  isLoading?: boolean;
-}
-
-export function AnalyticsDashboard({
-  turnaroundData = MOCK_TURNAROUND,
-  slaData = MOCK_SLA,
-  volumeData = MOCK_VOLUME,
-  uploadersData = MOCK_UPLOADERS,
-  isLoading = false,
-}: AnalyticsDashboardProps) {
-  const [slaRange, setSlaRange] = useState<AnalyticsRange>("12m");
-  const [volRange, setVolRange] = useState<AnalyticsRange>("6m");
-  const [collapsed, setCollapsed] = useState(false);
-
+function KpiRow({ query }: { query: UseQueryResult<Overview> }) {
+  const { data, isLoading } = query;
   if (isLoading) {
     return (
-      <div className="flex h-40 items-center justify-center gap-2 rounded-xl border border-border bg-card text-sm text-muted-foreground">
-        <Loader2 className="h-4 w-4 animate-spin" />
-        Loading analytics…
+      <div className="grid grid-cols-2 gap-3 lg:grid-cols-3 xl:grid-cols-6">
+        {Array.from({ length: 6 }).map((_, i) => <div key={i} className="h-24 animate-pulse rounded-xl bg-card" />)}
       </div>
     );
   }
-
+  if (!data) return null;
   return (
-    <div className="space-y-3">
-      {/* Section toggle header */}
-      <div className="flex items-center justify-between">
-        <div className="flex items-center gap-2">
-          <BarChart2 className="h-4 w-4 text-muted-foreground" />
-          <h2 className="text-sm font-bold uppercase tracking-[0.12em] text-muted-foreground">
-            Analytics
-          </h2>
-        </div>
-        <button
-          type="button"
-          onClick={() => setCollapsed((v) => !v)}
-          className="inline-flex items-center gap-1 rounded-md px-2 py-1 text-xs text-muted-foreground transition hover:bg-muted hover:text-foreground"
-        >
-          {collapsed ? "Show" : "Hide"}
-          <ChevronDown
-            className={`h-3.5 w-3.5 transition-transform ${collapsed ? "-rotate-90" : ""}`}
-          />
-        </button>
-      </div>
-
-      {!collapsed && (
-        <>
-          {/* Row 1: Turnaround (wider) + SLA breach (narrower) */}
-          <div className="grid grid-cols-1 gap-6 xl:grid-cols-5">
-            <div className="xl:col-span-3">
-              <ApprovalTurnaroundChart data={turnaroundData} />
-            </div>
-            <div className="xl:col-span-2">
-              <SlaBreachRateChart
-                data={slaData}
-                range={slaRange}
-                onRangeChange={setSlaRange}
-              />
-            </div>
-          </div>
-
-          {/* Row 2: Volume (wider) + Uploaders (narrower) */}
-          <div className="grid grid-cols-1 gap-6 xl:grid-cols-5">
-            <div className="xl:col-span-3">
-              <DocumentVolumeChart
-                data={volumeData}
-                range={volRange}
-                onRangeChange={setVolRange}
-              />
-            </div>
-            <div className="xl:col-span-2">
-              <TopUploadersChart data={uploadersData} />
-            </div>
-          </div>
-        </>
-      )}
+    <div className="grid grid-cols-2 gap-3 lg:grid-cols-3 xl:grid-cols-6">
+      <StatCard title="Documents" value={data.documents.current ?? 0} icon={FileText} color="primary" trend={kpiTrend(data.documents, true)} />
+      <StatCard title="Approved" value={data.approved.current ?? 0} icon={CheckCircle2} color="teal" trend={kpiTrend(data.approved, true)} />
+      <StatCard title="Pending backlog" value={data.pending_now} icon={Hourglass} color="accent" />
+      <StatCard title="Avg turnaround" value={fmt(data.avg_turnaround_hours.current, "h")} icon={Clock} color="primary" trend={kpiTrend(data.avg_turnaround_hours, false)} />
+      <StatCard title="SLA compliance" value={fmt(data.sla_compliance.current, "%")} icon={ShieldCheck} color="teal" trend={kpiTrend(data.sla_compliance, true)} />
+      <StatCard title="Active uploaders" value={data.active_uploaders.current ?? 0} icon={Users} color="accent" trend={kpiTrend(data.active_uploaders, true)} />
     </div>
   );
 }
 
+/* ── Charts ────────────────────────────────────────────────────────────────── */
+function SlaBreachChart({ data }: { data: SlaItem[] }) {
+  const avg = data.length ? (data.reduce((s, d) => s + d.breach_rate, 0) / data.length).toFixed(1) : "—";
+  return (
+    <>
+      <ResponsiveContainer width="100%" height={250}>
+        <AreaChart data={data} margin={{ left: -8, right: 12, top: 4, bottom: 0 }}>
+          <defs>
+            <linearGradient id="slaGrad" x1="0" y1="0" x2="0" y2="1">
+              <stop offset="5%" stopColor={BRAND.danger} stopOpacity={0.22} />
+              <stop offset="95%" stopColor={BRAND.danger} stopOpacity={0} />
+            </linearGradient>
+          </defs>
+          <CartesianGrid strokeDasharray="3 3" stroke="hsl(210,20%,91%)" />
+          <XAxis dataKey="month" tickLine={false} axisLine={false} tick={{ fontSize: 10, fill: BRAND.muted }} interval="preserveStartEnd" />
+          <YAxis tickLine={false} axisLine={false} tick={{ fontSize: 11, fill: BRAND.muted }} tickFormatter={(v: number) => `${v}%`} domain={[0, "dataMax + 5"]} />
+          <Tooltip content={<ChartTooltip formatter={(n, v) => (n === "Breach rate" ? `${v}%` : String(v))} />} />
+          <ReferenceLine y={10} stroke={BRAND.warning} strokeDasharray="5 3" label={{ value: "10% target", position: "right", fontSize: 10, fill: BRAND.warning }} />
+          <Area type="monotone" dataKey="breach_rate" name="Breach rate" stroke={BRAND.danger} strokeWidth={2.5} fill="url(#slaGrad)" dot={{ r: 2.5, fill: BRAND.danger, strokeWidth: 0 }} activeDot={{ r: 5 }} />
+        </AreaChart>
+      </ResponsiveContainer>
+      <p className="mt-2 text-[11px] text-muted-foreground">Average breach rate this period: <span className="font-semibold text-foreground">{avg}%</span>. Dashed line marks the 10% target.</p>
+    </>
+  );
+}
+
+function StatusDonut({ data }: { data: StatusItem[] }) {
+  const total = data.reduce((s, d) => s + d.count, 0);
+  return (
+    <div className="flex flex-col items-center gap-4 lg:flex-row">
+      <ResponsiveContainer width="100%" height={230} className="lg:!w-1/2">
+        <PieChart>
+          <Pie data={data} dataKey="count" nameKey="label" innerRadius={58} outerRadius={88} paddingAngle={2} strokeWidth={0}>
+            {data.map((d) => <Cell key={d.status} fill={STATUS_COLORS[d.status] ?? BRAND.neutral} />)}
+          </Pie>
+          <Tooltip content={<ChartTooltip formatter={(_n, v) => `${v} (${total ? Math.round((v / total) * 100) : 0}%)`} />} />
+        </PieChart>
+      </ResponsiveContainer>
+      <div className="grid w-full grid-cols-1 gap-1.5 sm:grid-cols-2 lg:w-1/2">
+        {data.map((d) => (
+          <div key={d.status} className="flex items-center justify-between gap-2 text-xs">
+            <span className="flex items-center gap-1.5 truncate text-muted-foreground">
+              <span className="inline-block h-2.5 w-2.5 shrink-0 rounded-sm" style={{ background: STATUS_COLORS[d.status] ?? BRAND.neutral }} />
+              <span className="truncate">{d.label}</span>
+            </span>
+            <span className="shrink-0 font-semibold text-foreground">{d.count}<span className="ml-1 text-muted-foreground">({total ? Math.round((d.count / total) * 100) : 0}%)</span></span>
+          </div>
+        ))}
+      </div>
+    </div>
+  );
+}
+
+function TurnaroundChart({ data }: { data: TurnaroundItem[] }) {
+  const breaching = data.filter((d) => d.avg_hours > d.sla_hours).length;
+  return (
+    <>
+      <ResponsiveContainer width="100%" height={Math.max(220, data.length * 46)}>
+        <BarChart data={data} layout="vertical" margin={{ left: 0, right: 44, top: 4, bottom: 4 }} barCategoryGap="26%">
+          <CartesianGrid horizontal={false} strokeDasharray="3 3" stroke="hsl(210,20%,91%)" />
+          <XAxis type="number" tickLine={false} axisLine={false} tick={{ fontSize: 11, fill: BRAND.muted }} tickFormatter={(v: number) => `${v}h`} />
+          <YAxis type="category" dataKey="step" width={120} tickLine={false} axisLine={false} tick={{ fontSize: 11, fill: "hsl(210,12%,45%)", fontWeight: 500 }} />
+          <Tooltip content={<ChartTooltip formatter={(_n, v) => `${v}h`} />} />
+          <Bar dataKey="avg_hours" name="Avg hours" radius={[0, 4, 4, 0]} maxBarSize={22}>
+            {data.map((e, i) => <Cell key={i} fill={e.avg_hours > e.sla_hours ? BRAND.danger : BRAND.primary} fillOpacity={0.9} />)}
+            <LabelList dataKey="avg_hours" position="right" formatter={(v: number) => `${v}h`} style={{ fontSize: 11, fontWeight: 600, fill: "hsl(222,30%,20%)" }} />
+          </Bar>
+          <Bar dataKey="sla_hours" name="SLA target" radius={[0, 4, 4, 0]} maxBarSize={7} fill={BRAND.neutral} fillOpacity={0.7} />
+          <Legend iconType="circle" iconSize={8} wrapperStyle={{ fontSize: 11, paddingTop: 8 }} />
+        </BarChart>
+      </ResponsiveContainer>
+      <p className="mt-2 text-[11px] text-muted-foreground">Red bars exceed their SLA target — <span className="font-medium text-foreground">{breaching} of {data.length} steps</span> currently breaching.</p>
+    </>
+  );
+}
+
+function DepartmentChart({ data }: { data: DeptItem[] }) {
+  return (
+    <ResponsiveContainer width="100%" height={Math.max(220, data.length * 44)}>
+      <BarChart data={data} layout="vertical" margin={{ left: 0, right: 16, top: 4, bottom: 4 }} barCategoryGap="24%">
+        <CartesianGrid horizontal={false} strokeDasharray="3 3" stroke="hsl(210,20%,91%)" />
+        <XAxis type="number" tickLine={false} axisLine={false} tick={{ fontSize: 11, fill: BRAND.muted }} />
+        <YAxis type="category" dataKey="department" width={120} tickLine={false} axisLine={false} tick={{ fontSize: 11, fill: "hsl(210,12%,45%)", fontWeight: 500 }} />
+        <Tooltip content={<ChartTooltip />} />
+        <Legend iconType="circle" iconSize={8} wrapperStyle={{ fontSize: 11, paddingTop: 8 }} />
+        <Bar dataKey="approved" name="Approved" stackId="a" fill="hsl(150,55%,42%)" maxBarSize={22} />
+        <Bar dataKey="pending" name="Pending" stackId="a" fill={BRAND.primary} maxBarSize={22} />
+        <Bar dataKey="rejected" name="Rejected" stackId="a" fill={BRAND.danger} maxBarSize={22} />
+      </BarChart>
+    </ResponsiveContainer>
+  );
+}
+
+function VolumeChart({ data }: { data: VolumeItem[] }) {
+  const docTypes = useMemo(() => {
+    const set = new Set<string>();
+    data.forEach((row) => Object.keys(row).forEach((k) => { if (k !== "month") set.add(k); }));
+    return Array.from(set);
+  }, [data]);
+
+  const [savedColors, setSavedColors] = useState<Record<string, string>>(() => loadSavedDocTypeColors());
+  const [editingType, setEditingType] = useState<string | null>(null);
+
+  const colorFor = (t: string, i: number) => savedColors[t] ?? VOLUME_PALETTE[i % VOLUME_PALETTE.length];
+
+  useEffect(() => {
+    let mounted = true;
+    api.get("/documents/doc-type-colors/").then((resp) => {
+      if (!mounted) return;
+      const payload = resp?.data || {};
+      const map: Record<string, string> = {};
+      if (Array.isArray(payload)) payload.forEach((it: any) => { if (it.doc_type && it.color) map[it.doc_type] = it.color; });
+      else Object.assign(map, payload);
+      setSavedColors((prev) => { const merged = { ...prev, ...map }; saveDocTypeColors(merged); return merged; });
+    }).catch(() => { /* ignore */ });
+    return () => { mounted = false; };
+  }, []);
+
+  const updateColor = (type: string, color: string) => {
+    setSavedColors((prev) => { const next = { ...prev, [type]: color }; saveDocTypeColors(next); return next; });
+    api.post("/documents/doc-type-colors/", { mappings: [{ doc_type: type, color }] }).catch(() => { /* ignore */ });
+  };
+
+  const totals = useMemo(() => {
+    const t: Record<string, number> = {};
+    docTypes.forEach((dt) => { t[dt] = data.reduce((s, row) => s + (Number(row[dt]) || 0), 0); });
+    return t;
+  }, [data, docTypes]);
+  const grand = Object.values(totals).reduce((s, v) => s + v, 0);
+
+  return (
+    <>
+      <div className="mb-4 flex flex-wrap gap-2">
+        {docTypes.map((t, i) => (
+          <div key={t} className="flex items-center gap-1.5 rounded-full border border-border bg-card px-2.5 py-1 text-[11px] font-semibold">
+            <span className="inline-block h-2 w-2 rounded-full" style={{ background: colorFor(t, i) }} />
+            <span className="text-muted-foreground">{t}</span>
+            <span className="text-foreground">{totals[t]}</span>
+            <span className="text-muted-foreground">({grand ? Math.round((totals[t] / grand) * 100) : 0}%)</span>
+            <button type="button" onClick={() => setEditingType(editingType === t ? null : t)} className="ml-1 text-muted-foreground hover:text-foreground">edit</button>
+            {editingType === t && (
+              <input type="color" value={colorFor(t, i)} onChange={(e) => updateColor(t, e.target.value)} onBlur={() => setEditingType(null)} className="h-5 w-8 rounded" />
+            )}
+          </div>
+        ))}
+      </div>
+      <ResponsiveContainer width="100%" height={260}>
+        <BarChart data={data} margin={{ left: -10, right: 8, top: 4, bottom: 0 }} barCategoryGap="30%">
+          <CartesianGrid strokeDasharray="3 3" stroke="hsl(210,20%,91%)" vertical={false} />
+          <XAxis dataKey="month" tickLine={false} axisLine={false} tick={{ fontSize: 10, fill: BRAND.muted }} interval="preserveStartEnd" />
+          <YAxis tickLine={false} axisLine={false} tick={{ fontSize: 11, fill: BRAND.muted }} />
+          <Tooltip content={<ChartTooltip />} />
+          {docTypes.map((t, i) => (
+            <Bar key={t} dataKey={t} stackId="a" fill={colorFor(t, i)} fillOpacity={0.9} radius={i === docTypes.length - 1 ? [4, 4, 0, 0] : [0, 0, 0, 0]} />
+          ))}
+        </BarChart>
+      </ResponsiveContainer>
+    </>
+  );
+}
+
+function UploadersList({ data }: { data: UploaderItem[] }) {
+  const max = Math.max(...data.map((d) => d.count), 1);
+  return (
+    <div className="-mx-5 -mb-5 divide-y divide-border">
+      {data.map((p, i) => {
+        const approvedPct = p.count ? Math.round((p.approved / p.count) * 100) : 0;
+        const barWidth = Math.round((p.count / max) * 100);
+        return (
+          <div key={p.name + i} className="flex items-center gap-4 px-5 py-3">
+            <span className="w-5 shrink-0 text-center text-[13px] font-black tabular-nums" style={{ color: i === 0 ? BRAND.warning : i < 3 ? BRAND.primary : "hsl(210,12%,60%)" }}>{i + 1}</span>
+            <div className="flex h-8 w-8 shrink-0 items-center justify-center rounded-full text-[11px] font-black text-white" style={{ background: BRAND.accent }}>
+              {p.name.split(" ").map((n) => n[0]).join("").slice(0, 2).toUpperCase()}
+            </div>
+            <div className="min-w-0 flex-1">
+              <div className="flex items-center justify-between gap-2">
+                <p className="truncate text-sm font-semibold text-foreground">{p.name}</p>
+                <span className="shrink-0 text-sm font-black tabular-nums text-foreground">{p.count}</span>
+              </div>
+              <div className="mt-0.5 flex items-center gap-2 text-[11px]">
+                <span className="text-muted-foreground">{p.department}</span>
+                <span className="text-muted-foreground">·</span>
+                <span className="font-medium" style={{ color: approvedPct >= 80 ? BRAND.teal : BRAND.warning }}>{approvedPct}% approved</span>
+                {p.rejected > 0 && <><span className="text-muted-foreground">·</span><span className="font-medium" style={{ color: BRAND.danger }}>{p.rejected} rejected</span></>}
+              </div>
+              <div className="mt-1.5 h-1.5 w-full overflow-hidden rounded-full bg-muted">
+                <div className="h-full rounded-full transition-all duration-500" style={{ width: `${barWidth}%`, background: BRAND.accent, opacity: 0.75 }} />
+              </div>
+            </div>
+          </div>
+        );
+      })}
+    </div>
+  );
+}
+
+/* ── Filter bar ────────────────────────────────────────────────────────────── */
+function FilterBar({ filters, onChange, departments, docTypes }: {
+  filters: Filters;
+  onChange: (f: Filters) => void;
+  departments: { id: string; name: string }[];
+  docTypes: DocumentType[];
+}) {
+  const periods: Period[] = [3, 6, 12];
+  const selectCls = "h-9 rounded-lg border border-border bg-card px-3 text-sm text-foreground outline-none focus:border-primary";
+  return (
+    <div className="flex flex-wrap items-center gap-3">
+      <div className="inline-flex rounded-lg border border-border bg-muted/40 p-0.5">
+        {periods.map((p) => (
+          <button key={p} type="button" onClick={() => onChange({ ...filters, months: p })}
+            className={`rounded-md px-3 py-1 text-[11px] font-semibold uppercase tracking-wide transition-all ${filters.months === p ? "bg-card text-foreground shadow-sm" : "text-muted-foreground hover:text-foreground"}`}>
+            {p}m
+          </button>
+        ))}
+      </div>
+      <select value={filters.department} onChange={(e) => onChange({ ...filters, department: e.target.value })} className={selectCls}>
+        <option value="">All departments</option>
+        {departments.map((d) => <option key={d.id} value={d.id}>{d.name}</option>)}
+      </select>
+      <select value={filters.document_type} onChange={(e) => onChange({ ...filters, document_type: e.target.value })} className={selectCls}>
+        <option value="">All document types</option>
+        {docTypes.map((t) => <option key={t.id} value={t.id}>{t.name}</option>)}
+      </select>
+    </div>
+  );
+}
+
+/* ── Page ──────────────────────────────────────────────────────────────────── */
 export default function AnalyticsDashboardPage() {
-  const user = useAuthStore((state) => state.user);
-  const enabled = Boolean(user?.has_admin_access);
+  const [filters, setFilters] = useState<Filters>({ months: 12, department: "", document_type: "" });
 
-  const { data: turnaroundData, isLoading: turnaroundLoading } = useQuery({
-    queryKey: ["analytics", "turnaround"],
-    queryFn: () => api.get("/analytics/approval-turnaround/").then((r) => r.data),
-    enabled,
+  const { data: departments = [] } = useQuery({
+    queryKey: ["departments-all"],
+    queryFn: () => departmentsAPI.list().then((r) => normalizeListResponse<{ id: string; name: string }>(r.data)),
+    ...QUERY_FIVE_MIN_STALE,
+  });
+  const { data: docTypes = [] } = useQuery({
+    queryKey: ["document-types-all"],
+    queryFn: () => documentTypesAPI.list().then((r) => normalizeListResponse<DocumentType>(r.data)),
+    select: (rows: DocumentType[]) => rows.filter((t) => !SYSTEM_TYPE_CODES.includes((t.code || "").toUpperCase()) && !t.is_personal_type),
     ...QUERY_FIVE_MIN_STALE,
   });
 
-  const { data: slaData, isLoading: slaLoading } = useQuery({
-    queryKey: ["analytics", "sla-breach"],
-    queryFn: () => api.get("/analytics/sla-breach-rate/").then((r) => r.data),
-    enabled,
-    ...QUERY_FIVE_MIN_STALE,
-  });
-
-  const { data: volumeData, isLoading: volumeLoading } = useQuery({
-    queryKey: ["analytics", "document-volume"],
-    queryFn: () => api.get("/analytics/document-volume/").then((r) => r.data),
-    enabled,
-    ...QUERY_FIVE_MIN_STALE,
-  });
-
-  const { data: uploadersData, isLoading: uploadersLoading } = useQuery({
-    queryKey: ["analytics", "top-uploaders"],
-    queryFn: () => api.get("/analytics/top-uploaders/").then((r) => r.data),
-    enabled,
-    ...QUERY_FIVE_MIN_STALE,
-  });
+  const overview = useAnalytics<Overview>("overview", "overview", filters);
+  const sla = useAnalytics<SlaItem[]>("sla", "sla-breach-rate", filters);
+  const status = useAnalytics<StatusItem[]>("status", "status-distribution", filters);
+  const turnaround = useAnalytics<TurnaroundItem[]>("turnaround", "approval-turnaround", filters);
+  const dept = useAnalytics<DeptItem[]>("dept", "department-activity", filters);
+  const volume = useAnalytics<VolumeItem[]>("volume", "document-volume", filters);
+  const uploaders = useAnalytics<UploaderItem[]>("uploaders", "top-uploaders", filters);
 
   return (
     <div className="-m-6 min-h-[calc(100vh-3.5rem)] bg-[#EDEDED] text-[#1F2933]">
@@ -1024,28 +480,47 @@ export default function AnalyticsDashboardPage() {
           <p className="text-[11px] font-semibold uppercase tracking-[0.2em] text-white/70">Manager workspace</p>
           <h1 className="mt-1 text-xl font-semibold tracking-tight">Analytics</h1>
         </div>
-        <Link
-          to="/"
-          className="inline-flex h-9 items-center justify-center border border-white/20 bg-[#206D99] px-4 text-sm font-semibold text-white hover:bg-[#1B5F86]"
-        >
+        <Link to="/" className="inline-flex h-9 items-center justify-center border border-white/20 bg-[#206D99] px-4 text-sm font-semibold text-white hover:bg-[#1B5F86]">
           Back to dashboard
         </Link>
       </div>
 
-      <div className="p-4 pr-8">
-        {enabled ? (
-          <AnalyticsDashboard
-            turnaroundData={turnaroundData ?? []}
-            slaData={slaData ?? []}
-            volumeData={volumeData ?? []}
-            uploadersData={uploadersData ?? []}
-            isLoading={turnaroundLoading || slaLoading || volumeLoading || uploadersLoading}
-          />
-        ) : (
-          <div className="border border-[#C8CDD2] bg-white p-6 text-sm text-[#5E6870]">
-            Analytics is available to managers and administrators.
-          </div>
-        )}
+      <div className="space-y-4 p-4 pr-8">
+        <FilterBar filters={filters} onChange={setFilters} departments={departments} docTypes={docTypes} />
+
+        <KpiRow query={overview} />
+
+        <div className="grid grid-cols-1 gap-4 xl:grid-cols-2">
+          <ChartCard icon={AlertTriangle} title="SLA Breach Rate" subtitle="% of completed approvals that exceeded SLA per month"
+            query={sla} exportName="sla-breach-rate" exportRows={(d) => d as any}>
+            {(d) => <SlaBreachChart data={d} />}
+          </ChartCard>
+
+          <ChartCard icon={PieIcon} title="Status Distribution" subtitle="Documents by status in the selected period"
+            query={status} exportName="status-distribution" exportRows={(d) => d as any}>
+            {(d) => <StatusDonut data={d} />}
+          </ChartCard>
+
+          <ChartCard icon={Clock} title="Approval Turnaround" subtitle="Average hours per workflow step vs SLA target"
+            query={turnaround} exportName="approval-turnaround" exportRows={(d) => d as any}>
+            {(d) => <TurnaroundChart data={d} />}
+          </ChartCard>
+
+          <ChartCard icon={Building2} title="Department Activity" subtitle="Approvals, pending and rejections by department"
+            query={dept} exportName="department-activity" exportRows={(d) => d as any}>
+            {(d) => <DepartmentChart data={d} />}
+          </ChartCard>
+
+          <ChartCard icon={FileBarChart} title="Document Volume by Type" subtitle="Monthly upload breakdown across categories"
+            query={volume} exportName="document-volume" exportRows={(d) => d as any}>
+            {(d) => <VolumeChart data={d} />}
+          </ChartCard>
+
+          <ChartCard icon={Users} title="Top Uploaders" subtitle="Staff ranked by submissions this period"
+            query={uploaders} exportName="top-uploaders" exportRows={(d) => d as any}>
+            {(d) => <UploadersList data={d} />}
+          </ChartCard>
+        </div>
       </div>
     </div>
   );
