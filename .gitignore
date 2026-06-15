@@ -13,6 +13,8 @@ staticfiles/
 
 # Environments
 .env
+.env.uat
+.env.*.local
 .venv
 env/
 venv/
