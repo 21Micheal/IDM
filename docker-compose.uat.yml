@@ -117,6 +117,8 @@ services:
     build:
       context: ./frontend
       target: builder            # runs `npm run build` → /app/dist
+      args:
+        VITE_API_URL: ""         # same-origin: SPA calls a relative /api/v1
     image: idm-frontend-build:uat
     command: sh -c "rm -rf /out/* && cp -a /app/dist/. /out/"
     volumes:
