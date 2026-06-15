@@ -1,7 +1,7 @@
 # IDM — Internal UAT Deployment (Windows Server 2019)
 
 This runbook stands up the IDM document-management system for **internal UAT** on a
-Windows Server 2019 host, reachable by hostname over the LAN (e.g. `http://idm-uat`).
+Windows Server 2019 host, reachable by hostname over the LAN (e.g. `http://fsedms`).
 
 The whole stack is **Linux containers**, so we don't run Docker on Windows directly.
 We run a small **Ubuntu Server VM under Hyper-V** (built into Server 2019) and run
@@ -48,17 +48,20 @@ New-VMSwitch -Name "LAN" -NetAdapterName "Ethernet" -AllowManagementOS $true
 Download the **Ubuntu Server 22.04 LTS** ISO, then create the VM (adjust the path):
 
 ```powershell
-New-VM -Name "idm-uat" -Generation 2 -MemoryStartupBytes 12GB `
-  -NewVHDPath "D:\VMs\idm-uat.vhdx" -NewVHDSizeBytes 80GB -SwitchName "LAN"
-Set-VM -Name "idm-uat" -ProcessorCount 6
-Set-VMDvdDrive -VMName "idm-uat" -Path "C:\iso\ubuntu-22.04-live-server-amd64.iso"
+New-VM -Name "fsedms" -Generation 2 -MemoryStartupBytes 12GB `
+  -NewVHDPath "D:\VMs\fsedms.vhdx" -NewVHDSizeBytes 80GB -SwitchName "LAN"
+Set-VM -Name "fsedms" -ProcessorCount 6
+Set-VMDvdDrive -VMName "fsedms" -Path "C:\iso\ubuntu-22.04-live-server-amd64.iso"
 # Gen-2 VMs need Secure Boot set to the MS UEFI CA for Ubuntu to boot:
-Set-VMFirmware -VMName "idm-uat" -SecureBootTemplate MicrosoftUEFICertificateAuthority
-Start-VM -Name "idm-uat"
+Set-VMFirmware -VMName "fsedms" -SecureBootTemplate MicrosoftUEFICertificateAuthority
+Start-VM -Name "fsedms"
 ```
 
-Connect with **Hyper-V Manager → idm-uat → Connect**, run the Ubuntu installer:
-- Set hostname `idm-uat`.
+Connect with **Hyper-V Manager → fsedms → Connect**, run the Ubuntu installer:
+- Set hostname `fsedms` (lowercase). Hostnames are case-insensitive on the
+  network, so testers can still type `fseDMS`; keep the OS hostname and
+  `ALLOWED_HOSTS` lowercase to avoid tooling/Host-header surprises. Brand the
+  UI/docs "fseDMS" freely — only the machine name needs to be lowercase.
 - Install **OpenSSH server** when prompted (lets you SSH in instead of the console).
 - Give it a static lease/IP from your network team (or a DHCP reservation) so the
   hostname stays put.
@@ -66,11 +69,11 @@ Connect with **Hyper-V Manager → idm-uat → Connect**, run the Ubuntu install
 After install, from the Windows host (or your workstation):
 
 ```powershell
-ssh youruser@idm-uat        # or the VM's IP
+ssh youruser@fsedms        # or the VM's IP
 ```
 
-> **Internal DNS:** ask your network team to point `idm-uat` (and
-> `idm-uat.company.local`) at the VM's IP so testers can use the friendly name.
+> **Internal DNS:** ask your network team to point `fsedms` (and
+> `fsedms.company.local`) at the VM's IP so testers can use the friendly name.
 > Until then you can test with the raw IP.
 
 ---
@@ -100,7 +103,7 @@ git clone <your-repo-url> idm && cd idm
 git checkout version2          # the branch you're testing
 
 # Option B — no git on the VM: copy from your workstation
-#   scp -r ./IDM youruser@idm-uat:~/idm     (run on your workstation)
+#   scp -r ./IDM youruser@fsedms:~/idm     (run on your workstation)
 ```
 
 ---
@@ -117,7 +120,7 @@ Fill in, at minimum:
   `docker run --rm idm-app:uat python -c "from django.core.management.utils import get_random_secret_key as g; print(g())"`
   (or paste any 50+ char random string now).
 - `ALLOWED_HOSTS` / `CSRF_TRUSTED_ORIGINS` — set to your real hostname(s),
-  e.g. `idm-uat,idm-uat.company.local`.
+  e.g. `fsedms,fsedms.company.local`.
 - `DB_PASSWORD`, `DB_ROOT_PASSWORD`, `REDIS_PASSWORD` — strong unique values.
 - (Optional) `ANTHROPIC_API_KEY` for AI field extraction; internal SMTP under
   `EMAIL_*` if you want real notification emails.
@@ -161,10 +164,10 @@ $C python manage.py search_index --rebuild -f
 
 ## 7. Verify
 
-From a tester's machine on the LAN, browse to **`http://idm-uat`**:
+From a tester's machine on the LAN, browse to **`http://fsedms`**:
 
 - Login page loads, you can sign in as the superuser.
-- Open DevTools → Network: API calls go to `http://idm-uat/api/v1/...` (same origin)
+- Open DevTools → Network: API calls go to `http://fsedms/api/v1/...` (same origin)
   and return 200, not CORS errors.
 - Upload a document → it appears, preview renders, OCR/extraction completes
   (watch `logs -f celery_ocr`).
@@ -206,7 +209,7 @@ docker run --rm -v idm_media_files:/m -v "$PWD":/b alpine tar czf /b/media_$(dat
   do **not** expose it to the internet. For HTTPS later, terminate TLS at the edge
   nginx (add a `443` server block + cert) or front it with IIS/ARR on the Windows
   host.
-- **Windows host firewall:** if testers can't reach `http://idm-uat`, confirm the
+- **Windows host firewall:** if testers can't reach `http://fsedms`, confirm the
   VM's `LAN` switch is *external* and allow inbound TCP 80 to the VM's IP.
 - **db/redis/elasticsearch are not published** — they're reachable only inside the
   compose network, by design. Use `dcu exec` to inspect them.
