@@ -354,11 +354,17 @@ LOGGING = {
 }
 
 # ── Security ─────────────────────────────────────────────────────────────────
+# HTTPS hardening is on by default whenever DEBUG is off. An internal, HTTP-only
+# UAT behind a plain reverse proxy must opt out (SECURE_SSL=False) — otherwise
+# Django 301-redirects every request to https:// and sets secure-only cookies,
+# which breaks login over HTTP. Leave SECURE_SSL=True (the default) in production
+# where TLS terminates at the edge.
 if not DEBUG:
-    SECURE_HSTS_SECONDS = 31536000
-    SECURE_SSL_REDIRECT = True
-    SESSION_COOKIE_SECURE = True
-    CSRF_COOKIE_SECURE = True
+    SECURE_SSL = env.bool("SECURE_SSL", default=True)
+    SECURE_SSL_REDIRECT = SECURE_SSL
+    SESSION_COOKIE_SECURE = SECURE_SSL
+    CSRF_COOKIE_SECURE = SECURE_SSL
+    SECURE_HSTS_SECONDS = 31536000 if SECURE_SSL else 0
 
 TEMPLATES = [
     {
