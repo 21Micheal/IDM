@@ -99,6 +99,10 @@ class WorkflowStep(models.Model):
         settings.AUTH_USER_MODEL, null=True, blank=True,
         on_delete=models.SET_NULL, related_name="assigned_steps",
     )
+    # True when assignee_user was auto-filled from the group's designated approver
+    # (head) rather than hand-picked. Such steps resolve the group's CURRENT head
+    # at assignment time, so changing the group's approver propagates to them.
+    assignee_user_auto = models.BooleanField(default=False)
     sla_hours      = models.PositiveSmallIntegerField(default=48)
     allow_resubmit = models.BooleanField(default=True)
     allow_approve  = models.BooleanField(default=True, help_text="Approver can approve at this step")

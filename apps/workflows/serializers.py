@@ -85,7 +85,7 @@ class WorkflowStepSerializer(serializers.ModelSerializer):
         fields = [
             "id", "order", "name", "status_label",
             "assignee_type", "assignee_group", "assignee_group_name",
-            "assignee_user", "assignee_user_name",
+            "assignee_user", "assignee_user_name", "assignee_user_auto",
             "sla_hours", "allow_resubmit",
             "allow_approve", "allow_reject", "allow_return",
             "requires_signature",
@@ -139,7 +139,7 @@ class WorkflowStepWriteSerializer(serializers.ModelSerializer):
         model  = WorkflowStep
         fields = [
             "id", "name", "status_label",
-            "assignee_type", "assignee_group", "assignee_user",
+            "assignee_type", "assignee_group", "assignee_user", "assignee_user_auto",
             "sla_hours", "allow_resubmit",
             "allow_approve", "allow_reject", "allow_return",
             "requires_signature",

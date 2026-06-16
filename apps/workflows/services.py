@@ -451,7 +451,28 @@ class WorkflowService:
             return [step.assignee_user]
 
         if step.assignee_type == "group_specific":
-            if not step.assignee_group_id or not step.assignee_user_id:
+            if not step.assignee_group_id:
+                raise WorkflowError(f"Step '{step.name}' is missing its assigned group.")
+            # "Designated approver": resolve the group's CURRENT head dynamically,
+            # so changing the group's approver flows through to new assignments
+            # instead of persisting the approver snapshotted when the step was built.
+            if step.assignee_user_auto:
+                head = step.assignee_group.head
+                if not head:
+                    raise WorkflowError(
+                        f"Group '{step.assignee_group.name}' has no designated approver set."
+                    )
+                if not head.is_active:
+                    raise WorkflowError(
+                        f"Designated approver for group '{step.assignee_group.name}' is not active."
+                    )
+                if not WorkflowService._is_active_group_member(step.assignee_group, head):
+                    raise WorkflowError(
+                        f"Designated approver is not an active member of group '{step.assignee_group.name}'."
+                    )
+                return [head]
+            # Hand-picked specific member: use the stored user.
+            if not step.assignee_user_id:
                 raise WorkflowError(f"Step '{step.name}' is missing its assigned group member.")
             if not WorkflowService._is_active_group_member(step.assignee_group, step.assignee_user):
                 raise WorkflowError(
