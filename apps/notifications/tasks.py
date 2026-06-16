@@ -11,14 +11,26 @@ import logging
 logger = logging.getLogger(__name__)
 
 
-def _send_email(recipient, subject: str, body: str) -> None:
-    """Fire-and-forget email. Logs on failure, never raises."""
+def _send_email(recipient, subject: str, body: str, link: str = "") -> None:
+    """Fire-and-forget email. Logs on failure, never raises.
+
+    Appends a footer pointing at the live system (settings.FRONTEND_URL) so
+    recipients can log in from the email. If ``link`` (a relative path such as
+    ``/documents/<id>``) is given, a direct deep-link is included too.
+    """
     if not recipient or not recipient.email:
         return
+
+    base = settings.FRONTEND_URL.rstrip("/")
+    footer = "\n\n"
+    if link:
+        footer += f"Open it directly: {base}{link}\n"
+    footer += f"Log in to DMS: {base}\n"
+
     try:
         send_mail(
             subject=subject,
-            message=body,
+            message=body + footer,
             from_email=settings.DEFAULT_FROM_EMAIL,
             recipient_list=[recipient.email],
             fail_silently=False,
@@ -103,6 +115,7 @@ def notify_task_assigned(task_id: str) -> None:
             + (f"  Due by: {task.due_at.strftime('%d %b %Y %H:%M UTC')}\n" if task.due_at else "")
             + f"\nPlease log in to DMS to action this request.\n"
         ),
+        link=link,
     )
 
 
@@ -135,6 +148,7 @@ def notify_workflow_complete(instance_id: str, outcome: str) -> None:
             f"  Status: {verb.capitalize()}\n\n"
             f"Log in to DMS to view the document.\n"
         ),
+        link=link,
     )
 
 

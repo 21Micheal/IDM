@@ -44,6 +44,12 @@ CSRF_TRUSTED_ORIGINS = env.list(
 if NGROK_URL and NGROK_URL not in CSRF_TRUSTED_ORIGINS:
     CSRF_TRUSTED_ORIGINS.append(NGROK_URL)
 
+# Public base URL of the app, used to build clickable links in outgoing emails
+# (welcome email, workflow/notification emails). Set this to whatever address
+# users actually reach the system on — e.g. http://192.168.100.40 — otherwise
+# email links point at the developer default below.
+FRONTEND_URL = env("FRONTEND_URL", default="http://localhost:3000")
+
 # ── Proxy / Forwarded Headers (Critical for ngrok + Google Docs / Office previews) ──
 # Without these, request.build_absolute_uri() returns http://localhost/... instead
 # of the public ngrok URL, breaking external document viewers.
