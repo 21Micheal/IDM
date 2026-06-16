@@ -195,6 +195,7 @@ def notify_document_returned(task_id: str, comment: str) -> None:
             f"Please update the document and resubmit for approval.\n\n"
             f"Log in to DMS to view and resubmit.\n"
         ),
+        link=link,
     )
 
     # Also notify the owner if different from uploader
@@ -252,6 +253,7 @@ def notify_document_held(task_id: str, comment: str, hold_hours: int) -> None:
             f"after the hold period ends, or when manually released.\n\n"
             f"Log in to DMS to view the document status.\n"
         ),
+        link=link,
     )
 
 
@@ -290,6 +292,7 @@ def notify_hold_released(task_id: str) -> None:
             f"  Reference: {doc.reference_number}\n\n"
             f"The document is now back in the approval queue.\n"
         ),
+        link=link,
     )
 
     # Notify approver their task is active again
@@ -310,6 +313,7 @@ def notify_hold_released(task_id: str) -> None:
                 f"  Step: {task.step.name}\n\n"
                 f"Please log in to DMS to continue the approval.\n"
             ),
+            link=link,
         )
 
 
@@ -350,6 +354,7 @@ def notify_hold_ending(task_id: str) -> None:
                 f"  Hold ends: {task.held_until.strftime('%d %b %Y %H:%M UTC')}\n\n"
                 f"Please log in to DMS if you need to action or extend the task.\n"
             ),
+            link=link,
         )
 
 
@@ -388,6 +393,7 @@ def notify_hold_auto_released(task_id: str) -> None:
             f"  Step: {task.step.name}\n\n"
             f"Please log in to DMS to action this approval.\n"
         ),
+        link=link,
     )
 
 
@@ -427,6 +433,7 @@ def notify_task_sla_warning(task_id: str) -> None:
                 f"  Due by: {task.due_at.strftime('%d %b %Y %H:%M UTC')}\n\n"
                 f"Please log in to DMS to action this request.\n"
             ),
+            link=link,
         )
 
 
@@ -469,6 +476,7 @@ def notify_task_overdue(task_id: str) -> None:
                 f"  Was due: {task.due_at.strftime('%d %b %Y %H:%M UTC') if task.due_at else 'N/A'}\n\n"
                 f"Please log in to DMS immediately.\n"
             ),
+            link=link,
         )
 
 
@@ -649,14 +657,14 @@ def notify_workflow_action(action_id: str, user_ids: list[str] = None) -> None:
     
     # Notify the uploader
     _create_notification(uploader, msg_uploader, link, "workflow_action")
-    _send_email(uploader, subject_uploader, body_uploader)
+    _send_email(uploader, subject_uploader, body_uploader, link=link)
     
     # Also notify other specified users if provided
     if user_ids:
         other_users = User.objects.filter(id__in=user_ids).exclude(id=uploader.id)
         for user in other_users:
             _create_notification(user, msg_uploader, link, "workflow_action")
-            _send_email(user, subject_uploader, body_uploader)
+            _send_email(user, subject_uploader, body_uploader, link=link)
 
 
 # ── Ad-hoc signature requests ──────────────────────────────────────────────────
@@ -693,6 +701,7 @@ def notify_signature_requested(signer_id: str, request_id: str) -> None:
             + (f"  Note: {req.message}\n" if req.message else "")
             + "\nLog in to DMS to review and sign.\n"
         ),
+        link=link,
     )
 
 
@@ -755,6 +764,7 @@ def notify_signature_declined(request_id: str, signer_id: str) -> None:
             f"  Reason: {reason}\n\n"
             f"The signature request has been stopped.\n"
         ),
+        link=link,
     )
 
 
@@ -780,6 +790,7 @@ def notify_signature_completed(request_id: str) -> None:
             f"All requested signatures have been collected on '{doc.title}'.\n"
             f"The signed document is ready in DMS.\n"
         ),
+        link=link,
     )
 
 
