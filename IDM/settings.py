@@ -176,6 +176,11 @@ SERVE_MEDIA_PUBLIC = env.bool("SERVE_MEDIA_PUBLIC", default=False)
 STATIC_ROOT = BASE_DIR / "staticfiles"
 STATIC_URL = "/static/"
 
+# Logical storage allowance for documents, used by the dashboard "Storage Used"
+# panel as the percentage denominator. This is a soft quota for reporting only
+# (not enforced) — set it to whatever capacity you want to track against.
+STORAGE_QUOTA_GB = env.int("STORAGE_QUOTA_GB", default=50)
+
 # Default authentication always includes local Django auth.
 # If LDAP/AD is configured via LDAP_SERVER_URI, it will be enabled first.
 AUTHENTICATION_BACKENDS = ["django.contrib.auth.backends.ModelBackend"]
