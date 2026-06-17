@@ -90,6 +90,7 @@ class UserSerializer(serializers.ModelSerializer):
     full_name        = serializers.SerializerMethodField()
     group_names      = serializers.SerializerMethodField()
     has_admin_access = serializers.SerializerMethodField()
+    admin_source     = serializers.SerializerMethodField()
 
     class Meta:
         model  = User
@@ -97,7 +98,7 @@ class UserSerializer(serializers.ModelSerializer):
             "id", "email", "first_name", "last_name", "full_name",
             "job_description",
             "is_staff",
-            "has_admin_access",
+            "has_admin_access", "admin_source",
             "department", "department_name",
             "mfa_enabled", "must_change_password",
             "is_active", "last_login_ip", "last_login",
@@ -105,7 +106,7 @@ class UserSerializer(serializers.ModelSerializer):
         ]
         read_only_fields = [
             "id", "full_name", "department_name",
-            "has_admin_access",
+            "has_admin_access", "admin_source",
             "must_change_password", "last_login_ip", "last_login",
             "group_names", "created_at", "updated_at",
         ]
@@ -122,6 +123,14 @@ class UserSerializer(serializers.ModelSerializer):
 
     def get_has_admin_access(self, obj):
         return obj.has_admin_access
+
+    def get_admin_source(self, obj):
+        """Where a user's admin rights come from: their account vs. group membership."""
+        if obj.is_superuser or obj.is_staff:
+            return "account"
+        if obj.has_admin_access:
+            return "group"
+        return None
 
 
 class UserSignatureSerializer(serializers.ModelSerializer):

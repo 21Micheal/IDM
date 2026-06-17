@@ -198,6 +198,7 @@ export interface UserSummary {
   job_description?: string;
   is_staff?: boolean;
   has_admin_access?: boolean;
+  admin_source?: "account" | "group" | null;
   group_names?: string[];
   department_name?: string | null;
 }
