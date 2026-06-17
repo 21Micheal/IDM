@@ -60,7 +60,10 @@ Queue assignments (unchanged):
                                                don't starve text-indexing jobs.
 """
 import logging
-import fcntl
+try:
+    import fcntl  # POSIX-only file locking; absent on Windows
+except ImportError:  # pragma: no cover - Windows
+    fcntl = None
 import os
 import shutil
 import signal
@@ -550,6 +553,33 @@ def _pdf_filter_for(source_path: Path) -> str:
     return "pdf:writer_pdf_Export"
 
 
+def _kill_process_tree(proc, force: bool = False) -> None:
+    """
+    Terminate a process and its children, cross-platform.
+
+    POSIX: signal the process group (LibreOffice forks soffice.bin). Windows:
+    `taskkill /T` walks the tree. Used to clean up a timed-out conversion.
+    """
+    if os.name == "nt":
+        try:
+            subprocess.run(
+                ["taskkill", "/F", "/T", "/PID", str(proc.pid)],
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+            )
+        except Exception:
+            try:
+                proc.kill()
+            except Exception:
+                pass
+        return
+    sig = signal.SIGKILL if force else signal.SIGTERM
+    try:
+        os.killpg(os.getpgid(proc.pid), sig)
+    except (ProcessLookupError, OSError):
+        pass
+
+
 def _convert_office_to_pdf(
     soffice_bin: str,
     source_path: Path,
@@ -604,13 +634,19 @@ def _convert_office_to_pdf(
 
     logger.info("LibreOffice cmd: %s", " ".join(cmd))
 
+    # New process group so we can kill LibreOffice + its children on timeout.
+    if os.name == "nt":
+        popen_kwargs = {"creationflags": subprocess.CREATE_NEW_PROCESS_GROUP}
+    else:
+        popen_kwargs = {"start_new_session": True}
+
     # Capture stderr so conversion errors appear in Celery logs instead of /dev/null
     proc = subprocess.Popen(
         cmd,
         stdout=subprocess.PIPE,
         stderr=subprocess.STDOUT,
         env=env,
-        start_new_session=True,
+        **popen_kwargs,
     )
     try:
         deadline = time.monotonic() + timeout
@@ -644,17 +680,11 @@ def _convert_office_to_pdf(
                 except Exception:
                     pass
                 logger.error("LibreOffice conversion timed out after %ds", timeout)
-                try:
-                    os.killpg(os.getpgid(proc.pid), signal.SIGTERM)
-                except (ProcessLookupError, OSError):
-                    pass
+                _kill_process_tree(proc)
                 try:
                     proc.wait(timeout=5)
                 except subprocess.TimeoutExpired:
-                    try:
-                        os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
-                    except (ProcessLookupError, OSError):
-                        pass
+                    _kill_process_tree(proc, force=True)
                     proc.wait()
                 return False
 
@@ -744,7 +774,11 @@ def _convert_office_source_to_pdf_bytes(
             # from a previously killed run before converting.
             lock_path = persistent_profile / ".preview.lock"
             with open(lock_path, "w") as lock_file:
-                fcntl.flock(lock_file, fcntl.LOCK_EX)
+                # POSIX: serialise concurrent conversions on the shared profile.
+                # Windows: Celery runs the preview worker solo (one task at a
+                # time), so no cross-process lock is needed.
+                if fcntl is not None:
+                    fcntl.flock(lock_file, fcntl.LOCK_EX)
                 _clear_stale_lo_locks(persistent_profile)
                 if heartbeat:
                     heartbeat()

@@ -201,6 +201,11 @@ class DocumentSearchView(APIView):
     permission_classes = [IsAuthenticated]
 
     def post(self, request):
+        from django.conf import settings
+
+        if not getattr(settings, "ELASTICSEARCH_ENABLED", True):
+            return self._db_search(request)
+
         from .documents import DocumentIndex
 
         data = request.data
@@ -400,4 +405,143 @@ class DocumentSearchView(APIView):
             "page": page,
             "page_size": page_size,
             "results": hits,
+        })
+
+    # ── Database fallback (ELASTICSEARCH_ENABLED=False) ──────────────────────
+    def _db_search(self, request):
+        """
+        Elasticsearch-free search over the database. Covers the common case —
+        free-text across title/reference/supplier/file name/OCR text/tags plus
+        the structured filters — honouring the same per-user visibility rules as
+        the document list, and returning the same response shape as the ES path.
+        Ranking/fuzziness are not replicated; matches are date-ordered.
+        """
+        from django.db.models import Q as DQ
+        from django.utils import timezone
+        from apps.documents.models import Document, DocumentShare
+
+        data = request.data
+        search_text = _as_text(data.get("search"))[:MAX_SEARCH_LENGTH]
+        filters = _as_filter_dict(data.get("filters"))
+        page = _parse_positive_int(data.get("page", 1), 1)
+        page_size = _parse_positive_int(data.get("page_size", 20), 20, maximum=100)
+        user = request.user
+
+        qs = (
+            Document.objects
+            .exclude(document_type__code="UNCLASS")
+            .filter(deleted_at__isnull=True)
+            .select_related("document_type")
+            .prefetch_related("tags")
+        )
+
+        # Visibility — mirror DocumentViewSet involvement rules.
+        if not user.has_admin_access and not user.sees_all_documents:
+            shared = DocumentShare.objects.filter(
+                recipient=user, revoked_at__isnull=True,
+            ).filter(
+                DQ(expires_at__isnull=True) | DQ(expires_at__gt=timezone.now())
+            ).values("document_id")
+            qs = qs.filter(
+                DQ(uploaded_by=user) |
+                DQ(owned_by=user) |
+                DQ(workflow_instance__tasks__assigned_to=user) |
+                DQ(signature_request__signers__signer=user) |
+                DQ(id__in=shared)
+            ).distinct()
+
+        if search_text:
+            qs = qs.filter(
+                DQ(title__icontains=search_text) |
+                DQ(reference_number__icontains=search_text) |
+                DQ(supplier__icontains=search_text) |
+                DQ(file_name__icontains=search_text) |
+                DQ(extracted_text__icontains=search_text) |
+                DQ(tags__name__icontains=search_text)
+            ).distinct()
+
+        if filters.get("document_type"):
+            dt = filters["document_type"]
+            qs = qs.filter(DQ(document_type__name=dt) | DQ(document_type_id=str(dt)))
+        if filters.get("supplier"):
+            qs = qs.filter(supplier__icontains=filters["supplier"])
+        if filters.get("status"):
+            qs = qs.filter(status__in=_as_list(filters["status"]))
+        if filters.get("file_mime_type"):
+            qs = qs.filter(file_mime_type__in=_as_list(filters["file_mime_type"]))
+        if filters.get("currency"):
+            qs = qs.filter(currency=str(filters["currency"]).upper())
+        if filters.get("is_self_upload") is not None:
+            is_self = _parse_bool(filters.get("is_self_upload"))
+            if is_self is not None:
+                qs = qs.filter(is_self_upload=is_self)
+        if filters.get("date_from"):
+            qs = qs.filter(document_date__gte=filters["date_from"])
+        if filters.get("date_to"):
+            qs = qs.filter(document_date__lte=filters["date_to"])
+        if filters.get("amount_min") is not None:
+            try:
+                qs = qs.filter(amount__gte=float(filters["amount_min"]))
+            except (ValueError, TypeError):
+                pass
+        if filters.get("amount_max") is not None:
+            try:
+                qs = qs.filter(amount__lte=float(filters["amount_max"]))
+            except (ValueError, TypeError):
+                pass
+        if filters.get("tags"):
+            qs = qs.filter(tags__name__in=_as_list(filters["tags"])).distinct()
+
+        ordering = _as_text(data.get("ordering"))
+        sortable = {"created_at", "document_date", "amount", "reference_number", "status"}
+        if ordering:
+            desc = ordering.startswith("-")
+            key = ordering[1:] if desc else ordering
+            qs = qs.order_by(f"-{key}" if desc else key) if key in sortable else qs.order_by("-created_at")
+        else:
+            qs = qs.order_by("-created_at")
+
+        total = qs.count()
+        start = (page - 1) * page_size
+        docs = list(qs[start:start + page_size])
+
+        terms = [t for t in search_text.split() if t] if search_text else []
+        results = []
+        for doc in docs:
+            highlights = {}
+            if search_text:
+                for field, text in (("extracted_text", doc.extracted_text), ("title", doc.title)):
+                    if not text:
+                        continue
+                    idx = _find_match_index(text, search_text, terms)
+                    if idx != -1:
+                        highlights[field] = [_sentence_around_match(text, idx)]
+            meta = doc.metadata if isinstance(doc.metadata, dict) else {}
+            personal_tags = meta.get("personal_tags") or []
+            if not isinstance(personal_tags, list):
+                personal_tags = [personal_tags]
+            results.append({
+                "id": str(doc.id),
+                "score": 0,
+                "title": doc.title or "",
+                "reference_number": doc.reference_number or "",
+                "document_type": doc.document_type.name if doc.document_type_id else "",
+                "file_name": doc.file_name or "",
+                "file_mime_type": doc.file_mime_type or "",
+                "supplier": doc.supplier or "",
+                "amount": float(doc.amount) if doc.amount is not None else None,
+                "currency": doc.currency or "",
+                "status": doc.status or "",
+                "document_date": doc.document_date.isoformat() if doc.document_date else None,
+                "is_self_upload": bool(doc.is_self_upload),
+                "tags": [t.name for t in doc.tags.all()],
+                "personal_tags": [str(t) for t in personal_tags],
+                "highlights": highlights,
+            })
+
+        return Response({
+            "total": total,
+            "page": page,
+            "page_size": page_size,
+            "results": results,
         })

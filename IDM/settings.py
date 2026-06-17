@@ -108,19 +108,43 @@ WSGI_APPLICATION = "IDM.wsgi.application"
 ASGI_APPLICATION = "IDM.asgi.application"
 
 # ── Database ────────────────────────────────────────────────────────────────
-DATABASES = {
-    "default": dj_database_url.parse(
-        env("DATABASE_URL"),
-        conn_max_age=600,
-        engine="django.db.backends.mysql",
-    )
-}
+# DB_ENGINE lets the same codebase run on Linux/MySQL (default) and native
+# Windows/MS SQL Server. MySQL keeps the DATABASE_URL form; MS SQL is configured
+# from discrete vars (dj-database-url has no clean mssql scheme) via the
+# mssql-django backend + Microsoft ODBC Driver.
+DB_ENGINE = env("DB_ENGINE", default="mysql").lower()
 
-# MySQL options to avoid charset warnings and ensure strict mode
-DATABASES["default"]["OPTIONS"] = {
-    "charset": "utf8mb4",
-    "init_command": "SET sql_mode='STRICT_TRANS_TABLES'",
-}
+if DB_ENGINE in ("mssql", "sqlserver"):
+    DATABASES = {
+        "default": {
+            "ENGINE": "mssql",
+            "NAME": env("DB_NAME", default="idm_db"),
+            "USER": env("DB_USER", default=""),          # blank = Windows/trusted auth
+            "PASSWORD": env("DB_PASSWORD", default=""),
+            "HOST": env("DB_HOST", default="localhost"),
+            "PORT": env("DB_PORT", default=""),
+            "CONN_MAX_AGE": env.int("DB_CONN_MAX_AGE", default=600),
+            "OPTIONS": {
+                "driver": env("DB_ODBC_DRIVER", default="ODBC Driver 18 for SQL Server"),
+                # SQL auth over a self-signed cert by default; for Windows auth set
+                # DB_EXTRA_PARAMS=Trusted_Connection=yes (and leave DB_USER blank).
+                "extra_params": env("DB_EXTRA_PARAMS", default="TrustServerCertificate=yes"),
+            },
+        }
+    }
+else:
+    DATABASES = {
+        "default": dj_database_url.parse(
+            env("DATABASE_URL"),
+            conn_max_age=600,
+            engine="django.db.backends.mysql",
+        )
+    }
+    # MySQL options to avoid charset warnings and ensure strict mode
+    DATABASES["default"]["OPTIONS"] = {
+        "charset": "utf8mb4",
+        "init_command": "SET sql_mode='STRICT_TRANS_TABLES'",
+    }
 
 # ── Auth & JWT ───────────────────────────────────────────────────────────────
 AUTH_USER_MODEL = "accounts.User"
@@ -243,9 +267,16 @@ CELERY_BEAT_SCHEDULE = {
 }
 
 # ── Elasticsearch ─────────────────────────────────────────────────────────────
+# Full-text search via Elasticsearch is optional. When ELASTICSEARCH_ENABLED is
+# False (e.g. lean native-Windows installs), index sync is skipped and the search
+# API falls back to a database query — no ES server required. The ES client libs
+# stay installed (pure Python) but never contact a server.
+ELASTICSEARCH_ENABLED = env.bool("ELASTICSEARCH_ENABLED", default=True)
 ELASTICSEARCH_DSL = {
     "default": {"hosts": env("ELASTICSEARCH_URL", default="http://localhost:9200")},
 }
+# Turn off django-elasticsearch-dsl's auto-indexing signal processor when off.
+ELASTICSEARCH_DSL_AUTOSYNC = ELASTICSEARCH_ENABLED
 
 # ── OCR ───────────────────────────────────────────────────────────────────────
 OCR_ENGINE = env("OCR_ENGINE", default="paddle")

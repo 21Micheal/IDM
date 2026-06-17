@@ -29,6 +29,15 @@ def _delay_after_commit(task, *args, **kwargs) -> None:
 
 
 def queue_index_document(document_id: str) -> None:
+    from django.conf import settings
+
+    # When Elasticsearch is disabled (e.g. native-Windows installs), there is no
+    # index to maintain — the search API reads live rows instead. OCR/text
+    # extraction (queue_content_extraction) still runs, so extracted_text — which
+    # the DB search reads — stays populated.
+    if not getattr(settings, "ELASTICSEARCH_ENABLED", True):
+        return
+
     try:
         from apps.search.tasks import index_document
 

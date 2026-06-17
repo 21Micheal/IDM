@@ -1,0 +1,93 @@
+# ──────────────────────────────────────────────────────────────────────────────
+# Native Windows install requirements (no Docker).
+#
+# Differences from requirements.txt (the Linux/Docker set):
+#   • DB driver:    mysqlclient  →  mssql-django + pyodbc  (MS SQL Server)
+#   • libmagic:     python-magic →  python-magic-bin       (bundles the DLL)
+#   • gunicorn:     dropped (Linux WSGI server; Windows uses daphne/ASGI)
+#   • python-ldap:  omitted by default (needs a prebuilt Windows wheel; only
+#                   required if a client enables AD/LDAP — see notes below)
+#
+# Elasticsearch client libs are kept (pure Python). With ELASTICSEARCH_ENABLED=
+# False they never contact a server — search falls back to the database.
+#
+# Install (from an activated venv):
+#   pip install -r requirements-windows.txt
+#   python -m spacy download en_core_web_sm   # if not pulled by the pin below
+# ──────────────────────────────────────────────────────────────────────────────
+
+# Core
+django==5.0.4
+djangorestframework==3.15.1
+django-cors-headers==4.3.1
+django-environ==0.11.2
+django-filter==24.2
+djangorestframework-simplejwt==5.3.1
+dj-database-url==2.1.0
+
+# Auth & MFA
+django-otp==1.5.1
+qrcode[pil]==7.4.2
+# AD / LDAP auth (optional). python-ldap has no official Windows wheel; install a
+# prebuilt one (e.g. from a trusted wheel source) THEN uncomment these, and set
+# LDAP_SERVER_URI in the env. The app runs fine without them when LDAP is unset.
+# python-ldap==3.4.4
+# django-auth-ldap==4.6.0
+
+# Storage
+boto3==1.34.74
+django-storages==1.14.2
+
+# Search (client libs only — pure Python; no ES server needed when disabled)
+elasticsearch==8.12.1
+elasticsearch-dsl==8.9.0
+django-elasticsearch-dsl==8.0
+
+# Task queue (broker = Memurai, Redis-compatible, on Windows)
+celery==5.3.6
+redis==5.0.3
+django-celery-beat==2.6.0
+django-celery-results==2.5.1
+
+# WebSocket / Channels (channel layer = Memurai)
+channels==4.0.0
+channels-redis==4.2.0
+daphne==4.2.1
+
+# Document processing
+python-docx==1.1.0
+openpyxl==3.1.2
+pdfplumber==0.11.0
+Pillow==10.3.0
+python-magic-bin==0.4.14     # Windows: bundles the libmagic DLL
+PyMuPDF==1.24.14
+reportlab>=4.0
+
+# DB — MS SQL Server (requires Microsoft ODBC Driver 18 installed on the host)
+mssql-django==1.5
+pyodbc==5.1.0
+
+# Utils
+whitenoise==6.6.0
+django-auditlog==3.0.0
+shortuuid==1.0.13
+
+# OCR (Tesseract, LibreOffice, and poppler are installed natively — not via pip)
+pytesseract>=0.3.10
+pdf2image>=1.17.0
+opencv-python-headless==4.6.0.66
+
+# PaddleOCR (CPU)
+paddlepaddle==2.6.2
+paddleocr==2.7.3
+Cython<3
+protobuf>=3.20.2,<5.0.0
+
+# spaCy NER
+spacy==3.7.4
+en-core-web-sm @ https://github.com/explosion/spacy-models/releases/download/en_core_web_sm-3.7.1/en_core_web_sm-3.7.1-py3-none-any.whl
+
+# Misc
+python-dateutil>=2.8.2
+anthropic>=0.97.0
+pypdfium2>=4.30.0
