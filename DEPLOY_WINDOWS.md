@@ -121,6 +121,7 @@ Use **forward slashes** in paths.
 
 ```powershell
 python manage.py migrate
+python manage.py smoke_check          # validates DB + key queries + cache
 python manage.py collectstatic --noinput
 python manage.py createsuperuser
 ```
@@ -128,6 +129,13 @@ python manage.py createsuperuser
 > First run against a fresh MS SQL DB applies all migrations. If a migration
 > trips on an MSSQL-specific constraint, note which one and we'll adjust it —
 > the schema is MySQL-developed, so a couple of edge cases may surface here.
+>
+> **`smoke_check`** is a read-only command that exercises the live stack against
+> SQL Server right after migrate: DB connection + vendor, representative ORM
+> queries (including the cross-DB JSON personal-tag filter and the analytics
+> datetime arithmetic), a `DISTINCT`+`ORDER BY` query, and a cache round-trip to
+> Memurai. Every line should read `[ OK ]`; it exits non-zero if anything fails,
+> so it's the fastest way to confirm the MSSQL + Memurai wiring before going further.
 
 Smoke-test ASGI from the venv (Ctrl+C to stop once it says *Listening*):
 
