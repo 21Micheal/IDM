@@ -1,8 +1,9 @@
 # IDM — Native Windows Install (no Docker)
 
-Stand up IDM directly on Windows Server with **MS SQL Server**, **Memurai**
-(Redis-compatible), **IIS** as the front, and search degraded to the database
-(no Elasticsearch). Target host in this guide: `192.168.100.244`.
+Stand up IDM directly on Windows Server with **MS SQL Server**, a
+**Redis-compatible service** (free Redis-for-Windows or Memurai), **IIS** as the
+front, and search degraded to the database (no Elasticsearch). Target host in
+this guide: `192.168.100.244`.
 
 ```
 Windows Server 2022
@@ -13,7 +14,7 @@ Windows Server 2022
 │   ├─ celery beat                             │  services via NSSM
 │   └─ celery worker  (preview / ocr)         ─┘
 ├─ MS SQL Server  (idm_db)
-└─ Memurai        (Celery broker + Channels + cache)
+└─ Redis service  (Celery broker + Channels + cache)  — Redis-for-Windows / Memurai
 ```
 
 Search uses the DB fallback (`ELASTICSEARCH_ENABLED=False`); OCR, Office
@@ -29,8 +30,8 @@ previews, workflows, email/OTP all work natively.
 | **Node.js 20 LTS** | nodejs.org | Only to build the SPA. |
 | **Git** | git-scm.com | Or copy the source over. |
 | **MS SQL Server 2019/2022** | Microsoft | Express edition is fine for small sites. |
-| **Microsoft ODBC Driver 18 for SQL Server** | Microsoft | Required by pyodbc. |
-| **Memurai** | memurai.com | Redis-compatible; installs as a service. |
+| **Microsoft ODBC Driver 17 or 18 for SQL Server** | Microsoft | Required by pyodbc. Either works; use whichever is installed (set `DB_ODBC_DRIVER` to match). |
+| **Redis-compatible service** | see §2 | Free Redis-for-Windows or Memurai; installs as a service. |
 | **Tesseract OCR** | UB-Mannheim build | Default path `C:\Program Files\Tesseract-OCR`. |
 | **LibreOffice** | libreoffice.org | For Office→PDF previews. |
 | **Poppler for Windows** | poppler-windows releases | Unzip and **add its `\bin` to PATH** (pdf2image needs it). |
@@ -62,16 +63,27 @@ and the **SQL Server Browser** service is running if you use a named instance.
 
 ---
 
-## 2. Memurai (Redis)
+## 2. Redis (Redis-compatible service)
 
-Install Memurai (Developer edition is free) — it registers a Windows service on
-`localhost:6379`. Verify:
+Redis backs the Celery broker, the Channels (websocket) layer, and the cache, so
+it must stay up continuously. Any Redis-compatible Windows service works — it's a
+drop-in via `REDIS_URL`. Options:
+
+- **Free Redis-for-Windows** (tporadowski build) — free, unofficial, Redis ~5.x,
+  installs as a Windows service. The default for these installs.
+- **Memurai** — actively maintained; Developer edition is free for non-production,
+  Enterprise (licensed) for production. **Avoid the RC/preview builds**: they
+  carry a ~10-day max-uptime auto-shutdown that would take Redis (and thus
+  background processing + websockets + cache) down until restarted.
+
+Install your choice as a service on `localhost:6379`, then verify with its CLI:
 
 ```powershell
-memurai-cli ping        # -> PONG
+redis-cli ping          # -> PONG   (memurai-cli ping for Memurai)
 ```
 
-If you set a password in `memurai.conf`, reflect it in `REDIS_URL`.
+If the service has a password, reflect it in `REDIS_URL`
+(`redis://:YOUR_PASSWORD@localhost:6379/0`).
 
 ---
 
@@ -257,7 +269,7 @@ Server-side checks:
 C:\IDM\venv\Scripts\activate; cd C:\IDM\app
 python manage.py check
 python -c "import pyodbc, django, os; os.environ.setdefault('DJANGO_SETTINGS_MODULE','IDM.settings'); django.setup(); from django.db import connection; connection.ensure_connection(); print('DB OK')"
-memurai-cli ping
+redis-cli ping          # (memurai-cli ping for Memurai) -> PONG
 ```
 
 ---
@@ -270,8 +282,10 @@ memurai-cli ping
   (xdg-mime/nohup) — those won't run on Windows clients. The in-browser
   preview/download path works; native desktop-edit needs a Windows equivalent
   (future work).
-- **Memurai** Developer edition is free for non-production; production use needs
-  a Memurai license (or swap in another Redis-compatible service via `REDIS_URL`).
+- **Redis** runs continuously (broker + websockets + cache). Free Redis-for-Windows
+  is the default here; Memurai is an alternative (Enterprise license for prod).
+  Don't use Memurai RC/preview builds — they auto-shut-down after ~10 days uptime.
+  Either way it's a `REDIS_URL` swap, no code change.
 - **HTTP only** on the LAN. For HTTPS, add a binding + cert on the IIS site.
 - **MS SQL migrations**: the schema was MySQL-developed; if `migrate` errors on
   a specific migration, capture it — a small number may need MSSQL-compatible
