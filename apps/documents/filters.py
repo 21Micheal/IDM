@@ -7,7 +7,7 @@ Added is_self_upload BooleanFilter so clients can request only personal
 docs (is_self_upload=true) or only workflow docs (is_self_upload=false).
 """
 import django_filters
-from django.db import models
+from django.db import connection, models
 from .models import Document, DocumentStatus
 
 
@@ -44,7 +44,16 @@ class DocumentFilter(django_filters.FilterSet):
         value = (value or "").strip()
         if not value:
             return queryset
-        return queryset.filter(is_self_upload=True, metadata__personal_tags__contains=[value])
+        qs = queryset.filter(is_self_upload=True)
+        if connection.vendor == "microsoft":
+            # SQL Server has no JSON-containment lookup; evaluate in Python.
+            # Personal docs are a small, user-scoped set, so this stays cheap.
+            matching = [
+                obj.pk for obj in qs.only("pk", "metadata")
+                if value in ((obj.metadata or {}).get("personal_tags") or [])
+            ]
+            return qs.filter(pk__in=matching)
+        return qs.filter(metadata__personal_tags__contains=[value])
 
     def filter_status(self, queryset, name, value):
         values = [item.strip() for item in str(value).split(",") if item.strip()]
