@@ -415,10 +415,10 @@ class UserViewSet(viewsets.ModelViewSet):
 
         try:
             send_mail(
-                subject="Access Granted: Your DocVault Account",
+                subject="Access Granted: Your FseDMS Account",
                 message=f"""Hello {user.first_name},
 
-Your DocVault account has been created by an administrator.
+Your FseDMS account has been created by an administrator.
 
 Credentials:
     Login ID:  {user.email}
@@ -432,7 +432,7 @@ Login here: {frontend_url}
 
 If you did not expect this account, please contact your administrator immediately.
 
-— DocVault Administration
+— FseDMS Administration
 """,
                 from_email=settings.DEFAULT_FROM_EMAIL,
                 recipient_list=[user.email],
@@ -482,7 +482,7 @@ If you did not expect this account, please contact your administrator immediatel
         from django.conf import settings
         try:
             send_mail(
-                subject="DocVault — your password has been reset",
+                subject="FseDMS — your password has been reset",
                 message=f"""Hello {user.first_name},
 
 Your password has been reset by an administrator.
@@ -491,9 +491,9 @@ Your password has been reset by an administrator.
 
 You will be required to set a new password when you next log in.
 
-— DocVault Administration
+— FseDMS Administration
 """,
-                from_email=getattr(settings, "DEFAULT_FROM_EMAIL", "noreply@docvault.local"),
+                from_email=getattr(settings, "DEFAULT_FROM_EMAIL", "noreply@flaxem.local"),
                 recipient_list=[user.email],
                 fail_silently=False,
             )
