@@ -111,6 +111,19 @@ services:
   celery_preview:
     <<: *app
     command: celery -A IDM worker -Q preview -c 1 --loglevel=info
+    # Reuse a warm LibreOffice profile (persisted in a volume) so Office→PDF
+    # previews skip first-run init on every conversion. Re-declares the shared
+    # app env because a service-level `environment` replaces the anchor's.
+    environment:
+      DJANGO_SETTINGS_MODULE: IDM.settings
+      DATABASE_URL: mysql://idm_user:${DB_PASSWORD}@db:3306/idm_db
+      REDIS_URL: redis://:${REDIS_PASSWORD}@redis:6379/0
+      ELASTICSEARCH_URL: http://elasticsearch:9200
+      MEDIA_ROOT: /app/media
+      LIBREOFFICE_PROFILE_DIR: /var/cache/lo-preview
+    volumes:
+      - media_files:/app/media
+      - lo_preview_profile:/var/cache/lo-preview
 
   # ── Build the SPA once into a shared volume, then exit ───────────────────────
   frontend_build:
@@ -147,3 +160,4 @@ volumes:
   media_files:
   paddle_models:
   spa_static:
+  lo_preview_profile:

@@ -205,9 +205,12 @@ services:
       - MEDIA_ROOT=/app/media
       - DJANGO_SETTINGS_MODULE=IDM.settings
       - LIBREOFFICE_TIMEOUT=120
+      # Warm, reusable LibreOffice profile (persisted) → faster Office previews
+      - LIBREOFFICE_PROFILE_DIR=/var/cache/lo-preview
     volumes:
       - .:/app
       - media_files:/app/media
+      - lo_preview_profile:/var/cache/lo-preview
     depends_on:
       db:
         condition: service_healthy
@@ -248,3 +251,5 @@ volumes:
   # Named volume for PaddleOCR model cache — avoids re-downloading (~8 MB)
   # PP-OCRv4 detection + recognition + direction models on every container restart.
   paddle_models:
+  # Warm LibreOffice profile for Office→PDF previews (persists across restarts).
+  lo_preview_profile:

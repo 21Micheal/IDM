@@ -285,6 +285,11 @@ OCR_IDP_VISION_DPI = env.int("OCR_IDP_VISION_DPI", default=150)
 OCR_IDP_TIMEOUT = env.int("OCR_IDP_TIMEOUT", default=60)
 OCR_IDP_MAX_PAGES = env.int("OCR_IDP_MAX_PAGES", default=3)
 
+# Persistent, reusable LibreOffice profile dir for Office→PDF previews. When set
+# (see the preview worker in docker-compose), the warm profile is reused across
+# conversions instead of rebuilt each time, cutting per-preview latency. Empty =
+# original per-call isolated profile.
+LIBREOFFICE_PROFILE_DIR = env("LIBREOFFICE_PROFILE_DIR", default="")
 LIBREOFFICE_CMD = env("LIBREOFFICE_CMD", default="libreoffice")
 # Backward-compatible alias used by tasks.py
 LIBREOFFICE_BIN = env("LIBREOFFICE_BIN", default=LIBREOFFICE_CMD)
