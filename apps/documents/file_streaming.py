@@ -56,6 +56,14 @@ def user_is_involved_with_document(user: User, doc: Document) -> bool:
         models.Q(expires_at__isnull=True) | models.Q(expires_at__gt=timezone.now())
     ).exists():
         return True
+    # A selected signer on an ad-hoc signature request for this document is
+    # involved (so they can open and sign it).
+    from apps.documents.models import SignatureRequestSigner
+    if SignatureRequestSigner.objects.filter(
+        request__document_id=doc.id,
+        signer=user,
+    ).exists():
+        return True
     return False
 
 

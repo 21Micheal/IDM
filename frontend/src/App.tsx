@@ -1,5 +1,6 @@
 import { Suspense, lazy, useEffect, useState } from "react";
 import { Routes, Route, Navigate, useLocation } from "react-router-dom";
+import { useQuery } from "@tanstack/react-query";
 import { useAuthStore } from "@/store/authStore";
 import { authAPI } from "@/services/api";
 import { VaultToaster } from "@/components/ui/vault-toast";
@@ -14,6 +15,7 @@ const DocumentsPage = lazy(() => import("@/pages/DocumentsPage"));
 const TrashPage = lazy(() => import("@/pages/TrashPage"));
 const DocumentDetailPage = lazy(() => import("@/pages/DocumentDetailPage"));
 const UploadPage = lazy(() => import("@/pages/UploadPage"));
+const RequestSignaturePage = lazy(() => import("@/pages/RequestSignaturePage"));
 const SearchPage = lazy(() => import("@/pages/SearchPage"));
 const WorkflowPage = lazy(() => import("@/pages/WorkflowPage"));
 const AdminPage = lazy(() => import("@/pages/AdminPage"));
@@ -91,6 +93,38 @@ function AuthBootstrap({ children }: { children: React.ReactNode }) {
 }
 
 /**
+ * Background session sync. Re-fetches the current user so privilege/group
+ * changes (e.g. being added to or removed from the Administrators group) take
+ * effect without a manual sign-out: revalidates on window focus and on a short
+ * interval, then updates the auth store in place. The backend already enforces
+ * permissions per request — this keeps the UI (menus, role label, guards) in
+ * sync. Self-disables when unauthenticated, so it's safe to mount globally.
+ */
+function SessionSync() {
+  const accessToken = useAuthStore((s) => s.accessToken);
+  const isAuthenticated = useAuthStore((s) => s.isAuthenticated);
+  const isSessionExpired = useAuthStore((s) => s.isSessionExpired);
+  const setUser = useAuthStore((s) => s.setUser);
+
+  const enabled = isAuthenticated && !!accessToken && !isSessionExpired();
+
+  const { data } = useQuery({
+    queryKey: ["auth", "me"],
+    queryFn: () => authAPI.me(accessToken as string).then((res) => res.data),
+    enabled,
+    refetchOnWindowFocus: true,
+    refetchInterval: 60_000,
+    staleTime: 30_000,
+  });
+
+  useEffect(() => {
+    if (data) setUser(data);
+  }, [data, setUser]);
+
+  return null;
+}
+
+/**
  * If the user has logged in but must change their password,
  * redirect them to the change-password page and block everything else.
  */
@@ -106,6 +140,15 @@ function RequireAdmin({ children }: { children: React.ReactNode }) {
   const user = useAuthStore((s) => s.user);
   if (!user) return <Navigate to="/login" replace />;
   if (!user.has_admin_access) return <Navigate to="/" replace />;
+  return <>{children}</>;
+}
+
+/** Analytics is open to admins and department heads (HOD group members). */
+function RequireAnalytics({ children }: { children: React.ReactNode }) {
+  const user = useAuthStore((s) => s.user);
+  if (!user) return <Navigate to="/login" replace />;
+  const allowed = user.has_admin_access || (user.group_names ?? []).includes("HOD");
+  if (!allowed) return <Navigate to="/" replace />;
   return <>{children}</>;
 }
 
@@ -213,6 +256,7 @@ export default function App() {
   return (
     <AuthBootstrap>
       <>
+        <SessionSync />
         <Suspense fallback={<RouteFallback />}>
           <Routes>
             {/* Public */}
@@ -240,7 +284,7 @@ export default function App() {
               }
             >
               <Route index element={<DashboardPage />} />
-              <Route path="analytics" element={<RequireAdmin><AnalyticsDashboardPage /></RequireAdmin>} />
+              <Route path="analytics" element={<RequireAnalytics><AnalyticsDashboardPage /></RequireAnalytics>} />
 
               {/* Documents */}
               <Route path="documents"        element={<DocumentsPage />} />
@@ -252,6 +296,7 @@ export default function App() {
               <Route path="documents/bulk-scan" element={<Navigate to="/documents/scan?mode=bulk" replace />} />
               <Route path="documents/:id"    element={<DocumentDetailPage />} />
               <Route path="documents/folders/:folderId" element={<FolderPage />} />
+              <Route path="request-signature" element={<RequestSignaturePage />} />
 
               <Route path="templates" element={<Navigate to="/admin/templates" replace />} />
 

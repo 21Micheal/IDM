@@ -16,6 +16,10 @@ class Notification(models.Model):
         ("workflow_action", "Workflow Action"),
         ("delegation", "Delegation"),
         ("document_shared", "Document Shared"),
+        ("signature_requested", "Signature Requested"),
+        ("signature_signed", "Signature Added"),
+        ("signature_declined", "Signature Declined"),
+        ("signature_completed", "Signatures Complete"),
     ]
 
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)

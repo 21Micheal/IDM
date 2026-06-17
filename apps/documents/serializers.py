@@ -263,7 +263,7 @@ class DocumentTypeSerializer(serializers.ModelSerializer):
             "id", "name", "code", "reference_prefix", "reference_padding",
             "title_field",
             "description", "icon", "is_active",
-            "is_personal_type", "metadata_mode",
+            "is_personal_type", "metadata_mode", "max_file_size_mb",
             "access_policy",
             "workflow_template", "workflow_template_name",
             "metadata_fields",
@@ -880,6 +880,12 @@ class DocumentUploadSerializer(serializers.ModelSerializer):
         doc_type   = validated_data["document_type"]
         is_scanned = validated_data.get("is_scanned", False)
 
+        if upload.size > doc_type.max_file_size_bytes:
+            raise serializers.ValidationError({
+                "file": f"File is too large. The limit for {doc_type.name} is "
+                        f"{doc_type.max_file_size_mb} MB."
+            })
+
         validated_data["reference_number"] = _generate_unique_reference(doc_type)
 
         validated_data["file_name"]   = upload.name
@@ -1151,7 +1157,7 @@ class DocumentTypeWriteSerializer(serializers.ModelSerializer):
             "name", "code", "reference_prefix", "reference_padding",
             "title_field",
             "description", "icon", "is_active",
-            "is_personal_type", "metadata_mode",
+            "is_personal_type", "metadata_mode", "max_file_size_mb",
             "access_policy",
             "workflow_template",
             "metadata_fields",
@@ -1165,6 +1171,7 @@ class DocumentTypeWriteSerializer(serializers.ModelSerializer):
             "title_field":       {"required": False, "allow_blank": True},
             "is_personal_type":  {"required": False},
             "metadata_mode":     {"required": False},
+            "max_file_size_mb":  {"required": False},
             "workflow_template": {"required": False, "allow_null": True},
         }
 

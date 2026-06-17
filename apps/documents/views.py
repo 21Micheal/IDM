@@ -30,6 +30,7 @@ from rest_framework.response import Response
 from rest_framework_simplejwt.tokens import AccessToken
 
 from apps.accounts.views import IsGroupAdmin
+from apps.documents.analytics import IsAnalyticsViewer
 
 from .models import (
     Document,
@@ -132,7 +133,7 @@ class DocumentTypeViewSet(AuditMixin, viewsets.ModelViewSet):
 
     def get_permissions(self):
         if self.action in ("create", "update", "partial_update", "destroy"):
-            return [permissions.IsAuthenticated(), permissions.IsAdminUser()]
+            return [permissions.IsAuthenticated(), IsGroupAdmin()]
         return [permissions.IsAuthenticated()]
 
     def perform_create(self, serializer):
@@ -163,7 +164,7 @@ class DocumentTypeViewSet(AuditMixin, viewsets.ModelViewSet):
         instance.save(update_fields=["is_active"])
 
     @action(detail=True, methods=["post"], url_path="duplicate",
-            permission_classes=[permissions.IsAuthenticated, permissions.IsAdminUser])
+            permission_classes=[permissions.IsAuthenticated, IsGroupAdmin])
     def duplicate(self, request, pk=None):
         """
         Deep-clone a document type (metadata fields + relationship rules).
@@ -260,23 +261,30 @@ class DocumentTypeViewSet(AuditMixin, viewsets.ModelViewSet):
 
 class DocumentVolumeView(APIView):
     """
-    Groups Document uploads by month + document_type.
+    Groups Document uploads by month + document_type within the selected window.
+    Months are year-safe ("Jan 2026") and zero-filled so the axis is continuous.
     Response shape: List[{ month, <DocType>: count, ... }]
     """
-    permission_classes = [permissions.IsAuthenticated, IsGroupAdmin]
+    permission_classes = [permissions.IsAuthenticated, IsAnalyticsViewer]
 
     def get(self, request):
+        from apps.documents.analytics import (
+            parse_analytics_filters, org_documents_qs, month_key, month_axis,
+        )
+        f = parse_analytics_filters(request)
+
         qs = (
-            Document.objects
+            org_documents_qs(f)
+            .filter(created_at__gte=f.start)
             .annotate(month=TruncMonth("created_at"))
             .values("month", type_name=models.F("document_type__name"))
             .annotate(count=Count("id"))
             .order_by("month", "type_name")
         )
 
-        rows = {}
+        rows: dict[str, dict] = {label: {"month": label} for label in month_axis(f)}
         for row in qs:
-            key = row["month"].strftime("%b")
+            key = month_key(row["month"])
             rows.setdefault(key, {"month": key})
             rows[key][row["type_name"] or "Other"] = row["count"]
 
@@ -285,20 +293,18 @@ class DocumentVolumeView(APIView):
 
 class TopUploadersView(APIView):
     """
-    Ranks users by document upload count in the last 90 days.
-    Response shape: List[{ name, department, count, approved, pending }]
+    Ranks users by document upload count within the selected window.
+    Response shape: List[{ name, department, count, approved, pending, rejected }]
     """
-    permission_classes = [permissions.IsAuthenticated, IsGroupAdmin]
+    permission_classes = [permissions.IsAuthenticated, IsAnalyticsViewer]
 
     def get(self, request):
-        from datetime import timedelta
-        from django.utils import timezone
-
-        cutoff = timezone.now() - timedelta(days=90)
+        from apps.documents.analytics import parse_analytics_filters, org_documents_qs
+        f = parse_analytics_filters(request)
 
         qs = (
-            Document.objects
-            .filter(created_at__gte=cutoff)
+            org_documents_qs(f)
+            .filter(created_at__gte=f.start)
             .annotate(
                 uploader_id=models.F("uploaded_by__id"),
                 uploader_name=Concat(
@@ -313,17 +319,19 @@ class TopUploadersView(APIView):
                 count=Count("id"),
                 approved=Count("id", filter=models.Q(status="approved")),
                 pending=Count("id", filter=models.Q(status="pending_approval")),
+                rejected=Count("id", filter=models.Q(status="rejected")),
             )
             .order_by("-count")[:10]
         )
 
         data = [
             {
-                "name":       row.get("uploader_name") or "Unknown",
+                "name":       (row.get("uploader_name") or "").strip() or "Unknown",
                 "department": row.get("department_name") or "—",
                 "count":      row.get("count"),
                 "approved":   row.get("approved"),
                 "pending":    row.get("pending"),
+                "rejected":   row.get("rejected"),
             }
             for row in qs
         ]
@@ -429,6 +437,7 @@ class DocumentViewSet(AuditMixin, viewsets.ModelViewSet):
                 models.Q(uploaded_by=user) |
                 models.Q(owned_by=user) |
                 models.Q(workflow_instance__tasks__assigned_to=user) |
+                models.Q(signature_request__signers__signer=user) |
                 models.Q(id__in=active_shared_docs)
             ).distinct()
 
@@ -713,6 +722,13 @@ class DocumentViewSet(AuditMixin, viewsets.ModelViewSet):
         file = request.FILES.get("file")
         if not file:
             return Response({"detail": "No file provided."}, status=400)
+
+        dt = doc.document_type
+        if dt and file.size > dt.max_file_size_bytes:
+            return Response(
+                {"detail": f"File is too large. The limit for {dt.name} is {dt.max_file_size_mb} MB."},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
 
         sha256 = hashlib.sha256()
         for chunk in file.chunks():

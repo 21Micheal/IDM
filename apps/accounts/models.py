@@ -180,9 +180,26 @@ class User(AbstractBaseUser, PermissionsMixin):
     @property
     def has_admin_access(self) -> bool:
         """
-        Application administration is user-level, not group-granted.
+        Application-administration access.
+
+        Granted to Django superusers/staff, and to active (expiry-aware) members
+        of the built-in "Administrators" group. Group membership confers
+        app-level admin only — it does NOT grant Django-admin (/admin/) access,
+        which still requires is_staff/is_superuser.
         """
-        return bool(self.is_superuser or self.is_staff)
+        if self.is_superuser or self.is_staff:
+            return True
+        if not hasattr(self, "_admin_group_member_cache"):
+            now = timezone.now()
+            self._admin_group_member_cache = (
+                self.group_memberships.filter(
+                    group__is_active=True,
+                    group__name=UserGroup.ADMIN_GROUP_NAME,
+                )
+                .filter(Q(expires_at__isnull=True) | Q(expires_at__gt=now))
+                .exists()
+            )
+        return self._admin_group_member_cache
 
     @cached_property
     def sees_all_documents(self) -> bool:

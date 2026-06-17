@@ -208,11 +208,16 @@ function blankStep(): WorkflowStep {
 }
 
 function stepToPayload(step: WorkflowStep): Partial<WorkflowStep> {
-  const { assignee_user_name: _assignee_user_name, assignee_group_name: _assignee_group_name, assignee_user_auto: _assignee_user_auto, ...rest } = normalizeStep(step) as any;
-  void _assignee_user_name; void _assignee_group_name; void _assignee_user_auto;
-  // Ensure assignee_user is only sent for types that allow it
+  const { assignee_user_name: _assignee_user_name, assignee_group_name: _assignee_group_name, ...rest } = normalizeStep(step) as any;
+  void _assignee_user_name; void _assignee_group_name;
+  // assignee_user and its "designated approver" auto flag only apply to the
+  // specific-member mode. Persisting assignee_user_auto lets the backend track
+  // the group's current approver instead of the one snapshotted at build time.
   if (rest.assignee_type !== "group_specific") {
     rest.assignee_user = null;
+    rest.assignee_user_auto = false;
+  } else {
+    rest.assignee_user_auto = Boolean(rest.assignee_user_auto);
   }
   return rest;
 }

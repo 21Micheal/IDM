@@ -523,7 +523,10 @@ function GroupDetail({
     onError: (err: any) => toast.error(err?.response?.data?.head_id?.[0] || "Failed to update group approver"),
   });
 
-  const memberIds = new Set(members?.map((m) => m.user.id) ?? []);
+  // Defend against orphaned memberships whose user no longer resolves (the API
+  // can return user: null for a stale row). One such row must not crash the page.
+  const safeMembers = (members ?? []).filter((m) => Boolean(m && m.user));
+  const memberIds = new Set(safeMembers.map((m) => m.user.id));
   const currentHead = groupDetail?.head ?? null;
 
   return (
@@ -661,7 +664,7 @@ function GroupDetail({
                   )}
                 </div>
                 <div className="space-y-2">
-                  {members?.map((m) => (
+                  {safeMembers.map((m) => (
                     <div key={m.id} className="flex items-center gap-4 p-4 bg-card border border-border rounded-xl hover:border-accent/40 transition-colors group">
                       <div className="w-10 h-10 rounded-full bg-accent/15 flex items-center justify-center text-accent text-sm font-bold">
                         {m.user.full_name.split(" ").map((n) => n[0]).join("").slice(0, 2)}

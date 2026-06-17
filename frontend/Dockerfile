@@ -24,6 +24,13 @@ COPY package.json package-lock.json* ./
 RUN npm ci
 
 COPY . .
+
+# API base URL baked into the bundle. Empty (the default) makes the SPA call a
+# relative /api/v1, i.e. same-origin — correct when nginx serves the SPA and
+# proxies the API. Set a value only for a split-origin deployment. This ENV
+# takes precedence over any committed .env.local during the build.
+ARG VITE_API_URL=""
+ENV VITE_API_URL=$VITE_API_URL
 RUN npm run build
 
 FROM nginx:alpine AS production

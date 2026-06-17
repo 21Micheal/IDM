@@ -64,6 +64,7 @@ type StorageStats = {
   used_mb: number;
   total_mb: number;
   percentage: number;
+  document_count: number;
 };
 
 type StatTrend = {
@@ -592,6 +593,7 @@ export default function DashboardPage() {
       used_mb: 0,
       total_mb: 0,
       percentage: 0,
+      document_count: 0,
     };
   }, [storageStats]);
   const storageDisplay = useMemo(
@@ -1324,6 +1326,9 @@ export default function DashboardPage() {
             </div>
             <p className="mt-2 text-[11px] text-muted-foreground">
               {storageDisplay.value} {storageDisplay.unit} of {storage.total_gb} GB
+              {storage.document_count > 0 && (
+                <> · {storage.document_count.toLocaleString()} document{storage.document_count === 1 ? "" : "s"}</>
+              )}
             </p>
             {storage.percentage > 80 && (
               <p className="mt-2 text-[11px] text-destructive font-medium">

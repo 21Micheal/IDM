@@ -44,6 +44,12 @@ CSRF_TRUSTED_ORIGINS = env.list(
 if NGROK_URL and NGROK_URL not in CSRF_TRUSTED_ORIGINS:
     CSRF_TRUSTED_ORIGINS.append(NGROK_URL)
 
+# Public base URL of the app, used to build clickable links in outgoing emails
+# (welcome email, workflow/notification emails). Set this to whatever address
+# users actually reach the system on — e.g. http://192.168.100.40 — otherwise
+# email links point at the developer default below.
+FRONTEND_URL = env("FRONTEND_URL", default="http://localhost:3000")
+
 # ── Proxy / Forwarded Headers (Critical for ngrok + Google Docs / Office previews) ──
 # Without these, request.build_absolute_uri() returns http://localhost/... instead
 # of the public ngrok URL, breaking external document viewers.
@@ -170,6 +176,11 @@ SERVE_MEDIA_PUBLIC = env.bool("SERVE_MEDIA_PUBLIC", default=False)
 STATIC_ROOT = BASE_DIR / "staticfiles"
 STATIC_URL = "/static/"
 
+# Logical storage allowance for documents, used by the dashboard "Storage Used"
+# panel as the percentage denominator. This is a soft quota for reporting only
+# (not enforced) — set it to whatever capacity you want to track against.
+STORAGE_QUOTA_GB = env.int("STORAGE_QUOTA_GB", default=50)
+
 # Default authentication always includes local Django auth.
 # If LDAP/AD is configured via LDAP_SERVER_URI, it will be enabled first.
 AUTHENTICATION_BACKENDS = ["django.contrib.auth.backends.ModelBackend"]
@@ -225,6 +236,10 @@ CELERY_BEAT_SCHEDULE = {
         "task": "apps.documents.tasks.empty_trash",
         "schedule": 60 * 60,
     },
+    "signature-pending-reminders": {
+        "task": "apps.notifications.tasks.remind_pending_signatures",
+        "schedule": 24 * 60 * 60,
+    },
 }
 
 # ── Elasticsearch ─────────────────────────────────────────────────────────────
@@ -270,6 +285,11 @@ OCR_IDP_VISION_DPI = env.int("OCR_IDP_VISION_DPI", default=150)
 OCR_IDP_TIMEOUT = env.int("OCR_IDP_TIMEOUT", default=60)
 OCR_IDP_MAX_PAGES = env.int("OCR_IDP_MAX_PAGES", default=3)
 
+# Persistent, reusable LibreOffice profile dir for Office→PDF previews. When set
+# (see the preview worker in docker-compose), the warm profile is reused across
+# conversions instead of rebuilt each time, cutting per-preview latency. Empty =
+# original per-call isolated profile.
+LIBREOFFICE_PROFILE_DIR = env("LIBREOFFICE_PROFILE_DIR", default="")
 LIBREOFFICE_CMD = env("LIBREOFFICE_CMD", default="libreoffice")
 # Backward-compatible alias used by tasks.py
 LIBREOFFICE_BIN = env("LIBREOFFICE_BIN", default=LIBREOFFICE_CMD)
@@ -350,11 +370,17 @@ LOGGING = {
 }
 
 # ── Security ─────────────────────────────────────────────────────────────────
+# HTTPS hardening is on by default whenever DEBUG is off. An internal, HTTP-only
+# UAT behind a plain reverse proxy must opt out (SECURE_SSL=False) — otherwise
+# Django 301-redirects every request to https:// and sets secure-only cookies,
+# which breaks login over HTTP. Leave SECURE_SSL=True (the default) in production
+# where TLS terminates at the edge.
 if not DEBUG:
-    SECURE_HSTS_SECONDS = 31536000
-    SECURE_SSL_REDIRECT = True
-    SESSION_COOKIE_SECURE = True
-    CSRF_COOKIE_SECURE = True
+    SECURE_SSL = env.bool("SECURE_SSL", default=True)
+    SECURE_SSL_REDIRECT = SECURE_SSL
+    SESSION_COOKIE_SECURE = SECURE_SSL
+    CSRF_COOKIE_SECURE = SECURE_SSL
+    SECURE_HSTS_SECONDS = 31536000 if SECURE_SSL else 0
 
 TEMPLATES = [
     {

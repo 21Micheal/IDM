@@ -11,14 +11,26 @@ import logging
 logger = logging.getLogger(__name__)
 
 
-def _send_email(recipient, subject: str, body: str) -> None:
-    """Fire-and-forget email. Logs on failure, never raises."""
+def _send_email(recipient, subject: str, body: str, link: str = "") -> None:
+    """Fire-and-forget email. Logs on failure, never raises.
+
+    Appends a footer pointing at the live system (settings.FRONTEND_URL) so
+    recipients can log in from the email. If ``link`` (a relative path such as
+    ``/documents/<id>``) is given, a direct deep-link is included too.
+    """
     if not recipient or not recipient.email:
         return
+
+    base = settings.FRONTEND_URL.rstrip("/")
+    footer = "\n\n"
+    if link:
+        footer += f"Open it directly: {base}{link}\n"
+    footer += f"Log in to DMS: {base}\n"
+
     try:
         send_mail(
             subject=subject,
-            message=body,
+            message=body + footer,
             from_email=settings.DEFAULT_FROM_EMAIL,
             recipient_list=[recipient.email],
             fail_silently=False,
@@ -103,6 +115,7 @@ def notify_task_assigned(task_id: str) -> None:
             + (f"  Due by: {task.due_at.strftime('%d %b %Y %H:%M UTC')}\n" if task.due_at else "")
             + f"\nPlease log in to DMS to action this request.\n"
         ),
+        link=link,
     )
 
 
@@ -135,6 +148,7 @@ def notify_workflow_complete(instance_id: str, outcome: str) -> None:
             f"  Status: {verb.capitalize()}\n\n"
             f"Log in to DMS to view the document.\n"
         ),
+        link=link,
     )
 
 
@@ -181,6 +195,7 @@ def notify_document_returned(task_id: str, comment: str) -> None:
             f"Please update the document and resubmit for approval.\n\n"
             f"Log in to DMS to view and resubmit.\n"
         ),
+        link=link,
     )
 
     # Also notify the owner if different from uploader
@@ -238,6 +253,7 @@ def notify_document_held(task_id: str, comment: str, hold_hours: int) -> None:
             f"after the hold period ends, or when manually released.\n\n"
             f"Log in to DMS to view the document status.\n"
         ),
+        link=link,
     )
 
 
@@ -276,6 +292,7 @@ def notify_hold_released(task_id: str) -> None:
             f"  Reference: {doc.reference_number}\n\n"
             f"The document is now back in the approval queue.\n"
         ),
+        link=link,
     )
 
     # Notify approver their task is active again
@@ -296,6 +313,7 @@ def notify_hold_released(task_id: str) -> None:
                 f"  Step: {task.step.name}\n\n"
                 f"Please log in to DMS to continue the approval.\n"
             ),
+            link=link,
         )
 
 
@@ -336,6 +354,7 @@ def notify_hold_ending(task_id: str) -> None:
                 f"  Hold ends: {task.held_until.strftime('%d %b %Y %H:%M UTC')}\n\n"
                 f"Please log in to DMS if you need to action or extend the task.\n"
             ),
+            link=link,
         )
 
 
@@ -374,6 +393,7 @@ def notify_hold_auto_released(task_id: str) -> None:
             f"  Step: {task.step.name}\n\n"
             f"Please log in to DMS to action this approval.\n"
         ),
+        link=link,
     )
 
 
@@ -413,6 +433,7 @@ def notify_task_sla_warning(task_id: str) -> None:
                 f"  Due by: {task.due_at.strftime('%d %b %Y %H:%M UTC')}\n\n"
                 f"Please log in to DMS to action this request.\n"
             ),
+            link=link,
         )
 
 
@@ -455,6 +476,7 @@ def notify_task_overdue(task_id: str) -> None:
                 f"  Was due: {task.due_at.strftime('%d %b %Y %H:%M UTC') if task.due_at else 'N/A'}\n\n"
                 f"Please log in to DMS immediately.\n"
             ),
+            link=link,
         )
 
 
@@ -635,11 +657,151 @@ def notify_workflow_action(action_id: str, user_ids: list[str] = None) -> None:
     
     # Notify the uploader
     _create_notification(uploader, msg_uploader, link, "workflow_action")
-    _send_email(uploader, subject_uploader, body_uploader)
+    _send_email(uploader, subject_uploader, body_uploader, link=link)
     
     # Also notify other specified users if provided
     if user_ids:
         other_users = User.objects.filter(id__in=user_ids).exclude(id=uploader.id)
         for user in other_users:
             _create_notification(user, msg_uploader, link, "workflow_action")
-            _send_email(user, subject_uploader, body_uploader)
+            _send_email(user, subject_uploader, body_uploader, link=link)
+
+
+# ── Ad-hoc signature requests ──────────────────────────────────────────────────
+
+def _signature_link(doc_id) -> str:
+    return f"/documents/{doc_id}"
+
+
+@shared_task(queue="notifications")
+def notify_signature_requested(signer_id: str, request_id: str) -> None:
+    """Tell a signer it's their turn to sign an ad-hoc request."""
+    from apps.documents.models import SignatureRequest
+    from apps.accounts.models import User
+    try:
+        req = SignatureRequest.objects.select_related("document", "requested_by").get(id=request_id)
+        signer = User.objects.get(id=signer_id)
+    except (SignatureRequest.DoesNotExist, User.DoesNotExist):
+        return
+    if req.status != SignatureRequest.Status.PENDING:
+        return
+
+    doc = req.document
+    requester = req.requested_by.get_full_name() or req.requested_by.email
+    link = _signature_link(doc.id)
+    msg = f"{requester} requested your signature on '{doc.title}'."
+    _create_once(signer, msg, link, "signature_requested")
+    _send_email(
+        signer,
+        subject=f"DMS — Signature requested: {doc.title}",
+        body=(
+            f"Hello {signer.first_name},\n\n"
+            f"{requester} has requested your signature on a document.\n\n"
+            f"  Document: {doc.title}\n"
+            + (f"  Note: {req.message}\n" if req.message else "")
+            + "\nLog in to DMS to review and sign.\n"
+        ),
+        link=link,
+    )
+
+
+@shared_task(queue="notifications")
+def notify_signature_signed(request_id: str, signer_id: str) -> None:
+    """Notify the requester that a signer signed, and prompt the next signer(s)."""
+    from apps.documents.models import SignatureRequest, SignatureRequestSigner
+    from apps.accounts.models import User
+    try:
+        req = SignatureRequest.objects.select_related("document", "requested_by").get(id=request_id)
+    except SignatureRequest.DoesNotExist:
+        return
+    doc = req.document
+    link = _signature_link(doc.id)
+
+    signed = req.signers.filter(status=SignatureRequestSigner.Status.SIGNED).count()
+    total = req.signers.count()
+    try:
+        who = User.objects.get(id=signer_id)
+        who_name = who.get_full_name() or who.email
+    except User.DoesNotExist:
+        who_name = "A signer"
+    _create_notification(
+        req.requested_by,
+        f"{who_name} signed '{doc.title}' ({signed}/{total} signed).",
+        link, "signature_signed",
+    )
+
+    # Prompt whoever can sign next (ordered -> the new current signer(s)).
+    if req.status == SignatureRequest.Status.PENDING:
+        for s in req.current_pending_signers():
+            notify_signature_requested.delay(str(s.signer_id), str(req.id))
+
+
+@shared_task(queue="notifications")
+def notify_signature_declined(request_id: str, signer_id: str) -> None:
+    from apps.documents.models import SignatureRequest
+    from apps.accounts.models import User
+    try:
+        req = SignatureRequest.objects.select_related("document", "requested_by").get(id=request_id)
+        who = User.objects.get(id=signer_id)
+    except (SignatureRequest.DoesNotExist, User.DoesNotExist):
+        return
+    doc = req.document
+    signer_row = req.signers.filter(signer=who).first()
+    reason = (signer_row.decline_reason if signer_row else "") or "No reason provided."
+    who_name = who.get_full_name() or who.email
+    link = _signature_link(doc.id)
+    _create_notification(
+        req.requested_by,
+        f"{who_name} declined to sign '{doc.title}': {reason}",
+        link, "signature_declined",
+    )
+    _send_email(
+        req.requested_by,
+        subject=f"DMS — Signature declined: {doc.title}",
+        body=(
+            f"Hello {req.requested_by.first_name},\n\n"
+            f"{who_name} declined to sign '{doc.title}'.\n\n"
+            f"  Reason: {reason}\n\n"
+            f"The signature request has been stopped.\n"
+        ),
+        link=link,
+    )
+
+
+@shared_task(queue="notifications")
+def notify_signature_completed(request_id: str) -> None:
+    from apps.documents.models import SignatureRequest
+    try:
+        req = SignatureRequest.objects.select_related("document", "requested_by").get(id=request_id)
+    except SignatureRequest.DoesNotExist:
+        return
+    doc = req.document
+    link = _signature_link(doc.id)
+    _create_notification(
+        req.requested_by,
+        f"'{doc.title}' is fully signed and ready.",
+        link, "signature_completed",
+    )
+    _send_email(
+        req.requested_by,
+        subject=f"DMS — Fully signed: {doc.title}",
+        body=(
+            f"Hello {req.requested_by.first_name},\n\n"
+            f"All requested signatures have been collected on '{doc.title}'.\n"
+            f"The signed document is ready in DMS.\n"
+        ),
+        link=link,
+    )
+
+
+@shared_task(queue="notifications")
+def remind_pending_signatures() -> None:
+    """Periodic backstop (Celery Beat): remind whoever still needs to sign each
+    pending request — ordered: the current signer(s); unordered: every pending."""
+    from apps.documents.models import SignatureRequest
+    for req in SignatureRequest.objects.filter(status=SignatureRequest.Status.PENDING):
+        try:
+            for s in req.current_pending_signers():
+                notify_signature_requested.delay(str(s.signer_id), str(req.id))
+        except Exception as exc:
+            logger.warning("remind_pending_signatures: request %s error: %s", req.id, exc)

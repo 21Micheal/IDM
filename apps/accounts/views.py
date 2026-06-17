@@ -355,7 +355,10 @@ class UserViewSet(viewsets.ModelViewSet):
         user = self.request.user
         qs   = User.objects.select_related("department").prefetch_related("group_memberships__group")
         if not user.has_admin_access:
-            return qs.filter(id=user.id)
+            # Non-admins get a read-only directory of active members so they can
+            # pick people to share with, request signatures from, etc. Sensitive
+            # fields are withheld via UserSummarySerializer (see below).
+            return qs.filter(is_active=True)
 
         department = self.request.query_params.get("department")
         is_active  = self.request.query_params.get("is_active")
@@ -369,6 +372,10 @@ class UserViewSet(viewsets.ModelViewSet):
             return UserCreateSerializer
         if self.action in ("update", "partial_update"):
             return UserUpdateSerializer
+        # Non-admins see only a limited directory summary (no last-login IP,
+        # group memberships, etc.).
+        if self.action in ("list", "retrieve") and not self.request.user.has_admin_access:
+            return UserSummarySerializer
         return UserSerializer
 
     def create(self, request, *args, **kwargs):

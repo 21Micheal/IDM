@@ -21,6 +21,7 @@ export interface DocumentType {
   is_active?: boolean;
   is_personal_type?: boolean;
   metadata_mode?: "admin_defined" | "user_defined";
+  max_file_size_mb?: number;
   access_policy?: DocumentTypeAccessPolicy;
   workflow_template?: string | null;
   workflow_template_name?: string | null;
@@ -197,6 +198,7 @@ export interface UserSummary {
   job_description?: string;
   is_staff?: boolean;
   has_admin_access?: boolean;
+  admin_source?: "account" | "group" | null;
   group_names?: string[];
   department_name?: string | null;
 }

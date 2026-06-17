@@ -591,6 +591,35 @@ export const documentApi = {
   types: documentTypesAPI.list,
 };
 
+// ── Ad-hoc signature requests ─────────────────────────────────────────────────
+export const signatureRequestsAPI = {
+  list: (params?: { box?: "incoming" | "sent"; document?: string }) =>
+    api.get("/documents/signature-requests/", { params }),
+  get: (id: string) => api.get(`/documents/signature-requests/${id}/`),
+  create: (data: {
+    file: File;
+    title: string;
+    message?: string;
+    ordered: boolean;
+    signers: string[]; // ordered user ids
+  }) => {
+    const fd = new FormData();
+    fd.append("file", data.file, data.file.name);
+    fd.append("title", data.title);
+    if (data.message) fd.append("message", data.message);
+    fd.append("ordered", String(data.ordered));
+    fd.append("signers", JSON.stringify(data.signers));
+    return api.post("/documents/signature-requests/", fd, {
+      headers: { "Content-Type": undefined },
+    });
+  },
+  sign: (id: string, placement: { page_number: number; x_percent: number; y_percent: number; width_percent?: number }) =>
+    api.post(`/documents/signature-requests/${id}/sign/`, { placement }),
+  decline: (id: string, reason: string) =>
+    api.post(`/documents/signature-requests/${id}/decline/`, { reason }),
+  cancel: (id: string) => api.post(`/documents/signature-requests/${id}/cancel/`),
+};
+
 export const usersAPI = {
   list: (params?: Record<string, unknown>) => api.get("/users/", { params }),
   get: (id: string) => api.get(`/users/${id}/`),

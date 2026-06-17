@@ -9,7 +9,6 @@ import { Lock, Eye, EyeOff, Loader2, Check, ArrowRight, ShieldCheck } from "luci
 import { authAPI, profileAPI } from "@/services/api";
 import { useAuthStore } from "@/store/authStore";
 import { toast } from "@/components/ui/vault-toast";
-import { FlaxemLogo } from "@/components/shared/FlaxemLogo";
 
 const schema = z
   .object({
@@ -87,37 +86,88 @@ export default function ForceChangePasswordPage() {
   };
 
   const inputBase =
-    "w-full h-11 rounded-md border border-slate-200 bg-white px-3 pr-10 text-sm text-slate-900 placeholder:text-slate-400 shadow-sm transition focus:border-sky-500 focus:ring-2 focus:ring-sky-500/20 focus:outline-none";
+    "block h-9 w-full border border-[#bcbcbc] bg-white px-2.5 pr-10 text-[14px] text-[#1a1a1a] placeholder:text-[#666] transition-colors focus:border-[#1175c6] focus:outline-none";
 
   return (
-    <div className="min-h-screen bg-gradient-to-br from-sky-50 via-sky-100 to-blue-100 flex items-center justify-center p-4">
-      <div className="w-full max-w-md">
-        {/* Logo */}
-        <div className="flex justify-center mb-8">
-          <FlaxemLogo variant="dark" className="h-10 w-auto" />
-        </div>
+    <div
+      className="relative min-h-screen overflow-hidden"
+      style={{
+        background:
+          "linear-gradient(135deg, #1175c6 0%, #2389d4 45%, #3aa3e6 100%)",
+      }}
+    >
+      <div className="pointer-events-none absolute inset-0 overflow-hidden">
+        <svg
+          className="absolute inset-0 h-full w-full"
+          viewBox="0 0 1920 1080"
+          preserveAspectRatio="none"
+        >
+          <g stroke="#ffffff" strokeOpacity="0.28" strokeWidth="1" fill="none">
+            <path d="M-50 720 L1400 -50" />
+            <path d="M-50 820 L1500 60" />
+            <path d="M-50 980 L1700 120" />
+            <path d="M200 1100 L1920 280" />
+            <path d="M600 1100 L1920 520" />
+          </g>
+          <g stroke="#bfe3ff" strokeOpacity="0.35" strokeWidth="1" fill="none">
+            <path d="M-50 760 L1450 -20" />
+            <path d="M-50 900 L1600 80" />
+          </g>
+        </svg>
+        <svg
+          className="absolute -bottom-32 -left-32 h-[520px] w-[520px] opacity-40"
+          viewBox="0 0 400 400"
+          fill="none"
+        >
+          <circle cx="200" cy="200" r="180" stroke="#bfe3ff" strokeWidth="1" />
+          <circle cx="200" cy="200" r="140" stroke="#bfe3ff" strokeWidth="1" />
+          <circle cx="200" cy="200" r="100" stroke="#bfe3ff" strokeWidth="1" />
+          <circle cx="200" cy="200" r="60" stroke="#bfe3ff" strokeWidth="1" />
+        </svg>
+        <svg
+          className="absolute bottom-10 left-64 h-[260px] w-[260px] opacity-30"
+          viewBox="0 0 400 400"
+          fill="none"
+        >
+          <circle cx="200" cy="200" r="180" stroke="#ffffff" strokeWidth="1" />
+          <circle cx="200" cy="200" r="120" stroke="#ffffff" strokeWidth="1" />
+          <circle cx="200" cy="200" r="60" stroke="#ffffff" strokeWidth="1" />
+        </svg>
+      </div>
 
-        {/* Status pill */}
-        <div className="mb-6 flex justify-center">
-          <span className="inline-flex items-center gap-1.5 rounded-full border border-amber-200 bg-amber-50 px-3 py-1 text-[11px] font-medium uppercase tracking-wide text-amber-700">
-            <ShieldCheck className="w-3.5 h-3.5" />
-            One-time setup
-          </span>
-        </div>
+      <div className="relative z-10 flex min-h-screen items-center justify-center p-6">
+        <div className="w-full max-w-[500px] bg-white shadow-[0_2px_6px_rgba(0,0,0,0.22)]">
+          <div className="border-b border-[#d6d6d6] px-10 pb-6 pt-9">
+            <div className="flex items-start justify-between gap-4">
+              <div>
+                <h1 className="text-[26px] font-normal tracking-wide text-[#1a1a1a]">
+                  FLAXEM
+                </h1>
+                <p className="mt-1 text-[12px] font-medium uppercase tracking-[0.18em] text-[#5E6870]">
+                  Account security
+                </p>
+              </div>
+              <span className="inline-flex items-center gap-1.5 border border-[#f2c46d] bg-[#fff7e6] px-2.5 py-1 text-[11px] font-semibold text-[#8a5a00]">
+                <ShieldCheck className="h-3.5 w-3.5" />
+                One-time setup
+              </span>
+            </div>
 
-        {/* Card */}
-        <div className="rounded-xl border border-slate-200 bg-white shadow-xl shadow-sky-900/10 overflow-hidden">
-          <div className="px-8 pt-8 pb-6 border-b border-slate-100">
-            <h1 className="text-xl font-semibold text-slate-900">Set a new password</h1>
-            <p className="mt-1.5 text-sm text-slate-500">
-              Replace the temporary password from your welcome email with a strong one.
+            <h2 className="mt-9 text-[17px] font-semibold text-[#1a1a1a]">
+              Set a new password
+            </h2>
+            <p className="mt-2 max-w-[26rem] text-[13px] leading-5 text-[#5E6870]">
+              Replace the temporary password from your welcome email before opening the document workspace.
             </p>
           </div>
 
-          <form onSubmit={handleSubmit(onSubmit)} className="px-8 py-6 space-y-5">
-            {/* Temporary Password */}
+          <form onSubmit={handleSubmit(onSubmit)} className="space-y-4 px-10 py-6">
+            <div className="border border-[#c8cdd2] bg-[#f7f8f9] px-3 py-2.5 text-[12px] leading-5 text-[#3F474F]">
+              Use a password that is unique to this account. You will use it for future sign-ins.
+            </div>
+
             <div>
-              <label className="mb-1.5 block text-sm font-medium text-slate-700">
+              <label className="mb-1.5 block text-[13px] font-semibold text-[#3F474F]">
                 Temporary password
               </label>
               <div className="relative">
@@ -126,25 +176,25 @@ export default function ForceChangePasswordPage() {
                   type={showOld ? "text" : "password"}
                   className={inputBase}
                   placeholder="From your welcome email"
+                  autoComplete="current-password"
                   autoFocus
                 />
                 <button
                   type="button"
                   onClick={() => setShowOld((v) => !v)}
-                  className="absolute right-2.5 top-1/2 -translate-y-1/2 p-1 text-slate-400 hover:text-slate-600"
+                  className="absolute right-2.5 top-1/2 -translate-y-1/2 p-1 text-[#6B737B] transition-colors hover:text-[#1F2933]"
                   aria-label={showOld ? "Hide password" : "Show password"}
                 >
-                  {showOld ? <EyeOff className="w-4 h-4" /> : <Eye className="w-4 h-4" />}
+                  {showOld ? <EyeOff className="h-4 w-4" /> : <Eye className="h-4 w-4" />}
                 </button>
               </div>
               {errors.old_password && (
-                <p className="mt-1.5 text-xs text-red-600">{errors.old_password.message}</p>
+                <p className="mt-1.5 text-xs text-[#c2410c]">{errors.old_password.message}</p>
               )}
             </div>
 
-            {/* New Password */}
             <div>
-              <label className="mb-1.5 block text-sm font-medium text-slate-700">
+              <label className="mb-1.5 block text-[13px] font-semibold text-[#3F474F]">
                 New password
               </label>
               <div className="relative">
@@ -153,53 +203,54 @@ export default function ForceChangePasswordPage() {
                   type={showNew ? "text" : "password"}
                   className={inputBase}
                   placeholder="Create a strong password"
+                  autoComplete="new-password"
                 />
                 <button
                   type="button"
                   onClick={() => setShowNew((v) => !v)}
-                  className="absolute right-2.5 top-1/2 -translate-y-1/2 p-1 text-slate-400 hover:text-slate-600"
+                  className="absolute right-2.5 top-1/2 -translate-y-1/2 p-1 text-[#6B737B] transition-colors hover:text-[#1F2933]"
                   aria-label={showNew ? "Hide password" : "Show password"}
                 >
-                  {showNew ? <EyeOff className="w-4 h-4" /> : <Eye className="w-4 h-4" />}
+                  {showNew ? <EyeOff className="h-4 w-4" /> : <Eye className="h-4 w-4" />}
                 </button>
               </div>
 
-              {/* Strength + requirements */}
-              <div className="mt-3 space-y-2.5">
+              <div className="mt-3 border border-[#d6d6d6] bg-white p-3">
                 <div className="flex items-center gap-3">
-                  <div className="flex gap-1 flex-1">
+                  <div className="flex flex-1 gap-1">
                     {[1, 2, 3, 4].map((i) => (
                       <div
                         key={i}
-                        className={`h-1 flex-1 rounded-full transition-colors ${
-                          i <= strength.score ? strength.color : "bg-slate-100"
+                        className={`h-1 flex-1 transition-colors ${
+                          i <= strength.score ? strength.color : "bg-[#e3e7ea]"
                         }`}
                       />
                     ))}
                   </div>
-                  <span className="text-[11px] font-medium text-slate-500 w-12 text-right">
+                  <span className="w-12 text-right text-[11px] font-semibold text-[#5E6870]">
                     {strength.label}
                   </span>
                 </div>
-                <ul className="grid grid-cols-2 gap-x-3 gap-y-1.5">
+
+                <ul className="mt-3 grid gap-x-3 gap-y-1.5 sm:grid-cols-2">
                   {requirements.map((req) => {
                     const met = req.test(newPwValue);
                     return (
                       <li
                         key={req.label}
                         className={`flex items-center gap-1.5 text-xs ${
-                          met ? "text-emerald-600" : "text-slate-400"
+                          met ? "text-[#287EAD]" : "text-[#6B737B]"
                         }`}
                       >
                         <span
-                          className={`flex h-3.5 w-3.5 items-center justify-center rounded-full ${
-                            met ? "bg-emerald-100" : "bg-slate-100"
+                          className={`flex h-3.5 w-3.5 items-center justify-center border ${
+                            met ? "border-[#287EAD] bg-[#e5f3fb]" : "border-[#c8cdd2] bg-[#f7f8f9]"
                           }`}
                         >
                           {met ? (
                             <Check className="h-2.5 w-2.5" strokeWidth={3} />
                           ) : (
-                            <span className="h-1 w-1 rounded-full bg-slate-300" />
+                            <span className="h-1 w-1 bg-[#aeb5bb]" />
                           )}
                         </span>
                         {req.label}
@@ -210,13 +261,12 @@ export default function ForceChangePasswordPage() {
               </div>
 
               {errors.new_password && (
-                <p className="mt-2 text-xs text-red-600">{errors.new_password.message}</p>
+                <p className="mt-2 text-xs text-[#c2410c]">{errors.new_password.message}</p>
               )}
             </div>
 
-            {/* Confirm Password */}
             <div>
-              <label className="mb-1.5 block text-sm font-medium text-slate-700">
+              <label className="mb-1.5 block text-[13px] font-semibold text-[#3F474F]">
                 Confirm new password
               </label>
               <div className="relative">
@@ -224,235 +274,61 @@ export default function ForceChangePasswordPage() {
                   {...register("confirm_password")}
                   type={showConfirm ? "text" : "password"}
                   className={`${inputBase} ${
-                    matches ? "border-emerald-400 focus:border-emerald-500 focus:ring-emerald-500/20" : ""
+                    matches ? "border-[#287EAD] focus:border-[#287EAD]" : ""
                   }`}
                   placeholder="Repeat your new password"
+                  autoComplete="new-password"
                 />
                 <button
                   type="button"
                   onClick={() => setShowConfirm((v) => !v)}
-                  className="absolute right-2.5 top-1/2 -translate-y-1/2 p-1 text-slate-400 hover:text-slate-600"
+                  className="absolute right-2.5 top-1/2 -translate-y-1/2 p-1 text-[#6B737B] transition-colors hover:text-[#1F2933]"
                   aria-label={showConfirm ? "Hide password" : "Show password"}
                 >
-                  {showConfirm ? <EyeOff className="w-4 h-4" /> : <Eye className="w-4 h-4" />}
+                  {showConfirm ? <EyeOff className="h-4 w-4" /> : <Eye className="h-4 w-4" />}
                 </button>
               </div>
               {matches && !errors.confirm_password && (
-                <p className="mt-1.5 flex items-center gap-1 text-xs text-emerald-600">
+                <p className="mt-1.5 flex items-center gap-1 text-xs text-[#287EAD]">
                   <Check className="h-3 w-3" strokeWidth={3} />
                   Passwords match
                 </p>
               )}
               {errors.confirm_password && (
-                <p className="mt-1.5 text-xs text-red-600">{errors.confirm_password.message}</p>
+                <p className="mt-1.5 text-xs text-[#c2410c]">{errors.confirm_password.message}</p>
               )}
             </div>
 
-            <button
-              type="submit"
-              disabled={loading}
-              className="mt-2 inline-flex h-11 w-full items-center justify-center gap-2 rounded-md bg-slate-900 px-4 text-sm font-medium text-white shadow-sm transition hover:bg-slate-800 disabled:cursor-not-allowed disabled:opacity-70"
-            >
-              {loading ? (
-                <>
-                  <Loader2 className="h-4 w-4 animate-spin" />
-                  Updating…
-                </>
-              ) : (
-                <>
-                  Update password
-                  <ArrowRight className="h-4 w-4" />
-                </>
-              )}
-            </button>
+            <div className="flex items-center justify-between gap-3 pt-2">
+              <p className="flex items-center gap-1.5 text-[11px] text-[#5E6870]">
+                <Lock className="h-3.5 w-3.5" />
+                Encrypted in transit and at rest.
+              </p>
+              <button
+                type="submit"
+                disabled={loading}
+                className="inline-flex h-9 min-w-[150px] items-center justify-center gap-2 bg-[#1175c6] px-5 text-[14px] font-normal text-white transition-colors hover:bg-[#0a5ea3] disabled:cursor-not-allowed disabled:opacity-70"
+              >
+                {loading ? (
+                  <>
+                    <Loader2 className="h-4 w-4 animate-spin" />
+                    Updating
+                  </>
+                ) : (
+                  <>
+                    Update password
+                    <ArrowRight className="h-4 w-4" />
+                  </>
+                )}
+              </button>
+            </div>
           </form>
 
-          <div className="flex items-center gap-2 border-t border-slate-100 bg-slate-50/60 px-8 py-3.5 text-xs text-slate-500 rounded-b-xl">
-            <Lock className="h-3.5 w-3.5" />
-            Your password is encrypted and never shared.
+          <div className="border-t border-[#d6d6d6] bg-[#f7f8f9] px-10 py-3 text-[12px] text-[#5E6870]">
+            Need help? Contact your Flaxem administrator.
           </div>
         </div>
-
-        <p className="mt-6 text-center text-xs text-slate-500">
-          Need help? Contact your Flaxem administrator.
-        </p>
       </div>
     </div>
   );
 }
-
-// /**
-//  * ForceChangePasswordPage.tsx
-//  *
-//  * Shown immediately after first login when must_change_password=true.
-//  * The user cannot navigate anywhere else until they complete this step.
-//  * React Router blocks all other routes via the RequirePasswordChange guard in App.tsx.
-//  */
-// import { useState } from "react";
-// import { useNavigate } from "react-router-dom";
-// import { useForm } from "react-hook-form";
-// import { zodResolver } from "@hookform/resolvers/zod";
-// import { z } from "zod";
-// import { authAPI, profileAPI } from "@/services/api";
-// import { useAuthStore } from "@/store/authStore";
-// import { Lock, Eye, EyeOff, Loader2, ShieldCheck } from "lucide-react";
-// import { toast } from "@/components/ui/vault-toast";
-
-// const schema = z.object({
-//   old_password:     z.string().min(1, "Current (temporary) password required"),
-//   new_password:     z.string()
-//     .min(8,  "At least 8 characters")
-//     .regex(/[A-Z]/,    "Include at least one uppercase letter")
-//     .regex(/[0-9]/,    "Include at least one number")
-//     .regex(/[^A-Za-z0-9]/, "Include at least one special character"),
-//   confirm_password: z.string(),
-// }).refine((d) => d.new_password === d.confirm_password, {
-//   message: "Passwords do not match",
-//   path: ["confirm_password"],
-// });
-
-// type FormData = z.infer<typeof schema>;
-
-// const requirements = [
-//   { label: "At least 8 characters",      test: (v: string) => v.length >= 8 },
-//   { label: "One uppercase letter",        test: (v: string) => /[A-Z]/.test(v) },
-//   { label: "One number",                  test: (v: string) => /[0-9]/.test(v) },
-//   { label: "One special character",       test: (v: string) => /[^A-Za-z0-9]/.test(v) },
-// ];
-
-// export default function ForceChangePasswordPage() {
-//   const navigate  = useNavigate();
-//   const { setUser } = useAuthStore();
-//   const [showPw, setShowPw] = useState(false);
-//   const [newPw, setNewPw]   = useState("");
-
-//   const { register, handleSubmit, watch, formState: { errors } } = useForm<FormData>({
-//     resolver: zodResolver(schema),
-//   });
-
-//   const mutation_pending = watch(); // triggers re-render for strength meter
-//   const [loading, setLoading] = useState(false);
-
-//   const onSubmit = async (values: FormData) => {
-//     setLoading(true);
-//     try {
-//       await profileAPI.changePassword(values.old_password, values.new_password);
-//       // Refresh user object so must_change_password is false in store
-//       const { data: me } = await authAPI.me();
-//       setUser(me);
-//       toast.success("Password updated. Welcome to DocVault!");
-//       navigate("/", { replace: true });
-//     } catch (err: unknown) {
-//       const detail = (err as { response?: { data?: { detail?: string | string[] } } })
-//         ?.response?.data?.detail;
-//       toast.error(Array.isArray(detail) ? detail.join(" ") : detail || "Failed to update password");
-//     } finally {
-//       setLoading(false);
-//     }
-//   };
-
-//   const newPwValue = watch("new_password") ?? "";
-
-//   return (
-//     <div className="min-h-screen bg-gradient-to-br from-brand-900 to-brand-700 flex items-center justify-center p-4">
-//       <div className="w-full max-w-md">
-//         <div className="text-center mb-8">
-//           <div className="inline-flex items-center justify-center w-14 h-14 bg-white rounded-2xl shadow-lg mb-4">
-//             <Lock className="w-7 h-7 text-brand-600" />
-//           </div>
-//           <h1 className="text-2xl font-bold text-white">Set your password</h1>
-//           <p className="text-brand-200 text-sm mt-2 max-w-xs mx-auto">
-//             Your account was created with a temporary password. Please set a new one to continue.
-//           </p>
-//         </div>
-
-//         <div className="card p-8 space-y-5">
-//           <div className="flex items-start gap-3 bg-amber-50 border border-amber-200 rounded-lg p-3">
-//             <ShieldCheck className="w-4 h-4 text-amber-500 flex-shrink-0 mt-0.5" />
-//             <p className="text-xs text-amber-700">
-//               This is a one-time step. Your new password must meet the requirements shown below.
-//             </p>
-//           </div>
-
-//           <form onSubmit={handleSubmit(onSubmit)} className="space-y-4">
-//             <div>
-//               <label className="label">Temporary password (from your email)</label>
-//               <div className="relative">
-//                 <input
-//                   {...register("old_password")}
-//                   type={showPw ? "text" : "password"}
-//                   className="input pr-10"
-//                   placeholder="Enter the password you received"
-//                   autoFocus
-//                 />
-//                 <button
-//                   type="button"
-//                   onClick={() => setShowPw(!showPw)}
-//                   className="absolute right-3 top-1/2 -translate-y-1/2 text-gray-400 hover:text-gray-600"
-//                 >
-//                   {showPw ? <EyeOff className="w-4 h-4" /> : <Eye className="w-4 h-4" />}
-//                 </button>
-//               </div>
-//               {errors.old_password && (
-//                 <p className="text-red-500 text-xs mt-1">{errors.old_password.message}</p>
-//               )}
-//             </div>
-
-//             <div>
-//               <label className="label">New password</label>
-//               <input
-//                 {...register("new_password")}
-//                 type={showPw ? "text" : "password"}
-//                 className="input"
-//                 placeholder="Create a strong password"
-//               />
-//               {errors.new_password && (
-//                 <p className="text-red-500 text-xs mt-1">{errors.new_password.message}</p>
-//               )}
-
-//               {/* Strength checklist */}
-//               {newPwValue && (
-//                 <ul className="mt-2 space-y-1">
-//                   {requirements.map((req) => {
-//                     const met = req.test(newPwValue);
-//                     return (
-//                       <li
-//                         key={req.label}
-//                         className={`flex items-center gap-2 text-xs ${met ? "text-green-600" : "text-gray-400"}`}
-//                       >
-//                         <span className={`w-1.5 h-1.5 rounded-full flex-shrink-0 ${met ? "bg-green-500" : "bg-gray-300"}`} />
-//                         {req.label}
-//                       </li>
-//                     );
-//                   })}
-//                 </ul>
-//               )}
-//             </div>
-
-//             <div>
-//               <label className="label">Confirm new password</label>
-//               <input
-//                 {...register("confirm_password")}
-//                 type={showPw ? "text" : "password"}
-//                 className="input"
-//                 placeholder="Repeat your new password"
-//               />
-//               {errors.confirm_password && (
-//                 <p className="text-red-500 text-xs mt-1">{errors.confirm_password.message}</p>
-//               )}
-//             </div>
-
-//             <button
-//               type="submit"
-//               disabled={loading}
-//               className="btn-primary w-full justify-center mt-2"
-//             >
-//               {loading && <Loader2 className="w-4 h-4 animate-spin" />}
-//               Set password & continue
-//             </button>
-//           </form>
-//         </div>
-//       </div>
-//     </div>
-//   );
-// }

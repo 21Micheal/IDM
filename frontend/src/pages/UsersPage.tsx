@@ -31,6 +31,7 @@ interface User {
   mfa_enabled: boolean;
   last_login: string | null;
   created_at: string;
+  admin_source?: "account" | "group" | null;
 }
 
 // ── Schemas ───────────────────────────────────────────────────────────────────
@@ -406,6 +407,7 @@ export default function UsersPage() {
                 <th className="text-left px-6 py-4 font-semibold text-xs uppercase tracking-wider text-muted-foreground">User</th>
                 <th className="text-left px-6 py-4 font-semibold text-xs uppercase tracking-wider text-muted-foreground">Job Description</th>
                 <th className="text-left px-6 py-4 font-semibold text-xs uppercase tracking-wider text-muted-foreground">Department</th>
+                <th className="text-left px-6 py-4 font-semibold text-xs uppercase tracking-wider text-muted-foreground">Access</th>
                 <th className="text-left px-6 py-4 font-semibold text-xs uppercase tracking-wider text-muted-foreground">Status</th>
                 <th className="text-left px-6 py-4 font-semibold text-xs uppercase tracking-wider text-muted-foreground">MFA</th>
                 <th className="text-left px-6 py-4 font-semibold text-xs uppercase tracking-wider text-muted-foreground">Last Login</th>
@@ -416,7 +418,7 @@ export default function UsersPage() {
               {isLoading ? (
                 Array.from({ length: 6 }).map((_, i) => (
                   <tr key={i}>
-                    {Array.from({ length: 7 }).map((_, j) => (
+                    {Array.from({ length: 8 }).map((_, j) => (
                       <td key={j} className="px-6 py-4"><div className="h-4 bg-muted rounded animate-pulse" /></td>
                     ))}
                   </tr>
@@ -441,6 +443,23 @@ export default function UsersPage() {
                   </td>
                   <td className="px-6 py-4 text-foreground">{user.job_description || "—"}</td>
                   <td className="px-6 py-4 text-muted-foreground">{user.department_name || "—"}</td>
+                  <td className="px-6 py-4">
+                    {user.admin_source ? (
+                      <span
+                        className="badge text-xs border bg-primary/10 text-primary border-primary/30"
+                        title={user.admin_source === "group"
+                          ? "Admin via membership in the Administrators group"
+                          : "Admin granted on the user account (staff/superuser)"}
+                      >
+                        Admin
+                        <span className="ml-1 font-normal opacity-70">
+                          · {user.admin_source === "group" ? "via group" : "account"}
+                        </span>
+                      </span>
+                    ) : (
+                      <span className="text-xs text-muted-foreground">Member</span>
+                    )}
+                  </td>
                   <td className="px-6 py-4">
                     <span className={clsx(
                       "badge text-xs border",

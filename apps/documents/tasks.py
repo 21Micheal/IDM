@@ -60,6 +60,7 @@ Queue assignments (unchanged):
                                                don't starve text-indexing jobs.
 """
 import logging
+import fcntl
 import os
 import shutil
 import signal
@@ -668,6 +669,50 @@ def _convert_office_to_pdf(
         return False
 
 
+def _persistent_lo_profile_dir() -> Path | None:
+    """
+    Return the persistent LibreOffice profile directory if one is configured
+    (settings.LIBREOFFICE_PROFILE_DIR), else None.
+
+    Reusing a warm profile across conversions skips LibreOffice's expensive
+    first-run initialisation (profile build + font-cache) on every preview,
+    which dominates conversion time on slower/virtualised hosts. Backed by a
+    Docker volume, the profile also stays warm across restarts.
+    """
+    from django.conf import settings as django_settings
+
+    raw = (getattr(django_settings, "LIBREOFFICE_PROFILE_DIR", "") or "").strip()
+    if not raw:
+        return None
+    try:
+        profile_dir = Path(raw)
+        profile_dir.mkdir(parents=True, exist_ok=True)
+        return profile_dir
+    except OSError as exc:
+        # Unusable path — fall back to the isolated per-call profile rather than
+        # breaking previews entirely.
+        logger.warning("LIBREOFFICE_PROFILE_DIR %r unusable (%s); using per-call profile", raw, exc)
+        return None
+
+
+def _clear_stale_lo_locks(profile_dir: Path) -> None:
+    """
+    Remove LibreOffice lock files left behind by a killed/timed-out run. When a
+    persistent profile is reused these would otherwise make the next headless
+    run hang on a recovery/lock prompt. Safe to clear while holding our own lock
+    (no soffice is running against this profile at that point).
+    """
+    try:
+        for pattern in (".lock", "**/.~lock.*#", "**/.lock"):
+            for stale in profile_dir.glob(pattern):
+                try:
+                    stale.unlink()
+                except OSError:
+                    pass
+    except Exception:  # pragma: no cover - best effort cleanup
+        pass
+
+
 def _convert_office_source_to_pdf_bytes(
     source_path: Path,
     soffice_bin: str,
@@ -675,28 +720,55 @@ def _convert_office_source_to_pdf_bytes(
     heartbeat=None,
 ) -> bytes:
     """
-    Convert an Office source file to PDF bytes using an isolated temporary
-    LibreOffice profile and output directory.
+    Convert an Office source file to PDF bytes.
+
+    The output always goes to a per-call temp dir. The LibreOffice *profile*,
+    however, is reused from a persistent directory when one is configured
+    (settings.LIBREOFFICE_PROFILE_DIR) — warm reuse avoids paying first-run
+    initialisation on every conversion. A cross-process exclusive lock around
+    the conversion keeps the shared profile safe even if the preview worker is
+    ever run with concurrency > 1. Without the setting it falls back to the
+    original fully-isolated per-call profile.
     """
     pdf_bytes: bytes | None = None
+    persistent_profile = _persistent_lo_profile_dir()
 
     with TemporaryDirectory(prefix="docpreview_") as tmpdir:
         tmp = Path(tmpdir)
         output_dir = tmp / "output"
-        profile_dir = tmp / "profile"
         output_dir.mkdir()
-        profile_dir.mkdir()
 
-        if heartbeat:
-            heartbeat()
-        success = _convert_office_to_pdf(
-            soffice_bin,
-            source_path,
-            output_dir,
-            profile_dir,
-            timeout,
-            heartbeat=heartbeat,
-        )
+        if persistent_profile is not None:
+            # Serialise on a lock file inside the profile so concurrent
+            # conversions never share a live profile, then clear any stale locks
+            # from a previously killed run before converting.
+            lock_path = persistent_profile / ".preview.lock"
+            with open(lock_path, "w") as lock_file:
+                fcntl.flock(lock_file, fcntl.LOCK_EX)
+                _clear_stale_lo_locks(persistent_profile)
+                if heartbeat:
+                    heartbeat()
+                success = _convert_office_to_pdf(
+                    soffice_bin,
+                    source_path,
+                    output_dir,
+                    persistent_profile,
+                    timeout,
+                    heartbeat=heartbeat,
+                )
+        else:
+            profile_dir = tmp / "profile"
+            profile_dir.mkdir()
+            if heartbeat:
+                heartbeat()
+            success = _convert_office_to_pdf(
+                soffice_bin,
+                source_path,
+                output_dir,
+                profile_dir,
+                timeout,
+                heartbeat=heartbeat,
+            )
 
         preview_path = output_dir / f"{source_path.stem}.pdf"
         if not preview_path.exists():

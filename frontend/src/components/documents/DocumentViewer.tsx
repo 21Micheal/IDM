@@ -1428,6 +1428,7 @@ export default function DocumentViewer({ document: doc, submitSlot, hideUploadAc
               <UploadVersionDrawer
                 documentId={doc.id}
                 currentVersion={doc.current_version}
+                maxSizeMb={doc.document_type?.max_file_size_mb}
                 onVersionUploaded={onVersionUploaded}
               />
             </Suspense>

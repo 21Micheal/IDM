@@ -84,6 +84,7 @@ const mainNav: NavEntry[] = [
     ],
   } as NavGroup,
   { to: "/personal-documents", icon: Lock, label: "Personal documents" } as NavLeaf,
+  { to: "/request-signature", icon: FileSignature, label: "Request signature" } as NavLeaf,
   {
     to: "/workflow",
     icon: Workflow,

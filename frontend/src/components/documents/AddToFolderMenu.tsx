@@ -21,9 +21,10 @@ interface Props {
   documentId: string;
   showLabel?: boolean;
   className?: string;
+  triggerClassName?: string;
 }
 
-export function AddToFolderMenu({ documentId, showLabel = false, className }: Props) {
+export function AddToFolderMenu({ documentId, showLabel = false, className, triggerClassName }: Props) {
   const [open, setOpen] = useState(false);
   const [creating, setCreating] = useState(false);
   const [folderName, setFolderName] = useState("");
@@ -131,13 +132,15 @@ export function AddToFolderMenu({ documentId, showLabel = false, className }: Pr
         aria-label="Organize document in folders"
         onClick={(e) => { e.stopPropagation(); setOpen((o) => !o); }}
         className={clsx(
-          showLabel
-            ? "inline-flex items-center gap-2 rounded-md border border-border bg-card px-2.5 py-1 text-xs font-semibold"
-            : "p-1.5 rounded-lg",
-          "text-muted-foreground hover:text-foreground hover:bg-muted transition-colors",
+          triggerClassName ?? [
+            showLabel
+              ? "inline-flex items-center gap-2 rounded-md border border-border bg-card px-2.5 py-1 text-xs font-semibold"
+              : "p-1.5 rounded-lg",
+            "text-muted-foreground hover:text-foreground hover:bg-muted transition-colors",
+          ],
         )}
       >
-        <FolderPlus className="w-4 h-4" />
+        <FolderPlus className={showLabel ? "w-3.5 h-3.5" : "w-4 h-4"} />
         {showLabel && <span>Add to folder</span>}
       </button>
 
