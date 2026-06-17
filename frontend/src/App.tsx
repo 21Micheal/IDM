@@ -1,5 +1,6 @@
 import { Suspense, lazy, useEffect, useState } from "react";
 import { Routes, Route, Navigate, useLocation } from "react-router-dom";
+import { useQuery } from "@tanstack/react-query";
 import { useAuthStore } from "@/store/authStore";
 import { authAPI } from "@/services/api";
 import { VaultToaster } from "@/components/ui/vault-toast";
@@ -89,6 +90,38 @@ function AuthBootstrap({ children }: { children: React.ReactNode }) {
 
   if (!ready) return <RouteFallback />;
   return <>{children}</>;
+}
+
+/**
+ * Background session sync. Re-fetches the current user so privilege/group
+ * changes (e.g. being added to or removed from the Administrators group) take
+ * effect without a manual sign-out: revalidates on window focus and on a short
+ * interval, then updates the auth store in place. The backend already enforces
+ * permissions per request — this keeps the UI (menus, role label, guards) in
+ * sync. Self-disables when unauthenticated, so it's safe to mount globally.
+ */
+function SessionSync() {
+  const accessToken = useAuthStore((s) => s.accessToken);
+  const isAuthenticated = useAuthStore((s) => s.isAuthenticated);
+  const isSessionExpired = useAuthStore((s) => s.isSessionExpired);
+  const setUser = useAuthStore((s) => s.setUser);
+
+  const enabled = isAuthenticated && !!accessToken && !isSessionExpired();
+
+  const { data } = useQuery({
+    queryKey: ["auth", "me"],
+    queryFn: () => authAPI.me(accessToken as string).then((res) => res.data),
+    enabled,
+    refetchOnWindowFocus: true,
+    refetchInterval: 60_000,
+    staleTime: 30_000,
+  });
+
+  useEffect(() => {
+    if (data) setUser(data);
+  }, [data, setUser]);
+
+  return null;
 }
 
 /**
@@ -223,6 +256,7 @@ export default function App() {
   return (
     <AuthBootstrap>
       <>
+        <SessionSync />
         <Suspense fallback={<RouteFallback />}>
           <Routes>
             {/* Public */}
