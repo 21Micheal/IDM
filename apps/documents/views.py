@@ -133,7 +133,7 @@ class DocumentTypeViewSet(AuditMixin, viewsets.ModelViewSet):
 
     def get_permissions(self):
         if self.action in ("create", "update", "partial_update", "destroy"):
-            return [permissions.IsAuthenticated(), permissions.IsAdminUser()]
+            return [permissions.IsAuthenticated(), IsGroupAdmin()]
         return [permissions.IsAuthenticated()]
 
     def perform_create(self, serializer):
@@ -164,7 +164,7 @@ class DocumentTypeViewSet(AuditMixin, viewsets.ModelViewSet):
         instance.save(update_fields=["is_active"])
 
     @action(detail=True, methods=["post"], url_path="duplicate",
-            permission_classes=[permissions.IsAuthenticated, permissions.IsAdminUser])
+            permission_classes=[permissions.IsAuthenticated, IsGroupAdmin])
     def duplicate(self, request, pk=None):
         """
         Deep-clone a document type (metadata fields + relationship rules).

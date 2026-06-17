@@ -1,5 +1,6 @@
 from django.core.files.uploadedfile import SimpleUploadedFile
 from django.test import TestCase
+from rest_framework.test import APIClient
 
 from apps.accounts.models import (
     AccessStage,
@@ -172,3 +173,115 @@ class DocumentEditPolicyTests(TestCase):
             last_name="User",
         )
         self.assertTrue(document_allows_edit(self.document, user=admin))
+
+
+class DocumentTypeAdminGroupPermissionTests(TestCase):
+    def setUp(self):
+        self.client = APIClient()
+        self.user = User.objects.create_user(
+            email="group-admin@example.com",
+            password="pass",
+            first_name="Group",
+            last_name="Admin",
+        )
+        admins_group = UserGroup.ensure_administrators_group(created_by=self.user)
+        UserGroupMembership.objects.create(user=self.user, group=admins_group)
+        self.client.force_authenticate(user=self.user)
+        self.doc_type = DocumentType.objects.create(
+            name="Base Type",
+            code="BASETYPE",
+            reference_prefix="BST",
+            created_by=self.user,
+        )
+
+    def test_admin_group_member_can_create_document_type(self):
+        response = self.client.post(
+            "/api/v1/document-types/",
+            {
+                "name": "Operations Memo",
+                "code": "OPMEMO",
+                "reference_prefix": "OPM",
+            },
+            format="json",
+        )
+
+        self.assertEqual(response.status_code, 201)
+        self.assertEqual(response.data["name"], "Operations Memo")
+        self.assertEqual(response.data["code"], "OPMEMO")
+
+    def test_admin_group_member_can_update_document_type(self):
+        response = self.client.patch(
+            f"/api/v1/document-types/{self.doc_type.id}/",
+            {"description": "Updated by group admin"},
+            format="json",
+        )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.data["description"], "Updated by group admin")
+
+    def test_admin_group_member_can_duplicate_document_type(self):
+        response = self.client.post(
+            f"/api/v1/document-types/{self.doc_type.id}/duplicate/",
+            {"name": "Base Type Copy", "code": "BASETYPECPY"},
+            format="json",
+        )
+
+        self.assertEqual(response.status_code, 201)
+        self.assertEqual(response.data["name"], "Base Type Copy")
+        self.assertEqual(response.data["code"], "BASETYPECPY")
+
+    def test_admin_group_member_can_delete_document_type(self):
+        response = self.client.delete(f"/api/v1/document-types/{self.doc_type.id}/")
+        self.assertEqual(response.status_code, 204)
+        self.doc_type.refresh_from_db()
+        self.assertFalse(self.doc_type.is_active)
+
+
+class DocumentTypeRegularUserPermissionTests(TestCase):
+    def setUp(self):
+        self.client = APIClient()
+        self.user = User.objects.create_user(
+            email="regular-user@example.com",
+            password="pass",
+            first_name="Regular",
+            last_name="User",
+        )
+        self.doc_type = DocumentType.objects.create(
+            name="Restricted Type",
+            code="RSTRTYPE",
+            reference_prefix="RST",
+            created_by=self.user,
+        )
+        self.client.force_authenticate(user=self.user)
+
+    def test_regular_user_cannot_create_document_type(self):
+        response = self.client.post(
+            "/api/v1/document-types/",
+            {
+                "name": "Unauthorized Create",
+                "code": "UNAUTHCRT",
+                "reference_prefix": "UCR",
+            },
+            format="json",
+        )
+        self.assertEqual(response.status_code, 403)
+
+    def test_regular_user_cannot_update_document_type(self):
+        response = self.client.patch(
+            f"/api/v1/document-types/{self.doc_type.id}/",
+            {"description": "No access"},
+            format="json",
+        )
+        self.assertEqual(response.status_code, 403)
+
+    def test_regular_user_cannot_duplicate_document_type(self):
+        response = self.client.post(
+            f"/api/v1/document-types/{self.doc_type.id}/duplicate/",
+            {"name": "Unauthorized Copy", "code": "UNAUTHCPY"},
+            format="json",
+        )
+        self.assertEqual(response.status_code, 403)
+
+    def test_regular_user_cannot_delete_document_type(self):
+        response = self.client.delete(f"/api/v1/document-types/{self.doc_type.id}/")
+        self.assertEqual(response.status_code, 403)
