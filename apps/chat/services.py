@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from asgiref.sync import async_to_sync
 from channels.layers import get_channel_layer
-from django.db import transaction
+from django.db import connection, transaction
 from django.utils import timezone
 
 from .models import ChatMessage, ChatNotification, ChatRoom, ChatRoomParticipant, UnreadMessage
@@ -66,19 +66,24 @@ def create_delivery_records(message: ChatMessage) -> list[ChatRoomParticipant]:
         .select_related("user")
     )
 
+    # SQL Server doesn't support ignore_conflicts (raises NotSupportedError).
+    # For a brand-new message no delivery rows exist yet, so conflicts are
+    # impossible — only request the flag where the backend supports it.
+    ignore = connection.features.supports_ignore_conflicts
+
     UnreadMessage.objects.bulk_create(
         [
             UnreadMessage(user=participant.user, message=message, room=message.room)
             for participant in participants
         ],
-        ignore_conflicts=True,
+        ignore_conflicts=ignore,
     )
     ChatNotification.objects.bulk_create(
         [
             ChatNotification(recipient=participant.user, message=message)
             for participant in participants
         ],
-        ignore_conflicts=True,
+        ignore_conflicts=ignore,
     )
     return participants
 
