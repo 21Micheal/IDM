@@ -214,41 +214,25 @@ Install-WindowsFeature -Name Web-Server,Web-Mgmt-Console,Web-WebSockets
 ```
 
 Create a site whose **physical path is the SPA build** (`C:\IDM\app\frontend\dist`)
-bound to port 80. Add a `web.config` in that folder:
+bound to port 80.
 
-```xml
-<?xml version="1.0" encoding="UTF-8"?>
-<configuration>
-  <system.webServer>
-    <rewrite>
-      <rules>
-        <!-- API + websockets → daphne -->
-        <rule name="api" stopProcessing="true">
-          <match url="^(api|ws|static|media)/.*" />
-          <action type="Rewrite" url="http://127.0.0.1:8000/{R:0}" />
-        </rule>
-        <!-- SPA client-side routing: everything else → index.html -->
-        <rule name="spa" stopProcessing="true">
-          <match url=".*" />
-          <conditions logicalGrouping="MatchAll">
-            <add input="{REQUEST_FILENAME}" matchType="IsFile" negate="true" />
-            <add input="{REQUEST_FILENAME}" matchType="IsDirectory" negate="true" />
-          </conditions>
-          <action type="Rewrite" url="/index.html" />
-        </rule>
-      </rules>
-    </rewrite>
-    <security>
-      <requestFiltering><requestLimits maxAllowedContentLength="52428800" /></requestFiltering>
-    </security>
-  </system.webServer>
-</configuration>
-```
+The required **`web.config`** (API/WS reverse-proxy + SPA fallback) now ships in
+the repo at `frontend/public/web.config`, so `npm run build` copies it into
+`dist/` automatically — there's nothing to add by hand.
+
+> ⚠️ Don't drop a `web.config` directly into `dist/` — `npm run build` empties
+> `dist/` first and would delete it. That's why it lives in `public/`. After any
+> rebuild, confirm `dist\web.config` exists.
+
+Also enable **"Preserve client Host header"** so the backend builds correct
+absolute URLs (IIS Manager → server node → Application Request Routing Cache →
+Server Proxy Settings → tick it). The frontend re-hosts API URLs as a safety net,
+but preserving Host is the right proxy hygiene.
 
 Notes:
 - The **WebSocket feature** (installed above) lets ARR proxy `/ws/` for chat /
   live workflow updates.
-- `maxAllowedContentLength=52428800` = 50 MB uploads (match Django).
+- `maxAllowedContentLength=52428800` (in the web.config) = 50 MB uploads (match Django).
 - `/media` and `/static` are proxied to daphne here for simplicity (WhiteNoise
   serves `/static`; Django serves `/media`). For higher throughput you can later
   point an IIS virtual directory straight at `C:\IDM\media`.
