@@ -64,11 +64,35 @@ function TemporaryPasswordModal({
 }) {
   const [copied, setCopied] = useState(false);
 
-  const copyToClipboard = () => {
-    navigator.clipboard.writeText(temporary_password);
-    setCopied(true);
-    setTimeout(() => setCopied(false), 2000);
-    toast.success("Password copied to clipboard");
+  const copyToClipboard = async () => {
+    // navigator.clipboard only exists in a secure context (HTTPS or localhost).
+    // Over plain HTTP on a LAN IP it's undefined, so fall back to execCommand.
+    let ok = false;
+    try {
+      if (navigator.clipboard?.writeText) {
+        await navigator.clipboard.writeText(temporary_password);
+        ok = true;
+      } else {
+        const ta = document.createElement("textarea");
+        ta.value = temporary_password;
+        ta.style.position = "fixed";
+        ta.style.opacity = "0";
+        document.body.appendChild(ta);
+        ta.focus();
+        ta.select();
+        ok = document.execCommand("copy");
+        document.body.removeChild(ta);
+      }
+    } catch {
+      ok = false;
+    }
+    if (ok) {
+      setCopied(true);
+      setTimeout(() => setCopied(false), 2000);
+      toast.success("Password copied to clipboard");
+    } else {
+      toast.error("Couldn't copy automatically — select and copy it manually.");
+    }
   };
 
   return (
