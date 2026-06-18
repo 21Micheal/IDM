@@ -117,6 +117,23 @@ const FAILED_CONFIRM_DELAY_MS = 1_500;
 
 function normalizeUrl(url: string | null | undefined): string | undefined {
   if (!url) return url ?? undefined;
+  // Re-host absolute API URLs onto the page origin. The backend builds file/
+  // preview URLs with request.build_absolute_uri(), which leaks the proxy's
+  // internal address (e.g. 127.0.0.1:8000) when the reverse proxy doesn't
+  // preserve the Host header (IIS/ARR). Only OUR /api/ endpoints are rewritten,
+  // so genuinely external URLs (e.g. S3) are left untouched.
+  if (/^https?:\/\//i.test(url)) {
+    try {
+      const parsed = new URL(url);
+      if (parsed.pathname.startsWith("/api/")) {
+        parsed.protocol = window.location.protocol;
+        parsed.host = window.location.host;
+        return parsed.toString();
+      }
+    } catch {
+      /* fall through to the scheme-only handling below */
+    }
+  }
   if (window.location.protocol === "https:" && url.startsWith("http://")) {
     return url.replace("http://", "https://");
   }
