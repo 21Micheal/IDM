@@ -9,6 +9,7 @@ import json
 from .models import DocumentTemplate, TemplateUsage
 from .serializers import DocumentTemplateSerializer
 from .tasks import generate_document_from_template_sync
+from apps.accounts.views import IsGroupAdmin
 
 
 def _request_bool(value) -> bool:
@@ -66,7 +67,7 @@ class DocumentTemplateViewSet(viewsets.ModelViewSet):
 
     def get_permissions(self):
         if self.action in ("create", "update", "partial_update", "destroy", "duplicate"):
-            return [permissions.IsAuthenticated(), permissions.IsAdminUser()]
+            return [permissions.IsAuthenticated(), IsGroupAdmin()]
         return [permissions.IsAuthenticated()]
 
     def get_queryset(self):
