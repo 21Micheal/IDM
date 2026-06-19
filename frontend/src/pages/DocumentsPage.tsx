@@ -318,6 +318,45 @@ interface DocumentsPageProps {
   personalOnly?: boolean;
 }
 
+/** Reorderable list of documents to be stitched into one PDF (top = first).
+ *  Shared by the "share in email" combined mode and the merge-download modal. */
+function StitchOrderList({
+  order,
+  docs,
+  onMove,
+}: {
+  order: string[];
+  docs: Document[];
+  onMove: (index: number, dir: -1 | 1) => void;
+}) {
+  return (
+    <div className="border border-[#C8CDD2] bg-[#F9FAFB] p-2">
+      <p className="mb-2 text-xs font-semibold uppercase tracking-wide text-[#5E6870]">
+        Merge order — top appears first
+      </p>
+      <ul className="space-y-1">
+        {order.map((docId, idx) => {
+          const d = docs.find((x) => x.id === docId);
+          return (
+            <li key={docId} className="flex items-center gap-2 border border-[#E3E7EA] bg-white px-2 py-1.5 text-sm">
+              <span className="w-5 flex-shrink-0 text-center text-xs font-semibold text-[#5E6870]">{idx + 1}</span>
+              <span className="flex-1 truncate text-[#1F2933]" title={d?.title}>{d?.title ?? docId}</span>
+              <button type="button" onClick={() => onMove(idx, -1)} disabled={idx === 0}
+                      className="p-1 text-[#5E6870] hover:text-[#287EAD] disabled:opacity-30" title="Move up">
+                <ArrowUp className="h-3.5 w-3.5" />
+              </button>
+              <button type="button" onClick={() => onMove(idx, 1)} disabled={idx === order.length - 1}
+                      className="p-1 text-[#5E6870] hover:text-[#287EAD] disabled:opacity-30" title="Move down">
+                <ArrowDown className="h-3.5 w-3.5" />
+              </button>
+            </li>
+          );
+        })}
+      </ul>
+    </div>
+  );
+}
+
 export default function DocumentsPage({ personalOnly = false }: DocumentsPageProps) {
   const queryClient = useQueryClient();
   const [searchParams, setSearchParams] = useSearchParams();
@@ -353,6 +392,9 @@ export default function DocumentsPage({ personalOnly = false }: DocumentsPagePro
   const [shareMessage, setShareMessage] = useState("");
   const [showBulkDownloadTray, setShowBulkDownloadTray] = useState(false);
   const bulkDownloadTrayRef = useRef<HTMLDivElement | null>(null);
+  // Merge-download modal: reorder the documents before stitching into one PDF.
+  const [mergeModalOpen, setMergeModalOpen] = useState(false);
+  const [mergeDocOrder, setMergeDocOrder] = useState<string[]>([]);
 
   // ── View mode (table / card / thumbnails) — Infor-style layout switcher ────
   type ViewMode = "table" | "card" | "thumbnails";
@@ -596,8 +638,8 @@ export default function DocumentsPage({ personalOnly = false }: DocumentsPagePro
   });
 
   const downloadSelectedMergedPdfMutation = useMutation({
-    mutationFn: () => documentsAPI.downloadSelectedMergedPdf(selectedIds),
-    onSuccess: (response) => {
+    mutationFn: (orderedIds: string[]) => documentsAPI.downloadSelectedMergedPdf(orderedIds),
+    onSuccess: (response, orderedIds) => {
       const blob = new Blob([response.data], { type: "application/pdf" });
       const url = URL.createObjectURL(blob);
       const a = document.createElement("a");
@@ -607,10 +649,21 @@ export default function DocumentsPage({ personalOnly = false }: DocumentsPagePro
       a.click();
       a.remove();
       URL.revokeObjectURL(url);
-      toast.success(`Downloaded ${selectedIds.length} document${selectedIds.length === 1 ? "" : "s"} as merged PDF.`);
+      setMergeModalOpen(false);
+      toast.success(`Downloaded ${orderedIds.length} document${orderedIds.length === 1 ? "" : "s"} as merged PDF.`);
     },
     onError: () => toast.error("Could not create merged PDF. Ensure selected documents have PDF previews."),
   });
+
+  const moveMergeDoc = (index: number, dir: -1 | 1) => {
+    setMergeDocOrder((prev) => {
+      const next = [...prev];
+      const target = index + dir;
+      if (target < 0 || target >= next.length) return prev;
+      [next[index], next[target]] = [next[target], next[index]];
+      return next;
+    });
+  };
 
   // Close bulk-download tray on outside click
   useEffect(() => {
@@ -633,6 +686,16 @@ export default function DocumentsPage({ personalOnly = false }: DocumentsPagePro
       return [...kept, ...added];
     });
   }, [emailModalOpen, selectedIds]);
+
+  // Same for the merge-download modal.
+  useEffect(() => {
+    if (!mergeModalOpen) return;
+    setMergeDocOrder((prev) => {
+      const kept = prev.filter((docId) => selectedIds.includes(docId));
+      const added = selectedIds.filter((docId) => !kept.includes(docId));
+      return [...kept, ...added];
+    });
+  }, [mergeModalOpen, selectedIds]);
 
   const moveStitchDoc = (index: number, dir: -1 | 1) => {
     setEmailDocOrder((prev) => {
@@ -961,14 +1024,14 @@ export default function DocumentsPage({ personalOnly = false }: DocumentsPagePro
                         {/* Merged PDF — only useful for multiple */}
                         <button
                           type="button"
-                          onClick={() => { setShowBulkDownloadTray(false); downloadSelectedMergedPdfMutation.mutate(); }}
+                          onClick={() => { setShowBulkDownloadTray(false); setMergeModalOpen(true); }}
                           disabled={downloadSelectedMergedPdfMutation.isPending}
                           className="flex w-full items-center gap-2.5 border-t border-[#E3E7EA] px-3 py-2.5 text-sm text-[#1F2933] hover:bg-[#EEF6FB] hover:text-[#287EAD] disabled:opacity-50"
                         >
                           <FileText className="h-4 w-4 shrink-0 text-[#287EAD]" />
                           <div className="text-left">
                             <p className="font-medium text-[#287EAD]">Merged PDF</p>
-                            <p className="text-[11px] text-[#5E6870]">All documents stitched into one PDF</p>
+                            <p className="text-[11px] text-[#5E6870]">Reorder, then stitch into one PDF</p>
                           </div>
                         </button>
                       </div>
@@ -1523,6 +1586,58 @@ export default function DocumentsPage({ personalOnly = false }: DocumentsPagePro
           </div>
         )}
 
+        {mergeModalOpen && (
+          <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-4">
+            <div className="w-full max-w-md border border-[#C8CDD2] bg-white shadow-2xl">
+              <div className="flex items-center justify-between border-b border-[#C8CDD2] bg-[#287EAD] px-5 py-3 text-white">
+                <div>
+                  <h2 className="text-base font-semibold">Merge &amp; download PDF</h2>
+                  <p className="text-xs text-white/75">
+                    {mergeDocOrder.length} document{mergeDocOrder.length === 1 ? "" : "s"} — drag order top-first
+                  </p>
+                </div>
+                <button
+                  type="button"
+                  onClick={() => setMergeModalOpen(false)}
+                  className="p-1 text-white/75 hover:text-white"
+                  aria-label="Close merge dialog"
+                >
+                  <X className="h-5 w-5" />
+                </button>
+              </div>
+              <div className="space-y-4 p-5">
+                {mergeDocOrder.length > 1 ? (
+                  <StitchOrderList order={mergeDocOrder} docs={docs} onMove={moveMergeDoc} />
+                ) : (
+                  <p className="text-sm text-[#5E6870]">
+                    Select more than one document to choose the merge order.
+                  </p>
+                )}
+                <div className="flex justify-end gap-2">
+                  <button
+                    type="button"
+                    onClick={() => setMergeModalOpen(false)}
+                    className="border border-[#AEB5BB] bg-white px-4 py-2 text-sm font-semibold text-[#1F2933] hover:bg-[#F3F5F6]"
+                  >
+                    Cancel
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => downloadSelectedMergedPdfMutation.mutate(mergeDocOrder)}
+                    disabled={downloadSelectedMergedPdfMutation.isPending || mergeDocOrder.length === 0}
+                    className="inline-flex items-center gap-2 bg-[#287EAD] px-4 py-2 text-sm font-semibold text-white hover:bg-[#206D99] disabled:opacity-50"
+                  >
+                    {downloadSelectedMergedPdfMutation.isPending
+                      ? <Loader2 className="h-4 w-4 animate-spin" />
+                      : <FileText className="h-4 w-4" />}
+                    Download merged PDF
+                  </button>
+                </div>
+              </div>
+            </div>
+          </div>
+        )}
+
         {emailModalOpen && (
           <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-4">
             <div className="w-full max-w-3xl border border-[#C8CDD2] bg-white shadow-2xl">
@@ -1648,29 +1763,8 @@ export default function DocumentsPage({ personalOnly = false }: DocumentsPagePro
                     </div>
 
                     {emailAttachmentMode === "combined" && emailDocOrder.length > 1 && (
-                      <div className="mt-2 border border-[#C8CDD2] bg-[#F9FAFB] p-2">
-                        <p className="mb-2 text-xs font-semibold uppercase tracking-wide text-[#5E6870]">
-                          Merge order — top appears first
-                        </p>
-                        <ul className="space-y-1">
-                          {emailDocOrder.map((docId, idx) => {
-                            const d = docs.find((x: Document) => x.id === docId);
-                            return (
-                              <li key={docId} className="flex items-center gap-2 border border-[#E3E7EA] bg-white px-2 py-1.5 text-sm">
-                                <span className="w-5 flex-shrink-0 text-center text-xs font-semibold text-[#5E6870]">{idx + 1}</span>
-                                <span className="flex-1 truncate text-[#1F2933]" title={d?.title}>{d?.title ?? docId}</span>
-                                <button type="button" onClick={() => moveStitchDoc(idx, -1)} disabled={idx === 0}
-                                        className="p-1 text-[#5E6870] hover:text-[#287EAD] disabled:opacity-30" title="Move up">
-                                  <ArrowUp className="h-3.5 w-3.5" />
-                                </button>
-                                <button type="button" onClick={() => moveStitchDoc(idx, 1)} disabled={idx === emailDocOrder.length - 1}
-                                        className="p-1 text-[#5E6870] hover:text-[#287EAD] disabled:opacity-30" title="Move down">
-                                  <ArrowDown className="h-3.5 w-3.5" />
-                                </button>
-                              </li>
-                            );
-                          })}
-                        </ul>
+                      <div className="mt-2">
+                        <StitchOrderList order={emailDocOrder} docs={docs} onMove={moveStitchDoc} />
                       </div>
                     )}
                   </div>
