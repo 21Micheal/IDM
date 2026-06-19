@@ -7,7 +7,7 @@
  * document type metadata fields only.
  */
 import { useMutation, useQueryClient } from "@tanstack/react-query";
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import type { ReactNode } from "react";
 import {
   useForm,
@@ -23,9 +23,22 @@ import { Edit2, Save, X, Loader2, Plus } from "lucide-react";
 import { toast } from "@/components/ui/vault-toast";
 import type { Document, MetadataField } from "@/types";
 
+/** Imperative handle the page uses to flush unsaved edits before check-in. */
+export type MetadataSaver = {
+  isDirty: boolean;
+  /** Validate + save; resolves true on success, false on validation/save error. */
+  save: () => Promise<boolean>;
+};
+
 interface Props {
   document: Document;
   onClose: () => void;
+  /**
+   * Lets the parent page reach in to check dirty state and save before the
+   * document lock is released (check-in). Registered while mounted, cleared on
+   * unmount.
+   */
+  registerSaver?: (saver: MetadataSaver | null) => void;
 }
 
 type MetadataEditValues = {
@@ -164,7 +177,7 @@ function DynamicField({
   );
 }
 
-export default function MetadataEditPanel({ document: doc, onClose }: Props) {
+export default function MetadataEditPanel({ document: doc, onClose, registerSaver }: Props) {
   const qc = useQueryClient();
   const initialPersonalMetadataEntries = Object.entries(doc.metadata ?? {}).map(([key, value]) => ({
     key,
@@ -222,7 +235,7 @@ export default function MetadataEditPanel({ document: doc, onClose }: Props) {
     else onClose();
   };
 
-  const onSubmit = (values: MetadataEditValues) => {
+  const buildPayload = (values: MetadataEditValues): Record<string, unknown> => {
     const personalTags = (values.personal_tags ?? [])
       .map((tag) => tag.value.trim())
       .filter(Boolean);
@@ -257,8 +270,32 @@ export default function MetadataEditPanel({ document: doc, onClose }: Props) {
     if (payload.due_date === "") {
       delete payload.due_date;
     }
-    mutation.mutate(payload);
+    return payload;
   };
+
+  const onSubmit = (values: MetadataEditValues) => mutation.mutate(buildPayload(values));
+
+  // Expose dirty state + an async save to the page so it can flush unsaved
+  // edits when the user releases (checks in) the document.
+  useEffect(() => {
+    if (!registerSaver) return;
+    const save = () =>
+      new Promise<boolean>((resolve) => {
+        handleSubmit(
+          async (values) => {
+            try {
+              await mutation.mutateAsync(buildPayload(values));
+              resolve(true);
+            } catch {
+              resolve(false);
+            }
+          },
+          () => resolve(false), // validation errors → don't release
+        )();
+      });
+    registerSaver({ isDirty, save });
+    return () => registerSaver(null);
+  });
 
   return (
     <div className="h-full overflow-y-auto p-4 space-y-5">

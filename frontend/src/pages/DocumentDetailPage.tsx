@@ -8,7 +8,7 @@ import { WorkflowVisualizer } from "@/components/notifications/workflow-visualiz
 // StatusBadge not used in this file
 import OcrStatusBadge from "@/components/documents/OcrStatusBadge";
 import { AddToFolderMenu } from "@/components/documents/AddToFolderMenu";
-import MetadataEditPanel from "@/components/documents/MetadataEditPanel";
+import MetadataEditPanel, { type MetadataSaver } from "@/components/documents/MetadataEditPanel";
 import TemplateForm, { requiredFieldLabels } from "@/components/templates/TemplateForm";
 import { collectFormAttachments } from "@/components/templates/formAttachments";
 import WorkflowActionPanel from "@/components/workflow/WorkflowActionPanel";
@@ -601,6 +601,21 @@ export default function DocumentDetailPage() {
     document.addEventListener("mousedown", handler);
     return () => document.removeEventListener("mousedown", handler);
   }, [showDownloadTray]);
+
+  // ── Check-in (release) coordination ──────────────────────────────────────
+  // The edit panel registers a saver so that releasing the lock can flush any
+  // unsaved metadata edits first (Infor-style Save / Discard / Cancel prompt).
+  const metadataSaverRef = useRef<MetadataSaver | null>(null);
+  const registerMetadataSaver = useCallback((s: MetadataSaver | null) => {
+    metadataSaverRef.current = s;
+  }, []);
+  const [releasePrompt, setReleasePrompt] = useState<{ resolve: (proceed: boolean) => void } | null>(null);
+  const [releaseSaving, setReleaseSaving] = useState(false);
+  const confirmRelease = useCallback(async (): Promise<boolean> => {
+    const saver = metadataSaverRef.current;
+    if (!saver || !saver.isDirty) return true;
+    return new Promise<boolean>((resolve) => setReleasePrompt({ resolve }));
+  }, []);
 
   if (isLoading)
     return (
@@ -1219,6 +1234,7 @@ export default function DocumentDetailPage() {
                   submitSlot={null}
                   hideUploadActionBar
                   onPreviewLinksChange={handlePreviewLinksChange}
+                  onBeforeRelease={confirmRelease}
                 />
               </Suspense>
             </div>
@@ -2025,7 +2041,11 @@ export default function DocumentDetailPage() {
                   </h3>
                 </div>
                 <Suspense fallback={<div className="p-4 text-sm text-muted-foreground">Loading editor…</div>}>
-                  <MetadataEditPanel document={doc} onClose={() => setActiveTab("properties")} />
+                  <MetadataEditPanel
+                    document={doc}
+                    onClose={() => setActiveTab("properties")}
+                    registerSaver={registerMetadataSaver}
+                  />
                 </Suspense>
               </div>
             )}
@@ -2042,6 +2062,52 @@ export default function DocumentDetailPage() {
         </div>
 
       </div>
+
+      {/* Check-in: unsaved metadata edits prompt (fires on Release) */}
+      {releasePrompt && (
+        <div className="fixed inset-0 z-[60] flex items-center justify-center bg-foreground/40 backdrop-blur-sm p-4">
+          <div className="w-full max-w-sm rounded-2xl border border-border bg-card p-6 shadow-elegant">
+            <h4 className="text-base font-semibold text-foreground">Save changes?</h4>
+            <p className="mt-2 text-sm text-muted-foreground">
+              You have unsaved detail changes. Do you want to save them before checking in (releasing the lock)?
+            </p>
+            <div className="mt-5 flex justify-end gap-2">
+              <button
+                type="button"
+                disabled={releaseSaving}
+                onClick={() => { releasePrompt.resolve(false); setReleasePrompt(null); }}
+                className="btn-secondary"
+              >
+                Cancel
+              </button>
+              <button
+                type="button"
+                disabled={releaseSaving}
+                onClick={() => { releasePrompt.resolve(true); setReleasePrompt(null); }}
+                className="btn-secondary"
+              >
+                Discard
+              </button>
+              <button
+                type="button"
+                disabled={releaseSaving}
+                onClick={async () => {
+                  const saver = metadataSaverRef.current;
+                  setReleaseSaving(true);
+                  const ok = saver ? await saver.save() : true;
+                  setReleaseSaving(false);
+                  releasePrompt.resolve(ok);
+                  setReleasePrompt(null);
+                }}
+                className="btn-primary"
+              >
+                {releaseSaving && <Loader2 className="w-4 h-4 animate-spin" />}
+                Save &amp; check in
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 }

@@ -563,6 +563,7 @@ type OfficeEditPanelProps = {
   onVersionUploaded: () => void;
   showHeaderOpenButton?: boolean;
   onOfficeEditActionChange?: (action: { label: string; enabled: boolean; onClick: () => void }) => void;
+  onBeforeRelease?: () => Promise<boolean>;
 };
 
 function OfficeEditPanel({
@@ -574,6 +575,7 @@ function OfficeEditPanel({
   onVersionUploaded,
   showHeaderOpenButton = true,
   onOfficeEditActionChange,
+  onBeforeRelease,
 }: OfficeEditPanelProps) {
   const qc   = useQueryClient();
   const user = useAuthStore((s) => s.user);
@@ -718,6 +720,11 @@ function OfficeEditPanel({
       qc.invalidateQueries({ queryKey: ["document", doc.id] });
     },
   });
+
+  const handleRelease = useCallback(async () => {
+    if (onBeforeRelease && !(await onBeforeRelease())) return;
+    releaseLock.mutate();
+  }, [onBeforeRelease, releaseLock]);
 
   const retryPreviewMutation = useMutation({
     mutationFn: () =>
@@ -930,7 +937,7 @@ function OfficeEditPanel({
           )}
           {lockedByMe && (
             <button
-              onClick={() => releaseLock.mutate()}
+              onClick={handleRelease}
               disabled={releaseLock.isPending}
               className="inline-flex items-center gap-1.5 border border-[#C8CDD2] px-2.5 py-1.5 text-xs font-medium text-[#5E6870] transition-colors hover:bg-destructive/5 hover:text-destructive disabled:opacity-50"
               title="Release (check in)"
@@ -1079,9 +1086,15 @@ interface Props {
     downloadHref: string;
     signedFileUrlsEnabled: boolean;
   }) => void;
+  /**
+   * Called when the user attempts to release (check in) the lock. Lets the
+   * page resolve unsaved metadata edits first (Infor-style Save / Discard /
+   * Cancel prompt). Resolve `false` to abort the release.
+   */
+  onBeforeRelease?: () => Promise<boolean>;
 }
 
-export default function DocumentViewer({ document: doc, submitSlot, hideUploadActionBar, onPreviewLinksChange }: Props) {
+export default function DocumentViewer({ document: doc, submitSlot, hideUploadActionBar, onPreviewLinksChange, onBeforeRelease }: Props) {
   const qc   = useQueryClient();
   const user = useAuthStore((s) => s.user);
   const [selectedVersionId, setSelectedVersionId] = useState<string | null>(null);
@@ -1162,6 +1175,11 @@ export default function DocumentViewer({ document: doc, submitSlot, hideUploadAc
       qc.invalidateQueries({ queryKey: ["document-preview", doc.id] });
     },
   });
+
+  const handleRelease = useCallback(async () => {
+    if (onBeforeRelease && !(await onBeforeRelease())) return;
+    releaseLock.mutate();
+  }, [onBeforeRelease, releaseLock]);
 
   const onVersionUploaded = useCallback(() => {
     setSelectedVersionId(null);
@@ -1304,7 +1322,7 @@ export default function DocumentViewer({ document: doc, submitSlot, hideUploadAc
           <EditLockBanner
             doc={doc}
             currentUserId={user?.id}
-            onRelease={() => releaseLock.mutate()}
+            onRelease={handleRelease}
           />
         </div>
       )}
@@ -1410,6 +1428,7 @@ export default function DocumentViewer({ document: doc, submitSlot, hideUploadAc
             onVersionUploaded={onVersionUploaded}
             showHeaderOpenButton={false}
             onOfficeEditActionChange={setOfficeEditAction}
+            onBeforeRelease={onBeforeRelease}
           />
         </WatermarkedPreview>
       )}
