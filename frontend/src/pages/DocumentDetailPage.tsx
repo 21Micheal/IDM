@@ -589,6 +589,19 @@ export default function DocumentDetailPage() {
     return filtered;
   }, [relationshipSearchData, doc?.id, relationships, relationshipType, relationshipSearch]);
 
+  // Close download tray on outside click. Must stay above the early returns
+  // below so hook order is stable across loading/loaded renders (React #310).
+  useEffect(() => {
+    if (!showDownloadTray) return;
+    const handler = (e: MouseEvent) => {
+      if (downloadTrayRef.current && !downloadTrayRef.current.contains(e.target as Node)) {
+        setShowDownloadTray(false);
+      }
+    };
+    document.addEventListener("mousedown", handler);
+    return () => document.removeEventListener("mousedown", handler);
+  }, [showDownloadTray]);
+
   if (isLoading)
     return (
       <div className="flex items-center justify-center h-64">
@@ -788,18 +801,6 @@ export default function DocumentDetailPage() {
       setDownloadingPdf(false);
     }
   };
-
-  // Close download tray on outside click
-  useEffect(() => {
-    if (!showDownloadTray) return;
-    const handler = (e: MouseEvent) => {
-      if (downloadTrayRef.current && !downloadTrayRef.current.contains(e.target as Node)) {
-        setShowDownloadTray(false);
-      }
-    };
-    document.addEventListener("mousedown", handler);
-    return () => document.removeEventListener("mousedown", handler);
-  }, [showDownloadTray]);
 
   const getPrintableUrl = async (url: string) => {
     if (viewerLinks.signedFileUrlsEnabled) return url;
