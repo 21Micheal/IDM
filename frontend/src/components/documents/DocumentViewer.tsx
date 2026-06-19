@@ -800,7 +800,7 @@ function OfficeEditPanel({
     }
   };
 
-  const openInEditor = useCallback((data = lockData) => {
+  const openInEditor = useCallback((data: { webdav_url: string } | null | undefined = lockData) => {
     if (!data) return;
     const { msScheme } = info as { msScheme?: string };
 
@@ -814,6 +814,19 @@ function OfficeEditPanel({
       window.location.href = `docvault-open://${encoded}`;
     }
   }, [handlerInstalled, info, isLinux, isWindows, lockData]);
+
+  // Open the live document in the desktop app READ-ONLY (no lock). Available to
+  // members without edit rights so they can view in Word/LibreOffice; the server
+  // rejects any save attempt against a read-only token.
+  const openReadOnly = useCallback(async () => {
+    try {
+      const r = await documentsAPI.readOnlyToken(doc.id);
+      const webdav_url = normalizeUrl(r.data.webdav_url) ?? r.data.webdav_url;
+      openInEditor({ webdav_url });
+    } catch {
+      toast.error("Could not open the document. Please try again.");
+    }
+  }, [doc.id, openInEditor]);
 
   /**
    * One-click handler used by the minimal "Open in <App>" button.
@@ -838,6 +851,9 @@ function OfficeEditPanel({
   }, [acquireLock.mutate, handlerInstalled, isLinux, lockData, lockedByOther, openInEditor]);
 
   const canShowOpenButton = canEditInEditor && !lockedByOther;
+  // Non-editors can still open the file in the desktop app, read-only (no lock).
+  const canOpenReadOnly =
+    !canEditInEditor && Boolean(info.msScheme) && (isWindows || (isLinux && handlerInstalled));
   const openLabel = lockData || lockedByMe
     ? `Open in ${info.app}`
     : "Lock";
@@ -899,6 +915,15 @@ function OfficeEditPanel({
                 ? <Loader2 className="w-3.5 h-3.5 animate-spin" />
                 : <ExternalLink className="w-3.5 h-3.5" />}
               {openLabel}
+            </button>
+          )}
+          {canOpenReadOnly && showHeaderOpenButton && (
+            <button
+              onClick={openReadOnly}
+              className="inline-flex items-center gap-1.5 border border-[#C8CDD2] px-3 py-1.5 text-xs font-medium text-[#5E6870] transition-colors hover:bg-muted"
+              title={`Open in ${info.app} (read-only)`}
+            >
+              <ExternalLink className="w-3.5 h-3.5" /> Open (read-only)
             </button>
           )}
           {(lockedByMe || lockData) && (

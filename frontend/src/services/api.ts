@@ -450,6 +450,12 @@ export const documentsAPI = {
   editToken: (id: string) =>
     api.post<DocumentEditTokenResponse>(`/documents/${id}/edit_token/`),
 
+  /** Get a read-only WebDAV URL to open the doc in a desktop editor — no lock. POST. */
+  readOnlyToken: (id: string) =>
+    api.post<{ webdav_url: string; read_only: true; doc_id: string; file_name: string; mime_type: string }>(
+      `/documents/${id}/read_only_token/`,
+    ),
+
   /**
    * Download the one-time install script that registers the docvault-open://
    * protocol handler with xdg-open and Chrome on Linux.

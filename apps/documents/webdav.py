@@ -235,6 +235,7 @@ class DocumentWebDAVView(View):
         # Authenticating here means we never issue a 401 that triggers the
         # LibreOffice credential dialog.
         user = None
+        read_only = False
         if token:
             cached = cache.get(f"webdav_edit_token:{token}")
             if cached and str(cached.get("document_id")) == str(document_id):
@@ -243,6 +244,7 @@ class DocumentWebDAVView(View):
                     candidate = _User.objects.get(id=cached["user_id"])
                     if candidate.is_active:
                         user = candidate
+                        read_only = bool(cached.get("read_only"))
                         # Slide TTL forward on every request so long editing
                         # sessions don't lose auth after an hour.
                         cache.set(f"webdav_edit_token:{token}", cached, timeout=3600)
@@ -275,11 +277,16 @@ class DocumentWebDAVView(View):
         if not doc:
             return HttpResponse("Not Found", status=404)
 
-        if not self._can(user, doc, "edit"):
+        required = "view" if read_only else "edit"
+        if not self._can(user, doc, required):
             return HttpResponse("Forbidden", status=403)
+        # Read-only tokens may only use safe (non-writing) WebDAV methods.
+        if read_only and method not in ("head", "get", "propfind"):
+            return HttpResponse("Read-only", status=403)
 
         request.dav_user = user
         request.dav_doc  = doc
+        request.dav_read_only = read_only
         request.dav_href = request.build_absolute_uri(request.path)
         return getattr(self, method, self.http_method_not_allowed)(
             request, document_id, filename, *args, **kwargs
@@ -312,7 +319,7 @@ class DocumentWebDAVView(View):
     def get(self, request, document_id, filename=""):
         doc  = request.dav_doc
         user = request.dav_user
-        if not self._can(user, doc, "edit"):
+        if not self._can(user, doc, "view"):
             return HttpResponse("Forbidden", status=403)
         try:
             content = doc.file.read()
@@ -332,7 +339,7 @@ class DocumentWebDAVView(View):
     def propfind(self, request, document_id, filename=""):
         doc  = request.dav_doc
         user = request.dav_user
-        if not self._can(user, doc, "edit"):
+        if not self._can(user, doc, "view"):
             return HttpResponse("Forbidden", status=403)
 
         depth = request.headers.get("Depth", "infinity")

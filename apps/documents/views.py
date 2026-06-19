@@ -1471,6 +1471,46 @@ class DocumentViewSet(AuditMixin, viewsets.ModelViewSet):
             "mime_type":   doc.file_mime_type,
         })
 
+    @action(detail=True, methods=["post"])
+    def read_only_token(self, request, pk=None):
+        """
+        Issue a short-lived WebDAV token to open the document in a desktop editor
+        READ-ONLY — no edit lock is taken. The WebDAV layer rejects writes
+        (PUT/LOCK) for read-only tokens, so members without edit rights can open
+        the live file in Word/LibreOffice to view it without changing it.
+        """
+        doc = self.get_object()  # get_queryset already enforces visibility
+        if not user_can_download_document(request.user, doc):
+            return Response({"detail": "View not permitted."}, status=403)
+
+        webdav_token = secrets.token_hex(32)
+        cache.set(
+            f"webdav_edit_token:{webdav_token}",
+            {
+                "user_id": str(request.user.id),
+                "document_id": str(doc.id),
+                "read_only": True,
+            },
+            timeout=3600,
+        )
+
+        api_base = request.build_absolute_uri("/api/v1").rstrip("/")
+        parsed = urlparse(api_base)
+        webdav_path = (
+            f"{parsed.path}/documents/webdav/{doc.id}"
+            f"/{webdav_token}"
+            f"/{urlquote(doc.file_name, safe='')}"
+        )
+        webdav_url = urlunparse(parsed._replace(path=webdav_path, query="", fragment=""))
+
+        return Response({
+            "webdav_url":  webdav_url,
+            "read_only":   True,
+            "doc_id":      str(doc.id),
+            "file_name":   doc.file_name,
+            "mime_type":   doc.file_mime_type,
+        })
+
     def _get_open_script_content(self, filename, open_url):
         safe_filename = filename.replace("'", "\\'")
         return f"""#!/usr/bin/env bash
