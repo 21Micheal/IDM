@@ -247,12 +247,17 @@ config. On the **client** machines:
 
 - The **WebClient** service must be **Running** (it's the Windows WebDAV
   redirector Office uses): `Set-Service WebClient -StartupType Automatic; Start-Service WebClient`.
-- Office's redirector is cautious about **plain HTTP**. If "Edit in Word" opens
-  read-only or fails to save, either add `http://192.168.100.244` to the browser's
-  **Local Intranet** zone, or set the WebClient registry value
-  `HKLM\SYSTEM\CurrentControlSet\Services\WebClient\Parameters\BasicAuthLevel = 2`
-  and restart the WebClient service. (Authentication itself is via a one-time
-  token embedded in the WebDAV URL, not Windows creds.)
+- **Add `http://192.168.100.244` to the Local Intranet zone** on client machines
+  (Internet Options → Security → Local intranet → Sites → Advanced). This is the
+  single biggest UX win: it stops Office opening the file in **Protected View**
+  (read-only) first and re-fetching on "Enable Editing" — which is most of the
+  "takes a while to launch" delay — and avoids repeated auth prompts.
+- If editing still opens read-only or won't save over plain HTTP, set the WebClient
+  registry value `HKLM\SYSTEM\CurrentControlSet\Services\WebClient\Parameters\BasicAuthLevel = 2`
+  and restart the WebClient service. (Auth is via a one-time token in the WebDAV
+  URL, not Windows creds.)
+- Some launch/save latency is inherent to the WebDAV redirector and can't be tuned
+  away server-side; the steps above remove the avoidable part.
 - Saving in the desktop app writes back as a **new document version**.
 
 ---
