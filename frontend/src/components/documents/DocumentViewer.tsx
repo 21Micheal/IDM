@@ -238,15 +238,15 @@ function EditLockBanner({
         <div className="flex items-center gap-2 text-foreground">
           <Lock className="w-4 h-4 text-accent flex-shrink-0" />
           <span>
-            <strong>You are editing this document.</strong> Other users can only
-            view it until you close your editor or release the lock.
+            <strong>Locked by you.</strong> Other users can only view it until
+            you close your editor or release the lock.
           </span>
         </div>
         <button
           onClick={onRelease}
           className="flex-shrink-0 inline-flex items-center gap-1.5 text-xs font-medium text-foreground border border-border rounded-lg px-3 py-1.5 hover:bg-muted transition-colors"
         >
-          <Unlock className="w-3.5 h-3.5" /> Release lock
+          <Unlock className="w-3.5 h-3.5" /> Release
         </button>
       </div>
     );
@@ -256,8 +256,8 @@ function EditLockBanner({
     <div className="flex items-center gap-3 rounded-xl border border-destructive/30 bg-destructive/5 px-4 py-3 text-sm">
       <Lock className="w-4 h-4 text-destructive flex-shrink-0" />
       <span className="text-foreground">
-        <strong>{doc.edit_locked_by_name ?? "Another user"}</strong> is currently
-        editing this document. View-only until they finish.
+        Locked by <strong>{doc.edit_locked_by_name ?? "another user"}</strong>.
+        View-only until they release it.
       </span>
     </div>
   );
@@ -698,13 +698,13 @@ function OfficeEditPanel({
       startVersionPolling(doc.current_version);
       qc.invalidateQueries({ queryKey: ["document", doc.id] });
       qc.invalidateQueries({ queryKey: ["document-preview", doc.id] });
-      toast.success("Edit lock acquired. Open the document in your editor.");
+      toast.success("Locked by you. Open the document in your editor.");
     },
     onError: (err: any) => {
       if (err?.response?.status === 423) {
-        toast.error(err.response.data?.detail ?? "Document is currently locked by another user.");
+        toast.error(err.response.data?.detail ?? "Locked by another user.");
       } else {
-        toast.error("Could not acquire edit lock. Please try again.");
+        toast.error("Could not lock the document. Please try again.");
       }
     },
   });
@@ -714,7 +714,7 @@ function OfficeEditPanel({
     onSuccess: () => {
       stopVersionPolling();
       setLockData(null);
-      toast.success("Edit lock released.");
+      toast.success("Released.");
       qc.invalidateQueries({ queryKey: ["document", doc.id] });
     },
   });
@@ -840,7 +840,7 @@ function OfficeEditPanel({
   const canShowOpenButton = canEditInEditor && !lockedByOther;
   const openLabel = lockData || lockedByMe
     ? `Open in ${info.app}`
-    : `Edit in ${info.app}`;
+    : "Lock";
 
   useEffect(() => {
     onOfficeEditActionChange?.({
@@ -907,7 +907,7 @@ function OfficeEditPanel({
               disabled={releaseLock.isPending}
               className="inline-flex items-center gap-1.5 border border-[#C8CDD2] px-2.5 py-1.5 text-xs font-medium text-[#5E6870] transition-colors hover:bg-destructive/5 hover:text-destructive"
             >
-              <Unlock className="w-3.5 h-3.5" /> Release lock
+              <Unlock className="w-3.5 h-3.5" /> Release
             </button>
           )}
         </div>
@@ -1140,7 +1140,7 @@ export default function DocumentViewer({ document: doc, submitSlot, hideUploadAc
   const releaseLock = useMutation({
     mutationFn: () => documentsAPI.releaseLock(doc.id),
     onSuccess: () => {
-      toast.success("Edit lock released.");
+      toast.success("Released.");
       qc.invalidateQueries({ queryKey: ["document", doc.id] });
       qc.invalidateQueries({ queryKey: ["document-preview", doc.id] });
     },
