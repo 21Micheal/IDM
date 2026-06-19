@@ -829,42 +829,43 @@ function OfficeEditPanel({
   }, [doc.id, openInEditor]);
 
   /**
-   * One-click handler used by the minimal "Open in <App>" button.
-   * If we don't yet have a lock we acquire it first, then open the editor
-   * once the mutation resolves.
+   * "Open in <App>" — Infor-style check-out behaviour:
+   *   • you hold the lock        → open editable
+   *   • you can edit & unlocked  → auto-check-out (lock), then open editable
+   *   • locked by someone else, or no edit rights → open READ-ONLY
    */
-  const handleOpenClick = useCallback(() => {
-    if (lockedByOther) return;
+  const handleOpenInApp = useCallback(() => {
     if (isLinux && !handlerInstalled) {
-      toast.info("Run the one-time Linux install script before starting document editing.");
+      toast.info("Run the one-time Linux install script before opening documents in the editor.");
       return;
     }
-    if (lockData) {
+    if (lockedByMe || lockData) {
       openInEditor();
       return;
     }
-    acquireLock.mutate(undefined, {
-      onSuccess: (data) => {
-        openInEditor(data);
-      },
-    });
-  }, [acquireLock.mutate, handlerInstalled, isLinux, lockData, lockedByOther, openInEditor]);
+    if (canEditInEditor && !lockedByOther) {
+      acquireLock.mutate(undefined, { onSuccess: (data) => openInEditor(data) });
+      return;
+    }
+    openReadOnly();
+  }, [acquireLock, canEditInEditor, handlerInstalled, isLinux, lockData, lockedByMe, lockedByOther, openInEditor, openReadOnly]);
 
-  const canShowOpenButton = canEditInEditor && !lockedByOther;
-  // Non-editors can still open the file in the desktop app, read-only (no lock).
-  const canOpenReadOnly =
-    !canEditInEditor && Boolean(info.msScheme) && (isWindows || (isLinux && handlerInstalled));
-  const openLabel = lockData || lockedByMe
-    ? `Open in ${info.app}`
-    : "Lock";
+  // Explicit check-out (no editor). This is what enables metadata "Edit details".
+  const handleLock = useCallback(() => acquireLock.mutate(), [acquireLock]);
+
+  const isLockedByAnyone = lockedByMe || lockedByOther;
+  // Office docs that can be opened in a desktop editor on this platform.
+  const canOpenInApp = Boolean(info.msScheme) && (isWindows || (isLinux && handlerInstalled));
+  // Whether "Open in <app>" will be read-only for this user.
+  const willOpenReadOnly = !lockedByMe && !lockData && (lockedByOther || !canEditInEditor);
 
   useEffect(() => {
     onOfficeEditActionChange?.({
-      label: openLabel,
-      enabled: canShowOpenButton,
-      onClick: handleOpenClick,
+      label: `Open in ${info.app}`,
+      enabled: canOpenInApp,
+      onClick: handleOpenInApp,
     });
-  }, [onOfficeEditActionChange, openLabel, canShowOpenButton, handleOpenClick]);
+  }, [onOfficeEditActionChange, info.app, canOpenInApp, handleOpenInApp]);
 
   // ─────────────────────────────────────────────────────────────────────────
   // Render
@@ -904,33 +905,35 @@ function OfficeEditPanel({
         </div>
 
         <div className="flex items-center gap-2 flex-wrap">
-          {canShowOpenButton && showHeaderOpenButton && (
+          {canOpenInApp && showHeaderOpenButton && (
             <button
-              onClick={handleOpenClick}
+              onClick={handleOpenInApp}
               disabled={acquireLock.isPending}
               className="inline-flex items-center gap-1.5 bg-[#287EAD] px-3 py-1.5 text-xs font-medium text-white transition-colors hover:bg-[#206D99] disabled:opacity-50"
-              title={openLabel}
+              title={willOpenReadOnly ? `Open in ${info.app} (read-only)` : `Open in ${info.app}`}
             >
               {acquireLock.isPending
                 ? <Loader2 className="w-3.5 h-3.5 animate-spin" />
                 : <ExternalLink className="w-3.5 h-3.5" />}
-              {openLabel}
+              Open in {info.app}{willOpenReadOnly ? " (read-only)" : ""}
             </button>
           )}
-          {canOpenReadOnly && showHeaderOpenButton && (
+          {canEditInEditor && !isLockedByAnyone && showHeaderOpenButton && (
             <button
-              onClick={openReadOnly}
-              className="inline-flex items-center gap-1.5 border border-[#C8CDD2] px-3 py-1.5 text-xs font-medium text-[#5E6870] transition-colors hover:bg-muted"
-              title={`Open in ${info.app} (read-only)`}
+              onClick={handleLock}
+              disabled={acquireLock.isPending}
+              className="inline-flex items-center gap-1.5 border border-[#287EAD] px-3 py-1.5 text-xs font-medium text-[#287EAD] transition-colors hover:bg-[#EEF6FB] disabled:opacity-50"
+              title="Lock (check out) to edit this document or its details"
             >
-              <ExternalLink className="w-3.5 h-3.5" /> Open (read-only)
+              <Lock className="w-3.5 h-3.5" /> Lock
             </button>
           )}
-          {(lockedByMe || lockData) && (
+          {lockedByMe && (
             <button
               onClick={() => releaseLock.mutate()}
               disabled={releaseLock.isPending}
-              className="inline-flex items-center gap-1.5 border border-[#C8CDD2] px-2.5 py-1.5 text-xs font-medium text-[#5E6870] transition-colors hover:bg-destructive/5 hover:text-destructive"
+              className="inline-flex items-center gap-1.5 border border-[#C8CDD2] px-2.5 py-1.5 text-xs font-medium text-[#5E6870] transition-colors hover:bg-destructive/5 hover:text-destructive disabled:opacity-50"
+              title="Release (check in)"
             >
               <Unlock className="w-3.5 h-3.5" /> Release
             </button>
@@ -938,19 +941,8 @@ function OfficeEditPanel({
         </div>
       </div>
 
-      {/* Locked-by-other notice */}
-      {lockedByOther && (
-        <div className="mx-3 flex items-center gap-3 border border-destructive/30 bg-destructive/5 px-4 py-3 text-sm text-foreground">
-          <Lock className="w-4 h-4 text-destructive flex-shrink-0" />
-          <span>
-            Editing is disabled — this document is currently locked by{" "}
-            <strong>{doc.edit_locked_by_name ?? "another user"}</strong>.
-          </span>
-        </div>
-      )}
-
       {/* Linux install one-time banner */}
-      {isLinux && canShowOpenButton && !handlerInstalled && (
+      {isLinux && canOpenInApp && !lockedByOther && !handlerInstalled && (
         <div className="mx-3 space-y-2 border border-accent/30 bg-accent/5 p-3">
           <p className="text-xs font-medium text-foreground">
             One-time setup for one-click editing on Linux

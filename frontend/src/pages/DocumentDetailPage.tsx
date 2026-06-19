@@ -708,6 +708,7 @@ export default function DocumentDetailPage() {
   const canDownload = hasAdminAccess || permissions.includes("download");
   const ocrQuality = getOcrQuality(doc.metadata);
   const isLockedByOther = Boolean(doc.is_edit_locked && doc.edit_locked_by !== user?.id);
+  const lockedByMe = Boolean(doc.is_edit_locked && doc.edit_locked_by === user?.id);
 
   // Rejection is terminal: rejected documents cannot restart the workflow.
   // Returned documents go back to the uploader to edit and resubmit (resumes
@@ -744,7 +745,7 @@ export default function DocumentDetailPage() {
     { id: "comments", label: `Comments (${doc.comments?.length ?? 0})` },
     { id: "audit", label: "Audit trail" },
     ...(isDraftOrRejected
-      ? [{ id: "edit" as const, label: "Edit details", disabled: !canEdit || isLockedByOther }]
+      ? [{ id: "edit" as const, label: "Edit details", disabled: !canEdit || !lockedByMe }]
       : []),
   ];
 

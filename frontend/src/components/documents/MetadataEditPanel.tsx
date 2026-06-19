@@ -7,7 +7,7 @@
  * document type metadata fields only.
  */
 import { useMutation, useQueryClient } from "@tanstack/react-query";
-import { useEffect, useRef, useState } from "react";
+import { useState } from "react";
 import type { ReactNode } from "react";
 import {
   useForm,
@@ -213,36 +213,9 @@ export default function MetadataEditPanel({ document: doc, onClose }: Props) {
       toast.error(err?.response?.data?.detail ?? "Update failed"),
   });
 
-  // Latest onClose, without making the lock effect depend on it.
-  const onCloseRef = useRef(onClose);
-  onCloseRef.current = onClose;
-
-  // Editing details locks the document so it can't be edited in a desktop editor
-  // (or by another user) at the same time. Acquire on open; release on close/unmount.
-  const lockHeldRef = useRef(false);
-  useEffect(() => {
-    let cancelled = false;
-    documentsAPI.editToken(doc.id)
-      .then(() => { if (!cancelled) lockHeldRef.current = true; })
-      .catch((err: { response?: { status?: number; data?: { detail?: string } } }) => {
-        if (cancelled) return;
-        toast.error(
-          err?.response?.status === 423
-            ? (err.response.data?.detail ?? "Locked by another user.")
-            : "Could not lock the document for editing.",
-        );
-        onCloseRef.current();
-      });
-    return () => {
-      cancelled = true;
-      if (lockHeldRef.current) {
-        documentsAPI.releaseLock(doc.id).catch(() => {});
-        lockHeldRef.current = false;
-      }
-    };
-  }, [doc.id]);
-
-  // Closing with unsaved edits prompts Save / Discard before releasing the lock.
+  // The document is already checked out (locked) by the time this panel opens —
+  // the lock is taken explicitly via the viewer's Lock button, not here.
+  // Closing with unsaved edits still prompts Save / Discard.
   const [showDiscardPrompt, setShowDiscardPrompt] = useState(false);
   const requestClose = () => {
     if (isDirty) setShowDiscardPrompt(true);
