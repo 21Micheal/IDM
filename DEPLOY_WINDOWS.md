@@ -237,6 +237,24 @@ Notes:
   serves `/static`; Django serves `/media`). For higher throughput you can later
   point an IIS virtual directory straight at `C:\IDM\media`.
 
+### "Edit in <Office app>" (WebDAV)
+
+Opening a document in the desktop Office app uses WebDAV. The shipped `web.config`
+**removes IIS's `WebDAVModule`/handler** so the WebDAV verbs (`PROPFIND`, `LOCK`,
+`UNLOCK`, `PUT`) pass through to daphne — IIS's own WebDAV would otherwise grab
+them and editing would silently fail. No extra IIS step beyond using the shipped
+config. On the **client** machines:
+
+- The **WebClient** service must be **Running** (it's the Windows WebDAV
+  redirector Office uses): `Set-Service WebClient -StartupType Automatic; Start-Service WebClient`.
+- Office's redirector is cautious about **plain HTTP**. If "Edit in Word" opens
+  read-only or fails to save, either add `http://192.168.100.244` to the browser's
+  **Local Intranet** zone, or set the WebClient registry value
+  `HKLM\SYSTEM\CurrentControlSet\Services\WebClient\Parameters\BasicAuthLevel = 2`
+  and restart the WebClient service. (Authentication itself is via a one-time
+  token embedded in the WebDAV URL, not Windows creds.)
+- Saving in the desktop app writes back as a **new document version**.
+
 ---
 
 ## 9. Verify
