@@ -768,15 +768,6 @@ export default function DocumentDetailPage() {
     window.setTimeout(() => URL.revokeObjectURL(blobUrl), 1000);
   };
 
-  const handleDownloadDocument = async () => {
-    if (!canDownload || !viewerLinks.downloadHref) return;
-    try {
-      await downloadBlobFromUrl(viewerLinks.downloadHref, doc?.file_name || "document");
-    } catch {
-      toast.error("Could not download this document.");
-    }
-  };
-
   const handleDownloadAsPdf = async () => {
     if (!canDownload || !id) return;
     setDownloadingPdf(true);
@@ -1004,39 +995,43 @@ export default function DocumentDetailPage() {
                 <p className="border-b border-[#E3E7EA] bg-[#F5F7F8] px-3 py-1.5 text-[10px] font-semibold uppercase tracking-wider text-[#5E6870]">
                   Download as
                 </p>
-                {/* Original format */}
-                {viewerLinks.signedFileUrlsEnabled ? (
+                {/* Original format — a real anchor click keeps user-activation,
+                    so the browser downloads it (an async blob + a.click() loses
+                    the gesture over HTTP and Chrome blocks it). */}
+                <a
+                  href={viewerLinks.downloadHref}
+                  download={doc?.file_name || "document"}
+                  onClick={() => setShowDownloadTray(false)}
+                  className="flex w-full items-center gap-2.5 px-3 py-2.5 text-sm text-[#1F2933] hover:bg-[#EEF6FB] hover:text-[#287EAD]"
+                >
+                  <Download className="h-4 w-4 shrink-0 text-[#5E6870]" />
+                  <span className="font-medium">Original format</span>
+                </a>
+                {/* Download as PDF — direct link to the signed preview PDF when
+                    available; blob fallback only when there's no preview URL. */}
+                {viewerLinks.openInNewTabUrl ? (
                   <a
-                    href={viewerLinks.downloadHref}
-                    download
+                    href={viewerLinks.openInNewTabUrl}
+                    download={`${(doc?.file_name || "document").replace(/\.[^.]+$/, "")}.pdf`}
                     onClick={() => setShowDownloadTray(false)}
                     className="flex w-full items-center gap-2.5 px-3 py-2.5 text-sm text-[#1F2933] hover:bg-[#EEF6FB] hover:text-[#287EAD]"
                   >
-                    <Download className="h-4 w-4 shrink-0 text-[#5E6870]" />
-                    <span className="font-medium">Original format</span>
+                    <FileText className="h-4 w-4 shrink-0 text-[#5E6870]" />
+                    <span className="font-medium">Download as PDF</span>
                   </a>
                 ) : (
                   <button
                     type="button"
-                    onClick={() => { setShowDownloadTray(false); handleDownloadDocument(); }}
-                    className="flex w-full items-center gap-2.5 px-3 py-2.5 text-sm text-[#1F2933] hover:bg-[#EEF6FB] hover:text-[#287EAD]"
+                    onClick={handleDownloadAsPdf}
+                    disabled={downloadingPdf}
+                    className="flex w-full items-center gap-2.5 px-3 py-2.5 text-sm text-[#1F2933] hover:bg-[#EEF6FB] hover:text-[#287EAD] disabled:cursor-not-allowed disabled:opacity-50"
                   >
-                    <Download className="h-4 w-4 shrink-0 text-[#5E6870]" />
-                    <span className="font-medium">Original format</span>
+                    {downloadingPdf
+                      ? <Loader2 className="h-4 w-4 shrink-0 animate-spin text-[#5E6870]" />
+                      : <FileText className="h-4 w-4 shrink-0 text-[#5E6870]" />}
+                    <span className="font-medium">Download as PDF</span>
                   </button>
                 )}
-                {/* Download as PDF */}
-                <button
-                  type="button"
-                  onClick={handleDownloadAsPdf}
-                  disabled={downloadingPdf}
-                  className="flex w-full items-center gap-2.5 px-3 py-2.5 text-sm text-[#1F2933] hover:bg-[#EEF6FB] hover:text-[#287EAD] disabled:cursor-not-allowed disabled:opacity-50"
-                >
-                  {downloadingPdf
-                    ? <Loader2 className="h-4 w-4 shrink-0 animate-spin text-[#5E6870]" />
-                    : <FileText className="h-4 w-4 shrink-0 text-[#5E6870]" />}
-                  <span className="font-medium">Download as PDF</span>
-                </button>
               </div>
             )}
           </div>
