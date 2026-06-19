@@ -3,6 +3,9 @@ Bundling helpers for acting on multiple documents at once.
 
   - collect_document_files: read the (permission-checked) file bytes for a set
     of documents, preserving caller order.
+  - collect_document_files_as_pdf: like collect_document_files but converts
+    every document to its PDF representation (preview PDF for Office files,
+    original for PDFs, PIL conversion for images).
   - zip_items: package items into a single ZIP (bulk download).
   - stitch_items_to_pdf: merge items into ONE PDF, in order (Infor-style
     "stitching"). PDFs are merged directly; office files use their generated
@@ -42,6 +45,95 @@ def collect_document_files(documents, user) -> tuple[list[dict], list[dict]]:
             "content_type": content_type,
             "filename": filename,
         })
+    return items, skipped
+
+
+def collect_document_files_as_pdf(documents, user) -> tuple[list[dict], list[dict]]:
+    """
+    Like collect_document_files but returns each document as PDF bytes.
+
+    Strategy per document:
+      - Already a PDF → use original file.
+      - Office doc with a generated preview PDF → use the preview PDF.
+      - Image → convert to single-page PDF via PIL.
+      - Anything else → skip (no PDF representation available).
+
+    Each item: {"document", "raw" (PDF bytes), "content_type": "application/pdf", "filename"}.
+    Each skipped: {"id", "title", "detail"}.
+    """
+    import io
+    items: list[dict] = []
+    skipped: list[dict] = []
+
+    for doc in documents:
+        if not user_can_download_document(user, doc):
+            skipped.append({"id": str(doc.id), "title": doc.title, "detail": "Download not permitted."})
+            continue
+
+        try:
+            raw, content_type, filename = read_document_bytes(doc, version=None, use_preview=False)
+        except FileNotFoundError as exc:
+            skipped.append({"id": str(doc.id), "title": doc.title, "detail": str(exc)})
+            continue
+
+        ct = (content_type or "").lower()
+        fn = (filename or "").lower()
+
+        # Already a PDF — use as-is.
+        if ct == "application/pdf" or fn.endswith(".pdf"):
+            stem = filename.rsplit(".", 1)[0] if "." in filename else filename
+            items.append({
+                "document": doc,
+                "raw": raw,
+                "content_type": "application/pdf",
+                "filename": f"{stem}.pdf",
+            })
+            continue
+
+        # Office document: try the stored preview PDF.
+        preview = getattr(doc, "preview_pdf", None)
+        if preview:
+            try:
+                with preview.open("rb") as fh:
+                    pdf_bytes = fh.read()
+                stem = filename.rsplit(".", 1)[0] if "." in filename else filename
+                items.append({
+                    "document": doc,
+                    "raw": pdf_bytes,
+                    "content_type": "application/pdf",
+                    "filename": f"{stem}.pdf",
+                })
+                continue
+            except Exception:
+                logger.warning("collect_as_pdf: could not read preview_pdf for %s", doc.id)
+
+        # Image: convert via PIL.
+        if ct.startswith("image/") or fn.endswith((".png", ".jpg", ".jpeg", ".tif", ".tiff", ".bmp", ".gif")):
+            try:
+                from PIL import Image
+                img = Image.open(io.BytesIO(raw))
+                if img.mode not in ("RGB", "L"):
+                    img = img.convert("RGB")
+                out = io.BytesIO()
+                img.save(out, "PDF")
+                stem = filename.rsplit(".", 1)[0] if "." in filename else filename
+                items.append({
+                    "document": doc,
+                    "raw": out.getvalue(),
+                    "content_type": "application/pdf",
+                    "filename": f"{stem}.pdf",
+                })
+                continue
+            except Exception:
+                logger.warning("collect_as_pdf: could not convert image %s to PDF", doc.id)
+
+        # No PDF representation available.
+        skipped.append({
+            "id": str(doc.id),
+            "title": doc.title,
+            "detail": "No PDF version available (Office preview not yet generated, or unsupported format).",
+        })
+
     return items, skipped
 
 

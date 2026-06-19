@@ -1976,11 +1976,26 @@ echo "✓ DocVault LibreOffice integration installed."
 
     @action(detail=False, methods=["post"], url_path="download_selected")
     def download_selected(self, request):
-        """Bulk-download the selected documents as a single ZIP file."""
+        """
+        Bulk-download selected documents.
+
+        Body:
+          document_ids: list[str]  — required
+          format:       str        — "original" (default) | "pdf" | "merged_pdf"
+
+        Formats:
+          original    → ZIP of original files (existing behaviour)
+          pdf         → ZIP where every file is converted to its PDF representation
+          merged_pdf  → single merged PDF (stitched in selection order)
+        """
         from django.http import HttpResponse
-        from .bundling import collect_document_files, zip_items
+        from .bundling import collect_document_files, collect_document_files_as_pdf, zip_items, stitch_items_to_pdf
 
         doc_ids = request.data.get("document_ids") or []
+        fmt = (request.data.get("format") or "original").strip().lower()
+        if fmt not in ("original", "pdf", "merged_pdf"):
+            fmt = "original"
+
         if not isinstance(doc_ids, list) or not doc_ids:
             return Response({"detail": "No documents selected."}, status=400)
         if len(doc_ids) > 100:
@@ -1992,21 +2007,119 @@ echo "✓ DocVault LibreOffice integration installed."
         order = {str(doc_id): idx for idx, doc_id in enumerate(doc_ids)}
         documents.sort(key=lambda d: order.get(str(d.id), len(order)))
 
-        items, skipped = collect_document_files(documents, request.user)
+        if fmt == "pdf":
+            items, skipped = collect_document_files_as_pdf(documents, request.user)
+        else:
+            items, skipped = collect_document_files(documents, request.user)
+
         if not items:
             return Response(
                 {"detail": "No selected documents could be downloaded.", "skipped": skipped},
                 status=400,
             )
 
+        if fmt == "merged_pdf":
+            pdf_bytes, stitch_skipped = stitch_items_to_pdf(items)
+            skipped.extend(stitch_skipped)
+            if not pdf_bytes:
+                return Response(
+                    {"detail": "Could not produce a merged PDF. Ensure documents have PDF previews.", "skipped": skipped},
+                    status=400,
+                )
+            for item in items:
+                self.record_audit("document.downloaded", item["document"], {"bulk_action": True, "via": "merged_pdf"})
+            response = HttpResponse(pdf_bytes, content_type="application/pdf")
+            response["Content-Disposition"] = 'attachment; filename="documents-merged.pdf"'
+            response["X-Skipped-Count"] = str(len(skipped))
+            return response
+
+        # ZIP download (original or pdf-converted)
         zip_bytes = zip_items(items)
         for item in items:
-            self.record_audit("document.downloaded", item["document"], {"bulk_action": True, "via": "zip"})
+            via = "zip_pdf" if fmt == "pdf" else "zip"
+            self.record_audit("document.downloaded", item["document"], {"bulk_action": True, "via": via})
 
+        filename = "documents-pdf.zip" if fmt == "pdf" else "documents.zip"
         response = HttpResponse(zip_bytes, content_type="application/zip")
-        response["Content-Disposition"] = 'attachment; filename="documents.zip"'
+        response["Content-Disposition"] = f'attachment; filename="{filename}"'
         response["X-Skipped-Count"] = str(len(skipped))
         return response
+
+    @action(detail=True, methods=["get"], url_path="download_as_pdf")
+    def download_as_pdf(self, request, pk=None):
+        """
+        Download a single document as PDF.
+
+        Strategy:
+          - Already a PDF  → stream the original file.
+          - Office doc     → stream the generated preview PDF (if available).
+          - Image          → convert to single-page PDF via PIL.
+          - Other formats  → 400 (no PDF representation).
+        """
+        from django.http import HttpResponse
+
+        doc = self.get_object()
+        if not user_can_download_document(request.user, doc):
+            return Response({"detail": "Download not permitted."}, status=403)
+
+        mime = (doc.file_mime_type or "").lower()
+        filename = doc.file_name or "document"
+
+        # PDFs served directly.
+        if mime == "application/pdf" or filename.lower().endswith(".pdf"):
+            try:
+                from .file_streaming import read_document_bytes
+                raw, content_type, name = read_document_bytes(doc, version=None, use_preview=False)
+            except FileNotFoundError as exc:
+                return Response({"detail": str(exc)}, status=404)
+            stem = filename.rsplit(".", 1)[0] if "." in filename else filename
+            self.record_audit(AuditEvent.DOCUMENT_DOWNLOADED, doc, {"format": "pdf"})
+            response = HttpResponse(raw, content_type="application/pdf")
+            response["Content-Disposition"] = f'attachment; filename="{stem}.pdf"'
+            return response
+
+        # Office documents: use the preview PDF.
+        if doc.is_office_doc() and doc.preview_pdf:
+            try:
+                with doc.preview_pdf.open("rb") as fh:
+                    pdf_bytes = fh.read()
+                stem = filename.rsplit(".", 1)[0] if "." in filename else filename
+                self.record_audit(AuditEvent.DOCUMENT_DOWNLOADED, doc, {"format": "pdf", "via": "preview"})
+                response = HttpResponse(pdf_bytes, content_type="application/pdf")
+                response["Content-Disposition"] = f'attachment; filename="{stem}.pdf"'
+                return response
+            except Exception:
+                return Response(
+                    {"detail": "PDF preview is not ready yet. Try again after preview generation completes."},
+                    status=400,
+                )
+
+        # Images: convert via PIL.
+        if mime.startswith("image/") or filename.lower().endswith((".png", ".jpg", ".jpeg", ".tif", ".tiff", ".bmp", ".gif")):
+            try:
+                import io as _io
+                from PIL import Image
+                from .file_streaming import read_document_bytes
+                raw, _, _ = read_document_bytes(doc, version=None, use_preview=False)
+                img = Image.open(_io.BytesIO(raw))
+                if img.mode not in ("RGB", "L"):
+                    img = img.convert("RGB")
+                out = _io.BytesIO()
+                img.save(out, "PDF")
+                stem = filename.rsplit(".", 1)[0] if "." in filename else filename
+                self.record_audit(AuditEvent.DOCUMENT_DOWNLOADED, doc, {"format": "pdf", "via": "pil"})
+                response = HttpResponse(out.getvalue(), content_type="application/pdf")
+                response["Content-Disposition"] = f'attachment; filename="{stem}.pdf"'
+                return response
+            except Exception:
+                return Response({"detail": "Could not convert this image to PDF."}, status=400)
+
+        # No PDF representation.
+        return Response(
+            {"detail": "This document format cannot be converted to PDF. "
+                       "For Office documents, wait for the preview to finish generating."},
+            status=400,
+        )
 
     @action(detail=False, methods=["post"], url_path="share_selected")
     def share_selected(self, request):

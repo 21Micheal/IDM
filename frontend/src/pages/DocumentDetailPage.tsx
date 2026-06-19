@@ -17,7 +17,7 @@ import { format } from "date-fns";
 import {
   ArrowLeft, Send, MessageSquare, ShieldCheck,
   Loader2, RotateCcw, Edit2, Lock, Info, Download,
-  AlertTriangle, ScanLine, RefreshCw,
+  AlertTriangle, ScanLine, RefreshCw, ChevronDown, FileText,
   Printer, Trash2, X, Check, Link2, Plus, ExternalLink, Columns2, Eye, EyeOff, Archive
 } from "lucide-react";
 import { toast } from "@/components/ui/vault-toast";
@@ -215,6 +215,9 @@ export default function DocumentDetailPage() {
   const [relationshipType, setRelationshipType] = useState<DocumentRelationType>("references");
   const [relationshipNote, setRelationshipNote] = useState("");
   const [compareDocumentId, setCompareDocumentId] = useState<string | null>(null);
+  const [showDownloadTray, setShowDownloadTray] = useState(false);
+  const [downloadingPdf, setDownloadingPdf] = useState(false);
+  const downloadTrayRef = useRef<HTMLDivElement | null>(null);
   const printFrameRef = useRef<HTMLIFrameElement | null>(null);
 
   const pollRef = useRef<ReturnType<typeof setInterval> | null>(null);
@@ -728,7 +731,7 @@ export default function DocumentDetailPage() {
     { id: "comments", label: `Comments (${doc.comments?.length ?? 0})` },
     { id: "audit", label: "Audit trail" },
     ...(isDraftOrRejected
-      ? [{ id: "edit" as const, label: "Edit details", disabled: !canEdit }]
+      ? [{ id: "edit" as const, label: "Edit details", disabled: !canEdit || isLockedByOther }]
       : []),
   ];
 
@@ -760,6 +763,43 @@ export default function DocumentDetailPage() {
       toast.error("Could not download this document.");
     }
   };
+
+  const handleDownloadAsPdf = async () => {
+    if (!canDownload || !id) return;
+    setDownloadingPdf(true);
+    setShowDownloadTray(false);
+    try {
+      const res = await documentsAPI.downloadAsPdf(id);
+      const disposition = String(res.headers?.["content-disposition"] ?? "");
+      const match = disposition.match(/filename\*?=(?:UTF-8'')?["']?([^"';]+)["']?/i);
+      const stem = (doc?.file_name || "document").replace(/\.[^.]+$/, "");
+      const filename = match?.[1] ? decodeURIComponent(match[1]) : `${stem}.pdf`;
+      const blobUrl = URL.createObjectURL(new Blob([res.data], { type: "application/pdf" }));
+      const link = document.createElement("a");
+      link.href = blobUrl;
+      link.download = filename;
+      document.body.appendChild(link);
+      link.click();
+      link.remove();
+      window.setTimeout(() => URL.revokeObjectURL(blobUrl), 1000);
+    } catch (err: any) {
+      toast.error("Could not download as PDF. The PDF preview may not be ready yet.");
+    } finally {
+      setDownloadingPdf(false);
+    }
+  };
+
+  // Close download tray on outside click
+  useEffect(() => {
+    if (!showDownloadTray) return;
+    const handler = (e: MouseEvent) => {
+      if (downloadTrayRef.current && !downloadTrayRef.current.contains(e.target as Node)) {
+        setShowDownloadTray(false);
+      }
+    };
+    document.addEventListener("mousedown", handler);
+    return () => document.removeEventListener("mousedown", handler);
+  }, [showDownloadTray]);
 
   const getPrintableUrl = async (url: string) => {
     if (viewerLinks.signedFileUrlsEnabled) return url;
@@ -928,36 +968,77 @@ export default function DocumentDetailPage() {
 
           <div className="mx-1 hidden h-5 w-px bg-white/20 sm:block" />
 
-          {canDownload && viewerLinks.downloadHref && viewerLinks.signedFileUrlsEnabled ? (
-            <a
-              href={viewerLinks.downloadHref}
-              download
-              className={commandActionClass}
-              title="Download current document"
-            >
-              <Download className="w-3.5 h-3.5" />
-              <span>Download</span>
-            </a>
-          ) : canDownload && viewerLinks.downloadHref ? (
-            <button
-              type="button"
-              onClick={handleDownloadDocument}
-              className={commandActionClass}
-              title="Download current document"
-            >
-              <Download className="w-3.5 h-3.5" />
-              <span>Download</span>
-            </button>
-          ) : (
-            <button
-              disabled
-              className={commandActionDisabledClass}
-              title={canDownload ? "Preview not ready yet" : "Download permission required"}
-            >
-              <Download className="w-3.5 h-3.5" />
-              <span>Download</span>
-            </button>
-          )}
+          {/* Download split button with format tray */}
+          <div ref={downloadTrayRef} className="relative" id="download-tray">
+            {canDownload && viewerLinks.downloadHref ? (
+              <button
+                type="button"
+                onClick={() => setShowDownloadTray((v) => !v)}
+                className={cn(commandActionClass, showDownloadTray && "bg-white/10 text-white")}
+                title="Download options"
+                aria-haspopup="true"
+                aria-expanded={showDownloadTray}
+              >
+                <Download className="w-3.5 h-3.5" />
+                <span>Download</span>
+                <ChevronDown className={cn("w-3 h-3 transition-transform", showDownloadTray && "rotate-180")} />
+              </button>
+            ) : (
+              <button
+                disabled
+                className={commandActionDisabledClass}
+                title={canDownload ? "Preview not ready yet" : "Download permission required"}
+              >
+                <Download className="w-3.5 h-3.5" />
+                <span>Download</span>
+                <ChevronDown className="w-3 h-3" />
+              </button>
+            )}
+
+            {showDownloadTray && canDownload && viewerLinks.downloadHref && (
+              <div
+                className="absolute right-0 top-full z-50 mt-1 w-56 overflow-hidden rounded border border-[#C8CDD2] bg-white shadow-lg"
+                style={{ minWidth: "14rem" }}
+              >
+                <p className="border-b border-[#E3E7EA] bg-[#F5F7F8] px-3 py-1.5 text-[10px] font-semibold uppercase tracking-wider text-[#5E6870]">
+                  Download as
+                </p>
+                {/* Original format */}
+                {viewerLinks.signedFileUrlsEnabled ? (
+                  <a
+                    href={viewerLinks.downloadHref}
+                    download
+                    onClick={() => setShowDownloadTray(false)}
+                    className="flex w-full items-center gap-2.5 px-3 py-2.5 text-sm text-[#1F2933] hover:bg-[#EEF6FB] hover:text-[#287EAD]"
+                  >
+                    <Download className="h-4 w-4 shrink-0 text-[#5E6870]" />
+                    <span className="font-medium">Original format</span>
+                  </a>
+                ) : (
+                  <button
+                    type="button"
+                    onClick={() => { setShowDownloadTray(false); handleDownloadDocument(); }}
+                    className="flex w-full items-center gap-2.5 px-3 py-2.5 text-sm text-[#1F2933] hover:bg-[#EEF6FB] hover:text-[#287EAD]"
+                  >
+                    <Download className="h-4 w-4 shrink-0 text-[#5E6870]" />
+                    <span className="font-medium">Original format</span>
+                  </button>
+                )}
+                {/* Download as PDF */}
+                <button
+                  type="button"
+                  onClick={handleDownloadAsPdf}
+                  disabled={downloadingPdf}
+                  className="flex w-full items-center gap-2.5 px-3 py-2.5 text-sm text-[#1F2933] hover:bg-[#EEF6FB] hover:text-[#287EAD] disabled:cursor-not-allowed disabled:opacity-50"
+                >
+                  {downloadingPdf
+                    ? <Loader2 className="h-4 w-4 shrink-0 animate-spin text-[#5E6870]" />
+                    : <FileText className="h-4 w-4 shrink-0 text-[#5E6870]" />}
+                  <span className="font-medium">Download as PDF</span>
+                </button>
+              </div>
+            )}
+          </div>
 
           <button
             onClick={handlePrintDocument}
@@ -1949,12 +2030,6 @@ export default function DocumentDetailPage() {
                   <h3 className="text-sm font-bold uppercase tracking-wider text-muted-foreground">
                     Edit Properties
                   </h3>
-                  <button
-                    onClick={() => setActiveTab("properties")}
-                    className="text-sm font-semibold text-muted-foreground transition-colors hover:text-foreground hover:underline"
-                  >
-                    Cancel
-                  </button>
                 </div>
                 <Suspense fallback={<div className="p-4 text-sm text-muted-foreground">Loading editor…</div>}>
                   <MetadataEditPanel document={doc} onClose={() => setActiveTab("properties")} />

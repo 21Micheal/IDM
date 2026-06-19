@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useState, useRef } from "react";
 import statusUtils from "@/lib/status";
 import { Link, useSearchParams } from "react-router-dom";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
@@ -7,7 +7,7 @@ import {
   FileText, UploadCloud, Lock, LayoutList,
   Archive, Trash2, Loader2, CheckSquare, Square, X, CheckCircle, XCircle,
   Search as SearchIcon, SlidersHorizontal, Eye,
-  Rows3, LayoutGrid, Plus,
+  Rows3, LayoutGrid, Plus, ChevronDown,
   List, Mail, Send, Share2, Download, ArrowUp, ArrowDown,
 } from "lucide-react";
 import { format } from "date-fns";
@@ -351,6 +351,8 @@ export default function DocumentsPage({ personalOnly = false }: DocumentsPagePro
   const [shareExpiresAt, setShareExpiresAt] = useState("");
   const [shareNotifyByEmail, setShareNotifyByEmail] = useState(false);
   const [shareMessage, setShareMessage] = useState("");
+  const [showBulkDownloadTray, setShowBulkDownloadTray] = useState(false);
+  const bulkDownloadTrayRef = useRef<HTMLDivElement | null>(null);
 
   // ── View mode (table / card / thumbnails) — Infor-style layout switcher ────
   type ViewMode = "table" | "card" | "thumbnails";
@@ -575,6 +577,52 @@ export default function DocumentsPage({ personalOnly = false }: DocumentsPagePro
     },
     onError: () => toast.error("Could not download the selected documents."),
   });
+
+  const downloadSelectedAsPdfMutation = useMutation({
+    mutationFn: () => documentsAPI.downloadSelectedAsPdf(selectedIds),
+    onSuccess: (response) => {
+      const blob = new Blob([response.data], { type: "application/zip" });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement("a");
+      a.href = url;
+      a.download = "documents-pdf.zip";
+      document.body.appendChild(a);
+      a.click();
+      a.remove();
+      URL.revokeObjectURL(url);
+      toast.success(`Downloaded ${selectedIds.length} document${selectedIds.length === 1 ? "" : "s"} as PDF ZIP.`);
+    },
+    onError: () => toast.error("Could not download the selected documents as PDF."),
+  });
+
+  const downloadSelectedMergedPdfMutation = useMutation({
+    mutationFn: () => documentsAPI.downloadSelectedMergedPdf(selectedIds),
+    onSuccess: (response) => {
+      const blob = new Blob([response.data], { type: "application/pdf" });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement("a");
+      a.href = url;
+      a.download = "documents-merged.pdf";
+      document.body.appendChild(a);
+      a.click();
+      a.remove();
+      URL.revokeObjectURL(url);
+      toast.success(`Downloaded ${selectedIds.length} document${selectedIds.length === 1 ? "" : "s"} as merged PDF.`);
+    },
+    onError: () => toast.error("Could not create merged PDF. Ensure selected documents have PDF previews."),
+  });
+
+  // Close bulk-download tray on outside click
+  useEffect(() => {
+    if (!showBulkDownloadTray) return;
+    const handler = (e: MouseEvent) => {
+      if (bulkDownloadTrayRef.current && !bulkDownloadTrayRef.current.contains(e.target as Node)) {
+        setShowBulkDownloadTray(false);
+      }
+    };
+    document.addEventListener("mousedown", handler);
+    return () => document.removeEventListener("mousedown", handler);
+  }, [showBulkDownloadTray]);
 
   // Keep the stitch order aligned with the current selection while the email modal is open.
   useEffect(() => {
@@ -861,16 +909,71 @@ export default function DocumentsPage({ personalOnly = false }: DocumentsPagePro
                     <Mail className="h-4 w-4" />
                     Send to email
                   </button>
-                  <button
-                    type="button"
-                    onClick={() => downloadSelectedMutation.mutate()}
-                    disabled={downloadSelectedMutation.isPending}
-                    className="inline-flex items-center gap-2 border border-[#C8CDD2] bg-white px-3 py-1.5 text-sm font-semibold text-[#1F2933] hover:bg-[#EEF6FB] hover:text-[#287EAD] disabled:cursor-not-allowed disabled:opacity-40"
-                    title="Download selected documents as a ZIP"
-                  >
-                    {downloadSelectedMutation.isPending ? <Loader2 className="h-4 w-4 animate-spin" /> : <Download className="h-4 w-4" />}
-                    Download (ZIP)
-                  </button>
+                  {/* Bulk download split button */}
+                  <div ref={bulkDownloadTrayRef} className="relative">
+                    <button
+                      type="button"
+                      onClick={() => setShowBulkDownloadTray((v) => !v)}
+                      disabled={downloadSelectedMutation.isPending || downloadSelectedAsPdfMutation.isPending || downloadSelectedMergedPdfMutation.isPending}
+                      className="inline-flex items-center gap-2 border border-[#C8CDD2] bg-white px-3 py-1.5 text-sm font-semibold text-[#1F2933] hover:bg-[#EEF6FB] hover:text-[#287EAD] disabled:cursor-not-allowed disabled:opacity-40"
+                      title="Download selected documents"
+                      aria-haspopup="true"
+                      aria-expanded={showBulkDownloadTray}
+                    >
+                      {(downloadSelectedMutation.isPending || downloadSelectedAsPdfMutation.isPending || downloadSelectedMergedPdfMutation.isPending)
+                        ? <Loader2 className="h-4 w-4 animate-spin" />
+                        : <Download className="h-4 w-4" />}
+                      Download
+                      <ChevronDown className={cn("h-3.5 w-3.5 transition-transform", showBulkDownloadTray && "rotate-180")} />
+                    </button>
+
+                    {showBulkDownloadTray && (
+                      <div className="absolute left-0 top-full z-50 mt-1 w-60 overflow-hidden rounded border border-[#C8CDD2] bg-white shadow-lg">
+                        <p className="border-b border-[#E3E7EA] bg-[#F5F7F8] px-3 py-1.5 text-[10px] font-semibold uppercase tracking-wider text-[#5E6870]">
+                          Download as
+                        </p>
+                        {/* Original files ZIP */}
+                        <button
+                          type="button"
+                          onClick={() => { setShowBulkDownloadTray(false); downloadSelectedMutation.mutate(); }}
+                          disabled={downloadSelectedMutation.isPending}
+                          className="flex w-full items-center gap-2.5 px-3 py-2.5 text-sm text-[#1F2933] hover:bg-[#EEF6FB] hover:text-[#287EAD] disabled:opacity-50"
+                        >
+                          <Download className="h-4 w-4 shrink-0 text-[#5E6870]" />
+                          <div className="text-left">
+                            <p className="font-medium">ZIP (original files)</p>
+                            <p className="text-[11px] text-[#5E6870]">Original formats bundled in a ZIP</p>
+                          </div>
+                        </button>
+                        {/* PDF ZIP */}
+                        <button
+                          type="button"
+                          onClick={() => { setShowBulkDownloadTray(false); downloadSelectedAsPdfMutation.mutate(); }}
+                          disabled={downloadSelectedAsPdfMutation.isPending}
+                          className="flex w-full items-center gap-2.5 px-3 py-2.5 text-sm text-[#1F2933] hover:bg-[#EEF6FB] hover:text-[#287EAD] disabled:opacity-50"
+                        >
+                          <FileText className="h-4 w-4 shrink-0 text-[#5E6870]" />
+                          <div className="text-left">
+                            <p className="font-medium">ZIP (PDF versions)</p>
+                            <p className="text-[11px] text-[#5E6870]">All files converted to PDF, in a ZIP</p>
+                          </div>
+                        </button>
+                        {/* Merged PDF — only useful for multiple */}
+                        <button
+                          type="button"
+                          onClick={() => { setShowBulkDownloadTray(false); downloadSelectedMergedPdfMutation.mutate(); }}
+                          disabled={downloadSelectedMergedPdfMutation.isPending}
+                          className="flex w-full items-center gap-2.5 border-t border-[#E3E7EA] px-3 py-2.5 text-sm text-[#1F2933] hover:bg-[#EEF6FB] hover:text-[#287EAD] disabled:opacity-50"
+                        >
+                          <FileText className="h-4 w-4 shrink-0 text-[#287EAD]" />
+                          <div className="text-left">
+                            <p className="font-medium text-[#287EAD]">Merged PDF</p>
+                            <p className="text-[11px] text-[#5E6870]">All documents stitched into one PDF</p>
+                          </div>
+                        </button>
+                      </div>
+                    )}
+                  </div>
                   <button
                     type="button"
                     onClick={() => bulkMutation.mutate({ action: "archive" })}

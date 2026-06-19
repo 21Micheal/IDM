@@ -383,9 +383,21 @@ export const documentsAPI = {
     message?: string;
   }) => api.post("/documents/email_selected/", data),
 
-  /** Bulk-download selected documents as a single ZIP (returns a Blob). */
+  /** Bulk-download selected documents as a ZIP of original files (returns a Blob). */
   downloadSelected: (documentIds: string[]) =>
-    api.post("/documents/download_selected/", { document_ids: documentIds }, { responseType: "blob" }),
+    api.post("/documents/download_selected/", { document_ids: documentIds, format: "original" }, { responseType: "blob" }),
+
+  /** Bulk-download selected documents as a ZIP where each file is converted to PDF (returns a Blob). */
+  downloadSelectedAsPdf: (documentIds: string[]) =>
+    api.post("/documents/download_selected/", { document_ids: documentIds, format: "pdf" }, { responseType: "blob" }),
+
+  /** Bulk-download selected documents stitched into one merged PDF (returns a Blob). */
+  downloadSelectedMergedPdf: (documentIds: string[]) =>
+    api.post("/documents/download_selected/", { document_ids: documentIds, format: "merged_pdf" }, { responseType: "blob" }),
+
+  /** Download a single document as PDF (original if already PDF, preview for Office, PIL-converted for images). */
+  downloadAsPdf: (id: string) =>
+    api.get(`/documents/${id}/download_as_pdf/`, { responseType: "blob" }),
 
   shareSelected: (data: {
     document_ids: string[];
