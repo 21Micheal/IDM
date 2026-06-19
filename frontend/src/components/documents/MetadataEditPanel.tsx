@@ -7,6 +7,7 @@
  * document type metadata fields only.
  */
 import { useMutation, useQueryClient } from "@tanstack/react-query";
+import { useEffect, useRef, useState } from "react";
 import type { ReactNode } from "react";
 import {
   useForm,
@@ -212,6 +213,42 @@ export default function MetadataEditPanel({ document: doc, onClose }: Props) {
       toast.error(err?.response?.data?.detail ?? "Update failed"),
   });
 
+  // Latest onClose, without making the lock effect depend on it.
+  const onCloseRef = useRef(onClose);
+  onCloseRef.current = onClose;
+
+  // Editing details locks the document so it can't be edited in a desktop editor
+  // (or by another user) at the same time. Acquire on open; release on close/unmount.
+  const lockHeldRef = useRef(false);
+  useEffect(() => {
+    let cancelled = false;
+    documentsAPI.editToken(doc.id)
+      .then(() => { if (!cancelled) lockHeldRef.current = true; })
+      .catch((err: { response?: { status?: number; data?: { detail?: string } } }) => {
+        if (cancelled) return;
+        toast.error(
+          err?.response?.status === 423
+            ? (err.response.data?.detail ?? "Locked by another user.")
+            : "Could not lock the document for editing.",
+        );
+        onCloseRef.current();
+      });
+    return () => {
+      cancelled = true;
+      if (lockHeldRef.current) {
+        documentsAPI.releaseLock(doc.id).catch(() => {});
+        lockHeldRef.current = false;
+      }
+    };
+  }, [doc.id]);
+
+  // Closing with unsaved edits prompts Save / Discard before releasing the lock.
+  const [showDiscardPrompt, setShowDiscardPrompt] = useState(false);
+  const requestClose = () => {
+    if (isDirty) setShowDiscardPrompt(true);
+    else onClose();
+  };
+
   const onSubmit = (values: MetadataEditValues) => {
     const personalTags = (values.personal_tags ?? [])
       .map((tag) => tag.value.trim())
@@ -257,7 +294,7 @@ export default function MetadataEditPanel({ document: doc, onClose }: Props) {
           <Edit2 className="w-4 h-4 text-primary" />
           <h3 className="font-semibold text-foreground text-sm">Edit document details</h3>
         </div>
-        <button type="button" onClick={onClose} className="text-muted-foreground hover:text-foreground">
+        <button type="button" onClick={requestClose} className="text-muted-foreground hover:text-foreground">
           <X className="w-4 h-4" />
         </button>
       </div>
@@ -370,11 +407,40 @@ export default function MetadataEditPanel({ document: doc, onClose }: Props) {
             {mutation.isPending && <Loader2 className="w-4 h-4 animate-spin" />}
             <Save className="w-4 h-4" /> Save changes
           </button>
-          <button type="button" onClick={onClose} className="btn-secondary">
+          <button type="button" onClick={requestClose} className="btn-secondary">
             Cancel
           </button>
         </div>
       </form>
+
+      {showDiscardPrompt && (
+        <div className="fixed inset-0 z-[60] flex items-center justify-center bg-foreground/40 backdrop-blur-sm p-4">
+          <div className="w-full max-w-sm rounded-2xl border border-border bg-card p-6 shadow-elegant">
+            <h4 className="text-base font-semibold text-foreground">Unsaved changes</h4>
+            <p className="mt-2 text-sm text-muted-foreground">
+              You have unsaved metadata changes. Save them before releasing the lock, or discard them?
+            </p>
+            <div className="mt-5 flex justify-end gap-2">
+              <button
+                type="button"
+                onClick={() => { setShowDiscardPrompt(false); onClose(); }}
+                className="btn-secondary"
+              >
+                Discard
+              </button>
+              <button
+                type="button"
+                disabled={mutation.isPending}
+                onClick={() => { setShowDiscardPrompt(false); handleSubmit(onSubmit)(); }}
+                className="btn-primary"
+              >
+                {mutation.isPending && <Loader2 className="w-4 h-4 animate-spin" />}
+                Save changes
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 }
