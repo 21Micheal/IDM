@@ -19,10 +19,21 @@ class DocumentTemplate(models.Model):
         ("other", "Other"),
     ]
 
+    KIND_CHOICES = [
+        ("form", "Interactive form (data entry)"),
+        ("document", "WYSIWYG document layout"),
+    ]
+
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
     name = models.CharField(max_length=200)
     description = models.TextField(blank=True)
     type = models.CharField(max_length=20, choices=TYPE_CHOICES, default="built")
+    # Distinguishes the two "built" sub-kinds: "form" uses `sections` (interactive
+    # form filled in-app); "document" uses `design` (block layout rendered to an
+    # editable file). Ignored for type="uploaded".
+    kind = models.CharField(
+        max_length=20, choices=KIND_CHOICES, default="form", db_index=True
+    )
     document_type = models.ForeignKey(
         "documents.DocumentType",
         on_delete=models.PROTECT,
@@ -42,7 +53,11 @@ class DocumentTemplate(models.Model):
     #              "options", "columns", "placeholder", "help_text" }
     sections = models.JSONField(default=list, blank=True)
 
-    # For type="uploaded": the original DOCX/XLSX file
+    # For type="built", kind="document": the WYSIWYG designer layout.
+    # Shape: { "page", "theme", "header", "footer", "blocks": [...] }
+    design = models.JSONField(default=dict, blank=True)
+
+    # For type="uploaded": the original DOCX/XLSX/PPTX file
     file = models.FileField(
         upload_to="templates/source/", null=True, blank=True
     )

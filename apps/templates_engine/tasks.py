@@ -333,6 +333,278 @@ def generate_built_docx(template, values) -> bytes:
     return buf.getvalue()
 
 
+# ─── Document designer (WYSIWYG block layout) → DOCX ─────────────────────────
+
+_TOKEN_RE = re.compile(r"\{\{([a-zA-Z0-9_]+)\}\}")
+
+
+def _subst_tokens(text, values, keep_page=False):
+    """Replace {{key}} with values. When keep_page is True, leave {{page}} and
+    {{pages}} intact so they can become Word page-number fields."""
+    if not text:
+        return ""
+
+    def repl(m):
+        key = m.group(1)
+        if keep_page and key in ("page", "pages"):
+            return m.group(0)
+        val = values.get(key)
+        return "" if val is None else str(val)
+
+    return _TOKEN_RE.sub(repl, str(text))
+
+
+def _designer_hex_to_rgb(hexstr, default="1F2933"):
+    from docx.shared import RGBColor
+    s = (hexstr or "").lstrip("#")
+    if len(s) != 6:
+        s = default
+    try:
+        return RGBColor(int(s[0:2], 16), int(s[2:4], 16), int(s[4:6], 16))
+    except ValueError:
+        return RGBColor(0x1F, 0x29, 0x33)
+
+
+def _designer_font_family(css):
+    if not css:
+        return None
+    first = css.split(",")[0].strip().strip("'\"")
+    return first or None
+
+
+def _designer_add_page_field(paragraph, instr):
+    """Append a Word field (PAGE / NUMPAGES) to a paragraph."""
+    from docx.oxml import OxmlElement
+    from docx.oxml.ns import qn
+
+    fld = OxmlElement("w:fldSimple")
+    fld.set(qn("w:instr"), instr)
+    run = OxmlElement("w:r")
+    t = OxmlElement("w:t")
+    t.text = "1"
+    run.append(t)
+    fld.append(run)
+    paragraph._p.append(fld)
+
+
+def _designer_band_runs(paragraph, text, values):
+    """Render header/footer band text into a paragraph, turning {{page}} /
+    {{pages}} into live Word fields and substituting other tokens."""
+    rendered = _subst_tokens(text, values, keep_page=True)
+    for part in re.split(r"(\{\{page\}\}|\{\{pages\}\})", rendered):
+        if part == "{{page}}":
+            _designer_add_page_field(paragraph, "PAGE")
+        elif part == "{{pages}}":
+            _designer_add_page_field(paragraph, "NUMPAGES")
+        elif part:
+            paragraph.add_run(part)
+
+
+def _designer_clear_table_borders(table):
+    from docx.oxml import OxmlElement
+    from docx.oxml.ns import qn
+
+    tblPr = table._tbl.tblPr
+    borders = OxmlElement("w:tblBorders")
+    for edge in ("top", "left", "bottom", "right", "insideH", "insideV"):
+        el = OxmlElement(f"w:{edge}")
+        el.set(qn("w:val"), "none")
+        borders.append(el)
+    tblPr.append(borders)
+
+
+def generate_designer_docx(design, values) -> bytes:
+    """
+    Render a WYSIWYG document-designer template (block layout) to an editable
+    DOCX, substituting {{tokens}} from `values`. Faithful-but-approximate to the
+    on-screen designer; the output follows the normal Office editing lifecycle.
+    """
+    from docx import Document
+    from docx.shared import Pt, Mm, RGBColor
+    from docx.enum.text import WD_ALIGN_PARAGRAPH
+    from docx.enum.section import WD_ORIENT
+    from docx.oxml.ns import qn
+    from docx.oxml import OxmlElement
+
+    design = design or {}
+    theme = design.get("theme", {}) or {}
+    page = design.get("page", {}) or {}
+    blocks = design.get("blocks", []) or []
+
+    body_font = _designer_font_family(theme.get("fontFamily")) or "Calibri"
+    heading_font = _designer_font_family(theme.get("headingFamily")) or body_font
+    base_px = theme.get("baseFontSize") or 13
+    base_pt = max(8, round(float(base_px) * 0.75))
+    text_rgb = _designer_hex_to_rgb(theme.get("textColor"), "1F2933")
+    heading_rgb = _designer_hex_to_rgb(theme.get("headingColor"), "0F2A3A")
+    accent_rgb = _designer_hex_to_rgb(theme.get("accentColor"), "287EAD")
+
+    px_to_pt = lambda px, fallback: max(8, round(float(px) * 0.75)) if px else fallback
+
+    doc = Document()
+
+    # Base style
+    normal = doc.styles["Normal"]
+    normal.font.name = body_font
+    normal.font.size = Pt(base_pt)
+    normal.font.color.rgb = text_rgb
+
+    ALIGN = {
+        "left": WD_ALIGN_PARAGRAPH.LEFT, "center": WD_ALIGN_PARAGRAPH.CENTER,
+        "right": WD_ALIGN_PARAGRAPH.RIGHT, "justify": WD_ALIGN_PARAGRAPH.JUSTIFY,
+    }
+
+    # ── Page setup ──────────────────────────────────────────────────────────
+    PAGE_DIMS = {"A4": (210, 297), "Letter": (216, 279), "Legal": (216, 356)}
+    w_mm, h_mm = PAGE_DIMS.get(page.get("size", "A4"), (210, 297))
+    margin = page.get("margin", {}) or {}
+    for section in doc.sections:
+        if page.get("orientation") == "landscape":
+            section.orientation = WD_ORIENT.LANDSCAPE
+            section.page_width, section.page_height = Mm(h_mm), Mm(w_mm)
+        else:
+            section.page_width, section.page_height = Mm(w_mm), Mm(h_mm)
+        section.top_margin = Mm(margin.get("top", 20))
+        section.bottom_margin = Mm(margin.get("bottom", 20))
+        section.left_margin = Mm(margin.get("left", 18))
+        section.right_margin = Mm(margin.get("right", 18))
+
+    # ── Header / footer bands (left / center / right) ───────────────────────
+    def render_band(band, container):
+        if not band or not band.get("enabled"):
+            return
+        content = band.get("content", {}) or {}
+        table = container.add_table(rows=1, cols=3, width=Mm(w_mm - margin.get("left", 18) - margin.get("right", 18)))
+        _designer_clear_table_borders(table)
+        cells = table.rows[0].cells
+        for cell, (slot, align) in zip(cells, (("left", "left"), ("center", "center"), ("right", "right"))):
+            para = cell.paragraphs[0]
+            para.alignment = ALIGN[align]
+            _designer_band_runs(para, content.get(slot, ""), values)
+
+    section = doc.sections[0]
+    render_band(design.get("header"), section.header)
+    render_band(design.get("footer"), section.footer)
+
+    # ── Blocks ──────────────────────────────────────────────────────────────
+    def styled(run, *, size=None, color=None, bold=None, italic=None, underline=None, font=None):
+        if size:   run.font.size = Pt(size)
+        if color:  run.font.color.rgb = color
+        if bold is not None:      run.bold = bold
+        if italic is not None:    run.italic = italic
+        if underline is not None: run.underline = underline
+        if font:   run.font.name = font
+
+    def block_subst(s):
+        return _subst_tokens(s, values)
+
+    for b in blocks:
+        btype = b.get("type")
+        align = ALIGN.get(b.get("align", "left"), WD_ALIGN_PARAGRAPH.LEFT)
+
+        if btype == "heading":
+            level = b.get("level", 2)
+            size = px_to_pt(b.get("fontSize"), {1: 18, 2: 14, 3: 12}.get(level, 14))
+            p = doc.add_paragraph()
+            p.alignment = align
+            r = p.add_run(block_subst(b.get("text", "")))
+            styled(r, size=size, color=_designer_hex_to_rgb(b.get("color")) if b.get("color") else heading_rgb,
+                   bold=True, font=heading_font)
+
+        elif btype in ("paragraph", "quote"):
+            p = doc.add_paragraph()
+            p.alignment = align
+            r = p.add_run(block_subst(b.get("text", "")))
+            styled(r, size=px_to_pt(b.get("fontSize"), None),
+                   color=_designer_hex_to_rgb(b.get("color")) if b.get("color") else None,
+                   bold=b.get("bold"), italic=b.get("italic") or (btype == "quote"),
+                   underline=b.get("underline"))
+
+        elif btype in ("bulleted_list", "numbered_list"):
+            style = "List Bullet" if btype == "bulleted_list" else "List Number"
+            for item in b.get("items", []) or []:
+                p = doc.add_paragraph(style=style)
+                p.add_run(block_subst(item))
+
+        elif btype == "key_value":
+            pairs = b.get("pairs", []) or []
+            if pairs:
+                table = doc.add_table(rows=len(pairs), cols=2)
+                _designer_clear_table_borders(table)
+                for i, pair in enumerate(pairs):
+                    lc, vc = table.rows[i].cells
+                    lr = lc.paragraphs[0].add_run(block_subst(pair.get("label", "")))
+                    lr.bold = True
+                    vc.paragraphs[0].add_run(block_subst(pair.get("value", "")))
+
+        elif btype == "data_table":
+            cols = b.get("columns", []) or []
+            if cols:
+                rows = ([["" for _ in cols]] if b.get("bound") else (b.get("rows", []) or []))
+                table = doc.add_table(rows=1, cols=len(cols))
+                table.style = "Table Grid" if b.get("bordered", True) else "Light List"
+                for i, col in enumerate(cols):
+                    cell = table.rows[0].cells[i]
+                    run = cell.paragraphs[0].add_run(col.get("label", ""))
+                    run.bold = True
+                for row in rows:
+                    cells = table.add_row().cells
+                    for i, _col in enumerate(cols):
+                        val = row[i] if i < len(row) else ""
+                        cells[i].paragraphs[0].add_run(block_subst(val))
+
+        elif btype == "two_column":
+            table = doc.add_table(rows=1, cols=2)
+            _designer_clear_table_borders(table)
+            lc, rc = table.rows[0].cells
+            lc.paragraphs[0].add_run(block_subst(b.get("left", "")))
+            rc.paragraphs[0].add_run(block_subst(b.get("right", "")))
+
+        elif btype == "divider":
+            p = doc.add_paragraph()
+            pPr = p._p.get_or_add_pPr()
+            pBdr = OxmlElement("w:pBdr")
+            bottom = OxmlElement("w:bottom")
+            bottom.set(qn("w:val"), "single")
+            bottom.set(qn("w:sz"), "6")
+            bottom.set(qn("w:space"), "1")
+            bottom.set(qn("w:color"), "C8CDD2")
+            pBdr.append(bottom)
+            pPr.append(pBdr)
+
+        elif btype == "spacer":
+            p = doc.add_paragraph()
+            p.paragraph_format.space_after = Pt(px_to_pt(b.get("height", 24), 18))
+
+        elif btype == "page_break":
+            doc.add_page_break()
+
+        elif btype == "signature":
+            sigs = b.get("signatories", []) or []
+            if sigs:
+                table = doc.add_table(rows=1, cols=min(len(sigs), 3))
+                _designer_clear_table_borders(table)
+                for i, s in enumerate(sigs[:3]):
+                    cell = table.rows[0].cells[i]
+                    cell.paragraphs[0].add_run("\n_______________________")
+                    role = cell.add_paragraph()
+                    role.add_run(s.get("role", "")).bold = True
+                    if s.get("nameToken"):
+                        cell.add_paragraph().add_run(block_subst(s.get("nameToken")))
+                    if s.get("dateToken"):
+                        cell.add_paragraph().add_run(block_subst(s.get("dateToken")))
+
+        elif btype in ("image", "logo"):
+            # External/data-URL images aren't fetched server-side in this pass —
+            # leave a light placeholder so layout intent is preserved.
+            alt = block_subst(b.get("alt", "")) or ("Logo" if btype == "logo" else "Image")
+            doc.add_paragraph().add_run(f"[{alt}]").italic = True
+
+    buf = BytesIO()
+    doc.save(buf)
+    return buf.getvalue()
+
+
 # ─── Uploaded template fillers ───────────────────────────────────────────────
 
 def fill_docx_template(template, values) -> bytes:
@@ -395,6 +667,67 @@ def fill_xlsx_template(template, values) -> bytes:
     return buf.getvalue()
 
 
+def _replace_placeholder_in_pptx_paragraph(para, values: dict):
+    """
+    Replace {{key}} placeholders in a python-pptx paragraph, stitching text
+    across runs (PowerPoint, like Word, often splits a placeholder over several
+    runs). The merged text is written back into the first run; the rest cleared.
+    """
+    runs = para.runs
+    if not runs:
+        return
+    full_text = "".join(run.text for run in runs)
+    if "{{" not in full_text:
+        return
+
+    def replacer(match):
+        val = values.get(match.group(1))
+        return "" if val is None else str(val)
+
+    new_text = re.sub(r"\{\{([a-zA-Z0-9_]+)\}\}", replacer, full_text)
+    if new_text == full_text:
+        return
+    runs[0].text = new_text
+    for run in runs[1:]:
+        run.text = ""
+
+
+def fill_pptx_template(template, values) -> bytes:
+    """Fill an uploaded PPTX template with placeholder values."""
+    from pptx import Presentation
+
+    prs = Presentation(template.file.path)
+    for slide in prs.slides:
+        for shape in slide.shapes:
+            if shape.has_text_frame:
+                for para in shape.text_frame.paragraphs:
+                    _replace_placeholder_in_pptx_paragraph(para, values)
+            if shape.has_table:
+                for row in shape.table.rows:
+                    for cell in row.cells:
+                        for para in cell.text_frame.paragraphs:
+                            _replace_placeholder_in_pptx_paragraph(para, values)
+
+    buf = BytesIO()
+    prs.save(buf)
+    return buf.getvalue()
+
+
+def pptx_to_pdf(pptx_bytes: bytes) -> bytes:
+    """Convert PPTX to PDF using LibreOffice headless."""
+    from apps.documents.tasks import _convert_office_source_to_pdf_bytes
+
+    with tempfile.NamedTemporaryFile(suffix=".pptx", delete=False) as f:
+        f.write(pptx_bytes)
+        tmp_path = f.name
+    try:
+        return _convert_office_source_to_pdf_bytes(
+            Path(tmp_path), soffice_bin="libreoffice", timeout=60
+        )
+    finally:
+        os.unlink(tmp_path)
+
+
 def docx_to_pdf(docx_bytes: bytes) -> bytes:
     """Convert DOCX to PDF using LibreOffice headless."""
     from apps.documents.tasks import _convert_office_source_to_pdf_bytes
@@ -437,11 +770,27 @@ def generate_document_from_template_sync(template, values, fmt, title, user, typ
     import hashlib
 
     is_xlsx = template.file_name.endswith((".xlsx", ".xls")) if template.file_name else False
+    is_pptx = template.file_name.endswith((".pptx", ".ppt")) if template.file_name else False
+    kind = getattr(template, "kind", "form") or "form"
 
     # Reserve the reference up front so a `reference_number` formula can use it.
     reference_number = _generate_unique_reference(template.document_type)
 
-    if template.type == "built":
+    if template.type == "built" and kind == "document":
+        # WYSIWYG document designer: render the block layout to an editable DOCX
+        # (or PDF on request) so the result follows the normal Office lifecycle.
+        render_values = descriptors_to_names(values)
+        docx_content = generate_designer_docx(template.design, render_values)
+        if fmt == "pdf":
+            content = docx_to_pdf(docx_content)
+            filename = f"{title}.pdf"
+            content_type = "application/pdf"
+        else:
+            content = docx_content
+            filename = f"{title}.docx"
+            content_type = "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+
+    elif template.type == "built":
         # Freeze auto-fill formula values authoritatively (creator, submit time,
         # assigned reference) into the stored form values.
         values = apply_formulas(
@@ -470,6 +819,16 @@ def generate_document_from_template_sync(template, values, fmt, title, user, typ
                 content = xlsx_content
                 filename = f"{title}.xlsx"
                 content_type = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+        elif is_pptx:
+            pptx_content = fill_pptx_template(template, values)
+            if fmt == "pdf":
+                content = pptx_to_pdf(pptx_content)
+                filename = f"{title}.pdf"
+                content_type = "application/pdf"
+            else:
+                content = pptx_content
+                filename = f"{title}.pptx"
+                content_type = "application/vnd.openxmlformats-officedocument.presentationml.presentation"
         else:
             docx_content = fill_docx_template(template, values)
             if fmt == "pdf":
@@ -488,10 +847,12 @@ def generate_document_from_template_sync(template, values, fmt, title, user, typ
         "template_name": template.name,
         **_form_values_for_metadata(values),
     }
-    if template.type == "built":
-        # Built templates are interactive forms: store the schema snapshot + the
-        # entered values so the document IS the filled form and can be re-rendered
-        # / edited in-app (no external editor). The generated file is just a view.
+    if template.type == "built" and kind == "form":
+        # Built FORM templates are interactive forms: store the schema snapshot +
+        # the entered values so the document IS the filled form and can be
+        # re-rendered / edited in-app (no external editor). The generated file is
+        # just a view. Designer ("document") templates render a static editable
+        # file instead and follow the normal Office lifecycle — no form snapshot.
         doc_metadata["form"] = {
             "template_id": str(template.id),
             "sections": template.sections,

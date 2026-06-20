@@ -25,6 +25,10 @@ import clsx from "clsx";
 import { templatesAPI, documentTypesAPI, normalizeListResponse } from "@/services/api";
 import type { DocumentType } from "@/types";
 import TemplateBuilderV2 from "@/pages/TemplateBuilderV2";
+import DocumentTemplateDesigner, {
+  type DocumentTemplate as DesignerTemplate,
+  type EditableDocumentTemplate,
+} from "@/pages/TemplateDesigner";
 import TemplatePreview from "@/components/templates/TemplatePreview";
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -75,6 +79,10 @@ export interface Template {
   name: string;
   description?: string;
   type: "built" | "uploaded";
+  /** Sub-kind for type="built": interactive form vs WYSIWYG document layout. */
+  kind?: "form" | "document";
+  /** For kind="document": the designer block layout ({page,theme,header,footer,blocks}). */
+  design?: Record<string, unknown>;
   category?: string;
   tags?: string[];
   document_type?: string;
@@ -89,6 +97,45 @@ export interface Template {
   created_by?: { full_name: string };
   use_count?: number;
   sections: TemplateSection[];
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Designer (document-kind) adapters — the WYSIWYG designer uses a flat shape
+// (page/theme/header/footer/blocks at top level); the backend nests those under
+// `design` and uses document_type / kind. These translate between the two.
+// ─────────────────────────────────────────────────────────────────────────────
+
+function designerToBackend(dt: DesignerTemplate): Record<string, unknown> {
+  return {
+    id: dt.id,
+    name: dt.name,
+    description: dt.description ?? "",
+    type: "built",
+    kind: "document",
+    category: dt.category ?? "other",
+    tags: dt.tags ?? [],
+    document_type: dt.document_type_id,
+    design: { page: dt.page, theme: dt.theme, header: dt.header, footer: dt.footer, blocks: dt.blocks },
+    placeholders: dt.placeholders ?? [],
+  };
+}
+
+function backendToDesigner(row: Template): EditableDocumentTemplate {
+  const design = (row.design ?? {}) as Partial<DesignerTemplate>;
+  return {
+    id: row.id,
+    name: row.name,
+    description: row.description,
+    category: row.category,
+    tags: row.tags,
+    document_type_id: row.document_type_id || row.document_type,
+    page: design.page,
+    theme: design.theme,
+    header: design.header,
+    footer: design.footer,
+    blocks: design.blocks,
+    placeholders: row.placeholders,
+  } as EditableDocumentTemplate;
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -345,7 +392,7 @@ function UploadTemplateModal({
             )}
             onClick={() => document.getElementById("template-file-input")?.click()}
           >
-            <input id="template-file-input" type="file" accept=".docx,.xlsx,.doc,.xls" className="hidden"
+            <input id="template-file-input" type="file" accept=".docx,.doc,.xlsx,.xls,.pptx,.ppt" className="hidden"
                    onChange={(e) => { const f = e.target.files?.[0]; if (f) handleFile(f); }} />
             {file ? (
               <div className="space-y-1">
@@ -357,12 +404,12 @@ function UploadTemplateModal({
               <div className="space-y-1">
                 <FileText className="mx-auto h-8 w-8 text-[#5E6870]" />
                 <p className="text-sm font-semibold text-[#1F2933]">{editing?.file_name || "Current file"}</p>
-                <p className="text-xs text-slate-400">Drop a new DOCX/XLSX to replace it, or leave as-is</p>
+                <p className="text-xs text-slate-400">Drop a new DOCX/XLSX/PPTX to replace it, or leave as-is</p>
               </div>
             ) : (
               <div className="space-y-2">
                 <Upload className="w-8 h-8 text-slate-300 mx-auto" />
-                <p className="text-sm text-slate-500">Drop a DOCX or XLSX file here</p>
+                <p className="text-sm text-slate-500">Drop a DOCX, XLSX or PPTX file here</p>
                 <p className="text-xs text-slate-400">
                   Use <code className="bg-slate-100 px-1.5 rounded text-slate-600">{"{{field_name}}"}</code> in your document for auto-detected placeholders
                 </p>
@@ -457,11 +504,15 @@ function TemplateRow({ template, onPreview, onEdit, onDelete, onDuplicate }: {
         </button>
       </td>
       <td className="px-4 py-3 text-sm text-[#1F2933]">{typeLabel}</td>
-      <td className="px-4 py-3 text-sm text-[#1F2933]">{template.type === "uploaded" ? "Office" : "Builder"}</td>
       <td className="px-4 py-3 text-sm text-[#1F2933]">
-        {template.type === "built"
-          ? `${sectionCount} sections / ${fieldCount} fields`
-          : `${template.placeholders?.length ?? 0} placeholders`}
+        {template.type === "uploaded" ? "Office" : template.kind === "document" ? "Document" : "Builder"}
+      </td>
+      <td className="px-4 py-3 text-sm text-[#1F2933]">
+        {template.type === "uploaded"
+          ? `${template.placeholders?.length ?? 0} placeholders`
+          : template.kind === "document"
+            ? `${(template.design?.blocks as unknown[] | undefined)?.length ?? 0} blocks / ${template.placeholders?.length ?? 0} fields`
+            : `${sectionCount} sections / ${fieldCount} fields`}
       </td>
       <td className="px-4 py-3 text-sm text-[#1F2933]">{template.use_count ?? 0}</td>
       <td className="px-4 py-3 text-right">
@@ -532,7 +583,7 @@ function PreviewModal({ template, onClose }: {
 // Main TemplatesPage
 // ─────────────────────────────────────────────────────────────────────────────
 
-type PageMode = "list" | "builder";
+type PageMode = "list" | "builder" | "designer";
 
 export default function TemplatesPage() {
   const qc       = useQueryClient();
@@ -566,12 +617,14 @@ export default function TemplatesPage() {
   });
 
   const saveMutation = useMutation({
-    mutationFn: (params: { template: Template; stayOpen?: boolean }) => {
+    // Accepts either a form-builder Template or a designer (document-kind)
+    // template; the designer shape is translated to the backend's `design` form.
+    mutationFn: (params: { template: Template | DesignerTemplate; stayOpen?: boolean }) => {
       const { template } = params;
-      const payload = {
-        ...template,
-        document_type: template.document_type_id,
-      };
+      const isDesigner = (template as { kind?: string }).kind === "document";
+      const payload = isDesigner
+        ? designerToBackend(template as DesignerTemplate)
+        : { ...template, document_type: (template as Template).document_type_id };
       return template.id
         ? templatesAPI.update(template.id, payload)
         : templatesAPI.create(payload);
@@ -637,6 +690,18 @@ export default function TemplatesPage() {
     );
   }
 
+  if (mode === "designer") {
+    return (
+      <DocumentTemplateDesigner
+        initial={editTarget ? backendToDesigner(editTarget) : null}
+        documentTypes={docTypes.map((t) => ({ id: t.id, name: t.name, code: t.code }))}
+        onSave={(tpl, stayOpen) => saveMutation.mutate({ template: tpl, stayOpen })}
+        onCancel={() => { setMode("list"); setEditTarget(undefined); }}
+        isSaving={saveMutation.isPending}
+      />
+    );
+  }
+
   // ── List mode ────────────────────────────────────────────────────────────
 
   return (
@@ -653,15 +718,25 @@ export default function TemplatesPage() {
             className="inline-flex items-center gap-2 border border-white/25 px-3 py-2 text-sm font-semibold text-white hover:bg-white/10"
           >
             <Upload className="h-4 w-4" />
-            Upload Template
+            Upload Office
+          </button>
+          <button
+            type="button"
+            onClick={() => { setEditTarget(undefined); setMode("designer"); }}
+            className="inline-flex items-center gap-2 border border-white/25 px-3 py-2 text-sm font-semibold text-white hover:bg-white/10"
+            title="Design a document layout (WYSIWYG) that renders to an editable file"
+          >
+            <FileText className="h-4 w-4" />
+            New Document
           </button>
           <button
             type="button"
             onClick={() => { setEditTarget(undefined); setMode("builder"); }}
             className="inline-flex items-center gap-2 border border-white/25 px-3 py-2 text-sm font-semibold text-white hover:bg-white/10"
+            title="Build an interactive data-entry form"
           >
             <Plus className="h-4 w-4" />
-            New Template
+            New Form
           </button>
         </div>
       </div>
@@ -767,7 +842,10 @@ export default function TemplatesPage() {
                         template={template}
                         onPreview={() => setPreviewTarget(template)}
                         onEdit={() => {
-                          if (template.type === "built") {
+                          if (template.type === "built" && template.kind === "document") {
+                            setEditTarget(template);
+                            setMode("designer");
+                          } else if (template.type === "built") {
                             setEditTarget(template);
                             setMode("builder");
                           } else {

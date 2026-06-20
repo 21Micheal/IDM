@@ -57,6 +57,21 @@ def extract_placeholders(file):
                     if isinstance(cell, str):
                         found.update(pattern.findall(cell))
 
+    elif file.name.endswith((".pptx", ".ppt")):
+        from pptx import Presentation
+        prs = Presentation(file)
+        for slide in prs.slides:
+            for shape in slide.shapes:
+                if shape.has_text_frame:
+                    for para in shape.text_frame.paragraphs:
+                        # Join run text so split placeholders are still matched.
+                        found.update(pattern.findall("".join(r.text for r in para.runs)))
+                if shape.has_table:
+                    for row in shape.table.rows:
+                        for cell in row.cells:
+                            for para in cell.text_frame.paragraphs:
+                                found.update(pattern.findall("".join(r.text for r in para.runs)))
+
     return sorted(found)
 
 
@@ -137,10 +152,12 @@ class DocumentTemplateViewSet(viewsets.ModelViewSet):
             name=f"{original.name} (Copy)",
             description=original.description,
             type=original.type,
+            kind=original.kind,
             category=original.category,
             document_type=original.document_type,
             tags=original.tags,
             sections=original.sections,
+            design=original.design,
             placeholders=original.placeholders,
             file=original.file,
             file_name=original.file_name,
@@ -204,9 +221,11 @@ class DocumentTemplateViewSet(viewsets.ModelViewSet):
         if fmt not in ("pdf", "docx"):
             raise ValidationError({"output_format": "Must be 'pdf' or 'docx'."})
 
-        # Validate required fields for built templates. Auto-fill (formula) fields
-        # are skipped — the server fills them authoritatively on create.
-        if template.type == "built" and not draft_from_template:
+        # Validate required fields for built FORM templates. Designer ("document")
+        # templates have no interactive fields — their merge values are optional
+        # placeholders. Auto-fill (formula) fields are skipped — the server fills
+        # them authoritatively on create.
+        if template.type == "built" and template.kind == "form" and not draft_from_template:
             all_fields = [
                 f for section in template.sections
                 for f in section.get("fields", [])

@@ -41,6 +41,8 @@ type DocumentTemplateOption = {
   name: string;
   description?: string;
   type: "built" | "uploaded";
+  /** Sub-kind for type="built": "form" (interactive) vs "document" (designer layout). */
+  kind?: "form" | "document";
   document_type?: string;
   document_type_id?: string;
   file_name?: string;
@@ -722,6 +724,10 @@ function TemplateFillSection({ template, register, values, onChange }: {
   const placeholders = template.placeholders ?? [];
   const humanize = (key: string) =>
     key.replace(/_/g, " ").replace(/\b\w/g, (c) => c.toUpperCase());
+  // Office uploads AND designer ("document"-kind) templates are filled by
+  // supplying {{merge_field}} values; only built FORM templates render the
+  // interactive in-app form.
+  const usesPlaceholders = template.type === "uploaded" || template.kind === "document";
 
   return (
     <div className="space-y-6">
@@ -729,7 +735,7 @@ function TemplateFillSection({ template, register, values, onChange }: {
         <input {...register("title")} className="input" placeholder={template.name} />
       </InforFieldRow>
 
-      {template.type === "uploaded" ? (
+      {usesPlaceholders ? (
         placeholders.length > 0 ? (
           <div>
             <p className="mb-3 text-xs font-semibold uppercase tracking-wider text-muted-foreground">
@@ -975,7 +981,10 @@ export default function UploadPage({ scanOnly = false }: UploadPageProps) {
   const [showBuiltForm, setShowBuiltForm] = useState(false);
   useEffect(() => { setShowBuiltForm(false); }, [selectedTemplateId]);
 
-  const isBuiltTemplate = selectedTemplate?.type === "built";
+  // "Built form" templates (interactive, filled via the full-screen modal).
+  // Designer ("document"-kind) templates are filled like Office uploads instead
+  // — placeholder inputs + a rendered editable file — so they are excluded here.
+  const isBuiltTemplate = selectedTemplate?.type === "built" && selectedTemplate?.kind !== "document";
 
   const isOcrFlow      = isScanned && !isSelfUpload;
   const showManualForm = !isOcrFlow && Boolean(selectedTypeId) && scanStage === "idle";
@@ -1275,11 +1284,12 @@ export default function UploadPage({ scanOnly = false }: UploadPageProps) {
         toast.error("Please select a template");
         return;
       }
-      const isUploaded = selectedTemplate.type === "uploaded";
-
-      // Built templates are filled via the full-screen modal — guard against
-      // accidentally reaching this path without going through it.
-      if (!isUploaded) {
+      // Office uploads AND designer ("document"-kind) templates are filled here
+      // with {{merge_field}} values and rendered to an editable file. Built FORM
+      // templates are completed via the full-screen modal instead.
+      const usesPlaceholders =
+        selectedTemplate.type === "uploaded" || selectedTemplate.kind === "document";
+      if (!usesPlaceholders) {
         setShowBuiltForm(true);
         return;
       }
