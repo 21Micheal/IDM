@@ -20,6 +20,9 @@ type WorkflowTaskRecord = {
     name?: string;
     order?: number;
     status_label?: string;
+    step_type?: string;
+    notify_user_name?: string | null;
+    notify_email?: string;
   };
   assigned_to?: {
     full_name?: string;
@@ -56,9 +59,12 @@ type WorkflowTemplateStepRecord = {
   order: number;
   name: string;
   status_label?: string;
+  step_type?: string;
   assignee_type?: string;
   assignee_group_name?: string | null;
   assignee_user_name?: string | null;
+  notify_user_name?: string | null;
+  notify_email?: string;
   instructions?: string;
 };
 
@@ -183,34 +189,56 @@ function buildApproverWorkflow(
     .map((templateStep, index) => {
       const stepOrder = templateStep.order;
       const items = grouped.get(stepOrder) ?? [];
+      const isNotification = templateStep.step_type === "notification"
+        || items.some((item) => item.task.step?.step_type === "notification");
       const allHistory = items.flatMap((item) => item.history ?? []);
       const latestAction = latestActionForHistory(allHistory);
       const statuses = items.map((item) => mapTaskStatus(item.task.status, latestActionForHistory(item.history)?.action));
       const status = resolveStepStatus(statuses);
       const taskWithAssignee = items.find((item) => item.task.assigned_to) ?? items[0];
       const rawName = templateStep.name?.trim() || items[0]?.task.step?.name?.trim() || `${ordinal(index + 1)} Approver`;
-      const name = rawName || `${ordinal(index + 1)} Approver`;
+      const name = isNotification
+        ? (rawName || "Notification")
+        : (rawName || `${ordinal(index + 1)} Approver`);
       const previousName = index > 0
         ? sourceSteps[index - 1].name?.trim() || `${ordinal(index)} Approver`
         : undefined;
 
-      return {
-        id: `approver-${stepOrder}`,
-        name,
-        approver:
-          formatPerson(taskWithAssignee?.task.assigned_to) ||
-          templateStep.assignee_user_name ||
-          templateStep.assignee_group_name ||
-          formatAssigneeType(templateStep.assignee_type) ||
-          "Unassigned",
-        status,
-        statusDisplay: status === "pending" && previousName
+      const recipientLabel = templateStep.notify_user_name
+        || items[0]?.task.step?.notify_user_name
+        || templateStep.notify_email
+        || items[0]?.task.step?.notify_email
+        || "Recipient";
+
+      const statusDisplay = isNotification
+        ? (status === "completed"
+          ? (templateStep.status_label?.trim() || "Notification sent")
+          : (templateStep.status_label?.trim() || "Pending notification"))
+        : (status === "pending" && previousName
           ? `Awaiting ${previousName}`
-          : templateStep.status_label,
+          : templateStep.status_label);
+
+      return {
+        id: isNotification ? `notification-${stepOrder}` : `approver-${stepOrder}`,
+        name,
+        approver: isNotification
+          ? recipientLabel
+          : (
+            formatPerson(taskWithAssignee?.task.assigned_to) ||
+            templateStep.assignee_user_name ||
+            templateStep.assignee_group_name ||
+            formatAssigneeType(templateStep.assignee_type) ||
+            "Unassigned"
+          ),
+        status,
+        statusDisplay,
         completedAt: latestAction?.created_at || items.find((item) => item.task.acted_at)?.task.acted_at || undefined,
         comment: latestAction?.comment || items.find((item) => item.task.comment)?.task.comment || undefined,
         order: stepOrder,
-        description: templateStep.instructions || `${ordinal(index + 1)} approval step`,
+        description: isNotification
+          ? "Automated notification step"
+          : (templateStep.instructions || `${ordinal(index + 1)} approval step`),
+        stepType: isNotification ? "notification" as const : "approval" as const,
       };
     });
 
@@ -301,7 +329,7 @@ function latestActionForHistory(history: TaskHistoryRecord[]) {
   return [...history]
     .reverse()
     .find((item) =>
-      ["approved", "rejected", "returned", "held", "released"].includes(
+      ["approved", "rejected", "returned", "held", "released", "notified"].includes(
         String(item.action ?? "").toLowerCase(),
       ),
     );
@@ -343,11 +371,13 @@ function getWorkflowMeta(orderedTasks: WorkflowTaskRecord[], instance?: Workflow
 function mapTaskStatus(taskStatus?: string, action?: string): WorkflowStep["status"] {
   const normalizedAction = String(action ?? "").toLowerCase();
   const normalizedStatus = String(taskStatus ?? "").toLowerCase();
+  if (normalizedAction === "notified" || normalizedStatus === "notified") return "completed";
   if (normalizedAction === "approved" || normalizedStatus === "approved" || normalizedStatus === "completed") return "completed";
   if (normalizedAction === "rejected" || normalizedStatus === "rejected") return "rejected";
   if (normalizedAction === "returned" || normalizedStatus === "returned") return "returned";
   if (normalizedAction === "held" || normalizedStatus === "held") return "on-hold";
   if (normalizedStatus === "in_progress") return "in-progress";
+  if (normalizedStatus === "skipped") return "skipped";
   return "pending";
 }
 

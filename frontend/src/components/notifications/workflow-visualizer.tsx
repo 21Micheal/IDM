@@ -239,9 +239,10 @@ function nodeFill(node: WorkflowStep) {
 }
 
 function statusLabel(node: WorkflowStep) {
-  if (node.status === "in-progress") return "In progress";
-  if (node.status === "on-hold") return "On hold";
+  if (node.status === "in-progress") return node.statusDisplay ?? "In progress";
+  if (node.status === "on-hold") return node.statusDisplay ?? "On hold";
   if (node.status === "pending") return node.statusDisplay ?? "Awaiting approval";
+  if (node.statusDisplay) return node.statusDisplay;
   return TONE[node.status].label;
 }
 

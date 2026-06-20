@@ -11,6 +11,31 @@ import logging
 logger = logging.getLogger(__name__)
 
 
+def _email_footer(link: str = "") -> str:
+    base = settings.FRONTEND_URL.rstrip("/")
+    footer = "\n\n"
+    if link:
+        footer += f"Open it directly: {base}{link}\n"
+    footer += f"Log in to DMS: {base}\n"
+    return footer
+
+
+def _send_email_to_address(email: str, subject: str, body: str, link: str = "") -> None:
+    """Send email to a raw address (no User record required)."""
+    if not email:
+        return
+    try:
+        send_mail(
+            subject=subject,
+            message=body + _email_footer(link),
+            from_email=settings.DEFAULT_FROM_EMAIL,
+            recipient_list=[email],
+            fail_silently=False,
+        )
+    except Exception as exc:
+        logger.warning("Email send failed to %s: %s", email, exc)
+
+
 def _send_email(recipient, subject: str, body: str, link: str = "") -> None:
     """Fire-and-forget email. Logs on failure, never raises.
 
@@ -21,22 +46,58 @@ def _send_email(recipient, subject: str, body: str, link: str = "") -> None:
     if not recipient or not recipient.email:
         return
 
-    base = settings.FRONTEND_URL.rstrip("/")
-    footer = "\n\n"
-    if link:
-        footer += f"Open it directly: {base}{link}\n"
-    footer += f"Log in to DMS: {base}\n"
-
     try:
         send_mail(
             subject=subject,
-            message=body + footer,
+            message=body + _email_footer(link),
             from_email=settings.DEFAULT_FROM_EMAIL,
             recipient_list=[recipient.email],
             fail_silently=False,
         )
     except Exception as exc:
         logger.warning("Email send failed to %s: %s", recipient.email, exc)
+
+
+def _render_email_template(template: str, **ctx) -> str:
+    """Substitute {placeholder} tokens in a custom email subject or body."""
+    if not template:
+        return template
+    try:
+        return template.format(**ctx)
+    except (KeyError, IndexError, ValueError) as exc:
+        logger.warning("Email template render failed: %s", exc)
+        return template
+
+
+def _render_approver_email_template(template: str, **ctx) -> str:
+    return _render_email_template(template, **ctx)
+
+
+def _template_email_parts(workflow_template, key: str) -> tuple[str | None, str | None]:
+    """Return (subject, body) overrides for a template event key, or (None, None)."""
+    if not workflow_template:
+        return None, None
+    entry = (getattr(workflow_template, "email_templates", None) or {}).get(key) or {}
+    subject = (entry.get("subject") or "").strip() or None
+    body = (entry.get("body") or "").strip() or None
+    return subject, body
+
+
+def _resolve_email(
+    workflow_template,
+    key: str,
+    default_subject: str,
+    default_body: str,
+    **ctx,
+) -> tuple[str, str]:
+    custom_subject, custom_body = _template_email_parts(workflow_template, key)
+    subject = _render_email_template(custom_subject, **ctx) if custom_subject else default_subject
+    body = _render_email_template(custom_body, **ctx) if custom_body else default_body
+    return subject, body
+
+
+def _document_url(document_id) -> str:
+    return f"{settings.FRONTEND_URL.rstrip('/')}/documents/{document_id}"
 
 
 def _create_notification(recipient, message: str, link: str = "", notification_type: str = "task_assigned") -> None:
@@ -82,7 +143,11 @@ def _create_once(recipient, message: str, link: str = "", notification_type: str
 # ── Task assigned ─────────────────────────────────────────────────────────────
 
 @shared_task(queue="notifications")
-def notify_task_assigned(task_id: str) -> None:
+def notify_task_assigned(
+    task_id: str,
+    custom_subject: str | None = None,
+    custom_body: str | None = None,
+) -> None:
     from apps.workflows.models import WorkflowTask
     try:
         task = WorkflowTask.objects.select_related(
@@ -102,10 +167,24 @@ def notify_task_assigned(task_id: str) -> None:
     )
 
     _create_notification(task.assigned_to, message, link, "task_assigned")
-    _send_email(
-        task.assigned_to,
-        subject=f"DMS — Approval required: {doc.reference_number}",
-        body=(
+
+    base = settings.FRONTEND_URL.rstrip("/")
+    document_url = f"{base}{link}"
+    approver_name = task.assigned_to.get_full_name() or task.assigned_to.email
+    ctx = dict(
+        approver_name=approver_name,
+        document_title=doc.title,
+        document_ref=doc.reference_number,
+        step_name=task.step.name,
+        instructions=task.step.instructions or "None",
+        document_url=document_url,
+    )
+
+    if custom_subject or custom_body:
+        subject = _render_approver_email_template(custom_subject or "", **ctx) or (
+            f"DMS — Approval required: {doc.reference_number}"
+        )
+        body = _render_approver_email_template(custom_body or "", **ctx) or (
             f"Hello {task.assigned_to.first_name},\n\n"
             f"A document requires your approval.\n\n"
             f"  Document: {doc.title}\n"
@@ -114,8 +193,65 @@ def notify_task_assigned(task_id: str) -> None:
             f"  Instructions: {task.step.instructions or 'None'}\n"
             + (f"  Due by: {task.due_at.strftime('%d %b %Y %H:%M UTC')}\n" if task.due_at else "")
             + f"\nPlease log in to DMS to action this request.\n"
-        ),
-        link=link,
+        )
+    else:
+        subject = f"DMS — Approval required: {doc.reference_number}"
+        body = (
+            f"Hello {task.assigned_to.first_name},\n\n"
+            f"A document requires your approval.\n\n"
+            f"  Document: {doc.title}\n"
+            f"  Reference: {doc.reference_number}\n"
+            f"  Step: {task.step.name}\n"
+            f"  Instructions: {task.step.instructions or 'None'}\n"
+            + (f"  Due by: {task.due_at.strftime('%d %b %Y %H:%M UTC')}\n" if task.due_at else "")
+            + f"\nPlease log in to DMS to action this request.\n"
+        )
+
+    _send_email(task.assigned_to, subject=subject, body=body, link=link)
+
+
+@shared_task(queue="notifications")
+def send_workflow_notification_step_email(
+    recipient_user_id: str | None,
+    recipient_email: str | None,
+    subject: str,
+    message: str,
+    document_id: str,
+    step_name: str = "",
+) -> None:
+    """
+    Send the email configured on a workflow notification step.
+    System users also receive an in-app notification; external addresses get email only.
+    """
+    from django.contrib.auth import get_user_model
+
+    link = f"/documents/{document_id}"
+    in_app_message = (
+        f"Workflow notification: '{step_name}'"
+        if step_name
+        else "Workflow notification"
+    )
+
+    if recipient_user_id:
+        User = get_user_model()
+        try:
+            recipient = User.objects.get(id=recipient_user_id, is_active=True)
+        except User.DoesNotExist:
+            logger.warning(
+                "Notification step recipient user %s not found", recipient_user_id
+            )
+            return
+        _create_notification(recipient, in_app_message, link, "workflow_action")
+        _send_email(recipient, subject=subject, body=message, link=link)
+        return
+
+    if recipient_email:
+        _send_email_to_address(recipient_email, subject=subject, body=message, link=link)
+        return
+
+    logger.warning(
+        "Notification step email skipped for document %s: no recipient configured",
+        document_id,
     )
 
 
@@ -126,30 +262,39 @@ def notify_workflow_complete(instance_id: str, outcome: str) -> None:
     from apps.workflows.models import WorkflowInstance
     try:
         instance = WorkflowInstance.objects.select_related(
-            "document", "started_by"
+            "document", "started_by", "template"
         ).get(id=instance_id)
     except WorkflowInstance.DoesNotExist:
         return
 
-    doc    = instance.document
-    verb   = "approved" if outcome == "approved" else "rejected"
-    link   = f"/documents/{doc.id}"
-    msg    = f"Your document '{doc.title}' ({doc.reference_number}) has been {verb}."
-
-    _create_notification(instance.started_by, msg, link, "workflow_complete")
-    _send_email(
-        instance.started_by,
-        subject=f"DMS — Document {verb}: {doc.reference_number}",
-        body=(
-            f"Hello {instance.started_by.first_name},\n\n"
-            f"Your document has been {verb}.\n\n"
-            f"  Document: {doc.title}\n"
-            f"  Reference: {doc.reference_number}\n"
-            f"  Status: {verb.capitalize()}\n\n"
-            f"Log in to DMS to view the document.\n"
-        ),
-        link=link,
+    doc      = instance.document
+    verb     = "approved" if outcome == "approved" else "rejected"
+    link     = f"/documents/{doc.id}"
+    msg      = f"Your document '{doc.title}' ({doc.reference_number}) has been {verb}."
+    recipient = instance.started_by
+    ctx = dict(
+        recipient_name=recipient.first_name,
+        document_title=doc.title,
+        document_ref=doc.reference_number,
+        outcome=verb,
+        outcome_label=verb.capitalize(),
+        document_url=_document_url(doc.id),
     )
+    default_subject = f"DMS — Document {verb}: {doc.reference_number}"
+    default_body = (
+        f"Hello {recipient.first_name},\n\n"
+        f"Your document has been {verb}.\n\n"
+        f"  Document: {doc.title}\n"
+        f"  Reference: {doc.reference_number}\n"
+        f"  Status: {verb.capitalize()}\n\n"
+        f"Log in to DMS to view the document.\n"
+    )
+    subject, body = _resolve_email(
+        instance.template, "workflow_complete", default_subject, default_body, **ctx
+    )
+
+    _create_notification(recipient, msg, link, "workflow_complete")
+    _send_email(recipient, subject=subject, body=body, link=link)
 
 
 # ── Document returned for review ──────────────────────────────────────────────
@@ -327,6 +472,7 @@ def notify_hold_ending(task_id: str) -> None:
         task = WorkflowTask.objects.select_related(
             "assigned_to", "step",
             "workflow_instance__document",
+            "workflow_instance__template",
         ).get(id=task_id)
     except WorkflowTask.DoesNotExist:
         return
@@ -336,26 +482,37 @@ def notify_hold_ending(task_id: str) -> None:
 
     doc  = task.workflow_instance.document
     link = f"/documents/{doc.id}"
+    hold_ends = task.held_until.strftime("%d %b %Y %H:%M UTC")
     msg = (
         f"Hold ending soon: '{doc.title}' ({doc.reference_number}) "
-        f"is scheduled to leave hold at {task.held_until.strftime('%d %b %Y %H:%M UTC')}."
+        f"is scheduled to leave hold at {hold_ends}."
     )
     created = _create_once(task.assigned_to, msg, link, "hold_ending")
     if created:
-        _send_email(
-            task.assigned_to,
-            subject=f"DMS — Hold ending soon: {doc.reference_number}",
-            body=(
-                f"Hello {task.assigned_to.first_name},\n\n"
-                f"A hold you scheduled is approaching its end.\n\n"
-                f"  Document: {doc.title}\n"
-                f"  Reference: {doc.reference_number}\n"
-                f"  Step: {task.step.name}\n"
-                f"  Hold ends: {task.held_until.strftime('%d %b %Y %H:%M UTC')}\n\n"
-                f"Please log in to DMS if you need to action or extend the task.\n"
-            ),
-            link=link,
+        approver = task.assigned_to
+        ctx = dict(
+            approver_name=approver.first_name,
+            document_title=doc.title,
+            document_ref=doc.reference_number,
+            step_name=task.step.name,
+            hold_ends_at=hold_ends,
+            document_url=_document_url(doc.id),
         )
+        default_subject = f"DMS — Hold ending soon: {doc.reference_number}"
+        default_body = (
+            f"Hello {approver.first_name},\n\n"
+            f"A hold you scheduled is approaching its end.\n\n"
+            f"  Document: {doc.title}\n"
+            f"  Reference: {doc.reference_number}\n"
+            f"  Step: {task.step.name}\n"
+            f"  Hold ends: {hold_ends}\n\n"
+            f"Please log in to DMS if you need to action or extend the task.\n"
+        )
+        subject, body = _resolve_email(
+            task.workflow_instance.template, "hold_ending",
+            default_subject, default_body, **ctx,
+        )
+        _send_email(approver, subject=subject, body=body, link=link)
 
 
 @shared_task(queue="notifications")
@@ -366,6 +523,7 @@ def notify_hold_auto_released(task_id: str) -> None:
         task = WorkflowTask.objects.select_related(
             "assigned_to", "step",
             "workflow_instance__document",
+            "workflow_instance__template",
         ).get(id=task_id)
     except WorkflowTask.DoesNotExist:
         return
@@ -381,20 +539,28 @@ def notify_hold_auto_released(task_id: str) -> None:
         f"Your hold on '{doc.title}' ({doc.reference_number}) "
         f"has expired. The document is awaiting your approval."
     )
-    _create_notification(approver, msg, link, "hold_expired")
-    _send_email(
-        approver,
-        subject=f"DMS — Hold expired, action required: {doc.reference_number}",
-        body=(
-            f"Hello {approver.first_name},\n\n"
-            f"The hold period you set on a document has expired.\n\n"
-            f"  Document: {doc.title}\n"
-            f"  Reference: {doc.reference_number}\n"
-            f"  Step: {task.step.name}\n\n"
-            f"Please log in to DMS to action this approval.\n"
-        ),
-        link=link,
+    ctx = dict(
+        approver_name=approver.first_name,
+        document_title=doc.title,
+        document_ref=doc.reference_number,
+        step_name=task.step.name,
+        document_url=_document_url(doc.id),
     )
+    default_subject = f"DMS — Hold expired, action required: {doc.reference_number}"
+    default_body = (
+        f"Hello {approver.first_name},\n\n"
+        f"The hold period you set on a document has expired.\n\n"
+        f"  Document: {doc.title}\n"
+        f"  Reference: {doc.reference_number}\n"
+        f"  Step: {task.step.name}\n\n"
+        f"Please log in to DMS to action this approval.\n"
+    )
+    subject, body = _resolve_email(
+        task.workflow_instance.template, "hold_expired",
+        default_subject, default_body, **ctx,
+    )
+    _create_notification(approver, msg, link, "hold_expired")
+    _send_email(approver, subject=subject, body=body, link=link)
 
 
 # ── Task overdue (SLA breach) ─────────────────────────────────────────────────
@@ -405,7 +571,9 @@ def notify_task_sla_warning(task_id: str) -> None:
     from apps.workflows.models import WorkflowTask
     try:
         task = WorkflowTask.objects.select_related(
-            "assigned_to", "step", "workflow_instance__document"
+            "assigned_to", "step",
+            "workflow_instance__document",
+            "workflow_instance__template",
         ).get(id=task_id)
     except WorkflowTask.DoesNotExist:
         return
@@ -415,26 +583,37 @@ def notify_task_sla_warning(task_id: str) -> None:
 
     doc  = task.workflow_instance.document
     link = f"/documents/{doc.id}"
+    due_at = task.due_at.strftime("%d %b %Y %H:%M UTC")
     msg = (
         f"SLA approaching: Your approval task for '{doc.title}' "
-        f"({doc.reference_number}) is due by {task.due_at.strftime('%d %b %Y %H:%M UTC')}."
+        f"({doc.reference_number}) is due by {due_at}."
     )
     created = _create_once(task.assigned_to, msg, link, "task_sla_warning")
     if created:
-        _send_email(
-            task.assigned_to,
-            subject=f"DMS — SLA approaching: {doc.reference_number}",
-            body=(
-                f"Hello {task.assigned_to.first_name},\n\n"
-                f"An approval task is approaching its SLA deadline.\n\n"
-                f"  Document: {doc.title}\n"
-                f"  Reference: {doc.reference_number}\n"
-                f"  Step: {task.step.name}\n"
-                f"  Due by: {task.due_at.strftime('%d %b %Y %H:%M UTC')}\n\n"
-                f"Please log in to DMS to action this request.\n"
-            ),
-            link=link,
+        approver = task.assigned_to
+        ctx = dict(
+            approver_name=approver.first_name,
+            document_title=doc.title,
+            document_ref=doc.reference_number,
+            step_name=task.step.name,
+            due_at=due_at,
+            document_url=_document_url(doc.id),
         )
+        default_subject = f"DMS — SLA approaching: {doc.reference_number}"
+        default_body = (
+            f"Hello {approver.first_name},\n\n"
+            f"An approval task is approaching its SLA deadline.\n\n"
+            f"  Document: {doc.title}\n"
+            f"  Reference: {doc.reference_number}\n"
+            f"  Step: {task.step.name}\n"
+            f"  Due by: {due_at}\n\n"
+            f"Please log in to DMS to action this request.\n"
+        )
+        subject, body = _resolve_email(
+            task.workflow_instance.template, "sla_warning",
+            default_subject, default_body, **ctx,
+        )
+        _send_email(approver, subject=subject, body=body, link=link)
 
 
 @shared_task(queue="notifications")
@@ -443,7 +622,9 @@ def notify_task_overdue(task_id: str) -> None:
     from apps.workflows.models import WorkflowTask
     try:
         task = WorkflowTask.objects.select_related(
-            "assigned_to", "step", "workflow_instance__document"
+            "assigned_to", "step",
+            "workflow_instance__document",
+            "workflow_instance__template",
         ).get(id=task_id)
     except WorkflowTask.DoesNotExist:
         return
@@ -457,6 +638,7 @@ def notify_task_overdue(task_id: str) -> None:
 
     doc  = task.workflow_instance.document
     link = f"/documents/{doc.id}"
+    due_at = task.due_at.strftime("%d %b %Y %H:%M UTC") if task.due_at else "N/A"
 
     msg  = (
         f"OVERDUE: Your approval task for '{doc.title}' "
@@ -464,20 +646,30 @@ def notify_task_overdue(task_id: str) -> None:
     )
     created = _create_once(task.assigned_to, msg, link, "task_overdue")
     if created:
-        _send_email(
-            task.assigned_to,
-            subject=f"DMS — SLA overdue: {doc.reference_number}",
-            body=(
-                f"Hello {task.assigned_to.first_name},\n\n"
-                f"An approval task has passed its SLA deadline and requires urgent action.\n\n"
-                f"  Document: {doc.title}\n"
-                f"  Reference: {doc.reference_number}\n"
-                f"  Step: {task.step.name}\n"
-                f"  Was due: {task.due_at.strftime('%d %b %Y %H:%M UTC') if task.due_at else 'N/A'}\n\n"
-                f"Please log in to DMS immediately.\n"
-            ),
-            link=link,
+        approver = task.assigned_to
+        ctx = dict(
+            approver_name=approver.first_name,
+            document_title=doc.title,
+            document_ref=doc.reference_number,
+            step_name=task.step.name,
+            due_at=due_at,
+            document_url=_document_url(doc.id),
         )
+        default_subject = f"DMS — SLA overdue: {doc.reference_number}"
+        default_body = (
+            f"Hello {approver.first_name},\n\n"
+            f"An approval task has passed its SLA deadline and requires urgent action.\n\n"
+            f"  Document: {doc.title}\n"
+            f"  Reference: {doc.reference_number}\n"
+            f"  Step: {task.step.name}\n"
+            f"  Was due: {due_at}\n\n"
+            f"Please log in to DMS immediately.\n"
+        )
+        subject, body = _resolve_email(
+            task.workflow_instance.template, "sla_overdue",
+            default_subject, default_body, **ctx,
+        )
+        _send_email(approver, subject=subject, body=body, link=link)
 
 
 # ── Clear resolved task notifications ──────────────────────────────────────────
@@ -550,6 +742,7 @@ def notify_workflow_action(action_id: str, user_ids: list[str] = None) -> None:
             "task__step",
             "task__assigned_to",
             "task__workflow_instance__document__uploaded_by",
+            "task__workflow_instance__template",
             "actor",
         ).get(id=action_id)
     except WorkflowTaskAction.DoesNotExist:
@@ -558,42 +751,55 @@ def notify_workflow_action(action_id: str, user_ids: list[str] = None) -> None:
     task = action.task
     doc = task.workflow_instance.document
     uploader = doc.uploaded_by
-    approver = task.assigned_to
+    if not uploader:
+        logger.warning(
+            "notify_workflow_action: document %s has no uploader; skipping",
+            doc.pk,
+        )
+        return
     actor = action.actor
     link = f"/documents/{doc.id}"
+    workflow_template = task.workflow_instance.template
+    actor_name = actor.get_full_name() if actor else "System"
+    comment_line = f"  Comment: {action.comment}\n" if action.comment else ""
+    reason_line = f"  Reason: {action.comment}\n" if action.comment else ""
     
     # Determine action-specific messaging
     action_type = action.action
+    template_key = "action_other"
     
     if action_type == "approved":
-        msg_uploader = f"✓ Approved: Your document '{doc.title}' ({doc.reference_number}) has been approved by {actor.get_full_name()}."
-        subject_uploader = f"DMS — Document approved: {doc.reference_number}"
-        body_uploader = (
+        template_key = "action_approved"
+        msg_uploader = f"✓ Approved: Your document '{doc.title}' ({doc.reference_number}) has been approved by {actor_name}."
+        default_subject = f"DMS — Document approved: {doc.reference_number}"
+        default_body = (
             f"Hello {uploader.first_name},\n\n"
             f"Your document has been approved.\n\n"
             f"  Document: {doc.title}\n"
             f"  Reference: {doc.reference_number}\n"
-            f"  Approved by: {actor.get_full_name()}\n"
+            f"  Approved by: {actor_name}\n"
             f"  Step: {task.step.name}\n"
-            + (f"  Comment: {action.comment}\n" if action.comment else "")
+            + comment_line
             + f"\nLog in to DMS to view the document status.\n"
         )
     
     elif action_type == "rejected":
-        msg_uploader = f"✗ Rejected: Your document '{doc.title}' ({doc.reference_number}) has been rejected by {actor.get_full_name()}."
-        subject_uploader = f"DMS — Document rejected: {doc.reference_number}"
-        body_uploader = (
+        template_key = "action_rejected"
+        msg_uploader = f"✗ Rejected: Your document '{doc.title}' ({doc.reference_number}) has been rejected by {actor_name}."
+        default_subject = f"DMS — Document rejected: {doc.reference_number}"
+        default_body = (
             f"Hello {uploader.first_name},\n\n"
             f"Your document has been rejected and requires revision.\n\n"
             f"  Document: {doc.title}\n"
             f"  Reference: {doc.reference_number}\n"
-            f"  Rejected by: {actor.get_full_name()}\n"
+            f"  Rejected by: {actor_name}\n"
             f"  Step: {task.step.name}\n"
-            + (f"  Reason: {action.comment}\n" if action.comment else "")
+            + reason_line
             + f"\nPlease make the required changes and resubmit.\n"
         )
     
     elif action_type == "returned":
+        template_key = "action_returned"
         return_destination = {
             "previous_step": "the previous approver",
             "uploader": "you for further review",
@@ -601,59 +807,88 @@ def notify_workflow_action(action_id: str, user_ids: list[str] = None) -> None:
         }.get(action.return_to, "for review")
         
         msg_uploader = f"↩ Returned: Your document '{doc.title}' ({doc.reference_number}) has been returned {return_destination}."
-        subject_uploader = f"DMS — Document returned for review: {doc.reference_number}"
-        body_uploader = (
+        default_subject = f"DMS — Document returned for review: {doc.reference_number}"
+        default_body = (
             f"Hello {uploader.first_name},\n\n"
             f"Your document has been returned and requires your attention.\n\n"
             f"  Document: {doc.title}\n"
             f"  Reference: {doc.reference_number}\n"
-            f"  Returned by: {actor.get_full_name()}\n"
+            f"  Returned by: {actor_name}\n"
             f"  Returned to: {return_destination}\n"
-            + (f"  Reason: {action.comment}\n" if action.comment else "")
+            + reason_line
             + f"\nPlease make the required changes and resubmit for approval.\n"
         )
     
     elif action_type == "held":
+        template_key = "action_held"
         hold_duration = f"{action.hold_hours} hour{'s' if action.hold_hours != 1 else ''}" if action.hold_hours else "indefinitely"
         msg_uploader = f"⏸ On Hold: Your document '{doc.title}' ({doc.reference_number}) has been placed on hold for {hold_duration}."
-        subject_uploader = f"DMS — Document on hold: {doc.reference_number}"
-        body_uploader = (
+        default_subject = f"DMS — Document on hold: {doc.reference_number}"
+        default_body = (
             f"Hello {uploader.first_name},\n\n"
             f"Your document has been placed on hold during the approval process.\n\n"
             f"  Document: {doc.title}\n"
             f"  Reference: {doc.reference_number}\n"
-            f"  Held by: {actor.get_full_name()}\n"
+            f"  Held by: {actor_name}\n"
             f"  Duration: {hold_duration}\n"
-            + (f"  Reason: {action.comment}\n" if action.comment else "")
+            + reason_line
             + f"\nThe document will resume processing after the hold period, or when manually released.\n"
         )
     
     elif action_type == "released":
+        template_key = "action_released"
         msg_uploader = f"▶ Released: The hold on your document '{doc.title}' ({doc.reference_number}) has been released."
-        subject_uploader = f"DMS — Hold released: {doc.reference_number}"
-        body_uploader = (
+        default_subject = f"DMS — Hold released: {doc.reference_number}"
+        default_body = (
             f"Hello {uploader.first_name},\n\n"
             f"The hold on your document has been released.\n\n"
             f"  Document: {doc.title}\n"
             f"  Reference: {doc.reference_number}\n"
-            f"  Released by: {actor.get_full_name()}\n"
+            f"  Released by: {actor_name}\n"
             f"  Step: {task.step.name}\n\n"
             f"The document is now back in the approval queue.\n"
         )
     
     else:
-        # Generic fallback for unknown action types
-        msg_uploader = f"Document '{doc.title}' ({doc.reference_number}): {action.get_action_display()} by {actor.get_full_name()}."
-        subject_uploader = f"DMS — Document action: {doc.reference_number}"
-        body_uploader = (
+        msg_uploader = f"Document '{doc.title}' ({doc.reference_number}): {action.get_action_display()} by {actor_name}."
+        default_subject = f"DMS — Document action: {doc.reference_number}"
+        default_body = (
             f"Hello {uploader.first_name},\n\n"
             f"An action has been taken on your document.\n\n"
             f"  Document: {doc.title}\n"
             f"  Reference: {doc.reference_number}\n"
             f"  Action: {action.get_action_display()}\n"
-            f"  By: {actor.get_full_name()}\n\n"
+            f"  By: {actor_name}\n\n"
             f"Log in to DMS to view the document status.\n"
         )
+
+    return_destination = {
+        "previous_step": "the previous approver",
+        "uploader": "you for further review",
+        "same_step": "another approver in this step",
+    }.get(action.return_to, "for review")
+    hold_duration = (
+        f"{action.hold_hours} hour{'s' if action.hold_hours != 1 else ''}"
+        if action.hold_hours else "indefinitely"
+    )
+    ctx = dict(
+        uploader_name=uploader.first_name,
+        document_title=doc.title,
+        document_ref=doc.reference_number,
+        actor_name=actor_name,
+        step_name=task.step.name,
+        comment=action.comment or "",
+        return_destination=return_destination,
+        hold_duration=hold_duration,
+        document_url=_document_url(doc.id),
+    )
+    if template_key != "action_other":
+        subject_uploader, body_uploader = _resolve_email(
+            workflow_template, template_key,
+            default_subject, default_body, **ctx,
+        )
+    else:
+        subject_uploader, body_uploader = default_subject, default_body
     
     # Notify the uploader
     _create_notification(uploader, msg_uploader, link, "workflow_action")

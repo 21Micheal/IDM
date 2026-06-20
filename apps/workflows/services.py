@@ -1,24 +1,23 @@
 """
 apps/workflows/services.py
 
+Changes in this version:
+  - _activate_step now detects step_type == "notification":
+      • Resolves the recipient (notify_user or notify_email).
+      • Fires the configured notification email immediately via
+        _send_notification_step_email() — a thin wrapper you wire into your
+        existing email/notification infrastructure.
+      • Creates a WorkflowTask with status="notified" (no human action needed).
+      • Records a WorkflowTaskAction(action="notified", actor=None).
+      • Auto-advances to the next step without waiting for any human.
+  - _activate_step for approval steps now passes the step's custom email
+    fields (approver_email_subject / approver_email_body) through to the
+    notify_task_assigned Celery task so the notifications app can render them.
+
 New methods:
   WorkflowService.return_for_review(task, actor, comment)
-    - Marks task as "returned"
-    - If step.order > 1 → creates a new task for the previous step
-    - If step.order == 1 → cancels the instance, document goes back to "draft"
-      and the uploader must resubmit (which starts fresh from step 1)
-    - Fires notify_document_returned
-
   WorkflowService.hold(task, actor, comment, hold_hours)
-    - Marks task as "held", stores held_until datetime
-    - Document status → "On Hold"
-    - Schedules release_hold Celery task at held_until
-    - Fires notify_document_held
-
   WorkflowService.release_hold(task, actor, *, auto=False)
-    - Restores task to "in_progress"
-    - Document status → step.status_label
-    - Fires notify_hold_released (unless auto=True, which is silent)
 """
 import logging
 
@@ -51,22 +50,18 @@ class WorkflowError(Exception):
     """Domain rule violation — maps to HTTP 400 in views."""
 
 
+def _queue_after_commit(fn) -> None:
+    """Run *fn* only after the current DB transaction commits (safe for Celery .delay)."""
+    transaction.on_commit(fn)
+
+
 class WorkflowService:
 
     # ── Rule / template resolution ─────────────────────────────────────────
 
     @staticmethod
     def _resolve_routing(document):
-        """Pick the (rule, template) for a document by amount threshold.
-
-        Currency handling: amounts in different currencies aren't comparable, so
-        currency only acts as a discriminator when a document type actually has
-        rules in more than one currency. For the common single-currency setup
-        (every rule shares one currency), routing is purely amount-based — so a
-        rule's currency that doesn't happen to match the document's (e.g. rules
-        left at the default USD while documents are KES) no longer silently
-        defeats threshold routing and forces the primary fallback.
-        """
+        """Pick the (rule, template) for a document by amount threshold."""
         doc_type = document.document_type
         amount   = document.amount or 0
         currency = (document.currency or "").upper()
@@ -85,8 +80,6 @@ class WorkflowService:
             (c or "").upper() for c in type_rules.values_list("currency", flat=True)
         }
         candidates = type_rules.filter(amount_q)
-        # Only enforce currency when the type genuinely mixes currencies AND the
-        # document declares one; otherwise match on amount alone.
         if len(rule_currencies) > 1 and currency:
             candidates = candidates.filter(currency=currency)
 
@@ -180,7 +173,6 @@ class WorkflowService:
             changes={"task_id": str(task.id), "action": action.action, "comment": action.comment},
         )
 
-        # Notify stakeholders of approval
         WorkflowService._notify_action(action, doc)
 
         if step.assignee_type == "group_all" and WorkflowService._has_active_step_tasks(instance, step.order):
@@ -201,7 +193,7 @@ class WorkflowService:
         task.save(update_fields=["status", "comment", "acted_at"])
 
         action = WorkflowTaskAction.objects.create(task=task, actor=actor, action="rejected", comment=comment)
-        
+
         instance = task.workflow_instance
         doc      = instance.document
 
@@ -214,9 +206,7 @@ class WorkflowService:
             changes={"task_id": str(task.id), "action": action.action, "comment": action.comment},
         )
 
-        # Notify stakeholders of rejection
         WorkflowService._notify_action(action, doc)
-        
         WorkflowService._complete(instance, "rejected")
 
     # ── Return for review ──────────────────────────────────────────────────
@@ -226,17 +216,6 @@ class WorkflowService:
     def return_for_review(
         task: WorkflowTask, actor, comment: str, return_to: str = "uploader"
     ) -> None:
-        """
-        Return the document for review with choice of destination.
-        
-        return_to choices:
-        - 'previous_step': Return to the previous approver
-        - 'uploader': Return to document uploader to resubmit (default)
-        - 'same_step': Reassign to another user in the same step
-        
-        If current step order > 1 AND return_to='previous_step' → step back.
-        Otherwise, keep the workflow active so resubmission resumes the current step.
-        """
         WorkflowService._assert_actionable(task)
         if not comment.strip():
             raise WorkflowError("A comment explaining what needs fixing is required.")
@@ -270,7 +249,6 @@ class WorkflowService:
         WorkflowService._skip_active_tasks(instance, step_order=current_order)
 
         if return_to == "previous_step" and current_order > 1:
-            # Step back to previous approver
             prev_order = current_order - 1
             doc.status = f"Returned to Step {prev_order}"
             WorkflowService._save_document(doc, update_fields=["status", "updated_at"])
@@ -278,16 +256,12 @@ class WorkflowService:
             instance.current_step_order = prev_order
             instance.save(update_fields=["current_step_order"])
 
-            # Create a fresh task for the previous step
             WorkflowService._activate_step(instance, order=prev_order)
 
         else:
-            # Return to uploader OR step 1 / uploader preference
-            # Keep the workflow active so the uploader can resubmit at the current step.
             doc.status = DocumentStatus.RETURNED
             WorkflowService._save_document(doc, update_fields=["status", "updated_at"])
 
-        # Notify uploader and document owner of the return
         WorkflowService._notify_action(action, doc)
 
     # ── Hold ───────────────────────────────────────────────────────────────
@@ -295,10 +269,6 @@ class WorkflowService:
     @staticmethod
     @transaction.atomic
     def hold(task: WorkflowTask, actor, comment: str, hold_hours: int = None) -> None:
-        """
-        Place the task on hold until a scheduled expiry time.
-        A warning and an automatic release are scheduled from held_until.
-        """
         WorkflowService._assert_actionable(task)
 
         held_until = timezone.now() + timedelta(hours=hold_hours or 24)
@@ -327,7 +297,6 @@ class WorkflowService:
             changes={"task_id": str(task.id), "action": action.action, "comment": action.comment, "hold_hours": hold_hours},
         )
 
-        # Notify uploader
         WorkflowService._notify_action(action, doc)
         WorkflowService._schedule_hold_notifications(task)
 
@@ -336,10 +305,6 @@ class WorkflowService:
     @staticmethod
     @transaction.atomic
     def release_hold(task: WorkflowTask, actor=None, *, auto: bool = False) -> None:
-        """
-        Release a held task back to in_progress.
-        Approver must explicitly release when ready.
-        """
         if task.status != "held":
             raise WorkflowError("This task is not currently on hold.")
 
@@ -347,12 +312,12 @@ class WorkflowService:
         task.held_until = None
         task.save(update_fields=["status", "held_until"])
 
-        action = None
-        if actor is not None:
-            action = WorkflowTaskAction.objects.create(
-                task=task, actor=actor, action="released",
-                comment="Manually released from hold",
-            )
+        action = WorkflowTaskAction.objects.create(
+            task=task,
+            actor=actor,
+            action="released",
+            comment="Automatically released from hold" if auto else "Manually released from hold",
+        )
 
         AuditLog.objects.create(
             event=AuditEvent.WORKFLOW_RELEASED,
@@ -367,13 +332,11 @@ class WorkflowService:
             },
         )
 
-        # Restore document status to the step's label
         step = task.step
         doc  = task.workflow_instance.document
         WorkflowService._save_document(doc, update_fields=["status", "updated_at"])
 
-        if action is not None:
-            WorkflowService._notify_action(action, doc)
+        WorkflowService._notify_action(action, doc)
 
     # ── Cancel ─────────────────────────────────────────────────────────────
 
@@ -410,6 +373,12 @@ class WorkflowService:
             WorkflowService._complete(instance, "approved")
             return
 
+        # ── Notification step: fire-and-forget, then immediately advance ──────
+        if step.step_type == "notification":
+            WorkflowService._execute_notification_step(instance, step, order)
+            return
+
+        # ── Approval step: create tasks and wait for human action ─────────────
         due      = (
             timezone.now() + timedelta(hours=step.sla_hours)
             if step.sla_hours else None
@@ -438,10 +407,112 @@ class WorkflowService:
         try:
             from apps.notifications.tasks import notify_task_assigned
             for task in tasks:
-                notify_task_assigned.delay(str(task.id))
+                task_id = str(task.id)
+                custom_subject = step.approver_email_subject or None
+                custom_body = step.approver_email_body or None
+                _queue_after_commit(
+                    lambda tid=task_id, cs=custom_subject, cb=custom_body: notify_task_assigned.delay(
+                        tid, custom_subject=cs, custom_body=cb,
+                    )
+                )
                 WorkflowService._schedule_task_sla_notifications(task)
         except Exception:
             pass
+
+    @staticmethod
+    @transaction.atomic
+    def _execute_notification_step(instance: WorkflowInstance, step: WorkflowStep, order: int) -> None:
+        """
+        Handle a notification step:
+          1. Update document status to step.status_label.
+          2. Create a WorkflowTask with status="notified" (no human needed).
+          3. Log a WorkflowTaskAction(action="notified", actor=None).
+          4. Send the configured email to the recipient.
+          5. Auto-advance to the next step.
+        """
+        doc        = instance.document
+        doc.status = step.status_label
+        WorkflowService._save_document(doc, update_fields=["status", "updated_at"])
+
+        instance.current_step_order = order
+        instance.save(update_fields=["current_step_order"])
+
+        # Create a task record for auditability
+        task = WorkflowTask.objects.create(
+            workflow_instance=instance,
+            step=step,
+            assigned_to=None,
+            status="notified",
+            acted_at=timezone.now(),
+        )
+
+        WorkflowTaskAction.objects.create(
+            task=task,
+            actor=None,
+            action="notified",
+            comment="Notification step auto-executed by workflow engine.",
+        )
+
+        AuditLog.objects.create(
+            event=AuditEvent.WORKFLOW_APPROVED,   # reuse closest event; no dedicated NOTIFIED event yet
+            actor=None,
+            object_type=doc.__class__.__name__,
+            object_id=str(doc.pk),
+            object_repr=str(doc)[:255],
+            changes={
+                "step": step.name,
+                "step_type": "notification",
+                "recipient_user": str(step.notify_user_id) if step.notify_user_id else None,
+                "recipient_email": step.notify_email or None,
+            },
+        )
+
+        # Fire the notification email asynchronously
+        WorkflowService._send_notification_step_email(step, doc)
+
+        # Immediately advance — notification steps never block
+        WorkflowService._advance_step(instance, order)
+
+    @staticmethod
+    def _send_notification_step_email(step: WorkflowStep, document) -> None:
+        """
+        Dispatch the notification-step email via Celery.
+
+        The notifications app receives:
+          - recipient_user_id (str|None)
+          - recipient_email   (str|None)
+          - subject           (str)
+          - message           (str)
+          - document_id       (str)
+
+        Wire this to your existing email/notification infrastructure.
+        The notification task should resolve the recipient's email from the user
+        if recipient_user_id is set, otherwise use recipient_email directly.
+        """
+        try:
+            from apps.notifications.tasks import send_workflow_notification_step_email
+            recipient_user_id = str(step.notify_user_id) if step.notify_user_id else None
+            recipient_email = step.notify_email or None
+            subject = step.notification_subject
+            message = step.notification_message
+            document_id = str(document.pk)
+            step_name = step.name
+            _queue_after_commit(
+                lambda: send_workflow_notification_step_email.delay(
+                    recipient_user_id=recipient_user_id,
+                    recipient_email=recipient_email,
+                    subject=subject,
+                    message=message,
+                    document_id=document_id,
+                    step_name=step_name,
+                )
+            )
+        except Exception:
+            logger.exception(
+                "Failed to dispatch notification-step email for step '%s' on document %s",
+                step.name,
+                document.pk,
+            )
 
     @staticmethod
     def _resolve_assignees(step: WorkflowStep, document=None):
@@ -453,9 +524,6 @@ class WorkflowService:
         if step.assignee_type == "group_specific":
             if not step.assignee_group_id:
                 raise WorkflowError(f"Step '{step.name}' is missing its assigned group.")
-            # "Designated approver": resolve the group's CURRENT head dynamically,
-            # so changing the group's approver flows through to new assignments
-            # instead of persisting the approver snapshotted when the step was built.
             if step.assignee_user_auto:
                 head = step.assignee_group.head
                 if not head:
@@ -471,7 +539,6 @@ class WorkflowService:
                         f"Designated approver is not an active member of group '{step.assignee_group.name}'."
                     )
                 return [head]
-            # Hand-picked specific member: use the stored user.
             if not step.assignee_user_id:
                 raise WorkflowError(f"Step '{step.name}' is missing its assigned group member.")
             if not WorkflowService._is_active_group_member(step.assignee_group, step.assignee_user):
@@ -567,8 +634,6 @@ class WorkflowService:
             qs = qs.filter(step__order=step_order)
         skipped_ids = list(qs.values_list("id", flat=True))
         qs.update(status="skipped", acted_at=timezone.now())
-        # A peer in a group step actioned it — clear the skipped members' stale
-        # task notifications so they disappear from those members' trays too.
         if skipped_ids:
             try:
                 from apps.notifications.tasks import clear_resolved_task_notifications_now
@@ -631,7 +696,10 @@ class WorkflowService:
 
         try:
             from apps.notifications.tasks import notify_workflow_complete
-            notify_workflow_complete.delay(str(instance.id), outcome)
+            instance_id = str(instance.id)
+            _queue_after_commit(
+                lambda iid=instance_id, oc=outcome: notify_workflow_complete.delay(iid, oc)
+            )
         except Exception:
             pass
 
@@ -672,9 +740,18 @@ class WorkflowService:
 
             warning_hours = getattr(settings, "WORKFLOW_SLA_WARNING_HOURS", 4)
             warning_at = task.due_at - timedelta(hours=warning_hours)
+            task_id = str(task.id)
             if warning_at > timezone.now():
-                notify_task_sla_warning.apply_async(args=[str(task.id)], eta=warning_at)
-            notify_task_overdue.apply_async(args=[str(task.id)], eta=task.due_at)
+                _queue_after_commit(
+                    lambda tid=task_id, eta=warning_at: notify_task_sla_warning.apply_async(
+                        args=[tid], eta=eta,
+                    )
+                )
+            _queue_after_commit(
+                lambda tid=task_id, eta=task.due_at: notify_task_overdue.apply_async(
+                    args=[tid], eta=eta,
+                )
+            )
         except Exception:
             pass
 
@@ -688,9 +765,18 @@ class WorkflowService:
 
             warning_hours = getattr(settings, "WORKFLOW_HOLD_WARNING_HOURS", 2)
             warning_at = task.held_until - timedelta(hours=warning_hours)
+            task_id = str(task.id)
             if warning_at > timezone.now():
-                notify_hold_ending.apply_async(args=[str(task.id)], eta=warning_at)
-            auto_release_hold.apply_async(args=[str(task.id)], eta=task.held_until)
+                _queue_after_commit(
+                    lambda tid=task_id, eta=warning_at: notify_hold_ending.apply_async(
+                        args=[tid], eta=eta,
+                    )
+                )
+            _queue_after_commit(
+                lambda tid=task_id, eta=task.held_until: auto_release_hold.apply_async(
+                    args=[tid], eta=eta,
+                )
+            )
         except Exception:
             pass
 
@@ -742,28 +828,26 @@ class WorkflowService:
 
     @staticmethod
     def _notify_action(action: WorkflowTaskAction, document) -> None:
-        """
-        Notify the uploader and document owner of a workflow action.
-        Tracks notifications to avoid duplicates.
-        """
         from apps.workflows.models import WorkflowTaskActionNotification
         from django.contrib.auth import get_user_model
 
         User = get_user_model()
 
-        # Get the uploader and create a set of users to notify
-        uploader = document.created_by if hasattr(document, 'created_by') else None
+        template = action.task.workflow_instance.template
+        if action.action == "approved" and not template.notify_uploader_on_approval:
+            try:
+                from apps.notifications.tasks import clear_resolved_task_notifications_now
+                clear_resolved_task_notifications_now(str(action.task_id))
+            except Exception:
+                pass
+            return
+
+        uploader = document.uploaded_by if hasattr(document, "uploaded_by") else None
         notify_users = set()
 
         if uploader:
             notify_users.add(uploader)
 
-        # Also notify the approver if the action is not from them
-        if action.actor and action.actor != uploader:
-            # Could add notification back to actor for confirmation, optional
-            pass
-
-        # Create notification records for each user
         for user in notify_users:
             try:
                 WorkflowTaskActionNotification.objects.get_or_create(
@@ -772,17 +856,16 @@ class WorkflowService:
             except Exception:
                 pass
 
-        # Trigger async notification task
         try:
             from apps.notifications.tasks import notify_workflow_action
-            notify_workflow_action.delay(str(action.id), [str(u.id) for u in notify_users])
+            action_id = str(action.id)
+            user_id_list = [str(u.id) for u in notify_users]
+            _queue_after_commit(
+                lambda aid=action_id, uids=user_id_list: notify_workflow_action.delay(aid, uids)
+            )
         except Exception:
             pass
 
-        # Once a task is resolved (approved/rejected/returned), drop the actor's
-        # now-stale "action required"/SLA notifications for this document so they
-        # disappear from the tray. Done synchronously so the client's immediate
-        # post-action refetch already reflects it.
         if action.action in ("approved", "rejected", "returned"):
             try:
                 from apps.notifications.tasks import clear_resolved_task_notifications_now

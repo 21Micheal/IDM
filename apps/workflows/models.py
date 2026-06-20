@@ -8,8 +8,16 @@ Additions to existing model file:
   2. WorkflowTaskAction — immutable record of every action taken on a task
      (approve, reject, hold, return). Replaces the single comment field for
      a full audit trail of task actions.
+  3. WorkflowStep gains:
+       step_type: "approval" (default) | "notification"
+       notify_user: FK to User (optional, notification recipient)
+       notify_email: EmailField (optional, external recipient)
+       notification_subject: subject line for notification steps
+       notification_message: body for notification steps
+       approver_email_subject: custom subject for task-assignment emails
+       approver_email_body: custom body for task-assignment emails
 
-MIGRATION NOTE: run 0003_task_hold_return after applying this file.
+MIGRATION NOTE: run 0004_step_type_notification after applying this file.
 """
 from django.core.exceptions import ValidationError
 from django.db import models
@@ -30,6 +38,23 @@ class WorkflowTemplate(models.Model):
         help_text="Document type this template belongs to.",
     )
     is_active   = models.BooleanField(default=True)
+    notify_uploader_on_approval = models.BooleanField(
+        default=True,
+        help_text=(
+            "When enabled, the document uploader receives an email and in-app "
+            "notification each time an approval step is completed."
+        ),
+    )
+    email_templates = models.JSONField(
+        default=dict,
+        blank=True,
+        help_text=(
+            "Optional per-event email overrides. Keys: workflow_complete, "
+            "action_approved, action_rejected, action_returned, action_held, "
+            "action_released, hold_ending, hold_expired, sla_warning, sla_overdue. "
+            "Each value may contain 'subject' and 'body'. Leave blank to use defaults."
+        ),
+    )
     created_by  = models.ForeignKey(
         settings.AUTH_USER_MODEL, null=True, on_delete=models.SET_NULL,
         related_name="created_workflow_templates",
@@ -80,6 +105,11 @@ class WorkflowStep(models.Model):
         ("group_specific", "Specific member of group"),
     ]
 
+    STEP_TYPES = [
+        ("approval",     "Approval"),
+        ("notification", "Notification"),
+    ]
+
     id            = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
     template      = models.ForeignKey(
         WorkflowTemplate, on_delete=models.CASCADE, related_name="steps"
@@ -87,6 +117,19 @@ class WorkflowStep(models.Model):
     order         = models.PositiveSmallIntegerField(db_index=True)
     name          = models.CharField(max_length=120)
     status_label  = models.CharField(max_length=80, default="Pending Approval")
+
+    # ── Step type ─────────────────────────────────────────────────────────────
+    step_type = models.CharField(
+        max_length=20,
+        choices=STEP_TYPES,
+        default="approval",
+        help_text=(
+            "'approval' requires a human to act; "
+            "'notification' fires an email and auto-advances immediately."
+        ),
+    )
+
+    # ── Approval-step fields ──────────────────────────────────────────────────
     assignee_type = models.CharField(max_length=20, choices=ASSIGNEE_TYPES, default="group_any")
     assignee_group = models.ForeignKey(
         "accounts.UserGroup",
@@ -113,6 +156,49 @@ class WorkflowStep(models.Model):
         help_text="Approving this step must stamp the approver's saved e-signature onto the document.",
     )
     instructions   = models.TextField(blank=True)
+
+    # ── Custom email for approvers (approval steps only) ──────────────────────
+    # When set, these override the default hardcoded task-assignment email.
+    approver_email_subject = models.CharField(
+        max_length=255,
+        blank=True,
+        help_text="Custom subject for the task-assignment email sent to approvers. "
+                  "Leave blank to use the system default.",
+    )
+    approver_email_body = models.TextField(
+        blank=True,
+        help_text=(
+            "Custom body for the task-assignment email sent to approvers. "
+            "Supports these placeholders: {approver_name}, {document_title}, "
+            "{document_ref}, {step_name}, {instructions}, {document_url}. "
+            "Leave blank to use the system default."
+        ),
+    )
+
+    # ── Notification-step fields ───────────────────────────────────────────────
+    # Exactly one of notify_user or notify_email must be set for notification steps.
+    notify_user = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        null=True,
+        blank=True,
+        on_delete=models.SET_NULL,
+        related_name="notification_steps",
+        help_text="System user to notify (notification steps only).",
+    )
+    notify_email = models.EmailField(
+        blank=True,
+        help_text="External email address to notify (notification steps only).",
+    )
+    notification_subject = models.CharField(
+        max_length=255,
+        blank=True,
+        help_text="Email subject for notification steps.",
+    )
+    notification_message = models.TextField(
+        blank=True,
+        help_text="Email body for notification steps.",
+    )
+
     created_at     = models.DateTimeField(auto_now_add=True, null=True)
     updated_at     = models.DateTimeField(auto_now=True)
 
@@ -122,6 +208,31 @@ class WorkflowStep(models.Model):
 
     def __str__(self):
         return f"{self.template.name} → {self.order}. {self.name}"
+
+    def clean(self):
+        super().clean()
+        if self.step_type == "notification":
+            if not self.notify_user_id and not self.notify_email:
+                raise ValidationError(
+                    "Notification steps require either a recipient user or an email address."
+                )
+            if not self.notification_subject:
+                raise ValidationError(
+                    {"notification_subject": "A subject is required for notification steps."}
+                )
+            if not self.notification_message:
+                raise ValidationError(
+                    {"notification_message": "A message body is required for notification steps."}
+                )
+        elif self.step_type == "approval":
+            if not self.assignee_group_id:
+                raise ValidationError(
+                    {"assignee_group": "Approval steps require an assignee group."}
+                )
+            if not any([self.allow_approve, self.allow_reject, self.allow_return]):
+                raise ValidationError(
+                    "At least one approver action (approve, reject, or return) must be enabled."
+                )
 
 
 class WorkflowRule(models.Model):
@@ -205,11 +316,13 @@ class WorkflowTask(models.Model):
         ("in_progress", "In Progress"),
         ("approved",    "Approved"),
         ("rejected",    "Rejected"),
-        ("returned",    "Returned for Review"),   # ← new
-        ("held",        "On Hold"),               # ← new
+        ("returned",    "Returned for Review"),
+        ("held",        "On Hold"),
         ("skipped",     "Skipped"),
+        # Notification steps are auto-completed; this status marks that.
+        ("notified",    "Notification Sent"),
     ]
-    
+
     RETURN_TO_CHOICES = [
         ("previous_step", "Previous Approver"),
         ("uploader",      "Document Uploader"),
@@ -256,14 +369,15 @@ class WorkflowTaskAction(models.Model):
     so the full action history is always preserved.
     """
     ACTION_CHOICES = [
-        ("approved",  "Approved"),
-        ("rejected",  "Rejected"),
-        ("returned",  "Returned for Review"),
-        ("held",      "Put on Hold"),
-        ("released",  "Hold Released"),
-        ("reassigned","Reassigned"),
+        ("approved",   "Approved"),
+        ("rejected",   "Rejected"),
+        ("returned",   "Returned for Review"),
+        ("held",       "Put on Hold"),
+        ("released",   "Hold Released"),
+        ("reassigned", "Reassigned"),
+        ("notified",   "Notification Sent"),
     ]
-    
+
     RETURN_TO_CHOICES = [
         ("previous_step", "Previous Approver"),
         ("uploader",      "Document Uploader"),
@@ -273,11 +387,15 @@ class WorkflowTaskAction(models.Model):
     id         = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
     task       = models.ForeignKey(WorkflowTask, on_delete=models.CASCADE, related_name="actions")
     actor      = models.ForeignKey(
-        settings.AUTH_USER_MODEL, on_delete=models.PROTECT, related_name="task_actions"
+        settings.AUTH_USER_MODEL,
+        null=True,   # null for system-generated actions (e.g. notification auto-advance)
+        blank=True,
+        on_delete=models.PROTECT,
+        related_name="task_actions",
     )
     action     = models.CharField(max_length=20, choices=ACTION_CHOICES)
     comment    = models.TextField(blank=True)
-    # For hold: how many hours the hold was set for (removed auto-release)
+    # For hold: how many hours the hold was set for
     hold_hours = models.PositiveSmallIntegerField(null=True, blank=True)
     # Where the document was returned to (only populated for return actions)
     return_to  = models.CharField(
@@ -290,7 +408,8 @@ class WorkflowTaskAction(models.Model):
         ordering = ["created_at"]
 
     def __str__(self):
-        return f"{self.task} → {self.action} by {self.actor.email}"
+        actor_label = self.actor.email if self.actor_id else "system"
+        return f"{self.task} → {self.action} by {actor_label}"
 
 
 class DocumentSignature(models.Model):
