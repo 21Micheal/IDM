@@ -708,6 +708,21 @@ class DocumentViewSet(AuditMixin, viewsets.ModelViewSet):
                 {"detail": "This document cannot be edited in its current status."},
                 status=status.HTTP_400_BAD_REQUEST,
             )
+        # Editing details requires holding the checkout lock, so a save can't land
+        # after the lock was released (admin force-release) or expired — which
+        # would otherwise let a revoked editor keep writing. The one exception is
+        # the uploader doing initial setup on their own still-unlocked document
+        # (the post-upload "confirm details" flow takes no lock); once the doc is
+        # locked, or anyone other than the uploader edits, the lock is required.
+        holder = doc.edit_lock_holder
+        lock_required = doc.is_edit_locked or doc.uploaded_by_id != request.user.id
+        if lock_required and (holder is None or holder.id != request.user.id):
+            detail = (
+                f"This document is locked by {holder.get_full_name()}."
+                if holder
+                else "Your edit lock was released. Re-lock the document to edit its details."
+            )
+            return Response({"detail": detail}, status=status.HTTP_423_LOCKED)
         serializer = DocumentMetadataEditSerializer(
             doc, data=request.data, partial=True, context={"request": request}
         )

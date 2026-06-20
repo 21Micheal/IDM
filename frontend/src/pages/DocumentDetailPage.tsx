@@ -457,6 +457,17 @@ export default function DocumentDetailPage() {
     }
   }, [activeTask]);
 
+  // Leave the "Edit details" tab as soon as this user stops holding the lock —
+  // e.g. an admin force-released it, or it was released elsewhere. The tab also
+  // disables, but an already-open panel would otherwise linger and let them keep
+  // typing into a save the server now rejects.
+  useEffect(() => {
+    const stillLockedByMe = Boolean(doc?.is_edit_locked && doc?.edit_locked_by === user?.id);
+    if (activeTab === "edit" && !stillLockedByMe) {
+      setActiveTab("attributes");
+    }
+  }, [doc?.is_edit_locked, doc?.edit_locked_by, user?.id, activeTab]);
+
   const submitMutation = useMutation({
     mutationFn: () => documentsAPI.submit(id!),
     onSuccess: () => { toast.success("Submitted for approval"); qc.invalidateQueries({ queryKey: ["document", id] }); },

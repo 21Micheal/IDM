@@ -564,17 +564,22 @@ class DocumentWebDAVView(View):
             )
             return HttpResponse("Forbidden", status=403)
 
-        # Application-level lock check
-        if doc.is_edit_locked and doc.edit_lock_holder != user:
+        # Application-level lock check — the saver MUST currently hold the lock,
+        # not merely "nobody else holds it". If the lock was released (an admin
+        # force-released an abandoned/active checkout) or expired, the editor still
+        # has a valid token and would otherwise keep saving over a document it no
+        # longer owns. Reject so a save can't land after the lock is gone.
+        if doc.edit_lock_holder != user:
             holder = doc.edit_lock_holder
             logger.warning(
-                "WebDAV PUT denied (locked by other): user=%s holder=%s doc=%s",
+                "WebDAV PUT denied (caller does not hold lock): user=%s holder=%s doc=%s",
                 user.email, getattr(holder, "email", None), document_id,
             )
-            return HttpResponse(
-                f"423 Locked by {holder.get_full_name() if holder else 'another user'}",
-                status=423,
+            detail = (
+                f"423 Locked by {holder.get_full_name()}" if holder
+                else "423 Your edit lock was released — re-lock the document to save."
             )
+            return HttpResponse(detail, status=423)
 
         # WebDAV protocol lock check
         proto_lock = _PROTOCOL_LOCKS.get(str(document_id))
