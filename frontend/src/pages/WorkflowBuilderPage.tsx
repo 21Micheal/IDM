@@ -1434,7 +1434,9 @@ function FlowchartEditor({
                           {step.allow_reject  && <span className="w-1.5 h-1.5 rounded-full bg-destructive" title="Reject" />}
                           {step.allow_return  && <span className="w-1.5 h-1.5 rounded-full bg-accent" title="Return" />}
                           {(step.approver_email_subject || step.approver_email_body) && (
-                            <Mail className="w-3 h-3 text-primary/60" title="Custom email configured" />
+                            <span title="Custom email configured" className="inline-flex">
+                              <Mail className="w-3 h-3 text-primary/60" />
+                            </span>
                           )}
                         </div>
                       </div>
