@@ -44,6 +44,19 @@ logger = logging.getLogger(__name__)
 _PROTOCOL_LOCKS: dict[str, dict] = {}
 
 
+def clear_protocol_lock(document_id) -> None:
+    """
+    Drop any in-process WebDAV protocol lock for a document.
+
+    Called when the application-level edit lock is released out-of-band (e.g. an
+    admin force-releases a lock held by an unreachable user). Without this, the
+    stale protocol lock would make the next user's WebDAV LOCK return 423 until it
+    expires (up to an hour). Best-effort: the store is per-process, so this only
+    clears it in the current worker — but the protocol lock also self-expires.
+    """
+    _PROTOCOL_LOCKS.pop(str(document_id), None)
+
+
 def _xml_response(body: str, status: int = 200) -> HttpResponse:
     return HttpResponse(
         body.strip(), content_type="application/xml; charset=utf-8", status=status
@@ -310,7 +323,11 @@ class DocumentWebDAVView(View):
             return handler(request, document_id, filename, *args, **kwargs)
         finally:
             _elapsed_ms = (_time.monotonic() - _started) * 1000
-            logger.info(
+            # Editors PROPFIND every ~2s for the whole session, so only surface
+            # genuinely slow requests at INFO; everything else goes to DEBUG to
+            # avoid flooding the log.
+            _log = logger.info if _elapsed_ms >= 1000 else logger.debug
+            _log(
                 "WebDAV %s doc=%s ro=%s -> %.0fms",
                 method.upper(), document_id, read_only, _elapsed_ms,
             )

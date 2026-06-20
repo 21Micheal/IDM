@@ -1671,6 +1671,12 @@ echo "✓ DocVault LibreOffice integration installed."
         if not doc.release_lock(user=request.user, force=force):
             return Response({"detail": "Lock held by another user."}, status=423)
 
+        # Also drop the in-process WebDAV protocol lock so the next editor can
+        # LOCK immediately instead of waiting for the stale lock to expire —
+        # important for admin force-release of an abandoned checkout.
+        from .webdav import clear_protocol_lock
+        clear_protocol_lock(doc.id)
+
         self.record_audit(AuditEvent.DOCUMENT_EDIT_LOCK_RELEASED, doc)
         return Response({"detail": "Lock released."})
 

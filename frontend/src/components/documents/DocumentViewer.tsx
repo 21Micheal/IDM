@@ -255,10 +255,16 @@ function EditLockBanner({
   doc,
   currentUserId,
   onRelease,
+  canForceRelease = false,
+  onForceRelease,
+  forceReleasing = false,
 }: {
   doc: Document;
   currentUserId: string | undefined;
   onRelease: () => void;
+  canForceRelease?: boolean;
+  onForceRelease?: () => void;
+  forceReleasing?: boolean;
 }) {
   const isLocked     = Boolean(doc.is_edit_locked);
   const isLockedByMe = isLocked && doc.edit_locked_by === currentUserId;
@@ -286,12 +292,27 @@ function EditLockBanner({
   }
 
   return (
-    <div className="flex items-center gap-3 rounded-xl border border-destructive/30 bg-destructive/5 px-4 py-3 text-sm">
-      <Lock className="w-4 h-4 text-destructive flex-shrink-0" />
-      <span className="text-foreground">
-        Locked by <strong>{doc.edit_locked_by_name ?? "another user"}</strong>.
-        View-only until they release it.
-      </span>
+    <div className="flex items-center justify-between gap-3 rounded-xl border border-destructive/30 bg-destructive/5 px-4 py-3 text-sm">
+      <div className="flex items-center gap-2 text-foreground">
+        <Lock className="w-4 h-4 text-destructive flex-shrink-0" />
+        <span>
+          Locked by <strong>{doc.edit_locked_by_name ?? "another user"}</strong>.
+          View-only until they release it.
+        </span>
+      </div>
+      {canForceRelease && onForceRelease && (
+        <button
+          onClick={onForceRelease}
+          disabled={forceReleasing}
+          className="flex-shrink-0 inline-flex items-center gap-1.5 text-xs font-medium text-destructive border border-destructive/40 rounded-lg px-3 py-1.5 hover:bg-destructive/10 transition-colors disabled:opacity-50"
+          title="Admin override: release another user's lock"
+        >
+          {forceReleasing
+            ? <Loader2 className="w-3.5 h-3.5 animate-spin" />
+            : <Unlock className="w-3.5 h-3.5" />}
+          Release (admin)
+        </button>
+      )}
     </div>
   );
 }
@@ -784,12 +805,23 @@ function OfficeEditPanel({
       if (typeof document !== "undefined" && document.hidden) return;
       try {
         const { data: latest } = await documentsAPI.get(doc.id);
+        let changed = false;
         if (latest.current_version > baseVersion) {
           baseVersion = latest.current_version;
           toast.success(`Version ${latest.current_version} saved from editor.`);
-          qc.invalidateQueries({ queryKey: ["document", doc.id] });
           onVersionUploaded();
+          changed = true;
         }
+        // Detect lock release from the editor (UNLOCK fires when the user closes
+        // the document). Without this the banner stays "Locked by you" until a
+        // manual page refresh, even though the lock is already gone server-side.
+        const stillLockedByMe = Boolean(latest.is_edit_locked && latest.edit_locked_by === user?.id);
+        if (!stillLockedByMe) {
+          setLockData(null);
+          stopVersionPolling();
+          changed = true;
+        }
+        if (changed) qc.invalidateQueries({ queryKey: ["document", doc.id] });
       } catch { /* ignore transient errors */ }
     }, 5_000);
   };
@@ -1208,6 +1240,29 @@ export default function DocumentViewer({ document: doc, submitSlot, hideUploadAc
     releaseLock.mutate();
   }, [onBeforeRelease, releaseLock]);
 
+  // Admin override: release a lock held by another user (e.g. a member who left
+  // their editor checked out and is unreachable). Gated server-side on
+  // has_admin_access; the `force` flag is ignored for non-admins.
+  const forceReleaseLock = useMutation({
+    mutationFn: () => documentsAPI.releaseLock(doc.id, true),
+    onSuccess: () => {
+      toast.success("Lock released (admin override).");
+      qc.invalidateQueries({ queryKey: ["document", doc.id] });
+      qc.invalidateQueries({ queryKey: ["document-preview", doc.id] });
+    },
+    onError: (err: any) =>
+      toast.error(err?.response?.data?.detail ?? "Could not release the lock."),
+  });
+
+  const handleForceRelease = useCallback(() => {
+    const holder = doc.edit_locked_by_name ?? "another user";
+    if (!window.confirm(
+      `Release the lock held by ${holder}? Any unsaved changes in their editor ` +
+      `will not be captured. They will need to re-lock to continue editing.`
+    )) return;
+    forceReleaseLock.mutate();
+  }, [doc.edit_locked_by_name, forceReleaseLock]);
+
   const onVersionUploaded = useCallback(() => {
     setSelectedVersionId(null);
     clearDocumentVersionCache(doc.id);
@@ -1350,6 +1405,9 @@ export default function DocumentViewer({ document: doc, submitSlot, hideUploadAc
             doc={doc}
             currentUserId={user?.id}
             onRelease={handleRelease}
+            canForceRelease={Boolean(user?.has_admin_access) && isLockedByOther}
+            onForceRelease={handleForceRelease}
+            forceReleasing={forceReleaseLock.isPending}
           />
         </div>
       )}

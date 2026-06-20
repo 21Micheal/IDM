@@ -34,6 +34,12 @@ import { clearDocumentVersionCache, getCachedVersionPreview, getPreviewCacheKey,
 
 const AUDIT_PAGE_SIZE = 5;
 
+// Keep the open document's lock state (and other server-side changes) current for
+// every viewer without a manual refresh: while the detail page is focused, refetch
+// on this cadence. React Query pauses the interval when the tab is backgrounded
+// (refetchIntervalInBackground defaults to false), so it doesn't poll needlessly.
+const LOCK_STATUS_POLL_MS = 8_000;
+
 const DOCUMENT_FIELD_KEYS = ["title", "supplier", "amount", "currency", "document_date", "due_date"] as const;
 type DocumentFieldKey = (typeof DOCUMENT_FIELD_KEYS)[number];
 const DOCUMENT_FIELD_KEY_SET = new Set<string>(DOCUMENT_FIELD_KEYS);
@@ -227,6 +233,8 @@ export default function DocumentDetailPage() {
     queryFn: () => documentsAPI.get(id!).then((r) => r.data),
     enabled: !!id,
     ...QUERY_SHORT_STALE,
+    // Surface lock/release (and other) changes made by other users automatically.
+    refetchInterval: LOCK_STATUS_POLL_MS,
   });
 
   // ── Document status polling ────────────────────────────────────────────────
