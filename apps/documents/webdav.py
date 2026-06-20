@@ -297,9 +297,23 @@ class DocumentWebDAVView(View):
         # the editor actually opened (localhost:3000, ngrok, prod), so it's correct
         # under every proxy. request.path is URL-decoded, so re-encode it.
         request.dav_href = quote(request.path, safe="/")
-        return getattr(self, method, self.http_method_not_allowed)(
-            request, document_id, filename, *args, **kwargs
-        )
+        # Time each WebDAV request server-side. A save is ~7 round-trips
+        # (OPTIONS/PROPFIND/LOCK/GET/PUT/PROPFIND/UNLOCK); logging per-request
+        # server time lets you tell whether a slow save is spent in Django
+        # (storage/broker/cache) or in the network + desktop WebDAV redirector
+        # (IIS ARR, Windows WebClient, Word/LibreOffice), which the server can't
+        # speed up. Compare the sum of these to the wall-clock save time.
+        import time as _time
+        _started = _time.monotonic()
+        handler = getattr(self, method, self.http_method_not_allowed)
+        try:
+            return handler(request, document_id, filename, *args, **kwargs)
+        finally:
+            _elapsed_ms = (_time.monotonic() - _started) * 1000
+            logger.info(
+                "WebDAV %s doc=%s ro=%s -> %.0fms",
+                method.upper(), document_id, read_only, _elapsed_ms,
+            )
 
     # ── OPTIONS ────────────────────────────────────────────────────────────────
 
@@ -590,6 +604,8 @@ class DocumentWebDAVView(View):
 
         new_version = doc.current_version + 1
 
+        import time as _time
+        _t_write = _time.monotonic()
         try:
             with transaction.atomic():
                 version_file = ContentFile(content, name=doc.file_name)
@@ -625,10 +641,7 @@ class DocumentWebDAVView(View):
             )
             return HttpResponse("Internal Server Error", status=500)
 
-        logger.info(
-            "WebDAV PUT saved version %s of doc=%s by user=%s (%d bytes)",
-            new_version, document_id, user.email, len(content),
-        )
+        _write_ms = (_time.monotonic() - _t_write) * 1000
 
         # Refresh application-level lock TTL
         doc.refresh_lock(user)
@@ -636,20 +649,34 @@ class DocumentWebDAVView(View):
         # Release WebDAV protocol lock (editor re-locks on next save if needed)
         _PROTOCOL_LOCKS.pop(str(document_id), None)
 
-        # Re-generate Office PDF preview
-        if doc.is_office_doc():
-            from .models import PreviewStatus
-            Document.objects.filter(id=doc.id).update(
-                preview_status="",
-                preview_pdf="",
+        # Post-save fan-out: reset the Office→PDF preview and queue text
+        # re-extraction / search indexing. These enqueue Celery jobs (a broker
+        # publish) and must never block or fail the editor's save — a slow or
+        # unreachable broker would otherwise stall every Ctrl+S. Best-effort and
+        # timed so a slow broker shows up clearly in the logs.
+        _t_post = _time.monotonic()
+        try:
+            if doc.is_office_doc():
+                Document.objects.filter(id=doc.id).update(
+                    preview_status="",
+                    preview_pdf="",
+                )
+            from apps.search.indexing import schedule_document_search_pipeline
+            schedule_document_search_pipeline(
+                str(doc.id),
+                reextract_content=True,
+                index_immediately=True,
             )
+        except Exception:
+            logger.warning(
+                "WebDAV PUT: post-save indexing/preview fan-out failed for %s "
+                "(save itself succeeded)", document_id, exc_info=True,
+            )
+        _post_ms = (_time.monotonic() - _t_post) * 1000
 
-        from apps.search.indexing import schedule_document_search_pipeline
-
-        schedule_document_search_pipeline(
-            str(doc.id),
-            reextract_content=True,
-            index_immediately=True,
+        logger.info(
+            "WebDAV PUT saved v%s doc=%s user=%s (%d bytes) write=%.0fms post=%.0fms",
+            new_version, document_id, user.email, len(content), _write_ms, _post_ms,
         )
 
         return HttpResponse(status=204)
