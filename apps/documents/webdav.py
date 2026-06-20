@@ -492,7 +492,9 @@ class DocumentWebDAVView(View):
   </D:lockdiscovery>
 </D:prop>"""
         resp = _xml_response(xml, status=200)
-        resp["Lock-Token"] = f"<urn:uuid:{token}>"
+        resp["Lock-Token"]    = f"<urn:uuid:{token}>"
+        resp["ETag"]          = f'"{doc.checksum[:16]}"'
+        resp["Last-Modified"] = formatdate(timeval=doc.updated_at.timestamp(), usegmt=True)
         return resp
 
     # ── UNLOCK ─────────────────────────────────────────────────────────────────
@@ -600,7 +602,7 @@ class DocumentWebDAVView(View):
         if checksum == doc.checksum:
             # Identical save — refresh lock TTL only
             doc.refresh_lock(user)
-            return HttpResponse(status=204)
+            return self._put_ok(doc)
 
         new_version = doc.current_version + 1
 
@@ -679,4 +681,19 @@ class DocumentWebDAVView(View):
             new_version, document_id, user.email, len(content), _write_ms, _post_ms,
         )
 
-        return HttpResponse(status=204)
+        return self._put_ok(doc)
+
+    @staticmethod
+    def _put_ok(doc) -> HttpResponse:
+        """
+        204 response for a successful save, carrying the new ETag and
+        Last-Modified. Desktop editors (Word/LibreOffice via the Windows
+        WebClient) otherwise can't learn the saved state from the PUT itself and
+        fall back to a burst of confirmation PROPFINDs — the slow ~2s-spaced
+        tail you see after every save. Echoing validators here lets the client
+        accept the save immediately and skip (most of) that round-tripping.
+        """
+        resp = HttpResponse(status=204)
+        resp["ETag"]          = f'"{doc.checksum[:16]}"'
+        resp["Last-Modified"] = formatdate(timeval=doc.updated_at.timestamp(), usegmt=True)
+        return resp
