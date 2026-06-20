@@ -287,7 +287,16 @@ class DocumentWebDAVView(View):
         request.dav_user = user
         request.dav_doc  = doc
         request.dav_read_only = read_only
-        request.dav_href = request.build_absolute_uri(request.path)
+        # Use a host-agnostic ABSOLUTE-PATH href (no scheme/host) in every WebDAV
+        # XML response (PROPFIND resources + LOCK lockroot). build_absolute_uri()
+        # would embed request.get_host(), which behind a changeOrigin proxy is the
+        # internal upstream (e.g. backend:8000) — a host the desktop editor can't
+        # reach. The editor opens the file fine via direct GET, but then can't
+        # resolve the LOCK root / save target and fails with "object cannot be
+        # created in directory". An absolute path resolves against whatever origin
+        # the editor actually opened (localhost:3000, ngrok, prod), so it's correct
+        # under every proxy. request.path is URL-decoded, so re-encode it.
+        request.dav_href = quote(request.path, safe="/")
         return getattr(self, method, self.http_method_not_allowed)(
             request, document_id, filename, *args, **kwargs
         )
@@ -516,11 +525,19 @@ class DocumentWebDAVView(View):
         user = request.dav_user
 
         if not self._can(user, doc, "edit"):
+            logger.warning(
+                "WebDAV PUT denied (no edit permission): user=%s doc=%s",
+                user.email, document_id,
+            )
             return HttpResponse("Forbidden", status=403)
 
         # Application-level lock check
         if doc.is_edit_locked and doc.edit_lock_holder != user:
             holder = doc.edit_lock_holder
+            logger.warning(
+                "WebDAV PUT denied (locked by other): user=%s holder=%s doc=%s",
+                user.email, getattr(holder, "email", None), document_id,
+            )
             return HttpResponse(
                 f"423 Locked by {holder.get_full_name() if holder else 'another user'}",
                 status=423,
@@ -533,10 +550,36 @@ class DocumentWebDAVView(View):
             lock_header = request.headers.get("Lock-Token", "")
             tok = proto_lock["token"]
             if proto_lock["user_id"] != str(user.id) and tok not in if_header and tok not in lock_header:
+                logger.warning(
+                    "WebDAV PUT denied (protocol lock held by other session): "
+                    "user=%s doc=%s", user.email, document_id,
+                )
                 return HttpResponse("Locked", status=423)
 
-        content = request.body
+        # Read the raw PUT body. Prefer request.body (cached; safe if any
+        # upstream middleware already buffered the stream), but fall back to a
+        # streaming read() when the body exceeds settings.DATA_UPLOAD_MAX_MEMORY_SIZE
+        # (2.5 MB by default), which would otherwise raise RequestDataTooBig and
+        # fail every save of a larger document. On RequestDataTooBig the stream
+        # has not been consumed yet, so read() can still pull the full body.
+        from django.core.exceptions import RequestDataTooBig
+        try:
+            content = request.body
+        except RequestDataTooBig:
+            content = request.read()
+        except Exception:
+            logger.warning(
+                "WebDAV PUT: could not read request body for %s", document_id,
+                exc_info=True,
+            )
+            return HttpResponse("Bad Request", status=400)
         if not content:
+            logger.warning(
+                "WebDAV PUT: empty body for doc=%s (content_length=%s, transfer_encoding=%s)",
+                document_id,
+                request.META.get("CONTENT_LENGTH"),
+                request.META.get("HTTP_TRANSFER_ENCODING"),
+            )
             return HttpResponse("No content provided", status=400)
 
         checksum = hashlib.sha256(content).hexdigest()
@@ -577,11 +620,15 @@ class DocumentWebDAVView(View):
                 doc.refresh_from_db()
 
         except Exception as exc:
-            import logging
-            logging.getLogger(__name__).error(
-                "WebDAV PUT failed for %s: %s", document_id, exc
+            logger.error(
+                "WebDAV PUT failed for %s: %s", document_id, exc, exc_info=True
             )
             return HttpResponse("Internal Server Error", status=500)
+
+        logger.info(
+            "WebDAV PUT saved version %s of doc=%s by user=%s (%d bytes)",
+            new_version, document_id, user.email, len(content),
+        )
 
         # Refresh application-level lock TTL
         doc.refresh_lock(user)

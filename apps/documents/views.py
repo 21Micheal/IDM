@@ -1480,7 +1480,11 @@ class DocumentViewSet(AuditMixin, viewsets.ModelViewSet):
         the live file in Word/LibreOffice to view it without changing it.
         """
         doc = self.get_object()  # get_queryset already enforces visibility
-        if not user_can_download_document(request.user, doc):
+        # Opening read-only in a desktop editor is a view action — the WebDAV
+        # layer issues this token with read_only=True and rejects every write
+        # method (PUT/LOCK), so it must gate on VIEW, not DOWNLOAD. Requiring
+        # download here 403'd members who can see a locked doc but lack download.
+        if not user_can_view_document(request.user, doc):
             return Response({"detail": "View not permitted."}, status=403)
 
         webdav_token = secrets.token_hex(32)

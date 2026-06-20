@@ -936,7 +936,7 @@ export default function DocumentDetailPage() {
               )}
               {doc.is_edit_locked && (
                 <span className="inline-flex animate-fade-in items-center gap-1 border border-amber-200 bg-amber-100 px-2 py-0.5 text-[10px] font-semibold text-amber-800">
-                  <Lock className="w-2.5 h-2.5" /> Checked Out By {doc.edit_locked_by_name || "User"}
+                  <Lock className="w-2.5 h-2.5" /> Locked By {doc.edit_locked_by_name || "User"}
                 </span>
               )}
             </div>

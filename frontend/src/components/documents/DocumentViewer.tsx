@@ -18,7 +18,7 @@
 
 import { lazy, Suspense, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { documentsAPI, dmsSettingsAPI, api, type DmsSettings } from "../../services/api";
+import { documentsAPI, dmsSettingsAPI, api, apiBaseUrl, type DmsSettings } from "../../services/api";
 import { useAuthStore } from "@/store/authStore";
 import { toast } from "@/components/ui/vault-toast";
 import {
@@ -138,6 +138,39 @@ function normalizeUrl(url: string | null | undefined): string | undefined {
     return url.replace("http://", "https://");
   }
   return url;
+}
+
+// WebDAV URLs need different handling from normalizeUrl(). The desktop editor
+// (Word/LibreOffice) must reach the backend at the SAME origin the SPA uses for
+// its API calls — i.e. the backend or its WebDAV-capable reverse proxy. In dev
+// the page is served by the Vite dev server (e.g. :3000) while the API lives on
+// the backend (e.g. :8000); Vite's proxy does NOT forward WebDAV write methods
+// (LOCK/PUT) to the ASGI backend, so rewriting the WebDAV URL onto the PAGE
+// origin (as normalizeUrl does) makes the file open but every save fail with
+// "object cannot be created in directory". Rewriting onto the API origin routes
+// the editor straight to the backend, which speaks WebDAV. In production the API
+// and page share an origin, so this collapses to the same result.
+function getApiOrigin(): string | null {
+  try {
+    return new URL(apiBaseUrl, window.location.origin).origin;
+  } catch {
+    return null;
+  }
+}
+
+function normalizeWebdavUrl(url: string | null | undefined): string | undefined {
+  if (!url) return url ?? undefined;
+  const apiOrigin = getApiOrigin();
+  if (!apiOrigin) return normalizeUrl(url);
+  try {
+    const parsed = new URL(url, apiOrigin);
+    const target = new URL(apiOrigin);
+    parsed.protocol = target.protocol;
+    parsed.host = target.host;
+    return parsed.toString();
+  } catch {
+    return url;
+  }
 }
 
 function getFileExtension(name?: string): string {
@@ -562,7 +595,6 @@ type OfficeEditPanelProps = {
   canEditInEditor: boolean;
   onVersionUploaded: () => void;
   showHeaderOpenButton?: boolean;
-  onOfficeEditActionChange?: (action: { label: string; enabled: boolean; onClick: () => void }) => void;
   onBeforeRelease?: () => Promise<boolean>;
 };
 
@@ -574,7 +606,6 @@ function OfficeEditPanel({
   canEditInEditor,
   onVersionUploaded,
   showHeaderOpenButton = true,
-  onOfficeEditActionChange,
   onBeforeRelease,
 }: OfficeEditPanelProps) {
   const qc   = useQueryClient();
@@ -692,7 +723,7 @@ function OfficeEditPanel({
     mutationFn: () =>
       documentsAPI.editToken(doc.id).then((r) => ({
         ...r.data,
-        webdav_url: normalizeUrl(r.data.webdav_url) ?? r.data.webdav_url,
+        webdav_url: normalizeWebdavUrl(r.data.webdav_url) ?? r.data.webdav_url,
         file_url:   normalizeUrl(r.data.file_url)   ?? r.data.file_url,
       })),
     onSuccess: (td) => {
@@ -828,7 +859,7 @@ function OfficeEditPanel({
   const openReadOnly = useCallback(async () => {
     try {
       const r = await documentsAPI.readOnlyToken(doc.id);
-      const webdav_url = normalizeUrl(r.data.webdav_url) ?? r.data.webdav_url;
+      const webdav_url = normalizeWebdavUrl(r.data.webdav_url) ?? r.data.webdav_url;
       openInEditor({ webdav_url });
     } catch {
       toast.error("Could not open the document. Please try again.");
@@ -846,11 +877,17 @@ function OfficeEditPanel({
       toast.info("Run the one-time Linux install script before opening documents in the editor.");
       return;
     }
-    if (lockedByMe || lockData) {
+    // Fresh editable token already in hand this session → open straight away.
+    if (lockData) {
       openInEditor();
       return;
     }
-    if (canEditInEditor && !lockedByOther) {
+    // We hold the lock (e.g. after a page reload, or it was taken via the Lock
+    // button) but have no editor token yet — or we can take the lock now.
+    // Either way (re)acquire an editable WebDAV token, then open. acquire_lock
+    // is idempotent for the current holder, so this also refreshes the lock and
+    // guarantees the editor opens with a valid token it can save through.
+    if (lockedByMe || (canEditInEditor && !lockedByOther)) {
       acquireLock.mutate(undefined, { onSuccess: (data) => openInEditor(data) });
       return;
     }
@@ -865,14 +902,6 @@ function OfficeEditPanel({
   const canOpenInApp = Boolean(info.msScheme) && (isWindows || (isLinux && handlerInstalled));
   // Whether "Open in <app>" will be read-only for this user.
   const willOpenReadOnly = !lockedByMe && !lockData && (lockedByOther || !canEditInEditor);
-
-  useEffect(() => {
-    onOfficeEditActionChange?.({
-      label: `Open in ${info.app}`,
-      enabled: canOpenInApp,
-      onClick: handleOpenInApp,
-    });
-  }, [onOfficeEditActionChange, info.app, canOpenInApp, handleOpenInApp]);
 
   // ─────────────────────────────────────────────────────────────────────────
   // Render
@@ -1098,7 +1127,6 @@ export default function DocumentViewer({ document: doc, submitSlot, hideUploadAc
   const qc   = useQueryClient();
   const user = useAuthStore((s) => s.user);
   const [selectedVersionId, setSelectedVersionId] = useState<string | null>(null);
-  const [officeEditAction, setOfficeEditAction] = useState<{ label: string; enabled: boolean; onClick: () => void } | null>(null);
   const sortedVersions = useMemo(
     () => [...(doc.versions ?? [])].sort((a, b) => a.version_number - b.version_number),
     [doc.versions],
@@ -1106,7 +1134,6 @@ export default function DocumentViewer({ document: doc, submitSlot, hideUploadAc
 
   useEffect(() => {
     setSelectedVersionId(null);
-    setOfficeEditAction(null);
   }, [doc.id]);
 
   useEffect(() => {
@@ -1341,19 +1368,6 @@ export default function DocumentViewer({ document: doc, submitSlot, hideUploadAc
             </span>
           )}
         </div>
-        {officeEditAction && (
-          <div className="flex items-center gap-2 flex-wrap">
-            <button
-              type="button"
-              onClick={officeEditAction.onClick}
-              disabled={!officeEditAction.enabled}
-              className="border border-[#C8CDD2] bg-white px-3 py-1.5 text-xs hover:bg-[#F5F7F8] disabled:cursor-not-allowed disabled:opacity-50"
-              title={officeEditAction.label}
-            >
-              <ExternalLink className="w-3.5 h-3.5" /> {officeEditAction.label}
-            </button>
-          </div>
-        )}
       </div>
 
       {/* Version pills */}
@@ -1426,8 +1440,7 @@ export default function DocumentViewer({ document: doc, submitSlot, hideUploadAc
             selectedVersionId={selectedVersionId}
             canEditInEditor={canEdit}
             onVersionUploaded={onVersionUploaded}
-            showHeaderOpenButton={false}
-            onOfficeEditActionChange={setOfficeEditAction}
+            showHeaderOpenButton
             onBeforeRelease={onBeforeRelease}
           />
         </WatermarkedPreview>
