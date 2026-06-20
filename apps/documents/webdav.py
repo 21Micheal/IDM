@@ -648,8 +648,17 @@ class DocumentWebDAVView(View):
         # Refresh application-level lock TTL
         doc.refresh_lock(user)
 
-        # Release WebDAV protocol lock (editor re-locks on next save if needed)
-        _PROTOCOL_LOCKS.pop(str(document_id), None)
+        # Keep the WebDAV protocol lock alive for the rest of the editing session
+        # (it is released on UNLOCK when the editor closes). Popping it here
+        # desynced us from the editor's model: LibreOffice/Word hold ONE lock from
+        # open to close and save repeatedly within it. After a pop, the editor's
+        # post-save PROPFIND saw an empty <lockdiscovery> — its lock had vanished —
+        # so neon re-polled to reconcile, producing the ~2s-spaced PROPFIND tail
+        # that makes a save feel slow. Refresh the TTL instead so lockdiscovery
+        # stays consistent and the editor's first post-save PROPFIND succeeds.
+        proto = _PROTOCOL_LOCKS.get(str(document_id))
+        if proto and proto.get("user_id") == str(user.id):
+            proto["expires_at"] = timezone.now() + timedelta(hours=1)
 
         # Post-save fan-out: reset the Office→PDF preview and queue text
         # re-extraction / search indexing. These enqueue Celery jobs (a broker
