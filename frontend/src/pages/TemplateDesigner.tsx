@@ -528,6 +528,12 @@ function MergeFieldMenu({ fields, onPick, label = "Insert field", repeatingOnly 
             ))}
             {filtered.length === 0 && <p className="px-3 py-4 text-center text-xs text-[#8C969E]">No fields</p>}
           </div>
+          {!repeatingOnly && !pool.some((f) => (f.group ?? "") === "Document references") && (
+            <div className="border-t border-[#C8CDD2] bg-[#F6F7F8] px-3 py-1.5 text-[10px] leading-snug text-[#8C969E]">
+              Need data from another document? Add a reference in{" "}
+              <strong>Settings → Document references</strong>.
+            </div>
+          )}
         </div>
       )}
     </div>
@@ -1507,7 +1513,15 @@ function SettingsTab({ template, documentTypes, fields, onCommit }: {
           <input value={refInput} onChange={(e) => setRefInput(e.target.value)} onKeyDown={(e) => e.key === "Enter" && (e.preventDefault(), addRef())} placeholder="e.g. Related Purchase Order" className={cn(inputCls, "flex-1")} />
           <button onClick={addRef} className="h-9 bg-[#287EAD] px-3 text-sm font-semibold text-white hover:bg-[#1E6F99]"><Plus className="h-4 w-4" /></button>
         </div>
-        {refs.length > 0 && (
+        {refs.length === 0 ? (
+          <p className="mt-2 border border-dashed border-[#C8CDD2] bg-[#F9FAFB] px-3 py-2 text-[11px] leading-relaxed text-[#5E6870]">
+            None yet. Add one above (e.g. <em>Related Invoice</em>), then insert{" "}
+            <code className="rounded bg-[#EEF6FB] px-1 font-mono text-[#287EAD]">{"{{related_invoice}}"}</code> or{" "}
+            <code className="rounded bg-[#EEF6FB] px-1 font-mono text-[#287EAD]">{"{{related_invoice__supplier}}"}</code>{" "}
+            from any block's <strong>Insert field</strong> menu on the <strong>Design</strong> tab. When a user creates the
+            document they'll pick the related document, and its data fills these in.
+          </p>
+        ) : (
           <div className="mt-2 space-y-1.5">
             {refs.map((r) => (
               <div key={r.key} className="flex items-center justify-between gap-2 border border-[#E5E8EB] px-2.5 py-1.5 text-xs">
@@ -1515,6 +1529,9 @@ function SettingsTab({ template, documentTypes, fields, onCommit }: {
                 <button onClick={() => onCommit({ references: refs.filter((x) => x.key !== r.key) })} className="text-[#8C969E] hover:text-red-600"><Minus className="h-3.5 w-3.5" /></button>
               </div>
             ))}
+            <p className="text-[11px] text-[#8C969E]">
+              Insert these from any block's <strong>Insert field</strong> menu (Design tab) → <em>Document references</em>.
+            </p>
           </div>
         )}
       </Card>

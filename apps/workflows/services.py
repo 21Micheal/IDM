@@ -140,7 +140,8 @@ class WorkflowService:
 
     @staticmethod
     @transaction.atomic
-    def approve(task: WorkflowTask, actor, comment: str = "", request=None, signature_placement=None) -> None:
+    def approve(task: WorkflowTask, actor, comment: str = "", request=None, signature_placement=None,
+                items=None, use_new_signature: bool = False, signature_image=None) -> None:
         WorkflowService._assert_actionable(task)
 
         task.status   = "approved"
@@ -162,6 +163,9 @@ class WorkflowService:
                 actor,
                 request=request,
                 placement=signature_placement,
+                items=items,
+                use_new_signature=use_new_signature,
+                signature_image=signature_image,
             )
 
         AuditLog.objects.create(
@@ -781,11 +785,41 @@ class WorkflowService:
             pass
 
     @staticmethod
-    def _embed_signature(document: Document, task: WorkflowTask, action: WorkflowTaskAction, actor, request=None, placement=None) -> None:
-        from apps.documents.signing import embed_signature_into_document, SignatureError
+    def _embed_signature(document: Document, task: WorkflowTask, action: WorkflowTaskAction, actor, request=None,
+                         placement=None, items=None, use_new_signature: bool = False, signature_image=None) -> None:
+        from apps.documents.signing import (
+            embed_signature_into_document,
+            embed_signing_items_into_document,
+            SignatureError,
+        )
 
         try:
-            version, info = embed_signature_into_document(document, actor, placement)
+            if items:
+                # Sejda-style multi-item signing (shared with signature requests).
+                version, info = embed_signing_items_into_document(
+                    document, actor, items,
+                    use_new_signature=use_new_signature,
+                    signature_image=signature_image,
+                )
+                # Audit row keeps the primary signature item's placement; the
+                # signed PDF itself carries every stamped item.
+                placed = info.get("items") or []
+                primary = next((i for i in placed if i.get("kind") == "signature"), placed[0] if placed else {})
+                page_number = int(primary.get("page_number", 1) or 1)
+                x = float(primary.get("x_percent", 0) or 0)
+                y = float(primary.get("y_percent", 0) or 0)
+                width = float(primary.get("width_percent", 0) or 0)
+                height = float(primary.get("height_percent", 0) or 0)
+                source_signature = info.get("signature")
+                checksum = info.get("checksum", "")
+            else:
+                # Legacy single saved-signature placement.
+                version, info = embed_signature_into_document(document, actor, placement)
+                page_number = info["page_number"]
+                x, y = info["x"], info["y"]
+                width, height = info["width"], info["height"]
+                source_signature = info["signature"]
+                checksum = info["checksum"]
         except SignatureError as exc:
             raise WorkflowError(str(exc)) from exc
 
@@ -796,16 +830,16 @@ class WorkflowService:
             task=task,
             action=action,
             signer=actor,
-            source_signature=info["signature"],
+            source_signature=source_signature,
             signed_version=version,
-            page_number=info["page_number"],
-            x=info["x"],
-            y=info["y"],
-            width=info["width"],
-            height=info["height"],
+            page_number=page_number,
+            x=x,
+            y=y,
+            width=width,
+            height=height,
             ip_address=ip_address,
             user_agent=user_agent,
-            checksum=info["checksum"],
+            checksum=checksum,
         )
 
         AuditLog.objects.create(
@@ -816,9 +850,9 @@ class WorkflowService:
             object_repr=str(document)[:255],
             changes={
                 "task_id": str(task.id),
-                "signature_id": str(info["signature"].id),
+                "signature_id": str(source_signature.id) if source_signature else None,
                 "version": version.version_number,
-                "checksum": info["checksum"],
+                "checksum": checksum,
             },
             ip_address=ip_address,
             user_agent=user_agent,

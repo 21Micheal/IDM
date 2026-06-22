@@ -9,6 +9,7 @@ import { useState } from "react";
 import { useNavigate } from "react-router-dom";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { signatureRequestsAPI, usersAPI } from "@/services/api";
+import { useAuthStore } from "@/store/authStore";
 import { toast } from "@/components/ui/vault-toast";
 import {
   FileSignature, Upload, X, Loader2, Plus, ArrowUp, ArrowDown, Search,
@@ -40,7 +41,7 @@ const STATUS_BADGE: Record<string, string> = {
 };
 
 // ── Signer add control ──────────────────────────────────────────────────────────
-function SignerPicker({ exclude, onAdd }: { exclude: Set<string>; onAdd: (u: UserLite) => void }) {
+function SignerPicker({ exclude, onAdd, currentUserId }: { exclude: Set<string>; onAdd: (u: UserLite) => void; currentUserId?: string }) {
   const [search, setSearch] = useState("");
   const [open, setOpen] = useState(false);
   const { data: users = [] } = useQuery<UserLite[]>({
@@ -70,6 +71,7 @@ function SignerPicker({ exclude, onAdd }: { exclude: Set<string>; onAdd: (u: Use
               className="flex w-full items-center gap-2 px-3 py-2 text-left text-sm hover:bg-muted/60">
               <Plus className="w-3.5 h-3.5 text-primary" />
               <span className="text-foreground">{u.full_name}</span>
+              {u.id === currentUserId && <span className="rounded-full bg-primary/10 px-1.5 text-[10px] font-medium text-primary">you</span>}
               <span className="text-xs text-muted-foreground">{u.email}</span>
             </button>
           ))}
@@ -81,6 +83,7 @@ function SignerPicker({ exclude, onAdd }: { exclude: Set<string>; onAdd: (u: Use
 
 // ── Create form ─────────────────────────────────────────────────────────────────
 function RequestForm({ onCreated }: { onCreated: (documentId: string) => void }) {
+  const me = useAuthStore((s) => s.user);
   const [file, setFile] = useState<File | null>(null);
   const [title, setTitle] = useState("");
   const [message, setMessage] = useState("");
@@ -109,9 +112,10 @@ function RequestForm({ onCreated }: { onCreated: (documentId: string) => void })
     });
   };
 
+  const SIGN_EXT = /\.(pdf|docx?|xlsx?|pptx?|odt|ods|odp)$/i;
   const submit = () => {
-    if (!file) { toast.error("Upload a PDF document"); return; }
-    if (!file.name.toLowerCase().endsWith(".pdf")) { toast.error("Only PDF documents can be signed"); return; }
+    if (!file) { toast.error("Upload a document"); return; }
+    if (!SIGN_EXT.test(file.name)) { toast.error("Upload a PDF or Office document (Word, Excel, PowerPoint)"); return; }
     if (signers.length === 0) { toast.error("Add at least one signer"); return; }
     create.mutate();
   };
@@ -120,7 +124,7 @@ function RequestForm({ onCreated }: { onCreated: (documentId: string) => void })
     <div className="max-w-2xl space-y-5">
       {/* Upload */}
       <div>
-        <label className="label">Document (PDF) <span className="text-destructive">*</span></label>
+        <label className="label">Document <span className="text-destructive">*</span></label>
         {file ? (
           <div className="flex items-center gap-2 rounded-lg border border-border bg-muted/20 px-3 py-2.5">
             <FileSignature className="w-4 h-4 text-primary" />
@@ -130,9 +134,10 @@ function RequestForm({ onCreated }: { onCreated: (documentId: string) => void })
         ) : (
           <label className="flex cursor-pointer flex-col items-center gap-2 rounded-lg border-2 border-dashed border-border bg-muted/20 py-6 text-sm text-muted-foreground hover:border-primary/50">
             <Upload className="w-5 h-5" />
-            <span>Click to upload a PDF</span>
-            <input type="file" accept="application/pdf,.pdf" className="sr-only"
-              onChange={(e) => { const f = e.target.files?.[0]; if (f) { setFile(f); if (!title) setTitle(f.name.replace(/\.pdf$/i, "")); } }} />
+            <span>Click to upload a PDF or Office document</span>
+            <span className="text-[11px] text-muted-foreground/80">Word, Excel & PowerPoint are signed on their PDF rendition</span>
+            <input type="file" accept="application/pdf,.pdf,.doc,.docx,.xls,.xlsx,.ppt,.pptx,.odt,.ods,.odp" className="sr-only"
+              onChange={(e) => { const f = e.target.files?.[0]; if (f) { setFile(f); if (!title) setTitle(f.name.replace(/\.[^.]+$/i, "")); } }} />
           </label>
         )}
       </div>
@@ -149,7 +154,8 @@ function RequestForm({ onCreated }: { onCreated: (documentId: string) => void })
       {/* Signers */}
       <div>
         <label className="label">Signers <span className="text-destructive">*</span></label>
-        <SignerPicker exclude={new Set(signers.map((s) => s.id))} onAdd={(u) => setSigners((p) => [...p, u])} />
+        <SignerPicker exclude={new Set(signers.map((s) => s.id))} currentUserId={me?.id} onAdd={(u) => setSigners((p) => [...p, u])} />
+        <p className="mt-1 text-[11px] text-muted-foreground">You can include yourself if you also need to sign.</p>
         {signers.length > 0 && (
           <div className="mt-2 space-y-1.5">
             {signers.map((s, i) => (
@@ -264,12 +270,14 @@ export default function RequestSignaturePage() {
         </nav>
       </div>
 
-      {tab === "request" && (
+      {/* Keep the request form mounted so the uploaded file + fields persist when
+          the user flips to another tab and back (it only unmounts on submit/nav). */}
+      <div className={tab === "request" ? "" : "hidden"}>
         <RequestForm onCreated={(documentId) => {
           qc.invalidateQueries({ queryKey: ["signature-requests", "sent"] });
           navigate(`/documents/${documentId}`);
         }} />
-      )}
+      </div>
       {tab === "incoming" && <RequestList box="incoming" />}
       {tab === "sent" && <RequestList box="sent" />}
     </div>

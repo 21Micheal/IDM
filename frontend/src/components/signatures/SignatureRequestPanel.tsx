@@ -9,7 +9,7 @@ import { signatureRequestsAPI } from "@/services/api";
 import { toast } from "@/components/ui/vault-toast";
 import { CheckCircle2, Clock, XCircle, Loader2, FileSignature, X } from "lucide-react";
 import clsx from "clsx";
-import SignaturePlacementModal, { type SignaturePlacement } from "./SignaturePlacementModal";
+import SignaturePlacementModal, { type SignaturePlacementResult } from "./SignaturePlacementModal";
 
 interface Signer {
   id: string;
@@ -60,10 +60,12 @@ export default function SignatureRequestPanel({ documentId }: { documentId: stri
     qc.invalidateQueries({ queryKey: ["signature-request", documentId] });
     qc.invalidateQueries({ queryKey: ["document", documentId] });
     qc.invalidateQueries({ queryKey: ["notifications"] });
+    // Refresh the "Awaiting my signature" list + nav badge (count) after signing.
+    qc.invalidateQueries({ queryKey: ["signature-requests"] });
   };
 
   const signMutation = useMutation({
-    mutationFn: (placement: SignaturePlacement) => signatureRequestsAPI.sign(req!.id, placement),
+    mutationFn: (result: SignaturePlacementResult) => signatureRequestsAPI.sign(req!.id, result),
     onSuccess: () => { toast.success("Document signed"); setShowSign(false); refresh(); },
     onError: (e: any) => toast.error(e?.response?.data?.detail ?? "Could not sign"),
   });

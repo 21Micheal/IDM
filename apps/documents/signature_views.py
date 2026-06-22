@@ -25,7 +25,7 @@ from .models import (
     get_signature_request_document_type,
 )
 from .serializers import _generate_unique_reference
-from .signing import embed_signature_into_document, SignatureError
+from .signing import embed_signing_items_into_document, SignatureError
 
 
 # ── Serializers ────────────────────────────────────────────────────────────────
@@ -113,18 +113,52 @@ class SignatureRequestViewSet(viewsets.ModelViewSet):
         if box == "sent":
             return qs.filter(requested_by=user)
         if box == "incoming":
-            return qs.filter(signers__signer=user).distinct()
+            # Only requests still awaiting THIS user's signature: their signer row
+            # is pending AND the request is still active. Once they sign (or the
+            # request completes/cancels) it leaves their "awaiting my signature".
+            return qs.filter(
+                signers__signer=user,
+                signers__status=SignatureRequestSigner.Status.PENDING,
+                status=SignatureRequest.Status.PENDING,
+            ).distinct()
         return qs.filter(Q(requested_by=user) | Q(signers__signer=user)).distinct()
+
+    @action(detail=False, methods=["get"])
+    def incoming_count(self, request):
+        """Number of requests still awaiting the current user's signature — drives
+        the nav badge."""
+        count = (
+            SignatureRequest.objects
+            .filter(
+                signers__signer=request.user,
+                signers__status=SignatureRequestSigner.Status.PENDING,
+                status=SignatureRequest.Status.PENDING,
+            )
+            .distinct()
+            .count()
+        )
+        return Response({"count": count})
 
     # ── Create ───────────────────────────────────────────────────────────────
     def create(self, request, *args, **kwargs):
         upload = request.FILES.get("file")
         if not upload:
-            return Response({"detail": "A PDF file is required."}, status=400)
+            return Response({"detail": "A document file is required."}, status=400)
         name = (upload.name or "").lower()
         ctype = (getattr(upload, "content_type", "") or "").lower()
-        if not (name.endswith(".pdf") or "pdf" in ctype):
-            return Response({"detail": "Only PDF documents can be sent for signature."}, status=400)
+        is_pdf_upload = name.endswith(".pdf") or "pdf" in ctype
+        office_exts = (".doc", ".docx", ".xls", ".xlsx", ".ppt", ".pptx", ".odt", ".ods", ".odp")
+        is_office_upload = name.endswith(office_exts)
+        if not (is_pdf_upload or is_office_upload):
+            return Response(
+                {"detail": "Upload a PDF or Office document (Word, Excel, PowerPoint). It is signed on its PDF rendition."},
+                status=400,
+            )
+        import mimetypes as _mimetypes
+        file_mime = (
+            "application/pdf" if is_pdf_upload
+            else (upload.content_type or _mimetypes.guess_type(name)[0] or "application/octet-stream")
+        )
 
         title = (request.data.get("title") or upload.name or "Signature request").strip()
         message = (request.data.get("message") or "").strip()
@@ -141,11 +175,12 @@ class SignatureRequestViewSet(viewsets.ModelViewSet):
         else:
             signer_ids = request.data.getlist("signers") if hasattr(request.data, "getlist") else []
 
-        # De-dupe while preserving order; drop the requester if accidentally included.
+        # De-dupe while preserving order. The requester MAY include themselves as
+        # a signer (e.g. they are also on the approving committee).
         seen, ordered_ids = set(), []
         for sid in signer_ids:
             sid = str(sid)
-            if sid and sid != str(request.user.id) and sid not in seen:
+            if sid and sid not in seen:
                 seen.add(sid)
                 ordered_ids.append(sid)
         if not ordered_ids:
@@ -166,10 +201,10 @@ class SignatureRequestViewSet(viewsets.ModelViewSet):
                 doc = Document.objects.create(
                     title=title,
                     reference_number=reference_number,
-                    file=ContentFile(content, name=upload.name or "document.pdf"),
-                    file_name=upload.name or "document.pdf",
+                    file=ContentFile(content, name=upload.name or "document"),
+                    file_name=upload.name or "document",
                     file_size=len(content),
-                    file_mime_type="application/pdf",
+                    file_mime_type=file_mime,
                     checksum=checksum,
                     uploaded_by=request.user,
                     owned_by=request.user,
@@ -193,6 +228,13 @@ class SignatureRequestViewSet(viewsets.ModelViewSet):
                     request=sig_request, signer=users[sid], order=idx,
                 )
 
+            # Office uploads are signed on their PDF rendition — generate it now so
+            # signers can place items as soon as they open the request.
+            if doc.is_office_doc():
+                from apps.documents.tasks import generate_document_preview
+                Document.objects.filter(id=doc.id).update(preview_status="pending")
+                transaction.on_commit(lambda: generate_document_preview.delay(str(doc.id)))
+
         self._notify_current_signers(sig_request)
         ser = self.get_serializer(sig_request)
         return Response(ser.data, status=status.HTTP_201_CREATED)
@@ -212,21 +254,45 @@ class SignatureRequestViewSet(viewsets.ModelViewSet):
         if sig_request.ordered and row.id not in {s.id for s in sig_request.current_pending_signers()}:
             return Response({"detail": "It is not your turn to sign yet."}, status=400)
 
-        placement = request.data.get("placement")
-        if isinstance(placement, str):
+        # `items` is the Sejda-style placed-items array from SignaturePlacementModal
+        # (one or more signature items plus any optional name/date/text items).
+        items = request.data.get("items")
+        if isinstance(items, str):
             try:
-                placement = json.loads(placement)
+                items = json.loads(items) if items.strip() else None
             except json.JSONDecodeError:
-                placement = None
+                return Response({"detail": "Placement data is invalid."}, status=400)
+
+        if not items:
+            # Back-compat: older clients send a single `placement` object for
+            # just the signature, with no name/date/text items.
+            placement = request.data.get("placement")
+            if isinstance(placement, str):
+                try:
+                    placement = json.loads(placement)
+                except json.JSONDecodeError:
+                    placement = None
+            if isinstance(placement, dict):
+                items = [{**placement, "kind": "signature"}]
+
+        use_new_signature = str(request.data.get("use_new_signature", "")).lower() in ("1", "true", "yes", "on")
+        signature_image = request.data.get("signature_image") if use_new_signature else None
+
         try:
-            embed_signature_into_document(sig_request.document, request.user, placement)
+            version, info = embed_signing_items_into_document(
+                sig_request.document,
+                request.user,
+                items,
+                use_new_signature=use_new_signature,
+                signature_image=signature_image,
+            )
         except SignatureError as exc:
             return Response({"detail": str(exc)}, status=400)
 
         now = timezone.now()
         row.status = SignatureRequestSigner.Status.SIGNED
         row.signed_at = now
-        row.placement = placement if isinstance(placement, dict) else None
+        row.placement = {"items": info["items"]}
         row.save(update_fields=["status", "signed_at", "placement"])
 
         remaining = sig_request.signers.filter(status=SignatureRequestSigner.Status.PENDING).exists()

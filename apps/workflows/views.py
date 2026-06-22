@@ -257,6 +257,21 @@ class WorkflowTaskViewSet(viewsets.ReadOnlyModelViewSet):
         if not task.step.allow_approve:
             return Response({"detail": "Approve is not permitted for this step."}, status=403)
         self._check_permission(task, request.user)
+
+        # Sejda-style multi-item signing (signature + optional name/date/text),
+        # shared with the signature-request flow. `items` is a JSON array; an
+        # ad-hoc drawn signature arrives as use_new_signature + signature_image.
+        # A bare `signature_placement` is still accepted from older clients.
+        import json as _json
+        items = request.data.get("items")
+        if isinstance(items, str):
+            try:
+                items = _json.loads(items) if items.strip() else None
+            except _json.JSONDecodeError:
+                items = None
+        use_new_signature = str(request.data.get("use_new_signature", "")).lower() in ("1", "true", "yes", "on")
+        signature_image = request.data.get("signature_image") if use_new_signature else None
+
         try:
             WorkflowService.approve(
                 task,
@@ -264,6 +279,9 @@ class WorkflowTaskViewSet(viewsets.ReadOnlyModelViewSet):
                 request.data.get("comment", ""),
                 request=request,
                 signature_placement=request.data.get("signature_placement"),
+                items=items,
+                use_new_signature=use_new_signature,
+                signature_image=signature_image,
             )
         except WorkflowError as exc:
             return Response({"detail": str(exc)}, status=400)

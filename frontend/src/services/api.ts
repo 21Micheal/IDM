@@ -535,6 +535,30 @@ export const searchAPI = {
   search: (payload: unknown) => api.post("/search/", payload),
 };
 
+// ── Signing payload (structurally matches SignaturePlacementResult from
+// SignaturePlacementModal) — kept local so this module stays decoupled from UI.
+export type SignSubmission = {
+  items: unknown[];
+  timezone?: string;
+  useNewSignature?: boolean;
+  signatureImage?: string | null;
+};
+
+/** Build the multipart body the sign / approve endpoints expect from a placement
+ *  result: the placed `items`, optional `timezone`, and (only when the signer
+ *  drew a one-off signature) `use_new_signature` + `signature_image`. */
+function buildSignatureForm(result: SignSubmission, extra?: Record<string, string>): FormData {
+  const fd = new FormData();
+  fd.append("items", JSON.stringify(result.items ?? []));
+  if (result.timezone) fd.append("timezone", result.timezone);
+  if (result.useNewSignature && result.signatureImage) {
+    fd.append("use_new_signature", "true");
+    fd.append("signature_image", result.signatureImage);
+  }
+  for (const [k, v] of Object.entries(extra ?? {})) fd.append(k, v);
+  return fd;
+}
+
 export const workflowAPI = {
   // Templates
   listTemplates: () => api.get("/workflows/templates/"),
@@ -572,15 +596,12 @@ export const workflowAPI = {
   myTasks: () => api.get("/workflows/tasks/my_tasks/"),
   listTasks: (params?: Record<string, unknown>) =>
     api.get("/workflows/tasks/", { params }),
-  approveTask: (
-    id: string,
-    comment = "",
-    signaturePlacement?: { page_number: number; x_percent: number; y_percent: number; width_percent?: number },
-  ) =>
-    api.post(`/workflows/tasks/${id}/approve/`, {
-      comment,
-      ...(signaturePlacement ? { signature_placement: signaturePlacement } : {}),
-    }),
+  approveTask: (id: string, comment = "", result?: SignSubmission) =>
+    result
+      ? api.post(`/workflows/tasks/${id}/approve/`, buildSignatureForm(result, { comment }), {
+          headers: { "Content-Type": undefined },
+        })
+      : api.post(`/workflows/tasks/${id}/approve/`, { comment }),
   rejectTask: (id: string, comment: string) =>
     api.post(`/workflows/tasks/${id}/reject/`, { comment }),
   returnForReview: (id: string, comment: string) =>
@@ -615,6 +636,9 @@ export const documentApi = {
 export const signatureRequestsAPI = {
   list: (params?: { box?: "incoming" | "sent"; document?: string }) =>
     api.get("/documents/signature-requests/", { params }),
+  /** Count of requests still awaiting the current user's signature (nav badge). */
+  incomingCount: () =>
+    api.get<{ count: number }>("/documents/signature-requests/incoming_count/"),
   get: (id: string) => api.get(`/documents/signature-requests/${id}/`),
   create: (data: {
     file: File;
@@ -633,8 +657,10 @@ export const signatureRequestsAPI = {
       headers: { "Content-Type": undefined },
     });
   },
-  sign: (id: string, placement: { page_number: number; x_percent: number; y_percent: number; width_percent?: number }) =>
-    api.post(`/documents/signature-requests/${id}/sign/`, { placement }),
+  sign: (id: string, result: SignSubmission) =>
+    api.post(`/documents/signature-requests/${id}/sign/`, buildSignatureForm(result), {
+      headers: { "Content-Type": undefined },
+    }),
   decline: (id: string, reason: string) =>
     api.post(`/documents/signature-requests/${id}/decline/`, { reason }),
   cancel: (id: string) => api.post(`/documents/signature-requests/${id}/cancel/`),

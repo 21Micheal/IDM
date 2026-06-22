@@ -20,7 +20,7 @@ import {
 } from "lucide-react";
 import { useAuthStore } from "../../store/authStore";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { notificationsAPI, workflowAPI } from "../../services/api";
+import { notificationsAPI, workflowAPI, signatureRequestsAPI } from "../../services/api";
 import { FlaxemLogo } from "./FlaxemLogo";
 import { QUERY_SHORT_STALE } from "@/lib/reactQueryDefaults";
 import { preloadCommonRoutes, preloadRouteForPath } from "@/lib/routePreload";
@@ -571,6 +571,14 @@ export default function Layout() {
     ...QUERY_SHORT_STALE,
   });
 
+  const { data: signatureCount = 0 } = useQuery({
+    queryKey: ["signature-requests", "incoming-count"],
+    queryFn: () => signatureRequestsAPI.incomingCount().then((r) => r.data.count),
+    refetchInterval: 30_000,
+    enabled: idleReady,
+    ...QUERY_SHORT_STALE,
+  });
+
   const unread = (notifications as { is_read: boolean; type: string }[] | undefined)
     ?.filter((n) => !n.is_read && !TASK_NOTIFICATION_TYPES.has(n.type)).length ?? 0;
 
@@ -623,7 +631,10 @@ export default function Layout() {
               }
               const { to, icon: Icon, label, exact, allowedRoles } = entry;
               if (allowedRoles && !hasAdminAccess) return null;
-              const badgeValue = to === "/notifications" ? unread : to === "/workflow" ? pendingTasksCount : undefined;
+              const badgeValue = to === "/notifications" ? unread
+                : to === "/workflow" ? pendingTasksCount
+                : to === "/request-signature" ? (signatureCount || undefined)
+                : undefined;
               return (
                 <NavLink
                   key={to}
