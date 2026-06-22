@@ -257,6 +257,12 @@ class DMSSettings(models.Model):
         FOOTER = "footer", "Footer"
 
     id = models.PositiveSmallIntegerField(primary_key=True, default=1, editable=False)
+
+    # Organization identity — used to auto-fill {{company_name}} / {{company_address}}
+    # merge fields in designer document templates.
+    organization_name = models.CharField(max_length=200, blank=True, default="")
+    organization_address = models.TextField(blank=True, default="")
+
     watermark_enabled = models.BooleanField(default=False)
     watermark_text = models.CharField(max_length=120, default="CONFIDENTIAL", blank=True)
     watermark_opacity = models.PositiveSmallIntegerField(default=15)

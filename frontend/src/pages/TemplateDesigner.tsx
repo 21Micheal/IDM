@@ -245,19 +245,23 @@ const FONT_OPTIONS = [
   { value: "Calibri, 'Segoe UI', sans-serif",           label: "Calibri" },
 ];
 
-/** Default merge fields when the host app passes none. Override via props. */
+/**
+ * Auto-fill merge fields — resolved server-side at create time (and STATIC in the
+ * document thereafter). Keys must match apps/templates_engine/tasks.py
+ * `_designer_merge_values`. The host also appends the selected document type's
+ * own metadata fields to this list.
+ */
 const DEFAULT_MERGE_FIELDS: MergeField[] = [
-  { key: "company_name",     label: "Company name",     group: "Organisation" },
-  { key: "company_address",  label: "Company address",  group: "Organisation" },
-  { key: "department",       label: "Department",       group: "Organisation" },
-  { key: "document_no",      label: "Document number",  group: "Document" },
-  { key: "document_title",   label: "Document title",   group: "Document" },
-  { key: "document_date",    label: "Document date",    group: "Document" },
-  { key: "reference_number", label: "Reference number", group: "Document" },
-  { key: "author_name",      label: "Author name",      group: "People" },
-  { key: "recipient_name",   label: "Recipient name",   group: "People" },
-  { key: "approver_name",    label: "Approver name",    group: "People" },
-  { key: "line_items",       label: "Line items",       group: "Collections", repeating: true },
+  { key: "author_name",      label: "Your name (author)",  group: "Auto-fill" },
+  { key: "author_email",     label: "Your email",          group: "Auto-fill" },
+  { key: "department",       label: "Your department",     group: "Auto-fill" },
+  { key: "document_title",   label: "Document title",      group: "Auto-fill" },
+  { key: "reference_number", label: "Reference number",    group: "Auto-fill" },
+  { key: "document_no",      label: "Document number",     group: "Auto-fill" },
+  { key: "document_date",    label: "Today's date",        group: "Auto-fill" },
+  { key: "now",              label: "Date & time",         group: "Auto-fill" },
+  { key: "company_name",     label: "Company name",        group: "Organisation" },
+  { key: "company_address",  label: "Company address",     group: "Organisation" },
 ];
 
 const uid = () => Math.random().toString(36).slice(2, 10);
@@ -282,6 +286,18 @@ function substitute(s: string | undefined, data: Record<string, string>): string
   return s.replace(/\{\{\s*([a-zA-Z0-9_.]+)\s*\}\}/g, (_, key) =>
     data[key] ?? `\u00ab${key}\u00bb`,
   );
+}
+
+/** Render a string with [[user placeholders]] shown as highlighted fill-in
+ *  markers \u2014 matching how the generated document highlights them for the user. */
+function highlightPlaceholders(str: string): React.ReactNode {
+  if (!str || !str.includes("[[")) return str;
+  return str.split(/(\[\[[^\]]+\]\])/g).map((part, i) => {
+    const m = /^\[\[([^\]]+)\]\]$/.exec(part);
+    return m
+      ? <mark key={i} className="rounded-sm bg-yellow-200 px-0.5 text-[#1F2933]">{m[1]}</mark>
+      : part;
+  });
 }
 
 /* ============================================================
@@ -434,14 +450,17 @@ const labelCls = "text-[11px] font-semibold uppercase tracking-wider text-[#5E68
  * Merge field insert menu
  * ============================================================ */
 
-function MergeFieldMenu({ fields, onPick, label = "Insert field", repeatingOnly = false }: {
+function MergeFieldMenu({ fields, onPick, label = "Insert field", repeatingOnly = false, allowPlaceholder = true }: {
   fields: MergeField[];
   onPick: (token: string, field: MergeField) => void;
   label?: string;
   repeatingOnly?: boolean;
+  /** Show the "Ask the user (fill-in)" control that inserts [[label]] placeholders. */
+  allowPlaceholder?: boolean;
 }) {
   const [open, setOpen] = useState(false);
   const [q, setQ] = useState("");
+  const [ph, setPh] = useState("");
   const ref = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
@@ -466,11 +485,26 @@ function MergeFieldMenu({ fields, onPick, label = "Insert field", repeatingOnly 
         <Braces className="h-3 w-3" /> {label}
       </button>
       {open && (
-        <div className="absolute right-0 z-50 mt-1 w-64 border border-[#C8CDD2] bg-white shadow-xl">
+        <div className="absolute right-0 z-50 mt-1 w-72 border border-[#C8CDD2] bg-white shadow-xl">
+          {allowPlaceholder && !repeatingOnly && (
+            <div className="border-b border-[#C8CDD2] bg-[#FFFBEB] p-2">
+              <p className="mb-1 text-[10px] font-semibold uppercase tracking-wider text-[#92700A]">Ask the user (fill when editing)</p>
+              <div className="flex items-center gap-1">
+                <input value={ph} onChange={(e) => setPh(e.target.value)}
+                       onKeyDown={(e) => { if (e.key === "Enter" && ph.trim()) { e.preventDefault(); onPick(`[[${ph.trim()}]]`, { key: ph.trim(), label: ph.trim() }); setOpen(false); setPh(""); } }}
+                       placeholder="e.g. Amount, Due date"
+                       className="h-8 w-full border border-[#E3C765] bg-white px-2 text-xs outline-none focus:border-[#C9A227]" />
+                <button type="button" disabled={!ph.trim()}
+                        onClick={() => { if (ph.trim()) { onPick(`[[${ph.trim()}]]`, { key: ph.trim(), label: ph.trim() }); setOpen(false); setPh(""); } }}
+                        className="h-8 shrink-0 bg-[#C9A227] px-2 text-[11px] font-semibold text-white disabled:opacity-40">Add</button>
+              </div>
+            </div>
+          )}
           <div className="border-b border-[#C8CDD2] p-2">
+            <p className="mb-1 text-[10px] font-semibold uppercase tracking-wider text-[#8C969E]">Auto-fill field (static on create)</p>
             <div className="relative">
               <Search className="pointer-events-none absolute left-2 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-[#5E6870]" />
-              <input autoFocus value={q} onChange={(e) => setQ(e.target.value)} placeholder="Search fields…"
+              <input value={q} onChange={(e) => setQ(e.target.value)} placeholder="Search fields…"
                      className="h-8 w-full border border-[#AEB5BB] bg-white pl-7 pr-2 text-xs outline-none focus:border-[#287EAD]" />
             </div>
           </div>
@@ -595,7 +629,9 @@ function blockTextStyle(b: DocBlock, theme: ThemeSettings, heading = false): Rea
 function RenderBlock({ block: b, theme, data }: {
   block: DocBlock; theme: ThemeSettings; data: Record<string, string> | null;
 }) {
-  const render = (s?: string) => (data ? substitute(s, data) : (s ?? ""));
+  // String form (for attributes like alt); node form highlights [[placeholders]].
+  const renderStr = (s?: string) => (data ? substitute(s, data) : (s ?? ""));
+  const render = (s?: string): React.ReactNode => highlightPlaceholders(renderStr(s));
   const headingSize = b.level === 1 ? 24 : b.level === 2 ? 18 : 15;
 
   switch (b.type) {
@@ -686,7 +722,7 @@ function RenderBlock({ block: b, theme, data }: {
       return (
         <div style={{ display: "flex", justifyContent: wrapAlign, marginTop: b.marginTop, marginBottom: b.marginBottom }}>
           {b.src ? (
-            <img src={b.src} alt={render(b.alt)} style={{ width: b.width, height: b.height, objectFit: "contain" }} />
+            <img src={b.src} alt={renderStr(b.alt)} style={{ width: b.width, height: b.height, objectFit: "contain" }} />
           ) : (
             <div style={{ width: b.width, height: b.height, border: "1px dashed #AEB5BB", display: "flex", alignItems: "center", justifyContent: "center", color: "#8C969E", fontSize: 11, background: "#F6F7F8" }}>
               {b.type === "logo" ? "Company logo" : "Image"}
@@ -1124,7 +1160,29 @@ function BlockInspector({ block, theme, fields, repeatingFields, patch }: {
 
       {(block.type === "image" || block.type === "logo") && (
         <>
-          <Field label="Image URL"><input value={block.src ?? ""} placeholder="https://… or {{logo_url}}" onChange={(e) => patch({ src: e.target.value })} className={inputCls} /></Field>
+          <Field label="Upload image">
+            <div className="space-y-2">
+              <label className="flex cursor-pointer items-center justify-center gap-2 border border-dashed border-[#287EAD]/50 bg-[#EEF6FB] px-3 py-2 text-xs font-semibold text-[#287EAD] hover:bg-[#E3F0F8]">
+                <ImageIcon className="h-3.5 w-3.5" /> Choose image…
+                <input type="file" accept="image/*" className="hidden"
+                       onChange={(e) => {
+                         const f = e.target.files?.[0];
+                         if (!f) return;
+                         const reader = new FileReader();
+                         reader.onload = () => patch({ src: String(reader.result) });
+                         reader.readAsDataURL(f);
+                         e.target.value = "";
+                       }} />
+              </label>
+              {block.src?.startsWith("data:image") && (
+                <div className="flex items-center justify-between gap-2 border border-[#C8CDD2] bg-white p-2">
+                  <img src={block.src} alt="" className="h-10 w-auto object-contain" />
+                  <button type="button" onClick={() => patch({ src: "" })} className="text-[11px] font-semibold text-[#5E6870] hover:text-red-600">Remove</button>
+                </div>
+              )}
+            </div>
+          </Field>
+          <Field label="…or image URL"><input value={block.src?.startsWith("data:") ? "" : (block.src ?? "")} placeholder="https://… or {{logo_url}}" onChange={(e) => patch({ src: e.target.value })} className={inputCls} /></Field>
           <Field label="Alt text"><input value={block.alt ?? ""} onChange={(e) => patch({ alt: e.target.value })} className={inputCls} /></Field>
           <div className="grid grid-cols-2 gap-2">
             <NumberRow label="Width" value={block.width} onChange={(n) => patch({ width: n })} suffix="px" />
@@ -1425,9 +1483,12 @@ export interface DocumentTemplateDesignerProps {
   onSave: (template: DocumentTemplate, stayOpen?: boolean) => void;
   onCancel: () => void;
   isSaving?: boolean;
-  /** Document types for filing (same shape as TemplateBuilderV2). */
-  documentTypes?: Array<{ id: string; name: string; code: string }>;
-  /** Merge fields available to insert. Defaults provided if omitted. */
+  /** Document types for filing. Their metadata fields become insertable merge fields. */
+  documentTypes?: Array<{
+    id: string; name: string; code: string;
+    metadata_fields?: Array<{ key?: string; field_key?: string; label: string }>;
+  }>;
+  /** Merge fields available to insert. Defaults + the doc type's fields if omitted. */
   mergeFields?: MergeField[];
   /** Optional sample values used by the Preview tab. */
   sampleData?: Record<string, string>;
@@ -1436,11 +1497,21 @@ export interface DocumentTemplateDesignerProps {
 export default function DocumentTemplateDesigner({
   initial, onSave, onCancel, isSaving, documentTypes = [], mergeFields, sampleData,
 }: DocumentTemplateDesignerProps) {
-  const fields = mergeFields && mergeFields.length ? mergeFields : DEFAULT_MERGE_FIELDS;
-
   const [history, setHistory] = useState<DocumentTemplate[]>([normalizeTemplate(initial ?? initialDocument)]);
   const [cursor, setCursor] = useState(0);
   const template = history[cursor];
+
+  // Available merge fields = caller override, else the auto-fill defaults plus the
+  // selected document type's own metadata fields (so admins insert real fields).
+  const fields = useMemo<MergeField[]>(() => {
+    if (mergeFields && mergeFields.length) return mergeFields;
+    const dt = documentTypes.find((t) => t.id === template?.document_type_id);
+    const meta: MergeField[] = (dt?.metadata_fields ?? [])
+      .map((f) => ({ key: (f.key ?? f.field_key ?? "").trim(), label: f.label, group: "Document fields" }))
+      .filter((f) => f.key);
+    const seen = new Set(DEFAULT_MERGE_FIELDS.map((f) => f.key));
+    return [...DEFAULT_MERGE_FIELDS, ...meta.filter((f) => !seen.has(f.key))];
+  }, [mergeFields, documentTypes, template?.document_type_id]);
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [tab, setTab] = useState<Tab>("design");
   const [dragType, setDragType] = useState<BlockType | null>(null);

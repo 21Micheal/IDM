@@ -4,6 +4,7 @@ import { dmsSettingsAPI, type DmsSettings } from "@/services/api";
 import { toast } from "@/components/ui/vault-toast";
 import {
   Archive,
+  Building2,
   ClipboardCheck,
   Copy,
   Droplets,
@@ -388,6 +389,33 @@ function SettingsWorkspace() {
 
           {activeSection === "governance" && (
             <>
+              <SettingBlock
+                icon={Building2}
+                title="Organization identity"
+                description="Used to auto-fill {{company_name}} / {{company_address}} merge fields in document templates."
+              >
+                <div className="grid gap-4 sm:grid-cols-2">
+                  <label>
+                    <span className="mb-1.5 block text-xs font-semibold uppercase tracking-wider text-[#5E6870]">Organization name</span>
+                    <input
+                      className={`${inputCls} w-full`}
+                      value={settings.organization_name ?? ""}
+                      onChange={(event) => update("organization_name", event.target.value)}
+                      placeholder="e.g. Fairfield Systems Ltd"
+                    />
+                  </label>
+                  <label>
+                    <span className="mb-1.5 block text-xs font-semibold uppercase tracking-wider text-[#5E6870]">Organization address</span>
+                    <input
+                      className={`${inputCls} w-full`}
+                      value={settings.organization_address ?? ""}
+                      onChange={(event) => update("organization_address", event.target.value)}
+                      placeholder="e.g. 12 Market St, Nairobi"
+                    />
+                  </label>
+                </div>
+              </SettingBlock>
+
               <SettingBlock
                 icon={Copy}
                 title="Duplicate uploads"

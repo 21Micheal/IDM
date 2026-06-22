@@ -336,6 +336,45 @@ def generate_built_docx(template, values) -> bytes:
 # ─── Document designer (WYSIWYG block layout) → DOCX ─────────────────────────
 
 _TOKEN_RE = re.compile(r"\{\{([a-zA-Z0-9_]+)\}\}")
+# User placeholders the admin marks for the recipient to fill when editing the
+# generated document, e.g. [[Amount]]. Rendered as highlighted fill-in markers.
+_PLACEHOLDER_RE = re.compile(r"\[\[([^\]]+)\]\]")
+
+
+def _designer_add_text(paragraph, raw, values, *, size=None, color=None,
+                       bold=None, italic=None, underline=None, font=None):
+    """
+    Emit runs into a paragraph for a designer text string. {{merge_fields}} are
+    substituted to static text; [[user placeholders]] become highlighted runs the
+    recipient fills in when editing the generated document.
+    """
+    from docx.shared import Pt
+    from docx.enum.text import WD_COLOR_INDEX
+
+    substituted = _subst_tokens(raw, values)
+    if not substituted:
+        return
+    # re.split with a capture group yields: [text, label, text, label, ...] — the
+    # odd indices are the placeholder labels.
+    for i, part in enumerate(_PLACEHOLDER_RE.split(substituted)):
+        if not part:
+            continue
+        run = paragraph.add_run(part)
+        is_placeholder = i % 2 == 1
+        if size:
+            run.font.size = Pt(size)
+        if font:
+            run.font.name = font
+        if bold is not None:
+            run.bold = bold
+        if italic is not None:
+            run.italic = italic
+        if underline is not None:
+            run.underline = underline
+        if is_placeholder:
+            run.font.highlight_color = WD_COLOR_INDEX.YELLOW
+        elif color is not None:
+            run.font.color.rgb = color
 
 
 def _subst_tokens(text, values, keep_page=False):
@@ -413,6 +452,63 @@ def _designer_clear_table_borders(table):
     tblPr.append(borders)
 
 
+def _designer_merge_values(values, *, user, reference_number, title):
+    """
+    Resolve a designer ("document") template's merge fields. These templates are
+    NOT filled by the user with placeholders — their {{tokens}} auto-populate
+    from the acting user, the current date, the assigned reference, the document
+    title, and any document-type metadata the user supplied at upload.
+
+    User-supplied values (the document-type metadata) take precedence; the
+    context defaults below only fill tokens that were left blank. Advanced
+    sources (per-field formulas, document references) are a later enhancement.
+    """
+    from django.utils import timezone
+
+    resolved = dict(values or {})
+    full_name = (user.get_full_name() or "").strip() or user.email
+    now = timezone.localtime()
+    today_str = now.strftime("%d %b %Y")
+    now_str = now.strftime("%d %b %Y %H:%M")
+    dept = getattr(user, "department", None)
+    dept_name = getattr(dept, "name", "") if dept else ""
+
+    # Organization identity from DMS settings (auto-fills company merge fields).
+    org_name = org_address = ""
+    try:
+        from apps.documents.models import DMSSettings
+        settings_row = DMSSettings.objects.first()
+        if settings_row:
+            org_name = settings_row.organization_name or ""
+            org_address = settings_row.organization_address or ""
+    except Exception:
+        pass
+
+    defaults = {
+        "author_name": full_name,
+        "author_email": user.email,
+        "user_name": full_name,
+        "prepared_by": full_name,
+        "department": dept_name,
+        "company_name": org_name,
+        "company_address": org_address,
+        "organization_name": org_name,
+        "document_title": title,
+        "title": title,
+        "document_no": reference_number,
+        "document_number": reference_number,
+        "reference_number": reference_number,
+        "document_date": today_str,
+        "date": today_str,
+        "now": now_str,
+    }
+    for key, value in defaults.items():
+        current = resolved.get(key)
+        if value and (current is None or (isinstance(current, str) and not current.strip())):
+            resolved[key] = value
+    return resolved
+
+
 def generate_designer_docx(design, values) -> bytes:
     """
     Render a WYSIWYG document-designer template (block layout) to an editable
@@ -487,16 +583,8 @@ def generate_designer_docx(design, values) -> bytes:
     render_band(design.get("footer"), section.footer)
 
     # ── Blocks ──────────────────────────────────────────────────────────────
-    def styled(run, *, size=None, color=None, bold=None, italic=None, underline=None, font=None):
-        if size:   run.font.size = Pt(size)
-        if color:  run.font.color.rgb = color
-        if bold is not None:      run.bold = bold
-        if italic is not None:    run.italic = italic
-        if underline is not None: run.underline = underline
-        if font:   run.font.name = font
-
-    def block_subst(s):
-        return _subst_tokens(s, values)
+    def add_text(paragraph, raw, **style):
+        _designer_add_text(paragraph, raw, values, **style)
 
     for b in blocks:
         btype = b.get("type")
@@ -507,24 +595,22 @@ def generate_designer_docx(design, values) -> bytes:
             size = px_to_pt(b.get("fontSize"), {1: 18, 2: 14, 3: 12}.get(level, 14))
             p = doc.add_paragraph()
             p.alignment = align
-            r = p.add_run(block_subst(b.get("text", "")))
-            styled(r, size=size, color=_designer_hex_to_rgb(b.get("color")) if b.get("color") else heading_rgb,
-                   bold=True, font=heading_font)
+            add_text(p, b.get("text", ""), size=size, font=heading_font, bold=True,
+                     color=_designer_hex_to_rgb(b.get("color")) if b.get("color") else heading_rgb)
 
         elif btype in ("paragraph", "quote"):
             p = doc.add_paragraph()
             p.alignment = align
-            r = p.add_run(block_subst(b.get("text", "")))
-            styled(r, size=px_to_pt(b.get("fontSize"), None),
-                   color=_designer_hex_to_rgb(b.get("color")) if b.get("color") else None,
-                   bold=b.get("bold"), italic=b.get("italic") or (btype == "quote"),
-                   underline=b.get("underline"))
+            add_text(p, b.get("text", ""), size=px_to_pt(b.get("fontSize"), None),
+                     color=_designer_hex_to_rgb(b.get("color")) if b.get("color") else None,
+                     bold=b.get("bold"), italic=b.get("italic") or (btype == "quote"),
+                     underline=b.get("underline"))
 
         elif btype in ("bulleted_list", "numbered_list"):
             style = "List Bullet" if btype == "bulleted_list" else "List Number"
             for item in b.get("items", []) or []:
                 p = doc.add_paragraph(style=style)
-                p.add_run(block_subst(item))
+                add_text(p, item)
 
         elif btype == "key_value":
             pairs = b.get("pairs", []) or []
@@ -533,9 +619,8 @@ def generate_designer_docx(design, values) -> bytes:
                 _designer_clear_table_borders(table)
                 for i, pair in enumerate(pairs):
                     lc, vc = table.rows[i].cells
-                    lr = lc.paragraphs[0].add_run(block_subst(pair.get("label", "")))
-                    lr.bold = True
-                    vc.paragraphs[0].add_run(block_subst(pair.get("value", "")))
+                    add_text(lc.paragraphs[0], pair.get("label", ""), bold=True)
+                    add_text(vc.paragraphs[0], pair.get("value", ""))
 
         elif btype == "data_table":
             cols = b.get("columns", []) or []
@@ -551,14 +636,14 @@ def generate_designer_docx(design, values) -> bytes:
                     cells = table.add_row().cells
                     for i, _col in enumerate(cols):
                         val = row[i] if i < len(row) else ""
-                        cells[i].paragraphs[0].add_run(block_subst(val))
+                        add_text(cells[i].paragraphs[0], val)
 
         elif btype == "two_column":
             table = doc.add_table(rows=1, cols=2)
             _designer_clear_table_borders(table)
             lc, rc = table.rows[0].cells
-            lc.paragraphs[0].add_run(block_subst(b.get("left", "")))
-            rc.paragraphs[0].add_run(block_subst(b.get("right", "")))
+            add_text(lc.paragraphs[0], b.get("left", ""))
+            add_text(rc.paragraphs[0], b.get("right", ""))
 
         elif btype == "divider":
             p = doc.add_paragraph()
@@ -590,15 +675,27 @@ def generate_designer_docx(design, values) -> bytes:
                     role = cell.add_paragraph()
                     role.add_run(s.get("role", "")).bold = True
                     if s.get("nameToken"):
-                        cell.add_paragraph().add_run(block_subst(s.get("nameToken")))
+                        add_text(cell.add_paragraph(), s.get("nameToken"))
                     if s.get("dateToken"):
-                        cell.add_paragraph().add_run(block_subst(s.get("dateToken")))
+                        add_text(cell.add_paragraph(), s.get("dateToken"))
 
         elif btype in ("image", "logo"):
-            # External/data-URL images aren't fetched server-side in this pass —
-            # leave a light placeholder so layout intent is preserved.
-            alt = block_subst(b.get("alt", "")) or ("Logo" if btype == "logo" else "Image")
-            doc.add_paragraph().add_run(f"[{alt}]").italic = True
+            # Admin-uploaded images arrive as base64 data URLs embedded in the
+            # template; decode and embed them. Fall back to a light text marker
+            # for a missing/URL-only source.
+            from docx.shared import Emu
+            raw_img = _decode_data_url_image(b.get("src"))
+            p = doc.add_paragraph()
+            p.alignment = align
+            if raw_img:
+                try:
+                    width_px = b.get("width") or 160
+                    # 96 px/inch → EMUs (914400 per inch).
+                    p.add_run().add_picture(BytesIO(raw_img), width=Emu(int(float(width_px) / 96 * 914400)))
+                except Exception:
+                    add_text(p, _subst_tokens(b.get("alt", ""), values) or ("Logo" if btype == "logo" else "Image"), italic=True)
+            else:
+                add_text(p, b.get("alt", "") or ("Logo" if btype == "logo" else "Image"), italic=True)
 
     buf = BytesIO()
     doc.save(buf)
@@ -777,9 +874,14 @@ def generate_document_from_template_sync(template, values, fmt, title, user, typ
     reference_number = _generate_unique_reference(template.document_type)
 
     if template.type == "built" and kind == "document":
-        # WYSIWYG document designer: render the block layout to an editable DOCX
-        # (or PDF on request) so the result follows the normal Office lifecycle.
-        render_values = descriptors_to_names(values)
+        # WYSIWYG document designer: merge fields auto-populate from the user,
+        # date, reference and the document-type metadata — the user fills no
+        # placeholders. Render the block layout to an editable DOCX (or PDF on
+        # request) so the result follows the normal Office lifecycle.
+        merge_values = _designer_merge_values(
+            values, user=user, reference_number=reference_number, title=title
+        )
+        render_values = descriptors_to_names(merge_values)
         docx_content = generate_designer_docx(template.design, render_values)
         if fmt == "pdf":
             content = docx_to_pdf(docx_content)

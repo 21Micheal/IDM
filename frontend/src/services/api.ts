@@ -51,6 +51,8 @@ export type OcrSuggestionsResponse = {
 };
 
 export type DmsSettings = {
+  organization_name: string;
+  organization_address: string;
   watermark_enabled: boolean;
   watermark_text: string;
   watermark_opacity: number;

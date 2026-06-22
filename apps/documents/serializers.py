@@ -179,6 +179,8 @@ class DMSSettingsSerializer(serializers.ModelSerializer):
     class Meta:
         model = DMSSettings
         fields = [
+            "organization_name",
+            "organization_address",
             "watermark_enabled",
             "watermark_text",
             "watermark_opacity",
