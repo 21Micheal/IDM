@@ -115,7 +115,7 @@ function designerToBackend(dt: DesignerTemplate): Record<string, unknown> {
     category: dt.category ?? "other",
     tags: dt.tags ?? [],
     document_type: dt.document_type_id,
-    design: { page: dt.page, theme: dt.theme, header: dt.header, footer: dt.footer, blocks: dt.blocks },
+    design: { page: dt.page, theme: dt.theme, header: dt.header, footer: dt.footer, blocks: dt.blocks, references: dt.references ?? [] },
     placeholders: dt.placeholders ?? [],
   };
 }
@@ -134,6 +134,7 @@ function backendToDesigner(row: Template): EditableDocumentTemplate {
     header: design.header,
     footer: design.footer,
     blocks: design.blocks,
+    references: design.references,
     placeholders: row.placeholders,
   } as EditableDocumentTemplate;
 }

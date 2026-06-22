@@ -29,6 +29,7 @@ import BulkScanPage from "@/pages/BulkScanPage";
 import TemplatePreview from "@/components/templates/TemplatePreview";
 import TemplateForm from "@/components/templates/TemplateForm";
 import BuiltTemplateFormModal from "@/components/templates/BuiltTemplateFormModal";
+import { resolveSource, type ReferenceValue } from "@/components/templates/referenceSources";
 
 // ── Types ─────────────────────────────────────────────────────────────────────
 
@@ -48,6 +49,8 @@ type DocumentTemplateOption = {
   file_name?: string;
   placeholders?: string[];
   sections?: unknown[];
+  /** Designer ("document") layout — `references` drives the fill-time document pickers. */
+  design?: { references?: Array<{ key: string; label: string }> };
 };
 
 type UploadFormValues = {
@@ -711,6 +714,70 @@ function InforFieldRow({
         {label}
       </label>
       <div>{children}</div>
+    </div>
+  );
+}
+
+// Picker for a designer template's document-reference field: search and select a
+// related document; the picked {id,label,source} is pulled through on create.
+function DocumentReferencePicker({ label, value, onChange }: {
+  label: string;
+  value?: ReferenceValue;
+  onChange: (v: ReferenceValue | undefined) => void;
+}) {
+  const [q, setQ] = useState("");
+  const [open, setOpen] = useState(false);
+  const [options, setOptions] = useState<{ id: string; label: string }[]>([]);
+  const [loading, setLoading] = useState(false);
+  const source = resolveSource("documents");
+
+  useEffect(() => {
+    if (!open) return;
+    let cancelled = false;
+    setLoading(true);
+    const t = setTimeout(async () => {
+      try {
+        const opts = source ? await source.fetch(q) : [];
+        if (!cancelled) setOptions(opts);
+      } catch {
+        if (!cancelled) setOptions([]);
+      } finally {
+        if (!cancelled) setLoading(false);
+      }
+    }, 250);
+    return () => { cancelled = true; clearTimeout(t); };
+  }, [q, open, source]);
+
+  return (
+    <div className="relative">
+      <label className="mb-1.5 block text-xs font-semibold text-foreground">{label}</label>
+      {value ? (
+        <div className="flex items-center justify-between gap-2 rounded border border-[#287EAD]/30 bg-[#EEF6FB] px-3 py-2 text-sm">
+          <span className="truncate text-[#1F2933]">{value.label}</span>
+          <button type="button" onClick={() => onChange(undefined)} className="shrink-0 text-xs font-semibold text-[#5E6870] hover:text-red-600">Change</button>
+        </div>
+      ) : (
+        <>
+          <input
+            value={q}
+            onFocus={() => setOpen(true)}
+            onChange={(e) => { setQ(e.target.value); setOpen(true); }}
+            placeholder="Search documents…"
+            className="input w-full"
+          />
+          {open && (
+            <div className="absolute z-30 mt-1 max-h-56 w-full overflow-y-auto rounded border border-[#C8CDD2] bg-white shadow-lg">
+              {loading && <p className="px-3 py-2 text-xs text-[#8C969E]">Searching…</p>}
+              {!loading && options.length === 0 && <p className="px-3 py-2 text-xs text-[#8C969E]">No matching documents</p>}
+              {options.map((o) => (
+                <button key={o.id} type="button"
+                        onClick={() => { onChange({ id: o.id, label: o.label, source: "documents" }); setOpen(false); setQ(""); }}
+                        className="block w-full truncate px-3 py-2 text-left text-sm hover:bg-[#EEF6FB]">{o.label}</button>
+              ))}
+            </div>
+          )}
+        </>
+      )}
     </div>
   );
 }
@@ -1930,12 +1997,31 @@ export default function UploadPage({ scanOnly = false }: UploadPageProps) {
                             />
                           </div>
                           {isDesignerDoc ? (
-                            <p className="border border-[#A7CDE3] bg-[#EEF6FB] px-3 py-2.5 text-xs text-[#1F2933]">
-                              This is an admin-standardised template. Its merge fields
-                              (author, date, reference, and the details above) are
-                              filled in automatically — click <strong>Create Document</strong> below
-                              to generate it and open it in the editor.
-                            </p>
+                            <>
+                              {(selectedTemplate.design?.references ?? []).length > 0 && (
+                                <div className="space-y-3 border border-[#C8CDD2] bg-white p-3">
+                                  <p className="text-xs font-semibold uppercase tracking-wider text-muted-foreground">Linked documents</p>
+                                  {(selectedTemplate.design?.references ?? []).map((r) => (
+                                    <DocumentReferencePicker
+                                      key={r.key}
+                                      label={r.label}
+                                      value={templateValues[r.key] as ReferenceValue | undefined}
+                                      onChange={(v) => setTemplateValues((prev) => {
+                                        const next = { ...prev };
+                                        if (v) next[r.key] = v; else delete next[r.key];
+                                        return next;
+                                      })}
+                                    />
+                                  ))}
+                                </div>
+                              )}
+                              <p className="border border-[#A7CDE3] bg-[#EEF6FB] px-3 py-2.5 text-xs text-[#1F2933]">
+                                This is an admin-standardised template. Its merge fields
+                                (author, date, reference, and the details above) are
+                                filled in automatically — click <strong>Create Document</strong> below
+                                to generate it and open it in the editor.
+                              </p>
+                            </>
                           ) : (
                           <button
                             type="button"

@@ -464,14 +464,21 @@ def _designer_merge_values(values, *, user, reference_number, title):
     sources (per-field formulas, document references) are a later enhancement.
     """
     from django.utils import timezone
+    from apps.documents.form_formulas import resolve_formula
 
     resolved = dict(values or {})
-    full_name = (user.get_full_name() or "").strip() or user.email
     now = timezone.localtime()
-    today_str = now.strftime("%d %b %Y")
-    now_str = now.strftime("%d %b %Y %H:%M")
-    dept = getattr(user, "department", None)
-    dept_name = getattr(dept, "name", "") if dept else ""
+
+    # Canonical formula vocabulary — shared with the form builder so the same
+    # formula keys resolve identically in both. The designer's "formula picker"
+    # inserts these keys directly.
+    formula = {
+        key: resolve_formula(key, user=user, reference_number=reference_number, now=now)
+        for key in (
+            "current_user", "current_user_email", "current_user_department",
+            "today", "now", "reference_number",
+        )
+    }
 
     # Organization identity from DMS settings (auto-fills company merge fields).
     org_name = org_address = ""
@@ -485,27 +492,65 @@ def _designer_merge_values(values, *, user, reference_number, title):
         pass
 
     defaults = {
-        "author_name": full_name,
-        "author_email": user.email,
-        "user_name": full_name,
-        "prepared_by": full_name,
-        "department": dept_name,
+        # Canonical formula keys.
+        **formula,
+        # Friendly aliases (and designer-specific fields) → same resolved values.
+        "author_name": formula["current_user"],
+        "author_email": formula["current_user_email"],
+        "user_name": formula["current_user"],
+        "prepared_by": formula["current_user"],
+        "department": formula["current_user_department"],
+        "document_date": formula["today"],
+        "date": formula["today"],
+        "document_no": reference_number,
+        "document_number": reference_number,
         "company_name": org_name,
         "company_address": org_address,
         "organization_name": org_name,
         "document_title": title,
         "title": title,
-        "document_no": reference_number,
-        "document_number": reference_number,
-        "reference_number": reference_number,
-        "document_date": today_str,
-        "date": today_str,
-        "now": now_str,
     }
     for key, value in defaults.items():
         current = resolved.get(key)
         if value and (current is None or (isinstance(current, str) and not current.strip())):
             resolved[key] = value
+
+    # ── Document references ───────────────────────────────────────────────────
+    # A value picked from a related document ({id,label,source}) resolves to its
+    # label for {{key}}, and pulls common fields for {{key__field}} — e.g.
+    # {{related_po}}, {{related_po__supplier}}, {{related_po__reference_number}}.
+    from apps.documents.form_attachments import is_reference_value
+    from apps.documents.models import Document as _RefDoc
+    for key, val in list(resolved.items()):
+        if not is_reference_value(val):
+            continue
+        resolved[key] = val.get("label", "") or ""
+        ref_id = val.get("id")
+        if not ref_id:
+            continue
+        try:
+            ref_doc = _RefDoc.objects.filter(pk=ref_id).first()
+        except Exception:
+            ref_doc = None
+        if not ref_doc:
+            continue
+        # Authoritative label from the referenced document (don't trust the client).
+        resolved[key] = (
+            f"{ref_doc.title} ({ref_doc.reference_number})"
+            if ref_doc.reference_number else (ref_doc.title or "")
+        )
+        amt = getattr(ref_doc, "amount", None)
+        dd = getattr(ref_doc, "document_date", None)
+        resolved[f"{key}__reference_number"] = ref_doc.reference_number or ""
+        resolved[f"{key}__title"] = ref_doc.title or ""
+        resolved[f"{key}__supplier"] = getattr(ref_doc, "supplier", "") or ""
+        resolved[f"{key}__amount"] = str(amt) if amt is not None else ""
+        resolved[f"{key}__currency"] = getattr(ref_doc, "currency", "") or ""
+        resolved[f"{key}__document_date"] = dd.strftime("%d %b %Y") if dd else ""
+        for mk, mv in (getattr(ref_doc, "metadata", None) or {}).items():
+            if isinstance(mv, (str, int, float)):
+                resolved.setdefault(f"{key}__{mk}", str(mv))
+
     return resolved
 
 
@@ -625,7 +670,21 @@ def generate_designer_docx(design, values) -> bytes:
         elif btype == "data_table":
             cols = b.get("columns", []) or []
             if cols:
-                rows = ([["" for _ in cols]] if b.get("bound") else (b.get("rows", []) or []))
+                if b.get("bound"):
+                    # Bound to a collection if one was supplied (one row per
+                    # record); otherwise emit blank fillable rows for the user to
+                    # complete when editing the generated document.
+                    source = values.get(b.get("sourceKey") or "")
+                    if isinstance(source, list) and source:
+                        rows = [
+                            [str((rec or {}).get(c.get("key", ""), "")) for c in cols]
+                            for rec in source
+                        ]
+                    else:
+                        n = max(1, int(b.get("fillRows") or 3))
+                        rows = [["" for _ in cols] for _ in range(n)]
+                else:
+                    rows = b.get("rows", []) or []
                 table = doc.add_table(rows=1, cols=len(cols))
                 table.style = "Table Grid" if b.get("bordered", True) else "Light List"
                 for i, col in enumerate(cols):
@@ -667,17 +726,32 @@ def generate_designer_docx(design, values) -> bytes:
         elif btype == "signature":
             sigs = b.get("signatories", []) or []
             if sigs:
-                table = doc.add_table(rows=1, cols=min(len(sigs), 3))
-                _designer_clear_table_borders(table)
-                for i, s in enumerate(sigs[:3]):
-                    cell = table.rows[0].cells[i]
-                    cell.paragraphs[0].add_run("\n_______________________")
-                    role = cell.add_paragraph()
-                    role.add_run(s.get("role", "")).bold = True
-                    if s.get("nameToken"):
-                        add_text(cell.add_paragraph(), s.get("nameToken"))
-                    if s.get("dateToken"):
-                        add_text(cell.add_paragraph(), s.get("dateToken"))
+                # Lay out up to 3 signatories per row, wrapping into more rows for
+                # additional approvers. Each cell: role, a signing line, then the
+                # Name/Date fields (which may be {{auto-fill}}, [[placeholders]] or
+                # plain text).
+                per_row = 3
+                for start in range(0, len(sigs), per_row):
+                    chunk = sigs[start:start + per_row]
+                    table = doc.add_table(rows=1, cols=len(chunk))
+                    _designer_clear_table_borders(table)
+                    for i, s in enumerate(chunk):
+                        cell = table.rows[0].cells[i]
+                        cell.paragraphs[0].add_run(s.get("role", "")).bold = True
+                        cell.add_paragraph()  # signing space
+                        cell.add_paragraph().add_run("_______________________")
+                        lbl = cell.add_paragraph().add_run("Signature")
+                        lbl.italic = True
+                        lbl.font.size = Pt(8)
+                        if s.get("nameToken"):
+                            p = cell.add_paragraph()
+                            p.add_run("Name: ").bold = True
+                            add_text(p, s.get("nameToken"))
+                        if s.get("dateToken"):
+                            p = cell.add_paragraph()
+                            p.add_run("Date: ").bold = True
+                            add_text(p, s.get("dateToken"))
+                    doc.add_paragraph()  # spacing between signatory rows
 
         elif btype in ("image", "logo"):
             # Admin-uploaded images arrive as base64 data URLs embedded in the

@@ -53,6 +53,8 @@ import {
   Braces, Rows3, ScrollText, Building2,
 } from "lucide-react";
 import { cn } from "@/lib/utils";
+import { FORMULAS, evaluateFormula } from "@/components/templates/formulas";
+import { useAuthStore } from "@/store/authStore";
 
 /* ============================================================
  * Types
@@ -120,8 +122,9 @@ export interface DocBlock {
   /* data table */
   columns?: DocTableColumn[];
   rows?: string[][];      // static rows (each cell may hold {{tokens}})
-  bound?: boolean;        // if true, repeat one row per record
-  sourceKey?: string;     // the repeating data key, e.g. "line_items"
+  bound?: boolean;        // if true, render fillable/repeating rows (not static)
+  sourceKey?: string;     // optional data key to bind to, e.g. "line_items"
+  fillRows?: number;      // blank rows to render for the user to fill (when bound, no data)
   striped?: boolean;
   bordered?: boolean;
 
@@ -181,6 +184,9 @@ export interface DocumentTemplate {
   header: BandSettings;
   footer: BandSettings;
   blocks: DocBlock[];
+  /** Document-reference fields: at create time the user picks a related document
+   *  per entry; {{key}} resolves to its label and {{key__field}} pulls its data. */
+  references?: Array<{ key: string; label: string }>;
   placeholders?: string[];
   created_at?: string;
   updated_at?: string;
@@ -247,19 +253,15 @@ const FONT_OPTIONS = [
 
 /**
  * Auto-fill merge fields — resolved server-side at create time (and STATIC in the
- * document thereafter). Keys must match apps/templates_engine/tasks.py
- * `_designer_merge_values`. The host also appends the selected document type's
- * own metadata fields to this list.
+ * document thereafter). The formula entries share the exact vocabulary the form
+ * builder uses (frontend/src/components/templates/formulas.ts ↔ backend
+ * apps/documents/form_formulas.py); apps/templates_engine/tasks.py
+ * `_designer_merge_values` resolves them. The host also appends the selected
+ * document type's own metadata fields to this list.
  */
 const DEFAULT_MERGE_FIELDS: MergeField[] = [
-  { key: "author_name",      label: "Your name (author)",  group: "Auto-fill" },
-  { key: "author_email",     label: "Your email",          group: "Auto-fill" },
-  { key: "department",       label: "Your department",     group: "Auto-fill" },
-  { key: "document_title",   label: "Document title",      group: "Auto-fill" },
-  { key: "reference_number", label: "Reference number",    group: "Auto-fill" },
-  { key: "document_no",      label: "Document number",     group: "Auto-fill" },
-  { key: "document_date",    label: "Today's date",        group: "Auto-fill" },
-  { key: "now",              label: "Date & time",         group: "Auto-fill" },
+  ...Object.values(FORMULAS).map((f) => ({ key: f.key, label: f.label, group: "Auto-fill (formula)" })),
+  { key: "document_title",   label: "Document title",      group: "Auto-fill (formula)" },
   { key: "company_name",     label: "Company name",        group: "Organisation" },
   { key: "company_address",  label: "Company address",     group: "Organisation" },
 ];
@@ -352,8 +354,8 @@ function newBlock(type: BlockType): DocBlock {
       return {
         ...base, marginTop: 24,
         signatories: [
-          { id: uid(), role: "Prepared by", nameToken: "{{author_name}}", dateToken: "{{document_date}}" },
-          { id: uid(), role: "Approved by", nameToken: "{{approver_name}}", dateToken: "" },
+          { id: uid(), role: "Prepared by", nameToken: "{{current_user}}", dateToken: "{{today}}" },
+          { id: uid(), role: "Approved by", nameToken: "[[Approver name]]", dateToken: "[[Date]]" },
         ],
       };
     default:
@@ -388,6 +390,7 @@ const initialDocument: DocumentTemplate = {
     { ...newBlock("data_table") },
     { ...newBlock("signature") },
   ],
+  references: [],
 };
 
 /* ============================================================
@@ -405,6 +408,7 @@ function normalizeTemplate(t: EditableDocumentTemplate): DocumentTemplate {
     header: { ...initialDocument.header, ...(t.header ?? {}), content: { ...initialDocument.header.content, ...(t.header?.content ?? {}) } },
     footer: { ...initialDocument.footer, ...(t.footer ?? {}), content: { ...initialDocument.footer.content, ...(t.footer?.content ?? {}) } },
     blocks: Array.isArray(t.blocks) && t.blocks.length ? t.blocks : initialDocument.blocks,
+    references: Array.isArray(t.references) ? t.references : [],
     tags: t.tags ?? [],
   };
 }
@@ -680,12 +684,13 @@ function RenderBlock({ block: b, theme, data }: {
       const cols = b.columns ?? [];
       const border = b.bordered ? "1px solid #C8CDD2" : "none";
       const totalW = cols.reduce((a, c) => a + (c.width ?? 1), 0) || 1;
-      const rows = b.bound ? [cols.map(() => "")] : (b.rows ?? []);
+      const fillRows = Math.max(1, b.fillRows ?? 3);
+      const rows = b.bound ? Array.from({ length: fillRows }, () => cols.map(() => "")) : (b.rows ?? []);
       return (
         <div style={blockTextStyle(b, theme)}>
           {b.bound && (
-            <div className="mb-1 inline-flex items-center gap-1 rounded bg-[#EEF6FB] px-2 py-0.5 text-[10px] font-semibold text-[#287EAD]">
-              <Rows3 className="h-3 w-3" /> Repeats per “{b.sourceKey || "record"}”
+            <div className="mb-1 inline-flex items-center gap-1 rounded bg-[#FFFBEB] px-2 py-0.5 text-[10px] font-semibold text-[#92700A]">
+              <Rows3 className="h-3 w-3" /> {b.sourceKey ? `Repeats per “${b.sourceKey}” (or ${fillRows} blank rows)` : `${fillRows} blank rows for the user to fill`}
             </div>
           )}
           <table style={{ borderCollapse: "collapse", width: "100%", border }}>
@@ -702,8 +707,8 @@ function RenderBlock({ block: b, theme, data }: {
               {rows.map((r, ri) => (
                 <tr key={ri} style={{ background: b.striped && ri % 2 ? "#F3F5F6" : undefined }}>
                   {cols.map((c, ci) => (
-                    <td key={c.id} style={{ textAlign: c.align ?? "left", padding: "6px 8px", border, color: theme.textColor }}>
-                      {b.bound ? <span style={{ color: "#8C969E" }}>{`{{${b.sourceKey || "record"}.${c.key}}}`}</span> : render(r?.[ci])}
+                    <td key={c.id} style={{ textAlign: c.align ?? "left", padding: "6px 8px", border, color: theme.textColor, minWidth: 40 }}>
+                      {b.bound ? <span>&nbsp;</span> : render(r?.[ci])}
                     </td>
                   ))}
                 </tr>
@@ -750,13 +755,18 @@ function RenderBlock({ block: b, theme, data }: {
       );
     case "signature":
       return (
-        <div style={{ display: "grid", gridTemplateColumns: `repeat(${Math.min((b.signatories ?? []).length || 1, 3)}, 1fr)`, gap: 32, marginTop: b.marginTop, marginBottom: b.marginBottom }}>
+        <div style={{ display: "grid", gridTemplateColumns: `repeat(${Math.min((b.signatories ?? []).length || 1, 3)}, 1fr)`, gap: 28, marginTop: b.marginTop, marginBottom: b.marginBottom }}>
           {(b.signatories ?? []).map((s) => (
-            <div key={s.id} style={{ color: theme.textColor }}>
-              <div style={{ borderTop: "1px solid #1F2933", marginTop: 28, paddingTop: 4, fontSize: 12 }}>
-                <div style={{ fontWeight: 600 }}>{s.role}</div>
-                {s.nameToken && <div>{render(s.nameToken)}</div>}
-                {s.dateToken && <div style={{ color: "#5E6870" }}>{render(s.dateToken)}</div>}
+            <div key={s.id} style={{ color: theme.textColor, fontSize: 12 }}>
+              <div style={{ fontWeight: 600, marginBottom: 30 }}>{s.role}</div>
+              <div style={{ borderTop: "1px solid #1F2933", paddingTop: 3 }}>
+                <div style={{ fontSize: 10, textTransform: "uppercase", letterSpacing: "0.05em", color: "#5E6870" }}>Signature</div>
+                {(s.nameToken || s.dateToken) && (
+                  <div style={{ marginTop: 6, lineHeight: 1.6 }}>
+                    {s.nameToken && <div><span style={{ color: "#5E6870" }}>Name: </span>{render(s.nameToken)}</div>}
+                    {s.dateToken && <div><span style={{ color: "#5E6870" }}>Date: </span>{render(s.dateToken)}</div>}
+                  </div>
+                )}
               </div>
             </div>
           ))}
@@ -995,19 +1005,25 @@ function DataTableInspector({ block, repeatingFields, patch }: {
 
   return (
     <div className="space-y-4">
-      <Field label="Data source">
+      <Field label="Rows">
         <div className="space-y-2">
           <label className="flex items-center gap-2 text-xs text-[#1F2933]">
-            <input type="radio" checked={!block.bound} onChange={() => patch({ bound: false })} /> Static rows (typed in template)
+            <input type="radio" checked={!block.bound} onChange={() => patch({ bound: false })} /> Static rows (typed in the template)
           </label>
           <label className="flex items-center gap-2 text-xs text-[#1F2933]">
-            <input type="radio" checked={!!block.bound} onChange={() => patch({ bound: true, sourceKey: block.sourceKey || repeatingFields[0]?.key })} /> Repeating — one row per record
+            <input type="radio" checked={!!block.bound} onChange={() => patch({ bound: true })} /> Fillable rows — the user completes them when editing
           </label>
           {block.bound && (
-            <select value={block.sourceKey ?? ""} onChange={(e) => patch({ sourceKey: e.target.value })} className={inputCls}>
-              <option value="">Select collection…</option>
-              {repeatingFields.map((f) => <option key={f.key} value={f.key}>{f.label}</option>)}
-            </select>
+            <div className="space-y-2 border-l-2 border-[#E3C765] pl-3">
+              <NumberRow label="Blank rows" value={block.fillRows ?? 3} min={1} max={50} onChange={(n) => patch({ fillRows: Math.max(1, n) })} />
+              <div>
+                <p className="mb-1 text-[10px] text-[#8C969E]">Optionally bind to a collection (one row per record when data is supplied):</p>
+                <select value={block.sourceKey ?? ""} onChange={(e) => patch({ sourceKey: e.target.value })} className={cn(inputCls, "h-8")}>
+                  <option value="">No collection — blank rows</option>
+                  {repeatingFields.map((f) => <option key={f.key} value={f.key}>{f.label}</option>)}
+                </select>
+              </div>
+            </div>
           )}
         </div>
       </Field>
@@ -1204,19 +1220,37 @@ function BlockInspector({ block, theme, fields, repeatingFields, patch }: {
       {block.type === "signature" && (
         <Field label="Signatories">
           <div className="space-y-2">
-            {(block.signatories ?? []).map((s) => (
-              <div key={s.id} className="space-y-1 border border-[#E5E8EB] p-2">
-                <div className="flex gap-1">
-                  <input value={s.role} placeholder="Role" onChange={(e) => patch({ signatories: (block.signatories ?? []).map((x) => x.id === s.id ? { ...x, role: e.target.value } : x) })} className={cn(inputCls, "h-8")} />
+            <p className="text-[11px] text-[#8C969E]">
+              Each entry is a signature line. Set <strong>Name</strong>/<strong>Date</strong> to an
+              auto-fill field (e.g. <code className="font-mono">{"{{current_user}}"}</code>), a
+              fill-in <code className="font-mono">[[placeholder]]</code>, or plain text. Add as many
+              approvers as you need.
+            </p>
+            {(block.signatories ?? []).map((s, idx) => {
+              const setSig = (p: Partial<Signatory>) =>
+                patch({ signatories: (block.signatories ?? []).map((x) => x.id === s.id ? { ...x, ...p } : x) });
+              return (
+              <div key={s.id} className="space-y-1.5 border border-[#E5E8EB] p-2">
+                <div className="flex items-center gap-1">
+                  <span className="shrink-0 text-[10px] font-semibold text-[#8C969E]">#{idx + 1}</span>
+                  <input value={s.role} placeholder="Role e.g. Approved by" onChange={(e) => setSig({ role: e.target.value })} className={cn(inputCls, "h-8")} />
                   <button onClick={() => patch({ signatories: (block.signatories ?? []).filter((x) => x.id !== s.id) })}
+                          title="Remove signatory"
                           className="flex h-8 w-8 shrink-0 items-center justify-center border border-[#AEB5BB] text-[#5E6870] hover:bg-red-50 hover:text-red-500"><Minus className="h-3.5 w-3.5" /></button>
                 </div>
-                <input value={s.nameToken ?? ""} placeholder="Name e.g. {{author_name}}" onChange={(e) => patch({ signatories: (block.signatories ?? []).map((x) => x.id === s.id ? { ...x, nameToken: e.target.value } : x) })} className={cn(inputCls, "h-8 font-mono text-xs")} />
-                <input value={s.dateToken ?? ""} placeholder="Date e.g. {{document_date}}" onChange={(e) => patch({ signatories: (block.signatories ?? []).map((x) => x.id === s.id ? { ...x, dateToken: e.target.value } : x) })} className={cn(inputCls, "h-8 font-mono text-xs")} />
+                <div className="flex items-center gap-1">
+                  <input value={s.nameToken ?? ""} placeholder="Name — field, [[ask]] or text" onChange={(e) => setSig({ nameToken: e.target.value })} className={cn(inputCls, "h-8 font-mono text-xs")} />
+                  <MergeFieldMenu fields={fields} label="" onPick={(t) => setSig({ nameToken: (s.nameToken ? s.nameToken + " " : "") + t })} />
+                </div>
+                <div className="flex items-center gap-1">
+                  <input value={s.dateToken ?? ""} placeholder="Date — field, [[ask]] or text" onChange={(e) => setSig({ dateToken: e.target.value })} className={cn(inputCls, "h-8 font-mono text-xs")} />
+                  <MergeFieldMenu fields={fields} label="" onPick={(t) => setSig({ dateToken: (s.dateToken ? s.dateToken + " " : "") + t })} />
+                </div>
               </div>
-            ))}
-            <button onClick={() => patch({ signatories: [...(block.signatories ?? []), { id: uid(), role: "Signed by" }] })}
-                    className="inline-flex items-center gap-1.5 border border-[#287EAD]/40 bg-white px-3 py-1.5 text-xs font-semibold text-[#287EAD] hover:bg-[#EEF6FB]"><Plus className="h-3.5 w-3.5" /> Add signatory</button>
+              );
+            })}
+            <button onClick={() => patch({ signatories: [...(block.signatories ?? []), { id: uid(), role: "Approved by", nameToken: "[[Name]]", dateToken: "[[Date]]" }] })}
+                    className="inline-flex items-center gap-1.5 border border-[#287EAD]/40 bg-white px-3 py-1.5 text-xs font-semibold text-[#287EAD] hover:bg-[#EEF6FB]"><Plus className="h-3.5 w-3.5" /> Add approver / signatory</button>
           </div>
         </Field>
       )}
@@ -1371,6 +1405,14 @@ function SettingsTab({ template, documentTypes, fields, onCommit }: {
     if (t && !(template.tags ?? []).includes(t)) onCommit({ tags: [...(template.tags ?? []), t] });
     setTagInput("");
   };
+  const [refInput, setRefInput] = useState("");
+  const refs = template.references ?? [];
+  const addRef = () => {
+    const label = refInput.trim();
+    const key = slugify(label);
+    if (key && !refs.some((r) => r.key === key)) onCommit({ references: [...refs, { key, label }] });
+    setRefInput("");
+  };
   const theme = template.theme;
   const setTheme = (p: Partial<ThemeSettings>) => onCommit({ theme: { ...theme, ...p } });
   const page = template.page;
@@ -1460,6 +1502,23 @@ function SettingsTab({ template, documentTypes, fields, onCommit }: {
       <BandEditor title="Header" band={template.header} fields={fields} onChange={(b) => onCommit({ header: b })} />
       <BandEditor title="Footer" band={template.footer} fields={fields} allowPageTokens onChange={(b) => onCommit({ footer: b })} />
 
+      <Card title="Document references" subtitle="Pull data from a related document. The user picks the document at create time; insert {{key}} for its label and {{key__field}} (e.g. supplier, amount) for its data.">
+        <div className="flex gap-2">
+          <input value={refInput} onChange={(e) => setRefInput(e.target.value)} onKeyDown={(e) => e.key === "Enter" && (e.preventDefault(), addRef())} placeholder="e.g. Related Purchase Order" className={cn(inputCls, "flex-1")} />
+          <button onClick={addRef} className="h-9 bg-[#287EAD] px-3 text-sm font-semibold text-white hover:bg-[#1E6F99]"><Plus className="h-4 w-4" /></button>
+        </div>
+        {refs.length > 0 && (
+          <div className="mt-2 space-y-1.5">
+            {refs.map((r) => (
+              <div key={r.key} className="flex items-center justify-between gap-2 border border-[#E5E8EB] px-2.5 py-1.5 text-xs">
+                <span className="text-[#1F2933]">{r.label} <span className="ml-1 font-mono text-[10px] text-[#8C969E]">{`{{${r.key}}}`}</span></span>
+                <button onClick={() => onCommit({ references: refs.filter((x) => x.key !== r.key) })} className="text-[#8C969E] hover:text-red-600"><Minus className="h-3.5 w-3.5" /></button>
+              </div>
+            ))}
+          </div>
+        )}
+      </Card>
+
       <Card title="Merge fields in use">
         <div className="flex flex-wrap gap-2">
           {collectPlaceholders(template).length === 0 && <p className="text-xs text-[#8C969E]">No merge fields used yet.</p>}
@@ -1501,6 +1560,22 @@ export default function DocumentTemplateDesigner({
   const [cursor, setCursor] = useState(0);
   const template = history[cursor];
 
+  const currentUser = useAuthStore((s) => s.user);
+
+  // Live preview values for formula merge fields — evaluated client-side with the
+  // current user (mirrors the form builder preview), so the Preview tab shows real
+  // values (your name, today's date) instead of placeholders.
+  const formulaSample = useMemo<Record<string, string>>(() => {
+    const ctx = { user: currentUser as Parameters<typeof evaluateFormula>[1]["user"], now: new Date() };
+    const out: Record<string, string> = {};
+    for (const f of Object.values(FORMULAS)) {
+      const v = evaluateFormula(f.key, ctx);
+      if (v) out[f.key] = v;
+    }
+    out.document_title = template?.name || "Document title";
+    return out;
+  }, [currentUser, template?.name]);
+
   // Available merge fields = caller override, else the auto-fill defaults plus the
   // selected document type's own metadata fields (so admins insert real fields).
   const fields = useMemo<MergeField[]>(() => {
@@ -1509,9 +1584,17 @@ export default function DocumentTemplateDesigner({
     const meta: MergeField[] = (dt?.metadata_fields ?? [])
       .map((f) => ({ key: (f.key ?? f.field_key ?? "").trim(), label: f.label, group: "Document fields" }))
       .filter((f) => f.key);
+    // Each document-reference field offers its link label + pull-through subfields.
+    const refs: MergeField[] = (template?.references ?? []).flatMap((r) => [
+      { key: r.key, label: `${r.label} — link label`, group: "Document references" },
+      { key: `${r.key}__reference_number`, label: `${r.label} — reference no.`, group: "Document references" },
+      { key: `${r.key}__supplier`, label: `${r.label} — supplier`, group: "Document references" },
+      { key: `${r.key}__amount`, label: `${r.label} — amount`, group: "Document references" },
+      { key: `${r.key}__document_date`, label: `${r.label} — date`, group: "Document references" },
+    ]);
     const seen = new Set(DEFAULT_MERGE_FIELDS.map((f) => f.key));
-    return [...DEFAULT_MERGE_FIELDS, ...meta.filter((f) => !seen.has(f.key))];
-  }, [mergeFields, documentTypes, template?.document_type_id]);
+    return [...DEFAULT_MERGE_FIELDS, ...meta.filter((f) => !seen.has(f.key)), ...refs];
+  }, [mergeFields, documentTypes, template?.document_type_id, template?.references]);
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [tab, setTab] = useState<Tab>("design");
   const [dragType, setDragType] = useState<BlockType | null>(null);
@@ -1719,7 +1802,7 @@ export default function DocumentTemplateDesigner({
           )}
           {tab === "preview" && (
             <main className="flex-1 overflow-y-auto bg-slate-100 animate-in fade-in duration-150">
-              <PreviewTab template={template} fields={fields} sampleData={sampleData} />
+              <PreviewTab template={template} fields={fields} sampleData={{ ...formulaSample, ...sampleData }} />
             </main>
           )}
           {tab === "settings" && (
