@@ -435,6 +435,8 @@ export default function DocumentDetailPage() {
     queryFn: () => loadWorkflowData(id!),
     enabled: !!id && !!doc && !(doc as any).is_self_upload,
     ...QUERY_SHORT_STALE,
+    // Keep the visualizer in sync with approvals as they occur, then idle.
+    refetchInterval: (query) => (query.state.data?.isActive ? 15_000 : false),
   });
   const workflowStepsCount = workflowData?.steps?.length ?? 0;
 

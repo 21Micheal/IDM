@@ -102,6 +102,7 @@ type TaskHistoryRecord = {
 export async function loadWorkflowData(documentId: string): Promise<{
   steps: WorkflowStep[];
   currentStep: number;
+  isActive: boolean;
   documentTitle?: string;
   submittedBy?: string;
   submittedDate?: string;
@@ -153,9 +154,21 @@ export async function loadWorkflowData(documentId: string): Promise<{
   const meta = getWorkflowMeta(orderedTasks, instance);
   const steps = buildApproverWorkflow(tasksWithHistory, template?.steps ?? []);
 
+  // The workflow is still "live" (worth polling) while at least one stage is
+  // running or yet to be reached, and it hasn't ended in a rejection.
+  const taskSteps = steps.filter((step) => !step.kind || step.kind === "task");
+  const isActive = orderedTasks.length > 0
+    && taskSteps.some((step) =>
+      step.status === "in-progress" ||
+      step.status === "on-hold" ||
+      step.status === "returned" ||
+      step.status === "pending",
+    );
+
   return {
     steps,
     currentStep: steps.findIndex((step) => step.status === "in-progress" || step.status === "on-hold"),
+    isActive,
     ...meta,
   };
 }
@@ -185,62 +198,85 @@ function buildApproverWorkflow(
           instructions: undefined,
         }));
 
-  const approvers = sourceSteps
-    .map((templateStep, index) => {
-      const stepOrder = templateStep.order;
-      const items = grouped.get(stepOrder) ?? [];
-      const isNotification = templateStep.step_type === "notification"
-        || items.some((item) => item.task.step?.step_type === "notification");
-      const allHistory = items.flatMap((item) => item.history ?? []);
-      const latestAction = latestActionForHistory(allHistory);
-      const statuses = items.map((item) => mapTaskStatus(item.task.status, latestActionForHistory(item.history)?.action));
-      const status = resolveStepStatus(statuses);
-      const taskWithAssignee = items.find((item) => item.task.assigned_to) ?? items[0];
-      const rawName = templateStep.name?.trim() || items[0]?.task.step?.name?.trim() || `${ordinal(index + 1)} Approver`;
-      const name = isNotification
-        ? (rawName || "Notification")
-        : (rawName || `${ordinal(index + 1)} Approver`);
-      const previousName = index > 0
-        ? sourceSteps[index - 1].name?.trim() || `${ordinal(index)} Approver`
-        : undefined;
+  // ── Pass 1: derive each step's raw status from its own tasks ────────────────
+  // A step only has tasks once the engine has reached it, so a step with no
+  // tasks simply hasn't started yet → "pending" (upcoming).
+  const base = sourceSteps.map((templateStep, index) => {
+    const stepOrder = templateStep.order;
+    const items = grouped.get(stepOrder) ?? [];
+    const isNotification = templateStep.step_type === "notification"
+      || items.some((item) => item.task.step?.step_type === "notification");
+    const allHistory = items.flatMap((item) => item.history ?? []);
+    const latestAction = latestActionForHistory(allHistory);
+    const statuses = items.map((item) => mapTaskStatus(item.task.status, latestActionForHistory(item.history)?.action));
+    const rawStatus: WorkflowStep["status"] = items.length ? resolveStepStatus(statuses) : "pending";
+    const taskWithAssignee = items.find((item) => item.task.assigned_to) ?? items[0];
+    const rawName = templateStep.name?.trim() || items[0]?.task.step?.name?.trim() || `${ordinal(index + 1)} Approver`;
+    const name = isNotification ? (rawName || "Notification") : (rawName || `${ordinal(index + 1)} Approver`);
 
-      const recipientLabel = templateStep.notify_user_name
-        || items[0]?.task.step?.notify_user_name
-        || templateStep.notify_email
-        || items[0]?.task.step?.notify_email
-        || "Recipient";
+    const recipientLabel = templateStep.notify_user_name
+      || items[0]?.task.step?.notify_user_name
+      || templateStep.notify_email
+      || items[0]?.task.step?.notify_email
+      || "Recipient";
 
-      const statusDisplay = isNotification
-        ? (status === "completed"
-          ? (templateStep.status_label?.trim() || "Notification sent")
-          : (templateStep.status_label?.trim() || "Pending notification"))
-        : (status === "pending" && previousName
-          ? `Awaiting ${previousName}`
-          : templateStep.status_label);
+    const approver = isNotification
+      ? recipientLabel
+      : (
+        formatPerson(taskWithAssignee?.task.assigned_to) ||
+        templateStep.assignee_user_name ||
+        templateStep.assignee_group_name ||
+        formatAssigneeType(templateStep.assignee_type) ||
+        "Unassigned"
+      );
 
-      return {
-        id: isNotification ? `notification-${stepOrder}` : `approver-${stepOrder}`,
-        name,
-        approver: isNotification
-          ? recipientLabel
-          : (
-            formatPerson(taskWithAssignee?.task.assigned_to) ||
-            templateStep.assignee_user_name ||
-            templateStep.assignee_group_name ||
-            formatAssigneeType(templateStep.assignee_type) ||
-            "Unassigned"
-          ),
-        status,
-        statusDisplay,
-        completedAt: latestAction?.created_at || items.find((item) => item.task.acted_at)?.task.acted_at || undefined,
-        comment: latestAction?.comment || items.find((item) => item.task.comment)?.task.comment || undefined,
-        order: stepOrder,
-        description: isNotification
-          ? "Automated notification step"
-          : (templateStep.instructions || `${ordinal(index + 1)} approval step`),
-        stepType: isNotification ? "notification" as const : "approval" as const,
-      };
-    });
+    return {
+      id: isNotification ? `notification-${stepOrder}` : `approver-${stepOrder}`,
+      stepOrder,
+      index,
+      isNotification,
+      name,
+      approver,
+      rawStatus,
+      hasTasks: items.length > 0,
+      completedAt: latestAction?.created_at || items.find((item) => item.task.acted_at)?.task.acted_at || undefined,
+      comment: latestAction?.comment || items.find((item) => item.task.comment)?.task.comment || undefined,
+      description: isNotification
+        ? "Automated notification step"
+        : (templateStep.instructions || `${ordinal(index + 1)} approval step`),
+    };
+  });
+
+  // ── Pass 2: once a step is rejected the workflow stops; later steps that
+  // never received a task are unreachable rather than merely "pending". ────────
+  let terminated = false;
+  const resolved = base.map((step) => {
+    let status: WorkflowStep["status"] = step.rawStatus;
+    if (terminated && !step.hasTasks) status = "skipped";
+    if (status === "rejected") terminated = true;
+    return { ...step, status };
+  });
+
+  // ── Pass 3: compose human-readable status text from each step's position ────
+  const approvers = resolved.map((step, index) => {
+    const previous = index > 0 ? resolved[index - 1] : undefined;
+    return {
+      id: step.id,
+      name: step.name,
+      approver: step.approver,
+      status: step.status,
+      statusDisplay: describeStatus({
+        status: step.status,
+        isNotification: step.isNotification,
+        previousName: previous?.name,
+        previousIsNotification: previous?.isNotification,
+      }),
+      completedAt: step.completedAt,
+      comment: step.comment,
+      order: step.stepOrder,
+      description: step.description,
+    };
+  });
 
   const steps: WorkflowStep[] = [
     {
@@ -309,6 +345,51 @@ function buildApproverWorkflow(
   });
 
   return steps;
+}
+
+/**
+ * Turn a step's status (plus its position in the chain) into the label shown on
+ * the card. The current stage reads "In progress", finished stages read
+ * "Approved"/"Notification sent", and upcoming stages read
+ * "Awaiting <preceding stage> approval" so it's clear what they're blocked on.
+ */
+function describeStatus({
+  status,
+  isNotification,
+  previousName,
+  previousIsNotification,
+}: {
+  status: WorkflowStep["status"];
+  isNotification: boolean;
+  previousName?: string;
+  previousIsNotification?: boolean;
+}): string {
+  switch (status) {
+    case "completed":
+      return isNotification ? "Notification sent" : "Approved";
+    case "in-progress":
+      return isNotification ? "Sending notification" : "In progress";
+    case "on-hold":
+      return "On hold";
+    case "rejected":
+      return "Rejected";
+    case "returned":
+      return "Returned for review";
+    case "skipped":
+      return "Not reached";
+    case "pending":
+    default:
+      if (!previousName) {
+        // Nothing precedes this step — the workflow just hasn't started here yet.
+        return isNotification ? "Pending notification" : "Awaiting submission";
+      }
+      if (isNotification) {
+        return `Pending — sends after ${previousName}`;
+      }
+      return previousIsNotification
+        ? `Awaiting ${previousName}`
+        : `Awaiting ${previousName} approval`;
+  }
 }
 
 function resolveStepStatus(statuses: WorkflowStep["status"][]): WorkflowStep["status"] {

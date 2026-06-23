@@ -54,7 +54,10 @@ export default function NotificationWorkflowPage() {
     queryKey: ["notification-workflow", documentId],
     queryFn: () => loadWorkflowData(documentId),
     enabled: !!documentId,
-    staleTime: 30_000,
+    staleTime: 10_000,
+    // Reflect approvals/notifications as they happen; stop once the workflow ends.
+    refetchInterval: (query) => (query.state.data?.isActive ? 15_000 : false),
+    refetchOnWindowFocus: true,
   });
 
   const viewDocumentLink = notificationContext?.viewDocumentLink || `/documents/${documentId}`;
