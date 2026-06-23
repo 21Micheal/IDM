@@ -578,7 +578,9 @@ class DocumentViewSet(AuditMixin, viewsets.ModelViewSet):
 
         duplicate_doc = (
             Document.objects
-            .filter(checksum=checksum, uploaded_by=request.user)
+            # Ignore trashed (soft-deleted) documents so a file in Trash does not
+            # block re-uploading the same content.
+            .filter(checksum=checksum, uploaded_by=request.user, deleted_at__isnull=True)
             .exclude(file="")
             .select_related("uploaded_by")
             .order_by("created_at")

@@ -156,7 +156,11 @@ def _find_existing_document_for_checksum(
 ):
     if not checksum:
         return None
-    qs = Document.objects.filter(checksum=checksum).exclude(file="")
+    # Trashed (soft-deleted) documents must not count as duplicates — a user
+    # should be able to re-upload a file they have sent to Trash.
+    qs = Document.objects.filter(
+        checksum=checksum, deleted_at__isnull=True
+    ).exclude(file="")
     if uploaded_by is not None:
         qs = qs.filter(uploaded_by=uploaded_by)
     if exclude_document_id:
