@@ -1,4 +1,5 @@
 import { useState, useEffect } from "react";
+import { extractApiError } from "@/lib/apiError";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useSearchParams } from "react-router-dom";
 import { useForm } from "react-hook-form";
@@ -104,9 +105,8 @@ export default function ProfilePage() {
       reset();
       setShowPasswordForm(false);
     },
-    onError: (err: { response?: { data?: { detail?: string | string[] } } }) => {
-      const detail = err?.response?.data?.detail;
-      toast.error(Array.isArray(detail) ? detail.join(" ") : detail || "Failed to change password");
+    onError: (err) => {
+      toast.error(extractApiError(err, "Failed to change password"));
     },
   });
 
@@ -120,7 +120,7 @@ export default function ProfilePage() {
           : state
       );
     },
-    onError: () => toast.error("Failed to update MFA"),
+    onError: (err) => toast.error(extractApiError(err, "Failed to update MFA")),
   });
   void _toggleMFAMutation;
 
@@ -156,7 +156,7 @@ export default function ProfilePage() {
       qc.invalidateQueries({ queryKey: ["delegations"] });
     },
     onError: (err: { response?: { data?: { detail?: string } } }) =>
-      toast.error(err?.response?.data?.detail || "Failed to create delegation"),
+      toast.error(extractApiError(err, "Failed to create delegation")),
   });
 
   const updatePreferencesMutation = useMutation({
@@ -187,7 +187,7 @@ export default function ProfilePage() {
       toast.success("Delegation disabled");
       qc.invalidateQueries({ queryKey: ["delegations"] });
     },
-    onError: () => toast.error("Failed to disable delegation"),
+    onError: (err) => toast.error(extractApiError(err, "Failed to disable delegation")),
   });
 
   const tabs = [

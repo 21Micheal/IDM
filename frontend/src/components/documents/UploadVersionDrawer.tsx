@@ -1,4 +1,5 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { extractApiError } from "@/lib/apiError";
 import { useMutation } from "@tanstack/react-query";
 import { Upload, File as FileIcon, Loader2, X } from "lucide-react";
 import { toast } from "@/components/ui/vault-toast";
@@ -165,7 +166,7 @@ export function UploadVersionDrawer({
       setOpen(false);
     },
     onError: (error: any) => {
-      toast.error(error?.response?.data?.detail || "Upload failed");
+      toast.error(extractApiError(error, "Upload failed"));
       setProgress(0);
     },
   });

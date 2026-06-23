@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
+import { extractApiError } from "@/lib/apiError";
 import { useNavigate } from "react-router-dom";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import {
@@ -175,8 +176,8 @@ export default function BulkScanPage({ scanMode = true, onSingleMode }: BulkScan
         setStage("processing");
       }
     },
-    onError: () => {
-      toast.error("Bulk upload failed. Please try again.");
+    onError: (err) => {
+      toast.error(extractApiError(err, "Bulk upload failed. Please try again."));
       setUploadProgress(0);
       setStage("select");
     },
@@ -195,8 +196,8 @@ export default function BulkScanPage({ scanMode = true, onSingleMode }: BulkScan
       queryClient.invalidateQueries({ queryKey: ["documents"] });
       toast.success("Batch submitted successfully.");
     },
-    onError: () => {
-      toast.error("Could not submit the batch. Please try again.");
+    onError: (err) => {
+      toast.error(extractApiError(err, "Could not submit the batch. Please try again."));
     },
   });
 
@@ -215,8 +216,8 @@ export default function BulkScanPage({ scanMode = true, onSingleMode }: BulkScan
       setLocalPreviews({});
       toast.success("Review canceled and draft batch discarded.");
     },
-    onError: () => {
-      toast.error("Could not cancel the review. Please try again.");
+    onError: (err) => {
+      toast.error(extractApiError(err, "Could not cancel the review. Please try again."));
     },
   });
 

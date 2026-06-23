@@ -1,4 +1,5 @@
 import { useEffect, useMemo, useState } from "react";
+import { extractApiError } from "@/lib/apiError";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { useForm, useFieldArray } from "react-hook-form";
 import {
@@ -238,7 +239,7 @@ export default function AdminDocumentTypesPage() {
       qc.invalidateQueries({ queryKey: ["document-types"] });
       if (editingId === type.id) setEditingId(null);
     },
-    onError: (err: any) => toast.error(err?.response?.data?.detail || "Failed to delete document type."),
+    onError: (err: any) => toast.error(extractApiError(err, "Failed to delete document type.")),
   });
 
   const duplicateMutation = useMutation({

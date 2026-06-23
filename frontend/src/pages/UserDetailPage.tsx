@@ -1,4 +1,5 @@
 import { useEffect, useState } from "react";
+import { extractApiError } from "@/lib/apiError";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useNavigate, useParams } from "react-router-dom";
 import { usersAPI, departmentsAPI, profileAPI } from "@/services/api";
@@ -117,13 +118,13 @@ export default function UserDetailPage() {
       qc.invalidateQueries({ queryKey: ["users"] });
       qc.invalidateQueries({ queryKey: ["users", "detail", id] });
     },
-    onError: () => toast.error("Failed to update user"),
+    onError: (err) => toast.error(extractApiError(err, "Failed to update user")),
   });
 
   const resetPwMutation = useMutation({
     mutationFn: () => usersAPI.resetPassword(id),
     onSuccess: () => toast.success("Temporary password generated and emailed"),
-    onError: () => toast.error("Failed to reset password"),
+    onError: (err) => toast.error(extractApiError(err, "Failed to reset password")),
   });
 
   const toggleActiveMutation = useMutation({
@@ -133,7 +134,7 @@ export default function UserDetailPage() {
       qc.invalidateQueries({ queryKey: ["users"], exact: false });
       qc.invalidateQueries({ queryKey: ["users", "detail", id], exact: true });
     },
-    onError: () => toast.error("Failed to toggle status"),
+    onError: (err) => toast.error(extractApiError(err, "Failed to toggle status")),
   });
 
   const reassignMutation = useMutation({
@@ -142,7 +143,7 @@ export default function UserDetailPage() {
       toast.success(res.data.detail || "Tasks reassigned");
       setReassignTo("");
     },
-    onError: () => toast.error("Failed to reassign active tasks"),
+    onError: (err) => toast.error(extractApiError(err, "Failed to reassign active tasks")),
   });
 
   const disableDelegationMutation = useMutation({
@@ -153,7 +154,7 @@ export default function UserDetailPage() {
       qc.invalidateQueries({ queryKey: ["users", "delegations", id] });
       qc.invalidateQueries({ queryKey: ["delegations"] });
     },
-    onError: () => toast.error("Failed to disable delegation"),
+    onError: (err) => toast.error(extractApiError(err, "Failed to disable delegation")),
   });
 
   const reassignCandidates = users.filter((u) => u.id !== id && u.is_active);

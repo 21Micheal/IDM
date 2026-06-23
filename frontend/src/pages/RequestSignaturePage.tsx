@@ -6,6 +6,7 @@
  *   • Sent by me: my requests + their progress.
  */
 import { useState } from "react";
+import { extractApiError } from "@/lib/apiError";
 import { useNavigate } from "react-router-dom";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { signatureRequestsAPI, usersAPI } from "@/services/api";
@@ -99,7 +100,7 @@ function RequestForm({ onCreated }: { onCreated: (documentId: string) => void })
       signers: signers.map((s) => s.id),
     }),
     onSuccess: (r) => { toast.success("Signature request sent"); onCreated(r.data.document_id); },
-    onError: (e: any) => toast.error(e?.response?.data?.detail ?? "Could not send request"),
+    onError: (e: any) => toast.error(extractApiError(e, "Could not send request")),
   });
 
   const move = (i: number, dir: -1 | 1) => {

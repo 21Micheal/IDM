@@ -14,6 +14,7 @@
  */
 
 import { useState, useMemo } from "react";
+import { extractApiError } from "@/lib/apiError";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import {
   Plus, Upload, X, Eye, FileText, Trash2,
@@ -638,19 +639,19 @@ export default function TemplatesPage() {
         setEditTarget(undefined);
       }
     },
-    onError: () => toast.error("Failed to save template"),
+    onError: (err) => toast.error(extractApiError(err, "Failed to save template")),
   });
 
   const deleteMutation = useMutation({
     mutationFn: (id: string) => templatesAPI.delete(id),
     onSuccess: () => { toast.success("Template deleted"); qc.invalidateQueries({ queryKey: ["templates"] }); },
-    onError: () => toast.error("Failed to delete template"),
+    onError: (err) => toast.error(extractApiError(err, "Failed to delete template")),
   });
 
   const duplicateMutation = useMutation({
     mutationFn: (id: string) => templatesAPI.duplicate(id),
     onSuccess: () => { toast.success("Template duplicated"); qc.invalidateQueries({ queryKey: ["templates"] }); },
-    onError: () => toast.error("Failed to duplicate template"),
+    onError: (err) => toast.error(extractApiError(err, "Failed to duplicate template")),
   });
 
   // ── Filtered list ───────────────────────────────────────────────────────

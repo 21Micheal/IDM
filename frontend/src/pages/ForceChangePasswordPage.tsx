@@ -1,6 +1,7 @@
 // src/pages/ForceChangePasswordPage.tsx
 "use client";
 import { useState } from "react";
+import { extractApiError } from "@/lib/apiError";
 import { useNavigate } from "react-router-dom";
 import { useForm } from "react-hook-form";
 import { zodResolver } from "@hookform/resolvers/zod";
@@ -76,10 +77,7 @@ export default function ForceChangePasswordPage() {
       toast.success("Password updated successfully! Welcome to Flaxem.");
       navigate("/", { replace: true });
     } catch (err: any) {
-      const detail = err?.response?.data?.detail;
-      toast.error(
-        Array.isArray(detail) ? detail.join(" ") : detail || "Failed to update password"
-      );
+      toast.error(extractApiError(err, "Failed to update password"));
     } finally {
       setLoading(false);
     }

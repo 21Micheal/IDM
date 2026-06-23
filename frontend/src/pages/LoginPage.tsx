@@ -2,6 +2,7 @@
 "use client";
 
 import { useState } from "react";
+import { extractApiError } from "@/lib/apiError";
 import { useNavigate } from "react-router-dom";
 import { useQueryClient } from "@tanstack/react-query";
 import { useForm } from "react-hook-form";
@@ -116,7 +117,7 @@ export default function LoginPage() {
         await completeLogin(data);
       }
     } catch (err: any) {
-      toast.error(err?.response?.data?.detail || "Invalid email or password.");
+      toast.error(extractApiError(err, "Invalid email or password."));
     } finally {
       setLoading(false);
     }
@@ -128,7 +129,7 @@ export default function LoginPage() {
       const { data } = await authAPI.verifyOTP(pendingUserId, values.otp);
       await completeLogin(data);
     } catch (err: any) {
-      toast.error(err?.response?.data?.detail || "Invalid or expired verification code.");
+      toast.error(extractApiError(err, "Invalid or expired verification code."));
     } finally {
       setLoading(false);
     }

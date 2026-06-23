@@ -17,6 +17,7 @@
  */
 
 import { lazy, Suspense, useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { extractApiError } from "@/lib/apiError";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { documentsAPI, dmsSettingsAPI, api, apiBaseUrl, type DmsSettings } from "../../services/api";
 import { useAuthStore } from "@/store/authStore";
@@ -792,7 +793,7 @@ function OfficeEditPanel({
       });
     },
     onError: (err: any) => {
-      toast.error(err?.response?.data?.detail ?? "Could not queue preview. Please try again.");
+      toast.error(extractApiError(err, "Could not queue preview. Please try again."));
     },
   });
 
@@ -1269,7 +1270,7 @@ export default function DocumentViewer({ document: doc, submitSlot, hideUploadAc
       qc.invalidateQueries({ queryKey: ["document-preview", doc.id] });
     },
     onError: (err: any) =>
-      toast.error(err?.response?.data?.detail ?? "Could not release the lock."),
+      toast.error(extractApiError(err, "Could not release the lock.")),
   });
 
   const handleForceRelease = useCallback(() => {

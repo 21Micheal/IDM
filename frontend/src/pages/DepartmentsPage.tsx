@@ -1,4 +1,5 @@
 import { useState } from "react";
+import { extractApiError } from "@/lib/apiError";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { useForm } from "react-hook-form";
 import { zodResolver } from "@hookform/resolvers/zod";
@@ -114,7 +115,7 @@ function DepartmentDetail({
       qc.invalidateQueries({ queryKey: ["department-members", department.id] });
       qc.invalidateQueries({ queryKey: ["departments"] });
     },
-    onError: () => toast.error("Failed to add user"),
+    onError: (err) => toast.error(extractApiError(err, "Failed to add user")),
   });
 
   const removeMemberMutation = useMutation({
@@ -352,7 +353,7 @@ export default function DepartmentsPage() {
       qc.invalidateQueries({ queryKey: ["departments"] });
     },
     onError: (err: any) =>
-      toast.error(err?.response?.data?.detail || "Cannot delete department with active users"),
+      toast.error(extractApiError(err, "Cannot delete department with active users")),
   });
 
   return (

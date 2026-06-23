@@ -1,4 +1,5 @@
 import { useMemo, useState } from "react";
+import { extractApiError } from "@/lib/apiError";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { dmsSettingsAPI, type DmsSettings } from "@/services/api";
 import { toast } from "@/components/ui/vault-toast";
@@ -147,7 +148,7 @@ function SettingsWorkspace() {
       qc.setQueryData(["dms-settings"], saved);
       toast.success("DMS settings saved.");
     },
-    onError: () => toast.error("Could not save DMS settings."),
+    onError: (err) => toast.error(extractApiError(err, "Could not save DMS settings.")),
   });
 
   const update = <K extends keyof DmsSettings>(key: K, value: DmsSettings[K]) => {

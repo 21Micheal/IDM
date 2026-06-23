@@ -1,4 +1,5 @@
 import { Suspense, useState, useEffect, useRef, useCallback } from "react";
+import { extractApiError } from "@/lib/apiError";
 import { useParams, useNavigate } from "react-router-dom";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { api, documentsAPI, workflowAPI } from "@/services/api";
@@ -453,7 +454,7 @@ export default function DocumentDetailPage() {
   const submitMutation = useMutation({
     mutationFn: () => documentsAPI.submit(id!),
     onSuccess: () => { toast.success("Submitted for approval"); qc.invalidateQueries({ queryKey: ["document", id] }); },
-    onError: () => toast.error("Submission failed"),
+    onError: (err) => toast.error(extractApiError(err, "Submission failed")),
   });
 
   const archiveMutation = useMutation({
@@ -464,7 +465,7 @@ export default function DocumentDetailPage() {
   const commentMutation = useMutation({
     mutationFn: (content: string) => documentsAPI.addComment(id!, content),
     onSuccess: () => { setComment(""); qc.invalidateQueries({ queryKey: ["document", id] }); },
-    onError: () => toast.error("Failed to add comment"),
+    onError: (err) => toast.error(extractApiError(err, "Failed to add comment")),
   });
 
   const restoreMutation = useMutation({
@@ -476,7 +477,7 @@ export default function DocumentDetailPage() {
       qc.invalidateQueries({ queryKey: ["document-preview", id] });
       clearDocumentVersionCache(id!);
     },
-    onError: () => { toast.error("Restore failed."); setConfirmRestoreId(null); },
+    onError: (err) => { toast.error(extractApiError(err, "Restore failed.")); setConfirmRestoreId(null); },
   });
 
   const reOcrMutation = useMutation({
@@ -485,7 +486,7 @@ export default function DocumentDetailPage() {
       toast.info("OCR queued. Text will be updated shortly.");
       qc.invalidateQueries({ queryKey: ["document", id] });
     },
-    onError: () => toast.error("Could not queue OCR. Please try again."),
+    onError: (err) => toast.error(extractApiError(err, "Could not queue OCR. Please try again.")),
   });
 
   const updateFormMutation = useMutation({
@@ -502,7 +503,7 @@ export default function DocumentDetailPage() {
       qc.invalidateQueries({ queryKey: ["document", id] });
     },
     onError: (err: any) =>
-      toast.error(err?.response?.data?.detail || "Could not update the form."),
+      toast.error(extractApiError(err, "Could not update the form.")),
   });
 
   const deleteMutation = useMutation({
@@ -513,7 +514,7 @@ export default function DocumentDetailPage() {
       navigate("/documents");
     },
     onError: (err: any) =>
-      toast.error(err?.response?.data?.detail || "Could not delete document."),
+      toast.error(extractApiError(err, "Could not delete document.")),
   });
 
   const confirmRelationshipSuggestionMutation = useMutation({
@@ -530,7 +531,7 @@ export default function DocumentDetailPage() {
       qc.invalidateQueries({ queryKey: ["document-audit", id] });
     },
     onError: (err: any) => {
-      toast.error(err?.response?.data?.detail ?? "Could not confirm the suggested link.");
+      toast.error(extractApiError(err, "Could not confirm the suggested link."));
     },
   });
 
@@ -543,7 +544,7 @@ export default function DocumentDetailPage() {
       qc.invalidateQueries({ queryKey: ["document-relationships", id] });
       qc.invalidateQueries({ queryKey: ["document-audit", id] });
     },
-    onError: () => toast.error("Could not remove document relationship."),
+    onError: (err) => toast.error(extractApiError(err, "Could not remove document relationship.")),
   });
   // Close download tray on outside click. Must stay above the early returns
   // below so hook order is stable across loading/loaded renders (React #310).

@@ -18,6 +18,7 @@
  */
 
 import { useState } from "react";
+import { extractApiError } from "@/lib/apiError";
 import { useNavigate } from "react-router-dom";
 import { useMutation, useQueryClient } from "@tanstack/react-query";
 import { templatesAPI } from "@/services/api";
@@ -105,8 +106,7 @@ export default function BuiltTemplateFormModal({
     },
     onError: (err: any) => {
       setUploadingFiles(false);
-      const msg = err?.response?.data?.detail || err?.response?.data?.values || "Could not create document.";
-      toast.error(Array.isArray(msg) ? msg.join(", ") : String(msg));
+      toast.error(extractApiError(err, "Could not create document."));
     },
   });
 

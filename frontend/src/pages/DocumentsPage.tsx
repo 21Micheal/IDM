@@ -1,4 +1,5 @@
 import { useEffect, useMemo, useState, useRef } from "react";
+import { extractApiError } from "@/lib/apiError";
 import statusUtils from "@/lib/status";
 import { Link, useSearchParams } from "react-router-dom";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
@@ -545,7 +546,7 @@ export default function DocumentsPage({ personalOnly = false }: DocumentsPagePro
       toast.success("Document archived.");
       queryClient.invalidateQueries({ queryKey: ["documents"] });
     },
-    onError: () => toast.error("Could not archive document."),
+    onError: (err) => toast.error(extractApiError(err, "Could not archive document.")),
   });
 
   const deleteMutation = useMutation({
@@ -555,7 +556,7 @@ export default function DocumentsPage({ personalOnly = false }: DocumentsPagePro
       queryClient.invalidateQueries({ queryKey: ["documents"] });
     },
     onError: (err: any) =>
-      toast.error(err?.response?.data?.detail || "Could not delete document."),
+      toast.error(extractApiError(err, "Could not delete document.")),
   });
 
   const TRASHABLE_STATUSES = ["draft", "returned", "rejected"];
@@ -568,7 +569,7 @@ export default function DocumentsPage({ personalOnly = false }: DocumentsPagePro
       setSelectedIds([]);
       queryClient.invalidateQueries({ queryKey: ["documents"] });
     },
-    onError: () => toast.error("Bulk action failed"),
+    onError: (err) => toast.error(extractApiError(err, "Bulk action failed")),
   });
 
   const emailSelectedMutation = useMutation({
@@ -599,7 +600,7 @@ export default function DocumentsPage({ personalOnly = false }: DocumentsPagePro
       setSelectedIds([]);
     },
     onError: (err: any) => {
-      toast.error(err?.response?.data?.detail ?? "Could not send selected documents.");
+      toast.error(extractApiError(err, "Could not send selected documents."));
     },
   });
 
@@ -617,7 +618,7 @@ export default function DocumentsPage({ personalOnly = false }: DocumentsPagePro
       URL.revokeObjectURL(url);
       toast.success(`Downloaded ${selectedIds.length} document${selectedIds.length === 1 ? "" : "s"} as ZIP.`);
     },
-    onError: () => toast.error("Could not download the selected documents."),
+    onError: (err) => toast.error(extractApiError(err, "Could not download the selected documents.")),
   });
 
   const downloadSelectedAsPdfMutation = useMutation({
@@ -634,7 +635,7 @@ export default function DocumentsPage({ personalOnly = false }: DocumentsPagePro
       URL.revokeObjectURL(url);
       toast.success(`Downloaded ${selectedIds.length} document${selectedIds.length === 1 ? "" : "s"} as PDF ZIP.`);
     },
-    onError: () => toast.error("Could not download the selected documents as PDF."),
+    onError: (err) => toast.error(extractApiError(err, "Could not download the selected documents as PDF.")),
   });
 
   const downloadSelectedMergedPdfMutation = useMutation({
@@ -652,7 +653,7 @@ export default function DocumentsPage({ personalOnly = false }: DocumentsPagePro
       setMergeModalOpen(false);
       toast.success(`Downloaded ${orderedIds.length} document${orderedIds.length === 1 ? "" : "s"} as merged PDF.`);
     },
-    onError: () => toast.error("Could not create merged PDF. Ensure selected documents have PDF previews."),
+    onError: (err) => toast.error(extractApiError(err, "Could not create merged PDF. Ensure selected documents have PDF previews.")),
   });
 
   const moveMergeDoc = (index: number, dir: -1 | 1) => {
@@ -731,7 +732,7 @@ export default function DocumentsPage({ personalOnly = false }: DocumentsPagePro
       queryClient.invalidateQueries({ queryKey: ["documents"] });
     },
     onError: (err: any) => {
-      toast.error(err?.response?.data?.detail ?? "Could not share selected documents.");
+      toast.error(extractApiError(err, "Could not share selected documents."));
     },
   });
 

@@ -1,4 +1,5 @@
 import { useEffect, useState } from "react";
+import { extractApiError } from "@/lib/apiError";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { groupsAPI, documentTypesAPI, usersAPI, normalizeListResponse, dmsSettingsAPI } from "@/services/api";
 import {
@@ -114,7 +115,7 @@ function DuplicateGroupModal({
       onDuplicated(res.data as Group);
     },
     onError: (err: any) =>
-      toast.error(err?.response?.data?.detail || "Failed to duplicate group."),
+      toast.error(extractApiError(err, "Failed to duplicate group.")),
   });
 
   return (
@@ -466,7 +467,7 @@ function GroupDetail({
       toast.success("Permissions saved successfully");
       qc.invalidateQueries({ queryKey: ["groups"] });
     },
-    onError: () => toast.error("Failed to save permissions"),
+    onError: (err) => toast.error(extractApiError(err, "Failed to save permissions")),
   });
 
   const setSeesAllMutation = useMutation({
@@ -478,7 +479,7 @@ function GroupDetail({
       qc.invalidateQueries({ queryKey: ["groups"] });
       qc.invalidateQueries({ queryKey: ["group", group.id] });
     },
-    onError: () => toast.error("Failed to update document visibility"),
+    onError: (err) => toast.error(extractApiError(err, "Failed to update document visibility")),
   });
 
   const deleteMutation = useMutation({
@@ -488,7 +489,7 @@ function GroupDetail({
       qc.invalidateQueries({ queryKey: ["groups"] });
       onClose();
     },
-    onError: () => toast.error("Failed to delete group"),
+    onError: (err) => toast.error(extractApiError(err, "Failed to delete group")),
   });
 
   const addMemberMutation = useMutation({
@@ -498,7 +499,7 @@ function GroupDetail({
       qc.invalidateQueries({ queryKey: ["group-members", group.id] });
       qc.invalidateQueries({ queryKey: ["groups"] });
     },
-    onError: () => toast.error("Failed to add member"),
+    onError: (err) => toast.error(extractApiError(err, "Failed to add member")),
   });
 
   const removeMemberMutation = useMutation({
@@ -508,7 +509,7 @@ function GroupDetail({
       qc.invalidateQueries({ queryKey: ["group-members", group.id] });
       qc.invalidateQueries({ queryKey: ["groups"] });
     },
-    onError: () => toast.error("Failed to remove member"),
+    onError: (err) => toast.error(extractApiError(err, "Failed to remove member")),
   });
 
   const setHeadMutation = useMutation({
@@ -800,7 +801,7 @@ export default function GroupsPage() {
       setNewName("");
       setNewDesc("");
     },
-    onError: () => toast.error("Failed to create group"),
+    onError: (err) => toast.error(extractApiError(err, "Failed to create group")),
   });
 
   const deleteGroupMutation = useMutation({
@@ -812,7 +813,7 @@ export default function GroupsPage() {
         setSelected(null);
       }
     },
-    onError: () => toast.error("Failed to delete group"),
+    onError: (err) => toast.error(extractApiError(err, "Failed to delete group")),
   });
 
   return (

@@ -6,6 +6,7 @@
  * automatically after the retention period configured in Admin → DMS settings.
  */
 import { useMemo, useState } from "react";
+import { extractApiError } from "@/lib/apiError";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { Link } from "react-router-dom";
 import { Trash2, RotateCcw, Loader2, Eye, FileText, AlertTriangle } from "lucide-react";
@@ -35,7 +36,7 @@ export default function TrashPage() {
     mutationFn: (id: string) => documentsAPI.restore(id),
     onMutate: (id) => setBusyId(id),
     onSuccess: () => { toast.success("Document restored."); invalidate(); },
-    onError: (err: any) => toast.error(err?.response?.data?.detail || "Could not restore document."),
+    onError: (err: any) => toast.error(extractApiError(err, "Could not restore document.")),
     onSettled: () => setBusyId(null),
   });
 
@@ -43,7 +44,7 @@ export default function TrashPage() {
     mutationFn: (id: string) => documentsAPI.purge(id),
     onMutate: (id) => setBusyId(id),
     onSuccess: () => { toast.success("Permanently deleted."); invalidate(); },
-    onError: (err: any) => toast.error(err?.response?.data?.detail || "Could not delete document."),
+    onError: (err: any) => toast.error(extractApiError(err, "Could not delete document.")),
     onSettled: () => setBusyId(null),
   });
 

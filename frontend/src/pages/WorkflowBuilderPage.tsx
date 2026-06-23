@@ -1753,7 +1753,7 @@ function RoutingRulesPanel({ template }: { template: WorkflowTemplate }) {
       toast.success("Rule removed");
       qc.invalidateQueries({ queryKey: ["workflow-rules", templateId] });
     },
-    onError: () => toast.error("Failed to remove rule"),
+    onError: (err: any) => toast.error(formatApiError(err?.response?.data) || "Failed to remove rule"),
   });
 
   const [editingId, setEditingId] = useState<string | null>(null);

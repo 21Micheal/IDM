@@ -1,4 +1,5 @@
 import { useState } from "react";
+import { extractApiError } from "@/lib/apiError";
 import { useNavigate } from "react-router-dom";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { useForm } from "react-hook-form";
@@ -162,7 +163,7 @@ function CreateUserModal({
       qc.invalidateQueries({ queryKey: ["users"] });
     },
     onError: (err: any) => {
-      const detail = err?.response?.data?.detail || "Failed to create user";
+      const detail = extractApiError(err, "Failed to create user");
       toast.error(detail);
     },
   });
@@ -265,7 +266,7 @@ function EditUserModal({
       qc.invalidateQueries({ queryKey: ["users"] });
       onClose();
     },
-    onError: () => toast.error("Failed to update user"),
+    onError: (err) => toast.error(extractApiError(err, "Failed to update user")),
   });
 
   return (
@@ -363,7 +364,7 @@ export default function UsersPage() {
   const _resetPasswordMutation = useMutation<unknown, unknown, string>({
     mutationFn: (id: string) => usersAPI.resetPassword(id),
     onSuccess: (res: any) => setPwResult(res.data),
-    onError: () => toast.error("Password reset failed"),
+    onError: (err) => toast.error(extractApiError(err, "Password reset failed")),
   });
   void _resetPasswordMutation;
 
@@ -373,7 +374,7 @@ export default function UsersPage() {
       qc.invalidateQueries({ queryKey: ["users"] });
       toast.success("User status updated");
     },
-    onError: () => toast.error("Failed to update status"),
+    onError: (err) => toast.error(extractApiError(err, "Failed to update status")),
   });
   void _toggleActiveMutation;
 

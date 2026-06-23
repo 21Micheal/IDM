@@ -12,6 +12,7 @@
  *   ▶ Release hold (only shown when task is currently held)
  */
 import { useState } from "react";
+import { extractApiError } from "@/lib/apiError";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { documentsAPI, workflowAPI } from "@/services/api";
 import {
@@ -294,7 +295,7 @@ export default function WorkflowActionPanel({ task, documentId, onCompleted }: P
     onMutate: () => beginOptimisticAction("approve"),
     onSuccess: () => { toast.success("Document approved"); completeAction(); },
     onError:   (e: { response?: { data?: { detail?: string } } }) =>
-      failAction(e?.response?.data?.detail ?? "Approval failed"),
+      failAction(extractApiError(e, "Approval failed")),
   });
 
   const rejectMutation = useMutation({
@@ -302,7 +303,7 @@ export default function WorkflowActionPanel({ task, documentId, onCompleted }: P
     onMutate: () => beginOptimisticAction("reject"),
     onSuccess: () => { toast.success("Document rejected"); completeAction(); },
     onError:   (e: { response?: { data?: { detail?: string } } }) =>
-      failAction(e?.response?.data?.detail ?? "Rejection failed"),
+      failAction(extractApiError(e, "Rejection failed")),
   });
 
   const returnMutation = useMutation({
@@ -313,7 +314,7 @@ export default function WorkflowActionPanel({ task, documentId, onCompleted }: P
       completeAction();
     },
     onError: (e: { response?: { data?: { detail?: string } } }) =>
-      failAction(e?.response?.data?.detail ?? "Return failed"),
+      failAction(extractApiError(e, "Return failed")),
   });
 
   const holdMutation = useMutation({
@@ -324,7 +325,7 @@ export default function WorkflowActionPanel({ task, documentId, onCompleted }: P
       completeAction();
     },
     onError: (e: { response?: { data?: { detail?: string } } }) =>
-      failAction(e?.response?.data?.detail ?? "Hold failed"),
+      failAction(extractApiError(e, "Hold failed")),
   });
 
   const releaseMutation = useMutation({
@@ -332,7 +333,7 @@ export default function WorkflowActionPanel({ task, documentId, onCompleted }: P
     onMutate: () => beginOptimisticAction("release"),
     onSuccess: () => { toast.success("Hold released"); completeAction(); },
     onError:   (e: { response?: { data?: { detail?: string } } }) =>
-      failAction(e?.response?.data?.detail ?? "Release failed"),
+      failAction(extractApiError(e, "Release failed")),
   });
 
   const isHeld     = task.status === "held";
