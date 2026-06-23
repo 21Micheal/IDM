@@ -3,6 +3,7 @@ import {
 } from "react";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { workflowAPI, documentTypesAPI, groupsAPI, normalizeListResponse } from "@/services/api";
+import { deriveDocumentTypeConfig } from "@/lib/documentTypeConfig";
 import {
   Plus, Trash2, Save, GitBranch, Loader2, X,
   Settings2, AlertCircle,
@@ -198,6 +199,7 @@ interface DocumentType {
   workflow_template: string | null;
   category?: string;
   is_active: boolean;
+  is_personal_type?: boolean;
   description?: string;
 }
 
@@ -2641,9 +2643,17 @@ export default function WorkflowBuilderPage() {
   };
 
   const docTypesArray  = useMemo(() => Array.isArray(docTypes) ? docTypes : [], [docTypes]);
+  // Workflows only apply to standard document types — personal documents and the
+  // catch-all "Unclassified" type never run a workflow, so keep them out of the list.
+  const workflowDocTypes = useMemo(
+    () => docTypesArray.filter(
+      (dt) => !deriveDocumentTypeConfig(dt).isPersonalType && dt.code !== "UNCLASS",
+    ),
+    [docTypesArray],
+  );
   const filteredDocTypes = useMemo(
-    () => docTypesArray.filter(dt => dt.name.toLowerCase().includes(search.toLowerCase())),
-    [docTypesArray, search]
+    () => workflowDocTypes.filter(dt => dt.name.toLowerCase().includes(search.toLowerCase())),
+    [workflowDocTypes, search]
   );
   const allTemplatesArray = useMemo(() => Array.isArray(allTemplates) ? allTemplates : [], [allTemplates]);
   const resolvedTemplates = useMemo(
@@ -2669,8 +2679,8 @@ export default function WorkflowBuilderPage() {
       .sort((a, b) => a[1].label.localeCompare(b[1].label));
   }, [filteredTemplates]);
 
-  const withTemplate    = docTypesArray.filter(d => d.workflow_template).length;
-  const withoutTemplate = docTypesArray.length - withTemplate;
+  const withTemplate    = workflowDocTypes.filter(d => d.workflow_template).length;
+  const withoutTemplate = workflowDocTypes.length - withTemplate;
 
   const showEditor = selectedDocType || editingTemplateId || creatingForDocType;
   const currentTemplate = creatingForDocType ? null : (fetchedTemplate ?? null);

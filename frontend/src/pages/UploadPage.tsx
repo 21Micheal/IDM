@@ -1015,6 +1015,10 @@ export default function UploadPage({ scanOnly = false }: UploadPageProps) {
   });
 
   const visibleDocTypes = useMemo(
+    // Keep types whose workflow isn't fully configured: approval routing is
+    // amount-rule based and the primary template is only a fallback, so a type
+    // with no primary template may still route via its rules. Documents that
+    // truly have no workflow are caught when submitting for approval.
     () => scanOnly
       ? docTypes.filter((type) => !deriveDocumentTypeConfig(type).isPersonalType)
       : docTypes,

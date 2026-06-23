@@ -101,9 +101,10 @@ class WorkflowService:
             return None, primary
 
         raise WorkflowError(
-            f"No workflow template is configured for document type "
-            f"'{doc_type.name}'. "
-            f"Go to Admin → Workflow Builder and assign a template."
+            f"This document can't be submitted yet — no approval workflow is set "
+            f"up for the '{doc_type.name}' document type (no matching amount rule "
+            f"and no fallback template). Ask an administrator to configure it in "
+            f"the Workflow Builder."
         )
 
     @staticmethod

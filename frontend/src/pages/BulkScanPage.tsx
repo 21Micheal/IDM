@@ -75,7 +75,11 @@ export default function BulkScanPage({ scanMode = true, onSingleMode }: BulkScan
   });
 
   const visibleDocTypes = useMemo(
-    () => docTypes.filter((type) => !deriveDocumentTypeConfig(type).isPersonalType && type.code !== "UNCLASS"),
+    // A type with no primary template may still route via amount-based rules,
+    // so don't hide it here; the "no workflow" case is reported at submission.
+    () => docTypes.filter((type) =>
+      !deriveDocumentTypeConfig(type).isPersonalType && type.code !== "UNCLASS"
+    ),
     [docTypes],
   );
   const selectedType = visibleDocTypes.find((t) => t.id === selectedTypeId);
