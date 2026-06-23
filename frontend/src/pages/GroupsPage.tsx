@@ -615,8 +615,8 @@ function GroupDetail({
                 <div>
                   <p className="text-sm font-semibold text-foreground">This group can see all documents</p>
                   <p className="text-xs text-muted-foreground mt-0.5">
-                    Members get full visibility of every document (e.g. auditors), bypassing the
-                    involvement rule. What they can <span className="font-medium">do</span> with each
+                    Members get full visibility of every document (e.g. auditors) — in lists and
+                    search — bypassing the involvement rule. What they can <span className="font-medium">do</span> with each
                     document is still governed by the permissions below.
                   </p>
                 </div>

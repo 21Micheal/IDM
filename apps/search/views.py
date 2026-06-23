@@ -216,7 +216,11 @@ class DocumentSearchView(APIView):
 
         s = DocumentIndex.search()
         user = request.user
-        if not user.has_admin_access:
+        # A "sees all documents" group member (e.g. an auditor) bypasses the
+        # per-document involvement filter, exactly like the document list and the
+        # DB-search fallback — otherwise search couldn't locate documents they
+        # can legitimately view.
+        if not user.has_admin_access and not user.sees_all_documents:
             s = s.filter("term", accessible_user_ids=str(user.id))
 
         if search_text:

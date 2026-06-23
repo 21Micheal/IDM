@@ -370,7 +370,7 @@ export default function DocumentsPage({ personalOnly = false }: DocumentsPagePro
   const [typeFilter, setTypeFilter] = useState("");
   const [supplierFilter, setSupplierFilter] = useState("");
   const [personalTagFilter, setPersonalTagFilter] = useState("");
-  const [sort, setSort] = useState<"created_at" | "document_date" | "amount" | "title" | "reference_number">("created_at");
+  const [sort, setSort] = useState<"created_at" | "updated_at" | "document_date" | "amount" | "title" | "reference_number">("created_at");
   const [sortDir, _setSortDir] = useState<"asc" | "desc">("desc");
   void _setSortDir;
   const [page, setPage] = useState(1);
@@ -943,6 +943,7 @@ export default function DocumentsPage({ personalOnly = false }: DocumentsPagePro
                       className="border-0 bg-transparent py-1 pr-6 text-xs text-[#5E6870] focus:outline-none"
                     >
                       <option value="created_at">Created Date</option>
+                      <option value="updated_at">Modified Date</option>
                       <option value="title">Title</option>
                       <option value="reference_number">Reference</option>
                       <option value="document_date">Document Date</option>
