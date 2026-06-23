@@ -501,12 +501,14 @@ export default function DocumentsPage({ personalOnly = false }: DocumentsPagePro
   const filteredResults = useMemo(() => rawDocs.filter(docMatchesFilters), [rawDocs, statusFilter, typeFilter, supplierFilter, personalTagFilter]);
 
   const docs = filteredResults;
-  const supplierOptions = useMemo<string[]>(() => {
-    const currentPageSuppliers = docs
-      .map((doc: Document) => doc.supplier as string | null | undefined)
-      .filter((value: string | null | undefined): value is string => typeof value === "string" && value.length > 0);
-    return Array.from(new Set(currentPageSuppliers));
-  }, [docs]);
+  // Suppliers come from a dedicated endpoint so the dropdown lists every supplier
+  // in the system (scoped to what the user can see) rather than only those on the
+  // current — already supplier-filtered — page.
+  const { data: supplierOptions = [] } = useQuery<string[]>({
+    queryKey: ["document-suppliers"],
+    queryFn: () => documentsAPI.suppliers().then((r) => r.data),
+    ...QUERY_FIVE_MIN_STALE,
+  });
 
   // Prefetch adjacent pages
   useEffect(() => {

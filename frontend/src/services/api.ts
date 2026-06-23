@@ -240,6 +240,9 @@ export const documentsAPI = {
   list: (params?: Record<string, unknown>) =>
     api.get("/documents/", { params }),
 
+  /** Distinct supplier names across all documents the user can see. */
+  suppliers: () => api.get<string[]>("/documents/suppliers/"),
+
   /**
    * List only the current user's personal (self-upload) documents.
    * Equivalent to /documents/?is_self_upload=true

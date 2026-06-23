@@ -550,6 +550,32 @@ class DocumentViewSet(AuditMixin, viewsets.ModelViewSet):
             status=status.HTTP_201_CREATED,
         )
 
+    @action(detail=False, methods=["get"])
+    def suppliers(self, request):
+        """
+        Distinct, non-empty supplier names across the (live) documents the user
+        can see. Powers the supplier filter dropdown on the Documents page, which
+        must list every supplier in the system — not just those on the page.
+        """
+        names = (
+            self.get_queryset()
+            .filter(deleted_at__isnull=True)
+            .exclude(supplier__isnull=True)
+            .exclude(supplier__exact="")
+            .values_list("supplier", flat=True)
+            .distinct()
+        )
+        # Collapse case/whitespace variants while keeping a clean display form.
+        seen, result = set(), []
+        for name in names:
+            cleaned = (name or "").strip()
+            key = cleaned.lower()
+            if not key or key in seen:
+                continue
+            seen.add(key)
+            result.append(cleaned)
+        return Response(sorted(result, key=str.lower))
+
     @action(detail=False, methods=["get"], url_path="duplicate-check")
     def duplicate_check(self, request):
         dms_settings = DMSSettings.load()
