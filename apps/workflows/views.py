@@ -64,9 +64,37 @@ class WorkflowTemplateViewSet(viewsets.ModelViewSet):
     def perform_create(self, serializer):
         serializer.save(created_by=self.request.user)
 
-    def perform_destroy(self, instance):
-        instance.is_active = False
-        instance.save(update_fields=["is_active"])
+    def destroy(self, request, *args, **kwargs):
+        """
+        Permanently delete a workflow template, its steps and routing rules.
+
+        Templates that have already been used to run a workflow on a document are
+        referenced by WorkflowInstance with on_delete=PROTECT — deleting them would
+        destroy that approval history, so those are refused with a clear message.
+        """
+        instance = self.get_object()
+        used_by = WorkflowInstance.objects.filter(template=instance).count()
+        if used_by:
+            return Response(
+                {
+                    "detail": (
+                        f"This workflow has already processed {used_by} "
+                        f"document{'s' if used_by != 1 else ''} and cannot be "
+                        "permanently deleted without destroying their approval "
+                        "history."
+                    )
+                },
+                status=status.HTTP_409_CONFLICT,
+            )
+
+        with transaction.atomic():
+            # Routing rules reference the template with on_delete=PROTECT, so they
+            # must be removed first. Steps cascade automatically, and any document
+            # type pointing here as its primary template is detached (SET_NULL).
+            instance.rules.all().delete()
+            instance.delete()
+
+        return Response(status=status.HTTP_204_NO_CONTENT)
 
     @action(detail=True, methods=["post"])
     def duplicate(self, request, pk=None):

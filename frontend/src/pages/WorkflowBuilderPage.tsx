@@ -231,7 +231,7 @@ const HOD_GROUP_NAME = "HOD";
 const ASSIGNEE_MODES: { value: AssigneeType; label: string; description: string; Icon: typeof Users }[] = [
   { value: "group_any", label: "Any member", description: "Single approver from group", Icon: Users },
   { value: "group_all", label: "All members", description: "Consensus required", Icon: UsersRound },
-  { value: "group_specific", label: "Specific member", description: "Designated approver", Icon: User },
+  { value: "group_specific", label: "Specific member", description: "Designated approver or a chosen member", Icon: User },
 ];
 
 const GROUP_COLORS = [
@@ -602,16 +602,28 @@ function StepEditPanel({
     }
   }, [isHodGroupSelected, onChange, step.assignee_type, step.assignee_user, step.assignee_user_name]);
 
-  // Default specific assignee to group's designated approver if present
+  // Keep the "designated approver" choice bound to the group's CURRENT head.
+  //  - On first entry to group_specific (no explicit pick yet) default to the head.
+  //  - When the admin explicitly chose "Designated approver" (assignee_user_auto),
+  //    re-sync the stored user whenever the group's head changes, so the builder
+  //    never keeps pointing at a former approver. Hand-picked members are left as-is.
   useEffect(() => {
     if (step.assignee_type !== "group_specific") return;
-    if (step.assignee_user) return;
-    if (step.assignee_user_auto === false) return;
     const head = groupDetail?.head;
-    if (head && head.id) {
-      onChange({ assignee_user: head.id, assignee_user_name: head.full_name, assignee_user_auto: true });
+    if (!head?.id) return;
+
+    if (step.assignee_user_auto) {
+      if (step.assignee_user !== head.id || step.assignee_user_name !== head.full_name) {
+        onChange({ assignee_user: head.id, assignee_user_name: head.full_name, assignee_user_auto: true });
+      }
+      return;
     }
-  }, [step.assignee_type, step.assignee_user, step.assignee_user_auto, groupDetail?.head, onChange]);
+
+    // Not in auto mode: only seed a default the very first time (no user picked yet).
+    if (step.assignee_user_auto === false) return;
+    if (step.assignee_user) return;
+    onChange({ assignee_user: head.id, assignee_user_name: head.full_name, assignee_user_auto: true });
+  }, [step.assignee_type, step.assignee_user, step.assignee_user_name, step.assignee_user_auto, groupDetail?.head, onChange]);
 
   // Whether the custom approver email section is expanded
   const [showApproverEmail, setShowApproverEmail] = useState(
@@ -740,24 +752,50 @@ function StepEditPanel({
 
             {needsGroupMember && (
               <div>
-                <Label required>Specific member</Label>
+                <Label required>Approver</Label>
                 <select
-                  value={step.assignee_user ?? ""}
+                  value={step.assignee_user_auto ? "__designated__" : (step.assignee_user ?? "")}
                   onChange={e => {
-                    const id = e.target.value || null;
-                    const u = groupMembers.find(x => x.id === id);
+                    const val = e.target.value;
+                    if (val === "__designated__") {
+                      const head = groupDetail?.head;
+                      onChange({
+                        assignee_user: head?.id ?? null,
+                        assignee_user_name: head?.full_name,
+                        assignee_user_auto: true,
+                      });
+                      return;
+                    }
+                    const id = val || null;
+                    const u = effectiveGroupMembers.find(x => x.id === id);
                     onChange({ assignee_user: id, assignee_user_name: u?.full_name, assignee_user_auto: false });
                   }}
                   disabled={!step.assignee_group || membersLoading}
                   className={inp}
                 >
-                  <option value="">{membersLoading ? "Loading members..." : "Select member"}</option>
+                  <option value="">{membersLoading ? "Loading members..." : "Select approver"}</option>
+                  {(groupDetail?.head?.id || step.assignee_user_auto) && (
+                    <option value="__designated__">
+                      Designated approver — always the group&apos;s current head
+                    </option>
+                  )}
                   {effectiveGroupMembers.map(u => (
-                    <option key={u.id} value={u.id}>{u.full_name}</option>
+                    <option key={u.id} value={u.id}>
+                      {u.full_name}{groupDetail?.head?.id === u.id ? " (current designated approver)" : ""}
+                    </option>
                   ))}
                 </select>
-                {!step.assignee_group && (
+                {step.assignee_user_auto ? (
+                  <p className="text-[11px] text-muted-foreground mt-1">
+                    Follows the group&apos;s designated approver — change it on the group and this step
+                    updates automatically{groupDetail?.head?.full_name ? ` (currently ${groupDetail.head.full_name})` : ""}.
+                  </p>
+                ) : !step.assignee_group ? (
                   <p className="text-[11px] text-muted-foreground mt-1">Pick a group first</p>
+                ) : (
+                  <p className="text-[11px] text-muted-foreground mt-1">
+                    Pinned to this specific person — it won&apos;t change if the group&apos;s designated approver changes.
+                  </p>
                 )}
               </div>
             )}
@@ -1419,7 +1457,9 @@ function FlowchartEditor({
                         </div>
                         <p className="text-[11px] text-muted-foreground truncate flex-1">
                           {step.assignee_group_name || "No group"}
-                          {step.assignee_user_name && ` · ${step.assignee_user_name}`}
+                          {step.assignee_type === "group_specific" && step.assignee_user_auto
+                            ? " · Designated approver"
+                            : step.assignee_user_name ? ` · ${step.assignee_user_name}` : ""}
                         </p>
                       </div>
                       <div className="flex items-center justify-between">
@@ -1872,6 +1912,7 @@ function TemplateEditor({
   docType = null,
   onSaved,
   onDuplicate,
+  onDelete,
   allTemplates: _allTemplates,
   docTypes,
 }: {
@@ -1879,6 +1920,7 @@ function TemplateEditor({
   docType?: DocumentType | null;
   onSaved: (t: WorkflowTemplate, isNew: boolean) => void;
   onDuplicate?: () => void;
+  onDelete?: () => void;
   allTemplates?: WorkflowTemplate[];
   docTypes?: DocumentType[];
 }) {
@@ -2123,6 +2165,14 @@ function TemplateEditor({
               <Copy className="w-4 h-4" /> Duplicate
             </button>
           )}
+          {template && onDelete && (
+            <button
+              onClick={onDelete}
+              className="btn-secondary text-sm text-destructive hover:bg-destructive/10 hover:border-destructive/40"
+            >
+              <Trash2 className="w-4 h-4" /> Delete
+            </button>
+          )}
           <button onClick={handleSave} disabled={saveMutation.isPending} className="btn-primary text-sm">
             {saveMutation.isPending ? <Loader2 className="w-4 h-4 animate-spin" /> : <Save className="w-4 h-4" />}
             Save
@@ -2273,6 +2323,112 @@ function DuplicateTemplateModal({
   );
 }
 
+// ── Delete Template Modal ─────────────────────────────────────────────────────
+function DeleteTemplateModal({
+  template, docTypes, onClose, onDeleted,
+}: {
+  template: WorkflowTemplate;
+  docTypes: DocumentType[];
+  onClose: () => void;
+  onDeleted: (deletedId: string) => void;
+}) {
+  const [confirmText, setConfirmText] = useState("");
+  const primaryForDocTypes = useMemo(
+    () => docTypes.filter((d) => d.workflow_template === template.id),
+    [docTypes, template.id]
+  );
+
+  const deleteMutation = useMutation({
+    mutationFn: () => workflowAPI.deleteTemplate(template.id),
+    onSuccess: () => {
+      toast.success(`"${template.name}" permanently deleted`);
+      onDeleted(template.id);
+    },
+    onError: (err: any) => {
+      toast.error(formatApiError(err?.response?.data) || "Failed to delete workflow");
+    },
+  });
+
+  const canDelete = confirmText.trim().toLowerCase() === "delete" && !deleteMutation.isPending;
+
+  return (
+    <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50 p-4" onClick={onClose}>
+      <div className="bg-card rounded-2xl w-full max-w-md shadow-2xl" onClick={(e) => e.stopPropagation()}>
+        <div className="flex items-center justify-between p-5 border-b border-border">
+          <div className="flex items-center gap-3">
+            <div className="w-9 h-9 rounded-xl bg-destructive/15 flex items-center justify-center">
+              <Trash2 className="w-4 h-4 text-destructive" />
+            </div>
+            <div>
+              <h2 className="text-sm font-bold text-foreground">Delete workflow</h2>
+              <p className="text-xs text-muted-foreground mt-0.5">This permanently removes the template and all its steps.</p>
+            </div>
+          </div>
+          <button onClick={onClose} className="p-1.5 hover:bg-muted rounded-lg transition-colors">
+            <X className="w-4 h-4 text-muted-foreground" />
+          </button>
+        </div>
+
+        <div className="p-5 space-y-4">
+          <div className="rounded-xl border border-border bg-muted/40 px-4 py-3">
+            <p className="text-sm font-semibold text-foreground">{template.name}</p>
+            <p className="text-xs text-muted-foreground mt-0.5">
+              {template.step_count ?? template.steps?.length ?? 0} steps
+              {template.document_type_name ? ` · ${template.document_type_name}` : ""}
+            </p>
+          </div>
+
+          <div className="flex items-start gap-2.5 rounded-xl border border-destructive/30 bg-destructive/10 px-4 py-3">
+            <AlertCircle className="w-4 h-4 text-destructive mt-0.5 flex-shrink-0" />
+            <div className="text-xs text-foreground leading-relaxed">
+              This action <span className="font-semibold">cannot be undone</span>. The template, its steps and
+              its amount-based routing rules will be permanently deleted.
+              {primaryForDocTypes.length > 0 && (
+                <p className="mt-1.5">
+                  It is the primary template for{" "}
+                  <span className="font-semibold">
+                    {primaryForDocTypes.map((d) => d.name).join(", ")}
+                  </span>
+                  , which will be left with no workflow until you assign a new one.
+                </p>
+              )}
+            </div>
+          </div>
+
+          <div>
+            <Label>Type <span className="font-mono font-semibold">delete</span> to confirm</Label>
+            <input
+              value={confirmText}
+              onChange={(e) => setConfirmText(e.target.value)}
+              className={inp}
+              placeholder="delete"
+              autoFocus
+              onKeyDown={(e) => { if (e.key === "Enter" && canDelete) deleteMutation.mutate(); }}
+            />
+          </div>
+
+          <div className="flex gap-2 pt-1">
+            <button
+              onClick={() => deleteMutation.mutate()}
+              disabled={!canDelete}
+              className={clsx(
+                "flex-1 inline-flex items-center justify-center gap-2 px-4 py-2.5 rounded-xl font-medium transition-colors",
+                canDelete
+                  ? "bg-destructive text-white hover:bg-destructive/90"
+                  : "bg-muted text-muted-foreground cursor-not-allowed"
+              )}
+            >
+              {deleteMutation.isPending ? <Loader2 className="w-4 h-4 animate-spin" /> : <Trash2 className="w-4 h-4" />}
+              Delete permanently
+            </button>
+            <button onClick={onClose} className="btn-secondary">Cancel</button>
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+}
+
 // ── Document Type Detail Modal ────────────────────────────────────────────────
 function DocTypeDetailModal({
   docType, onClose, onAssignTemplate, onCreateTemplate, templates, isLoading,
@@ -2397,6 +2553,7 @@ export default function WorkflowBuilderPage() {
   const [showDetailModal, setShowDetailModal] = useState<DocumentType | null>(null);
   const [creatingForDocType, setCreatingForDocType] = useState<DocumentType | null>(null);
   const [duplicatingTemplate, setDuplicatingTemplate] = useState<WorkflowTemplate | null>(null);
+  const [deletingTemplate, setDeletingTemplate] = useState<WorkflowTemplate | null>(null);
 
   const { data: docTypes } = useQuery<unknown, Error, DocumentType[]>({
     queryKey: ["document-types"],
@@ -2623,7 +2780,7 @@ export default function WorkflowBuilderPage() {
                       <div key={t.id} className="relative group/item">
                         <button
                           onClick={() => handleTemplateClick(t)}
-                          className={clsx("w-full text-left rounded-xl p-3 pr-10 transition-all border",
+                          className={clsx("w-full text-left rounded-xl p-3 pr-16 transition-all border",
                             isSelected ? "bg-accent/10 border-accent/40" : "bg-card border-border hover:border-foreground/20")}
                         >
                           <div className="flex items-start gap-2.5">
@@ -2637,13 +2794,22 @@ export default function WorkflowBuilderPage() {
                             </div>
                           </div>
                         </button>
-                        <button
-                          onClick={(e) => { e.stopPropagation(); setDuplicatingTemplate(t); }}
-                          title="Duplicate workflow"
-                          className="absolute right-2 top-1/2 -translate-y-1/2 p-1.5 rounded-lg border border-border bg-card opacity-0 group-hover/item:opacity-100 hover:bg-accent/10 hover:border-accent/40 hover:text-accent transition-all"
-                        >
-                          <Copy className="w-3.5 h-3.5 text-muted-foreground" />
-                        </button>
+                        <div className="absolute right-2 top-1/2 -translate-y-1/2 flex items-center gap-1 opacity-0 group-hover/item:opacity-100 transition-opacity">
+                          <button
+                            onClick={(e) => { e.stopPropagation(); setDuplicatingTemplate(t); }}
+                            title="Duplicate workflow"
+                            className="p-1.5 rounded-lg border border-border bg-card hover:bg-accent/10 hover:border-accent/40 hover:text-accent transition-all"
+                          >
+                            <Copy className="w-3.5 h-3.5 text-muted-foreground" />
+                          </button>
+                          <button
+                            onClick={(e) => { e.stopPropagation(); setDeletingTemplate(t); }}
+                            title="Delete workflow"
+                            className="p-1.5 rounded-lg border border-border bg-card hover:bg-destructive/10 hover:border-destructive/40 transition-all"
+                          >
+                            <Trash2 className="w-3.5 h-3.5 text-muted-foreground hover:text-destructive" />
+                          </button>
+                        </div>
                       </div>
                     );
                   })}
@@ -2687,6 +2853,7 @@ export default function WorkflowBuilderPage() {
               template={currentTemplate}
               onSaved={handleSaved}
               onDuplicate={currentTemplate ? () => setDuplicatingTemplate(currentTemplate) : undefined}
+              onDelete={currentTemplate ? () => setDeletingTemplate(currentTemplate) : undefined}
               allTemplates={resolvedTemplates}
               docTypes={docTypesArray}
             />
@@ -2717,6 +2884,21 @@ export default function WorkflowBuilderPage() {
             setEditingTemplateId(newTemplate.id);
             setSelectedDocType(null); setCreatingForDocType(null);
             setSidebarTab("templates");
+          }}
+        />
+      )}
+
+      {deletingTemplate && (
+        <DeleteTemplateModal
+          template={deletingTemplate}
+          docTypes={docTypesArray}
+          onClose={() => setDeletingTemplate(null)}
+          onDeleted={(deletedId) => {
+            setDeletingTemplate(null);
+            if (editingTemplateId === deletedId) setEditingTemplateId(null);
+            if (selectedDocType?.workflow_template === deletedId) setSelectedDocType(null);
+            qc.invalidateQueries({ queryKey: ["workflow-templates"] });
+            qc.invalidateQueries({ queryKey: ["document-types"] });
           }}
         />
       )}

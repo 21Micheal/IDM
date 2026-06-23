@@ -567,6 +567,8 @@ export const workflowAPI = {
   updateTemplate: (id: string, data: unknown) =>
     api.put(`/workflows/templates/${id}/`, data),
 
+  deleteTemplate: (id: string) => api.delete(`/workflows/templates/${id}/`),
+
   duplicateTemplate: (id: string, name?: string) =>
     api.post(
       `/workflows/templates/${id}/duplicate/`,
