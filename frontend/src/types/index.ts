@@ -45,6 +45,7 @@ export interface MetadataField {
   key?: string; // Alias for field_key (used in some contexts)
   field_type: "text" | "varchar" | "number" | "date" | "currency" | "select" | "boolean" | "textarea";
   is_required: boolean;
+  is_unique?: boolean;
   is_searchable?: boolean;
   select_options?: string[] | null;
   default_value?: string;

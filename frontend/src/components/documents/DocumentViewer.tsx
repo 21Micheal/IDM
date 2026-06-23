@@ -1240,6 +1240,24 @@ export default function DocumentViewer({ document: doc, submitSlot, hideUploadAc
     releaseLock.mutate();
   }, [onBeforeRelease, releaseLock]);
 
+  // Explicit check-out for NON-office documents (PDF/image/etc.). Office docs get
+  // their own Lock button inside OfficeEditPanel; this enables the "Edit details"
+  // tab — which is gated on holding the lock — for everything else.
+  const acquireLock = useMutation({
+    mutationFn: () => documentsAPI.editToken(doc.id),
+    onSuccess: () => {
+      toast.success("Locked by you. You can now edit the details.");
+      qc.invalidateQueries({ queryKey: ["document", doc.id] });
+    },
+    onError: (err: any) => {
+      toast.error(
+        err?.response?.status === 423
+          ? (err.response.data?.detail ?? "Locked by another user.")
+          : "Could not lock the document. Please try again.",
+      );
+    },
+  });
+
   // Admin override: release a lock held by another user (e.g. a member who left
   // their editor checked out and is unreachable). Gated server-side on
   // has_admin_access; the `force` flag is ignored for non-admins.
@@ -1283,6 +1301,7 @@ export default function DocumentViewer({ document: doc, submitSlot, hideUploadAc
   const isOfficeByExt    = OFFICE_EXTENSIONS.has(getFileExtension(doc.file_name));
   const isOffice         = isOfficeByMime || isOfficeByExt;
   const isLockedByOther  = Boolean(doc.is_edit_locked && doc.edit_locked_by !== user?.id);
+  const lockedByMe       = Boolean(doc.is_edit_locked && doc.edit_locked_by === user?.id);
   const isImage          =
     doc.file_mime_type?.startsWith("image/") ||
     /\.(png|jpe?g|gif|webp|svg|bmp)$/i.test(doc.file_name ?? "");
@@ -1426,6 +1445,34 @@ export default function DocumentViewer({ document: doc, submitSlot, hideUploadAc
             </span>
           )}
         </div>
+
+        {/* Lock / Release for NON-office docs (PDF, images, …). Office docs get
+            these inside OfficeEditPanel. Locking enables the "Edit details" tab. */}
+        {!isOffice && (
+          <div className="flex items-center gap-2 flex-wrap">
+            {canEdit && !doc.is_edit_locked && (
+              <button
+                onClick={() => acquireLock.mutate()}
+                disabled={acquireLock.isPending}
+                className="inline-flex items-center gap-1.5 border border-[#287EAD] px-3 py-1.5 text-xs font-medium text-[#287EAD] transition-colors hover:bg-[#EEF6FB] disabled:opacity-50"
+                title="Lock (check out) to edit this document's details"
+              >
+                {acquireLock.isPending ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <Lock className="w-3.5 h-3.5" />}
+                Lock
+              </button>
+            )}
+            {lockedByMe && (
+              <button
+                onClick={handleRelease}
+                disabled={releaseLock.isPending}
+                className="inline-flex items-center gap-1.5 border border-[#C8CDD2] px-2.5 py-1.5 text-xs font-medium text-[#5E6870] transition-colors hover:bg-destructive/5 hover:text-destructive disabled:opacity-50"
+                title="Release (check in)"
+              >
+                <Unlock className="w-3.5 h-3.5" /> Release
+              </button>
+            )}
+          </div>
+        )}
       </div>
 
       {/* Version pills */}

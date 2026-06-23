@@ -138,6 +138,13 @@ class MetadataField(models.Model):
     key            = models.SlugField(max_length=100)
     field_type     = models.CharField(max_length=20, choices=FIELD_TYPES, default="text")
     is_required    = models.BooleanField(default=False)
+    is_unique      = models.BooleanField(
+        default=False,
+        help_text=(
+            "When set, the value entered for this attribute (e.g. a reference "
+            "number) must not match any other document of the same type."
+        ),
+    )
     is_searchable  = models.BooleanField(default=True)
     select_options = models.JSONField(default=list, blank=True)
     default_value  = models.CharField(max_length=255, blank=True)

@@ -34,12 +34,11 @@ const RELATIONSHIP_TYPES: Array<{ value: DocumentRelationType; label: string }> 
 ];
 
 const CORE_DEFAULT_FIELDS: MetadataFieldForm[] = [
-  { label: "Document Name", field_key: "title", field_type: "text", is_required: true, select_options_raw: "", help_text: "Name shown to users", order: 0 },
-  { label: "Supplier / Vendor", field_key: "supplier", field_type: "text", is_required: false, select_options_raw: "", help_text: "Business partner", order: 1 },
-  { label: "Amount", field_key: "amount", field_type: "currency", is_required: false, select_options_raw: "", help_text: "Document total amount", order: 2 },
-  { label: "Currency", field_key: "currency", field_type: "select", is_required: false, select_options_raw: "KES, USD, EUR, GBP, UGX, TZS, NGN, ZAR", help_text: "ISO currency code", order: 3 },
-  { label: "Document Date", field_key: "document_date", field_type: "date", is_required: false, select_options_raw: "", help_text: "Date on the document", order: 4 },
-  { label: "Due Date", field_key: "due_date", field_type: "date", is_required: false, select_options_raw: "", help_text: "Payment due date", order: 5 },
+  { label: "Supplier / Vendor", field_key: "supplier", field_type: "text", is_required: false, is_unique: false, select_options_raw: "", help_text: "Business partner", order: 0 },
+  { label: "Amount", field_key: "amount", field_type: "currency", is_required: false, is_unique: false, select_options_raw: "", help_text: "Document total amount", order: 1 },
+  { label: "Currency", field_key: "currency", field_type: "select", is_required: false, is_unique: false, select_options_raw: "KES, USD, EUR, GBP, UGX, TZS, NGN, ZAR", help_text: "ISO currency code", order: 2 },
+  { label: "Document Date", field_key: "document_date", field_type: "date", is_required: false, is_unique: false, select_options_raw: "", help_text: "Date on the document", order: 3 },
+  { label: "Due Date", field_key: "due_date", field_type: "date", is_required: false, is_unique: false, select_options_raw: "", help_text: "Payment due date", order: 4 },
 ];
 
 const STANDARD_REFERENCE_FIELDS = [
@@ -58,6 +57,7 @@ interface MetadataFieldForm {
   field_key: string;
   field_type: string;
   is_required: boolean;
+  is_unique: boolean;
   select_options_raw: string;
   help_text: string;
   order: number;
@@ -127,6 +127,7 @@ function buildPayload(values: DocTypeForm) {
           field_key: field.field_key,
           field_type: field.field_type,
           is_required: field.is_required,
+          is_unique: field.is_unique,
           help_text: field.help_text,
           order: index,
           select_options: field.field_type === "select" && field.select_options_raw
@@ -297,6 +298,7 @@ export default function AdminDocumentTypesPage() {
         field_key: field.key ?? field.field_key,
         field_type: field.field_type,
         is_required: field.is_required,
+        is_unique: field.is_unique ?? false,
         help_text: field.help_text ?? "",
         order: field.order,
         select_options_raw: (field.select_options ?? []).join(", "),
@@ -318,7 +320,7 @@ export default function AdminDocumentTypesPage() {
 
   const addMetadataField = () => {
     appendMetadataField({
-      label: "", field_key: "", field_type: "text", is_required: false,
+      label: "", field_key: "", field_type: "text", is_required: false, is_unique: false,
       select_options_raw: "", help_text: "", order: metadataFields.length,
     });
   };
@@ -339,7 +341,7 @@ export default function AdminDocumentTypesPage() {
 
   const tabs: Array<{ id: TabId; label: string; icon: typeof FileText }> = [
     { id: "general", label: "General", icon: FileText },
-    { id: "attributes", label: `Attributes (${metadataFields.length})`, icon: GripVertical },
+    { id: "attributes", label: `Details (${metadataFields.length})`, icon: GripVertical },
     { id: "relationships", label: `Related documents (${relationshipRules.length})`, icon: Link2 },
     { id: "security", label: "Security", icon: Shield },
   ];
@@ -403,7 +405,7 @@ export default function AdminDocumentTypesPage() {
               >
                 <span className="block truncate">{type.name}</span>
                 <span className={cn("mt-1 block truncate text-xs", editingId === type.id ? "text-white/75" : "text-[#5E6870]")}>
-                  {type.code} · {(type.metadata_fields ?? []).length} attributes
+                  {type.code} · {(type.metadata_fields ?? []).length} details
                 </span>
               </button>
             ))}
@@ -580,7 +582,7 @@ export default function AdminDocumentTypesPage() {
                 <section className="grid grid-cols-[minmax(360px,560px)_1fr] gap-6">
                   <div className="border border-[#C8CDD2] bg-white">
                     <div className="flex items-center justify-between border-b border-[#C8CDD2] px-4 py-3">
-                      <p className="text-sm font-semibold text-[#1F2933]">Attributes</p>
+                      <p className="text-sm font-semibold text-[#1F2933]">Details</p>
                       <button type="button" onClick={addMetadataField} disabled={!useAdminMetadata} className="p-1 text-[#287EAD] disabled:opacity-40">
                         <Plus className="h-4 w-4" />
                       </button>
@@ -589,13 +591,13 @@ export default function AdminDocumentTypesPage() {
                       {!useAdminMetadata ? (
                         <div className="p-5 text-sm text-[#5E6870]">Admin-defined metadata is disabled for this type.</div>
                       ) : metadataFields.length === 0 ? (
-                        <div className="p-5 text-sm text-[#5E6870]">No attributes configured.</div>
+                        <div className="p-5 text-sm text-[#5E6870]">No details configured.</div>
                       ) : metadataFields.map((field, index) => (
                         <div key={field.id} className="border-b border-[#D3D7DA] p-3">
                           <div className="mb-3 flex items-center justify-between">
                             <div className="flex items-center gap-2 text-sm font-semibold text-[#1F2933]">
                               <GripVertical className="h-4 w-4 text-[#5E6870]" />
-                              {form.watch(`metadata_fields.${index}.label`) || `Attribute ${index + 1}`}
+                              {form.watch(`metadata_fields.${index}.label`) || `Detail ${index + 1}`}
                             </div>
                             <button type="button" onClick={() => removeMetadataField(index)} className="text-[#5E6870] hover:text-red-700">
                               <Trash2 className="h-4 w-4" />
@@ -608,7 +610,7 @@ export default function AdminDocumentTypesPage() {
                                 onChange: (event) => form.setValue(`metadata_fields.${index}.field_key`, toFieldKey(event.target.value), { shouldDirty: true }),
                               })}
                               className={inputCls}
-                              placeholder="Attribute label"
+                              placeholder="Detail label"
                             />
                             <input {...form.register(`metadata_fields.${index}.field_key`, { required: true })} className={cn(inputCls, "font-mono text-xs")} readOnly />
                             <select {...form.register(`metadata_fields.${index}.field_type`)} className={inputCls}>
@@ -617,6 +619,13 @@ export default function AdminDocumentTypesPage() {
                             <label className="flex items-center gap-2 text-sm text-[#1F2933]">
                               <input type="checkbox" {...form.register(`metadata_fields.${index}.is_required`)} />
                               Required
+                            </label>
+                            <label className="col-span-2 flex items-center gap-2 text-sm text-[#1F2933]">
+                              <input type="checkbox" {...form.register(`metadata_fields.${index}.is_unique`)} />
+                              <span>
+                                Unique
+                                <span className="ml-1 text-xs text-[#8C969E]">— value can&apos;t match any other document of this type (e.g. a reference number)</span>
+                              </span>
                             </label>
                           </div>
                           {form.watch(`metadata_fields.${index}.field_type`) === "select" && (

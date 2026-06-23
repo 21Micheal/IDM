@@ -22,6 +22,7 @@ import { documentsAPI } from "@/services/api";
 import { Edit2, Save, X, Loader2, Plus } from "lucide-react";
 import { toast } from "@/components/ui/vault-toast";
 import type { Document, MetadataField } from "@/types";
+import { extractApiError } from "@/lib/apiError";
 
 /** Imperative handle the page uses to flush unsaved edits before check-in. */
 export type MetadataSaver = {
@@ -222,8 +223,7 @@ export default function MetadataEditPanel({ document: doc, onClose, registerSave
       qc.invalidateQueries({ queryKey: ["document-preview", doc.id] });
       onClose();
     },
-    onError: (err: { response?: { data?: { detail?: string } } }) =>
-      toast.error(err?.response?.data?.detail ?? "Update failed"),
+    onError: (err) => toast.error(extractApiError(err, "Update failed")),
   });
 
   // The document is already checked out (locked) by the time this panel opens —

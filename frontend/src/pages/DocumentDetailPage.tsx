@@ -1,4 +1,4 @@
-import { Suspense, useState, useEffect, useRef, useCallback, useMemo } from "react";
+import { Suspense, useState, useEffect, useRef, useCallback } from "react";
 import { useParams, useNavigate } from "react-router-dom";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { api, documentsAPI, workflowAPI } from "@/services/api";
@@ -18,11 +18,11 @@ import {
   ArrowLeft, Send, MessageSquare, ShieldCheck,
   Loader2, RotateCcw, Edit2, Lock, Info, Download,
   AlertTriangle, ScanLine, RefreshCw, ChevronDown, FileText,
-  Printer, Trash2, X, Check, Link2, Plus, ExternalLink, Columns2, Eye, EyeOff, Archive
+  Printer, Trash2, X, Check, ExternalLink, Columns2, Eye, EyeOff, Archive
 } from "lucide-react";
 import { toast } from "@/components/ui/vault-toast";
 import { useAuthStore } from "@/store/authStore";
-import type { Document, DocumentRelationType, DocumentRelationship, DocumentRelationshipSuggestion, MetadataField } from "@/types";
+import type { Document, DocumentRelationship, DocumentRelationshipSuggestion, MetadataField } from "@/types";
 import { clsx as cn } from "clsx";
 import { QUERY_SHORT_STALE } from "@/lib/reactQueryDefaults";
 import { formatDocumentFileType } from "@/lib/documentFormat";
@@ -157,13 +157,6 @@ function describeAuditEvent(event: string) {
   }
 }
 
-const RELATIONSHIP_OPTIONS: { value: DocumentRelationType; label: string; helper: string }[] = [
-  { value: "supports", label: "Supports", helper: "This document provides evidence for the selected document." },
-  { value: "references", label: "References", helper: "This document cites or depends on the selected document." },
-  { value: "supersedes", label: "Supersedes", helper: "This document replaces the selected document." },
-  { value: "linked-to", label: "Linked to", helper: "General business link between both records." },
-];
-
 function describeRelationship(relationship: DocumentRelationship) {
   const label = relationship.relation_type_label || relationship.relation_type.replace(/-/g, " ");
   if (relationship.direction === "outbound") return label;
@@ -216,13 +209,12 @@ export default function DocumentDetailPage() {
     signedFileUrlsEnabled: false,
   });
   const [workflowActionCompleted, setWorkflowActionCompleted] = useState(false);
-  const [relationshipSearch, setRelationshipSearch] = useState("");
-  const [relationshipTargetId, setRelationshipTargetId] = useState("");
-  const [relationshipType, setRelationshipType] = useState<DocumentRelationType>("references");
-  const [relationshipNote, setRelationshipNote] = useState("");
   const [compareDocumentId, setCompareDocumentId] = useState<string | null>(null);
   const [showDownloadTray, setShowDownloadTray] = useState(false);
   const [downloadingPdf, setDownloadingPdf] = useState(false);
+  // Removing a confirmed link is intentional-only: a type-to-confirm dialog guards it.
+  const [relationshipToRemove, setRelationshipToRemove] = useState<DocumentRelationship | null>(null);
+  const [removeConfirmText, setRemoveConfirmText] = useState("");
   const downloadTrayRef = useRef<HTMLDivElement | null>(null);
   const printFrameRef = useRef<HTMLIFrameElement | null>(null);
 
@@ -411,18 +403,6 @@ export default function DocumentDetailPage() {
     ...QUERY_SHORT_STALE,
   });
 
-  const { data: relationshipSearchData, isFetching: relationshipSearchLoading } = useQuery({
-    queryKey: ["documents", "relationship-search", relationshipSearch],
-    queryFn: () =>
-      documentsAPI.list({
-        search: relationshipSearch,
-        page_size: 8,
-        is_self_upload: false,
-      }).then((r) => r.data),
-    enabled: relationshipSearch.trim().length >= 2,
-    ...QUERY_SHORT_STALE,
-  });
-
   const { data: compareDoc } = useQuery<Document>({
     queryKey: ["document", compareDocumentId],
     queryFn: () => documentsAPI.get(compareDocumentId!).then((r) => r.data),
@@ -536,27 +516,6 @@ export default function DocumentDetailPage() {
       toast.error(err?.response?.data?.detail || "Could not delete document."),
   });
 
-  const addRelationshipMutation = useMutation({
-    mutationFn: () =>
-      documentsAPI.addRelationship(id!, {
-        target_document_id: relationshipTargetId,
-        relation_type: relationshipType,
-        note: relationshipNote.trim(),
-      }),
-    onSuccess: () => {
-      toast.success("Document relationship added.");
-      setRelationshipSearch("");
-      setRelationshipTargetId("");
-      setRelationshipType("references");
-      setRelationshipNote("");
-      qc.invalidateQueries({ queryKey: ["document-relationships", id] });
-      qc.invalidateQueries({ queryKey: ["document-audit", id] });
-    },
-    onError: (err: any) => {
-      toast.error(err?.response?.data?.detail ?? "Could not link the selected document.");
-    },
-  });
-
   const confirmRelationshipSuggestionMutation = useMutation({
     mutationFn: (suggestion: DocumentRelationshipSuggestion) =>
       documentsAPI.addRelationship(id!, {
@@ -579,37 +538,13 @@ export default function DocumentDetailPage() {
     mutationFn: (relationshipId: string) => documentsAPI.deleteRelationship(id!, relationshipId),
     onSuccess: () => {
       toast.success("Document relationship removed.");
+      setRelationshipToRemove(null);
+      setRemoveConfirmText("");
       qc.invalidateQueries({ queryKey: ["document-relationships", id] });
       qc.invalidateQueries({ queryKey: ["document-audit", id] });
     },
     onError: () => toast.error("Could not remove document relationship."),
   });
-  // Keep derived hooks/values above early returns so hook order remains stable
-  const relationshipSearchResults = useMemo<Document[]>(() => {
-    const raw = (relationshipSearchData?.results ?? []) as Document[];
-    const filtered = raw.filter((candidate) => {
-      if (!doc?.id) return false;
-      if (candidate.id === doc.id) return false;
-      if (candidate.is_self_upload) return false;
-      // Remove candidates that are already related with the same relation type
-      if (relationships.some((relationship) => (
-        relationship.related_document.id === candidate.id &&
-        relationship.relation_type === relationshipType
-      ))) return false;
-
-      // If a search term exists, ensure candidate matches it in title, reference, or supplier
-      const q = relationshipSearch.trim().toLowerCase();
-      if (q.length >= 2) {
-        const hay = [candidate.title, candidate.reference_number, candidate.supplier, candidate.document_type_name]
-          .filter(Boolean).join(" ").toLowerCase();
-        if (!hay.includes(q)) return false;
-      }
-
-      return true;
-    });
-    return filtered;
-  }, [relationshipSearchData, doc?.id, relationships, relationshipType, relationshipSearch]);
-
   // Close download tray on outside click. Must stay above the early returns
   // below so hook order is stable across loading/loaded renders (React #310).
   useEffect(() => {
@@ -699,7 +634,6 @@ export default function DocumentDetailPage() {
       relationship.relation_type === suggestion.relation_type
     ))
   ));
-  const selectedRelationshipTarget = relationshipSearchResults.find((candidate) => candidate.id === relationshipTargetId);
   const isPersonal = Boolean((doc as any).is_self_upload);
   const isScanned = Boolean((doc as any).is_scanned);
   const personalTags = doc.personal_tags ?? [];
@@ -1487,7 +1421,7 @@ export default function DocumentDetailPage() {
                 <div className="border-b border-[#C8CDD2] pb-3">
                   <p className="text-sm font-bold uppercase tracking-wider text-[#5E6870]">Document relationships</p>
                   <p className="mt-1 text-sm text-[#5E6870]">
-                    Make procurement chains explicit: PO, invoice, GRN, contract, and supporting documents.
+                    Links are detected automatically from the rules configured on the document type. Confirm the suggested matches to add them to the procurement chain.
                   </p>
                 </div>
 
@@ -1545,7 +1479,7 @@ export default function DocumentDetailPage() {
                 <div className="space-y-2">
                   {relationships.length === 0 ? (
                     <div className="border border-[#C8CDD2] bg-[#F5F7F8] px-4 py-8 text-center text-sm text-[#5E6870]">
-                      No related documents linked yet.
+                      No related documents yet. Matches are detected automatically from the configured rules and appear here for confirmation.
                     </div>
                   ) : (
                     <div className="divide-y divide-[#D3D7DA] border border-[#C8CDD2] bg-white">
@@ -1577,9 +1511,8 @@ export default function DocumentDetailPage() {
                               {canEdit && (
                                 <button
                                   type="button"
-                                  onClick={() => deleteRelationshipMutation.mutate(relationship.id)}
-                                  disabled={deleteRelationshipMutation.isPending}
-                                  className="shrink-0 p-1 text-[#5E6870] hover:text-red-700 disabled:opacity-40"
+                                  onClick={() => { setRelationshipToRemove(relationship); setRemoveConfirmText(""); }}
+                                  className="shrink-0 p-1 text-[#5E6870] hover:text-red-700"
                                   title="Remove relationship"
                                 >
                                   <X className="h-4 w-4" />
@@ -1616,107 +1549,6 @@ export default function DocumentDetailPage() {
                   )}
                 </div>
 
-                {canEdit && (
-                  <div className="space-y-3 border border-[#C8CDD2] bg-[#F5F7F8] p-3">
-                    <div className="flex items-center gap-2">
-                      <Link2 className="h-4 w-4 text-[#287EAD]" />
-                      <p className="text-sm font-bold text-[#1F2933]">Link another document</p>
-                    </div>
-
-                    <div>
-                      <label className="text-sm font-semibold text-[#1F2933]">Relationship type</label>
-                      <select
-                        value={relationshipType}
-                        onChange={(event) => {
-                          setRelationshipType(event.target.value as DocumentRelationType);
-                          setRelationshipTargetId("");
-                        }}
-                        className="mt-2 h-9 w-full border border-[#AEB5BB] bg-white px-2 text-sm text-[#1F2933] focus:outline-none focus:ring-1 focus:ring-[#287EAD]"
-                      >
-                        {RELATIONSHIP_OPTIONS.map((option) => (
-                          <option key={option.value} value={option.value}>{option.label}</option>
-                        ))}
-                      </select>
-                      <p className="mt-1 text-xs text-[#5E6870]">
-                        {RELATIONSHIP_OPTIONS.find((option) => option.value === relationshipType)?.helper}
-                      </p>
-                    </div>
-
-                    <div>
-                      <label className="text-sm font-semibold text-[#1F2933]">Find document</label>
-                      <input
-                        value={relationshipSearch}
-                        onChange={(event) => {
-                          setRelationshipSearch(event.target.value);
-                          setRelationshipTargetId("");
-                        }}
-                        placeholder="Search title, reference, supplier, or text"
-                        className="mt-2 h-9 w-full border border-[#AEB5BB] bg-white px-3 text-sm text-[#1F2933] focus:outline-none focus:ring-1 focus:ring-[#287EAD]"
-                      />
-                    </div>
-
-                    {relationshipSearch.trim().length >= 2 && (
-                      <div className="max-h-52 overflow-y-auto border border-[#C8CDD2] bg-white">
-                        {relationshipSearchLoading ? (
-                          <div className="flex items-center gap-2 px-3 py-4 text-sm text-[#5E6870]">
-                            <Loader2 className="h-4 w-4 animate-spin" />
-                            Searching documents…
-                          </div>
-                        ) : relationshipSearchResults.length === 0 ? (
-                          <div className="px-3 py-4 text-center text-sm text-[#5E6870]">No eligible documents found.</div>
-                        ) : relationshipSearchResults.map((candidate) => (
-                          <label
-                            key={candidate.id}
-                            className={cn(
-                              "grid cursor-pointer grid-cols-[auto_1fr] gap-3 border-b border-[#D3D7DA] px-3 py-2 last:border-b-0 hover:bg-[#F5F7F8]",
-                              relationshipTargetId === candidate.id && "bg-[#EEF6FB]",
-                            )}
-                          >
-                            <input
-                              type="radio"
-                              name="relationship-target"
-                              checked={relationshipTargetId === candidate.id}
-                              onChange={() => setRelationshipTargetId(candidate.id)}
-                              className="mt-1"
-                            />
-                            <span className="min-w-0">
-                              <span className="block truncate text-sm font-semibold text-[#1F2933]">{candidate.title}</span>
-                              <span className="block truncate text-xs text-[#5E6870]">
-                                {candidate.reference_number} · {candidate.document_type_name || candidate.document_type?.name || "Document"}
-                              </span>
-                            </span>
-                          </label>
-                        ))}
-                      </div>
-                    )}
-
-                    <div>
-                      <label className="text-sm font-semibold text-[#1F2933]">Note</label>
-                      <textarea
-                        value={relationshipNote}
-                        onChange={(event) => setRelationshipNote(event.target.value)}
-                        rows={2}
-                        placeholder="Optional context for this link"
-                        className="mt-2 block w-full border border-[#AEB5BB] bg-white px-3 py-2 text-sm text-[#1F2933] focus:outline-none focus:ring-1 focus:ring-[#287EAD]"
-                      />
-                    </div>
-
-                    <div className="flex items-center justify-between gap-3">
-                      <span className="min-w-0 truncate text-xs text-[#5E6870]">
-                        {selectedRelationshipTarget ? selectedRelationshipTarget.reference_number : "Select a document to link"}
-                      </span>
-                      <button
-                        type="button"
-                        onClick={() => addRelationshipMutation.mutate()}
-                        disabled={!relationshipTargetId || addRelationshipMutation.isPending}
-                        className="inline-flex items-center gap-2 bg-[#287EAD] px-3 py-2 text-sm font-semibold text-white hover:bg-[#206D99] disabled:cursor-not-allowed disabled:opacity-50"
-                      >
-                        {addRelationshipMutation.isPending ? <Loader2 className="h-4 w-4 animate-spin" /> : <Plus className="h-4 w-4" />}
-                        Add link
-                      </button>
-                    </div>
-                  </div>
-                )}
               </div>
             )}
 
@@ -2129,6 +1961,75 @@ export default function DocumentDetailPage() {
           </div>
         </div>
       )}
+
+      {relationshipToRemove && (() => {
+        const related = relationshipToRemove.related_document;
+        const canConfirm =
+          removeConfirmText.trim().toLowerCase() === "remove" && !deleteRelationshipMutation.isPending;
+        return (
+          <div className="fixed inset-0 z-[60] flex items-center justify-center bg-foreground/40 backdrop-blur-sm p-4">
+            <div className="w-full max-w-md rounded-2xl border border-border bg-card p-6 shadow-elegant">
+              <div className="flex items-start gap-3">
+                <div className="flex h-9 w-9 shrink-0 items-center justify-center rounded-xl bg-destructive/15 text-destructive">
+                  <Trash2 className="h-4 w-4" />
+                </div>
+                <div className="min-w-0">
+                  <h4 className="text-base font-semibold text-foreground">Remove this link?</h4>
+                  <p className="mt-0.5 text-sm text-muted-foreground">
+                    This removes the relationship between the two documents. The system may re-suggest it later if it still matches the configured rules.
+                  </p>
+                </div>
+              </div>
+
+              <div className="mt-4 rounded-xl border border-border bg-muted/40 px-4 py-3">
+                <p className="text-xs font-semibold uppercase tracking-wide text-[#287EAD]">
+                  {describeRelationship(relationshipToRemove)}
+                </p>
+                <p className="mt-1 truncate text-sm font-bold text-foreground" title={related.title}>
+                  {related.title}
+                </p>
+                <p className="mt-0.5 truncate font-mono text-xs text-muted-foreground">
+                  {related.reference_number}
+                </p>
+              </div>
+
+              <div className="mt-4">
+                <label className="text-sm text-muted-foreground">
+                  Type <span className="font-mono font-semibold text-foreground">remove</span> to confirm
+                </label>
+                <input
+                  value={removeConfirmText}
+                  onChange={(e) => setRemoveConfirmText(e.target.value)}
+                  className="mt-2 h-9 w-full rounded-lg border border-[#AEB5BB] bg-white px-3 text-sm text-[#1F2933] outline-none focus:border-[#287EAD] focus:ring-1 focus:ring-[#287EAD]"
+                  placeholder="remove"
+                  autoFocus
+                  onKeyDown={(e) => { if (e.key === "Enter" && canConfirm) deleteRelationshipMutation.mutate(relationshipToRemove.id); }}
+                />
+              </div>
+
+              <div className="mt-5 flex justify-end gap-2">
+                <button
+                  type="button"
+                  disabled={deleteRelationshipMutation.isPending}
+                  onClick={() => { setRelationshipToRemove(null); setRemoveConfirmText(""); }}
+                  className="btn-secondary"
+                >
+                  Cancel
+                </button>
+                <button
+                  type="button"
+                  disabled={!canConfirm}
+                  onClick={() => deleteRelationshipMutation.mutate(relationshipToRemove.id)}
+                  className="inline-flex items-center gap-2 rounded-lg bg-destructive px-4 py-2 text-sm font-medium text-white hover:bg-destructive/90 disabled:cursor-not-allowed disabled:opacity-50"
+                >
+                  {deleteRelationshipMutation.isPending ? <Loader2 className="h-4 w-4 animate-spin" /> : <Trash2 className="h-4 w-4" />}
+                  Remove link
+                </button>
+              </div>
+            </div>
+          </div>
+        );
+      })()}
     </div>
   );
 }

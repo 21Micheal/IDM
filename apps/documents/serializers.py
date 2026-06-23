@@ -47,6 +47,56 @@ DOCUMENT_COLUMN_METADATA_KEYS = {
 logger = logging.getLogger(__name__)
 
 
+def _check_unique_metadata(doc_type, attrs, *, exclude_pk=None):
+    """
+    Enforce per-attribute uniqueness for a document type.
+
+    Any metadata field flagged ``is_unique`` (e.g. a reference / invoice number)
+    must not repeat a value already used by another document of the same type.
+    Column-backed keys (title, supplier, amount, …) are compared against the
+    document column; everything else against the ``metadata`` JSON. Trashed
+    documents and the document being edited (``exclude_pk``) are ignored.
+    """
+    if not doc_type:
+        return
+
+    unique_fields = list(doc_type.metadata_fields.filter(is_unique=True))
+    if not unique_fields:
+        return
+
+    metadata = attrs.get("metadata")
+    metadata = metadata if isinstance(metadata, dict) else {}
+    errors = {}
+
+    for field in unique_fields:
+        key = field.key
+        if key in DOCUMENT_COLUMN_METADATA_KEYS:
+            value = attrs.get(key)
+            lookup = {key: value}
+        else:
+            value = metadata.get(key)
+            lookup = {f"metadata__{key}": value}
+
+        if value in (None, "") or (isinstance(value, str) and not value.strip()):
+            continue
+
+        clash = (
+            Document.objects
+            .filter(document_type=doc_type, deleted_at__isnull=True, **lookup)
+        )
+        if exclude_pk:
+            clash = clash.exclude(pk=exclude_pk)
+
+        if clash.exists():
+            errors[key] = (
+                f"{field.label} must be unique — \"{value}\" is already used by "
+                "another document of this type."
+            )
+
+    if errors:
+        raise serializers.ValidationError(errors)
+
+
 def _generate_unique_reference(doc_type: DocumentType) -> str:
     if doc_type.code == "UNCLASS":
         while True:
@@ -219,7 +269,7 @@ class MetadataFieldSerializer(serializers.ModelSerializer):
     class Meta:
         model  = MetadataField
         fields = [
-            "id", "label", "key", "field_type", "is_required",
+            "id", "label", "key", "field_type", "is_required", "is_unique",
             "is_searchable", "select_options", "default_value", "help_text", "order",
         ]
 
@@ -229,7 +279,7 @@ class MetadataFieldWriteSerializer(serializers.ModelSerializer):
     class Meta:
         model  = MetadataField
         fields = [
-            "label", "field_key", "field_type", "is_required",
+            "label", "field_key", "field_type", "is_required", "is_unique",
             "is_searchable", "select_options", "default_value", "help_text", "order",
         ]
 
@@ -718,6 +768,14 @@ class DocumentMetadataEditSerializer(serializers.ModelSerializer):
             "document_date", "due_date", "metadata", "tag_ids", "personal_tags",
         ]
 
+    def validate(self, attrs):
+        instance = self.instance
+        if instance is not None:
+            _check_unique_metadata(
+                instance.document_type, attrs, exclude_pk=instance.pk
+            )
+        return attrs
+
     def update(self, instance, validated_data):
 
         tags = validated_data.pop("tags", None)
@@ -859,6 +917,10 @@ class DocumentUploadSerializer(serializers.ModelSerializer):
             raise serializers.ValidationError(
                 {"document_type_id": "Document type is required for workflow documents."}
             )
+        # Uniqueness applies to every workflow upload, including scanned/OCR ones,
+        # regardless of whether metadata is otherwise mandatory.
+        if not attrs.get("is_self_upload"):
+            _check_unique_metadata(attrs.get("document_type"), attrs)
         return attrs
 
     def create(self, validated_data):

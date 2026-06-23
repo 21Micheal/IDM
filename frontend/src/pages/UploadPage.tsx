@@ -23,6 +23,7 @@ import { toast } from "@/components/ui/vault-toast";
 import type { DocumentType, MetadataField } from "@/types";
 import clsx from "clsx";
 import { QUERY_FIVE_MIN_STALE } from "@/lib/reactQueryDefaults";
+import { extractApiError } from "@/lib/apiError";
 import { deriveDocumentTypeConfig } from "@/lib/documentTypeConfig";
 import { applyOcrToFields, sanitizeOcrFields, type OcrFields } from "@/lib/ocrFieldMatcher";
 import BulkScanPage from "@/pages/BulkScanPage";
@@ -1291,8 +1292,8 @@ export default function UploadPage({ scanOnly = false }: UploadPageProps) {
         navigate(`/documents/${data.id}`);
       }
     },
-    onError: () => {
-      toast.error("Upload failed. Please try again.");
+    onError: (err) => {
+      toast.error(extractApiError(err, "Upload failed. Please try again."));
       setUploadProgress(0);
       setScanStage("idle");
     },
@@ -1306,8 +1307,8 @@ export default function UploadPage({ scanOnly = false }: UploadPageProps) {
       toast.success("Details confirmed and saved.");
       navigate(`/documents/${id}`);
     },
-    onError: () => {
-      toast.error("Could not save details. Please try again.");
+    onError: (err) => {
+      toast.error(extractApiError(err, "Could not save details. Please try again."));
       setScanStage("ocr_done");
     },
   });
