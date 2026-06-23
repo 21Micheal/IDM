@@ -281,6 +281,10 @@ class DMSSettings(models.Model):
     watermark_apply_to_previews = models.BooleanField(default=True)
 
     allow_duplicate_uploads = models.BooleanField(default=False)
+    # When duplicates are blocked, a document sitting in Trash never counts as a
+    # duplicate. With this on, re-uploading identical content also permanently
+    # removes the uploader's trashed copy so no stale duplicate is left behind.
+    purge_trashed_duplicates_on_reupload = models.BooleanField(default=False)
     signed_file_urls_enabled = models.BooleanField(
         default=False,
         help_text="Issue short-lived signed file URLs for browser contexts that cannot send Authorization headers.",

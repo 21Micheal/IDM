@@ -59,6 +59,7 @@ export type DmsSettings = {
   watermark_position: "diagonal" | "center" | "footer";
   watermark_apply_to_previews: boolean;
   allow_duplicate_uploads: boolean;
+  purge_trashed_duplicates_on_reupload: boolean;
   signed_file_urls_enabled: boolean;
   auto_archive_enabled: boolean;
   auto_archive_after_days: number;

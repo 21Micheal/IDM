@@ -4,7 +4,7 @@ from django.http import HttpResponse
 from rest_framework import generics, permissions
 from rest_framework.exceptions import PermissionDenied
 from django.db.models import Q
-from .models import AuditEvent, AuditLog
+from .models import AuditEvent, AuditLog, LOW_SIGNAL_AUDIT_EVENTS
 from .serializers import AuditLogSerializer
 from django.utils.dateparse import parse_date
 from apps.documents.models import Document
@@ -136,6 +136,7 @@ class MyActivityListView(generics.ListAPIView):
                 Q(object_type="Document", object_id__in=tracked_doc_ids)
             )
             .exclude(actor=user)
+            .exclude(event__in=LOW_SIGNAL_AUDIT_EVENTS)
             .select_related("actor")
             .order_by("-timestamp")
         )

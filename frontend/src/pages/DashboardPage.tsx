@@ -403,7 +403,9 @@ export default function DashboardPage() {
       documentsAPI.list({
         page: recentDocsPage,
         page_size: RECENT_DOCS_PAGE_SIZE,
-        ordering: "-updated_at",
+        // Most-recently-touched first (covers both new uploads and edits to
+        // older documents); created_at breaks ties for stable pagination.
+        ordering: "-updated_at,-created_at",
       }).then((r) => r.data as PaginatedResponse<Document>),
     ...QUERY_SHORT_STALE,
   });

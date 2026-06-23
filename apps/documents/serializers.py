@@ -241,6 +241,7 @@ class DMSSettingsSerializer(serializers.ModelSerializer):
             "watermark_position",
             "watermark_apply_to_previews",
             "allow_duplicate_uploads",
+            "purge_trashed_duplicates_on_reupload",
             "signed_file_urls_enabled",
             "auto_archive_enabled",
             "auto_archive_after_days",
@@ -1000,6 +1001,24 @@ class DocumentUploadSerializer(serializers.ModelSerializer):
         validated_data["checksum"] = checksum
 
         dms_settings = DMSSettings.load()
+
+        # Trashed copies never block a re-upload. If the admin opted in, also
+        # permanently remove the uploader's trashed copies of this exact file so
+        # a re-upload replaces the trashed version instead of leaving a stale one.
+        if dms_settings.purge_trashed_duplicates_on_reupload:
+            trashed_duplicates = (
+                Document.objects
+                .filter(checksum=checksum, uploaded_by=request.user, deleted_at__isnull=False)
+                .exclude(file="")
+            )
+            for trashed in trashed_duplicates:
+                try:
+                    trashed.hard_delete()
+                except Exception:
+                    logger.exception(
+                        "Failed to purge trashed duplicate %s on re-upload", trashed.id
+                    )
+
         same_user_duplicate = None
         if not dms_settings.allow_duplicate_uploads:
             same_user_duplicate = _find_existing_document_for_checksum(

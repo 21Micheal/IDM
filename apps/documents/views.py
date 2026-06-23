@@ -400,7 +400,7 @@ class DocumentViewSet(AuditMixin, viewsets.ModelViewSet):
     filter_backends    = [DjangoFilterBackend, SearchFilter, OrderingFilter]
     filterset_class    = DocumentFilter
     search_fields      = ["title", "reference_number", "supplier", "extracted_text"]
-    ordering_fields    = ["created_at", "document_date", "amount", "title", "reference_number"]
+    ordering_fields    = ["created_at", "updated_at", "document_date", "amount", "title", "reference_number"]
     ordering           = ["-created_at"]
     parser_classes     = [MultiPartParser, FormParser, JSONParser]
 
@@ -1787,11 +1787,15 @@ echo "✓ DocVault LibreOffice integration installed."
     @action(detail=True, methods=["get"])
     def audit_trail(self, request, pk=None):
         from apps.audit.serializers import AuditLogSerializer
-        from apps.audit.models import AuditLog
+        from apps.audit.models import AuditLog, LOW_SIGNAL_AUDIT_EVENTS
         doc = self.get_object()
+        # Hide low-signal events (views, previews, transient queue/lock states)
+        # that only clutter the per-document trail. The full immutable log is
+        # still available to admins on the system audit page.
         logs = (
             AuditLog.objects
             .filter(object_type="Document", object_id=str(doc.id))
+            .exclude(event__in=LOW_SIGNAL_AUDIT_EVENTS)
             .select_related("actor")
             .order_by("-timestamp")
         )

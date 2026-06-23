@@ -47,6 +47,21 @@ class AuditEvent(models.TextChoices):
     AUDIT_EXPORTED = "audit.exported", "Audit Log Exported"
 
 
+# Low-signal, high-volume events (views, inline previews, transient queue/lock
+# states). They stay in the immutable log and the admin system audit, but are
+# hidden from the curated, user-facing trails (per-document Audit tab and the
+# non-admin activity feed) where they only add noise.
+LOW_SIGNAL_AUDIT_EVENTS = frozenset({
+    AuditEvent.DOCUMENT_VIEWED,
+    AuditEvent.DOCUMENT_PREVIEWED,
+    AuditEvent.DOCUMENT_PREVIEW_QUEUED,
+    AuditEvent.DOCUMENT_VERSION_PREVIEW_QUEUED,
+    AuditEvent.DOCUMENT_OCR_QUEUED,
+    AuditEvent.DOCUMENT_EDIT_LOCK_ACQUIRED,
+    AuditEvent.DOCUMENT_EDIT_LOCK_RELEASED,
+})
+
+
 class AuditLog(models.Model):
     """Append-only audit log. Never update or delete rows."""
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)

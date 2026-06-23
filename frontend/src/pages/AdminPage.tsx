@@ -428,11 +428,20 @@ function SettingsWorkspace() {
                   label="Allow duplicate uploads"
                   description="When off, duplicate files uploaded by the same user are blocked before storage."
                 />
+                <SettingToggle
+                  checked={settings.purge_trashed_duplicates_on_reupload}
+                  onChange={(checked) => update("purge_trashed_duplicates_on_reupload", checked)}
+                  label="Replace trashed copies on re-upload"
+                  description="A document in Trash never blocks a re-upload. With this on, re-uploading the same file also permanently removes the uploader's trashed copy, instead of leaving both."
+                />
                 <InfoNote>
                   Current mode:{" "}
                   <span className="font-semibold text-[#1F2933]">
                     {settings.allow_duplicate_uploads ? "duplicates allowed" : "duplicates blocked"}
                   </span>
+                  {settings.purge_trashed_duplicates_on_reupload && (
+                    <> · re-uploads replace the trashed copy</>
+                  )}
                 </InfoNote>
               </SettingBlock>
 
