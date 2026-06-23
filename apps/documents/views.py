@@ -733,9 +733,26 @@ class DocumentViewSet(AuditMixin, viewsets.ModelViewSet):
         self.record_audit("document.updated", doc)
         return Response(DocumentDetailSerializer(doc, context={"request": request}).data)
 
+    def _require_edit_lock(self, doc, user):
+        """Return a 423 Response if `user` does not hold the document's edit lock,
+        else None. Version-mutating actions (new version, restore) require holding
+        the lock — the same checkout that gates editing the details/file."""
+        holder = doc.edit_lock_holder
+        if holder is not None and holder.id == user.id:
+            return None
+        detail = (
+            f"This document is locked by {holder.get_full_name()}."
+            if holder
+            else "Lock (check out) the document first."
+        )
+        return Response({"detail": detail}, status=status.HTTP_423_LOCKED)
+
     @action(detail=True, methods=["post"], parser_classes=[MultiPartParser])
     def upload_version(self, request, pk=None):
         doc  = self.get_object()
+        lock_block = self._require_edit_lock(doc, request.user)
+        if lock_block:
+            return lock_block
         file = request.FILES.get("file")
         if not file:
             return Response({"detail": "No file provided."}, status=400)
@@ -970,6 +987,9 @@ class DocumentViewSet(AuditMixin, viewsets.ModelViewSet):
     @action(detail=True, methods=["post"])
     def restore_version(self, request, pk=None):
         doc = self.get_object()
+        lock_block = self._require_edit_lock(doc, request.user)
+        if lock_block:
+            return lock_block
         version_id = request.data.get("version_id")
         version = get_object_or_404(DocumentVersion, id=version_id, document=doc)
 

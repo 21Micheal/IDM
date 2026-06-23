@@ -2,6 +2,7 @@ import React, { useCallback, useEffect, useMemo, useRef, useState } from "react"
 import { extractApiError } from "@/lib/apiError";
 import { useMutation } from "@tanstack/react-query";
 import { Upload, File as FileIcon, Loader2, X } from "lucide-react";
+import { clsx } from "clsx";
 import { toast } from "@/components/ui/vault-toast";
 
 import { documentsAPI } from "@/services/api";
@@ -29,6 +30,10 @@ interface UploadVersionDrawerProps {
   triggerClassName?: string;
   /** Optional className applied to the trigger icon. */
   triggerIconClassName?: string;
+  /** Disable the trigger (e.g. when the document isn't locked by the user). */
+  disabled?: boolean;
+  /** Tooltip shown on the trigger (e.g. why it's disabled). */
+  triggerTitle?: string;
 }
 
 type DuplicateCheckResult = {
@@ -64,6 +69,8 @@ export function UploadVersionDrawer({
   triggerLabel,
   triggerClassName,
   triggerIconClassName,
+  disabled = false,
+  triggerTitle,
 }: UploadVersionDrawerProps) {
   const [open, setOpen] = useState(false);
   const [file, setFile] = useState<File | null>(null);
@@ -215,7 +222,9 @@ export function UploadVersionDrawer({
       <button
         type="button"
         onClick={() => setOpen(true)}
-        className={triggerClassName ?? "btn-secondary"}
+        disabled={disabled}
+        title={triggerTitle}
+        className={clsx(triggerClassName ?? "btn-secondary", disabled && "cursor-not-allowed opacity-50")}
       >
         <Upload className={triggerIconClassName ?? "w-4 h-4"} />
         {triggerLabel ?? "Upload new version"}

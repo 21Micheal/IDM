@@ -1602,6 +1602,8 @@ export default function DocumentViewer({ document: doc, submitSlot, hideUploadAc
                 currentVersion={doc.current_version}
                 maxSizeMb={doc.document_type?.max_file_size_mb}
                 onVersionUploaded={onVersionUploaded}
+                disabled={!lockedByMe}
+                triggerTitle={lockedByMe ? "Upload a new version" : "Lock the document first to upload a new version"}
               />
             </Suspense>
           )}

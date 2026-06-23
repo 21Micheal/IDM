@@ -1023,6 +1023,8 @@ export default function DocumentDetailPage() {
                 onVersionUploaded={handleVersionUploaded}
                 triggerClassName={commandActionClass}
                 triggerIconClassName="w-3.5 h-3.5"
+                disabled={!lockedByMe}
+                triggerTitle={lockedByMe ? "Upload a new version" : "Lock the document first to upload a new version"}
               />
             </Suspense>
           )}
@@ -1700,8 +1702,12 @@ export default function DocumentDetailPage() {
                                 ) : (
                                   <button
                                     onClick={() => setConfirmRestoreId(v.id)}
-                                    className="inline-flex items-center gap-1 border border-[#C8CDD2] bg-white px-2.5 py-1.5 text-xs font-semibold text-[#1F2933] hover:bg-[#F5F7F8]"
-                                    title="Restore to this version"
+                                    disabled={!lockedByMe}
+                                    className={cn(
+                                      "inline-flex items-center gap-1 border border-[#C8CDD2] bg-white px-2.5 py-1.5 text-xs font-semibold text-[#1F2933] hover:bg-[#F5F7F8]",
+                                      !lockedByMe && "cursor-not-allowed opacity-50 hover:bg-white",
+                                    )}
+                                    title={lockedByMe ? "Restore to this version" : "Lock the document first to restore a version"}
                                   >
                                     <RotateCcw className="h-3.5 w-3.5" /> Restore
                                   </button>
