@@ -1,4 +1,8 @@
-import { useState, useCallback, useEffect, useMemo, useRef, type MouseEvent, type ReactNode } from "react";
+import { useState, useCallback, useEffect, useMemo, useRef, lazy, Suspense, type MouseEvent, type ReactNode } from "react";
+import { useAuthStore } from "@/store/authStore";
+
+// The PDF editor pulls in pdf-lib + pdfjs, so load it only when actually opened.
+const PdfEditor = lazy(() => import("@/components/pdf-editor"));
 import { useLocation, useNavigate } from "react-router-dom";
 import { useDropzone, type FileRejection } from "react-dropzone";
 import {
@@ -17,7 +21,7 @@ import { documentsAPI, documentTypesAPI, normalizeListResponse, templatesAPI } f
 import {
   Upload, File, X, Loader2, ArrowRight, CheckCircle, Plus, Lock,
   Info, ScanLine, Sparkles, AlertCircle, ChevronRight, ShieldAlert,
-  Cpu, List, FileText, Tags, LayoutTemplate, Wand2,
+  Cpu, List, FileText, Tags, LayoutTemplate, Wand2, Pencil,
 } from "lucide-react";
 import { toast } from "@/components/ui/vault-toast";
 import type { DocumentType, MetadataField } from "@/types";
@@ -889,12 +893,14 @@ function CapturePreviewPane({
   stateLabel,
   progress,
   compact = false,
+  onEditPdf,
 }: {
   file: File | null;
   previewUrl: string | null;
   stateLabel?: string;
   progress?: number;
   compact?: boolean;
+  onEditPdf?: () => void;
 }) {
   const kind = getCapturePreviewKind(file);
   const previewHeight = compact ? COMPACT_PREVIEW_HEIGHT : PREVIEW_HEIGHT;
@@ -908,11 +914,23 @@ function CapturePreviewPane({
           <p className="text-sm font-bold text-[#1F2933]">Document preview</p>
           <p className="truncate text-xs text-[#5E6870]">{file?.name || "No file selected"}</p>
         </div>
-        {stateLabel && (
-          <span className="shrink-0 border border-[#C8CDD2] bg-white px-2 py-1 text-[11px] font-semibold text-[#5E6870]">
-            {stateLabel}
-          </span>
-        )}
+        <div className="flex shrink-0 items-center gap-2">
+          {onEditPdf && kind === "pdf" && (
+            <button
+              type="button"
+              onClick={onEditPdf}
+              className="inline-flex items-center gap-1.5 border border-[#287EAD] bg-white px-2.5 py-1 text-[11px] font-semibold text-[#287EAD] hover:bg-[#EEF6FB]"
+            >
+              <Pencil className="h-3.5 w-3.5" />
+              Edit PDF
+            </button>
+          )}
+          {stateLabel && (
+            <span className="border border-[#C8CDD2] bg-white px-2 py-1 text-[11px] font-semibold text-[#5E6870]">
+              {stateLabel}
+            </span>
+          )}
+        </div>
       </div>
 
       {progress !== undefined && progress > 0 && (
@@ -961,7 +979,9 @@ export default function UploadPage({ scanOnly = false }: UploadPageProps) {
   const location     = useLocation();
   const queryClient  = useQueryClient();
 
+  const user = useAuthStore((s) => s.user);
   const [droppedFile,      setDroppedFile]      = useState<File | null>(null);
+  const [showPdfEditor,    setShowPdfEditor]    = useState(false);
   const [selectedTypeId,   setSelectedTypeId]   = useState("");
   const [uploadProgress,   setUploadProgress]   = useState(0);
   const [isScanned,        setIsScanned]         = useState(scanOnly);
@@ -1255,6 +1275,22 @@ export default function UploadPage({ scanOnly = false }: UploadPageProps) {
     const file = accepted[0];
     if (file) setDroppedFile(file);
   }, []);
+
+  // Receive the edited PDF back from the editor and stage it for upload in place
+  // of the original. The preview + (empty) title refresh via the droppedFile effect.
+  const handleEditedPdf = useCallback(
+    ({ blobs }: { blobs: Array<{ name: string; bytes: Uint8Array; mime: string }> }) => {
+      const out = blobs[0];
+      if (!out) return;
+      const baseName = (droppedFile?.name ?? "document").replace(/\.pdf$/i, "");
+      // `File` from lucide-react shadows the DOM constructor here, so use globalThis.
+      const edited = new globalThis.File([out.bytes as BlobPart], `${baseName}.pdf`, { type: "application/pdf" });
+      setDroppedFile(edited);
+      setShowPdfEditor(false);
+      toast.success("Edited PDF applied to this upload.");
+    },
+    [droppedFile],
+  );
 
   const onDropRejected = useCallback((rejections: FileRejection[]) => {
     const err = rejections[0]?.errors?.[0];
@@ -1871,6 +1907,7 @@ export default function UploadPage({ scanOnly = false }: UploadPageProps) {
                 previewUrl={pdfPreviewUrl}
                 stateLabel={isScanned ? "Ready to scan" : "Ready"}
                 compact={false}
+                onEditPdf={() => setShowPdfEditor(true)}
               />
             </div>
           )}
@@ -2335,6 +2372,44 @@ export default function UploadPage({ scanOnly = false }: UploadPageProps) {
         initialValues={templateBaseValuesFromForm(getValues() as Record<string, unknown>)}
         onClose={() => setShowBuiltForm(false)}
       />
+    )}
+
+    {/* ── PDF editor (pre-upload) ────────────────────────────────────────────── */}
+    {showPdfEditor && droppedFile && (
+      <div className="fixed inset-0 z-[70] flex flex-col bg-white">
+        <div className="flex items-center justify-between gap-3 border-b border-[#C8CDD2] bg-[#F5F7F8] px-4 py-2">
+          <div className="min-w-0">
+            <p className="text-sm font-bold text-[#1F2933]">Edit PDF before upload</p>
+            <p className="truncate text-xs text-[#5E6870]">
+              <span className="font-semibold">Save</span> applies your edits to this upload · {droppedFile.name}
+            </p>
+          </div>
+          <button
+            type="button"
+            onClick={() => setShowPdfEditor(false)}
+            className="inline-flex shrink-0 items-center gap-1.5 border border-[#C8CDD2] bg-white px-3 py-1.5 text-sm font-semibold text-[#5E6870] hover:bg-[#EEF3F7]"
+          >
+            <X className="h-4 w-4" /> Close without saving
+          </button>
+        </div>
+        <div className="min-h-0 flex-1">
+          <Suspense
+            fallback={
+              <div className="flex h-full items-center justify-center">
+                <Loader2 className="h-6 w-6 animate-spin text-[#287EAD]" />
+              </div>
+            }
+          >
+            <PdfEditor
+              initialFiles={[droppedFile]}
+              signerName={[user?.first_name, user?.last_name].filter(Boolean).join(" ")}
+              onSave={handleEditedPdf}
+              disabledTools={["split", "compress", "convert", "protect", "unlock"]}
+              className="h-full"
+            />
+          </Suspense>
+        </div>
+      </div>
     )}
     </>
   );
