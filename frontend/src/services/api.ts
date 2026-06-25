@@ -133,9 +133,17 @@ if (import.meta.env.DEV) {
   console.warn('API Base URL resolved to:', apiBaseUrl);
 }
 
+// A default ceiling for ordinary JSON requests. Normal calls finish in well
+// under a second; this just prevents a slow/overloaded backend from leaving a
+// request hanging indefinitely — which, under high traffic, would exhaust the
+// browser's ~6-connections-per-host budget and stall the rest of the UI.
+// Uploads and blob downloads are exempted in the request interceptor below.
+const DEFAULT_REQUEST_TIMEOUT_MS = 60_000;
+
 export const api = axios.create({
   baseURL: apiBaseUrl,
   headers: { "Content-Type": "application/json" },
+  timeout: DEFAULT_REQUEST_TIMEOUT_MS,
 });
 
 let refreshPromise: Promise<string> | null = null;
@@ -178,6 +186,17 @@ api.interceptors.request.use((config: InternalAxiosRequestConfig) => {
 
   const token = authState.accessToken;
   if (token) config.headers.Authorization = `Bearer ${token}`;
+
+  // File uploads (FormData) and binary downloads (blob) can legitimately run
+  // far longer than a JSON call — large files on slow links. Disable the
+  // default timeout for them so the ceiling only ever applies to normal API
+  // traffic. An explicit per-request timeout still wins if one was set.
+  const isUpload = config.data instanceof FormData;
+  const isBlob = config.responseType === "blob";
+  if ((isUpload || isBlob) && config.timeout === DEFAULT_REQUEST_TIMEOUT_MS) {
+    config.timeout = 0;
+  }
+
   if (config.data instanceof FormData) {
     const headers = config.headers as unknown as {
       delete?: (key: string) => void;
@@ -630,9 +649,19 @@ export const workflowAPI = {
   taskHistory: (id: string) => api.get(`/workflows/tasks/${id}/history/`),
 };
 
+export interface NotificationSummary {
+  unread_notifications: number;
+  unread_task_alerts: number;
+  pending_tasks: number;
+  incoming_signatures: number;
+}
+
 export const notificationsAPI = {
   list: (params?: { is_read?: boolean }) => api.get("/notifications/", { params }),
   unreadCount: () => api.get("/notifications/unread_count/"),
+  // Consolidated badge counts for the app shell — one cheap request instead of
+  // separately polling notifications, workflow tasks and signature requests.
+  summary: () => api.get<NotificationSummary>("/notifications/summary/"),
   markRead: (id: string) =>
     api.patch(`/notifications/${id}/`, { is_read: true }),
   markUnread: (id: string) =>

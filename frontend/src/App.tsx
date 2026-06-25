@@ -113,9 +113,12 @@ function SessionSync() {
     queryKey: ["auth", "me"],
     queryFn: () => authAPI.me(accessToken as string).then((res) => res.data),
     enabled,
+    // Revalidates privilege/group changes. These are rare, so a 2-minute poll
+    // (plus an on-focus refetch, deduped by staleTime) keeps the UI in sync
+    // without every client hammering /auth/me each minute under load.
     refetchOnWindowFocus: true,
-    refetchInterval: 60_000,
-    staleTime: 30_000,
+    refetchInterval: 120_000,
+    staleTime: 60_000,
   });
 
   useEffect(() => {

@@ -20,9 +20,9 @@ import {
 } from "lucide-react";
 import { useAuthStore } from "../../store/authStore";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { notificationsAPI, workflowAPI, signatureRequestsAPI } from "../../services/api";
+import { notificationsAPI, workflowAPI } from "../../services/api";
 import { FlaxemLogo } from "./FlaxemLogo";
-import { QUERY_SHORT_STALE } from "@/lib/reactQueryDefaults";
+import { QUERY_ONE_MINUTE_STALE } from "@/lib/reactQueryDefaults";
 import { preloadCommonRoutes, preloadRouteForPath } from "@/lib/routePreload";
 import { FolderTree } from "@/components/folders/FolderTree";
 import clsx from "clsx";
@@ -265,14 +265,24 @@ function ProfileMenu() {
 function NotificationsTray({
   notifications,
   tasks,
+  attentionCount,
 }: {
   notifications?: { id: string; type: string; message: string; link?: string; is_read: boolean; created_at: string }[];
   tasks: unknown[];
+  attentionCount: number;
 }) {
   const _navigate = useNavigate();
   void _navigate;
   const queryClient = useQueryClient();
   const [open, setOpen] = useState(false);
+
+  // The tray's list data is no longer polled (badge counts come from the
+  // summary endpoint), so refresh it whenever the user opens the tray.
+  useEffect(() => {
+    if (!open) return;
+    queryClient.invalidateQueries({ queryKey: ["notifications"] });
+    queryClient.invalidateQueries({ queryKey: ["workflow", "my-tasks"] });
+  }, [open, queryClient]);
   const markReadMutation = useMutation({
     mutationFn: (id: string) => notificationsAPI.markRead(id),
     onMutate: async (id: string) => {
@@ -325,7 +335,8 @@ function NotificationsTray({
     due_at?: string | null;
     workflow_instance?: { document?: { title?: string; reference_number?: string } };
   }[];
-  const attentionCount = noticeUnreadCount + taskAlertUnreadCount + tasks.length;
+  // attentionCount (the bell badge) is supplied by the parent from the summary
+  // endpoint; the per-section counts below come from the lists shown when open.
 
   useEffect(() => {
     if (!open) return;
@@ -555,34 +566,43 @@ export default function Layout() {
     return () => { if (fallbackTimer) clearTimeout(fallbackTimer); };
   }, []);
 
+  // All sidebar/bell badge counts come from a single consolidated endpoint that
+  // runs on every authenticated page. This is the app's constant background
+  // load multiplier, so it's one cheap COUNT request (not three row-fetching
+  // polls) every 60s. (react-query pauses it while the tab is backgrounded.)
+  const { data: summary } = useQuery({
+    queryKey: ["notifications", "summary"],
+    queryFn: () => notificationsAPI.summary().then((r) => r.data),
+    refetchInterval: 60_000,
+    enabled: idleReady,
+    ...QUERY_ONE_MINUTE_STALE,
+  });
+
+  // The notification + task *lists* only feed the expanded tray, so they're no
+  // longer polled — they load once and the tray refetches them when opened.
   const { data: notifications } = useQuery({
     queryKey: ["notifications"],
     queryFn: () => notificationsAPI.list().then((r) => r.data.results ?? r.data),
-    refetchInterval: 30_000,
     enabled: idleReady,
-    ...QUERY_SHORT_STALE,
+    ...QUERY_ONE_MINUTE_STALE,
   });
 
   const { data: myTasks = [] } = useQuery({
     queryKey: ["workflow", "my-tasks"],
     queryFn: () => workflowAPI.myTasks().then((r) => r.data.results ?? r.data),
-    refetchInterval: 30_000,
     enabled: idleReady,
-    ...QUERY_SHORT_STALE,
+    ...QUERY_ONE_MINUTE_STALE,
   });
 
-  const { data: signatureCount = 0 } = useQuery({
-    queryKey: ["signature-requests", "incoming-count"],
-    queryFn: () => signatureRequestsAPI.incomingCount().then((r) => r.data.count),
-    refetchInterval: 30_000,
-    enabled: idleReady,
-    ...QUERY_SHORT_STALE,
-  });
-
-  const unread = (notifications as { is_read: boolean; type: string }[] | undefined)
-    ?.filter((n) => !n.is_read && !TASK_NOTIFICATION_TYPES.has(n.type)).length ?? 0;
-
-  const pendingTasksCount = (myTasks as unknown[]).length;
+  const unread = summary?.unread_notifications ?? 0;
+  const pendingTasksCount = summary?.pending_tasks ?? 0;
+  const signatureCount = summary?.incoming_signatures ?? 0;
+  // Bell badge: every unread notification (notices + task alerts) plus pending
+  // tasks — mirrors what the tray used to sum from the now-unpolled lists.
+  const trayAttentionCount =
+    (summary?.unread_notifications ?? 0) +
+    (summary?.unread_task_alerts ?? 0) +
+    (summary?.pending_tasks ?? 0);
 
   useEffect(() => {
     mainRef.current?.scrollTo({ top: 0, behavior: "auto" });
@@ -739,6 +759,7 @@ export default function Layout() {
           <NotificationsTray
             notifications={notifications as any}
             tasks={myTasks as unknown[]}
+            attentionCount={trayAttentionCount}
           />
           <div className="mx-1 h-6 w-px bg-[#C8CDD2]" />
           <ProfileMenu />

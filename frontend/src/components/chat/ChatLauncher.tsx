@@ -46,6 +46,9 @@ export function ChatLauncher() {
 
     let mounted = true;
     const fetchUnread = async () => {
+      // This is a fallback to the realtime WebSocket; skip it while the tab is
+      // backgrounded so idle tabs stop polling and don't add baseline load.
+      if (typeof document !== "undefined" && document.hidden) return;
       try {
         const r = await chatAPI.unread.count();
         if (!mounted) return;
@@ -78,9 +81,14 @@ export function ChatLauncher() {
     };
     fetchUnread();
     const id = setInterval(fetchUnread, 30_000);
+    // Refresh immediately when the user returns to a backgrounded tab, since
+    // polling was paused while it was hidden.
+    const onVisible = () => { if (!document.hidden) fetchUnread(); };
+    document.addEventListener("visibilitychange", onVisible);
     return () => {
       mounted = false;
       clearInterval(id);
+      document.removeEventListener("visibilitychange", onVisible);
     };
   }, [accessToken]);
 

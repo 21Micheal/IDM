@@ -357,6 +357,11 @@ class WorkflowTask(models.Model):
 
     class Meta:
         ordering = ["step__order"]
+        indexes = [
+            # Backs the "my tasks" badge/list query (assigned_to + status filter),
+            # which is polled frequently by the app shell.
+            models.Index(fields=["assigned_to", "status"]),
+        ]
 
     def __str__(self):
         return f"Task: {self.step.name} [{self.status}]"

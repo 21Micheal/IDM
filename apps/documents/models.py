@@ -1101,6 +1101,11 @@ class SignatureRequestSigner(models.Model):
     class Meta:
         ordering        = ["order", "id"]
         unique_together = [("request", "signer")]
+        indexes = [
+            # Backs the incoming-signature badge count (signer + status filter),
+            # polled by the app shell.
+            models.Index(fields=["signer", "status"]),
+        ]
 
     def __str__(self):
         return f"{self.signer_id} → {self.request_id} ({self.status})"
