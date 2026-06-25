@@ -995,7 +995,7 @@ export default function DocumentsPage({ personalOnly = false }: DocumentsPagePro
                     </button>
 
                     {showBulkDownloadTray && (
-                      <div className="absolute left-0 top-full z-50 mt-1 w-60 overflow-hidden rounded border border-[#C8CDD2] bg-white shadow-lg">
+                      <div className="absolute left-0 top-full z-50 mt-1 w-60 overflow-hidden border border-[#C8CDD2] bg-white shadow-lg">
                         <p className="border-b border-[#E3E7EA] bg-[#F5F7F8] px-3 py-1.5 text-[10px] font-semibold uppercase tracking-wider text-[#5E6870]">
                           Download as
                         </p>

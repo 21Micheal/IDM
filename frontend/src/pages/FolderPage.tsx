@@ -116,26 +116,26 @@ function AddDocumentModal({
 
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center p-4">
-      <div className="absolute inset-0 bg-black/40 backdrop-blur-sm" onClick={onClose} />
+      <div className="absolute inset-0 bg-black/50" onClick={onClose} />
       <div
-        className="relative w-full max-w-lg rounded-2xl border border-border bg-card shadow-2xl overflow-hidden"
+        className="relative w-full max-w-lg border border-[#C8CDD2] bg-white shadow-xl overflow-hidden"
         style={{ maxHeight: "80vh" }}
       >
         {/* Header */}
-        <div className="flex items-center justify-between px-5 py-4 border-b border-border">
-          <h2 className="text-base font-semibold text-foreground">Add documents to folder</h2>
-          <button onClick={onClose} className="p-1 rounded-lg hover:bg-muted transition-colors">
-            <X className="w-4 h-4 text-muted-foreground" />
+        <div className="flex items-center justify-between px-5 py-4 border-b border-[#C8CDD2] bg-[#287EAD]">
+          <h2 className="text-base font-semibold text-white">Add documents to folder</h2>
+          <button onClick={onClose} className="p-1 text-white/70 hover:text-white hover:bg-white/10 transition-colors">
+            <X className="w-4 h-4" />
           </button>
         </div>
 
         {/* Search */}
-        <div className="px-5 py-3 border-b border-border">
+        <div className="px-5 py-3 border-b border-[#C8CDD2]">
           <div className="relative">
             <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-muted-foreground pointer-events-none" />
             <input
               autoFocus
-              className="input w-full pl-9"
+              className="w-full pl-9 border border-[#C8CDD2] px-3 py-2 text-sm outline-none focus:border-[#287EAD]"
               placeholder="Search documents…"
               value={q}
               onChange={(e) => setQ(e.target.value)}
@@ -154,17 +154,17 @@ function AddDocumentModal({
               {q ? "No documents match your search." : "All documents are already in this folder."}
             </p>
           ) : (
-            <div className="divide-y divide-border">
+            <div className="divide-y divide-[#C8CDD2]">
               {docs.map((doc) => {
                 const checked = selected.has(doc.id);
                 return (
                   <label
                     key={doc.id}
-                    className="flex items-center gap-3 px-5 py-3 hover:bg-muted/40 cursor-pointer transition-colors"
+                    className="flex items-center gap-3 px-5 py-3 hover:bg-[#F5F7F8] cursor-pointer transition-colors"
                   >
                     <input
                       type="checkbox"
-                      className="rounded border-border"
+                      className="rounded border-[#C8CDD2] text-[#287EAD] focus:ring-0"
                       checked={checked}
                       onChange={() => {
                         setSelected((prev) => {
@@ -190,7 +190,7 @@ function AddDocumentModal({
         </div>
 
         {/* Footer */}
-        <div className="flex items-center justify-between gap-3 px-5 py-4 border-t border-border bg-muted/20">
+        <div className="flex items-center justify-between gap-3 px-5 py-4 border-t border-[#C8CDD2] bg-[#F5F7F8]">
           <p className="text-xs text-muted-foreground">
             {selected.size} selected
           </p>
@@ -198,7 +198,7 @@ function AddDocumentModal({
             <button
               type="button"
               onClick={onClose}
-              className="btn-ghost text-sm px-3 py-1.5"
+              className="text-sm px-3 py-1.5 border border-[#C8CDD2] bg-white hover:bg-[#F5F7F8]"
             >
               Cancel
             </button>
@@ -206,7 +206,7 @@ function AddDocumentModal({
               type="button"
               disabled={selected.size === 0 || addMutation.isPending}
               onClick={handleAdd}
-              className="btn-primary text-sm px-4 py-1.5 disabled:opacity-50"
+              className="text-sm px-4 py-1.5 bg-[#287EAD] text-white disabled:opacity-50"
             >
               {addMutation.isPending ? (
                 <Loader2 className="w-4 h-4 animate-spin" />
@@ -227,10 +227,10 @@ function SubfolderCard({ folder }: { folder: DocumentFolder }) {
   return (
     <Link
       to={`/documents/folders/${folder.id}`}
-      className="group flex items-center gap-3 rounded-xl border border-border bg-card p-4 hover:border-primary/30 hover:bg-muted/30 transition-all"
+      className="group flex items-center gap-3 border border-[#C8CDD2] bg-white p-4 hover:border-[#287EAD]/40 hover:bg-[#F5F7F8] transition-colors"
     >
       <div
-        className="flex h-10 w-10 items-center justify-center rounded-lg"
+        className="flex h-10 w-10 items-center justify-center border border-[#C8CDD2]"
         style={{ backgroundColor: `${folder.color}20` }}
       >
         <Folder className="w-5 h-5" style={{ color: folder.color }} />
@@ -260,10 +260,10 @@ function DocumentCard({
 
   return (
     <div
-      className="group flex items-start gap-3 rounded-xl border border-border bg-card p-4 hover:border-primary/30 hover:shadow-sm transition-all cursor-pointer"
+      className="group flex items-start gap-3 border border-[#C8CDD2] bg-white p-4 hover:border-[#287EAD]/40 hover:bg-[#F5F7F8] transition-colors cursor-pointer"
       onClick={() => navigate(`/documents/${item.document}`)}
     >
-      <div className="flex h-10 w-10 items-center justify-center rounded-lg bg-primary/5 text-primary shrink-0">
+      <div className="flex h-10 w-10 items-center justify-center border border-[#C8CDD2] bg-[#EEF6FB] text-[#287EAD] shrink-0">
         <FileText className="w-5 h-5" />
       </div>
       <div className="flex-1 min-w-0">
@@ -285,7 +285,7 @@ function DocumentCard({
       {/* Actions */}
       <div className="relative shrink-0" onClick={(e) => e.stopPropagation()}>
         <button
-          className="p-1.5 rounded-lg opacity-0 group-hover:opacity-100 hover:bg-muted transition-all"
+          className="p-1.5 rounded-lg opacity-0 group-hover:opacity-100 hover:bg-white border border-[#C8CDD2] transition-all"
           onClick={() => setMenuOpen((o) => !o)}
         >
           <MoreHorizontal className="w-4 h-4 text-muted-foreground" />
@@ -293,16 +293,16 @@ function DocumentCard({
         {menuOpen && (
           <>
             <div className="fixed inset-0 z-10" onClick={() => setMenuOpen(false)} />
-            <div className="absolute right-0 top-8 z-20 w-40 rounded-xl border border-border bg-card shadow-xl py-1 text-sm">
+            <div className="absolute right-0 top-8 z-20 w-40 border border-[#C8CDD2] bg-white shadow-xl py-1 text-sm">
               <button
-                className="flex items-center gap-2 w-full px-3 py-2 hover:bg-muted text-foreground"
+                className="flex items-center gap-2 w-full px-3 py-2 hover:bg-[#F5F7F8] text-foreground"
                 onClick={() => navigate(`/documents/${item.document}`)}
               >
                 <ExternalLink className="w-3.5 h-3.5 text-muted-foreground" />
                 Open
               </button>
               <button
-                className="flex items-center gap-2 w-full px-3 py-2 hover:bg-destructive/10 text-destructive"
+                className="flex items-center gap-2 w-full px-3 py-2 hover:bg-red-50 text-red-600"
                 onClick={() => { onRemove(); setMenuOpen(false); }}
               >
                 <Trash2 className="w-3.5 h-3.5" />
@@ -398,7 +398,7 @@ export default function FolderPage() {
           <Breadcrumb folder={folder} />
           <div className="flex items-center gap-3">
             <div
-              className="flex h-10 w-10 items-center justify-center rounded-xl"
+              className="flex h-10 w-10 items-center justify-center border border-[#C8CDD2]"
               style={{ backgroundColor: `${folder.color}20` }}
             >
               <FolderIcon
@@ -422,7 +422,7 @@ export default function FolderPage() {
           <button
             type="button"
             onClick={() => setShowAdd(true)}
-            className="inline-flex items-center gap-2 rounded-xl bg-primary px-4 py-2.5 text-sm font-semibold text-primary-foreground hover:bg-primary/90 transition-colors"
+            className="inline-flex items-center gap-2 bg-[#287EAD] px-4 py-2.5 text-sm font-semibold text-white hover:bg-[#206D99] transition-colors"
           >
             <Plus className="w-4 h-4" />
             Add documents
@@ -440,9 +440,9 @@ export default function FolderPage() {
             {!folder.is_favourites && (
               <button
                 type="button"
-                className="group flex items-center gap-3 rounded-xl border border-dashed border-border bg-card p-4 hover:border-primary/30 hover:bg-muted/30 transition-all text-left"
+                className="group flex items-center gap-3 border border-dashed border-[#C8CDD2] bg-white p-4 hover:border-[#287EAD]/40 hover:bg-[#F5F7F8] transition-colors text-left"
               >
-                <div className="flex h-10 w-10 items-center justify-center rounded-lg bg-primary/5 text-primary shrink-0">
+                <div className="flex h-10 w-10 items-center justify-center border border-[#C8CDD2] bg-[#EEF6FB] text-[#287EAD] shrink-0">
                   <Plus className="w-5 h-5" />
                 </div>
                 <div className="flex-1 min-w-0">
@@ -472,7 +472,7 @@ export default function FolderPage() {
             <Loader2 className="w-6 h-6 animate-spin text-muted-foreground" />
           </div>
         ) : items.length === 0 ? (
-          <div className="flex flex-col items-center justify-center rounded-2xl border border-dashed border-border py-20 text-center">
+          <div className="flex flex-col items-center justify-center border border-dashed border-[#C8CDD2] py-20 text-center">
             {folder.is_favourites ? (
               <>
                 <Star className="w-12 h-12 text-amber-300/60 mb-4" />
@@ -490,7 +490,7 @@ export default function FolderPage() {
                 </p>
                 <button
                   onClick={() => setShowAdd(true)}
-                  className="mt-5 inline-flex items-center gap-2 rounded-xl bg-primary px-4 py-2.5 text-sm font-semibold text-primary-foreground hover:bg-primary/90 transition-colors"
+                  className="mt-5 inline-flex items-center gap-2 bg-[#287EAD] px-4 py-2.5 text-sm font-semibold text-white hover:bg-[#206D99] transition-colors"
                 >
                   <Plus className="w-4 h-4" />
                   Add documents

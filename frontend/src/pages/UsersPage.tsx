@@ -97,37 +97,37 @@ function TemporaryPasswordModal({
   };
 
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-sm p-4">
-      <div className="bg-card w-full max-w-md rounded-2xl shadow-xl p-8 space-y-6">
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 p-4">
+      <div className="bg-white w-full max-w-md border border-[#C8CDD2] shadow-xl p-8 space-y-6">
         <div className="flex items-center gap-4">
-          <div className="w-12 h-12 bg-accent/10 rounded-2xl flex items-center justify-center">
-            <KeyRound className="w-6 h-6 text-accent" />
+          <div className="flex h-12 w-12 items-center justify-center border border-[#C8CDD2] bg-[#EEF6FB] flex-shrink-0">
+            <KeyRound className="w-6 h-6 text-[#287EAD]" />
           </div>
           <div>
-            <h2 className="text-xl font-semibold">Temporary Password</h2>
-            <p className="text-sm text-muted-foreground">Share this with the new user</p>
+            <h2 className="text-xl font-semibold text-[#1F2933]">Temporary Password</h2>
+            <p className="text-sm text-[#5E6870]">Share this with the new user</p>
           </div>
         </div>
 
-        <div className="bg-muted border border-border rounded-xl p-5">
-          <p className="text-xs text-muted-foreground mb-2">One-time password</p>
-          <div className="flex items-center justify-between bg-card border border-border rounded-lg px-5 py-4 font-mono text-xl tracking-widest">
+        <div className="bg-[#F5F7F8] border border-[#C8CDD2] p-5">
+          <p className="text-xs text-[#5E6870] mb-2">One-time password</p>
+          <div className="flex items-center justify-between bg-white border border-[#C8CDD2] px-5 py-4 font-mono text-xl tracking-widest">
             {temporary_password}
             <button
               onClick={copyToClipboard}
-              className="text-sm font-medium text-primary hover:underline"
+              className="text-sm font-medium text-[#287EAD] hover:underline"
             >
               {copied ? "✓ Copied" : "Copy"}
             </button>
           </div>
         </div>
 
-        <div className="text-sm bg-accent/5 border border-accent/20 rounded-xl p-4">
+        <div className="text-sm bg-[#EEF6FB] border border-[#BDE3F5] p-4 text-[#1F2933]">
           The user will be prompted to set a new strong password on first login.<br />
           MFA is enabled by default.
         </div>
 
-        <button onClick={onClose} className="btn-primary w-full">
+        <button onClick={onClose} className="inline-flex w-full items-center justify-center gap-2 bg-[#287EAD] px-5 py-2.5 font-medium text-white transition-colors hover:bg-[#206D99]">
           I have saved this password
         </button>
       </div>
@@ -177,43 +177,44 @@ function CreateUserModal({
   return (
     <>
       {!tempPassword && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-sm p-4">
-          <div className="bg-card w-full max-w-lg rounded-2xl shadow-xl p-8">
-            <div className="flex justify-between items-center mb-6">
-              <h2 className="text-2xl font-semibold">Create New User</h2>
-              <button onClick={onClose} className="text-muted-foreground hover:text-foreground">
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 p-4">
+          <div className="bg-white w-full max-w-lg border border-[#C8CDD2] shadow-xl">
+            {/* Header */}
+            <div className="flex items-center justify-between border-b border-[#C8CDD2] px-6 py-5 bg-[#F5F7F8]">
+              <h2 className="text-lg font-semibold text-[#1F2933]">Create New User</h2>
+              <button onClick={onClose} className="p-1.5 text-[#5E6870] hover:text-[#1F2933] hover:bg-[#EDEDED] transition-colors">
                 <X className="w-5 h-5" />
               </button>
             </div>
 
-            <form onSubmit={handleSubmit((v) => mutation.mutate(v))} className="space-y-5">
+            <form onSubmit={handleSubmit((v) => mutation.mutate(v))} className="p-6 space-y-5">
               <div className="grid grid-cols-2 gap-4">
                 <div>
-                  <label className="block text-sm font-medium mb-1.5">First Name *</label>
+                  <label className="block text-sm font-medium text-[#1F2933] mb-1.5">First Name *</label>
                   <input {...register("first_name")} className="input" placeholder="John" autoFocus />
                   {errors.first_name && <p className="text-destructive text-xs mt-1">{errors.first_name.message}</p>}
                 </div>
                 <div>
-                  <label className="block text-sm font-medium mb-1.5">Last Name *</label>
+                  <label className="block text-sm font-medium text-[#1F2933] mb-1.5">Last Name *</label>
                   <input {...register("last_name")} className="input" placeholder="Doe" />
                   {errors.last_name && <p className="text-destructive text-xs mt-1">{errors.last_name.message}</p>}
                 </div>
               </div>
 
               <div>
-                <label className="block text-sm font-medium mb-1.5">Email Address *</label>
+                <label className="block text-sm font-medium text-[#1F2933] mb-1.5">Email Address *</label>
                 <input {...register("email")} type="email" className="input" placeholder="john@company.com" />
                 {errors.email && <p className="text-destructive text-xs mt-1">{errors.email.message}</p>}
               </div>
 
               <div>
-                <label className="block text-sm font-medium mb-1.5">Job Description *</label>
+                <label className="block text-sm font-medium text-[#1F2933] mb-1.5">Job Description *</label>
                 <textarea {...register("job_description")} rows={3} className="input" placeholder="e.g. Accounts Payable Officer" />
                 {errors.job_description && <p className="text-destructive text-xs mt-1">{errors.job_description.message}</p>}
               </div>
 
               <div>
-                <label className="block text-sm font-medium mb-1.5">Department</label>
+                <label className="block text-sm font-medium text-[#1F2933] mb-1.5">Department</label>
                 <select {...register("department")} className="input">
                   <option value="">— None —</option>
                   {departments.map((d) => (
@@ -222,8 +223,8 @@ function CreateUserModal({
                 </select>
               </div>
 
-              <button type="submit" disabled={mutation.isPending} className="btn-primary w-full">
-                {mutation.isPending && <Loader2 className="w-4 h-4 animate-spin mr-2" />}
+              <button type="submit" disabled={mutation.isPending} className="inline-flex w-full items-center justify-center gap-2 bg-[#287EAD] px-5 py-2.5 font-medium text-white transition-colors hover:bg-[#206D99] disabled:opacity-60">
+                {mutation.isPending && <Loader2 className="w-4 h-4 animate-spin" />}
                 Create User
               </button>
             </form>
@@ -270,35 +271,38 @@ function EditUserModal({
   });
 
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-sm p-4">
-      <div className="bg-card w-full max-w-md rounded-2xl shadow-xl p-8">
-        <div className="flex justify-between mb-6">
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 p-4">
+      <div className="bg-white w-full max-w-md border border-[#C8CDD2] shadow-xl">
+        {/* Header */}
+        <div className="flex items-center justify-between border-b border-[#C8CDD2] px-6 py-5 bg-[#F5F7F8]">
           <div>
-            <h2 className="text-xl font-semibold">Edit User</h2>
-            <p className="text-sm text-muted-foreground">{user.email}</p>
+            <h2 className="text-lg font-semibold text-[#1F2933]">Edit User</h2>
+            <p className="text-sm text-[#5E6870]">{user.email}</p>
           </div>
-          <button onClick={onClose}><X className="w-5 h-5" /></button>
+          <button onClick={onClose} className="p-1.5 text-[#5E6870] hover:text-[#1F2933] hover:bg-[#EDEDED] transition-colors">
+            <X className="w-5 h-5" />
+          </button>
         </div>
 
-        <form onSubmit={handleSubmit((v) => mutation.mutate(v))} className="space-y-5">
+        <form onSubmit={handleSubmit((v) => mutation.mutate(v))} className="p-6 space-y-5">
           <div className="grid grid-cols-2 gap-4">
             <div>
-              <label className="block text-sm font-medium mb-1.5">First Name</label>
+              <label className="block text-sm font-medium text-[#1F2933] mb-1.5">First Name</label>
               <input {...register("first_name")} className="input" />
             </div>
             <div>
-              <label className="block text-sm font-medium mb-1.5">Last Name</label>
+              <label className="block text-sm font-medium text-[#1F2933] mb-1.5">Last Name</label>
               <input {...register("last_name")} className="input" />
             </div>
           </div>
 
           <div>
-            <label className="block text-sm font-medium mb-1.5">Job Description</label>
+            <label className="block text-sm font-medium text-[#1F2933] mb-1.5">Job Description</label>
             <textarea {...register("job_description")} rows={3} className="input" />
           </div>
 
           <div>
-            <label className="block text-sm font-medium mb-1.5">Department</label>
+            <label className="block text-sm font-medium text-[#1F2933] mb-1.5">Department</label>
             <select {...register("department")} className="input">
               <option value="">— None —</option>
               {departments.map(d => <option key={d.id} value={d.id}>{d.name}</option>)}
@@ -306,14 +310,14 @@ function EditUserModal({
           </div>
 
           <div className="flex items-center gap-3">
-            <input {...register("is_active")} type="checkbox" className="w-5 h-5 accent-primary" />
-            <label className="text-sm font-medium">Account is active</label>
+            <input {...register("is_active")} type="checkbox" className="w-4 h-4 accent-[#287EAD]" />
+            <label className="text-sm font-medium text-[#1F2933]">Account is active</label>
           </div>
 
-          <div className="flex gap-3 pt-4">
-            <button type="button" onClick={onClose} className="btn-secondary flex-1">Cancel</button>
-            <button type="submit" disabled={mutation.isPending} className="btn-primary flex-1">
-              {mutation.isPending && <Loader2 className="animate-spin mr-2" />} Save Changes
+          <div className="flex gap-3 pt-2 border-t border-[#C8CDD2]">
+            <button type="button" onClick={onClose} className="flex-1 border border-[#C8CDD2] px-4 py-2.5 text-sm font-medium text-[#1F2933] hover:bg-[#F5F7F8] transition-colors">Cancel</button>
+            <button type="submit" disabled={mutation.isPending} className="flex-1 inline-flex items-center justify-center gap-2 bg-[#287EAD] px-4 py-2.5 text-sm font-medium text-white transition-colors hover:bg-[#206D99] disabled:opacity-60">
+              {mutation.isPending && <Loader2 className="animate-spin w-4 h-4" />} Save Changes
             </button>
           </div>
         </form>
@@ -457,7 +461,8 @@ export default function UsersPage() {
                 >
                   <td className="px-6 py-4">
                     <div className="flex items-center gap-3">
-                      <div className="w-9 h-9 rounded-full bg-primary text-primary-foreground flex items-center justify-center text-sm font-semibold flex-shrink-0">
+                      {/* Square initials avatar — squire style */}
+                      <div className="flex h-9 w-9 items-center justify-center border border-[#C8CDD2] bg-[#EEF6FB] text-[#287EAD] text-sm font-semibold flex-shrink-0">
                         {user.first_name[0]}{user.last_name[0]}
                       </div>
                       <div>

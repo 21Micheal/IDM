@@ -970,7 +970,7 @@ export default function DocumentDetailPage() {
 
             {showDownloadTray && canDownload && viewerLinks.downloadHref && (
               <div
-                className="absolute right-0 top-full z-50 mt-1 w-56 overflow-hidden rounded border border-[#C8CDD2] bg-white shadow-lg"
+                className="absolute right-0 top-full z-50 mt-1 w-56 overflow-hidden border border-[#C8CDD2] bg-white shadow-lg"
                 style={{ minWidth: "14rem" }}
               >
                 <p className="border-b border-[#E3E7EA] bg-[#F5F7F8] px-3 py-1.5 text-[10px] font-semibold uppercase tracking-wider text-[#5E6870]">
@@ -1925,45 +1925,50 @@ export default function DocumentDetailPage() {
 
       {/* Check-in: unsaved metadata edits prompt (fires on Release) */}
       {releasePrompt && (
-        <div className="fixed inset-0 z-[60] flex items-center justify-center bg-foreground/40 backdrop-blur-sm p-4">
-          <div className="w-full max-w-sm rounded-2xl border border-border bg-card p-6 shadow-elegant">
-            <h4 className="text-base font-semibold text-foreground">Save changes?</h4>
-            <p className="mt-2 text-sm text-muted-foreground">
-              You have unsaved detail changes. Do you want to save them before checking in (releasing the lock)?
-            </p>
-            <div className="mt-5 flex justify-end gap-2">
-              <button
-                type="button"
-                disabled={releaseSaving}
-                onClick={() => { releasePrompt.resolve(false); setReleasePrompt(null); }}
-                className="btn-secondary"
-              >
-                Cancel
-              </button>
-              <button
-                type="button"
-                disabled={releaseSaving}
-                onClick={() => { releasePrompt.resolve(true); setReleasePrompt(null); }}
-                className="btn-secondary"
-              >
-                Discard
-              </button>
-              <button
-                type="button"
-                disabled={releaseSaving}
-                onClick={async () => {
-                  const saver = metadataSaverRef.current;
-                  setReleaseSaving(true);
-                  const ok = saver ? await saver.save() : true;
-                  setReleaseSaving(false);
-                  releasePrompt.resolve(ok);
-                  setReleasePrompt(null);
-                }}
-                className="btn-primary"
-              >
-                {releaseSaving && <Loader2 className="w-4 h-4 animate-spin" />}
-                Save &amp; check in
-              </button>
+        <div className="fixed inset-0 z-[60] flex items-center justify-center bg-black/50 p-4">
+          <div className="w-full max-w-sm border border-[#C8CDD2] bg-white shadow-xl">
+            {/* Header */}
+            <div className="border-b border-[#C8CDD2] bg-[#287EAD] px-5 py-4">
+              <h4 className="text-base font-semibold text-white">Save changes?</h4>
+            </div>
+            <div className="p-5">
+              <p className="text-sm text-[#5E6870]">
+                You have unsaved detail changes. Do you want to save them before checking in (releasing the lock)?
+              </p>
+              <div className="mt-5 flex justify-end gap-2">
+                <button
+                  type="button"
+                  disabled={releaseSaving}
+                  onClick={() => { releasePrompt.resolve(false); setReleasePrompt(null); }}
+                  className="border border-[#C8CDD2] bg-white px-4 py-2 text-sm font-medium text-[#1F2933] hover:bg-[#F5F7F8] transition-colors disabled:opacity-50"
+                >
+                  Cancel
+                </button>
+                <button
+                  type="button"
+                  disabled={releaseSaving}
+                  onClick={() => { releasePrompt.resolve(true); setReleasePrompt(null); }}
+                  className="border border-[#C8CDD2] bg-white px-4 py-2 text-sm font-medium text-[#1F2933] hover:bg-[#F5F7F8] transition-colors disabled:opacity-50"
+                >
+                  Discard
+                </button>
+                <button
+                  type="button"
+                  disabled={releaseSaving}
+                  onClick={async () => {
+                    const saver = metadataSaverRef.current;
+                    setReleaseSaving(true);
+                    const ok = saver ? await saver.save() : true;
+                    setReleaseSaving(false);
+                    releasePrompt.resolve(ok);
+                    setReleasePrompt(null);
+                  }}
+                  className="inline-flex items-center gap-2 bg-[#287EAD] px-4 py-2 text-sm font-medium text-white hover:bg-[#206D99] transition-colors disabled:opacity-50"
+                >
+                  {releaseSaving && <Loader2 className="w-4 h-4 animate-spin" />}
+                  Save &amp; check in
+                </button>
+              </div>
             </div>
           </div>
         </div>
@@ -1974,64 +1979,69 @@ export default function DocumentDetailPage() {
         const canConfirm =
           removeConfirmText.trim().toLowerCase() === "remove" && !deleteRelationshipMutation.isPending;
         return (
-          <div className="fixed inset-0 z-[60] flex items-center justify-center bg-foreground/40 backdrop-blur-sm p-4">
-            <div className="w-full max-w-md rounded-2xl border border-border bg-card p-6 shadow-elegant">
-              <div className="flex items-start gap-3">
-                <div className="flex h-9 w-9 shrink-0 items-center justify-center rounded-xl bg-destructive/15 text-destructive">
-                  <Trash2 className="h-4 w-4" />
+          <div className="fixed inset-0 z-[60] flex items-center justify-center bg-black/50 p-4">
+            <div className="w-full max-w-md border border-[#C8CDD2] bg-white shadow-xl">
+              {/* Header */}
+              <div className="flex items-center gap-3 border-b border-[#C8CDD2] bg-[#287EAD] px-5 py-4">
+                <div className="flex h-9 w-9 shrink-0 items-center justify-center border border-white/25 bg-white/10">
+                  <Trash2 className="h-4 w-4 text-white" />
                 </div>
-                <div className="min-w-0">
-                  <h4 className="text-base font-semibold text-foreground">Remove this link?</h4>
-                  <p className="mt-0.5 text-sm text-muted-foreground">
-                    This removes the relationship between the two documents. The system may re-suggest it later if it still matches the configured rules.
+                <div>
+                  <h4 className="text-base font-semibold text-white">Remove this link?</h4>
+                  <p className="text-xs text-white/75 mt-0.5">This action cannot be undone automatically.</p>
+                </div>
+              </div>
+
+              <div className="p-5 space-y-4">
+                <p className="text-sm text-[#5E6870]">
+                  This removes the relationship between the two documents. The system may re-suggest it later if it still matches the configured rules.
+                </p>
+
+                <div className="border border-[#C8CDD2] bg-[#F5F7F8] px-4 py-3">
+                  <p className="text-xs font-semibold uppercase tracking-wide text-[#287EAD]">
+                    {describeRelationship(relationshipToRemove)}
+                  </p>
+                  <p className="mt-1 truncate text-sm font-bold text-[#1F2933]" title={related.title}>
+                    {related.title}
+                  </p>
+                  <p className="mt-0.5 truncate font-mono text-xs text-[#5E6870]">
+                    {related.reference_number}
                   </p>
                 </div>
-              </div>
 
-              <div className="mt-4 rounded-xl border border-border bg-muted/40 px-4 py-3">
-                <p className="text-xs font-semibold uppercase tracking-wide text-[#287EAD]">
-                  {describeRelationship(relationshipToRemove)}
-                </p>
-                <p className="mt-1 truncate text-sm font-bold text-foreground" title={related.title}>
-                  {related.title}
-                </p>
-                <p className="mt-0.5 truncate font-mono text-xs text-muted-foreground">
-                  {related.reference_number}
-                </p>
-              </div>
+                <div>
+                  <label className="text-sm text-[#5E6870]">
+                    Type <span className="font-mono font-semibold text-[#1F2933]">remove</span> to confirm
+                  </label>
+                  <input
+                    value={removeConfirmText}
+                    onChange={(e) => setRemoveConfirmText(e.target.value)}
+                    className="mt-2 h-9 w-full border border-[#AEB5BB] bg-white px-3 text-sm text-[#1F2933] outline-none focus:border-[#287EAD] focus:ring-1 focus:ring-[#287EAD]"
+                    placeholder="remove"
+                    autoFocus
+                    onKeyDown={(e) => { if (e.key === "Enter" && canConfirm) deleteRelationshipMutation.mutate(relationshipToRemove.id); }}
+                  />
+                </div>
 
-              <div className="mt-4">
-                <label className="text-sm text-muted-foreground">
-                  Type <span className="font-mono font-semibold text-foreground">remove</span> to confirm
-                </label>
-                <input
-                  value={removeConfirmText}
-                  onChange={(e) => setRemoveConfirmText(e.target.value)}
-                  className="mt-2 h-9 w-full rounded-lg border border-[#AEB5BB] bg-white px-3 text-sm text-[#1F2933] outline-none focus:border-[#287EAD] focus:ring-1 focus:ring-[#287EAD]"
-                  placeholder="remove"
-                  autoFocus
-                  onKeyDown={(e) => { if (e.key === "Enter" && canConfirm) deleteRelationshipMutation.mutate(relationshipToRemove.id); }}
-                />
-              </div>
-
-              <div className="mt-5 flex justify-end gap-2">
-                <button
-                  type="button"
-                  disabled={deleteRelationshipMutation.isPending}
-                  onClick={() => { setRelationshipToRemove(null); setRemoveConfirmText(""); }}
-                  className="btn-secondary"
-                >
-                  Cancel
-                </button>
-                <button
-                  type="button"
-                  disabled={!canConfirm}
-                  onClick={() => deleteRelationshipMutation.mutate(relationshipToRemove.id)}
-                  className="inline-flex items-center gap-2 rounded-lg bg-destructive px-4 py-2 text-sm font-medium text-white hover:bg-destructive/90 disabled:cursor-not-allowed disabled:opacity-50"
-                >
-                  {deleteRelationshipMutation.isPending ? <Loader2 className="h-4 w-4 animate-spin" /> : <Trash2 className="h-4 w-4" />}
-                  Remove link
-                </button>
+                <div className="flex justify-end gap-2 pt-1 border-t border-[#C8CDD2]">
+                  <button
+                    type="button"
+                    disabled={deleteRelationshipMutation.isPending}
+                    onClick={() => { setRelationshipToRemove(null); setRemoveConfirmText(""); }}
+                    className="border border-[#C8CDD2] bg-white px-4 py-2 text-sm font-medium text-[#1F2933] hover:bg-[#F5F7F8] transition-colors"
+                  >
+                    Cancel
+                  </button>
+                  <button
+                    type="button"
+                    disabled={!canConfirm}
+                    onClick={() => deleteRelationshipMutation.mutate(relationshipToRemove.id)}
+                    className="inline-flex items-center gap-2 bg-red-600 px-4 py-2 text-sm font-medium text-white hover:bg-red-700 disabled:cursor-not-allowed disabled:opacity-50 transition-colors"
+                  >
+                    {deleteRelationshipMutation.isPending ? <Loader2 className="h-4 w-4 animate-spin" /> : <Trash2 className="h-4 w-4" />}
+                    Remove link
+                  </button>
+                </div>
               </div>
             </div>
           </div>

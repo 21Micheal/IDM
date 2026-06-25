@@ -119,27 +119,26 @@ function DuplicateGroupModal({
   });
 
   return (
-    <div className="fixed inset-0 z-[60] flex items-center justify-center bg-foreground/40 backdrop-blur-sm p-4">
-      <div className="w-full max-w-md bg-card rounded-2xl overflow-hidden border border-border"
-           style={{ boxShadow: "var(--shadow-elegant)" }}>
+    <div className="fixed inset-0 z-[60] flex items-center justify-center bg-black/50 p-4">
+      <div className="w-full max-w-md bg-white border border-[#C8CDD2]">
         {/* Header */}
-        <div className="flex items-center justify-between px-6 py-5 border-b border-border">
+        <div className="flex items-center justify-between px-6 py-5 border-b border-[#C8CDD2] bg-[#287EAD]">
           <div className="flex items-center gap-3">
-            <div className="w-9 h-9 rounded-xl bg-accent/15 flex items-center justify-center flex-shrink-0">
-              <Copy className="w-4 h-4 text-accent" />
+            <div className="flex h-9 w-9 items-center justify-center border border-white/25 bg-white/10 flex-shrink-0">
+              <Copy className="w-4 h-4 text-white" />
             </div>
             <div>
-              <h2 className="font-semibold text-base text-foreground">Duplicate group</h2>
-              <p className="text-xs text-muted-foreground">Copies name, description and all permission rules.</p>
+              <h2 className="font-semibold text-base text-white">Duplicate group</h2>
+              <p className="text-xs text-white/75">Copies name, description and all permission rules.</p>
             </div>
           </div>
-          <button onClick={onClose} className="p-1.5 text-muted-foreground hover:text-foreground rounded-lg hover:bg-muted transition-colors">
+          <button onClick={onClose} className="p-1.5 text-white/70 hover:text-white hover:bg-white/10 transition-colors">
             <X className="w-4 h-4" />
           </button>
         </div>
 
         {/* Source badge */}
-        <div className="mx-6 mt-5 flex items-center gap-2 rounded-xl border border-border bg-muted/40 px-4 py-3">
+        <div className="mx-6 mt-5 flex items-center gap-2 border border-[#C8CDD2] bg-[#F5F7F8] px-4 py-3">
           <Shield className="w-4 h-4 text-accent flex-shrink-0" />
           <div className="min-w-0">
             <p className="text-xs text-muted-foreground">Duplicating</p>
@@ -284,7 +283,7 @@ function PermissionMatrix({
 
   return (
     <div className="space-y-6">
-      <div className="flex items-center gap-3 text-sm text-foreground bg-[#287EAD]/10 border border-[#287EAD]/30 rounded-xl p-4">
+      <div className="flex items-center gap-3 text-sm text-[#1F2933] bg-[#EEF6FB] border border-[#BDE3F5] p-4">
         <Info className="w-5 h-5 flex-shrink-0 text-[#287EAD]" />
         <span>
           {singleStage
@@ -294,7 +293,7 @@ function PermissionMatrix({
       </div>
 
       {/* Fallback (all document types) toggle */}
-      <label className="flex items-start gap-3 rounded-xl border border-border bg-card p-4 cursor-pointer">
+      <label className="flex items-start gap-3 border border-[#C8CDD2] bg-white p-4 cursor-pointer">
         <input
           type="checkbox"
           checked={useGlobal}
@@ -320,10 +319,10 @@ function PermissionMatrix({
                 title={stage.description}
                 onClick={() => setActiveStage(stage.value)}
                 className={clsx(
-                  "px-4 py-2 rounded-lg text-sm font-medium border transition-colors",
+                  "px-4 py-2 text-sm font-medium border transition-colors",
                   activeStage === stage.value
                     ? "bg-[#287EAD] text-white border-[#287EAD]"
-                    : "bg-card text-foreground border-border hover:border-[#287EAD]/50"
+                    : "bg-white text-[#1F2933] border-[#C8CDD2] hover:border-[#287EAD]/50"
                 )}
               >
                 {stage.label}
@@ -336,7 +335,7 @@ function PermissionMatrix({
         </>
       )}
 
-      <div className="overflow-x-auto rounded-xl border border-border">
+      <div className="overflow-x-auto border border-[#C8CDD2]">
         <table className="w-full text-sm min-w-[900px]">
           <thead>
             <tr className="bg-muted/60 border-b border-border">
@@ -531,25 +530,25 @@ function GroupDetail({
   const currentHead = groupDetail?.head ?? null;
 
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center bg-foreground/40 backdrop-blur-sm p-4">
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 p-4">
       <div
-        className="w-full max-w-4xl bg-card rounded-2xl overflow-hidden max-h-[92vh] flex flex-col border border-border"
+        className="w-full max-w-4xl bg-white overflow-hidden max-h-[92vh] flex flex-col border border-[#C8CDD2] shadow-xl"
         style={{ boxShadow: "var(--shadow-elegant)" }}
       >
         {/* Header */}
-        <div className="flex items-center justify-between px-8 py-5 border-b border-border bg-muted/40">
+        <div className="flex items-center justify-between px-8 py-5 border-b border-[#C8CDD2] bg-[#287EAD]">
           <div className="flex items-center gap-4">
-            <div className="w-11 h-11 rounded-xl bg-accent/15 flex items-center justify-center">
-              <Shield className="w-5 h-5 text-accent" />
+            <div className="flex h-11 w-11 items-center justify-center border border-white/25 bg-white/10">
+              <Shield className="w-5 h-5 text-white" />
             </div>
             <div>
-              <h2 className="font-semibold text-xl text-foreground tracking-tight">{group.name}</h2>
+              <h2 className="font-semibold text-xl text-white tracking-tight">{group.name}</h2>
               {isHodGroup && (
-                <p className="text-xs font-semibold uppercase tracking-widest text-accent mt-1">
+                <p className="text-xs font-semibold uppercase tracking-widest text-white/80 mt-1">
                   Synced from department heads
                 </p>
               )}
-              {group.description && <p className="text-sm text-muted-foreground">{group.description}</p>}
+              {group.description && <p className="text-sm text-white/75">{group.description}</p>}
             </div>
           </div>
           <div className="flex items-center gap-2">
@@ -561,14 +560,14 @@ function GroupDetail({
                   }
                 }}
                 disabled={deleteMutation.isPending}
-                className="px-3 py-2 rounded-lg text-sm font-semibold text-destructive hover:bg-destructive/10 transition-colors disabled:opacity-50"
+                className="px-3 py-2 text-sm font-semibold text-white/80 hover:text-white hover:bg-white/10 transition-colors disabled:opacity-50"
               >
                 {deleteMutation.isPending ? "Deleting..." : "Delete"}
               </button>
             )}
             <button
               onClick={onClose}
-              className="p-2 text-muted-foreground hover:text-foreground hover:bg-muted rounded-lg transition-colors"
+              className="p-2 text-white/70 hover:text-white hover:bg-white/10 transition-colors"
             >
               <X className="w-5 h-5" />
             </button>
@@ -576,7 +575,7 @@ function GroupDetail({
         </div>
 
         {/* Tabs */}
-        <div className="border-b border-border px-8">
+        <div className="border-b border-[#C8CDD2] px-8 bg-white">
           <nav className="-mb-px flex gap-8">
             {[
               { id: "permissions", label: "Permissions", icon: Shield },
@@ -588,8 +587,8 @@ function GroupDetail({
                 className={clsx(
                   "flex items-center gap-2 px-1 py-4 text-sm font-medium border-b-2 transition-colors -mb-px",
                   tab === id
-                    ? "border-accent text-accent"
-                    : "border-transparent text-muted-foreground hover:text-foreground"
+                    ? "border-[#287EAD] text-[#287EAD]"
+                    : "border-transparent text-[#5E6870] hover:text-[#1F2933]"
                 )}
               >
                 <Icon className="w-4 h-4" />
@@ -600,11 +599,11 @@ function GroupDetail({
         </div>
 
         {/* Content Area */}
-        <div className="flex-1 overflow-y-auto p-8 bg-background">
+        <div className="flex-1 overflow-y-auto p-8 bg-[#F5F7F8]">
           {tab === "permissions" && (
             <div className="space-y-6">
               {/* Sees-all-documents (auditor) toggle */}
-              <label className="flex items-start gap-3 rounded-xl border border-border bg-card p-4 cursor-pointer">
+              <label className="flex items-start gap-3 border border-[#C8CDD2] bg-white p-4 cursor-pointer">
                 <input
                   type="checkbox"
                   checked={Boolean(groupDetail?.sees_all_documents ?? group.sees_all_documents)}
@@ -640,8 +639,8 @@ function GroupDetail({
                 <div className="mb-6">
                   <h4 className="text-sm font-semibold text-foreground mb-2">Designated approver</h4>
                   {currentHead ? (
-                    <div className="flex items-center gap-4 p-4 bg-accent/10 border border-accent/30 rounded-xl">
-                      <div className="w-10 h-10 rounded-full bg-accent/20 flex items-center justify-center text-accent text-sm font-bold flex-shrink-0">
+                    <div className="flex items-center gap-4 p-4 bg-[#EEF6FB] border border-[#BDE3F5]">
+                      <div className="flex h-10 w-10 items-center justify-center border border-[#BDE3F5] bg-[#287EAD] text-white text-sm font-bold flex-shrink-0">
                         {currentHead.full_name.split(" ").map((n: string) => n[0]).join("").slice(0, 2)}
                       </div>
                       <div className="flex-1 min-w-0">
@@ -661,13 +660,13 @@ function GroupDetail({
                       </div>
                     </div>
                   ) : (
-                    <div className="border border-dashed border-border rounded-xl p-4 text-sm text-muted-foreground">No approver set for this group.</div>
+                    <div className="border border-dashed border-[#C8CDD2] p-4 text-sm text-[#5E6870]">No approver set for this group.</div>
                   )}
                 </div>
                 <div className="space-y-2">
                   {safeMembers.map((m) => (
-                    <div key={m.id} className="flex items-center gap-4 p-4 bg-card border border-border rounded-xl hover:border-accent/40 transition-colors group">
-                      <div className="w-10 h-10 rounded-full bg-accent/15 flex items-center justify-center text-accent text-sm font-bold">
+                    <div key={m.id} className="flex items-center gap-4 p-4 bg-white border border-[#C8CDD2] hover:border-[#287EAD]/40 transition-colors group">
+                      <div className="flex h-10 w-10 items-center justify-center border border-[#C8CDD2] bg-[#EEF6FB] text-[#287EAD] text-sm font-bold flex-shrink-0">
                         {m.user.full_name.split(" ").map((n) => n[0]).join("").slice(0, 2)}
                       </div>
                       <div className="flex-1 min-w-0">
@@ -705,7 +704,7 @@ function GroupDetail({
                     </div>
                   ))}
                   {!members?.length && (
-                    <div className="text-center py-12 text-muted-foreground border border-dashed border-border rounded-xl text-sm">
+                    <div className="text-center py-12 text-[#5E6870] border border-dashed border-[#C8CDD2] text-sm">
                       No members yet. Add some from below.
                     </div>
                   )}
@@ -716,7 +715,7 @@ function GroupDetail({
               <div>
                 <h3 className="font-semibold text-base text-foreground mb-4">Add members</h3>
                 {isHodGroup && (
-                  <div className="mb-4 rounded-xl border border-accent/30 bg-accent/10 p-4 text-sm text-foreground">
+                  <div className="mb-4 border border-[#BDE3F5] bg-[#EEF6FB] p-4 text-sm text-[#1F2933]">
                     HOD group membership is managed by setting a head on each department.
                   </div>
                 )}
@@ -737,7 +736,7 @@ function GroupDetail({
                         key={u.id}
                         className="flex items-center gap-4 p-4 hover:bg-muted/40 transition-colors"
                       >
-                        <div className="w-10 h-10 rounded-full bg-muted flex items-center justify-center text-muted-foreground text-sm font-bold">
+                        <div className="w-10 h-10 inline-flex bg-muted flex items-center justify-center text-muted-foreground text-sm font-bold">
                           {u.full_name.split(" ").map((n) => n[0]).join("").slice(0, 2)}
                         </div>
                         <div className="flex-1 min-w-0">
@@ -835,7 +834,7 @@ export default function GroupsPage() {
 
       {/* Create Form */}
       {showCreate && (
-        <div className="card p-6 max-w-lg mb-8">
+        <div className="border border-[#C8CDD2] bg-white p-6 max-w-lg mb-8">
           <h2 className="text-base font-semibold mb-4 text-foreground">Create new group</h2>
           <div className="space-y-4">
             <div>
@@ -877,9 +876,9 @@ export default function GroupsPage() {
       {/* Groups Grid */}
       <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-5">
         {isLoading && Array.from({ length: 6 }).map((_, i) => (
-          <div key={i} className="card p-6 animate-pulse">
-            <div className="h-6 bg-muted rounded w-3/4 mb-4" />
-            <div className="h-4 bg-muted rounded w-1/2" />
+          <div key={i} className="border border-[#C8CDD2] bg-white p-6 animate-pulse">
+            <div className="h-6 bg-[#EDEDED] w-3/4 mb-4" />
+            <div className="h-4 bg-[#EDEDED] w-1/2" />
           </div>
         ))}
 
@@ -892,20 +891,19 @@ export default function GroupsPage() {
             <div
               key={group.id}
               onClick={() => setSelected(group)}
-              className="card p-6 hover:border-accent/40 transition-all duration-200 cursor-pointer group"
-              style={{ boxShadow: "var(--shadow-card)" }}
+              className="border border-[#C8CDD2] bg-white p-6 hover:border-[#287EAD]/40 hover:bg-[#F5F7F8] transition-colors cursor-pointer group"
             >
               <div className="flex items-start justify-between">
                 <div className="flex items-center gap-3">
-                  <div className="w-12 h-12 rounded-xl bg-accent/15 flex items-center justify-center flex-shrink-0">
-                    <Shield className="w-6 h-6 text-accent" />
+                  <div className="flex h-12 w-12 items-center justify-center border border-[#C8CDD2] bg-[#EEF6FB] flex-shrink-0">
+                    <Shield className="w-6 h-6 text-[#287EAD]" />
                   </div>
                   <div>
                     <h3 className="font-semibold text-lg text-foreground group-hover:text-accent transition-colors">
                       {group.name}
                     </h3>
                     {isHodGroup && (
-                      <span className="inline-flex items-center rounded-full bg-accent/15 px-2.5 py-1 text-[11px] font-semibold text-accent mt-2">
+                      <span className="inline-flex items-center inline-flex bg-accent/15 px-2.5 py-1 text-[11px] font-semibold text-accent mt-2">
                         Synced from department heads
                       </span>
                     )}
@@ -933,7 +931,7 @@ export default function GroupsPage() {
                         e.stopPropagation();
                         setDuplicatingGroup(group);
                       }}
-                      className="p-2 rounded-lg text-muted-foreground hover:text-accent hover:bg-accent/10 transition-colors opacity-0 group-hover:opacity-100"
+                      className="p-2 text-[#5E6870] hover:text-[#287EAD] hover:bg-[#EEF6FB] transition-colors opacity-0 group-hover:opacity-100"
                       title="Duplicate group"
                     >
                       <Copy className="w-4 h-4" />
@@ -949,7 +947,7 @@ export default function GroupsPage() {
                         }
                       }}
                       disabled={deleteGroupMutation.isPending}
-                      className="p-2 rounded-lg text-muted-foreground hover:text-destructive hover:bg-destructive/10 transition-colors opacity-0 group-hover:opacity-100"
+                      className="p-2 text-[#5E6870] hover:text-red-600 hover:bg-red-50 transition-colors opacity-0 group-hover:opacity-100"
                       title="Delete group"
                     >
                       <Trash2 className="w-4 h-4" />
