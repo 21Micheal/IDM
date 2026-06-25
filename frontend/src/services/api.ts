@@ -405,6 +405,10 @@ export const documentsAPI = {
   downloadAsPdf: (id: string) =>
     api.get(`/documents/${id}/download_as_pdf/`, { responseType: "blob" }),
 
+  /** Run a server-side PDF editor job (compress / convert); returns a Blob. */
+  pdfTool: (formData: FormData) =>
+    api.post("/documents/pdf-tool/", formData, { responseType: "blob" }),
+
   shareSelected: (data: {
     document_ids: string[];
     recipient_user_ids: string[];

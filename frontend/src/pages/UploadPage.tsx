@@ -17,7 +17,7 @@ import {
   type Path,
   type UseFormRegister,
 } from "react-hook-form";
-import { documentsAPI, documentTypesAPI, normalizeListResponse, templatesAPI } from "@/services/api";
+import { documentsAPI, documentTypesAPI, normalizeListResponse, templatesAPI, profileAPI } from "@/services/api";
 import {
   Upload, File, X, Loader2, ArrowRight, CheckCircle, Plus, Lock,
   Info, ScanLine, Sparkles, AlertCircle, ChevronRight, ShieldAlert,
@@ -887,6 +887,17 @@ function getCapturePreviewKind(file: File | null | undefined): CapturePreviewKin
   return "other";
 }
 
+// Office / HTML documents the editor can open by converting to PDF first.
+const OFFICE_EDIT_EXT = /\.(docx?|docm|dotx?|rtf|odt|xlsx?|xlsm|xlsb|ods|csv|pptx?|pptm|ppsx?|odp|html?|txt)$/i;
+function isOfficeEditable(file: File | null | undefined): boolean {
+  if (!file) return false;
+  return OFFICE_EDIT_EXT.test(file.name)
+    || /(officedocument|opendocument|msword|ms-excel|ms-powerpoint|text\/html)/i.test(file.type);
+}
+function isHtmlFile(file: File): boolean {
+  return /\.html?$/i.test(file.name) || file.type === "text/html";
+}
+
 function CapturePreviewPane({
   file,
   previewUrl,
@@ -894,6 +905,7 @@ function CapturePreviewPane({
   progress,
   compact = false,
   onEditPdf,
+  editLabel = "Edit PDF",
 }: {
   file: File | null;
   previewUrl: string | null;
@@ -901,6 +913,7 @@ function CapturePreviewPane({
   progress?: number;
   compact?: boolean;
   onEditPdf?: () => void;
+  editLabel?: string;
 }) {
   const kind = getCapturePreviewKind(file);
   const previewHeight = compact ? COMPACT_PREVIEW_HEIGHT : PREVIEW_HEIGHT;
@@ -915,14 +928,14 @@ function CapturePreviewPane({
           <p className="truncate text-xs text-[#5E6870]">{file?.name || "No file selected"}</p>
         </div>
         <div className="flex shrink-0 items-center gap-2">
-          {onEditPdf && kind === "pdf" && (
+          {onEditPdf && (
             <button
               type="button"
               onClick={onEditPdf}
               className="inline-flex items-center gap-1.5 border border-[#287EAD] bg-white px-2.5 py-1 text-[11px] font-semibold text-[#287EAD] hover:bg-[#EEF6FB]"
             >
               <Pencil className="h-3.5 w-3.5" />
-              Edit PDF
+              {editLabel}
             </button>
           )}
           {stateLabel && (
@@ -982,6 +995,11 @@ export default function UploadPage({ scanOnly = false }: UploadPageProps) {
   const user = useAuthStore((s) => s.user);
   const [droppedFile,      setDroppedFile]      = useState<File | null>(null);
   const [showPdfEditor,    setShowPdfEditor]    = useState(false);
+  // PDF bytes to open the editor with (set when an Office file is converted on
+  // open); null means open the staged file directly (it's already a PDF).
+  const [editorBytes,      setEditorBytes]      = useState<Uint8Array | null>(null);
+  const [editorIsOffice,   setEditorIsOffice]   = useState(false);
+  const [convertingForEditor, setConvertingForEditor] = useState(false);
   const [selectedTypeId,   setSelectedTypeId]   = useState("");
   const [uploadProgress,   setUploadProgress]   = useState(0);
   const [isScanned,        setIsScanned]         = useState(scanOnly);
@@ -1276,20 +1294,109 @@ export default function UploadPage({ scanOnly = false }: UploadPageProps) {
     if (file) setDroppedFile(file);
   }, []);
 
+  // Open the editor. PDFs open directly; Office/HTML files are converted to PDF
+  // on the backend first (the upload then proceeds as a PDF).
+  const handleEditClick = useCallback(async () => {
+    const file = droppedFile;
+    if (!file) return;
+    if (file.type === "application/pdf") {
+      setEditorBytes(null);
+      setEditorIsOffice(false);
+      setShowPdfEditor(true);
+      return;
+    }
+    setConvertingForEditor(true);
+    try {
+      const fd = new FormData();
+      fd.append("type", "convert");
+      fd.append("target", isHtmlFile(file) ? "html-to-pdf" : "office-to-pdf");
+      fd.append("file", file, file.name);
+      const res = await documentsAPI.pdfTool(fd);
+      const bytes = new Uint8Array(await (res.data as Blob).arrayBuffer());
+      setEditorBytes(bytes);
+      setEditorIsOffice(true);
+      setShowPdfEditor(true);
+    } catch (err) {
+      let message = "Couldn't convert this document for editing.";
+      const data = (err as { response?: { data?: unknown } })?.response?.data;
+      if (data instanceof Blob) {
+        try { message = JSON.parse(await data.text())?.detail || message; } catch { /* keep default */ }
+      } else {
+        message = extractApiError(err, message);
+      }
+      toast.error(message);
+    } finally {
+      setConvertingForEditor(false);
+    }
+  }, [droppedFile]);
+
   // Receive the edited PDF back from the editor and stage it for upload in place
   // of the original. The preview + (empty) title refresh via the droppedFile effect.
   const handleEditedPdf = useCallback(
     ({ blobs }: { blobs: Array<{ name: string; bytes: Uint8Array; mime: string }> }) => {
       const out = blobs[0];
       if (!out) return;
-      const baseName = (droppedFile?.name ?? "document").replace(/\.pdf$/i, "");
+      // The editor hands back either the edited PDF or a converted file
+      // (e.g. .docx). Stage it under the original base name with the new
+      // extension/type so the upload proceeds with that document.
+      const ext = out.name.match(/\.[^./\\]+$/)?.[0] || ".pdf";
+      const baseName = (droppedFile?.name ?? "document").replace(/\.[^./\\]+$/, "");
+      const mime = out.mime || "application/pdf";
       // `File` from lucide-react shadows the DOM constructor here, so use globalThis.
-      const edited = new globalThis.File([out.bytes as BlobPart], `${baseName}.pdf`, { type: "application/pdf" });
-      setDroppedFile(edited);
+      const staged = new globalThis.File([out.bytes as BlobPart], `${baseName}${ext}`, { type: mime });
+      setDroppedFile(staged);
       setShowPdfEditor(false);
-      toast.success("Edited PDF applied to this upload.");
+      setEditorBytes(null);
+      setEditorIsOffice(false);
+      toast.success(
+        ext.toLowerCase() === ".pdf"
+          ? "Edited PDF applied to this upload."
+          : `Converted ${ext.slice(1).toUpperCase()} applied to this upload.`,
+      );
     },
     [droppedFile],
+  );
+
+  // The user's saved signature, offered for one-click reuse in the editor's
+  // Sign tool. Fetched only once the editor is opened.
+  const { data: savedSignatureData } = useQuery({
+    queryKey: ["profile-signature"],
+    queryFn: () => profileAPI.getSignature().then((r) => r.data.signature ?? null),
+    enabled: showPdfEditor,
+    ...QUERY_FIVE_MIN_STALE,
+  });
+  const savedSignatures = useMemo(() => {
+    const src = savedSignatureData?.image_data || savedSignatureData?.image_url;
+    return src ? [{ id: String(savedSignatureData.id), src, label: "Saved signature" }] : [];
+  }, [savedSignatureData]);
+
+  // Server-side PDF editor jobs (compress / convert). Returns the processed
+  // bytes for the editor to download, or null with a toast on failure.
+  const handlePdfJob = useCallback(
+    async (job: { type: string; bytes: Uint8Array; filename: string; params: Record<string, unknown> }) => {
+      const fd = new FormData();
+      fd.append("type", job.type);
+      fd.append("file", new globalThis.Blob([job.bytes as BlobPart], { type: "application/pdf" }), job.filename || "document.pdf");
+      for (const [k, v] of Object.entries(job.params ?? {})) {
+        if (v != null) fd.append(k, String(v));
+      }
+      try {
+        const res = await documentsAPI.pdfTool(fd);
+        return new Uint8Array(await (res.data as Blob).arrayBuffer());
+      } catch (err) {
+        // The error body is a Blob (JSON) because the request used responseType:"blob".
+        let message = "This operation isn't available right now.";
+        const data = (err as { response?: { data?: unknown } })?.response?.data;
+        if (data instanceof Blob) {
+          try { message = JSON.parse(await data.text())?.detail || message; } catch { /* keep default */ }
+        } else {
+          message = extractApiError(err, message);
+        }
+        toast.error(message);
+        return null;
+      }
+    },
+    [],
   );
 
   const onDropRejected = useCallback((rejections: FileRejection[]) => {
@@ -1907,7 +2014,12 @@ export default function UploadPage({ scanOnly = false }: UploadPageProps) {
                 previewUrl={pdfPreviewUrl}
                 stateLabel={isScanned ? "Ready to scan" : "Ready"}
                 compact={false}
-                onEditPdf={() => setShowPdfEditor(true)}
+                onEditPdf={
+                  droppedFile.type === "application/pdf" || isOfficeEditable(droppedFile)
+                    ? handleEditClick
+                    : undefined
+                }
+                editLabel={droppedFile.type === "application/pdf" ? "Edit PDF" : "Edit as PDF"}
               />
             </div>
           )}
@@ -2379,14 +2491,16 @@ export default function UploadPage({ scanOnly = false }: UploadPageProps) {
       <div className="fixed inset-0 z-[70] flex flex-col bg-white">
         <div className="flex items-center justify-between gap-3 border-b border-[#C8CDD2] bg-[#F5F7F8] px-4 py-2">
           <div className="min-w-0">
-            <p className="text-sm font-bold text-[#1F2933]">Edit PDF before upload</p>
+            <p className="text-sm font-bold text-[#1F2933]">Edit before upload</p>
             <p className="truncate text-xs text-[#5E6870]">
-              <span className="font-semibold">Save</span> applies your edits to this upload · {droppedFile.name}
+              {editorIsOffice
+                ? <>Converted to PDF · <span className="font-semibold">Save</span> uploads it as a PDF · {droppedFile.name}</>
+                : <><span className="font-semibold">Save</span> applies your edits to this upload · {droppedFile.name}</>}
             </p>
           </div>
           <button
             type="button"
-            onClick={() => setShowPdfEditor(false)}
+            onClick={() => { setShowPdfEditor(false); setEditorBytes(null); setEditorIsOffice(false); }}
             className="inline-flex shrink-0 items-center gap-1.5 border border-[#C8CDD2] bg-white px-3 py-1.5 text-sm font-semibold text-[#5E6870] hover:bg-[#EEF3F7]"
           >
             <X className="h-4 w-4" /> Close without saving
@@ -2401,13 +2515,27 @@ export default function UploadPage({ scanOnly = false }: UploadPageProps) {
             }
           >
             <PdfEditor
-              initialFiles={[droppedFile]}
+              initialFiles={[editorIsOffice && editorBytes ? editorBytes : droppedFile]}
               signerName={[user?.first_name, user?.last_name].filter(Boolean).join(" ")}
+              savedSignatures={savedSignatures}
               onSave={handleEditedPdf}
-              disabledTools={["split", "compress", "convert", "protect", "unlock"]}
+              onJob={handlePdfJob}
+              disabledTools={editorIsOffice
+                ? ["split", "protect", "unlock", "convert"]
+                : ["split", "protect", "unlock"]}
               className="h-full"
             />
           </Suspense>
+        </div>
+      </div>
+    )}
+
+    {/* Converting an Office/HTML file to PDF before the editor opens */}
+    {convertingForEditor && (
+      <div className="fixed inset-0 z-[75] flex items-center justify-center bg-black/30">
+        <div className="flex items-center gap-3 rounded-xl bg-white px-6 py-4 shadow-2xl">
+          <Loader2 className="h-5 w-5 animate-spin text-[#287EAD]" />
+          <span className="text-sm font-medium">Converting to PDF for editing…</span>
         </div>
       </div>
     )}

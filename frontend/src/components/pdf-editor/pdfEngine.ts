@@ -333,20 +333,40 @@ async function stampAnnotations(
         break;
       }
       case "link": {
-        drawLink(doc, page, a as unknown as { url?: string }, x, y, w, h);
+        drawLink(doc, page, a as unknown as { url?: string }, x, y, w, h, fonts.regular);
         break;
       }
     }
   }
 }
 
-/** Low-level clickable URI link annotation. */
+/** A visible, clickable URI link: the URL drawn as blue underlined text inside
+ *  the box (the standard hyperlink look), plus the clickable URI annotation. */
 function drawLink(
   doc: PDFDocument,
   page: PDFPage,
   a: { url?: string },
   x: number, y: number, w: number, h: number,
+  font: PDFFont,
 ) {
+  const blue = rgb(0x28 / 255, 0x7e / 255, 0xad / 255);
+  const label = (a.url ?? "").trim() || "link";
+
+  // Size the URL text to fit the box (height first, then shrink to fit width).
+  let size = Math.max(6, h * 0.72);
+  const textW = font.widthOfTextAtSize(label, size);
+  if (textW > w && textW > 0) size = Math.max(4, size * (w / textW));
+  const baseline = y + (h - size) / 2 + size * 0.22;
+
+  page.drawText(label, { x: x + 1, y: baseline, size, font, color: blue });
+  // Underline for the hyperlink look.
+  const lw = Math.min(w, font.widthOfTextAtSize(label, size));
+  page.drawLine({
+    start: { x: x + 1, y: baseline - size * 0.14 },
+    end: { x: x + 1 + lw, y: baseline - size * 0.14 },
+    thickness: Math.max(0.5, size * 0.05), color: blue,
+  });
+
   if (!a.url) return;
   try {
     const ctx = doc.context;
@@ -489,6 +509,32 @@ export interface ExportOptions {
   flatten?: boolean;
 }
 
+/**
+ * Whether the working document is a single, untouched source — no annotations,
+ * no enrichment, original page order with no rotation/crop/deletes. In that
+ * case re-assembling through pdf-lib only inflates the file (and would undo a
+ * prior compression), so the export can return the source bytes verbatim.
+ */
+function isPristinePassthrough(
+  sources: SourceDocument[],
+  pages: EditorPage[],
+  annotations: Annotation[],
+  opts: ExportOptions,
+): boolean {
+  const hasOpts = Boolean(
+    opts.watermark || opts.pageNumbers || opts.headerFooter ||
+    opts.bates || opts.metadata || opts.flatten,
+  );
+  if (hasOpts || sources.length !== 1 || annotations.length > 0) return false;
+  const src = sources[0];
+  const visible = pages.filter((p) => !p.deleted);
+  return (
+    visible.length === src.pageCount &&
+    visible.every((p, i) =>
+      p.sourceId === src.id && p.sourceIndex === i && (p.rotation % 360) === 0 && !p.crop)
+  );
+}
+
 /** The main export path: assemble + stamp + enrich → final bytes. */
 export async function exportDocument(
   sources: SourceDocument[],
@@ -496,6 +542,11 @@ export async function exportDocument(
   annotations: Annotation[],
   opts: ExportOptions = {},
 ): Promise<Uint8Array> {
+  // Fast path: hand back the original bytes untouched so a compressed (or
+  // already-optimised) document isn't re-inflated by a pdf-lib re-save.
+  if (isPristinePassthrough(sources, pages, annotations, opts)) {
+    return sources[0].bytes;
+  }
   const { doc, order } = await assemble(sources, pages);
   await stampAnnotations(doc, order, annotations);
   if (opts.watermark) await applyWatermark(doc, opts.watermark);

@@ -27,6 +27,8 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     tesseract-ocr \
     tesseract-ocr-eng \
     poppler-utils \
+    # Ghostscript for deep PDF compression (PDF editor "Compress" job):
+    ghostscript \
     # LibreOffice for Office document conversion:
     libreoffice \
     # Runtime dependencies for PaddleOCR/OpenCV:

@@ -110,6 +110,10 @@ export default function AnnotationCanvas({
     startX: number; startY: number; orig: Annotation;
     /** Original positions for each annotation in a group-move */
     origMulti?: Record<string, { x: number; y: number }>;
+    /** Whether the pointer actually moved (vs a click in place). */
+    moved?: boolean;
+    /** Whether this annotation was already the (single) selection at mousedown. */
+    wasSelected?: boolean;
   } | null>(null);
 
   // ── page render ────────────────────────────────────────────────────────
@@ -317,6 +321,12 @@ export default function AnnotationCanvas({
 
     if (d.mode === "move") {
       const dx = x - d.startX, dy = y - d.startY;
+      // Treat sub-threshold motion as a click (so a plain click can deselect).
+      if (!d.moved) {
+        if (Math.abs(dx) <= 0.004 && Math.abs(dy) <= 0.004) return;
+        d.moved = true;
+        onInteractionStart?.();
+      }
       if (d.origMulti) {
         // Group move — update all selected annotations by their individual delta
         pageAnns.filter((a) => allSelected.has(a.id)).forEach((a) => {
@@ -342,12 +352,16 @@ export default function AnnotationCanvas({
   };
 
   const endDrag = () => {
-    if (drag.current?.mode === "create" && draft) {
+    const d = drag.current;
+    if (d?.mode === "create" && draft) {
       if (draft.width >= (draft.kind === "ink" ? 0 : 0.01) || draft.kind === "ink") {
         onCreate(draft); onSelect(draft.id); onCommit?.();
       }
       setDraft(null);
     }
+    // Clicking an already-selected annotation without dragging deselects it —
+    // a forgiving way to drop a selection and avoid unintended edits.
+    if (d?.mode === "move" && !d.moved && d.wasSelected) onSelect(null);
     drag.current = null;
   };
 
@@ -375,8 +389,10 @@ export default function AnnotationCanvas({
 
     // Normal click — if this annotation is already in the multi-selection,
     // start a GROUP move; otherwise clear multi-select and move this one.
+    // (onInteractionStart fires on the first real move, not here, so a plain
+    // click that just deselects doesn't push a redundant undo step.)
+    const wasSelected = a.id === selectedId;
     onSelect(a.id);
-    onInteractionStart?.();
     const { x, y } = toFrac(e.clientX, e.clientY);
 
     const isGrouped = allSelected.has(a.id) && allSelected.size >= 2;
@@ -391,7 +407,8 @@ export default function AnnotationCanvas({
     // Clear multi if clicking an annotation that was NOT in the selection
     if (!allSelected.has(a.id)) setMultiIds(new Set());
 
-    drag.current = { mode: "move", startX: x, startY: y, orig: a, origMulti };
+    // Only allow click-to-deselect for a lone selection (not a group move).
+    drag.current = { mode: "move", startX: x, startY: y, orig: a, origMulti, moved: false, wasSelected: wasSelected && !isGrouped };
   };
 
   const beginResize = (e: React.MouseEvent, a: Annotation, handle: Handle) => {
@@ -796,7 +813,18 @@ function AnnotationView({
       </svg>
     );
   } else if (a.kind === "link") {
-    inner = <div className="h-full w-full border border-dashed border-[#287EAD] bg-[#287EAD]/10" />;
+    const url = (a as { url?: string }).url ?? "";
+    const linkPx = Math.max(8, a.height * canvasRect.height * 0.66);
+    inner = (
+      <div className="flex h-full w-full items-center overflow-hidden border border-dashed border-[#287EAD] bg-[#287EAD]/10 px-1">
+        <span
+          className="truncate font-medium text-[#287EAD] underline"
+          style={{ fontSize: linkPx, lineHeight: 1 }}
+        >
+          {url || "link"}
+        </span>
+      </div>
+    );
   }
 
   const boxStyle: React.CSSProperties = a.kind === "text"

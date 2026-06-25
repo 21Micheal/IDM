@@ -21,6 +21,7 @@ from .folder_views import (
     DocumentFavouriteViewSet,
 )
 from .signature_views import SignatureRequestViewSet
+from .pdf_tools_views import PdfToolView
 
 router = DefaultRouter()
 router.register(r"bulk-uploads", BulkUploadViewSet, basename="bulk-upload")
@@ -76,6 +77,13 @@ urlpatterns = [
         "settings/",
         DMSSettingsView.as_view(),
         name="document-settings",
+    ),
+    # In-app PDF editor server-side jobs (compress / convert). Must precede the
+    # router so it isn't captured as a document <pk>.
+    path(
+        "pdf-tool/",
+        PdfToolView.as_view(),
+        name="document-pdf-tool",
     ),
     *router.urls,
 ]

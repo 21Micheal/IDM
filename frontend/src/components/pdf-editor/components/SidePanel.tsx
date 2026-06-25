@@ -4,6 +4,7 @@
  * the matching callback when applied.
  */
 import { useRef, useState } from "react";
+import { X, ArrowUp, ArrowDown } from "lucide-react";
 import clsx from "clsx";
 import type {
   BatesConfig, CompressLevel, ConvertConfig, HeaderFooterConfig,
@@ -86,25 +87,99 @@ const PositionGrid = ({ value, onChange }: { value: PagePosition; onChange: (p: 
 );
 
 /* ---------- panels ---------- */
-function MergePanel({ onMerge }: { onMerge: (f: File[]) => void }) {
+/** Pick files first, review the list, then confirm — so the action that
+ *  actually merges/inserts is explicit (not a silent on-pick side effect). */
+function FilePickPanel({
+  title, hint, accept, chooseLabel, confirmLabel, onConfirm,
+}: {
+  title: string; hint: string; accept: string;
+  chooseLabel: string; confirmLabel: (n: number) => string;
+  onConfirm: (files: File[]) => void;
+}) {
   const ref = useRef<HTMLInputElement>(null);
+  const [files, setFiles] = useState<File[]>([]);
+
+  const move = (i: number, dir: -1 | 1) => {
+    setFiles((prev) => {
+      const j = i + dir;
+      if (j < 0 || j >= prev.length) return prev;
+      const next = [...prev];
+      [next[i], next[j]] = [next[j], next[i]];
+      return next;
+    });
+  };
+
   return (
-    <Wrap title="Merge PDFs" hint="Pick additional PDFs to append after the current document.">
-      <input ref={ref} type="file" accept="application/pdf" multiple hidden
-        onChange={(e) => e.target.files && onMerge([...e.target.files])} />
-      <Apply onClick={() => ref.current?.click()} label="Choose PDFs to add" />
+    <Wrap title={title} hint={hint}>
+      <input
+        ref={ref} type="file" accept={accept} multiple hidden
+        onChange={(e) => { if (e.target.files) setFiles((prev) => [...prev, ...e.target.files!]); e.target.value = ""; }}
+      />
+      <button
+        onClick={() => ref.current?.click()}
+        className="w-full rounded-md border border-dashed border-[#C8CDD2] px-3 py-2 text-sm text-[#5E6870] hover:border-[#287EAD] hover:bg-[#EEF6FB]"
+      >
+        {chooseLabel}
+      </button>
+
+      {files.length > 0 && (
+        <>
+          <p className="text-xs font-medium uppercase tracking-wide text-[#9AA4AD]">
+            Order — top is added first
+          </p>
+          <ul className="space-y-1">
+            {files.map((f, i) => (
+              <li key={`${f.name}-${i}`} className="flex items-center gap-1.5 rounded border border-[#E3E7EA] bg-white px-2 py-1.5 text-sm">
+                <span className="w-4 shrink-0 text-center text-xs font-semibold text-[#5E6870]">{i + 1}</span>
+                <span className="flex-1 truncate text-[#1F2933]" title={f.name}>{f.name}</span>
+                <button onClick={() => move(i, -1)} disabled={i === 0}
+                  className="shrink-0 rounded p-0.5 text-[#5E6870] hover:text-[#287EAD] disabled:opacity-30" title="Move up">
+                  <ArrowUp className="h-3.5 w-3.5" />
+                </button>
+                <button onClick={() => move(i, 1)} disabled={i === files.length - 1}
+                  className="shrink-0 rounded p-0.5 text-[#5E6870] hover:text-[#287EAD] disabled:opacity-30" title="Move down">
+                  <ArrowDown className="h-3.5 w-3.5" />
+                </button>
+                <button onClick={() => setFiles((prev) => prev.filter((_, j) => j !== i))}
+                  className="shrink-0 rounded p-0.5 text-[#9AA4AD] hover:text-red-600" title="Remove">
+                  <X className="h-3.5 w-3.5" />
+                </button>
+              </li>
+            ))}
+          </ul>
+          <p className="text-[11px] text-[#9AA4AD]">
+            Added after the current document. Fine-tune any page order afterwards in the Pages tab.
+          </p>
+          <Apply onClick={() => { onConfirm(files); setFiles([]); }} label={confirmLabel(files.length)} />
+        </>
+      )}
     </Wrap>
   );
 }
 
-function InsertPanel({ onInsert }: { onInsert: (f: File[]) => void }) {
-  const ref = useRef<HTMLInputElement>(null);
+function MergePanel({ onMerge }: { onMerge: (f: File[]) => void }) {
   return (
-    <Wrap title="Insert pages" hint="Insert pages from another PDF or images into this document.">
-      <input ref={ref} type="file" accept="application/pdf,image/*" multiple hidden
-        onChange={(e) => e.target.files && onInsert([...e.target.files])} />
-      <Apply onClick={() => ref.current?.click()} label="Choose files to insert" />
-    </Wrap>
+    <FilePickPanel
+      title="Merge PDFs"
+      hint="Choose PDFs to append after the current document, then merge."
+      accept="application/pdf"
+      chooseLabel="+ Choose PDFs to add"
+      confirmLabel={(n) => (n ? `Merge ${n} PDF${n === 1 ? "" : "s"}` : "Merge")}
+      onConfirm={onMerge}
+    />
+  );
+}
+
+function InsertPanel({ onInsert }: { onInsert: (f: File[]) => void }) {
+  return (
+    <FilePickPanel
+      title="Insert pages"
+      hint="Choose PDFs or images to insert after the current page, then insert."
+      accept="application/pdf,image/*"
+      chooseLabel="+ Choose files to insert"
+      confirmLabel={(n) => (n ? `Insert ${n} file${n === 1 ? "" : "s"}` : "Insert")}
+      onConfirm={onInsert}
+    />
   );
 }
 
@@ -275,8 +350,6 @@ function ConvertPanel({ onApply }: { onApply: (c: ConvertConfig) => void }) {
           </optgroup>
           <optgroup label="To PDF">
             <option value="jpg-to-pdf">Images → PDF (in-browser)</option>
-            <option value="office-to-pdf">Word/Excel/PPT → PDF (backend)</option>
-            <option value="html-to-pdf">HTML → PDF (backend)</option>
           </optgroup>
         </select>
       </Field>

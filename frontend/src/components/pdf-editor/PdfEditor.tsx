@@ -23,7 +23,7 @@ import {
   ArrowUpRight, Pencil, Eraser, EyeOff, Link2, Stamp, Hash, PanelTop,
   FileText, Settings2, Shrink, RefreshCw, Lock, Unlock, Undo2, Redo2,
   ZoomIn, ZoomOut, Download, Save, ChevronLeft, ChevronRight, Loader2, X,
-  Shapes as ShapesIcon, ChevronDown,
+  Shapes as ShapesIcon, ChevronDown, Crop, Check,
 } from "lucide-react";
 import clsx from "clsx";
 import type {
@@ -39,6 +39,7 @@ import {
 import { evictRenderCache, rasterizeAll } from "./pdfRender";
 import PageOrganizer from "./components/PageOrganizer";
 import AnnotationCanvas, { type EditTool } from "./components/AnnotationCanvas";
+import CropView from "./components/CropView";
 import SidePanel from "./components/SidePanel";
 import SignaturePad from "../profile/SignaturePad";
 
@@ -50,6 +51,7 @@ const RAIL: Array<{ group: string; items: RailItem[] }> = [
     { id: "merge", label: "Merge", icon: Combine },
     { id: "split", label: "Split", icon: Scissors },
     { id: "insert", label: "Insert", icon: FilePlus2 },
+    { id: "crop", label: "Crop", icon: Crop },
   ]},
   { group: "Edit", items: [
     { id: "edit", label: "Select", icon: MousePointer2 },
@@ -83,6 +85,7 @@ const RAIL_TIPS: Partial<Record<ToolId, string>> = {
   merge: "Merge — append other PDFs after this document",
   split: "Split — break this document into multiple files",
   insert: "Insert — add pages from another PDF or images",
+  crop: "Crop — trim the current page's margins",
   edit: "Select — click any object to move, resize, or format it. Click existing PDF text to edit it inline.",
   text: "Text — click the page to place a text box, then start typing",
   image: "Image — pick an image then click the page to place it",
@@ -124,8 +127,22 @@ const SHAPE_PICKER: Array<{ id: EditTool; label: string; icon: typeof Square }> 
 
 interface Snapshot { pages: EditorPage[]; annotations: Annotation[] }
 
+function formatBytes(n: number): string {
+  if (n >= 1024 ** 2) return `${(n / 1024 ** 2).toFixed(1)} MB`;
+  if (n >= 1024) return `${(n / 1024).toFixed(0)} KB`;
+  return `${n} B`;
+}
+
+const MIME_BY_EXT: Record<string, string> = {
+  docx: "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+  xlsx: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+  pptx: "application/vnd.openxmlformats-officedocument.presentationml.presentation",
+  txt: "text/plain",
+  pdf: "application/pdf",
+};
+
 export default function PdfEditor({
-  initialFiles, signerName = "", onJob, onSave, disabledTools = [], className,
+  initialFiles, signerName = "", savedSignatures = [], onJob, onSave, disabledTools = [], className,
 }: PdfEditorProps) {
   const [sources, setSources] = useState<SourceDocument[]>([]);
   const [pages, setPages] = useState<EditorPage[]>([]);
@@ -145,11 +162,34 @@ export default function PdfEditor({
   const [imageSrc, setImageSrc] = useState<string | null>(null);
   const [showSignPad, setShowSignPad] = useState(false);
   const [busy, setBusy] = useState<string | null>(null);
+  // Transient success message (e.g. compression result), shown as a toast.
+  const [flash, setFlash] = useState<string | null>(null);
+  useEffect(() => {
+    if (!flash) return;
+    const t = window.setTimeout(() => setFlash(null), 5000);
+    return () => window.clearTimeout(t);
+  }, [flash]);
+
+  // A converted output awaiting the user's choice to Download a copy or Save it
+  // onward — the editor stays open until they pick. Holds one or more files
+  // (multi-page image exports produce several); only single-file results can be
+  // "used" as the upload.
+  const [pendingExport, setPendingExport] = useState<{
+    files: Array<{ name: string; bytes: Uint8Array; mime: string }>;
+    label: string;
+    canUseInUpload: boolean;
+  } | null>(null);
+  // Editing the document invalidates a pending conversion (it would be stale).
+  useEffect(() => { setPendingExport(null); }, [pages, annotations, sources]);
   const [past, setPast] = useState<Snapshot[]>([]);
   const [future, setFuture] = useState<Snapshot[]>([]);
+  // Guards the one-time initial load against React 18 StrictMode's double effect
+  // invocation, which would otherwise load every initial file twice (duplicates).
+  const loadedRef = useRef(false);
 
   useEffect(() => {
-    if (!initialFiles?.length) return;
+    if (loadedRef.current || !initialFiles?.length) return;
+    loadedRef.current = true;
     (async () => {
       setBusy("Loading…");
       for (let i = 0; i < initialFiles.length; i++) {
@@ -161,6 +201,7 @@ export default function PdfEditor({
   }, []);
 
   const visiblePages = useMemo(() => pages.filter((p) => !p.deleted), [pages]);
+  const redactCount = useMemo(() => annotations.filter((a) => a.kind === "redact").length, [annotations]);
   const activePage = visiblePages[Math.min(pageIdx, visiblePages.length - 1)];
   const activeSource = activePage && sources.find((s) => s.id === activePage.sourceId);
   const isOrganize = ORGANIZE_VIEW.includes(tool);
@@ -231,6 +272,8 @@ export default function PdfEditor({
   };
   const rotatePages = (ids: string[], delta: number) =>
     commit({ pages: pages.map((p) => ids.includes(p.id) ? { ...p, rotation: (((p.rotation + delta) % 360) + 360) % 360 } : p) });
+  const setPageCrop = (id: string, crop: EditorPage["crop"]) =>
+    commit({ pages: pages.map((p) => p.id === id ? { ...p, crop } : p) });
   const deletePages = (ids: string[]) =>
     commit({ pages: pages.map((p) => ids.includes(p.id) ? { ...p, deleted: true } : p) });
   const restorePages = (ids: string[]) =>
@@ -249,6 +292,12 @@ export default function PdfEditor({
     const bytes = await exportDocument(sources, subset, annotations);
     downloadBytes("extracted.pdf", bytes);
     setBusy(null);
+  };
+  // Open a page from the organizer straight into the edit canvas.
+  const openPageForEdit = (pageId: string) => {
+    const idx = visiblePages.findIndex((p) => p.id === pageId);
+    if (idx >= 0) setPageIdx(idx);
+    setTool("edit");
   };
 
   const createAnn = (a: Annotation) => commit({ annotations: [...annotations, a] });
@@ -307,8 +356,10 @@ export default function PdfEditor({
     } finally { setBusy(null); }
   };
 
+  // Save path: hand the document to the host (DMS) when onSave is wired,
+  // otherwise fall back to a local download. Used by Save + the enrich tools.
   const doExport = async (extra: Parameters<typeof exportDocument>[3] = {}, name = "edited.pdf") => {
-    setBusy("Exporting…");
+    setBusy(onSave ? "Saving…" : "Exporting…");
     try {
       const bytes = await exportDocument(sources, pages, annotations, extra);
       if (onSave) await onSave({ blobs: [{ name, bytes, mime: "application/pdf" }] });
@@ -316,11 +367,19 @@ export default function PdfEditor({
     } finally { setBusy(null); }
   };
 
-  const applyWatermark = (c: WatermarkConfig) => doExport({ watermark: c }, "watermarked.pdf");
-  const applyNumbers = (c: PageNumberConfig) => doExport({ pageNumbers: c }, "numbered.pdf");
-  const applyHF = (c: HeaderFooterConfig) => doExport({ headerFooter: c }, "header-footer.pdf");
-  const applyBates = (c: BatesConfig) => doExport({ bates: c }, "bates.pdf");
-  const applyMeta = (c: MetadataConfig) => doExport({ metadata: c }, "properties.pdf");
+  // Always writes a file to the user's computer, regardless of onSave.
+  const doDownload = async (extra: Parameters<typeof exportDocument>[3] = {}, name = "edited.pdf") => {
+    setBusy("Preparing download…");
+    try {
+      downloadBytes(name, await exportDocument(sources, pages, annotations, extra));
+    } finally { setBusy(null); }
+  };
+
+  const applyWatermark = (c: WatermarkConfig) => applyEnrich({ watermark: c }, "watermarked.pdf", "Watermark");
+  const applyNumbers = (c: PageNumberConfig) => applyEnrich({ pageNumbers: c }, "numbered.pdf", "Page numbers");
+  const applyHF = (c: HeaderFooterConfig) => applyEnrich({ headerFooter: c }, "header-footer.pdf", "Header & footer");
+  const applyBates = (c: BatesConfig) => applyEnrich({ bates: c }, "bates.pdf", "Bates numbering");
+  const applyMeta = (c: MetadataConfig) => applyEnrich({ metadata: c }, "properties.pdf", "Document properties");
 
   const doSplit = async (c: SplitConfig) => {
     setBusy("Splitting…");
@@ -331,16 +390,117 @@ export default function PdfEditor({
     } finally { setBusy(null); }
   };
 
-  const doCompress = async (level: CompressLevel) => {
-    if (level === "low" || level === "medium") {
-      setBusy("Compressing…");
-      try { downloadBytes("compressed.pdf", await compressLite(await currentBytes())); }
-      finally { setBusy(null); }
-    } else {
-      runJob({ type: "compress", params: { level } }, "compressed.pdf");
+  // Replace the whole working document with new bytes (flattening current pages
+  // + annotations into a single fresh source). Used by Compress so the result
+  // stays in the editor for the user to keep working / save back — not downloaded.
+  const replaceWorkingDoc = async (bytes: Uint8Array, name: string) => {
+    const src = await loadSource(bytes, name);
+    const newPages = await pagesForSource(src);
+    setPast((p) => [...p.slice(-49), snapshot()]);
+    setFuture([]);
+    setSources([src]);
+    setPages(newPages);
+    setAnnotations([]);
+    setSelectedAnn(null);
+    setPageIdx(0);
+  };
+
+  // Enrich tools (watermark / page numbers / header-footer / Bates / properties)
+  // bake their result into the working document and keep the editor open — the
+  // same flow as Compress — so the user can stack edits and then choose Download
+  // or Save, instead of the old apply-and-immediately-export behaviour.
+  const applyEnrich = async (
+    extra: Parameters<typeof exportDocument>[3],
+    name: string,
+    label: string,
+  ) => {
+    setBusy("Applying…");
+    try {
+      const bytes = await exportDocument(sources, pages, annotations, extra);
+      await replaceWorkingDoc(bytes, name);
+      setFlash(`${label} applied. Download or Save to keep it.`);
+    } finally {
+      setBusy(null);
     }
   };
 
+  // True redaction: cosmetic redact boxes only *cover* content (recoverable). This
+  // sends the document plus the redaction rectangles to the backend, which rewrites
+  // the page content streams to permanently delete what's underneath, then bakes the
+  // clean result back into the working doc.
+  const doRedact = async () => {
+    const redactions = annotations.filter((a) => a.kind === "redact");
+    if (!redactions.length) return;
+    if (!onJob) { setFlash("Permanent redaction needs a backend."); return; }
+    const order = new Map(pages.filter((p) => !p.deleted).map((p, i) => [p.id, i]));
+    const rects = redactions
+      .map((a) => {
+        const page = order.get(a.pageId);
+        return page === undefined ? null : { page, x: a.x, y: a.y, w: a.width, h: a.height };
+      })
+      .filter((r): r is { page: number; x: number; y: number; w: number; h: number } => r !== null);
+    if (!rects.length) return;
+
+    setBusy("Redacting…");
+    try {
+      const bytes = await currentBytes();
+      const result = await onJob({
+        type: "redact",
+        params: { rects: JSON.stringify(rects) },
+        bytes,
+        filename: "redacted.pdf",
+      });
+      if (!result) return; // host surfaces the error
+      await replaceWorkingDoc(result, "redacted.pdf");
+      setFlash(`${rects.length} area${rects.length > 1 ? "s" : ""} permanently redacted. Download or Save to keep it.`);
+    } finally {
+      setBusy(null);
+    }
+  };
+
+  const doCompress = async (level: CompressLevel) => {
+    setBusy("Compressing…");
+    try {
+      // Baseline = the faithful current document. For an unedited single source,
+      // use its ORIGINAL bytes: pdf-lib re-assembly inflates small/optimised PDFs,
+      // which would make compression look like it grew the file.
+      const visible = pages.filter((p) => !p.deleted);
+      const pristine =
+        sources.length === 1 &&
+        annotations.length === 0 &&
+        visible.length === sources[0].pageCount &&
+        visible.every((p, i) =>
+          p.sourceId === sources[0].id && p.sourceIndex === i && (p.rotation % 360) === 0 && !p.crop);
+      const before = pristine ? sources[0].bytes : await currentBytes();
+
+      let after: Uint8Array | null;
+      if (level === "low" || level === "medium") {
+        after = await compressLite(before);
+      } else if (onJob) {
+        after = await onJob({ type: "compress", params: { level }, bytes: before, filename: "compressed.pdf" });
+      } else {
+        setFlash("Deep compression needs a backend.");
+        return;
+      }
+      if (!after) return; // server-side failures are surfaced by the host's onJob
+
+      if (after.length < before.length) {
+        await replaceWorkingDoc(after, "compressed.pdf");
+        const pct = Math.round((1 - after.length / before.length) * 100);
+        setFlash(`Compressed from ${formatBytes(before.length)} to ${formatBytes(after.length)} — ${pct}% smaller. Save to keep it.`);
+      } else {
+        // No real gain — leave the document untouched rather than inflate it.
+        setFlash(`Already optimised — ${formatBytes(before.length)}. It can't be compressed further.`);
+      }
+    } finally {
+      setBusy(null);
+    }
+  };
+
+  // Every conversion produces a "pending export" (one or more files) so the user
+  // chooses Download (a copy) or Save (proceed with it) — consistent across all
+  // targets. Multi-file results (page images) can be downloaded but not used as
+  // a single upload.
   const doConvert = async (c: ConvertConfig) => {
     if (c.target === "pdf-to-jpg" || c.target === "pdf-to-png") {
       setBusy("Rendering pages…");
@@ -348,11 +508,17 @@ export default function PdfEditor({
         const bytes = await currentBytes();
         const tmp = await loadSource(bytes, "out.pdf");
         const size = Math.round((c.dpi ?? 150) / 72 * 1000);
-        const mime = c.target === "pdf-to-png" ? "image/png" : "image/jpeg";
+        const png = c.target === "pdf-to-png";
+        const mime = png ? "image/png" : "image/jpeg";
         const imgs = await rasterizeAll(tmp.id, bytes, { maxSize: size, mime });
-        imgs.forEach((url, i) => setTimeout(async () => {
-          downloadBytes(`page-${i + 1}.${c.target === "pdf-to-png" ? "png" : "jpg"}`, await toBytes(url), mime);
-        }, i * 200));
+        const files = await Promise.all(imgs.map(async (url, i) => ({
+          name: `page-${i + 1}.${png ? "png" : "jpg"}`,
+          bytes: await toBytes(url),
+          mime,
+        })));
+        if (!files.length) return;
+        setPendingExport({ files, label: png ? "PNG images" : "JPG images", canUseInUpload: files.length === 1 });
+        setTool("edit");
       } finally { setBusy(null); }
     } else if (c.target === "jpg-to-pdf") {
       const input = document.createElement("input");
@@ -360,14 +526,30 @@ export default function PdfEditor({
       input.onchange = async () => {
         if (!input.files?.length) return;
         setBusy("Building PDF…");
-        try { downloadBytes("images.pdf", await imagesToPdf([...input.files], { pageSize: "a4", margin: 24 })); }
-        finally { setBusy(null); }
+        try {
+          const bytes = await imagesToPdf([...input.files], { pageSize: "a4", margin: 24 });
+          setPendingExport({ files: [{ name: "images.pdf", bytes, mime: "application/pdf" }], label: "PDF", canUseInUpload: true });
+          setTool("edit");
+        } finally { setBusy(null); }
       };
       input.click();
     } else {
+      // PDF → Word/Excel/PowerPoint/Text on the backend.
+      if (!onJob) { setFlash("Conversion needs a backend."); return; }
       const ext = c.target.includes("docx") ? "docx" : c.target.includes("xlsx") ? "xlsx"
         : c.target.includes("pptx") ? "pptx" : c.target.includes("text") ? "txt" : "pdf";
-      runJob({ type: "convert", params: { target: c.target, dpi: c.dpi } }, `converted.${ext}`);
+      const name = `converted.${ext}`;
+      setBusy("Converting on server…");
+      try {
+        const result = await onJob({ type: "convert", params: { target: c.target, dpi: c.dpi }, bytes: await currentBytes(), filename: name });
+        if (!result) return; // host surfaced any error
+        setPendingExport({
+          files: [{ name, bytes: result, mime: MIME_BY_EXT[ext] ?? "application/octet-stream" }],
+          label: ext.toUpperCase(),
+          canUseInUpload: true,
+        });
+        setTool("edit"); // close the convert panel so the banner + page are visible
+      } finally { setBusy(null); }
     }
   };
 
@@ -435,26 +617,89 @@ export default function PdfEditor({
           </div>
         )}
         <button
-          onClick={() => doExport({}, "edited.pdf")}
+          onClick={() => {
+            if (pendingExport) {
+              pendingExport.files.forEach((f, i) =>
+                setTimeout(() => downloadBytes(f.name, f.bytes, f.mime), i * 150));
+            } else {
+              doDownload({}, "edited.pdf");
+            }
+          }}
           disabled={!hasDoc}
+          title={pendingExport ? "Download the converted file(s) to this computer" : "Download a copy to this computer"}
           className="ml-2 inline-flex items-center gap-1.5 rounded-md border border-[#C8CDD2] px-3 py-1.5 text-sm text-[#5E6870] hover:bg-[#F1F5F8] disabled:opacity-40"
         >
           <Download className="h-4 w-4" /> Download
         </button>
         {onSave && (
           <button
-            onClick={() => doExport({}, "edited.pdf")}
-            disabled={!hasDoc}
+            onClick={async () => {
+              if (pendingExport) {
+                if (!pendingExport.canUseInUpload) return;
+                await onSave({ blobs: [pendingExport.files[0]] });
+                setPendingExport(null);
+              } else {
+                doExport({}, "edited.pdf");
+              }
+            }}
+            disabled={!hasDoc || (!!pendingExport && !pendingExport.canUseInUpload)}
+            title={
+              pendingExport
+                ? (pendingExport.canUseInUpload
+                    ? "Use the converted file and continue to upload"
+                    : "Multiple files — download them instead")
+                : "Save back to the document library"
+            }
             className="inline-flex items-center gap-1.5 rounded-md bg-[#287EAD] px-3 py-1.5 text-sm font-medium text-white hover:bg-[#216C95] disabled:opacity-40"
           >
-            <Save className="h-4 w-4" /> Save
+            <Save className="h-4 w-4" /> {pendingExport ? "Use & continue" : "Save"}
           </button>
         )}
       </header>
 
+      {/* Pending-conversion banner: choose Download (copy) or Save (proceed). */}
+      {pendingExport && (
+        <div className="flex flex-wrap items-center gap-2 border-b border-[#F2D98E] bg-[#FFF8E6] px-4 py-2 text-sm text-[#7A5B12]">
+          <FileText className="h-4 w-4 shrink-0 text-[#B7791F]" />
+          <span>
+            Converted to <strong>{pendingExport.label}</strong> —{" "}
+            {pendingExport.files.length === 1
+              ? <span className="font-mono">{pendingExport.files[0].name}</span>
+              : <>{pendingExport.files.length} files</>}.{" "}
+            Use <strong>Download</strong> for {pendingExport.files.length === 1 ? "a copy" : "the files"}
+            {onSave && pendingExport.canUseInUpload && <> or <strong>Use &amp; continue</strong> to proceed with it</>}.
+          </span>
+          <button
+            onClick={() => setPendingExport(null)}
+            className="ml-auto font-medium text-[#7A5B12] underline-offset-2 hover:underline"
+          >
+            Discard &amp; keep editing
+          </button>
+        </div>
+      )}
+
+      {/* Redaction is only cosmetic until burned in on the server — nudge the user. */}
+      {redactCount > 0 && (
+        <div className="flex flex-wrap items-center gap-2 border-b border-[#F0B4B4] bg-[#FDECEC] px-4 py-2 text-sm text-[#9B2C2C]">
+          <EyeOff className="h-4 w-4 shrink-0 text-[#C53030]" />
+          <span>
+            {redactCount} redaction box{redactCount > 1 ? "es" : ""} placed. These only
+            <strong> cover </strong> content — the text underneath is still in the file until you apply them.
+          </span>
+          <button
+            onClick={doRedact}
+            disabled={!onJob}
+            title={onJob ? "Permanently remove the content under each box" : "Needs a backend connection"}
+            className="ml-auto inline-flex items-center gap-1.5 rounded-md bg-[#C53030] px-3 py-1.5 text-xs font-medium text-white hover:bg-[#9B2C2C] disabled:opacity-40"
+          >
+            <EyeOff className="h-3.5 w-3.5" /> Apply redactions
+          </button>
+        </div>
+      )}
+
       <div className="flex min-h-0 flex-1">
-        {/* ---- left rail ---- */}
-        <nav className="relative w-[88px] shrink-0 overflow-visible border-r border-[#C8CDD2] bg-[#FAFBFC] py-2">
+        {/* ---- left rail (scrolls so every group stays reachable) ---- */}
+        <nav className="w-[88px] shrink-0 overflow-y-auto overflow-x-hidden border-r border-[#C8CDD2] bg-[#FAFBFC] py-2">
           {RAIL.map((grp) => (
             <div key={grp.group} className="mb-2">
               <div className="px-2 py-1 text-[10px] font-semibold uppercase tracking-wide text-[#9AA4AD]">
@@ -479,20 +724,20 @@ export default function PdfEditor({
                         {isShapes && <ChevronDown className="h-3 w-3" />}
                       </span>
                     </button>
+                    {/* Compact inline shape picker — stays within the rail width
+                        so the rail can scroll without clipping a side flyout. */}
                     {isShapes && shapesOpen && tool === "shape" && (
-                      <div
-                        className="absolute left-full top-0 z-30 ml-1 w-36 rounded-md border border-[#C8CDD2] bg-white py-1 shadow-lg"
-                        onMouseLeave={() => setShapesOpen(false)}
-                      >
+                      <div className="mt-0.5 space-y-0.5 rounded-md bg-[#F1F5F8] p-1">
                         {SHAPE_PICKER.map((s) => (
                           <button
                             key={s.id}
                             onClick={() => { setShapeTool(s.id); setShapesOpen(false); }}
+                            title={s.label}
                             className={clsx(
-                              "flex w-full items-center gap-2 px-3 py-1.5 text-left text-sm",
+                              "flex w-full flex-col items-center gap-0.5 rounded px-1 py-1 text-[10px]",
                               shapeTool === s.id
-                                ? "bg-[#EEF6FB] text-[#287EAD]"
-                                : "text-[#5E6870] hover:bg-[#F1F5F8]",
+                                ? "bg-white text-[#287EAD] shadow-sm"
+                                : "text-[#5E6870] hover:bg-white",
                             )}
                           >
                             <s.icon className="h-4 w-4" /> {s.label}
@@ -509,7 +754,7 @@ export default function PdfEditor({
 
         {/* ---- main canvas area ---- */}
         <main className="flex min-w-0 flex-1 flex-col">
-          {!isOrganize && hasDoc && (
+          {!isOrganize && tool !== "crop" && hasDoc && (
             <EditToolbar
               tool={tool}
               shapeTool={shapeTool}
@@ -534,6 +779,15 @@ export default function PdfEditor({
               onReorder={reorder} onRotate={rotatePages}
               onDelete={deletePages} onRestore={restorePages}
               onDuplicate={duplicatePages} onExtract={extractPages}
+              onOpen={openPageForEdit}
+            />
+          ) : tool === "crop" && activePage && activeSource ? (
+            <CropView
+              page={activePage}
+              source={activeSource}
+              zoom={zoom}
+              onApply={(crop) => setPageCrop(activePage.id, crop)}
+              onReset={() => setPageCrop(activePage.id, undefined)}
             />
           ) : activePage && activeSource ? (
             <AnnotationCanvas
@@ -589,7 +843,9 @@ export default function PdfEditor({
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 p-4">
           <div className="w-full max-w-lg rounded-xl bg-white p-5 shadow-2xl">
             <div className="mb-4 flex items-center justify-between">
-              <h3 className="text-base font-semibold text-[#2A3138]">Create signature</h3>
+              <h3 className="text-base font-semibold text-[#2A3138]">
+                {savedSignatures.length ? "Add signature" : "Create signature"}
+              </h3>
               <button
                 onClick={() => setShowSignPad(false)}
                 className="rounded-md p-1 text-[#5E6870] hover:bg-[#F1F5F8]"
@@ -597,6 +853,29 @@ export default function PdfEditor({
                 <X className="h-5 w-5" />
               </button>
             </div>
+
+            {/* one-click reuse of the user's stored signatures */}
+            {savedSignatures.length > 0 && (
+              <div className="mb-4">
+                <p className="mb-2 text-xs font-medium uppercase tracking-wide text-[#9AA4AD]">Your saved signatures</p>
+                <div className="flex flex-wrap gap-2">
+                  {savedSignatures.map((sig) => (
+                    <button
+                      key={sig.id}
+                      title={sig.label ?? "Use this signature"}
+                      onClick={() => { setImageSrc(sig.src); setShowSignPad(false); setTool("sign"); }}
+                      className="flex h-16 w-36 items-center justify-center rounded-md border border-[#C8CDD2] bg-white p-1.5 hover:border-[#287EAD] hover:bg-[#EEF6FB]"
+                    >
+                      <img src={sig.src} alt={sig.label ?? "Saved signature"} className="max-h-full max-w-full object-contain" />
+                    </button>
+                  ))}
+                </div>
+                <div className="my-4 flex items-center gap-3 text-[11px] uppercase tracking-wide text-[#9AA4AD]">
+                  <span className="h-px flex-1 bg-[#E1E5E8]" /> or create new <span className="h-px flex-1 bg-[#E1E5E8]" />
+                </div>
+              </div>
+            )}
+
             <SignaturePad defaultName={signerName} onChange={(url) => setImageSrc(url)} />
             <div className="mt-4 flex justify-end gap-2">
               <button
@@ -623,6 +902,19 @@ export default function PdfEditor({
           <div className="flex items-center gap-3 rounded-xl bg-white px-6 py-4 shadow-2xl">
             <Loader2 className="h-5 w-5 animate-spin text-[#287EAD]" />
             <span className="text-sm font-medium">{busy}</span>
+          </div>
+        </div>
+      )}
+
+      {/* ---- transient success toast ---- */}
+      {flash && (
+        <div className="pointer-events-none fixed bottom-6 left-1/2 z-[60] -translate-x-1/2">
+          <div className="pointer-events-auto flex items-center gap-2 rounded-lg bg-[#1F2933] px-4 py-2.5 text-sm font-medium text-white shadow-2xl">
+            <Check className="h-4 w-4 text-[#7ED0A0]" />
+            <span>{flash}</span>
+            <button onClick={() => setFlash(null)} className="ml-2 text-white/60 hover:text-white">
+              <X className="h-4 w-4" />
+            </button>
           </div>
         </div>
       )}

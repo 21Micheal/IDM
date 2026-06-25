@@ -198,9 +198,19 @@ export interface ExportResult {
   blobs: Array<{ name: string; bytes: Uint8Array; mime: string }>;
 }
 
+/** A reusable signature the user has on file, offered in the Sign tool. */
+export interface SavedSignature {
+  id: string;
+  /** PNG/JPEG data URL (preferred) or an absolute image URL. */
+  src: string;
+  label?: string;
+}
+
 export interface PdfEditorProps {
   initialFiles?: Array<File | string | Uint8Array>;
   signerName?: string;
+  /** The user's stored signatures, shown for one-click reuse in the Sign tool. */
+  savedSignatures?: SavedSignature[];
   onJob?: (job: EditorJob) => Promise<Uint8Array | null>;
   onSave?: (result: ExportResult) => void | Promise<void>;
   disabledTools?: ToolId[];
