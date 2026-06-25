@@ -1,9 +1,9 @@
 import { Suspense, lazy, useEffect, useState } from "react";
 import { Routes, Route, Navigate, useLocation } from "react-router-dom";
 import { useQuery } from "@tanstack/react-query";
-import { useAuthStore } from "@/store/authStore";
+import { useAuthStore, applyServerSessionPolicy } from "@/store/authStore";
 import { authAPI } from "@/services/api";
-import { VaultToaster } from "@/components/ui/vault-toast";
+import { VaultToaster, toast } from "@/components/ui/vault-toast";
 import { Loader2 } from "lucide-react";
 
 const Layout = lazy(() => import("@/components/shared/Layout"));
@@ -69,6 +69,7 @@ function AuthBootstrap({ children }: { children: React.ReactNode }) {
     authAPI.me(accessToken)
       .then(({ data }) => {
         if (!cancelled) {
+          applyServerSessionPolicy(data.session_policy);
           setUser(data);
         }
       })
@@ -118,8 +119,68 @@ function SessionSync() {
   });
 
   useEffect(() => {
-    if (data) setUser(data);
+    if (data) {
+      applyServerSessionPolicy(data.session_policy);
+      setUser(data);
+    }
   }, [data, setUser]);
+
+  return null;
+}
+
+/**
+ * Enforces the configurable session policy on the client:
+ *  - tracks genuine user interaction to drive the inactivity (idle) timeout, and
+ *  - on a short interval, signs the user out once the absolute lifetime or the
+ *    idle window has elapsed — even when no network request is in flight.
+ * The backend pins each refresh token to the same absolute lifetime, so this is
+ * a UX layer on top of a server-enforced cap, not the sole gate.
+ */
+function SessionGuard() {
+  const isAuthenticated = useAuthStore((s) => s.isAuthenticated);
+  const recordActivity = useAuthStore((s) => s.recordActivity);
+  const logout = useAuthStore((s) => s.logout);
+
+  useEffect(() => {
+    if (!isAuthenticated) return;
+
+    const endSession = () => {
+      if (!useAuthStore.getState().isAuthenticated) return;
+      logout();
+      toast.info("You were signed out. Please sign in again to continue.");
+    };
+
+    // Throttle activity writes — we only need ~per-30s resolution for the timer.
+    let lastRecorded = Date.now();
+    const onActivity = () => {
+      const now = Date.now();
+      if (now - lastRecorded > 30_000) {
+        lastRecorded = now;
+        recordActivity();
+      }
+    };
+    const events: Array<keyof WindowEventMap> = [
+      "mousemove",
+      "mousedown",
+      "keydown",
+      "scroll",
+      "touchstart",
+      "click",
+    ];
+    events.forEach((e) => window.addEventListener(e, onActivity, { passive: true }));
+
+    // Returning to a tab that sat idle past the timeout should sign out at once.
+    if (useAuthStore.getState().isSessionExpired()) endSession();
+
+    const interval = window.setInterval(() => {
+      if (useAuthStore.getState().isSessionExpired()) endSession();
+    }, 15_000);
+
+    return () => {
+      events.forEach((e) => window.removeEventListener(e, onActivity));
+      window.clearInterval(interval);
+    };
+  }, [isAuthenticated, recordActivity, logout]);
 
   return null;
 }
@@ -257,6 +318,7 @@ export default function App() {
     <AuthBootstrap>
       <>
         <SessionSync />
+        <SessionGuard />
         <Suspense fallback={<RouteFallback />}>
           <Routes>
             {/* Public */}

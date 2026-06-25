@@ -1,5 +1,5 @@
 import axios, { AxiosError, InternalAxiosRequestConfig } from "axios";
-import { useAuthStore } from "@/store/authStore";
+import { useAuthStore, applyServerSessionPolicy } from "@/store/authStore";
 import type {
   DocumentEditTokenResponse,
   DocumentPreviewResponse,
@@ -67,6 +67,8 @@ export type DmsSettings = {
   trash_retention_days: number;
   rbac_single_stage: boolean;
   require_metadata_on_upload: boolean;
+  session_lifetime_minutes: number;
+  session_idle_timeout_minutes: number;
   updated_at?: string;
 };
 
@@ -154,6 +156,8 @@ async function refreshAccessToken(): Promise<string> {
         `${api.defaults.baseURL}/token/refresh/`,
         { refresh: refreshToken }
       );
+      // Pick up any admin change to the session policy on each refresh.
+      applyServerSessionPolicy(data.session_policy);
       useAuthStore.getState().setTokens(data.access, data.refresh ?? refreshToken);
       return data.access as string;
     })().finally(() => {

@@ -2,7 +2,7 @@ from django.contrib import admin
 from django.urls import path, include
 from django.conf import settings
 from django.conf.urls.static import static
-from rest_framework_simplejwt.views import TokenRefreshView
+from apps.accounts.views import SessionTokenRefreshView
 from apps.documents.storage_views import StorageStatsView
 from apps.documents.views import DocumentVolumeView, TopUploadersView
 from apps.workflows.views import ApprovalTurnaroundView, SlaBreachRateView
@@ -48,7 +48,7 @@ urlpatterns = [
     path("api/v1/analytics/department-activity/", DepartmentActivityView.as_view(), name="analytics-department-activity"),
 
     # JWT refresh
-    path("api/v1/token/refresh/", TokenRefreshView.as_view(), name="token_refresh"),
+    path("api/v1/token/refresh/", SessionTokenRefreshView.as_view(), name="token_refresh"),
 
 ]
 

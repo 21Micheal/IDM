@@ -18,9 +18,9 @@ import {
   workflowAPI,
 } from "@/services/api";
 
-import { useAuthStore } from "@/store/authStore";
+import { useAuthStore, applyServerSessionPolicy } from "@/store/authStore";
 import { toast } from "@/components/ui/vault-toast";
-import type { AuthUser } from "@/store/authStore";
+import type { AuthUser, ServerSessionPolicy } from "@/store/authStore";
 
 const credSchema = z.object({
   email: z.string().email("Please enter a valid email address."),
@@ -55,7 +55,11 @@ export default function LoginPage() {
     refresh: string;
     must_change_password?: boolean;
     user?: AuthUser;
+    session_policy?: ServerSessionPolicy;
   }) => {
+    // Apply the configured session policy before starting the session clock so
+    // the absolute deadline uses the admin-defined lifetime, not the fallback.
+    applyServerSessionPolicy(tokenData.session_policy);
     setTokens(tokenData.access, tokenData.refresh);
 
     if (tokenData.user) {

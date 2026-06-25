@@ -7,6 +7,7 @@ import {
   Archive,
   Building2,
   ClipboardCheck,
+  Clock,
   Copy,
   Droplets,
   Link2,
@@ -14,11 +15,12 @@ import {
   RotateCcw,
   Save,
   ShieldCheck,
+  Timer,
   Trash2,
 } from "lucide-react";
 import clsx from "clsx";
 
-type SectionId = "preview" | "lifecycle" | "governance";
+type SectionId = "preview" | "lifecycle" | "governance" | "security";
 
 const inputCls =
   "h-9 border border-[#AEB5BB] bg-white px-3 text-sm text-[#1F2933] outline-none focus:border-[#287EAD] focus:ring-1 focus:ring-[#287EAD]";
@@ -51,7 +53,23 @@ const sections: Array<{
     description: "Duplicates, metadata, and stage access",
     icon: ShieldCheck,
   },
+  {
+    id: "security",
+    title: "Security",
+    description: "Session lifetime and inactivity sign-out",
+    icon: Clock,
+  },
 ];
+
+/** Render a minutes value as a human-friendly "Xh Ym" / "X min" string. */
+function formatMinutes(total: number): string {
+  if (!total || total <= 0) return "disabled";
+  const hours = Math.floor(total / 60);
+  const minutes = total % 60;
+  if (hours && minutes) return `${hours}h ${minutes}m`;
+  if (hours) return `${hours}h`;
+  return `${minutes} min`;
+}
 
 function SettingToggle({
   checked,
@@ -167,6 +185,13 @@ function SettingsWorkspace() {
       { label: "Watermark", value: settings.watermark_enabled ? "Enabled" : "Off" },
       { label: "Duplicates", value: settings.allow_duplicate_uploads ? "Allowed" : "Blocked" },
       { label: "Access mode", value: settings.rbac_single_stage ? "Global" : "Stage-based" },
+      { label: "Session", value: formatMinutes(settings.session_lifetime_minutes) },
+      {
+        label: "Idle out",
+        value: settings.session_idle_timeout_minutes > 0
+          ? formatMinutes(settings.session_idle_timeout_minutes)
+          : "Off",
+      },
     ];
   }, [settings]);
 
@@ -475,6 +500,78 @@ function SettingsWorkspace() {
                 />
                 <InfoNote>
                   Required metadata is checked against each document type&apos;s admin-defined required fields.
+                </InfoNote>
+              </SettingBlock>
+            </>
+          )}
+
+          {activeSection === "security" && (
+            <>
+              <SettingBlock
+                icon={Clock}
+                title="Session lifetime"
+                description="The maximum time a signed-in session stays valid before users must sign in again, regardless of activity."
+              >
+                <label className="block">
+                  <span className="mb-1.5 block text-xs font-semibold uppercase tracking-wider text-[#5E6870]">
+                    Sign users out after
+                  </span>
+                  <div className="flex items-center gap-2">
+                    <input
+                      type="number"
+                      min={5}
+                      className={`${inputCls} w-32`}
+                      value={settings.session_lifetime_minutes}
+                      onChange={(event) =>
+                        update("session_lifetime_minutes", Math.max(5, Number(event.target.value) || 5))
+                      }
+                    />
+                    <span className="text-sm text-[#5E6870]">
+                      minutes since sign-in · {formatMinutes(settings.session_lifetime_minutes)}
+                    </span>
+                  </div>
+                </label>
+                <InfoNote>
+                  This is the absolute cap. When it elapses the session ends even if the user is active, and they
+                  are returned to the sign-in screen.
+                </InfoNote>
+              </SettingBlock>
+
+              <SettingBlock
+                icon={Timer}
+                title="Inactivity timeout"
+                description="Sign users out after a period with no interaction (mouse, keyboard, scrolling, or navigation)."
+              >
+                <label className="block">
+                  <span className="mb-1.5 block text-xs font-semibold uppercase tracking-wider text-[#5E6870]">
+                    Sign idle users out after
+                  </span>
+                  <div className="flex items-center gap-2">
+                    <input
+                      type="number"
+                      min={0}
+                      max={settings.session_lifetime_minutes}
+                      className={`${inputCls} w-32`}
+                      value={settings.session_idle_timeout_minutes}
+                      onChange={(event) =>
+                        update(
+                          "session_idle_timeout_minutes",
+                          Math.max(0, Number(event.target.value) || 0),
+                        )
+                      }
+                    />
+                    <span className="text-sm text-[#5E6870]">
+                      minutes of inactivity ·{" "}
+                      {settings.session_idle_timeout_minutes > 0
+                        ? formatMinutes(settings.session_idle_timeout_minutes)
+                        : "disabled"}
+                    </span>
+                  </div>
+                </label>
+                <InfoNote>
+                  Set to <span className="font-semibold text-[#1F2933]">0</span> to disable the inactivity timeout —
+                  only the absolute session lifetime will apply. The idle timeout cannot exceed the session
+                  lifetime.
                 </InfoNote>
               </SettingBlock>
             </>

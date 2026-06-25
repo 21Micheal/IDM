@@ -249,6 +249,8 @@ class DMSSettingsSerializer(serializers.ModelSerializer):
             "trash_retention_days",
             "rbac_single_stage",
             "require_metadata_on_upload",
+            "session_lifetime_minutes",
+            "session_idle_timeout_minutes",
             "bulk_scan_submit_for_approval",
             "access_stages",
             "updated_at",
@@ -269,6 +271,32 @@ class DMSSettingsSerializer(serializers.ModelSerializer):
         if value < 1:
             raise serializers.ValidationError("Auto-archive age must be at least 1 day.")
         return value
+
+    def validate_session_lifetime_minutes(self, value):
+        if value < 5:
+            raise serializers.ValidationError("Session lifetime must be at least 5 minutes.")
+        return value
+
+    def validate_session_idle_timeout_minutes(self, value):
+        if value < 0:
+            raise serializers.ValidationError("Idle timeout cannot be negative.")
+        return value
+
+    def validate(self, attrs):
+        lifetime = attrs.get(
+            "session_lifetime_minutes",
+            getattr(self.instance, "session_lifetime_minutes", None),
+        )
+        idle = attrs.get(
+            "session_idle_timeout_minutes",
+            getattr(self.instance, "session_idle_timeout_minutes", None),
+        )
+        if lifetime is not None and idle:
+            if idle > lifetime:
+                raise serializers.ValidationError(
+                    {"session_idle_timeout_minutes": "Idle timeout cannot exceed the session lifetime."}
+                )
+        return attrs
 
 class MetadataFieldSerializer(serializers.ModelSerializer):
     class Meta:

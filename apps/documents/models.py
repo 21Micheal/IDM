@@ -304,6 +304,24 @@ class DMSSettings(models.Model):
     rbac_single_stage = models.BooleanField(default=False)
 
     require_metadata_on_upload = models.BooleanField(default=True)
+
+    # Session policy — replaces the previously hardcoded ~6h logout. Two
+    # independent controls:
+    #   * session_lifetime_minutes  — absolute maximum a session may live from
+    #     sign-in, regardless of activity. Enforced via the refresh-token
+    #     lifetime and the frontend session clock.
+    #   * session_idle_timeout_minutes — log a user out after this many minutes
+    #     with no interaction. 0 disables the idle timeout (only the absolute
+    #     lifetime applies).
+    session_lifetime_minutes = models.PositiveIntegerField(
+        default=360,
+        help_text="Absolute maximum session duration from sign-in, in minutes.",
+    )
+    session_idle_timeout_minutes = models.PositiveIntegerField(
+        default=30,
+        help_text="Sign users out after this many minutes of inactivity. 0 disables the idle timeout.",
+    )
+
     bulk_scan_submit_for_approval = models.BooleanField(
         default=False,
         help_text="When enabled, reviewed bulk scan documents are immediately submitted to approval workflows.",
@@ -335,6 +353,14 @@ class DMSSettings(models.Model):
             self.auto_archive_after_days = 1
         if self.trash_retention_days < 1:
             self.trash_retention_days = 1
+        # Keep the session policy sane: an absolute lifetime of at least 5
+        # minutes, and an idle timeout that never outlives that absolute cap.
+        if self.session_lifetime_minutes < 5:
+            self.session_lifetime_minutes = 5
+        if self.session_idle_timeout_minutes < 0:
+            self.session_idle_timeout_minutes = 0
+        if self.session_idle_timeout_minutes > self.session_lifetime_minutes:
+            self.session_idle_timeout_minutes = self.session_lifetime_minutes
         super().save(*args, **kwargs)
 
     @classmethod

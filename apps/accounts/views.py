@@ -28,6 +28,78 @@ from .email_otp import send_otp_email
 from apps.audit.models import AuditLog, AuditEvent
 
 
+# ── Session policy ────────────────────────────────────────────────────────────
+# The session lifetime (formerly a hardcoded ~6h) is admin-configurable via the
+# DMS settings. We expose the policy to the client at sign-in / refresh so the
+# frontend can enforce the absolute lifetime and the inactivity (idle) timeout,
+# and we pin each refresh token's expiry to the configured absolute lifetime so
+# the backend never trusts a session for longer than the policy allows.
+
+def get_session_policy() -> dict:
+    """Current session policy as a plain dict for API responses."""
+    from datetime import timedelta
+    from apps.documents.models import DMSSettings
+
+    settings = DMSSettings.load()
+    return {
+        "session_lifetime_minutes": settings.session_lifetime_minutes,
+        "session_idle_timeout_minutes": settings.session_idle_timeout_minutes,
+    }
+
+
+def issue_refresh_for_user(user) -> RefreshToken:
+    """RefreshToken whose lifetime matches the configured session lifetime."""
+    from datetime import timedelta
+
+    refresh = RefreshToken.for_user(user)
+    lifetime = get_session_policy()["session_lifetime_minutes"]
+    if lifetime:
+        refresh.set_exp(lifetime=timedelta(minutes=lifetime))
+    return refresh
+
+
+from rest_framework_simplejwt.views import TokenRefreshView
+from rest_framework_simplejwt.serializers import TokenRefreshSerializer
+from rest_framework_simplejwt.settings import api_settings as jwt_settings
+
+
+class SessionTokenRefreshSerializer(TokenRefreshSerializer):
+    """Refresh serializer that pins rotated refresh tokens to the configured
+    absolute session lifetime instead of the static SIMPLE_JWT setting."""
+
+    def validate(self, attrs):
+        from datetime import timedelta
+
+        refresh = self.token_class(attrs["refresh"])
+        data = {"access": str(refresh.access_token)}
+
+        if jwt_settings.ROTATE_REFRESH_TOKENS:
+            if jwt_settings.BLACKLIST_AFTER_ROTATION:
+                try:
+                    refresh.blacklist()
+                except AttributeError:
+                    pass
+            refresh.set_jti()
+            refresh.set_iat()
+            refresh.set_exp()
+            lifetime = get_session_policy()["session_lifetime_minutes"]
+            if lifetime:
+                refresh.set_exp(lifetime=timedelta(minutes=lifetime))
+            data["refresh"] = str(refresh)
+
+        return data
+
+
+class SessionTokenRefreshView(TokenRefreshView):
+    serializer_class = SessionTokenRefreshSerializer
+
+    def post(self, request, *args, **kwargs):
+        response = super().post(request, *args, **kwargs)
+        if response.status_code == 200:
+            response.data["session_policy"] = get_session_policy()
+        return response
+
+
 # ── Permission helpers ────────────────────────────────────────────────────────
 
 class IsGroupAdmin(permissions.BasePermission):
@@ -140,7 +212,7 @@ class VerifyOTPView(APIView):
         user.last_login = timezone.now()
         user.save(update_fields=["last_login"])
 
-        refresh = RefreshToken.for_user(user)
+        refresh = issue_refresh_for_user(user)
 
         AuditLog.objects.create(
             event=AuditEvent.USER_LOGIN,
@@ -157,6 +229,7 @@ class VerifyOTPView(APIView):
             "refresh":              str(refresh),
             "must_change_password": user.must_change_password,
             "user":                 UserSerializer(user).data,
+            "session_policy":       get_session_policy(),
         })
 
 
@@ -189,6 +262,13 @@ class MeView(generics.RetrieveUpdateAPIView):
         if self.request.method in ("PUT", "PATCH"):
             return UserUpdateSerializer
         return UserSerializer
+
+    def retrieve(self, request, *args, **kwargs):
+        # Piggyback the current session policy so the SPA can pick up admin
+        # changes to session lifetime / idle timeout without re-authenticating.
+        response = super().retrieve(request, *args, **kwargs)
+        response.data["session_policy"] = get_session_policy()
+        return response
 
 
 class ChangePasswordView(APIView):
