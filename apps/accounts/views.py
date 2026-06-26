@@ -546,7 +546,7 @@ If you did not expect this account, please contact your administrator immediatel
                 "Consider deactivating their account instead."
             )
 
-    @action(detail=True, methods=["post"])
+    @action(detail=True, methods=["post"], url_path="reset-password")
     def reset_password(self, request, pk=None):
         user = self.get_object()
         temp_password = get_random_string(
@@ -560,6 +560,8 @@ If you did not expect this account, please contact your administrator immediatel
         # Email the new temp password
         from django.core.mail import send_mail
         from django.conf import settings
+
+        frontend_url = getattr(settings, "FRONTEND_URL", "http://localhost:3000")
         try:
             send_mail(
                 subject="FseDMS — your password has been reset",
@@ -567,9 +569,17 @@ If you did not expect this account, please contact your administrator immediatel
 
 Your password has been reset by an administrator.
 
-  Temporary password: {temp_password}
+Credentials:
+    Login ID:           {user.email}
+    Temporary password: {temp_password}
 
-You will be required to set a new password when you next log in.
+Next steps:
+1. Go to {frontend_url} and sign in with the Login ID and temporary password above.
+2. Check your email for a one-time security code (OTP) and enter it to continue.
+3. You will then be prompted to set a new strong password of your own.
+
+For your security, the temporary password works only until you set a new one.
+If you did not expect this reset, contact your administrator immediately.
 
 — FseDMS Administration
 """,

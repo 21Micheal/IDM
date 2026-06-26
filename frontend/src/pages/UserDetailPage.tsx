@@ -23,6 +23,7 @@ import {
   CalendarClock,
 } from "lucide-react";
 import { toast } from "@/components/ui/vault-toast";
+import { TemporaryPasswordModal } from "@/components/users/TemporaryPasswordModal";
 import { format } from "date-fns";
 
 interface Department {
@@ -61,6 +62,7 @@ export default function UserDetailPage() {
   const navigate = useNavigate();
   const qc = useQueryClient();
   const [reassignTo, setReassignTo] = useState("");
+  const [resetPassword, setResetPassword] = useState<string | null>(null);
 
   const { data: user, isLoading } = useQuery<User>({
     queryKey: ["users", "detail", id],
@@ -123,7 +125,16 @@ export default function UserDetailPage() {
 
   const resetPwMutation = useMutation({
     mutationFn: () => usersAPI.resetPassword(id),
-    onSuccess: () => toast.success("Temporary password generated and emailed"),
+    onSuccess: (res: any) => {
+      const temp = res?.data?.temporary_password;
+      if (temp) {
+        // Surface the password to the admin — outbound email may not be
+        // delivered, so this is the reliable channel to hand it to the user.
+        setResetPassword(temp);
+      } else {
+        toast.success("Temporary password generated and emailed");
+      }
+    },
     onError: (err) => toast.error(extractApiError(err, "Failed to reset password")),
   });
 
@@ -524,6 +535,15 @@ export default function UserDetailPage() {
           })}
         </div>
       </section>
+
+      {resetPassword && (
+        <TemporaryPasswordModal
+          temporary_password={resetPassword}
+          title="Password Reset"
+          subtitle={`New temporary password for ${user.full_name}`}
+          onClose={() => setResetPassword(null)}
+        />
+      )}
     </div>
   );
 }
