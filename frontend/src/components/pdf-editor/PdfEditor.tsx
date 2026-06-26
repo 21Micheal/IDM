@@ -152,6 +152,7 @@
     const [shapeTool, setShapeTool]   = useState<EditTool>("rect");
     const [shapesOpen, setShapesOpen] = useState(false);
     const shapeBtnRef = useRef<HTMLButtonElement>(null);
+    const ribbonRef = useRef<HTMLDivElement>(null);
     const [selectedPages, setSelectedPages] = useState<Set<string>>(new Set());
     const [selectedAnn, setSelectedAnn]     = useState<string | null>(null);
     const [pageIdx, setPageIdx] = useState(0);
@@ -164,7 +165,7 @@
     const [showSignPad, setShowSignPad] = useState(false);
     const [busy, setBusy]   = useState<string | null>(null);
     const [flash, setFlash] = useState<string | null>(null);
-    const [shelfOpen, setShelfOpen] = useState(true);
+    const [shelfOpen, setShelfOpen] = useState(false);
 
     useEffect(() => {
       if (!flash) return;
@@ -440,8 +441,14 @@
         setTool("shape"); return;
       }
       setShapesOpen(false);
+      // For shelf tools: toggle if same tool, open if switching
+      if (SHELF_TOOLS.includes(id)) {
+        if (id === tool) { setShelfOpen((v) => !v); }
+        else { setTool(id); setShelfOpen(true); }
+        return;
+      }
       setTool(id);
-      if (SHELF_TOOLS.includes(id)) setShelfOpen(true);
+      setShelfOpen(false);
     };
 
     useEffect(() => () => evictRenderCache(), []);
@@ -524,7 +531,7 @@
         {/* ══════════════════════════════════════════════════════════════════
             TOOL RIBBON — horizontal, grouped, replaces the left sidebar
         ══════════════════════════════════════════════════════════════════ */}
-        <div className="relative shrink-0 overflow-x-auto border-b border-[#C8CDD2] bg-[#FAFBFC]">
+        <div ref={ribbonRef} className="relative shrink-0 overflow-x-auto border-b border-[#C8CDD2] bg-[#FAFBFC]">
           <div className="flex min-w-max items-end px-3 pb-1 pt-2">
             {RIBBON.map((grp, gi) => (
               <div key={grp.group} className={clsx("flex flex-col", gi > 0 && "ml-1")}>
@@ -606,36 +613,22 @@
         )}
 
         {/* ══════════════════════════════════════════════════════════════════
-            CONFIG SHELF — drops below the ribbon for "side panel" tools
+            CONFIG SHELF — compact floating panel (portal)
         ══════════════════════════════════════════════════════════════════ */}
-        {showShelf && (
-          <div className="shrink-0 border-b border-[#C8CDD2] bg-white">
-            {/* Shelf header */}
-            <button
-              onClick={() => setShelfOpen((v) => !v)}
-              className="flex w-full items-center gap-2 px-4 py-2 text-left text-sm font-semibold text-[#1C2830] hover:bg-[#F7F9FB]"
-            >
-              <span className="flex-1">
-                {RIBBON.flatMap((g) => g.items).find((it) => it.id === tool)?.label ?? "Options"}
-              </span>
-              {shelfOpen ? <ChevronUp className="h-4 w-4 text-[#9AA4AD]" /> : <ChevronDown className="h-4 w-4 text-[#9AA4AD]" />}
-            </button>
-            {shelfOpen && (
-              <div className="overflow-x-auto">
-                <div className="min-w-[480px] px-4 pb-4">
-                  <SidePanel
-                    tool={tool} pageCount={visiblePages.length}
-                    onMerge={mergeFiles} onInsertFiles={insertFiles}
-                    onWatermark={applyWatermark} onPageNumbers={applyNumbers}
-                    onHeaderFooter={applyHF} onBates={applyBates} onMetadata={applyMeta}
-                    onSplit={doSplit} onCompress={doCompress} onConvert={doConvert}
-                    onProtect={doProtect} onUnlock={doUnlock}
-                    compact
-                  />
-                </div>
-              </div>
-            )}
-          </div>
+        {showShelf && shelfOpen && createPortal(
+          <ShelfPanel
+            ribbonRef={ribbonRef}
+            tool={tool}
+            label={RIBBON.flatMap((g) => g.items).find((it) => it.id === tool)?.label ?? "Options"}
+            pageCount={visiblePages.length}
+            onClose={() => setShelfOpen(false)}
+            onMerge={mergeFiles} onInsertFiles={insertFiles}
+            onWatermark={applyWatermark} onPageNumbers={applyNumbers}
+            onHeaderFooter={applyHF} onBates={applyBates} onMetadata={applyMeta}
+            onSplit={doSplit} onCompress={doCompress} onConvert={doConvert}
+            onProtect={doProtect} onUnlock={doUnlock}
+          />,
+          document.body,
         )}
 
         {/* ══════════════════════════════════════════════════════════════════
@@ -818,7 +811,84 @@
   }
 
   /* ═══════════════════════════════════════════════════════════════════════ */
-  /* EditToolbar — secondary row: colour, stroke, font                       */
+  /* ShelfPanel — compact floating config panel anchored below the ribbon    */
+  /* ═══════════════════════════════════════════════════════════════════════ */
+
+  function ShelfPanel({
+    ribbonRef, tool, label, pageCount, onClose,
+    onMerge, onInsertFiles, onWatermark, onPageNumbers,
+    onHeaderFooter, onBates, onMetadata, onSplit, onCompress, onConvert,
+    onProtect, onUnlock,
+  }: {
+    ribbonRef: React.RefObject<HTMLDivElement>;
+    tool: ToolId; label: string; pageCount: number; onClose: () => void;
+    onMerge: (f: File[]) => void;
+    onInsertFiles: (f: File[]) => void;
+    onWatermark: (c: WatermarkConfig) => void;
+    onPageNumbers: (c: PageNumberConfig) => void;
+    onHeaderFooter: (c: HeaderFooterConfig) => void;
+    onBates: (c: BatesConfig) => void;
+    onMetadata: (c: MetadataConfig) => void;
+    onSplit: (c: SplitConfig) => void;
+    onCompress: (l: CompressLevel) => void;
+    onConvert: (c: ConvertConfig) => void;
+    onProtect: (pw: string, perms: string[]) => void;
+    onUnlock: (pw: string) => void;
+  }) {
+    const panelRef = useRef<HTMLDivElement>(null);
+    const [top, setTop] = useState(120);
+
+    /* Position just below the ribbon */
+    useEffect(() => {
+      const el = ribbonRef.current;
+      if (!el) return;
+      setTop(el.getBoundingClientRect().bottom + 4);
+    }, [ribbonRef]);
+
+    /* Close on outside click or Escape */
+    useEffect(() => {
+      const onDown = (e: MouseEvent) => {
+        if (panelRef.current && !panelRef.current.contains(e.target as Node)) onClose();
+      };
+      const onKey  = (e: KeyboardEvent) => { if (e.key === "Escape") onClose(); };
+      window.addEventListener("mousedown", onDown, true);
+      window.addEventListener("keydown", onKey);
+      return () => {
+        window.removeEventListener("mousedown", onDown, true);
+        window.removeEventListener("keydown", onKey);
+      };
+    }, [onClose]);
+
+    return (
+      <div
+        ref={panelRef}
+        style={{ position: "fixed", top, right: 16, zIndex: 9999 }}
+        className="w-[300px] border border-[#C8CDD2] bg-white shadow-2xl overflow-hidden"
+      >
+        {/* Header */}
+        <div className="flex items-center justify-between border-b border-[#C8CDD2] bg-[#287EAD] px-3 py-2">
+          <span className="text-sm font-semibold text-white">{label}</span>
+          <button onClick={onClose} className="p-0.5 text-white/75 hover:text-white" title="Close panel">
+            <X className="h-4 w-4" />
+          </button>
+        </div>
+        {/* Scrollable body */}
+        <div className="max-h-[calc(100vh-16rem)] overflow-y-auto p-3">
+          <SidePanel
+            tool={tool} pageCount={pageCount}
+            onMerge={onMerge} onInsertFiles={onInsertFiles}
+            onWatermark={onWatermark} onPageNumbers={onPageNumbers}
+            onHeaderFooter={onHeaderFooter} onBates={onBates} onMetadata={onMetadata}
+            onSplit={onSplit} onCompress={onCompress} onConvert={onConvert}
+            onProtect={onProtect} onUnlock={onUnlock}
+            compact
+          />
+        </div>
+      </div>
+    );
+  }
+
+
   /* ═══════════════════════════════════════════════════════════════════════ */
 
   function EditToolbar({
