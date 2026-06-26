@@ -21,12 +21,18 @@ env/
 media/
 *.log
 
-frontend/node_modules/
-frontend/dist/
-frontend/dist.old/
-frontend/dist_new/
-frontend/dist_verify/
+# The backend image (context = repo root) does not need the SPA at all — the
+# frontend is built by the separate `frontend_build` service (context ./frontend).
+# Excluding it keeps ~350MB of source out of the backend image and its export.
+frontend/
+
+# Node tooling at the repo root (eslint devDeps) is irrelevant to the backend.
+node_modules/
+
+# Editor / assistant scratch and tag caches — never needed in any image.
+.aider*
 
 .agents/
 .codex
 .sixth/
+.claude/
