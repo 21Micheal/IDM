@@ -3,7 +3,7 @@
  * active tool (watermark, page numbers, split, convert, secure, …) and calls
  * the matching callback when applied.
  */
-import { useRef, useState } from "react";
+import { createContext, useContext, useRef, useState } from "react";
 import { X, ArrowUp, ArrowDown } from "lucide-react";
 import clsx from "clsx";
 import type {
@@ -33,24 +33,33 @@ interface Props {
   onConvert: (c: ConvertConfig) => void;
   onProtect: (password: string, permissions: string[]) => void;
   onUnlock: (password: string) => void;
+  /** Render in the denser collapsible-shelf layout (mobile / narrow). */
+  compact?: boolean;
 }
 
+/** Compact mode is set once at the SidePanel root and read by the shared
+ *  `Wrap` atom, so individual panels stay prop-free. */
+const CompactContext = createContext(false);
+
 export default function SidePanel(props: Props) {
-  switch (props.tool) {
-    case "merge": return <MergePanel onMerge={props.onMerge} />;
-    case "insert": return <InsertPanel onInsert={props.onInsertFiles} />;
-    case "split": return <SplitPanel pageCount={props.pageCount} onSplit={props.onSplit} />;
-    case "watermark": return <WatermarkPanel onApply={props.onWatermark} />;
-    case "page_numbers": return <PageNumbersPanel onApply={props.onPageNumbers} />;
-    case "header_footer": return <HeaderFooterPanel onApply={props.onHeaderFooter} />;
-    case "bates": return <BatesPanel onApply={props.onBates} />;
-    case "metadata": return <MetadataPanel onApply={props.onMetadata} />;
-    case "compress": return <CompressPanel onApply={props.onCompress} />;
-    case "convert": return <ConvertPanel onApply={props.onConvert} />;
-    case "protect": return <ProtectPanel onApply={props.onProtect} />;
-    case "unlock": return <UnlockPanel onApply={props.onUnlock} />;
-    default: return null;
-  }
+  const panel = (() => {
+    switch (props.tool) {
+      case "merge": return <MergePanel onMerge={props.onMerge} />;
+      case "insert": return <InsertPanel onInsert={props.onInsertFiles} />;
+      case "split": return <SplitPanel pageCount={props.pageCount} onSplit={props.onSplit} />;
+      case "watermark": return <WatermarkPanel onApply={props.onWatermark} />;
+      case "page_numbers": return <PageNumbersPanel onApply={props.onPageNumbers} />;
+      case "header_footer": return <HeaderFooterPanel onApply={props.onHeaderFooter} />;
+      case "bates": return <BatesPanel onApply={props.onBates} />;
+      case "metadata": return <MetadataPanel onApply={props.onMetadata} />;
+      case "compress": return <CompressPanel onApply={props.onCompress} />;
+      case "convert": return <ConvertPanel onApply={props.onConvert} />;
+      case "protect": return <ProtectPanel onApply={props.onProtect} />;
+      case "unlock": return <UnlockPanel onApply={props.onUnlock} />;
+      default: return null;
+    }
+  })();
+  return <CompactContext.Provider value={!!props.compact}>{panel}</CompactContext.Provider>;
 }
 
 /* ---------- shared atoms ---------- */
@@ -60,26 +69,35 @@ const Field = ({ label, children }: { label: string; children: React.ReactNode }
     {children}
   </label>
 );
-const inputCls = "w-full rounded-md border border-[#C8CDD2] px-2.5 py-1.5 text-sm outline-none focus:border-[#287EAD]";
+const inputCls = "w-full border border-[#C8CDD2] px-2.5 py-1.5 text-sm outline-none focus:border-[#287EAD]";
 const Apply = ({ onClick, label = "Apply" }: { onClick: () => void; label?: string }) => (
-  <button onClick={onClick} className="w-full rounded-md bg-[#287EAD] px-3 py-2 text-sm font-medium text-white hover:bg-[#216C95]">
+  <button onClick={onClick} className="w-full bg-[#287EAD] px-3 py-2 text-sm font-medium text-white hover:bg-[#216C95]">
     {label}
   </button>
 );
-const Wrap = ({ title, hint, children }: { title: string; hint?: string; children: React.ReactNode }) => (
-  <div className="flex h-full flex-col gap-3 overflow-auto p-4">
-    <div>
-      <h3 className="text-sm font-semibold text-[#2A3138]">{title}</h3>
-      {hint && <p className="mt-0.5 text-xs text-[#5E6870]">{hint}</p>}
+const Wrap = ({ title, hint, children }: { title: string; hint?: string; children: React.ReactNode }) => {
+  const compact = useContext(CompactContext);
+  // In the collapsible shelf the tool name is already shown on the toggle and
+  // the shelf supplies its own padding, so drop the title block and outer pad.
+  return (
+    <div className={clsx("flex h-full flex-col overflow-auto", compact ? "gap-2.5 p-0" : "gap-3 p-4")}>
+      {compact ? (
+        hint && <p className="text-xs text-[#5E6870]">{hint}</p>
+      ) : (
+        <div>
+          <h3 className="text-sm font-semibold text-[#2A3138]">{title}</h3>
+          {hint && <p className="mt-0.5 text-xs text-[#5E6870]">{hint}</p>}
+        </div>
+      )}
+      {children}
     </div>
-    {children}
-  </div>
-);
+  );
+};
 const PositionGrid = ({ value, onChange }: { value: PagePosition; onChange: (p: PagePosition) => void }) => (
   <div className="grid grid-cols-3 gap-1">
     {POSITIONS.map((p) => (
       <button key={p} onClick={() => onChange(p)}
-        className={clsx("h-8 rounded border text-[10px]", value === p ? "border-[#287EAD] bg-[#EEF6FB] text-[#287EAD]" : "border-[#C8CDD2] text-[#5E6870]")}>
+        className={clsx("h-8 border text-[10px]", value === p ? "border-[#287EAD] bg-[#EEF6FB] text-[#287EAD]" : "border-[#C8CDD2] text-[#5E6870]")}>
         {p.split("-").map((s) => s[0].toUpperCase()).join("")}
       </button>
     ))}
@@ -117,7 +135,7 @@ function FilePickPanel({
       />
       <button
         onClick={() => ref.current?.click()}
-        className="w-full rounded-md border border-dashed border-[#C8CDD2] px-3 py-2 text-sm text-[#5E6870] hover:border-[#287EAD] hover:bg-[#EEF6FB]"
+        className="w-full border border-dashed border-[#C8CDD2] px-3 py-2 text-sm text-[#5E6870] hover:border-[#287EAD] hover:bg-[#EEF6FB]"
       >
         {chooseLabel}
       </button>
@@ -129,19 +147,19 @@ function FilePickPanel({
           </p>
           <ul className="space-y-1">
             {files.map((f, i) => (
-              <li key={`${f.name}-${i}`} className="flex items-center gap-1.5 rounded border border-[#E3E7EA] bg-white px-2 py-1.5 text-sm">
+              <li key={`${f.name}-${i}`} className="flex items-center gap-1.5 border border-[#E3E7EA] bg-white px-2 py-1.5 text-sm">
                 <span className="w-4 shrink-0 text-center text-xs font-semibold text-[#5E6870]">{i + 1}</span>
                 <span className="flex-1 truncate text-[#1F2933]" title={f.name}>{f.name}</span>
                 <button onClick={() => move(i, -1)} disabled={i === 0}
-                  className="shrink-0 rounded p-0.5 text-[#5E6870] hover:text-[#287EAD] disabled:opacity-30" title="Move up">
+                  className="shrink-0 p-0.5 text-[#5E6870] hover:text-[#287EAD] disabled:opacity-30" title="Move up">
                   <ArrowUp className="h-3.5 w-3.5" />
                 </button>
                 <button onClick={() => move(i, 1)} disabled={i === files.length - 1}
-                  className="shrink-0 rounded p-0.5 text-[#5E6870] hover:text-[#287EAD] disabled:opacity-30" title="Move down">
+                  className="shrink-0 p-0.5 text-[#5E6870] hover:text-[#287EAD] disabled:opacity-30" title="Move down">
                   <ArrowDown className="h-3.5 w-3.5" />
                 </button>
                 <button onClick={() => setFiles((prev) => prev.filter((_, j) => j !== i))}
-                  className="shrink-0 rounded p-0.5 text-[#9AA4AD] hover:text-red-600" title="Remove">
+                  className="shrink-0 p-0.5 text-[#9AA4AD] hover:text-red-600" title="Remove">
                   <X className="h-3.5 w-3.5" />
                 </button>
               </li>
@@ -319,7 +337,7 @@ function CompressPanel({ onApply }: { onApply: (l: CompressLevel) => void }) {
       <div className="space-y-1.5">
         {levels.map((l) => (
           <button key={l.id} onClick={() => setLevel(l.id)}
-            className={clsx("flex w-full items-center justify-between rounded-md border px-3 py-2 text-sm", level === l.id ? "border-[#287EAD] bg-[#EEF6FB]" : "border-[#C8CDD2]")}>
+            className={clsx("flex w-full items-center justify-between border px-3 py-2 text-sm", level === l.id ? "border-[#287EAD] bg-[#EEF6FB]" : "border-[#C8CDD2]")}>
             <span className="font-medium text-[#2A3138]">{l.label}</span>
             <span className="text-xs text-[#5E6870]">{l.hint}</span>
           </button>

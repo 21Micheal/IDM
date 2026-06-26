@@ -455,7 +455,7 @@
         {/* ══════════════════════════════════════════════════════════════════
             HEADER — solid Infor blue
         ══════════════════════════════════════════════════════════════════ */}
-        <header className="flex shrink-0 items-center gap-2 bg-[#0067AC] px-4 py-2.5 shadow-md">
+        <header className="flex shrink-0 items-center gap-2 bg-[#287EAD] px-4 py-2.5 shadow-md">
           {/* Brand */}
           <span className="mr-3 flex items-center gap-2">
             <FileText className="h-5 w-5 text-white/80" />
@@ -473,7 +473,7 @@
           {/* Zoom */}
           <HBtn icon={ZoomOut} label="Zoom out" onClick={() => setZoom((z) => Math.max(0.4, +(z - 0.15).toFixed(2)))} />
           <button onClick={() => setZoom(1)} title="Reset zoom"
-            className="w-14 rounded border border-white/30 px-1 py-1 text-center text-xs text-white/80 hover:bg-white/10">
+            className="w-14 border border-white/30 px-1 py-1 text-center text-xs text-white/80 hover:bg-white/10">
             {Math.round(zoom * 100)}%
           </button>
           <HBtn icon={ZoomIn} label="Zoom in" onClick={() => setZoom((z) => Math.min(3, +(z + 0.15).toFixed(2)))} />
@@ -500,7 +500,7 @@
               : doDownload({}, "edited.pdf")
             }
             disabled={!hasDoc}
-            className="inline-flex items-center gap-1.5 rounded-md border border-white/30 px-3 py-1.5 text-sm text-white/90 hover:bg-white/10 disabled:opacity-40"
+            className="inline-flex items-center gap-1.5 border border-white/30 px-3 py-1.5 text-sm text-white/90 hover:bg-white/10 disabled:opacity-40"
           >
             <Download className="h-4 w-4" /> Download
           </button>
@@ -514,7 +514,7 @@
                 } else { doExport({}, "edited.pdf"); }
               }}
               disabled={!hasDoc || (!!pendingExport && !pendingExport.canUseInUpload)}
-              className="inline-flex items-center gap-1.5 rounded-md bg-white px-3 py-1.5 text-sm font-semibold text-[#0067AC] hover:bg-blue-50 disabled:opacity-40"
+              className="inline-flex items-center gap-1.5 bg-white px-3 py-1.5 text-sm font-semibold text-[#287EAD] hover:bg-[#EEF6FB] disabled:opacity-40"
             >
               <Save className="h-4 w-4" /> {pendingExport ? "Use & continue" : "Save"}
             </button>
@@ -543,10 +543,10 @@
                         onClick={() => pickTool(it.id)}
                         title={TOOL_TIPS[it.id] ?? it.label}
                         className={clsx(
-                          "flex flex-col items-center gap-0.5 rounded-md px-2.5 py-1.5 text-[11px] font-medium transition",
+                          "flex flex-col items-center gap-0.5 px-2.5 py-1.5 text-[11px] font-medium transition border-b-2",
                           active
-                            ? "bg-[#0067AC] text-white shadow-sm"
-                            : "text-[#5E6870] hover:bg-[#EEF0F2] hover:text-[#1C2830]",
+                            ? "border-[#287EAD] bg-[#EEF6FB] text-[#287EAD]"
+                            : "border-transparent text-[#5E6870] hover:bg-[#EEF0F2] hover:text-[#1C2830]",
                         )}
                       >
                         <it.icon className="h-4 w-4" />
@@ -599,7 +599,7 @@
             <EyeOff className="h-4 w-4 shrink-0 text-[#C53030]" />
             <span>{redactCount} redaction box{redactCount > 1 ? "es" : ""} placed — <strong>cover only</strong>, text is still in the file until applied.</span>
             <button onClick={doRedact} disabled={!onJob}
-              className="ml-auto inline-flex items-center gap-1.5 rounded-md bg-[#C53030] px-3 py-1.5 text-xs font-medium text-white hover:bg-[#9B2C2C] disabled:opacity-40">
+              className="ml-auto inline-flex items-center gap-1.5 bg-red-700 px-3 py-1.5 text-xs font-medium text-white hover:bg-red-800 disabled:opacity-40">
               <EyeOff className="h-3.5 w-3.5" /> Apply redactions
             </button>
           </div>
@@ -689,41 +689,44 @@
         {/* ── Signature pad modal ── */}
         {showSignPad && (
           <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 p-4">
-            <div className="w-full max-w-lg rounded-xl bg-white p-5 shadow-2xl">
-              <div className="mb-4 flex items-center justify-between">
-                <h3 className="text-base font-semibold text-[#1C2830]">
+            <div className="w-full max-w-lg border border-[#C8CDD2] bg-white shadow-2xl">
+              {/* Header */}
+              <div className="flex items-center justify-between border-b border-[#C8CDD2] bg-[#287EAD] px-5 py-3">
+                <h3 className="text-base font-semibold text-white">
                   {savedSignatures.length ? "Add signature" : "Create signature"}
                 </h3>
-                <button onClick={() => setShowSignPad(false)} className="rounded-md p-1 text-[#5E6870] hover:bg-[#F1F5F8]">
+                <button onClick={() => setShowSignPad(false)} className="p-1 text-white/75 hover:text-white">
                   <X className="h-5 w-5" />
                 </button>
               </div>
-              {savedSignatures.length > 0 && (
-                <div className="mb-4">
-                  <p className="mb-2 text-xs font-medium uppercase tracking-wide text-[#9AA4AD]">Your saved signatures</p>
-                  <div className="flex flex-wrap gap-2">
-                    {savedSignatures.map((sig) => (
-                      <button key={sig.id} onClick={() => { setImageSrc(sig.src); setShowSignPad(false); setTool("sign"); }}
-                        className="flex h-16 w-36 items-center justify-center rounded-md border border-[#C8CDD2] bg-white p-1.5 hover:border-[#0067AC] hover:bg-[#E5F0F9]">
-                        <img src={sig.src} alt={sig.label ?? "Saved signature"} className="max-h-full max-w-full object-contain" />
-                      </button>
-                    ))}
+              <div className="p-5">
+                {savedSignatures.length > 0 && (
+                  <div className="mb-4">
+                    <p className="mb-2 text-xs font-semibold uppercase tracking-wide text-[#5E6870]">Your saved signatures</p>
+                    <div className="flex flex-wrap gap-2">
+                      {savedSignatures.map((sig) => (
+                        <button key={sig.id} onClick={() => { setImageSrc(sig.src); setShowSignPad(false); setTool("sign"); }}
+                          className="flex h-16 w-36 items-center justify-center border border-[#C8CDD2] bg-white p-1.5 hover:border-[#287EAD] hover:bg-[#EEF6FB]">
+                          <img src={sig.src} alt={sig.label ?? "Saved signature"} className="max-h-full max-w-full object-contain" />
+                        </button>
+                      ))}
+                    </div>
+                    <div className="my-4 flex items-center gap-3 text-[11px] uppercase tracking-wide text-[#9AA4AD]">
+                      <span className="h-px flex-1 bg-[#E1E5E8]" /> or create new <span className="h-px flex-1 bg-[#E1E5E8]" />
+                    </div>
                   </div>
-                  <div className="my-4 flex items-center gap-3 text-[11px] uppercase tracking-wide text-[#9AA4AD]">
-                    <span className="h-px flex-1 bg-[#E1E5E8]" /> or create new <span className="h-px flex-1 bg-[#E1E5E8]" />
-                  </div>
+                )}
+                <SignaturePad defaultName={signerName} onChange={(url) => setImageSrc(url)} />
+                <div className="mt-4 flex justify-end gap-2 border-t border-[#C8CDD2] pt-4">
+                  <button onClick={() => setShowSignPad(false)}
+                    className="border border-[#C8CDD2] bg-white px-4 py-2 text-sm text-[#5E6870] hover:bg-[#F5F7F8] transition-colors">
+                    Cancel
+                  </button>
+                  <button disabled={!imageSrc} onClick={() => { setShowSignPad(false); setTool("sign"); }}
+                    className="bg-[#287EAD] px-4 py-2 text-sm font-medium text-white hover:bg-[#206D99] disabled:opacity-40 transition-colors">
+                    Use signature
+                  </button>
                 </div>
-              )}
-              <SignaturePad defaultName={signerName} onChange={(url) => setImageSrc(url)} />
-              <div className="mt-4 flex justify-end gap-2">
-                <button onClick={() => setShowSignPad(false)}
-                  className="rounded-md border border-[#C8CDD2] px-4 py-2 text-sm text-[#5E6870] hover:bg-[#F1F5F8]">
-                  Cancel
-                </button>
-                <button disabled={!imageSrc} onClick={() => { setShowSignPad(false); setTool("sign"); }}
-                  className="rounded-md bg-[#0067AC] px-4 py-2 text-sm font-medium text-white hover:bg-[#005B95] disabled:opacity-40">
-                  Use signature
-                </button>
               </div>
             </div>
           </div>
@@ -732,8 +735,8 @@
         {/* Busy overlay */}
         {busy && (
           <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/30">
-            <div className="flex items-center gap-3 rounded-xl bg-white px-6 py-4 shadow-2xl">
-              <Loader2 className="h-5 w-5 animate-spin text-[#0067AC]" />
+            <div className="flex items-center gap-3 border border-[#C8CDD2] bg-white px-6 py-4 shadow-2xl">
+              <Loader2 className="h-5 w-5 animate-spin text-[#287EAD]" />
               <span className="text-sm font-medium">{busy}</span>
             </div>
           </div>
@@ -742,10 +745,10 @@
         {/* Toast */}
         {flash && (
           <div className="pointer-events-none fixed bottom-6 left-1/2 z-[60] -translate-x-1/2">
-            <div className="pointer-events-auto flex items-center gap-2 rounded-lg bg-[#1C2830] px-4 py-2.5 text-sm font-medium text-white shadow-2xl">
-              <Check className="h-4 w-4 text-[#5CC98B]" />
+            <div className="pointer-events-auto flex items-center gap-2 border border-[#C8CDD2] bg-[#287EAD] px-4 py-2.5 text-sm font-medium text-white shadow-2xl">
+              <Check className="h-4 w-4 text-white" />
               <span>{flash}</span>
-              <button onClick={() => setFlash(null)} className="ml-2 text-white/60 hover:text-white"><X className="h-4 w-4" /></button>
+              <button onClick={() => setFlash(null)} className="ml-2 text-white/70 hover:text-white"><X className="h-4 w-4" /></button>
             </div>
           </div>
         )}
@@ -787,21 +790,21 @@
       <div
         ref={ref}
         style={{ position: "fixed", top: pos.top, left: pos.left, zIndex: 10000 }}
-        className="rounded-xl border border-[#C8CDD2] bg-white p-3 shadow-2xl"
+        className="border border-[#C8CDD2] bg-white shadow-2xl overflow-hidden"
       >
-        <p className="mb-2.5 text-[10px] font-semibold uppercase tracking-widest text-[#9AA4AD]">
+        <p className="px-3 py-2 border-b border-[#C8CDD2] bg-[#287EAD] text-[10px] font-semibold uppercase tracking-widest text-white">
           Choose a shape
         </p>
-        <div className="grid grid-cols-2 gap-2">
+        <div className="grid grid-cols-2 gap-2 p-3">
           {SHAPE_PICKER.map((s) => (
             <button
               key={s.id}
               onClick={() => onPick(s.id)}
               className={clsx(
-                "flex flex-col items-center gap-1.5 rounded-lg border-2 px-4 py-3 text-center transition",
+                "flex flex-col items-center gap-1.5 border-2 px-4 py-3 text-center transition",
                 current === s.id
-                  ? "border-[#0067AC] bg-[#E5F0F9] text-[#0067AC]"
-                  : "border-[#E1E5E8] text-[#5E6870] hover:border-[#0067AC] hover:bg-[#F5F9FC] hover:text-[#0067AC]",
+                  ? "border-[#287EAD] bg-[#EEF6FB] text-[#287EAD]"
+                  : "border-[#C8CDD2] text-[#5E6870] hover:border-[#287EAD] hover:bg-[#F5F9FC] hover:text-[#287EAD]",
               )}
             >
               <s.icon className="h-5 w-5" />
@@ -840,8 +843,8 @@
           <label className="flex cursor-pointer items-center gap-2 text-[#5E6870]">
             <span className="text-xs font-medium">Colour</span>
             <button type="button" onClick={() => colorRef.current?.click()}
-              className="flex h-7 w-7 items-center justify-center rounded-md border border-[#C8CDD2] p-0.5 shadow-sm hover:shadow">
-              <span className="h-full w-full rounded-sm" style={{ background: color }} />
+              className="flex h-7 w-7 items-center justify-center border border-[#C8CDD2] p-0.5 hover:shadow">
+              <span className="h-full w-full" style={{ background: color }} />
             </button>
             <input ref={colorRef} type="color" value={color} onChange={(e) => setColor(e.target.value)} className="sr-only" />
           </label>
@@ -858,7 +861,7 @@
             <label className="flex items-center gap-2 text-[#5E6870]">
               <span className="text-xs font-medium">Font</span>
               <select value={fontFamily} onChange={(e) => setFontFamily(e.target.value)}
-                className="rounded-md border border-[#C8CDD2] px-2 py-1 text-xs focus:border-[#0067AC] focus:outline-none">
+                className="border border-[#C8CDD2] px-2 py-1 text-xs focus:border-[#287EAD] focus:outline-none">
                 <option value="Helvetica">Helvetica</option>
                 <option value="Arial">Arial</option>
                 <option value="Times">Times</option>
@@ -871,7 +874,7 @@
               <span className="text-xs font-medium">Size</span>
               <input type="number" min={4} max={300} value={fontSizePt}
                 onChange={(e) => setFontSizePt(Math.max(4, Math.min(300, Number(e.target.value) || 12)))}
-                className="w-14 rounded-md border border-[#C8CDD2] px-2 py-1 text-xs focus:border-[#0067AC] focus:outline-none" />
+                className="w-14 border border-[#C8CDD2] px-2 py-1 text-xs focus:border-[#287EAD] focus:outline-none" />
               <span className="text-xs text-[#9AA4AD]">pt</span>
             </label>
           </>
@@ -896,7 +899,7 @@
   function HBtn({ icon: Icon, label, onClick, disabled }: { icon: typeof Files; label: string; onClick: () => void; disabled?: boolean }) {
     return (
       <button onClick={onClick} disabled={disabled} title={label}
-        className="rounded-md p-1.5 text-white/80 transition hover:bg-white/15 disabled:opacity-30">
+        className="p-1.5 text-white/80 transition hover:bg-white/15 disabled:opacity-30">
         <Icon className="h-4 w-4" />
       </button>
     );
@@ -913,19 +916,19 @@
       <div className="flex flex-1 items-center justify-center bg-[#EEF0F2] p-8">
         <label
           className={clsx(
-            "flex cursor-pointer flex-col items-center gap-4 rounded-2xl border-2 border-dashed bg-white px-16 py-20 text-center transition",
-            dragging ? "border-[#0067AC] bg-[#E5F0F9]" : "border-[#C8CDD2] hover:border-[#0067AC]",
+            "flex cursor-pointer flex-col items-center gap-4 border-2 border-dashed bg-white px-16 py-20 text-center transition",
+            dragging ? "border-[#287EAD] bg-[#EEF6FB]" : "border-[#C8CDD2] hover:border-[#287EAD]",
           )}
           onDragOver={(e) => { e.preventDefault(); setDragging(true); }}
           onDragLeave={() => setDragging(false)}
           onDrop={handleDrop}
         >
-          <FileText className="h-12 w-12 text-[#0067AC]" />
+          <FileText className="h-12 w-12 text-[#287EAD]" />
           <div>
             <p className="text-base font-semibold text-[#1C2830]">Open a PDF to start editing</p>
             <p className="mt-1 text-sm text-[#5E6870]">or drop one here — merge more later</p>
           </div>
-          <span className="rounded-lg bg-[#0067AC] px-5 py-2 text-sm font-medium text-white">Choose file</span>
+          <span className="bg-[#287EAD] px-5 py-2 text-sm font-medium text-white hover:bg-[#206D99]">Choose file</span>
           <input type="file" accept="application/pdf" multiple hidden onChange={(e) => e.target.files && onOpen([...e.target.files])} />
         </label>
       </div>
