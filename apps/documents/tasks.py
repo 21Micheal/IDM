@@ -1363,3 +1363,15 @@ def _trigger_index(document_id: str) -> None:
             "_trigger_index: could not queue indexing for %s: %s",
             document_id, exc,
         )
+
+
+@shared_task(bind=True, max_retries=0, queue="default")
+def run_migration_job(self, job_id: str):
+    """Run an Infor IDM → fseDMS migration job in the background.
+
+    Thin Celery wrapper around ``apps.documents.migration.run_migration_job``;
+    that helper owns all status/counter/log bookkeeping and never lets a single
+    item failure abort the batch, so there is nothing to retry here.
+    """
+    from .migration import run_migration_job as _run
+    return str(_run(job_id).id)

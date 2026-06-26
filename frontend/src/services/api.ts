@@ -566,6 +566,88 @@ export const searchAPI = {
   search: (payload: unknown) => api.post("/search/", payload),
 };
 
+// ── Infor IDM migration ───────────────────────────────────────────────────────
+export type MigrationConnection = {
+  api_url?: string;
+  token_url?: string;
+  tenant?: string;
+  client_id?: string;
+  client_secret?: string;
+  saak?: string;
+  sask?: string;
+  scope?: string;
+  idm_path?: string;
+  verify_tls?: boolean;
+};
+
+export type MigrationJobStatus =
+  | "draft" | "queued" | "running" | "completed" | "partial" | "failed" | "cancelled";
+
+export type MigrationLogEntry = {
+  ion_id?: string | null;
+  reference_number?: string;
+  document_id?: string;
+  status?: "imported" | "skipped" | "failed";
+  detail?: string;
+};
+
+export type MigrationJob = {
+  id: string;
+  name: string;
+  connection: MigrationConnection;
+  source_query: string;
+  target_document_type: string | null;
+  target_document_type_name?: string | null;
+  include_attributes: boolean;
+  max_documents: number;
+  status: MigrationJobStatus;
+  total_items: number;
+  processed_items: number;
+  succeeded_items: number;
+  failed_items: number;
+  skipped_items: number;
+  log?: MigrationLogEntry[];
+  error?: string;
+  created_by?: string | null;
+  created_by_name?: string | null;
+  created_at: string;
+  updated_at: string;
+  started_at?: string | null;
+  finished_at?: string | null;
+  has_client_secret?: boolean;
+  has_sask?: boolean;
+};
+
+export type MigrationJobInput = {
+  name: string;
+  connection?: MigrationConnection;
+  source_query?: string;
+  target_document_type?: string | null;
+  include_attributes?: boolean;
+  max_documents?: number;
+};
+
+export const migrationAPI = {
+  list: () => api.get<MigrationJob[]>("/documents/migrations/"),
+  get: (id: string) => api.get<MigrationJob>(`/documents/migrations/${id}/`),
+  status: (id: string) => api.get<MigrationJob>(`/documents/migrations/${id}/status/`),
+  create: (data: MigrationJobInput) =>
+    api.post<MigrationJob>("/documents/migrations/", data),
+  update: (id: string, data: Partial<MigrationJobInput>) =>
+    api.patch<MigrationJob>(`/documents/migrations/${id}/`, data),
+  delete: (id: string) => api.delete(`/documents/migrations/${id}/`),
+  run: (id: string) => api.post<MigrationJob>(`/documents/migrations/${id}/run/`, {}),
+  testConnection: (connection: MigrationConnection) =>
+    api.post<{ ok: boolean; tenant?: string; api_url?: string; detail?: string }>(
+      "/documents/migrations/test_connection/",
+      { connection },
+    ),
+  connectionDefaults: () =>
+    api.get<{ connection: MigrationConnection; has_client_secret: boolean; has_sask: boolean }>(
+      "/documents/migrations/connection_defaults/",
+    ),
+};
+
 // ── Signing payload (structurally matches SignaturePlacementResult from
 // SignaturePlacementModal) — kept local so this module stays decoupled from UI.
 export type SignSubmission = {

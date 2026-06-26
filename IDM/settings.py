@@ -236,6 +236,7 @@ CELERY_TASK_ROUTES = {
     "apps.documents.tasks.generate_document_preview": {"queue": "preview"},
     "apps.documents.tasks.auto_archive_documents": {"queue": "default"},
     "apps.documents.tasks.empty_trash": {"queue": "default"},
+    "apps.documents.tasks.run_migration_job": {"queue": "default"},
 }
 WORKFLOW_SLA_WARNING_HOURS = env.int("WORKFLOW_SLA_WARNING_HOURS", default=4)
 WORKFLOW_HOLD_WARNING_HOURS = env.int("WORKFLOW_HOLD_WARNING_HOURS", default=2)
@@ -296,6 +297,21 @@ OCR_PADDLE_USE_ANGLE_CLS = env.bool("OCR_PADDLE_USE_ANGLE_CLS", default=True)
 # spaCy NER post-processing settings
 OCR_SPACY_ENABLED = env.bool("OCR_SPACY_ENABLED", default=True)
 OCR_SPACY_MODEL = env("OCR_SPACY_MODEL", default="en_core_web_sm")
+
+# ── Infor IDM migration (ION API) ───────────────────────────────────────────
+# Default ION connection settings used to migrate documents out of Infor IDM.
+# Each MigrationJob may override these in its own `connection` JSON; anything
+# left blank on a job falls back to the environment defaults exposed here.
+ION_API_URL       = env("ION_API_URL", default="")        # gateway base, ends with tenant: https://.../TENANT/
+ION_TOKEN_URL     = env("ION_TOKEN_URL", default="")      # full OAuth2 token endpoint (pu + ot)
+ION_TENANT        = env("ION_TENANT", default="")
+ION_CLIENT_ID     = env("ION_CLIENT_ID", default="")
+ION_CLIENT_SECRET = env("ION_CLIENT_SECRET", default="")
+ION_SAAK          = env("ION_SAAK", default="")           # service account access key
+ION_SASK          = env("ION_SASK", default="")           # service account secret key
+ION_SCOPE         = env("ION_SCOPE", default="")
+ION_IDM_PATH      = env("ION_IDM_PATH", default="IDM/api") # IDM REST path under the gateway
+ION_VERIFY_TLS    = env.bool("ION_VERIFY_TLS", default=True)
 
 # ── IDP (Intelligent Document Processing) ───────────────────────────────────
 # Provider selection:

@@ -16,7 +16,7 @@ import {
   Workflow, Settings, LogOut,
   Bell, Users, Building2, UserRoundCog, Shield,
   ChevronDown, ChevronRight, Archive, ScanLine, Loader2, UserCheck, Monitor, Lock, History, Trash2,
-  BellRing, CircleUserRound, ClipboardCheck, Inbox, ArrowRight, FileSignature, LayoutTemplate,
+  BellRing, CircleUserRound, ClipboardCheck, Inbox, ArrowRight, FileSignature, LayoutTemplate, Database,
 } from "lucide-react";
 import { useAuthStore } from "../../store/authStore";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
@@ -111,6 +111,7 @@ const adminNav: NavLeaf[] = [
   { to: "/admin/departments", icon: Building2, label: "Departments", allowedRoles: ["admin"] },
   { to: "/admin/groups",      icon: Shield,    label: "Groups",      allowedRoles: ["admin"] },
   { to: "/admin/settings",    icon: Settings,  label: "Settings",    allowedRoles: ["admin"] },
+  { to: "/admin/migration",   icon: Database,  label: "IDM Migration", allowedRoles: ["admin"] },
   { to: "/workflow/builder", icon: Settings, label: "Workflow Builder", allowedRoles: ["admin"] },
 ];
 

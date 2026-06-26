@@ -20,6 +20,7 @@ const SearchPage = lazy(() => import("@/pages/SearchPage"));
 const WorkflowPage = lazy(() => import("@/pages/WorkflowPage"));
 const AdminPage = lazy(() => import("@/pages/AdminPage"));
 const AdminDocumentTypesPage = lazy(() => import("@/pages/AdminDocumentTypesPage"));
+const AdminMigrationPage = lazy(() => import("@/pages/AdminMigrationPage"));
 const AuditPage = lazy(() => import("@/pages/AuditPage"));
 const UsersPage = lazy(() => import("@/pages/UsersPage"));
 const UserDetailPage = lazy(() => import("@/pages/UserDetailPage"));
@@ -390,6 +391,7 @@ export default function App() {
               <Route path="admin/templates"       element={<RequireAdmin><TemplatesPage /></RequireAdmin>} />
               <Route path="admin/departments"     element={<RequireAdmin><DepartmentsPage /></RequireAdmin>} />
               <Route path="admin/groups"          element={<RequireAdmin><GroupsPage /></RequireAdmin>} />
+              <Route path="admin/migration"       element={<RequireAdmin><AdminMigrationPage /></RequireAdmin>} />
             </Route>
 
             <Route path="*" element={<Navigate to="/" replace />} />

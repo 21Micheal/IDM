@@ -1109,3 +1109,118 @@ class SignatureRequestSigner(models.Model):
 
     def __str__(self):
         return f"{self.signer_id} → {self.request_id} ({self.status})"
+
+
+class MigrationJobStatus(models.TextChoices):
+    """Lifecycle of an Infor IDM → fseDMS migration run."""
+    DRAFT      = "draft",      "Draft"
+    QUEUED     = "queued",     "Queued"
+    RUNNING    = "running",    "Running"
+    COMPLETED  = "completed",  "Completed"
+    PARTIAL    = "partial",    "Completed with errors"
+    FAILED     = "failed",     "Failed"
+    CANCELLED  = "cancelled",  "Cancelled"
+
+
+class MigrationJob(models.Model):
+    """
+    A migration of documents from Infor IDM (reached over the ION API) into
+    this DMS.
+
+    The job owns three concerns:
+
+    * **connection** – the ION API credentials/endpoints used to reach IDM.
+      Stored as JSON so the exact shape can evolve as we learn the real ION
+      tenant configuration. Secret values (``client_secret``/``password``/
+      ``sask``) are write-only at the API layer and redacted on read.
+    * **selection** – ``source_query`` is the IDM query (AQL/OData-style) that
+      decides *which* documents are pulled. Empty means "the connector's
+      default", which the client may interpret as "everything it can list".
+    * **mapping & results** – ``target_document_type`` is the fseDMS type that
+      imported documents are filed under (a single fallback type for now;
+      per-IDM-type mapping can be layered on later). ``include_attributes``
+      controls whether IDM attributes are copied into ``Document.metadata``.
+      The running task updates the counters and appends per-item outcomes to
+      ``log`` so the UI can show progress and surface failures.
+
+    NB: actual IDM field/attribute mapping is intentionally thin and lives in
+    ``apps.documents.migration`` so it can be tuned once the real ION response
+    shapes are confirmed.
+    """
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    name = models.CharField(max_length=200)
+
+    connection = models.JSONField(
+        default=dict,
+        blank=True,
+        help_text=(
+            "ION API connection settings: api_url, tenant, token_url, "
+            "client_id, client_secret, saak, sask, scope, etc."
+        ),
+    )
+    source_query = models.TextField(
+        blank=True,
+        help_text="IDM query selecting which documents to migrate. Empty = connector default.",
+    )
+
+    target_document_type = models.ForeignKey(
+        DocumentType,
+        null=True,
+        blank=True,
+        on_delete=models.SET_NULL,
+        related_name="migration_jobs",
+        help_text="fseDMS document type imported documents are filed under.",
+    )
+    include_attributes = models.BooleanField(
+        default=True,
+        help_text="Copy IDM attributes/metadata into each imported document's metadata.",
+    )
+    # Hard cap so an exploratory run can't accidentally pull an entire archive.
+    max_documents = models.PositiveIntegerField(
+        default=0,
+        help_text="Optional ceiling on documents imported in one run. 0 = no limit.",
+    )
+
+    status = models.CharField(
+        max_length=20,
+        choices=MigrationJobStatus.choices,
+        default=MigrationJobStatus.DRAFT,
+        db_index=True,
+    )
+
+    total_items     = models.PositiveIntegerField(default=0)
+    processed_items = models.PositiveIntegerField(default=0)
+    succeeded_items = models.PositiveIntegerField(default=0)
+    failed_items    = models.PositiveIntegerField(default=0)
+    skipped_items   = models.PositiveIntegerField(default=0)
+
+    # Append-only list of {ion_id, reference_number?, status, detail} dicts.
+    log   = models.JSONField(default=list, blank=True)
+    error = models.TextField(blank=True)
+
+    created_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        null=True,
+        on_delete=models.SET_NULL,
+        related_name="migration_jobs",
+    )
+    created_at  = models.DateTimeField(auto_now_add=True)
+    updated_at  = models.DateTimeField(auto_now=True)
+    started_at  = models.DateTimeField(null=True, blank=True)
+    finished_at = models.DateTimeField(null=True, blank=True)
+
+    class Meta:
+        ordering = ["-created_at"]
+        indexes = [
+            models.Index(fields=["status", "created_at"]),
+        ]
+
+    def __str__(self):
+        return f"MigrationJob {self.name} ({self.status})"
+
+    def append_log(self, entry: dict) -> None:
+        """Append one per-item outcome. Caller is responsible for saving."""
+        log = list(self.log or [])
+        log.append(entry)
+        self.log = log
