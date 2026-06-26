@@ -531,6 +531,19 @@ class Document(models.Model):
     def __str__(self):
         return f"[{self.reference_number}] {self.title}"
 
+    def save(self, *args, **kwargs):
+        # Default the document's department to the uploader's on first creation so
+        # "department activity" reflects real org structure. It stays independently
+        # re-assignable afterwards — this only fills it when blank at creation.
+        if self._state.adding and self.department_id is None and self.uploaded_by_id:
+            from apps.accounts.models import User
+            self.department_id = (
+                User.objects.filter(pk=self.uploaded_by_id)
+                .values_list("department_id", flat=True)
+                .first()
+            )
+        super().save(*args, **kwargs)
+
     def hard_delete(self):
         """Permanently remove the document, its versions, and their stored files."""
         import logging as _logging

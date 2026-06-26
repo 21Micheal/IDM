@@ -19,6 +19,7 @@
     "axios": "^1.6.7",
     "clsx": "^2.1.0",
     "date-fns": "^3.6.0",
+    "html-to-image": "^1.11.13",
     "lucide-react": "^0.363.0",
     "pdf-lib": "^1.17.1",
     "pdfjs-dist": "^4.10.38",
