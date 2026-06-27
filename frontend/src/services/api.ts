@@ -668,7 +668,10 @@ export const migrationAPI = {
 };
 
 // ── Email ingestion (IMAP mailboxes) ──────────────────────────────────────────
+export type MailboxProtocol = "imap" | "graph";
+
 export type MailboxConnection = {
+  // IMAP
   host?: string;
   port?: number;
   use_ssl?: boolean;
@@ -676,6 +679,11 @@ export type MailboxConnection = {
   password?: string;
   folder?: string;
   verify_tls?: boolean;
+  // Microsoft Graph
+  tenant_id?: string;
+  client_id?: string;
+  client_secret?: string;
+  mailbox?: string;
 };
 
 export type MailboxPollStatus = "idle" | "polling" | "ok" | "error";
@@ -698,7 +706,9 @@ export type IngestedEmail = {
 export type Mailbox = {
   id: string;
   name: string;
+  protocol: MailboxProtocol;
   connection: MailboxConnection;
+  last_seen_cursor?: string;
   default_document_type: string | null;
   default_document_type_name?: string | null;
   auto_classify: boolean;
@@ -726,6 +736,7 @@ export type Mailbox = {
 
 export type MailboxInput = {
   name: string;
+  protocol?: MailboxProtocol;
   connection?: MailboxConnection;
   default_document_type?: string | null;
   auto_classify?: boolean;
@@ -747,14 +758,15 @@ export const mailboxAPI = {
     api.patch<Mailbox>(`/documents/mailboxes/${id}/`, data),
   delete: (id: string) => api.delete(`/documents/mailboxes/${id}/`),
   poll: (id: string) => api.post<Mailbox>(`/documents/mailboxes/${id}/poll/`, {}),
-  testConnection: (connection: MailboxConnection) =>
-    api.post<{ ok: boolean; host?: string; folder?: string; detail?: string }>(
+  testConnection: (connection: MailboxConnection, protocol: MailboxProtocol = "imap") =>
+    api.post<{ ok: boolean; host?: string; folder?: string; mailbox?: string; detail?: string }>(
       "/documents/mailboxes/test_connection/",
-      { connection },
+      { connection, protocol },
     ),
-  connectionDefaults: () =>
+  connectionDefaults: (protocol: MailboxProtocol = "imap") =>
     api.get<{ connection: MailboxConnection; has_password: boolean }>(
       "/documents/mailboxes/connection_defaults/",
+      { params: { protocol } },
     ),
 };
 

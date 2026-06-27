@@ -1280,15 +1280,27 @@ class Mailbox(models.Model):
     only carries connection, routing, and last-poll bookkeeping.
     """
 
+    class Protocol(models.TextChoices):
+        IMAP  = "imap",  "IMAP"
+        GRAPH = "graph", "Microsoft Graph"
+
     id   = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
     name = models.CharField(max_length=200)
 
+    protocol = models.CharField(
+        max_length=10,
+        choices=Protocol.choices,
+        default=Protocol.IMAP,
+        db_index=True,
+        help_text="Mail backend used to reach this mailbox.",
+    )
     connection = models.JSONField(
         default=dict,
         blank=True,
         help_text=(
-            "IMAP connection settings: host, port, use_ssl, username, "
-            "password, folder, search_criteria."
+            "Connection settings. IMAP: host, port, use_ssl, username, password, "
+            "folder. Microsoft Graph: tenant_id, client_id, client_secret, "
+            "mailbox (user principal name), folder."
         ),
     )
 
@@ -1356,6 +1368,9 @@ class Mailbox(models.Model):
     last_error     = models.TextField(blank=True)
     # IMAP UID of the highest message seen, so each poll only fetches newer mail.
     last_seen_uid  = models.PositiveBigIntegerField(default=0)
+    # Microsoft Graph cursor: ISO receivedDateTime of the last message processed
+    # (Graph has no monotonic UID). Empty until the first Graph poll runs.
+    last_seen_cursor = models.CharField(max_length=64, blank=True, default="")
 
     # Aggregate counters for the most recent poll (per-email detail is on IngestedEmail).
     last_imported_count = models.PositiveIntegerField(default=0)

@@ -37,6 +37,7 @@ from .imap_client import (
     IMAPError,
     merge_connection_with_defaults,
 )
+from .graph_client import GraphError
 from .bulk_upload import (
     UNCLASSIFIED_BULK_DOCUMENT_TYPE_CODE,
     get_unclassified_bulk_document_type,
@@ -355,7 +356,7 @@ def import_email(mailbox: Mailbox, fetched, *, user) -> dict:
     is_related = (mailbox.related_set_attachments and len(attachments) > 1) or unclassified
     supplier = mailbox.supplier_for_sender(sender)
     provenance = {
-        "source": "imap",
+        "source": mailbox.protocol,
         "mailbox_id": str(mailbox.id),
         "mailbox": mailbox.name,
         "message_id": msg_id,
@@ -479,42 +480,18 @@ def run_mailbox_poll(mailbox_id: str) -> Mailbox:
             "Mailbox has no owner to attribute imported documents to.",
         )
 
-    limit = mailbox.max_messages_per_poll or None
     # Track progress on the instance so every exit path (success or error)
     # persists the same partial counters and cursor via _finish_poll.
     mailbox.last_imported_count = 0
     mailbox.last_skipped_count = 0
     mailbox.last_failed_count = 0
-    start_uid = mailbox.last_seen_uid
 
     try:
-        with IMAPClient(IMAPConfig.from_mapping(merge_connection_with_defaults(mailbox.connection))) as client:
-            # First poll of a mailbox that should not import its backlog: jump the
-            # cursor to the current high UID and ingest nothing this round, so only
-            # mail arriving afterwards is picked up.
-            if start_uid == 0 and not mailbox.ingest_history:
-                mailbox.last_seen_uid = client.highest_uid()
-                Mailbox.objects.filter(id=mailbox.id).update(last_seen_uid=mailbox.last_seen_uid)
-                return _finish_poll(mailbox, MailboxPollStatus.OK, "")
-
-            for processed, fetched in enumerate(
-                client.iter_messages(since_uid=start_uid, since_date=mailbox.ingest_since)
-            ):
-                if limit is not None and processed >= limit:
-                    break
-                entry = import_email(mailbox, fetched, user=user)
-                outcome = entry.get("status")
-                if outcome in (IngestedEmail.Status.IMPORTED, IngestedEmail.Status.PARTIAL):
-                    mailbox.last_imported_count += 1
-                elif outcome in ("skipped", IngestedEmail.Status.SKIPPED):
-                    mailbox.last_skipped_count += 1
-                else:
-                    mailbox.last_failed_count += 1
-                # Advance the cursor as we go so a mid-poll crash still makes
-                # forward progress and we don't re-fetch processed mail.
-                mailbox.last_seen_uid = max(mailbox.last_seen_uid, fetched.uid)
-                Mailbox.objects.filter(id=mailbox.id).update(last_seen_uid=mailbox.last_seen_uid)
-    except IMAPError as exc:
+        if mailbox.protocol == Mailbox.Protocol.GRAPH:
+            _poll_graph(mailbox, user)
+        else:
+            _poll_imap(mailbox, user)
+    except (IMAPError, GraphError) as exc:
         return _finish_poll(mailbox, MailboxPollStatus.ERROR, str(exc))
     except Exception as exc:  # noqa: BLE001
         logger.exception("run_mailbox_poll: mailbox %s crashed", mailbox_id)
@@ -523,12 +500,76 @@ def run_mailbox_poll(mailbox_id: str) -> Mailbox:
     return _finish_poll(mailbox, MailboxPollStatus.OK, "")
 
 
+def _tally(mailbox: Mailbox, outcome) -> None:
+    if outcome in (IngestedEmail.Status.IMPORTED, IngestedEmail.Status.PARTIAL):
+        mailbox.last_imported_count += 1
+    elif outcome in ("skipped", IngestedEmail.Status.SKIPPED):
+        mailbox.last_skipped_count += 1
+    else:
+        mailbox.last_failed_count += 1
+
+
+def _poll_imap(mailbox: Mailbox, user) -> None:
+    """IMAP poll loop: UID-cursor incremental fetch."""
+    limit = mailbox.max_messages_per_poll or None
+    start_uid = mailbox.last_seen_uid
+    with IMAPClient(IMAPConfig.from_mapping(merge_connection_with_defaults(mailbox.connection))) as client:
+        # First poll of a mailbox that should not import its backlog: jump the
+        # cursor to the current high UID and ingest nothing this round.
+        if start_uid == 0 and not mailbox.ingest_history:
+            mailbox.last_seen_uid = client.highest_uid()
+            Mailbox.objects.filter(id=mailbox.id).update(last_seen_uid=mailbox.last_seen_uid)
+            return
+
+        for processed, fetched in enumerate(
+            client.iter_messages(since_uid=start_uid, since_date=mailbox.ingest_since)
+        ):
+            if limit is not None and processed >= limit:
+                break
+            _tally(mailbox, import_email(mailbox, fetched, user=user).get("status"))
+            # Advance the cursor as we go so a mid-poll crash still makes forward
+            # progress and we don't re-fetch processed mail.
+            mailbox.last_seen_uid = max(mailbox.last_seen_uid, fetched.uid)
+            Mailbox.objects.filter(id=mailbox.id).update(last_seen_uid=mailbox.last_seen_uid)
+
+
+def _poll_graph(mailbox: Mailbox, user) -> None:
+    """Microsoft Graph poll loop: receivedDateTime-cursor incremental fetch."""
+    from .graph_client import (
+        GraphClient,
+        GraphConfig,
+        merge_connection_with_defaults as graph_merge,
+    )
+
+    limit = mailbox.max_messages_per_poll or None
+    cursor = mailbox.last_seen_cursor or ""
+    with GraphClient(GraphConfig.from_mapping(graph_merge(mailbox.connection))) as client:
+        if not cursor and not mailbox.ingest_history:
+            # Skip the existing backlog: set the cursor to the newest message's
+            # timestamp (or now, if empty) and ingest nothing this round.
+            mailbox.last_seen_cursor = client.highest_received() or timezone.now().isoformat()
+            Mailbox.objects.filter(id=mailbox.id).update(last_seen_cursor=mailbox.last_seen_cursor)
+            return
+
+        since = cursor or (
+            f"{mailbox.ingest_since.isoformat()}T00:00:00Z" if mailbox.ingest_since else None
+        )
+        for processed, fetched in enumerate(client.iter_messages(since_datetime=since)):
+            if limit is not None and processed >= limit:
+                break
+            _tally(mailbox, import_email(mailbox, fetched, user=user).get("status"))
+            if fetched.received_at:
+                # ISO UTC timestamps compare lexicographically in chronological order.
+                mailbox.last_seen_cursor = max(mailbox.last_seen_cursor or "", fetched.received_at)
+                Mailbox.objects.filter(id=mailbox.id).update(last_seen_cursor=mailbox.last_seen_cursor)
+
+
 def _finish_poll(mailbox: Mailbox, status: str, error: str) -> Mailbox:
     mailbox.poll_status = status
     mailbox.last_error = error or ""
     mailbox.last_polled_at = timezone.now()
     mailbox.save(update_fields=[
-        "poll_status", "last_error", "last_polled_at", "last_seen_uid",
+        "poll_status", "last_error", "last_polled_at", "last_seen_uid", "last_seen_cursor",
         "last_imported_count", "last_skipped_count", "last_failed_count",
         "updated_at",
     ])

@@ -333,6 +333,18 @@ IMAP_PASSWORD   = env("IMAP_PASSWORD", default="")
 IMAP_FOLDER     = env("IMAP_FOLDER", default="INBOX")
 IMAP_VERIFY_TLS = env.bool("IMAP_VERIFY_TLS", default=True)
 
+# ── Email ingestion (Microsoft Graph) ───────────────────────────────────────
+# Optional default Microsoft 365 / Outlook connection used by Graph mailboxes.
+# App-only auth (OAuth2 client credentials); the Azure app registration needs
+# the application permission Mail.Read with admin consent. Per-mailbox
+# `connection` JSON overrides any blank fields here.
+GRAPH_TENANT_ID     = env("GRAPH_TENANT_ID", default="")
+GRAPH_CLIENT_ID     = env("GRAPH_CLIENT_ID", default="")
+GRAPH_CLIENT_SECRET = env("GRAPH_CLIENT_SECRET", default="")
+GRAPH_MAILBOX       = env("GRAPH_MAILBOX", default="")        # user principal name / email to read
+GRAPH_FOLDER        = env("GRAPH_FOLDER", default="inbox")
+GRAPH_VERIFY_TLS    = env.bool("GRAPH_VERIFY_TLS", default=True)
+
 # ── IDP (Intelligent Document Processing) ───────────────────────────────────
 # Provider selection:
 #   anthropic → Claude via Anthropic API

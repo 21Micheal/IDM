@@ -35,12 +35,20 @@ from .imap_client import (
     default_connection_from_settings,
     merge_connection_with_defaults,
 )
+from .graph_client import (
+    GraphClient,
+    GraphConfig,
+    GraphError,
+    default_connection_from_settings as graph_default_connection,
+    merge_connection_with_defaults as graph_merge_connection,
+)
 from .models import DocumentType, IngestedEmail, Mailbox, MailboxPollStatus
 
 logger = logging.getLogger(__name__)
 
-# Connection keys whose values must never be sent back to the browser.
-SECRET_CONNECTION_KEYS = ("password",)
+# Connection keys whose values must never be sent back to the browser
+# (IMAP password + Graph client secret).
+SECRET_CONNECTION_KEYS = ("password", "client_secret")
 
 
 def _redact_connection(connection: dict | None) -> dict:
@@ -66,6 +74,9 @@ class MailboxConnectionTestSerializer(serializers.Serializer):
     """Validates an ad-hoc connection blob for the test-connection action."""
 
     connection = serializers.DictField(child=serializers.JSONField(), required=False)
+    protocol = serializers.ChoiceField(
+        choices=Mailbox.Protocol.choices, required=False, default=Mailbox.Protocol.IMAP
+    )
 
 
 class IngestedEmailSerializer(serializers.ModelSerializer):
@@ -96,24 +107,28 @@ class MailboxSerializer(serializers.ModelSerializer):
     class Meta:
         model = Mailbox
         fields = [
-            "id", "name", "connection",
+            "id", "name", "protocol", "connection",
             "default_document_type", "default_document_type_name",
             "auto_classify", "sender_supplier_map", "sender_allowlist",
             "related_set_attachments", "ingest_history", "ingest_since",
             "max_messages_per_poll", "is_active",
-            "poll_status", "last_polled_at", "last_error", "last_seen_uid",
+            "poll_status", "last_polled_at", "last_error",
+            "last_seen_uid", "last_seen_cursor",
             "last_imported_count", "last_skipped_count", "last_failed_count",
             "created_by", "created_by_name", "created_at", "updated_at",
             "has_password", "recent_emails",
         ]
         read_only_fields = [
-            "poll_status", "last_polled_at", "last_error", "last_seen_uid",
+            "poll_status", "last_polled_at", "last_error",
+            "last_seen_uid", "last_seen_cursor",
             "last_imported_count", "last_skipped_count", "last_failed_count",
             "created_by", "created_at", "updated_at",
         ]
 
     def get_has_password(self, obj) -> bool:
-        return bool((obj.connection or {}).get("password"))
+        # The stored secret is the IMAP password or the Graph client secret.
+        conn = obj.connection or {}
+        return bool(conn.get("password") or conn.get("client_secret"))
 
     def get_recent_emails(self, obj):
         # Detail view only — keep list payloads light.
@@ -163,7 +178,7 @@ class MailboxListSerializer(serializers.ModelSerializer):
     class Meta:
         model = Mailbox
         fields = [
-            "id", "name", "is_active", "auto_classify", "related_set_attachments",
+            "id", "name", "protocol", "is_active", "auto_classify", "related_set_attachments",
             "default_document_type", "default_document_type_name",
             "poll_status", "last_polled_at", "last_error",
             "last_imported_count", "last_skipped_count", "last_failed_count",
@@ -186,25 +201,41 @@ class MailboxViewSet(viewsets.ModelViewSet):
 
     @action(detail=False, methods=["get"], url_path="connection_defaults")
     def connection_defaults(self, request):
-        """Return env-configured IMAP defaults (secrets redacted) for prefill."""
-        defaults = default_connection_from_settings()
+        """Return env-configured connection defaults (secrets redacted) for prefill.
+
+        Protocol-aware via ``?protocol=graph`` (defaults to IMAP).
+        """
+        protocol = request.query_params.get("protocol", Mailbox.Protocol.IMAP)
+        if protocol == Mailbox.Protocol.GRAPH:
+            defaults = graph_default_connection()
+            has_secret = bool(defaults.get("client_secret"))
+        else:
+            defaults = default_connection_from_settings()
+            has_secret = bool(defaults.get("password"))
         return Response({
             "connection": _redact_connection(defaults),
-            "has_password": bool(defaults.get("password")),
+            "has_password": has_secret,
         })
 
     @action(detail=False, methods=["post"], url_path="test_connection")
     def test_connection(self, request):
-        """Validate IMAP credentials by logging in. Saves nothing."""
+        """Validate mailbox credentials without saving (IMAP login / Graph token)."""
         serializer = MailboxConnectionTestSerializer(data=request.data)
         serializer.is_valid(raise_exception=True)
-        connection = merge_connection_with_defaults(
-            serializer.validated_data.get("connection")
-        )
+        raw_connection = serializer.validated_data.get("connection")
+        protocol = serializer.validated_data.get("protocol", Mailbox.Protocol.IMAP)
         try:
-            client = IMAPClient(IMAPConfig.from_mapping(connection))
-            result = client.test_connection()
-        except IMAPError as exc:
+            if protocol == Mailbox.Protocol.GRAPH:
+                client = GraphClient(
+                    GraphConfig.from_mapping(graph_merge_connection(raw_connection))
+                )
+                result = client.test_connection()
+            else:
+                client = IMAPClient(
+                    IMAPConfig.from_mapping(merge_connection_with_defaults(raw_connection))
+                )
+                result = client.test_connection()
+        except (IMAPError, GraphError) as exc:
             return Response(
                 {"ok": False, "detail": str(exc)},
                 status=status.HTTP_400_BAD_REQUEST,

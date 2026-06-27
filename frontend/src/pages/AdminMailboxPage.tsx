@@ -9,6 +9,7 @@ import {
   normalizeListResponse,
   type Mailbox,
   type MailboxConnection,
+  type MailboxProtocol,
 } from "@/services/api";
 import { extractApiError } from "@/lib/apiError";
 import { toast } from "@/components/ui/vault-toast";
@@ -39,7 +40,7 @@ const EMAIL_STATUS_STYLES: Record<string, string> = {
   failed: "bg-[#FEE2E2] text-[#991B1B]",
 };
 
-const EMPTY_CONNECTION: MailboxConnection = {
+const EMPTY_IMAP: MailboxConnection = {
   host: "",
   port: 993,
   use_ssl: true,
@@ -48,6 +49,15 @@ const EMPTY_CONNECTION: MailboxConnection = {
   folder: "INBOX",
   verify_tls: true,
 };
+const EMPTY_GRAPH: MailboxConnection = {
+  tenant_id: "",
+  client_id: "",
+  client_secret: "",
+  mailbox: "",
+  folder: "inbox",
+};
+const emptyConnectionFor = (p: MailboxProtocol): MailboxConnection =>
+  p === "graph" ? { ...EMPTY_GRAPH } : { ...EMPTY_IMAP };
 
 // Render the sender→supplier map as editable "key = value" lines, and parse
 // them back. Keeps the admin form simple while the backend stores a JSON map.
@@ -70,14 +80,6 @@ function textToMap(text: string): Record<string, string> {
   return out;
 }
 
-function stripBlank(obj: Record<string, unknown>): Record<string, unknown> {
-  const out: Record<string, unknown> = {};
-  for (const [k, v] of Object.entries(obj)) {
-    if (v !== "" && v !== null && v !== undefined) out[k] = v;
-  }
-  return out;
-}
-
 // Sender allowlist: one address/domain per line (commas also accepted).
 function listToText(list: string[]): string {
   return (list || []).join("\n");
@@ -91,7 +93,8 @@ function textToList(text: string): string[] {
 
 export default function AdminMailboxPage() {
   const queryClient = useQueryClient();
-  const [connection, setConnection] = useState<MailboxConnection>(EMPTY_CONNECTION);
+  const [protocol, setProtocol] = useState<MailboxProtocol>("imap");
+  const [connection, setConnection] = useState<MailboxConnection>(EMPTY_IMAP);
   const [name, setName] = useState("");
   const [defaultType, setDefaultType] = useState("");
   const [autoClassify, setAutoClassify] = useState(false);
@@ -105,11 +108,20 @@ export default function AdminMailboxPage() {
   // null = creating a new mailbox; an id = editing that mailbox.
   const [editingId, setEditingId] = useState<string | null>(null);
 
-  // Prefill the connection form from environment-configured IMAP defaults.
+  // Prefill the connection form from environment-configured defaults for the
+  // selected protocol.
   const defaultsQuery = useQuery({
-    queryKey: ["mailbox-connection-defaults"],
-    queryFn: () => mailboxAPI.connectionDefaults().then((r) => r.data),
+    queryKey: ["mailbox-connection-defaults", protocol],
+    queryFn: () => mailboxAPI.connectionDefaults(protocol).then((r) => r.data),
   });
+
+  // Switching protocol resets the connection to that protocol's empty shape;
+  // the defaults effect then overlays any non-blank env values.
+  const changeProtocol = (p: MailboxProtocol) => {
+    if (p === protocol) return;
+    setProtocol(p);
+    setConnection(emptyConnectionFor(p));
+  };
   useEffect(() => {
     const defaults = defaultsQuery.data?.connection;
     if (!defaults) return;
@@ -157,9 +169,10 @@ export default function AdminMailboxPage() {
     setConnection((prev) => ({ ...prev, [key]: value }));
 
   const testMutation = useMutation({
-    mutationFn: () => mailboxAPI.testConnection(connection).then((r) => r.data),
+    mutationFn: () => mailboxAPI.testConnection(connection, protocol).then((r) => r.data),
     onSuccess: (data) => {
-      if (data.ok) toast.success(`Connected to ${data.host ?? "mailbox"} (${data.folder ?? "INBOX"}).`);
+      if (data.ok)
+        toast.success(`Connected to ${data.mailbox ?? data.host ?? "mailbox"} (${data.folder ?? "INBOX"}).`);
       else toast.error(data.detail || "Connection failed.");
     },
     onError: (err) => toast.error(extractApiError(err, "Connection test failed.")),
@@ -170,6 +183,7 @@ export default function AdminMailboxPage() {
       mailboxAPI
         .create({
           name: name.trim(),
+          protocol,
           connection,
           default_document_type: defaultType || null,
           auto_classify: autoClassify,
@@ -201,11 +215,9 @@ export default function AdminMailboxPage() {
     setIngestSince("");
     setSupplierMapText("");
     setAllowlistText("");
-    // Restore the env-default prefill so the next create starts clean.
-    const defaults = defaultsQuery.data?.connection;
-    setConnection(
-      defaults ? { ...EMPTY_CONNECTION, ...stripBlank(defaults) } : { ...EMPTY_CONNECTION },
-    );
+    // Back to a clean IMAP create form; the defaults effect re-overlays env values.
+    setProtocol("imap");
+    setConnection({ ...EMPTY_IMAP });
   };
 
   const startEdit = async (id: string) => {
@@ -213,14 +225,14 @@ export default function AdminMailboxPage() {
       const { data } = await mailboxAPI.get(id);
       setEditingId(id);
       setName(data.name);
+      setProtocol(data.protocol);
+      // Keep the stored (redacted) connection as-is; blank the secrets so an
+      // unchanged save preserves them server-side.
       setConnection({
-        host: data.connection?.host ?? "",
-        port: data.connection?.port ?? 993,
-        use_ssl: data.connection?.use_ssl ?? true,
-        username: data.connection?.username ?? "",
-        password: "", // never returned; leaving blank keeps the stored secret
-        folder: data.connection?.folder ?? "INBOX",
-        verify_tls: data.connection?.verify_tls ?? true,
+        ...emptyConnectionFor(data.protocol),
+        ...(data.connection ?? {}),
+        password: "",
+        client_secret: "",
       });
       setDefaultType(data.default_document_type ?? "");
       setAutoClassify(data.auto_classify);
@@ -241,6 +253,7 @@ export default function AdminMailboxPage() {
       mailboxAPI
         .update(editingId as string, {
           name: name.trim(),
+          protocol,
           connection,
           default_document_type: defaultType || null,
           auto_classify: autoClassify,
@@ -306,85 +319,158 @@ export default function AdminMailboxPage() {
         <div>
           <h1 className="text-xl font-semibold text-[#1F2933]">Email Ingestion</h1>
           <p className="text-sm text-[#6E767D]">
-            Watch an IMAP mailbox and import attachments as draft documents into the review queue.
+            Watch an IMAP or Microsoft 365 mailbox and import attachments as draft documents into
+            the review queue.
           </p>
         </div>
       </header>
 
-      {/* ── IMAP connection ─────────────────────────────────────────────── */}
+      {/* ── Mailbox connection ──────────────────────────────────────────── */}
       <section className={panelCls}>
         <div className={panelHeaderCls}>
           <PlugZap className="h-4 w-4 text-[#287EAD]" />
-          <h2 className="text-sm font-semibold text-[#1F2933]">IMAP Connection</h2>
+          <h2 className="text-sm font-semibold text-[#1F2933]">Mailbox Connection</h2>
           <span className="text-xs text-[#6E767D]">
             Blank fields fall back to server-configured defaults.
           </span>
         </div>
         <div className="grid grid-cols-1 gap-4 p-4 md:grid-cols-2">
           <div>
-            <label className={labelCls}>Host</label>
-            <input
+            <label className={labelCls}>Protocol</label>
+            <select
               className={inputCls}
-              value={connection.host ?? ""}
-              onChange={(e) => setField("host", e.target.value)}
-              placeholder="imap.example.com"
-            />
+              value={protocol}
+              onChange={(e) => changeProtocol(e.target.value as MailboxProtocol)}
+            >
+              <option value="imap">IMAP</option>
+              <option value="graph">Microsoft Graph (Microsoft 365 / Outlook)</option>
+            </select>
           </div>
-          <div>
-            <label className={labelCls}>Port</label>
-            <input
-              className={inputCls}
-              type="number"
-              min={1}
-              value={connection.port ?? 993}
-              onChange={(e) => setField("port", Number(e.target.value))}
-            />
-          </div>
-          <div>
-            <label className={labelCls}>Username</label>
-            <input
-              className={inputCls}
-              value={connection.username ?? ""}
-              onChange={(e) => setField("username", e.target.value)}
-              placeholder="invoices@example.com"
-            />
-          </div>
-          <div>
-            <label className={labelCls}>Password</label>
-            <input
-              className={inputCls}
-              type="password"
-              value={connection.password ?? ""}
-              placeholder="•••••• (leave blank to keep stored)"
-              onChange={(e) => setField("password", e.target.value)}
-            />
-          </div>
-          <div>
-            <label className={labelCls}>Folder</label>
-            <input
-              className={inputCls}
-              value={connection.folder ?? "INBOX"}
-              onChange={(e) => setField("folder", e.target.value)}
-            />
-          </div>
-          <div className="flex items-end gap-4">
-            <label className="flex items-center gap-2 text-sm text-[#1F2933]">
-              <input
-                type="checkbox"
-                checked={connection.use_ssl ?? true}
-                onChange={(e) => setField("use_ssl", e.target.checked)}
-              />
-              Use SSL
-            </label>
-            <label className="flex items-center gap-2 text-sm text-[#1F2933]">
-              <input
-                type="checkbox"
-                checked={connection.verify_tls ?? true}
-                onChange={(e) => setField("verify_tls", e.target.checked)}
-              />
-              Verify TLS
-            </label>
-          </div>
+          <div className="hidden md:block" />
+
+          {protocol === "imap" ? (
+            <>
+              <div>
+                <label className={labelCls}>Host</label>
+                <input
+                  className={inputCls}
+                  value={connection.host ?? ""}
+                  onChange={(e) => setField("host", e.target.value)}
+                  placeholder="imap.example.com"
+                />
+              </div>
+              <div>
+                <label className={labelCls}>Port</label>
+                <input
+                  className={inputCls}
+                  type="number"
+                  min={1}
+                  value={connection.port ?? 993}
+                  onChange={(e) => setField("port", Number(e.target.value))}
+                />
+              </div>
+              <div>
+                <label className={labelCls}>Username</label>
+                <input
+                  className={inputCls}
+                  value={connection.username ?? ""}
+                  onChange={(e) => setField("username", e.target.value)}
+                  placeholder="invoices@example.com"
+                />
+              </div>
+              <div>
+                <label className={labelCls}>Password</label>
+                <input
+                  className={inputCls}
+                  type="password"
+                  value={connection.password ?? ""}
+                  placeholder="•••••• (leave blank to keep stored)"
+                  onChange={(e) => setField("password", e.target.value)}
+                />
+              </div>
+              <div>
+                <label className={labelCls}>Folder</label>
+                <input
+                  className={inputCls}
+                  value={connection.folder ?? "INBOX"}
+                  onChange={(e) => setField("folder", e.target.value)}
+                />
+              </div>
+              <div className="flex items-end gap-4">
+                <label className="flex items-center gap-2 text-sm text-[#1F2933]">
+                  <input
+                    type="checkbox"
+                    checked={connection.use_ssl ?? true}
+                    onChange={(e) => setField("use_ssl", e.target.checked)}
+                  />
+                  Use SSL
+                </label>
+                <label className="flex items-center gap-2 text-sm text-[#1F2933]">
+                  <input
+                    type="checkbox"
+                    checked={connection.verify_tls ?? true}
+                    onChange={(e) => setField("verify_tls", e.target.checked)}
+                  />
+                  Verify TLS
+                </label>
+              </div>
+            </>
+          ) : (
+            <>
+              <div>
+                <label className={labelCls}>Tenant ID</label>
+                <input
+                  className={inputCls}
+                  value={connection.tenant_id ?? ""}
+                  onChange={(e) => setField("tenant_id", e.target.value)}
+                  placeholder="Azure AD directory (tenant) id"
+                />
+              </div>
+              <div>
+                <label className={labelCls}>Client ID</label>
+                <input
+                  className={inputCls}
+                  value={connection.client_id ?? ""}
+                  onChange={(e) => setField("client_id", e.target.value)}
+                  placeholder="App registration (client) id"
+                />
+              </div>
+              <div>
+                <label className={labelCls}>Client Secret</label>
+                <input
+                  className={inputCls}
+                  type="password"
+                  value={connection.client_secret ?? ""}
+                  placeholder="•••••• (leave blank to keep stored)"
+                  onChange={(e) => setField("client_secret", e.target.value)}
+                />
+              </div>
+              <div>
+                <label className={labelCls}>Mailbox (user)</label>
+                <input
+                  className={inputCls}
+                  value={connection.mailbox ?? ""}
+                  onChange={(e) => setField("mailbox", e.target.value)}
+                  placeholder="invoices@your-tenant.com"
+                />
+              </div>
+              <div>
+                <label className={labelCls}>Folder</label>
+                <input
+                  className={inputCls}
+                  value={connection.folder ?? "inbox"}
+                  onChange={(e) => setField("folder", e.target.value)}
+                  placeholder="inbox"
+                />
+              </div>
+              <div className="flex items-end">
+                <p className="text-xs text-[#6E767D]">
+                  App-only access: the Azure app registration needs the application permission
+                  <span className="font-medium"> Mail.Read</span> with admin consent.
+                </p>
+              </div>
+            </>
+          )}
         </div>
         <div className="flex justify-end gap-2 border-t border-[#C8CDD2] px-4 py-3">
           <button

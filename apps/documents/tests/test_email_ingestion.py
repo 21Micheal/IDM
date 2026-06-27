@@ -359,6 +359,61 @@ class RunMailboxPollTests(IngestionTestBase):
         self.mailbox.refresh_from_db()
         self.assertEqual(self.mailbox.last_seen_uid, 7)
 
+    def _make_graph_mailbox(self, ingest_history=True):
+        self.mailbox.protocol = "graph"
+        self.mailbox.ingest_history = ingest_history
+        self.mailbox.connection = {
+            "tenant_id": "t", "client_id": "c", "client_secret": "s", "mailbox": "x@y.com",
+        }
+        self.mailbox.save()
+
+    def test_graph_poll_imports_and_sets_cursor(self):
+        import email as _email
+        from apps.documents.graph_client import GraphMessage
+
+        self._make_graph_mailbox()
+        raw = _build_email(
+            message_id="<g1@x>",
+            attachments=(("g.pdf", b"%PDF g", "application", "pdf"),),
+        ).as_bytes()
+        gm = GraphMessage(uid=0, raw=raw, message=_email.message_from_bytes(raw),
+                          received_at="2026-06-27T10:00:00Z", graph_id="ABC")
+
+        class FakeGraph:
+            def __init__(self, *a, **k): pass
+            def __enter__(self): return self
+            def __exit__(self, *a): return False
+            def highest_received(self): return "2026-06-27T09:00:00Z"
+            def iter_messages(self, *, since_datetime=None):
+                yield gm
+
+        with mock.patch("apps.documents.graph_client.GraphClient", FakeGraph):
+            email_ingestion.run_mailbox_poll(str(self.mailbox.id))
+
+        self.assertEqual(Document.objects.count(), 1)
+        self.mailbox.refresh_from_db()
+        self.assertEqual(self.mailbox.poll_status, MailboxPollStatus.OK)
+        self.assertEqual(self.mailbox.last_seen_cursor, "2026-06-27T10:00:00Z")
+        self.assertEqual(Document.objects.get().metadata["_email"]["source"], "graph")
+
+    def test_graph_first_poll_skips_backlog_by_default(self):
+        self._make_graph_mailbox(ingest_history=False)
+
+        class FakeGraph:
+            def __init__(self, *a, **k): pass
+            def __enter__(self): return self
+            def __exit__(self, *a): return False
+            def highest_received(self): return "2026-06-27T09:00:00Z"
+            def iter_messages(self, *, since_datetime=None):
+                raise AssertionError("should not iterate on backlog-skip")
+
+        with mock.patch("apps.documents.graph_client.GraphClient", FakeGraph):
+            email_ingestion.run_mailbox_poll(str(self.mailbox.id))
+
+        self.assertEqual(Document.objects.count(), 0)
+        self.mailbox.refresh_from_db()
+        self.assertEqual(self.mailbox.last_seen_cursor, "2026-06-27T09:00:00Z")
+
     def test_poll_records_error(self):
         from apps.documents.imap_client import IMAPError
 
