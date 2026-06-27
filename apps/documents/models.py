@@ -1237,3 +1237,237 @@ class MigrationJob(models.Model):
         log = list(self.log or [])
         log.append(entry)
         self.log = log
+
+
+# ── Email ingestion ────────────────────────────────────────────────────────────
+
+class MailboxPollStatus(models.TextChoices):
+    """Outcome of the most recent poll of a mailbox."""
+    IDLE    = "idle",    "Idle"
+    POLLING = "polling", "Polling"
+    OK      = "ok",      "Last poll succeeded"
+    ERROR   = "error",   "Last poll failed"
+
+
+class Mailbox(models.Model):
+    """
+    An IMAP mailbox the system watches for inbound documents.
+
+    Email ingestion is the server-side sibling of an upload: a poll connects to
+    the mailbox, pulls unseen messages, and turns each message's attachments
+    into ``DocumentStatus.DRAFT`` documents that land in the bulk-upload review
+    queue. A human confirms the document type and metadata there before the
+    normal amount-threshold workflow rules pick an approval template — email
+    metadata is machine-guessed, so it never auto-starts a workflow.
+
+    Configuration mirrors :class:`MigrationJob`:
+
+    * **connection** – IMAP settings as JSON so the shape can evolve. The
+      ``password`` is write-only at the API layer (accepted on save, redacted on
+      read), exactly like the ION ``sask``.
+    * **routing** – ``default_document_type`` files every attachment under one
+      type (the reliable, zero-ML path: one mailbox per type). When null,
+      attachments land under the shared ``UNCLASS`` placeholder for the reviewer
+      to classify. ``auto_classify`` is an opt-in hook for inferring the type
+      from content; until a classifier is wired it falls back to the default.
+    * **enrichment** – ``sender_supplier_map`` pre-fills the supplier from the
+      sender address/domain (structured data the OCR can't match as reliably).
+    * **related_set_attachments** – when an email carries several attachments
+      (e.g. an invoice with its PO and delivery note), import them as one
+      related set so the reviewer sees them together.
+
+    Per-message state and idempotency live on :class:`IngestedEmail`; this model
+    only carries connection, routing, and last-poll bookkeeping.
+    """
+
+    id   = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    name = models.CharField(max_length=200)
+
+    connection = models.JSONField(
+        default=dict,
+        blank=True,
+        help_text=(
+            "IMAP connection settings: host, port, use_ssl, username, "
+            "password, folder, search_criteria."
+        ),
+    )
+
+    default_document_type = models.ForeignKey(
+        DocumentType,
+        null=True,
+        blank=True,
+        on_delete=models.SET_NULL,
+        related_name="mailboxes",
+        help_text="Document type imported attachments are filed under. Null = UNCLASS placeholder.",
+    )
+    auto_classify = models.BooleanField(
+        default=False,
+        help_text="Attempt to infer the document type from content instead of always using the default.",
+    )
+    sender_supplier_map = models.JSONField(
+        default=dict,
+        blank=True,
+        help_text="Map of sender email/domain -> supplier name, used to pre-fill the supplier field.",
+    )
+    sender_allowlist = models.JSONField(
+        default=list,
+        blank=True,
+        help_text=(
+            "If non-empty, only emails whose sender address/domain appears here "
+            "are ingested; everything else is skipped. Empty = accept all senders."
+        ),
+    )
+    related_set_attachments = models.BooleanField(
+        default=True,
+        help_text="Import a multi-attachment email as one related document set.",
+    )
+    # Defence against an exploratory poll dragging in a huge backlog at once.
+    max_messages_per_poll = models.PositiveIntegerField(
+        default=50,
+        help_text="Ceiling on messages processed in one poll. 0 = no limit.",
+    )
+
+    is_active = models.BooleanField(
+        default=True,
+        db_index=True,
+        help_text="Only active mailboxes are polled by the scheduled job.",
+    )
+
+    poll_status   = models.CharField(
+        max_length=20,
+        choices=MailboxPollStatus.choices,
+        default=MailboxPollStatus.IDLE,
+        db_index=True,
+    )
+    last_polled_at = models.DateTimeField(null=True, blank=True)
+    last_error     = models.TextField(blank=True)
+    # IMAP UID of the highest message seen, so each poll only fetches newer mail.
+    last_seen_uid  = models.PositiveBigIntegerField(default=0)
+
+    # Aggregate counters for the most recent poll (per-email detail is on IngestedEmail).
+    last_imported_count = models.PositiveIntegerField(default=0)
+    last_skipped_count  = models.PositiveIntegerField(default=0)
+    last_failed_count   = models.PositiveIntegerField(default=0)
+
+    created_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        null=True,
+        on_delete=models.SET_NULL,
+        related_name="mailboxes",
+        help_text="Owner that imported documents are attributed to.",
+    )
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ["name"]
+        verbose_name_plural = "mailboxes"
+        indexes = [
+            models.Index(fields=["is_active", "poll_status"]),
+        ]
+
+    def __str__(self):
+        return f"Mailbox {self.name}"
+
+    def supplier_for_sender(self, sender: str) -> str:
+        """Resolve a supplier name from a sender address via ``sender_supplier_map``.
+
+        Matches the full address first (``billing@acme.com``), then the bare
+        domain (``acme.com``). Matching is case-insensitive. Returns "" when no
+        rule applies, so the reviewer/OCR fills supplier instead.
+        """
+        if not sender or not isinstance(self.sender_supplier_map, dict):
+            return ""
+        addr = sender.strip().lower()
+        lookup = {str(k).strip().lower(): v for k, v in self.sender_supplier_map.items()}
+        if addr in lookup:
+            return str(lookup[addr] or "")
+        domain = addr.rsplit("@", 1)[-1] if "@" in addr else addr
+        return str(lookup.get(domain, "") or "")
+
+    def is_sender_allowed(self, sender: str) -> bool:
+        """Whether a sender passes the allowlist.
+
+        An empty allowlist accepts everyone (the default). Otherwise the sender's
+        full address (``ap@acme.com``) or bare domain (``acme.com``) must appear
+        in the list. Matching is case-insensitive.
+        """
+        allow = [str(x).strip().lower() for x in (self.sender_allowlist or []) if str(x).strip()]
+        if not allow:
+            return True
+        if not sender:
+            return False
+        addr = sender.strip().lower()
+        domain = addr.rsplit("@", 1)[-1] if "@" in addr else addr
+        return addr in allow or domain in allow
+
+
+class IngestedEmail(models.Model):
+    """
+    Record of one email processed by a :class:`Mailbox` poll.
+
+    Two jobs:
+
+    * **idempotency** – polls re-see messages, so ``message_id`` is unique per
+      mailbox; a message already recorded is never imported twice. (Attachment
+      content is additionally deduped by ``Document.checksum`` downstream.)
+    * **audit/provenance** – keeps the sender/subject/received metadata and the
+      original ``.eml`` for compliance, and links to the ``BulkUpload`` whose
+      review queue the resulting drafts landed in.
+    """
+
+    class Status(models.TextChoices):
+        IMPORTED = "imported", "Imported"
+        SKIPPED  = "skipped",  "Skipped"
+        PARTIAL  = "partial",  "Imported with errors"
+        FAILED   = "failed",   "Failed"
+
+    id      = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    mailbox = models.ForeignKey(
+        Mailbox, on_delete=models.CASCADE, related_name="ingested_emails"
+    )
+
+    message_id  = models.CharField(max_length=512, db_index=True)
+    imap_uid    = models.PositiveBigIntegerField(default=0)
+    sender      = models.CharField(max_length=320, blank=True)
+    subject     = models.CharField(max_length=512, blank=True)
+    received_at = models.DateTimeField(null=True, blank=True)
+
+    raw_email = models.FileField(
+        upload_to="ingested_emails/",
+        blank=True,
+        null=True,
+        help_text="Original RFC-822 message stored for compliance/audit.",
+    )
+
+    status            = models.CharField(
+        max_length=20, choices=Status.choices, default=Status.IMPORTED, db_index=True
+    )
+    attachment_count  = models.PositiveSmallIntegerField(default=0)
+    documents_created = models.PositiveSmallIntegerField(default=0)
+    detail            = models.TextField(blank=True)
+
+    bulk_upload = models.ForeignKey(
+        "BulkUpload",
+        null=True,
+        blank=True,
+        on_delete=models.SET_NULL,
+        related_name="ingested_emails",
+    )
+
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        ordering = ["-created_at"]
+        constraints = [
+            models.UniqueConstraint(
+                fields=["mailbox", "message_id"],
+                name="uniq_mailbox_message_id",
+            ),
+        ]
+        indexes = [
+            models.Index(fields=["mailbox", "status"]),
+        ]
+
+    def __str__(self):
+        return f"IngestedEmail {self.message_id} ({self.status})"

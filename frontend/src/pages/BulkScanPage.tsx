@@ -39,6 +39,13 @@ const POLL_MS = 3000;
 type BulkScanPageProps = {
   scanMode?: boolean;
   onSingleMode?: () => void;
+  /**
+   * Open an already-created batch (e.g. from the pending-review queue or email
+   * ingestion) and jump straight to its review, instead of starting a new
+   * upload. The batch is polled and, once in "review", the per-document review
+   * panel renders exactly as for a freshly uploaded batch.
+   */
+  initialBatchId?: string;
 };
 
 async function calculateFileSha256(file: File): Promise<string> {
@@ -49,15 +56,17 @@ async function calculateFileSha256(file: File): Promise<string> {
     .join("");
 }
 
-export default function BulkScanPage({ scanMode = true, onSingleMode }: BulkScanPageProps) {
+export default function BulkScanPage({ scanMode = true, onSingleMode, initialBatchId }: BulkScanPageProps) {
   const navigate = useNavigate();
   const queryClient = useQueryClient();
 
-  const [stage, setStage] = useState<Stage>("select");
+  // When opening an existing batch, start in "processing" so the status poll
+  // runs and transitions to "review" on its own.
+  const [stage, setStage] = useState<Stage>(initialBatchId ? "processing" : "select");
   const [selectedTypeId, setSelectedTypeId] = useState("");
   const [isRelatedSet, setIsRelatedSet] = useState(false);
   const [files, setFiles] = useState<File[]>([]);
-  const [batchId, setBatchId] = useState<string | null>(null);
+  const [batchId, setBatchId] = useState<string | null>(initialBatchId ?? null);
   const [uploadProgress, setUploadProgress] = useState(0);
   const [reviewStates, setReviewStates] = useState<BulkDocReviewState[]>([]);
   const [completedBatch, setCompletedBatch] = useState<BulkUploadBatch | null>(null);

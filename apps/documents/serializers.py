@@ -1566,6 +1566,44 @@ class BulkUploadSerializer(serializers.ModelSerializer):
         ]
 
 
+class BulkUploadSummarySerializer(serializers.ModelSerializer):
+    """Lightweight batch row for the 'pending review' queue.
+
+    Reports where the batch came from (``email`` ingestion vs a ``scan``/manual
+    bulk upload) and, for email, the originating message so the reviewer has
+    context before opening it. Relies on ``ingested_emails`` being prefetched.
+    """
+
+    document_type = DocumentTypeSerializer(read_only=True)
+    source = serializers.SerializerMethodField()
+    email = serializers.SerializerMethodField()
+
+    class Meta:
+        model = BulkUpload
+        fields = [
+            "id", "document_type", "mode", "status",
+            "total_files", "successful_uploads", "failed_uploads",
+            "created_at", "updated_at", "source", "email",
+        ]
+
+    def _first_email(self, obj):
+        emails = list(obj.ingested_emails.all())
+        return emails[0] if emails else None
+
+    def get_source(self, obj) -> str:
+        return "email" if self._first_email(obj) else "scan"
+
+    def get_email(self, obj):
+        ie = self._first_email(obj)
+        if not ie:
+            return None
+        return {
+            "sender": ie.sender,
+            "subject": ie.subject,
+            "received_at": ie.received_at.isoformat() if ie.received_at else None,
+        }
+
+
 class BulkUploadCreateSerializer(serializers.Serializer):
     """
     Serializer for initiating a bulk upload.

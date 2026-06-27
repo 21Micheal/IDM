@@ -21,6 +21,8 @@ const WorkflowPage = lazy(() => import("@/pages/WorkflowPage"));
 const AdminPage = lazy(() => import("@/pages/AdminPage"));
 const AdminDocumentTypesPage = lazy(() => import("@/pages/AdminDocumentTypesPage"));
 const AdminMigrationPage = lazy(() => import("@/pages/AdminMigrationPage"));
+const AdminMailboxPage = lazy(() => import("@/pages/AdminMailboxPage"));
+const ReviewQueuePage = lazy(() => import("@/pages/ReviewQueuePage"));
 const AuditPage = lazy(() => import("@/pages/AuditPage"));
 const UsersPage = lazy(() => import("@/pages/UsersPage"));
 const UserDetailPage = lazy(() => import("@/pages/UserDetailPage"));
@@ -360,6 +362,9 @@ export default function App() {
               <Route path="documents/scan"   element={<UploadPage scanOnly />} />
               <Route path="documents/bulk-upload" element={<Navigate to="/documents/upload?mode=bulk" replace />} />
               <Route path="documents/bulk-scan" element={<Navigate to="/documents/scan?mode=bulk" replace />} />
+              {/* Review queue — must precede documents/:id so "review" isn't read as an id. */}
+              <Route path="documents/review" element={<ReviewQueuePage />} />
+              <Route path="documents/review/:batchId" element={<ReviewQueuePage />} />
               <Route path="documents/:id"    element={<DocumentDetailPage />} />
               <Route path="documents/folders/:folderId" element={<FolderPage />} />
               <Route path="request-signature" element={<RequestSignaturePage />} />
@@ -392,6 +397,7 @@ export default function App() {
               <Route path="admin/departments"     element={<RequireAdmin><DepartmentsPage /></RequireAdmin>} />
               <Route path="admin/groups"          element={<RequireAdmin><GroupsPage /></RequireAdmin>} />
               <Route path="admin/migration"       element={<RequireAdmin><AdminMigrationPage /></RequireAdmin>} />
+              <Route path="admin/mailboxes"       element={<RequireAdmin><AdminMailboxPage /></RequireAdmin>} />
             </Route>
 
             <Route path="*" element={<Navigate to="/" replace />} />

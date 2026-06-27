@@ -237,6 +237,8 @@ CELERY_TASK_ROUTES = {
     "apps.documents.tasks.auto_archive_documents": {"queue": "default"},
     "apps.documents.tasks.empty_trash": {"queue": "default"},
     "apps.documents.tasks.run_migration_job": {"queue": "default"},
+    "apps.documents.tasks.poll_mailbox": {"queue": "default"},
+    "apps.documents.tasks.poll_active_mailboxes": {"queue": "default"},
 }
 WORKFLOW_SLA_WARNING_HOURS = env.int("WORKFLOW_SLA_WARNING_HOURS", default=4)
 WORKFLOW_HOLD_WARNING_HOURS = env.int("WORKFLOW_HOLD_WARNING_HOURS", default=2)
@@ -264,6 +266,10 @@ CELERY_BEAT_SCHEDULE = {
     "signature-pending-reminders": {
         "task": "apps.notifications.tasks.remind_pending_signatures",
         "schedule": 24 * 60 * 60,
+    },
+    "mailbox-email-ingestion-poll": {
+        "task": "apps.documents.tasks.poll_active_mailboxes",
+        "schedule": env.int("IMAP_POLL_INTERVAL_SECONDS", default=5 * 60),
     },
 }
 
@@ -312,6 +318,20 @@ ION_SASK          = env("ION_SASK", default="")           # service account secr
 ION_SCOPE         = env("ION_SCOPE", default="")
 ION_IDM_PATH      = env("ION_IDM_PATH", default="IDM/api") # IDM REST path under the gateway
 ION_VERIFY_TLS    = env.bool("ION_VERIFY_TLS", default=True)
+
+# ── Email ingestion (IMAP) ──────────────────────────────────────────────────
+# Default IMAP connection settings used to ingest documents from a mailbox.
+# Each Mailbox may override these in its own `connection` JSON; anything left
+# blank on a mailbox falls back to the environment defaults exposed here.
+# poll_active_mailboxes (Celery beat) polls every active mailbox on the
+# IMAP_POLL_INTERVAL_SECONDS schedule defined in CELERY_BEAT_SCHEDULE above.
+IMAP_HOST       = env("IMAP_HOST", default="")
+IMAP_PORT       = env.int("IMAP_PORT", default=993)
+IMAP_USE_SSL    = env.bool("IMAP_USE_SSL", default=True)
+IMAP_USERNAME   = env("IMAP_USERNAME", default="")
+IMAP_PASSWORD   = env("IMAP_PASSWORD", default="")
+IMAP_FOLDER     = env("IMAP_FOLDER", default="INBOX")
+IMAP_VERIFY_TLS = env.bool("IMAP_VERIFY_TLS", default=True)
 
 # ── IDP (Intelligent Document Processing) ───────────────────────────────────
 # Provider selection:

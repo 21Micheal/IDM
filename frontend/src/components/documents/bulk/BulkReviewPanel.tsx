@@ -1,6 +1,9 @@
 import { useEffect, useMemo, useState } from "react";
+import { useQuery } from "@tanstack/react-query";
 import { CheckCircle, Loader2, ArrowRight, Sparkles, FileText } from "lucide-react";
-import type { DocumentType } from "@/types";
+import type { DocumentType, DocumentPreviewResponse } from "@/types";
+import { documentsAPI, api } from "@/services/api";
+import { useAuthStore } from "@/store/authStore";
 import type { BulkDocReviewState, BulkLocalPreview } from "./bulkUploadTypes";
 import { countReviewDecisions } from "./bulkUploadUtils";
 import BulkDocumentReviewCard from "./BulkDocumentReviewCard";
@@ -126,6 +129,11 @@ export default function BulkReviewPanel({
                 <div className={`mx-auto flex w-full max-w-[920px] items-center justify-center overflow-auto border border-[#C8CDD2] bg-white ${REVIEW_PREVIEW_HEIGHT}`}>
                   <img src={selectedPreview.url} alt="Bulk review preview" className="max-h-full max-w-full object-contain" />
                 </div>
+              ) : selectedState?.documentId ? (
+                // No local blob (e.g. batch opened from the pending-review queue
+                // or email ingestion): preview the stored document by id, the
+                // same way the detail/upload pages do.
+                <ServerDocumentPreview documentId={selectedState.documentId} heightCls={REVIEW_PREVIEW_HEIGHT} />
               ) : (
                 <div className={`mx-auto flex w-full max-w-[920px] flex-col items-center justify-center border border-dashed border-[#C8CDD2] bg-white text-center ${REVIEW_PREVIEW_HEIGHT}`}>
                   <FileText className="mb-3 h-12 w-12 text-[#5E6870]" />
@@ -184,6 +192,136 @@ export default function BulkReviewPanel({
           )}
         </button>
       </div>
+    </div>
+  );
+}
+
+const SERVER_BOX = "mx-auto w-full max-w-[920px] border border-[#C8CDD2] bg-white";
+const SERVER_BOX_CENTER =
+  "mx-auto flex w-full max-w-[920px] flex-col items-center justify-center border border-dashed border-[#C8CDD2] bg-white text-center";
+
+// Re-host absolute /api/ URLs onto the page origin (the backend builds them with
+// build_absolute_uri, which can leak an internal proxy host). Mirrors the
+// DocumentViewer helper.
+function normalizeApiUrl(url: string): string {
+  if (/^https?:\/\//i.test(url)) {
+    try {
+      const parsed = new URL(url);
+      if (parsed.pathname.startsWith("/api/")) {
+        parsed.protocol = window.location.protocol;
+        parsed.host = window.location.host;
+        return parsed.toString();
+      }
+    } catch {
+      /* fall through */
+    }
+  }
+  return url;
+}
+
+/**
+ * Preview a stored document by id, used when the review card has no local file
+ * blob (batches opened from the pending-review queue or created by email
+ * ingestion). The file/preview endpoint requires the Authorization header, so —
+ * exactly like the detail viewer — we fetch it as an authenticated blob and
+ * render that object URL rather than pointing an iframe at the raw URL (which
+ * would 401 unless signed file URLs are enabled).
+ */
+function ServerDocumentPreview({ documentId, heightCls }: { documentId: string; heightCls: string }) {
+  const token = useAuthStore((s) => s.accessToken);
+  const { data, isLoading } = useQuery({
+    queryKey: ["bulk-review-preview", documentId],
+    queryFn: () => documentsAPI.previewUrl(documentId).then((r) => r.data as DocumentPreviewResponse),
+    enabled: Boolean(documentId),
+    refetchInterval: (query) => {
+      const d = query.state.data as DocumentPreviewResponse | undefined;
+      const pending = d?.preview_status === "pending" || d?.preview_status === "processing";
+      return d?.viewer === "processing" || pending ? 3000 : false;
+    },
+  });
+
+  const rawUrl = data?.url ?? null;
+  const viewer = data?.viewer;
+  const renderable = viewer === "pdfjs" || viewer === "image";
+  const [blobUrl, setBlobUrl] = useState<string | null>(null);
+  const [blobErr, setBlobErr] = useState(false);
+
+  useEffect(() => {
+    if (!rawUrl || !renderable) {
+      setBlobUrl(null);
+      return;
+    }
+    let cancelled = false;
+    let objectUrl = "";
+    setBlobErr(false);
+    (async () => {
+      try {
+        const res = await api.get(normalizeApiUrl(rawUrl), {
+          responseType: "blob",
+          headers: token ? { Authorization: `Bearer ${token}` } : {},
+        });
+        if (cancelled) return;
+        objectUrl = URL.createObjectURL(res.data);
+        setBlobUrl(objectUrl);
+      } catch {
+        if (!cancelled) setBlobErr(true);
+      }
+    })();
+    return () => {
+      cancelled = true;
+      if (objectUrl) URL.revokeObjectURL(objectUrl);
+    };
+  }, [rawUrl, renderable, token]);
+
+  const preparing =
+    viewer === "processing" ||
+    data?.preview_status === "pending" ||
+    data?.preview_status === "processing";
+
+  // Still resolving the preview URL, or fetching the blob for a renderable doc.
+  if (isLoading || (renderable && !blobUrl && !blobErr)) {
+    return (
+      <div className={`${SERVER_BOX_CENTER} ${heightCls}`}>
+        <Loader2 className="h-8 w-8 animate-spin text-[#5E6870]" />
+      </div>
+    );
+  }
+
+  if (viewer === "pdfjs" && blobUrl) {
+    return (
+      <div className={`${SERVER_BOX} ${heightCls}`}>
+        <iframe
+          src={`${blobUrl}#toolbar=1&navpanes=0&scrollbar=1&view=FitV`}
+          title="Document preview"
+          className="h-full w-full bg-white"
+        />
+      </div>
+    );
+  }
+
+  if (viewer === "image" && blobUrl) {
+    return (
+      <div className={`mx-auto flex w-full max-w-[920px] items-center justify-center overflow-auto border border-[#C8CDD2] bg-white ${heightCls}`}>
+        <img src={blobUrl} alt="Document preview" className="max-h-full max-w-full object-contain" />
+      </div>
+    );
+  }
+
+  if (preparing) {
+    return (
+      <div className={`${SERVER_BOX_CENTER} ${heightCls}`}>
+        <Loader2 className="mb-3 h-10 w-10 animate-spin text-[#5E6870]" />
+        <p className="text-sm font-semibold text-[#1F2933]">Preparing preview…</p>
+        <p className="mt-1 max-w-xs text-xs text-[#5E6870]">This document is being converted for preview.</p>
+      </div>
+    );
+  }
+
+  return (
+    <div className={`${SERVER_BOX_CENTER} ${heightCls}`}>
+      <FileText className="mb-3 h-12 w-12 text-[#5E6870]" />
+      <p className="text-sm font-semibold text-[#1F2933]">Preview unavailable for this format</p>
+      <p className="mt-1 max-w-xs text-xs text-[#5E6870]">Use the fields on the left to complete review.</p>
     </div>
   );
 }

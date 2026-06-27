@@ -28,6 +28,7 @@ from .serializers import (
     BulkUploadDetailSerializer,
     BulkUploadReviewSerializer,
     BulkUploadSerializer,
+    BulkUploadSummarySerializer,
 )
 
 
@@ -52,7 +53,39 @@ class BulkUploadViewSet(viewsets.GenericViewSet):
             return BulkUploadDetailSerializer
         if self.action == "create":
             return BulkUploadCreateSerializer
+        if self.action == "list":
+            return BulkUploadSummarySerializer
         return BulkUploadSerializer
+
+    def list(self, request, *args, **kwargs):
+        """List the current user's batches for the pending-review queue.
+
+        Defaults to the batches that still need attention (processing/review);
+        pass ``?status=...`` (comma-separated) to widen or narrow that.
+        """
+        qs = (
+            BulkUpload.objects.filter(uploaded_by=request.user)
+            .select_related("document_type")
+            .prefetch_related("ingested_emails")
+            .order_by("-created_at")
+        )
+        status_param = request.query_params.get("status")
+        statuses = (
+            [s.strip() for s in status_param.split(",") if s.strip()]
+            if status_param
+            else [BulkUploadStatus.PROCESSING, BulkUploadStatus.REVIEW]
+        )
+        qs = qs.filter(status__in=statuses)
+        batches = list(qs)
+        # Advance any batch whose OCR has finished since it was created. Email
+        # batches have no live poller of their own (the bulk-scan UI polls the
+        # batches it creates), so without this they'd sit in "processing"
+        # forever even after extraction completes.
+        for batch in batches:
+            if batch.status == BulkUploadStatus.PROCESSING:
+                sync_bulk_upload_status(batch)
+        data = BulkUploadSummarySerializer(batches, many=True, context={"request": request}).data
+        return Response(data)
 
     def _user_can_upload_type(self, document_type: DocumentType) -> bool:
         user = self.request.user

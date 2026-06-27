@@ -404,11 +404,21 @@ class DocumentViewSet(AuditMixin, viewsets.ModelViewSet):
     ordering           = ["-created_at"]
     parser_classes     = [MultiPartParser, FormParser, JSONParser]
 
+    def get_object(self):
+        # Resolve a single document by id even when it is an UNCLASS draft that
+        # listings hide. Object-level permission checks (and the involvement
+        # scoping in get_queryset) still apply, so this only affects whether a
+        # hidden-from-lists draft is reachable by direct id, not who may see it.
+        self._include_unclassified = True
+        try:
+            return super().get_object()
+        finally:
+            self._include_unclassified = False
+
     def get_queryset(self):
         user = self.request.user
         qs   = (
             Document.objects
-            .exclude(document_type__code="UNCLASS")
             .select_related(
                 "document_type",
                 "uploaded_by",
@@ -418,6 +428,12 @@ class DocumentViewSet(AuditMixin, viewsets.ModelViewSet):
             )
             .prefetch_related("tags", "versions", "workflow_instance__tasks__step")
         )
+        # UNCLASS placeholders are hidden from every listing, but single-object
+        # lookups (retrieve/preview_url/file) opt in via get_object() so the
+        # bulk-review screen can preview unreviewed email/scan drafts. Access is
+        # still gated by the involvement filter below + object-level checks.
+        if not getattr(self, "_include_unclassified", False):
+            qs = qs.exclude(document_type__code="UNCLASS")
         # A "sees all documents" group (e.g. auditors) gets full visibility; what
         # they can DO is still governed by the object-level permission checks.
         if not user.has_admin_access and not user.sees_all_documents:

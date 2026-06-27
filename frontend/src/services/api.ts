@@ -542,6 +542,25 @@ export const bulkUploadAPI = {
     api.post(`/documents/bulk-uploads/${id}/review/`, { documents }),
 
   cancel: (id: string) => api.post(`/documents/bulk-uploads/${id}/cancel/`),
+
+  // Pending-review queue: the user's batches (email ingestion + bulk scans).
+  // Defaults server-side to processing/review; pass status to widen/narrow.
+  list: (params?: { status?: string }) =>
+    api.get<BulkUploadSummary[]>("/documents/bulk-uploads/", { params }),
+};
+
+export type BulkUploadSummary = {
+  id: string;
+  document_type: { id: string; name: string; code: string } | null;
+  mode: "same_type" | "related_set";
+  status: "pending" | "uploading" | "processing" | "review" | "completed" | "failed";
+  total_files: number;
+  successful_uploads: number;
+  failed_uploads: number;
+  created_at: string;
+  updated_at: string;
+  source: "email" | "scan";
+  email: { sender: string; subject: string; received_at: string | null } | null;
 };
 
 export const dmsSettingsAPI = {
@@ -645,6 +664,93 @@ export const migrationAPI = {
   connectionDefaults: () =>
     api.get<{ connection: MigrationConnection; has_client_secret: boolean; has_sask: boolean }>(
       "/documents/migrations/connection_defaults/",
+    ),
+};
+
+// ── Email ingestion (IMAP mailboxes) ──────────────────────────────────────────
+export type MailboxConnection = {
+  host?: string;
+  port?: number;
+  use_ssl?: boolean;
+  username?: string;
+  password?: string;
+  folder?: string;
+  verify_tls?: boolean;
+};
+
+export type MailboxPollStatus = "idle" | "polling" | "ok" | "error";
+
+export type IngestedEmail = {
+  id: string;
+  message_id: string;
+  imap_uid: number;
+  sender: string;
+  subject: string;
+  received_at?: string | null;
+  status: "imported" | "skipped" | "partial" | "failed";
+  attachment_count: number;
+  documents_created: number;
+  detail: string;
+  bulk_upload?: string | null;
+  created_at: string;
+};
+
+export type Mailbox = {
+  id: string;
+  name: string;
+  connection: MailboxConnection;
+  default_document_type: string | null;
+  default_document_type_name?: string | null;
+  auto_classify: boolean;
+  sender_supplier_map: Record<string, string>;
+  sender_allowlist: string[];
+  related_set_attachments: boolean;
+  max_messages_per_poll: number;
+  is_active: boolean;
+  poll_status: MailboxPollStatus;
+  last_polled_at?: string | null;
+  last_error?: string;
+  last_seen_uid: number;
+  last_imported_count: number;
+  last_skipped_count: number;
+  last_failed_count: number;
+  created_by?: string | null;
+  created_by_name?: string | null;
+  created_at: string;
+  updated_at: string;
+  has_password?: boolean;
+  recent_emails?: IngestedEmail[] | null;
+};
+
+export type MailboxInput = {
+  name: string;
+  connection?: MailboxConnection;
+  default_document_type?: string | null;
+  auto_classify?: boolean;
+  sender_supplier_map?: Record<string, string>;
+  sender_allowlist?: string[];
+  related_set_attachments?: boolean;
+  max_messages_per_poll?: number;
+  is_active?: boolean;
+};
+
+export const mailboxAPI = {
+  list: () => api.get<Mailbox[]>("/documents/mailboxes/"),
+  get: (id: string) => api.get<Mailbox>(`/documents/mailboxes/${id}/`),
+  status: (id: string) => api.get<Mailbox>(`/documents/mailboxes/${id}/status/`),
+  create: (data: MailboxInput) => api.post<Mailbox>("/documents/mailboxes/", data),
+  update: (id: string, data: Partial<MailboxInput>) =>
+    api.patch<Mailbox>(`/documents/mailboxes/${id}/`, data),
+  delete: (id: string) => api.delete(`/documents/mailboxes/${id}/`),
+  poll: (id: string) => api.post<Mailbox>(`/documents/mailboxes/${id}/poll/`, {}),
+  testConnection: (connection: MailboxConnection) =>
+    api.post<{ ok: boolean; host?: string; folder?: string; detail?: string }>(
+      "/documents/mailboxes/test_connection/",
+      { connection },
+    ),
+  connectionDefaults: () =>
+    api.get<{ connection: MailboxConnection; has_password: boolean }>(
+      "/documents/mailboxes/connection_defaults/",
     ),
 };
 

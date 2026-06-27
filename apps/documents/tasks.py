@@ -1375,3 +1375,32 @@ def run_migration_job(self, job_id: str):
     """
     from .migration import run_migration_job as _run
     return str(_run(job_id).id)
+
+
+@shared_task(bind=True, max_retries=0, queue="default")
+def poll_mailbox(self, mailbox_id: str):
+    """Poll one IMAP mailbox and ingest new messages.
+
+    Thin Celery wrapper around ``apps.documents.email_ingestion.run_mailbox_poll``;
+    that helper owns all status/counter bookkeeping and never lets a single
+    message failure abort the poll, so there is nothing to retry here.
+    """
+    from .email_ingestion import run_mailbox_poll
+    return str(run_mailbox_poll(mailbox_id).id)
+
+
+@shared_task(queue="default")
+def poll_active_mailboxes():
+    """Fan out a poll task for every active mailbox.
+
+    Scheduled by Celery beat. Each mailbox is polled in its own task so one slow
+    or unreachable server does not hold up the others.
+    """
+    from .models import Mailbox
+
+    mailbox_ids = list(
+        Mailbox.objects.filter(is_active=True).values_list("id", flat=True)
+    )
+    for mailbox_id in mailbox_ids:
+        poll_mailbox.delay(str(mailbox_id))
+    return len(mailbox_ids)

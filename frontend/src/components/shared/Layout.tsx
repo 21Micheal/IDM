@@ -79,6 +79,7 @@ const mainNav: NavEntry[] = [
       { to: "/documents?status=archived", icon: Archive,  label: "Archived" },
       { to: "/documents/upload",          icon: Upload,   label: "Upload" },
       { to: "/documents/scan",            icon: ScanLine, label: "Scan" },
+      { to: "/documents/review",          icon: ClipboardCheck, label: "Pending review" },
       { to: "/documents/trash",           icon: Trash2,   label: "Trash" },
       { to: "/search",                    icon: Search,   label: "Search" },
     ],
@@ -112,6 +113,7 @@ const adminNav: NavLeaf[] = [
   { to: "/admin/groups",      icon: Shield,    label: "Groups",      allowedRoles: ["admin"] },
   { to: "/admin/settings",    icon: Settings,  label: "Settings",    allowedRoles: ["admin"] },
   { to: "/admin/migration",   icon: Database,  label: "IDM Migration", allowedRoles: ["admin"] },
+  { to: "/admin/mailboxes",   icon: Inbox,     label: "Email Ingestion", allowedRoles: ["admin"] },
   { to: "/workflow/builder", icon: Settings, label: "Workflow Builder", allowedRoles: ["admin"] },
 ];
 

@@ -333,6 +333,88 @@ def _call_anthropic_vision(settings, model: str, pages_b64: list[tuple[str, str]
     return response.content[0].text.strip()
 
 
+def classify_document_type(content: bytes, mime: str, filename: str, candidates, *, settings=None):
+    """Infer which of ``candidates`` (DocumentType objects) a file best matches.
+
+    Used by email ingestion when a mailbox opts into auto-classification. Returns
+    the chosen ``DocumentType`` or ``None`` (unsure / unavailable / non-scannable),
+    in which case the caller falls back to the mailbox default or UNCLASS.
+
+    Only PDFs and images are classified — Office formats are filled manually, so
+    there is nothing to gain from an LLM round-trip on them.
+    """
+    import os
+    import tempfile
+
+    from django.conf import settings as dj_settings
+
+    settings = settings or dj_settings
+
+    if getattr(settings, "IDP_PROVIDER", "") != "anthropic":
+        return None
+    if not getattr(settings, "ANTHROPIC_API_KEY", "").strip():
+        return None
+    if not candidates:
+        return None
+    scannable = mime == "application/pdf" or mime.startswith("image/")
+    if not scannable:
+        return None
+
+    catalog = "\n".join(
+        f"- {c.code}: {c.name}" + (f" — {c.description}" if c.description else "")
+        for c in candidates
+    )
+    prompt = (
+        "Classify this business document into exactly one of the known document "
+        "types below, based on its content.\n\n"
+        f"DOCUMENT TYPES:\n{catalog}\n\n"
+        'Respond with strict JSON only: {"code": "<matching type code, or NONE if unsure>"}.'
+    )
+    model = _claude_model(settings)
+
+    ext = os.path.splitext(filename)[1] or (".pdf" if mime == "application/pdf" else ".bin")
+    path = None
+    try:
+        with tempfile.NamedTemporaryFile(suffix=ext, delete=False) as tmp:
+            tmp.write(content)
+            path = tmp.name
+
+        raw = None
+        if mime == "application/pdf":
+            text = _extract_raw_text(path, mime)
+            if text.strip():
+                raw = _call_anthropic_text(
+                    settings, model, f"DOCUMENT TEXT:\n{text[:8000]}", prompt
+                )
+        if raw is None:
+            # Image, or an image-based PDF with no text layer → vision.
+            from apps.documents.ocr.tasks_ocr import render_doc_to_images
+
+            pages = render_doc_to_images(path, mime, dpi=120, max_pages=2)
+            if pages:
+                raw = _call_anthropic_vision(settings, model, pages, prompt)
+        if not raw:
+            return None
+
+        code = str(_parse_claude_json(raw).get("code", "")).strip().upper()
+        if not code or code == "NONE":
+            return None
+        for c in candidates:
+            if c.code.upper() == code:
+                logger.info("classify_document_type: %r -> %s", filename, c.code)
+                return c
+        return None
+    except Exception:  # noqa: BLE001 - classification is best-effort
+        logger.exception("classify_document_type failed for %r", filename)
+        return None
+    finally:
+        if path:
+            try:
+                os.unlink(path)
+            except OSError:
+                pass
+
+
 def _call_anthropic_text(settings, model: str, document_context: str, prompt: str) -> str:
     import anthropic
 

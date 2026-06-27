@@ -1,0 +1,239 @@
+"""
+apps/documents/mailbox_views.py
+
+Admin API for ingesting documents from an IMAP mailbox into this DMS.
+
+Endpoints (all admin-only), mounted under ``/documents/mailboxes/``:
+
+    GET    mailboxes/                      list mailboxes
+    POST   mailboxes/                      create a mailbox
+    GET    mailboxes/{id}/                 mailbox detail (incl. recent emails)
+    PATCH  mailboxes/{id}/                 update a mailbox
+    DELETE mailboxes/{id}/                 delete a mailbox
+    GET    mailboxes/{id}/status/          lightweight poll (counters + status)
+    POST   mailboxes/{id}/poll/            queue an immediate poll
+    POST   mailboxes/test_connection/      validate IMAP credentials without saving
+    GET    mailboxes/connection_defaults/  env-configured IMAP defaults (redacted)
+
+The connection secret (``password``) is write-only: it is accepted on
+create/update but never returned. ``has_password`` tells the UI whether a
+secret is already stored so it can show "configured" without leaking the value.
+This mirrors :mod:`apps.documents.migration_views`.
+"""
+from __future__ import annotations
+
+import logging
+
+from rest_framework import permissions, serializers, status, viewsets
+from rest_framework.decorators import action
+from rest_framework.response import Response
+
+from .imap_client import (
+    IMAPClient,
+    IMAPConfig,
+    IMAPError,
+    default_connection_from_settings,
+    merge_connection_with_defaults,
+)
+from .models import DocumentType, IngestedEmail, Mailbox, MailboxPollStatus
+
+logger = logging.getLogger(__name__)
+
+# Connection keys whose values must never be sent back to the browser.
+SECRET_CONNECTION_KEYS = ("password",)
+
+
+def _redact_connection(connection: dict | None) -> dict:
+    """Return a copy of the connection with secret values stripped."""
+    safe = dict(connection or {})
+    for key in SECRET_CONNECTION_KEYS:
+        safe.pop(key, None)
+    return safe
+
+
+class IsAdminAccess(permissions.BasePermission):
+    """Allow only users with administrative access (mirrors RequireAdmin)."""
+
+    def has_permission(self, request, view):
+        return bool(
+            request.user
+            and request.user.is_authenticated
+            and getattr(request.user, "has_admin_access", False)
+        )
+
+
+class MailboxConnectionTestSerializer(serializers.Serializer):
+    """Validates an ad-hoc connection blob for the test-connection action."""
+
+    connection = serializers.DictField(child=serializers.JSONField(), required=False)
+
+
+class IngestedEmailSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = IngestedEmail
+        fields = [
+            "id", "message_id", "imap_uid", "sender", "subject", "received_at",
+            "status", "attachment_count", "documents_created", "detail",
+            "bulk_upload", "created_at",
+        ]
+
+
+class MailboxSerializer(serializers.ModelSerializer):
+    default_document_type = serializers.PrimaryKeyRelatedField(
+        queryset=DocumentType.objects.all(),
+        required=False,
+        allow_null=True,
+    )
+    default_document_type_name = serializers.CharField(
+        source="default_document_type.name", read_only=True, default=None
+    )
+    created_by_name = serializers.CharField(
+        source="created_by.get_full_name", read_only=True, default=None
+    )
+    has_password = serializers.SerializerMethodField()
+    recent_emails = serializers.SerializerMethodField()
+
+    class Meta:
+        model = Mailbox
+        fields = [
+            "id", "name", "connection",
+            "default_document_type", "default_document_type_name",
+            "auto_classify", "sender_supplier_map", "sender_allowlist",
+            "related_set_attachments",
+            "max_messages_per_poll", "is_active",
+            "poll_status", "last_polled_at", "last_error", "last_seen_uid",
+            "last_imported_count", "last_skipped_count", "last_failed_count",
+            "created_by", "created_by_name", "created_at", "updated_at",
+            "has_password", "recent_emails",
+        ]
+        read_only_fields = [
+            "poll_status", "last_polled_at", "last_error", "last_seen_uid",
+            "last_imported_count", "last_skipped_count", "last_failed_count",
+            "created_by", "created_at", "updated_at",
+        ]
+
+    def get_has_password(self, obj) -> bool:
+        return bool((obj.connection or {}).get("password"))
+
+    def get_recent_emails(self, obj):
+        # Detail view only — keep list payloads light.
+        if self.context.get("view") and getattr(self.context["view"], "action", None) == "list":
+            return None
+        emails = obj.ingested_emails.all()[:25]
+        return IngestedEmailSerializer(emails, many=True).data
+
+    def to_representation(self, instance):
+        data = super().to_representation(instance)
+        data["connection"] = _redact_connection(instance.connection)
+        return data
+
+    def _merge_secret_preserving(self, instance, connection: dict | None) -> dict:
+        """When updating, keep stored secrets if the client omits them.
+
+        The UI never receives the password, so a plain PATCH would otherwise
+        wipe it. Any secret key absent or blank in the incoming payload is
+        back-filled from the stored connection.
+        """
+        incoming = dict(connection or {})
+        stored = dict((instance.connection if instance else {}) or {})
+        for key in SECRET_CONNECTION_KEYS:
+            if not incoming.get(key) and stored.get(key):
+                incoming[key] = stored[key]
+        return incoming
+
+    def create(self, validated_data):
+        validated_data["created_by"] = self.context["request"].user
+        return super().create(validated_data)
+
+    def update(self, instance, validated_data):
+        if "connection" in validated_data:
+            validated_data["connection"] = self._merge_secret_preserving(
+                instance, validated_data["connection"]
+            )
+        return super().update(instance, validated_data)
+
+
+class MailboxListSerializer(serializers.ModelSerializer):
+    """Lightweight list/poll payload."""
+
+    default_document_type_name = serializers.CharField(
+        source="default_document_type.name", read_only=True, default=None
+    )
+
+    class Meta:
+        model = Mailbox
+        fields = [
+            "id", "name", "is_active", "auto_classify", "related_set_attachments",
+            "default_document_type", "default_document_type_name",
+            "poll_status", "last_polled_at", "last_error",
+            "last_imported_count", "last_skipped_count", "last_failed_count",
+            "created_at", "updated_at",
+        ]
+
+
+class MailboxViewSet(viewsets.ModelViewSet):
+    """CRUD + poll/test for IMAP ingestion mailboxes."""
+
+    permission_classes = [IsAdminAccess]
+    queryset = Mailbox.objects.select_related(
+        "default_document_type", "created_by"
+    ).all()
+
+    def get_serializer_class(self):
+        if self.action == "list":
+            return MailboxListSerializer
+        return MailboxSerializer
+
+    @action(detail=False, methods=["get"], url_path="connection_defaults")
+    def connection_defaults(self, request):
+        """Return env-configured IMAP defaults (secrets redacted) for prefill."""
+        defaults = default_connection_from_settings()
+        return Response({
+            "connection": _redact_connection(defaults),
+            "has_password": bool(defaults.get("password")),
+        })
+
+    @action(detail=False, methods=["post"], url_path="test_connection")
+    def test_connection(self, request):
+        """Validate IMAP credentials by logging in. Saves nothing."""
+        serializer = MailboxConnectionTestSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        connection = merge_connection_with_defaults(
+            serializer.validated_data.get("connection")
+        )
+        try:
+            client = IMAPClient(IMAPConfig.from_mapping(connection))
+            result = client.test_connection()
+        except IMAPError as exc:
+            return Response(
+                {"ok": False, "detail": str(exc)},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        return Response(result)
+
+    @action(detail=True, methods=["post"])
+    def poll(self, request, pk=None):
+        """Queue an immediate poll of this mailbox."""
+        mailbox = self.get_object()
+        if mailbox.poll_status == MailboxPollStatus.POLLING:
+            return Response(
+                {"detail": "Mailbox is already polling."},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        mailbox.poll_status = MailboxPollStatus.POLLING
+        mailbox.last_error = ""
+        mailbox.save(update_fields=["poll_status", "last_error", "updated_at"])
+
+        from .tasks import poll_mailbox
+        poll_mailbox.delay(str(mailbox.id))
+
+        serializer = MailboxSerializer(mailbox, context={"request": request, "view": self})
+        return Response(serializer.data, status=status.HTTP_202_ACCEPTED)
+
+    @action(detail=True, methods=["get"])
+    def status(self, request, pk=None):
+        """Lightweight poll endpoint for progress."""
+        mailbox = self.get_object()
+        serializer = MailboxListSerializer(mailbox, context={"request": request})
+        return Response(serializer.data)
