@@ -237,12 +237,30 @@ class IMAPClient:
         finally:
             self.close()
 
-    def iter_messages(self, *, since_uid: int = 0) -> Iterator[FetchedMessage]:
+    def highest_uid(self) -> int:
+        """Return the largest UID currently in the folder (0 if empty).
+
+        Used to skip an existing backlog: a new mailbox can fast-forward its
+        cursor to here so only mail arriving afterwards is ingested.
+        """
+        conn = self._connect()
+        self._select_folder()
+        try:
+            typ, data = conn.uid("search", None, "ALL")
+        except imaplib.IMAP4.error as exc:
+            raise IMAPError(f"IMAP search failed: {exc}") from exc
+        if typ != "OK":
+            raise IMAPError(f"IMAP search returned {typ!r}.")
+        uids = [int(x) for x in (data[0].split() if data and data[0] else [])]
+        return max(uids) if uids else 0
+
+    def iter_messages(self, *, since_uid: int = 0, since_date=None) -> Iterator[FetchedMessage]:
         """Yield messages whose UID is greater than ``since_uid``, oldest first.
 
         Uses UID search/fetch so the cursor is stable across polls. The caller
         is responsible for persisting the highest UID it processed back onto the
-        mailbox.
+        mailbox. ``since_date`` (a ``date``) additionally limits results to
+        messages received on or after that day via the IMAP ``SINCE`` key.
         """
         conn = self._connect()
         self._select_folder()
@@ -250,8 +268,11 @@ class IMAPClient:
         # UID n:* always returns at least the message with the highest UID, even
         # when none are strictly greater than ``since_uid``; filter those out.
         low = (since_uid or 0) + 1
+        criteria = f"UID {low}:*"
+        if since_date is not None:
+            criteria += f" SINCE {_imap_date(since_date)}"
         try:
-            typ, data = conn.uid("search", None, f"UID {low}:*")
+            typ, data = conn.uid("search", None, criteria)
         except imaplib.IMAP4.error as exc:
             raise IMAPError(f"IMAP search failed: {exc}") from exc
         if typ != "OK":
@@ -273,6 +294,21 @@ class IMAPClient:
                 logger.warning("IMAP fetch for UID %s had no payload — skipping", uid)
                 continue
             yield FetchedMessage(uid=uid, raw=raw, message=email.message_from_bytes(raw))
+
+
+_IMAP_MONTHS = (
+    "Jan", "Feb", "Mar", "Apr", "May", "Jun",
+    "Jul", "Aug", "Sep", "Oct", "Nov", "Dec",
+)
+
+
+def _imap_date(d) -> str:
+    """Format a date as IMAP's ``DD-Mon-YYYY`` with English months.
+
+    Avoids ``strftime('%b')`` so a non-English server locale can't produce a
+    month name IMAP won't understand.
+    """
+    return f"{d.day:02d}-{_IMAP_MONTHS[d.month - 1]}-{d.year}"
 
 
 def _first_rfc822_payload(msg_data) -> bytes | None:

@@ -1321,6 +1321,19 @@ class Mailbox(models.Model):
         default=True,
         help_text="Import a multi-attachment email as one related document set.",
     )
+    ingest_history = models.BooleanField(
+        default=False,
+        help_text=(
+            "Import messages already in the mailbox at the time it is created. "
+            "Off (default) ingests only mail that arrives afterwards, so a busy "
+            "existing inbox doesn't pull its whole backlog on the first poll."
+        ),
+    )
+    ingest_since = models.DateField(
+        null=True,
+        blank=True,
+        help_text="Only import messages received on or after this date. Blank = no date limit.",
+    )
     # Defence against an exploratory poll dragging in a huge backlog at once.
     max_messages_per_poll = models.PositiveIntegerField(
         default=50,

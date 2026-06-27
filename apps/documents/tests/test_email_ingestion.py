@@ -78,7 +78,10 @@ class _FakeIMAPClient:
     def __exit__(self, *exc):
         return False
 
-    def iter_messages(self, *, since_uid=0):
+    def highest_uid(self):
+        return max((m.uid for m in self._messages), default=0)
+
+    def iter_messages(self, *, since_uid=0, since_date=None):
         if self._raise:
             raise self._raise
         for m in self._messages:
@@ -296,6 +299,8 @@ class ImportEmailTests(IngestionTestBase):
 
 class RunMailboxPollTests(IngestionTestBase):
     def test_poll_imports_and_advances_cursor(self):
+        self.mailbox.ingest_history = True  # import on first poll for this test
+        self.mailbox.save(update_fields=["ingest_history"])
         messages = [
             _fetched(_build_email(
                 message_id="<a@x>",
@@ -327,9 +332,38 @@ class RunMailboxPollTests(IngestionTestBase):
         self.mailbox.refresh_from_db()
         self.assertEqual(self.mailbox.last_seen_uid, 9)
 
+    def test_first_poll_skips_backlog_by_default(self):
+        # ingest_history defaults False → first poll fast-forwards the cursor to
+        # the high UID and imports nothing.
+        messages = [_fetched(_build_email(message_id="<a@x>"), uid=5),
+                    _fetched(_build_email(message_id="<b@x>"), uid=7)]
+        with mock.patch.object(email_ingestion, "IMAPClient", _FakeIMAPClient(messages)):
+            email_ingestion.run_mailbox_poll(str(self.mailbox.id))
+        self.mailbox.refresh_from_db()
+        self.assertEqual(self.mailbox.last_seen_uid, 7)
+        self.assertEqual(self.mailbox.last_imported_count, 0)
+        self.assertEqual(Document.objects.count(), 0)
+
+    def test_first_poll_imports_backlog_when_enabled(self):
+        self.mailbox.ingest_history = True
+        self.mailbox.save(update_fields=["ingest_history"])
+        messages = [
+            _fetched(_build_email(message_id="<a@x>",
+                                  attachments=(("a.pdf", b"%PDF a", "application", "pdf"),)), uid=5),
+            _fetched(_build_email(message_id="<b@x>",
+                                  attachments=(("b.pdf", b"%PDF b", "application", "pdf"),)), uid=7),
+        ]
+        with mock.patch.object(email_ingestion, "IMAPClient", _FakeIMAPClient(messages)):
+            email_ingestion.run_mailbox_poll(str(self.mailbox.id))
+        self.assertEqual(Document.objects.count(), 2)
+        self.mailbox.refresh_from_db()
+        self.assertEqual(self.mailbox.last_seen_uid, 7)
+
     def test_poll_records_error(self):
         from apps.documents.imap_client import IMAPError
 
+        self.mailbox.ingest_history = True  # reach iter_messages (where the error is raised)
+        self.mailbox.save(update_fields=["ingest_history"])
         fake = _FakeIMAPClient([], raise_on_iter=IMAPError("login failed"))
         with mock.patch.object(email_ingestion, "IMAPClient", fake):
             email_ingestion.run_mailbox_poll(str(self.mailbox.id))

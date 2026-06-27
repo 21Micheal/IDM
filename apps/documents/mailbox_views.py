@@ -99,7 +99,7 @@ class MailboxSerializer(serializers.ModelSerializer):
             "id", "name", "connection",
             "default_document_type", "default_document_type_name",
             "auto_classify", "sender_supplier_map", "sender_allowlist",
-            "related_set_attachments",
+            "related_set_attachments", "ingest_history", "ingest_since",
             "max_messages_per_poll", "is_active",
             "poll_status", "last_polled_at", "last_error", "last_seen_uid",
             "last_imported_count", "last_skipped_count", "last_failed_count",

@@ -489,7 +489,17 @@ def run_mailbox_poll(mailbox_id: str) -> Mailbox:
 
     try:
         with IMAPClient(IMAPConfig.from_mapping(merge_connection_with_defaults(mailbox.connection))) as client:
-            for processed, fetched in enumerate(client.iter_messages(since_uid=start_uid)):
+            # First poll of a mailbox that should not import its backlog: jump the
+            # cursor to the current high UID and ingest nothing this round, so only
+            # mail arriving afterwards is picked up.
+            if start_uid == 0 and not mailbox.ingest_history:
+                mailbox.last_seen_uid = client.highest_uid()
+                Mailbox.objects.filter(id=mailbox.id).update(last_seen_uid=mailbox.last_seen_uid)
+                return _finish_poll(mailbox, MailboxPollStatus.OK, "")
+
+            for processed, fetched in enumerate(
+                client.iter_messages(since_uid=start_uid, since_date=mailbox.ingest_since)
+            ):
                 if limit is not None and processed >= limit:
                     break
                 entry = import_email(mailbox, fetched, user=user)

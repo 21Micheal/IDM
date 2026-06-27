@@ -705,6 +705,8 @@ export type Mailbox = {
   sender_supplier_map: Record<string, string>;
   sender_allowlist: string[];
   related_set_attachments: boolean;
+  ingest_history: boolean;
+  ingest_since: string | null;
   max_messages_per_poll: number;
   is_active: boolean;
   poll_status: MailboxPollStatus;
@@ -730,6 +732,8 @@ export type MailboxInput = {
   sender_supplier_map?: Record<string, string>;
   sender_allowlist?: string[];
   related_set_attachments?: boolean;
+  ingest_history?: boolean;
+  ingest_since?: string | null;
   max_messages_per_poll?: number;
   is_active?: boolean;
 };

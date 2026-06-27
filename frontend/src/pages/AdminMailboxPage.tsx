@@ -97,6 +97,8 @@ export default function AdminMailboxPage() {
   const [autoClassify, setAutoClassify] = useState(false);
   const [relatedSet, setRelatedSet] = useState(true);
   const [maxMessages, setMaxMessages] = useState(50);
+  const [ingestHistory, setIngestHistory] = useState(false);
+  const [ingestSince, setIngestSince] = useState("");
   const [supplierMapText, setSupplierMapText] = useState("");
   const [allowlistText, setAllowlistText] = useState("");
   const [selectedId, setSelectedId] = useState<string | null>(null);
@@ -172,6 +174,8 @@ export default function AdminMailboxPage() {
           default_document_type: defaultType || null,
           auto_classify: autoClassify,
           related_set_attachments: relatedSet,
+          ingest_history: ingestHistory,
+          ingest_since: ingestSince || null,
           max_messages_per_poll: Number(maxMessages) || 0,
           sender_supplier_map: textToMap(supplierMapText),
           sender_allowlist: textToList(allowlistText),
@@ -193,6 +197,8 @@ export default function AdminMailboxPage() {
     setAutoClassify(false);
     setRelatedSet(true);
     setMaxMessages(50);
+    setIngestHistory(false);
+    setIngestSince("");
     setSupplierMapText("");
     setAllowlistText("");
     // Restore the env-default prefill so the next create starts clean.
@@ -220,6 +226,8 @@ export default function AdminMailboxPage() {
       setAutoClassify(data.auto_classify);
       setRelatedSet(data.related_set_attachments);
       setMaxMessages(data.max_messages_per_poll);
+      setIngestHistory(data.ingest_history);
+      setIngestSince(data.ingest_since ?? "");
       setSupplierMapText(mapToText(data.sender_supplier_map ?? {}));
       setAllowlistText(listToText(data.sender_allowlist ?? []));
       window.scrollTo({ top: 0, behavior: "smooth" });
@@ -237,6 +245,8 @@ export default function AdminMailboxPage() {
           default_document_type: defaultType || null,
           auto_classify: autoClassify,
           related_set_attachments: relatedSet,
+          ingest_history: ingestHistory,
+          ingest_since: ingestSince || null,
           max_messages_per_poll: Number(maxMessages) || 0,
           sender_supplier_map: textToMap(supplierMapText),
           sender_allowlist: textToList(allowlistText),
@@ -465,6 +475,32 @@ export default function AdminMailboxPage() {
               value={maxMessages}
               onChange={(e) => setMaxMessages(Number(e.target.value))}
             />
+          </div>
+          <div>
+            <label className={labelCls}>Import messages since (optional)</label>
+            <input
+              className={inputCls}
+              type="date"
+              value={ingestSince}
+              onChange={(e) => setIngestSince(e.target.value)}
+            />
+            <p className="mt-1 text-xs text-[#6E767D]">
+              Only ingest mail received on or after this date.
+            </p>
+          </div>
+          <div className="md:col-span-2">
+            <label className="flex items-center gap-2 text-sm text-[#1F2933]">
+              <input
+                type="checkbox"
+                checked={ingestHistory}
+                onChange={(e) => setIngestHistory(e.target.checked)}
+              />
+              Import the mailbox's existing backlog on first poll
+            </label>
+            <p className="mt-1 text-xs text-[#6E767D]">
+              Off by default — a new mailbox ingests only mail that arrives after it's created,
+              so an existing inbox doesn't pull its whole history.
+            </p>
           </div>
           <div className="flex flex-col justify-end gap-2">
             <label className="flex items-center gap-2 text-sm text-[#1F2933]">
