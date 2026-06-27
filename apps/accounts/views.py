@@ -1,6 +1,8 @@
 """
 apps/accounts/views.py
 """
+import logging
+
 from django.contrib.auth import authenticate
 from django.contrib.auth.password_validation import validate_password
 from django.core.exceptions import ValidationError as DjangoValidationError
@@ -26,6 +28,8 @@ from .serializers import (
 from apps.notifications.tasks import _create_notification, _send_email
 from .email_otp import send_otp_email
 from apps.audit.models import AuditLog, AuditEvent
+
+logger = logging.getLogger(__name__)
 
 
 # ── Session policy ────────────────────────────────────────────────────────────
@@ -126,26 +130,9 @@ class LoginView(APIView):
         email    = request.data.get("email", "").strip().lower()
         password = request.data.get("password", "").strip()
 
-        print(f"DEBUG: Attempting login for {email} with password length {len(password)}")
-
-        # Check if user exists
-        try:
-            user_obj = User.objects.get(email=email)
-            print(f"DEBUG: User found: {user_obj.email}, active: {user_obj.is_active}, has_password: {bool(user_obj.password)}")
-            print(f"DEBUG: Password hash starts with: {user_obj.password[:10] if user_obj.password else 'None'}")
-            # Manual password check
-            if user_obj.check_password(password):
-                print(f"DEBUG: Manual password check PASSED for {email}")
-            else:
-                print(f"DEBUG: Manual password check FAILED for {email}")
-        except User.DoesNotExist:
-            print(f"DEBUG: User {email} does not exist")
-            user_obj = None
-
         user = authenticate(request, username=email, password=password)
 
         if not user:
-            print(f"DEBUG: Authentication failed for {email}")
             AuditLog.objects.create(
                 event=AuditEvent.USER_LOGIN_FAILED,
                 object_type="User",
@@ -166,10 +153,8 @@ class LoginView(APIView):
         # Since MFA is now default, always send OTP
         try:
             send_otp_email(user, purpose="login")
-        except Exception as e:
-            print(f"ERROR: Failed to send OTP email to {user.email}: {type(e).__name__}: {str(e)}")
-            import traceback
-            traceback.print_exc()
+        except Exception:
+            logger.exception("Failed to send login OTP email to %s", user.email)
             return Response(
                 {"detail": "Could not send OTP email. Contact your administrator."},
                 status=503,
@@ -518,9 +503,8 @@ If you did not expect this account, please contact your administrator immediatel
                 recipient_list=[user.email],
                 fail_silently=False,   # Changed to False so you notice if email fails
             )
-        except Exception as e:
-            # Log the email failure to server console
-            print(f"Failed to send welcome email to {user.email}: {e}")
+        except Exception:
+            logger.exception("Failed to send welcome email to %s", user.email)
 
     def perform_destroy(self, instance):
         if instance == self.request.user:
@@ -587,8 +571,8 @@ If you did not expect this reset, contact your administrator immediately.
                 recipient_list=[user.email],
                 fail_silently=False,
             )
-        except Exception as e:
-            print(f"Failed to send password reset email to {user.email}: {e}")
+        except Exception:
+            logger.exception("Failed to send password reset email to %s", user.email)
 
         AuditLog.objects.create(
             event=AuditEvent.PERMISSION_CHANGED,
