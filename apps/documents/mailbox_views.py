@@ -103,6 +103,7 @@ class MailboxSerializer(serializers.ModelSerializer):
     )
     has_password = serializers.SerializerMethodField()
     recent_emails = serializers.SerializerMethodField()
+    email_counts = serializers.SerializerMethodField()
 
     class Meta:
         model = Mailbox
@@ -110,20 +111,41 @@ class MailboxSerializer(serializers.ModelSerializer):
             "id", "name", "protocol", "connection",
             "default_document_type", "default_document_type_name",
             "auto_classify", "sender_supplier_map", "sender_allowlist",
+            "allowed_attachment_extensions",
             "related_set_attachments", "ingest_history", "ingest_since",
             "max_messages_per_poll", "is_active",
-            "poll_status", "last_polled_at", "last_error",
+            "poll_status", "last_polled_at", "last_error", "consecutive_failures",
             "last_seen_uid", "last_seen_cursor",
             "last_imported_count", "last_skipped_count", "last_failed_count",
             "created_by", "created_by_name", "created_at", "updated_at",
-            "has_password", "recent_emails",
+            "has_password", "recent_emails", "email_counts",
         ]
         read_only_fields = [
-            "poll_status", "last_polled_at", "last_error",
+            "poll_status", "last_polled_at", "last_error", "consecutive_failures",
             "last_seen_uid", "last_seen_cursor",
             "last_imported_count", "last_skipped_count", "last_failed_count",
             "created_by", "created_at", "updated_at",
         ]
+
+    def _is_list(self) -> bool:
+        view = self.context.get("view")
+        return bool(view and getattr(view, "action", None) == "list")
+
+    def get_email_counts(self, obj):
+        # Detail view only — keep list payloads light.
+        if self._is_list():
+            return None
+        from django.db.models import Count
+
+        rows = obj.ingested_emails.values("status").annotate(n=Count("id"))
+        counts = {r["status"]: r["n"] for r in rows}
+        return {
+            "imported": counts.get("imported", 0),
+            "partial": counts.get("partial", 0),
+            "skipped": counts.get("skipped", 0),
+            "failed": counts.get("failed", 0),
+            "total": sum(counts.values()),
+        }
 
     def get_has_password(self, obj) -> bool:
         # The stored secret is the IMAP password or the Graph client secret.

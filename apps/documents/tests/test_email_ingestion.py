@@ -287,6 +287,25 @@ class ImportEmailTests(IngestionTestBase):
         self.assertEqual(entry["status"], IngestedEmail.Status.IMPORTED)
         self.assertEqual(Document.objects.count(), 1)
 
+    def test_attachment_type_filter_keeps_allowed(self):
+        self.mailbox.allowed_attachment_extensions = ["pdf"]
+        self.mailbox.save(update_fields=["allowed_attachment_extensions"])
+        msg = _build_email(attachments=(
+            ("invoice.pdf", b"%PDF a", "application", "pdf"),
+            ("logo.png", b"PNGdata here", "application", "png"),
+        ))
+        entry = email_ingestion.import_email(self.mailbox, _fetched(msg), user=self.user)
+        self.assertEqual(entry["documents_created"], 1)
+        self.assertEqual(Document.objects.get().file_name, "invoice.pdf")
+
+    def test_attachment_type_filter_all_removed_skips(self):
+        self.mailbox.allowed_attachment_extensions = ["pdf"]
+        self.mailbox.save(update_fields=["allowed_attachment_extensions"])
+        msg = _build_email(attachments=(("note.png", b"PNGdata", "application", "png"),))
+        entry = email_ingestion.import_email(self.mailbox, _fetched(msg), user=self.user)
+        self.assertEqual(entry["status"], "skipped")
+        self.assertEqual(Document.objects.count(), 0)
+
     def test_supplier_for_sender_domain_and_address(self):
         self.mailbox.sender_supplier_map = {
             "billing@acme.com": "ACME Billing",
@@ -426,3 +445,27 @@ class RunMailboxPollTests(IngestionTestBase):
         self.mailbox.refresh_from_db()
         self.assertEqual(self.mailbox.poll_status, MailboxPollStatus.ERROR)
         self.assertIn("login failed", self.mailbox.last_error)
+
+    def test_poll_failure_notifies_owner_once_per_outage(self):
+        from apps.documents.imap_client import IMAPError
+        from apps.notifications.models import Notification
+
+        self.mailbox.ingest_history = True
+        self.mailbox.save(update_fields=["ingest_history"])
+        fake = _FakeIMAPClient([], raise_on_iter=IMAPError("login failed"))
+
+        def poll():
+            with mock.patch.object(email_ingestion, "IMAPClient", fake):
+                email_ingestion.run_mailbox_poll(str(self.mailbox.id))
+
+        poll()
+        notes = Notification.objects.filter(recipient=self.user, type="mailbox_poll_failed")
+        self.assertEqual(notes.count(), 1)
+        self.mailbox.refresh_from_db()
+        self.assertEqual(self.mailbox.consecutive_failures, 1)
+
+        # A second consecutive failure must not spam another notification.
+        poll()
+        self.assertEqual(notes.count(), 1)
+        self.mailbox.refresh_from_db()
+        self.assertEqual(self.mailbox.consecutive_failures, 2)

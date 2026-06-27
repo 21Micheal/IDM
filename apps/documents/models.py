@@ -1333,6 +1333,14 @@ class Mailbox(models.Model):
         default=True,
         help_text="Import a multi-attachment email as one related document set.",
     )
+    allowed_attachment_extensions = models.JSONField(
+        default=list,
+        blank=True,
+        help_text=(
+            "If non-empty, only attachments with these file extensions are "
+            "imported (e.g. ['pdf', 'png']); others are ignored. Empty = all."
+        ),
+    )
     ingest_history = models.BooleanField(
         default=False,
         help_text=(
@@ -1376,6 +1384,9 @@ class Mailbox(models.Model):
     last_imported_count = models.PositiveIntegerField(default=0)
     last_skipped_count  = models.PositiveIntegerField(default=0)
     last_failed_count   = models.PositiveIntegerField(default=0)
+    # Number of consecutive failed polls; reset to 0 on any success. Used to
+    # alert the owner once per outage rather than on every failed poll.
+    consecutive_failures = models.PositiveIntegerField(default=0)
 
     created_by = models.ForeignKey(
         settings.AUTH_USER_MODEL,
@@ -1412,6 +1423,22 @@ class Mailbox(models.Model):
             return str(lookup[addr] or "")
         domain = addr.rsplit("@", 1)[-1] if "@" in addr else addr
         return str(lookup.get(domain, "") or "")
+
+    def attachment_allowed(self, filename: str) -> bool:
+        """Whether an attachment's extension passes the per-mailbox filter.
+
+        An empty filter accepts everything (the default). Extensions are matched
+        case-insensitively, with or without a leading dot.
+        """
+        allowed = [
+            str(x).strip().lower().lstrip(".")
+            for x in (self.allowed_attachment_extensions or [])
+            if str(x).strip()
+        ]
+        if not allowed:
+            return True
+        ext = os.path.splitext(filename or "")[1].lower().lstrip(".")
+        return ext in allowed
 
     def is_sender_allowed(self, sender: str) -> bool:
         """Whether a sender passes the allowlist.

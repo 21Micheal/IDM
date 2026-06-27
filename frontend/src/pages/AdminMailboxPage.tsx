@@ -104,6 +104,7 @@ export default function AdminMailboxPage() {
   const [ingestSince, setIngestSince] = useState("");
   const [supplierMapText, setSupplierMapText] = useState("");
   const [allowlistText, setAllowlistText] = useState("");
+  const [attachmentTypesText, setAttachmentTypesText] = useState("");
   const [selectedId, setSelectedId] = useState<string | null>(null);
   // null = creating a new mailbox; an id = editing that mailbox.
   const [editingId, setEditingId] = useState<string | null>(null);
@@ -193,6 +194,7 @@ export default function AdminMailboxPage() {
           max_messages_per_poll: Number(maxMessages) || 0,
           sender_supplier_map: textToMap(supplierMapText),
           sender_allowlist: textToList(allowlistText),
+          allowed_attachment_extensions: textToList(attachmentTypesText),
         })
         .then((r) => r.data),
     onSuccess: (box) => {
@@ -215,6 +217,7 @@ export default function AdminMailboxPage() {
     setIngestSince("");
     setSupplierMapText("");
     setAllowlistText("");
+    setAttachmentTypesText("");
     // Back to a clean IMAP create form; the defaults effect re-overlays env values.
     setProtocol("imap");
     setConnection({ ...EMPTY_IMAP });
@@ -242,6 +245,7 @@ export default function AdminMailboxPage() {
       setIngestSince(data.ingest_since ?? "");
       setSupplierMapText(mapToText(data.sender_supplier_map ?? {}));
       setAllowlistText(listToText(data.sender_allowlist ?? []));
+      setAttachmentTypesText(listToText(data.allowed_attachment_extensions ?? []));
       window.scrollTo({ top: 0, behavior: "smooth" });
     } catch (err) {
       toast.error(extractApiError(err, "Could not load mailbox for editing."));
@@ -263,6 +267,7 @@ export default function AdminMailboxPage() {
           max_messages_per_poll: Number(maxMessages) || 0,
           sender_supplier_map: textToMap(supplierMapText),
           sender_allowlist: textToList(allowlistText),
+          allowed_attachment_extensions: textToList(attachmentTypesText),
         })
         .then((r) => r.data),
     onSuccess: (box) => {
@@ -552,6 +557,20 @@ export default function AdminMailboxPage() {
               When set, only emails from these senders are ingested — everything else is skipped.
             </p>
           </div>
+          <div className="md:col-span-2">
+            <label className={labelCls}>
+              Attachment types (file extensions, comma or line separated — leave empty for all)
+            </label>
+            <input
+              className={inputCls}
+              value={attachmentTypesText}
+              onChange={(e) => setAttachmentTypesText(e.target.value)}
+              placeholder="pdf, png, jpg"
+            />
+            <p className="mt-1 text-xs text-[#6E767D]">
+              When set, only attachments with these extensions are imported — others are ignored.
+            </p>
+          </div>
           <div>
             <label className={labelCls}>Max messages per poll (0 = no limit)</label>
             <input
@@ -757,7 +776,23 @@ export default function AdminMailboxPage() {
             {detail.last_error && (
               <p className="border border-[#FECACA] bg-[#FEF2F2] px-3 py-2 text-sm text-[#991B1B]">
                 {detail.last_error}
+                {(detail.consecutive_failures ?? 0) > 1 && (
+                  <span className="font-medium"> · {detail.consecutive_failures} consecutive failed polls</span>
+                )}
               </p>
+            )}
+            {detail.email_counts && (
+              <div className="flex flex-wrap gap-4 text-sm">
+                <span className="text-[#1F2933]">
+                  <span className="font-semibold">{detail.email_counts.total}</span> emails seen
+                </span>
+                <span className="text-[#16A34A]">✓ {detail.email_counts.imported} imported</span>
+                {detail.email_counts.partial > 0 && (
+                  <span className="text-[#854D0E]">◐ {detail.email_counts.partial} partial</span>
+                )}
+                <span className="text-[#6E767D]">⊘ {detail.email_counts.skipped} skipped</span>
+                <span className="text-[#DC2626]">✗ {detail.email_counts.failed} failed</span>
+              </div>
             )}
             <div className="max-h-72 overflow-auto border border-[#E5E7EB]">
               <table className="w-full text-xs">

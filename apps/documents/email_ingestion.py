@@ -320,6 +320,10 @@ def import_email(mailbox: Mailbox, fetched, *, user) -> dict:
                 "detail": "Sender not allowlisted."}
 
     attachments = extract_attachments(message)
+    # Per-mailbox attachment-type filter (e.g. PDFs only) — drop the rest before
+    # they become documents.
+    if mailbox.allowed_attachment_extensions:
+        attachments = [a for a in attachments if mailbox.attachment_allowed(a[0])]
 
     record = IngestedEmail(
         mailbox=mailbox,
@@ -568,9 +572,35 @@ def _finish_poll(mailbox: Mailbox, status: str, error: str) -> Mailbox:
     mailbox.poll_status = status
     mailbox.last_error = error or ""
     mailbox.last_polled_at = timezone.now()
+    # Track consecutive failures so the owner is alerted once per outage (on the
+    # first failure after a healthy poll), not on every 5-minute retry.
+    if status == MailboxPollStatus.ERROR:
+        first_failure = mailbox.consecutive_failures == 0
+        mailbox.consecutive_failures += 1
+        if first_failure:
+            _notify_poll_failure(mailbox, error)
+    else:
+        mailbox.consecutive_failures = 0
     mailbox.save(update_fields=[
         "poll_status", "last_error", "last_polled_at", "last_seen_uid", "last_seen_cursor",
         "last_imported_count", "last_skipped_count", "last_failed_count",
-        "updated_at",
+        "consecutive_failures", "updated_at",
     ])
     return mailbox
+
+
+def _notify_poll_failure(mailbox: Mailbox, error: str) -> None:
+    """Alert the mailbox owner that polling has started failing."""
+    if not mailbox.created_by_id:
+        return
+    try:
+        from apps.notifications.models import Notification
+
+        Notification.objects.create(
+            recipient_id=mailbox.created_by_id,
+            type="mailbox_poll_failed",
+            message=f"Mailbox '{mailbox.name}' failed to poll: {error}"[:2000],
+            link="/admin/mailboxes",
+        )
+    except Exception:  # noqa: BLE001 - a notification failure must not break polling
+        logger.exception("Failed to create poll-failure notification for mailbox %s", mailbox.id)

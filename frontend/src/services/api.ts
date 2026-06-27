@@ -714,6 +714,7 @@ export type Mailbox = {
   auto_classify: boolean;
   sender_supplier_map: Record<string, string>;
   sender_allowlist: string[];
+  allowed_attachment_extensions: string[];
   related_set_attachments: boolean;
   ingest_history: boolean;
   ingest_since: string | null;
@@ -722,6 +723,14 @@ export type Mailbox = {
   poll_status: MailboxPollStatus;
   last_polled_at?: string | null;
   last_error?: string;
+  consecutive_failures?: number;
+  email_counts?: {
+    imported: number;
+    partial: number;
+    skipped: number;
+    failed: number;
+    total: number;
+  } | null;
   last_seen_uid: number;
   last_imported_count: number;
   last_skipped_count: number;
@@ -742,6 +751,7 @@ export type MailboxInput = {
   auto_classify?: boolean;
   sender_supplier_map?: Record<string, string>;
   sender_allowlist?: string[];
+  allowed_attachment_extensions?: string[];
   related_set_attachments?: boolean;
   ingest_history?: boolean;
   ingest_since?: string | null;
