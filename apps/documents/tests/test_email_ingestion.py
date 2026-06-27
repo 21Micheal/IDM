@@ -446,6 +446,21 @@ class RunMailboxPollTests(IngestionTestBase):
         self.assertEqual(self.mailbox.poll_status, MailboxPollStatus.ERROR)
         self.assertIn("login failed", self.mailbox.last_error)
 
+    def test_successful_ingest_notifies_owner(self):
+        from apps.notifications.models import Notification
+
+        self.mailbox.ingest_history = True
+        self.mailbox.save(update_fields=["ingest_history"])
+        messages = [_fetched(_build_email(
+            message_id="<n1@x>",
+            attachments=(("a.pdf", b"%PDF a", "application", "pdf"),),
+        ), uid=5)]
+        with mock.patch.object(email_ingestion, "IMAPClient", _FakeIMAPClient(messages)):
+            email_ingestion.run_mailbox_poll(str(self.mailbox.id))
+        self.assertEqual(
+            Notification.objects.filter(recipient=self.user, type="mailbox_ingested").count(), 1
+        )
+
     def test_poll_failure_notifies_owner_once_per_outage(self):
         from apps.documents.imap_client import IMAPError
         from apps.notifications.models import Notification

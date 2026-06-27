@@ -778,6 +778,27 @@ export const mailboxAPI = {
       "/documents/mailboxes/connection_defaults/",
       { params: { protocol } },
     ),
+  stats: (days = 30) =>
+    api.get<MailboxStats>("/documents/mailboxes/stats/", { params: { days } }),
+};
+
+export type MailboxStats = {
+  days: number;
+  daily: { date: string; imported: number; skipped: number; failed: number }[];
+  totals: { imported: number; skipped: number; failed: number; documents: number; total: number };
+  mailboxes: {
+    id: string;
+    name: string;
+    protocol: MailboxProtocol;
+    poll_status: MailboxPollStatus;
+    is_active: boolean;
+    consecutive_failures: number;
+    last_polled_at: string | null;
+    imported: number;
+    skipped: number;
+    failed: number;
+    documents: number;
+  }[];
 };
 
 // ── Signing payload (structurally matches SignaturePlacementResult from

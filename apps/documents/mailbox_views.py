@@ -290,3 +290,87 @@ class MailboxViewSet(viewsets.ModelViewSet):
         mailbox = self.get_object()
         serializer = MailboxListSerializer(mailbox, context={"request": request})
         return Response(serializer.data)
+
+    @action(detail=False, methods=["get"])
+    def stats(self, request):
+        """Operational dashboard data: ingestion volume over time + per-mailbox.
+
+        ``?days=N`` (default 30, capped 365) sets the window for the daily series.
+        """
+        from datetime import timedelta
+
+        from django.db.models import Count, Q, Sum
+        from django.db.models.functions import TruncDate
+        from django.utils import timezone
+
+        try:
+            days = min(max(int(request.query_params.get("days", 30)), 1), 365)
+        except (TypeError, ValueError):
+            days = 30
+        since = timezone.now() - timedelta(days=days)
+
+        emails = IngestedEmail.objects.filter(created_at__gte=since)
+
+        # ── daily series (imported = imported+partial) ───────────────────────
+        rows = (
+            emails.annotate(day=TruncDate("created_at"))
+            .values("day", "status")
+            .annotate(n=Count("id"))
+        )
+        by_day: dict = {}
+        for r in rows:
+            bucket = by_day.setdefault(r["day"], {"imported": 0, "skipped": 0, "failed": 0})
+            status_key = r["status"]
+            if status_key in ("imported", "partial"):
+                bucket["imported"] += r["n"]
+            elif status_key == "skipped":
+                bucket["skipped"] += r["n"]
+            else:
+                bucket["failed"] += r["n"]
+
+        today = timezone.now().date()
+        daily = []
+        for i in range(days):
+            d = today - timedelta(days=days - 1 - i)
+            b = by_day.get(d, {"imported": 0, "skipped": 0, "failed": 0})
+            daily.append({"date": d.isoformat(), **b})
+
+        # ── totals ───────────────────────────────────────────────────────────
+        documents = emails.aggregate(n=Sum("documents_created"))["n"] or 0
+        totals = {
+            "imported": sum(x["imported"] for x in daily),
+            "skipped": sum(x["skipped"] for x in daily),
+            "failed": sum(x["failed"] for x in daily),
+            "documents": documents,
+        }
+        totals["total"] = totals["imported"] + totals["skipped"] + totals["failed"]
+
+        # ── per-mailbox summary ──────────────────────────────────────────────
+        per = (
+            emails.values("mailbox_id")
+            .annotate(
+                imported=Count("id", filter=Q(status__in=["imported", "partial"])),
+                skipped=Count("id", filter=Q(status="skipped")),
+                failed=Count("id", filter=Q(status="failed")),
+                documents=Sum("documents_created"),
+            )
+        )
+        per_map = {row["mailbox_id"]: row for row in per}
+        mailboxes = []
+        for mb in Mailbox.objects.all().order_by("name"):
+            row = per_map.get(mb.id, {})
+            mailboxes.append({
+                "id": str(mb.id),
+                "name": mb.name,
+                "protocol": mb.protocol,
+                "poll_status": mb.poll_status,
+                "is_active": mb.is_active,
+                "consecutive_failures": mb.consecutive_failures,
+                "last_polled_at": mb.last_polled_at.isoformat() if mb.last_polled_at else None,
+                "imported": row.get("imported", 0),
+                "skipped": row.get("skipped", 0),
+                "failed": row.get("failed", 0),
+                "documents": row.get("documents") or 0,
+            })
+
+        return Response({"days": days, "daily": daily, "totals": totals, "mailboxes": mailboxes})

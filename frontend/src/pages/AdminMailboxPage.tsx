@@ -1,7 +1,17 @@
 import { useEffect, useMemo, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { Inbox, Loader2, Mail, Pencil, PlugZap, RefreshCw, Trash2, X } from "lucide-react";
+import { BarChart3, Inbox, Loader2, Mail, Pencil, PlugZap, RefreshCw, Trash2, X } from "lucide-react";
 import clsx from "clsx";
+import {
+  Bar,
+  BarChart,
+  CartesianGrid,
+  Legend,
+  ResponsiveContainer,
+  Tooltip,
+  XAxis,
+  YAxis,
+} from "recharts";
 
 import {
   documentTypesAPI,
@@ -144,6 +154,12 @@ export default function AdminMailboxPage() {
     queryKey: ["document-types-lite"],
     queryFn: () =>
       documentTypesAPI.list().then((r) => normalizeListResponse<DocumentTypeLite>(r.data)),
+  });
+
+  const [statsDays, setStatsDays] = useState(30);
+  const statsQuery = useQuery({
+    queryKey: ["mailbox-stats", statsDays],
+    queryFn: () => mailboxAPI.stats(statsDays).then((r) => r.data),
   });
 
   const mailboxesQuery = useQuery({
@@ -644,6 +660,64 @@ export default function AdminMailboxPage() {
             )}
             {editingId ? "Save changes" : "Create mailbox"}
           </button>
+        </div>
+      </section>
+
+      {/* ── Ingestion statistics ────────────────────────────────────────── */}
+      <section className={panelCls}>
+        <div className={clsx(panelHeaderCls, "justify-between")}>
+          <span className="flex items-center gap-2">
+            <BarChart3 className="h-4 w-4 text-[#287EAD]" />
+            <h2 className="text-sm font-semibold text-[#1F2933]">Ingestion statistics</h2>
+          </span>
+          <select
+            className="h-8 border border-[#AEB5BB] bg-white px-2 text-xs text-[#1F2933] outline-none"
+            value={statsDays}
+            onChange={(e) => setStatsDays(Number(e.target.value))}
+          >
+            <option value={7}>Last 7 days</option>
+            <option value={30}>Last 30 days</option>
+            <option value={90}>Last 90 days</option>
+          </select>
+        </div>
+        <div className="space-y-4 p-4">
+          {statsQuery.data && (
+            <div className="flex flex-wrap gap-x-6 gap-y-1 text-sm">
+              <span className="text-[#1F2933]">
+                <span className="font-semibold">{statsQuery.data.totals.documents}</span> documents
+              </span>
+              <span className="text-[#16A34A]">✓ {statsQuery.data.totals.imported} imported</span>
+              <span className="text-[#6E767D]">⊘ {statsQuery.data.totals.skipped} skipped</span>
+              <span className="text-[#DC2626]">✗ {statsQuery.data.totals.failed} failed</span>
+              <span className="text-[#6E767D]">{statsQuery.data.totals.total} emails seen</span>
+            </div>
+          )}
+          <div className="h-64 w-full">
+            {statsQuery.isLoading ? (
+              <div className="flex h-full items-center justify-center">
+                <Loader2 className="h-6 w-6 animate-spin text-[#5E6870]" />
+              </div>
+            ) : (
+              <ResponsiveContainer width="100%" height="100%">
+                <BarChart data={statsQuery.data?.daily ?? []} margin={{ top: 8, right: 8, left: -16, bottom: 0 }}>
+                  <CartesianGrid strokeDasharray="3 3" stroke="#EEF1F3" />
+                  <XAxis
+                    dataKey="date"
+                    tick={{ fontSize: 11, fill: "#6E767D" }}
+                    tickFormatter={(d: string) => d.slice(5)}
+                    interval="preserveStartEnd"
+                    minTickGap={24}
+                  />
+                  <YAxis allowDecimals={false} tick={{ fontSize: 11, fill: "#6E767D" }} width={32} />
+                  <Tooltip />
+                  <Legend wrapperStyle={{ fontSize: 12 }} />
+                  <Bar dataKey="imported" stackId="a" name="Imported" fill="#16A34A" />
+                  <Bar dataKey="skipped" stackId="a" name="Skipped" fill="#CBD5E1" />
+                  <Bar dataKey="failed" stackId="a" name="Failed" fill="#DC2626" />
+                </BarChart>
+              </ResponsiveContainer>
+            )}
+          </div>
         </div>
       </section>
 

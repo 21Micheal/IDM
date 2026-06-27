@@ -581,6 +581,10 @@ def _finish_poll(mailbox: Mailbox, status: str, error: str) -> Mailbox:
             _notify_poll_failure(mailbox, error)
     else:
         mailbox.consecutive_failures = 0
+        # Digest: when a poll actually brought in documents, nudge the owner that
+        # there's a review queue to clear (one notification per productive poll).
+        if mailbox.last_imported_count > 0:
+            _notify_ingested(mailbox, mailbox.last_imported_count)
     mailbox.save(update_fields=[
         "poll_status", "last_error", "last_polled_at", "last_seen_uid", "last_seen_cursor",
         "last_imported_count", "last_skipped_count", "last_failed_count",
@@ -604,3 +608,20 @@ def _notify_poll_failure(mailbox: Mailbox, error: str) -> None:
         )
     except Exception:  # noqa: BLE001 - a notification failure must not break polling
         logger.exception("Failed to create poll-failure notification for mailbox %s", mailbox.id)
+
+
+def _notify_ingested(mailbox: Mailbox, count: int) -> None:
+    """Tell the mailbox owner a poll brought in documents to review."""
+    if not mailbox.created_by_id:
+        return
+    try:
+        from apps.notifications.models import Notification
+
+        Notification.objects.create(
+            recipient_id=mailbox.created_by_id,
+            type="mailbox_ingested",
+            message=f"{count} new document email(s) from '{mailbox.name}' are ready for review.",
+            link="/documents/review",
+        )
+    except Exception:  # noqa: BLE001 - a notification failure must not break polling
+        logger.exception("Failed to create ingestion notification for mailbox %s", mailbox.id)
