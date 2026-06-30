@@ -1,46 +1,39 @@
-// Flaxem System Enterprises Ltd - FSE Logo
-// Corporate branding: Blue and Red
-import React from 'react';
+import React from "react";
+import fseLogo from "@/assets/images/fselogo.png";
 
 interface FlaxemLogoProps {
   className?: string;
-  variant?: 'light' | 'dark';
+  variant?: "light" | "dark";
   compact?: boolean;
 }
 
-export const FlaxemLogo: React.FC<FlaxemLogoProps> = ({ className = "h-10 w-auto", variant = 'light', compact = false }) => {
+export const FlaxemLogo: React.FC<FlaxemLogoProps> = ({
+  className = "h-11 w-[118px]",
+  variant = "light",
+  compact = false,
+}) => {
+  const isLight = variant === "light";
+
   return (
-    <div className={`flex items-center gap-2 ${className}`}>
-      {/* FSE Logo - Blue and Red */}
-      <svg width="48" height="32" viewBox="0 0 48 32" fill="none" xmlns="http://www.w3.org/2000/svg" className="h-full w-auto">
-        {/* Blue FSE background shape */}
-        <path d="M0 8L12 0H28L16 8H0Z" fill="#0066CC"/>
-        <path d="M8 8L20 0H36L24 8H8Z" fill="#0066CC"/>
-        <path d="M16 8L28 0H44L32 8H16Z" fill="#0066CC"/>
-        
-        <path d="M0 16L8 8H24L16 16H0Z" fill="#0066CC"/>
-        <path d="M12 16L28 0H40L24 16H12Z" fill="#0066CC"/>
-        
-        <path d="M0 24L12 16H28L16 24H0Z" fill="#0066CC"/>
-        <path d="M8 24L20 16H36L24 24H8Z" fill="#0066CC"/>
-        <path d="M24 24L36 16H48L40 24H24Z" fill="#FF2E2E"/>
-        
-        <path d="M12 32L24 24H40L28 32H12Z" fill="#0066CC"/>
-        <path d="M32 32L44 24H48L40 32H32Z" fill="#FF2E2E"/>
-      </svg>
-      
-      {!compact && (
-        <div className="flex items-baseline gap-1.5 leading-none">
-          <span className={`text-base font-bold tracking-tight ${
-            variant === 'light' ? 'text-white' : 'text-slate-900'
-          }`}>
-            FSE
-          </span>
-          <span className="text-[13px] font-semibold tracking-wide text-red-600">
-            | DMS
-          </span>
+    <div className={`flex items-center ${className}`} aria-label="FSE DMS">
+      <div
+        className={`flex h-full items-center overflow-hidden border ${
+          compact ? "w-12 justify-center" : "w-full gap-2 px-2.5"
+        } ${isLight ? "border-white/20 bg-white" : "border-[#D7DCE0] bg-white"}`}
+      >
+        <div className="relative h-9 w-16 shrink-0 overflow-hidden">
+          <img
+            src={fseLogo}
+            alt="Flaxem System Enterprises"
+            className="absolute left-1/2 top-1/2 h-[82px] w-[82px] max-w-none -translate-x-1/2 -translate-y-[45%] object-cover object-[50%_30%]"
+          />
         </div>
-      )}
+        {!compact && (
+          <span className="text-[11px] font-bold uppercase tracking-[0.18em] text-[#D71932]">
+            DMS
+          </span>
+        )}
+      </div>
     </div>
   );
 };

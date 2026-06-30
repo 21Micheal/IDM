@@ -141,6 +141,51 @@ class WorkflowTemplateViewSet(viewsets.ModelViewSet):
                     s.save(update_fields=["order"])
         return Response(WorkflowTemplateSerializer(template, context={"request": request}).data)
 
+    @action(detail=False, methods=["get"], url_path="process-steps")
+    def process_steps(self, request):
+        """List the process steps (statuses) a document of a given type can be in.
+
+        Used by the form builder to populate "process step equals …" conditions
+        for section/field visibility. Combines the per-step ``status_label``s of
+        the active workflow template(s) routed to that document type with the
+        standard lifecycle statuses every document can reach. ``value`` is what a
+        document's ``status`` field actually holds at runtime; ``label`` is for
+        display. Pass ``?document_type=<id>``; without it, only the standard
+        statuses are returned."""
+        from apps.documents.models import DocumentStatus
+
+        doc_type = request.query_params.get("document_type")
+        steps: list[dict] = []
+        seen: set = set()
+
+        def add(value: str, label: str):
+            if value and value not in seen:
+                seen.add(value)
+                steps.append({"value": value, "label": label})
+
+        # Draft is the implicit starting state while a document is being created.
+        add(DocumentStatus.DRAFT, DocumentStatus.DRAFT.label)
+
+        if doc_type:
+            labels = (
+                WorkflowStep.objects
+                .filter(template__document_type_id=doc_type, template__is_active=True)
+                .order_by("template__id", "order")
+                .values_list("status_label", "name")
+            )
+            for status_label, name in labels:
+                add(status_label, f"{name} · {status_label}" if name and name != status_label else status_label)
+
+        # Standard terminal / lifecycle statuses a document can also carry.
+        for st in (
+            DocumentStatus.PENDING_REVIEW, DocumentStatus.PENDING_APPROVAL,
+            DocumentStatus.RETURNED, DocumentStatus.APPROVED,
+            DocumentStatus.REJECTED, DocumentStatus.ARCHIVED, DocumentStatus.VOID,
+        ):
+            add(st, st.label)
+
+        return Response(steps)
+
 
 # ── Rules ──────────────────────────────────────────────────────────────────────
 

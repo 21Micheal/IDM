@@ -67,6 +67,13 @@ class DocumentTemplate(models.Model):
     # e.g. ["supplier_name", "invoice_date", "amount"]
     placeholders = models.JSONField(default=list, blank=True)
 
+    # Infor SunSystems integration mapping for "form" templates. Declarative
+    # config compiled into an <SSC> journal (and budget inquiry) by
+    # apps/sunsystems/mapping.py. Snapshotted onto each created document's
+    # metadata.sunsystems at fill time. Shape: { "journal": {...}, "budget": {...},
+    # "connection": {...} }. Empty = no SunSystems integration for this template.
+    sunsystems = models.JSONField(default=dict, blank=True)
+
     # How many times this template has been used to create a document
     use_count = models.PositiveIntegerField(default=0)
 

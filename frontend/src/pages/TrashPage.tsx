@@ -15,7 +15,6 @@ import {
   Loader2,
   Eye,
   FileText,
-  AlertTriangle,
   Info,
 } from "lucide-react";
 import { documentsAPI } from "@/services/api";
@@ -23,6 +22,7 @@ import { toast } from "@/components/ui/vault-toast";
 import type { Document } from "@/types";
 import { format, formatDistanceToNow } from "date-fns";
 import StatusBadge from "@/components/documents/StatusBadge";
+import { WorkspaceCommandBar } from "@/components/shared/WorkspaceCommandBar";
 
 export default function TrashPage() {
   const qc = useQueryClient();
@@ -57,32 +57,31 @@ export default function TrashPage() {
   });
 
   return (
-    <div className="-m-6 min-h-[calc(100vh-3.5rem)] bg-[#EDEDED] text-[13px] text-[#1F2933]">
+    <div className="min-h-screen bg-[#EDEDED] text-[13px] text-[#1F2933]">
 
       {/* ── Page header bar ─────────────────────────────────────────────────── */}
-      <div className="border-b border-[#206D99] bg-[#287EAD] px-6 py-4 text-white">
-        <div className="flex items-center justify-between gap-3">
-          <div className="flex items-center gap-3">
-            <div className="flex h-10 w-10 items-center justify-center border border-white/25 bg-white/10">
-              <Trash2 className="h-5 w-5 text-white" />
-            </div>
-            <div>
-              <h1 className="text-xl font-semibold">Trash</h1>
-              <p className="mt-0.5 text-sm text-white/75">
-                Deleted documents — restore or permanently remove them.
-              </p>
-            </div>
-          </div>
-          {!isLoading && docs.length > 0 && (
+      <WorkspaceCommandBar
+        actions={
+          !isLoading && docs.length > 0 ? (
             <div className="border border-white/25 bg-white/10 px-3 py-2 text-sm font-semibold">
               {docs.length} item{docs.length !== 1 ? "s" : ""}
             </div>
-          )}
+          ) : null
+        }
+      >
+        <div className="flex h-10 w-10 items-center justify-center border border-white/25 bg-white/10">
+          <Trash2 className="h-5 w-5 text-white" />
         </div>
-      </div>
+        <div>
+          <h1 className="text-xl font-semibold">Trash</h1>
+          <p className="mt-0.5 text-sm text-white/75">
+            Deleted documents — restore or permanently remove them.
+          </p>
+        </div>
+      </WorkspaceCommandBar>
 
       {/* ── Body ────────────────────────────────────────────────────────────── */}
-      <div className="space-y-4 p-4 pr-8">
+      <div className="space-y-4 p-5 pr-0">
 
         {/* Retention notice */}
         <div className="flex items-start gap-2.5 border border-amber-300 bg-amber-50 px-4 py-3 text-sm text-amber-800">

@@ -31,15 +31,14 @@ from .ion_client import (
     IONClient,
     IONConfig,
     IONError,
+    SECRET_CONNECTION_KEYS,
     default_connection_from_settings,
+    encrypt_connection_secrets,
     merge_connection_with_defaults,
 )
 from .models import DocumentType, MigrationJob, MigrationJobStatus
 
 logger = logging.getLogger(__name__)
-
-# Connection keys whose values must never be sent back to the browser.
-SECRET_CONNECTION_KEYS = ("client_secret", "sask", "password")
 
 
 def _redact_connection(connection: dict | None) -> dict:
@@ -127,13 +126,18 @@ class MigrationJobSerializer(serializers.ModelSerializer):
 
     def create(self, validated_data):
         validated_data["created_by"] = self.context["request"].user
+        if "connection" in validated_data:
+            validated_data["connection"] = encrypt_connection_secrets(
+                validated_data["connection"]
+            )
         return super().create(validated_data)
 
     def update(self, instance, validated_data):
         if "connection" in validated_data:
-            validated_data["connection"] = self._merge_secret_preserving(
-                instance, validated_data["connection"]
-            )
+            merged = self._merge_secret_preserving(instance, validated_data["connection"])
+            # Encrypt freshly-typed secrets; back-filled stored ones are already
+            # encrypted and pass through untouched.
+            validated_data["connection"] = encrypt_connection_secrets(merged)
         return super().update(instance, validated_data)
 
 

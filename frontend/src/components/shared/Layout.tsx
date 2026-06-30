@@ -17,6 +17,7 @@ import {
   Bell, Users, Building2, UserRoundCog, Shield,
   ChevronDown, ChevronRight, Archive, ScanLine, Loader2, UserCheck, Monitor, Lock, History, Trash2,
   BellRing, CircleUserRound, ClipboardCheck, Inbox, ArrowRight, FileSignature, LayoutTemplate, Database,
+  Plug,
 } from "lucide-react";
 import { useAuthStore } from "../../store/authStore";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
@@ -114,6 +115,7 @@ const adminNav: NavLeaf[] = [
   { to: "/admin/settings",    icon: Settings,  label: "Settings",    allowedRoles: ["admin"] },
   { to: "/admin/migration",   icon: Database,  label: "IDM Migration", allowedRoles: ["admin"] },
   { to: "/admin/mailboxes",   icon: Inbox,     label: "Email Ingestion", allowedRoles: ["admin"] },
+  { to: "/admin/sunsystems",  icon: Plug,      label: "SunSystems", allowedRoles: ["admin"] },
   { to: "/workflow/builder", icon: Settings, label: "Workflow Builder", allowedRoles: ["admin"] },
 ];
 
@@ -206,11 +208,14 @@ function SidebarGroup({
 
 // ── ProfileMenu (unchanged) ───────────────────────────────────────────────────
 
-function ProfileMenu() {
+function ProfileMenu({ variant = "light" }: { variant?: "light" | "blue" }) {
   const { user, logout } = useAuthStore();
   const _navigate = useNavigate();
   void _navigate;
   const [open, setOpen] = useState(false);
+  const buttonClassName = variant === "blue"
+    ? "flex h-9 w-9 items-center justify-center text-white/85 transition-colors hover:bg-white/10 hover:text-white"
+    : "flex h-9 w-9 items-center justify-center border border-[#C8CDD2] bg-white text-[#5E6870] transition-colors hover:bg-[#EEF6FB] hover:text-[#287EAD]";
 
   useEffect(() => {
     if (!open) return;
@@ -227,7 +232,7 @@ function ProfileMenu() {
     <div className="relative">
       <button
         onClick={() => setOpen(!open)}
-        className="flex h-9 w-9 items-center justify-center border border-[#C8CDD2] bg-white text-[#5E6870] transition-colors hover:bg-[#EEF6FB] hover:text-[#287EAD]"
+        className={buttonClassName}
         title="Profile"
         aria-label="Open profile menu"
       >
@@ -269,10 +274,12 @@ function NotificationsTray({
   notifications,
   tasks,
   attentionCount,
+  variant = "light",
 }: {
   notifications?: { id: string; type: string; message: string; link?: string; is_read: boolean; created_at: string }[];
   tasks: unknown[];
   attentionCount: number;
+  variant?: "light" | "blue";
 }) {
   const _navigate = useNavigate();
   void _navigate;
@@ -364,12 +371,15 @@ function NotificationsTray({
     setOpen(false);
     _navigate("/workflow");
   };
+  const buttonClassName = variant === "blue"
+    ? "relative flex h-9 w-9 items-center justify-center text-white/85 transition-colors hover:bg-white/10 hover:text-white"
+    : "relative flex h-9 w-9 items-center justify-center border border-[#C8CDD2] bg-white text-[#5E6870] transition-colors hover:bg-[#EEF6FB] hover:text-[#287EAD]";
 
   return (
     <div className="relative">
       <button
         onClick={() => setOpen((value) => !value)}
-        className="relative flex h-9 w-9 items-center justify-center border border-[#C8CDD2] bg-white text-[#5E6870] transition-colors hover:bg-[#EEF6FB] hover:text-[#287EAD]"
+        className={buttonClassName}
         title="Notifications and tasks"
         aria-label="Open notifications and tasks tray"
       >
@@ -539,6 +549,72 @@ function SidebarProfile() {
   );
 }
 
+export function WorkspaceHeaderActions({ variant = "light" }: { variant?: "light" | "blue" }) {
+  const [idleReady, setIdleReady] = useState(false);
+
+  useEffect(() => {
+    let fallbackTimer: ReturnType<typeof setTimeout> | null = null;
+    let idleHandle: number | null = null;
+    const markReady = () => setIdleReady(true);
+    if (typeof window !== "undefined" && "requestIdleCallback" in window) {
+      idleHandle = (window as any).requestIdleCallback(markReady, { timeout: 1500 });
+      fallbackTimer = setTimeout(markReady, 1600);
+      return () => {
+        if (idleHandle !== null) (window as any).cancelIdleCallback(idleHandle);
+        if (fallbackTimer) clearTimeout(fallbackTimer);
+      };
+    }
+    fallbackTimer = setTimeout(markReady, 500);
+    return () => { if (fallbackTimer) clearTimeout(fallbackTimer); };
+  }, []);
+
+  const { data: summary } = useQuery({
+    queryKey: ["notifications", "summary"],
+    queryFn: () => notificationsAPI.summary().then((r) => r.data),
+    refetchInterval: 60_000,
+    enabled: idleReady,
+    ...QUERY_ONE_MINUTE_STALE,
+  });
+
+  const { data: notifications } = useQuery({
+    queryKey: ["notifications"],
+    queryFn: () => notificationsAPI.list().then((r) => r.data.results ?? r.data),
+    enabled: idleReady,
+    ...QUERY_ONE_MINUTE_STALE,
+  });
+
+  const { data: myTasks = [] } = useQuery({
+    queryKey: ["workflow", "my-tasks"],
+    queryFn: () => workflowAPI.myTasks().then((r) => r.data.results ?? r.data),
+    enabled: idleReady,
+    ...QUERY_ONE_MINUTE_STALE,
+  });
+
+  const trayAttentionCount =
+    (summary?.unread_notifications ?? 0) +
+    (summary?.unread_task_alerts ?? 0) +
+    (summary?.pending_tasks ?? 0);
+  const isBlue = variant === "blue";
+
+  return (
+    <div className="flex shrink-0 items-center gap-2">
+      {idleReady ? (
+        <Suspense fallback={null}>
+          <ChatLauncher variant={variant} />
+        </Suspense>
+      ) : null}
+      <NotificationsTray
+        notifications={notifications as any}
+        tasks={myTasks as unknown[]}
+        attentionCount={trayAttentionCount}
+        variant={variant}
+      />
+      {!isBlue && <div className="mx-1 h-6 w-px bg-[#C8CDD2]" />}
+      <ProfileMenu variant={variant} />
+    </div>
+  );
+}
+
 // ── Layout ────────────────────────────────────────────────────────────────────
 
 export default function Layout() {
@@ -600,6 +676,24 @@ export default function Layout() {
   const unread = summary?.unread_notifications ?? 0;
   const pendingTasksCount = summary?.pending_tasks ?? 0;
   const signatureCount = summary?.incoming_signatures ?? 0;
+  const documentsRouteSegment = location.pathname.split("/")[2] ?? "";
+  const usesWorkspaceCommandBar =
+    location.pathname === "/" ||
+    location.pathname === "/notifications" ||
+    location.pathname === "/search" ||
+    location.pathname === "/workflow" ||
+    location.pathname === "/audit" ||
+    location.pathname === "/admin/templates" ||
+    location.pathname === "/documents" ||
+    location.pathname === "/documents/upload" ||
+    location.pathname === "/documents/scan" ||
+    location.pathname === "/documents/trash" ||
+    (
+      location.pathname.startsWith("/documents/") &&
+      Boolean(documentsRouteSegment) &&
+      !["upload", "scan", "review", "trash", "folders"].includes(documentsRouteSegment) &&
+      !location.pathname.slice("/documents/".length).includes("/")
+    );
   // Bell badge: every unread notification (notices + task alerts) plus pending
   // tasks — mirrors what the tray used to sum from the now-unpolled lists.
   const trayAttentionCount =
@@ -626,7 +720,10 @@ export default function Layout() {
 
       {/* ── Sidebar ────────────────────────────────────────────────────── */}
       <aside
-        className="flex w-[270px] flex-shrink-0 flex-col border-r border-[#C8CDD2] bg-[#F2F3F4] text-[#1F2933]"
+        className={clsx(
+          "flex w-[270px] flex-shrink-0 flex-col bg-[#F2F3F4] text-[#1F2933]",
+          usesWorkspaceCommandBar ? "border-r-0" : "border-r border-[#C8CDD2]",
+        )}
       >
         {/* Logo */}
         <div className="flex h-[69px] items-center border-b border-[#206D99] bg-[#287EAD] px-4">
@@ -753,22 +850,30 @@ export default function Layout() {
 
       {/* ── Main area (unchanged) ──────────────────────────────────── */}
       <div className="flex-1 flex flex-col min-w-0">
-        <header className="flex h-14 flex-shrink-0 items-center justify-end gap-2 border-b border-[#C8CDD2] bg-white px-6">
-          {idleReady ? (
-            <Suspense fallback={null}>
-              <ChatLauncher />
-            </Suspense>
-          ) : null}
-          <NotificationsTray
-            notifications={notifications as any}
-            tasks={myTasks as unknown[]}
-            attentionCount={trayAttentionCount}
-          />
-          <div className="mx-1 h-6 w-px bg-[#C8CDD2]" />
-          <ProfileMenu />
-        </header>
+        {!usesWorkspaceCommandBar && (
+          <header className="flex h-14 flex-shrink-0 items-center justify-end gap-2 border-b border-[#C8CDD2] bg-white px-6">
+            {idleReady ? (
+              <Suspense fallback={null}>
+                <ChatLauncher />
+              </Suspense>
+            ) : null}
+            <NotificationsTray
+              notifications={notifications as any}
+              tasks={myTasks as unknown[]}
+              attentionCount={trayAttentionCount}
+            />
+            <div className="mx-1 h-6 w-px bg-[#C8CDD2]" />
+            <ProfileMenu />
+          </header>
+        )}
 
-        <main ref={mainRef} className="flex-1 overflow-y-auto p-6 bg-background">
+        <main
+          ref={mainRef}
+          className={clsx(
+            "flex-1 overflow-y-auto bg-background",
+            usesWorkspaceCommandBar ? "p-0" : "p-6",
+          )}
+        >
           <Suspense fallback={<ContentFallback />}>
             <Outlet />
           </Suspense>

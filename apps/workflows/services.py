@@ -708,6 +708,30 @@ class WorkflowService:
         except Exception:
             pass
 
+        WorkflowService._maybe_post_sunsystems_journal(doc, outcome)
+
+    @staticmethod
+    def _maybe_post_sunsystems_journal(document, outcome: str) -> None:
+        """Post the form's journal to SunSystems when an approval lands.
+
+        Only fires for documents whose snapshotted mapping enables journal
+        posting and whose configured trigger matches this outcome (default
+        "approved"). The post runs after commit and is idempotent — the
+        JournalPosting row guards against double-posting if completion is ever
+        re-entered.
+        """
+        try:
+            from apps.sunsystems.config import journal_posting_enabled, post_trigger
+            if not journal_posting_enabled(document):
+                return
+            if post_trigger(document) != outcome:
+                return
+            from apps.sunsystems.tasks import post_journal_for_document
+            doc_id = str(document.pk)
+            _queue_after_commit(lambda did=doc_id: post_journal_for_document.delay(did))
+        except Exception:
+            logger.exception("Failed to enqueue SunSystems journal posting for %s", getattr(document, "pk", "?"))
+
     @staticmethod
     def get_overdue_tasks():
         return (

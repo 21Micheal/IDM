@@ -6,17 +6,21 @@ import { persist } from "zustand/middleware";
 // render after login, before the login/me response is applied).
 const DEFAULT_SESSION_LIFETIME_MIN = 360; // absolute max session, 6h
 const DEFAULT_IDLE_TIMEOUT_MIN = 30;      // sign out after inactivity; 0 disables
+const DEFAULT_WARNING_MIN = 3;            // warn before expiry; 0 disables
 
 export interface SessionPolicy {
   /** Absolute maximum session duration from sign-in, in minutes. */
   lifetimeMinutes: number;
   /** Sign out after this many minutes of inactivity. 0 disables the idle timeout. */
   idleTimeoutMinutes: number;
+  /** Warn this many minutes before the session ends. 0 disables the warning. */
+  warningMinutes: number;
 }
 
 const DEFAULT_POLICY: SessionPolicy = {
   lifetimeMinutes: DEFAULT_SESSION_LIFETIME_MIN,
   idleTimeoutMinutes: DEFAULT_IDLE_TIMEOUT_MIN,
+  warningMinutes: DEFAULT_WARNING_MIN,
 };
 
 export interface AuthUser {
@@ -116,6 +120,7 @@ export const useAuthStore = create<AuthState>()(
 export interface ServerSessionPolicy {
   session_lifetime_minutes?: number;
   session_idle_timeout_minutes?: number;
+  session_warning_minutes?: number;
 }
 
 /**
@@ -131,6 +136,9 @@ export function applyServerSessionPolicy(policy?: ServerSessionPolicy | null): v
   }
   if (typeof policy.session_idle_timeout_minutes === "number") {
     next.idleTimeoutMinutes = policy.session_idle_timeout_minutes;
+  }
+  if (typeof policy.session_warning_minutes === "number") {
+    next.warningMinutes = policy.session_warning_minutes;
   }
   if (Object.keys(next).length > 0) {
     useAuthStore.getState().setSessionPolicy(next);

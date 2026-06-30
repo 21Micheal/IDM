@@ -23,7 +23,7 @@ class DocumentTemplateSerializer(serializers.ModelSerializer):
         fields = [
             "id", "name", "description", "type", "kind", "category", "tags",
             "document_type", "document_type_id", "document_type_name", "document_type_code",
-            "sections", "design", "placeholders",
+            "sections", "design", "placeholders", "sunsystems",
             "file", "file_name",
             "use_count", "is_active",
             "created_by", "created_at", "updated_at",

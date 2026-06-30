@@ -20,6 +20,7 @@ import StatusBadge from "@/components/documents/StatusBadge";
 import { QUERY_FIVE_MIN_STALE, QUERY_SHORT_STALE } from "@/lib/reactQueryDefaults";
 import { formatDocumentFileType } from "@/lib/documentFormat";
 import { preloadDocumentWorkspace } from "@/lib/routePreload";
+import { WorkspaceCommandBar } from "@/components/shared/WorkspaceCommandBar";
 
 const PAGE_SIZE = 10;
 type BulkAction = "approve" | "reject" | "archive" | "void" | "trash";
@@ -819,14 +820,16 @@ export default function DocumentsPage({ personalOnly = false }: DocumentsPagePro
     const matchingCount = docs.length;
 
     return (
-      <div className="-m-6 flex h-[calc(100vh-3.5rem)] min-h-[42rem] overflow-hidden bg-[#EDEDED] text-[13px] text-[#1F2933]">
-        <div className="flex w-[70px] shrink-0 flex-col border-r border-[#C8CDD2] bg-[#F3F3F3]">
-          <div className="h-[69px] border-b border-[#C8CDD2] bg-[#2C7FAE]" />
-          <div className="flex-1" />
-        </div>
-
+      <div className="flex h-screen min-h-[42rem] overflow-hidden bg-[#EDEDED] text-[13px] text-[#1F2933]">
         <div className="flex min-w-0 flex-1 flex-col">
-          <div className="flex h-[69px] shrink-0 items-center gap-3 bg-[#287EAD] px-5 text-white">
+          <WorkspaceCommandBar
+            actions={
+              <Link to="/documents/upload" className="inline-flex items-center gap-2 text-sm text-white/80 hover:text-white">
+                <Plus className="h-5 w-5" />
+                Add Document
+              </Link>
+            }
+          >
             <div className="relative min-w-[220px] max-w-[340px] flex-1">
               <SearchIcon className="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-[#5E6870]" />
               <input
@@ -900,15 +903,9 @@ export default function DocumentsPage({ personalOnly = false }: DocumentsPagePro
               </button>
             )}
 
-            <div className="ml-auto flex items-center gap-6 text-sm text-white/80">
-              <Link to="/documents/upload" className="inline-flex items-center gap-2 hover:text-white">
-                <Plus className="h-5 w-5" />
-                Add Document
-              </Link>
-            </div>
-          </div>
+          </WorkspaceCommandBar>
 
-          <div className="flex min-h-0 flex-1 pr-4">
+          <div className="flex min-h-0 flex-1">
             <section className="flex min-w-0 flex-1 flex-col">
               <div className="flex h-[66px] shrink-0 items-end border-b border-[#C8CDD2] bg-[#EDEDED] pl-4">
                 <button

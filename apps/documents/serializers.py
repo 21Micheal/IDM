@@ -251,6 +251,7 @@ class DMSSettingsSerializer(serializers.ModelSerializer):
             "require_metadata_on_upload",
             "session_lifetime_minutes",
             "session_idle_timeout_minutes",
+            "session_warning_minutes",
             "bulk_scan_submit_for_approval",
             "access_stages",
             "updated_at",
@@ -282,6 +283,11 @@ class DMSSettingsSerializer(serializers.ModelSerializer):
             raise serializers.ValidationError("Idle timeout cannot be negative.")
         return value
 
+    def validate_session_warning_minutes(self, value):
+        if value < 0:
+            raise serializers.ValidationError("Warning lead time cannot be negative.")
+        return value
+
     def validate(self, attrs):
         lifetime = attrs.get(
             "session_lifetime_minutes",
@@ -295,6 +301,15 @@ class DMSSettingsSerializer(serializers.ModelSerializer):
             if idle > lifetime:
                 raise serializers.ValidationError(
                     {"session_idle_timeout_minutes": "Idle timeout cannot exceed the session lifetime."}
+                )
+        warning = attrs.get(
+            "session_warning_minutes",
+            getattr(self.instance, "session_warning_minutes", None),
+        )
+        if lifetime is not None and warning:
+            if warning > lifetime:
+                raise serializers.ValidationError(
+                    {"session_warning_minutes": "Warning lead time cannot exceed the session lifetime."}
                 )
         return attrs
 

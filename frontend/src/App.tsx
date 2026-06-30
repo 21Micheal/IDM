@@ -2,9 +2,12 @@ import { Suspense, lazy, useEffect, useState } from "react";
 import { Routes, Route, Navigate, useLocation } from "react-router-dom";
 import { useQuery } from "@tanstack/react-query";
 import { useAuthStore, applyServerSessionPolicy } from "@/store/authStore";
+import { useSessionUiStore } from "@/store/sessionUiStore";
 import { authAPI } from "@/services/api";
-import { VaultToaster, toast } from "@/components/ui/vault-toast";
+import { VaultToaster } from "@/components/ui/vault-toast";
 import { Loader2 } from "lucide-react";
+
+const SessionDialogs = lazy(() => import("@/components/shared/SessionDialogs"));
 
 const Layout = lazy(() => import("@/components/shared/Layout"));
 const LoginPage = lazy(() => import("@/pages/LoginPage"));
@@ -22,6 +25,7 @@ const AdminPage = lazy(() => import("@/pages/AdminPage"));
 const AdminDocumentTypesPage = lazy(() => import("@/pages/AdminDocumentTypesPage"));
 const AdminMigrationPage = lazy(() => import("@/pages/AdminMigrationPage"));
 const AdminMailboxPage = lazy(() => import("@/pages/AdminMailboxPage"));
+const AdminSunSystemsPage = lazy(() => import("@/pages/AdminSunSystemsPage"));
 const ReviewQueuePage = lazy(() => import("@/pages/ReviewQueuePage"));
 const AuditPage = lazy(() => import("@/pages/AuditPage"));
 const UsersPage = lazy(() => import("@/pages/UsersPage"));
@@ -54,7 +58,12 @@ function AuthBootstrap({ children }: { children: React.ReactNode }) {
     let cancelled = false;
 
     if (!accessToken || isSessionExpired()) {
-      if (accessToken) logout();
+      if (accessToken) {
+        // We had a session and it has lapsed (e.g. tab reopened after the idle
+        // window) — surface the "expired" notice, not a silent bounce to login.
+        useSessionUiStore.getState().showExpiredNotice();
+        logout();
+      }
       setReady(true);
       return () => {
         cancelled = true;
@@ -152,8 +161,10 @@ function SessionGuard() {
 
     const endSession = () => {
       if (!useAuthStore.getState().isAuthenticated) return;
+      // Raise the expiry notice before clearing auth so the modal shows over the
+      // login page the user is about to be redirected to.
+      useSessionUiStore.getState().showExpiredNotice();
       logout();
-      toast.info("You were signed out. Please sign in again to continue.");
     };
 
     // Throttle activity writes — we only need ~per-30s resolution for the timer.
@@ -398,10 +409,14 @@ export default function App() {
               <Route path="admin/groups"          element={<RequireAdmin><GroupsPage /></RequireAdmin>} />
               <Route path="admin/migration"       element={<RequireAdmin><AdminMigrationPage /></RequireAdmin>} />
               <Route path="admin/mailboxes"       element={<RequireAdmin><AdminMailboxPage /></RequireAdmin>} />
+              <Route path="admin/sunsystems"      element={<RequireAdmin><AdminSunSystemsPage /></RequireAdmin>} />
             </Route>
 
             <Route path="*" element={<Navigate to="/" replace />} />
           </Routes>
+        </Suspense>
+        <Suspense fallback={null}>
+          <SessionDialogs />
         </Suspense>
         <VaultToaster />
       </>

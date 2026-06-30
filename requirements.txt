@@ -92,3 +92,5 @@ python-dateutil>=2.8.2
 # anthropic
 anthropic>=0.97.0
 pypdfium2>=4.30.0
+# Fernet encryption for SunSystems connection secrets at rest
+cryptography>=42.0.0

@@ -87,6 +87,7 @@ INSTALLED_APPS = [
     "apps.notifications",
     "apps.chat",
     "apps.templates_engine",
+    "apps.sunsystems",
 ]
 
 MIDDLEWARE = [
@@ -239,6 +240,7 @@ CELERY_TASK_ROUTES = {
     "apps.documents.tasks.run_migration_job": {"queue": "default"},
     "apps.documents.tasks.poll_mailbox": {"queue": "default"},
     "apps.documents.tasks.poll_active_mailboxes": {"queue": "default"},
+    "apps.sunsystems.tasks.post_journal_for_document": {"queue": "default"},
 }
 WORKFLOW_SLA_WARNING_HOURS = env.int("WORKFLOW_SLA_WARNING_HOURS", default=4)
 WORKFLOW_HOLD_WARNING_HOURS = env.int("WORKFLOW_HOLD_WARNING_HOURS", default=2)
@@ -332,6 +334,26 @@ IMAP_USERNAME   = env("IMAP_USERNAME", default="")
 IMAP_PASSWORD   = env("IMAP_PASSWORD", default="")
 IMAP_FOLDER     = env("IMAP_FOLDER", default="INBOX")
 IMAP_VERIFY_TLS = env.bool("IMAP_VERIFY_TLS", default=True)
+
+# ── Infor SunSystems (SunSystems Connect / SSC web services) ─────────────────
+# Default connection used to reach a SunSystems Connect SOAP gateway for budget
+# inquiries and journal (Ledger Import) postings. Two SOAP endpoints under one
+# base URL: SecurityProvider (authenticate -> token) and ComponentExecutor (run
+# a component/method with an <SSC> payload). A per-template mapping may override
+# the business unit / budget code; anything left blank falls back to these env
+# defaults. See apps/sunsystems/client.py.
+SUNSYSTEMS_BASE_URL       = env("SUNSYSTEMS_BASE_URL", default="")        # e.g. https://host/sunsystems-connect/soap
+SUNSYSTEMS_SECURITY_PATH  = env("SUNSYSTEMS_SECURITY_PATH", default="SecurityProvider")
+SUNSYSTEMS_EXECUTOR_PATH  = env("SUNSYSTEMS_EXECUTOR_PATH", default="ComponentExecutor")
+SUNSYSTEMS_USERNAME       = env("SUNSYSTEMS_USERNAME", default="")
+SUNSYSTEMS_PASSWORD       = env("SUNSYSTEMS_PASSWORD", default="")
+SUNSYSTEMS_BUSINESS_UNIT  = env("SUNSYSTEMS_BUSINESS_UNIT", default="")   # default SunSystemsContext/BusinessUnit
+SUNSYSTEMS_BUDGET_CODE    = env("SUNSYSTEMS_BUDGET_CODE", default="A")    # default SunSystemsContext/BudgetCode
+SUNSYSTEMS_VERIFY_TLS     = env.bool("SUNSYSTEMS_VERIFY_TLS", default=True)
+# Until a real SunSystems Connect budget-inquiry sample is wired, budget checks
+# return a deterministic stub answer so the form UI is fully functional. Flip to
+# False once apps/sunsystems/budget.py:_real_budget_query is implemented.
+SUNSYSTEMS_BUDGET_STUB    = env.bool("SUNSYSTEMS_BUDGET_STUB", default=True)
 
 # ── Email ingestion (Microsoft Graph) ───────────────────────────────────────
 # Optional default Microsoft 365 / Outlook connection used by Graph mailboxes.

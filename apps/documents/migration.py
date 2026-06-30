@@ -26,6 +26,7 @@ from .ion_client import (
     IONClient,
     IONConfig,
     IONError,
+    decrypt_connection_secrets,
     merge_connection_with_defaults,
 )
 from .models import (
@@ -211,7 +212,11 @@ def run_migration_job(job_id: str) -> MigrationJob:
 
     try:
         client = IONClient(
-            IONConfig.from_mapping(merge_connection_with_defaults(job.connection))
+            IONConfig.from_mapping(
+                merge_connection_with_defaults(
+                    decrypt_connection_secrets(job.connection)
+                )
+            )
         )
         client.test_connection()
     except IONError as exc:

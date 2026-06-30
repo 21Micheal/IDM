@@ -31,6 +31,7 @@ import DocumentTemplateDesigner, {
   type EditableDocumentTemplate,
 } from "@/pages/TemplateDesigner";
 import TemplatePreview from "@/components/templates/TemplatePreview";
+import { WorkspaceCommandBar } from "@/components/shared/WorkspaceCommandBar";
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Types
@@ -707,43 +708,46 @@ export default function TemplatesPage() {
   // ── List mode ────────────────────────────────────────────────────────────
 
   return (
-    <div className="-m-6 min-h-[calc(100vh-3.5rem)] bg-[#EDEDED] text-[#1F2933]">
-      <div className="flex h-[69px] items-center justify-between bg-[#287EAD] px-5 pr-8 text-white">
+    <div className="min-h-screen bg-[#EDEDED] text-[#1F2933]">
+      <WorkspaceCommandBar
+        actions={
+          <>
+            <button
+              type="button"
+              onClick={() => setShowUpload(true)}
+              className="inline-flex items-center gap-2 border border-white/25 px-3 py-2 text-sm font-semibold text-white hover:bg-white/10"
+            >
+              <Upload className="h-4 w-4" />
+              Upload Office
+            </button>
+            <button
+              type="button"
+              onClick={() => { setEditTarget(undefined); setMode("designer"); }}
+              className="inline-flex items-center gap-2 border border-white/25 px-3 py-2 text-sm font-semibold text-white hover:bg-white/10"
+              title="Design a document layout (WYSIWYG) that renders to an editable file"
+            >
+              <FileText className="h-4 w-4" />
+              New Document
+            </button>
+            <button
+              type="button"
+              onClick={() => { setEditTarget(undefined); setMode("builder"); }}
+              className="inline-flex items-center gap-2 border border-white/25 px-3 py-2 text-sm font-semibold text-white hover:bg-white/10"
+              title="Build an interactive data-entry form"
+            >
+              <Plus className="h-4 w-4" />
+              New Form
+            </button>
+          </>
+        }
+      >
         <div>
           <h1 className="text-xl font-semibold">Document Templates</h1>
           <p className="mt-0.5 text-xs text-white/75">Create and maintain document-type templates for upload workflows.</p>
         </div>
-        <div className="flex items-center gap-2">
-          <button
-            type="button"
-            onClick={() => setShowUpload(true)}
-            className="inline-flex items-center gap-2 border border-white/25 px-3 py-2 text-sm font-semibold text-white hover:bg-white/10"
-          >
-            <Upload className="h-4 w-4" />
-            Upload Office
-          </button>
-          <button
-            type="button"
-            onClick={() => { setEditTarget(undefined); setMode("designer"); }}
-            className="inline-flex items-center gap-2 border border-white/25 px-3 py-2 text-sm font-semibold text-white hover:bg-white/10"
-            title="Design a document layout (WYSIWYG) that renders to an editable file"
-          >
-            <FileText className="h-4 w-4" />
-            New Document
-          </button>
-          <button
-            type="button"
-            onClick={() => { setEditTarget(undefined); setMode("builder"); }}
-            className="inline-flex items-center gap-2 border border-white/25 px-3 py-2 text-sm font-semibold text-white hover:bg-white/10"
-            title="Build an interactive data-entry form"
-          >
-            <Plus className="h-4 w-4" />
-            New Form
-          </button>
-        </div>
-      </div>
+      </WorkspaceCommandBar>
 
-      <div className="grid min-h-[calc(100vh-7.8rem)] grid-cols-[290px_1fr]">
+      <div className="grid min-h-[calc(100vh-69px)] grid-cols-[290px_1fr]">
         <aside className="border-r border-[#C8CDD2] bg-[#F6F7F8]">
           <div className="border-b border-[#C8CDD2] p-3">
             <button

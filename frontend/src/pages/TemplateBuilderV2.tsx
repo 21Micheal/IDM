@@ -32,7 +32,7 @@
  */
 
 import { useState, useCallback, useMemo, useRef, useEffect } from "react";
-import { useQueryClient, useMutation } from "@tanstack/react-query";
+import { useQueryClient, useMutation, useQuery } from "@tanstack/react-query";
 import {
   DndContext, PointerSensor, useSensor, useSensors,
   useDraggable, useDroppable, DragOverlay,
@@ -49,11 +49,12 @@ import {
   Image as ImageIcon, Table2, Heading, Minus, ChevronUp,
   ChevronDown, AlertCircle, Tag, Layers, ArrowRight,
   ChevronRight, X, Loader2, Sliders, Link2, User as UserIcon,
-  Wrench,
+  Wrench, FileCode,
 } from "lucide-react";
 import { cn } from "@/lib/utils";
-import { documentTypesAPI } from "@/services/api";
+import { documentTypesAPI, groupsAPI, workflowAPI } from "@/services/api";
 import { FORMULA_OPTIONS } from "@/components/templates/formulas";
+import JournalPayloadModal from "@/components/templates/JournalPayloadModal";
 
 /* ============================================================
  * Types
@@ -91,12 +92,100 @@ export interface TableColumn {
   referenceSource?: string;    // e.g. "users", "departments", "vendors"
   readonly?: boolean;
   hidden?: boolean;
+  /* SunSystems binding for table columns (journal line column roles). */
+  sunsystems?: ColumnFinanceBinding;
 }
 
+/* SunSystems / finance bindings (see compileSunSystems). A field/column carries
+ * a semantic role that the builder compiles into the journal + budget mapping. */
+export interface FieldFinanceBinding {
+  // Journal / header role (posting side) — see FINANCE_FIELD_ROLES.
+  role?: string;
+  dc?: "D" | "C";           // for role "journal_amount"
+  account?: string;         // SunSystems account code for that line
+  // Budget role (live-check side) — independent of the journal role, so one
+  // amount field can both post a journal line AND be the budget-checked amount.
+  // See FINANCE_BUDGET_ROLES. ("budget_amount"/"budget_account" were the old
+  // combined `role` values; migrated to this on load — see normalizeField.)
+  budgetRole?: string;
+}
+export interface ColumnFinanceBinding {
+  role?: string;            // see FINANCE_COLUMN_ROLES
+  account?: string;         // for role "account_code" used as a constant fallback
+  analysisNumber?: number;  // for role "analysis" → AnalysisCode{n}
+}
+
+export type ConditionOperator = "equals" | "not_equals" | "is_empty" | "is_not_empty";
+
+/* Legacy single-rule shape (pre rule-groups). Still read from older saved
+ * templates and migrated into a one-condition RuleGroup on load (toRuleGroup). */
 export interface ConditionalRule {
   fieldKey: string;   // sibling field's KEY
-  operator: "equals" | "not_equals" | "is_empty" | "is_not_empty";
+  operator: ConditionOperator;
   value?: string;
+}
+
+/* A single visibility condition. `source` selects what it tests:
+ *  - "field":        a sibling field's value (by key)
+ *  - "process_step": the document's current workflow status (status_label) */
+export type ConditionSource = "field" | "process_step";
+export interface VisibilityCondition {
+  source: ConditionSource;
+  fieldKey?: string;          // when source === "field"
+  operator: ConditionOperator;
+  value?: string;             // a field value, or a status_label for process_step
+}
+
+/* A group of conditions combined with AND/OR. A field/section is shown only when
+ * the group evaluates true (an empty group = no restriction = always shown). */
+export interface RuleGroup {
+  combinator: "and" | "or";
+  conditions: VisibilityCondition[];
+}
+
+/* Normalize any stored `visibleWhen` (legacy single rule, a group, or null) into
+ * a RuleGroup. Idempotent — safe to run on every load. */
+function toRuleGroup(v: unknown): RuleGroup | null {
+  if (!v || typeof v !== "object") return null;
+  const obj = v as Record<string, unknown>;
+  if (Array.isArray(obj.conditions)) {
+    return {
+      combinator: obj.combinator === "or" ? "or" : "and",
+      conditions: (obj.conditions as VisibilityCondition[]).map((c) => ({
+        source: c.source === "process_step" ? "process_step" : "field",
+        fieldKey: c.fieldKey,
+        operator: c.operator,
+        value: c.value,
+      })),
+    };
+  }
+  if (typeof obj.fieldKey === "string") {
+    return {
+      combinator: "and",
+      conditions: [{ source: "field", fieldKey: obj.fieldKey as string, operator: obj.operator as ConditionOperator, value: obj.value as string | undefined }],
+    };
+  }
+  return null;
+}
+
+const OPERATOR_LABEL: Record<ConditionOperator, string> = {
+  equals: "=", not_equals: "≠", is_empty: "is empty", is_not_empty: "is not empty",
+};
+
+function summarizeCondition(c: VisibilityCondition): string {
+  const left = c.source === "process_step" ? "step" : (c.fieldKey || "field");
+  const op = OPERATOR_LABEL[c.operator] ?? c.operator;
+  if (c.operator === "is_empty" || c.operator === "is_not_empty") return `${left} ${op}`;
+  return `${left} ${op} ${c.value ?? ""}`.trim();
+}
+
+function summarizeRuleGroup(g?: RuleGroup | null): string {
+  if (!g || g.conditions.length === 0) return "";
+  return g.conditions.map(summarizeCondition).join(g.combinator === "or" ? " OR " : " AND ");
+}
+
+function ruleGroupHasConditions(g?: RuleGroup | null): boolean {
+  return !!g && g.conditions.length > 0;
 }
 
 export interface TemplateField {
@@ -128,7 +217,32 @@ export interface TemplateField {
   formula?: string;            // auto-fill formula, e.g. "current_user", "now"
   readonly?: boolean;
   hidden?: boolean;
-  visibleWhen?: ConditionalRule | null;
+  visibleWhen?: RuleGroup | null;
+  /* SunSystems binding (journal line / budget / header role). */
+  sunsystems?: FieldFinanceBinding;
+}
+
+/* The header/connection config the SunSystems settings card edits. The journal
+ * + budget mappings sent to the backend are *compiled* from this plus the field
+ * bindings (compileSunSystems); this is the editable source of truth. */
+export interface SunSystemsUi {
+  journalEnabled?: boolean;
+  budgetEnabled?: boolean;
+  budgetMode?: "warn" | "block";
+  businessUnit?: string;
+  budgetCode?: string;
+  journalType?: string;
+  postingType?: string;
+  parameters?: { name: string; value: string }[];
+  currencyConst?: string;
+  dateFormat?: string;
+  validateBalance?: boolean;
+}
+export interface SunSystemsConfig {
+  ui?: SunSystemsUi;
+  journal?: Record<string, unknown>;
+  budget?: Record<string, unknown>;
+  connection?: Record<string, unknown>;
 }
 
 export interface TemplateSection {
@@ -137,6 +251,21 @@ export interface TemplateSection {
   description?: string;
   fields: TemplateField[];
   collapsible?: boolean;
+  /* Visibility — mirrors the per-field model. `hidden` always hides the whole
+   * section (and its fields); `visibleWhen` shows it only when a field matches;
+   * `visibleToGroups` restricts the section to members of the listed RBAC groups
+   * (empty/absent = everyone). The three are mutually-exclusive modes in the UI. */
+  hidden?: boolean;
+  visibleWhen?: RuleGroup | null;
+  visibleToGroups?: SectionGroupRef[];
+}
+
+/* A reference to an RBAC group a section is restricted to. `id` is canonical
+ * (matched server-side); `name` is the label + the client-side match key (the
+ * auth payload only carries group names). */
+export interface SectionGroupRef {
+  id: string;
+  name: string;
 }
 
 export interface Template {
@@ -154,6 +283,7 @@ export interface Template {
   created_by?: { full_name: string };
   use_count?: number;
   sections: TemplateSection[];
+  sunsystems?: SunSystemsConfig;
 }
 
 export type EditableTemplate = Omit<Template, "type"> & { type?: Template["type"] };
@@ -433,6 +563,16 @@ const initialTemplate: Template = {
   ],
 };
 
+/* Migrate the legacy single-`role` budget tags onto the independent
+ * `budgetRole` axis so a field can carry a journal role and a budget role at
+ * once. Idempotent — runs whenever a template is (re)loaded into the builder. */
+function migrateFinanceBinding(ss?: FieldFinanceBinding): FieldFinanceBinding | undefined {
+  if (!ss) return ss;
+  if (ss.role === "budget_amount") return { ...ss, role: undefined, budgetRole: ss.budgetRole ?? "amount" };
+  if (ss.role === "budget_account") return { ...ss, role: undefined, budgetRole: ss.budgetRole ?? "account" };
+  return ss;
+}
+
 function normalizeField(field: TemplateField): TemplateField {
   const type = field.type === "checkbox" ? "boolean" : field.type;
   const colSpan = field.colSpan ?? field.width ?? 6;
@@ -441,7 +581,9 @@ function normalizeField(field: TemplateField): TemplateField {
   const columns = (field.type === "table" || type === "table")
     ? (field.columns ?? [newColumn("text", "Item"), newColumn("number", "Amount")])
     : field.columns;
-  return { ...field, type, key, colSpan, width: colSpan, helpText, columns };
+  const sunsystems = migrateFinanceBinding(field.sunsystems);
+  const visibleWhen = toRuleGroup(field.visibleWhen);
+  return { ...field, type, key, colSpan, width: colSpan, helpText, columns, sunsystems, visibleWhen };
 }
 
 function normalizeTemplate(template: EditableTemplate): Template {
@@ -453,15 +595,182 @@ function normalizeTemplate(template: EditableTemplate): Template {
     tags: template.tags ?? [],
     sections: sections.map((s) => ({
       ...s,
+      visibleWhen: toRuleGroup(s.visibleWhen),
       fields: Array.isArray(s.fields) ? s.fields.map(normalizeField) : [],
     })),
   };
+}
+
+/* ── SunSystems finance bindings ──────────────────────────────────────────────
+ * Field/column roles the inspector exposes, and the compiler that turns the
+ * visual bindings + settings card into the declarative mapping the backend
+ * (apps/sunsystems/mapping.py) consumes. */
+// Journal / header roles (posting side). Budget roles live on a separate axis.
+export const FINANCE_FIELD_ROLES = [
+  { value: "",                 label: "— none —" },
+  { value: "journal_amount",   label: "Journal line amount" },
+  { value: "currency",         label: "Currency" },
+  { value: "reference",        label: "Transaction reference" },
+  { value: "transaction_date", label: "Transaction date" },
+  { value: "description",      label: "Description" },
+];
+// Budget roles (live-check side) — independent of the journal role.
+export const FINANCE_BUDGET_ROLES = [
+  { value: "",        label: "— none —" },
+  { value: "amount",  label: "Budget amount (checked)" },
+  { value: "account", label: "Budget account / code" },
+];
+export const FINANCE_COLUMN_ROLES = [
+  { value: "",             label: "— none —" },
+  { value: "line_amount",  label: "Line amount" },
+  { value: "account_code", label: "Account code" },
+  { value: "description",  label: "Description" },
+  { value: "analysis",     label: "Analysis code" },
+];
+
+/* A field's budget role, tolerating the legacy combined `role` values
+ * ("budget_amount"/"budget_account") in case a template wasn't re-saved. */
+function budgetRoleOf(field: TemplateField): string {
+  const ss = field.sunsystems;
+  if (!ss) return "";
+  if (ss.budgetRole) return ss.budgetRole;
+  if (ss.role === "budget_amount") return "amount";
+  if (ss.role === "budget_account") return "account";
+  return "";
+}
+
+function valueSpec(field?: { key: string } | null, opts?: { format?: string }) {
+  return field ? { field: field.key, ...(opts?.format ? { format: opts.format } : {}) } : undefined;
+}
+
+/* Placeholder values for the builder's payload preview (no real form data yet).
+ * Mirrors the value shape the compiled mapping expects: header fields keyed by
+ * field key, tables as arrays of column-keyed rows. */
+function sampleScalar(f: { type: FieldType; label: string; options?: string[]; defaultValue?: string }): string | number {
+  if (f.defaultValue) return f.defaultValue;
+  switch (f.type) {
+    case "number": case "currency": return 100;
+    case "date": return new Date().toISOString().slice(0, 10);
+    case "datetime": return new Date().toISOString().slice(0, 16);
+    case "time": return "09:00";
+    case "select": case "radio": case "multi_select": return f.options?.[0] ?? "Sample";
+    case "boolean": case "checkbox": return "true";
+    case "email": return "sample@example.com";
+    default: return f.label || "Sample";
+  }
+}
+
+function buildSampleValues(template: Template): Record<string, unknown> {
+  const out: Record<string, unknown> = {};
+  const skip = new Set(["divider", "heading", "file", "image", "signature"]);
+  for (const s of template.sections) {
+    for (const f of s.fields ?? []) {
+      if (!f.key) continue;
+      if (f.type === "table") {
+        const row: Record<string, unknown> = {};
+        for (const c of f.columns ?? []) {
+          row[c.key] = (c.type === "number" || c.type === "currency") ? 100 : (c.label || "Item");
+        }
+        out[f.key] = [row, { ...row }];
+      } else if (!skip.has(f.type)) {
+        out[f.key] = sampleScalar(f);
+      }
+    }
+  }
+  return out;
+}
+
+function compileSunSystems(template: Template): SunSystemsConfig | undefined {
+  const ss = template.sunsystems ?? {};
+  const ui: SunSystemsUi = ss.ui ?? {};
+  if (!ui.journalEnabled && !ui.budgetEnabled) return ss;
+
+  const fields = template.sections.flatMap((s) => s.fields ?? []);
+  const byRole = (role: string) => fields.find((f) => f.sunsystems?.role === role);
+
+  const currencyField = byRole("currency");
+  const currencySpec = valueSpec(currencyField) ?? (ui.currencyConst ? { const: ui.currencyConst } : undefined);
+  const referenceSpec = valueSpec(byRole("reference"));
+  const dateSpec = valueSpec(byRole("transaction_date"), { format: ui.dateFormat || "DDMMYYYY" });
+  const descSpec = valueSpec(byRole("description"));
+
+  // Journal lines: header amount fields + table "journal_lines" repeat blocks.
+  const lines: Record<string, unknown>[] = [];
+  for (const f of fields) {
+    const b = f.sunsystems;
+    if (!b) continue;
+    if (f.type !== "table" && b.role === "journal_amount") {
+      lines.push({
+        account: { const: b.account ?? "" },
+        dc: b.dc ?? "D",
+        amount: { field: f.key },
+        ...(descSpec ? { description: descSpec } : {}),
+      });
+    }
+    if (f.type === "table" && b.role === "journal_lines") {
+      const cols = f.columns ?? [];
+      const amountCol = cols.find((c) => c.sunsystems?.role === "line_amount");
+      if (!amountCol) continue; // a repeat line needs an amount source
+      const acctCol = cols.find((c) => c.sunsystems?.role === "account_code");
+      const descCol = cols.find((c) => c.sunsystems?.role === "description");
+      const analysis: Record<string, unknown> = {};
+      for (const c of cols.filter((c) => c.sunsystems?.role === "analysis")) {
+        analysis[String(c.sunsystems?.analysisNumber ?? 1)] = { row_field: c.key };
+      }
+      lines.push({
+        repeat_over: f.key,
+        account: acctCol ? { row_field: acctCol.key } : { const: b.account ?? "" },
+        dc: b.dc ?? "D",
+        amount: { row_field: amountCol.key },
+        description: descCol ? { row_field: descCol.key } : descSpec,
+        ...(Object.keys(analysis).length ? { analysis } : {}),
+      });
+    }
+  }
+
+  const parameters: Record<string, string> = {};
+  if (ui.journalType) parameters.JournalType = ui.journalType;
+  if (ui.postingType) parameters.PostingType = ui.postingType;
+  for (const p of ui.parameters ?? []) if (p.name) parameters[p.name] = p.value;
+
+  const journal = ui.journalEnabled
+    ? {
+        enabled: true,
+        post_on: "approved",
+        component: "Journal",
+        method: "Import",
+        context: {
+          ...(ui.businessUnit ? { business_unit: { const: ui.businessUnit } } : {}),
+          ...(ui.budgetCode ? { budget_code: { const: ui.budgetCode } } : {}),
+        },
+        parameters,
+        ...(currencySpec ? { currency: currencySpec } : {}),
+        ...(referenceSpec ? { reference: referenceSpec } : {}),
+        ...(dateSpec ? { date: dateSpec } : {}),
+        validate_balance: ui.validateBalance !== false,
+        lines,
+      }
+    : { enabled: false };
+
+  const byBudgetRole = (r: string) => fields.find((f) => budgetRoleOf(f) === r);
+  const budget = ui.budgetEnabled
+    ? {
+        enabled: true,
+        mode: ui.budgetMode ?? "warn",
+        ...(valueSpec(byBudgetRole("account")) ? { account: valueSpec(byBudgetRole("account")) } : {}),
+        ...(valueSpec(byBudgetRole("amount")) ? { amount: valueSpec(byBudgetRole("amount")) } : {}),
+        ...(currencySpec ? { currency: currencySpec } : {}),
+      }
+    : { enabled: false };
+
+  return { ...ss, ui, journal, budget };
 }
 
 function outputTemplate(template: Template, keepId: boolean): Template {
   const out = {
     ...template,
     type: template.type ?? "built",
+    sunsystems: compileSunSystems(template),
     sections: template.sections.map((s) => ({
       ...s,
       fields: s.fields.map((f) => ({
@@ -798,8 +1107,10 @@ function FieldCard({
             <span className="ml-1 rounded bg-[#EEF6FB] px-1.5 py-0.5 text-[9px] uppercase tracking-wider text-[#287EAD] flex-shrink-0 border border-[#287EAD]/20">
               {FIELD_META[field.type]?.label ?? field.type}
             </span>
-            {field.visibleWhen && (
-              <span className="rounded bg-amber-50 px-1.5 py-0.5 text-[9px] font-semibold text-amber-700 border border-amber-200 flex-shrink-0" title={`Show when ${field.visibleWhen.fieldKey} ${field.visibleWhen.operator} ${field.visibleWhen.value ?? ""}`}>cond</span>
+            {field.hidden ? (
+              <span className="rounded bg-slate-100 px-1.5 py-0.5 text-[9px] font-semibold text-slate-500 border border-slate-300 flex-shrink-0" title="Always hidden from people filling the form">hidden</span>
+            ) : ruleGroupHasConditions(field.visibleWhen) && (
+              <span className="rounded bg-amber-50 px-1.5 py-0.5 text-[9px] font-semibold text-amber-700 border border-amber-200 flex-shrink-0" title={`Show when ${summarizeRuleGroup(field.visibleWhen)}`}>cond</span>
             )}
           </div>
           <div className="flex items-center gap-0.5 opacity-0 transition group-hover:opacity-100 flex-shrink-0">
@@ -902,16 +1213,35 @@ function SectionBlock(props: {
           </button>
         </div>
         <div className="flex-1 min-w-0">
-          <input value={section.title}
-                 onChange={(e) => props.onUpdateSection(section.id, { title: e.target.value })}
-                 onClick={(e) => e.stopPropagation()}
-                 className="w-full bg-transparent text-sm font-bold text-[#1F2933] outline-none border-b border-transparent focus:border-[#287EAD] pb-0.5 transition-colors" />
+          <div className="flex items-center gap-1.5">
+            <input value={section.title}
+                   onChange={(e) => props.onUpdateSection(section.id, { title: e.target.value })}
+                   onClick={(e) => e.stopPropagation()}
+                   className="min-w-0 flex-1 bg-transparent text-sm font-bold text-[#1F2933] outline-none border-b border-transparent focus:border-[#287EAD] pb-0.5 transition-colors" />
+            {section.hidden ? (
+              <span className="rounded bg-slate-100 px-1.5 py-0.5 text-[9px] font-semibold text-slate-500 border border-slate-300 flex-shrink-0" title="Section always hidden from people filling the form">hidden</span>
+            ) : section.visibleToGroups && section.visibleToGroups.length > 0 ? (
+              <span className="rounded bg-[#EEF6FB] px-1.5 py-0.5 text-[9px] font-semibold text-[#287EAD] border border-[#287EAD]/30 flex-shrink-0" title={`Visible only to: ${section.visibleToGroups.map((g) => g.name).join(", ")}`}>
+                {section.visibleToGroups.length === 1 ? section.visibleToGroups[0].name : `${section.visibleToGroups.length} groups`}
+              </span>
+            ) : ruleGroupHasConditions(section.visibleWhen) && (
+              <span className="rounded bg-amber-50 px-1.5 py-0.5 text-[9px] font-semibold text-amber-700 border border-amber-200 flex-shrink-0" title={`Section shows when ${summarizeRuleGroup(section.visibleWhen)}`}>cond</span>
+            )}
+          </div>
           <input value={section.description ?? ""}
                  placeholder="Add a description…"
                  onChange={(e) => props.onUpdateSection(section.id, { description: e.target.value })}
                  onClick={(e) => e.stopPropagation()}
                  className="mt-1 w-full bg-transparent text-xs text-[#5E6870] outline-none placeholder:text-[#AEB5BB] border-b border-transparent focus:border-[#AEB5BB] pb-0.5 transition-colors" />
         </div>
+        <button onClick={(e) => { e.stopPropagation(); props.onSelect(section.id); }}
+                title="Section settings"
+                className={cn(
+                  "rounded-md p-1.5 transition-colors flex-shrink-0",
+                  isSelected ? "bg-[#287EAD] text-white" : "text-slate-500 hover:bg-white hover:text-[#287EAD]",
+                )}>
+          <Settings className="h-4 w-4" />
+        </button>
         <button onClick={(e) => { e.stopPropagation(); setCollapsed((c) => !c); }}
                 title={collapsed ? "Expand" : "Collapse"}
                 className="rounded-md p-1.5 text-slate-500 hover:bg-white hover:text-slate-800 transition-colors flex-shrink-0">
@@ -1112,6 +1442,25 @@ function ColumnConfigModal({
                   />
                 </Row>
               )}
+              <Row label="SunSystems role">
+                <select
+                  className={iCls}
+                  value={draft.sunsystems?.role ?? ""}
+                  onChange={(e) => set({ sunsystems: { ...(draft.sunsystems ?? {}), role: e.target.value || undefined } })}
+                >
+                  {FINANCE_COLUMN_ROLES.map((o) => <option key={o.value} value={o.value}>{o.label}</option>)}
+                </select>
+              </Row>
+              {draft.sunsystems?.role === "analysis" && (
+                <Row label="Analysis code number (1–10)">
+                  <input
+                    type="number" min={1} max={10}
+                    className={iCls}
+                    value={draft.sunsystems?.analysisNumber ?? 1}
+                    onChange={(e) => set({ sunsystems: { ...(draft.sunsystems ?? {}), analysisNumber: Math.max(1, Math.min(10, Number(e.target.value))) } })}
+                  />
+                </Row>
+              )}
             </div>
           )}
 
@@ -1275,10 +1624,270 @@ function InspectorRow({ label, children, hint }: { label: string; children: Reac
   );
 }
 
-function FieldEditor({ field, onUpdate, allFields }: {
+/* SunSystems binding controls for a single field (inspector). Journal role and
+ * budget role are two independent axes, so e.g. an "amount spent" field can both
+ * post a journal line AND be the figure checked against the budget. For a table
+ * field the journal axis offers "journal lines" (one ledger line per row, with
+ * column roles set in the column editor). */
+function FinanceBindingFields({ field, onUpdate }: {
+  field: TemplateField;
+  onUpdate: (patch: Partial<TemplateField>) => void;
+}) {
+  const isTable = field.type === "table";
+  const binding = field.sunsystems ?? {};
+  const setB = (patch: Partial<FieldFinanceBinding>) =>
+    onUpdate({ sunsystems: { ...binding, ...patch } });
+
+  const role = binding.role ?? "";
+  const journalOptions = isTable
+    ? [{ value: "", label: "— none —" }, { value: "journal_lines", label: "Journal lines (one per row)" }]
+    : FINANCE_FIELD_ROLES;
+  const showAcct = role === "journal_amount" || role === "journal_lines";
+
+  return (
+    <div className="space-y-3 border-t border-dashed border-[#C8CDD2] pt-3">
+      <InspectorRow label="Journal role" hint="How this field posts to the SunSystems ledger on approval.">
+        <select className={inputCls} value={role} onChange={(e) => setB({ role: e.target.value || undefined })}>
+          {journalOptions.map((o) => <option key={o.value} value={o.value}>{o.label}</option>)}
+        </select>
+      </InspectorRow>
+      {showAcct && (
+        <div className="grid grid-cols-2 gap-3">
+          <InspectorRow label="Debit / Credit">
+            <select className={inputCls} value={binding.dc ?? "D"} onChange={(e) => setB({ dc: e.target.value as "D" | "C" })}>
+              <option value="D">Debit</option>
+              <option value="C">Credit</option>
+            </select>
+          </InspectorRow>
+          <InspectorRow label={isTable ? "Default account" : "Account code"} hint={isTable ? "Used unless a column is 'Account code'." : undefined}>
+            <input className={cn(inputCls, "font-mono")} value={binding.account ?? ""} onChange={(e) => setB({ account: e.target.value })} placeholder="e.g. 37400" />
+          </InspectorRow>
+        </div>
+      )}
+      {!isTable && (
+        <InspectorRow label="Budget role" hint="Independent of the journal role — the same field can do both.">
+          <select className={inputCls} value={binding.budgetRole ?? ""} onChange={(e) => setB({ budgetRole: e.target.value || undefined })}>
+            {FINANCE_BUDGET_ROLES.map((o) => <option key={o.value} value={o.value}>{o.label}</option>)}
+          </select>
+        </InspectorRow>
+      )}
+    </div>
+  );
+}
+
+/* Visibility modes shared by fields and sections. `hidden` = always hidden,
+ * `visibleWhen` = conditional, `visibleToGroups` = role-restricted (sections
+ * only), none = always visible. */
+type VisibilityMode = "visible" | "hidden" | "conditional" | "groups";
+
+interface VisibilityState {
+  hidden?: boolean;
+  visibleWhen?: RuleGroup | null;
+  visibleToGroups?: SectionGroupRef[];
+}
+
+function visibilityModeOf(item: VisibilityState): VisibilityMode {
+  if (item.hidden) return "hidden";
+  // A defined (even empty) list means "groups" mode is selected — keeps the
+  // picker open while the user is still choosing. Other modes clear it to
+  // undefined, so an empty list never lingers once a different mode is chosen.
+  if (item.visibleToGroups !== undefined) return "groups";
+  if (item.visibleWhen) return "conditional";
+  return "visible";
+}
+
+function defaultCondition(sources: { key: string }[]): VisibilityCondition {
+  return { source: "field", fieldKey: sources[0]?.key ?? "", operator: "equals", value: "" };
+}
+
+/* Editor for an AND/OR group of visibility conditions. Each condition tests
+ * either a form field's value or the document's current process step. */
+function RuleGroupEditor({ group, sources, processSteps, onChange }: {
+  group: RuleGroup;
+  sources: { key: string; label: string }[];
+  processSteps: { value: string; label: string }[];
+  onChange: (g: RuleGroup) => void;
+}) {
+  const updateCond = (i: number, patch: Partial<VisibilityCondition>) =>
+    onChange({ ...group, conditions: group.conditions.map((c, idx) => (idx === i ? { ...c, ...patch } : c)) });
+  const removeCond = (i: number) =>
+    onChange({ ...group, conditions: group.conditions.filter((_, idx) => idx !== i) });
+  const addCond = () =>
+    onChange({ ...group, conditions: [...group.conditions, defaultCondition(sources)] });
+  const needsValue = (op: ConditionOperator) => op === "equals" || op === "not_equals";
+
+  return (
+    <div className="space-y-2">
+      {/* AND / OR combinator — only meaningful with 2+ conditions */}
+      <div className="flex items-center gap-2">
+        <span className="text-[10px] font-semibold uppercase tracking-wider text-[#5E6870]">Match</span>
+        <div className="inline-flex overflow-hidden rounded border border-[#C8CDD2]">
+          {(["and", "or"] as const).map((c) => (
+            <button key={c} type="button" onClick={() => onChange({ ...group, combinator: c })}
+              className={cn("px-2.5 py-1 text-[11px] font-semibold uppercase",
+                group.combinator === c ? "bg-[#287EAD] text-white" : "bg-white text-[#5E6870] hover:bg-[#F3F5F6]")}>
+              {c}
+            </button>
+          ))}
+        </div>
+        <span className="text-[10px] text-[#8C969E]">{group.combinator === "and" ? "all conditions" : "any condition"}</span>
+      </div>
+
+      {group.conditions.map((c, i) => (
+        <div key={i} className="space-y-1.5 rounded border border-[#E5E8EB] bg-[#FAFBFC] p-2">
+          <div className="flex items-center gap-1.5">
+            <select className={cn(inputCls, "h-8 flex-1")} value={c.source}
+                    onChange={(e) => {
+                      const source = e.target.value as ConditionSource;
+                      updateCond(i, source === "process_step"
+                        ? { source, fieldKey: undefined, operator: "equals", value: processSteps[0]?.value ?? "" }
+                        : { source, fieldKey: sources[0]?.key ?? "", value: "" });
+                    }}>
+              <option value="field">Form field</option>
+              <option value="process_step">Process step</option>
+            </select>
+            <button type="button" onClick={() => removeCond(i)} title="Remove condition"
+                    className="rounded p-1 text-[#8C969E] hover:bg-red-50 hover:text-red-500">
+              <X className="h-3.5 w-3.5" />
+            </button>
+          </div>
+
+          {c.source === "field" && (
+            <select className={cn(inputCls, "h-8")} value={c.fieldKey ?? ""}
+                    onChange={(e) => updateCond(i, { fieldKey: e.target.value })}>
+              <option value="">— choose a field —</option>
+              {sources.map((s) => <option key={s.key} value={s.key}>{s.label} ({s.key})</option>)}
+            </select>
+          )}
+
+          <div className="grid grid-cols-2 gap-1.5">
+            <select className={cn(inputCls, "h-8")} value={c.operator}
+                    onChange={(e) => updateCond(i, { operator: e.target.value as ConditionOperator })}>
+              <option value="equals">equals</option>
+              <option value="not_equals">not equals</option>
+              {c.source === "field" && <option value="is_empty">is empty</option>}
+              {c.source === "field" && <option value="is_not_empty">is not empty</option>}
+            </select>
+            {needsValue(c.operator) && (
+              c.source === "process_step" ? (
+                <select className={cn(inputCls, "h-8")} value={c.value ?? ""}
+                        onChange={(e) => updateCond(i, { value: e.target.value })}>
+                  <option value="">— choose a step —</option>
+                  {processSteps.map((s) => <option key={s.value} value={s.value}>{s.label}</option>)}
+                </select>
+              ) : (
+                <input className={cn(inputCls, "h-8")} value={c.value ?? ""}
+                       onChange={(e) => updateCond(i, { value: e.target.value })} placeholder="Value" />
+              )
+            )}
+          </div>
+        </div>
+      ))}
+
+      <button type="button" onClick={addCond}
+              className="flex items-center gap-1 text-[11px] font-semibold text-[#287EAD] hover:text-[#1E6F99]">
+        <Plus className="h-3 w-3" /> Add condition
+      </button>
+
+      {group.conditions.length === 0 && (
+        <p className="text-[10px] text-amber-600">Add at least one condition, or this stays visible to everyone.</p>
+      )}
+      {processSteps.length === 0 && group.conditions.some((c) => c.source === "process_step") && (
+        <p className="text-[10px] text-amber-600">No workflow steps found for this document type yet.</p>
+      )}
+    </div>
+  );
+}
+
+/* Unified visibility control used by both the field inspector and the section
+ * inspector. A single mode selector:
+ *   Always visible · Always hidden · Show only when <rule group>
+ *   · Visible only to groups…   (sections only — pass `groupOptions`)
+ * `sources` are the fields whose values can drive a conditional rule;
+ * `processSteps` are the workflow statuses for "process step" conditions. */
+function VisibilityEditor({ value, sources, onChange, subject, groupOptions, processSteps = [] }: {
+  value: VisibilityState;
+  sources: { key: string; label: string }[];
+  onChange: (patch: VisibilityState) => void;
+  subject: "field" | "section";
+  groupOptions?: { id: string; name: string }[];
+  processSteps?: { value: string; label: string }[];
+}) {
+  const mode = visibilityModeOf(value);
+  const rule = value.visibleWhen ?? null;
+  const allowsGroups = Array.isArray(groupOptions);
+  const selectedGroups = value.visibleToGroups ?? [];
+  const isGroupSelected = (id: string) => selectedGroups.some((g) => g.id === id);
+
+  const setMode = (m: VisibilityMode) => {
+    const cleared = { hidden: false, visibleWhen: null, visibleToGroups: undefined } as VisibilityState;
+    if (m === "visible") onChange(cleared);
+    else if (m === "hidden") onChange({ ...cleared, hidden: true });
+    else if (m === "groups") onChange({ ...cleared, visibleToGroups: selectedGroups });
+    else onChange({
+      ...cleared,
+      visibleWhen: rule ?? { combinator: "and", conditions: [defaultCondition(sources)] },
+    });
+  };
+
+  const toggleGroup = (g: { id: string; name: string }) => {
+    const next = isGroupSelected(g.id)
+      ? selectedGroups.filter((s) => s.id !== g.id)
+      : [...selectedGroups, { id: g.id, name: g.name }];
+    onChange({ hidden: false, visibleWhen: null, visibleToGroups: next });
+  };
+
+  return (
+    <InspectorRow
+      label="Visibility"
+      hint={
+        mode === "hidden"
+          ? `This ${subject} is always hidden from people filling the form.`
+          : mode === "groups"
+          ? "Only members of the selected groups (and admins) see this section."
+          : `Control when this ${subject} appears for people filling the form.`
+      }
+    >
+      <div className="space-y-2 border border-[#C8CDD2] bg-white p-2.5">
+        <select className={inputCls} value={mode} onChange={(e) => setMode(e.target.value as VisibilityMode)}>
+          <option value="visible">Always visible</option>
+          <option value="hidden">Always hidden</option>
+          <option value="conditional">Show only when…</option>
+          {allowsGroups && <option value="groups">Visible only to groups…</option>}
+        </select>
+        {mode === "groups" && allowsGroups && (
+          <div className="space-y-1">
+            {groupOptions!.length === 0 && (
+              <p className="text-[10px] text-amber-600">No groups defined yet.</p>
+            )}
+            <div className="max-h-40 overflow-y-auto rounded border border-[#E5E8EB] divide-y divide-[#F0F2F3]">
+              {groupOptions!.map((g) => (
+                <label key={g.id} className="flex cursor-pointer items-center gap-2 px-2 py-1.5 text-xs text-[#1F2933] hover:bg-[#F6F7F8]">
+                  <input type="checkbox" checked={isGroupSelected(g.id)} onChange={() => toggleGroup(g)}
+                         className="h-3.5 w-3.5 accent-[#287EAD]" />
+                  <span className="truncate">{g.name}</span>
+                </label>
+              ))}
+            </div>
+            {selectedGroups.length === 0 && (
+              <p className="text-[10px] text-amber-600">Pick at least one group, or the section stays visible to everyone.</p>
+            )}
+          </div>
+        )}
+        {mode === "conditional" && rule && (
+          <RuleGroupEditor group={rule} sources={sources} processSteps={processSteps}
+            onChange={(g) => onChange({ visibleWhen: g })} />
+        )}
+      </div>
+    </InspectorRow>
+  );
+}
+
+function FieldEditor({ field, onUpdate, allFields, processSteps }: {
   field: TemplateField;
   onUpdate: (patch: Partial<TemplateField>) => void;
   allFields: TemplateField[];
+  processSteps: { value: string; label: string }[];
 }) {
   const [tab, setTab] = useState<"field" | "advanced">("field");
   const hasOptions = field.type === "select" || field.type === "radio" || field.type === "multi_select";
@@ -1386,6 +1995,9 @@ function FieldEditor({ field, onUpdate, allFields }: {
               </select>
             </InspectorRow>
           )}
+          {!isLayout && (
+            <FinanceBindingFields field={field} onUpdate={onUpdate} />
+          )}
         </>
       )}
 
@@ -1419,51 +2031,41 @@ function FieldEditor({ field, onUpdate, allFields }: {
               <input className={cn(inputCls, "font-mono")} value={field.dateFormat ?? "YYYY-MM-DD"} onChange={(e) => onUpdate({ dateFormat: e.target.value })} />
             </InspectorRow>
           )}
-          <InspectorRow label="Conditional visibility" hint="Show this field only when another field matches">
-            <div className="space-y-2 border border-[#C8CDD2] bg-white p-2.5">
-              <select className={inputCls}
-                      value={field.visibleWhen?.fieldKey ?? ""}
-                      onChange={(e) => onUpdate({
-                        visibleWhen: e.target.value
-                          ? { fieldKey: e.target.value, operator: field.visibleWhen?.operator ?? "equals", value: field.visibleWhen?.value }
-                          : null,
-                      })}>
-                <option value="">Always visible</option>
-                {siblings.map((s) => <option key={s.id} value={s.key}>{s.label} ({s.key})</option>)}
-              </select>
-              {field.visibleWhen && (
-                <div className="grid grid-cols-2 gap-2">
-                  <select className={inputCls} value={field.visibleWhen.operator}
-                          onChange={(e) => onUpdate({ visibleWhen: { ...field.visibleWhen!, operator: e.target.value as ConditionalRule["operator"] } })}>
-                    <option value="equals">equals</option>
-                    <option value="not_equals">not equals</option>
-                    <option value="is_empty">is empty</option>
-                    <option value="is_not_empty">is not empty</option>
-                  </select>
-                  {(field.visibleWhen.operator === "equals" || field.visibleWhen.operator === "not_equals") && (
-                    <input className={inputCls} value={field.visibleWhen.value ?? ""}
-                           onChange={(e) => onUpdate({ visibleWhen: { ...field.visibleWhen!, value: e.target.value } })}
-                           placeholder="Value" />
-                  )}
-                </div>
-              )}
-            </div>
-          </InspectorRow>
-          <label className="flex cursor-pointer items-center gap-2.5 text-sm text-[#1F2933]">
-            <input type="checkbox" checked={!!field.hidden} onChange={(e) => onUpdate({ hidden: e.target.checked })}
-                   className="h-4 w-4 accent-[#287EAD]" />
-            Hidden in preview
-          </label>
+          <VisibilityEditor
+            value={field}
+            sources={siblings.map((s) => ({ key: s.key, label: s.label }))}
+            onChange={onUpdate}
+            subject="field"
+            processSteps={processSteps}
+          />
         </>
       )}
     </div>
   );
 }
 
-function SectionEditor({ section, onUpdate }: {
+function SectionEditor({ section, onUpdate, allFields, processSteps }: {
   section: TemplateSection;
   onUpdate: (patch: Partial<TemplateSection>) => void;
+  allFields: TemplateField[];
+  processSteps: { value: string; label: string }[];
 }) {
+  // A section rule can be driven by any field on the form (sections have no
+  // siblings of their own), excluding fields that live in this same section —
+  // those would be hidden alongside it.
+  const ownFieldIds = new Set(section.fields.map((f) => f.id));
+  const sources = allFields.filter((f) => f.key && !ownFieldIds.has(f.id));
+
+  // RBAC groups for the "visible only to groups" mode.
+  const { data: groups = [] } = useQuery({
+    queryKey: ["groups", "list"],
+    queryFn: async () => {
+      const res = await groupsAPI.list();
+      const rows = (res.data?.results ?? res.data ?? []) as Array<{ id: string; name: string }>;
+      return rows.map((g) => ({ id: String(g.id), name: String(g.name) }));
+    },
+    staleTime: 60_000,
+  });
   return (
     <div className="space-y-4">
       <InspectorRow label="Section title">
@@ -1474,15 +2076,24 @@ function SectionEditor({ section, onUpdate }: {
                   onChange={(e) => onUpdate({ description: e.target.value })}
                   className={inputCls.replace("h-9", "min-h-[76px] py-2 resize-none")} />
       </InspectorRow>
+      <VisibilityEditor
+        value={section}
+        sources={sources.map((f) => ({ key: f.key, label: f.label }))}
+        onChange={onUpdate}
+        subject="section"
+        groupOptions={groups}
+        processSteps={processSteps}
+      />
     </div>
   );
 }
 
-function Inspector({ sections, selectedId, onUpdateField, onUpdateSection, onCollapse }: {
+function Inspector({ sections, selectedId, onUpdateField, onUpdateSection, onCollapse, processSteps }: {
   sections: TemplateSection[]; selectedId: string | null;
   onUpdateField: (sectionId: string, fieldId: string, patch: Partial<TemplateField>) => void;
   onUpdateSection: (sectionId: string, patch: Partial<TemplateSection>) => void;
   onCollapse: () => void;
+  processSteps: { value: string; label: string }[];
 }) {
   let target:
     | { kind: "field"; field: TemplateField; sectionId: string }
@@ -1533,11 +2144,14 @@ function Inspector({ sections, selectedId, onUpdateField, onUpdateSection, onCol
         )}
         {target?.kind === "section" && (
           <SectionEditor section={target.section}
+            allFields={allFields}
+            processSteps={processSteps}
             onUpdate={(patch) => target!.kind === "section" && onUpdateSection(target.section.id, patch)} />
         )}
         {target?.kind === "field" && (
           <FieldEditor field={target.field}
             allFields={allFields}
+            processSteps={processSteps}
             onUpdate={(patch) => target!.kind === "field" && onUpdateField(target.sectionId, target.field.id, patch)} />
         )}
       </div>
@@ -1664,19 +2278,36 @@ function PreviewTableField({ field }: { field: TemplateField }) {
   );
 }
 
-function evalVisible(field: TemplateField, values: Record<string, unknown>, allFields: TemplateField[]): boolean {
-  if (!field.visibleWhen) return true;
-  const sib = allFields.find((f) => f.key === field.visibleWhen!.fieldKey);
-  if (!sib) return true;
-  const v = values[sib.id];
-  const sv = v == null ? "" : String(v);
-  switch (field.visibleWhen.operator) {
-    case "equals":       return sv === (field.visibleWhen.value ?? "");
-    case "not_equals":   return sv !== (field.visibleWhen.value ?? "");
+/* Evaluate one condition. In the builder preview there is no live document, so
+ * the process step is treated as "draft" (the implicit start state). Field
+ * values here are keyed by field id (react-hook-form register key). */
+function evalCondition(c: VisibilityCondition, values: Record<string, unknown>, allFields: TemplateField[], processStep: string): boolean {
+  let sv: string;
+  if (c.source === "process_step") {
+    sv = processStep;
+  } else {
+    const sib = allFields.find((f) => f.key === c.fieldKey);
+    if (!sib) return true;
+    const v = values[sib.id];
+    sv = v == null ? "" : String(v);
+  }
+  switch (c.operator) {
+    case "equals":       return sv === (c.value ?? "");
+    case "not_equals":   return sv !== (c.value ?? "");
     case "is_empty":     return sv.trim() === "";
     case "is_not_empty": return sv.trim() !== "";
     default:             return true;
   }
+}
+
+/* Visibility for a field OR a section (both carry `hidden` + `visibleWhen`).
+ * An empty/absent rule group means no restriction (visible). */
+function evalVisible(item: VisibilityState, values: Record<string, unknown>, allFields: TemplateField[], processStep = "draft"): boolean {
+  if (item.hidden) return false;
+  const group = item.visibleWhen;
+  if (!group || group.conditions.length === 0) return true;
+  const results = group.conditions.map((c) => evalCondition(c, values, allFields, processStep));
+  return group.combinator === "or" ? results.some(Boolean) : results.every(Boolean);
 }
 
 function PreviewField({ field, register, errors }: {
@@ -1847,7 +2478,9 @@ function Preview({ sections, templateName }: { sections: TemplateSection[]; temp
           <h1 className="text-2xl font-bold text-slate-900">{templateName}</h1>
           <p className="mt-1 text-sm text-slate-500">Fill out the form below to preview how end users will experience this template.</p>
         </header>
-        {sections.map((s) => (
+        {sections.map((s) => {
+          if (!evalVisible(s, values, allFields)) return null;
+          return (
           <section key={s.id} className="rounded-2xl border border-slate-200 bg-white p-6 shadow-sm">
             <div className="mb-5 pb-4 border-b border-slate-100">
               <h2 className="text-base font-bold text-slate-800">{s.title}</h2>
@@ -1864,7 +2497,8 @@ function Preview({ sections, templateName }: { sections: TemplateSection[]; temp
               })}
             </div>
           </section>
-        ))}
+          );
+        })}
         <div className="flex items-center justify-end gap-3 pt-2">
           <button type="button" onClick={() => reset()}
                   className="inline-flex items-center gap-1.5 rounded-xl border border-slate-200 bg-white px-4 py-2 text-sm font-semibold text-slate-700 hover:bg-slate-50">
@@ -1986,6 +2620,133 @@ function SettingsTab({ template, onCommit, documentTypes }: {
           ))}
         </div>
       </div>
+      <FinanceSettingsCard template={template} onCommit={onCommit} iCls={iCls} />
+    </div>
+  );
+}
+
+/* SunSystems / finance header config. Field-level bindings (accounts, amounts,
+ * analysis) are set visually in the field inspector; this card holds the
+ * connection-level constants (business unit, journal type, …) and the on/off
+ * toggles, and previews what the bindings will compile into. */
+function FinanceSettingsCard({ template, onCommit, iCls }: {
+  template: Template;
+  onCommit: (patch: Partial<Template>) => void;
+  iCls: string;
+}) {
+  const ss = template.sunsystems ?? {};
+  const ui: SunSystemsUi = ss.ui ?? {};
+  const setUi = (patch: Partial<SunSystemsUi>) =>
+    onCommit({ sunsystems: { ...ss, ui: { ...ui, ...patch } } });
+  const [showXml, setShowXml] = useState(false);
+
+  const fields = template.sections.flatMap((s) => s.fields ?? []);
+  const roleLabel = (role: string) => {
+    const bound = fields.filter((f) => f.sunsystems?.role === role).map((f) => f.label);
+    return bound.length ? bound.join(", ") : "—";
+  };
+  const budgetLabel = (r: string) => {
+    const bound = fields.filter((f) => budgetRoleOf(f) === r).map((f) => f.label);
+    return bound.length ? bound.join(", ") : "—";
+  };
+  const journalFieldLines = fields.filter((f) => f.type !== "table" && f.sunsystems?.role === "journal_amount").length;
+  const journalTableLines = fields.filter((f) => f.type === "table" && f.sunsystems?.role === "journal_lines").length;
+
+  const label = "text-xs font-semibold uppercase tracking-wider text-[#5E6870]";
+  const Toggle = ({ on, onClick }: { on: boolean; onClick: () => void }) => (
+    <button type="button" onClick={onClick}
+      className={cn("relative h-5 w-9 rounded-full transition-colors", on ? "bg-[#287EAD]" : "bg-[#C8CDD2]")}>
+      <span className={cn("absolute top-0.5 h-4 w-4 rounded-full bg-white transition-all", on ? "left-[18px]" : "left-0.5")} />
+    </button>
+  );
+
+  return (
+    <div className="border border-[#C8CDD2] bg-white shadow-sm">
+      <div className="border-b border-[#C8CDD2] bg-[#F3F5F6] px-5 py-3">
+        <h2 className="text-sm font-bold text-[#1F2933]">Infor SunSystems</h2>
+        <p className="text-xs text-[#5E6870] mt-0.5">Budget checks while filling, and journal posting on approval. Bind individual fields in the field inspector.</p>
+      </div>
+      <div className="space-y-5 p-5">
+        {/* Budget check */}
+        <div className="flex items-center justify-between">
+          <div>
+            <p className="text-sm font-semibold text-[#1F2933]">Budget check</p>
+            <p className="text-xs text-[#5E6870]">Show available budget while the form is filled.</p>
+          </div>
+          <Toggle on={!!ui.budgetEnabled} onClick={() => setUi({ budgetEnabled: !ui.budgetEnabled })} />
+        </div>
+        {ui.budgetEnabled && (
+          <div className="space-y-3 border-l-2 border-[#287EAD]/30 pl-4">
+            <div className="grid grid-cols-2 gap-3 text-xs">
+              <div><span className={label}>Budget account</span><div className="mt-1 text-[#1F2933]">{budgetLabel("account")}</div></div>
+              <div><span className={label}>Budget amount</span><div className="mt-1 text-[#1F2933]">{budgetLabel("amount")}</div></div>
+            </div>
+            <div className="space-y-1.5">
+              <span className={label}>When over budget at submit</span>
+              <select className={iCls} value={ui.budgetMode ?? "warn"} onChange={(e) => setUi({ budgetMode: e.target.value as "warn" | "block" })}>
+                <option value="warn">Warn only</option>
+                <option value="block">Block submission</option>
+              </select>
+            </div>
+          </div>
+        )}
+
+        {/* Journal posting */}
+        <div className="flex items-center justify-between border-t border-[#EEF0F2] pt-4">
+          <div>
+            <p className="text-sm font-semibold text-[#1F2933]">Journal posting</p>
+            <p className="text-xs text-[#5E6870]">Post a ledger journal to SunSystems on final approval.</p>
+          </div>
+          <Toggle on={!!ui.journalEnabled} onClick={() => setUi({ journalEnabled: !ui.journalEnabled })} />
+        </div>
+        {ui.journalEnabled && (
+          <div className="space-y-3 border-l-2 border-[#287EAD]/30 pl-4">
+            <div className="grid grid-cols-2 gap-3">
+              <div className="space-y-1.5"><span className={label}>Business unit</span>
+                <input className={iCls} value={ui.businessUnit ?? ""} onChange={(e) => setUi({ businessUnit: e.target.value })} placeholder="e.g. ZRD" /></div>
+              <div className="space-y-1.5"><span className={label}>Budget code</span>
+                <input className={iCls} value={ui.budgetCode ?? ""} onChange={(e) => setUi({ budgetCode: e.target.value })} placeholder="e.g. A" /></div>
+              <div className="space-y-1.5"><span className={label}>Journal type</span>
+                <input className={cn(iCls, "font-mono")} value={ui.journalType ?? ""} onChange={(e) => setUi({ journalType: e.target.value })} placeholder="e.g. PIINV" /></div>
+              <div className="space-y-1.5"><span className={label}>Posting type</span>
+                <input className={cn(iCls, "font-mono")} value={ui.postingType ?? ""} onChange={(e) => setUi({ postingType: e.target.value })} placeholder="e.g. 2" /></div>
+            </div>
+            <div className="grid grid-cols-2 gap-3 text-xs">
+              <div><span className={label}>Reference</span><div className="mt-1 text-[#1F2933]">{roleLabel("reference")}</div></div>
+              <div><span className={label}>Transaction date</span><div className="mt-1 text-[#1F2933]">{roleLabel("transaction_date")}</div></div>
+              <div><span className={label}>Currency</span><div className="mt-1 text-[#1F2933]">{roleLabel("currency") !== "—" ? roleLabel("currency") : (ui.currencyConst || "—")}</div></div>
+              <div><span className={label}>Description</span><div className="mt-1 text-[#1F2933]">{roleLabel("description")}</div></div>
+            </div>
+            <label className="flex cursor-pointer items-center gap-2.5 text-sm text-[#1F2933]">
+              <input type="checkbox" checked={ui.validateBalance !== false} onChange={(e) => setUi({ validateBalance: e.target.checked })}
+                     className="h-4 w-4 accent-[#287EAD]" />
+              Require debits to balance credits before posting
+            </label>
+            <div className="rounded border border-[#EEF0F2] bg-[#F8FAFB] px-3 py-2 text-xs text-[#5E6870]">
+              Journal lines from bindings: <b className="text-[#1F2933]">{journalFieldLines}</b> fixed + <b className="text-[#1F2933]">{journalTableLines}</b> table block{journalTableLines !== 1 ? "s" : ""}.
+              {journalFieldLines + journalTableLines === 0 && <span className="text-amber-600"> Bind at least one amount field/table to post.</span>}
+            </div>
+            {journalFieldLines + journalTableLines > 0 && (
+              <button
+                type="button"
+                onClick={() => setShowXml(true)}
+                className="inline-flex items-center gap-1.5 border border-[#287EAD] px-3 py-1.5 text-xs font-semibold text-[#287EAD] hover:bg-[#EEF6FB]"
+              >
+                <FileCode className="h-3.5 w-3.5" /> Preview journal XML
+              </button>
+            )}
+          </div>
+        )}
+      </div>
+      {showXml && (
+        <JournalPayloadModal
+          mapping={compileSunSystems(template)?.journal ?? null}
+          values={buildSampleValues(template)}
+          sample
+          title={template.name}
+          onClose={() => setShowXml(false)}
+        />
+      )}
     </div>
   );
 }
@@ -2005,8 +2766,15 @@ export interface TemplateBuilderV2Props {
 }
 
 export default function TemplateBuilderV2({ initial, onSave, onCancel, isSaving, documentTypes = [] }: TemplateBuilderV2Props) {
-  const [history, setHistory]       = useState<Template[]>([normalizeTemplate(initial ?? initialTemplate)]);
-  const [cursor, setCursor]         = useState(0);
+  // History + cursor live in ONE state so they can never desync. (A previous
+  // split — setHistory using a stale `cursor` from a drag listener's closure
+  // while setCursor incremented functionally — let `cursor` outrun the stack
+  // during a resize drag, making `history[cursor]` undefined.)
+  const [hist, setHist] = useState<{ stack: Template[]; cursor: number }>(() => ({
+    stack: [normalizeTemplate(initial ?? initialTemplate)],
+    cursor: 0,
+  }));
+  const { stack: history, cursor } = hist;
   const template = history[cursor];
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [tab, setTab]               = useState<Tab>("form");
@@ -2023,6 +2791,17 @@ export default function TemplateBuilderV2({ initial, onSave, onCancel, isSaving,
   const [lastAutoSavedAt, setLastAutoSavedAt] = useState<number | null>(null);
   const autoSaveTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
 
+  // Workflow process steps for this template's document type — drives the
+  // "process step" visibility conditions in the inspector.
+  const { data: processSteps = [] } = useQuery({
+    queryKey: ["workflow-process-steps", template?.document_type_id ?? ""],
+    queryFn: async () => {
+      const { data } = await workflowAPI.processSteps(template?.document_type_id);
+      return (data ?? []) as { value: string; label: string }[];
+    },
+    staleTime: 60_000,
+  });
+
   useEffect(() => {
     if (typeof window !== "undefined") {
       window.localStorage.setItem("tb:autoSave", autoSave ? "1" : "0");
@@ -2037,16 +2816,17 @@ export default function TemplateBuilderV2({ initial, onSave, onCancel, isSaving,
   const handleCancel = () => { setClosing(true); setTimeout(onCancel, 220); };
 
   useEffect(() => {
-    setHistory([normalizeTemplate(initial ?? initialTemplate)]);
-    setCursor(0);
+    setHist({ stack: [normalizeTemplate(initial ?? initialTemplate)], cursor: 0 });
     setSelectedId(null);
     autoSaveSkipNext.current = true;
   }, [initial]);
 
   const commit = useCallback((next: Template) => {
-    setHistory((h) => [...h.slice(0, cursor + 1), next]);
-    setCursor((c) => c + 1);
-  }, [cursor]);
+    setHist(({ stack, cursor }) => {
+      const nstack = [...stack.slice(0, cursor + 1), next];
+      return { stack: nstack, cursor: nstack.length - 1 };
+    });
+  }, []);
 
   const canUndo = cursor > 0;
   const canRedo = cursor < history.length - 1;
@@ -2277,11 +3057,11 @@ export default function TemplateBuilderV2({ initial, onSave, onCancel, isSaving,
 
         <div className="flex items-center gap-2">
           <div className="flex items-center gap-1">
-            <button disabled={!canUndo} onClick={() => setCursor((c) => Math.max(0, c - 1))} title="Undo"
+            <button disabled={!canUndo} onClick={() => setHist((s) => ({ ...s, cursor: Math.max(0, s.cursor - 1) }))} title="Undo"
                     className="p-1.5 text-white/70 hover:bg-white/10 hover:text-white disabled:opacity-25">
               <Undo2 className="h-4 w-4" />
             </button>
-            <button disabled={!canRedo} onClick={() => setCursor((c) => Math.min(history.length - 1, c + 1))} title="Redo"
+            <button disabled={!canRedo} onClick={() => setHist((s) => ({ ...s, cursor: Math.min(s.stack.length - 1, s.cursor + 1) }))} title="Redo"
                     className="p-1.5 text-white/70 hover:bg-white/10 hover:text-white disabled:opacity-25">
               <Redo2 className="h-4 w-4" />
             </button>
@@ -2305,7 +3085,7 @@ export default function TemplateBuilderV2({ initial, onSave, onCancel, isSaving,
                 <Canvas
                   sections={template.sections}
                   selectedId={selectedId}
-                  onSelect={setSelectedId}
+                  onSelect={(id) => { setSelectedId(id); if (id) setInspectorOpen(true); }}
                   onAddSection={addSection}
                   onUpdateSection={updateSection}
                   onRemoveSection={removeSection}
@@ -2333,6 +3113,7 @@ export default function TemplateBuilderV2({ initial, onSave, onCancel, isSaving,
                   onUpdateField={updateField}
                   onUpdateSection={updateSection}
                   onCollapse={() => setInspectorOpen(false)}
+                  processSteps={processSteps}
                 />
               </div>
             </div>

@@ -48,6 +48,7 @@ def get_session_policy() -> dict:
     return {
         "session_lifetime_minutes": settings.session_lifetime_minutes,
         "session_idle_timeout_minutes": settings.session_idle_timeout_minutes,
+        "session_warning_minutes": settings.session_warning_minutes,
     }
 
 

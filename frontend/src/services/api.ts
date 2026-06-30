@@ -69,6 +69,7 @@ export type DmsSettings = {
   require_metadata_on_upload: boolean;
   session_lifetime_minutes: number;
   session_idle_timeout_minutes: number;
+  session_warning_minutes: number;
   updated_at?: string;
 };
 
@@ -667,6 +668,107 @@ export const migrationAPI = {
     ),
 };
 
+// ── Infor SunSystems (budget checks + journal posting) ────────────────────────
+export type BudgetResult = {
+  ok: boolean;
+  available: boolean;
+  account: string;
+  currency: string;
+  budget: string;
+  actual: string;
+  commitment: string;
+  remaining: string;
+  requested: string;
+  over_by: string;
+  mode: "warn" | "block" | string;
+  message: string;
+  stub: boolean;
+};
+
+export type JournalPostingStatus =
+  | "pending" | "posting" | "posted" | "failed" | "skipped" | "none";
+
+export type JournalPosting = {
+  id: string;
+  document_id: string;
+  status: JournalPostingStatus;
+  attempts: number;
+  component: string;
+  method: string;
+  business_unit: string;
+  journal_number: string;
+  message: string;
+  error: string;
+  request_xml: string;
+  response_xml: string;
+  posted_at: string | null;
+  posted_by_name: string | null;
+  created_at: string;
+  updated_at: string;
+  detail?: string;
+};
+
+export type BudgetCheckInput = {
+  template_id?: string;
+  document_id?: string;
+  values?: Record<string, unknown>;
+  mapping?: Record<string, unknown> | null;
+};
+
+export type JournalPreviewResult = {
+  ok: boolean;
+  enabled: boolean;
+  component?: string;
+  method?: string;
+  business_unit?: string;
+  ssc_xml?: string;
+  soap_xml?: string;
+  line_count?: number;
+  debit_total?: string;
+  credit_total?: string;
+  balanced?: boolean;
+  warnings?: string[];
+  error?: string | null;
+};
+
+export type SunSystemsConnection = {
+  base_url?: string;
+  security_path?: string;
+  executor_path?: string;
+  username?: string;
+  password?: string;
+  business_unit?: string;
+  budget_code?: string;
+  verify_tls?: boolean;
+};
+
+export type SunSystemsConnectionResponse = {
+  connection: SunSystemsConnection;   // admin-saved values (password redacted)
+  effective: SunSystemsConnection;    // what is actually used (env folded in)
+  env_defaults: SunSystemsConnection; // SUNSYSTEMS_* env defaults (redacted)
+  has_password: boolean;
+  updated_at: string | null;
+};
+
+export const sunsystemsAPI = {
+  budgetCheck: (input: BudgetCheckInput) =>
+    api.post<BudgetResult>("/sunsystems/budget-check/", input),
+  journalPreview: (input: BudgetCheckInput) =>
+    api.post<JournalPreviewResult>("/sunsystems/journal-preview/", input),
+  getConnection: () =>
+    api.get<SunSystemsConnectionResponse>("/sunsystems/connection/"),
+  updateConnection: (conn: SunSystemsConnection) =>
+    api.put<{ connection: SunSystemsConnection; effective: SunSystemsConnection }>(
+      "/sunsystems/connection/", conn),
+  testConnection: (conn: SunSystemsConnection) =>
+    api.post<{ ok: boolean; detail?: string; base_url?: string; token_acquired?: boolean }>(
+      "/sunsystems/connection/test/", { connection: conn }),
+  getPosting: (documentId: string) =>
+    api.get<JournalPosting>(`/sunsystems/postings/${documentId}/`),
+  retryPosting: (documentId: string) =>
+    api.post<JournalPosting>(`/sunsystems/postings/${documentId}/retry/`, {}),
+};
+
 // ── Email ingestion (IMAP mailboxes) ──────────────────────────────────────────
 export type MailboxProtocol = "imap" | "graph";
 
@@ -829,6 +931,12 @@ export const workflowAPI = {
   // Templates
   listTemplates: () => api.get("/workflows/templates/"),
   getTemplate: (id: string) => api.get(`/workflows/templates/${id}/`),
+  // Process steps (statuses) a document of `documentTypeId` can be in — drives
+  // "process step equals …" visibility conditions in the form builder.
+  processSteps: (documentTypeId?: string) =>
+    api.get("/workflows/templates/process-steps/", {
+      params: documentTypeId ? { document_type: documentTypeId } : {},
+    }),
   createTemplate: (data: unknown) => api.post("/workflows/templates/", data),
   updateTemplate: (id: string, data: unknown) =>
     api.put(`/workflows/templates/${id}/`, data),

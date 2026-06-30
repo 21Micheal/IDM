@@ -20,6 +20,7 @@ import {
   hasWorkflowTaskFilters,
   type WorkflowTaskFilters,
 } from "@/lib/workflowTaskFilters";
+import { WorkspaceCommandBar } from "@/components/shared/WorkspaceCommandBar";
 
 export default function WorkflowPage() {
   const [filters, setFilters] = useState<WorkflowTaskFilters>(DEFAULT_WORKFLOW_TASK_FILTERS);
@@ -78,25 +79,24 @@ export default function WorkflowPage() {
   const clearFilters = () => setFilters(DEFAULT_WORKFLOW_TASK_FILTERS);
 
   return (
-    <div className="-m-6 min-h-[calc(100vh-3.5rem)] bg-[#EDEDED]">
-      <div className="border-b border-[#206D99] bg-[#287EAD] px-6 py-4 text-white">
-        <div className="flex flex-col gap-3 lg:flex-row lg:items-center lg:justify-between">
-          <div className="flex items-center gap-3">
-            <div className="flex h-10 w-10 items-center justify-center border border-white/25 bg-white/10">
-              <GitBranch className="h-5 w-5 text-white" />
-            </div>
-            <div>
-              <h1 className="text-xl font-semibold">Workflow tasks</h1>
-              <p className="mt-0.5 text-sm text-white/75">Documents waiting for your review or approval.</p>
-            </div>
-          </div>
+    <div className="min-h-screen bg-[#EDEDED]">
+      <WorkspaceCommandBar
+        actions={
           <div className="border border-white/25 bg-white/10 px-3 py-2 text-sm font-semibold">
             {allTasks.length} open
           </div>
+        }
+      >
+        <div className="flex h-10 w-10 items-center justify-center border border-white/25 bg-white/10">
+          <GitBranch className="h-5 w-5 text-white" />
         </div>
-      </div>
+        <div>
+          <h1 className="text-xl font-semibold">Workflow tasks</h1>
+          <p className="mt-0.5 text-sm text-white/75">Documents waiting for your review or approval.</p>
+        </div>
+      </WorkspaceCommandBar>
 
-      <div className="space-y-4 p-4 pr-8">
+      <div className="space-y-4 p-5 pr-0">
         {isLoading && (
           <div className="flex h-40 items-center justify-center border border-[#C8CDD2] bg-white">
             <Loader2 className="h-6 w-6 animate-spin text-[#287EAD]" />

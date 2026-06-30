@@ -34,6 +34,7 @@ import {
   hasWorkflowTaskFilters,
   type WorkflowTaskFilters,
 } from "@/lib/workflowTaskFilters";
+import { WorkspaceCommandBar } from "@/components/shared/WorkspaceCommandBar";
 
 const RECENT_DOCS_PAGE_SIZE = 5;
 const RECENT_AUDIT_PAGE_SIZE = 5;
@@ -698,17 +699,27 @@ export default function DashboardPage() {
   // ── Render ────────────────────────────────────────────────────────────────
 
   return (
-    <div className="-m-6 min-h-[calc(100vh-3.5rem)] bg-[#EDEDED] text-[#1F2933]">
-      <div className="flex min-h-[69px] flex-col gap-3 bg-[#287EAD] px-5 py-3 text-white xl:flex-row xl:items-center xl:justify-between">
-        <div className="min-w-0">
+    <div className="min-h-screen bg-[#EDEDED] text-[#1F2933]">
+      <WorkspaceCommandBar
+        actions={
+          <button
+            type="button"
+            onClick={handleDashboardSearch}
+            className="inline-flex h-9 items-center justify-center gap-2 border border-white/20 bg-[#206D99] px-4 text-sm font-semibold text-white transition-colors hover:bg-[#1B5F86]"
+          >
+            <Search className="w-4 h-4" />
+            Search
+          </button>
+        }
+      >
+        <div className="min-w-0 shrink-0">
           <p className="text-[11px] font-semibold uppercase tracking-[0.2em] text-white/70">Operations workspace</p>
           <h1 className="mt-1 text-xl font-semibold tracking-tight">
             {user?.first_name ? `Welcome, ${user.first_name}` : "Document Operations"}
           </h1>
         </div>
 
-        <div className="flex min-w-0 flex-1 flex-col gap-2 xl:max-w-3xl xl:flex-row xl:items-start">
-          <div ref={dashboardSearchRef} className="relative min-w-0 flex-1">
+        <div ref={dashboardSearchRef} className="relative ml-auto w-full min-w-0 max-w-2xl">
             <div className="relative">
               <span className="pointer-events-none absolute left-3 top-1/2 -translate-y-1/2 text-[#5E6870]">
                 <Search className="w-4 h-4" />
@@ -894,18 +905,9 @@ export default function DashboardPage() {
             )}
           </div>
 
-          <button
-            type="button"
-            onClick={handleDashboardSearch}
-            className="inline-flex h-9 items-center justify-center gap-2 border border-white/20 bg-[#206D99] px-4 text-sm font-semibold text-white transition-colors hover:bg-[#1B5F86]"
-          >
-            <Search className="w-4 h-4" />
-            Search
-          </button>
-        </div>
-      </div>
+      </WorkspaceCommandBar>
 
-      <div className="space-y-4 p-4 pr-8">
+      <div className="space-y-4 p-5 pr-0">
         <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 xl:grid-cols-4">
           <StatCard
             title="Total Documents"

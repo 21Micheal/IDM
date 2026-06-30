@@ -22,6 +22,7 @@ import { useDebounce } from "@/hooks/useDebounce";
 import { getPreferredHighlights, highlightSearchText } from "@/lib/search";
 import { formatDocumentFileType } from "@/lib/documentFormat";
 import { QUERY_FIVE_MIN_STALE } from "@/lib/reactQueryDefaults";
+import { WorkspaceCommandBar } from "@/components/shared/WorkspaceCommandBar";
 
 const PAGE_SIZE = 20;
 
@@ -343,9 +344,15 @@ export default function SearchPage() {
   ].filter(Boolean).length;
 
   return (
-    <div className="-m-6 min-h-[calc(100vh-3.5rem)] bg-[#EDEDED] text-[13px] text-[#1F2933]">
-      <div className="flex h-[69px] items-center gap-3 bg-[#287EAD] px-5 pr-8 text-white">
-        <div className="flex min-w-0 flex-1 items-center gap-3">
+    <div className="min-h-screen bg-[#EDEDED] text-[13px] text-[#1F2933]">
+      <WorkspaceCommandBar
+        actions={
+          <div className="flex items-center gap-2 text-white/85">
+            <SlidersHorizontal className="h-4 w-4" />
+            <span>{activeFilterCount} filters</span>
+          </div>
+        }
+      >
           <div className="relative w-full max-w-[620px]">
             <Search className="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-[#5E6870]" />
             <input
@@ -417,15 +424,9 @@ export default function SearchPage() {
               </option>
             ))}
           </select>
-        </div>
+      </WorkspaceCommandBar>
 
-        <div className="flex items-center gap-2 text-white/85">
-          <SlidersHorizontal className="h-4 w-4" />
-          <span>{activeFilterCount} filters</span>
-        </div>
-      </div>
-
-      <div className="px-5 pb-8 pr-8">
+      <div className="px-5 pb-8 pr-0">
         <section className="border-b border-[#C8CDD2] bg-[#F7F7F7] px-4 py-3">
           <div className="grid gap-3 lg:grid-cols-[1fr_1fr_1fr_1fr_1fr_auto]">
             <input

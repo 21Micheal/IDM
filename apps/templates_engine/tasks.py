@@ -1034,6 +1034,12 @@ def generate_document_from_template_sync(template, values, fmt, title, user, typ
             "sections": template.sections,
             "values": values,
         }
+        # Snapshot the SunSystems integration mapping (journal/budget) onto the
+        # document so budget checks and journal posting depend on the document
+        # alone and survive later template edits. See apps/sunsystems/config.py.
+        ss_mapping = getattr(template, "sunsystems", None)
+        if isinstance(ss_mapping, dict) and ss_mapping:
+            doc_metadata["sunsystems"] = ss_mapping
 
     create_kwargs = dict(
         title=title,

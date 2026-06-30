@@ -35,6 +35,7 @@ import TemplatePreview from "@/components/templates/TemplatePreview";
 import TemplateForm from "@/components/templates/TemplateForm";
 import BuiltTemplateFormModal from "@/components/templates/BuiltTemplateFormModal";
 import { resolveSource, type ReferenceValue } from "@/components/templates/referenceSources";
+import { WorkspaceCommandBar } from "@/components/shared/WorkspaceCommandBar";
 
 // ── Types ─────────────────────────────────────────────────────────────────────
 
@@ -56,6 +57,8 @@ type DocumentTemplateOption = {
   sections?: unknown[];
   /** Designer ("document") layout — `references` drives the fill-time document pickers. */
   design?: { references?: Array<{ key: string; label: string }> };
+  /** SunSystems integration mapping (budget check / journal posting). */
+  sunsystems?: { budget?: Record<string, unknown>; journal?: Record<string, unknown> } | null;
 };
 
 type UploadFormValues = {
@@ -1674,39 +1677,42 @@ export default function UploadPage({ scanOnly = false }: UploadPageProps) {
 
   return (
     <>
-    <div className="-m-6 min-h-[calc(100vh-3.5rem)] bg-[#EDEDED] text-[#1F2933]">
-      <div className="flex h-[69px] items-center justify-between gap-4 bg-[#287EAD] px-5 pr-8 text-white">
+    <div className="min-h-screen bg-[#EDEDED] text-[#1F2933]">
+      <WorkspaceCommandBar
+        actions={
+          <div className="hidden items-center gap-3 text-xs text-white/80 md:flex">
+            <label className="inline-flex cursor-pointer items-center gap-2 border border-white/30 px-2.5 py-1.5 font-semibold">
+              <input
+                type="checkbox"
+                checked={bulkMode}
+                onChange={(event) => {
+                  setBulkMode(event.target.checked);
+                  if (event.target.checked) {
+                    navigate(`${scanOnly ? "/documents/scan" : "/documents/upload"}?mode=bulk`, { replace: true });
+                  }
+                }}
+                className="h-3.5 w-3.5"
+              />
+              Bulk mode
+            </label>
+            <span className="border border-white/30 px-2 py-1">{selectedType?.name || "No type selected"}</span>
+            <span className="border border-white/30 px-2 py-1">
+              {useTemplate ? (selectedTemplate ? "Template selected" : "Awaiting template") : droppedFile ? "File attached" : "Awaiting file"}
+            </span>
+          </div>
+        }
+      >
         <div className="min-w-0">
           <h1 className="text-lg font-semibold tracking-tight">{scanOnly ? "Scan Document" : "Upload Document"}</h1>
           <p className="mt-0.5 text-xs text-white/75">
             {scanOnly ? "Review the file beside OCR results before saving." : "Attach a file, preview it, then complete the document details."}
           </p>
         </div>
-        <div className="hidden items-center gap-3 text-xs text-white/80 md:flex">
-          <label className="inline-flex cursor-pointer items-center gap-2 border border-white/30 px-2.5 py-1.5 font-semibold">
-            <input
-              type="checkbox"
-              checked={bulkMode}
-              onChange={(event) => {
-                setBulkMode(event.target.checked);
-                if (event.target.checked) {
-                  navigate(`${scanOnly ? "/documents/scan" : "/documents/upload"}?mode=bulk`, { replace: true });
-                }
-              }}
-              className="h-3.5 w-3.5"
-            />
-            Bulk mode
-          </label>
-          <span className="border border-white/30 px-2 py-1">{selectedType?.name || "No type selected"}</span>
-          <span className="border border-white/30 px-2 py-1">
-            {useTemplate ? (selectedTemplate ? "Template selected" : "Awaiting template") : droppedFile ? "File attached" : "Awaiting file"}
-          </span>
-        </div>
-      </div>
+      </WorkspaceCommandBar>
 
       {/* ── OCR wait / review / submitting ──────────────────────────────── */}
       {isOcrFlow && scanStage !== "idle" && scanStage !== "uploading" && (
-        <div className="grid gap-4 p-5 pr-8 lg:grid-cols-12">
+        <div className="grid gap-4 p-5 pr-0 lg:grid-cols-12">
           <div className="lg:col-span-7 2xl:col-span-8">
             <CapturePreviewPane
               file={droppedFile}
@@ -1859,7 +1865,7 @@ export default function UploadPage({ scanOnly = false }: UploadPageProps) {
 
       {/* ── Main upload layout ─────────────────────────────────────────── */}
       {(scanStage === "idle" || scanStage === "uploading") && (
-        <div className="grid grid-cols-1 gap-5 p-5 pr-8 xl:grid-cols-12">
+        <div className="grid grid-cols-1 gap-5 p-5 pr-0 xl:grid-cols-12">
           {/* Left column — controls */}
           <div className={clsx(droppedFile ? "order-2 xl:col-span-3" : useTemplate ? "xl:col-span-4" : "xl:col-start-2 xl:col-span-4", "space-y-4")}>
             {/* Step 1 — Document Type */}

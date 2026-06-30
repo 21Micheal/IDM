@@ -321,6 +321,13 @@ class DMSSettings(models.Model):
         default=30,
         help_text="Sign users out after this many minutes of inactivity. 0 disables the idle timeout.",
     )
+    #   * session_warning_minutes — show a "session about to expire" warning this
+    #     many minutes before sign-out, with an option to extend (idle case). 0
+    #     disables the warning.
+    session_warning_minutes = models.PositiveIntegerField(
+        default=3,
+        help_text="Warn users this many minutes before their session ends. 0 disables the warning.",
+    )
 
     bulk_scan_submit_for_approval = models.BooleanField(
         default=False,
@@ -361,6 +368,11 @@ class DMSSettings(models.Model):
             self.session_idle_timeout_minutes = 0
         if self.session_idle_timeout_minutes > self.session_lifetime_minutes:
             self.session_idle_timeout_minutes = self.session_lifetime_minutes
+        # The pre-expiry warning must fire within the session window, so cap it
+        # at the absolute lifetime (the client further limits it to half the
+        # relevant window so short timeouts don't warn the instant they begin).
+        if self.session_warning_minutes > self.session_lifetime_minutes:
+            self.session_warning_minutes = self.session_lifetime_minutes
         super().save(*args, **kwargs)
 
     @classmethod

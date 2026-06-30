@@ -16,7 +16,7 @@ const ChatPanel = lazy(() =>
  * - Receiver-side toast pop-up via vaultToast on every chat_notification
  * - Click toast to deep-link into the right room
  */
-export function ChatLauncher() {
+export function ChatLauncher({ variant = "light" }: { variant?: "light" | "blue" }) {
   const accessToken = useAuthStore((s) => s.accessToken);
   const [open, setOpen] = useState(false);
   const [initialRoomId, setInitialRoomId] = useState<string | undefined>();
@@ -142,6 +142,11 @@ export function ChatLauncher() {
     lastServerUnreadRef.current = 0;
   };
 
+  const isBlue = variant === "blue";
+  const launcherClassName = isBlue
+    ? "group relative flex h-9 w-9 items-center justify-center text-white/85 transition-colors hover:bg-white/10 hover:text-white active:scale-95"
+    : "group relative flex h-9 w-9 items-center justify-center border border-[#C8CDD2] bg-white text-[#5E6870] transition-colors hover:bg-[#EEF6FB] hover:text-[#287EAD] active:scale-95";
+
   const handleClose = () => {
     setOpen(false);
     setInitialRoomId(undefined);
@@ -166,7 +171,7 @@ export function ChatLauncher() {
         onClick={open ? handleClose : handleOpen}
         aria-label={open ? "Close chat" : "Open chat"}
         title={open ? "Close chat" : "Open chat"}
-        className="group relative flex h-9 w-9 items-center justify-center border border-[#C8CDD2] bg-white text-[#5E6870] transition-colors hover:bg-[#EEF6FB] hover:text-[#287EAD] active:scale-95"
+        className={launcherClassName}
       >
         {/* Animated accent ring on new message */}
         <span
@@ -174,7 +179,7 @@ export function ChatLauncher() {
             pulse ? "animate-ping opacity-70" : "opacity-0"
           }`}
         />
-        {open && <span className="absolute inset-x-1 bottom-0 h-0.5 bg-[#287EAD]" />}
+        {open && <span className={`absolute inset-x-1 bottom-0 h-0.5 ${isBlue ? "bg-white" : "bg-[#287EAD]"}`} />}
 
         {open ? (
           <X className="h-5 w-5" strokeWidth={2.25} />

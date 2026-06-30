@@ -11,6 +11,9 @@ import OcrStatusBadge from "@/components/documents/OcrStatusBadge";
 import { AddToFolderMenu } from "@/components/documents/AddToFolderMenu";
 import MetadataEditPanel, { type MetadataSaver } from "@/components/documents/MetadataEditPanel";
 import TemplateForm, { requiredFieldLabels } from "@/components/templates/TemplateForm";
+import BudgetBanner from "@/components/templates/BudgetBanner";
+import JournalPostingCard from "@/components/templates/JournalPostingCard";
+import JournalPayloadModal from "@/components/templates/JournalPayloadModal";
 import { collectFormAttachments } from "@/components/templates/formAttachments";
 import WorkflowActionPanel from "@/components/workflow/WorkflowActionPanel";
 import SignatureRequestPanel from "@/components/signatures/SignatureRequestPanel";
@@ -19,7 +22,7 @@ import {
   ArrowLeft, Send, MessageSquare, ShieldCheck,
   Loader2, RotateCcw, Edit2, Lock, Info, Download,
   AlertTriangle, ScanLine, RefreshCw, ChevronDown, FileText,
-  Printer, Trash2, X, Check, ExternalLink, Columns2, Eye, EyeOff, Archive
+  Printer, Trash2, X, Check, ExternalLink, Columns2, Eye, EyeOff, Archive, FileCode, MoreHorizontal
 } from "lucide-react";
 import { toast } from "@/components/ui/vault-toast";
 import { useAuthStore } from "@/store/authStore";
@@ -28,6 +31,7 @@ import { clsx as cn } from "clsx";
 import { QUERY_SHORT_STALE } from "@/lib/reactQueryDefaults";
 import { formatDocumentFileType } from "@/lib/documentFormat";
 import { loadWorkflowData } from "@/components/notifications/workflow-data";
+import { WorkspaceCommandBar } from "@/components/shared/WorkspaceCommandBar";
 
 import { StarButton } from "@/components/documents/StarButton";
 
@@ -201,6 +205,7 @@ export default function DocumentDetailPage() {
   const [formEditing, setFormEditing] = useState(false);
   const [formValues, setFormValues] = useState<Record<string, unknown>>({});
   const [showFormPdf, setShowFormPdf] = useState(false);
+  const [showJournalXml, setShowJournalXml] = useState(false);
   const [comment, setComment] = useState("");
   const [confirmRestoreId, setConfirmRestoreId] = useState<string | null>(null);
   const [auditPage, setAuditPage] = useState(1);
@@ -212,11 +217,13 @@ export default function DocumentDetailPage() {
   const [workflowActionCompleted, setWorkflowActionCompleted] = useState(false);
   const [compareDocumentId, setCompareDocumentId] = useState<string | null>(null);
   const [showDownloadTray, setShowDownloadTray] = useState(false);
+  const [showMoreMenu, setShowMoreMenu] = useState(false);
   const [downloadingPdf, setDownloadingPdf] = useState(false);
   // Removing a confirmed link is intentional-only: a type-to-confirm dialog guards it.
   const [relationshipToRemove, setRelationshipToRemove] = useState<DocumentRelationship | null>(null);
   const [removeConfirmText, setRemoveConfirmText] = useState("");
   const downloadTrayRef = useRef<HTMLDivElement | null>(null);
+  const moreMenuRef = useRef<HTMLDivElement | null>(null);
   const printFrameRef = useRef<HTMLIFrameElement | null>(null);
 
   const pollRef = useRef<ReturnType<typeof setInterval> | null>(null);
@@ -559,6 +566,17 @@ export default function DocumentDetailPage() {
     return () => document.removeEventListener("mousedown", handler);
   }, [showDownloadTray]);
 
+  useEffect(() => {
+    if (!showMoreMenu) return;
+    const handler = (e: MouseEvent) => {
+      if (moreMenuRef.current && !moreMenuRef.current.contains(e.target as Node)) {
+        setShowMoreMenu(false);
+      }
+    };
+    document.addEventListener("mousedown", handler);
+    return () => document.removeEventListener("mousedown", handler);
+  }, [showMoreMenu]);
+
   // ── Check-in (release) coordination ──────────────────────────────────────
   // The edit panel registers a saver so that releasing the lock can flush any
   // unsaved metadata edits first (Infor-style Save / Discard / Cancel prompt).
@@ -662,12 +680,17 @@ export default function DocumentDetailPage() {
     | undefined;
   const isFormDocument = Boolean(formData?.sections);
   const formDocEditable = canEdit && ["draft", "returned"].includes(doc.status);
+  const budgetEnabled = Boolean((doc.metadata as any)?.sunsystems?.budget?.enabled);
+  const journalEnabled = Boolean((doc.metadata as any)?.sunsystems?.journal?.enabled);
   const startFormEdit = () => {
     setFormValues({ ...(formData?.values ?? {}) });
     setFormEditing(true);
   };
   const saveForm = () => {
-    const missing = requiredFieldLabels(formData?.sections ?? [], formValues);
+    const missing = requiredFieldLabels(formData?.sections ?? [], formValues, {
+      groupNames: user?.group_names ?? [],
+      isAdmin: Boolean(user?.has_admin_access || user?.is_staff),
+    }, doc?.status);
     if (missing.length) { toast.error(`Please fill in: ${missing.join(", ")}`); return; }
     updateFormMutation.mutate();
   };
@@ -694,7 +717,7 @@ export default function DocumentDetailPage() {
     !["archived", "void"].includes(doc.status) &&
     (isPersonal || doc.status === "approved");
   const commandActionClass = "flex h-8 items-center gap-1 px-2 text-white/80 transition-colors hover:bg-white/10 hover:text-white disabled:cursor-not-allowed disabled:opacity-40";
-  const commandActionDisabledClass = "flex h-8 cursor-not-allowed items-center gap-1 px-2 text-white/80 opacity-40";
+  const commandActionDisabledClass = "flex h-8 cursor-not-allowed items-center gap-1 px-2 text-white/55 opacity-60";
 
   const isDraftOrRejected = ["draft", "rejected", "returned"].includes(doc.status);
   // Delete to Trash: creation-stage documents the user is allowed to delete.
@@ -854,7 +877,7 @@ export default function DocumentDetailPage() {
   let lastDateHeader = "";
 
   return (
-    <div className="-m-6 min-h-[calc(100vh-3.5rem)] bg-[#EDEDED] text-[#1F2933]">
+    <div className="min-h-screen bg-[#EDEDED] text-[#1F2933]">
       <iframe ref={printFrameRef} title="Printable document" className="hidden" />
 
       {workflowActionCompleted && !activeTask && (
@@ -863,17 +886,16 @@ export default function DocumentDetailPage() {
           <p className="mt-1">This document has moved to the next stage and is no longer actionable from your current access level.</p>
         </div>
       )}
-      <div className="flex min-h-[69px] flex-col gap-3 bg-[#287EAD] px-5 py-3 text-xs text-white xl:flex-row xl:items-center xl:justify-between">
-        <div className="flex min-w-0 flex-col gap-2 sm:flex-row sm:items-center">
+      <WorkspaceCommandBar className="text-xs">
           <button
             onClick={() => navigate(-1)}
-            className="flex h-9 items-center gap-1 border border-white/20 bg-[#206D99] px-3 text-xs text-white/85 transition-colors hover:text-white"
+            className="flex h-9 shrink-0 items-center gap-1 border border-white/20 bg-[#206D99] px-3 text-xs text-white/85 transition-colors hover:text-white"
           >
             <ArrowLeft className="w-3.5 h-3.5" /> Back
           </button>
-          <div className="min-w-0">
-            <div className="flex flex-wrap items-center gap-2 text-white">
-              <h1 className="max-w-[28rem] truncate text-base font-semibold">{doc.title}</h1>
+          <div className="min-w-0 overflow-hidden">
+            <div className="flex min-w-0 items-center gap-2 text-white">
+              <h1 className="min-w-0 max-w-[28rem] truncate text-base font-semibold">{doc.title}</h1>
               <span className={cn(
                 "inline-flex items-center border px-2.5 py-0.5 text-xs font-bold shadow-sm",
                 getCommandStatusClass(doc.status),
@@ -896,16 +918,15 @@ export default function DocumentDetailPage() {
                 </span>
               )}
             </div>
-            <div className="mt-1 flex flex-wrap items-center gap-2 text-[11px] text-white/75">
-              <span className="max-w-[20rem] truncate font-medium">{doc.file_name}</span>
+            <div className="mt-1 flex min-w-0 items-center gap-2 overflow-hidden whitespace-nowrap text-[11px] text-white/75">
+              <span className="max-w-[20rem] shrink-0 truncate font-medium">{doc.file_name}</span>
               <span>{formatBytes(doc.file_size)}</span>
               <span>{doc.current_version ? `v${doc.current_version}` : "—"}</span>
               <span>{doc.reference_number}</span>
             </div>
           </div>
-        </div>
 
-        <div className="flex w-full flex-wrap items-center justify-start gap-1.5 font-medium text-white/80 xl:w-auto xl:justify-end">
+        <div className="ml-auto flex shrink-0 items-center gap-1.5 text-xs font-semibold">
           {canSubmit ? (
             <button
               onClick={() => submitMutation.mutate()}
@@ -1004,58 +1025,77 @@ export default function DocumentDetailPage() {
             )}
           </div>
 
-          <button
-            onClick={handlePrintDocument}
-            disabled={!canDownload || (!viewerLinks.openInNewTabUrl && !viewerLinks.downloadHref)}
-            className={commandActionClass}
-            title={canDownload ? "Print document" : "Print permission required"}
-          >
-            <Printer className="w-3.5 h-3.5" />
-            <span>Print</span>
-          </button>
-
-          {canUploadVersion && !isLockedByOther && (
-            <Suspense fallback={<span className="inline-flex items-center gap-1 px-2 py-1 rounded bg-muted/10 text-xs text-muted-foreground">Loading…</span>}>
-              <UploadVersionDrawer
-                documentId={doc.id}
-                currentVersion={doc.current_version}
-                maxSizeMb={doc.document_type?.max_file_size_mb}
-                onVersionUploaded={handleVersionUploaded}
-                triggerClassName={commandActionClass}
-                triggerIconClassName="w-3.5 h-3.5"
-                disabled={!lockedByMe}
-                triggerTitle={lockedByMe ? "Upload a new version" : "Lock the document first to upload a new version"}
-              />
-            </Suspense>
-          )}
-
-          {canArchiveNow && (
+          <div ref={moreMenuRef} className="relative">
             <button
-              onClick={() => archiveMutation.mutate()}
-              disabled={archiveMutation.isPending}
-              className={commandActionClass}
-              title="Archive document"
+              type="button"
+              onClick={() => setShowMoreMenu((v) => !v)}
+              className={cn(commandActionClass, showMoreMenu && "bg-white/10 text-white")}
+              title="More actions"
+              aria-haspopup="true"
+              aria-expanded={showMoreMenu}
             >
-              {archiveMutation.isPending ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <Archive className="w-3.5 h-3.5" />}
-              <span className="sr-only sm:not-sr-only">Archive</span>
+              <MoreHorizontal className="w-3.5 h-3.5" />
+              <span className="hidden sm:inline">More</span>
             </button>
-          )}
 
-          {canDelete && (
-            <button
-              onClick={() => {
-                if (window.confirm("Move this document to Trash? You can restore it later.")) deleteMutation.mutate();
-              }}
-              disabled={deleteMutation.isPending}
-              className="flex h-8 items-center gap-1 px-2 transition-colors hover:bg-white/10 hover:text-white disabled:opacity-50"
-              title="Move to Trash"
-            >
-              {deleteMutation.isPending ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <Trash2 className="w-3.5 h-3.5" />}
-              <span className="sr-only sm:not-sr-only">Delete</span>
-            </button>
-          )}
+            {showMoreMenu && (
+              <div className="absolute right-0 top-full z-50 mt-1 w-56 overflow-hidden border border-[#C8CDD2] bg-white shadow-lg">
+                <button
+                  type="button"
+                  onClick={() => { setShowMoreMenu(false); handlePrintDocument(); }}
+                  disabled={!canDownload || (!viewerLinks.openInNewTabUrl && !viewerLinks.downloadHref)}
+                  className="flex w-full items-center gap-2.5 px-3 py-2.5 text-sm text-[#1F2933] hover:bg-[#EEF6FB] hover:text-[#287EAD] disabled:cursor-not-allowed disabled:opacity-50"
+                >
+                  <Printer className="h-4 w-4 shrink-0 text-[#5E6870]" />
+                  <span className="font-medium">Print</span>
+                </button>
+
+                {canUploadVersion && !isLockedByOther && (
+                  <Suspense fallback={null}>
+                    <UploadVersionDrawer
+                      documentId={doc.id}
+                      currentVersion={doc.current_version}
+                      maxSizeMb={doc.document_type?.max_file_size_mb}
+                      onVersionUploaded={handleVersionUploaded}
+                      triggerClassName="flex w-full items-center gap-2.5 px-3 py-2.5 text-sm text-[#1F2933] hover:bg-[#EEF6FB] hover:text-[#287EAD] disabled:cursor-not-allowed disabled:opacity-50"
+                      triggerIconClassName="h-4 w-4 shrink-0 text-[#5E6870]"
+                      disabled={!lockedByMe}
+                      triggerTitle={lockedByMe ? "Upload a new version" : "Lock the document first to upload a new version"}
+                    />
+                  </Suspense>
+                )}
+
+                {canArchiveNow && (
+                  <button
+                    type="button"
+                    onClick={() => { setShowMoreMenu(false); archiveMutation.mutate(); }}
+                    disabled={archiveMutation.isPending}
+                    className="flex w-full items-center gap-2.5 px-3 py-2.5 text-sm text-[#1F2933] hover:bg-[#EEF6FB] hover:text-[#287EAD] disabled:opacity-50"
+                  >
+                    {archiveMutation.isPending ? <Loader2 className="h-4 w-4 shrink-0 animate-spin text-[#5E6870]" /> : <Archive className="h-4 w-4 shrink-0 text-[#5E6870]" />}
+                    <span className="font-medium">Archive</span>
+                  </button>
+                )}
+
+                {canDelete && (
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setShowMoreMenu(false);
+                      if (window.confirm("Move this document to Trash? You can restore it later.")) deleteMutation.mutate();
+                    }}
+                    disabled={deleteMutation.isPending}
+                    className="flex w-full items-center gap-2.5 px-3 py-2.5 text-sm text-[#B42318] hover:bg-[#FEECEA] disabled:opacity-50"
+                  >
+                    {deleteMutation.isPending ? <Loader2 className="h-4 w-4 shrink-0 animate-spin" /> : <Trash2 className="h-4 w-4 shrink-0" />}
+                    <span className="font-medium">Delete</span>
+                  </button>
+                )}
+              </div>
+            )}
+          </div>
         </div>
-      </div>
+      </WorkspaceCommandBar>
 
       {/* Enterprise workspace: preview left, document intelligence right */}
       <div className={cn(
@@ -1121,6 +1161,16 @@ export default function DocumentDetailPage() {
                   <span className="text-xs text-[#5E6870]">{formEditing ? "Editing — fill and save" : "Filled in-app"}</span>
                 </div>
                 <div className="flex items-center gap-2">
+                  {journalEnabled && (
+                    <button
+                      type="button"
+                      onClick={() => setShowJournalXml(true)}
+                      title="Preview the exact SunSystems journal XML this form will post"
+                      className="inline-flex items-center gap-1.5 border border-[#AEB5BB] bg-white px-2.5 py-1.5 text-xs font-semibold text-[#1F2933] hover:bg-[#F3F5F6]"
+                    >
+                      <FileCode className="h-3.5 w-3.5" /> Journal XML
+                    </button>
+                  )}
                   {!formEditing && (
                     <button
                       type="button"
@@ -1163,16 +1213,31 @@ export default function DocumentDetailPage() {
                   )}
                 </div>
               </div>
-              <div className="p-5">
+              <div className="p-5 space-y-4">
+                {budgetEnabled && formEditing && (
+                  <BudgetBanner values={formValues} documentId={doc.id} sections={formData?.sections ?? []} enabled />
+                )}
                 <TemplateForm
                   sections={formData?.sections ?? []}
                   values={formEditing ? formValues : (formData?.values ?? {})}
                   onChange={(k, v) => setFormValues((prev) => ({ ...prev, [k]: v }))}
                   readOnly={!formEditing}
                   documentId={doc.id}
+                  documentStatus={doc.status}
                 />
               </div>
             </div>
+          )}
+
+          {isFormDocument && <JournalPostingCard documentId={doc.id} />}
+
+          {showJournalXml && (
+            <JournalPayloadModal
+              documentId={doc.id}
+              values={formEditing ? formValues : undefined}
+              title={doc.title}
+              onClose={() => setShowJournalXml(false)}
+            />
           )}
 
           <div className={cn(

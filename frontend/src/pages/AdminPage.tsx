@@ -5,6 +5,7 @@ import { dmsSettingsAPI, type DmsSettings } from "@/services/api";
 import { toast } from "@/components/ui/vault-toast";
 import {
   Archive,
+  BellRing,
   Building2,
   ClipboardCheck,
   Clock,
@@ -572,6 +573,44 @@ function SettingsWorkspace() {
                   Set to <span className="font-semibold text-[#1F2933]">0</span> to disable the inactivity timeout —
                   only the absolute session lifetime will apply. The idle timeout cannot exceed the session
                   lifetime.
+                </InfoNote>
+              </SettingBlock>
+
+              <SettingBlock
+                icon={BellRing}
+                title="Expiry warning"
+                description="Warn users before their session ends, with the option to stay signed in when the timeout is due to inactivity."
+              >
+                <label className="block">
+                  <span className="mb-1.5 block text-xs font-semibold uppercase tracking-wider text-[#5E6870]">
+                    Show the warning before expiry
+                  </span>
+                  <div className="flex items-center gap-2">
+                    <input
+                      type="number"
+                      min={0}
+                      max={settings.session_lifetime_minutes}
+                      className={`${inputCls} w-32`}
+                      value={settings.session_warning_minutes}
+                      onChange={(event) =>
+                        update(
+                          "session_warning_minutes",
+                          Math.max(0, Number(event.target.value) || 0),
+                        )
+                      }
+                    />
+                    <span className="text-sm text-[#5E6870]">
+                      minutes before sign-out ·{" "}
+                      {settings.session_warning_minutes > 0
+                        ? formatMinutes(settings.session_warning_minutes)
+                        : "disabled"}
+                    </span>
+                  </div>
+                </label>
+                <InfoNote>
+                  Set to <span className="font-semibold text-[#1F2933]">0</span> to disable the warning. For very short
+                  timeouts the warning is automatically capped to half the remaining window so it never appears the
+                  instant a session begins.
                 </InfoNote>
               </SettingBlock>
             </>

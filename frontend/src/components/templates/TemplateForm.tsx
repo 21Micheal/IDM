@@ -42,11 +42,20 @@ type Column = {
   defaultValue?: string; referenceSource?: string;
 };
 
-type VisibleWhen = {
-  fieldKey: string;
-  operator: "equals" | "not_equals" | "is_empty" | "is_not_empty" | string;
+type ConditionOperator = "equals" | "not_equals" | "is_empty" | "is_not_empty" | string;
+
+type VisibilityCondition = {
+  source?: "field" | "process_step";
+  fieldKey?: string;
+  operator: ConditionOperator;
   value?: string;
 };
+
+// A rule group (AND/OR + conditions), or a legacy single-rule shape (fieldKey at
+// top level) still found in older saved templates / document snapshots.
+type VisibleWhen =
+  | { combinator?: "and" | "or"; conditions?: VisibilityCondition[] }
+  | { fieldKey: string; operator: ConditionOperator; value?: string };
 
 type Field = {
   id?: string; key?: string; type?: string; label?: string;
@@ -60,7 +69,30 @@ type Field = {
   visibleWhen?: VisibleWhen | null;
 };
 
-type Section = { id?: string; title?: string; description?: string; fields?: Field[] };
+type SectionGroupRef = { id?: string; name?: string };
+
+type Section = {
+  id?: string; title?: string; description?: string; fields?: Field[];
+  hidden?: boolean; visibleWhen?: VisibleWhen | null;
+  visibleToGroups?: SectionGroupRef[];
+};
+
+/** The person filling/viewing the form, used to evaluate role-restricted
+ * sections. The auth payload carries group *names* + admin flags. */
+export type FormViewer = { groupNames?: string[]; isAdmin?: boolean };
+
+/** A section restricted to RBAC groups is visible only to members of those
+ * groups (matched by name — the client only has names) and to admins. An empty
+ * / absent list means everyone. When the viewer is unknown we don't hide — the
+ * server stays authoritative. */
+function sectionVisibleToViewer(section: Section, viewer?: FormViewer): boolean {
+  const groups = section.visibleToGroups ?? [];
+  if (groups.length === 0) return true;
+  if (!viewer) return true;
+  if (viewer.isAdmin) return true;
+  const names = new Set(viewer.groupNames ?? []);
+  return groups.some((g) => Boolean(g.name) && names.has(g.name as string));
+}
 
 export type TemplateFormValues = Record<string, unknown>;
 
@@ -242,20 +274,52 @@ function ReferencePicker({ source, value, onChange, disabled, compact }: {
 
 // ── Conditional visibility ────────────────────────────────────────────────────
 
-function evalVisible(field: Field, values: TemplateFormValues, allFields: Field[]): boolean {
-  if (!field.visibleWhen) return true;
-  const rule = field.visibleWhen;
-  const sib = allFields.find((f) => f.key === rule.fieldKey);
-  if (!sib) return true;
-  const v = values[sib.key ?? ""];
-  const sv = v == null ? "" : String(v);
-  switch (rule.operator) {
-    case "equals":       return sv === (rule.value ?? "");
-    case "not_equals":   return sv !== (rule.value ?? "");
+// Normalize a stored `visibleWhen` (legacy single rule or a group) into a group.
+function ruleConditions(vw?: VisibleWhen | null): { combinator: "and" | "or"; conditions: VisibilityCondition[] } | null {
+  if (!vw || typeof vw !== "object") return null;
+  const obj = vw as Record<string, unknown>;
+  if (Array.isArray(obj.conditions)) {
+    return { combinator: obj.combinator === "or" ? "or" : "and", conditions: obj.conditions as VisibilityCondition[] };
+  }
+  if (typeof obj.fieldKey === "string") {
+    return { combinator: "and", conditions: [{ source: "field", fieldKey: obj.fieldKey as string, operator: obj.operator as ConditionOperator, value: obj.value as string | undefined }] };
+  }
+  return null;
+}
+
+function evalCondition(c: VisibilityCondition, values: TemplateFormValues, allFields: Field[], processStep: string): boolean {
+  let sv: string;
+  if (c.source === "process_step") {
+    sv = processStep;
+  } else {
+    const sib = allFields.find((f) => f.key === c.fieldKey);
+    if (!sib) return true;
+    const v = values[sib.key ?? ""];
+    sv = v == null ? "" : String(v);
+  }
+  switch (c.operator) {
+    case "equals":       return sv === (c.value ?? "");
+    case "not_equals":   return sv !== (c.value ?? "");
     case "is_empty":     return sv.trim() === "";
     case "is_not_empty": return sv.trim() !== "";
     default:             return true;
   }
+}
+
+// Works for a field OR a section — both carry `hidden` + `visibleWhen`. An
+// empty/absent rule group means no restriction (visible). `processStep` is the
+// document's current workflow status ("draft" while a new form is being filled).
+function evalVisible(
+  item: { hidden?: boolean; visibleWhen?: VisibleWhen | null },
+  values: TemplateFormValues,
+  allFields: Field[],
+  processStep = "draft",
+): boolean {
+  if (item.hidden) return false;
+  const g = ruleConditions(item.visibleWhen);
+  if (!g || g.conditions.length === 0) return true;
+  const results = g.conditions.map((c) => evalCondition(c, values, allFields, processStep));
+  return g.combinator === "or" ? results.some(Boolean) : results.every(Boolean);
 }
 
 // ── Table column cell ─────────────────────────────────────────────────────────
@@ -973,12 +1037,15 @@ function FormField({ field, control, errors, onChangeCb, readOnly, allValues }: 
 
 // ── Main export ───────────────────────────────────────────────────────────────
 
-export default function TemplateForm({ sections, values, onChange, readOnly = false, documentId }: {
+export default function TemplateForm({ sections, values, onChange, readOnly = false, documentId, documentStatus }: {
   sections: unknown[];
   values: TemplateFormValues;
   onChange: (key: string, value: unknown) => void;
   readOnly?: boolean;
   documentId?: string;
+  // The document's current workflow status, for "process step" visibility
+  // conditions. Absent (a brand-new form) is treated as "draft".
+  documentStatus?: string;
 }) {
   const list = (Array.isArray(sections) ? sections : []) as Section[];
   const allFields = list.flatMap((s) => s.fields ?? []);
@@ -1021,6 +1088,15 @@ export default function TemplateForm({ sections, values, onChange, readOnly = fa
   // Keep a live snapshot of form values for conditional visibility
   const liveValues = { ...values, ...(watch() as TemplateFormValues), __document_id: documentId };
 
+  // Viewer context for role-restricted sections.
+  const viewer: FormViewer = {
+    groupNames: currentUser?.group_names ?? [],
+    isAdmin: Boolean(currentUser?.has_admin_access || currentUser?.is_staff),
+  };
+
+  // Current process step for "process step" visibility conditions.
+  const processStep = documentStatus || "draft";
+
   if (list.length === 0) {
     return <p className="text-sm text-muted-foreground">This form has no fields.</p>;
   }
@@ -1031,8 +1107,11 @@ export default function TemplateForm({ sections, values, onChange, readOnly = fa
   return (
     <div className="space-y-6">
       {list.map((section, si) => {
+        // Hidden / conditionally-hidden / role-restricted sections drop out entirely.
+        if (!evalVisible(section, liveValues as TemplateFormValues, allFields, processStep)) return null;
+        if (!sectionVisibleToViewer(section, viewer)) return null;
         const visibleFields = (section.fields ?? []).filter((f) =>
-          evalVisible(f, liveValues as TemplateFormValues, allFields)
+          evalVisible(f, liveValues as TemplateFormValues, allFields, processStep)
         );
         return (
           <div key={section.id ?? si} className="rounded-xl border border-border bg-card shadow-sm overflow-hidden">
@@ -1070,18 +1149,28 @@ export default function TemplateForm({ sections, values, onChange, readOnly = fa
 // ── Validation helper (unchanged signature) ───────────────────────────────────
 
 /** Returns labels of required fields that are missing or fail basic validation. */
-export function requiredFieldLabels(sections: unknown[], values: TemplateFormValues): string[] {
+export function requiredFieldLabels(
+  sections: unknown[],
+  values: TemplateFormValues,
+  viewer?: FormViewer,
+  processStep = "draft",
+): string[] {
   const list = (Array.isArray(sections) ? sections : []) as Section[];
   const allFields = list.flatMap((s) => s.fields ?? []);
   const missing: string[] = [];
   for (const s of list) {
+    // Don't require fields the user never sees because their section is hidden
+    // (always-hidden, a conditional rule that isn't met, or a role restriction
+    // the viewer isn't a member of).
+    if (!evalVisible(s, values, allFields, processStep)) continue;
+    if (!sectionVisibleToViewer(s, viewer)) continue;
     for (const f of s.fields ?? []) {
       const type = f.type ?? "text";
       if (type === "divider" || type === "heading") continue;
       // Formula fields auto-fill (and the server finalizes them); never block on them.
       if (resolveFormula(f.formula)) continue;
       // Don't require a field the user can't see (hidden / conditionally hidden).
-      if (f.hidden || !evalVisible(f, values, allFields)) continue;
+      if (f.hidden || !evalVisible(f, values, allFields, processStep)) continue;
       const key = f.key ?? "";
       const v   = values[key];
       if (f.required) {

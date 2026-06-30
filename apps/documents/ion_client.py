@@ -44,11 +44,18 @@ from urllib.parse import urljoin
 
 import requests
 
+from apps.sunsystems.crypto import decrypt_secret, encrypt_secret, is_encrypted
+
 logger = logging.getLogger(__name__)
 
 # Network timeouts (connect, read) in seconds. Migrations can pull large
 # binaries, so the read side is generous.
 _DEFAULT_TIMEOUT = (10, 120)
+
+# Connection keys whose values are secrets: encrypted at rest (Fernet, via
+# apps.sunsystems.crypto) and redacted in API responses. Single source of truth
+# shared by the migration views' redaction logic.
+SECRET_CONNECTION_KEYS = ("client_secret", "sask", "password")
 
 
 class IONError(RuntimeError):
@@ -162,6 +169,34 @@ def default_connection_from_settings() -> dict:
         "idm_path": getattr(settings, "ION_IDM_PATH", "IDM/api") or "IDM/api",
         "verify_tls": bool(getattr(settings, "ION_VERIFY_TLS", True)),
     }
+
+
+def encrypt_connection_secrets(connection: dict | None) -> dict:
+    """Return a copy of ``connection`` with secret fields encrypted at rest.
+
+    Already-encrypted values are left untouched, so re-saving a job that only
+    changed non-secret fields is idempotent. Call this just before persisting a
+    job's connection.
+    """
+    out = dict(connection or {})
+    for key in SECRET_CONNECTION_KEYS:
+        value = out.get(key)
+        if value and not is_encrypted(value):
+            out[key] = encrypt_secret(value)
+    return out
+
+
+def decrypt_connection_secrets(connection: dict | None) -> dict:
+    """Inverse of :func:`encrypt_connection_secrets` — decrypt for actual use.
+
+    Legacy plaintext values (no ``enc:`` marker) pass through unchanged, so the
+    client keeps working for connections saved before encryption was added.
+    """
+    out = dict(connection or {})
+    for key in SECRET_CONNECTION_KEYS:
+        if out.get(key):
+            out[key] = decrypt_secret(out[key])
+    return out
 
 
 def merge_connection_with_defaults(connection: dict | None) -> dict:
