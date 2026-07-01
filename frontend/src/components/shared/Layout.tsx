@@ -15,7 +15,7 @@ import {
   LayoutDashboard, FileText, Upload, Search,
   Workflow, Settings, LogOut,
   Bell, Users, Building2, UserRoundCog, Shield,
-  ChevronDown, ChevronRight, Archive, ScanLine, Loader2, UserCheck, Monitor, Lock, History, Trash2,
+  ChevronDown, ChevronRight, ChevronLeft, Archive, ScanLine, Loader2, UserCheck, Monitor, Lock, History, Trash2,
   BellRing, CircleUserRound, ClipboardCheck, Inbox, ArrowRight, FileSignature, LayoutTemplate, Database,
   Plug,
 } from "lucide-react";
@@ -64,6 +64,20 @@ function navTarget(to: string) {
     pathname,
     search: rawSearch ? `?${rawSearch}` : "",
   };
+}
+
+// Content-heavy routes that open with the sidebar collapsed (full-width canvas)
+// by default. The user can still toggle the sidebar back open on these pages.
+function isFullWidthByDefaultRoute(pathname: string): boolean {
+  if (pathname === "/admin/templates" || pathname === "/workflow/builder") return true;
+  // Single-document workspace: /documents/:id (not the upload/scan/review/etc.)
+  const seg = pathname.split("/")[2] ?? "";
+  return (
+    pathname.startsWith("/documents/") &&
+    Boolean(seg) &&
+    !["upload", "scan", "review", "trash", "folders"].includes(seg) &&
+    !pathname.slice("/documents/".length).includes("/")
+  );
 }
 
 // ── Navigation structure (unchanged) ─────────────────────────────────────────
@@ -629,6 +643,35 @@ export default function Layout() {
   const [_foldersExpanded, _setFoldersExpanded] = useState(true);
   void _foldersExpanded; void _setFoldersExpanded;
 
+  // ── Sidebar collapse. `collapsePref` is the user's remembered choice for
+  // regular pages (persisted). The effective collapsed state is DERIVED during
+  // render — not stored in an effect — so a navigation paints the new page at
+  // the correct width on the first frame (one smooth slide, no snap-then-slide).
+  const [collapsePref, setCollapsePref] = useState<boolean>(() => {
+    if (typeof window === "undefined") return false;
+    try { return window.localStorage.getItem("sidebarCollapsed") === "1"; } catch { return false; }
+  });
+  // A manual toggle is remembered against the path it was made on, so it applies
+  // for that visit but never leaks onto the next page.
+  const [sidebarOverride, setSidebarOverride] = useState<{ path: string; collapsed: boolean } | null>(null);
+  useEffect(() => {
+    try { window.localStorage.setItem("sidebarCollapsed", collapsePref ? "1" : "0"); } catch { /* ignore */ }
+  }, [collapsePref]);
+
+  const routeDefaultCollapsed = isFullWidthByDefaultRoute(location.pathname) ? true : collapsePref;
+  const sidebarCollapsed =
+    sidebarOverride && sidebarOverride.path === location.pathname
+      ? sidebarOverride.collapsed
+      : routeDefaultCollapsed;
+
+  const toggleSidebar = () => {
+    const next = !sidebarCollapsed;
+    setSidebarOverride({ path: location.pathname, collapsed: next });
+    // On regular pages the toggle is also the lasting preference; on the
+    // collapse-by-default routes it's only an override for the current visit.
+    if (!isFullWidthByDefaultRoute(location.pathname)) setCollapsePref(next);
+  };
+
   useEffect(() => {
     let fallbackTimer: ReturnType<typeof setTimeout> | null = null;
     let idleHandle: number | null = null;
@@ -716,13 +759,14 @@ export default function Layout() {
   }, [idleReady]);
 
   return (
-    <div className="flex h-screen bg-background text-foreground">
+    <div className="relative flex h-screen bg-background text-foreground">
 
       {/* ── Sidebar ────────────────────────────────────────────────────── */}
       <aside
         className={clsx(
-          "flex w-[270px] flex-shrink-0 flex-col bg-[#F2F3F4] text-[#1F2933]",
-          usesWorkspaceCommandBar ? "border-r-0" : "border-r border-[#C8CDD2]",
+          "flex flex-shrink-0 flex-col overflow-hidden bg-[#F2F3F4] text-[#1F2933]",
+          sidebarCollapsed ? "w-0 border-r-0" : "w-[270px]",
+          !sidebarCollapsed && !usesWorkspaceCommandBar && "border-r border-[#C8CDD2]",
         )}
       >
         {/* Logo */}
@@ -733,7 +777,7 @@ export default function Layout() {
         </div>
 
         {/* Nav — scrollable, two sections split by a divider */}
-        <nav className="flex-1 overflow-y-auto">
+        <nav className="scrollbar-minimal flex-1 overflow-y-auto">
           {/* ── Primary nav ─────────────────────────────────────────────── */}
           <div className="space-y-0.5 px-2 py-3">
             {mainNav.map((entry) => {
@@ -848,6 +892,23 @@ export default function Layout() {
         <SidebarProfile />
       </aside>
 
+      {/* ── Sidebar collapse / expand toggle ─────────────────────────────
+          Sits on the sidebar↔content boundary and slides with it. Collapsing
+          drops the sidebar to 0 width so the workspace spans the full width. */}
+      <button
+        type="button"
+        onClick={toggleSidebar}
+        className={clsx(
+          "absolute top-1/2 z-40 flex h-7 w-7 -translate-y-1/2 items-center justify-center rounded-full border border-[#C8CDD2] bg-white text-[#5E6870] shadow-md transition-[background-color,color,border-color] duration-200 ease-in-out hover:border-[#287EAD] hover:bg-[#EEF6FB] hover:text-[#287EAD]",
+          sidebarCollapsed ? "left-0" : "left-[258px]",
+        )}
+        title={sidebarCollapsed ? "Expand sidebar" : "Collapse sidebar"}
+        aria-label={sidebarCollapsed ? "Expand sidebar" : "Collapse sidebar"}
+        aria-expanded={!sidebarCollapsed}
+      >
+        {sidebarCollapsed ? <ChevronRight className="h-4 w-4" /> : <ChevronLeft className="h-4 w-4" />}
+      </button>
+
       {/* ── Main area (unchanged) ──────────────────────────────────── */}
       <div className="flex-1 flex flex-col min-w-0">
         {!usesWorkspaceCommandBar && (
@@ -870,7 +931,7 @@ export default function Layout() {
         <main
           ref={mainRef}
           className={clsx(
-            "flex-1 overflow-y-auto bg-background",
+            "scrollbar-minimal flex-1 overflow-y-auto bg-background",
             usesWorkspaceCommandBar ? "p-0" : "p-6",
           )}
         >

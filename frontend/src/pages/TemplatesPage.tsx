@@ -708,7 +708,7 @@ export default function TemplatesPage() {
   // ── List mode ────────────────────────────────────────────────────────────
 
   return (
-    <div className="min-h-screen bg-[#EDEDED] text-[#1F2933]">
+    <div className="flex h-full flex-col bg-[#EDEDED] text-[#1F2933]">
       <WorkspaceCommandBar
         actions={
           <>
@@ -747,8 +747,8 @@ export default function TemplatesPage() {
         </div>
       </WorkspaceCommandBar>
 
-      <div className="grid min-h-[calc(100vh-69px)] grid-cols-[290px_1fr]">
-        <aside className="border-r border-[#C8CDD2] bg-[#F6F7F8]">
+      <div className="grid min-h-0 flex-1 grid-cols-[290px_1fr] overflow-hidden">
+        <aside className="scrollbar-minimal min-h-0 overflow-y-auto border-r border-[#C8CDD2] bg-[#F6F7F8]">
           <div className="border-b border-[#C8CDD2] p-3">
             <button
               type="button"
@@ -786,7 +786,7 @@ export default function TemplatesPage() {
           </div>
         </aside>
 
-        <main className="min-w-0 p-5 pr-8">
+        <main className="scrollbar-minimal min-h-0 min-w-0 overflow-y-auto p-5 pr-8">
           <div className="border border-[#C8CDD2] bg-white">
             <div className="flex min-h-[58px] items-center justify-between gap-3 border-b border-[#C8CDD2] px-4 py-3">
               <div className="flex flex-wrap items-center gap-3">

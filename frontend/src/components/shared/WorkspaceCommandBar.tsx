@@ -37,7 +37,11 @@ export function WorkspaceCommandBar({
   return (
     <div
       className={clsx(
-        "flex h-[69px] shrink-0 items-center gap-3 bg-[#287EAD] px-5 pr-6 text-white",
+        // sticky keeps the bar pinned to the top of whatever scrolls beneath it
+        // (page-level scroll on pages that still use min-h-screen). Pages that
+        // give the body its own scroll container render the bar above it, where
+        // sticky is simply a no-op.
+        "sticky top-0 z-20 flex h-[69px] shrink-0 items-center gap-3 bg-[#287EAD] px-5 pr-6 text-white",
         className,
       )}
     >

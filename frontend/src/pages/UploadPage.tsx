@@ -1677,7 +1677,7 @@ export default function UploadPage({ scanOnly = false }: UploadPageProps) {
 
   return (
     <>
-    <div className="min-h-screen bg-[#EDEDED] text-[#1F2933]">
+    <div className="flex h-full flex-col bg-[#EDEDED] text-[#1F2933]">
       <WorkspaceCommandBar
         actions={
           <div className="hidden items-center gap-3 text-xs text-white/80 md:flex">
@@ -1709,6 +1709,8 @@ export default function UploadPage({ scanOnly = false }: UploadPageProps) {
           </p>
         </div>
       </WorkspaceCommandBar>
+
+      <div className="scrollbar-minimal min-h-0 flex-1 overflow-y-auto">
 
       {/* ── OCR wait / review / submitting ──────────────────────────────── */}
       {isOcrFlow && scanStage !== "idle" && scanStage !== "uploading" && (
@@ -2478,6 +2480,7 @@ export default function UploadPage({ scanOnly = false }: UploadPageProps) {
           )}
         </div>
       )}
+      </div>
     </div>
 
     {/* ── Built template form modal ─────────────────────────────────────────── */}

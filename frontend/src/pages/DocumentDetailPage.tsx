@@ -877,7 +877,7 @@ export default function DocumentDetailPage() {
   let lastDateHeader = "";
 
   return (
-    <div className="min-h-screen bg-[#EDEDED] text-[#1F2933]">
+    <div className="flex h-full flex-col bg-[#EDEDED] text-[#1F2933]">
       <iframe ref={printFrameRef} title="Printable document" className="hidden" />
 
       {workflowActionCompleted && !activeTask && (
@@ -1025,7 +1025,60 @@ export default function DocumentDetailPage() {
             )}
           </div>
 
-          <div ref={moreMenuRef} className="relative">
+          {/* Secondary actions — shown inline on wide screens, and collapsed
+              into the "More" menu below xl so the bar never overflows. */}
+          <button
+            onClick={handlePrintDocument}
+            disabled={!canDownload || (!viewerLinks.openInNewTabUrl && !viewerLinks.downloadHref)}
+            className={cn(commandActionClass, "hidden xl:flex")}
+            title={canDownload ? "Print document" : "Print permission required"}
+          >
+            <Printer className="w-3.5 h-3.5" />
+            <span>Print</span>
+          </button>
+
+          {canUploadVersion && !isLockedByOther && (
+            <Suspense fallback={<span className="hidden h-8 items-center px-2 text-xs text-white/70 xl:inline-flex">Loading…</span>}>
+              <UploadVersionDrawer
+                documentId={doc.id}
+                currentVersion={doc.current_version}
+                maxSizeMb={doc.document_type?.max_file_size_mb}
+                onVersionUploaded={handleVersionUploaded}
+                triggerClassName={cn(commandActionClass, "hidden xl:flex")}
+                triggerIconClassName="w-3.5 h-3.5"
+                disabled={!lockedByMe}
+                triggerTitle={lockedByMe ? "Upload a new version" : "Lock the document first to upload a new version"}
+              />
+            </Suspense>
+          )}
+
+          {canArchiveNow && (
+            <button
+              onClick={() => archiveMutation.mutate()}
+              disabled={archiveMutation.isPending}
+              className={cn(commandActionClass, "hidden xl:flex")}
+              title="Archive document"
+            >
+              {archiveMutation.isPending ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <Archive className="w-3.5 h-3.5" />}
+              <span>Archive</span>
+            </button>
+          )}
+
+          {canDelete && (
+            <button
+              onClick={() => {
+                if (window.confirm("Move this document to Trash? You can restore it later.")) deleteMutation.mutate();
+              }}
+              disabled={deleteMutation.isPending}
+              className={cn(commandActionClass, "hidden xl:flex")}
+              title="Move to Trash"
+            >
+              {deleteMutation.isPending ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <Trash2 className="w-3.5 h-3.5" />}
+              <span>Delete</span>
+            </button>
+          )}
+
+          <div ref={moreMenuRef} className="relative xl:hidden">
             <button
               type="button"
               onClick={() => setShowMoreMenu((v) => !v)}
@@ -1099,7 +1152,7 @@ export default function DocumentDetailPage() {
 
       {/* Enterprise workspace: preview left, document intelligence right */}
       <div className={cn(
-        "grid grid-cols-1 items-start gap-4 p-4 pr-8 lg:grid-cols-12",
+        "scrollbar-minimal grid min-h-0 flex-1 grid-cols-1 items-start gap-4 overflow-y-auto p-4 pr-8 lg:grid-cols-12",
         compareDoc && "xl:grid-cols-12",
       )}>
 

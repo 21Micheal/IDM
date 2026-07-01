@@ -57,7 +57,7 @@ export default function TrashPage() {
   });
 
   return (
-    <div className="min-h-screen bg-[#EDEDED] text-[13px] text-[#1F2933]">
+    <div className="flex h-full flex-col bg-[#EDEDED] text-[13px] text-[#1F2933]">
 
       {/* ── Page header bar ─────────────────────────────────────────────────── */}
       <WorkspaceCommandBar
@@ -81,7 +81,7 @@ export default function TrashPage() {
       </WorkspaceCommandBar>
 
       {/* ── Body ────────────────────────────────────────────────────────────── */}
-      <div className="space-y-4 p-5 pr-0">
+      <div className="scrollbar-minimal min-h-0 flex-1 space-y-4 overflow-y-auto p-5 pr-0">
 
         {/* Retention notice */}
         <div className="flex items-start gap-2.5 border border-amber-300 bg-amber-50 px-4 py-3 text-sm text-amber-800">

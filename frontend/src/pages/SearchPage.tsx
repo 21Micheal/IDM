@@ -344,7 +344,7 @@ export default function SearchPage() {
   ].filter(Boolean).length;
 
   return (
-    <div className="min-h-screen bg-[#EDEDED] text-[13px] text-[#1F2933]">
+    <div className="flex h-full flex-col bg-[#EDEDED] text-[13px] text-[#1F2933]">
       <WorkspaceCommandBar
         actions={
           <div className="flex items-center gap-2 text-white/85">
@@ -426,7 +426,7 @@ export default function SearchPage() {
           </select>
       </WorkspaceCommandBar>
 
-      <div className="px-5 pb-8 pr-0">
+      <div className="scrollbar-minimal min-h-0 flex-1 overflow-y-auto px-5 pb-8 pr-0">
         <section className="border-b border-[#C8CDD2] bg-[#F7F7F7] px-4 py-3">
           <div className="grid gap-3 lg:grid-cols-[1fr_1fr_1fr_1fr_1fr_auto]">
             <input

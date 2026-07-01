@@ -197,7 +197,7 @@ export default function AuditPage() {
   }, [data]);
 
   return (
-    <div className="min-h-screen bg-[#EDEDED] text-[#1F2933]">
+    <div className="flex h-full flex-col bg-[#EDEDED] text-[#1F2933]">
       {/* Header */}
       <WorkspaceCommandBar
         actions={
@@ -242,7 +242,7 @@ export default function AuditPage() {
       </WorkspaceCommandBar>
 
       {/* Filters: full controls for admins, simplified note for regular users */}
-      <div className="p-5 pr-0">
+      <div className="scrollbar-minimal min-h-0 flex-1 overflow-y-auto p-5 pr-0">
       {user?.has_admin_access ? (
         <div className="mb-5 border border-[#C8CDD2] bg-white p-4">
           <div className="flex items-center justify-between mb-5">

@@ -64,7 +64,7 @@ export default function NotificationsPage() {
   ];
 
   return (
-    <div className="min-h-screen bg-[#EDEDED]">
+    <div className="flex h-full flex-col bg-[#EDEDED]">
       <WorkspaceCommandBar
         actions={
           <>
@@ -119,7 +119,7 @@ export default function NotificationsPage() {
         </div>
       </WorkspaceCommandBar>
 
-      <div className="p-5 pr-0">
+      <div className="scrollbar-minimal min-h-0 flex-1 overflow-y-auto p-5 pr-0">
         <NotificationList
           notifications={visibleNotifications}
           isLoading={isLoading}

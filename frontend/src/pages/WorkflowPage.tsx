@@ -79,7 +79,7 @@ export default function WorkflowPage() {
   const clearFilters = () => setFilters(DEFAULT_WORKFLOW_TASK_FILTERS);
 
   return (
-    <div className="min-h-screen bg-[#EDEDED]">
+    <div className="flex h-full flex-col bg-[#EDEDED]">
       <WorkspaceCommandBar
         actions={
           <div className="border border-white/25 bg-white/10 px-3 py-2 text-sm font-semibold">
@@ -96,7 +96,7 @@ export default function WorkflowPage() {
         </div>
       </WorkspaceCommandBar>
 
-      <div className="space-y-4 p-5 pr-0">
+      <div className="scrollbar-minimal min-h-0 flex-1 space-y-4 overflow-y-auto p-5 pr-0">
         {isLoading && (
           <div className="flex h-40 items-center justify-center border border-[#C8CDD2] bg-white">
             <Loader2 className="h-6 w-6 animate-spin text-[#287EAD]" />
