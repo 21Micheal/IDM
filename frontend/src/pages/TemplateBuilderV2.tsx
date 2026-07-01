@@ -54,6 +54,7 @@ import {
 import { cn } from "@/lib/utils";
 import { documentTypesAPI, groupsAPI, workflowAPI } from "@/services/api";
 import { FORMULA_OPTIONS } from "@/components/templates/formulas";
+import { CURRENCY_CODES, currencySymbolFor } from "@/lib/currencies";
 import JournalPayloadModal from "@/components/templates/JournalPayloadModal";
 
 /* ============================================================
@@ -88,6 +89,10 @@ export interface TableColumn {
   minLength?: number;
   maxLength?: number;
   currencySymbol?: string;
+  // For a currency column: the KEY of a sibling column (a currency dropdown) in
+  // the same table whose selected code drives this cell's symbol per row. When
+  // set, `currencySymbol` is only the fallback for unknown codes.
+  currencyFromColumn?: string;
   dateFormat?: string;
   referenceSource?: string;    // e.g. "users", "departments", "vendors"
   readonly?: boolean;
@@ -211,7 +216,11 @@ export interface TemplateField {
   max?: number;
   minLength?: number;
   maxLength?: number;
-  currencySymbol?: string;
+  currencySymbol?: string;     // fixed / fallback symbol for a currency field
+  // For a currency field: the KEY of a sibling field (a currency dropdown) whose
+  // selected code drives the symbol dynamically. When set, `currencySymbol` is
+  // only the fallback used if the selected value isn't a known currency code.
+  currencyFromField?: string;
   dateFormat?: string;
   referenceSource?: string;
   formula?: string;            // auto-fill formula, e.g. "current_user", "now"
@@ -1351,9 +1360,10 @@ const COL_TYPES: Array<{ value: TableColumnType; label: string }> = [
 ];
 
 function ColumnConfigModal({
-  column, onClose, onSave, onDelete,
+  column, siblingColumns = [], onClose, onSave, onDelete,
 }: {
   column: TableColumn;
+  siblingColumns?: TableColumn[];
   onClose: () => void;
   onSave: (col: TableColumn) => void;
   onDelete: () => void;
@@ -1363,6 +1373,10 @@ function ColumnConfigModal({
 
   const set = (patch: Partial<TableColumn>) => setDraft((d) => ({ ...d, ...patch }));
   const isDropdown = draft.type === "select";
+  // Sibling columns whose value can hold a currency code (drives this cell's symbol).
+  const currencySourceColumns = siblingColumns.filter(
+    (c) => c.id !== draft.id && c.key && ["select", "text"].includes(c.type ?? "text"),
+  );
   const isNumeric  = draft.type === "number" || draft.type === "currency";
   const isText     = draft.type === "text" || draft.type === "textarea" || draft.type === "email" || draft.type === "phone";
 
@@ -1476,7 +1490,20 @@ function ColumnConfigModal({
                 </>
               )}
               {draft.type === "currency" && (
-                <Row label="Currency symbol"><input className={iCls} value={draft.currencySymbol ?? "KSh"} onChange={(e) => set({ currencySymbol: e.target.value })} /></Row>
+                <>
+                  <Row label="Currency symbol source">
+                    <select className={iCls} value={draft.currencyFromColumn ?? ""}
+                            onChange={(e) => set({ currencyFromColumn: e.target.value || undefined })}>
+                      <option value="">Fixed symbol</option>
+                      {currencySourceColumns.map((c) => (
+                        <option key={c.id} value={c.key}>From column: {c.label} ({c.key})</option>
+                      ))}
+                    </select>
+                  </Row>
+                  <Row label={draft.currencyFromColumn ? "Fallback symbol" : "Currency symbol"}>
+                    <input className={iCls} value={draft.currencySymbol ?? "KSh"} onChange={(e) => set({ currencySymbol: e.target.value })} />
+                  </Row>
+                </>
               )}
               {isText && (
                 <>
@@ -1567,8 +1594,16 @@ function DropdownValuesEditor({ options, onChange }: { options: string[]; onChan
   };
   return (
     <div className="border border-[#C8CDD2] bg-white">
-      <div className="flex items-center border-b border-[#C8CDD2] bg-[#EEF6FB] px-3 py-2">
+      <div className="flex items-center justify-between border-b border-[#C8CDD2] bg-[#EEF6FB] px-3 py-2">
         <span className="text-xs font-semibold uppercase tracking-wider text-[#287EAD]">Values</span>
+        <button
+          type="button"
+          title="Append standard currency codes (USD, EUR, KES…) — link an amount field to this dropdown to auto-set its symbol"
+          onClick={() => onChange([...options, ...CURRENCY_CODES.filter((c) => !options.includes(c))])}
+          className="text-[10px] font-semibold text-[#287EAD] hover:text-[#1E6F99]"
+        >
+          + Currency codes
+        </button>
       </div>
       <div className="divide-y divide-[#E5E8EB]">
         {options.map((opt, idx) => (
@@ -1898,6 +1933,9 @@ function FieldEditor({ field, onUpdate, allFields, processSteps }: {
 
   const keyDuplicate = allFields.filter((f) => f.id !== field.id && f.key === field.key).length > 0;
   const siblings = allFields.filter((f) => f.id !== field.id && f.key);
+  // Fields whose selected value can drive a currency field's symbol — dropdowns
+  // (and plain text) that hold a currency code.
+  const currencySourceSiblings = siblings.filter((s) => ["select", "radio", "text"].includes(s.type));
 
   return (
     <div className="space-y-5">
@@ -2016,8 +2054,25 @@ function FieldEditor({ field, onUpdate, allFields, processSteps }: {
             </div>
           )}
           {field.type === "currency" && (
-            <InspectorRow label="Currency symbol">
-              <input className={inputCls} value={field.currencySymbol ?? "KSh"} onChange={(e) => onUpdate({ currencySymbol: e.target.value })} />
+            <InspectorRow
+              label="Currency symbol"
+              hint={field.currencyFromField
+                ? "Symbol follows the linked field's selected currency code; the symbol below is the fallback."
+                : "Fixed symbol shown before the amount."}
+            >
+              <div className="space-y-2">
+                <select className={inputCls}
+                        value={field.currencyFromField ?? ""}
+                        onChange={(e) => onUpdate({ currencyFromField: e.target.value || undefined })}>
+                  <option value="">Fixed symbol</option>
+                  {currencySourceSiblings.map((s) => (
+                    <option key={s.id} value={s.key}>From field: {s.label} ({s.key})</option>
+                  ))}
+                </select>
+                <input className={inputCls} value={field.currencySymbol ?? "KSh"}
+                       onChange={(e) => onUpdate({ currencySymbol: e.target.value })}
+                       placeholder={field.currencyFromField ? "Fallback symbol" : "Symbol, e.g. KSh"} />
+              </div>
             </InspectorRow>
           )}
           {isText && (
@@ -2167,7 +2222,7 @@ const previewInputCls =
   "h-10 w-full rounded-lg border border-slate-200 bg-white px-3 text-sm outline-none transition " +
   "focus:border-[#287EAD] focus:ring-2 focus:ring-[#287EAD]/15 text-slate-800";
 
-function PreviewColumnInput({ col, value, onChange }: { col: TableColumn; value: string; onChange: (v: string) => void }) {
+function PreviewColumnInput({ col, value, onChange, row }: { col: TableColumn; value: string; onChange: (v: string) => void; row?: Record<string, string> }) {
   const base = "w-full bg-transparent text-sm outline-none text-slate-700 placeholder:text-slate-300 py-1";
   if (col.hidden) return null;
   switch (col.type) {
@@ -2182,13 +2237,16 @@ function PreviewColumnInput({ col, value, onChange }: { col: TableColumn; value:
       return <input type="checkbox" checked={value === "true"} disabled={col.readonly} onChange={(e) => onChange(e.target.checked ? "true" : "false")} className="h-4 w-4 accent-[#287EAD]" />;
     case "textarea":
       return <textarea rows={1} value={value} disabled={col.readonly} onChange={(e) => onChange(e.target.value)} className={cn(base, "resize-none")} />;
-    case "currency":
+    case "currency": {
+      const symbol = currencySymbolFor(col.currencyFromColumn ? row?.[col.currencyFromColumn] : undefined)
+        ?? col.currencySymbol ?? "KSh";
       return (
         <div className="flex items-center gap-1">
-          <span className="text-[10px] text-slate-400">{col.currencySymbol ?? "KSh"}</span>
+          <span className="text-[10px] text-slate-400">{symbol}</span>
           <input type="number" step="0.01" min={col.min} max={col.max} disabled={col.readonly} value={value} onChange={(e) => onChange(e.target.value)} className={base} placeholder="0.00" />
         </div>
       );
+    }
     case "number":
       return <input type="number" min={col.min} max={col.max} value={value} disabled={col.readonly} onChange={(e) => onChange(e.target.value)} className={base} />;
     case "date":
@@ -2256,7 +2314,7 @@ function PreviewTableField({ field }: { field: TemplateField }) {
               <tr key={rowIdx} className="border-b border-slate-100 last:border-0 hover:bg-slate-50/50 transition-colors">
                 {cols.map((col) => (
                   <td key={col.id} className="px-2 py-1 border-r border-slate-100 last:border-0">
-                    <PreviewColumnInput col={col} value={row[col.key] ?? ""} onChange={(v) => updateCell(rowIdx, col.key, v)} />
+                    <PreviewColumnInput col={col} value={row[col.key] ?? ""} row={row} onChange={(v) => updateCell(rowIdx, col.key, v)} />
                   </td>
                 ))}
                 <td className="text-center px-1">
@@ -2310,10 +2368,12 @@ function evalVisible(item: VisibilityState, values: Record<string, unknown>, all
   return group.combinator === "or" ? results.some(Boolean) : results.every(Boolean);
 }
 
-function PreviewField({ field, register, errors }: {
+function PreviewField({ field, register, errors, values, allFields }: {
   field: TemplateField;
   register: UseFormRegister<Record<string, unknown>>;
   errors: FieldErrors<Record<string, unknown>>;
+  values: Record<string, unknown>;
+  allFields: TemplateField[];
 }) {
   if (field.hidden) return null;
   if (field.type === "table") return <PreviewTableField field={field} />;
@@ -2382,15 +2442,22 @@ function PreviewField({ field, register, errors }: {
           {field.required && <span className="text-red-500">*</span>}
         </label>
       );
-    case "currency":
+    case "currency": {
+      const linked = field.currencyFromField
+        ? allFields.find((f) => f.key === field.currencyFromField)
+        : undefined;
+      const linkedVal = linked ? values[linked.id] : undefined;
+      const symbol = currencySymbolFor(typeof linkedVal === "string" ? linkedVal : undefined)
+        ?? field.currencySymbol ?? "KSh";
       control = (
         <div className="relative">
-          <span className="absolute left-3 top-1/2 -translate-y-1/2 text-sm text-slate-400 font-medium">{field.currencySymbol ?? "KSh"}</span>
+          <span className="absolute left-3 top-1/2 -translate-y-1/2 text-sm text-slate-400 font-medium">{symbol}</span>
           <input type="number" step="0.01" {...reg} placeholder="0.00" disabled={field.readonly}
                  defaultValue={field.defaultValue ?? ""} className={cn(previewInputCls, "pl-14")} />
         </div>
       );
       break;
+    }
     case "number":
       control = <input type="number" {...reg} placeholder={field.placeholder} disabled={field.readonly} defaultValue={field.defaultValue ?? ""} className={previewInputCls} />;
       break;
@@ -2491,7 +2558,7 @@ function Preview({ sections, templateName }: { sections: TemplateSection[]; temp
                 if (!evalVisible(f, values, allFields)) return null;
                 return (
                   <div key={f.id} style={{ gridColumn: `span ${f.colSpan ?? 12} / span ${f.colSpan ?? 12}` }}>
-                    <PreviewField field={f} register={register} errors={errors} />
+                    <PreviewField field={f} register={register} errors={errors} values={values} allFields={allFields} />
                   </div>
                 );
               })}
@@ -2984,7 +3051,7 @@ export default function TemplateBuilderV2({ initial, onSave, onCancel, isSaving,
     const sec = template.sections.find((s) => s.id === configuringColumn.sectionId);
     const fld = sec?.fields.find((f) => f.id === configuringColumn.fieldId);
     const col = fld?.columns?.find((c) => c.id === configuringColumn.colId);
-    return col ? { ...configuringColumn, column: col } : null;
+    return col ? { ...configuringColumn, column: col, columns: fld?.columns ?? [] } : null;
   }, [configuringColumn, template]);
 
   return (
@@ -3147,6 +3214,7 @@ export default function TemplateBuilderV2({ initial, onSave, onCancel, isSaving,
       {configCol && (
         <ColumnConfigModal
           column={configCol.column}
+          siblingColumns={configCol.columns}
           onClose={() => setConfiguringColumn(null)}
           onSave={(updated) => {
             updateColumn(configCol.sectionId, configCol.fieldId, configCol.colId, updated);

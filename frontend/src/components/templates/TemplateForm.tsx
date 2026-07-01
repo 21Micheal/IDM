@@ -26,6 +26,7 @@ import {
   type ReferenceValue,
 } from "@/components/templates/referenceSources";
 import { resolveFormula, evaluateFormula, formulaLabel } from "@/components/templates/formulas";
+import { currencySymbolFor } from "@/lib/currencies";
 import { useAuthStore } from "@/store/authStore";
 import { Sparkles } from "lucide-react";
 
@@ -38,6 +39,7 @@ type ColType =
 type Column = {
   id?: string; key?: string; label?: string; required?: boolean;
   type?: ColType | string; options?: string[]; currencySymbol?: string;
+  currencyFromColumn?: string;
   tooltip?: string; additionalText?: string; readonly?: boolean; hidden?: boolean;
   defaultValue?: string; referenceSource?: string;
 };
@@ -62,7 +64,7 @@ type Field = {
   placeholder?: string; help_text?: string; helpText?: string;
   required?: boolean; colSpan?: number; width?: number;
   options?: string[]; columns?: Column[]; minRows?: number;
-  currencySymbol?: string; referenceSource?: string; tooltip?: string; regex?: string;
+  currencySymbol?: string; currencyFromField?: string; referenceSource?: string; tooltip?: string; regex?: string;
   min?: number; max?: number; minLength?: number; maxLength?: number;
   defaultValue?: string; readonly?: boolean; hidden?: boolean;
   formula?: string;
@@ -401,9 +403,9 @@ function TableFileCell({ value, onChange, disabled, documentId, attachmentKey }:
   );
 }
 
-function TableColInput({ col, value, onChange, readOnly, documentId, attachmentKey }: {
+function TableColInput({ col, value, onChange, readOnly, documentId, attachmentKey, row }: {
   col: Column; value: unknown; onChange: (v: unknown) => void; readOnly?: boolean;
-  documentId?: string; attachmentKey?: string;
+  documentId?: string; attachmentKey?: string; row?: Record<string, unknown>;
 }) {
   const base = "w-full bg-transparent py-0.5 text-sm outline-none text-foreground placeholder:text-muted-foreground/50";
   if (col.hidden) return null;
@@ -431,13 +433,17 @@ function TableColInput({ col, value, onChange, readOnly, documentId, attachmentK
       return <input type="checkbox" checked={sval === "true"} disabled={dis} onChange={(e) => onChange(e.target.checked ? "true" : "false")} className="h-4 w-4 accent-primary" />;
     case "textarea":
       return <textarea rows={1} value={sval} disabled={dis} onChange={(e) => onChange(e.target.value)} className={`${base} resize-none`} />;
-    case "currency":
+    case "currency": {
+      const linkedVal = col.currencyFromColumn ? row?.[col.currencyFromColumn] : undefined;
+      const symbol = currencySymbolFor(typeof linkedVal === "string" ? linkedVal : undefined)
+        ?? col.currencySymbol ?? "KSh";
       return (
         <div className="flex items-center gap-1">
-          <span className="text-[10px] text-muted-foreground flex-shrink-0">{col.currencySymbol ?? "KSh"}</span>
+          <span className="text-[10px] text-muted-foreground flex-shrink-0">{symbol}</span>
           <input type="number" step="0.01" value={sval} disabled={dis} onChange={(e) => onChange(e.target.value)} className={base} placeholder="0.00" />
         </div>
       );
+    }
     case "number":
       return <input type="number" value={sval} disabled={dis} onChange={(e) => onChange(e.target.value)} className={base} />;
     case "date":
@@ -528,6 +534,7 @@ function TableField({ field, value, onChange, readOnly, tableKey, documentId }: 
                       <TableColInput
                         col={col}
                         value={row[key] ?? ""}
+                        row={row}
                         onChange={(v) => update(ri, key, v)}
                         readOnly={readOnly}
                         documentId={documentId}
@@ -973,12 +980,18 @@ function FormField({ field, control, errors, onChangeCb, readOnly, allValues }: 
       );
       break;
 
-    case "currency":
+    case "currency": {
+      // Symbol follows a linked currency dropdown's selected code when set,
+      // otherwise the field's fixed/fallback symbol.
+      const linkedVal = field.currencyFromField ? allValues[field.currencyFromField] : undefined;
+      const currencySymbol =
+        currencySymbolFor(typeof linkedVal === "string" ? linkedVal : undefined) ??
+        field.currencySymbol ?? "KSh";
       control_el = (
         <Controller control={control} name={key} rules={rules} render={({ field: f }) => (
           <div className="relative">
             <span className="pointer-events-none absolute left-3 top-1/2 -translate-y-1/2 text-sm font-medium text-muted-foreground">
-              {field.currencySymbol ?? "KSh"}
+              {currencySymbol}
             </span>
             <input type="number" step="0.01" value={String(f.value ?? "")} disabled={dis}
               placeholder="0.00" min={field.min} max={field.max}
@@ -988,6 +1001,7 @@ function FormField({ field, control, errors, onChangeCb, readOnly, allValues }: 
         )} />
       );
       break;
+    }
 
     case "reference":
     case "user":
