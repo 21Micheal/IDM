@@ -36,7 +36,7 @@
  * @dnd-kit/core, lucide-react, sonner, and `cn` from "@/lib/utils".
  */
 
-import { useState, useCallback, useMemo, useRef, useEffect } from "react";
+import { useState, useCallback, useMemo, useRef, useEffect, Fragment } from "react";
 import {
   DndContext, PointerSensor, useSensor, useSensors,
   useDraggable, useDroppable, DragOverlay,
@@ -133,6 +133,10 @@ export interface DocBlock {
   alt?: string;
   width?: number;         // px (image)
   height?: number;        // px (image / spacer)
+  /* image/logo layout: "none" = full-width stacked (default); "left"/"right" put
+   * the image on that side with `beside` content filling the remaining space. */
+  float?: "none" | "left" | "right";
+  beside?: string;        // content shown next to the image (tokens allowed)
 
   /* two column */
   left?: string;          // tokens allowed
@@ -419,7 +423,7 @@ function collectPlaceholders(t: DocumentTemplate): string[] {
   const add = (s?: string) => tokensIn(s).forEach((k) => set.add(k));
   [t.header.content, t.footer.content].forEach((c) => { add(c.left); add(c.center); add(c.right); });
   for (const b of t.blocks) {
-    add(b.text); add(b.left); add(b.right); add(b.alt);
+    add(b.text); add(b.left); add(b.right); add(b.alt); add(b.beside);
     (b.items ?? []).forEach(add);
     (b.pairs ?? []).forEach((p) => { add(p.label); add(p.value); });
     (b.rows ?? []).forEach((r) => r.forEach(add));
@@ -729,16 +733,28 @@ function RenderBlock({ block: b, theme, data }: {
     }
     case "image":
     case "logo": {
+      const side = b.float ?? "none";
+      const imgEl = b.src ? (
+        <img src={b.src} alt={renderStr(b.alt)} style={{ width: b.width, height: b.height, objectFit: "contain" }} />
+      ) : (
+        <div style={{ width: b.width, height: b.height, border: "1px dashed #AEB5BB", display: "flex", alignItems: "center", justifyContent: "center", color: "#8C969E", fontSize: 11, background: "#F6F7F8" }}>
+          {b.type === "logo" ? "Company logo" : "Image"}
+        </div>
+      );
+      // Side-by-side: image on the chosen side, `beside` content fills the rest.
+      if (side === "left" || side === "right") {
+        const imgCol = <div style={{ flexShrink: 0, width: b.width }}>{imgEl}</div>;
+        const textCol = <div style={{ flex: 1, minWidth: 0 }}>{render(b.beside)}</div>;
+        return (
+          <div style={{ display: "flex", gap: 20, alignItems: "flex-start", marginTop: b.marginTop, marginBottom: b.marginBottom }}>
+            {side === "left" ? <>{imgCol}{textCol}</> : <>{textCol}{imgCol}</>}
+          </div>
+        );
+      }
       const wrapAlign = b.align === "center" ? "center" : b.align === "right" ? "flex-end" : "flex-start";
       return (
         <div style={{ display: "flex", justifyContent: wrapAlign, marginTop: b.marginTop, marginBottom: b.marginBottom }}>
-          {b.src ? (
-            <img src={b.src} alt={renderStr(b.alt)} style={{ width: b.width, height: b.height, objectFit: "contain" }} />
-          ) : (
-            <div style={{ width: b.width, height: b.height, border: "1px dashed #AEB5BB", display: "flex", alignItems: "center", justifyContent: "center", color: "#8C969E", fontSize: 11, background: "#F6F7F8" }}>
-              {b.type === "logo" ? "Company logo" : "Image"}
-            </div>
-          )}
+          {imgEl}
         </div>
       );
     }
@@ -845,7 +861,7 @@ function BlockCard({ block, index, count, isSelected, onSelect, onRemove, onDupl
 }
 
 function BandRow({ slot, data }: { slot: BandSlot; data?: Record<string, string> }) {
-  const r = (s?: string) => (data ? substitute(s, { ...data, page: "1", pages: "1" }) : (s ?? ""));
+  const r = (s?: string) => (data ? substitute(s, { page: "1", pages: "1", ...data }) : (s ?? ""));
   return (
     <div className="flex items-center justify-between gap-4 text-[11px]">
       <span className="flex-1 text-left">{r(slot.left)}</span>
@@ -855,54 +871,156 @@ function BandRow({ slot, data }: { slot: BandSlot; data?: Record<string, string>
   );
 }
 
-function Paper({ template, selectedId, onSelect, onRemove, onDuplicate, onMove }: {
+/** A larger drop target (page end / empty page). `index` is the insert position
+ *  in the flat blocks array. */
+function BigDropZone({ id, index, label }: { id: string; index: number; label: string }) {
+  const { setNodeRef, isOver } = useDroppable({ id, data: { source: "canvas", kind: "before", index } });
+  return (
+    <div ref={setNodeRef}
+         className={cn("mt-1 flex h-12 items-center justify-center rounded border-2 border-dashed text-xs font-medium transition",
+           isOver ? "border-[#287EAD] bg-[#EEF6FB] text-[#287EAD]" : "border-slate-200 text-slate-400 hover:border-[#287EAD]/60")}>
+      <Plus className="mr-1.5 h-3.5 w-3.5" /> {label}
+    </div>
+  );
+}
+
+/** Split the flat blocks array into pages at every `page_break` block. Each page
+ *  keeps its blocks' *global* indices so drag/drop insert positions stay correct. */
+type PageSlice = { items: { b: DocBlock; i: number }[]; breakBlock: DocBlock | null; startIndex: number };
+function splitPages(blocks: DocBlock[]): PageSlice[] {
+  const slices: PageSlice[] = [];
+  let cur: PageSlice = { items: [], breakBlock: null, startIndex: 0 };
+  blocks.forEach((b, i) => {
+    if (b.type === "page_break") {
+      cur.breakBlock = b;
+      slices.push(cur);
+      cur = { items: [], breakBlock: null, startIndex: i + 1 };
+    } else {
+      cur.items.push({ b, i });
+    }
+  });
+  slices.push(cur);
+  return slices;
+}
+
+/** Overlay that draws a dashed guide wherever the sheet's content grows past a
+ *  physical page height — so admins see content will spill onto another printed
+ *  page and can add a page break to control it. Zoom-safe: a hidden `mm` ruler is
+ *  measured in the same units as the sheet, and guides are positioned in `mm`. */
+function PageOverflowGuides({ pageHmm }: { pageHmm: number }) {
+  const rulerRef = useRef<HTMLDivElement>(null);
+  const [count, setCount] = useState(0);
+  useEffect(() => {
+    const ruler = rulerRef.current;
+    const sheet = ruler?.parentElement;
+    if (!ruler || !sheet) return;
+    const measure = () => {
+      const pageHpx = ruler.getBoundingClientRect().height || 1;
+      const sheetH = sheet.getBoundingClientRect().height;
+      setCount(Math.max(0, Math.floor((sheetH - 2) / pageHpx)));
+    };
+    const ro = new ResizeObserver(measure);
+    ro.observe(sheet);
+    measure();
+    return () => ro.disconnect();
+  }, [pageHmm]);
+  return (
+    <>
+      <div ref={rulerRef} className="pointer-events-none" style={{ position: "absolute", top: 0, left: 0, width: 0, height: `${pageHmm}mm`, visibility: "hidden" }} />
+      {Array.from({ length: count }).map((_, k) => (
+        <div key={k} className="pointer-events-none" style={{ position: "absolute", left: 0, right: 0, top: `${(k + 1) * pageHmm}mm`, zIndex: 5 }}>
+          <div style={{ borderTop: "1px dashed #E0736B" }} />
+          <span style={{ position: "absolute", right: 6, top: 2, fontSize: 9, fontWeight: 600, color: "#C0564E", background: "#FFF5F4", border: "1px solid #F1C3BF", padding: "0 4px", borderRadius: 2 }}>
+            ↧ spills to page {k + 2} — add a page break
+          </span>
+        </div>
+      ))}
+    </>
+  );
+}
+
+function Paper({ template, selectedId, onSelect, onRemove, onDuplicate, onMove, onAddPage }: {
   template: DocumentTemplate;
   selectedId: string | null;
   onSelect: (id: string | null) => void;
   onRemove: (id: string) => void;
   onDuplicate: (id: string) => void;
   onMove: (id: string, dir: "up" | "down") => void;
+  onAddPage: () => void;
 }) {
   CANVAS_THEME.current = template.theme;
   const dims = PAGE_DIMS[template.page.size];
   const portrait = template.page.orientation === "portrait";
   const pageW = portrait ? dims.w : dims.h;
+  const pageH = portrait ? dims.h : dims.w;
   const m = template.page.margin;
-  const { setNodeRef, isOver } = useDroppable({ id: "drop-body-end", data: { source: "canvas", kind: "end" } });
+  const count = template.blocks.length;
+  const pages = splitPages(template.blocks);
+
+  const header = template.header.enabled && (
+    <div className="text-[#5E6870]" style={{ padding: `${m.top}mm ${m.right}mm 4mm ${m.left}mm`, borderBottom: template.header.rule ? "1px solid #C8CDD2" : "none" }}>
+      <BandRow slot={template.header.content} />
+    </div>
+  );
+  const footer = template.footer.enabled && (
+    <div className="text-[#5E6870]" style={{ padding: `4mm ${m.right}mm ${m.bottom}mm ${m.left}mm`, borderTop: template.footer.rule ? "1px solid #C8CDD2" : "none" }}>
+      <BandRow slot={template.footer.content} />
+    </div>
+  );
 
   return (
-    <div className="flex justify-center px-8 py-8" onClick={() => onSelect(null)}>
-      <div className="bg-white shadow-lg" style={{ width: `${pageW}mm`, minHeight: "60vh", fontFamily: template.theme.fontFamily, fontSize: template.theme.baseFontSize, lineHeight: template.theme.lineHeight }}>
-        {template.header.enabled && (
-          <div className="text-[#5E6870]" style={{ padding: `${m.top}mm ${m.right}mm 4mm ${m.left}mm`, borderBottom: template.header.rule ? "1px solid #C8CDD2" : "none" }}>
-            <BandRow slot={template.header.content} />
-          </div>
-        )}
-        <div style={{ padding: `${template.header.enabled ? 6 : m.top}mm ${m.right}mm ${template.footer.enabled ? 6 : m.bottom}mm ${m.left}mm` }}>
-          <DropZone id="drop-before-0" data={{ source: "canvas", kind: "before", index: 0 }} />
-          {template.blocks.map((b, i) => (
-            <div key={b.id}>
-              <BlockCard block={b} index={i} count={template.blocks.length}
-                         isSelected={selectedId === b.id}
-                         onSelect={() => onSelect(b.id)}
-                         onRemove={() => onRemove(b.id)}
-                         onDuplicate={() => onDuplicate(b.id)}
-                         onMove={(d) => onMove(b.id, d)} />
-              <DropZone id={`drop-before-${i + 1}`} data={{ source: "canvas", kind: "before", index: i + 1 }} />
+    <div className="flex flex-col items-center gap-3 px-8 py-8" onClick={() => onSelect(null)}>
+      {pages.map((page, pageNo) => {
+        const endIndex = page.items.length ? page.items[page.items.length - 1].i + 1 : page.startIndex;
+        return (
+          <Fragment key={pageNo}>
+            <div className="flex flex-col items-center gap-1" style={{ width: `${pageW}mm` }}>
+              <div className="w-full text-[10px] font-semibold uppercase tracking-widest text-[#8C969E]">
+                Page {pageNo + 1} of {pages.length}
+              </div>
+              <div className="relative w-full bg-white shadow-lg" style={{ minHeight: `${pageH}mm`, fontFamily: template.theme.fontFamily, fontSize: template.theme.baseFontSize, lineHeight: template.theme.lineHeight }}>
+                <PageOverflowGuides pageHmm={pageH} />
+                {header}
+                <div style={{ padding: `${template.header.enabled ? 6 : m.top}mm ${m.right}mm ${template.footer.enabled ? 6 : m.bottom}mm ${m.left}mm` }}>
+                  {page.items.length > 0 && (
+                    <DropZone id={`drop-before-${page.startIndex}`} data={{ source: "canvas", kind: "before", index: page.startIndex }} />
+                  )}
+                  {page.items.map(({ b, i }, idx) => (
+                    <div key={b.id}>
+                      <BlockCard block={b} index={i} count={count}
+                                 isSelected={selectedId === b.id}
+                                 onSelect={() => onSelect(b.id)}
+                                 onRemove={() => onRemove(b.id)}
+                                 onDuplicate={() => onDuplicate(b.id)}
+                                 onMove={(d) => onMove(b.id, d)} />
+                      {idx < page.items.length - 1 && (
+                        <DropZone id={`drop-before-${i + 1}`} data={{ source: "canvas", kind: "before", index: i + 1 }} />
+                      )}
+                    </div>
+                  ))}
+                  <BigDropZone id={`drop-page-end-${pageNo}`} index={endIndex}
+                               label={page.items.length ? "Drop a block here" : "Empty page — drop a block here"} />
+                </div>
+                {footer}
+              </div>
             </div>
-          ))}
-          <div ref={setNodeRef}
-               className={cn("mt-1 flex h-12 items-center justify-center rounded border-2 border-dashed text-xs font-medium transition",
-                 isOver ? "border-[#287EAD] bg-[#EEF6FB] text-[#287EAD]" : "border-slate-200 text-slate-400 hover:border-[#287EAD]/60")}>
-            <Plus className="mr-1.5 h-3.5 w-3.5" /> Drop a block here
-          </div>
-        </div>
-        {template.footer.enabled && (
-          <div className="text-[#5E6870]" style={{ padding: `4mm ${m.right}mm ${m.bottom}mm ${m.left}mm`, borderTop: template.footer.rule ? "1px solid #C8CDD2" : "none" }}>
-            <BandRow slot={template.footer.content} />
-          </div>
-        )}
-      </div>
+            {page.breakBlock && (
+              <div className="flex items-center gap-2" onClick={(e) => e.stopPropagation()}>
+                <div className="h-px w-20 bg-[#C8CDD2]" />
+                <button onClick={() => onRemove(page.breakBlock!.id)} title="Remove page break (merge with next page)"
+                        className="flex items-center gap-1 rounded border border-[#C8CDD2] bg-white px-2 py-0.5 text-[10px] font-semibold uppercase tracking-wider text-[#8C969E] hover:border-red-300 hover:text-red-500">
+                  <ScrollText className="h-3 w-3" /> Page break <X className="h-3 w-3" />
+                </button>
+                <div className="h-px w-20 bg-[#C8CDD2]" />
+              </div>
+            )}
+          </Fragment>
+        );
+      })}
+      <button onClick={(e) => { e.stopPropagation(); onAddPage(); }}
+              className="mt-1 flex items-center gap-1.5 rounded border-2 border-dashed border-[#AEB5BB] bg-white/70 px-4 py-2 text-xs font-semibold text-[#5E6870] transition hover:border-[#287EAD] hover:bg-[#EEF6FB] hover:text-[#287EAD]">
+        <Plus className="h-3.5 w-3.5" /> Add page
+      </button>
     </div>
   );
 }
@@ -1210,7 +1328,22 @@ function BlockInspector({ block, theme, fields, repeatingFields, patch }: {
             <NumberRow label="Width" value={block.width} onChange={(n) => patch({ width: n })} suffix="px" />
             <NumberRow label="Height" value={block.height} onChange={(n) => patch({ height: n })} suffix="px" />
           </div>
-          <Field label="Alignment"><AlignToggle value={block.align} onChange={(a) => patch({ align: a })} /></Field>
+          <Field label="Layout">
+            <select value={block.float ?? "none"} onChange={(e) => patch({ float: e.target.value as DocBlock["float"] })} className={inputCls}>
+              <option value="none">Full width (stacked)</option>
+              <option value="left">Beside content — image on left</option>
+              <option value="right">Beside content — image on right</option>
+            </select>
+          </Field>
+          {(block.float === "left" || block.float === "right") ? (
+            <Field label="Content beside image">
+              <TokenTextarea value={block.beside ?? ""} rows={4} fields={fields}
+                             placeholder="e.g. company name, address, contact — {{company_address}}"
+                             onChange={(v) => patch({ beside: v })} />
+            </Field>
+          ) : (
+            <Field label="Alignment"><AlignToggle value={block.align} onChange={(a) => patch({ align: a })} /></Field>
+          )}
         </>
       )}
 
@@ -1319,28 +1452,31 @@ function PreviewTab({ template, fields, sampleData }: {
   const pageW = portrait ? dims.w : dims.h;
   const pageH = portrait ? dims.h : dims.w;
   const m = template.page.margin;
+  const pages = splitPages(template.blocks);
 
   return (
     <div className="flex flex-col items-center gap-6 px-8 py-8">
-      <div className="doc-preview-sheet bg-white shadow-lg"
-           style={{ width: `${pageW}mm`, minHeight: `${pageH}mm`, display: "flex", flexDirection: "column",
-                    fontFamily: template.theme.fontFamily, fontSize: template.theme.baseFontSize, lineHeight: template.theme.lineHeight, color: template.theme.textColor }}>
-        {template.header.enabled && (
-          <div style={{ padding: `${m.top}mm ${m.right}mm 4mm ${m.left}mm`, borderBottom: template.header.rule ? "1px solid #C8CDD2" : "none", color: "#5E6870" }}>
-            <BandRow slot={template.header.content} data={data} />
+      {pages.map((page, pageNo) => (
+        <div key={pageNo} className="doc-preview-sheet bg-white shadow-lg"
+             style={{ width: `${pageW}mm`, minHeight: `${pageH}mm`, display: "flex", flexDirection: "column",
+                      fontFamily: template.theme.fontFamily, fontSize: template.theme.baseFontSize, lineHeight: template.theme.lineHeight, color: template.theme.textColor }}>
+          {template.header.enabled && (
+            <div style={{ padding: `${m.top}mm ${m.right}mm 4mm ${m.left}mm`, borderBottom: template.header.rule ? "1px solid #C8CDD2" : "none", color: "#5E6870" }}>
+              <BandRow slot={template.header.content} data={{ ...data, page: String(pageNo + 1), pages: String(pages.length) }} />
+            </div>
+          )}
+          <div style={{ flex: 1, padding: `${template.header.enabled ? 6 : m.top}mm ${m.right}mm ${template.footer.enabled ? 6 : m.bottom}mm ${m.left}mm` }}>
+            {page.items.map(({ b }) => (
+              <div key={b.id}><RenderBlock block={b} theme={template.theme} data={data} /></div>
+            ))}
           </div>
-        )}
-        <div style={{ flex: 1, padding: `${template.header.enabled ? 6 : m.top}mm ${m.right}mm ${template.footer.enabled ? 6 : m.bottom}mm ${m.left}mm` }}>
-          {template.blocks.map((b) => (
-            <div key={b.id}><RenderBlock block={b} theme={template.theme} data={data} /></div>
-          ))}
+          {template.footer.enabled && (
+            <div style={{ padding: `4mm ${m.right}mm ${m.bottom}mm ${m.left}mm`, borderTop: template.footer.rule ? "1px solid #C8CDD2" : "none", color: "#5E6870" }}>
+              <BandRow slot={template.footer.content} data={{ ...data, page: String(pageNo + 1), pages: String(pages.length) }} />
+            </div>
+          )}
         </div>
-        {template.footer.enabled && (
-          <div style={{ padding: `4mm ${m.right}mm ${m.bottom}mm ${m.left}mm`, borderTop: template.footer.rule ? "1px solid #C8CDD2" : "none", color: "#5E6870" }}>
-            <BandRow slot={template.footer.content} data={data} />
-          </div>
-        )}
-      </div>
+      ))}
       <p className="text-xs text-[#8C969E]">Preview uses sample values. Repeating tables show one representative row.</p>
     </div>
   );
@@ -1578,8 +1714,13 @@ export interface DocumentTemplateDesignerProps {
 export default function DocumentTemplateDesigner({
   initial, onSave, onCancel, isSaving, documentTypes = [], mergeFields, sampleData,
 }: DocumentTemplateDesignerProps) {
-  const [history, setHistory] = useState<DocumentTemplate[]>([normalizeTemplate(initial ?? initialDocument)]);
-  const [cursor, setCursor] = useState(0);
+  // History + cursor in ONE state so they can never desync (a split lets a stale
+  // `cursor` closure outrun the stack and make `history[cursor]` undefined).
+  const [hist, setHist] = useState<{ stack: DocumentTemplate[]; cursor: number }>(() => ({
+    stack: [normalizeTemplate(initial ?? initialDocument)],
+    cursor: 0,
+  }));
+  const { stack: history, cursor } = hist;
   const template = history[cursor];
 
   const currentUser = useAuthStore((s) => s.user);
@@ -1645,16 +1786,18 @@ export default function DocumentTemplateDesigner({
     if (incomingId === loadedTemplateId.current) return;
     loadedTemplateId.current = incomingId;
     assignedIdRef.current = incomingId;
-    setHistory([normalizeTemplate(initial ?? initialDocument)]);
-    setCursor(0); setSelectedId(null); autoSaveSkip.current = true;
+    setHist({ stack: [normalizeTemplate(initial ?? initialDocument)], cursor: 0 });
+    setSelectedId(null); autoSaveSkip.current = true;
   }, [initial]);
 
   const handleCancel = () => { setClosing(true); setTimeout(onCancel, 220); };
 
   const commit = useCallback((next: DocumentTemplate) => {
-    setHistory((h) => [...h.slice(0, cursor + 1), next]);
-    setCursor((c) => c + 1);
-  }, [cursor]);
+    setHist(({ stack, cursor }) => {
+      const nstack = [...stack.slice(0, cursor + 1), next];
+      return { stack: nstack, cursor: nstack.length - 1 };
+    });
+  }, []);
 
   const canUndo = cursor > 0;
   const canRedo = cursor < history.length - 1;
@@ -1715,6 +1858,10 @@ export default function DocumentTemplateDesigner({
     const blocks = [...template.blocks];
     blocks.splice(idx + 1, 0, copy);
     commit({ ...template, blocks });
+  };
+  const addPage = () => {
+    // A page is delimited by a page_break block — append one to start a new page.
+    commit({ ...template, blocks: [...template.blocks, newBlock("page_break")] });
   };
   const moveBlock = (id: string, dir: "up" | "down") => {
     const idx = template.blocks.findIndex((b) => b.id === id);
@@ -1820,8 +1967,8 @@ export default function DocumentTemplateDesigner({
             </button>
           )}
           <div className="flex items-center gap-1">
-            <button disabled={!canUndo} onClick={() => setCursor((c) => Math.max(0, c - 1))} title="Undo" className="p-1.5 text-white/70 hover:bg-white/10 hover:text-white disabled:opacity-25"><Undo2 className="h-4 w-4" /></button>
-            <button disabled={!canRedo} onClick={() => setCursor((c) => Math.min(history.length - 1, c + 1))} title="Redo" className="p-1.5 text-white/70 hover:bg-white/10 hover:text-white disabled:opacity-25"><Redo2 className="h-4 w-4" /></button>
+            <button disabled={!canUndo} onClick={() => setHist((s) => ({ ...s, cursor: Math.max(0, s.cursor - 1) }))} title="Undo" className="p-1.5 text-white/70 hover:bg-white/10 hover:text-white disabled:opacity-25"><Undo2 className="h-4 w-4" /></button>
+            <button disabled={!canRedo} onClick={() => setHist((s) => ({ ...s, cursor: Math.min(s.stack.length - 1, s.cursor + 1) }))} title="Redo" className="p-1.5 text-white/70 hover:bg-white/10 hover:text-white disabled:opacity-25"><Redo2 className="h-4 w-4" /></button>
           </div>
           <div className="h-5 w-px bg-white/25" />
           <button onClick={() => handleSave(false)} disabled={isSaving}
@@ -1839,7 +1986,7 @@ export default function DocumentTemplateDesigner({
               <div className="w-[260px] shrink-0"><Palette /></div>
               <main className="relative flex-1 overflow-y-auto" style={{ background: "#EDEDED" }}>
                 <Paper template={template} selectedId={selectedId} onSelect={setSelectedId}
-                       onRemove={removeBlock} onDuplicate={duplicateBlock} onMove={moveBlock} />
+                       onRemove={removeBlock} onDuplicate={duplicateBlock} onMove={moveBlock} onAddPage={addPage} />
                 {!inspectorOpen && (
                   <button onClick={() => setInspectorOpen(true)} title="Open inspector"
                           className="absolute right-4 top-4 flex items-center gap-1.5 border border-[#AEB5BB] bg-white px-3 py-2 text-xs font-semibold text-[#5E6870] shadow-md hover:border-[#287EAD] hover:bg-[#EEF6FB] hover:text-[#287EAD]">

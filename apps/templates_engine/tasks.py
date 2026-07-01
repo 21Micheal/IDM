@@ -759,17 +759,37 @@ def generate_designer_docx(design, values) -> bytes:
             # for a missing/URL-only source.
             from docx.shared import Emu
             raw_img = _decode_data_url_image(b.get("src"))
-            p = doc.add_paragraph()
-            p.alignment = align
-            if raw_img:
-                try:
-                    width_px = b.get("width") or 160
-                    # 96 px/inch → EMUs (914400 per inch).
-                    p.add_run().add_picture(BytesIO(raw_img), width=Emu(int(float(width_px) / 96 * 914400)))
-                except Exception:
-                    add_text(p, _subst_tokens(b.get("alt", ""), values) or ("Logo" if btype == "logo" else "Image"), italic=True)
+            width_px = b.get("width") or 160
+            emu_width = Emu(int(float(width_px) / 96 * 914400))  # 96 px/inch
+
+            def _place_image(paragraph):
+                if raw_img:
+                    try:
+                        paragraph.add_run().add_picture(BytesIO(raw_img), width=emu_width)
+                        return
+                    except Exception:
+                        pass
+                add_text(paragraph, _subst_tokens(b.get("alt", ""), values) or ("Logo" if btype == "logo" else "Image"), italic=True)
+
+            side = b.get("float") or "none"
+            if side in ("left", "right"):
+                # Side-by-side: borderless 1×2 table — image in one cell, the
+                # `beside` content in the other. This is the Word-native way to
+                # place text alongside an image (docx has no CSS float/wrap).
+                table = doc.add_table(rows=1, cols=2)
+                _designer_clear_table_borders(table)
+                img_mm = min(w_mm - margin.get("left", 18) - margin.get("right", 18) - 10,
+                             max(10, float(width_px) / 96 * 25.4))
+                img_cell, text_cell = table.rows[0].cells
+                if side == "right":
+                    img_cell, text_cell = text_cell, img_cell
+                img_cell.width = Mm(img_mm)
+                _place_image(img_cell.paragraphs[0])
+                add_text(text_cell.paragraphs[0], b.get("beside", ""))
             else:
-                add_text(p, b.get("alt", "") or ("Logo" if btype == "logo" else "Image"), italic=True)
+                p = doc.add_paragraph()
+                p.alignment = align
+                _place_image(p)
 
     buf = BytesIO()
     doc.save(buf)
