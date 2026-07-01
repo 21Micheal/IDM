@@ -146,6 +146,7 @@ class DocumentIndex(ESDocument):
     title = fields.TextField(analyzer="english")
     reference_number = fields.KeywordField()
     document_type = fields.KeywordField()
+    document_type_code = fields.KeywordField()
     file_name = fields.TextField(
         fields={"keyword": fields.KeywordField()},
     )
@@ -178,6 +179,9 @@ class DocumentIndex(ESDocument):
 
     def prepare_document_type(self, instance):
         return instance.document_type.name
+
+    def prepare_document_type_code(self, instance):
+        return (instance.document_type.code or "").upper()
 
     def prepare_file_name(self, instance):
         return instance.file_name

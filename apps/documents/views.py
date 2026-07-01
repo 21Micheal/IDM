@@ -666,6 +666,9 @@ class DocumentViewSet(AuditMixin, viewsets.ModelViewSet):
         Document.objects.filter(id=doc.id).update(
             deleted_at=timezone.now(), deleted_by=request.user, updated_at=timezone.now()
         )
+        # Pull it out of the search index so a trashed doc stops showing in results.
+        from apps.search.indexing import queue_deindex_document
+        queue_deindex_document(str(doc.id))
         self.record_audit("document.deleted", doc, {"trashed": True})
         return Response(status=status.HTTP_204_NO_CONTENT)
 
@@ -680,6 +683,9 @@ class DocumentViewSet(AuditMixin, viewsets.ModelViewSet):
         Document.objects.filter(id=doc.id).update(
             deleted_at=None, deleted_by=None, updated_at=timezone.now()
         )
+        # Put it back in the search index now that it's live again.
+        from apps.search.indexing import queue_index_document
+        queue_index_document(str(doc.id))
         self.record_audit("document.restored", doc)
         doc.refresh_from_db()
         return Response(DocumentDetailSerializer(doc, context={"request": request}).data)
@@ -694,8 +700,12 @@ class DocumentViewSet(AuditMixin, viewsets.ModelViewSet):
             )
         if not self._can_manage_trash(doc, request.user):
             return Response({"detail": "Not permitted."}, status=status.HTTP_403_FORBIDDEN)
+        doc_id = str(doc.id)
         self.record_audit("document.purged", doc, {"reference": doc.reference_number})
         doc.hard_delete()
+        # Remove the now-orphaned search-index entry so it can't 404 on open.
+        from apps.search.indexing import queue_deindex_document
+        queue_deindex_document(doc_id)
         return Response(status=status.HTTP_204_NO_CONTENT)
 
     @action(detail=True, methods=["post"])
@@ -1935,6 +1945,8 @@ echo "✓ DocVault LibreOffice integration installed."
                     Document.objects.filter(id=doc.id).update(
                         deleted_at=timezone.now(), deleted_by=request.user, updated_at=timezone.now()
                     )
+                    from apps.search.indexing import queue_deindex_document
+                    queue_deindex_document(str(doc.id))
                     self.record_audit("document.deleted", doc, {"bulk_action": True, "trashed": True})
                 elif act == "restore":
                     if not doc.deleted_at:
@@ -1944,14 +1956,19 @@ echo "✓ DocVault LibreOffice integration installed."
                     Document.objects.filter(id=doc.id).update(
                         deleted_at=None, deleted_by=None, updated_at=timezone.now()
                     )
+                    from apps.search.indexing import queue_index_document
+                    queue_index_document(str(doc.id))
                     self.record_audit("document.restored", doc, {"bulk_action": True})
                 elif act == "purge":
                     if not doc.deleted_at:
                         raise ValueError("Only documents in Trash can be permanently deleted.")
                     if not self._can_manage_trash(doc, request.user):
                         raise ValueError("Not permitted.")
+                    purge_id = str(doc.id)
                     self.record_audit("document.purged", doc, {"bulk_action": True, "reference": doc.reference_number})
                     doc.hard_delete()
+                    from apps.search.indexing import queue_deindex_document
+                    queue_deindex_document(purge_id)
                 results.append({"id": str(doc_id), "success": True})
             except (WorkflowError, ValueError, AttributeError) as exc:
                 results.append({"id": str(doc_id), "success": False, "detail": str(exc)})

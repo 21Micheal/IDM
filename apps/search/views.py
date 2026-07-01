@@ -4,6 +4,7 @@ from __future__ import annotations
 import re
 from collections.abc import Iterable
 from datetime import date, datetime
+from uuid import UUID
 
 from elasticsearch import ApiError, ConnectionError as ESConnectionError, TransportError
 from rest_framework.response import Response
@@ -215,6 +216,9 @@ class DocumentSearchView(APIView):
         page_size = _parse_positive_int(data.get("page_size", 20), 20, maximum=100)
 
         s = DocumentIndex.search()
+        # Unclassified (bulk-staging) documents never surface in global search —
+        # they live in the bulk-review queue. Mirrors the DB-fallback exclusion.
+        s = s.exclude("term", document_type_code="UNCLASS")
         user = request.user
         # A "sees all documents" group member (e.g. an auditor) bypasses the
         # per-document involvement filter, exactly like the document list and the
@@ -222,6 +226,19 @@ class DocumentSearchView(APIView):
         # can legitimately view.
         if not user.has_admin_access and not user.sees_all_documents:
             s = s.filter("term", accessible_user_ids=str(user.id))
+
+        # Personal documents are private to their owner. Nobody else — not even
+        # admins or "sees all documents" groups — sees another user's personal
+        # docs in search: keep a hit only if it is non-personal or owned by me.
+        s = s.filter(
+            "bool",
+            should=[
+                Q("term", is_self_upload=False),
+                Q("term", uploaded_by_id=str(user.id)),
+                Q("term", owned_by_id=str(user.id)),
+            ],
+            minimum_should_match=1,
+        )
 
         if search_text:
             wildcard_query = _wildcard_query(search_text)
@@ -454,6 +471,10 @@ class DocumentSearchView(APIView):
                 DQ(id__in=shared)
             ).distinct()
 
+        # Personal documents are private to their owner — even admins / "sees all
+        # documents" groups don't see another user's personal docs in search.
+        qs = qs.filter(DQ(is_self_upload=False) | DQ(uploaded_by=user) | DQ(owned_by=user))
+
         if search_text:
             qs = qs.filter(
                 DQ(title__icontains=search_text) |
@@ -465,8 +486,15 @@ class DocumentSearchView(APIView):
             ).distinct()
 
         if filters.get("document_type"):
-            dt = filters["document_type"]
-            qs = qs.filter(DQ(document_type__name=dt) | DQ(document_type_id=str(dt)))
+            dt = str(filters["document_type"]).strip()
+            # The frontend sends the type *name*; match on id too, but only when
+            # the value is a real UUID (else casting a name to the id field errors).
+            type_q = DQ(document_type__name=dt)
+            try:
+                type_q |= DQ(document_type_id=UUID(dt))
+            except (ValueError, TypeError):
+                pass
+            qs = qs.filter(type_q)
         if filters.get("supplier"):
             qs = qs.filter(supplier__icontains=filters["supplier"])
         if filters.get("status"):
