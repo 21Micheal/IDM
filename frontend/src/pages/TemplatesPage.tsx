@@ -698,7 +698,14 @@ export default function TemplatesPage() {
       <DocumentTemplateDesigner
         initial={editTarget ? backendToDesigner(editTarget) : null}
         documentTypes={docTypes.map((t) => ({ id: t.id, name: t.name, code: t.code, metadata_fields: t.metadata_fields }))}
-        onSave={(tpl, stayOpen) => saveMutation.mutate({ template: tpl, stayOpen })}
+        onSave={async (tpl, stayOpen) => {
+          try {
+            const res = await saveMutation.mutateAsync({ template: tpl, stayOpen });
+            return (res?.data as { id?: string })?.id;
+          } catch {
+            return undefined; // error surfaced by the mutation's onError toast
+          }
+        }}
         onCancel={() => { setMode("list"); setEditTarget(undefined); }}
         isSaving={saveMutation.isPending}
       />

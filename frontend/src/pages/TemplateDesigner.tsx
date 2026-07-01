@@ -1556,7 +1556,12 @@ type Tab = "design" | "preview" | "settings";
 
 export interface DocumentTemplateDesignerProps {
   initial?: EditableDocumentTemplate | null;
-  onSave: (template: DocumentTemplate, stayOpen?: boolean) => void;
+  /**
+   * Persist the template. May return the saved template's id so the designer can
+   * turn a first (create) autosave into updates thereafter — without it, repeated
+   * autosaves of a brand-new template would each create a duplicate row.
+   */
+  onSave: (template: DocumentTemplate, stayOpen?: boolean) => void | Promise<string | void>;
   onCancel: () => void;
   isSaving?: boolean;
   /** Document types for filing. Their metadata fields become insertable merge fields. */
@@ -1623,10 +1628,23 @@ export default function DocumentTemplateDesigner({
   const autoSaveSkip = useRef(true);
   const autoSaveTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const [lastSavedAt, setLastSavedAt] = useState<number | null>(null);
+  // The id the backend assigns on the first (create) save. Once known, every later
+  // save carries it so the mutation updates that row instead of creating a new one.
+  const assignedIdRef = useRef<string | null>(initial?.id ?? null);
+  const savingRef = useRef(false);
 
   useEffect(() => { if (typeof window !== "undefined") window.localStorage.setItem("dtd:autoSave", autoSave ? "1" : "0"); }, [autoSave]);
   useEffect(() => { const id = requestAnimationFrame(() => setVisible(true)); return () => cancelAnimationFrame(id); }, []);
+  // Re-initialise only when a *different* template is opened. The parent rebuilds
+  // the `initial` object on every render (and re-renders on each autosave), so we
+  // must compare by identity (id) — depending on the object reference would reset
+  // history mid-edit and clobber in-progress typing (e.g. renaming).
+  const loadedTemplateId = useRef<string | null>(initial?.id ?? null);
   useEffect(() => {
+    const incomingId = initial?.id ?? null;
+    if (incomingId === loadedTemplateId.current) return;
+    loadedTemplateId.current = incomingId;
+    assignedIdRef.current = incomingId;
     setHistory([normalizeTemplate(initial ?? initialDocument)]);
     setCursor(0); setSelectedId(null); autoSaveSkip.current = true;
   }, [initial]);
@@ -1707,6 +1725,24 @@ export default function DocumentTemplateDesigner({
     commit({ ...template, blocks });
   };
 
+  // Single save path. Carries the known id (from `initial` or a prior create) so the
+  // backend updates rather than duplicates, and records the id returned by the first
+  // create. `savingRef` prevents an overlapping autosave from firing a second create
+  // before the first one's id comes back.
+  const persist = async (stayOpen: boolean) => {
+    const effId = initial?.id ?? assignedIdRef.current;
+    if (!effId && savingRef.current) return; // a create is already in flight — don't duplicate
+    const out = outputDocumentTemplate(template, Boolean(effId));
+    if (effId) out.id = effId;
+    savingRef.current = true;
+    try {
+      const savedId = await onSave(out, stayOpen);
+      if (typeof savedId === "string" && savedId && !initial?.id) assignedIdRef.current = savedId;
+    } finally {
+      savingRef.current = false;
+    }
+  };
+
   const handleSave = (stayOpen = false) => {
     if (!template.document_type_id) {
       toast.error("Select a document type before saving (Settings tab).");
@@ -1717,16 +1753,16 @@ export default function DocumentTemplateDesigner({
       toast.error("Add at least one block to the document.");
       return;
     }
-    onSave(outputDocumentTemplate(template, Boolean(initial?.id)), stayOpen);
+    void persist(stayOpen);
   };
 
   useEffect(() => {
     if (!autoSave) return;
     if (autoSaveSkip.current) { autoSaveSkip.current = false; return; }
     if (autoSaveTimer.current) clearTimeout(autoSaveTimer.current);
-    autoSaveTimer.current = setTimeout(() => {
+    autoSaveTimer.current = setTimeout(async () => {
       if (!template.document_type_id || template.blocks.length === 0) return;
-      onSave(outputDocumentTemplate(template, Boolean(initial?.id)), true);
+      await persist(true);
       setLastSavedAt(Date.now());
     }, 1200);
     return () => { if (autoSaveTimer.current) clearTimeout(autoSaveTimer.current); };
