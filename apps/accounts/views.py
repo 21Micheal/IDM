@@ -457,7 +457,7 @@ class UserViewSet(viewsets.ModelViewSet):
 
         # Log the creation
         AuditLog.objects.create(
-            event=AuditEvent.PERMISSION_CHANGED,
+            event=AuditEvent.USER_CREATED,
             actor=request.user,
             object_type="User",
             object_id=str(user.id),
@@ -517,7 +517,7 @@ If you did not expect this account, please contact your administrator immediatel
         try:
             instance.delete()
             AuditLog.objects.create(
-                event=AuditEvent.PERMISSION_CHANGED,
+                event=AuditEvent.USER_DELETED,
                 actor=self.request.user,
                 object_type="User",
                 object_id=uid,
@@ -576,10 +576,10 @@ If you did not expect this reset, contact your administrator immediately.
             logger.exception("Failed to send password reset email to %s", user.email)
 
         AuditLog.objects.create(
-            event=AuditEvent.PERMISSION_CHANGED,
+            event=AuditEvent.USER_PASSWORD_RESET,
             actor=request.user,
-            object_type="User", 
-            object_id=str(user.id), 
+            object_type="User",
+            object_id=str(user.id),
             object_repr=user.email,
             changes={"action": "password_reset"},
             ip_address=request.META.get("REMOTE_ADDR"),
@@ -597,10 +597,10 @@ If you did not expect this reset, contact your administrator immediately.
         user.is_active = not user.is_active
         user.save(update_fields=["is_active"])
         AuditLog.objects.create(
-            event=AuditEvent.PERMISSION_CHANGED,
+            event=AuditEvent.USER_ACTIVATED if user.is_active else AuditEvent.USER_DEACTIVATED,
             actor=request.user,
-            object_type="User", 
-            object_id=str(user.id), 
+            object_type="User",
+            object_id=str(user.id),
             object_repr=user.email,
             changes={"action": "activated" if user.is_active else "deactivated"},
             ip_address=request.META.get("REMOTE_ADDR"),

@@ -58,11 +58,11 @@ function BulkToolbar({
   return (
     <>
       <div
-        className="sticky top-0 z-10 rounded-xl border border-accent/30 bg-card px-5 py-3 flex items-center gap-3 flex-wrap"
+        className="sticky top-0 z-10 border border-accent/30 bg-card px-5 py-3 flex items-center gap-3 flex-wrap"
         style={{ boxShadow: "var(--shadow-elegant)" }}
       >
-        <div className="inline-flex items-center gap-2 px-3 py-1.5 rounded-full bg-accent/15 text-accent text-sm font-semibold">
-          <span className="w-1.5 h-1.5 rounded-full bg-accent" />
+        <div className="inline-flex items-center gap-2 px-3 py-1.5 bg-accent/15 text-accent text-sm font-semibold">
+          <span className="w-1.5 h-1.5 bg-accent" />
           {selectedIds.length} selected
         </div>
 
@@ -71,7 +71,7 @@ function BulkToolbar({
             <button
               onClick={() => onAction("approve")}
               disabled={isLoading}
-              className="inline-flex items-center gap-2 px-4 py-1.5 text-sm font-medium bg-teal text-teal-foreground rounded-lg hover:opacity-90 disabled:opacity-50 transition-opacity"
+              className="inline-flex items-center gap-2 px-4 py-1.5 text-sm font-medium bg-teal text-teal-foreground hover:opacity-90 disabled:opacity-50 transition-opacity"
             >
               {isLoading ? <Loader2 className="w-4 h-4 animate-spin" /> : <CheckCircle className="w-4 h-4" />}
               Approve
@@ -82,7 +82,7 @@ function BulkToolbar({
             <button
               onClick={() => setRejectModal(true)}
               disabled={isLoading}
-              className="inline-flex items-center gap-2 px-4 py-1.5 text-sm font-medium bg-destructive text-destructive-foreground rounded-lg hover:opacity-90 disabled:opacity-50 transition-opacity"
+              className="inline-flex items-center gap-2 px-4 py-1.5 text-sm font-medium bg-destructive text-destructive-foreground hover:opacity-90 disabled:opacity-50 transition-opacity"
             >
               <XCircle className="w-4 h-4" /> Reject
             </button>
@@ -92,7 +92,7 @@ function BulkToolbar({
             <button
               onClick={() => onAction("archive")}
               disabled={isLoading}
-              className="inline-flex items-center gap-2 px-4 py-1.5 text-sm font-medium bg-primary text-primary-foreground rounded-lg hover:opacity-90 disabled:opacity-50 transition-opacity"
+              className="inline-flex items-center gap-2 px-4 py-1.5 text-sm font-medium bg-primary text-primary-foreground hover:opacity-90 disabled:opacity-50 transition-opacity"
             >
               <Archive className="w-4 h-4" /> Archive
             </button>
@@ -106,7 +106,7 @@ function BulkToolbar({
                 }
               }}
               disabled={isLoading}
-              className="inline-flex items-center gap-2 px-4 py-1.5 text-sm font-medium bg-destructive text-destructive-foreground rounded-lg hover:opacity-90 disabled:opacity-50 transition-opacity"
+              className="inline-flex items-center gap-2 px-4 py-1.5 text-sm font-medium bg-destructive text-destructive-foreground hover:opacity-90 disabled:opacity-50 transition-opacity"
             >
               <Trash2 className="w-4 h-4" /> Delete
             </button>
@@ -120,7 +120,7 @@ function BulkToolbar({
                 }
               }}
               disabled={isLoading}
-              className="inline-flex items-center gap-2 px-4 py-1.5 text-sm font-medium bg-foreground text-background rounded-lg hover:opacity-90 disabled:opacity-50 transition-opacity"
+              className="inline-flex items-center gap-2 px-4 py-1.5 text-sm font-medium bg-foreground text-background hover:opacity-90 disabled:opacity-50 transition-opacity"
             >
               <Trash2 className="w-4 h-4" /> Void
             </button>
@@ -129,7 +129,7 @@ function BulkToolbar({
 
         <button
           onClick={onClear}
-          className="ml-auto text-muted-foreground hover:text-foreground p-2 rounded-lg hover:bg-muted transition-colors"
+          className="ml-auto text-muted-foreground hover:text-foreground p-2 hover:bg-muted transition-colors"
         >
           <X className="w-5 h-5" />
         </button>
@@ -139,7 +139,7 @@ function BulkToolbar({
       {rejectModal && (
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-foreground/40 backdrop-blur-sm p-4">
           <div
-            className="w-full max-w-md p-6 space-y-5 bg-card rounded-2xl border border-border"
+            className="w-full max-w-md p-6 space-y-5 bg-card border border-border"
             style={{ boxShadow: "var(--shadow-elegant)" }}
           >
             <div>
@@ -169,7 +169,7 @@ function BulkToolbar({
                   setComment("");
                 }}
                 disabled={isLoading}
-                className="inline-flex items-center gap-2 px-4 py-2 text-sm font-medium bg-destructive text-destructive-foreground rounded-lg hover:opacity-90 disabled:opacity-50 transition-opacity"
+                className="inline-flex items-center gap-2 px-4 py-2 text-sm font-medium bg-destructive text-destructive-foreground hover:opacity-90 disabled:opacity-50 transition-opacity"
               >
                 Reject Documents
               </button>
@@ -184,41 +184,45 @@ function BulkToolbar({
 function PersonalTagChips({
   tags,
   onTagClick,
+  max = 3,
 }: {
   tags: string[];
   onTagClick?: (tag: string) => void;
+  /** Cap how many chips render before collapsing the rest into a "+N". */
+  max?: number;
 }) {
   if (tags.length === 0) return null;
 
+  const visible = tags.slice(0, max);
+  const overflow = tags.length - visible.length;
+  const chipClassName = cn(
+    "inline-flex max-w-[8rem] items-center truncate border px-2 py-0.5 text-[10px] font-semibold transition-colors",
+    onTagClick
+      ? "border-accent/20 bg-accent/10 text-accent hover:border-accent/30 hover:bg-accent/15 cursor-pointer"
+      : "border-accent/20 bg-accent/10 text-accent",
+  );
+
   return (
-    <div className="flex flex-wrap gap-1.5">
-      {tags.map((tag) => {
-        const chipClassName = cn(
-          "inline-flex items-center rounded-full border px-2 py-0.5 text-[10px] font-semibold transition-colors",
-          onTagClick
-            ? "border-accent/20 bg-accent/10 text-accent hover:border-accent/30 hover:bg-accent/15 cursor-pointer"
-            : "border-accent/20 bg-accent/10 text-accent",
-        );
-
-        if (onTagClick) {
-          return (
-            <button
-              key={tag}
-              type="button"
-              onClick={() => onTagClick(tag)}
-              className={chipClassName}
-            >
-              {tag}
-            </button>
-          );
-        }
-
-        return (
-          <span key={tag} className={chipClassName}>
+    <div className="flex flex-wrap items-center gap-1.5">
+      {visible.map((tag) =>
+        onTagClick ? (
+          <button key={tag} type="button" title={tag} onClick={() => onTagClick(tag)} className={chipClassName}>
+            {tag}
+          </button>
+        ) : (
+          <span key={tag} title={tag} className={chipClassName}>
             {tag}
           </span>
-        );
-      })}
+        ),
+      )}
+      {overflow > 0 && (
+        <span
+          title={tags.slice(max).join(", ")}
+          className="inline-flex items-center border border-border bg-muted/40 px-1.5 py-0.5 text-[10px] font-semibold text-muted-foreground"
+        >
+          +{overflow}
+        </span>
+      )}
     </div>
   );
 }
@@ -371,6 +375,7 @@ export default function DocumentsPage({ personalOnly = false }: DocumentsPagePro
   const [typeFilter, setTypeFilter] = useState("");
   const [supplierFilter, setSupplierFilter] = useState("");
   const [personalTagFilter, setPersonalTagFilter] = useState("");
+  const [showAllTags, setShowAllTags] = useState(false);
   const [sort, setSort] = useState<"created_at" | "updated_at" | "document_date" | "amount" | "title" | "reference_number">("created_at");
   const [sortDir, _setSortDir] = useState<"asc" | "desc">("desc");
   void _setSortDir;
@@ -1818,12 +1823,12 @@ export default function DocumentsPage({ personalOnly = false }: DocumentsPagePro
       {/* Header */}
       {isArchiveView ? (
         <div
-          className="overflow-hidden rounded-xl border border-border bg-card"
+          className="overflow-hidden border border-border bg-card"
           style={{ boxShadow: "var(--shadow-card)" }}
         >
           <div className="flex items-center justify-between gap-4 border-b border-border bg-muted/40 px-5 py-4">
             <div className="flex items-center gap-3">
-              <div className="flex h-11 w-11 flex-shrink-0 items-center justify-center rounded-lg border border-border bg-background text-muted-foreground">
+              <div className="flex h-11 w-11 flex-shrink-0 items-center justify-center border border-border bg-background text-muted-foreground">
                 <Archive className="h-5 w-5" />
               </div>
               <div>
@@ -1834,7 +1839,7 @@ export default function DocumentsPage({ personalOnly = false }: DocumentsPagePro
               </div>
             </div>
             {data && (
-              <div className="rounded-lg border border-border bg-background px-4 py-2 text-right">
+              <div className="border border-border bg-background px-4 py-2 text-right">
                 <p className="text-[10px] font-semibold uppercase tracking-widest text-muted-foreground">Archive count</p>
                 <p className="text-xl font-semibold tabular-nums text-foreground">{data.count.toLocaleString()}</p>
               </div>
@@ -1844,7 +1849,7 @@ export default function DocumentsPage({ personalOnly = false }: DocumentsPagePro
       ) : personalOnly ? (
         <div className="flex items-center justify-between">
           <div>
-            <div className="mb-2 inline-flex items-center gap-2 rounded-full border border-primary/20 bg-primary/5 px-3 py-1 text-xs font-semibold text-primary">
+            <div className="mb-2 inline-flex items-center gap-2 border border-primary/20 bg-primary/5 px-3 py-1 text-xs font-semibold text-primary">
               <Lock className="h-3.5 w-3.5" />
               Personal vault
             </div>
@@ -1855,7 +1860,7 @@ export default function DocumentsPage({ personalOnly = false }: DocumentsPagePro
           </div>
           <Link
             to="/documents/upload"
-            className="inline-flex items-center gap-2 px-5 py-2.5 text-sm font-medium rounded-lg transition-all bg-primary text-primary-foreground hover:bg-primary/90"
+            className="inline-flex items-center gap-2 px-5 py-2.5 text-sm font-medium transition-all bg-primary text-primary-foreground hover:bg-primary/90"
             style={{ boxShadow: "var(--shadow-elegant)" }}
           >
             <UploadCloud className="w-4 h-4" /> Upload Personal Document
@@ -1871,7 +1876,7 @@ export default function DocumentsPage({ personalOnly = false }: DocumentsPagePro
           </div>
           <Link
             to="/documents/upload"
-            className="inline-flex items-center gap-2 px-5 py-2.5 text-sm font-medium rounded-lg transition-all bg-primary text-primary-foreground hover:bg-primary/90"
+            className="inline-flex items-center gap-2 px-5 py-2.5 text-sm font-medium transition-all bg-primary text-primary-foreground hover:bg-primary/90"
             style={{
               boxShadow: "var(--shadow-elegant)",
             }}
@@ -1884,7 +1889,7 @@ export default function DocumentsPage({ personalOnly = false }: DocumentsPagePro
 
       {/* Personal tab explainer */}
       {!isArchiveView && personalOnly && (
-        <div className="flex items-start gap-3 rounded-xl border border-primary/20 bg-primary/5 px-4 py-3 text-sm text-foreground">
+        <div className="flex items-start gap-3 border border-primary/20 bg-primary/5 px-4 py-3 text-sm text-foreground">
           <Lock className="w-4 h-4 mt-0.5 flex-shrink-0 text-primary" />
           <span>
             These documents are private to you. They are not part of any approval workflow and are visible only to you and administrators.
@@ -1900,7 +1905,7 @@ export default function DocumentsPage({ personalOnly = false }: DocumentsPagePro
             type="button"
             onClick={() => setPersonalTagFilter("")}
             className={cn(
-              "px-3 py-1.5 rounded-full text-xs font-medium border transition-colors",
+              "px-3 py-1.5 text-xs font-medium border transition-colors",
               !personalTagFilter
                 ? "bg-accent text-accent-foreground border-accent"
                 : "bg-card text-muted-foreground border-border hover:text-foreground hover:border-accent/40",
@@ -1908,13 +1913,14 @@ export default function DocumentsPage({ personalOnly = false }: DocumentsPagePro
           >
             All
           </button>
-          {personalTagOptions.map((tag) => (
+          {(showAllTags ? personalTagOptions : personalTagOptions.slice(0, 12)).map((tag) => (
             <button
               key={tag}
               type="button"
+              title={tag}
               onClick={() => setPersonalTagFilter(tag === personalTagFilter ? "" : tag)}
               className={cn(
-                "px-3 py-1.5 rounded-full text-xs font-medium border transition-colors",
+                "max-w-[12rem] truncate px-3 py-1.5 text-xs font-medium border transition-colors",
                 personalTagFilter === tag
                   ? "bg-accent text-accent-foreground border-accent"
                   : "bg-card text-muted-foreground border-border hover:text-foreground hover:border-accent/40",
@@ -1923,6 +1929,15 @@ export default function DocumentsPage({ personalOnly = false }: DocumentsPagePro
               {tag}
             </button>
           ))}
+          {personalTagOptions.length > 12 && (
+            <button
+              type="button"
+              onClick={() => setShowAllTags((v) => !v)}
+              className="px-3 py-1.5 text-xs font-medium border border-dashed border-border text-muted-foreground transition-colors hover:border-accent/40 hover:text-foreground"
+            >
+              {showAllTags ? "Show less" : `+${personalTagOptions.length - 12} more`}
+            </button>
+          )}
         </div>
       )}
 
@@ -1936,7 +1951,7 @@ export default function DocumentsPage({ personalOnly = false }: DocumentsPagePro
                 value={search}
                 onChange={(e) => { setSearch(e.target.value); setPage(1); }}
                 placeholder="Search documents…"
-                className="w-full text-sm bg-card border border-border rounded-lg pl-9 pr-3 py-2.5 focus:outline-none focus:ring-2 focus:ring-accent/40 focus:border-accent transition-colors"
+                className="w-full text-sm bg-card border border-border pl-9 pr-3 py-2.5 focus:outline-none focus:ring-2 focus:ring-accent/40 focus:border-accent transition-colors"
               />
             </div>
 
@@ -1944,7 +1959,7 @@ export default function DocumentsPage({ personalOnly = false }: DocumentsPagePro
               <button
                 onClick={() => setShowFilters(!showFilters)}
                 className={cn(
-                  "inline-flex items-center gap-2 px-4 py-2.5 text-sm font-medium rounded-lg border transition-colors",
+                  "inline-flex items-center gap-2 px-4 py-2.5 text-sm font-medium border transition-colors",
                   showFilters || activeFilterCount > 0
                     ? "border-accent/40 bg-accent/10 text-accent"
                     : "border-border bg-card text-muted-foreground hover:text-foreground hover:border-border"
@@ -1953,7 +1968,7 @@ export default function DocumentsPage({ personalOnly = false }: DocumentsPagePro
                 <SlidersHorizontal className="w-4 h-4" />
                 Filters
                 {activeFilterCount > 0 && (
-                  <span className="ml-1 inline-flex items-center justify-center w-5 h-5 rounded-full bg-accent text-accent-foreground text-[10px] font-bold">
+                  <span className="ml-1 inline-flex items-center justify-center w-5 h-5 bg-accent text-accent-foreground text-[10px] font-bold">
                     {activeFilterCount}
                   </span>
                 )}
@@ -1970,7 +1985,7 @@ export default function DocumentsPage({ personalOnly = false }: DocumentsPagePro
           {/* Expanded filter row */}
           {showFilters && !personalOnly && (
             <div
-              className="flex flex-wrap gap-3 items-center rounded-xl border border-border bg-muted/30 px-4 py-3"
+              className="flex flex-wrap gap-3 items-center border border-border bg-muted/30 px-4 py-3"
               style={{ boxShadow: "var(--shadow-card)" }}
             >
               <div className="space-y-1">
@@ -1978,7 +1993,7 @@ export default function DocumentsPage({ personalOnly = false }: DocumentsPagePro
                 <select
                   value={statusFilter}
                   onChange={(e) => { clearUrlStatusFilter(); setStatusFilter(e.target.value); setPage(1); }}
-                  className="block text-sm bg-card border border-border rounded-lg px-3 py-2 focus:outline-none focus:ring-2 focus:ring-accent/40 focus:border-accent transition-colors min-w-[140px]"
+                  className="block text-sm bg-card border border-border px-3 py-2 focus:outline-none focus:ring-2 focus:ring-accent/40 focus:border-accent transition-colors min-w-[140px]"
                 >
                   <option value="">All statuses</option>
                   {STATUS_OPTIONS.map((s) => (
@@ -1992,7 +2007,7 @@ export default function DocumentsPage({ personalOnly = false }: DocumentsPagePro
                 <select
                   value={typeFilter}
                   onChange={(e) => { setTypeFilter(e.target.value); setPage(1); }}
-                  className="block text-sm bg-card border border-border rounded-lg px-3 py-2 focus:outline-none focus:ring-2 focus:ring-accent/40 focus:border-accent transition-colors min-w-[140px]"
+                  className="block text-sm bg-card border border-border px-3 py-2 focus:outline-none focus:ring-2 focus:ring-accent/40 focus:border-accent transition-colors min-w-[140px]"
                 >
                   <option value="">All types</option>
                   {(typesData ?? []).map((t: any) => (
@@ -2006,7 +2021,7 @@ export default function DocumentsPage({ personalOnly = false }: DocumentsPagePro
                 <select
                   value={supplierFilter}
                   onChange={(e) => { setSupplierFilter(e.target.value); setPage(1); }}
-                  className="block text-sm bg-card border border-border rounded-lg px-3 py-2 focus:outline-none focus:ring-2 focus:ring-accent/40 focus:border-accent transition-colors min-w-[160px]"
+                  className="block text-sm bg-card border border-border px-3 py-2 focus:outline-none focus:ring-2 focus:ring-accent/40 focus:border-accent transition-colors min-w-[160px]"
                 >
                   <option value="">All suppliers</option>
                   {supplierOptions.map((s) => (
@@ -2024,7 +2039,7 @@ export default function DocumentsPage({ personalOnly = false }: DocumentsPagePro
                     setSupplierFilter("");
                     setPage(1);
                   }}
-                  className="self-end inline-flex items-center gap-1.5 px-3 py-2 text-xs font-medium text-destructive hover:bg-destructive/10 rounded-lg transition-colors"
+                  className="self-end inline-flex items-center gap-1.5 px-3 py-2 text-xs font-medium text-destructive hover:bg-destructive/10 transition-colors"
                 >
                   <X className="w-3.5 h-3.5" />
                   Clear all
@@ -2094,7 +2109,7 @@ export default function DocumentsPage({ personalOnly = false }: DocumentsPagePro
                   <tr key={i}>
                     {Array.from({ length: totalCols }).map((_, j) => (
                       <td key={j} className="px-4 py-3.5">
-                        <div className="h-4 bg-muted rounded-md animate-pulse" />
+                        <div className="h-4 bg-muted animate-pulse" />
                       </td>
                     ))}
                   </tr>
@@ -2149,12 +2164,12 @@ export default function DocumentsPage({ personalOnly = false }: DocumentsPagePro
                             to={`/documents/${doc.id}`}
                             onMouseEnter={preloadDocumentWorkspace}
                             onFocus={preloadDocumentWorkspace}
-                            className="font-mono text-xs bg-muted/60 text-foreground px-2 py-0.5 rounded-md hover:bg-accent/10 hover:text-accent transition-colors"
+                            className="font-mono text-xs bg-muted/60 text-foreground px-2 py-0.5 hover:bg-accent/10 hover:text-accent transition-colors"
                           >
                             {doc.reference_number}
                           </Link>
                           {isArchiveView && (
-                            <span className="inline-flex items-center gap-1 rounded-full border border-border bg-background px-1.5 py-0.5 text-[10px] font-semibold text-muted-foreground">
+                            <span className="inline-flex items-center gap-1 border border-border bg-background px-1.5 py-0.5 text-[10px] font-semibold text-muted-foreground">
                               <Archive className="h-2.5 w-2.5" />
                               Archived
                             </span>
@@ -2172,7 +2187,7 @@ export default function DocumentsPage({ personalOnly = false }: DocumentsPagePro
                           >
                             {doc.title}
                           </Link>
-                          <span className="inline-flex items-center rounded-md border border-border bg-muted/40 px-2 py-0.5 text-[10px] font-semibold uppercase text-muted-foreground tracking-wide">
+                          <span className="inline-flex items-center border border-border bg-muted/40 px-2 py-0.5 text-[10px] font-semibold uppercase text-muted-foreground tracking-wide">
                             {formatDocumentFileType(doc.file_name, doc.file_mime_type)}
                           </span>
                         </div>
@@ -2220,7 +2235,7 @@ export default function DocumentsPage({ personalOnly = false }: DocumentsPagePro
                             to={`/documents/${doc.id}`}
                             onMouseEnter={preloadDocumentWorkspace}
                             onFocus={preloadDocumentWorkspace}
-                            className="inline-flex items-center gap-1.5 rounded-md border border-border bg-card px-2.5 py-1.5 text-xs font-medium text-foreground hover:border-accent/40 hover:bg-accent/10 hover:text-accent transition-colors"
+                            className="inline-flex items-center gap-1.5 border border-border bg-card px-2.5 py-1.5 text-xs font-medium text-foreground hover:border-accent/40 hover:bg-accent/10 hover:text-accent transition-colors"
                           >
                             <Eye className="w-3.5 h-3.5" />
                             View
@@ -2231,7 +2246,7 @@ export default function DocumentsPage({ personalOnly = false }: DocumentsPagePro
                               onClick={() => {
                                 if (window.confirm("Archive this personal document?")) archiveMutation.mutate(doc.id);
                               }}
-                              className="p-1.5 rounded-md text-muted-foreground hover:bg-accent/15 hover:text-accent transition-colors"
+                              className="p-1.5 text-muted-foreground hover:bg-accent/15 hover:text-accent transition-colors"
                             >
                               <Archive className="w-4 h-4" />
                             </button>
@@ -2242,7 +2257,7 @@ export default function DocumentsPage({ personalOnly = false }: DocumentsPagePro
                               onClick={() => {
                                 if (window.confirm("Delete this personal document? This cannot be undone.")) deleteMutation.mutate(doc.id);
                               }}
-                              className="p-1.5 rounded-md text-muted-foreground hover:bg-destructive/10 hover:text-destructive transition-colors"
+                              className="p-1.5 text-muted-foreground hover:bg-destructive/10 hover:text-destructive transition-colors"
                             >
                               <Trash2 className="w-4 h-4" />
                             </button>
@@ -2255,7 +2270,7 @@ export default function DocumentsPage({ personalOnly = false }: DocumentsPagePro
                               onClick={() => {
                                 if (window.confirm("Move this document to Trash? You can restore it later.")) deleteMutation.mutate(doc.id);
                               }}
-                              className="p-1.5 rounded-md text-muted-foreground hover:bg-destructive/10 hover:text-destructive transition-colors"
+                              className="p-1.5 text-muted-foreground hover:bg-destructive/10 hover:text-destructive transition-colors"
                             >
                               <Trash2 className="w-4 h-4" />
                             </button>
@@ -2277,11 +2292,11 @@ export default function DocumentsPage({ personalOnly = false }: DocumentsPagePro
             {isLoading ? (
               Array.from({ length: 5 }).map((_, i) => (
                 <div key={i} className="flex items-start gap-4 px-5 py-4">
-                  <div className="h-24 w-20 bg-muted rounded-md animate-pulse flex-shrink-0" />
+                  <div className="h-24 w-20 bg-muted animate-pulse flex-shrink-0" />
                   <div className="flex-1 space-y-2">
-                    <div className="h-4 w-1/3 bg-muted rounded animate-pulse" />
-                    <div className="h-3 w-1/2 bg-muted rounded animate-pulse" />
-                    <div className="h-3 w-1/4 bg-muted rounded animate-pulse" />
+                    <div className="h-4 w-1/3 bg-muted animate-pulse" />
+                    <div className="h-3 w-1/2 bg-muted animate-pulse" />
+                    <div className="h-3 w-1/4 bg-muted animate-pulse" />
                   </div>
                 </div>
               ))
@@ -2417,9 +2432,9 @@ export default function DocumentsPage({ personalOnly = false }: DocumentsPagePro
             {isLoading ? (
               <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-5 gap-4">
                 {Array.from({ length: 10 }).map((_, i) => (
-                  <div key={i} className="border border-border rounded-lg p-3 space-y-3">
-                    <div className="h-3 w-2/3 bg-muted rounded animate-pulse" />
-                    <div className="aspect-[3/4] bg-muted rounded animate-pulse" />
+                  <div key={i} className="border border-border p-3 space-y-3">
+                    <div className="h-3 w-2/3 bg-muted animate-pulse" />
+                    <div className="aspect-[3/4] bg-muted animate-pulse" />
                   </div>
                 ))}
               </div>
@@ -2436,7 +2451,7 @@ export default function DocumentsPage({ personalOnly = false }: DocumentsPagePro
                     <div
                       key={doc.id}
                       className={cn(
-                        "border border-border rounded-lg bg-card hover:border-accent/40 transition-colors group flex flex-col",
+                        "border border-border bg-card hover:border-accent/40 transition-colors group flex flex-col",
                         isSelected && "border-accent/60 bg-accent/5",
                       )}
                     >
@@ -2492,14 +2507,14 @@ export default function DocumentsPage({ personalOnly = false }: DocumentsPagePro
               <button
                 onClick={() => setPage((p) => Math.max(1, p - 1))}
                 disabled={page === 1}
-                className="px-4 py-1.5 text-xs font-medium bg-card border border-border rounded-lg hover:bg-muted disabled:opacity-40 disabled:cursor-not-allowed transition-colors"
+                className="px-4 py-1.5 text-xs font-medium bg-card border border-border hover:bg-muted disabled:opacity-40 disabled:cursor-not-allowed transition-colors"
               >
                 Previous
               </button>
               <button
                 onClick={() => setPage((p) => p + 1)}
                 disabled={page * PAGE_SIZE >= data.count}
-                className="px-4 py-1.5 text-xs font-medium bg-card border border-border rounded-lg hover:bg-muted disabled:opacity-40 disabled:cursor-not-allowed transition-colors"
+                className="px-4 py-1.5 text-xs font-medium bg-card border border-border hover:bg-muted disabled:opacity-40 disabled:cursor-not-allowed transition-colors"
               >
                 Next
               </button>
@@ -2526,7 +2541,7 @@ export default function DocumentsPage({ personalOnly = false }: DocumentsPagePro
                 aria-pressed={effectiveView === id}
                 onClick={() => setViewMode(id)}
                 className={cn(
-                  "p-1.5 rounded-sm transition-colors",
+                  "p-1.5 transition-colors",
                   effectiveView === id
                     ? "bg-[#0072CE] text-white"
                     : "text-[#5A6470] hover:text-[#1E2B3A] hover:bg-[#E6EAEE]",

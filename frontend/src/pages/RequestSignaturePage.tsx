@@ -254,6 +254,7 @@ export default function RequestSignaturePage() {
 
   return (
     <div className="admin-shell">
+      <div className="mx-auto max-w-2xl">
       <div className="admin-page-header">
         <h1 className="admin-page-title">Request signature</h1>
         <p className="admin-page-subtitle">Collect e-signatures from specific people — no workflow, no document type.</p>
@@ -281,6 +282,7 @@ export default function RequestSignaturePage() {
       </div>
       {tab === "incoming" && <RequestList box="incoming" />}
       {tab === "sent" && <RequestList box="sent" />}
+      </div>
     </div>
   );
 }

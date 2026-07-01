@@ -55,6 +55,8 @@ type DashboardAuditEvent = {
   actor_email?: string;
   timestamp: string;
   object_repr?: string;
+  object_type?: string;
+  changes?: Record<string, unknown> | null;
 };
 
 type StorageStats = {
@@ -283,7 +285,11 @@ const EVENT_VERB_MAP: Record<string, string> = {
   "user.logout": "signed out",
   "user.login_failed": "failed to sign in",
   "user.password_changed": "changed their password",
-  "user.created": "was added",
+  "user.created": "added the user",
+  "user.deleted": "removed the user",
+  "user.password_reset": "reset the password for",
+  "user.activated": "activated the account of",
+  "user.deactivated": "deactivated the account of",
   "user.updated": "updated their profile",
   "document.created": "uploaded",
   "document.bulk_uploaded": "bulk uploaded",
@@ -320,11 +326,42 @@ const EVENT_VERB_MAP: Record<string, string> = {
 
 const VERB_RE = /(submitted|uploaded|edited|updated|created|deleted|approved|rejected|downloaded|viewed|previewed|printed|shared|failed|queued|completed|logged in|logged out|signed in|signed out|enabled|disabled|returned|held|released|archived|added|delegated|reassigned|exported)\b/i;
 
+// `permission.changed` is reused for a range of admin/account actions (create
+// user, reset password, activate/deactivate, delete, group/role tweaks…). The
+// specific action lives in `changes.action`, so translate that into a proper
+// verb + target instead of the meaningless "changed permissions" fallback.
+function describePermissionChange(event: DashboardAuditEvent): { verb: string; target: string } {
+  const changes = (event.changes ?? {}) as Record<string, unknown>;
+  const action = typeof changes.action === "string" ? changes.action : "";
+  const objectType = event.object_type ?? "";
+  const target = cleanAuditTitle(event.object_repr || "");
+
+  switch (action) {
+    case "created": return { verb: "added the user", target };
+    case "deleted": return { verb: "removed the user", target };
+    case "password_reset": return { verb: "reset the password for", target };
+    case "activated": return { verb: "activated the account of", target };
+    case "deactivated": return { verb: "deactivated the account of", target };
+    case "reassign_active_tasks": return { verb: "reassigned active tasks from", target };
+    case "duplicated_from": return { verb: "duplicated group", target };
+  }
+  if ("mfa" in changes) return { verb: changes.mfa ? "enabled MFA" : "disabled MFA", target: "" };
+  if (objectType === "UserSignature") return { verb: "updated their signature", target: "" };
+  if (objectType === "UserGroup") return { verb: "updated group", target };
+  if (objectType === "User") return { verb: "updated the account of", target };
+  return { verb: "updated permissions", target };
+}
+
 function formatAuditSummary(event: DashboardAuditEvent): AuditSummaryParts {
   const actor = deriveActorName(event);
   const code = String(event.event ?? "").toLowerCase();
   const summary = (event.summary || "").trim();
   const objectTitle = cleanAuditTitle(event.object_repr || "");
+
+  if (code === "permission.changed") {
+    const { verb, target } = describePermissionChange(event);
+    return { actor, verb, target };
+  }
 
   const mappedVerb = EVENT_VERB_MAP[code];
   if (mappedVerb) {

@@ -39,6 +39,16 @@ class AuditLogSerializer(serializers.ModelSerializer):
             return f"{actor} failed to log in"
         if event == "user.mfa_enabled":
             return f"{actor} enabled multi-factor authentication"
+        if event == "user.created":
+            return f"{actor} added user {obj.object_repr}".strip()
+        if event == "user.deleted":
+            return f"{actor} removed user {obj.object_repr}".strip()
+        if event == "user.password_reset":
+            return f"{actor} reset the password for {obj.object_repr}".strip()
+        if event == "user.activated":
+            return f"{actor} activated {obj.object_repr}".strip()
+        if event == "user.deactivated":
+            return f"{actor} deactivated {obj.object_repr}".strip()
 
         object_label = self._get_document_label(obj)
         if obj.object_type == "Document" or event.startswith("document.") or event.startswith("workflow."):

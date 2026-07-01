@@ -43,6 +43,11 @@ class AuditEvent(models.TextChoices):
     USER_LOGIN = "user.login", "User Login"
     USER_LOGIN_FAILED = "user.login_failed", "Login Failed"
     USER_MFA_ENABLED = "user.mfa_enabled", "MFA Enabled"
+    USER_CREATED = "user.created", "User Created"
+    USER_DELETED = "user.deleted", "User Deleted"
+    USER_PASSWORD_RESET = "user.password_reset", "User Password Reset"
+    USER_ACTIVATED = "user.activated", "User Activated"
+    USER_DEACTIVATED = "user.deactivated", "User Deactivated"
     PERMISSION_CHANGED = "permission.changed", "Permission Changed"
     AUDIT_EXPORTED = "audit.exported", "Audit Log Exported"
 

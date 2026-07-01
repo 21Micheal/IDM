@@ -20,21 +20,15 @@ function SessionExpiredModal() {
   const expiredNotice = useSessionUiStore((s) => s.expiredNotice);
   const dismiss = useSessionUiStore((s) => s.dismissExpiredNotice);
 
-  useEffect(() => {
-    if (!expiredNotice) return;
-    const onKey = () => dismiss();
-    window.addEventListener("keydown", onKey);
-    return () => window.removeEventListener("keydown", onKey);
-  }, [expiredNotice, dismiss]);
-
   if (!expiredNotice) return null;
 
+  // Dismissable only via the OK button — clicking elsewhere (overlay) or
+  // pressing a key must not close it.
   return (
     <div
       role="alertdialog"
       aria-modal="true"
       aria-labelledby="session-expired-title"
-      onClick={dismiss}
       className="fixed inset-0 z-[200] flex items-start justify-center bg-[#1F2933]/40 px-4 pt-[12vh]"
     >
       <div className="w-full max-w-md border border-[#C8CDD2] bg-white shadow-xl">
