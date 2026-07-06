@@ -634,6 +634,7 @@ function OfficeEditPanel({
   const user = useAuthStore((s) => s.user);
 
   const [lockData, setLockData]               = useState<DocumentEditTokenResponse | null>(null);
+  const [editEditorOpen, setEditEditorOpen]     = useState(false);
   const [versionPolling, setVersionPolling]   = useState(false);
   const [previewProgress, setPreviewProgress] = useState(0);
   const [previewTakingLong, setPreviewTakingLong] = useState(false);
@@ -769,6 +770,7 @@ function OfficeEditPanel({
     onSuccess: () => {
       stopVersionPolling();
       setLockData(null);
+      setEditEditorOpen(false);
       toast.success("Released.");
       qc.invalidateQueries({ queryKey: ["document", doc.id] });
     },
@@ -819,6 +821,7 @@ function OfficeEditPanel({
         const stillLockedByMe = Boolean(latest.is_edit_locked && latest.edit_locked_by === user?.id);
         if (!stillLockedByMe) {
           setLockData(null);
+          setEditEditorOpen(false);
           stopVersionPolling();
           changed = true;
         }
@@ -836,6 +839,10 @@ function OfficeEditPanel({
   };
 
   useEffect(() => () => stopVersionPolling(), []);
+
+  useEffect(() => {
+    if (!lockedByMe) setEditEditorOpen(false);
+  }, [lockedByMe]);
 
   // ── Platform detection ────────────────────────────────────────────────────
   const isWindows = typeof navigator !== "undefined" && /Windows/i.test(navigator.userAgent);
@@ -871,8 +878,7 @@ function OfficeEditPanel({
     }
   };
 
-  const openInEditor = useCallback((data: { webdav_url: string } | null | undefined = lockData) => {
-    if (!data) return;
+  const launchInEditor = useCallback((data: { webdav_url: string }, editable: boolean) => {
     const { msScheme } = info as { msScheme?: string };
 
     if (isWindows) {
@@ -884,7 +890,13 @@ function OfficeEditPanel({
       const encoded = btoa(webdavUrl).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
       window.location.href = `docvault-open://${encoded}`;
     }
-  }, [handlerInstalled, info, isLinux, isWindows, lockData]);
+    if (editable) setEditEditorOpen(true);
+  }, [handlerInstalled, info, isLinux, isWindows]);
+
+  const openInEditor = useCallback((data: { webdav_url: string } | null | undefined = lockData) => {
+    if (!data) return;
+    launchInEditor(data, true);
+  }, [launchInEditor, lockData]);
 
   // Open the live document in the desktop app READ-ONLY (no lock). Available to
   // members without edit rights so they can view in Word/LibreOffice; the server
@@ -893,11 +905,11 @@ function OfficeEditPanel({
     try {
       const r = await documentsAPI.readOnlyToken(doc.id);
       const webdav_url = normalizeWebdavUrl(r.data.webdav_url) ?? r.data.webdav_url;
-      openInEditor({ webdav_url });
+      launchInEditor({ webdav_url }, false);
     } catch {
       toast.error("Could not open the document. Please try again.");
     }
-  }, [doc.id, openInEditor]);
+  }, [doc.id, launchInEditor]);
 
   /**
    * "Open in <App>":
@@ -929,6 +941,7 @@ function OfficeEditPanel({
   const canOpenInApp = Boolean(info.msScheme) && (isWindows || (isLinux && handlerInstalled));
   // Whether "Open in <app>" will be read-only for this user.
   const willOpenReadOnly = !lockedByMe && !lockData;
+  const editEditorLaunchBlocked = editEditorOpen && !willOpenReadOnly;
 
   // ─────────────────────────────────────────────────────────────────────────
   // Render
@@ -965,15 +978,30 @@ function OfficeEditPanel({
               <Clock className="w-3 h-3 animate-pulse" /> Watching for saves
             </span>
           )}
+          {editEditorLaunchBlocked && (
+            <span className="inline-flex items-center gap-1.5 text-xs text-[#5E6870] bg-[#F5F7F8] border border-[#C8CDD2] px-2 py-0.5 rounded-full">
+              <ExternalLink className="w-3 h-3" /> Editing in {info.app}
+            </span>
+          )}
         </div>
 
         <div className="flex items-center gap-2 flex-wrap">
           {canOpenInApp && showHeaderOpenButton && (
             <button
               onClick={handleOpenInApp}
-              disabled={acquireLock.isPending}
-              className="inline-flex items-center gap-1.5 bg-[#287EAD] px-3 py-1.5 text-xs font-medium text-white transition-colors hover:bg-[#206D99] disabled:opacity-50"
-              title={willOpenReadOnly ? `Open in ${info.app} (read-only)` : `Open in ${info.app}`}
+              disabled={acquireLock.isPending || editEditorLaunchBlocked}
+              className={`inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium transition-colors disabled:cursor-not-allowed ${
+                editEditorLaunchBlocked
+                  ? "bg-[#D3D7DA] text-[#5E6870] cursor-not-allowed"
+                  : "bg-[#287EAD] text-white hover:bg-[#206D99] disabled:opacity-50"
+              }`}
+              title={
+                editEditorLaunchBlocked
+                  ? `Already open in ${info.app}. Close it there before opening again.`
+                  : willOpenReadOnly
+                    ? `Open in ${info.app} (read-only)`
+                    : `Open in ${info.app}`
+              }
             >
               {acquireLock.isPending
                 ? <Loader2 className="w-3.5 h-3.5 animate-spin" />
