@@ -278,7 +278,7 @@ function EditLockBanner({
         <div className="flex items-center gap-2 text-[#1F2933]">
           <Lock className="w-4 h-4 text-[#287EAD] flex-shrink-0" />
           <span>
-            <strong>Locked by you.</strong> Other users can only view it until
+            <strong>You are in edit mode.</strong> Other users can only view it until
             you close your editor or release the lock.
           </span>
         </div>
@@ -286,7 +286,7 @@ function EditLockBanner({
           onClick={onRelease}
           className="flex-shrink-0 inline-flex items-center gap-1.5 text-xs font-semibold text-[#1F2933] border border-[#C8CDD2] bg-white px-3 py-1.5 hover:bg-[#F5F7F8] transition-colors"
         >
-          <Unlock className="w-3.5 h-3.5" /> Release
+          <Unlock className="w-3.5 h-3.5" /> Release(Save)
         </button>
       </div>
     );
@@ -297,8 +297,8 @@ function EditLockBanner({
       <div className="flex items-center gap-2 text-[#1F2933]">
         <Lock className="w-4 h-4 text-red-600 flex-shrink-0" />
         <span>
-          Locked by <strong>{doc.edit_locked_by_name ?? "another user"}</strong>.
-          View-only until they release it.
+          <strong>{doc.edit_locked_by_name ?? "another user"} </strong> is editing this document.
+          View-only until they release/save it.
         </span>
       </div>
       {canForceRelease && onForceRelease && (
@@ -980,7 +980,7 @@ function OfficeEditPanel({
           )}
           {editEditorLaunchBlocked && (
             <span className="inline-flex items-center gap-1.5 text-xs text-[#5E6870] bg-[#F5F7F8] border border-[#C8CDD2] px-2 py-0.5 rounded-full">
-              <ExternalLink className="w-3 h-3" /> Editing in {info.app}
+              <ExternalLink className="w-3 h-3" /> Open in {info.app}
             </span>
           )}
         </div>
@@ -1016,7 +1016,7 @@ function OfficeEditPanel({
               className="inline-flex items-center gap-1.5 border border-[#287EAD] px-3 py-1.5 text-xs font-medium text-[#287EAD] transition-colors hover:bg-[#EEF6FB] disabled:opacity-50"
               title="Lock (check out) to edit this document or its details"
             >
-              <Lock className="w-3.5 h-3.5" /> Lock
+              <Lock className="w-3.5 h-3.5" /> Amend(Lock)
             </button>
           )}
           {lockedByMe && (
@@ -1026,7 +1026,7 @@ function OfficeEditPanel({
               className="inline-flex items-center gap-1.5 border border-[#C8CDD2] px-2.5 py-1.5 text-xs font-medium text-[#5E6870] transition-colors hover:bg-destructive/5 hover:text-destructive disabled:opacity-50"
               title="Release (check in)"
             >
-              <Unlock className="w-3.5 h-3.5" /> Release
+              <Unlock className="w-3.5 h-3.5" /> Release(Save)
             </button>
           )}
         </div>
@@ -1481,7 +1481,7 @@ export default function DocumentViewer({ document: doc, submitSlot, hideUploadAc
                 title="Lock (check out) to edit this document's details"
               >
                 {acquireLock.isPending ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <Lock className="w-3.5 h-3.5" />}
-                Lock
+                Lock(Amend)
               </button>
             )}
             {lockedByMe && (
@@ -1491,7 +1491,7 @@ export default function DocumentViewer({ document: doc, submitSlot, hideUploadAc
                 className="inline-flex items-center gap-1.5 border border-[#C8CDD2] px-2.5 py-1.5 text-xs font-medium text-[#5E6870] transition-colors hover:bg-destructive/5 hover:text-destructive disabled:opacity-50"
                 title="Release (check in)"
               >
-                <Unlock className="w-3.5 h-3.5" /> Release
+                <Unlock className="w-3.5 h-3.5" /> Release(Save)
               </button>
             )}
           </div>
