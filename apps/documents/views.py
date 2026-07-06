@@ -781,8 +781,29 @@ class DocumentViewSet(AuditMixin, viewsets.ModelViewSet):
             doc, data=request.data, partial=True, context={"request": request}
         )
         serializer.is_valid(raise_exception=True)
+
+        from apps.documents.metadata_audit import (
+            diff_metadata_snapshots,
+            snapshot_document_metadata,
+        )
+
+        doc = (
+            Document.objects
+            .select_related("document_type")
+            .prefetch_related("tags", "document_type__metadata_fields")
+            .get(pk=doc.pk)
+        )
+        before_snapshot = snapshot_document_metadata(doc)
         serializer.save()
-        self.record_audit("document.updated", doc)
+        doc = (
+            Document.objects
+            .select_related("document_type")
+            .prefetch_related("tags", "document_type__metadata_fields")
+            .get(pk=doc.pk)
+        )
+        metadata_edits = diff_metadata_snapshots(before_snapshot, snapshot_document_metadata(doc))
+        audit_changes = {"metadata_edits": metadata_edits} if metadata_edits else None
+        self.record_audit("document.updated", doc, audit_changes)
         return Response(DocumentDetailSerializer(doc, context={"request": request}).data)
 
     def _require_edit_lock(self, doc, user):

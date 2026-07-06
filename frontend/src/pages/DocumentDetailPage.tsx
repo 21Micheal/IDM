@@ -137,29 +137,66 @@ function getCommandStatusClass(status: string) {
 }
 
 function describeAuditEvent(event: string) {
-  const normalized = event.replace(/_/g, " ").toLowerCase();
+  const normalized = event.replace(/\./g, " ").replace(/_/g, " ").trim().toLowerCase();
   switch (normalized) {
-    case "created":
+    case "document created":
       return "was created";
-    case "updated":
-      return "was updated";
+    case "document updated":
+      return "was edited";
     case "metadata updated":
       return "metadata was updated";
-    case "file uploaded":
     case "document uploaded":
+    case "file uploaded":
       return "was uploaded";
-    case "file downloaded":
     case "document downloaded":
+    case "file downloaded":
       return "was downloaded";
-    case "reviewed":
+    case "document reviewed":
       return "was reviewed";
     case "workflow started":
       return "workflow was started";
+    case "document version restored":
     case "version restored":
       return "version was restored";
+    case "created":
+      return "was created";
+    case "updated":
+      return "was edited";
     default:
       return normalized;
   }
+}
+
+type AuditMetadataEdit = {
+  key: string;
+  field: string;
+  old: string;
+  new: string;
+};
+
+function AuditMetadataEditList({ edits }: { edits: AuditMetadataEdit[] }) {
+  if (!edits.length) return null;
+
+  return (
+    <ul className="mt-2 space-y-1.5 border-l-2 border-[#287EAD] bg-[#F5F7F8] px-2 py-1.5">
+      {edits.map((edit) => (
+        <li key={edit.key} className="text-sm leading-relaxed text-[#1F2933]">
+          <span className="font-medium">{edit.field}: </span>
+          {edit.old ? (
+            <span className="line-through text-[#5E6870]">{edit.old}</span>
+          ) : null}
+          {edit.old && edit.new ? (
+            <span className="mx-1.5 text-[#5E6870]">→</span>
+          ) : null}
+          {edit.new ? (
+            <span className="font-medium text-[#1F2933]">{edit.new}</span>
+          ) : edit.old ? (
+            <span className="italic text-[#5E6870]">(cleared)</span>
+          ) : null}
+        </li>
+      ))}
+    </ul>
+  );
 }
 
 function describeRelationship(relationship: DocumentRelationship) {
@@ -193,6 +230,10 @@ type DocumentAuditLog = {
   actor_name?: string;
   ip_address?: string;
   timestamp: string;
+  changes?: {
+    metadata_edits?: AuditMetadataEdit[];
+    [key: string]: unknown;
+  };
 };
 
 export default function DocumentDetailPage() {
@@ -1960,11 +2001,13 @@ export default function DocumentDetailPage() {
                               <p className="text-sm leading-normal text-[#1F2933]">
                                 <span className="font-bold text-[#287EAD]">{doc.reference_number}</span> {describeAuditEvent(log.event)} by <span className="font-semibold">{log.actor_name || "System"}</span>
                               </p>
-                              {log.summary && (
+                              {log.changes?.metadata_edits?.length ? (
+                                <AuditMetadataEditList edits={log.changes.metadata_edits} />
+                              ) : log.summary ? (
                                 <p className="mt-2 whitespace-pre-wrap border-l-2 border-[#287EAD] bg-[#F5F7F8] px-2 py-1.5 text-sm leading-relaxed text-[#5E6870]">
                                   {log.summary}
                                 </p>
-                              )}
+                              ) : null}
                               <div className="mt-2 flex flex-wrap items-center gap-2 text-xs font-mono text-[#5E6870]">
                                 <span>{log.ip_address || "System"}</span>
                                 <span>·</span>

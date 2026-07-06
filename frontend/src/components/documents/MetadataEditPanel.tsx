@@ -221,6 +221,7 @@ export default function MetadataEditPanel({ document: doc, onClose, registerSave
       toast.success("Metadata updated");
       qc.invalidateQueries({ queryKey: ["document", doc.id] });
       qc.invalidateQueries({ queryKey: ["document-preview", doc.id] });
+      qc.invalidateQueries({ queryKey: ["document-audit", doc.id] });
       onClose();
     },
     onError: (err) => toast.error(extractApiError(err, "Update failed")),
