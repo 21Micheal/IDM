@@ -7,8 +7,8 @@
  *   muted) — no raw gray/blue/amber colors.
  * • "Open in <Editor>" is now a small, minimal inline button placed next to the
  *   version pills in the header — no more big blue card.
- * • The Office editor flow exposes a single primary action button. Lock state,
- *   install banner (Linux), and helper script blurbs are kept but compacted.
+ * • The Office editor flow: "Open in <App>" is read-only until the user locks
+ *   the document; Lock (check-out) is required before editing or uploading.
  * • UploadVersionDrawer is no longer a collapsible drawer — it renders inline
  *   below the document with a regular submit button (see UploadVersionDrawer.tsx).
  *
@@ -900,32 +900,26 @@ function OfficeEditPanel({
   }, [doc.id, openInEditor]);
 
   /**
-   * "Open in <App>" — Infor-style check-out behaviour:
-   *   • you hold the lock        → open editable
-   *   • you can edit & unlocked  → auto-check-out (lock), then open editable
-   *   • locked by someone else, or no edit rights → open READ-ONLY
+   * "Open in <App>":
+   *   • you hold the lock (or already have an edit token this session) → editable
+   *   • otherwise → read-only (no auto check-out; use Lock first to edit)
    */
   const handleOpenInApp = useCallback(() => {
     if (isLinux && !handlerInstalled) {
       toast.info("Run the one-time Linux install script before opening documents in the editor.");
       return;
     }
-    // Fresh editable token already in hand this session → open straight away.
     if (lockData) {
       openInEditor();
       return;
     }
-    // We hold the lock (e.g. after a page reload, or it was taken via the Lock
-    // button) but have no editor token yet — or we can take the lock now.
-    // Either way (re)acquire an editable WebDAV token, then open. acquire_lock
-    // is idempotent for the current holder, so this also refreshes the lock and
-    // guarantees the editor opens with a valid token it can save through.
-    if (lockedByMe || (canEditInEditor && !lockedByOther)) {
+    if (lockedByMe) {
+      // Lock held (e.g. after reload) but no editor token in memory — fetch one.
       acquireLock.mutate(undefined, { onSuccess: (data) => openInEditor(data) });
       return;
     }
     openReadOnly();
-  }, [acquireLock, canEditInEditor, handlerInstalled, isLinux, lockData, lockedByMe, lockedByOther, openInEditor, openReadOnly]);
+  }, [acquireLock, handlerInstalled, isLinux, lockData, lockedByMe, openInEditor, openReadOnly]);
 
   // Explicit check-out (no editor). This is what enables metadata "Edit details".
   const handleLock = useCallback(() => acquireLock.mutate(), [acquireLock]);
@@ -934,7 +928,7 @@ function OfficeEditPanel({
   // Office docs that can be opened in a desktop editor on this platform.
   const canOpenInApp = Boolean(info.msScheme) && (isWindows || (isLinux && handlerInstalled));
   // Whether "Open in <app>" will be read-only for this user.
-  const willOpenReadOnly = !lockedByMe && !lockData && (lockedByOther || !canEditInEditor);
+  const willOpenReadOnly = !lockedByMe && !lockData;
 
   // ─────────────────────────────────────────────────────────────────────────
   // Render
@@ -1017,8 +1011,8 @@ function OfficeEditPanel({
             One-time setup for one-click editing on Linux
           </p>
           <p className="text-xs text-muted-foreground">
-            Before editing in {info.app}, run the install script once to register
-            the local opener. After that, editing works from the regular button.
+            Run the install script once to open documents in {info.app}. Lock the
+            document first when you need to edit or upload a new version.
           </p>
           <div className="flex items-center gap-2 flex-wrap">
             <button
