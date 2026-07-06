@@ -15,7 +15,7 @@ import { useState, useEffect, useRef } from "react";
 import { createPortal } from "react-dom";
 import { useForm, Controller } from "react-hook-form";
 import { useQuery } from "@tanstack/react-query";
-import { AlertCircle, ChevronDown, Download, ExternalLink, Loader2, Pencil, Paperclip, Plus, Search, Trash2, X } from "lucide-react";
+import { AlertCircle, ChevronDown, Download, ExternalLink, Loader2, Lock, Pencil, Paperclip, Plus, Search, Trash2, X } from "lucide-react";
 import type { ReactNode } from "react";
 import { documentsAPI } from "@/services/api";
 import { toast } from "@/components/ui/vault-toast";
@@ -69,6 +69,7 @@ type Field = {
   defaultValue?: string; readonly?: boolean; hidden?: boolean;
   formula?: string;
   visibleWhen?: VisibleWhen | null;
+  editableWhen?: VisibleWhen | null;
 };
 
 type SectionGroupRef = { id?: string; name?: string };
@@ -77,6 +78,7 @@ type Section = {
   id?: string; title?: string; description?: string; fields?: Field[];
   hidden?: boolean; visibleWhen?: VisibleWhen | null;
   visibleToGroups?: SectionGroupRef[];
+  readonly?: boolean; editableWhen?: VisibleWhen | null;
 };
 
 /** The person filling/viewing the form, used to evaluate role-restricted
@@ -319,6 +321,22 @@ function evalVisible(
 ): boolean {
   if (item.hidden) return false;
   const g = ruleConditions(item.visibleWhen);
+  if (!g || g.conditions.length === 0) return true;
+  const results = g.conditions.map((c) => evalCondition(c, values, allFields, processStep));
+  return g.combinator === "or" ? results.some(Boolean) : results.every(Boolean);
+}
+
+// Editability mirror: a field/section is editable unless always read-only
+// (`readonly`) or it has an `editableWhen` group that doesn't match at the
+// current step/values. Absent group = editable (preserves prior behaviour).
+function evalEditable(
+  item: { readonly?: boolean; editableWhen?: VisibleWhen | null },
+  values: TemplateFormValues,
+  allFields: Field[],
+  processStep = "draft",
+): boolean {
+  if (item.readonly) return false;
+  const g = ruleConditions(item.editableWhen);
   if (!g || g.conditions.length === 0) return true;
   const results = g.conditions.map((c) => evalCondition(c, values, allFields, processStep));
   return g.combinator === "or" ? results.some(Boolean) : results.every(Boolean);
@@ -792,13 +810,16 @@ function SignatureField({ fieldKey, disabled, value, onChangeCb }: {
 const inp = "input";
 const errCls = "mt-1 flex items-center gap-1 text-xs text-red-500";
 
-function FormField({ field, control, errors, onChangeCb, readOnly, allValues }: {
+function FormField({ field, control, errors, onChangeCb, readOnly, allValues, editable = true }: {
   field: Field;
   control: any;
   errors: Record<string, any>;
   onChangeCb: (key: string, val: unknown) => void;
   readOnly?: boolean;
   allValues: TemplateFormValues;
+  // Effective editability at the current process step (section ∧ field). When
+  // false the field is shown but locked (read-only) for this step.
+  editable?: boolean;
 }) {
   const key  = field.key ?? field.id ?? "";
   const type = field.type ?? "text";
@@ -806,7 +827,7 @@ function FormField({ field, control, errors, onChangeCb, readOnly, allValues }: 
   const help  = field.helpText ?? field.help_text;
   const span  = Math.min(12, Math.max(1, field.colSpan ?? field.width ?? 6));
   const style = { gridColumn: `span ${span} / span ${span}` };
-  const dis   = readOnly || field.readonly;
+  const dis   = readOnly || field.readonly || !editable;
   const err   = errors[key]?.message as string | undefined;
 
   if (field.hidden) return null;
@@ -825,7 +846,7 @@ function FormField({ field, control, errors, onChangeCb, readOnly, allValues }: 
       field={field}
       value={Array.isArray(allValues[key]) ? (allValues[key] as Record<string, unknown>[]) : []}
       onChange={(rows) => onChangeCb(key, rows)}
-      readOnly={readOnly}
+      readOnly={dis}
       tableKey={key}
       documentId={allValues.__document_id as string | undefined}
     />
@@ -1127,11 +1148,21 @@ export default function TemplateForm({ sections, values, onChange, readOnly = fa
         const visibleFields = (section.fields ?? []).filter((f) =>
           evalVisible(f, liveValues as TemplateFormValues, allFields, processStep)
         );
+        // Editability cascades: a read-only/locked section locks all its fields.
+        const sectionEditable = evalEditable(section, liveValues as TemplateFormValues, allFields, processStep);
+        const sectionLocked = !readOnly && !sectionEditable;
         return (
           <div key={section.id ?? si} className="rounded-xl border border-border bg-card shadow-sm overflow-hidden">
             {/* Section header */}
             <div className="border-b border-border bg-muted/40 px-5 py-3">
-              <h3 className="text-sm font-bold text-foreground">{section.title ?? `Section ${si + 1}`}</h3>
+              <h3 className="flex items-center gap-2 text-sm font-bold text-foreground">
+                {section.title ?? `Section ${si + 1}`}
+                {sectionLocked && (
+                  <span className="inline-flex items-center gap-1 rounded bg-muted px-1.5 py-0.5 text-[10px] font-semibold text-muted-foreground">
+                    <Lock className="h-2.5 w-2.5" /> Read-only at this step
+                  </span>
+                )}
+              </h3>
               {section.description && (
                 <p className="mt-0.5 text-xs text-muted-foreground">{section.description}</p>
               )}
@@ -1146,6 +1177,7 @@ export default function TemplateForm({ sections, values, onChange, readOnly = fa
                   errors={errors as Record<string, any>}
                   onChangeCb={onChange}
                   readOnly={readOnly}
+                  editable={sectionEditable && evalEditable(f, liveValues as TemplateFormValues, allFields, processStep)}
                   allValues={liveValues as TemplateFormValues}
                 />
               ))}
@@ -1178,6 +1210,8 @@ export function requiredFieldLabels(
     // the viewer isn't a member of).
     if (!evalVisible(s, values, allFields, processStep)) continue;
     if (!sectionVisibleToViewer(s, viewer)) continue;
+    // A read-only/locked section's fields can't be filled at this step.
+    const sectionEditable = evalEditable(s, values, allFields, processStep);
     for (const f of s.fields ?? []) {
       const type = f.type ?? "text";
       if (type === "divider" || type === "heading") continue;
@@ -1185,6 +1219,8 @@ export function requiredFieldLabels(
       if (resolveFormula(f.formula)) continue;
       // Don't require a field the user can't see (hidden / conditionally hidden).
       if (f.hidden || !evalVisible(f, values, allFields, processStep)) continue;
+      // Don't require a field the user can't edit at this step (read-only / locked).
+      if (!sectionEditable || !evalEditable(f, values, allFields, processStep)) continue;
       const key = f.key ?? "";
       const v   = values[key];
       if (f.required) {

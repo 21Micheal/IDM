@@ -20,58 +20,7 @@ def _request_bool(value) -> bool:
     return str(value).strip().lower() in {"1", "true", "yes", "on"}
 
 
-def _rule_conditions(vw):
-    """Normalize a stored ``visibleWhen`` (legacy single rule or a rule group)
-    into ``(combinator, conditions)``, or ``None`` when there's no rule."""
-    if not isinstance(vw, dict):
-        return None
-    if isinstance(vw.get("conditions"), list):
-        combinator = vw.get("combinator") if vw.get("combinator") in ("and", "or") else "and"
-        return combinator, vw["conditions"]
-    if isinstance(vw.get("fieldKey"), str):
-        return "and", [{
-            "source": "field", "fieldKey": vw["fieldKey"],
-            "operator": vw.get("operator"), "value": vw.get("value"),
-        }]
-    return None
-
-
-def _eval_condition(cond: dict, values: dict, process_step: str) -> bool:
-    if cond.get("source") == "process_step":
-        sv = process_step
-    else:
-        raw = values.get(cond.get("fieldKey"))
-        sv = "" if raw is None else str(raw)
-    operator = cond.get("operator")
-    expected = cond.get("value") or ""
-    if operator == "equals":
-        return sv == expected
-    if operator == "not_equals":
-        return sv != expected
-    if operator == "is_empty":
-        return sv.strip() == ""
-    if operator == "is_not_empty":
-        return sv.strip() != ""
-    return True
-
-
-def _eval_visible(item: dict, values: dict, process_step: str = "draft") -> bool:
-    """Server-side mirror of the frontend `evalVisible` (TemplateForm.tsx).
-
-    Works for both a field and a section dict — both may carry a ``hidden`` flag
-    (always hidden) and a ``visibleWhen`` rule group (AND/OR of conditions over
-    form fields and the document's process step). ``values`` is keyed by field
-    key (the display-string ``generation_values``). An empty/absent group means
-    no restriction (visible).
-    """
-    if item.get("hidden"):
-        return False
-    group = _rule_conditions(item.get("visibleWhen"))
-    if not group or not group[1]:
-        return True
-    combinator, conditions = group
-    results = [_eval_condition(c, values, process_step) for c in conditions]
-    return any(results) if combinator == "or" else all(results)
+from apps.templates_engine.conditions import is_visible as _eval_visible, is_editable  # noqa: E402
 
 
 def _section_visible_to_user(section: dict, group_ids: set, group_names: set, is_admin: bool) -> bool:
@@ -316,9 +265,11 @@ class DocumentTemplateViewSet(viewsets.ModelViewSet):
                 f for section in template.sections
                 if _eval_visible(section, generation_values)
                 and _section_visible_to_user(section, group_ids, group_names, is_admin)
+                and is_editable(section, generation_values)
                 for f in section.get("fields", [])
                 if f.get("required") and f.get("type") not in ("divider", "heading")
                 and not f.get("formula") and _eval_visible(f, generation_values)
+                and is_editable(f, generation_values)
             ]
             missing = [f["label"] for f in all_fields if not generation_values.get(f["key"])]
             if missing:

@@ -225,6 +225,9 @@ export interface TemplateField {
   referenceSource?: string;
   formula?: string;            // auto-fill formula, e.g. "current_user", "now"
   readonly?: boolean;
+  /* Editability — `readonly` = always read-only; `editableWhen` = editable only
+   * when the rule group matches (read-only otherwise). Absent = editable. */
+  editableWhen?: RuleGroup | null;
   hidden?: boolean;
   visibleWhen?: RuleGroup | null;
   /* SunSystems binding (journal line / budget / header role). */
@@ -267,6 +270,10 @@ export interface TemplateSection {
   hidden?: boolean;
   visibleWhen?: RuleGroup | null;
   visibleToGroups?: SectionGroupRef[];
+  /* Editability (cascades to the section's fields). `readonly` = always
+   * read-only; `editableWhen` = editable only when the rule group matches. */
+  readonly?: boolean;
+  editableWhen?: RuleGroup | null;
 }
 
 /* A reference to an RBAC group a section is restricted to. `id` is canonical
@@ -592,7 +599,8 @@ function normalizeField(field: TemplateField): TemplateField {
     : field.columns;
   const sunsystems = migrateFinanceBinding(field.sunsystems);
   const visibleWhen = toRuleGroup(field.visibleWhen);
-  return { ...field, type, key, colSpan, width: colSpan, helpText, columns, sunsystems, visibleWhen };
+  const editableWhen = toRuleGroup(field.editableWhen);
+  return { ...field, type, key, colSpan, width: colSpan, helpText, columns, sunsystems, visibleWhen, editableWhen };
 }
 
 function normalizeTemplate(template: EditableTemplate): Template {
@@ -605,6 +613,7 @@ function normalizeTemplate(template: EditableTemplate): Template {
     sections: sections.map((s) => ({
       ...s,
       visibleWhen: toRuleGroup(s.visibleWhen),
+      editableWhen: toRuleGroup(s.editableWhen),
       fields: Array.isArray(s.fields) ? s.fields.map(normalizeField) : [],
     })),
   };
@@ -1121,6 +1130,11 @@ function FieldCard({
             ) : ruleGroupHasConditions(field.visibleWhen) && (
               <span className="rounded bg-amber-50 px-1.5 py-0.5 text-[9px] font-semibold text-amber-700 border border-amber-200 flex-shrink-0" title={`Show when ${summarizeRuleGroup(field.visibleWhen)}`}>cond</span>
             )}
+            {field.readonly ? (
+              <span className="rounded bg-slate-100 px-1.5 py-0.5 text-[9px] font-semibold text-slate-500 border border-slate-300 flex-shrink-0" title="Always read-only">read-only</span>
+            ) : ruleGroupHasConditions(field.editableWhen) && (
+              <span className="rounded bg-violet-50 px-1.5 py-0.5 text-[9px] font-semibold text-violet-700 border border-violet-200 flex-shrink-0" title={`Editable when ${summarizeRuleGroup(field.editableWhen)}`}>edit-cond</span>
+            )}
           </div>
           <div className="flex items-center gap-0.5 opacity-0 transition group-hover:opacity-100 flex-shrink-0">
             <button onClick={(e) => { e.stopPropagation(); onDuplicate(); }} title="Duplicate"
@@ -1235,6 +1249,11 @@ function SectionBlock(props: {
               </span>
             ) : ruleGroupHasConditions(section.visibleWhen) && (
               <span className="rounded bg-amber-50 px-1.5 py-0.5 text-[9px] font-semibold text-amber-700 border border-amber-200 flex-shrink-0" title={`Section shows when ${summarizeRuleGroup(section.visibleWhen)}`}>cond</span>
+            )}
+            {section.readonly ? (
+              <span className="rounded bg-slate-100 px-1.5 py-0.5 text-[9px] font-semibold text-slate-500 border border-slate-300 flex-shrink-0" title="Section always read-only">read-only</span>
+            ) : ruleGroupHasConditions(section.editableWhen) && (
+              <span className="rounded bg-violet-50 px-1.5 py-0.5 text-[9px] font-semibold text-violet-700 border border-violet-200 flex-shrink-0" title={`Section editable when ${summarizeRuleGroup(section.editableWhen)}`}>edit-cond</span>
             )}
           </div>
           <input value={section.description ?? ""}
@@ -1918,6 +1937,62 @@ function VisibilityEditor({ value, sources, onChange, subject, groupOptions, pro
   );
 }
 
+/* Editability modes — the "Security" axis. `readonly` = always read-only,
+ * `editableWhen` = editable only when the group matches (read-only otherwise). */
+type EditabilityMode = "editable" | "readonly" | "conditional";
+interface EditabilityState {
+  readonly?: boolean;
+  editableWhen?: RuleGroup | null;
+}
+function editabilityModeOf(item: EditabilityState): EditabilityMode {
+  if (item.readonly) return "readonly";
+  if (item.editableWhen) return "conditional";
+  return "editable";
+}
+
+/* Companion to VisibilityEditor for the "Editable if / read-only" axis. Reuses
+ * the same rule-group editor (form-field + process-step conditions). */
+function EditabilityEditor({ value, sources, onChange, subject, processSteps = [] }: {
+  value: EditabilityState;
+  sources: { key: string; label: string }[];
+  onChange: (patch: EditabilityState) => void;
+  subject: "field" | "section";
+  processSteps?: { value: string; label: string }[];
+}) {
+  const mode = editabilityModeOf(value);
+  const rule = value.editableWhen ?? null;
+  const setMode = (m: EditabilityMode) => {
+    const cleared = { readonly: false, editableWhen: null } as EditabilityState;
+    if (m === "editable") onChange(cleared);
+    else if (m === "readonly") onChange({ ...cleared, readonly: true });
+    else onChange({ ...cleared, editableWhen: rule ?? { combinator: "and", conditions: [defaultCondition(sources)] } });
+  };
+  return (
+    <InspectorRow
+      label="Editability"
+      hint={
+        mode === "readonly"
+          ? `This ${subject} is always read-only.`
+          : mode === "conditional"
+          ? `Editable only while the rules below match — read-only at every other step.`
+          : `Control when people can edit this ${subject}.`
+      }
+    >
+      <div className="space-y-2 border border-[#C8CDD2] bg-white p-2.5">
+        <select className={inputCls} value={mode} onChange={(e) => setMode(e.target.value as EditabilityMode)}>
+          <option value="editable">Always editable</option>
+          <option value="readonly">Always read-only</option>
+          <option value="conditional">Editable only when…</option>
+        </select>
+        {mode === "conditional" && rule && (
+          <RuleGroupEditor group={rule} sources={sources} processSteps={processSteps}
+            onChange={(g) => onChange({ editableWhen: g })} />
+        )}
+      </div>
+    </InspectorRow>
+  );
+}
+
 function FieldEditor({ field, onUpdate, allFields, processSteps }: {
   field: TemplateField;
   onUpdate: (patch: Partial<TemplateField>) => void;
@@ -1998,11 +2073,7 @@ function FieldEditor({ field, onUpdate, allFields, processSteps }: {
                        className="h-4 w-4 border-[#AEB5BB] accent-[#287EAD]" />
                 Required
               </label>
-              <label className="flex cursor-pointer items-center gap-2.5 text-sm text-[#1F2933]">
-                <input type="checkbox" checked={!!field.readonly} onChange={(e) => onUpdate({ readonly: e.target.checked })}
-                       className="h-4 w-4 border-[#AEB5BB] accent-[#287EAD]" />
-                Read-only
-              </label>
+              {/* Read-only moved to the Editability control (Advanced tab). */}
             </div>
           )}
           {isTable && (
@@ -2093,6 +2164,13 @@ function FieldEditor({ field, onUpdate, allFields, processSteps }: {
             subject="field"
             processSteps={processSteps}
           />
+          <EditabilityEditor
+            value={field}
+            sources={siblings.map((s) => ({ key: s.key, label: s.label }))}
+            onChange={onUpdate}
+            subject="field"
+            processSteps={processSteps}
+          />
         </>
       )}
     </div>
@@ -2137,6 +2215,13 @@ function SectionEditor({ section, onUpdate, allFields, processSteps }: {
         onChange={onUpdate}
         subject="section"
         groupOptions={groups}
+        processSteps={processSteps}
+      />
+      <EditabilityEditor
+        value={section}
+        sources={sources.map((f) => ({ key: f.key, label: f.label }))}
+        onChange={onUpdate}
+        subject="section"
         processSteps={processSteps}
       />
     </div>
@@ -2222,43 +2307,44 @@ const previewInputCls =
   "h-10 w-full rounded-lg border border-slate-200 bg-white px-3 text-sm outline-none transition " +
   "focus:border-[#287EAD] focus:ring-2 focus:ring-[#287EAD]/15 text-slate-800";
 
-function PreviewColumnInput({ col, value, onChange, row }: { col: TableColumn; value: string; onChange: (v: string) => void; row?: Record<string, string> }) {
+function PreviewColumnInput({ col, value, onChange, row, disabled }: { col: TableColumn; value: string; onChange: (v: string) => void; row?: Record<string, string>; disabled?: boolean }) {
   const base = "w-full bg-transparent text-sm outline-none text-slate-700 placeholder:text-slate-300 py-1";
   if (col.hidden) return null;
+  const ro = disabled || col.readonly;
   switch (col.type) {
     case "select":
       return (
-        <select value={value} onChange={(e) => onChange(e.target.value)} className={base} disabled={col.readonly}>
+        <select value={value} onChange={(e) => onChange(e.target.value)} className={base} disabled={ro}>
           <option value="">—</option>
           {(col.options ?? []).map((o) => <option key={o} value={o}>{o}</option>)}
         </select>
       );
     case "boolean":
-      return <input type="checkbox" checked={value === "true"} disabled={col.readonly} onChange={(e) => onChange(e.target.checked ? "true" : "false")} className="h-4 w-4 accent-[#287EAD]" />;
+      return <input type="checkbox" checked={value === "true"} disabled={ro} onChange={(e) => onChange(e.target.checked ? "true" : "false")} className="h-4 w-4 accent-[#287EAD]" />;
     case "textarea":
-      return <textarea rows={1} value={value} disabled={col.readonly} onChange={(e) => onChange(e.target.value)} className={cn(base, "resize-none")} />;
+      return <textarea rows={1} value={value} disabled={ro} onChange={(e) => onChange(e.target.value)} className={cn(base, "resize-none")} />;
     case "currency": {
       const symbol = currencySymbolFor(col.currencyFromColumn ? row?.[col.currencyFromColumn] : undefined)
         ?? col.currencySymbol ?? "KSh";
       return (
         <div className="flex items-center gap-1">
           <span className="text-[10px] text-slate-400">{symbol}</span>
-          <input type="number" step="0.01" min={col.min} max={col.max} disabled={col.readonly} value={value} onChange={(e) => onChange(e.target.value)} className={base} placeholder="0.00" />
+          <input type="number" step="0.01" min={col.min} max={col.max} disabled={ro} value={value} onChange={(e) => onChange(e.target.value)} className={base} placeholder="0.00" />
         </div>
       );
     }
     case "number":
-      return <input type="number" min={col.min} max={col.max} value={value} disabled={col.readonly} onChange={(e) => onChange(e.target.value)} className={base} />;
+      return <input type="number" min={col.min} max={col.max} value={value} disabled={ro} onChange={(e) => onChange(e.target.value)} className={base} />;
     case "date":
-      return <input type="date" value={value} disabled={col.readonly} onChange={(e) => onChange(e.target.value)} className={base} />;
+      return <input type="date" value={value} disabled={ro} onChange={(e) => onChange(e.target.value)} className={base} />;
     case "datetime":
-      return <input type="datetime-local" value={value} disabled={col.readonly} onChange={(e) => onChange(e.target.value)} className={base} />;
+      return <input type="datetime-local" value={value} disabled={ro} onChange={(e) => onChange(e.target.value)} className={base} />;
     case "time":
-      return <input type="time" value={value} disabled={col.readonly} onChange={(e) => onChange(e.target.value)} className={base} />;
+      return <input type="time" value={value} disabled={ro} onChange={(e) => onChange(e.target.value)} className={base} />;
     case "email":
-      return <input type="email" value={value} disabled={col.readonly} onChange={(e) => onChange(e.target.value)} className={base} />;
+      return <input type="email" value={value} disabled={ro} onChange={(e) => onChange(e.target.value)} className={base} />;
     case "phone":
-      return <input type="tel" value={value} disabled={col.readonly} onChange={(e) => onChange(e.target.value)} className={base} />;
+      return <input type="tel" value={value} disabled={ro} onChange={(e) => onChange(e.target.value)} className={base} />;
     case "reference":
     case "user":
       return (
@@ -2268,13 +2354,13 @@ function PreviewColumnInput({ col, value, onChange, row }: { col: TableColumn; v
         </div>
       );
     case "file":
-      return <input type="file" disabled={col.readonly} className="text-xs" />;
+      return <input type="file" disabled={ro} className="text-xs" />;
     default:
-      return <input type="text" value={value} disabled={col.readonly} maxLength={col.maxLength} onChange={(e) => onChange(e.target.value)} className={base} />;
+      return <input type="text" value={value} disabled={ro} maxLength={col.maxLength} onChange={(e) => onChange(e.target.value)} className={base} />;
   }
 }
 
-function PreviewTableField({ field }: { field: TemplateField }) {
+function PreviewTableField({ field, readOnly = false }: { field: TemplateField; readOnly?: boolean }) {
   const cols = (field.columns ?? []).filter((c) => !c.hidden);
   const [rows, setRows] = useState<Record<string, string>[]>(
     Array.from({ length: field.minRows ?? 2 }, () => {
@@ -2314,11 +2400,11 @@ function PreviewTableField({ field }: { field: TemplateField }) {
               <tr key={rowIdx} className="border-b border-slate-100 last:border-0 hover:bg-slate-50/50 transition-colors">
                 {cols.map((col) => (
                   <td key={col.id} className="px-2 py-1 border-r border-slate-100 last:border-0">
-                    <PreviewColumnInput col={col} value={row[col.key] ?? ""} row={row} onChange={(v) => updateCell(rowIdx, col.key, v)} />
+                    <PreviewColumnInput col={col} value={row[col.key] ?? ""} row={row} disabled={readOnly} onChange={(v) => updateCell(rowIdx, col.key, v)} />
                   </td>
                 ))}
                 <td className="text-center px-1">
-                  {rows.length > 1 && (
+                  {!readOnly && rows.length > 1 && (
                     <button onClick={() => removeRow(rowIdx)} className="text-slate-300 hover:text-red-500 transition-colors p-1 rounded">
                       <Trash2 className="h-3 w-3" />
                     </button>
@@ -2329,9 +2415,11 @@ function PreviewTableField({ field }: { field: TemplateField }) {
           </tbody>
         </table>
       </div>
-      <button onClick={addRow} className="flex items-center gap-1.5 text-xs font-semibold text-[#287EAD] hover:text-[#1E6F99] transition-colors">
-        <Plus className="h-3.5 w-3.5" /> Add row
-      </button>
+      {!readOnly && (
+        <button onClick={addRow} className="flex items-center gap-1.5 text-xs font-semibold text-[#287EAD] hover:text-[#1E6F99] transition-colors">
+          <Plus className="h-3.5 w-3.5" /> Add row
+        </button>
+      )}
     </div>
   );
 }
@@ -2368,15 +2456,28 @@ function evalVisible(item: VisibilityState, values: Record<string, unknown>, all
   return group.combinator === "or" ? results.some(Boolean) : results.every(Boolean);
 }
 
-function PreviewField({ field, register, errors, values, allFields }: {
+/* Editability mirror (both carry `readonly` + `editableWhen`). Absent group =
+ * editable. The builder Preview evaluates at the "draft" process step. */
+function evalEditable(item: EditabilityState, values: Record<string, unknown>, allFields: TemplateField[], processStep = "draft"): boolean {
+  if (item.readonly) return false;
+  const group = item.editableWhen;
+  if (!group || group.conditions.length === 0) return true;
+  const results = group.conditions.map((c) => evalCondition(c, values, allFields, processStep));
+  return group.combinator === "or" ? results.some(Boolean) : results.every(Boolean);
+}
+
+function PreviewField({ field, register, errors, values, allFields, editable = true }: {
   field: TemplateField;
   register: UseFormRegister<Record<string, unknown>>;
   errors: FieldErrors<Record<string, unknown>>;
   values: Record<string, unknown>;
   allFields: TemplateField[];
+  editable?: boolean;
 }) {
   if (field.hidden) return null;
-  if (field.type === "table") return <PreviewTableField field={field} />;
+  // Read-only when always-read-only or not editable at this (draft) step.
+  const dis = Boolean(field.readonly) || !editable;
+  if (field.type === "table") return <PreviewTableField field={field} readOnly={dis} />;
 
   const err = errors[field.id]?.message as string | undefined;
   const validation: Record<string, unknown> = {
@@ -2403,13 +2504,13 @@ function PreviewField({ field, register, errors, values, allFields }: {
   let control: React.ReactNode = null;
   switch (field.type) {
     case "textarea":
-      control = <textarea {...reg} placeholder={field.placeholder} rows={4} disabled={field.readonly}
+      control = <textarea {...reg} placeholder={field.placeholder} rows={4} disabled={dis}
                           defaultValue={field.defaultValue ?? ""}
                           className={previewInputCls.replace("h-10", "min-h-[100px] py-2.5 resize-none")} />;
       break;
     case "select":
       control = (
-        <select {...reg} className={previewInputCls} defaultValue={field.defaultValue ?? ""} disabled={field.readonly}>
+        <select {...reg} className={previewInputCls} defaultValue={field.defaultValue ?? ""} disabled={dis}>
           <option value="" disabled>{field.placeholder ?? "Select an option"}</option>
           {(field.options ?? []).map((o) => <option key={o} value={o}>{o}</option>)}
         </select>
@@ -2417,7 +2518,7 @@ function PreviewField({ field, register, errors, values, allFields }: {
       break;
     case "multi_select":
       control = (
-        <select {...reg} multiple className={cn(previewInputCls, "h-auto min-h-[80px] py-2")} disabled={field.readonly}>
+        <select {...reg} multiple className={cn(previewInputCls, "h-auto min-h-[80px] py-2")} disabled={dis}>
           {(field.options ?? []).map((o) => <option key={o} value={o}>{o}</option>)}
         </select>
       );
@@ -2427,7 +2528,7 @@ function PreviewField({ field, register, errors, values, allFields }: {
         <div className="flex flex-col gap-2 pt-1">
           {(field.options ?? []).map((o) => (
             <label key={o} className="flex items-center gap-2.5 text-sm text-slate-700 cursor-pointer">
-              <input type="radio" value={o} {...reg} className="h-4 w-4 accent-[#287EAD]" />{o}
+              <input type="radio" value={o} {...reg} disabled={dis} className="h-4 w-4 accent-[#287EAD]" />{o}
             </label>
           ))}
         </div>
@@ -2437,7 +2538,7 @@ function PreviewField({ field, register, errors, values, allFields }: {
     case "checkbox":
       return (
         <label className="flex items-center gap-2.5 text-sm text-slate-700 cursor-pointer">
-          <input type="checkbox" {...reg} className="h-4 w-4 rounded border-slate-300 accent-[#287EAD]" />
+          <input type="checkbox" {...reg} disabled={dis} className="h-4 w-4 rounded border-slate-300 accent-[#287EAD]" />
           {field.label}
           {field.required && <span className="text-red-500">*</span>}
         </label>
@@ -2452,29 +2553,29 @@ function PreviewField({ field, register, errors, values, allFields }: {
       control = (
         <div className="relative">
           <span className="absolute left-3 top-1/2 -translate-y-1/2 text-sm text-slate-400 font-medium">{symbol}</span>
-          <input type="number" step="0.01" {...reg} placeholder="0.00" disabled={field.readonly}
+          <input type="number" step="0.01" {...reg} placeholder="0.00" disabled={dis}
                  defaultValue={field.defaultValue ?? ""} className={cn(previewInputCls, "pl-14")} />
         </div>
       );
       break;
     }
     case "number":
-      control = <input type="number" {...reg} placeholder={field.placeholder} disabled={field.readonly} defaultValue={field.defaultValue ?? ""} className={previewInputCls} />;
+      control = <input type="number" {...reg} placeholder={field.placeholder} disabled={dis} defaultValue={field.defaultValue ?? ""} className={previewInputCls} />;
       break;
     case "email":
-      control = <input type="email" {...reg} placeholder={field.placeholder} disabled={field.readonly} defaultValue={field.defaultValue ?? ""} className={previewInputCls} />;
+      control = <input type="email" {...reg} placeholder={field.placeholder} disabled={dis} defaultValue={field.defaultValue ?? ""} className={previewInputCls} />;
       break;
     case "phone":
-      control = <input type="tel" {...reg} placeholder={field.placeholder} disabled={field.readonly} defaultValue={field.defaultValue ?? ""} className={previewInputCls} />;
+      control = <input type="tel" {...reg} placeholder={field.placeholder} disabled={dis} defaultValue={field.defaultValue ?? ""} className={previewInputCls} />;
       break;
     case "date":
-      control = <input type="date" {...reg} disabled={field.readonly} defaultValue={field.defaultValue ?? ""} className={previewInputCls} />;
+      control = <input type="date" {...reg} disabled={dis} defaultValue={field.defaultValue ?? ""} className={previewInputCls} />;
       break;
     case "datetime":
-      control = <input type="datetime-local" {...reg} disabled={field.readonly} defaultValue={field.defaultValue ?? ""} className={previewInputCls} />;
+      control = <input type="datetime-local" {...reg} disabled={dis} defaultValue={field.defaultValue ?? ""} className={previewInputCls} />;
       break;
     case "time":
-      control = <input type="time" {...reg} disabled={field.readonly} defaultValue={field.defaultValue ?? ""} className={previewInputCls} />;
+      control = <input type="time" {...reg} disabled={dis} defaultValue={field.defaultValue ?? ""} className={previewInputCls} />;
       break;
     case "reference":
     case "user":
@@ -2488,7 +2589,7 @@ function PreviewField({ field, register, errors, values, allFields }: {
     case "file":
     case "image":
       control = (
-        <input type="file" {...reg} accept={field.type === "image" ? "image/*" : undefined} disabled={field.readonly}
+        <input type="file" {...reg} accept={field.type === "image" ? "image/*" : undefined} disabled={dis}
                className="block w-full text-sm text-slate-500 file:mr-3 file:rounded-lg file:border-0 file:bg-[#287EAD] file:px-4 file:py-2 file:text-sm file:font-semibold file:text-white hover:file:bg-[#1E6F99]" />
       );
       break;
@@ -2496,7 +2597,7 @@ function PreviewField({ field, register, errors, values, allFields }: {
       control = <div className="flex h-16 items-center justify-center rounded-lg border-2 border-dashed border-slate-200 text-sm text-slate-400"><Pencil className="h-4 w-4 mr-2" />Click to sign</div>;
       break;
     default:
-      control = <input type="text" {...reg} placeholder={field.placeholder} disabled={field.readonly} defaultValue={field.defaultValue ?? ""} className={previewInputCls} />;
+      control = <input type="text" {...reg} placeholder={field.placeholder} disabled={dis} defaultValue={field.defaultValue ?? ""} className={previewInputCls} />;
   }
 
   return (
@@ -2509,11 +2610,21 @@ function PreviewField({ field, register, errors, values, allFields }: {
   );
 }
 
-function Preview({ sections, templateName }: { sections: TemplateSection[]; templateName: string }) {
+function Preview({ sections, templateName, processSteps }: {
+  sections: TemplateSection[]; templateName: string;
+  processSteps: { value: string; label: string }[];
+}) {
   const { register, handleSubmit, reset, watch, formState: { errors } } = useForm<Record<string, unknown>>();
   const [submitted, setSubmitted] = useState<Record<string, unknown> | null>(null);
+  // Simulate the document being at a given workflow step, so process-step
+  // visibility/editability rules can be exercised without a live document.
+  const [previewStep, setPreviewStep] = useState("draft");
   const values = watch();
   const allFields = sections.flatMap((s) => s.fields);
+  // "draft" is always offered even if it isn't in the workflow's step list.
+  const stepOptions = processSteps.some((s) => s.value === "draft")
+    ? processSteps
+    : [{ value: "draft", label: "Draft (start)" }, ...processSteps];
 
   if (submitted) {
     return (
@@ -2541,24 +2652,40 @@ function Preview({ sections, templateName }: { sections: TemplateSection[]; temp
   return (
     <div className="mx-auto max-w-4xl p-8">
       <form onSubmit={handleSubmit((d) => setSubmitted(d))} className="space-y-6">
-        <header className="pb-4 border-b border-slate-200">
-          <h1 className="text-2xl font-bold text-slate-900">{templateName}</h1>
-          <p className="mt-1 text-sm text-slate-500">Fill out the form below to preview how end users will experience this template.</p>
+        <header className="flex items-start justify-between gap-4 pb-4 border-b border-slate-200">
+          <div>
+            <h1 className="text-2xl font-bold text-slate-900">{templateName}</h1>
+            <p className="mt-1 text-sm text-slate-500">Fill out the form below to preview how end users will experience this template.</p>
+          </div>
+          <label className="flex flex-shrink-0 flex-col gap-1 text-right">
+            <span className="text-[10px] font-semibold uppercase tracking-wider text-slate-500">Preview as step</span>
+            <select value={previewStep} onChange={(e) => setPreviewStep(e.target.value)}
+                    className="h-9 min-w-[180px] border border-[#AEB5BB] bg-white px-2 text-sm text-[#1F2933] outline-none focus:border-[#287EAD]">
+              {stepOptions.map((o) => <option key={o.value} value={o.value}>{o.label}</option>)}
+            </select>
+          </label>
         </header>
         {sections.map((s) => {
-          if (!evalVisible(s, values, allFields)) return null;
+          if (!evalVisible(s, values, allFields, previewStep)) return null;
+          const sectionEditable = evalEditable(s, values, allFields, previewStep);
           return (
           <section key={s.id} className="rounded-2xl border border-slate-200 bg-white p-6 shadow-sm">
             <div className="mb-5 pb-4 border-b border-slate-100">
-              <h2 className="text-base font-bold text-slate-800">{s.title}</h2>
+              <h2 className="flex items-center gap-2 text-base font-bold text-slate-800">
+                {s.title}
+                {!sectionEditable && (
+                  <span className="inline-flex items-center gap-1 rounded bg-slate-100 px-1.5 py-0.5 text-[10px] font-semibold text-slate-500">read-only</span>
+                )}
+              </h2>
               {s.description && <p className="mt-0.5 text-sm text-slate-500">{s.description}</p>}
             </div>
             <div className="grid grid-cols-12 gap-4">
               {s.fields.map((f) => {
-                if (!evalVisible(f, values, allFields)) return null;
+                if (!evalVisible(f, values, allFields, previewStep)) return null;
                 return (
                   <div key={f.id} style={{ gridColumn: `span ${f.colSpan ?? 12} / span ${f.colSpan ?? 12}` }}>
-                    <PreviewField field={f} register={register} errors={errors} values={values} allFields={allFields} />
+                    <PreviewField field={f} register={register} errors={errors} values={values} allFields={allFields}
+                                  editable={sectionEditable && evalEditable(f, values, allFields, previewStep)} />
                   </div>
                 );
               })}
@@ -3187,7 +3314,7 @@ export default function TemplateBuilderV2({ initial, onSave, onCancel, isSaving,
           )}
           {tab === "preview" && (
             <main key="preview" className="flex-1 overflow-y-auto bg-slate-100 animate-in fade-in duration-150">
-              <Preview sections={template.sections} templateName={template.name} />
+              <Preview sections={template.sections} templateName={template.name} processSteps={processSteps} />
             </main>
           )}
           {tab === "settings" && (

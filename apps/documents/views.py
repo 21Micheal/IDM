@@ -951,6 +951,31 @@ class DocumentViewSet(AuditMixin, viewsets.ModelViewSet):
 
         sections = form.get("sections") or []
 
+        # ── Editability enforcement (the "Security" axis) ──────────────────────
+        # A field/section can be marked read-only or "editable only when <process
+        # step / field> matches". At the document's current step, any locked field
+        # must not change — the client disables it, but we re-assert it here so a
+        # tampered request can't slip past. Locked fields are reverted to their
+        # stored value; conditions are evaluated against the STORED values (a user
+        # can't unlock a field within the same request that edits it).
+        from apps.templates_engine.conditions import is_editable
+        process_step = doc.status or "draft"
+        prior_render = descriptors_to_names(prior_values)
+        locked_keys = set()
+        for section in sections:
+            section_editable = is_editable(section, prior_render, process_step)
+            for f in section.get("fields", []):
+                key = f.get("key")
+                if not key:
+                    continue
+                if not (section_editable and is_editable(f, prior_render, process_step)):
+                    locked_keys.add(key)
+        for key in locked_keys:
+            if key in prior_values:
+                values[key] = prior_values[key]
+            else:
+                values.pop(key, None)
+
         # Re-derive picked reference/user labels server-side from their ids.
         values = reconcile_references(values, sections, default_reference_resolver)
 
