@@ -836,33 +836,33 @@ class DocumentViewSet(AuditMixin, viewsets.ModelViewSet):
             change_summary=request.data.get("change_summary", ""),
             created_by=request.user,
         )
-        file.seek(0)
-        doc.file = file
-        doc.file_name = file.name
-        doc.file_size = file.size
-        guessed_mime, _ = mimetypes.guess_type(file.name)
+        guessed_mime, _ = mimetypes.guess_type(version.file_name)
         incoming_mime = getattr(file, "content_type", "") or guessed_mime or ""
+        new_mime = doc.file_mime_type
         if incoming_mime and incoming_mime != "application/octet-stream":
-            doc.file_mime_type = incoming_mime
-        doc.checksum = checksum
-        doc.current_version = new_version
-        
-        doc.preview_status = ""
+            new_mime = incoming_mime
+
+        # Point the document at the version's stored path. The raw UploadedFile
+        # still carries the client filename (e.g. "report.pdf"), not the storage
+        # key (e.g. "versions/report.pdf") — using it here made current-version
+        # previews 404 while per-version tabs still worked.
         Document.objects.filter(id=doc.id).update(
-            file=doc.file.name,
-            file_name=doc.file_name,
-            file_size=doc.file_size,
-            file_mime_type=doc.file_mime_type,
-            checksum=doc.checksum,
-            current_version=doc.current_version,
+            file=version.file.name,
+            file_name=version.file_name,
+            file_size=version.file_size,
+            file_mime_type=new_mime,
+            checksum=checksum,
+            current_version=new_version,
             preview_pdf="",
             preview_status="",
             updated_at=timezone.now(),
         )
         cache.delete(_preview_error_cache_key(str(doc.id)))
         cache.delete(_preview_start_cache_key(str(doc.id)))
-        
+
+        doc.refresh_from_db()
         self._queue_office_preview(doc)
+        self._queue_office_version_preview(version)
         self.record_audit("document.version_uploaded", doc, {"version": new_version})
 
         from apps.search.indexing import schedule_document_search_pipeline

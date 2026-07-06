@@ -175,6 +175,32 @@ def verify_file_query_matches_payload(request, payload: dict[str, Any]) -> bool:
     )
 
 
+def _read_current_document_file(doc: Document) -> tuple[bytes, str, str]:
+    """Read the live document file, falling back to the current version row."""
+    if doc.file and doc.file.name:
+        try:
+            if default_storage.exists(doc.file.name):
+                with doc.file.open("rb") as fh:
+                    raw = fh.read()
+                mime = doc.file_mime_type or mimetypes.guess_type(doc.file_name or "")[0] or "application/octet-stream"
+                return raw, mime, doc.file_name or "file"
+        except FileNotFoundError:
+            pass
+
+    version = (
+        DocumentVersion.objects.filter(document=doc, version_number=doc.current_version)
+        .only("file", "file_name")
+        .first()
+    )
+    if version and version.file:
+        with version.file.open("rb") as fh:
+            raw = fh.read()
+        mime = mimetypes.guess_type(version.file_name or "")[0] or "application/octet-stream"
+        return raw, mime, version.file_name or "file"
+
+    raise FileNotFoundError("document file missing")
+
+
 def read_document_bytes(
     doc: Document,
     *,
@@ -207,12 +233,7 @@ def read_document_bytes(
             raw = fh.read()
         return raw, "application/pdf", "preview.pdf"
 
-    if not doc.file:
-        raise FileNotFoundError("document file missing")
-    with doc.file.open("rb") as fh:
-        raw = fh.read()
-    mime = doc.file_mime_type or mimetypes.guess_type(doc.file_name or "")[0] or "application/octet-stream"
-    return raw, mime, doc.file_name or "file"
+    return _read_current_document_file(doc)
 
 
 def build_http_file_response(

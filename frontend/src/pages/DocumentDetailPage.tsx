@@ -296,10 +296,11 @@ export default function DocumentDetailPage() {
     });
   }, [doc?.id, doc?.current_version, qc]);
 
-  const handleVersionUploaded = useCallback(() => {
+  const handleVersionUploaded = useCallback(async () => {
     if (!id) return;
     clearDocumentVersionCache(id);
-    qc.invalidateQueries({ queryKey: ["document", id] });
+    qc.removeQueries({ queryKey: ["document-preview", id] });
+    await qc.refetchQueries({ queryKey: ["document", id] });
     qc.invalidateQueries({ queryKey: ["document-preview", id] });
   }, [id, qc]);
 

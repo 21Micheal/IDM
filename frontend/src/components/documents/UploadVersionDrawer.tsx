@@ -23,7 +23,7 @@ interface UploadVersionDrawerProps {
   accept?: Record<string, string[]>;
   /** Max upload size (MB) for this document's type; enforced + shown. */
   maxSizeMb?: number;
-  onVersionUploaded: () => void;
+  onVersionUploaded: () => void | Promise<void>;
   /** Optional override for the trigger button label. */
   triggerLabel?: string;
   /** Optional className applied to the trigger button. */
@@ -167,9 +167,9 @@ export function UploadVersionDrawer({
           }
         },
       }),
-    onSuccess: () => {
+    onSuccess: async () => {
       toast.success(`Version ${currentVersion + 1} uploaded successfully`);
-      onVersionUploaded();
+      await onVersionUploaded();
       setOpen(false);
     },
     onError: (error: any) => {

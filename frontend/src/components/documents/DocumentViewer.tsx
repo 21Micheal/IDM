@@ -1282,11 +1282,11 @@ export default function DocumentViewer({ document: doc, submitSlot, hideUploadAc
     forceReleaseLock.mutate();
   }, [doc.edit_locked_by_name, forceReleaseLock]);
 
-  const onVersionUploaded = useCallback(() => {
+  const onVersionUploaded = useCallback(async () => {
     setSelectedVersionId(null);
     clearDocumentVersionCache(doc.id);
     qc.removeQueries({ queryKey: ["document-preview", doc.id] });
-    qc.invalidateQueries({ queryKey: ["document", doc.id] });
+    await qc.refetchQueries({ queryKey: ["document", doc.id] });
     qc.invalidateQueries({ queryKey: ["document-preview", doc.id] });
   }, [qc, doc.id]);
 
