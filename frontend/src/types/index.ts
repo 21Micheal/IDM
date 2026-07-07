@@ -240,11 +240,13 @@ export interface WorkflowTask {
   held_until?: string | null;
   status_display?: string;
   requires_signature?: boolean;
+  is_delegated?: boolean;
+  delegated_from?: UserSummary | null;
 }
 
 export interface Notification {
   id: string;
-  type: "task_assigned" | "workflow_complete" | "document_returned" | "document_held" | "hold_released" | "hold_ending" | "hold_expired" | "task_sla_warning" | "task_overdue" | "workflow_action" | "document_shared";
+  type: "task_assigned" | "workflow_complete" | "document_returned" | "document_held" | "hold_released" | "hold_ending" | "hold_expired" | "task_sla_warning" | "task_overdue" | "workflow_action" | "document_shared" | "delegation";
   message: string;
   link: string;
   is_read: boolean;

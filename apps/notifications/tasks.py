@@ -142,6 +142,47 @@ def _create_once(recipient, message: str, link: str = "", notification_type: str
 
 # ── Task assigned ─────────────────────────────────────────────────────────────
 
+def _notify_delegates_of_task(task, *, only_delegation=None) -> None:
+    """Alert active delegates who can action this task on the delegator's behalf."""
+    from apps.accounts.delegation import active_delegations_qs, delegation_covers_task
+
+    if task.status != "in_progress" or not task.assigned_to_id:
+        return
+
+    doc = task.workflow_instance.document
+    link = f"/documents/{doc.id}"
+    delegator_name = task.assigned_to.get_full_name() or task.assigned_to.email
+    message = (
+        f"Delegated action required: '{task.step.name}' for "
+        f"{doc.title} ({doc.reference_number}) — on behalf of {delegator_name}"
+    )
+    body = (
+        f"A workflow task has been delegated to you by {delegator_name}.\n\n"
+        f"  Document: {doc.title}\n"
+        f"  Reference: {doc.reference_number}\n"
+        f"  Step: {task.step.name}\n"
+        f"  Instructions: {task.step.instructions or 'None'}\n"
+        + (f"  Due by: {task.due_at.strftime('%d %b %Y %H:%M UTC')}\n" if task.due_at else "")
+        + f"\nPlease log in to DMS to action this request.\n"
+    )
+
+    if only_delegation is not None:
+        delegations = [only_delegation]
+    else:
+        delegations = active_delegations_qs(delegator=task.assigned_to)
+
+    for delegation in delegations:
+        if only_delegation is None and not delegation_covers_task(delegation, task):
+            continue
+        _create_once(delegation.delegate, message, link, "task_assigned")
+        _send_email(
+            delegation.delegate,
+            subject=f"DMS — Delegated approval: {doc.reference_number}",
+            body=f"Hello {delegation.delegate.first_name},\n\n{body}",
+            link=link,
+        )
+
+
 @shared_task(queue="notifications")
 def notify_task_assigned(
     task_id: str,
@@ -208,6 +249,49 @@ def notify_task_assigned(
         )
 
     _send_email(task.assigned_to, subject=subject, body=body, link=link)
+    _notify_delegates_of_task(task)
+
+
+# ── Delegation ─────────────────────────────────────────────────────────────────
+
+@shared_task(queue="notifications")
+def notify_delegation_activated(delegation_id: str) -> None:
+    """
+    When a delegation becomes active, alert the delegate about each delegable task.
+    Safe to call immediately on create (current delegation) or via ETA at starts_at.
+    """
+    from apps.accounts.delegation import delegation_covers_task, tasks_for_delegation
+    from apps.accounts.models import UserDelegation
+
+    try:
+        delegation = UserDelegation.objects.select_related(
+            "delegator", "delegate", "document_type",
+        ).get(id=delegation_id)
+    except UserDelegation.DoesNotExist:
+        return
+
+    if not delegation.is_active or not delegation.is_current:
+        return
+
+    tasks = tasks_for_delegation(delegation).select_related(
+        "assigned_to", "step", "workflow_instance__document",
+    )
+    task_count = tasks.count()
+    if task_count == 0:
+        return
+
+    delegator_name = delegation.delegator.get_full_name() or delegation.delegator.email
+    link = "/workflow"
+    summary = (
+        f"{task_count} workflow task{'s' if task_count != 1 else ''} "
+        f"delegated from {delegator_name} are now ready for your action."
+    )
+    _create_once(delegation.delegate, summary, link, "delegation")
+
+    for task in tasks:
+        if not delegation_covers_task(delegation, task):
+            continue
+        _notify_delegates_of_task(task, only_delegation=delegation)
 
 
 @shared_task(queue="notifications")

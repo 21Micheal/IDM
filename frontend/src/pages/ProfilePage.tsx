@@ -5,16 +5,21 @@ import { useSearchParams } from "react-router-dom";
 import { useForm } from "react-hook-form";
 import { zodResolver } from "@hookform/resolvers/zod";
 import { z } from "zod";
-import { profileAPI, documentTypesAPI } from "@/services/api";
+import { profileAPI } from "@/services/api";
 import SignaturePanel from "@/components/profile/SignaturePanel";
+import {
+  DelegationList,
+  DelegationScheduleForm,
+  type DelegationRecord,
+} from "@/components/users/DelegationManager";
 import { useAuthStore } from "@/store/authStore";
 import {
   Shield, Key, Smartphone,
   Loader2, Eye, EyeOff, AlertTriangle,
   Building2, Mail, Briefcase, ShieldCheck,
-  Calendar, UserCheck,
-  ChevronRight, Settings, Users, ArrowLeftRight,
-  Bell, Monitor, Globe, FileSignature,
+  UserCheck,
+  ChevronRight, Settings,
+  Bell, Monitor, FileSignature,
 } from "lucide-react";
 import { toast } from "@/components/ui/vault-toast";
 import clsx from "clsx";
@@ -28,30 +33,6 @@ const pwSchema = z.object({
   path: ["confirm_password"],
 });
 type PwForm = z.infer<typeof pwSchema>;
-type DelegationForm = { delegate_id: string; starts_at: string; ends_at: string; comment: string; document_type_id: string | null };
-
-interface Delegation {
-  id: string;
-  delegate: { id: string; full_name?: string; email: string };
-  starts_at: string;
-  ends_at: string;
-  comment: string;
-  document_type_name?: string | null;
-  is_active: boolean;
-  is_current: boolean;
-}
-
-interface UserOption {
-  id: string;
-  full_name: string;
-  email: string;
-}
-
-interface DocumentTypeOption {
-  id: string;
-  name: string;
-  code: string;
-}
 
 interface UserPreferences {
   date_format: string;
@@ -72,13 +53,6 @@ export default function ProfilePage() {
   const [activeTab, setActiveTab] = useState<ProfileTab>("settings");
   const [showPw, setShowPw] = useState(false);
   const [showPasswordForm, setShowPasswordForm] = useState(false);
-  const [delegationForm, setDelegationForm] = useState<DelegationForm>({
-    delegate_id: "",
-    starts_at: "",
-    ends_at: "",
-    comment: "",
-    document_type_id: null,
-  });
 
   // Handle URL parameter for tab navigation
   useEffect(() => {
@@ -124,21 +98,9 @@ export default function ProfilePage() {
   });
   void _toggleMFAMutation;
 
-  const { data: delegations = [] } = useQuery<Delegation[]>({
+  const { data: delegations = [] } = useQuery<DelegationRecord[]>({
     queryKey: ["delegations", "mine"],
     queryFn: () => profileAPI.listDelegations().then((r) => r.data.results ?? r.data),
-    enabled: Boolean(user),
-  });
-
-  const { data: delegationCandidates = [] } = useQuery<UserOption[]>({
-    queryKey: ["delegations", "candidates"],
-    queryFn: () => profileAPI.delegationCandidates().then((r) => r.data),
-    enabled: Boolean(user),
-  });
-
-  const { data: documentTypes = [] } = useQuery<DocumentTypeOption[]>({
-    queryKey: ["documentTypes"],
-    queryFn: () => documentTypesAPI.list().then((r) => r.data.results ?? r.data),
     enabled: Boolean(user),
   });
 
@@ -146,17 +108,6 @@ export default function ProfilePage() {
     queryKey: ["preferences"],
     queryFn: () => profileAPI.getPreferences().then((r) => r.data),
     enabled: Boolean(user),
-  });
-
-  const createDelegationMutation = useMutation({
-    mutationFn: () => profileAPI.createDelegation(delegationForm),
-    onSuccess: () => {
-      toast.success("Delegation created");
-      setDelegationForm({ delegate_id: "", starts_at: "", ends_at: "", comment: "", document_type_id: null });
-      qc.invalidateQueries({ queryKey: ["delegations"] });
-    },
-    onError: (err: { response?: { data?: { detail?: string } } }) =>
-      toast.error(extractApiError(err, "Failed to create delegation")),
   });
 
   const updatePreferencesMutation = useMutation({
@@ -536,190 +487,25 @@ export default function ProfilePage() {
             {/* Delegation Tab */}
             {activeTab === "delegation" && (
               <div className="space-y-4">
-                {/* Create Delegation */}
-                <div className="card p-6">
-                  <div className="flex items-center gap-3 mb-6">
-                    <div className="w-10 h-10 rounded-lg bg-emerald-100 flex items-center justify-center">
-                      <ArrowLeftRight className="w-5 h-5 text-emerald-600" />
-                    </div>
-                    <div>
-                      <h3 className="text-lg font-semibold text-foreground">Out of Office Delegation</h3>
-                      <p className="text-sm text-muted-foreground">Assign your workflow tasks to another user temporarily</p>
-                    </div>
-                  </div>
+                <DelegationScheduleForm />
 
-                  <div className="grid grid-cols-1 md:grid-cols-2 gap-4 mb-4">
-                    <div>
-                      <label className="label">Delegate to</label>
-                      <select
-                        className="input"
-                        value={delegationForm.delegate_id}
-                        onChange={(e) => setDelegationForm((s) => ({ ...s, delegate_id: e.target.value }))}
-                      >
-                        <option value="">Select user</option>
-                        {delegationCandidates.map((candidate) => (
-                          <option key={candidate.id} value={candidate.id}>
-                            {candidate.full_name || candidate.email}
-                          </option>
-                        ))}
-                      </select>
-                    </div>
-
-                    <div>
-                      <label className="label">Document Type Filter</label>
-                      <select
-                        className="input"
-                        value={delegationForm.document_type_id || ""}
-                        onChange={(e) => setDelegationForm((s) => ({ ...s, document_type_id: e.target.value || null }))}
-                      >
-                        <option value="">All Tasks</option>
-                        {documentTypes.map((dt) => (
-                          <option key={dt.id} value={dt.id}>
-                            {dt.name} ({dt.code})
-                          </option>
-                        ))}
-                      </select>
-                      <p className="text-xs text-muted-foreground mt-1">
-                        Leave empty to delegate all tasks, or select a specific document type
-                      </p>
-                    </div>
-
-                    <div className="grid grid-cols-2 gap-3">
-                      <div>
-                        <label className="label">Start date</label>
-                        <input
-                          type="datetime-local"
-                          className="input"
-                          value={delegationForm.starts_at}
-                          onChange={(e) => setDelegationForm((s) => ({ ...s, starts_at: e.target.value }))}
-                        />
-                      </div>
-                      <div>
-                        <label className="label">End date</label>
-                        <input
-                          type="datetime-local"
-                          className="input"
-                          value={delegationForm.ends_at}
-                          onChange={(e) => setDelegationForm((s) => ({ ...s, ends_at: e.target.value }))}
-                        />
-                      </div>
-                    </div>
-                  </div>
-
-                  <div className="mb-4">
-                    <label className="label">Reason for delegation</label>
-                    <textarea
-                      className="input h-20 resize-none"
-                      value={delegationForm.comment}
-                      onChange={(e) => setDelegationForm((s) => ({ ...s, comment: e.target.value }))}
-                      placeholder="Explain why you are delegating these tasks..."
-                    />
-                  </div>
-
-                  <button
-                    className="btn-primary"
-                    disabled={
-                      !delegationForm.delegate_id ||
-                      !delegationForm.starts_at ||
-                      !delegationForm.ends_at ||
-                      !delegationForm.comment.trim() ||
-                      createDelegationMutation.isPending
-                    }
-                    onClick={() => createDelegationMutation.mutate()}
-                  >
-                    {createDelegationMutation.isPending && <Loader2 className="w-4 h-4 animate-spin" />}
-                    Create delegation
-                  </button>
-                </div>
-
-                {/* Active Delegations */}
                 <div className="card p-6">
                   <div className="flex items-center gap-3 mb-6">
                     <div className="w-10 h-10 rounded-lg bg-violet-100 flex items-center justify-center">
                       <UserCheck className="w-5 h-5 text-violet-600" />
                     </div>
                     <div>
-                      <h3 className="text-lg font-semibold text-foreground">Active Delegations</h3>
+                      <h3 className="text-lg font-semibold text-foreground">Active delegations</h3>
                       <p className="text-sm text-muted-foreground">Currently active or scheduled delegations</p>
                     </div>
                   </div>
 
-                  {!delegations.length ? (
-                    <div className="text-center py-12">
-                      <Users className="w-12 h-12 text-muted-foreground/20 mx-auto mb-3" />
-                      <p className="text-sm font-medium text-foreground">No delegations set</p>
-                      <p className="text-xs text-muted-foreground mt-1">Create a delegation when you'll be away</p>
-                    </div>
-                  ) : (
-                    <div className="space-y-3">
-                      {delegations.map((delegation) => (
-                        <div
-                          key={delegation.id}
-                          className={clsx(
-                            "flex items-start justify-between p-4 rounded-xl border transition-colors",
-                            delegation.is_current
-                              ? "border-teal/30 bg-teal/[0.03]"
-                              : delegation.is_active
-                                ? "border-border bg-card hover:border-muted-foreground/20"
-                                : "border-border bg-muted/30 opacity-60"
-                          )}
-                        >
-                          <div className="flex items-start gap-3">
-                            <div className="w-8 h-8 rounded-full bg-primary/10 flex items-center justify-center flex-shrink-0">
-                              <UserCheck className="w-4 h-4 text-primary" />
-                            </div>
-                            <div>
-                              <p className="font-medium text-foreground">
-                                {delegation.delegate.full_name || delegation.delegate.email}
-                              </p>
-                              <div className="flex items-center gap-2 mt-1">
-                                <Calendar className="w-3.5 h-3.5 text-muted-foreground" />
-                                <span className="text-xs text-muted-foreground">
-                                  {new Date(delegation.starts_at).toLocaleDateString()} - {new Date(delegation.ends_at).toLocaleDateString()}
-                                </span>
-                              </div>
-                              {delegation.document_type_name && (
-                                <div className="flex items-center gap-2 mt-1">
-                                  <Globe className="w-3.5 h-3.5 text-muted-foreground" />
-                                  <span className="text-xs text-muted-foreground">
-                                    {delegation.document_type_name}
-                                  </span>
-                                </div>
-                              )}
-                              {delegation.comment && (
-                                <p className="text-sm text-muted-foreground mt-2">{delegation.comment}</p>
-                              )}
-                            </div>
-                          </div>
-                          <div className="flex items-center gap-2 flex-shrink-0">
-                            <span className={clsx(
-                              "text-xs px-2.5 py-1 rounded-full font-medium",
-                              delegation.is_current
-                                ? "bg-teal/10 text-teal border border-teal/20"
-                                : delegation.is_active
-                                  ? "bg-blue/10 text-blue border border-blue/20"
-                                  : "bg-muted text-muted-foreground border border-border"
-                            )}>
-                              {delegation.is_current ? "Active now" : delegation.is_active ? "Scheduled" : "Ended"}
-                            </span>
-                            {delegation.is_active && (
-                              <button
-                                onClick={() => disableDelegationMutation.mutate(delegation.id)}
-                                disabled={disableDelegationMutation.isPending}
-                                className="px-3 py-1.5 text-xs font-medium border border-destructive/30 text-destructive rounded-lg hover:bg-destructive/5 transition-colors"
-                              >
-                                {disableDelegationMutation.isPending ? (
-                                  <Loader2 className="w-3 h-3 animate-spin" />
-                                ) : (
-                                  "End"
-                                )}
-                              </button>
-                            )}
-                          </div>
-                        </div>
-                      ))}
-                    </div>
-                  )}
+                  <DelegationList
+                    delegations={delegations}
+                    onDisable={(delegationId) => disableDelegationMutation.mutate(delegationId)}
+                    disablePending={disableDelegationMutation.isPending}
+                    emptyMessage="No delegations set. Create one when you'll be away."
+                  />
                 </div>
               </div>
             )}

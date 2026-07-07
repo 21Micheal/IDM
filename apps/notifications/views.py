@@ -72,12 +72,8 @@ class NotificationViewSet(
         (and, unlike the old client-side count, it is not capped at one page).
         """
         # Local imports keep this cross-app action free of import-time cycles.
-        from django.db.models import Q
-        from django.utils import timezone
-
-        from apps.accounts.models import UserDelegation
-        from apps.workflows.models import WorkflowTask
         from apps.documents.models import SignatureRequest, SignatureRequestSigner
+        from apps.accounts.delegation import tasks_visible_to_user
 
         user = request.user
         base = Notification.objects.filter(recipient=user, is_read=False)
@@ -86,21 +82,7 @@ class NotificationViewSet(
         unread_task_alerts = base.filter(type__in=TASK_NOTIFICATION_TYPES).count()
         unread_notifications = base.count() - unread_task_alerts
 
-        now = timezone.now()
-        delegator_ids = list(
-            UserDelegation.objects.filter(
-                delegate=user,
-                is_active=True,
-                starts_at__lte=now,
-                ends_at__gte=now,
-            ).values_list("delegator_id", flat=True)
-        )
-        pending_tasks = (
-            WorkflowTask.objects.filter(
-                Q(assigned_to=user) | Q(assigned_to_id__in=delegator_ids),
-                status__in=["in_progress", "held"],
-            ).count()
-        )
+        pending_tasks = tasks_visible_to_user(user).count()
 
         incoming_signatures = (
             SignatureRequest.objects.filter(

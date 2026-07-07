@@ -274,6 +274,11 @@ export default function WorkflowPage() {
                   {uploaderName && (
                     <span>Uploader: <span className="font-semibold text-[#1F2933]">{uploaderName}</span></span>
                   )}
+                  {task.is_delegated && task.delegated_from && (
+                    <span className="rounded bg-violet-100 px-1.5 py-0.5 font-semibold text-violet-800">
+                      Delegated from {task.delegated_from.full_name || task.delegated_from.email}
+                    </span>
+                  )}
                   {task.due_at && (
                     <span
                       className={

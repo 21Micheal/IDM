@@ -25,7 +25,12 @@ from .serializers import (
     UserGroupSerializer, GroupPermissionSerializer, UserGroupMembershipSerializer, UserDelegationSerializer,
     UserPreferenceSerializer, UserSignatureSerializer,
 )
-from apps.notifications.tasks import _create_notification, _send_email
+from apps.notifications.tasks import (
+    _create_notification,
+    _send_email,
+    notify_delegation_activated,
+)
+from apps.accounts.delegation import tasks_for_delegation
 from .email_otp import send_otp_email
 from apps.audit.models import AuditLog, AuditEvent
 
@@ -892,7 +897,9 @@ class UserDelegationViewSet(viewsets.ModelViewSet):
             raise exceptions.PermissionDenied("You can only create delegations for yourself.")
 
         delegation = serializer.save(delegator=delegator, created_by=user)
+        self._notify_delegator_of_delegation(delegation)
         self._notify_delegate_of_delegation(delegation)
+        self._schedule_delegation_task_alerts(delegation)
 
         AuditLog.objects.create(
             event=AuditEvent.WORKFLOW_DELEGATED,
@@ -911,27 +918,108 @@ class UserDelegationViewSet(viewsets.ModelViewSet):
             ip_address=self.request.META.get("REMOTE_ADDR"),
         )
 
-    def _notify_delegate_of_delegation(self, delegation: UserDelegation) -> None:
+    def _delegation_window(self, delegation: UserDelegation) -> tuple[str, str]:
         start = delegation.starts_at.strftime("%d %b %Y %H:%M UTC")
         end = delegation.ends_at.strftime("%d %b %Y %H:%M UTC")
-        message = (
-            f"You have been delegated workflow tasks by {delegation.delegator.get_full_name()} "
-            f"from {start} to {end}. Reason: {delegation.comment.strip()}"
-        )
+        return start, end
+
+    def _delegation_scope_label(self, delegation: UserDelegation) -> str:
+        if delegation.document_type_id:
+            return f" ({delegation.document_type.name} tasks only)"
+        return ""
+
+    def _notify_delegator_of_delegation(self, delegation: UserDelegation) -> None:
+        start, end = self._delegation_window(delegation)
+        delegate_name = delegation.delegate.get_full_name() or delegation.delegate.email
+        scope = self._delegation_scope_label(delegation)
+        created_by = delegation.created_by
+        actor = created_by or delegation.delegator
+        actor_name = actor.get_full_name() or actor.email
+
+        if created_by and created_by.id != delegation.delegator_id:
+            message = (
+                f"{actor_name} scheduled delegation of your workflow tasks{scope} to "
+                f"{delegate_name} from {start} to {end}."
+            )
+            if delegation.comment.strip():
+                message += f" Reason: {delegation.comment.strip()}"
+        else:
+            message = (
+                f"You delegated your workflow tasks{scope} to {delegate_name} "
+                f"from {start} to {end}."
+            )
+            if delegation.comment.strip():
+                message += f" Reason: {delegation.comment.strip()}"
+
         link = "/profile"
+        _create_notification(delegation.delegator, message, link, "delegation")
+        _send_email(
+            delegation.delegator,
+            subject=f"DMS — Workflow delegation to {delegate_name}",
+            body=(
+                f"Hello {delegation.delegator.first_name},\n\n"
+                f"{message}\n\n"
+                f"Delegate: {delegate_name} ({delegation.delegate.email})\n"
+                f"  From: {start}\n"
+                f"  To:   {end}\n"
+                + (f"  Reason: {delegation.comment.strip()}\n" if delegation.comment.strip() else "")
+                + "\nYou can review or change this delegation from your profile.\n"
+            ),
+        )
+
+    def _notify_delegate_of_delegation(self, delegation: UserDelegation) -> None:
+        start, end = self._delegation_window(delegation)
+        delegator_name = delegation.delegator.get_full_name() or delegation.delegator.email
+        scope = self._delegation_scope_label(delegation)
+        task_count = tasks_for_delegation(delegation).count()
+        link = "/workflow"
+
+        if delegation.is_current:
+            if task_count:
+                message = (
+                    f"{delegator_name} delegated {task_count} workflow task"
+                    f"{'s' if task_count != 1 else ''}{scope} to you (active now until {end})."
+                )
+            else:
+                message = (
+                    f"{delegator_name} delegated workflow tasks{scope} to you "
+                    f"(active now until {end}). No open tasks at the moment."
+                )
+        else:
+            if task_count:
+                message = (
+                    f"{delegator_name} will delegate {task_count} workflow task"
+                    f"{'s' if task_count != 1 else ''}{scope} to you from {start} to {end}."
+                )
+            else:
+                message = (
+                    f"{delegator_name} will delegate workflow tasks{scope} to you "
+                    f"from {start} to {end}."
+                )
+        if delegation.comment.strip():
+            message += f" Reason: {delegation.comment.strip()}"
 
         _create_notification(delegation.delegate, message, link, "delegation")
         _send_email(
             delegation.delegate,
-            subject=f"DMS — New delegation from {delegation.delegator.get_full_name()}",
+            subject=f"DMS — Workflow delegation from {delegator_name}",
             body=(
                 f"Hello {delegation.delegate.first_name},\n\n"
-                f"{delegation.delegator.get_full_name()} has delegated workflow tasks to you.\n\n"
-                f"  From: {start}\n"
-                f"  To:   {end}\n"
-                f"  Reason: {delegation.comment.strip()}\n\n"
-                f"Please log in to DMS to view your delegated workload.\n"
+                f"{message}\n\n"
+                f"Please log in to DMS and open Workflow to view your delegated workload.\n"
             ),
+        )
+
+    def _schedule_delegation_task_alerts(self, delegation: UserDelegation) -> None:
+        if not delegation.is_active:
+            return
+        delegation_id = str(delegation.id)
+        if delegation.is_current:
+            notify_delegation_activated.delay(delegation_id)
+            return
+        notify_delegation_activated.apply_async(
+            args=[delegation_id],
+            eta=delegation.starts_at,
         )
 
     def perform_update(self, serializer):
@@ -949,5 +1037,11 @@ class UserDelegationViewSet(viewsets.ModelViewSet):
 
     @action(detail=False, methods=["get"])
     def candidates(self, request):
-        users = User.objects.filter(is_active=True).exclude(id=request.user.id).order_by("first_name", "last_name")
+        exclude_raw = (request.query_params.get("exclude") or "").strip()
+        exclude_id = exclude_raw or str(request.user.id)
+        users = (
+            User.objects.filter(is_active=True)
+            .exclude(id=exclude_id)
+            .order_by("first_name", "last_name")
+        )
         return Response(UserSummarySerializer(users, many=True).data)

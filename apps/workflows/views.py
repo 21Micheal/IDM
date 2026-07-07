@@ -28,7 +28,11 @@ from .serializers import (
     WorkflowTaskActionSerializer,
 )
 from .services import WorkflowService, WorkflowError
-from apps.accounts.models import UserDelegation
+from apps.accounts.delegation import (
+    delegated_tasks_q,
+    tasks_visible_to_user,
+    user_can_action_task_via_delegation,
+)
 from apps.accounts.views import IsGroupAdmin
 from apps.documents.analytics import IsAnalyticsViewer
 
@@ -271,47 +275,24 @@ class WorkflowTaskViewSet(viewsets.ReadOnlyModelViewSet):
             return qs.filter(
                 models.Q(assigned_to=user) |
                 models.Q(workflow_instance__started_by=user) |
-                models.Q(workflow_instance__document__uploaded_by=user)
+                models.Q(workflow_instance__document__uploaded_by=user) |
+                delegated_tasks_q(user),
             ).distinct()
 
         if user.has_admin_access:
             if s := self.request.query_params.get("status"):
                 qs = qs.filter(status=s)
             return qs
-        now = timezone.now()
-        delegate_for_user_ids = list(
-            UserDelegation.objects.filter(
-                delegate=user,
-                is_active=True,
-                starts_at__lte=now,
-                ends_at__gte=now,
-            ).values_list("delegator_id", flat=True)
-        )
-        # Non-admin users can see their own active tasks plus delegated tasks.
-        return qs.filter(
-            models.Q(assigned_to=user) | models.Q(assigned_to_id__in=delegate_for_user_ids),
-            status__in=["in_progress", "held"],
-        )
+        visible = tasks_visible_to_user(user).filter(pk__in=qs.values("pk"))
+        return qs.filter(pk__in=visible.values("pk")).distinct()
 
     @action(detail=False, methods=["get"], url_path="my_tasks")
     def my_tasks(self, request):
-        now = timezone.now()
-        delegate_for_user_ids = list(
-            UserDelegation.objects.filter(
-                delegate=request.user,
-                is_active=True,
-                starts_at__lte=now,
-                ends_at__gte=now,
-            ).values_list("delegator_id", flat=True)
-        )
         tasks = (
-            WorkflowTask.objects
-            .filter(
-                models.Q(assigned_to=request.user) | models.Q(assigned_to_id__in=delegate_for_user_ids),
-                status__in=["in_progress", "held"],
-            )
+            tasks_visible_to_user(request.user)
             .select_related(
                 "step",
+                "assigned_to",
                 "workflow_instance__document",
                 "workflow_instance__document__document_type",
                 "workflow_instance__document__department",
@@ -320,7 +301,9 @@ class WorkflowTaskViewSet(viewsets.ReadOnlyModelViewSet):
             )
             .order_by("due_at")
         )
-        return Response(WorkflowTaskSerializer(tasks, many=True).data)
+        return Response(
+            WorkflowTaskSerializer(tasks, many=True, context={"request": request}).data
+        )
 
     # ── Approve ────────────────────────────────────────────────────────────
 
@@ -452,16 +435,12 @@ class WorkflowTaskViewSet(viewsets.ReadOnlyModelViewSet):
     # ── Helper ─────────────────────────────────────────────────────────────
 
     def _check_permission(self, task, user):
-        has_active_delegation = UserDelegation.objects.filter(
-            delegator=task.assigned_to,
-            delegate=user,
-            is_active=True,
-            starts_at__lte=timezone.now(),
-            ends_at__gte=timezone.now(),
-        ).exists()
-        if task.assigned_to != user and not user.has_admin_access and not has_active_delegation:
-            from rest_framework.exceptions import PermissionDenied
-            raise PermissionDenied("You are not authorised to action this task.")
+        if task.assigned_to == user or user.has_admin_access:
+            return
+        if user_can_action_task_via_delegation(user, task):
+            return
+        from rest_framework.exceptions import PermissionDenied
+        raise PermissionDenied("You are not authorised to action this task.")
 
 
 class ApprovalTurnaroundView(APIView):

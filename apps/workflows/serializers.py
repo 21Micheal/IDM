@@ -549,10 +549,24 @@ class WorkflowTaskSerializer(serializers.ModelSerializer):
     file_mime_type = serializers.CharField(source="workflow_instance.document.file_mime_type", read_only=True)
     status_display = serializers.CharField(source="get_status_display", read_only=True)
     requires_signature = serializers.BooleanField(source="step.requires_signature", read_only=True)
+    is_delegated = serializers.SerializerMethodField()
+    delegated_from = serializers.SerializerMethodField()
 
     def get_uploaded_by_name(self, obj):
         uploader = obj.workflow_instance.document.uploaded_by
         return uploader.get_full_name() or uploader.email
+
+    def get_is_delegated(self, obj):
+        request = self.context.get("request")
+        if not request or not getattr(request.user, "is_authenticated", False):
+            return False
+        from apps.accounts.delegation import user_can_action_task_via_delegation
+        return user_can_action_task_via_delegation(request.user, obj)
+
+    def get_delegated_from(self, obj):
+        if not self.get_is_delegated(obj):
+            return None
+        return UserSummarySerializer(obj.assigned_to).data
 
     class Meta:
         model  = WorkflowTask
@@ -565,6 +579,7 @@ class WorkflowTaskSerializer(serializers.ModelSerializer):
             "document_id", "document_ref", "document_title", "document_type_name",
             "document_department_name", "uploaded_by_name", "uploader_department_name",
             "file_name", "file_mime_type",
+            "is_delegated", "delegated_from",
         ]
 
 

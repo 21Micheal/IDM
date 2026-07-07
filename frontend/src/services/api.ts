@@ -1078,6 +1078,16 @@ export const usersAPI = {
   resetPassword: (id: string) => api.post(`/users/${id}/reset-password/`),
   toggleActive: (id: string) => api.post(`/users/${id}/toggle_active/`),
   delegations: (id: string) => api.get(`/users/${id}/delegations/`),
+  createDelegation: (
+    delegatorId: string,
+    data: {
+      delegate_id: string;
+      starts_at: string;
+      ends_at: string;
+      comment: string;
+      document_type_id?: string | null;
+    },
+  ) => api.post("/delegations/", { ...data, delegator_id: delegatorId }),
   reassignActiveTasks: (id: string, toUserId: string) =>
     api.post(`/users/${id}/reassign-active-tasks/`, { to_user_id: toUserId }),
 };
@@ -1098,14 +1108,23 @@ export const profileAPI = {
   // MFA is now default, but we keep toggle for admin flexibility
   toggleMFA: (enable = true) => api.post("/auth/mfa/", { enable }),
   listDelegations: () => api.get("/delegations/"),
-  createDelegation: (data: { delegate_id: string; starts_at: string; ends_at: string; comment: string; document_type_id?: string | null }) =>
-    api.post("/delegations/", data),
+  createDelegation: (data: {
+    delegate_id: string;
+    starts_at: string;
+    ends_at: string;
+    comment: string;
+    document_type_id?: string | null;
+    delegator_id?: string;
+  }) => api.post("/delegations/", data),
   updateDelegation: (
     id: string,
     data: Partial<{ delegate_id: string; starts_at: string; ends_at: string; comment: string; is_active: boolean; document_type_id?: string | null }>,
   ) => api.patch(`/delegations/${id}/`, data),
   deleteDelegation: (id: string) => api.delete(`/delegations/${id}/`),
-  delegationCandidates: () => api.get("/delegations/candidates/"),
+  delegationCandidates: (excludeUserId?: string) =>
+    api.get("/delegations/candidates/", {
+      params: excludeUserId ? { exclude: excludeUserId } : undefined,
+    }),
   getPreferences: () => api.get("/auth/preferences/"),
   updatePreferences: (data: {
     date_format?: string;

@@ -24,6 +24,11 @@ import {
 } from "lucide-react";
 import { toast } from "@/components/ui/vault-toast";
 import { TemporaryPasswordModal } from "@/components/users/TemporaryPasswordModal";
+import {
+  DelegationList,
+  DelegationScheduleForm,
+  type DelegationRecord,
+} from "@/components/users/DelegationManager";
 import { format } from "date-fns";
 
 interface Department {
@@ -45,16 +50,6 @@ interface User {
   group_names?: string[];
   last_login: string | null;
   created_at: string;
-}
-
-interface Delegation {
-  id: string;
-  delegate: { id: string; full_name?: string; email: string };
-  starts_at: string;
-  ends_at: string;
-  comment: string;
-  is_active: boolean;
-  is_current: boolean;
 }
 
 export default function UserDetailPage() {
@@ -83,7 +78,7 @@ export default function UserDetailPage() {
     staleTime: 1000 * 60 * 5,
   });
 
-  const { data: delegations = [] } = useQuery<Delegation[]>({
+  const { data: delegations = [] } = useQuery<DelegationRecord[]>({
     queryKey: ["users", "delegations", id],
     queryFn: () => usersAPI.delegations(id).then((r) => r.data),
     enabled: Boolean(id),
@@ -465,74 +460,28 @@ export default function UserDetailPage() {
 
       {/* Delegations */}
       <section className="rounded-2xl border border-border bg-card shadow-sm">
-        <header className="px-6 py-4 border-b border-border flex items-center justify-between">
-          <div>
-            <h2 className="font-semibold text-foreground flex items-center gap-2">
-              <CalendarClock className="w-4 h-4 text-muted-foreground" />
-              Delegations
-            </h2>
-          </div>
-          <span className="text-xs text-muted-foreground">
-            {delegations.length} configured
-          </span>
+        <header className="px-6 py-4 border-b border-border">
+          <h2 className="font-semibold text-foreground flex items-center gap-2">
+            <CalendarClock className="w-4 h-4 text-muted-foreground" />
+            Delegations
+          </h2>
+          <p className="text-xs text-muted-foreground mt-1">
+            Schedule out-of-office task delegation on behalf of {user.full_name}.
+          </p>
         </header>
 
-        <div className="p-6 space-y-3">
-          {!delegations.length && (
-            <div className="rounded-lg border border-dashed border-border bg-muted/20 px-6 py-10 text-center">
-              <CalendarClock className="w-6 h-6 text-muted-foreground/60 mx-auto mb-2" />
-              <p className="text-sm text-muted-foreground">
-                No delegations configured for this user.
-              </p>
-            </div>
-          )}
-
-          {delegations.map((d) => {
-            const status = d.is_current
-              ? { label: "Active now", tone: "bg-emerald-500/10 text-emerald-600 border-emerald-500/20" }
-              : d.is_active
-              ? { label: "Scheduled", tone: "bg-primary/10 text-primary border-primary/20" }
-              : { label: "Disabled", tone: "bg-muted text-muted-foreground border-border" };
-
-            return (
-              <div
-                key={d.id}
-                className="rounded-xl border border-border bg-background hover:border-muted-foreground/20 transition-colors p-4 flex flex-col sm:flex-row sm:items-center justify-between gap-3"
-              >
-                <div className="min-w-0">
-                  <div className="flex items-center gap-2 flex-wrap">
-                    <p className="font-medium text-foreground truncate">
-                      {d.delegate.full_name || d.delegate.email}
-                    </p>
-                    <span
-                      className={`inline-flex items-center rounded-full px-2 py-0.5 text-[10px] font-medium border ${status.tone}`}
-                    >
-                      {status.label}
-                    </span>
-                  </div>
-                  <p className="text-xs text-muted-foreground mt-1">
-                    {format(new Date(d.starts_at), "dd MMM yyyy HH:mm")} →{" "}
-                    {format(new Date(d.ends_at), "dd MMM yyyy HH:mm")}
-                  </p>
-                  {d.comment && (
-                    <p className="text-xs text-muted-foreground mt-1 italic">
-                      "{d.comment}"
-                    </p>
-                  )}
-                </div>
-                {d.is_active && (
-                  <button
-                    onClick={() => disableDelegationMutation.mutate(d.id)}
-                    disabled={disableDelegationMutation.isPending}
-                    className="inline-flex items-center gap-1.5 h-9 px-3 rounded-lg border border-border bg-background text-xs font-medium hover:bg-muted transition-colors disabled:opacity-70 self-start sm:self-auto"
-                  >
-                    <CircleSlash className="w-3.5 h-3.5" />
-                    Disable
-                  </button>
-                )}
-              </div>
-            );
-          })}
+        <div className="p-6 space-y-6">
+          <DelegationScheduleForm
+            delegatorId={id}
+            delegatorName={user.full_name}
+            onCreated={() => qc.invalidateQueries({ queryKey: ["users", "delegations", id] })}
+          />
+          <DelegationList
+            delegations={delegations}
+            onDisable={(delegationId) => disableDelegationMutation.mutate(delegationId)}
+            disablePending={disableDelegationMutation.isPending}
+            emptyMessage="No delegations configured for this user."
+          />
         </div>
       </section>
 
