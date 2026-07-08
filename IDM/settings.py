@@ -342,7 +342,7 @@ IMAP_VERIFY_TLS = env.bool("IMAP_VERIFY_TLS", default=True)
 # a component/method with an <SSC> payload). A per-template mapping may override
 # the business unit / budget code; anything left blank falls back to these env
 # defaults. See apps/sunsystems/client.py.
-SUNSYSTEMS_BASE_URL       = env("SUNSYSTEMS_BASE_URL", default="")        # e.g. https://host/sunsystems-connect/soap
+SUNSYSTEMS_BASE_URL       = env("SUNSYSTEMS_BASE_URL", default="http://sunsrv02.flaxem.int:81/sunsystems-connect/wsdl")
 SUNSYSTEMS_SECURITY_PATH  = env("SUNSYSTEMS_SECURITY_PATH", default="SecurityProvider")
 SUNSYSTEMS_EXECUTOR_PATH  = env("SUNSYSTEMS_EXECUTOR_PATH", default="ComponentExecutor")
 SUNSYSTEMS_USERNAME       = env("SUNSYSTEMS_USERNAME", default="")

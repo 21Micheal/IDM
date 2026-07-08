@@ -32,6 +32,7 @@ from .client import (
     SunSystemsConfig,
     SunSystemsError,
     build_executor_envelope,
+    clear_client_cache,
     default_connection_from_settings,
 )
 from .config import (
@@ -42,7 +43,7 @@ from .config import (
     redact_connection,
 )
 from .crypto import encrypt_secret
-from .mapping import MappingError, build_journal_ssc
+from .mapping import MappingError, build_sunsystems_ssc
 from .models import (
     JournalPosting,
     JournalPostingStatus,
@@ -160,7 +161,7 @@ class JournalPreviewView(APIView):
 
         config = SunSystemsConfig.from_mapping(effective_connection(connection))
         try:
-            build = build_journal_ssc(
+            build = build_sunsystems_ssc(
                 {**mapping, "validate_balance": False},  # preview always renders
                 values,
                 business_unit_default=config.business_unit,
@@ -171,7 +172,7 @@ class JournalPreviewView(APIView):
             return Response({"ok": False, "enabled": True, "error": str(exc)})
 
         soap_xml = build_executor_envelope(
-            "{{SECURITY_TOKEN}}", build.component, build.method, build.ssc_xml
+            "{{SECURITY_TOKEN}}", build.component, build.method, build.ssc_xml, config=config
         )
         return Response({
             "ok": True,
@@ -220,16 +221,20 @@ class SunSystemsConnectionView(APIView):
         serializer.is_valid(raise_exception=True)
         row = SunSystemsConnection.get_solo()
         conn = dict(row.connection or {})
+        clear_password = serializer.validated_data.pop("clear_password", False)
+        if clear_password:
+            conn.pop("password", None)
         for key, value in serializer.validated_data.items():
             # A masked/blank password means "leave the stored one as-is".
             if key == "password":
-                if value in ("", _MASKED):
+                if clear_password or value in ("", _MASKED):
                     continue
                 value = encrypt_secret(value)  # encrypt at rest
             conn[key] = value
         row.connection = conn
         row.updated_by = request.user
         row.save(update_fields=["connection", "updated_by", "updated_at"])
+        clear_client_cache()
         return Response({
             "connection": redact_connection(conn),
             "effective": redact_connection(effective_connection()),
@@ -245,9 +250,13 @@ class SunSystemsTestConnectionView(APIView):
 
     def post(self, request):
         override = dict(request.data.get("connection") or {})
+        clear_password = bool(override.pop("clear_password", False))
         if override.get("password") in ("", _MASKED):
             override.pop("password", None)
-        config = SunSystemsConfig.from_mapping(effective_connection(override))
+        connection = effective_connection(override)
+        if clear_password:
+            connection["password"] = default_connection_from_settings().get("password", "")
+        config = SunSystemsConfig.from_mapping(connection)
         try:
             result = SunSystemsClient(config).test_connection()
             return Response({"ok": True, **result})
@@ -286,8 +295,12 @@ class JournalPostingRetryView(APIView):
             )
 
         # Re-run synchronously so the caller gets the outcome immediately; the
-        # orchestration is idempotent and records its own result.
+        # orchestration is idempotent and records its own result. A retry
+        # intentionally refreshes the SunSystems mapping from the current
+        # template first, so builder/code fixes affect the next payload.
+        from .config import refresh_sunsystems_config_from_template
+        refreshed = refresh_sunsystems_config_from_template(doc)
         from .journal import post_journal_for_document
         posting = post_journal_for_document(doc, actor=request.user)
         code = status.HTTP_200_OK if posting.status == JournalPostingStatus.POSTED else status.HTTP_502_BAD_GATEWAY
-        return Response(JournalPostingSerializer(posting).data, status=code)
+        return Response({**JournalPostingSerializer(posting).data, "mapping_refreshed": refreshed}, status=code)

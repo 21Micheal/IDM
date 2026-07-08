@@ -42,6 +42,37 @@ def get_form_values(document) -> dict:
     return {}
 
 
+def refresh_sunsystems_config_from_template(document) -> bool:
+    """Refresh a form document's SunSystems mapping from its current template.
+
+    Documents snapshot the mapping at creation time for audit/reproducibility.
+    A retry is different: it often follows a deliberate integration fix in the
+    template/builder, so it should rebuild the payload from the latest mapping.
+    The filled form values remain untouched.
+    """
+    meta = dict(getattr(document, "metadata", None) or {})
+    form = meta.get("form") if isinstance(meta.get("form"), dict) else {}
+    template_id = form.get("template_id") or meta.get("template_id")
+    if not template_id:
+        return False
+
+    try:
+        from apps.templates_engine.models import DocumentTemplate
+
+        template = DocumentTemplate.objects.filter(pk=template_id).first()
+    except Exception:  # pragma: no cover - defensive import/db guard
+        return False
+
+    ss_mapping = getattr(template, "sunsystems", None) if template else None
+    if not isinstance(ss_mapping, dict) or not ss_mapping:
+        return False
+
+    meta["sunsystems"] = ss_mapping
+    document.metadata = meta
+    type(document).objects.filter(pk=document.pk).update(metadata=meta)
+    return True
+
+
 def journal_posting_enabled(document) -> bool:
     mapping = get_journal_mapping(document)
     return bool(mapping and mapping.get("enabled"))

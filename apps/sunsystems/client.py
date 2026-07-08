@@ -6,53 +6,58 @@ budget inquiries and post journals (Ledger Import) from filled forms.
 
 Why this layer exists
 ─────────────────────
-SunSystems Connect exposes two SOAP endpoints under one base URL:
+SunSystems Connect exposes two SOAP/WSDL endpoints under one base URL:
 
-    SecurityProvider   POST → authenticate, returns a session token
-    ComponentExecutor  POST → run a {component, method} with an <SSC> payload
+    SecurityProvider   → Authenticate(username, password) -> token
+    ComponentExecutor  → Execute(component, method, payload, authentication)
 
-Every call funnels through this one client so the SOAP envelope shapes, auth
-token caching, and error handling live in a single, well-documented place. The
+Every call funnels through this one client so WSDL loading/caching, auth token
+handling, and error handling live in a single, well-documented place. The
 *business* document (the ``<SSC>`` XML — context, posting parameters, ledger
 lines) is built elsewhere, by :mod:`apps.sunsystems.mapping`, from a declarative
 per-template mapping. This client only knows how to authenticate and how to
-wrap a ready-made ``<SSC>`` payload in the ComponentExecutor envelope.
+call Execute with a ready-made ``<SSC>`` payload string.
 
-Authentication
-──────────────
-SecurityProvider takes a username/password and returns a token string. The
-token is cached on the client and reused until a call fails auth, at which point
-the caller can retry after :meth:`reset_token`. Credentials come from Django
-settings (env) and may be overridden per template via the connection mapping.
+Transport, concretely
+──────────────────────
+This talks to the *real* schema via ``zeep``, built from the live WSDL, rather
+than a hand-constructed SOAP envelope. That matters here: the exact namespace
+and message shape are whatever this tenant's WSDL says, and reproducing them by
+hand risks silently drifting from the real contract. Two things confirmed
+against the live gateway that are easy to get wrong otherwise:
 
-Nothing here is hard-coded to one tenant beyond URLs and credentials, so it is
-easy to point at a sandbox/mock during development. Network responses come from
-a trusted finance gateway; XML is parsed with the standard library.
+  * The ``<SSC>`` payload is passed as a **plain string** — zeep XML-escapes it
+    into the ``payload`` element's text content. No CDATA wrapping needed.
+  * ``Authenticate`` returns the token as a bare string (not a nested object);
+    ``Execute`` returns the raw ``<SSC>`` reply, also as a bare string.
+
+Authentication is two-layered: an HTTP Basic Auth header on the session
+*and* the business-level ``Authenticate`` call that returns the token passed
+to every ``Execute``. Both were required against the live gateway.
+
+zeep Clients are cached per endpoint, credentials, and TLS setting — building
+one means fetching + parsing the WSDL, which is too expensive to redo on every
+call.
 """
 from __future__ import annotations
 
+import hashlib
 import logging
 import re
+import threading
 from dataclasses import dataclass, field
-from typing import Any
-from urllib.parse import urljoin
-from xml.etree import ElementTree as ET
 
 import requests
+from requests.auth import HTTPBasicAuth
+from zeep import Client as ZeepClient
+from zeep.exceptions import Fault as ZeepFault
+from zeep.transports import Transport
 
 logger = logging.getLogger(__name__)
 
 # Network timeouts (connect, read) in seconds. Journal imports can take a while
 # server-side, so the read side is generous.
 _DEFAULT_TIMEOUT = (10, 120)
-
-# SOAP / SunSystems Connect namespaces.
-_NS_SOAPENV = "http://schemas.xmlsoap.org/soap/envelope/"
-_NS_WEB = "http://systemsunion.com/connect/webservices/"
-
-# SOAPAction headers (verified against the live SunSystems Connect demo gateway).
-_SOAP_ACTION_AUTHENTICATE = "http://systemsunion.com/connect/webservices/Authenticate"
-_SOAP_ACTION_EXECUTE = "http://systemsunion.com/connect/webservices/Execute"
 
 
 class SunSystemsError(RuntimeError):
@@ -63,12 +68,15 @@ class SunSystemsError(RuntimeError):
 class SunSystemsConfig:
     """Normalized SunSystems Connect connection settings.
 
-    Built from friendly keys (``base_url``, ``username`` …). ``business_unit``
-    and ``budget_code`` are defaults for the ``<SunSystemsContext>`` block; a
-    template mapping may override them per posting.
+    Built from friendly keys (``base_url``, ``username`` …). ``base_url`` is
+    the WSDL root, e.g. ``http://sunsrv02.flaxem.int:81/sunsystems-connect/wsdl``
+    — ``security_path``/``executor_path`` are appended to it (each becoming
+    ``{base_url}/{path}?wsdl``). ``business_unit`` and ``budget_code`` are
+    defaults for the ``<SunSystemsContext>`` block; a template mapping may
+    override them per posting.
     """
 
-    base_url: str = ""           # gateway base, e.g. https://host/sunsystems-connect/soap
+    base_url: str = ""           # WSDL root, e.g. http://host:81/sunsystems-connect/wsdl
     security_path: str = "SecurityProvider"
     executor_path: str = "ComponentExecutor"
     username: str = ""
@@ -110,22 +118,30 @@ class SunSystemsConfig:
         required = {
             "base_url": self.base_url,
             "username": self.username,
-            "password": self.password,
         }
         return [k for k, v in required.items() if not v]
 
+    def cache_key(self) -> tuple:
+        password_digest = hashlib.sha256(self.password.encode("utf-8")).hexdigest()
+        return (
+            self.base_url,
+            self.security_path,
+            self.executor_path,
+            self.username,
+            password_digest,
+            self.verify_tls,
+        )
+
 
 def _normalize_base_url(url: str) -> str:
-    """Tolerate a base URL that already includes an endpoint segment.
-
-    Admins often paste the full ``.../soap/SecurityProvider`` URL into the base
-    field; strip a trailing ``/SecurityProvider`` or ``/ComponentExecutor`` so
-    the per-call paths aren't appended twice.
-    """
-    u = (url or "").rstrip("/")
+    """Tolerate a base URL that already includes an endpoint segment (and a
+    trailing ``?wsdl``/``/wsdl``), stripping it back to the WSDL root so the
+    per-call paths aren't appended twice."""
+    u = (url or "").strip().rstrip("/")
+    u = re.sub(r"\?wsdl.*$", "", u, flags=re.IGNORECASE)
     for endpoint in ("SecurityProvider", "ComponentExecutor"):
         if u.lower().endswith("/" + endpoint.lower()):
-            return u[: -(len(endpoint) + 1)]
+            u = u[: -(len(endpoint) + 1)]
     return u
 
 
@@ -164,6 +180,45 @@ def merge_connection_with_defaults(connection: dict | None) -> dict:
     return merged
 
 
+# ── zeep client cache ───────────────────────────────────────────────────────────
+# Building a zeep Client fetches + parses the WSDL, which is too expensive to
+# redo on every call. Cache one pair (security, executor) per distinct config.
+_client_cache: dict[tuple, tuple[ZeepClient, ZeepClient]] = {}
+_cache_lock = threading.Lock()
+
+
+def _build_zeep_clients(cfg: SunSystemsConfig) -> tuple[ZeepClient, ZeepClient]:
+    key = cfg.cache_key()
+    with _cache_lock:
+        cached = _client_cache.get(key)
+        if cached:
+            return cached
+
+        session = requests.Session()
+        session.auth = HTTPBasicAuth(cfg.username, cfg.password)
+        session.verify = cfg.verify_tls
+        transport = Transport(session=session, timeout=_DEFAULT_TIMEOUT[0], operation_timeout=_DEFAULT_TIMEOUT[1])
+
+        base = cfg.base_url.rstrip("/")
+        security_wsdl = f"{base}/{cfg.security_path.strip('/')}?wsdl"
+        executor_wsdl = f"{base}/{cfg.executor_path.strip('/')}?wsdl"
+
+        try:
+            security_client = ZeepClient(wsdl=security_wsdl, transport=transport)
+            executor_client = ZeepClient(wsdl=executor_wsdl, transport=transport)
+        except Exception as exc:  # noqa: BLE001 - surface as our own error type
+            raise SunSystemsError(f"Could not load SunSystems WSDL: {exc}") from exc
+
+        _client_cache[key] = (security_client, executor_client)
+        return security_client, executor_client
+
+
+def clear_client_cache() -> None:
+    """Drop all cached zeep clients (e.g. after an admin changes credentials)."""
+    with _cache_lock:
+        _client_cache.clear()
+
+
 class SunSystemsClient:
     """Authenticated session against one SunSystems Connect gateway.
 
@@ -171,20 +226,12 @@ class SunSystemsClient:
 
         client = SunSystemsClient(SunSystemsConfig.from_mapping(conn))
         client.test_connection()
-        result_xml = client.execute("Journal", "Import", ssc_payload_xml)
+        result_xml = client.execute("PurchaseOrder", "CreateOrAmend", ssc_payload_xml)
     """
 
-    def __init__(self, config: SunSystemsConfig, *, session: requests.Session | None = None):
+    def __init__(self, config: SunSystemsConfig):
         self.config = config
-        self._session = session or requests.Session()
         self._token: str | None = None
-
-    # ── urls ────────────────────────────────────────────────────────────────
-    def _url(self, path: str) -> str:
-        base = self.config.base_url
-        if not base.endswith("/"):
-            base = base + "/"
-        return urljoin(base, path.lstrip("/"))
 
     # ── auth ────────────────────────────────────────────────────────────────
     def reset_token(self) -> None:
@@ -201,22 +248,18 @@ class SunSystemsClient:
                 f"Incomplete SunSystems connection settings: {', '.join(missing)}."
             )
 
-        envelope = _security_envelope(cfg.username, cfg.password)
-        body = self._post(
-            self._url(cfg.security_path),
-            envelope,
-            soap_action=_SOAP_ACTION_AUTHENTICATE,
-            what="authentication",
-        )
-        token = _extract_token(body)
+        security_client, _ = _build_zeep_clients(cfg)
+        try:
+            token = security_client.service.Authenticate(cfg.username, cfg.password)
+        except ZeepFault as exc:
+            raise SunSystemsError(f"SunSystems authentication fault: {exc}") from exc
+        except Exception as exc:  # noqa: BLE001
+            raise SunSystemsError(f"Could not reach SunSystems (authentication): {exc}") from exc
+
         if not token:
-            if _is_auth_response(body):
-                raise SunSystemsError(
-                    "Authentication failed — the SunSystems gateway returned an empty "
-                    "token. Check the username and password."
-                )
             raise SunSystemsError(
-                "SunSystems SecurityProvider response did not contain a token."
+                "Authentication failed — the SunSystems gateway returned an empty "
+                "token. Check the username and password."
             )
         self._token = token
         return token
@@ -231,194 +274,71 @@ class SunSystemsClient:
         """Run a SunSystems component/method with an ``<SSC>`` payload.
 
         ``ssc_payload`` is the inner business document XML (built by
-        :mod:`apps.sunsystems.mapping`). Returns the raw response body (SOAP
-        XML) for the caller to parse. Re-authenticates once on an auth failure.
+        :mod:`apps.sunsystems.mapping``), passed as a plain string — the
+        service expects XML-escaped text here, not a CDATA block. Returns the
+        raw ``<SSC>`` response (also a plain string) for the caller to parse.
+        Re-authenticates once on an auth/access failure.
         """
         token = self.get_token()
-        envelope = _executor_envelope(token, component, method, ssc_payload)
         try:
-            return self._post(
-                self._url(self.config.executor_path),
-                envelope,
-                soap_action=_SOAP_ACTION_EXECUTE,
-                what=f"{component}/{method}",
-            )
+            return self._execute_once(component, method, ssc_payload, token)
         except SunSystemsError as exc:
-            # A stale token surfaces as an auth fault; re-authenticate once.
             if _looks_like_auth_failure(str(exc)):
                 token = self.get_token(force=True)
-                envelope = _executor_envelope(token, component, method, ssc_payload)
-                return self._post(
-                    self._url(self.config.executor_path),
-                    envelope,
-                    soap_action=_SOAP_ACTION_EXECUTE,
-                    what=f"{component}/{method}",
-                )
+                return self._execute_once(component, method, ssc_payload, token)
             raise
 
-    # ── transport ─────────────────────────────────────────────────────────────
-    def _post(self, url: str, envelope: str, *, soap_action: str, what: str) -> str:
+    def _execute_once(self, component: str, method: str, ssc_payload: str, token: str) -> str:
+        _, executor_client = _build_zeep_clients(self.config)
         try:
-            resp = self._session.post(
-                url,
-                data=envelope.encode("utf-8"),
-                timeout=_DEFAULT_TIMEOUT,
-                verify=self.config.verify_tls,
-                headers={
-                    "Content-Type": "text/xml; charset=utf-8",
-                    "SOAPAction": soap_action,
-                    "Accept": "text/xml, application/xml",
-                },
+            response = executor_client.service.Execute(
+                component=component,
+                method=method,
+                payload=ssc_payload,
+                authentication=token,
             )
-        except requests.RequestException as exc:
-            raise SunSystemsError(f"Could not reach SunSystems ({what}): {exc}") from exc
-
-        body = resp.text or ""
-        if resp.status_code != 200:
-            raise SunSystemsError(
-                f"SunSystems {what} returned {resp.status_code}: {_safe(body)}"
-            )
-        fault = _extract_soap_fault(body)
-        if fault:
-            raise SunSystemsError(f"SunSystems {what} fault: {fault}")
-        return body
+        except ZeepFault as exc:
+            raise SunSystemsError(f"SunSystems {component}/{method} fault: {exc}") from exc
+        except Exception as exc:  # noqa: BLE001
+            raise SunSystemsError(f"Could not reach SunSystems ({component}/{method}): {exc}") from exc
+        return response or ""
 
 
-# ── envelope builders ────────────────────────────────────────────────────────
-def _security_envelope(username: str, password: str) -> str:
-    """SecurityProvider.Authenticate request.
+def build_executor_envelope(token: str, component: str, method: str, ssc_payload: str, *, config: SunSystemsConfig | None = None) -> str:
+    """Render the exact SOAP envelope Execute(...) would send, for preview/audit.
 
-    Element names match the live SunSystems Connect schema: the user goes in
-    ``<web:name>`` (not ``<web:user>``) and the password in ``<web:password>``,
-    sent in plain text inside the SOAP body — SunSystems Connect's native auth,
-    protected by TLS on the wire.
+    Uses the real WSDL (via zeep's message-building, no network send) so the
+    preview matches the true schema instead of a hand-guessed shape. Pass a
+    placeholder ``token`` (e.g. ``"{{SECURITY_TOKEN}}"``) when the real one
+    isn't available yet -- the rest of the envelope is exactly what gets sent.
+    Requires ``config`` to build/reuse a zeep client against the live WSDL; if
+    omitted or unreachable, falls back to a plain description (no envelope).
     """
-    return (
-        '<?xml version="1.0" encoding="utf-8"?>'
-        f'<soapenv:Envelope xmlns:soapenv="{_NS_SOAPENV}" xmlns:web="{_NS_WEB}">'
-        "<soapenv:Body>"
-        "<web:SecurityProviderAuthenticateRequest>"
-        f"<web:name>{_xml_escape(username)}</web:name>"
-        f"<web:password>{_xml_escape(password)}</web:password>"
-        "</web:SecurityProviderAuthenticateRequest>"
-        "</soapenv:Body>"
-        "</soapenv:Envelope>"
-    )
-
-
-def build_executor_envelope(token: str, component: str, method: str, ssc_payload: str) -> str:
-    """Public access to the ComponentExecutor SOAP envelope (e.g. payload preview).
-
-    For a preview, pass a placeholder ``token`` (the real one is injected at post
-    time) — the rest of the envelope is exactly what gets sent to SunSystems.
-    """
-    return _executor_envelope(token, component, method, ssc_payload)
-
-
-def _executor_envelope(token: str, component: str, method: str, ssc_payload: str) -> str:
-    """Wrap a ready-made ``<SSC>`` payload in the ComponentExecutor envelope.
-
-    The payload is CDATA-embedded exactly as SunSystems Connect expects (see the
-    reference TRN SunSystem EXP Journal connector).
-    """
-    return (
-        '<?xml version="1.0" encoding="utf-8"?>'
-        f'<soapenv:Envelope xmlns:soapenv="{_NS_SOAPENV}" xmlns:web="{_NS_WEB}">'
-        "<soapenv:Body>"
-        "<web:ComponentExecutorExecuteRequest>"
-        f"<web:authentication>{_xml_escape(token)}</web:authentication>"
-        f"<web:component>{_xml_escape(component)}</web:component>"
-        f"<web:method>{_xml_escape(method)}</web:method>"
-        f"<web:payload><![CDATA[{_strip_cdata(ssc_payload)}]]></web:payload>"
-        "</web:ComponentExecutorExecuteRequest>"
-        "</soapenv:Body>"
-        "</soapenv:Envelope>"
-    )
-
-
-# ── response parsing ───────────────────────────────────────────────────────────
-def _localname(tag: str) -> str:
-    return tag.rsplit("}", 1)[-1].lower()
-
-
-def _parse(xml: str) -> ET.Element | None:
+    if config is None:
+        return (
+            f"<!-- Preview unavailable without a connection: would call "
+            f"{component}/{method} with authentication={token!r} -->"
+        )
     try:
-        return ET.fromstring(xml.encode("utf-8") if isinstance(xml, str) else xml)
-    except ET.ParseError:
-        return None
+        from lxml import etree
 
-
-def _extract_token(xml: str) -> str | None:
-    """Pull the auth token out of a SecurityProvider response.
-
-    SunSystems Connect returns the token as the **text of the
-    ``<SecurityProviderAuthenticateResponse>`` element** (empty when the
-    credentials are rejected). We also accept a few token-ish child names for
-    tenants that nest it differently.
-    """
-    root = _parse(xml)
-    if root is None:
-        return None
-    for el in root.iter():
-        name = _localname(el.tag)
-        if name.endswith("authenticateresponse") or name in {
-            "token", "authentication", "securitytoken", "sessiontoken",
-        }:
-            if el.text and el.text.strip():
-                return el.text.strip()
-    return None
-
-
-def _is_auth_response(xml: str) -> bool:
-    """True when the body carries a SecurityProvider auth-response wrapper —
-    i.e. the gateway processed the request (an empty one ⇒ bad credentials)."""
-    root = _parse(xml)
-    if root is None:
-        return False
-    return any(_localname(el.tag).endswith("authenticateresponse") for el in root.iter())
-
-
-def _extract_soap_fault(xml: str) -> str | None:
-    root = _parse(xml)
-    if root is None:
-        return None
-    for el in root.iter():
-        if _localname(el.tag) in {"fault", "faultstring"}:
-            text = (el.text or "").strip()
-            if text:
-                return text
-            # <Fault> wrapper: gather child text.
-            inner = " ".join(
-                (c.text or "").strip() for c in el.iter() if (c.text or "").strip()
-            )
-            if inner:
-                return inner
-    return None
+        _, executor_client = _build_zeep_clients(config)
+        node = executor_client.create_message(
+            executor_client.service,
+            "Execute",
+            component=component,
+            method=method,
+            payload=ssc_payload,
+            authentication=token,
+        )
+        return etree.tostring(node, pretty_print=True).decode("utf-8")
+    except Exception as exc:  # noqa: BLE001 - preview is best-effort
+        logger.warning("Could not render live SOAP preview, falling back: %s", exc)
+        return (
+            f"<!-- Preview unavailable ({exc}) -- would call {component}/{method} "
+            f"with authentication={token!r} -->"
+        )
 
 
 def _looks_like_auth_failure(message: str) -> bool:
-    return bool(re.search(r"auth|token|unauthor|session|security", message, re.IGNORECASE))
-
-
-# ── helpers ────────────────────────────────────────────────────────────────────
-def _xml_escape(value: Any) -> str:
-    s = "" if value is None else str(value)
-    return (
-        s.replace("&", "&amp;")
-        .replace("<", "&lt;")
-        .replace(">", "&gt;")
-        .replace('"', "&quot;")
-    )
-
-
-def _strip_cdata(payload: str) -> str:
-    # Guard against a payload that accidentally contains a CDATA close marker,
-    # which would terminate the wrapper early.
-    return (payload or "").replace("]]>", "]] >")
-
-
-def _safe(body: str, limit: int = 500) -> str:
-    try:
-        return body[:limit]
-    except Exception:  # pragma: no cover - defensive
-        return "<unreadable response body>"
+    return bool(re.search(r"auth|token|unauthor|session|security|access rights", message, re.IGNORECASE))

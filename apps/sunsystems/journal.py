@@ -25,7 +25,7 @@ from django.utils import timezone
 
 from .client import SunSystemsClient, SunSystemsConfig, SunSystemsError
 from .config import get_connection_override, get_form_values, get_journal_mapping
-from .mapping import MappingError, build_journal_ssc, parse_journal_response
+from .mapping import MappingError, build_sunsystems_ssc, parse_posting_response
 from .models import JournalPosting, JournalPostingStatus, effective_connection
 
 logger = logging.getLogger(__name__)
@@ -65,7 +65,7 @@ def post_journal_for_document(document, *, actor=None, client: SunSystemsClient 
 
     # 1) Build the SSC document.
     try:
-        build = build_journal_ssc(
+        build = build_sunsystems_ssc(
             mapping,
             values,
             business_unit_default=config.business_unit,
@@ -88,10 +88,10 @@ def post_journal_for_document(document, *, actor=None, client: SunSystemsClient 
         return posting
 
     # 3) Parse the reply.
-    result = parse_journal_response(response_xml)
+    result = parse_posting_response(build.component, response_xml)
     posting.response_xml = result.raw
     posting.message = result.message
-    if result.ok or result.journal_number:
+    if result.ok:
         posting.journal_number = result.journal_number or ""
         posting.posted_at = timezone.now()
         posting.posted_by = actor

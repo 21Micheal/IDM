@@ -38,12 +38,13 @@ export default function JournalPostingCard({ documentId }: { documentId: string 
 
   const meta = STATUS_META[data.status] ?? STATUS_META.pending;
   const Icon = meta.Icon;
+  const isPurchaseOrder = data.component === "PurchaseOrder";
 
   const onRetry = async () => {
     setRetrying(true);
     try {
       const { data: posting } = await sunsystemsAPI.retryPosting(documentId);
-      if (posting.status === "posted") toast.success(`Journal ${posting.journal_number || ""} posted.`);
+      if (posting.status === "posted") toast.success(`SunSystems posting ${posting.journal_number || ""} completed.`);
       else toast.error(posting.error || posting.message || "Posting failed.");
       refetch();
     } catch (e: any) {
@@ -57,7 +58,7 @@ export default function JournalPostingCard({ documentId }: { documentId: string 
     <div className="border border-[#C8CDD2] bg-white shadow-sm">
       <div className="flex items-center gap-2 border-b border-[#C8CDD2] bg-[#F5F7F8] px-4 py-2.5">
         <Receipt className="h-4 w-4 text-[#287EAD]" />
-        <p className="text-sm font-bold text-[#1F2933]">SunSystems Journal</p>
+        <p className="text-sm font-bold text-[#1F2933]">{isPurchaseOrder ? "SunSystems LPO" : "SunSystems Journal"}</p>
       </div>
       <div className="p-4 space-y-3">
         <div className={`flex items-center gap-2 rounded border px-3 py-2 ${meta.cls}`}>
@@ -68,7 +69,7 @@ export default function JournalPostingCard({ documentId }: { documentId: string 
         <dl className="grid grid-cols-2 gap-x-4 gap-y-1.5 text-xs">
           {data.journal_number && (
             <>
-              <dt className="text-[#5E6870]">Journal number</dt>
+              <dt className="text-[#5E6870]">{isPurchaseOrder ? "SunSystems reference" : "Journal number"}</dt>
               <dd className="font-mono font-semibold text-[#1F2933]">{data.journal_number}</dd>
             </>
           )}

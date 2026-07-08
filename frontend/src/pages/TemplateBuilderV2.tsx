@@ -239,6 +239,7 @@ export interface TemplateField {
  * bindings (compileSunSystems); this is the editable source of truth. */
 export interface SunSystemsUi {
   journalEnabled?: boolean;
+  postingKind?: "journal" | "purchase_order";
   budgetEnabled?: boolean;
   budgetMode?: "warn" | "block";
   businessUnit?: string;
@@ -249,6 +250,17 @@ export interface SunSystemsUi {
   currencyConst?: string;
   dateFormat?: string;
   validateBalance?: boolean;
+  supplierCode?: string;
+  purchaseTransactionType?: string;
+  invoiceAddressCode?: string;
+  itemCode?: string;
+  accountCode?: string;
+  analysis10Category?: string;
+  analysis10Code?: string;
+  /** Fixed order quantity (default "1"). Blank = use the backend default. */
+  quantity?: string;
+  /** Fixed unit price. Blank = derived from total amount (qty-1 pattern). */
+  unitPrice?: string;
 }
 export interface SunSystemsConfig {
   ui?: SunSystemsUi;
@@ -711,6 +723,7 @@ function compileSunSystems(template: Template): SunSystemsConfig | undefined {
   const referenceSpec = valueSpec(byRole("reference"));
   const dateSpec = valueSpec(byRole("transaction_date"), { format: ui.dateFormat || "DDMMYYYY" });
   const descSpec = valueSpec(byRole("description"));
+  const postingKind = ui.postingKind ?? "journal";
 
   // Journal lines: header amount fields + table "journal_lines" repeat blocks.
   const lines: Record<string, unknown>[] = [];
@@ -751,8 +764,41 @@ function compileSunSystems(template: Template): SunSystemsConfig | undefined {
   if (ui.postingType) parameters.PostingType = ui.postingType;
   for (const p of ui.parameters ?? []) if (p.name) parameters[p.name] = p.value;
 
+  const purchaseAmountField = byRole("journal_amount");
   const journal = ui.journalEnabled
-    ? {
+    ? postingKind === "purchase_order"
+      ? {
+          enabled: true,
+          post_on: "approved",
+          component: "PurchaseOrder",
+          method: "CreateOrAmend",
+          context: {
+            ...(ui.businessUnit ? { business_unit: { const: ui.businessUnit } } : {}),
+            ...(ui.budgetCode ? { budget_code: { const: ui.budgetCode } } : {}),
+          },
+          ...(currencySpec ? { currency: currencySpec } : {}),
+          ...(referenceSpec ? { reference: referenceSpec } : {}),
+          ...(dateSpec ? { date: dateSpec } : {}),
+          purchase_order: {
+            supplier_code: { const: ui.supplierCode || "81105" },
+            transaction_type: { const: ui.purchaseTransactionType || "ASSETS" },
+            invoice_address_code: { const: ui.invoiceAddressCode || "0000000000" },
+            item_code: { const: ui.itemCode || "ITM29" },
+            account_code: { const: ui.accountCode || "" },
+            analysis10_category: { const: ui.analysis10Category ?? "11" },
+            analysis10_code: { const: ui.analysis10Code ?? "E" },
+            // quantity / unit_price: only emit when the operator has set them;
+            // the backend defaults quantity to "1" and unit_price to the total amount.
+            ...(ui.quantity ? { quantity: { const: ui.quantity } } : {}),
+            ...(ui.unitPrice ? { unit_price: { const: ui.unitPrice } } : {}),
+            ...(purchaseAmountField ? { amount: { field: purchaseAmountField.key } } : {}),
+            ...(currencySpec ? { currency: currencySpec } : {}),
+            ...(referenceSpec ? { reference: referenceSpec } : {}),
+            ...(dateSpec ? { date: dateSpec } : {}),
+            ...(descSpec ? { description: descSpec } : {}),
+          },
+        }
+      : {
         enabled: true,
         post_on: "approved",
         component: "Journal",
@@ -2845,6 +2891,8 @@ function FinanceSettingsCard({ template, onCommit, iCls }: {
   };
   const journalFieldLines = fields.filter((f) => f.type !== "table" && f.sunsystems?.role === "journal_amount").length;
   const journalTableLines = fields.filter((f) => f.type === "table" && f.sunsystems?.role === "journal_lines").length;
+  const postingKind = ui.postingKind ?? "journal";
+  const purchaseAmountLabel = roleLabel("journal_amount");
 
   const label = "text-xs font-semibold uppercase tracking-wider text-[#5E6870]";
   const Toggle = ({ on, onClick }: { on: boolean; onClick: () => void }) => (
@@ -2895,38 +2943,82 @@ function FinanceSettingsCard({ template, onCommit, iCls }: {
         </div>
         {ui.journalEnabled && (
           <div className="space-y-3 border-l-2 border-[#287EAD]/30 pl-4">
+            <div className="space-y-1.5">
+              <span className={label}>Posting type</span>
+              <select className={iCls} value={postingKind} onChange={(e) => setUi({ postingKind: e.target.value as "journal" | "purchase_order" })}>
+                <option value="journal">Ledger journal</option>
+                <option value="purchase_order">Purchase order / LPO</option>
+              </select>
+            </div>
             <div className="grid grid-cols-2 gap-3">
               <div className="space-y-1.5"><span className={label}>Business unit</span>
                 <input className={iCls} value={ui.businessUnit ?? ""} onChange={(e) => setUi({ businessUnit: e.target.value })} placeholder="e.g. ZRD" /></div>
               <div className="space-y-1.5"><span className={label}>Budget code</span>
                 <input className={iCls} value={ui.budgetCode ?? ""} onChange={(e) => setUi({ budgetCode: e.target.value })} placeholder="e.g. A" /></div>
-              <div className="space-y-1.5"><span className={label}>Journal type</span>
-                <input className={cn(iCls, "font-mono")} value={ui.journalType ?? ""} onChange={(e) => setUi({ journalType: e.target.value })} placeholder="e.g. PIINV" /></div>
-              <div className="space-y-1.5"><span className={label}>Posting type</span>
-                <input className={cn(iCls, "font-mono")} value={ui.postingType ?? ""} onChange={(e) => setUi({ postingType: e.target.value })} placeholder="e.g. 2" /></div>
+              {postingKind === "journal" ? (
+                <>
+                  <div className="space-y-1.5"><span className={label}>Journal type</span>
+                    <input className={cn(iCls, "font-mono")} value={ui.journalType ?? ""} onChange={(e) => setUi({ journalType: e.target.value })} placeholder="e.g. PIINV" /></div>
+                  <div className="space-y-1.5"><span className={label}>Posting type</span>
+                    <input className={cn(iCls, "font-mono")} value={ui.postingType ?? ""} onChange={(e) => setUi({ postingType: e.target.value })} placeholder="e.g. 2" /></div>
+                </>
+              ) : (
+                <>
+                  <div className="space-y-1.5"><span className={label}>Supplier code</span>
+                    <input className={cn(iCls, "font-mono")} value={ui.supplierCode ?? "81105"} onChange={(e) => setUi({ supplierCode: e.target.value })} placeholder="81105" /></div>
+                  <div className="space-y-1.5"><span className={label}>Transaction type</span>
+                    <input className={cn(iCls, "font-mono")} value={ui.purchaseTransactionType ?? "ASSETS"} onChange={(e) => setUi({ purchaseTransactionType: e.target.value })} placeholder="ASSETS" /></div>
+                  <div className="space-y-1.5"><span className={label}>Invoice address</span>
+                    <input className={cn(iCls, "font-mono")} value={ui.invoiceAddressCode ?? "0000000000"} onChange={(e) => setUi({ invoiceAddressCode: e.target.value })} placeholder="0000000000" /></div>
+                  <div className="space-y-1.5"><span className={label}>Item code</span>
+                    <input className={cn(iCls, "font-mono")} value={ui.itemCode ?? "ITM29"} onChange={(e) => setUi({ itemCode: e.target.value })} placeholder="ITM29" /></div>
+                  <div className="space-y-1.5"><span className={label}>Account code</span>
+                    <input className={cn(iCls, "font-mono")} value={ui.accountCode ?? ""} onChange={(e) => setUi({ accountCode: e.target.value })} placeholder="optional" /></div>
+                  <div className="space-y-1.5"><span className={label}>Analysis 10 category</span>
+                    <input className={cn(iCls, "font-mono")} value={ui.analysis10Category ?? "11"} onChange={(e) => setUi({ analysis10Category: e.target.value })} placeholder="11" /></div>
+                  <div className="space-y-1.5"><span className={label}>Analysis 10 code</span>
+                    <input className={cn(iCls, "font-mono")} value={ui.analysis10Code ?? "E"} onChange={(e) => setUi({ analysis10Code: e.target.value })} placeholder="E" /></div>
+                  <div className="space-y-1.5"><span className={label}>Order quantity</span>
+                    <input className={cn(iCls, "font-mono")} value={ui.quantity ?? ""} onChange={(e) => setUi({ quantity: e.target.value })} placeholder="1 (default)" /></div>
+                  <div className="space-y-1.5"><span className={label}>Unit price</span>
+                    <input className={cn(iCls, "font-mono")} value={ui.unitPrice ?? ""} onChange={(e) => setUi({ unitPrice: e.target.value })} placeholder="= total amount (default)" /></div>
+                </>
+              )}
             </div>
             <div className="grid grid-cols-2 gap-3 text-xs">
               <div><span className={label}>Reference</span><div className="mt-1 text-[#1F2933]">{roleLabel("reference")}</div></div>
               <div><span className={label}>Transaction date</span><div className="mt-1 text-[#1F2933]">{roleLabel("transaction_date")}</div></div>
               <div><span className={label}>Currency</span><div className="mt-1 text-[#1F2933]">{roleLabel("currency") !== "—" ? roleLabel("currency") : (ui.currencyConst || "—")}</div></div>
               <div><span className={label}>Description</span><div className="mt-1 text-[#1F2933]">{roleLabel("description")}</div></div>
+              {postingKind === "purchase_order" && <div><span className={label}>Amount</span><div className="mt-1 text-[#1F2933]">{purchaseAmountLabel}</div></div>}
             </div>
-            <label className="flex cursor-pointer items-center gap-2.5 text-sm text-[#1F2933]">
-              <input type="checkbox" checked={ui.validateBalance !== false} onChange={(e) => setUi({ validateBalance: e.target.checked })}
-                     className="h-4 w-4 accent-[#287EAD]" />
-              Require debits to balance credits before posting
-            </label>
+            {postingKind === "journal" && (
+              <label className="flex cursor-pointer items-center gap-2.5 text-sm text-[#1F2933]">
+                <input type="checkbox" checked={ui.validateBalance !== false} onChange={(e) => setUi({ validateBalance: e.target.checked })}
+                       className="h-4 w-4 accent-[#287EAD]" />
+                Require debits to balance credits before posting
+              </label>
+            )}
             <div className="rounded border border-[#EEF0F2] bg-[#F8FAFB] px-3 py-2 text-xs text-[#5E6870]">
-              Journal lines from bindings: <b className="text-[#1F2933]">{journalFieldLines}</b> fixed + <b className="text-[#1F2933]">{journalTableLines}</b> table block{journalTableLines !== 1 ? "s" : ""}.
-              {journalFieldLines + journalTableLines === 0 && <span className="text-amber-600"> Bind at least one amount field/table to post.</span>}
+              {postingKind === "journal" ? (
+                <>
+                  Journal lines from bindings: <b className="text-[#1F2933]">{journalFieldLines}</b> fixed + <b className="text-[#1F2933]">{journalTableLines}</b> table block{journalTableLines !== 1 ? "s" : ""}.
+                  {journalFieldLines + journalTableLines === 0 && <span className="text-amber-600"> Bind at least one amount field/table to post.</span>}
+                </>
+              ) : (
+                <>
+                  LPO amount binding: <b className="text-[#1F2933]">{purchaseAmountLabel}</b>.
+                  {purchaseAmountLabel === "—" && <span className="text-amber-600"> Bind one amount field as Journal line amount.</span>}
+                </>
+              )}
             </div>
-            {journalFieldLines + journalTableLines > 0 && (
+            {(postingKind === "purchase_order" ? purchaseAmountLabel !== "—" : journalFieldLines + journalTableLines > 0) && (
               <button
                 type="button"
                 onClick={() => setShowXml(true)}
                 className="inline-flex items-center gap-1.5 border border-[#287EAD] px-3 py-1.5 text-xs font-semibold text-[#287EAD] hover:bg-[#EEF6FB]"
               >
-                <FileCode className="h-3.5 w-3.5" /> Preview journal XML
+                <FileCode className="h-3.5 w-3.5" /> Preview {postingKind === "purchase_order" ? "LPO" : "journal"} XML
               </button>
             )}
           </div>

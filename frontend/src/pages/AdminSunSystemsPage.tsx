@@ -15,7 +15,7 @@ import { toast } from "@/components/ui/vault-toast";
 const FIELDS: Array<{
   key: keyof SunSystemsConnection; label: string; placeholder?: string; mono?: boolean; help?: string;
 }> = [
-  { key: "base_url", label: "Gateway base URL", placeholder: "https://host/sunsystems-connect/soap", mono: true, help: "The SunSystems Connect SOAP base — the SecurityProvider and ComponentExecutor endpoints sit under it." },
+  { key: "base_url", label: "Gateway base URL", placeholder: "http://host:81/sunsystems-connect/wsdl", mono: true, help: "The SunSystems Connect WSDL base — SecurityProvider and ComponentExecutor WSDLs sit under it." },
   { key: "security_path", label: "SecurityProvider path", placeholder: "SecurityProvider", mono: true },
   { key: "executor_path", label: "ComponentExecutor path", placeholder: "ComponentExecutor", mono: true },
   { key: "username", label: "Username", placeholder: "service account user" },
@@ -37,6 +37,7 @@ export default function AdminSunSystemsPage() {
 
   const [form, setForm] = useState<SunSystemsConnection>({});
   const [verifyTls, setVerifyTls] = useState(true);
+  const [clearPassword, setClearPassword] = useState(false);
   const [testResult, setTestResult] = useState<{ ok: boolean; detail?: string } | null>(null);
 
   // Seed the form from the saved connection (passwords arrive masked).
@@ -44,13 +45,19 @@ export default function AdminSunSystemsPage() {
     if (data) {
       setForm({ ...data.connection });
       setVerifyTls(data.connection.verify_tls ?? data.effective.verify_tls ?? true);
+      setClearPassword(false);
     }
   }, [data]);
 
   const set = (key: keyof SunSystemsConnection, value: string) =>
     setForm((f) => ({ ...f, [key]: value }));
 
-  const payload = (): SunSystemsConnection => ({ ...form, verify_tls: verifyTls });
+  const payload = (): SunSystemsConnection => ({
+    ...form,
+    password: clearPassword ? "" : form.password,
+    verify_tls: verifyTls,
+    clear_password: clearPassword,
+  });
 
   const saveMut = useMutation({
     mutationFn: () => sunsystemsAPI.updateConnection(payload()).then((r) => r.data),
@@ -109,6 +116,17 @@ export default function AdminSunSystemsPage() {
                   {f.help && <p className="text-[10px] text-[#8C969E]">{f.help}</p>}
                   {eff && eff[f.key] && !form[f.key] && (
                     <p className="text-[10px] text-[#8C969E]">Using env default: <span className="font-mono">{String(eff[f.key])}</span></p>
+                  )}
+                  {f.key === "password" && data?.has_password && (
+                    <label className="flex cursor-pointer items-center gap-2 pt-1 text-xs text-[#5E6870]">
+                      <input
+                        type="checkbox"
+                        checked={clearPassword}
+                        onChange={(e) => setClearPassword(e.target.checked)}
+                        className="h-3.5 w-3.5 accent-[#287EAD]"
+                      />
+                      Clear saved password and use the environment default
+                    </label>
                   )}
                 </div>
               ))}

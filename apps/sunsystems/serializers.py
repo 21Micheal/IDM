@@ -54,3 +54,4 @@ class ConnectionSerializer(serializers.Serializer):
     business_unit = serializers.CharField(required=False, allow_blank=True)
     budget_code = serializers.CharField(required=False, allow_blank=True)
     verify_tls = serializers.BooleanField(required=False)
+    clear_password = serializers.BooleanField(required=False, default=False)

@@ -111,6 +111,33 @@ def resolve_amount(spec: Any, values: dict, row: dict | None = None) -> Decimal:
 
 
 # ── journal build ──────────────────────────────────────────────────────────────
+def build_sunsystems_ssc(
+    mapping: dict,
+    values: dict,
+    *,
+    business_unit_default: str = "",
+    budget_code_default: str = "A",
+    pretty: bool = False,
+) -> JournalBuild:
+    """Compile a mapping into the appropriate SSC payload for its component."""
+    component = str((mapping or {}).get("component") or "Journal").strip().lower()
+    if component == "purchaseorder":
+        return build_purchase_order_ssc(
+            mapping,
+            values,
+            business_unit_default=business_unit_default,
+            budget_code_default=budget_code_default,
+            pretty=pretty,
+        )
+    return build_journal_ssc(
+        mapping,
+        values,
+        business_unit_default=business_unit_default,
+        budget_code_default=budget_code_default,
+        pretty=pretty,
+    )
+
+
 def build_journal_ssc(
     mapping: dict,
     values: dict,
@@ -192,6 +219,116 @@ def build_journal_ssc(
             f"Journal does not balance: debits {debit_total} ≠ credits {credit_total}."
         )
     return build
+
+
+def build_purchase_order_ssc(
+    mapping: dict,
+    values: dict,
+    *,
+    business_unit_default: str = "",
+    budget_code_default: str = "A",
+    pretty: bool = False,
+) -> JournalBuild:
+    """Compile a minimal PurchaseOrder/CreateOrAmend SSC payload.
+
+    This mirrors the proven LPO test payload while keeping the real business
+    values mapped from the form. Constants can be promoted to builder controls
+    later as SunSystems confirms which fields should vary by template.
+    """
+    if not isinstance(mapping, dict):
+        raise MappingError("Purchase order mapping is missing or not an object.")
+
+    po = mapping.get("purchase_order") or {}
+    context = mapping.get("context") or {}
+    component = (mapping.get("component") or "PurchaseOrder").strip()
+    method = (mapping.get("method") or "CreateOrAmend").strip()
+
+    reference = resolve_value(po.get("reference") or mapping.get("reference"), values)
+    amount = resolve_amount(po.get("amount"), values)
+    currency = resolve_value(po.get("currency") or mapping.get("currency"), values)
+    description = resolve_value(po.get("description"), values)
+
+    missing = []
+    if not reference:
+        missing.append("reference")
+    if amount <= 0:
+        missing.append("amount")
+    if not currency:
+        missing.append("currency")
+    if missing:
+        raise MappingError(f"Purchase order mapping produced missing/invalid fields: {', '.join(missing)}.")
+
+    ssc = ET.Element("SSC")
+    ctx_el = ET.SubElement(ssc, "SunSystemsContext")
+    ET.SubElement(ctx_el, "BusinessUnit").text = (
+        resolve_value(context.get("business_unit"), values, default=business_unit_default)
+        or business_unit_default
+    )
+    # BudgetCode is a journal/ledger concept; purchase orders don't include it.
+
+    payload_el = ET.SubElement(ssc, "Payload")
+    order_el = ET.SubElement(payload_el, "PurchaseOrder")
+    ET.SubElement(order_el, "Comment").text = description
+    ET.SubElement(order_el, "InvoiceAddressCode").text = resolve_value(po.get("invoice_address_code"), values, default="0000000000")
+    ET.SubElement(order_el, "PurchaseTransactionType").text = resolve_value(po.get("transaction_type"), values, default="ASSETS")
+    ET.SubElement(order_el, "PurchaseOrderReference").text = reference
+    ET.SubElement(order_el, "SecondReference").text = resolve_value(po.get("second_reference"), values)
+    ET.SubElement(order_el, "SupplierCode").text = resolve_value(po.get("supplier_code"), values, default="81105")
+
+    # Resolve order quantity — defaults to "1" for non-inventory / service LPOs.
+    quantity_str = resolve_value(po.get("quantity"), values, default="1") or "1"
+
+    line_el = ET.SubElement(order_el, "PurchaseOrderLine")
+    ET.SubElement(line_el, "AccountCode").text = resolve_value(po.get("account_code"), values)
+    ET.SubElement(line_el, "CurrencyCode").text = currency
+    ET.SubElement(line_el, "ItemCode").text = resolve_value(po.get("item_code"), values, default="ITM29")
+    ET.SubElement(line_el, "LineNumber").text = "1"
+    ET.SubElement(line_el, "OrderDate").text = resolve_value(po.get("date") or mapping.get("date"), values)
+    ET.SubElement(line_el, "UserLineNumber").text = "1"
+
+    analysis_qty = ET.SubElement(line_el, "AnalysisQuantity")
+    ET.SubElement(analysis_qty, "Quantity").text = quantity_str
+    analysis = dict(po.get("analysis") or {})
+    analysis.setdefault("10", {
+        "category": po.get("analysis10_category", {"const": ""}),
+        "code": po.get("analysis10_code", {"const": ""}),
+    })
+    for n in _ANALYSIS_CODES:
+        spec = analysis.get(str(n)) or {}
+        category = resolve_value(spec.get("category"), values)
+        code = resolve_value(spec.get("code"), values)
+        # Skip entries where both category and code are empty.
+        if not category and not code:
+            continue
+        analysis_el = ET.SubElement(analysis_qty, f"Analysis{n}")
+        ET.SubElement(analysis_el, "VPolCatAnalysis_AnlCatId").text = category
+        ET.SubElement(analysis_el, "VPolCatAnalysis_AnlCode").text = code
+
+    # VLAB7 Base = the per-unit quantity/rate value (matches the proven test
+    # payload: VLAB7=1 for a single-unit order). VLAB9 Trans = total value.
+    vlab7 = ET.SubElement(line_el, "VLAB7")
+    base = ET.SubElement(vlab7, "Base")
+    ET.SubElement(base, "VPolVlabEntry_Val").text = quantity_str
+
+    vlab9 = ET.SubElement(line_el, "VLAB9")
+    trans = ET.SubElement(vlab9, "Trans")
+    ET.SubElement(trans, "VPolVlabEntry_Val").text = _amount_str(amount)
+
+    if pretty:
+        try:
+            ET.indent(ssc, space="  ")
+        except AttributeError:  # pragma: no cover - Python < 3.9
+            pass
+
+    return JournalBuild(
+        component=component,
+        method=method,
+        ssc_xml=_serialize(ssc),
+        line_count=1,
+        debit_total=amount,
+        credit_total=Decimal("0"),
+        warnings=[],
+    )
 
 
 def _iter_lines(mapping: dict, values: dict, warnings: list[str]) -> Iterator[tuple[dict, dict | None]]:
@@ -297,6 +434,46 @@ def parse_journal_response(xml: str) -> JournalResult:
     message = "; ".join(dict.fromkeys(messages))  # dedupe, preserve order
     ok = (not has_error) and journal_number is not None
     return JournalResult(ok=ok, journal_number=journal_number, message=message, raw=xml or "")
+
+
+def parse_posting_response(component: str, xml: str) -> JournalResult:
+    """Parse the response for the configured SunSystems component."""
+    if str(component or "").lower() != "purchaseorder":
+        return parse_journal_response(xml)
+
+    root = _parse(xml)
+    if root is None:
+        return JournalResult(False, None, "Unparseable SunSystems response.", xml or "")
+
+    reference: str | None = None
+    messages: list[str] = []
+    has_error = False
+
+    for el in root.iter():
+        name = _localname(el.tag)
+        text = (el.text or "").strip()
+        attrs = {str(k).lower(): str(v).lower() for k, v in getattr(el, "attrib", {}).items()}
+        if attrs.get("status") in {"fail", "failed", "error"} or attrs.get("rejected") == "true":
+            has_error = True
+        if attrs.get("level") in {"error", "fatal"}:
+            has_error = True
+        if reference is None and not has_error and name == "purchaseorder":
+            reference = el.attrib.get("Reference") or el.attrib.get("reference")
+        if not text:
+            continue
+        if reference is None and not has_error and name in {
+            "purchaseordernumber", "ordernumber",
+        }:
+            reference = text
+        elif name in {"message", "description", "errortext", "text", "messagetext", "usertext"}:
+            messages.append(text)
+        elif name in {"errorlevel", "severity", "status"} and text.lower() in {
+            "error", "fatal", "2", "3", "failed", "failure",
+        }:
+            has_error = True
+
+    message = "; ".join(dict.fromkeys(messages))
+    return JournalResult(ok=(not has_error) and bool(reference), journal_number=reference, message=message, raw=xml or "")
 
 
 # ── helpers ────────────────────────────────────────────────────────────────────

@@ -706,6 +706,7 @@ export type JournalPosting = {
   created_at: string;
   updated_at: string;
   detail?: string;
+  mapping_refreshed?: boolean;
 };
 
 export type BudgetCheckInput = {
@@ -740,6 +741,7 @@ export type SunSystemsConnection = {
   business_unit?: string;
   budget_code?: string;
   verify_tls?: boolean;
+  clear_password?: boolean;
 };
 
 export type SunSystemsConnectionResponse = {
