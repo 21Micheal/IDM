@@ -304,14 +304,18 @@ def build_purchase_order_ssc(
         ET.SubElement(analysis_el, "VPolCatAnalysis_AnlCatId").text = category
         ET.SubElement(analysis_el, "VPolCatAnalysis_AnlCode").text = code
 
-    # VLAB7 Base = the per-unit quantity/rate value (matches the proven test
-    # payload: VLAB7=1 for a single-unit order). VLAB9 Trans = total value.
-    vlab7 = ET.SubElement(line_el, "VLAB7")
-    base = ET.SubElement(vlab7, "Base")
+    # VLAB numbers vary by SunSystems transaction-type configuration (e.g. PK1
+    # uses VLAB1=base-quantity and VLAB2=transaction-value; other BUs may differ).
+    # Override via purchase_order.vlab_base_num / vlab_trans_num in the mapping.
+    vlab_base_num = resolve_value(po.get("vlab_base_num"), values, default="1") or "1"
+    vlab_trans_num = resolve_value(po.get("vlab_trans_num"), values, default="2") or "2"
+
+    vlab_base_el = ET.SubElement(line_el, f"VLAB{vlab_base_num}")
+    base = ET.SubElement(vlab_base_el, "Base")
     ET.SubElement(base, "VPolVlabEntry_Val").text = quantity_str
 
-    vlab9 = ET.SubElement(line_el, "VLAB9")
-    trans = ET.SubElement(vlab9, "Trans")
+    vlab_trans_el = ET.SubElement(line_el, f"VLAB{vlab_trans_num}")
+    trans = ET.SubElement(vlab_trans_el, "Trans")
     ET.SubElement(trans, "VPolVlabEntry_Val").text = _amount_str(amount)
 
     if pretty:
@@ -404,6 +408,83 @@ class JournalResult:
     raw: str
 
 
+def _extract_structured_messages(root: ET.Element) -> tuple[list[str], bool]:
+    """Walk ``<Message>`` blocks and build human-readable strings that include
+    the SunSystems message number, the plain-English text, and the offending
+    field + value when present. Also returns whether any error-level message
+    was found.
+
+    Handles both the flat shape (``<Message><UserText>…</UserText></Message>``)
+    and the nested Application shape used by SunSystems Connect responses::
+
+        <Message Level="error">
+          <UserText>Abort() …</UserText>
+          <Application>
+            <MessageNumber>2527</MessageNumber>
+            <Message>A zero quantity …</Message>
+            <DataItem>PurchaseOrder.PurchaseOrderLine.CurrencyCode</DataItem>
+            <Value>USD</Value>
+          </Application>
+        </Message>
+    """
+    structured: list[str] = []
+    has_error = False
+
+    for msg_el in root.iter():
+        if _localname(msg_el.tag) != "message":
+            continue
+        level = (
+            msg_el.attrib.get("level") or msg_el.attrib.get("Level") or ""
+        ).lower()
+        if level in {"error", "fatal"}:
+            has_error = True
+
+        # Gather fields from direct children and nested <Application> blocks.
+        parts: dict[str, str] = {}
+        for child in msg_el:
+            cname = _localname(child.tag)
+            ctext = (child.text or "").strip()
+            if cname == "usertext" and ctext:
+                parts.setdefault("usertext", ctext)
+            elif cname == "application":
+                for app in child:
+                    aname = _localname(app.tag)
+                    atext = (app.text or "").strip()
+                    if not atext:
+                        continue
+                    if aname == "messagenumber":
+                        parts["number"] = atext
+                    elif aname == "message":
+                        parts.setdefault("message", atext)
+                    elif aname == "dataitem":
+                        parts["field"] = atext
+                    elif aname == "value":
+                        parts["value"] = atext
+                    elif aname == "component":
+                        parts["component"] = atext
+
+        # Build a single readable string: "[2527] A zero quantity … (field: …, value: …)"
+        line_parts: list[str] = []
+        if parts.get("number"):
+            line_parts.append(f"[{parts['number']}]")
+        text = parts.get("message") or parts.get("usertext") or ""
+        if text:
+            line_parts.append(text)
+        context: list[str] = []
+        if parts.get("field"):
+            context.append(f"field: {parts['field']}")
+        if parts.get("value"):
+            context.append(f"value: {parts['value']}")
+        if context:
+            line_parts.append(f"({', '.join(context)})")
+        if line_parts:
+            structured.append(" ".join(line_parts))
+        elif (child_text := (msg_el.text or "").strip()):
+            structured.append(child_text)
+
+    return structured, has_error
+
+
 def parse_journal_response(xml: str) -> JournalResult:
     """Best-effort extraction of the journal number / messages from a Ledger
     Import response. Shapes vary by tenant, so match by local element name."""
@@ -412,7 +493,6 @@ def parse_journal_response(xml: str) -> JournalResult:
         return JournalResult(False, None, "Unparseable SunSystems response.", xml or "")
 
     journal_number: str | None = None
-    messages: list[str] = []
     has_error = False
 
     for el in root.iter():
@@ -424,20 +504,57 @@ def parse_journal_response(xml: str) -> JournalResult:
             "journalnumber", "journalno", "vouchernumber", "voucher", "journal",
         }:
             journal_number = text
-        elif name in {"message", "description", "errortext", "text", "messagetext"}:
-            messages.append(text)
-        elif name in {"errorlevel", "severity", "status"} and text.lower() in {
+        elif name in {"errorlevel", "severity"} and text.lower() in {
             "error", "fatal", "2", "3", "failed", "failure",
         }:
             has_error = True
 
-    message = "; ".join(dict.fromkeys(messages))  # dedupe, preserve order
+    structured, msg_has_error = _extract_structured_messages(root)
+    has_error = has_error or msg_has_error
+    message = "; ".join(dict.fromkeys(structured))
     ok = (not has_error) and journal_number is not None
     return JournalResult(ok=ok, journal_number=journal_number, message=message, raw=xml or "")
 
 
+# Status attribute values that SunSystems Connect uses to signal an accepted PO.
+_PO_SUCCESS_STATUSES = {"success", "ok", "accepted", "created", "amended"}
+_PO_ERROR_STATUSES = {"fail", "failed", "error", "rejected"}
+# Attribute names that may carry the PO reference on the <PurchaseOrder> element.
+_PO_REFERENCE_ATTRS = (
+    "Reference", "reference", "PurchaseOrderReference",
+    "purchaseorderreference", "OrderNo", "orderno",
+)
+# Element local-names that may contain the PO reference as text content.
+_PO_REFERENCE_ELEMENTS = {
+    "purchaseordernumber", "purchaseorderreference",
+    "ordernumber", "ordreference", "reference",
+}
+
+
 def parse_posting_response(component: str, xml: str) -> JournalResult:
-    """Parse the response for the configured SunSystems component."""
+    """Parse a SunSystems Connect Execute response for the given component.
+
+    For Journal/Ledger responses delegates to :func:`parse_journal_response`.
+    For PurchaseOrder responses applies a two-pass strategy:
+
+    1. **Status pass** — inspect ``<PurchaseOrder status=…>`` directly.  An
+       explicit success status (``success``, ``ok``, ``accepted``, etc.) sets
+       ``has_success``; an explicit error status or ``rejected="true"`` sets
+       ``has_error``.  This is checked *independently* of any child messages so
+       that a success posting with advisory warnings is never mis-classified.
+
+    2. **Reference pass** — look for the PO reference in multiple attribute and
+       element shapes (SunSystems tenants vary in how they surface it).
+
+    3. **Message pass** — delegate to :func:`_extract_structured_messages` which
+       returns fully-structured strings including the message number, human text,
+       offending field, and offending value.
+
+    ``ok`` is ``True`` when ``has_success`` is set OR when no errors were found
+    and a reference was extracted.  When ``has_success`` is True, ``ok`` is
+    True even if no reference could be parsed (the posting happened; the missing
+    reference is a parsing gap, not a business failure).
+    """
     if str(component or "").lower() != "purchaseorder":
         return parse_journal_response(xml)
 
@@ -445,35 +562,55 @@ def parse_posting_response(component: str, xml: str) -> JournalResult:
     if root is None:
         return JournalResult(False, None, "Unparseable SunSystems response.", xml or "")
 
-    reference: str | None = None
-    messages: list[str] = []
+    has_success = False
     has_error = False
+    reference: str | None = None
 
+    # ── Pass 1: status + reference from <PurchaseOrder> element ────────────────
     for el in root.iter():
-        name = _localname(el.tag)
-        text = (el.text or "").strip()
-        attrs = {str(k).lower(): str(v).lower() for k, v in getattr(el, "attrib", {}).items()}
-        if attrs.get("status") in {"fail", "failed", "error"} or attrs.get("rejected") == "true":
-            has_error = True
-        if attrs.get("level") in {"error", "fatal"}:
-            has_error = True
-        if reference is None and not has_error and name == "purchaseorder":
-            reference = el.attrib.get("Reference") or el.attrib.get("reference")
-        if not text:
+        if _localname(el.tag) != "purchaseorder":
             continue
-        if reference is None and not has_error and name in {
-            "purchaseordernumber", "ordernumber",
-        }:
-            reference = text
-        elif name in {"message", "description", "errortext", "text", "messagetext", "usertext"}:
-            messages.append(text)
-        elif name in {"errorlevel", "severity", "status"} and text.lower() in {
-            "error", "fatal", "2", "3", "failed", "failure",
-        }:
+        status_raw = (
+            el.attrib.get("status") or el.attrib.get("Status") or ""
+        ).lower().strip()
+        rejected = (
+            el.attrib.get("rejected") or el.attrib.get("Rejected") or ""
+        ).lower().strip()
+        if status_raw in _PO_SUCCESS_STATUSES:
+            has_success = True
+        elif status_raw in _PO_ERROR_STATUSES or rejected == "true":
             has_error = True
+        if reference is None:
+            for attr in _PO_REFERENCE_ATTRS:
+                val = (el.attrib.get(attr) or "").strip()
+                if val:
+                    reference = val
+                    break
 
-    message = "; ".join(dict.fromkeys(messages))
-    return JournalResult(ok=(not has_error) and bool(reference), journal_number=reference, message=message, raw=xml or "")
+    # ── Pass 2: reference from child text elements ──────────────────────────────
+    if reference is None:
+        for el in root.iter():
+            name = _localname(el.tag)
+            text = (el.text or "").strip()
+            if text and name in _PO_REFERENCE_ELEMENTS:
+                # Don't pick up the *sent* reference — only the echoed/assigned one.
+                # Skip if the element is a direct child of the request payload.
+                reference = text
+                break
+
+    # ── Pass 3: structured messages + derived error flag ───────────────────────
+    structured, msg_has_error = _extract_structured_messages(root)
+    if msg_has_error:
+        has_error = True
+
+    message = "; ".join(dict.fromkeys(structured))
+    ok = has_success or (not has_error and bool(reference))
+    return JournalResult(
+        ok=ok,
+        journal_number=reference,
+        message=message,
+        raw=xml or "",
+    )
 
 
 # ── helpers ────────────────────────────────────────────────────────────────────

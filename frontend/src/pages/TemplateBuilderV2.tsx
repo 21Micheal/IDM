@@ -261,6 +261,10 @@ export interface SunSystemsUi {
   quantity?: string;
   /** Fixed unit price. Blank = derived from total amount (qty-1 pattern). */
   unitPrice?: string;
+  /** VLAB label number for the base/quantity value line (default "1"). */
+  vlabBase?: string;
+  /** VLAB label number for the transaction/amount value line (default "2"). */
+  vlabTrans?: string;
 }
 export interface SunSystemsConfig {
   ui?: SunSystemsUi;
@@ -791,6 +795,9 @@ function compileSunSystems(template: Template): SunSystemsConfig | undefined {
             // the backend defaults quantity to "1" and unit_price to the total amount.
             ...(ui.quantity ? { quantity: { const: ui.quantity } } : {}),
             ...(ui.unitPrice ? { unit_price: { const: ui.unitPrice } } : {}),
+            // VLAB numbers: only emit when explicitly set; backend defaults to 1 and 2.
+            ...(ui.vlabBase  ? { vlab_base_num:  { const: ui.vlabBase  } } : {}),
+            ...(ui.vlabTrans ? { vlab_trans_num: { const: ui.vlabTrans } } : {}),
             ...(purchaseAmountField ? { amount: { field: purchaseAmountField.key } } : {}),
             ...(currencySpec ? { currency: currencySpec } : {}),
             ...(referenceSpec ? { reference: referenceSpec } : {}),
@@ -2982,6 +2989,10 @@ function FinanceSettingsCard({ template, onCommit, iCls }: {
                     <input className={cn(iCls, "font-mono")} value={ui.quantity ?? ""} onChange={(e) => setUi({ quantity: e.target.value })} placeholder="1 (default)" /></div>
                   <div className="space-y-1.5"><span className={label}>Unit price</span>
                     <input className={cn(iCls, "font-mono")} value={ui.unitPrice ?? ""} onChange={(e) => setUi({ unitPrice: e.target.value })} placeholder="= total amount (default)" /></div>
+                  <div className="space-y-1.5"><span className={label}>VLAB base # (qty label)</span>
+                    <input className={cn(iCls, "font-mono")} value={ui.vlabBase ?? ""} onChange={(e) => setUi({ vlabBase: e.target.value })} placeholder="1 (default)" /></div>
+                  <div className="space-y-1.5"><span className={label}>VLAB trans # (amount label)</span>
+                    <input className={cn(iCls, "font-mono")} value={ui.vlabTrans ?? ""} onChange={(e) => setUi({ vlabTrans: e.target.value })} placeholder="2 (default)" /></div>
                 </>
               )}
             </div>
