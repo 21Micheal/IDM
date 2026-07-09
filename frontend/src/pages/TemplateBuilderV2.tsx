@@ -128,6 +128,11 @@ export interface FieldFinanceBinding {
   role?: string;
   dc?: "D" | "C";           // for role "journal_amount"
   account?: string;         // SunSystems account code for that line
+  /** Offsetting (counter) account that automatically creates the balancing entry.
+   *  e.g. set account=71001 dc=D counterAccount=10101 counterDc=C to get both
+   *  legs of an imprest advance from a single amount field. */
+  counterAccount?: string;
+  counterDc?: "D" | "C";
   // Budget role (live-check side) — independent of the journal role, so one
   // amount field can both post a journal line AND be the budget-checked amount.
   // See FINANCE_BUDGET_ROLES. ("budget_amount"/"budget_account" were the old
@@ -266,7 +271,14 @@ export interface TemplateField {
 export interface SunSystemsUi {
   journalEnabled?: boolean;
   postingKind?: "journal" | "purchase_order";
-  journalStages?: { stage: number; label?: string; postOn?: string }[];
+  journalStages?: {
+    stage: number;
+    label?: string;
+    postOn?: string;
+    /** Keys of fields/tables whose lines belong to this stage.
+     *  When empty/absent, all journal-bound fields are used (single-stage compat). */
+    fieldKeys?: string[];
+  }[];
   budgetEnabled?: boolean;
   budgetMode?: "warn" | "block";
   businessUnit?: string;
@@ -722,6 +734,17 @@ function budgetRoleOf(field: TemplateField): string {
   return "";
 }
 
+function tableHasJournalAmountColumn(field: TemplateField): boolean {
+  return field.type === "table" && (field.columns ?? []).some((c) => c.sunsystems?.role === "line_amount");
+}
+
+function isJournalLineSource(field: TemplateField): boolean {
+  if (field.type === "table") {
+    return field.sunsystems?.role === "journal_lines" || tableHasJournalAmountColumn(field);
+  }
+  return field.sunsystems?.role === "journal_amount";
+}
+
 function valueSpec(field?: { key: string } | null, opts?: { format?: string }) {
   return field ? { field: field.key, ...(opts?.format ? { format: opts.format } : {}) } : undefined;
 }
@@ -779,22 +802,36 @@ function compileSunSystems(template: Template): SunSystemsConfig | undefined {
   const postingKind = ui.postingKind ?? "journal";
 
   // Journal lines: header amount fields + table "journal_lines" repeat blocks.
+  // Each entry carries a hidden _fieldKey so per-stage fieldKeys filters can match.
   const lines: Record<string, unknown>[] = [];
   for (const f of fields) {
-    const b = f.sunsystems;
-    if (!b) continue;
+    const b = f.sunsystems ?? {};
     if (f.type !== "table" && b.role === "journal_amount") {
+      // Primary line
       lines.push({
+        _fieldKey: f.key,
         account: { const: b.account ?? "" },
         dc: b.dc ?? "D",
         amount: { field: f.key },
         ...(descSpec ? { description: descSpec } : {}),
       });
+      // Counter (offsetting) line — automatic double-entry when counterAccount is set.
+      // e.g. Dr 71001 advance_amount → also Cr 10101 same amount (imprest advance).
+      if (b.counterAccount) {
+        const counterDc = b.counterDc ?? (b.dc === "D" ? "C" : "D");
+        lines.push({
+          _fieldKey: f.key,
+          account: { const: b.counterAccount },
+          dc: counterDc,
+          amount: { field: f.key },
+          ...(descSpec ? { description: descSpec } : {}),
+        });
+      }
     }
-    if (f.type === "table" && b.role === "journal_lines") {
+    if (f.type === "table" && isJournalLineSource(f)) {
       const cols = f.columns ?? [];
       const amountCol = cols.find((c) => c.sunsystems?.role === "line_amount");
-      if (!amountCol) continue; // a repeat line needs an amount source
+      if (!amountCol) continue;
       const acctCol = cols.find((c) => c.sunsystems?.role === "account_code");
       const descCol = cols.find((c) => c.sunsystems?.role === "description");
       const analysis: Record<string, unknown> = {};
@@ -802,6 +839,7 @@ function compileSunSystems(template: Template): SunSystemsConfig | undefined {
         analysis[String(c.sunsystems?.analysisNumber ?? 1)] = { row_field: c.key };
       }
       lines.push({
+        _fieldKey: f.key,
         repeat_over: f.key,
         account: acctCol ? { row_field: acctCol.key } : { const: b.account ?? "" },
         dc: b.dc ?? "D",
@@ -834,13 +872,35 @@ function compileSunSystems(template: Template): SunSystemsConfig | undefined {
   const configuredStages = (ui.journalStages ?? [])
     .filter((s) => Number(s.stage) > 0)
     .sort((a, b) => Number(a.stage) - Number(b.stage));
-  const defaultJournalStages = [{ stage: 1, label: "Stage 1", postOn: "approved" }];
-  const journalStages = (configuredStages.length ? configuredStages : defaultJournalStages).map((s) => ({
-    ...journalStageBase,
-    stage: Number(s.stage),
-    ...(s.label ? { label: s.label } : {}),
-    post_on: s.postOn || "approved",
-  }));
+  const defaultJournalStages = [{ stage: 1, label: "Stage 1", postOn: "approved", fieldKeys: [] as string[] }];
+  const isMultiStage = configuredStages.length > 1;
+
+  const journalStages = (configuredStages.length ? configuredStages : defaultJournalStages).map((s) => {
+    // Per-stage line filtering. Single-stage templates keep the old "all lines"
+    // default; multi-stage templates require explicit assignment to avoid
+    // accidentally posting the same source lines in every stage.
+    const stageFieldKeys = s.fieldKeys?.length
+      ? new Set(s.fieldKeys)
+      : (isMultiStage ? new Set<string>() : null);
+    const stageLines = stageFieldKeys
+      ? lines.filter((l) => {
+          const key = (l as any)._fieldKey as string | undefined;
+          return key ? stageFieldKeys.has(key) : true;
+        })
+      : lines;
+    return {
+      ...journalStageBase,
+      // Override lines with stage-filtered lines (drop internal _fieldKey).
+      lines: stageLines.map(({ _fieldKey: _k, ...rest }: any) => rest),
+      stage: Number(s.stage),
+      ...(s.label ? { label: s.label } : {}),
+      post_on: s.postOn || "approved",
+    };
+  });
+
+  // When only one stage is configured, also expose a flat (non-stages) mapping
+  // for the XML preview which expects a single-stage shape.
+  void isMultiStage;
 
   const purchaseAmountField = byRole("journal_amount");
   const journal = ui.journalEnabled
@@ -1835,29 +1895,62 @@ function FinanceBindingFields({ field, onUpdate }: {
 
   const role = binding.role ?? "";
   const journalOptions = isTable
-    ? [{ value: "", label: "— none —" }, { value: "journal_lines", label: "Journal lines (one per row)" }]
+    ? [{ value: "", label: "— infer from columns —" }, { value: "journal_lines", label: "Journal lines (one per row)" }]
     : FINANCE_FIELD_ROLES;
   const showAcct = role === "journal_amount" || role === "journal_lines";
 
   return (
     <div className="space-y-3 border-t border-dashed border-[#C8CDD2] pt-3">
-      <InspectorRow label="Journal role" hint="How this field posts to the SunSystems ledger on approval.">
+      <InspectorRow
+        label="Journal role"
+        hint={isTable
+          ? "A table becomes a journal line source when one of its columns is marked Line amount."
+          : "How this field posts to the SunSystems ledger on approval."}
+      >
         <select className={inputCls} value={role} onChange={(e) => setB({ role: e.target.value || undefined })}>
           {journalOptions.map((o) => <option key={o.value} value={o.value}>{o.label}</option>)}
         </select>
       </InspectorRow>
       {showAcct && (
-        <div className="grid grid-cols-2 gap-3">
-          <InspectorRow label="Debit / Credit">
-            <select className={inputCls} value={binding.dc ?? "D"} onChange={(e) => setB({ dc: e.target.value as "D" | "C" })}>
-              <option value="D">Debit</option>
-              <option value="C">Credit</option>
-            </select>
-          </InspectorRow>
-          <InspectorRow label={isTable ? "Default account" : "Account code"} hint={isTable ? "Used unless a column is 'Account code'." : undefined}>
-            <input className={cn(inputCls, "font-mono")} value={binding.account ?? ""} onChange={(e) => setB({ account: e.target.value })} placeholder="e.g. 37400" />
-          </InspectorRow>
-        </div>
+        <>
+          <div className="grid grid-cols-2 gap-3">
+            <InspectorRow label="Debit / Credit">
+              <select className={inputCls} value={binding.dc ?? "D"} onChange={(e) => setB({ dc: e.target.value as "D" | "C" })}>
+                <option value="D">Debit</option>
+                <option value="C">Credit</option>
+              </select>
+            </InspectorRow>
+            <InspectorRow label={isTable ? "Default account" : "Account code"} hint={isTable ? "Used unless a column is 'Account code'." : undefined}>
+              <input className={cn(inputCls, "font-mono")} value={binding.account ?? ""} onChange={(e) => setB({ account: e.target.value })} placeholder="e.g. 71001" />
+            </InspectorRow>
+          </div>
+          {!isTable && (
+            <div className="space-y-1 rounded border border-dashed border-[#C8CDD2] p-2">
+              <p className="text-[10px] font-semibold uppercase text-[#5E6870]">Counter entry (double-entry offset)</p>
+              <p className="text-[10px] text-[#8C969E]">Automatically posts the balancing leg from the same amount — e.g. Dr 71001 / Cr 10101 for an imprest advance.</p>
+              <div className="grid grid-cols-2 gap-2 mt-1.5">
+                <InspectorRow label="Counter account">
+                  <input className={cn(inputCls, "font-mono")} value={binding.counterAccount ?? ""}
+                    onChange={(e) => {
+                      const acct = e.target.value || undefined;
+                      // Auto-set counterDc to the opposite of the primary dc when first filling this in.
+                      const autoCounterDc = binding.dc === "C" ? "D" : "C";
+                      setB({ counterAccount: acct, counterDc: binding.counterDc ?? autoCounterDc });
+                    }}
+                    placeholder="e.g. 10101 (leave blank to skip)" />
+                </InspectorRow>
+                <InspectorRow label="Counter D/C">
+                  <select className={inputCls}
+                    value={binding.counterDc ?? (binding.dc === "C" ? "D" : "C")}
+                    onChange={(e) => setB({ counterDc: e.target.value as "D" | "C" })}>
+                    <option value="D">Debit</option>
+                    <option value="C">Credit</option>
+                  </select>
+                </InspectorRow>
+              </div>
+            </div>
+          )}
+        </>
       )}
       {!isTable && (
         <InspectorRow label="Budget role" hint="Independent of the journal role — the same field can do both.">
@@ -3279,24 +3372,37 @@ function FinanceSettingsCard({ template, onCommit, iCls, processSteps }: {
     const bound = fields.filter((f) => budgetRoleOf(f) === r).map((f) => f.label);
     return bound.length ? bound.join(", ") : "—";
   };
-  const journalFieldLines = fields.filter((f) => f.type !== "table" && f.sunsystems?.role === "journal_amount").length;
-  const journalTableLines = fields.filter((f) => f.type === "table" && f.sunsystems?.role === "journal_lines").length;
+  const journalFieldLines = fields.filter((f) => f.type !== "table" && isJournalLineSource(f)).length;
+  const journalTableLines = fields.filter((f) => f.type === "table" && isJournalLineSource(f)).length;
   const postingKind = ui.postingKind ?? "journal";
   const purchaseAmountLabel = roleLabel("journal_amount");
   const stageOptions = processSteps.some((s) => s.value === "approved")
     ? processSteps
     : [...processSteps, { value: "approved", label: "Approved" }];
-  const journalStages = (ui.journalStages?.length ? ui.journalStages : [{ stage: 1, label: "Stage 1", postOn: "approved" }])
-    .map((s, idx) => ({ stage: Number(s.stage || idx + 1), label: s.label ?? `Stage ${idx + 1}`, postOn: s.postOn ?? "approved" }));
+  const journalBoundFields = fields.filter(isJournalLineSource);
+  const journalStages = (ui.journalStages?.length ? ui.journalStages : [{ stage: 1, label: "Stage 1", postOn: "approved", fieldKeys: [] as string[] }])
+    .map((s, idx) => ({
+      stage: Number(s.stage || idx + 1),
+      label: s.label ?? `Stage ${idx + 1}`,
+      postOn: s.postOn ?? "approved",
+      fieldKeys: s.fieldKeys ?? [],
+    }));
   const setStages = (stages: NonNullable<SunSystemsUi["journalStages"]>) => setUi({ journalStages: stages });
   const updateStage = (index: number, patch: Partial<NonNullable<SunSystemsUi["journalStages"]>[number]>) =>
     setStages(journalStages.map((s, i) => i === index ? { ...s, ...patch } : s));
   const addStage = () => {
     const next = Math.max(0, ...journalStages.map((s) => Number(s.stage) || 0)) + 1;
-    setStages([...journalStages, { stage: next, label: `Stage ${next}`, postOn: "approved" }]);
+    setStages([...journalStages, { stage: next, label: `Stage ${next}`, postOn: "approved", fieldKeys: [] }]);
   };
   const removeStage = (index: number) =>
     setStages(journalStages.filter((_, i) => i !== index).map((s, i) => ({ ...s, stage: i + 1 })));
+  const toggleStageField = (stageIndex: number, fieldKey: string) => {
+    const current = journalStages[stageIndex].fieldKeys ?? [];
+    const next = current.includes(fieldKey)
+      ? current.filter((k) => k !== fieldKey)
+      : [...current, fieldKey];
+    updateStage(stageIndex, { fieldKeys: next });
+  };
   const compiledJournal = compileSunSystems(template)?.journal as any;
   const previewMapping = Array.isArray(compiledJournal?.stages)
     ? compiledJournal.stages[0]
@@ -3409,55 +3515,84 @@ function FinanceSettingsCard({ template, onCommit, iCls, processSteps }: {
                 <div className="space-y-2">
                   <div className="flex items-center justify-between">
                     <span className={label}>Posting stages</span>
-                    <button
-                      type="button"
-                      onClick={addStage}
-                      className="inline-flex items-center gap-1 border border-[#287EAD] px-2 py-1 text-[11px] font-semibold text-[#287EAD] hover:bg-[#EEF6FB]"
-                    >
+                    <button type="button" onClick={addStage} className="inline-flex items-center gap-1 border border-[#287EAD] px-2 py-1 text-[11px] font-semibold text-[#287EAD] hover:bg-[#EEF6FB]">
                       <Plus className="h-3 w-3" /> Add stage
                     </button>
                   </div>
                   <div className="space-y-2">
                     {journalStages.map((stage, index) => (
-                      <div key={index} className="grid grid-cols-[70px_1fr_1.3fr_auto] gap-2 border border-[#E1E5E8] bg-[#F8FAFB] p-2">
-                        <div className="space-y-1">
-                          <span className="text-[10px] font-semibold uppercase text-[#5E6870]">Stage</span>
-                          <input
-                            className={cn(iCls, "font-mono")}
-                            type="number"
-                            min={1}
-                            value={stage.stage}
-                            onChange={(e) => updateStage(index, { stage: Math.max(1, Number(e.target.value) || 1) })}
-                          />
-                        </div>
-                        <div className="space-y-1">
-                          <span className="text-[10px] font-semibold uppercase text-[#5E6870]">Label</span>
-                          <input
-                            className={iCls}
-                            value={stage.label ?? ""}
-                            onChange={(e) => updateStage(index, { label: e.target.value })}
-                            placeholder={`Stage ${stage.stage}`}
-                          />
-                        </div>
-                        <div className="space-y-1">
-                          <span className="text-[10px] font-semibold uppercase text-[#5E6870]">Post when workflow status becomes</span>
-                          <select
-                            className={iCls}
-                            value={stage.postOn ?? "approved"}
-                            onChange={(e) => updateStage(index, { postOn: e.target.value })}
+                      <div key={index} className="border border-[#E1E5E8] bg-[#F8FAFB] p-2 space-y-2">
+                        {/* row 1: stage number / label / trigger / delete */}
+                        <div className="grid grid-cols-[70px_1fr_1.3fr_auto] gap-2">
+                          <div className="space-y-1">
+                            <span className="text-[10px] font-semibold uppercase text-[#5E6870]">Stage</span>
+                            <input
+                              className={cn(iCls, "font-mono")}
+                              type="number"
+                              min={1}
+                              value={stage.stage}
+                              onChange={(e) => updateStage(index, { stage: Math.max(1, Number(e.target.value) || 1) })}
+                            />
+                          </div>
+                          <div className="space-y-1">
+                            <span className="text-[10px] font-semibold uppercase text-[#5E6870]">Label</span>
+                            <input
+                              className={iCls}
+                              value={stage.label ?? ""}
+                              onChange={(e) => updateStage(index, { label: e.target.value })}
+                              placeholder={`Stage ${stage.stage}`}
+                            />
+                          </div>
+                          <div className="space-y-1">
+                            <span className="text-[10px] font-semibold uppercase text-[#5E6870]">Post when workflow status becomes</span>
+                            <select
+                              className={iCls}
+                              value={stage.postOn ?? "approved"}
+                              onChange={(e) => updateStage(index, { postOn: e.target.value })}
+                            >
+                              {stageOptions.map((s) => <option key={s.value} value={s.value}>{s.label}</option>)}
+                            </select>
+                          </div>
+                          <button
+                            type="button"
+                            onClick={() => removeStage(index)}
+                            disabled={journalStages.length <= 1}
+                            title="Remove stage"
+                            className="self-end inline-flex h-9 w-9 items-center justify-center border border-[#C8CDD2] text-[#5E6870] hover:border-red-300 hover:bg-red-50 hover:text-red-700 disabled:opacity-40"
                           >
-                            {stageOptions.map((s) => <option key={s.value} value={s.value}>{s.label}</option>)}
-                          </select>
+                            <Trash2 className="h-3.5 w-3.5" />
+                          </button>
                         </div>
-                        <button
-                          type="button"
-                          onClick={() => removeStage(index)}
-                          disabled={journalStages.length <= 1}
-                          title="Remove stage"
-                          className="self-end inline-flex h-9 w-9 items-center justify-center border border-[#C8CDD2] text-[#5E6870] hover:border-red-300 hover:bg-red-50 hover:text-red-700 disabled:opacity-40"
-                        >
-                          <Trash2 className="h-3.5 w-3.5" />
-                        </button>
+                        {/* row 2: field assignment (only shown when multi-stage + there are bound fields) */}
+                        {journalStages.length > 1 && journalBoundFields.length > 0 && (
+                          <div className="space-y-1 border-t border-[#E8EAEC] pt-2">
+                            <span className="text-[10px] font-semibold uppercase text-[#5E6870]">Lines in this stage</span>
+                            <div className="flex flex-wrap gap-1.5">
+                              {journalBoundFields.map((f) => {
+                                const assigned = stage.fieldKeys?.includes(f.key) ?? false;
+                                return (
+                                  <button
+                                    key={f.key}
+                                    type="button"
+                                    onClick={() => toggleStageField(index, f.key)}
+                                    title={f.key}
+                                    className={cn(
+                                      "inline-flex items-center gap-1 border px-2 py-0.5 text-[11px] font-medium transition-colors",
+                                      assigned
+                                        ? "border-[#287EAD] bg-[#EEF6FB] text-[#287EAD]"
+                                        : "border-[#C8CDD2] bg-white text-[#5E6870] hover:border-[#287EAD] hover:text-[#287EAD]"
+                                    )}
+                                  >
+                                    {f.type === "table" ? "⊞" : "≡"} {f.label || f.key}
+                                  </button>
+                                );
+                              })}
+                            </div>
+                            {(stage.fieldKeys?.length ?? 0) === 0 && (
+                              <p className="text-[10px] text-amber-600">No lines assigned — this stage will not post any journal lines.</p>
+                            )}
+                          </div>
+                        )}
                       </div>
                     ))}
                   </div>

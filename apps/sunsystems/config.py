@@ -146,20 +146,50 @@ def journal_posting_enabled(document) -> bool:
 def post_triggers(document) -> dict[str, int]:
     """Return a mapping of {outcome_string: stage_number} for all enabled stages.
 
-    Example: ``{"approved": 1, "retirement_approved": 2}``
-
-    The workflow hook calls this to find which stage (if any) to fire when a
-    particular workflow outcome lands.
+    When stages share the same ``post_on`` value (e.g. both use ``"approved"``
+    in a phase-based flow), the lowest-numbered stage wins in this dict.
+    Use :func:`find_stage_to_post` for the live workflow-hook dispatch path.
     """
     cfg = get_journal_config(document)
     if not cfg or not cfg.get("enabled"):
         return {}
     result: dict[str, int] = {}
-    for s in _get_stages(cfg):
+    for s in sorted(_get_stages(cfg), key=lambda x: int(x.get("stage", 1))):
         trigger = str(s.get("post_on") or "approved").strip()
         stage_num = int(s.get("stage", 1))
-        result[trigger] = stage_num
+        # First (lowest) stage wins per trigger key.
+        result.setdefault(trigger, stage_num)
     return result
+
+
+def find_stage_to_post(document, outcome: str) -> int | None:
+    """Return the stage number to post for ``outcome``, or None.
+
+    Handles the phase-based imprest case where multiple stages share the same
+    ``post_on`` value (e.g. both Stage 1 and Stage 2 fire on ``"approved"``):
+    it skips stages that are already POSTED and returns the first unposted one.
+    Called by the workflow hook after each approval outcome.
+    """
+    cfg = get_journal_config(document)
+    if not cfg or not cfg.get("enabled"):
+        return None
+
+    try:
+        from .models import JournalPosting, JournalPostingStatus
+        posted = set(
+            JournalPosting.objects
+            .filter(document=document, status=JournalPostingStatus.POSTED)
+            .values_list("stage", flat=True)
+        )
+    except Exception:  # pragma: no cover - DB not ready during tests
+        posted = set()
+
+    for s in sorted(_get_stages(cfg), key=lambda x: int(x.get("stage", 1))):
+        trigger = str(s.get("post_on") or "approved").strip()
+        stage_num = int(s.get("stage", 1))
+        if trigger == outcome and stage_num not in posted:
+            return stage_num
+    return None
 
 
 def post_trigger(document, default: str = "approved") -> str:

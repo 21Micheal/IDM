@@ -761,11 +761,10 @@ class WorkflowService:
         idempotent — a stage that is already POSTED is never re-posted.
         """
         try:
-            from apps.sunsystems.config import journal_posting_enabled, post_triggers
+            from apps.sunsystems.config import journal_posting_enabled, find_stage_to_post
             if not journal_posting_enabled(document):
                 return
-            triggers = post_triggers(document)   # {outcome_str: stage_num}
-            stage = triggers.get(outcome)
+            stage = find_stage_to_post(document, outcome)
             if stage is None:
                 return
             from apps.sunsystems.tasks import post_journal_for_document
