@@ -877,7 +877,7 @@ class UserDelegationViewSet(viewsets.ModelViewSet):
 
     def get_queryset(self):
         user = self.request.user
-        qs = UserDelegation.objects.select_related("delegator", "delegate")
+        qs = UserDelegation.objects.select_related("delegator", "delegate").filter(dismissed_at__isnull=True)
         if user.has_admin_access:
             if delegator := self.request.query_params.get("delegator"):
                 qs = qs.filter(delegator_id=delegator)
@@ -971,31 +971,18 @@ class UserDelegationViewSet(viewsets.ModelViewSet):
         start, end = self._delegation_window(delegation)
         delegator_name = delegation.delegator.get_full_name() or delegation.delegator.email
         scope = self._delegation_scope_label(delegation)
-        task_count = tasks_for_delegation(delegation).count()
         link = "/workflow"
 
         if delegation.is_current:
-            if task_count:
-                message = (
-                    f"{delegator_name} delegated {task_count} workflow task"
-                    f"{'s' if task_count != 1 else ''}{scope} to you (active now until {end})."
-                )
-            else:
-                message = (
-                    f"{delegator_name} delegated workflow tasks{scope} to you "
-                    f"(active now until {end}). No open tasks at the moment."
-                )
+            message = (
+                f"{delegator_name} has delegated workflow tasks{scope} to you "
+                f"(active now until {end})."
+            )
         else:
-            if task_count:
-                message = (
-                    f"{delegator_name} will delegate {task_count} workflow task"
-                    f"{'s' if task_count != 1 else ''}{scope} to you from {start} to {end}."
-                )
-            else:
-                message = (
-                    f"{delegator_name} will delegate workflow tasks{scope} to you "
-                    f"from {start} to {end}."
-                )
+            message = (
+                f"{delegator_name} will delegate workflow tasks{scope} to you "
+                f"from {start} to {end}."
+            )
         if delegation.comment.strip():
             message += f" Reason: {delegation.comment.strip()}"
 
@@ -1015,7 +1002,11 @@ class UserDelegationViewSet(viewsets.ModelViewSet):
             return
         delegation_id = str(delegation.id)
         if delegation.is_current:
-            notify_delegation_activated.delay(delegation_id)
+            # Use countdown=0 for immediate async processing
+            notify_delegation_activated.apply_async(
+                args=[delegation_id],
+                countdown=0,
+            )
             return
         notify_delegation_activated.apply_async(
             args=[delegation_id],
@@ -1034,6 +1025,35 @@ class UserDelegationViewSet(viewsets.ModelViewSet):
         if not user.has_admin_access and instance.delegator_id != user.id:
             raise exceptions.PermissionDenied("You can only remove your own delegations.")
         instance.delete()
+
+    @action(detail=True, methods=["post"])
+    def dismiss(self, request, pk=None):
+        """Dismiss an ended delegation so it no longer appears in the list."""
+        # Use unfiltered queryset to access even dismissed delegations
+        instance = UserDelegation.objects.select_related("delegator", "delegate").get(pk=pk)
+        user = self.request.user
+        
+        # Check permissions: admin or delegator can dismiss
+        if not user.has_admin_access and instance.delegator_id != user.id:
+            raise exceptions.PermissionDenied("You can only dismiss your own delegations.")
+        
+        # Only allow dismissing ended/inactive delegations
+        if instance.is_active and instance.is_current:
+            return Response(
+                {"detail": "Cannot dismiss an active delegation. Disable it first."},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+        
+        if instance.dismissed_at:
+            return Response(
+                {"detail": "This delegation has already been dismissed."},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+        
+        instance.dismissed_at = timezone.now()
+        instance.save(update_fields=["dismissed_at"])
+        
+        return Response({"detail": "Delegation dismissed successfully."})
 
     @action(detail=False, methods=["get"])
     def candidates(self, request):

@@ -1125,6 +1125,7 @@ export const profileAPI = {
     data: Partial<{ delegate_id: string; starts_at: string; ends_at: string; comment: string; is_active: boolean; document_type_id?: string | null }>,
   ) => api.patch(`/delegations/${id}/`, data),
   deleteDelegation: (id: string) => api.delete(`/delegations/${id}/`),
+  dismissDelegation: (id: string) => api.post(`/delegations/${id}/dismiss/`),
   delegationCandidates: (excludeUserId?: string) =>
     api.get("/delegations/candidates/", {
       params: excludeUserId ? { exclude: excludeUserId } : undefined,

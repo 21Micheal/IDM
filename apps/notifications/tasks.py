@@ -174,7 +174,7 @@ def _notify_delegates_of_task(task, *, only_delegation=None) -> None:
     for delegation in delegations:
         if only_delegation is None and not delegation_covers_task(delegation, task):
             continue
-        _create_once(delegation.delegate, message, link, "task_assigned")
+        _create_once(delegation.delegate, message, link, "delegation")
         _send_email(
             delegation.delegate,
             subject=f"DMS — Delegated approval: {doc.reference_number}",
@@ -283,15 +283,21 @@ def notify_delegation_activated(delegation_id: str) -> None:
     delegator_name = delegation.delegator.get_full_name() or delegation.delegator.email
     link = "/workflow"
     summary = (
-        f"{task_count} workflow task{'s' if task_count != 1 else ''} "
-        f"delegated from {delegator_name} are now ready for your action."
+        f"Workflow tasks delegated from {delegator_name} are now ready for your action."
     )
     _create_once(delegation.delegate, summary, link, "delegation")
 
     for task in tasks:
         if not delegation_covers_task(delegation, task):
             continue
-        _notify_delegates_of_task(task, only_delegation=delegation)
+        doc = task.workflow_instance.document
+        task_link = f"/documents/{doc.id}"
+        _create_once(
+            delegation.delegate,
+            f"Delegated action required: '{task.step.name}' for {doc.title} ({doc.reference_number})",
+            task_link,
+            "delegation"
+        )
 
 
 @shared_task(queue="notifications")
@@ -766,6 +772,7 @@ ACTIONABLE_TASK_NOTIFICATION_TYPES = [
     "task_overdue",
     "hold_ending",
     "hold_expired",
+    "delegation",
 ]
 
 
@@ -776,9 +783,10 @@ def clear_resolved_task_notifications_now(task_id: str) -> int:
     inside the workflow action transaction. Returns the number deleted."""
     from apps.workflows.models import WorkflowTask
     from apps.notifications.models import Notification
+    from apps.accounts.delegation import active_delegations_qs, delegated_tasks_q
 
     try:
-        task = WorkflowTask.objects.select_related("workflow_instance").get(id=task_id)
+        task = WorkflowTask.objects.select_related("workflow_instance", "assigned_to").get(id=task_id)
     except WorkflowTask.DoesNotExist:
         return 0
 
@@ -787,19 +795,37 @@ def clear_resolved_task_notifications_now(task_id: str) -> int:
         return 0
     document_id = task.workflow_instance.document_id
 
+    # Clear for the original assignee
     still_active = WorkflowTask.objects.filter(
         assigned_to_id=assignee_id,
         workflow_instance__document_id=document_id,
         status__in=["in_progress", "held"],
     ).exists()
-    if still_active:
-        return 0
+    if not still_active:
+        deleted, _ = Notification.objects.filter(
+            recipient_id=assignee_id,
+            type__in=ACTIONABLE_TASK_NOTIFICATION_TYPES,
+            link=f"/documents/{document_id}",
+        ).delete()
+    else:
+        deleted = 0
 
-    deleted, _ = Notification.objects.filter(
-        recipient_id=assignee_id,
-        type__in=ACTIONABLE_TASK_NOTIFICATION_TYPES,
-        link=f"/documents/{document_id}",
-    ).delete()
+    # Clear for delegates who have no other delegated tasks on this document
+    for delegation in active_delegations_qs(delegator=task.assigned_to):
+        delegate_id = delegation.delegate_id
+        delegated_still_active = WorkflowTask.objects.filter(
+            pk__in=delegated_tasks_q(delegation.delegate),
+            workflow_instance__document_id=document_id,
+            status__in=["in_progress", "held"],
+        ).exists()
+        if not delegated_still_active:
+            delegate_deleted, _ = Notification.objects.filter(
+                recipient_id=delegate_id,
+                type__in=ACTIONABLE_TASK_NOTIFICATION_TYPES,
+                link=f"/documents/{document_id}",
+            ).delete()
+            deleted += delegate_deleted
+
     return deleted
 
 

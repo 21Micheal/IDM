@@ -15,6 +15,7 @@ export type DelegationRecord = {
   is_active: boolean;
   is_current: boolean;
   document_type_name?: string | null;
+  dismissed_at?: string | null;
 };
 
 type DelegationForm = {
@@ -213,14 +214,18 @@ export function DelegationScheduleForm({
 type DelegationListProps = {
   delegations: DelegationRecord[];
   onDisable: (delegationId: string) => void;
+  onDismiss?: (delegationId: string) => void;
   disablePending?: boolean;
+  dismissPending?: boolean;
   emptyMessage?: string;
 };
 
 export function DelegationList({
   delegations,
   onDisable,
+  onDismiss,
   disablePending = false,
+  dismissPending = false,
   emptyMessage = "No delegations configured.",
 }: DelegationListProps) {
   if (!delegations.length) {
@@ -272,17 +277,30 @@ export function DelegationList({
                 </p>
               )}
             </div>
-            {delegation.is_active && (
-              <button
-                type="button"
-                onClick={() => onDisable(delegation.id)}
-                disabled={disablePending}
-                className="inline-flex items-center gap-1.5 h-9 px-3 rounded-lg border border-border bg-background text-xs font-medium hover:bg-muted disabled:opacity-70 self-start sm:self-auto"
-              >
-                <CircleSlash className="w-3.5 h-3.5" />
-                Disable
-              </button>
-            )}
+            <div className="flex gap-2 self-start sm:self-auto">
+              {delegation.is_active && (
+                <button
+                  type="button"
+                  onClick={() => onDisable(delegation.id)}
+                  disabled={disablePending}
+                  className="inline-flex items-center gap-1.5 h-9 px-3 rounded-lg border border-border bg-background text-xs font-medium hover:bg-muted disabled:opacity-70"
+                >
+                  <CircleSlash className="w-3.5 h-3.5" />
+                  Disable
+                </button>
+              )}
+              {!delegation.is_active && onDismiss && (
+                <button
+                  type="button"
+                  onClick={() => onDismiss(delegation.id)}
+                  disabled={dismissPending}
+                  className="inline-flex items-center gap-1.5 h-9 px-3 rounded-lg border border-border bg-background text-xs font-medium hover:bg-muted disabled:opacity-70"
+                >
+                  {dismissPending && <Loader2 className="w-3.5 h-3.5 animate-spin" />}
+                  Dismiss
+                </button>
+              )}
+            </div>
           </div>
         );
       })}

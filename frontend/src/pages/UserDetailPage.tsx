@@ -163,6 +163,17 @@ export default function UserDetailPage() {
     onError: (err) => toast.error(extractApiError(err, "Failed to disable delegation")),
   });
 
+  const dismissDelegationMutation = useMutation({
+    mutationFn: (delegationId: string) =>
+      profileAPI.dismissDelegation(delegationId),
+    onSuccess: () => {
+      toast.success("Delegation dismissed");
+      qc.invalidateQueries({ queryKey: ["users", "delegations", id] });
+      qc.invalidateQueries({ queryKey: ["delegations"] });
+    },
+    onError: (err) => toast.error(extractApiError(err, "Failed to dismiss delegation")),
+  });
+
   const reassignCandidates = users.filter((u) => u.id !== id && u.is_active);
 
   if (isLoading || !user) {
@@ -479,7 +490,9 @@ export default function UserDetailPage() {
           <DelegationList
             delegations={delegations}
             onDisable={(delegationId) => disableDelegationMutation.mutate(delegationId)}
+            onDismiss={(delegationId) => dismissDelegationMutation.mutate(delegationId)}
             disablePending={disableDelegationMutation.isPending}
+            dismissPending={dismissDelegationMutation.isPending}
             emptyMessage="No delegations configured for this user."
           />
         </div>

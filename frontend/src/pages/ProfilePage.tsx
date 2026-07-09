@@ -141,6 +141,15 @@ export default function ProfilePage() {
     onError: (err) => toast.error(extractApiError(err, "Failed to disable delegation")),
   });
 
+  const dismissDelegationMutation = useMutation({
+    mutationFn: (delegationId: string) => profileAPI.dismissDelegation(delegationId),
+    onSuccess: () => {
+      toast.success("Delegation dismissed");
+      qc.invalidateQueries({ queryKey: ["delegations"] });
+    },
+    onError: (err) => toast.error(extractApiError(err, "Failed to dismiss delegation")),
+  });
+
   const tabs = [
     { id: "settings" as const, label: "Settings", icon: Settings, description: "Account, password & security" },
     { id: "delegation" as const, label: "Delegation", icon: UserCheck, description: "Out of office tasks" },
@@ -503,7 +512,9 @@ export default function ProfilePage() {
                   <DelegationList
                     delegations={delegations}
                     onDisable={(delegationId) => disableDelegationMutation.mutate(delegationId)}
+                    onDismiss={(delegationId) => dismissDelegationMutation.mutate(delegationId)}
                     disablePending={disableDelegationMutation.isPending}
+                    dismissPending={dismissDelegationMutation.isPending}
                     emptyMessage="No delegations set. Create one when you'll be away."
                   />
                 </div>
