@@ -652,6 +652,34 @@ class DocumentViewSet(AuditMixin, viewsets.ModelViewSet):
     def _can_manage_trash(self, doc, user) -> bool:
         return bool(user.has_admin_access or doc.uploaded_by_id == user.id)
 
+    def _prepare_builder_workflow_phase(self, doc) -> str | None:
+        meta = dict(doc.metadata or {})
+        form = meta.get("form")
+        if not isinstance(form, dict):
+            return None
+
+        phase = "request"
+        try:
+            from apps.sunsystems.models import JournalPosting, JournalPostingStatus
+
+            stage_one_posted = JournalPosting.objects.filter(
+                document=doc,
+                stage=1,
+                status=JournalPostingStatus.POSTED,
+            ).exists()
+            if stage_one_posted:
+                phase = "retirement"
+        except Exception:
+            logger.exception("Could not infer workflow phase for builder document %s", doc.id)
+
+        form = dict(form)
+        if form.get("workflow_phase") != phase:
+            form["workflow_phase"] = phase
+            meta["form"] = form
+            doc.metadata = meta
+            doc.save(update_fields=["metadata", "updated_at"])
+        return phase
+
     def destroy(self, request, *args, **kwargs):
         """Move a document to Trash (soft delete) rather than removing it."""
         doc = self.get_object()
@@ -711,9 +739,14 @@ class DocumentViewSet(AuditMixin, viewsets.ModelViewSet):
     @action(detail=True, methods=["post"])
     def submit(self, request, pk=None):
         doc = self.get_object()
+        builder_phase = self._prepare_builder_workflow_phase(doc)
+        can_submit_retirement = (
+            builder_phase == "retirement"
+            and doc.status == DocumentStatus.APPROVED
+        )
         # Rejection is terminal — it ends the workflow. Only draft and returned
         # (sent back to the uploader for rework) documents can be (re)submitted.
-        if doc.status not in (
+        if not can_submit_retirement and doc.status not in (
             DocumentStatus.DRAFT,
             DocumentStatus.RETURNED,
             "Returned for Review",

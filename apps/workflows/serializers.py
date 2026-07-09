@@ -456,10 +456,11 @@ class WorkflowRuleSerializer(serializers.ModelSerializer):
             "id", "document_type", "document_type_name",
             "template", "template_name",
             "template_document_type",
-            "amount_min", "amount_max", "currency", "label", "is_active",
+            "phase", "amount_min", "amount_max", "currency", "label", "is_active",
         ]
         read_only_fields = ["id", "document_type", "template_name", "document_type_name", "template_document_type"]
         extra_kwargs = {
+            "phase":     {"required": False, "allow_blank": True},
             "label":     {"required": False, "allow_blank": True},
             "is_active": {"required": False},
         }
@@ -469,6 +470,7 @@ class WorkflowRuleSerializer(serializers.ModelSerializer):
         amount_min = attrs.get("amount_min", getattr(self.instance, "amount_min", 0))
         amount_max = attrs.get("amount_max", getattr(self.instance, "amount_max", None))
         currency   = (attrs.get("currency",  getattr(self.instance, "currency",   "USD")) or "USD").upper()
+        phase      = (attrs.get("phase", getattr(self.instance, "phase", WorkflowRule.DEFAULT_PHASE)) or WorkflowRule.DEFAULT_PHASE).strip().lower()
 
         if template is None:
             raise serializers.ValidationError({"template": "A template is required."})
@@ -487,6 +489,7 @@ class WorkflowRuleSerializer(serializers.ModelSerializer):
             .filter(
                 document_type=document_type,
                 template__document_type=document_type,
+                phase=phase,
                 currency=currency,
                 is_active=True,
             )
@@ -504,6 +507,7 @@ class WorkflowRuleSerializer(serializers.ModelSerializer):
 
         attrs["document_type"] = document_type
         attrs["currency"] = currency
+        attrs["phase"] = phase
         return attrs
 
 

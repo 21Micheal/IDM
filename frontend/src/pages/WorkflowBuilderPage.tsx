@@ -210,11 +210,24 @@ interface WorkflowRule {
   template: string;
   template_name: string;
   template_document_type?: string | null;
+  phase?: string;
   amount_min: string;
   amount_max: string | null;
   currency: string;
   label: string;
   is_active: boolean;
+}
+
+type WorkflowPhase = "request" | "retirement";
+
+const WORKFLOW_PHASES: { value: WorkflowPhase; label: string }[] = [
+  { value: "request", label: "Request" },
+  { value: "retirement", label: "Retirement" },
+];
+
+function workflowPhaseLabel(value?: string | null) {
+  const normalized = (value || "request").trim().toLowerCase();
+  return WORKFLOW_PHASES.find((phase) => phase.value === normalized)?.label ?? (normalized || "Request");
 }
 
 interface AppUser { id: string; full_name: string; email: string; job_description?: string; }
@@ -484,7 +497,13 @@ function Label({ children, required }: { children: React.ReactNode; required?: b
   );
 }
 
-type RuleFormValues = { amount_min: string; amount_max: string; currency: string; label: string };
+type RuleFormValues = {
+  phase: WorkflowPhase;
+  amount_min: string;
+  amount_max: string;
+  currency: string;
+  label: string;
+};
 
 function RuleFormFields({ values, onChange }: {
   values: RuleFormValues;
@@ -492,6 +511,21 @@ function RuleFormFields({ values, onChange }: {
 }) {
   return (
     <div className="grid grid-cols-2 gap-3">
+      <div className="col-span-2">
+        <Label>Workflow phase</Label>
+        <select
+          value={values.phase}
+          onChange={e => onChange({ phase: e.target.value as WorkflowPhase })}
+          className={inp}
+        >
+          {WORKFLOW_PHASES.map(phase => (
+            <option key={phase.value} value={phase.value}>{phase.label}</option>
+          ))}
+        </select>
+        <p className="text-[11px] text-muted-foreground mt-1">
+          Builder forms use Request for the first approval cycle and Retirement after the first SunSystems posting is complete.
+        </p>
+      </div>
       <div>
         <Label required>Minimum amount</Label>
         <input
@@ -1722,7 +1756,14 @@ function TemplateEmailsPanel({
 function RoutingRulesPanel({ template }: { template: WorkflowTemplate }) {
   const qc = useQueryClient();
   const [showAdd, setShowAdd] = useState(false);
-  const [form, setForm] = useState({ amount_min: "0", amount_max: "", currency: "USD", label: "" });
+  const blankRuleForm: RuleFormValues = {
+    phase: "request",
+    amount_min: "0",
+    amount_max: "",
+    currency: "USD",
+    label: "",
+  };
+  const [form, setForm] = useState<RuleFormValues>(blankRuleForm);
   const templateId = template.id;
   const hasDocumentType = Boolean(template.document_type);
 
@@ -1742,7 +1783,7 @@ function RoutingRulesPanel({ template }: { template: WorkflowTemplate }) {
       toast.success("Routing rule created");
       qc.invalidateQueries({ queryKey: ["workflow-rules", templateId] });
       setShowAdd(false);
-      setForm({ amount_min: "0", amount_max: "", currency: "USD", label: "" });
+      setForm(blankRuleForm);
     },
     onError: (err: any) => {
       toast.error(formatApiError(err?.response?.data) || "Failed to create rule");
@@ -1759,12 +1800,13 @@ function RoutingRulesPanel({ template }: { template: WorkflowTemplate }) {
   });
 
   const [editingId, setEditingId] = useState<string | null>(null);
-  const [editForm, setEditForm] = useState<RuleFormValues>({ amount_min: "0", amount_max: "", currency: "USD", label: "" });
+  const [editForm, setEditForm] = useState<RuleFormValues>(blankRuleForm);
 
   const startEdit = (rule: WorkflowRule) => {
     setShowAdd(false);
     setEditingId(rule.id);
     setEditForm({
+      phase: ((rule.phase || "request").trim().toLowerCase() || "request") as WorkflowPhase,
       amount_min: String(rule.amount_min ?? "0"),
       amount_max: rule.amount_max == null ? "" : String(rule.amount_max),
       currency: rule.currency, label: rule.label ?? "",
@@ -1775,6 +1817,7 @@ function RoutingRulesPanel({ template }: { template: WorkflowTemplate }) {
     mutationFn: () => workflowAPI.updateRule(editingId as string, {
       amount_min: editForm.amount_min || "0",
       amount_max: editForm.amount_max || null,
+      phase: editForm.phase,
       currency: editForm.currency, label: editForm.label,
     }),
     onSuccess: () => {
@@ -1788,7 +1831,11 @@ function RoutingRulesPanel({ template }: { template: WorkflowTemplate }) {
   });
 
   const sortedRules = useMemo(
-    () => [...(rules ?? [])].sort((a, b) => Number(a.amount_min) - Number(b.amount_min)),
+    () => [...(rules ?? [])].sort((a, b) => {
+      const phaseCompare = workflowPhaseLabel(a.phase).localeCompare(workflowPhaseLabel(b.phase));
+      if (phaseCompare) return phaseCompare;
+      return Number(a.amount_min) - Number(b.amount_min);
+    }),
     [rules]
   );
 
@@ -1804,7 +1851,7 @@ function RoutingRulesPanel({ template }: { template: WorkflowTemplate }) {
         <div className="flex-1">
           <h3 className="font-semibold text-foreground text-base flex items-center gap-2">
             <Settings2 className="w-4 h-4 text-muted-foreground" />
-            Amount-based routing rules
+            Phase and amount routing rules
           </h3>
           <p className="text-xs text-muted-foreground mt-1">
             Rules for this template are automatically scoped to{" "}
@@ -1884,6 +1931,9 @@ function RoutingRulesPanel({ template }: { template: WorkflowTemplate }) {
                   <div className="flex-1 min-w-0">
                     <div className="flex items-center gap-2 flex-wrap">
                       <p className="text-sm font-semibold text-foreground">{formatRuleRange(rule)}</p>
+                      <span className="text-[11px] px-2 py-0.5 rounded-full bg-primary/10 text-primary">
+                        {workflowPhaseLabel(rule.phase)}
+                      </span>
                       {rule.label && <span className="text-[11px] px-2 py-0.5 rounded-full bg-muted text-muted-foreground">{rule.label}</span>}
                     </div>
                     <p className="text-[11px] text-muted-foreground mt-1">

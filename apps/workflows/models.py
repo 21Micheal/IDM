@@ -236,6 +236,8 @@ class WorkflowStep(models.Model):
 
 
 class WorkflowRule(models.Model):
+    DEFAULT_PHASE = "request"
+
     id               = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
     document_type    = models.ForeignKey(
         "documents.DocumentType", on_delete=models.CASCADE, related_name="workflow_rules",
@@ -243,6 +245,7 @@ class WorkflowRule(models.Model):
     template         = models.ForeignKey(
         WorkflowTemplate, on_delete=models.PROTECT, related_name="rules"
     )
+    phase            = models.CharField(max_length=40, default=DEFAULT_PHASE, blank=True)
     amount_min       = models.DecimalField(max_digits=18, decimal_places=2, default=0)
     amount_max       = models.DecimalField(max_digits=18, decimal_places=2, null=True, blank=True)
     currency         = models.CharField(max_length=3, default="USD")
@@ -252,11 +255,11 @@ class WorkflowRule(models.Model):
     updated_at       = models.DateTimeField(auto_now=True)
 
     class Meta:
-        ordering = ["document_type", "amount_min", "amount_max"]
+        ordering = ["document_type", "phase", "amount_min", "amount_max"]
 
     def __str__(self):
         upper = self.amount_max if self.amount_max is not None else "∞"
-        return f"{self.document_type.name} [{self.amount_min} - {upper}] -> {self.template.name}"
+        return f"{self.document_type.name} [{self.phase}: {self.amount_min} - {upper}] -> {self.template.name}"
 
     def clean(self):
         super().clean()
@@ -277,6 +280,7 @@ class WorkflowRule(models.Model):
     def save(self, *args, **kwargs):
         if self.template_id and self.template.document_type_id:
             self.document_type_id = self.template.document_type_id
+        self.phase = (self.phase or self.DEFAULT_PHASE).strip().lower()
         self.full_clean()
         super().save(*args, **kwargs)
 

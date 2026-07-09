@@ -60,26 +60,43 @@ class WorkflowService:
     # ── Rule / template resolution ─────────────────────────────────────────
 
     @staticmethod
+    def _document_workflow_phase(document):
+        metadata = document.metadata if isinstance(document.metadata, dict) else {}
+        form = metadata.get("form") if isinstance(metadata.get("form"), dict) else None
+        if not form:
+            return WorkflowRule.DEFAULT_PHASE
+        phase = (
+            form.get("workflow_phase")
+            or metadata.get("workflow_phase")
+            or WorkflowRule.DEFAULT_PHASE
+        )
+        return (str(phase).strip().lower() or WorkflowRule.DEFAULT_PHASE)
+
+    @staticmethod
     def _resolve_routing(document):
-        """Pick the (rule, template) for a document by amount threshold."""
+        """Pick the (rule, template) for a document by builder phase and amount threshold."""
         doc_type = document.document_type
         amount   = document.amount or 0
         currency = (document.currency or "").upper()
+        phase = WorkflowService._document_workflow_phase(document)
 
-        type_rules = WorkflowRule.objects.filter(
+        base_rules = WorkflowRule.objects.filter(
             document_type=doc_type,
             template__document_type=doc_type,
             is_active=True,
         )
+        phase_rules = base_rules.filter(phase=phase)
+        if phase != WorkflowRule.DEFAULT_PHASE and not phase_rules.exists():
+            phase_rules = base_rules.filter(phase=WorkflowRule.DEFAULT_PHASE)
 
         amount_q = Q(amount_min__lte=amount) & (
             Q(amount_max__isnull=True) | Q(amount_max__gte=amount)
         )
 
         rule_currencies = {
-            (c or "").upper() for c in type_rules.values_list("currency", flat=True)
+            (c or "").upper() for c in phase_rules.values_list("currency", flat=True)
         }
-        candidates = type_rules.filter(amount_q)
+        candidates = phase_rules.filter(amount_q)
         if len(rule_currencies) > 1 and currency:
             candidates = candidates.filter(currency=currency)
 
@@ -125,6 +142,29 @@ class WorkflowService:
             return existing
 
         rule, template = WorkflowService._resolve_routing(document)
+        phase = WorkflowService._document_workflow_phase(document)
+        reusable = None
+        if phase != WorkflowRule.DEFAULT_PHASE:
+            reusable = (
+                WorkflowInstance.objects
+                .filter(document=document)
+                .exclude(status="in_progress")
+                .order_by("-started_at")
+                .first()
+            )
+        if reusable:
+            reusable.template = template
+            reusable.rule = rule
+            reusable.started_by = actor
+            reusable.status = "in_progress"
+            reusable.current_step_order = 1
+            reusable.completed_at = None
+            reusable.save(update_fields=[
+                "template", "rule", "started_by", "status",
+                "current_step_order", "completed_at", "updated_at",
+            ])
+            WorkflowService._activate_step(reusable, order=1)
+            return reusable
 
         instance = WorkflowInstance.objects.create(
             document=document,

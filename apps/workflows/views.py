@@ -196,7 +196,7 @@ class WorkflowTemplateViewSet(viewsets.ModelViewSet):
 class WorkflowRuleViewSet(viewsets.ModelViewSet):
     serializer_class = WorkflowRuleSerializer
     filter_backends  = [OrderingFilter]
-    ordering         = ["document_type", "amount_min", "amount_max"]
+    ordering         = ["document_type", "phase", "amount_min", "amount_max"]
 
     def get_queryset(self):
         qs = (
@@ -208,6 +208,8 @@ class WorkflowRuleViewSet(viewsets.ModelViewSet):
             qs = qs.filter(document_type__id=dt)
         if tmpl := self.request.query_params.get("template"):
             qs = qs.filter(template__id=tmpl)
+        if phase := self.request.query_params.get("phase"):
+            qs = qs.filter(phase=(phase or "").strip().lower())
         return qs
 
     def get_permissions(self):
