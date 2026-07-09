@@ -20,7 +20,9 @@ def _request_bool(value) -> bool:
     return str(value).strip().lower() in {"1", "true", "yes", "on"}
 
 
-from apps.templates_engine.conditions import is_visible as _eval_visible, is_editable  # noqa: E402
+from apps.templates_engine.conditions import (  # noqa: E402
+    is_visible as _eval_visible, is_editable, compute_calculated_values,
+)
 
 
 def _section_visible_to_user(section: dict, group_ids: set, group_names: set, is_admin: bool) -> bool:
@@ -220,6 +222,13 @@ class DocumentTemplateViewSet(viewsets.ModelViewSet):
         # stored values are trustworthy (a stale/spoofed client label can't persist).
         values = reconcile_references(values, template.sections, default_reference_resolver)
 
+        # Recompute every `calc`-bearing field (e.g. "total_days * daily_rate")
+        # authoritatively from the raw values — never trust a client-submitted
+        # calculated figure. Must run before `generation_values` is derived so
+        # both the required-field check and the stored usage snapshot see the
+        # server-computed numbers.
+        values = compute_calculated_values(template.sections, values)
+
         # `values` already carries filename placeholders for any file fields
         # (simple fields or file columns inside a table); the actual files arrive
         # as multipart uploads and are attached after the document is created.
@@ -268,7 +277,7 @@ class DocumentTemplateViewSet(viewsets.ModelViewSet):
                 and is_editable(section, generation_values)
                 for f in section.get("fields", [])
                 if f.get("required") and f.get("type") not in ("divider", "heading")
-                and not f.get("formula") and _eval_visible(f, generation_values)
+                and not f.get("formula") and not f.get("calc") and _eval_visible(f, generation_values)
                 and is_editable(f, generation_values)
             ]
             missing = [f["label"] for f in all_fields if not generation_values.get(f["key"])]

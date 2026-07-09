@@ -49,7 +49,7 @@ import {
   Image as ImageIcon, Table2, Heading, Minus, ChevronUp,
   ChevronDown, AlertCircle, Tag, Layers, ArrowRight,
   ChevronRight, X, Loader2, Sliders, Link2, User as UserIcon,
-  Wrench, FileCode,
+  Wrench, FileCode, Calculator, Star, Percent, Link as UrlIcon, ListOrdered,
 } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { documentTypesAPI, groupsAPI, workflowAPI } from "@/services/api";
@@ -65,7 +65,27 @@ export type FieldType =
   | "text" | "textarea" | "number" | "currency" | "date" | "datetime" | "time"
   | "select" | "radio" | "boolean" | "checkbox" | "email" | "phone"
   | "file" | "image" | "table" | "divider" | "heading" | "signature"
-  | "reference" | "user" | "multi_select";
+  | "reference" | "user" | "multi_select"
+  | "url" | "percentage" | "rating" | "auto_number"
+  | "calc_number" | "calc_currency" | "calc_text" | "calc_date";
+
+/* Field types that are auto-derived rather than typed by the person filling
+ * the form: calculated values (formula over sibling field keys) and the
+ * auto-number shortcut (sugar for a read-only reference-number formula
+ * field). Kept in one place so palette/newField/validation agree on which
+ * types never need to be "required". */
+const CALCULATED_TYPES = new Set<FieldType>(["calc_number", "calc_currency", "calc_text", "calc_date"]);
+
+/* A field's calculation config. `expression` is a small arithmetic formula
+ * referencing sibling fields by KEY (matches the server-side evaluator in
+ * apps/templates_engine/conditions.py) — e.g. "total_days * daily_rate".
+ * Supports + - * / (), unary +/-, and ROUND/ABS/MIN/MAX(...). Non-numeric or
+ * missing sibling values resolve to 0; a malformed expression evaluates to 0
+ * rather than throwing, both in the browser and on the server. */
+export interface CalcConfig {
+  expression: string;
+  decimals?: number;
+}
 
 export type TableColumnType =
   | "text" | "textarea" | "number" | "currency" | "date" | "datetime" | "time"
@@ -224,6 +244,12 @@ export interface TemplateField {
   dateFormat?: string;
   referenceSource?: string;
   formula?: string;            // auto-fill formula, e.g. "current_user", "now"
+  /* Calculated value — when set, this field is auto-derived from sibling
+   * field keys (see CalcConfig) instead of typed by the person filling the
+   * form. Builder UI marks such fields read-only by convention; the server
+   * (apps/templates_engine/conditions.py compute_calculated_values) is the
+   * authoritative source of the final value regardless of client state. */
+  calc?: CalcConfig | null;
   readonly?: boolean;
   /* Editability — `readonly` = always read-only; `editableWhen` = editable only
    * when the rule group matches (read-only otherwise). Absent = editable. */
@@ -321,7 +347,7 @@ export interface Template {
 
 export type EditableTemplate = Omit<Template, "type"> & { type?: Template["type"] };
 
-type FieldGroup = "input" | "choice" | "reference" | "advanced" | "layout";
+type FieldGroup = "input" | "choice" | "reference" | "advanced" | "calculated" | "layout";
 
 const FIELD_META: Record<FieldType, { label: string; group: FieldGroup; defaults: Partial<TemplateField>; hint?: string }> = {
   text:        { label: "Short text",    group: "input",     defaults: { colSpan: 6, placeholder: "Enter text…" } },
@@ -344,6 +370,14 @@ const FIELD_META: Record<FieldType, { label: string; group: FieldGroup; defaults
   file:        { label: "File upload",   group: "advanced",  defaults: { colSpan: 6 } },
   image:       { label: "Image",         group: "advanced",  defaults: { colSpan: 6 } },
   table:       { label: "Data table",    group: "advanced",  defaults: { colSpan: 12, minRows: 2 } },
+  url:         { label: "URL / Link",    group: "input",     defaults: { colSpan: 6, placeholder: "https://…" } },
+  percentage:  { label: "Percentage",    group: "input",     defaults: { colSpan: 4, placeholder: "0", min: 0, max: 100 } },
+  rating:      { label: "Rating",        group: "choice",    defaults: { colSpan: 4, max: 5 }, hint: "Star rating, 1–5 by default" },
+  auto_number: { label: "Auto Number",   group: "calculated", defaults: { colSpan: 4 }, hint: "Auto-populated with the document's reference number" },
+  calc_number:   { label: "Calculated Number",   group: "calculated", defaults: { colSpan: 4 }, hint: "Computed from a formula over other fields" },
+  calc_currency: { label: "Calculated Currency", group: "calculated", defaults: { colSpan: 4, currencySymbol: "KSh" }, hint: "Computed from a formula over other fields" },
+  calc_text:     { label: "Calculated Text",     group: "calculated", defaults: { colSpan: 6 }, hint: "Computed from a formula over other fields" },
+  calc_date:     { label: "Calculated Date",     group: "calculated", defaults: { colSpan: 4, dateFormat: "YYYY-MM-DD" }, hint: "Computed from a formula over other fields" },
   heading:     { label: "Heading",       group: "layout",    defaults: { colSpan: 12, defaultValue: "Section heading" } },
   divider:     { label: "Divider",       group: "layout",    defaults: { colSpan: 12 } },
 };
@@ -355,6 +389,8 @@ const ICONS: Record<FieldType, React.ElementType> = {
   signature: Pencil, email: Mail, phone: Phone, file: Paperclip,
   image: ImageIcon, table: Table2, heading: Heading, divider: Minus,
   reference: Link2, user: UserIcon,
+  url: UrlIcon, percentage: Percent, rating: Star, auto_number: ListOrdered,
+  calc_number: Calculator, calc_currency: Calculator, calc_text: Calculator, calc_date: Calculator,
 };
 
 const uid = () => Math.random().toString(36).slice(2, 10);
@@ -379,7 +415,7 @@ const REFERENCE_SOURCE_OPTIONS = [
 
 // Field types that can carry an auto-fill formula (scalar inputs).
 const FORMULA_FIELD_TYPES = new Set<string>([
-  "text", "textarea", "email", "phone", "number", "date", "datetime", "time",
+  "text", "textarea", "email", "phone", "number", "date", "datetime", "time", "auto_number",
 ]);
 
 /* ============================================================
@@ -559,6 +595,18 @@ function newField(type: FieldType): TemplateField {
       newColumn("text",     "Description"),
       newColumn("currency", "Amount"),
     ];
+  }
+  if (CALCULATED_TYPES.has(type)) {
+    // Always read-only — the value comes from the formula, not typed input.
+    base.readonly = true;
+    base.calc = { expression: "", decimals: type === "calc_text" || type === "calc_date" ? undefined : 2 };
+  }
+  if (type === "auto_number") {
+    // Sugar over the existing auto-fill formula mechanism: a read-only text
+    // field that freezes to the document's assigned reference number at
+    // submit time (see FORMULA_OPTIONS / apply_formulas).
+    base.readonly = true;
+    base.formula = "reference_number";
   }
   return base;
 }
@@ -910,17 +958,18 @@ function PaletteItem({ type }: { type: FieldType }) {
 }
 
 const PALETTE_GROUPS: Array<{ key: FieldGroup; label: string }> = [
-  { key: "input",     label: "Input" },
-  { key: "choice",    label: "Choice / Dropdown" },
-  { key: "reference", label: "Reference" },
-  { key: "advanced",  label: "Advanced" },
-  { key: "layout",    label: "Layout" },
+  { key: "input",      label: "Input" },
+  { key: "choice",     label: "Choice / Dropdown" },
+  { key: "reference",  label: "Reference" },
+  { key: "calculated", label: "Calculated" },
+  { key: "advanced",   label: "Advanced" },
+  { key: "layout",     label: "Layout" },
 ];
 
 function Palette() {
   const [query, setQuery] = useState("");
   const [openGroups, setOpenGroups] = useState<Record<FieldGroup, boolean>>({
-    input: true, choice: true, reference: false, advanced: false, layout: false,
+    input: true, choice: true, reference: false, calculated: false, advanced: false, layout: false,
   });
   const all = Object.keys(FIELD_META) as FieldType[];
   const filtered = all.filter((t) =>
@@ -1129,6 +1178,28 @@ function FieldPreview({ field, onConfigureColumn, onAddColumn, onRemoveColumn, o
       return <div className="flex h-12 items-center justify-center rounded border border-dashed border-zinc-200 bg-zinc-50 text-xs text-zinc-400"><Pencil className="h-3 w-3 mr-1.5" />Signature</div>;
     case "currency":
       return <div className={cn(inputPreview, "gap-1")}><span className="text-zinc-500">{field.currencySymbol ?? "KSh"}</span>{field.placeholder || "0.00"}</div>;
+    case "url":
+      return <div className={cn(inputPreview, "gap-1.5")}><UrlIcon className="h-3 w-3 text-zinc-400" />{field.placeholder || "https://…"}</div>;
+    case "percentage":
+      return <div className={cn(inputPreview, "justify-between")}><span>{field.placeholder || "0"}</span><Percent className="h-3 w-3 text-zinc-400" /></div>;
+    case "rating":
+      return (
+        <div className="flex items-center gap-0.5 text-zinc-200">
+          {Array.from({ length: field.max ?? 5 }).map((_, i) => <Star key={i} className="h-4 w-4" />)}
+        </div>
+      );
+    case "auto_number":
+      return <div className={cn(inputPreview, "gap-1.5 italic")}><ListOrdered className="h-3 w-3 text-zinc-400" />Assigned on submit</div>;
+    case "calc_number":
+    case "calc_currency":
+    case "calc_date":
+    case "calc_text":
+      return (
+        <div className={cn(inputPreview, "gap-1.5 bg-[#F0FBF6] border-emerald-200 text-emerald-700")}>
+          <Calculator className="h-3 w-3 flex-shrink-0" />
+          <span className="truncate">{field.calc?.expression ? `= ${field.calc.expression}` : "No formula set"}</span>
+        </div>
+      );
     default:
       return <div className={inputPreview}>{field.placeholder || ""}</div>;
   }
@@ -1192,6 +1263,9 @@ function FieldCard({
             <span className="ml-1 rounded bg-[#EEF6FB] px-1.5 py-0.5 text-[9px] uppercase tracking-wider text-[#287EAD] flex-shrink-0 border border-[#287EAD]/20">
               {FIELD_META[field.type]?.label ?? field.type}
             </span>
+            {field.calc?.expression && (
+              <span className="rounded bg-emerald-50 px-1.5 py-0.5 text-[9px] font-semibold text-emerald-700 border border-emerald-200 flex-shrink-0" title={`= ${field.calc.expression}`}>ƒx</span>
+            )}
             {field.hidden ? (
               <span className="rounded bg-slate-100 px-1.5 py-0.5 text-[9px] font-semibold text-slate-500 border border-slate-300 flex-shrink-0" title="Always hidden from people filling the form">hidden</span>
             ) : ruleGroupHasConditions(field.visibleWhen) && (
@@ -2060,6 +2134,80 @@ function EditabilityEditor({ value, sources, onChange, subject, processSteps = [
   );
 }
 
+/* Formula editor for the four "Calculated …" field types. Lets the admin
+ * write an arithmetic expression over sibling field KEYS (click a chip to
+ * insert it), matching the server evaluator 1:1. Shows a quick sanity-check
+ * value (every referenced field = 100) so a typo is obvious immediately,
+ * without needing to switch to the Preview tab. */
+function CalcFormulaEditor({ field, siblings, onUpdate }: {
+  field: TemplateField;
+  siblings: TemplateField[];
+  onUpdate: (patch: Partial<TemplateField>) => void;
+}) {
+  const calc = field.calc ?? { expression: "" };
+  const exprRef = useRef<HTMLTextAreaElement>(null);
+  const keyedSiblings = siblings.filter((s) => s.key);
+
+  const insertToken = (key: string) => {
+    const el = exprRef.current;
+    if (!el) { onUpdate({ calc: { ...calc, expression: `${calc.expression}${key}` } }); return; }
+    const start = el.selectionStart ?? el.value.length;
+    const end = el.selectionEnd ?? el.value.length;
+    const next = `${calc.expression.slice(0, start)}${key}${calc.expression.slice(end)}`;
+    onUpdate({ calc: { ...calc, expression: next } });
+    requestAnimationFrame(() => { el.focus(); el.selectionStart = el.selectionEnd = start + key.length; });
+  };
+
+  // Quick sanity preview: every referenced sibling = 100.
+  const sampleScope: Record<string, number> = {};
+  keyedSiblings.forEach((s) => { sampleScope[s.key] = 100; });
+  const previewValue = evaluateCalcExpression(calc.expression, sampleScope);
+  const showDecimals = field.type !== "calc_text" && field.type !== "calc_date";
+
+  return (
+    <InspectorRow
+      label="Formula"
+      hint="Arithmetic over sibling field keys — + - * / ( ), and ROUND()/ABS()/MIN()/MAX(). This exact formula re-runs authoritatively on the server at submit time, so the stored value can't be spoofed from the browser."
+    >
+      <div className="space-y-2 border border-[#C8CDD2] bg-white p-2.5">
+        <textarea
+          ref={exprRef}
+          value={calc.expression}
+          onChange={(e) => onUpdate({ calc: { ...calc, expression: e.target.value } })}
+          placeholder="e.g. total_days * daily_rate"
+          rows={2}
+          className={cn(inputCls, "h-auto min-h-[52px] py-2 font-mono resize-none")}
+        />
+        {keyedSiblings.length > 0 ? (
+          <div className="flex flex-wrap gap-1">
+            {keyedSiblings.map((s) => (
+              <button key={s.id} type="button" onClick={() => insertToken(s.key)} title={`Insert ${s.key}`}
+                      className="rounded border border-[#C8CDD2] bg-[#F6F7F8] px-1.5 py-0.5 font-mono text-[10px] text-[#287EAD] hover:border-[#287EAD] hover:bg-[#EEF6FB]">
+                {s.key}
+              </button>
+            ))}
+          </div>
+        ) : (
+          <p className="text-[10px] text-amber-600">Add other fields to this form first — a formula needs something to reference.</p>
+        )}
+        {showDecimals && (
+          <div className="flex items-center gap-2 pt-1">
+            <span className="text-[11px] font-semibold uppercase tracking-wider text-[#5E6870]">Decimal places</span>
+            <input type="number" min={0} max={6} value={calc.decimals ?? 2}
+                   onChange={(e) => onUpdate({ calc: { ...calc, decimals: Math.max(0, Math.min(6, Number(e.target.value))) } })}
+                   className={cn(inputCls, "h-8 w-20")} />
+          </div>
+        )}
+        {calc.expression.trim() && (
+          <p className="text-[11px] text-[#5E6870]">
+            Sanity check (every field above = 100): <span className="font-mono font-semibold text-[#287EAD]">{String(previewValue)}</span>
+          </p>
+        )}
+      </div>
+    </InspectorRow>
+  );
+}
+
 function FieldEditor({ field, onUpdate, allFields, processSteps }: {
   field: TemplateField;
   onUpdate: (patch: Partial<TemplateField>) => void;
@@ -2072,6 +2220,7 @@ function FieldEditor({ field, onUpdate, allFields, processSteps }: {
   const isLayout   = field.type === "divider" || field.type === "heading";
   const isNumeric  = field.type === "number" || field.type === "currency";
   const isText     = field.type === "text" || field.type === "textarea" || field.type === "email" || field.type === "phone";
+  const isCalculated = CALCULATED_TYPES.has(field.type);
 
   const keyDuplicate = allFields.filter((f) => f.id !== field.id && f.key === field.key).length > 0;
   const siblings = allFields.filter((f) => f.id !== field.id && f.key);
@@ -2114,7 +2263,8 @@ function FieldEditor({ field, onUpdate, allFields, processSteps }: {
               </div>
             )}
           </InspectorRow>
-          {!["heading", "divider", "checkbox", "boolean", "table", "file", "image", "signature"].includes(field.type) && (
+          {!["heading", "divider", "checkbox", "boolean", "table", "file", "image", "signature",
+             "rating", "auto_number", "calc_number", "calc_currency", "calc_text", "calc_date"].includes(field.type) && (
             <InspectorRow label="Placeholder">
               <input className={inputCls} value={field.placeholder ?? ""} onChange={(e) => onUpdate({ placeholder: e.target.value })} />
             </InspectorRow>
@@ -2133,7 +2283,7 @@ function FieldEditor({ field, onUpdate, allFields, processSteps }: {
               <div className="flex justify-between text-[10px] text-[#5E6870]"><span>1</span><span>6</span><span>12</span></div>
             </InspectorRow>
           )}
-          {!isLayout && !isTable && (
+          {!isLayout && !isTable && !isCalculated && (
             <div className="flex items-center gap-6">
               <label className="flex cursor-pointer items-center gap-2.5 text-sm text-[#1F2933]">
                 <input type="checkbox" checked={!!field.required} onChange={(e) => onUpdate({ required: e.target.checked })}
@@ -2157,6 +2307,12 @@ function FieldEditor({ field, onUpdate, allFields, processSteps }: {
               />
             </InspectorRow>
           )}
+          {field.type === "rating" && (
+            <InspectorRow label="Number of stars">
+              <input type="number" min={2} max={10} value={field.max ?? 5}
+                     onChange={(e) => onUpdate({ max: Math.max(2, Math.min(10, Number(e.target.value))) })} className={inputCls} />
+            </InspectorRow>
+          )}
           {(field.type === "reference" || field.type === "user") && (
             <InspectorRow label="Reference source">
               <select className={inputCls} value={field.referenceSource ?? (field.type === "user" ? "users" : "documents")} onChange={(e) => onUpdate({ referenceSource: e.target.value })}>
@@ -2170,6 +2326,9 @@ function FieldEditor({ field, onUpdate, allFields, processSteps }: {
                 {FORMULA_OPTIONS.map((o) => <option key={o.value} value={o.value}>{o.label}</option>)}
               </select>
             </InspectorRow>
+          )}
+          {isCalculated && (
+            <CalcFormulaEditor field={field} siblings={siblings} onUpdate={onUpdate} />
           )}
           {!isLayout && (
             <FinanceBindingFields field={field} onUpdate={onUpdate} />
@@ -2211,6 +2370,12 @@ function FieldEditor({ field, onUpdate, allFields, processSteps }: {
                        onChange={(e) => onUpdate({ currencySymbol: e.target.value })}
                        placeholder={field.currencyFromField ? "Fallback symbol" : "Symbol, e.g. KSh"} />
               </div>
+            </InspectorRow>
+          )}
+          {field.type === "calc_currency" && (
+            <InspectorRow label="Currency symbol" hint="Fixed symbol shown before the computed amount.">
+              <input className={inputCls} value={field.currencySymbol ?? "KSh"}
+                     onChange={(e) => onUpdate({ currencySymbol: e.target.value })} placeholder="Symbol, e.g. KSh" />
             </InspectorRow>
           )}
           {isText && (
@@ -2533,6 +2698,129 @@ function evalEditable(item: EditabilityState, values: Record<string, unknown>, a
   return group.combinator === "or" ? results.some(Boolean) : results.every(Boolean);
 }
 
+/* ── Calculated fields ────────────────────────────────────────────────────
+ * Client-side mirror of apps/templates_engine/conditions.py's evaluator, used
+ * to drive the live Build/Preview canvas. The server recomputes the same
+ * formulas authoritatively at submit time — this copy only powers what the
+ * person sees while filling the form, never what gets persisted. */
+type CalcToken = { t: "num"; v: number } | { t: "ident"; v: string } | { t: "op"; v: string };
+
+function calcTokenize(expr: string): CalcToken[] {
+  const re = /\s*(?:(\d+\.\d+|\d+)|([A-Za-z_][A-Za-z0-9_]*)|([+\-*/(),]))/y;
+  const tokens: CalcToken[] = [];
+  let pos = 0;
+  while (pos < expr.length) {
+    re.lastIndex = pos;
+    const m = re.exec(expr);
+    if (!m || m[0].length === 0) {
+      if (/\s/.test(expr[pos])) { pos += 1; continue; }
+      throw new Error(`Unexpected character at ${pos}`);
+    }
+    pos = re.lastIndex;
+    if (m[1] !== undefined) tokens.push({ t: "num", v: parseFloat(m[1]) });
+    else if (m[2] !== undefined) tokens.push({ t: "ident", v: m[2] });
+    else if (m[3] !== undefined) tokens.push({ t: "op", v: m[3] });
+  }
+  return tokens;
+}
+
+const CALC_FUNCS: Record<string, (...args: number[]) => number> = {
+  ROUND: (a, n = 0) => { const f = Math.pow(10, Math.trunc(n)); return Math.round(a * f) / f; },
+  ABS: Math.abs,
+  MIN: (...a) => Math.min(...a),
+  MAX: (...a) => Math.max(...a),
+};
+
+class CalcParser {
+  private i = 0;
+  constructor(private tokens: CalcToken[], private scope: Record<string, number>) {}
+  private peek() { return this.tokens[this.i]; }
+  private next() { return this.tokens[this.i++]; }
+  parse(): number {
+    const v = this.expr();
+    if (this.peek() !== undefined) throw new Error("Unexpected trailing input");
+    return v;
+  }
+  private expr(): number {
+    let v = this.term();
+    while (this.peek()?.t === "op" && (this.peek() as any).v === "+" || this.peek()?.t === "op" && (this.peek() as any).v === "-") {
+      const op = (this.next() as any).v;
+      const rhs = this.term();
+      v = op === "+" ? v + rhs : v - rhs;
+    }
+    return v;
+  }
+  private term(): number {
+    let v = this.factor();
+    while (this.peek()?.t === "op" && ((this.peek() as any).v === "*" || (this.peek() as any).v === "/")) {
+      const op = (this.next() as any).v;
+      const rhs = this.factor();
+      v = op === "*" ? v * rhs : (rhs ? v / rhs : 0);
+    }
+    return v;
+  }
+  private factor(): number {
+    const t = this.peek();
+    if (t?.t === "op" && t.v === "-") { this.next(); return -this.factor(); }
+    if (t?.t === "op" && t.v === "+") { this.next(); return this.factor(); }
+    return this.atom();
+  }
+  private atom(): number {
+    const t = this.next();
+    if (!t) throw new Error("Unexpected end of expression");
+    if (t.t === "num") return t.v;
+    if (t.t === "op" && t.v === "(") {
+      const v = this.expr();
+      const close = this.next();
+      if (!close || close.t !== "op" || close.v !== ")") throw new Error("Expected ')'");
+      return v;
+    }
+    if (t.t === "ident") {
+      const name = t.v;
+      const nxt = this.peek();
+      if (nxt?.t === "op" && nxt.v === "(") {
+        this.next();
+        const args: number[] = [];
+        if (!(this.peek()?.t === "op" && (this.peek() as any).v === ")")) {
+          args.push(this.expr());
+          while (this.peek()?.t === "op" && (this.peek() as any).v === ",") { this.next(); args.push(this.expr()); }
+        }
+        const close = this.next();
+        if (!close || close.t !== "op" || close.v !== ")") throw new Error("Expected ')'");
+        const fn = CALC_FUNCS[name.toUpperCase()];
+        if (!fn) throw new Error(`Unknown function ${name}`);
+        return fn(...args);
+      }
+      return this.scope[name] ?? 0;
+    }
+    throw new Error("Unexpected token");
+  }
+}
+
+/** Evaluate a calc expression against a { fieldKey: number } scope. Never
+ * throws — returns 0 for a malformed formula, matching the server. */
+function evaluateCalcExpression(expression: string | undefined, scope: Record<string, number>): number {
+  if (!expression || !expression.trim()) return 0;
+  try {
+    return new CalcParser(calcTokenize(expression), scope).parse();
+  } catch {
+    return 0;
+  }
+}
+
+/** Build a { fieldKey: number } scope from the form's current (id-keyed)
+ * values, for evaluating sibling calc expressions. */
+function buildCalcScope(allFields: TemplateField[], values: Record<string, unknown>): Record<string, number> {
+  const scope: Record<string, number> = {};
+  for (const f of allFields) {
+    if (!f.key) continue;
+    const raw = values[f.id];
+    const n = typeof raw === "number" ? raw : parseFloat(String(raw ?? ""));
+    scope[f.key] = Number.isFinite(n) ? n : 0;
+  }
+  return scope;
+}
+
 function PreviewField({ field, register, errors, values, allFields, editable = true }: {
   field: TemplateField;
   register: UseFormRegister<Record<string, unknown>>;
@@ -2663,6 +2951,63 @@ function PreviewField({ field, register, errors, values, allFields, editable = t
     case "signature":
       control = <div className="flex h-16 items-center justify-center rounded-lg border-2 border-dashed border-slate-200 text-sm text-slate-400"><Pencil className="h-4 w-4 mr-2" />Click to sign</div>;
       break;
+    case "url":
+      control = <input type="url" {...reg} placeholder={field.placeholder || "https://…"} disabled={dis} defaultValue={field.defaultValue ?? ""} className={previewInputCls} />;
+      break;
+    case "percentage":
+      control = (
+        <div className="relative">
+          <input type="number" step="0.01" min={field.min ?? 0} max={field.max ?? 100} {...reg}
+                 placeholder={field.placeholder || "0"} disabled={dis} defaultValue={field.defaultValue ?? ""}
+                 className={cn(previewInputCls, "pr-9")} />
+          <span className="absolute right-3 top-1/2 -translate-y-1/2 text-sm text-slate-400 font-medium">%</span>
+        </div>
+      );
+      break;
+    case "rating": {
+      const max = field.max ?? 5;
+      const current = Number(values[field.id] ?? 0);
+      return (
+        <div className="space-y-1.5">
+          {label}
+          <div className="flex items-center gap-1">
+            {Array.from({ length: max }, (_, i) => i + 1).map((n) => (
+              <button key={n} type="button" disabled={dis}
+                      onClick={() => !dis && reg.onChange({ target: { name: field.id, value: n } })}
+                      className={cn("transition-colors", n <= current ? "text-amber-400" : "text-slate-200", !dis && "hover:text-amber-300")}>
+                <Star className="h-5 w-5" fill="currentColor" />
+              </button>
+            ))}
+            <input type="hidden" {...reg} defaultValue={field.defaultValue ?? ""} />
+          </div>
+          {field.helpText && <p className="text-xs text-slate-500">{field.helpText}</p>}
+        </div>
+      );
+    }
+    case "auto_number":
+      control = (
+        <div className={cn(previewInputCls, "flex items-center gap-2 bg-slate-50 text-slate-400 italic")}>
+          <ListOrdered className="h-3.5 w-3.5" /> Assigned automatically on submit
+        </div>
+      );
+      break;
+    case "calc_number":
+    case "calc_currency": {
+      const symbol = field.type === "calc_currency" ? (field.currencySymbol ?? "KSh") : null;
+      control = (
+        <div className="relative">
+          {symbol && <span className="absolute left-3 top-1/2 -translate-y-1/2 text-sm text-slate-400 font-medium">{symbol}</span>}
+          <input type="number" {...reg} disabled className={cn(previewInputCls, "bg-slate-50 font-semibold text-slate-700", symbol && "pl-14")} />
+        </div>
+      );
+      break;
+    }
+    case "calc_date":
+      control = <input type="date" {...reg} disabled className={cn(previewInputCls, "bg-slate-50 font-semibold text-slate-700")} />;
+      break;
+    case "calc_text":
+      control = <input type="text" {...reg} disabled className={cn(previewInputCls, "bg-slate-50 font-semibold text-slate-700")} />;
+      break;
     default:
       control = <input type="text" {...reg} placeholder={field.placeholder} disabled={dis} defaultValue={field.defaultValue ?? ""} className={previewInputCls} />;
   }
@@ -2671,6 +3016,9 @@ function PreviewField({ field, register, errors, values, allFields, editable = t
     <div className="space-y-1.5">
       {label}
       {control}
+      {field.calc?.expression && (
+        <p className="flex items-center gap-1 text-[10px] text-emerald-600"><Calculator className="h-3 w-3" /> = {field.calc.expression}</p>
+      )}
       {field.helpText && <p className="text-xs text-slate-500">{field.helpText}</p>}
       {err && <p className="text-xs text-red-500 flex items-center gap-1"><AlertCircle className="h-3 w-3" />{err}</p>}
     </div>
@@ -2681,7 +3029,7 @@ function Preview({ sections, templateName, processSteps }: {
   sections: TemplateSection[]; templateName: string;
   processSteps: { value: string; label: string }[];
 }) {
-  const { register, handleSubmit, reset, watch, formState: { errors } } = useForm<Record<string, unknown>>();
+  const { register, handleSubmit, reset, watch, setValue, formState: { errors } } = useForm<Record<string, unknown>>();
   const [submitted, setSubmitted] = useState<Record<string, unknown> | null>(null);
   // Simulate the document being at a given workflow step, so process-step
   // visibility/editability rules can be exercised without a live document.
@@ -2692,6 +3040,25 @@ function Preview({ sections, templateName, processSteps }: {
   const stepOptions = processSteps.some((s) => s.value === "draft")
     ? processSteps
     : [{ value: "draft", label: "Draft (start)" }, ...processSteps];
+
+  // Recompute every `calc`-bearing field whenever any value changes, mirroring
+  // the server's authoritative recompute at submit time. Fields resolve in
+  // template order so a later formula can reference an earlier calculated
+  // field's result. Guarded by a value comparison so this settles to a fixed
+  // point instead of looping — a circular formula (A depends on B depends on
+  // A) will simply stop updating rather than hang.
+  useEffect(() => {
+    const scope = buildCalcScope(allFields, values);
+    for (const f of allFields) {
+      if (!f.calc?.expression) continue;
+      let result = evaluateCalcExpression(f.calc.expression, scope);
+      if (typeof f.calc.decimals === "number") result = Number(result.toFixed(f.calc.decimals));
+      scope[f.key] = result; // let later formulas see this one's result
+      if (values[f.id] !== result) setValue(f.id, result);
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [JSON.stringify(values), JSON.stringify(allFields.map((f) => f.calc))]);
+
 
   if (submitted) {
     return (

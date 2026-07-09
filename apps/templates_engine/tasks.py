@@ -992,6 +992,12 @@ def generate_document_from_template_sync(template, values, fmt, title, user, typ
         values = apply_formulas(
             values, template.sections, user=user, reference_number=reference_number
         )
+        # Freeze calculated fields (e.g. "total_days * daily_rate") the same
+        # way — computed server-side from the (now formula-frozen) values so
+        # the stored document and the rendered file always agree, regardless
+        # of what the client last had on screen.
+        from apps.templates_engine.conditions import compute_calculated_values
+        values = compute_calculated_values(template.sections, values)
         # The stored form.values keeps structured attachment descriptors and
         # reference {id,label} objects; the rendered file shows display strings.
         render_values = descriptors_to_names(values)
