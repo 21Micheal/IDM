@@ -386,12 +386,14 @@ def _append_line(
     )
 
     detail = line_spec.get("detail") or mapping.get("detail")
-    if detail:
-        lad = ET.SubElement(line_el, "DetailLad")
-        for i in (1, 2, 3):
-            ET.SubElement(lad, f"GeneralDescription{i}").text = resolve_value(
-                detail.get(f"general_description{i}"), values, row
-            )
+    if detail and isinstance(detail, dict):
+        count = int(detail.get("count") or 0)
+        if count > 0:
+            lad = ET.SubElement(line_el, "DetailLad")
+            for i in range(1, count + 1):
+                ET.SubElement(lad, f"GeneralDescription{i}").text = resolve_value(
+                    detail.get(f"general_description{i}"), values, row
+                )
 
 
 def _resolve_dc(spec: Any, values: dict, row: dict | None) -> str:

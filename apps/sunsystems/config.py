@@ -8,6 +8,33 @@ mapping + optional connection override). At fill time it is **snapshotted** onto
 the created document's ``metadata.sunsystems`` so posting/budget checks depend on
 the document alone and survive later template edits. These helpers are the one
 place that knows that layout.
+
+Multi-stage mapping shape
+-------------------------
+A template can define multiple posting stages via a ``stages`` list::
+
+    {
+      "enabled": true,
+      "stages": [
+        {
+          "stage": 1,
+          "label": "Advance",
+          "post_on": "approved",
+          "component": "Journal", "method": "Import",
+          "context": {...}, "parameters": {...},
+          "lines": [...]
+        },
+        {
+          "stage": 2,
+          "label": "Retirement",
+          "post_on": "retirement_approved",
+          "lines": [...]
+        }
+      ]
+    }
+
+Legacy (single-stage) mappings that have no ``stages`` key are treated as stage 1
+transparently, preserving backwards compatibility.
 """
 from __future__ import annotations
 
@@ -18,9 +45,47 @@ def get_sunsystems_config(document) -> dict:
     return cfg if isinstance(cfg, dict) else {}
 
 
-def get_journal_mapping(document) -> dict | None:
+def get_journal_config(document) -> dict | None:
+    """Return the raw journal config block (may contain ``stages`` list or be a
+    flat legacy mapping)."""
     mapping = get_sunsystems_config(document).get("journal")
     return mapping if isinstance(mapping, dict) else None
+
+
+def _get_stages(journal_cfg: dict) -> list[dict]:
+    """Return the list of stage dicts from a journal config.
+
+    Wraps a legacy flat mapping (no ``stages`` key) into a one-element list so
+    the rest of the code never needs to branch on the schema version.
+    """
+    stages = journal_cfg.get("stages")
+    if isinstance(stages, list) and stages:
+        return [s for s in stages if isinstance(s, dict)]
+    # Legacy: the entire mapping *is* stage 1.
+    return [dict(journal_cfg, stage=1)]
+
+
+def get_journal_mapping(document, stage: int = 1) -> dict | None:
+    """Return the resolved mapping for ``stage`` (1-based), or None.
+
+    For a legacy flat mapping (no ``stages`` array), stage 1 returns the mapping
+    itself and any other stage returns None.
+    """
+    cfg = get_journal_config(document)
+    if not cfg:
+        return None
+    for s in _get_stages(cfg):
+        if int(s.get("stage", 1)) == stage:
+            return s
+    return None
+
+
+def get_all_stages(document) -> list[dict]:
+    """Return all stage dicts defined for this document, ordered by stage number."""
+    cfg = get_journal_config(document)
+    if not cfg:
+        return []
+    return sorted(_get_stages(cfg), key=lambda s: int(s.get("stage", 1)))
 
 
 def get_budget_mapping(document) -> dict | None:
@@ -74,13 +139,32 @@ def refresh_sunsystems_config_from_template(document) -> bool:
 
 
 def journal_posting_enabled(document) -> bool:
-    mapping = get_journal_mapping(document)
-    return bool(mapping and mapping.get("enabled"))
+    cfg = get_journal_config(document)
+    return bool(cfg and cfg.get("enabled"))
+
+
+def post_triggers(document) -> dict[str, int]:
+    """Return a mapping of {outcome_string: stage_number} for all enabled stages.
+
+    Example: ``{"approved": 1, "retirement_approved": 2}``
+
+    The workflow hook calls this to find which stage (if any) to fire when a
+    particular workflow outcome lands.
+    """
+    cfg = get_journal_config(document)
+    if not cfg or not cfg.get("enabled"):
+        return {}
+    result: dict[str, int] = {}
+    for s in _get_stages(cfg):
+        trigger = str(s.get("post_on") or "approved").strip()
+        stage_num = int(s.get("stage", 1))
+        result[trigger] = stage_num
+    return result
 
 
 def post_trigger(document, default: str = "approved") -> str:
-    """Workflow outcome on which the journal should post (e.g. "approved")."""
-    mapping = get_journal_mapping(document) or {}
+    """Legacy single-trigger accessor (stage 1 only). Kept for backwards compat."""
+    mapping = get_journal_mapping(document, stage=1) or {}
     value = mapping.get("post_on") or default
     return str(value)
 

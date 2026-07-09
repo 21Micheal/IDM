@@ -1,18 +1,23 @@
 """
 apps/sunsystems/journal.py
 
-Orchestrates posting a form document's journal to SunSystems (Ledger Import).
+Orchestrates posting a form document's journal to SunSystems (Ledger Import or
+PurchaseOrder).
 
 The flow, kept deliberately small and idempotent:
 
-  1. Find/create the document's single :class:`JournalPosting` row.
+  1. Find/create the document's :class:`JournalPosting` row for the given stage.
      If it is already POSTED, do nothing (the workflow hook may fire more than
      once; we never double-post).
-  2. Read the journal mapping + filled values off the document.
+  2. Read the journal mapping for this stage + filled values off the document.
      If posting isn't enabled, mark the row SKIPPED.
   3. Compile the ``<SSC>`` document via :mod:`apps.sunsystems.mapping`.
   4. Authenticate + ComponentExecutor.Execute via :class:`SunSystemsClient`.
   5. Parse the reply; persist journal number / messages / raw XML on the row.
+
+A document may have multiple posting stages (e.g. stage 1 = advance journal,
+stage 2 = retirement reconciliation). Each stage has its own ``JournalPosting``
+row — identified by the ``(document, stage)`` pair — and is fully independent.
 
 Everything that can vary (accounts, analysis, business unit, journal type,
 connection) is data in the mapping; this module is pure orchestration.
@@ -35,23 +40,42 @@ class JournalPostingError(RuntimeError):
     """Raised for an unrecoverable posting failure (after the row is marked failed)."""
 
 
-def post_journal_for_document(document, *, actor=None, client: SunSystemsClient | None = None) -> JournalPosting:
-    """Post ``document``'s journal to SunSystems. Idempotent and self-logging.
+def post_journal_for_document(
+    document,
+    *,
+    stage: int = 1,
+    actor=None,
+    client: SunSystemsClient | None = None,
+) -> JournalPosting:
+    """Post ``document``'s journal for ``stage`` to SunSystems. Idempotent and self-logging.
 
     Returns the :class:`JournalPosting` row in its final state. Never raises for
     an ordinary SunSystems/mapping failure — the failure is recorded on the row
     (status FAILED) so it can be retried; it only raises for truly unexpected
     programmer errors.
     """
-    posting, _ = JournalPosting.objects.get_or_create(document=document)
+    posting, _ = JournalPosting.objects.get_or_create(document=document, stage=stage)
 
     if posting.status == JournalPostingStatus.POSTED:
         return posting
 
-    mapping = get_journal_mapping(document)
+    mapping = get_journal_mapping(document, stage=stage)
     if not mapping or not mapping.get("enabled"):
-        _mark(posting, JournalPostingStatus.SKIPPED, message="Journal posting is not enabled for this form.")
-        return posting
+        # Check the parent config's enabled flag (stages inherit it)
+        from .config import journal_posting_enabled
+        if not journal_posting_enabled(document):
+            _mark(posting, JournalPostingStatus.SKIPPED,
+                  message="Journal posting is not enabled for this form.")
+            return posting
+        if not mapping:
+            _mark(posting, JournalPostingStatus.SKIPPED,
+                  message=f"No mapping defined for posting stage {stage}.")
+            return posting
+
+    # Persist the stage label from the mapping (e.g. "Advance", "Retirement").
+    stage_label = str(mapping.get("label") or "").strip()
+    if stage_label and not posting.stage_label:
+        posting.stage_label = stage_label
 
     values = get_form_values(document)
     conn = effective_connection(get_connection_override(document))
@@ -61,7 +85,9 @@ def post_journal_for_document(document, *, actor=None, client: SunSystemsClient 
     posting.attempts = (posting.attempts or 0) + 1
     posting.business_unit = config.business_unit
     posting.error = ""
-    posting.save(update_fields=["status", "attempts", "business_unit", "error", "updated_at"])
+    posting.save(update_fields=[
+        "status", "attempts", "business_unit", "error", "stage_label", "updated_at",
+    ])
 
     # 1) Build the SSC document.
     try:
@@ -123,22 +149,28 @@ def _mark(posting: JournalPosting, status: str, **fields) -> None:
         update.add(key)
     # posted_at / posted_by / journal_number may have been set on the instance
     # before this call; include them so they persist.
-    for extra in ("posted_at", "posted_by", "journal_number", "component", "method", "business_unit"):
+    for extra in ("posted_at", "posted_by", "journal_number", "component", "method",
+                  "business_unit", "stage_label"):
         update.add(extra)
     posting.save(update_fields=list(update))
 
 
 def _write_back_to_document(document, posting: JournalPosting) -> None:
-    """Mirror the posting result onto metadata.sunsystems.posting for the UI."""
+    """Mirror the posting result onto metadata.sunsystems.postings[stage] for the UI."""
     try:
         meta = dict(document.metadata or {})
         ss = dict(meta.get("sunsystems") or {})
-        ss["posting"] = {
+        postings = dict(ss.get("postings") or {})
+        postings[str(posting.stage)] = {
             "status": posting.status,
             "journal_number": posting.journal_number,
             "message": posting.message,
             "posted_at": posting.posted_at.isoformat() if posting.posted_at else None,
         }
+        ss["postings"] = postings
+        # Legacy single-posting compat: also write to ss["posting"] for stage 1.
+        if posting.stage == 1:
+            ss["posting"] = postings["1"]
         meta["sunsystems"] = ss
         document.metadata = meta
         type(document).objects.filter(pk=document.pk).update(metadata=meta)

@@ -16,12 +16,12 @@ logger = logging.getLogger(__name__)
 
 
 @shared_task(bind=True, max_retries=0, queue="default")
-def post_journal_for_document(self, document_id: str, actor_id: str | None = None):
-    """Post one document's journal to SunSystems (idempotent).
+def post_journal_for_document(self, document_id: str, stage: int = 1, actor_id: str | None = None):
+    """Post one document's journal stage to SunSystems (idempotent).
 
-    Failures are recorded on the document's JournalPosting row by the
-    orchestration layer, so this task does not itself retry — an operator (or a
-    future scheduled sweep) retries via the API. Returns a small status dict.
+    ``stage`` selects which posting stage to execute (1 = advance/default,
+    2 = retirement, etc.). Failures are recorded on the document's JournalPosting
+    row; this task does not itself retry.
     """
     from apps.documents.models import Document
 
@@ -41,10 +41,11 @@ def post_journal_for_document(self, document_id: str, actor_id: str | None = Non
 
     from apps.sunsystems.journal import post_journal_for_document as run
 
-    posting = run(document, actor=actor)
+    posting = run(document, stage=stage, actor=actor)
     return {
         "ok": posting.status == "posted",
         "status": posting.status,
+        "stage": posting.stage,
         "journal_number": posting.journal_number,
         "document_id": str(document_id),
     }

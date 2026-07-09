@@ -40,17 +40,87 @@ print("Token:", token)
 # ------------------------------------------------------------------
 payload = f"""
 <SSC>
-  <User>
-    <Name>{USERNAME}</Name>
-  </User>
-
-  <SunSystemsContext>
-    <BusinessUnit>{BUSINESS_UNIT}</BusinessUnit>
-  </SunSystemsContext>
-
- <Payload><PurchaseOrder><Comment>Purchase of servers</Comment><InvoiceAddressCode>0000000000</InvoiceAddressCode><PurchaseTransactionType>PFA</PurchaseTransactionType><PurchaseOrderReference>imp-00025</PurchaseOrderReference><SecondReference></SecondReference><SupplierCode>81105</SupplierCode><PurchaseOrderLine><AccountCode>81105</AccountCode><CurrencyCode>USD</CurrencyCode><ItemCode>GS4002</ItemCode><LineNumber>1</LineNumber><OrderDate>07072026</OrderDate><UserLineNumber>1</UserLineNumber><AnalysisQuantity><Quantity>1</Quantity></AnalysisQuantity><VLAB7><Base><VPolVlabEntry_Val>1</VPolVlabEntry_Val></Base></VLAB7><VLAB9><Trans><VPolVlabEntry_Val>3000</VPolVlabEntry_Val></Trans></VLAB9></PurchaseOrderLine></PurchaseOrder></Payload>
-
-
+<SunSystemsContext>
+<BusinessUnit>PK1</BusinessUnit>
+<BudgetCode>A</BudgetCode>
+</SunSystemsContext>
+<MethodContext>
+<LedgerPostingParameters>
+<AllowBalTran>1</AllowBalTran>
+<AllowPostToSuspended>N</AllowPostToSuspended>
+<JournalType>FGJ</JournalType>
+<LoadOnly>N</LoadOnly>
+<PostProvisional>N</PostProvisional>
+<PostToHold>N</PostToHold>
+<PostingType>2</PostingType>
+<ReportingAccount>999</ReportingAccount>
+<ReportErrorsOnly>Y</ReportErrorsOnly>
+<SuppressSubstitutedMessages>Y</SuppressSubstitutedMessages>
+<SuspenseAccount>999</SuspenseAccount>
+<TransactionAmountAccount>999</TransactionAmountAccount>
+</LedgerPostingParameters>
+</MethodContext>
+<Payload>
+<Ledger>
+<Line>
+<AccountCode>71001</AccountCode>
+<AnalysisCode1>#</AnalysisCode1>
+<AnalysisCode2>#</AnalysisCode2>
+<AnalysisCode3>#</AnalysisCode3>
+<AnalysisCode4>#</AnalysisCode4>
+<AnalysisCode6>#</AnalysisCode6>
+<TransactionAmount>78900</TransactionAmount>
+<CurrencyCode>GBP</CurrencyCode>
+<DebitCredit>C</DebitCredit>
+<Description>Travel to Lusaka for Aide Memoir</Description>
+<TransactionReference>MEMO/2026/001</TransactionReference>
+<TransactionDate>07072026</TransactionDate>
+<DetailLad>
+<GeneralDescription1/>
+<GeneralDescription2/>
+<GeneralDescription3/>
+</DetailLad>
+</Line>
+<Line>
+<AccountCode>94200</AccountCode>
+<AnalysisCode1>#</AnalysisCode1>
+<AnalysisCode2>#</AnalysisCode2>
+<AnalysisCode3>#</AnalysisCode3>
+<AnalysisCode4>#</AnalysisCode4>
+<AnalysisCode6>#</AnalysisCode6>
+<TransactionAmount>78000</TransactionAmount>
+<CurrencyCode>GBP</CurrencyCode>
+<DebitCredit>D</DebitCredit>
+<Description>Travel to Lusaka for Aide Memoir</Description>
+<TransactionReference>MEMO/2026/001</TransactionReference>
+<TransactionDate>07072026</TransactionDate>
+<DetailLad>
+<GeneralDescription1/>
+<GeneralDescription2/>
+<GeneralDescription3/>
+</DetailLad>
+</Line>
+<Line>
+<AccountCode>37400</AccountCode>
+<AnalysisCode1>#</AnalysisCode1>
+<AnalysisCode2>#</AnalysisCode2>
+<AnalysisCode3>#</AnalysisCode3>
+<AnalysisCode4>#</AnalysisCode4>
+<AnalysisCode6>#</AnalysisCode6>
+<TransactionAmount>900</TransactionAmount>
+<CurrencyCode>GBP</CurrencyCode>
+<DebitCredit>D</DebitCredit>
+<Description>Tax -Travel to Lusaka for Aide Memoir</Description>
+<TransactionReference>MEMO/2026/001</TransactionReference>
+<TransactionDate>07072026</TransactionDate>
+<DetailLad>
+<GeneralDescription1/>
+<GeneralDescription2/>
+<GeneralDescription3/>
+</DetailLad>
+</Line>
+</Ledger>
+</Payload>
 </SSC>
 """
 
@@ -58,8 +128,8 @@ payload = f"""
 # EXECUTE CREATE PO
 # ------------------------------------------------------------------
 response = executor_client.service.Execute(
-    component="PurchaseOrder",
-    method="CreateOrAmend",
+    component="Journal",
+    method="Import",
     payload=payload,
     authentication=token
 )

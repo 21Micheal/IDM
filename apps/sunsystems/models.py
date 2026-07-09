@@ -14,24 +14,32 @@ class JournalPostingStatus(models.TextChoices):
 
 class JournalPosting(models.Model):
     """
-    One SunSystems journal (Ledger Import) posting for a form document.
+    One SunSystems posting (Ledger Import or PurchaseOrder) for a form document.
 
-    There is **at most one** posting row per document (``OneToOne``) so the
-    workflow-completion hook is idempotent: once a document is ``POSTED`` it is
-    never posted again, and a ``FAILED`` row can be retried in place. The full
-    request/response XML is retained for audit and troubleshooting, and the
-    returned ``journal_number`` is the link back to the SunSystems ledger.
+    A document may have **multiple** posting rows — one per stage (e.g. stage 1 =
+    advance journal, stage 2 = retirement reconciliation). The ``(document, stage)``
+    pair is unique, so the workflow-completion hook is idempotent: once a stage is
+    ``POSTED`` it is never re-posted, and a ``FAILED`` row can be retried in place.
+    The full request/response XML is retained for audit and troubleshooting.
 
-    The mapping that produced the journal lives on the template/document, not
-    here; this row is the *result log* of applying it.
+    The mapping that produced the posting lives on the template/document, not here;
+    this row is the *result log* of applying it.
     """
 
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
 
-    document = models.OneToOneField(
+    document = models.ForeignKey(
         "documents.Document",
         on_delete=models.CASCADE,
-        related_name="journal_posting",
+        related_name="journal_postings",
+    )
+    stage = models.PositiveSmallIntegerField(
+        default=1,
+        help_text="Posting stage number (1 = advance / first approval, 2 = retirement, …).",
+    )
+    stage_label = models.CharField(
+        max_length=64, blank=True,
+        help_text="Human-readable stage name from the mapping (e.g. 'Advance', 'Retirement').",
     )
 
     status = models.CharField(
@@ -68,13 +76,14 @@ class JournalPosting(models.Model):
     )
 
     class Meta:
-        ordering = ["-created_at"]
+        ordering = ["stage", "-created_at"]
+        unique_together = [("document", "stage")]
         indexes = [
             models.Index(fields=["status", "created_at"]),
         ]
 
     def __str__(self):
-        return f"JournalPosting {self.document_id} ({self.status})"
+        return f"JournalPosting {self.document_id} stage={self.stage} ({self.status})"
 
 
 class SunSystemsConnection(models.Model):

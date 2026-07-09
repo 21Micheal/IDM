@@ -691,6 +691,8 @@ export type JournalPostingStatus =
 export type JournalPosting = {
   id: string;
   document_id: string;
+  stage: number;
+  stage_label: string;
   status: JournalPostingStatus;
   attempts: number;
   component: string;
@@ -765,10 +767,10 @@ export const sunsystemsAPI = {
   testConnection: (conn: SunSystemsConnection) =>
     api.post<{ ok: boolean; detail?: string; base_url?: string; token_acquired?: boolean }>(
       "/sunsystems/connection/test/", { connection: conn }),
-  getPosting: (documentId: string) =>
-    api.get<JournalPosting>(`/sunsystems/postings/${documentId}/`),
-  retryPosting: (documentId: string) =>
-    api.post<JournalPosting>(`/sunsystems/postings/${documentId}/retry/`, {}),
+  getPostings: (documentId: string) =>
+    api.get<JournalPosting[]>(`/sunsystems/postings/${documentId}/`),
+  retryPosting: (documentId: string, stage = 1) =>
+    api.post<JournalPosting>(`/sunsystems/postings/${documentId}/retry/`, { stage }),
 };
 
 // ── Email ingestion (IMAP mailboxes) ──────────────────────────────────────────

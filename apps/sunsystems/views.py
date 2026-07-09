@@ -268,13 +268,14 @@ class JournalPostingDetailView(APIView):
     permission_classes = [IsAuthenticated]
 
     def get(self, request, document_id):
-        posting = JournalPosting.objects.filter(document_id=document_id).first()
-        if not posting:
+        """Return all posting stages for a document, ordered by stage number."""
+        postings = JournalPosting.objects.filter(document_id=document_id).order_by("stage")
+        if not postings.exists():
             return Response(
-                {"status": "none", "detail": "No journal posting for this document yet."},
+                {"status": "none", "detail": "No journal postings for this document yet."},
                 status=status.HTTP_404_NOT_FOUND,
             )
-        return Response(JournalPostingSerializer(posting).data)
+        return Response(JournalPostingSerializer(postings, many=True).data)
 
 
 class JournalPostingRetryView(APIView):
@@ -287,20 +288,26 @@ class JournalPostingRetryView(APIView):
         if not doc:
             return Response({"detail": "Document not found."}, status=status.HTTP_404_NOT_FOUND)
 
-        posting = JournalPosting.objects.filter(document=doc).first()
+        # Accept an explicit stage; default to 1 for backwards compat.
+        stage = int((request.data or {}).get("stage") or 1)
+
+        posting = JournalPosting.objects.filter(document=doc, stage=stage).first()
         if posting and posting.status == JournalPostingStatus.POSTED:
             return Response(
-                {"detail": "This document's journal is already posted.", **JournalPostingSerializer(posting).data},
+                {"detail": f"Stage {stage} is already posted.",
+                 **JournalPostingSerializer(posting).data},
                 status=status.HTTP_400_BAD_REQUEST,
             )
 
-        # Re-run synchronously so the caller gets the outcome immediately; the
-        # orchestration is idempotent and records its own result. A retry
-        # intentionally refreshes the SunSystems mapping from the current
-        # template first, so builder/code fixes affect the next payload.
+        # Re-run synchronously so the caller gets the outcome immediately.
+        # A retry intentionally refreshes the mapping from the current template
+        # first, so builder/code fixes affect the next payload.
         from .config import refresh_sunsystems_config_from_template
         refreshed = refresh_sunsystems_config_from_template(doc)
         from .journal import post_journal_for_document
-        posting = post_journal_for_document(doc, actor=request.user)
+        posting = post_journal_for_document(doc, stage=stage, actor=request.user)
         code = status.HTTP_200_OK if posting.status == JournalPostingStatus.POSTED else status.HTTP_502_BAD_GATEWAY
-        return Response({**JournalPostingSerializer(posting).data, "mapping_refreshed": refreshed}, status=code)
+        return Response(
+            {**JournalPostingSerializer(posting).data, "mapping_refreshed": refreshed},
+            status=code,
+        )

@@ -712,25 +712,32 @@ class WorkflowService:
 
     @staticmethod
     def _maybe_post_sunsystems_journal(document, outcome: str) -> None:
-        """Post the form's journal to SunSystems when an approval lands.
+        """Post any journal stages whose ``post_on`` trigger matches this outcome.
 
-        Only fires for documents whose snapshotted mapping enables journal
-        posting and whose configured trigger matches this outcome (default
-        "approved"). The post runs after commit and is idempotent — the
-        JournalPosting row guards against double-posting if completion is ever
-        re-entered.
+        Supports multi-stage imprest flows: stage 1 fires on "approved", stage 2
+        fires on "retirement_approved" (or whatever the template configures).
+        Each matching stage is enqueued independently after commit. The
+        JournalPosting row's unique_together constraint makes each stage
+        idempotent — a stage that is already POSTED is never re-posted.
         """
         try:
-            from apps.sunsystems.config import journal_posting_enabled, post_trigger
+            from apps.sunsystems.config import journal_posting_enabled, post_triggers
             if not journal_posting_enabled(document):
                 return
-            if post_trigger(document) != outcome:
+            triggers = post_triggers(document)   # {outcome_str: stage_num}
+            stage = triggers.get(outcome)
+            if stage is None:
                 return
             from apps.sunsystems.tasks import post_journal_for_document
             doc_id = str(document.pk)
-            _queue_after_commit(lambda did=doc_id: post_journal_for_document.delay(did))
+            _queue_after_commit(
+                lambda did=doc_id, s=stage: post_journal_for_document.delay(did, s)
+            )
         except Exception:
-            logger.exception("Failed to enqueue SunSystems journal posting for %s", getattr(document, "pk", "?"))
+            logger.exception(
+                "Failed to enqueue SunSystems journal posting for %s",
+                getattr(document, "pk", "?"),
+            )
 
     @staticmethod
     def get_overdue_tasks():

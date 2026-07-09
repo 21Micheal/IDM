@@ -10,7 +10,8 @@ class JournalPostingSerializer(serializers.ModelSerializer):
     class Meta:
         model = JournalPosting
         fields = [
-            "id", "document_id", "status", "attempts",
+            "id", "document_id", "stage", "stage_label",
+            "status", "attempts",
             "component", "method", "business_unit",
             "journal_number", "message", "error",
             "request_xml", "response_xml",

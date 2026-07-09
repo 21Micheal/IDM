@@ -240,6 +240,7 @@ export interface TemplateField {
 export interface SunSystemsUi {
   journalEnabled?: boolean;
   postingKind?: "journal" | "purchase_order";
+  journalStages?: { stage: number; label?: string; postOn?: string }[];
   budgetEnabled?: boolean;
   budgetMode?: "warn" | "block";
   businessUnit?: string;
@@ -768,6 +769,31 @@ function compileSunSystems(template: Template): SunSystemsConfig | undefined {
   if (ui.postingType) parameters.PostingType = ui.postingType;
   for (const p of ui.parameters ?? []) if (p.name) parameters[p.name] = p.value;
 
+  const journalStageBase = {
+    component: "Journal",
+    method: "Import",
+    context: {
+      ...(ui.businessUnit ? { business_unit: { const: ui.businessUnit } } : {}),
+      ...(ui.budgetCode ? { budget_code: { const: ui.budgetCode } } : {}),
+    },
+    parameters,
+    ...(currencySpec ? { currency: currencySpec } : {}),
+    ...(referenceSpec ? { reference: referenceSpec } : {}),
+    ...(dateSpec ? { date: dateSpec } : {}),
+    validate_balance: ui.validateBalance !== false,
+    lines,
+  };
+  const configuredStages = (ui.journalStages ?? [])
+    .filter((s) => Number(s.stage) > 0)
+    .sort((a, b) => Number(a.stage) - Number(b.stage));
+  const defaultJournalStages = [{ stage: 1, label: "Stage 1", postOn: "approved" }];
+  const journalStages = (configuredStages.length ? configuredStages : defaultJournalStages).map((s) => ({
+    ...journalStageBase,
+    stage: Number(s.stage),
+    ...(s.label ? { label: s.label } : {}),
+    post_on: s.postOn || "approved",
+  }));
+
   const purchaseAmountField = byRole("journal_amount");
   const journal = ui.journalEnabled
     ? postingKind === "purchase_order"
@@ -807,19 +833,7 @@ function compileSunSystems(template: Template): SunSystemsConfig | undefined {
         }
       : {
         enabled: true,
-        post_on: "approved",
-        component: "Journal",
-        method: "Import",
-        context: {
-          ...(ui.businessUnit ? { business_unit: { const: ui.businessUnit } } : {}),
-          ...(ui.budgetCode ? { budget_code: { const: ui.budgetCode } } : {}),
-        },
-        parameters,
-        ...(currencySpec ? { currency: currencySpec } : {}),
-        ...(referenceSpec ? { reference: referenceSpec } : {}),
-        ...(dateSpec ? { date: dateSpec } : {}),
-        validate_balance: ui.validateBalance !== false,
-        lines,
+        stages: journalStages,
       }
     : { enabled: false };
 
@@ -2765,10 +2779,11 @@ function Preview({ sections, templateName, processSteps }: {
  * Settings tab (unchanged behavior)
  * ============================================================ */
 
-function SettingsTab({ template, onCommit, documentTypes }: {
+function SettingsTab({ template, onCommit, documentTypes, processSteps }: {
   template: Template;
   onCommit: (patch: Partial<Template>) => void;
   documentTypes: Array<{ id: string; name: string; code: string }>;
+  processSteps: { value: string; label: string }[];
 }) {
   const [tagInput, setTagInput]     = useState("");
   const [showCreate, setShowCreate] = useState(false);
@@ -2867,7 +2882,7 @@ function SettingsTab({ template, onCommit, documentTypes }: {
           ))}
         </div>
       </div>
-      <FinanceSettingsCard template={template} onCommit={onCommit} iCls={iCls} />
+      <FinanceSettingsCard template={template} onCommit={onCommit} iCls={iCls} processSteps={processSteps} />
     </div>
   );
 }
@@ -2876,10 +2891,11 @@ function SettingsTab({ template, onCommit, documentTypes }: {
  * analysis) are set visually in the field inspector; this card holds the
  * connection-level constants (business unit, journal type, …) and the on/off
  * toggles, and previews what the bindings will compile into. */
-function FinanceSettingsCard({ template, onCommit, iCls }: {
+function FinanceSettingsCard({ template, onCommit, iCls, processSteps }: {
   template: Template;
   onCommit: (patch: Partial<Template>) => void;
   iCls: string;
+  processSteps: { value: string; label: string }[];
 }) {
   const ss = template.sunsystems ?? {};
   const ui: SunSystemsUi = ss.ui ?? {};
@@ -2900,6 +2916,24 @@ function FinanceSettingsCard({ template, onCommit, iCls }: {
   const journalTableLines = fields.filter((f) => f.type === "table" && f.sunsystems?.role === "journal_lines").length;
   const postingKind = ui.postingKind ?? "journal";
   const purchaseAmountLabel = roleLabel("journal_amount");
+  const stageOptions = processSteps.some((s) => s.value === "approved")
+    ? processSteps
+    : [...processSteps, { value: "approved", label: "Approved" }];
+  const journalStages = (ui.journalStages?.length ? ui.journalStages : [{ stage: 1, label: "Stage 1", postOn: "approved" }])
+    .map((s, idx) => ({ stage: Number(s.stage || idx + 1), label: s.label ?? `Stage ${idx + 1}`, postOn: s.postOn ?? "approved" }));
+  const setStages = (stages: NonNullable<SunSystemsUi["journalStages"]>) => setUi({ journalStages: stages });
+  const updateStage = (index: number, patch: Partial<NonNullable<SunSystemsUi["journalStages"]>[number]>) =>
+    setStages(journalStages.map((s, i) => i === index ? { ...s, ...patch } : s));
+  const addStage = () => {
+    const next = Math.max(0, ...journalStages.map((s) => Number(s.stage) || 0)) + 1;
+    setStages([...journalStages, { stage: next, label: `Stage ${next}`, postOn: "approved" }]);
+  };
+  const removeStage = (index: number) =>
+    setStages(journalStages.filter((_, i) => i !== index).map((s, i) => ({ ...s, stage: i + 1 })));
+  const compiledJournal = compileSunSystems(template)?.journal as any;
+  const previewMapping = Array.isArray(compiledJournal?.stages)
+    ? compiledJournal.stages[0]
+    : (compiledJournal ?? null);
 
   const label = "text-xs font-semibold uppercase tracking-wider text-[#5E6870]";
   const Toggle = ({ on, onClick }: { on: boolean; onClick: () => void }) => (
@@ -3004,11 +3038,69 @@ function FinanceSettingsCard({ template, onCommit, iCls }: {
               {postingKind === "purchase_order" && <div><span className={label}>Amount</span><div className="mt-1 text-[#1F2933]">{purchaseAmountLabel}</div></div>}
             </div>
             {postingKind === "journal" && (
-              <label className="flex cursor-pointer items-center gap-2.5 text-sm text-[#1F2933]">
-                <input type="checkbox" checked={ui.validateBalance !== false} onChange={(e) => setUi({ validateBalance: e.target.checked })}
-                       className="h-4 w-4 accent-[#287EAD]" />
-                Require debits to balance credits before posting
-              </label>
+              <>
+                <div className="space-y-2">
+                  <div className="flex items-center justify-between">
+                    <span className={label}>Posting stages</span>
+                    <button
+                      type="button"
+                      onClick={addStage}
+                      className="inline-flex items-center gap-1 border border-[#287EAD] px-2 py-1 text-[11px] font-semibold text-[#287EAD] hover:bg-[#EEF6FB]"
+                    >
+                      <Plus className="h-3 w-3" /> Add stage
+                    </button>
+                  </div>
+                  <div className="space-y-2">
+                    {journalStages.map((stage, index) => (
+                      <div key={index} className="grid grid-cols-[70px_1fr_1.3fr_auto] gap-2 border border-[#E1E5E8] bg-[#F8FAFB] p-2">
+                        <div className="space-y-1">
+                          <span className="text-[10px] font-semibold uppercase text-[#5E6870]">Stage</span>
+                          <input
+                            className={cn(iCls, "font-mono")}
+                            type="number"
+                            min={1}
+                            value={stage.stage}
+                            onChange={(e) => updateStage(index, { stage: Math.max(1, Number(e.target.value) || 1) })}
+                          />
+                        </div>
+                        <div className="space-y-1">
+                          <span className="text-[10px] font-semibold uppercase text-[#5E6870]">Label</span>
+                          <input
+                            className={iCls}
+                            value={stage.label ?? ""}
+                            onChange={(e) => updateStage(index, { label: e.target.value })}
+                            placeholder={`Stage ${stage.stage}`}
+                          />
+                        </div>
+                        <div className="space-y-1">
+                          <span className="text-[10px] font-semibold uppercase text-[#5E6870]">Post when workflow status becomes</span>
+                          <select
+                            className={iCls}
+                            value={stage.postOn ?? "approved"}
+                            onChange={(e) => updateStage(index, { postOn: e.target.value })}
+                          >
+                            {stageOptions.map((s) => <option key={s.value} value={s.value}>{s.label}</option>)}
+                          </select>
+                        </div>
+                        <button
+                          type="button"
+                          onClick={() => removeStage(index)}
+                          disabled={journalStages.length <= 1}
+                          title="Remove stage"
+                          className="self-end inline-flex h-9 w-9 items-center justify-center border border-[#C8CDD2] text-[#5E6870] hover:border-red-300 hover:bg-red-50 hover:text-red-700 disabled:opacity-40"
+                        >
+                          <Trash2 className="h-3.5 w-3.5" />
+                        </button>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+                <label className="flex cursor-pointer items-center gap-2.5 text-sm text-[#1F2933]">
+                  <input type="checkbox" checked={ui.validateBalance !== false} onChange={(e) => setUi({ validateBalance: e.target.checked })}
+                         className="h-4 w-4 accent-[#287EAD]" />
+                  Require debits to balance credits before posting
+                </label>
+              </>
             )}
             <div className="rounded border border-[#EEF0F2] bg-[#F8FAFB] px-3 py-2 text-xs text-[#5E6870]">
               {postingKind === "journal" ? (
@@ -3037,7 +3129,7 @@ function FinanceSettingsCard({ template, onCommit, iCls }: {
       </div>
       {showXml && (
         <JournalPayloadModal
-          mapping={compileSunSystems(template)?.journal ?? null}
+          mapping={previewMapping}
           values={buildSampleValues(template)}
           sample
           title={template.name}
@@ -3423,6 +3515,7 @@ export default function TemplateBuilderV2({ initial, onSave, onCancel, isSaving,
           {tab === "settings" && (
             <main key="settings" className="flex-1 overflow-y-auto bg-slate-100 animate-in fade-in duration-150">
               <SettingsTab template={template} documentTypes={documentTypes}
+                           processSteps={processSteps}
                            onCommit={(patch) => commit({ ...template, ...patch })} />
             </main>
           )}
