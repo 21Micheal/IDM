@@ -82,7 +82,6 @@ export default function UserDetailPage() {
     queryKey: ["users", "delegations", id],
     queryFn: () => usersAPI.delegations(id).then((r) => r.data),
     enabled: Boolean(id),
-    staleTime: 1000 * 60 * 2,
   });
 
   const [form, setForm] = useState({
@@ -166,12 +165,23 @@ export default function UserDetailPage() {
   const dismissDelegationMutation = useMutation({
     mutationFn: (delegationId: string) =>
       profileAPI.dismissDelegation(delegationId),
-    onSuccess: () => {
-      toast.success("Delegation dismissed");
-      qc.invalidateQueries({ queryKey: ["users", "delegations", id] });
-      qc.invalidateQueries({ queryKey: ["delegations"] });
+    onMutate: async (delegationId) => {
+      await qc.cancelQueries({ queryKey: ["users", "delegations", id] });
+      const previous = qc.getQueryData<DelegationRecord[]>(["users", "delegations", id]);
+      qc.setQueryData<DelegationRecord[]>(["users", "delegations", id], (old) =>
+        (old ?? []).filter((d) => d.id !== delegationId)
+      );
+      return { previous };
     },
-    onError: (err) => toast.error(extractApiError(err, "Failed to dismiss delegation")),
+    onError: (err, delegationId, context: any) => {
+      toast.error(extractApiError(err, "Failed to dismiss delegation"));
+      if (context?.previous) {
+        qc.setQueryData(["users", "delegations", id], context.previous);
+      }
+    },
+    onSettled: () => {
+      qc.refetchQueries({ queryKey: ["users", "delegations", id] });
+    },
   });
 
   const reassignCandidates = users.filter((u) => u.id !== id && u.is_active);

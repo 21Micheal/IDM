@@ -143,11 +143,23 @@ export default function ProfilePage() {
 
   const dismissDelegationMutation = useMutation({
     mutationFn: (delegationId: string) => profileAPI.dismissDelegation(delegationId),
-    onSuccess: () => {
-      toast.success("Delegation dismissed");
-      qc.invalidateQueries({ queryKey: ["delegations"] });
+    onMutate: async (delegationId) => {
+      await qc.cancelQueries({ queryKey: ["delegations", "mine"] });
+      const previous = qc.getQueryData<DelegationRecord[]>(["delegations", "mine"]);
+      qc.setQueryData<DelegationRecord[]>(["delegations", "mine"], (old) =>
+        (old ?? []).filter((d) => d.id !== delegationId)
+      );
+      return { previous };
     },
-    onError: (err) => toast.error(extractApiError(err, "Failed to dismiss delegation")),
+    onError: (err, delegationId, context: any) => {
+      toast.error(extractApiError(err, "Failed to dismiss delegation"));
+      if (context?.previous) {
+        qc.setQueryData(["delegations", "mine"], context.previous);
+      }
+    },
+    onSettled: () => {
+      qc.refetchQueries({ queryKey: ["delegations", "mine"] });
+    },
   });
 
   const tabs = [

@@ -59,6 +59,7 @@ services:
       - MEDIA_ROOT=/app/media
       - NGROK_URL=${NGROK_URL}
       - ALLOWED_HOSTS=${ALLOWED_HOSTS:-localhost,127.0.0.1,backend,frontend,nginx},.ngrok-free.dev
+      - TZ=Africa/Nairobi
     volumes:
       - .:/app
       - media_files:/app/media
@@ -86,6 +87,7 @@ services:
       - ELASTICSEARCH_URL=http://elasticsearch:9200
       - MEDIA_ROOT=/app/media
       - DJANGO_SETTINGS_MODULE=IDM.settings
+      - TZ=Africa/Nairobi
     volumes:
       - .:/app
       - media_files:/app/media
@@ -111,6 +113,7 @@ services:
       - ELASTICSEARCH_URL=http://elasticsearch:9200
       - MEDIA_ROOT=/app/media
       - DJANGO_SETTINGS_MODULE=IDM.settings
+      - TZ=Africa/Nairobi
     volumes:
       - .:/app
       - media_files:/app/media
@@ -147,6 +150,7 @@ services:
       - ELASTICSEARCH_URL=http://elasticsearch:9200
       - MEDIA_ROOT=/app/media
       - DJANGO_SETTINGS_MODULE=IDM.settings
+      - TZ=Africa/Nairobi
 
       # ── OCR engine selection ──────────────────────────────────────────────
       # Options: "paddle" (default) | "tesseract" | "textract"
@@ -207,6 +211,7 @@ services:
       - LIBREOFFICE_TIMEOUT=120
       # Warm, reusable LibreOffice profile (persisted) → faster Office previews
       - LIBREOFFICE_PROFILE_DIR=/var/cache/lo-preview
+      - TZ=Africa/Nairobi
     volumes:
       - .:/app
       - media_files:/app/media

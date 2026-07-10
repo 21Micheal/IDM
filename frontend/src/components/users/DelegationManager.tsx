@@ -240,11 +240,17 @@ export function DelegationList({
   return (
     <div className="space-y-3">
       {delegations.map((delegation) => {
+        const now = new Date();
+        const endsAt = new Date(delegation.ends_at);
+        const hasEnded = now > endsAt;
+        
         const status = delegation.is_current
           ? { label: "Active now", tone: "bg-emerald-500/10 text-emerald-600 border-emerald-500/20" }
-          : delegation.is_active
-            ? { label: "Scheduled", tone: "bg-primary/10 text-primary border-primary/20" }
-            : { label: "Ended", tone: "bg-muted text-muted-foreground border-border" };
+          : hasEnded
+            ? { label: "Ended", tone: "bg-muted text-muted-foreground border-border" }
+            : delegation.is_active
+              ? { label: "Scheduled", tone: "bg-primary/10 text-primary border-primary/20" }
+              : { label: "Ended", tone: "bg-muted text-muted-foreground border-border" };
 
         return (
           <div
@@ -278,7 +284,7 @@ export function DelegationList({
               )}
             </div>
             <div className="flex gap-2 self-start sm:self-auto">
-              {delegation.is_active && (
+              {delegation.is_active && !hasEnded && (
                 <button
                   type="button"
                   onClick={() => onDisable(delegation.id)}
@@ -289,7 +295,7 @@ export function DelegationList({
                   Disable
                 </button>
               )}
-              {!delegation.is_active && onDismiss && (
+              {(!delegation.is_active || hasEnded) && onDismiss && (
                 <button
                   type="button"
                   onClick={() => onDismiss(delegation.id)}

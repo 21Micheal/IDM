@@ -13,7 +13,7 @@
  *  - Field Library: UniFi-style grouped, collapsible, searchable palette
  *    (Input / Choice / Reference / Advanced / Layout) with per-group counts.
  *  - Wider canvas (max-w-6xl) and wider Inspector (400px).
- *  - Inspector now has "Field Properties" / "Advanced Properties" tabs
+ *  - Inspector now has "Field Properties" / "Advanced Properties"tabs
  *    (tooltip, default value, regex, min/max, min/maxLength, conditional
  *    visibility — "show this field only when X equals Y").
  *  - Data Table is no longer decorative: every column opens a FULL
@@ -117,6 +117,13 @@ export interface TableColumn {
   referenceSource?: string;    // e.g. "users", "departments", "vendors"
   readonly?: boolean;
   hidden?: boolean;
+  /* Calculated column value — same grammar/engine as TemplateField.calc, but
+   * evaluated per table ROW: the scope is that row's other column values
+   * plus every top-level form field (so a column formula can reference both
+   * a sibling cell in its own row, e.g. `qty * unit_price`, and a form-level
+   * field, e.g. `daily_subsistence_allowance` copied into every row — see
+   * the UniFi "DSA Amount"column). Builder UI marks such columns read-only. */
+  calc?: CalcConfig | null;
   /* SunSystems binding for table columns (journal line column roles). */
   sunsystems?: ColumnFinanceBinding;
 }
@@ -135,13 +142,13 @@ export interface FieldFinanceBinding {
   counterDc?: "D" | "C";
   // Budget role (live-check side) — independent of the journal role, so one
   // amount field can both post a journal line AND be the budget-checked amount.
-  // See FINANCE_BUDGET_ROLES. ("budget_amount"/"budget_account" were the old
+  // See FINANCE_BUDGET_ROLES. ("budget_amount"/"budget_account"were the old
   // combined `role` values; migrated to this on load — see normalizeField.)
   budgetRole?: string;
 }
 export interface ColumnFinanceBinding {
   role?: string;            // see FINANCE_COLUMN_ROLES
-  account?: string;         // for role "account_code" used as a constant fallback
+  account?: string;         // for role "account_code"used as a constant fallback
   analysisNumber?: number;  // for role "analysis" → AnalysisCode{n}
 }
 
@@ -211,7 +218,7 @@ function summarizeCondition(c: VisibilityCondition): string {
 
 function summarizeRuleGroup(g?: RuleGroup | null): string {
   if (!g || g.conditions.length === 0) return "";
-  return g.conditions.map(summarizeCondition).join(g.combinator === "or" ? " OR " : " AND ");
+  return g.conditions.map(summarizeCondition).join(g.combinator === "or" ? "OR " : "AND ");
 }
 
 function ruleGroupHasConditions(g?: RuleGroup | null): boolean {
@@ -411,6 +418,18 @@ function slugify(s: string) {
   return s.toLowerCase().replace(/[^a-z0-9]+/g, "_").replace(/^_+|_+$/g, "").slice(0, 50);
 }
 
+/* Same normalization as slugify() but used while the person is actively
+ * typing an ID (field key / column key). slugify() trims a trailing
+ * underscore on every call, which — re-run on every keystroke via a
+ * controlled input — made it impossible to type "expense_"at all: the
+ * underscore was stripped the instant it became the last character, and
+ * only "stuck"once a further character pushed it out of trailing position.
+ * This variant collapses invalid runs to a single underscore but never
+ * trims leading/trailing underscores, so what you type is what you get. */
+function slugifyLive(s: string) {
+  return s.toLowerCase().replace(/[^a-z0-9_]+/g, "_").slice(0, 50);
+}
+
 function toDocTypeCode(name: string) {
   return name.toUpperCase().trim().replace(/\s+/g, "_").replace(/[^A-Z0-9_]/g, "").replace(/_+/g, "_").replace(/^_|_$/g, "");
 }
@@ -431,7 +450,7 @@ const FORMULA_FIELD_TYPES = new Set<string>([
 ]);
 
 /* ============================================================
- * Quick "create document type" modal — unchanged from v2
+ * Quick "create document type"modal — unchanged from v2
  * ============================================================ */
 const QUICK_TITLE_FIELD_OPTIONS = [
   { key: "filename",         label: "File name (default)" },
@@ -475,7 +494,7 @@ function CreateDocTypeQuickModal({
       }),
     onSuccess: ({ data }: { data: any }) => {
       qc.invalidateQueries({ queryKey: ["document-types"] });
-      toast.success(`Document type "${dname}" created`);
+      toast.success(`Document type "${dname}"created`);
       onCreated({ id: data.id, name: data.name, code: data.code });
     },
     onError: (err: any) => {
@@ -504,7 +523,7 @@ function CreateDocTypeQuickModal({
         <div className="p-5 space-y-4">
           <div className="space-y-1.5">
             <label className="text-xs font-semibold uppercase tracking-wider text-[#5E6870]">Display name <span className="text-red-400 normal-case font-normal">*</span></label>
-            <input value={dname} onChange={(e) => { setDname(e.target.value); setCode(toDocTypeCode(e.target.value)); }} placeholder="e.g. Supplier Invoice" autoFocus className={iCls} />
+            <input value={dname} onChange={(e) => { setDname(e.target.value); setCode(toDocTypeCode(e.target.value)); }} placeholder="e.g. Supplier Invoice"autoFocus className={iCls} />
           </div>
           <div className="space-y-1.5">
             <label className="text-xs font-semibold uppercase tracking-wider text-[#5E6870]">Code <span className="text-red-400 normal-case font-normal">*</span></label>
@@ -548,6 +567,7 @@ function CreateDocTypeQuickModal({
 
 function cellPlaceholder(c: TableColumn): string {
   const t = c.type ?? "text";
+  if (c.calc?.expression) return `ƒx = ${c.calc.expression}`;
   if (c.defaultValue) return c.defaultValue;
   switch (t) {
     case "number":   return "0";
@@ -801,7 +821,7 @@ function compileSunSystems(template: Template): SunSystemsConfig | undefined {
   const descSpec = valueSpec(byRole("description"));
   const postingKind = ui.postingKind ?? "journal";
 
-  // Journal lines: header amount fields + table "journal_lines" repeat blocks.
+  // Journal lines: header amount fields + table "journal_lines"repeat blocks.
   // Each entry carries a hidden _fieldKey so per-stage fieldKeys filters can match.
   const lines: Record<string, unknown>[] = [];
   for (const f of fields) {
@@ -926,7 +946,7 @@ function compileSunSystems(template: Template): SunSystemsConfig | undefined {
             analysis10_category: { const: ui.analysis10Category ?? "11" },
             analysis10_code: { const: ui.analysis10Code ?? "E" },
             // quantity / unit_price: only emit when the operator has set them;
-            // the backend defaults quantity to "1" and unit_price to the total amount.
+            // the backend defaults quantity to "1"and unit_price to the total amount.
             ...(ui.quantity ? { quantity: { const: ui.quantity } } : {}),
             ...(ui.unitPrice ? { unit_price: { const: ui.unitPrice } } : {}),
             // VLAB numbers: only emit when explicitly set; backend defaults to 1 and 2.
@@ -1066,7 +1086,7 @@ function Palette() {
                   <ChevronDown className={cn("h-3 w-3 text-[#5E6870] transition-transform", !open && "-rotate-90")} />
                   <span className="text-[11px] font-semibold uppercase tracking-wider text-[#1F2933]">{g.label}</span>
                 </span>
-                <span className="rounded bg-[#E5E8EB] px-1.5 py-0.5 text-[10px] font-semibold text-[#5E6870]">{items.length}</span>
+                <span className="bg-[#E5E8EB] px-1.5 py-0.5 text-[10px] font-semibold text-[#5E6870]">{items.length}</span>
               </button>
               {open && (
                 <div className="flex flex-col">
@@ -1101,19 +1121,19 @@ function FieldPreview({ field, onConfigureColumn, onAddColumn, onRemoveColumn, o
   onMoveColumn?: (colId: string, dir: "left" | "right") => void;
   onUpdateColumn?: (colId: string, patch: Partial<TableColumn>) => void;
 }) {
-  const inputPreview = "h-8 rounded border border-zinc-200 bg-white px-3 text-xs text-zinc-400 flex items-center";
+  const inputPreview = "h-8  border border-zinc-200 bg-white px-3 text-xs text-zinc-400 flex items-center";
   switch (field.type) {
     case "heading":
       return <div className="text-sm font-bold text-zinc-800">{field.label || "Heading"}</div>;
     case "divider":
       return <div className="h-px w-full bg-zinc-200 my-1" />;
     case "textarea":
-      return <div className="h-14 rounded border border-zinc-200 bg-white px-3 py-2 text-xs text-zinc-400">{field.placeholder || "Long text…"}</div>;
+      return <div className="h-14 border border-zinc-200 bg-white px-3 py-2 text-xs text-zinc-400">{field.placeholder || "Long text…"}</div>;
     case "boolean":
     case "checkbox":
       return (
         <label className="flex items-center gap-2 text-xs text-zinc-700">
-          <span className="h-3.5 w-3.5 rounded border border-zinc-300 bg-white flex-shrink-0" />
+          <span className="h-3.5 w-3.5 border border-zinc-300 bg-white flex-shrink-0" />
           {field.label}
         </label>
       );
@@ -1137,9 +1157,9 @@ function FieldPreview({ field, onConfigureColumn, onAddColumn, onRemoveColumn, o
     case "table": {
       const cols = field.columns ?? [];
       return (
-        <div className="rounded-lg border border-[#C8CDD2] overflow-hidden bg-white shadow-sm">
+        <div className="border border-[#AEB5BB] overflow-hidden bg-white">
           {/* Header bar */}
-          <div className="flex items-center justify-between gap-2 border-b border-[#C8CDD2] bg-[#EEF6FB] px-3 py-1.5">
+          <div className="flex items-center justify-between gap-2 border-b border-[#AEB5BB] bg-[#EEF6FB] px-3 py-2">
             <div className="flex items-center gap-1.5">
               <Table2 className="h-3.5 w-3.5 text-[#287EAD]" />
               <span className="text-[11px] font-semibold text-[#287EAD]">
@@ -1148,7 +1168,7 @@ function FieldPreview({ field, onConfigureColumn, onAddColumn, onRemoveColumn, o
             </div>
             <button
               onClick={(e) => { e.stopPropagation(); onAddColumn?.(); }}
-              className="flex items-center gap-1 rounded border border-[#287EAD]/40 bg-white px-2 py-0.5 text-[10px] font-semibold text-[#287EAD] hover:bg-[#287EAD] hover:text-white transition-colors"
+              className="flex items-center gap-1 border border-[#287EAD]/40 bg-white px-2 py-1 text-[10px] font-semibold text-[#287EAD] hover:bg-[#287EAD] hover:text-white transition-colors"
               title="Add column"
             >
               <Plus className="h-3 w-3" /> Add column
@@ -1158,7 +1178,7 @@ function FieldPreview({ field, onConfigureColumn, onAddColumn, onRemoveColumn, o
           <div className="overflow-x-auto">
             <div className="min-w-max">
               {/* Column headers */}
-              <div className="flex border-b border-[#C8CDD2] bg-[#F3F5F6]">
+              <div className="flex border-b border-[#AEB5BB] bg-[#F0F2F4]">
                 {cols.map((c, idx) => {
                   const ColIcon = ({
                     text: Type, textarea: AlignLeft, number: Hash, currency: Hash,
@@ -1170,35 +1190,38 @@ function FieldPreview({ field, onConfigureColumn, onAddColumn, onRemoveColumn, o
                     <div
                       key={c.id}
                       onClick={(e) => { e.stopPropagation(); onConfigureColumn?.(c.id); }}
-                      className="group/col w-[200px] flex-shrink-0 border-r border-[#C8CDD2] last:border-0 cursor-pointer hover:bg-[#D6EAF5] transition-colors"
+                      className="group/col w-[230px] flex-shrink-0 border-r border-[#C8CDD2] last:border-0 cursor-pointer hover:bg-[#D6EAF5] transition-colors"
                       title="Click to configure column"
                     >
-                      <div className="flex items-center gap-1.5 px-3 py-2.5">
-                        <ColIcon className="h-3 w-3 flex-shrink-0 text-[#287EAD]" />
+                      <div className="flex items-center gap-2 px-3.5 py-3">
+                        <ColIcon className="h-3.5 w-3.5 flex-shrink-0 text-[#287EAD]" />
                         <input
                           value={c.label}
                           onClick={(e) => e.stopPropagation()}
                           onChange={(e) => onUpdateColumn?.(c.id, { label: e.target.value })}
-                          className="min-w-0 flex-1 truncate bg-transparent text-xs font-semibold text-[#1F2933] outline-none focus:bg-white focus:px-1 focus:rounded"
+                          className="min-w-0 flex-1 truncate bg-transparent text-xs font-semibold text-[#1F2933] outline-none focus:bg-white focus:px-1"
                         />
                         {c.required && <span className="text-red-500 flex-shrink-0 text-[10px]">*</span>}
+                        {c.calc?.expression && (
+                          <span className="bg-emerald-50 px-1 py-0.5 text-[8px] font-bold text-emerald-700 border border-emerald-200 flex-shrink-0" title="Calculated column">ƒx</span>
+                        )}
                       </div>
                       {/* Column actions on hover */}
-                      <div className="flex items-center gap-0.5 px-3 pb-1.5 opacity-0 transition group-hover/col:opacity-100">
+                      <div className="flex items-center gap-0.5 px-3.5 pb-2 opacity-0 transition group-hover/col:opacity-100">
                         <button onClick={(e) => { e.stopPropagation(); onConfigureColumn?.(c.id); }} title="Configure"
-                                className="rounded p-0.5 text-[#5E6870] hover:bg-[#287EAD]/10 hover:text-[#287EAD]">
+                                className="p-0.5 text-[#5E6870] hover:bg-[#287EAD]/10 hover:text-[#287EAD]">
                           <Wrench className="h-3 w-3" />
                         </button>
                         <button onClick={(e) => { e.stopPropagation(); onMoveColumn?.(c.id, "left"); }} disabled={idx === 0}
-                                title="Move left" className="rounded p-0.5 text-[#5E6870] hover:bg-[#287EAD]/10 disabled:opacity-20">
+                                title="Move left" className="p-0.5 text-[#5E6870] hover:bg-[#287EAD]/10 disabled:opacity-20">
                           <ChevronUp className="h-3 w-3 -rotate-90" />
                         </button>
                         <button onClick={(e) => { e.stopPropagation(); onMoveColumn?.(c.id, "right"); }} disabled={idx === (cols.length) - 1}
-                                title="Move right" className="rounded p-0.5 text-[#5E6870] hover:bg-[#287EAD]/10 disabled:opacity-20">
+                                title="Move right" className="p-0.5 text-[#5E6870] hover:bg-[#287EAD]/10 disabled:opacity-20">
                           <ChevronDown className="h-3 w-3 -rotate-90" />
                         </button>
                         <button onClick={(e) => { e.stopPropagation(); onRemoveColumn?.(c.id); }} title="Remove"
-                                className="rounded p-0.5 text-[#5E6870] hover:bg-red-50 hover:text-red-500">
+                                className="p-0.5 text-[#5E6870] hover:bg-red-50 hover:text-red-500">
                           <Trash2 className="h-3 w-3" />
                         </button>
                       </div>
@@ -1213,7 +1236,7 @@ function FieldPreview({ field, onConfigureColumn, onAddColumn, onRemoveColumn, o
                     <div
                       key={c.id}
                       onClick={(e) => { e.stopPropagation(); onConfigureColumn?.(c.id); }}
-                      className="w-[200px] flex-shrink-0 px-3 py-2 text-xs text-[#8C969E] border-r border-[#E5E8EB] last:border-0 cursor-pointer hover:bg-[#EEF6FB] hover:text-[#287EAD] transition-colors truncate"
+                      className="w-[230px] flex-shrink-0 px-3.5 py-3 text-xs text-[#8C969E] border-r border-[#E5E8EB] last:border-0 cursor-pointer hover:bg-[#EEF6FB] hover:text-[#287EAD] transition-colors truncate"
                       title={`Click to configure "${c.label}"`}
                     >
                       {cellPlaceholder(c)}
@@ -1233,9 +1256,9 @@ function FieldPreview({ field, onConfigureColumn, onAddColumn, onRemoveColumn, o
     }
     case "file":
     case "image":
-      return <div className="flex h-10 items-center justify-center rounded border border-dashed border-zinc-200 bg-zinc-50 text-xs text-zinc-400"><Paperclip className="h-3 w-3 mr-1.5" />Attach file</div>;
+      return <div className="flex h-10 items-center justify-center border border-dashed border-zinc-200 bg-zinc-50 text-xs text-zinc-400"><Paperclip className="h-3 w-3 mr-1.5" />Attach file</div>;
     case "signature":
-      return <div className="flex h-12 items-center justify-center rounded border border-dashed border-zinc-200 bg-zinc-50 text-xs text-zinc-400"><Pencil className="h-3 w-3 mr-1.5" />Signature</div>;
+      return <div className="flex h-12 items-center justify-center border border-dashed border-zinc-200 bg-zinc-50 text-xs text-zinc-400"><Pencil className="h-3 w-3 mr-1.5" />Signature</div>;
     case "currency":
       return <div className={cn(inputPreview, "gap-1")}><span className="text-zinc-500">{field.currencySymbol ?? "KSh"}</span>{field.placeholder || "0.00"}</div>;
     case "url":
@@ -1308,42 +1331,42 @@ function FieldCard({
     <div className={cn("relative flex items-stretch", isDragging && "opacity-40")}
          style={{ gridColumn: `span ${field.type === "table" ? 12 : (field.colSpan ?? 1)} / span ${field.type === "table" ? 12 : (field.colSpan ?? 1)}` }}>
       <div ref={dropBefore.setNodeRef}
-           className={cn("w-1 shrink-0 rounded-full transition-all", dropBefore.isOver ? "bg-[#287EAD]" : "bg-transparent")} />
+           className={cn("w-1 shrink-0 transition-all", dropBefore.isOver ? "bg-[#287EAD]" : "bg-transparent")} />
       <div onClick={(e) => { e.stopPropagation(); onSelect(); }}
            className={cn(
-             "group relative flex-1 rounded-lg border bg-white p-3 transition-all cursor-pointer",
-             isSelected ? "border-[#287EAD] ring-2 ring-[#287EAD]/20 shadow-sm" : "border-slate-200 hover:border-[#287EAD]/60 hover:shadow-sm",
+             "group relative flex-1 border bg-white p-3 transition-all cursor-pointer",
+             isSelected ? "border-[#287EAD] ring-2 ring-[#287EAD]/20 shadow-sm" : "border-slate-300 hover:border-[#287EAD]/60 hover:shadow-sm",
            )}>
         <div className="mb-2 flex items-center justify-between gap-2">
           <div ref={setDragRef} {...listeners} {...attributes}
                className="flex items-center gap-1.5 text-xs font-semibold text-slate-700 cursor-grab active:cursor-grabbing flex-1 min-w-0 overflow-hidden">
             <GripVertical className="h-3.5 w-3.5 text-slate-300 flex-shrink-0" />
-            <span className="truncate min-w-0 flex-1" title={field.label}>{field.label || <em className="font-normal text-slate-400">Unlabelled</em>}</span>
-            {field.required && <span className="text-red-500 flex-shrink-0">*</span>}
-            <span className="ml-1 rounded bg-[#EEF6FB] px-1.5 py-0.5 text-[9px] uppercase tracking-wider text-[#287EAD] flex-shrink-0 border border-[#287EAD]/20">
-              {FIELD_META[field.type]?.label ?? field.type}
+            {(() => { const TypeIcon = ICONS[field.type]; return <TypeIcon className="h-3.5 w-3.5 text-[#287EAD] flex-shrink-0" />; })()}
+            <span className="truncate min-w-0 flex-1" title={`${field.label || "Unlabelled"} — ${FIELD_META[field.type]?.label ?? field.type}`}>
+              {field.label || <em className="font-normal text-slate-400">Unlabelled</em>}
             </span>
+            {field.required && <span className="text-red-500 flex-shrink-0">*</span>}
             {field.calc?.expression && (
-              <span className="rounded bg-emerald-50 px-1.5 py-0.5 text-[9px] font-semibold text-emerald-700 border border-emerald-200 flex-shrink-0" title={`= ${field.calc.expression}`}>ƒx</span>
+              <span className="bg-emerald-50 px-1.5 py-0.5 text-[9px] font-semibold text-emerald-700 border border-emerald-200 flex-shrink-0" title="Calculated field">ƒx</span>
             )}
             {field.hidden ? (
-              <span className="rounded bg-slate-100 px-1.5 py-0.5 text-[9px] font-semibold text-slate-500 border border-slate-300 flex-shrink-0" title="Always hidden from people filling the form">hidden</span>
+              <span className="bg-slate-100 px-1.5 py-0.5 text-[9px] font-semibold text-slate-500 border border-slate-300 flex-shrink-0" title="Always hidden from people filling the form">hidden</span>
             ) : ruleGroupHasConditions(field.visibleWhen) && (
-              <span className="rounded bg-amber-50 px-1.5 py-0.5 text-[9px] font-semibold text-amber-700 border border-amber-200 flex-shrink-0" title={`Show when ${summarizeRuleGroup(field.visibleWhen)}`}>cond</span>
+              <span className="bg-amber-50 px-1.5 py-0.5 text-[9px] font-semibold text-amber-700 border border-amber-200 flex-shrink-0" title={`Show when ${summarizeRuleGroup(field.visibleWhen)}`}>cond</span>
             )}
             {field.readonly ? (
-              <span className="rounded bg-slate-100 px-1.5 py-0.5 text-[9px] font-semibold text-slate-500 border border-slate-300 flex-shrink-0" title="Always read-only">read-only</span>
+              <span className="bg-slate-100 px-1.5 py-0.5 text-[9px] font-semibold text-slate-500 border border-slate-300 flex-shrink-0" title="Always read-only">read-only</span>
             ) : ruleGroupHasConditions(field.editableWhen) && (
-              <span className="rounded bg-violet-50 px-1.5 py-0.5 text-[9px] font-semibold text-violet-700 border border-violet-200 flex-shrink-0" title={`Editable when ${summarizeRuleGroup(field.editableWhen)}`}>edit-cond</span>
+              <span className="bg-violet-50 px-1.5 py-0.5 text-[9px] font-semibold text-violet-700 border border-violet-200 flex-shrink-0" title={`Editable when ${summarizeRuleGroup(field.editableWhen)}`}>edit-cond</span>
             )}
           </div>
           <div className="flex items-center gap-0.5 opacity-0 transition group-hover:opacity-100 flex-shrink-0">
             <button onClick={(e) => { e.stopPropagation(); onDuplicate(); }} title="Duplicate"
-                    className="rounded p-1 text-slate-400 hover:bg-slate-100 hover:text-slate-700">
+                    className="p-1 text-slate-400 hover:bg-slate-100 hover:text-slate-700">
               <Copy className="h-3 w-3" />
             </button>
             <button onClick={(e) => { e.stopPropagation(); onRemove(); }} title="Remove"
-                    className="rounded p-1 text-slate-400 hover:bg-red-50 hover:text-red-500">
+                    className="p-1 text-slate-400 hover:bg-red-50 hover:text-red-500">
               <Trash2 className="h-3 w-3" />
             </button>
           </div>
@@ -1362,12 +1385,12 @@ function FieldCard({
         </div>
         {field.type !== "table" && (
           <div onMouseDown={startResize}
-               className="absolute right-0 top-0 h-full w-1.5 cursor-col-resize rounded-r-lg opacity-0 transition group-hover:bg-[#287EAD]/40 group-hover:opacity-100"
+               className="absolute right-0 top-0 h-full w-1.5 cursor-col-resize opacity-0 transition group-hover:bg-[#287EAD]/40 group-hover:opacity-100"
                title="Drag to resize" />
         )}
       </div>
       <div ref={dropAfter.setNodeRef}
-           className={cn("w-1 shrink-0 rounded-full transition-all", dropAfter.isOver ? "bg-[#287EAD]" : "bg-transparent")} />
+           className={cn("w-1 shrink-0 transition-all", dropAfter.isOver ? "bg-[#287EAD]" : "bg-transparent")} />
     </div>
   );
 }
@@ -1380,8 +1403,8 @@ function SectionDropZone({ sectionId }: { sectionId: string }) {
   return (
     <div ref={setNodeRef}
          className={cn(
-           "col-span-12 flex h-11 items-center justify-center rounded-lg border-2 border-dashed text-xs font-medium transition",
-           isOver ? "border-[#287EAD] bg-[#EEF6FB] text-[#287EAD]" : "border-slate-200 text-slate-400 hover:border-[#287EAD]/60",
+           "col-span-12 flex h-11 items-center justify-center border-2 border-dashed text-xs font-medium transition",
+           isOver ? "border-[#287EAD] bg-[#EEF6FB] text-[#287EAD]" : "border-slate-300 text-slate-400 hover:border-[#287EAD]/60",
          )}>
       <Plus className="h-3.5 w-3.5 mr-1.5" /> Drop a field here
     </div>
@@ -1422,17 +1445,17 @@ function SectionBlock(props: {
   return (
     <section onClick={() => props.onSelect(section.id)}
              className={cn(
-               "rounded-xl border-2 bg-white shadow-sm transition-all overflow-hidden",
+               "border-2 bg-white shadow-sm transition-all overflow-hidden",
                isSelected ? "border-[#287EAD] ring-2 ring-[#287EAD]/20" : "border-[#C8CDD2] hover:border-[#287EAD]/50",
              )}>
       <header className="flex items-start gap-3 border-b border-[#D0D5DA] bg-[#F3F5F6] px-5 py-3.5">
         <div className="flex flex-col gap-0.5 mt-1 flex-shrink-0">
           <button onClick={(e) => { e.stopPropagation(); props.onMoveSection(section.id, "up"); }} disabled={props.isFirst}
-                  className="rounded p-0.5 text-slate-500 hover:bg-white hover:text-slate-800 disabled:opacity-20 transition-colors">
+                  className="p-0.5 text-slate-500 hover:bg-white hover:text-slate-800 disabled:opacity-20 transition-colors">
             <ChevronUp className="h-3.5 w-3.5" />
           </button>
           <button onClick={(e) => { e.stopPropagation(); props.onMoveSection(section.id, "down"); }} disabled={props.isLast}
-                  className="rounded p-0.5 text-slate-500 hover:bg-white hover:text-slate-800 disabled:opacity-20 transition-colors">
+                  className="p-0.5 text-slate-500 hover:bg-white hover:text-slate-800 disabled:opacity-20 transition-colors">
             <ChevronDown className="h-3.5 w-3.5" />
           </button>
         </div>
@@ -1443,18 +1466,18 @@ function SectionBlock(props: {
                    onClick={(e) => e.stopPropagation()}
                    className="min-w-0 flex-1 bg-transparent text-sm font-bold text-[#1F2933] outline-none border-b border-transparent focus:border-[#287EAD] pb-0.5 transition-colors" />
             {section.hidden ? (
-              <span className="rounded bg-slate-100 px-1.5 py-0.5 text-[9px] font-semibold text-slate-500 border border-slate-300 flex-shrink-0" title="Section always hidden from people filling the form">hidden</span>
+              <span className="bg-slate-100 px-1.5 py-0.5 text-[9px] font-semibold text-slate-500 border border-slate-300 flex-shrink-0" title="Section always hidden from people filling the form">hidden</span>
             ) : section.visibleToGroups && section.visibleToGroups.length > 0 ? (
-              <span className="rounded bg-[#EEF6FB] px-1.5 py-0.5 text-[9px] font-semibold text-[#287EAD] border border-[#287EAD]/30 flex-shrink-0" title={`Visible only to: ${section.visibleToGroups.map((g) => g.name).join(", ")}`}>
+              <span className="bg-[#EEF6FB] px-1.5 py-0.5 text-[9px] font-semibold text-[#287EAD] border border-[#287EAD]/30 flex-shrink-0" title={`Visible only to: ${section.visibleToGroups.map((g) => g.name).join(", ")}`}>
                 {section.visibleToGroups.length === 1 ? section.visibleToGroups[0].name : `${section.visibleToGroups.length} groups`}
               </span>
             ) : ruleGroupHasConditions(section.visibleWhen) && (
-              <span className="rounded bg-amber-50 px-1.5 py-0.5 text-[9px] font-semibold text-amber-700 border border-amber-200 flex-shrink-0" title={`Section shows when ${summarizeRuleGroup(section.visibleWhen)}`}>cond</span>
+              <span className="bg-amber-50 px-1.5 py-0.5 text-[9px] font-semibold text-amber-700 border border-amber-200 flex-shrink-0" title={`Section shows when ${summarizeRuleGroup(section.visibleWhen)}`}>cond</span>
             )}
             {section.readonly ? (
-              <span className="rounded bg-slate-100 px-1.5 py-0.5 text-[9px] font-semibold text-slate-500 border border-slate-300 flex-shrink-0" title="Section always read-only">read-only</span>
+              <span className="bg-slate-100 px-1.5 py-0.5 text-[9px] font-semibold text-slate-500 border border-slate-300 flex-shrink-0" title="Section always read-only">read-only</span>
             ) : ruleGroupHasConditions(section.editableWhen) && (
-              <span className="rounded bg-violet-50 px-1.5 py-0.5 text-[9px] font-semibold text-violet-700 border border-violet-200 flex-shrink-0" title={`Section editable when ${summarizeRuleGroup(section.editableWhen)}`}>edit-cond</span>
+              <span className="bg-violet-50 px-1.5 py-0.5 text-[9px] font-semibold text-violet-700 border border-violet-200 flex-shrink-0" title={`Section editable when ${summarizeRuleGroup(section.editableWhen)}`}>edit-cond</span>
             )}
           </div>
           <input value={section.description ?? ""}
@@ -1466,18 +1489,18 @@ function SectionBlock(props: {
         <button onClick={(e) => { e.stopPropagation(); props.onSelect(section.id); }}
                 title="Section settings"
                 className={cn(
-                  "rounded-md p-1.5 transition-colors flex-shrink-0",
+                  "p-1.5 transition-colors flex-shrink-0",
                   isSelected ? "bg-[#287EAD] text-white" : "text-slate-500 hover:bg-white hover:text-[#287EAD]",
                 )}>
           <Settings className="h-4 w-4" />
         </button>
         <button onClick={(e) => { e.stopPropagation(); setCollapsed((c) => !c); }}
                 title={collapsed ? "Expand" : "Collapse"}
-                className="rounded-md p-1.5 text-slate-500 hover:bg-white hover:text-slate-800 transition-colors flex-shrink-0">
+                className="p-1.5 text-slate-500 hover:bg-white hover:text-slate-800 transition-colors flex-shrink-0">
           {collapsed ? <ChevronDown className="h-4 w-4" /> : <ChevronUp className="h-4 w-4" />}
         </button>
         <button onClick={(e) => { e.stopPropagation(); props.onRemoveSection(section.id); }}
-                className="rounded-md p-1.5 text-slate-500 hover:bg-red-50 hover:text-red-600 transition-colors flex-shrink-0"
+                className="p-1.5 text-slate-500 hover:bg-red-50 hover:text-red-600 transition-colors flex-shrink-0"
                 title="Remove section">
           <Trash2 className="h-4 w-4" />
         </button>
@@ -1551,7 +1574,7 @@ function Canvas(props: {
         />
       ))}
       <button onClick={(e) => { e.stopPropagation(); props.onAddSection(); }}
-              className="flex items-center justify-center gap-2 rounded-xl border-2 border-dashed border-slate-200 bg-white py-5 text-sm font-semibold text-slate-400 transition hover:border-[#287EAD] hover:bg-[#EEF6FB] hover:text-[#287EAD]">
+              className="flex items-center justify-center gap-2 border-2 border-dashed border-slate-300 bg-white py-5 text-sm font-semibold text-slate-400 transition hover:border-[#287EAD] hover:bg-[#EEF6FB] hover:text-[#287EAD]">
         <Plus className="h-4 w-4" /> Add Section
       </button>
     </div>
@@ -1579,11 +1602,131 @@ const COL_TYPES: Array<{ value: TableColumnType; label: string }> = [
   { value: "file",      label: "File / Attachment" },
 ];
 
+/* Formula editor for a calculated TABLE COLUMN. Same grammar/engine as the
+ * top-level CalcFormulaEditor, but the chip picker offers two scopes: this
+ * row's OTHER columns (e.g. `qty * unit_price`) and the form's top-level
+ * fields (e.g. `daily_subsistence_allowance`, copied into every row — this
+ * is exactly how UniFi's "DSA Amount"column formula works). Both resolve
+ * per-row on the server (apps/templates_engine/conditions.py
+ * compute_calculated_values), so a formula referencing a top-level field sees
+ * that field's single value in every row, while a formula referencing a
+ * sibling column sees that specific row's cell. */
+function ColumnCalcFormulaEditor({ column, siblingColumns, formFields, onChange }: {
+  column: TableColumn;
+  siblingColumns: TableColumn[];
+  formFields: TemplateField[];
+  onChange: (calc: CalcConfig) => void;
+}) {
+  const calc = column.calc ?? { expression: "" };
+  const exprRef = useRef<HTMLTextAreaElement>(null);
+  const keyedColumns = siblingColumns.filter((c) => c.id !== column.id && c.key);
+  const keyedFormFields = formFields.filter((f) => f.key);
+  const numericColumns = siblingColumns.filter(
+    (c) => c.id !== column.id && c.key && (c.type === "number" || c.type === "currency"),
+  );
+
+  const insertToken = (key: string) => {
+    const el = exprRef.current;
+    if (!el) { onChange({ ...calc, expression: `${calc.expression}${key}` }); return; }
+    const start = el.selectionStart ?? el.value.length;
+    const end = el.selectionEnd ?? el.value.length;
+    const next = `${calc.expression.slice(0, start)}${key}${calc.expression.slice(end)}`;
+    onChange({ ...calc, expression: next });
+    requestAnimationFrame(() => { el.focus(); el.selectionStart = el.selectionEnd = start + key.length; });
+  };
+
+  // Quick sanity preview: every referenced column/field = 100.
+  const sampleScope: Record<string, number> = {};
+  keyedColumns.forEach((c) => { sampleScope[c.key] = 100; });
+  keyedFormFields.forEach((f) => { sampleScope[f.key] = 100; });
+  const previewValue = evaluateCalcExpression(calc.expression, sampleScope);
+  const showDecimals = column.type === "number" || column.type === "currency";
+  const iCls =
+    "h-9 w-full border border-[#AEB5BB] bg-white px-3 text-sm text-[#1F2933] " +
+    "placeholder:text-[#8C969E] outline-none focus:border-[#287EAD] focus:ring-1 focus:ring-[#287EAD]";
+
+  return (
+    <div className="space-y-2 border border-[#C8CDD2] bg-white p-2.5">
+      <textarea
+        ref={exprRef}
+        value={calc.expression}
+        onChange={(e) => onChange({ ...calc, expression: e.target.value })}
+        placeholder="e.g. daily_subsistence_allowance or qty * unit_price"
+        rows={2}
+        className={cn(iCls, "h-auto min-h-[52px] py-2 font-mono resize-none")}
+      />
+      {keyedColumns.length > 0 && (
+        <div className="space-y-1">
+          <span className="text-[10px] font-semibold uppercase tracking-wider text-[#5E6870]">This row's columns</span>
+          <div className="flex flex-wrap gap-1">
+            {keyedColumns.map((c) => (
+              <button key={c.id} type="button" onClick={() => insertToken(c.key)} title={`Insert ${c.key}`}
+                      className="border border-[#C8CDD2] bg-[#F6F7F8] px-1.5 py-0.5 font-mono text-[10px] text-[#287EAD] hover:border-[#287EAD] hover:bg-[#EEF6FB]">
+                {c.key}
+              </button>
+            ))}
+          </div>
+        </div>
+      )}
+      {numericColumns.length > 0 && (
+        <div className="space-y-1">
+          <span className="text-[10px] font-semibold uppercase tracking-wider text-[#5E6870]">Whole-column totals (all rows)</span>
+          <div className="flex flex-wrap gap-1">
+            {numericColumns.map((c) => (
+              <span key={c.id} className="inline-flex overflow-hidden border border-[#C8CDD2]">
+                {(["SUM", "AVG", "COUNT"] as const).map((fn) => (
+                  <button key={fn} type="button" onClick={() => insertToken(`${fn}(${c.key})`)} title={`Insert ${fn}(${c.key}) — computed across every row`}
+                          className="border-r border-[#C8CDD2] bg-[#F6F7F8] px-1.5 py-0.5 font-mono text-[10px] text-[#5E6870] last:border-r-0 hover:bg-[#EEF6FB] hover:text-[#287EAD]">
+                    {fn}({c.key})
+                  </button>
+                ))}
+              </span>
+            ))}
+          </div>
+        </div>
+      )}
+      {keyedFormFields.length > 0 && (
+        <div className="space-y-1">
+          <span className="text-[10px] font-semibold uppercase tracking-wider text-[#5E6870]">Form fields (same value in every row)</span>
+          <div className="flex flex-wrap gap-1">
+            {keyedFormFields.map((f) => (
+              <button key={f.id} type="button" onClick={() => insertToken(f.key)} title={`Insert ${f.key}`}
+                      className="border border-emerald-200 bg-emerald-50 px-1.5 py-0.5 font-mono text-[10px] text-emerald-700 hover:border-emerald-400">
+                {f.key}
+              </button>
+            ))}
+          </div>
+        </div>
+      )}
+      {keyedColumns.length === 0 && keyedFormFields.length === 0 && (
+        <p className="text-[10px] text-amber-600">Add other columns or form fields first — a formula needs something to reference.</p>
+      )}
+      {showDecimals && (
+        <div className="flex items-center gap-2 pt-1">
+          <span className="text-[11px] font-semibold uppercase tracking-wider text-[#5E6870]">Decimal places</span>
+          <input type="number" min={0} max={6} value={calc.decimals ?? 2}
+                 onChange={(e) => onChange({ ...calc, decimals: Math.max(0, Math.min(6, Number(e.target.value))) })}
+                 className={cn(iCls, "h-8 w-20")} />
+        </div>
+      )}
+      {calc.expression.trim() && (
+        <p className="text-[11px] text-[#5E6870]">
+          Sanity check (every field above = 100): <span className="font-mono font-semibold text-[#287EAD]">{String(previewValue)}</span>
+        </p>
+      )}
+      <p className="text-[10px] text-[#8C969E]">
+        Arithmetic over column/field keys — + - * / ( ), and ROUND()/ABS()/MIN()/MAX(). SUM()/AVG()/COUNT()/COLMIN()/COLMAX() total a column across every row. Re-runs authoritatively on the server at submit time.
+      </p>
+    </div>
+  );
+}
+
 function ColumnConfigModal({
-  column, siblingColumns = [], onClose, onSave, onDelete,
+  column, siblingColumns = [], formFields = [], onClose, onSave, onDelete,
 }: {
   column: TableColumn;
   siblingColumns?: TableColumn[];
+  formFields?: TemplateField[];
   onClose: () => void;
   onSave: (col: TableColumn) => void;
   onDelete: () => void;
@@ -1599,6 +1742,7 @@ function ColumnConfigModal({
   );
   const isNumeric  = draft.type === "number" || draft.type === "currency";
   const isText     = draft.type === "text" || draft.type === "textarea" || draft.type === "email" || draft.type === "phone";
+  const isCalcCol  = !!draft.calc;
 
   const iCls =
     "h-9 w-full border border-[#AEB5BB] bg-white px-3 text-sm text-[#1F2933] " +
@@ -1632,11 +1776,11 @@ function ColumnConfigModal({
         <div className="max-h-[70vh] overflow-y-auto p-6">
           {tab === "field" && (
             <div className="space-y-4">
-              <Row label="Label" required>
+              <Row label="Label"required>
                 <input className={iCls} value={draft.label} onChange={(e) => set({ label: e.target.value })} />
               </Row>
               <Row label="ID">
-                <input className={cn(iCls, "font-mono")} value={draft.key} onChange={(e) => set({ key: slugify(e.target.value) || draft.key })} />
+                <input className={cn(iCls, "font-mono")} value={draft.key} onChange={(e) => set({ key: slugifyLive(e.target.value) || draft.key })} />
               </Row>
               <Row label="Type">
                 <select value={draft.type ?? "text"}
@@ -1692,6 +1836,30 @@ function ColumnConfigModal({
                     className={iCls}
                     value={draft.sunsystems?.analysisNumber ?? 1}
                     onChange={(e) => set({ sunsystems: { ...(draft.sunsystems ?? {}), analysisNumber: Math.max(1, Math.min(10, Number(e.target.value))) } })}
+                  />
+                </Row>
+              )}
+              {(isNumeric || draft.type === "date" || draft.type === "text") && (
+                <Row label="Calculated">
+                  <div className="space-y-1">
+                    <ToggleYesNo
+                      value={isCalcCol}
+                      onChange={(v) => {
+                        if (v) set({ calc: draft.calc ?? { expression: "", decimals: isNumeric ? 2 : undefined }, readonly: true });
+                        else set({ calc: null, readonly: false });
+                      }}
+                    />
+                    <p className="text-[10px] text-[#8C969E]">Auto-derive this column's value from a formula instead of typing it.</p>
+                  </div>
+                </Row>
+              )}
+              {isCalcCol && (
+                <Row label="Formula">
+                  <ColumnCalcFormulaEditor
+                    column={draft}
+                    siblingColumns={siblingColumns}
+                    formFields={formFields}
+                    onChange={(calc) => set({ calc })}
                   />
                 </Row>
               )}
@@ -1880,7 +2048,7 @@ function InspectorRow({ label, children, hint }: { label: string; children: Reac
 }
 
 /* SunSystems binding controls for a single field (inspector). Journal role and
- * budget role are two independent axes, so e.g. an "amount spent" field can both
+ * budget role are two independent axes, so e.g. an "amount spent"field can both
  * post a journal line AND be the figure checked against the budget. For a table
  * field the journal axis offers "journal lines" (one ledger line per row, with
  * column roles set in the column editor). */
@@ -1925,7 +2093,7 @@ function FinanceBindingFields({ field, onUpdate }: {
             </InspectorRow>
           </div>
           {!isTable && (
-            <div className="space-y-1 rounded border border-dashed border-[#C8CDD2] p-2">
+            <div className="space-y-1 border border-dashed border-[#C8CDD2] p-2">
               <p className="text-[10px] font-semibold uppercase text-[#5E6870]">Counter entry (double-entry offset)</p>
               <p className="text-[10px] text-[#8C969E]">Automatically posts the balancing leg from the same amount — e.g. Dr 71001 / Cr 10101 for an imprest advance.</p>
               <div className="grid grid-cols-2 gap-2 mt-1.5">
@@ -1976,7 +2144,7 @@ interface VisibilityState {
 
 function visibilityModeOf(item: VisibilityState): VisibilityMode {
   if (item.hidden) return "hidden";
-  // A defined (even empty) list means "groups" mode is selected — keeps the
+  // A defined (even empty) list means "groups"mode is selected — keeps the
   // picker open while the user is still choosing. Other modes clear it to
   // undefined, so an empty list never lingers once a different mode is chosen.
   if (item.visibleToGroups !== undefined) return "groups";
@@ -2009,7 +2177,7 @@ function RuleGroupEditor({ group, sources, processSteps, onChange }: {
       {/* AND / OR combinator — only meaningful with 2+ conditions */}
       <div className="flex items-center gap-2">
         <span className="text-[10px] font-semibold uppercase tracking-wider text-[#5E6870]">Match</span>
-        <div className="inline-flex overflow-hidden rounded border border-[#C8CDD2]">
+        <div className="inline-flex overflow-hidden border border-[#C8CDD2]">
           {(["and", "or"] as const).map((c) => (
             <button key={c} type="button" onClick={() => onChange({ ...group, combinator: c })}
               className={cn("px-2.5 py-1 text-[11px] font-semibold uppercase",
@@ -2022,7 +2190,7 @@ function RuleGroupEditor({ group, sources, processSteps, onChange }: {
       </div>
 
       {group.conditions.map((c, i) => (
-        <div key={i} className="space-y-1.5 rounded border border-[#E5E8EB] bg-[#FAFBFC] p-2">
+        <div key={i} className="space-y-1.5 border border-[#E5E8EB] bg-[#FAFBFC] p-2">
           <div className="flex items-center gap-1.5">
             <select className={cn(inputCls, "h-8 flex-1")} value={c.source}
                     onChange={(e) => {
@@ -2035,7 +2203,7 @@ function RuleGroupEditor({ group, sources, processSteps, onChange }: {
               <option value="process_step">Process step</option>
             </select>
             <button type="button" onClick={() => removeCond(i)} title="Remove condition"
-                    className="rounded p-1 text-[#8C969E] hover:bg-red-50 hover:text-red-500">
+                    className="p-1 text-[#8C969E] hover:bg-red-50 hover:text-red-500">
               <X className="h-3.5 w-3.5" />
             </button>
           </div>
@@ -2092,7 +2260,7 @@ function RuleGroupEditor({ group, sources, processSteps, onChange }: {
  *   Always visible · Always hidden · Show only when <rule group>
  *   · Visible only to groups…   (sections only — pass `groupOptions`)
  * `sources` are the fields whose values can drive a conditional rule;
- * `processSteps` are the workflow statuses for "process step" conditions. */
+ * `processSteps` are the workflow statuses for "process step"conditions. */
 function VisibilityEditor({ value, sources, onChange, subject, groupOptions, processSteps = [] }: {
   value: VisibilityState;
   sources: { key: string; label: string }[];
@@ -2148,7 +2316,7 @@ function VisibilityEditor({ value, sources, onChange, subject, groupOptions, pro
             {groupOptions!.length === 0 && (
               <p className="text-[10px] text-amber-600">No groups defined yet.</p>
             )}
-            <div className="max-h-40 overflow-y-auto rounded border border-[#E5E8EB] divide-y divide-[#F0F2F3]">
+            <div className="max-h-40 overflow-y-auto border border-[#E5E8EB] divide-y divide-[#F0F2F3]">
               {groupOptions!.map((g) => (
                 <label key={g.id} className="flex cursor-pointer items-center gap-2 px-2 py-1.5 text-xs text-[#1F2933] hover:bg-[#F6F7F8]">
                   <input type="checkbox" checked={isGroupSelected(g.id)} onChange={() => toggleGroup(g)}
@@ -2171,7 +2339,7 @@ function VisibilityEditor({ value, sources, onChange, subject, groupOptions, pro
   );
 }
 
-/* Editability modes — the "Security" axis. `readonly` = always read-only,
+/* Editability modes — the "Security"axis. `readonly` = always read-only,
  * `editableWhen` = editable only when the group matches (read-only otherwise). */
 type EditabilityMode = "editable" | "readonly" | "conditional";
 interface EditabilityState {
@@ -2184,7 +2352,7 @@ function editabilityModeOf(item: EditabilityState): EditabilityMode {
   return "editable";
 }
 
-/* Companion to VisibilityEditor for the "Editable if / read-only" axis. Reuses
+/* Companion to VisibilityEditor for the "Editable if / read-only"axis. Reuses
  * the same rule-group editor (form-field + process-step conditions). */
 function EditabilityEditor({ value, sources, onChange, subject, processSteps = [] }: {
   value: EditabilityState;
@@ -2227,7 +2395,7 @@ function EditabilityEditor({ value, sources, onChange, subject, processSteps = [
   );
 }
 
-/* Formula editor for the four "Calculated …" field types. Lets the admin
+/* Formula editor for the four "Calculated …"field types. Lets the admin
  * write an arithmetic expression over sibling field KEYS (click a chip to
  * insert it), matching the server evaluator 1:1. Shows a quick sanity-check
  * value (every referenced field = 100) so a typo is obvious immediately,
@@ -2275,7 +2443,7 @@ function CalcFormulaEditor({ field, siblings, onUpdate }: {
           <div className="flex flex-wrap gap-1">
             {keyedSiblings.map((s) => (
               <button key={s.id} type="button" onClick={() => insertToken(s.key)} title={`Insert ${s.key}`}
-                      className="rounded border border-[#C8CDD2] bg-[#F6F7F8] px-1.5 py-0.5 font-mono text-[10px] text-[#287EAD] hover:border-[#287EAD] hover:bg-[#EEF6FB]">
+                      className="border border-[#C8CDD2] bg-[#F6F7F8] px-1.5 py-0.5 font-mono text-[10px] text-[#287EAD] hover:border-[#287EAD] hover:bg-[#EEF6FB]">
                 {s.key}
               </button>
             ))}
@@ -2348,7 +2516,7 @@ function FieldEditor({ field, onUpdate, allFields, processSteps }: {
             <input
               className={cn(inputCls, keyDuplicate && "border-red-500 focus:border-red-500 focus:ring-red-500/20", "font-mono")}
               value={field.key}
-              onChange={(e) => onUpdate({ key: slugify(e.target.value) || field.key })}
+              onChange={(e) => onUpdate({ key: slugifyLive(e.target.value) || field.key })}
             />
             {keyDuplicate && (
               <div className="flex items-center gap-1.5 text-xs text-red-500 mt-1">
@@ -2514,7 +2682,7 @@ function SectionEditor({ section, onUpdate, allFields, processSteps }: {
   const ownFieldIds = new Set(section.fields.map((f) => f.id));
   const sources = allFields.filter((f) => f.key && !ownFieldIds.has(f.id));
 
-  // RBAC groups for the "visible only to groups" mode.
+  // RBAC groups for the "visible only to groups"mode.
   const { data: groups = [] } = useQuery({
     queryKey: ["groups", "list"],
     queryFn: async () => {
@@ -2597,8 +2765,8 @@ function Inspector({ sections, selectedId, onUpdateField, onUpdateSection, onCol
       </div>
       <div className="flex-1 overflow-y-auto px-5 py-5">
         {!target && (
-          <div className="flex flex-col items-center gap-3 rounded-xl border border-dashed border-[#C8CDD2] bg-white px-6 py-10 text-center">
-            <div className="flex h-10 w-10 items-center justify-center rounded-xl bg-[#EEF6FB]">
+          <div className="flex flex-col items-center gap-3 border border-dashed border-[#C8CDD2] bg-white px-6 py-10 text-center">
+            <div className="flex h-10 w-10 items-center justify-center bg-[#EEF6FB]">
               <Sliders className="h-5 w-5 text-[#287EAD]" />
             </div>
             <div>
@@ -2629,7 +2797,7 @@ function Inspector({ sections, selectedId, onUpdateField, onUpdateSection, onCol
  * ============================================================ */
 
 const previewInputCls =
-  "h-10 w-full rounded-lg border border-slate-200 bg-white px-3 text-sm outline-none transition " +
+  "h-10 w-full border border-slate-300 bg-white px-3 text-sm outline-none transition " +
   "focus:border-[#287EAD] focus:ring-2 focus:ring-[#287EAD]/15 text-slate-800";
 
 function PreviewColumnInput({ col, value, onChange, row, disabled }: { col: TableColumn; value: string; onChange: (v: string) => void; row?: Record<string, string>; disabled?: boolean }) {
@@ -2685,35 +2853,30 @@ function PreviewColumnInput({ col, value, onChange, row, disabled }: { col: Tabl
   }
 }
 
-function PreviewTableField({ field, readOnly = false }: { field: TemplateField; readOnly?: boolean }) {
+function PreviewTableField({ field, readOnly = false, rows, onUpdateCell, onAddRow, onRemoveRow }: {
+  field: TemplateField;
+  readOnly?: boolean;
+  rows: Record<string, string>[];
+  onUpdateCell: (rowIdx: number, colKey: string, val: string) => void;
+  onAddRow: () => void;
+  onRemoveRow: (rowIdx: number) => void;
+}) {
   const cols = (field.columns ?? []).filter((c) => !c.hidden);
-  const [rows, setRows] = useState<Record<string, string>[]>(
-    Array.from({ length: field.minRows ?? 2 }, () => {
-      const r: Record<string, string> = {};
-      cols.forEach((c) => { if (c.defaultValue) r[c.key] = c.defaultValue; });
-      return r;
-    })
-  );
-  const updateCell = (rowIdx: number, key: string, val: string) =>
-    setRows((rs) => rs.map((r, i) => i === rowIdx ? { ...r, [key]: val } : r));
-  const addRow = () => {
-    const r: Record<string, string> = {};
-    cols.forEach((c) => { if (c.defaultValue) r[c.key] = c.defaultValue; });
-    setRows((rs) => [...rs, r]);
-  };
-  const removeRow = (idx: number) => setRows((rs) => rs.filter((_, i) => i !== idx));
 
   return (
     <div className="col-span-12 space-y-2">
       <label className="text-sm font-semibold text-slate-700">{field.label}{field.required && <span className="ml-1 text-red-500">*</span>}</label>
       {field.helpText && <p className="text-xs text-slate-500">{field.helpText}</p>}
-      <div className="overflow-x-auto rounded-xl border border-slate-200 bg-white">
+      <div className="overflow-x-auto border border-slate-300 bg-white">
         <table className="w-full text-sm">
           <thead>
-            <tr className="border-b border-slate-200 bg-slate-50">
+            <tr className="border-b border-slate-300 bg-slate-100">
               {cols.map((col) => (
-                <th key={col.id} className="px-3 py-2.5 text-left text-xs font-semibold text-slate-600 border-r border-slate-100 last:border-0" title={col.tooltip}>
-                  {col.label}{col.required && <span className="text-red-400 ml-0.5">*</span>}
+                <th key={col.id} className="px-4 py-3.5 text-left text-xs font-semibold text-slate-700 border-r border-slate-300 last:border-0" title={col.tooltip}>
+                  <span className="inline-flex items-center gap-1.5">
+                    {col.label}{col.required && <span className="text-red-500 ml-0.5">*</span>}
+                    {col.calc?.expression && <Calculator className="h-3 w-3 text-emerald-600 flex-shrink-0" />}
+                  </span>
                   {col.additionalText && <div className="text-[10px] font-normal text-slate-400">{col.additionalText}</div>}
                 </th>
               ))}
@@ -2722,16 +2885,16 @@ function PreviewTableField({ field, readOnly = false }: { field: TemplateField; 
           </thead>
           <tbody>
             {rows.map((row, rowIdx) => (
-              <tr key={rowIdx} className="border-b border-slate-100 last:border-0 hover:bg-slate-50/50 transition-colors">
+              <tr key={rowIdx} className="border-b border-slate-300 last:border-0 hover:bg-slate-50 transition-colors">
                 {cols.map((col) => (
-                  <td key={col.id} className="px-2 py-1 border-r border-slate-100 last:border-0">
-                    <PreviewColumnInput col={col} value={row[col.key] ?? ""} row={row} disabled={readOnly} onChange={(v) => updateCell(rowIdx, col.key, v)} />
+                  <td key={col.id} className="px-3 py-2.5 border-r border-slate-300 last:border-0">
+                    <PreviewColumnInput col={col} value={row[col.key] ?? ""} row={row} disabled={readOnly} onChange={(v) => onUpdateCell(rowIdx, col.key, v)} />
                   </td>
                 ))}
                 <td className="text-center px-1">
                   {!readOnly && rows.length > 1 && (
-                    <button onClick={() => removeRow(rowIdx)} className="text-slate-300 hover:text-red-500 transition-colors p-1 rounded">
-                      <Trash2 className="h-3 w-3" />
+                    <button onClick={() => onRemoveRow(rowIdx)} className="text-slate-300 hover:text-red-500 transition-colors p-1">
+                      <Trash2 className="h-3.5 w-3.5" />
                     </button>
                   )}
                 </td>
@@ -2741,7 +2904,7 @@ function PreviewTableField({ field, readOnly = false }: { field: TemplateField; 
         </table>
       </div>
       {!readOnly && (
-        <button onClick={addRow} className="flex items-center gap-1.5 text-xs font-semibold text-[#287EAD] hover:text-[#1E6F99] transition-colors">
+        <button onClick={onAddRow} className="flex items-center gap-1.5 text-xs font-semibold text-[#287EAD] hover:text-[#1E6F99] transition-colors">
           <Plus className="h-3.5 w-3.5" /> Add row
         </button>
       )}
@@ -2782,7 +2945,7 @@ function evalVisible(item: VisibilityState, values: Record<string, unknown>, all
 }
 
 /* Editability mirror (both carry `readonly` + `editableWhen`). Absent group =
- * editable. The builder Preview evaluates at the "draft" process step. */
+ * editable. The builder Preview evaluates at the "draft"process step. */
 function evalEditable(item: EditabilityState, values: Record<string, unknown>, allFields: TemplateField[], processStep = "draft"): boolean {
   if (item.readonly) return false;
   const group = item.editableWhen;
@@ -2890,6 +3053,31 @@ class CalcParser {
   }
 }
 
+/** Coerce a raw field/column value into the number a calc formula should see.
+ * The naive `parseFloat(value)` this replaced silently broke date arithmetic:
+ * parseFloat("2026-07-12") reads as 2026 (just the leading digits), so
+ * `end_date - start_date` on two dates in the same year always evaluated to
+ * 0 regardless of the actual gap. Dates/datetimes now convert to a day-count
+ * (days since the Unix epoch, UTC) so subtracting two dates yields the
+ * number of days between them directly — matching how UniFi's own
+ * `(travel_end_date-travel_start_date)+1` formula behaves. */
+function coerceScopeValue(fieldType: string | undefined, raw: unknown): number {
+  if (raw === null || raw === undefined || raw === "") return 0;
+  if (fieldType === "date" || fieldType === "datetime" || fieldType === "calc_date") {
+    const d = new Date(String(raw));
+    if (Number.isNaN(d.getTime())) return 0;
+    return Math.floor(d.getTime() / 86400000);
+  }
+  if (fieldType === "time") {
+    const [hStr, mStr] = String(raw).split(":");
+    const h = parseInt(hStr, 10), m = parseInt(mStr, 10);
+    return (Number.isFinite(h) ? h : 0) * 60 + (Number.isFinite(m) ? m : 0);
+  }
+  if (fieldType === "boolean" || fieldType === "checkbox") return raw ? 1 : 0;
+  const n = typeof raw === "number" ? raw : parseFloat(String(raw));
+  return Number.isFinite(n) ? n : 0;
+}
+
 /** Evaluate a calc expression against a { fieldKey: number } scope. Never
  * throws — returns 0 for a malformed formula, matching the server. */
 function evaluateCalcExpression(expression: string | undefined, scope: Record<string, number>): number {
@@ -2902,30 +3090,117 @@ function evaluateCalcExpression(expression: string | undefined, scope: Record<st
 }
 
 /** Build a { fieldKey: number } scope from the form's current (id-keyed)
- * values, for evaluating sibling calc expressions. */
+ * values, for evaluating sibling calc expressions. Type-aware per field
+ * (see coerceScopeValue) — this is what makes date-difference formulas work. */
 function buildCalcScope(allFields: TemplateField[], values: Record<string, unknown>): Record<string, number> {
   const scope: Record<string, number> = {};
   for (const f of allFields) {
     if (!f.key) continue;
-    const raw = values[f.id];
-    const n = typeof raw === "number" ? raw : parseFloat(String(raw ?? ""));
-    scope[f.key] = Number.isFinite(n) ? n : 0;
+    scope[f.key] = coerceScopeValue(f.type, values[f.id]);
   }
   return scope;
 }
 
-function PreviewField({ field, register, errors, values, allFields, editable = true }: {
+/** Scope for a table column formula on one row: every top-level field, plus
+ * that row's own columns overlaid on top (row-local keys win on a name
+ * collision — the row is "closer"than the sheet, same as a spreadsheet).
+ * This is what lets a column formula reference either a sibling cell in its
+ * own row (`qty * unit_price`) or a form-level field copied into every row
+ * (`daily_subsistence_allowance`). */
+function buildRowCalcScope(
+  allFields: TemplateField[],
+  values: Record<string, unknown>,
+  columns: TableColumn[],
+  row: Record<string, string>,
+): Record<string, number> {
+  const scope = buildCalcScope(allFields, values);
+  const colTypeByKey: Record<string, TableColumnType | undefined> = {};
+  columns.forEach((c) => { colTypeByKey[c.key] = c.type; });
+  for (const [k, v] of Object.entries(row)) {
+    scope[k] = coerceScopeValue(colTypeByKey[k], v);
+  }
+  return scope;
+}
+
+/* Client-side mirror of the server's ``_resolve_row_aggregates`` (see
+ * apps/templates_engine/conditions.py). Replaces SUM(col)/AVG(col)/
+ * COUNT(col)/COLMIN(col)/COLMAX(col) — or the cross-table qualified form
+ * SUM(other_table_key.col) — in a table-column formula with the literal
+ * value computed across every row of a table, before the normal per-row
+ * expression evaluator ever sees the formula. Powers the live builder
+ * Preview only; the server recomputes the authoritative figure the same
+ * way at submit time. */
+const AGG_CALL_RE = /\b(SUM|AVG|COUNT|COLMIN|COLMAX)\(\s*([A-Za-z_][A-Za-z0-9_]*)(?:\.([A-Za-z_][A-Za-z0-9_]*))?\s*\)/gi;
+
+/** Registry entry for one table field, used to resolve cross-table
+ * aggregates: SUM(other_table_key.col) looks this up by table field key. */
+export interface TableCalcRegistryEntry {
+  rows: Record<string, string>[];
+  colTypeByKey: Record<string, TableColumnType | undefined>;
+}
+
+function resolveRowAggregates(
+  expression: string,
+  rows: Record<string, string>[],
+  colTypeByKey: Record<string, TableColumnType | undefined>,
+  allTables?: Record<string, TableCalcRegistryEntry>,
+): string {
+  if (!expression || !expression.includes("(")) return expression;
+  return expression.replace(AGG_CALL_RE, (_match, func: string, firstIdent: string, secondIdent: string | undefined) => {
+    let targetRows = rows;
+    let targetColType: TableColumnType | undefined;
+    let colKey: string;
+    if (secondIdent) {
+      // Qualified: firstIdent names another table field; secondIdent is the
+      // column key within THAT table.
+      const entry = allTables?.[firstIdent];
+      targetRows = entry?.rows ?? [];
+      targetColType = entry?.colTypeByKey[secondIdent];
+      colKey = secondIdent;
+    } else {
+      targetColType = colTypeByKey[firstIdent];
+      colKey = firstIdent;
+    }
+    const colValues = targetRows.map((r) => coerceScopeValue(targetColType, r[colKey]));
+    let result = 0;
+    switch (func.toUpperCase()) {
+      case "SUM": result = colValues.reduce((a, b) => a + b, 0); break;
+      case "AVG": result = colValues.length ? colValues.reduce((a, b) => a + b, 0) / colValues.length : 0; break;
+      case "COUNT": result = colValues.length; break;
+      case "COLMIN": result = colValues.length ? Math.min(...colValues) : 0; break;
+      case "COLMAX": result = colValues.length ? Math.max(...colValues) : 0; break;
+    }
+    return String(result);
+  });
+}
+
+function PreviewField({ field, register, errors, values, allFields, editable = true, tableRows, onUpdateTableCell, onAddTableRow, onRemoveTableRow }: {
   field: TemplateField;
   register: UseFormRegister<Record<string, unknown>>;
   errors: FieldErrors<Record<string, unknown>>;
   values: Record<string, unknown>;
   allFields: TemplateField[];
   editable?: boolean;
+  tableRows?: Record<string, Record<string, string>[]>;
+  onUpdateTableCell?: (tableKey: string, rowIdx: number, colKey: string, val: string) => void;
+  onAddTableRow?: (tableKey: string) => void;
+  onRemoveTableRow?: (tableKey: string, rowIdx: number) => void;
 }) {
   if (field.hidden) return null;
   // Read-only when always-read-only or not editable at this (draft) step.
   const dis = Boolean(field.readonly) || !editable;
-  if (field.type === "table") return <PreviewTableField field={field} readOnly={dis} />;
+  if (field.type === "table") {
+    return (
+      <PreviewTableField
+        field={field}
+        readOnly={dis}
+        rows={tableRows?.[field.key] ?? []}
+        onUpdateCell={(rowIdx, colKey, val) => onUpdateTableCell?.(field.key, rowIdx, colKey, val)}
+        onAddRow={() => onAddTableRow?.(field.key)}
+        onRemoveRow={(rowIdx) => onRemoveTableRow?.(field.key, rowIdx)}
+      />
+    );
+  }
 
   const err = errors[field.id]?.message as string | undefined;
   const validation: Record<string, unknown> = {
@@ -2939,8 +3214,8 @@ function PreviewField({ field, register, errors, values, allFields, editable = t
 
   const reg = register(field.id, validation as any);
 
-  if (field.type === "heading") return <h3 className="text-base font-bold text-slate-800 border-b border-slate-200 pb-2">{field.label}</h3>;
-  if (field.type === "divider") return <hr className="border-slate-200" />;
+  if (field.type === "heading") return <h3 className="text-base font-bold text-slate-800 border-b border-slate-300 pb-2">{field.label}</h3>;
+  if (field.type === "divider") return <hr className="border-slate-300" />;
 
   const label = field.type !== "boolean" && field.type !== "checkbox" ? (
     <label className="text-sm font-semibold text-slate-700">
@@ -2959,7 +3234,7 @@ function PreviewField({ field, register, errors, values, allFields, editable = t
     case "select":
       control = (
         <select {...reg} className={previewInputCls} defaultValue={field.defaultValue ?? ""} disabled={dis}>
-          <option value="" disabled>{field.placeholder ?? "Select an option"}</option>
+          <option value=""disabled>{field.placeholder ?? "Select an option"}</option>
           {(field.options ?? []).map((o) => <option key={o} value={o}>{o}</option>)}
         </select>
       );
@@ -2986,7 +3261,7 @@ function PreviewField({ field, register, errors, values, allFields, editable = t
     case "checkbox":
       return (
         <label className="flex items-center gap-2.5 text-sm text-slate-700 cursor-pointer">
-          <input type="checkbox" {...reg} disabled={dis} className="h-4 w-4 rounded border-slate-300 accent-[#287EAD]" />
+          <input type="checkbox" {...reg} disabled={dis} className="h-4 w-4 border-slate-300 accent-[#287EAD]" />
           {field.label}
           {field.required && <span className="text-red-500">*</span>}
         </label>
@@ -3038,11 +3313,11 @@ function PreviewField({ field, register, errors, values, allFields, editable = t
     case "image":
       control = (
         <input type="file" {...reg} accept={field.type === "image" ? "image/*" : undefined} disabled={dis}
-               className="block w-full text-sm text-slate-500 file:mr-3 file:rounded-lg file:border-0 file:bg-[#287EAD] file:px-4 file:py-2 file:text-sm file:font-semibold file:text-white hover:file:bg-[#1E6F99]" />
+               className="block w-full text-sm text-slate-500 file:mr-3 file:rounded-none file:border-0 file:bg-[#287EAD] file:px-4 file:py-2 file:text-sm file:font-semibold file:text-white hover:file:bg-[#1E6F99]" />
       );
       break;
     case "signature":
-      control = <div className="flex h-16 items-center justify-center rounded-lg border-2 border-dashed border-slate-200 text-sm text-slate-400"><Pencil className="h-4 w-4 mr-2" />Click to sign</div>;
+      control = <div className="flex h-16 items-center justify-center border-2 border-dashed border-slate-300 text-sm text-slate-400"><Pencil className="h-4 w-4 mr-2" />Click to sign</div>;
       break;
     case "url":
       control = <input type="url" {...reg} placeholder={field.placeholder || "https://…"} disabled={dis} defaultValue={field.defaultValue ?? ""} className={previewInputCls} />;
@@ -3109,9 +3384,6 @@ function PreviewField({ field, register, errors, values, allFields, editable = t
     <div className="space-y-1.5">
       {label}
       {control}
-      {field.calc?.expression && (
-        <p className="flex items-center gap-1 text-[10px] text-emerald-600"><Calculator className="h-3 w-3" /> = {field.calc.expression}</p>
-      )}
       {field.helpText && <p className="text-xs text-slate-500">{field.helpText}</p>}
       {err && <p className="text-xs text-red-500 flex items-center gap-1"><AlertCircle className="h-3 w-3" />{err}</p>}
     </div>
@@ -3129,10 +3401,46 @@ function Preview({ sections, templateName, processSteps }: {
   const [previewStep, setPreviewStep] = useState("draft");
   const values = watch();
   const allFields = sections.flatMap((s) => s.fields);
-  // "draft" is always offered even if it isn't in the workflow's step list.
+  const tableFields = allFields.filter((f) => f.type === "table" && f.key);
+  // "draft"is always offered even if it isn't in the workflow's step list.
   const stepOptions = processSteps.some((s) => s.value === "draft")
     ? processSteps
     : [{ value: "draft", label: "Draft (start)" }, ...processSteps];
+
+  // Table row data lives HERE (not inside each table field) rather than as
+  // local state per PreviewTableField, keyed by the table field's own key
+  // (unique across the template — enforced at save). Lifting it up is what
+  // makes cross-table aggregates possible: SUM(other_table.column) needs a
+  // single place that can see every table's current rows at once, mirroring
+  // the server's shared `all_tables` registry in compute_calculated_values.
+  const [tableRows, setTableRows] = useState<Record<string, Record<string, string>[]>>({});
+
+  // Seed a fresh table's initial rows the first time it appears (new field
+  // dropped onto the canvas, or first mount). Keyed off a structural
+  // fingerprint so it only re-seeds when a table is genuinely new/changed,
+  // not on every keystroke elsewhere in the form.
+  useEffect(() => {
+    setTableRows((prev) => {
+      let changed = false;
+      const next = { ...prev };
+      for (const f of tableFields) {
+        if (next[f.key]) continue;
+        const cols = f.columns ?? [];
+        next[f.key] = Array.from({ length: f.minRows ?? 2 }, () => {
+          const r: Record<string, string> = {};
+          cols.forEach((c) => { if (c.defaultValue) r[c.key] = c.defaultValue; });
+          return r;
+        });
+        changed = true;
+      }
+      // Drop rows for tables that no longer exist (field removed on canvas).
+      for (const key of Object.keys(next)) {
+        if (!tableFields.some((f) => f.key === key)) { delete next[key]; changed = true; }
+      }
+      return changed ? next : prev;
+    });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [JSON.stringify(tableFields.map((f) => ({ key: f.key, minRows: f.minRows, cols: (f.columns ?? []).map((c) => c.key) })))]);
 
   // Recompute every `calc`-bearing field whenever any value changes, mirroring
   // the server's authoritative recompute at submit time. Fields resolve in
@@ -3152,23 +3460,90 @@ function Preview({ sections, templateName, processSteps }: {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [JSON.stringify(values), JSON.stringify(allFields.map((f) => f.calc))]);
 
+  // Recompute every calc-bearing TABLE COLUMN across every table at once —
+  // mirrors the server's authoritative compute_calculated_values. Column
+  // major (each column resolved across all its own rows before moving to
+  // the next) and cross-table aware: a column formula can reference another
+  // table's rows via SUM(other_table_key.col), resolved through the shared
+  // `registry` built fresh each pass, exactly like the server's all_tables.
+  useEffect(() => {
+    const colTypesByTable: Record<string, Record<string, TableColumnType | undefined>> = {};
+    tableFields.forEach((f) => {
+      const map: Record<string, TableColumnType | undefined> = {};
+      (f.columns ?? []).forEach((c) => { map[c.key] = c.type; });
+      colTypesByTable[f.key] = map;
+    });
+
+    setTableRows((prev) => {
+      const working: Record<string, Record<string, string>[]> = {};
+      for (const f of tableFields) {
+        working[f.key] = (prev[f.key] ?? []).map((r) => ({ ...r }));
+      }
+      const registry: Record<string, TableCalcRegistryEntry> = {};
+      for (const f of tableFields) {
+        registry[f.key] = { rows: working[f.key], colTypeByKey: colTypesByTable[f.key] };
+      }
+
+      let changed = false;
+      for (const f of tableFields) {
+        const calcCols = (f.columns ?? []).filter((c) => c.calc?.expression);
+        if (calcCols.length === 0) continue;
+        const rows = working[f.key];
+        for (const col of calcCols) {
+          const resolvedExpr = resolveRowAggregates(col.calc!.expression, rows, colTypesByTable[f.key], registry);
+          for (const row of rows) {
+            const scope = buildRowCalcScope(allFields, values, f.columns ?? [], row);
+            let result = evaluateCalcExpression(resolvedExpr, scope);
+            if (typeof col.calc!.decimals === "number") result = Number(result.toFixed(col.calc!.decimals));
+            const str = String(result);
+            if (row[col.key] !== str) { row[col.key] = str; changed = true; }
+          }
+        }
+      }
+      return changed ? working : prev;
+    });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [
+    JSON.stringify(values),
+    JSON.stringify(tableRows),
+    JSON.stringify(tableFields.map((f) => ({ key: f.key, columns: f.columns }))),
+  ]);
+
+  const updateTableCell = (tableKey: string, rowIdx: number, colKey: string, val: string) =>
+    setTableRows((prev) => ({
+      ...prev,
+      [tableKey]: (prev[tableKey] ?? []).map((r, i) => (i === rowIdx ? { ...r, [colKey]: val } : r)),
+    }));
+  const addTableRow = (tableKey: string) => {
+    const f = tableFields.find((tf) => tf.key === tableKey);
+    const cols = f?.columns ?? [];
+    const r: Record<string, string> = {};
+    cols.forEach((c) => { if (c.defaultValue) r[c.key] = c.defaultValue; });
+    setTableRows((prev) => ({ ...prev, [tableKey]: [...(prev[tableKey] ?? []), r] }));
+  };
+  const removeTableRow = (tableKey: string, rowIdx: number) =>
+    setTableRows((prev) => ({
+      ...prev,
+      [tableKey]: (prev[tableKey] ?? []).filter((_, i) => i !== rowIdx),
+    }));
+
 
   if (submitted) {
     return (
       <div className="mx-auto max-w-4xl p-8">
-        <div className="rounded-2xl border border-slate-200 bg-white p-8 shadow-sm">
+        <div className="border border-slate-300 bg-white p-8 shadow-sm">
           <div className="mb-6 flex items-center gap-3">
-            <div className="flex h-10 w-10 items-center justify-center rounded-xl bg-emerald-100"><CheckCircle2 className="h-5 w-5 text-emerald-600" /></div>
+            <div className="flex h-10 w-10 items-center justify-center bg-emerald-100"><CheckCircle2 className="h-5 w-5 text-emerald-600" /></div>
             <div>
               <h2 className="text-lg font-bold text-slate-800">Submission preview</h2>
               <p className="text-sm text-slate-500">This is what would be saved when a user submits the form.</p>
             </div>
           </div>
-          <pre className="overflow-auto rounded-xl bg-slate-900 p-5 text-xs text-emerald-400 font-mono leading-relaxed">
+          <pre className="overflow-auto bg-slate-900 p-5 text-xs text-emerald-400 font-mono leading-relaxed">
             {JSON.stringify(submitted, null, 2)}
           </pre>
           <button onClick={() => { setSubmitted(null); reset(); }}
-                  className="mt-5 inline-flex items-center gap-1.5 rounded-xl border border-slate-200 bg-white px-4 py-2 text-sm font-semibold text-slate-700 hover:bg-slate-50">
+                  className="mt-5 inline-flex items-center gap-1.5 border border-slate-300 bg-white px-4 py-2 text-sm font-semibold text-slate-700 hover:bg-slate-50">
             <RotateCcw className="h-4 w-4" /> Test again
           </button>
         </div>
@@ -3179,7 +3554,7 @@ function Preview({ sections, templateName, processSteps }: {
   return (
     <div className="mx-auto max-w-4xl p-8">
       <form onSubmit={handleSubmit((d) => setSubmitted(d))} className="space-y-6">
-        <header className="flex items-start justify-between gap-4 pb-4 border-b border-slate-200">
+        <header className="flex items-start justify-between gap-4 pb-4 border-b border-slate-300">
           <div>
             <h1 className="text-2xl font-bold text-slate-900">{templateName}</h1>
             <p className="mt-1 text-sm text-slate-500">Fill out the form below to preview how end users will experience this template.</p>
@@ -3196,12 +3571,12 @@ function Preview({ sections, templateName, processSteps }: {
           if (!evalVisible(s, values, allFields, previewStep)) return null;
           const sectionEditable = evalEditable(s, values, allFields, previewStep);
           return (
-          <section key={s.id} className="rounded-2xl border border-slate-200 bg-white p-6 shadow-sm">
-            <div className="mb-5 pb-4 border-b border-slate-100">
+          <section key={s.id} className="border border-slate-300 bg-white p-6 shadow-sm">
+            <div className="mb-5 pb-4 border-b border-slate-200">
               <h2 className="flex items-center gap-2 text-base font-bold text-slate-800">
                 {s.title}
                 {!sectionEditable && (
-                  <span className="inline-flex items-center gap-1 rounded bg-slate-100 px-1.5 py-0.5 text-[10px] font-semibold text-slate-500">read-only</span>
+                  <span className="inline-flex items-center gap-1 bg-slate-100 px-1.5 py-0.5 text-[10px] font-semibold text-slate-500">read-only</span>
                 )}
               </h2>
               {s.description && <p className="mt-0.5 text-sm text-slate-500">{s.description}</p>}
@@ -3212,7 +3587,9 @@ function Preview({ sections, templateName, processSteps }: {
                 return (
                   <div key={f.id} style={{ gridColumn: `span ${f.colSpan ?? 12} / span ${f.colSpan ?? 12}` }}>
                     <PreviewField field={f} register={register} errors={errors} values={values} allFields={allFields}
-                                  editable={sectionEditable && evalEditable(f, values, allFields, previewStep)} />
+                                  editable={sectionEditable && evalEditable(f, values, allFields, previewStep)}
+                                  tableRows={tableRows} onUpdateTableCell={updateTableCell}
+                                  onAddTableRow={addTableRow} onRemoveTableRow={removeTableRow} />
                   </div>
                 );
               })}
@@ -3222,11 +3599,11 @@ function Preview({ sections, templateName, processSteps }: {
         })}
         <div className="flex items-center justify-end gap-3 pt-2">
           <button type="button" onClick={() => reset()}
-                  className="inline-flex items-center gap-1.5 rounded-xl border border-slate-200 bg-white px-4 py-2 text-sm font-semibold text-slate-700 hover:bg-slate-50">
+                  className="inline-flex items-center gap-1.5 border border-slate-300 bg-white px-4 py-2 text-sm font-semibold text-slate-700 hover:bg-slate-50">
             <RotateCcw className="h-4 w-4" /> Reset
           </button>
           <button type="submit"
-                  className="inline-flex items-center gap-1.5 rounded-xl bg-[#287EAD] px-5 py-2 text-sm font-semibold text-white hover:bg-[#1E6F99] shadow-sm">
+                  className="inline-flex items-center gap-1.5 bg-[#287EAD] px-5 py-2 text-sm font-semibold text-white hover:bg-[#1E6F99] shadow-sm">
             <ArrowRight className="h-4 w-4" /> Submit test
           </button>
         </div>
@@ -3604,7 +3981,7 @@ function FinanceSettingsCard({ template, onCommit, iCls, processSteps }: {
                 </label>
               </>
             )}
-            <div className="rounded border border-[#EEF0F2] bg-[#F8FAFB] px-3 py-2 text-xs text-[#5E6870]">
+            <div className="border border-[#EEF0F2] bg-[#F8FAFB] px-3 py-2 text-xs text-[#5E6870]">
               {postingKind === "journal" ? (
                 <>
                   Journal lines from bindings: <b className="text-[#1F2933]">{journalFieldLines}</b> fixed + <b className="text-[#1F2933]">{journalTableLines}</b> table block{journalTableLines !== 1 ? "s" : ""}.
@@ -3683,7 +4060,7 @@ export default function TemplateBuilderV2({ initial, onSave, onCancel, isSaving,
   const autoSaveTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   // Workflow process steps for this template's document type — drives the
-  // "process step" visibility conditions in the inspector.
+  // "process step"visibility conditions in the inspector.
   const { data: processSteps = [] } = useQuery({
     queryKey: ["workflow-process-steps", template?.document_type_id ?? ""],
     queryFn: async () => {
@@ -4027,7 +4404,7 @@ export default function TemplateBuilderV2({ initial, onSave, onCancel, isSaving,
           sideEffects: defaultDropAnimationSideEffects({ styles: { active: { opacity: "0.4" } } }),
         }}>
           {dragType ? (
-            <div className="flex items-center gap-2 rounded-lg border border-[#287EAD] bg-[#287EAD] px-3 py-2 text-sm font-semibold text-white shadow-xl">
+            <div className="flex items-center gap-2 border border-[#287EAD] bg-[#287EAD] px-3 py-2 text-sm font-semibold text-white shadow-xl">
               {(() => { const Icon = ICONS[dragType]; return <Icon className="h-4 w-4" />; })()}
               {FIELD_META[dragType].label}
             </div>
@@ -4040,6 +4417,7 @@ export default function TemplateBuilderV2({ initial, onSave, onCancel, isSaving,
         <ColumnConfigModal
           column={configCol.column}
           siblingColumns={configCol.columns}
+          formFields={template.sections.flatMap((s) => s.fields).filter((f) => f.key && f.type !== "table")}
           onClose={() => setConfiguringColumn(null)}
           onSave={(updated) => {
             updateColumn(configCol.sectionId, configCol.fieldId, configCol.colId, updated);
