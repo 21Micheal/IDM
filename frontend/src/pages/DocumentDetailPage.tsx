@@ -20,7 +20,7 @@ import SignatureRequestPanel from "@/components/signatures/SignatureRequestPanel
 import { format } from "date-fns";
 import {
   ArrowLeft, Send, MessageSquare, ShieldCheck,
-  Loader2, RotateCcw, Edit2, Lock, Info, Download,
+  Loader2, RotateCcw, Edit2, Lock, Unlock, Info, Download,
   AlertTriangle, ScanLine, RefreshCw, ChevronDown, FileText,
   Printer, Trash2, X, Check, ExternalLink, Columns2, Eye, EyeOff, Archive, FileCode, MoreHorizontal
 } from "lucide-react";
@@ -245,6 +245,7 @@ export default function DocumentDetailPage() {
   const [activeTab, setActiveTab] = useState<TabId>("attributes");
   const [formEditing, setFormEditing] = useState(false);
   const [formValues, setFormValues] = useState<Record<string, unknown>>({});
+  const formDirtyRef = useRef(false);
   const [showFormPdf, setShowFormPdf] = useState(false);
   const [showJournalXml, setShowJournalXml] = useState(false);
   const prevDocStatusRef = useRef<string | undefined>();
@@ -501,6 +502,74 @@ export default function DocumentDetailPage() {
     }
   }, [doc?.is_edit_locked, doc?.edit_locked_by, user?.id, activeTab]);
 
+  // Leave in-app form edit mode as soon as this user stops holding the lock.
+  useEffect(() => {
+    const stillLockedByMe = Boolean(doc?.is_edit_locked && doc?.edit_locked_by === user?.id);
+    if (formEditing && !stillLockedByMe) {
+      setFormEditing(false);
+      setFormValues({});
+      formDirtyRef.current = false;
+    }
+  }, [doc?.is_edit_locked, doc?.edit_locked_by, user?.id, formEditing]);
+
+  // Auto-open journal XML modal when a journal-enabled form document is approved.
+  useEffect(() => {
+    const formMeta = (doc?.metadata as Record<string, any> | undefined)?.form;
+    const isForm = Boolean(formMeta?.sections);
+    const journalOn = Boolean((doc?.metadata as any)?.sunsystems?.journal?.enabled);
+
+    if (
+      prevDocStatusRef.current === doc?.status ||
+      doc?.status !== "approved" ||
+      !journalOn ||
+      !isForm ||
+      showJournalXml
+    ) {
+      prevDocStatusRef.current = doc?.status;
+      return;
+    }
+
+    prevDocStatusRef.current = doc.status;
+    setShowJournalXml(true);
+  }, [doc?.status, doc?.metadata, showJournalXml]);
+
+  const acquireFormLock = useMutation({
+    mutationFn: () => documentsAPI.editToken(id!),
+    onSuccess: () => {
+      toast.success("Locked by you. You can now edit the form.");
+      qc.invalidateQueries({ queryKey: ["document", id] });
+    },
+    onError: (err: any) => {
+      toast.error(
+        err?.response?.status === 423
+          ? (err.response.data?.detail ?? "Locked by another user.")
+          : "Could not lock the document. Please try again.",
+      );
+    },
+  });
+
+  const releaseFormLock = useMutation({
+    mutationFn: () => documentsAPI.releaseLock(id!),
+    onSuccess: () => {
+      setFormEditing(false);
+      formDirtyRef.current = false;
+      toast.success("Released.");
+      qc.invalidateQueries({ queryKey: ["document", id] });
+    },
+    onError: (err: any) => toast.error(extractApiError(err, "Could not release the lock.")),
+  });
+
+  const forceReleaseFormLock = useMutation({
+    mutationFn: () => documentsAPI.releaseLock(id!, true),
+    onSuccess: () => {
+      setFormEditing(false);
+      formDirtyRef.current = false;
+      toast.success("Lock released (admin override).");
+      qc.invalidateQueries({ queryKey: ["document", id] });
+    },
+    onError: (err: any) => toast.error(extractApiError(err, "Could not release the lock.")),
+  });
+
   const submitMutation = useMutation({
     mutationFn: () => documentsAPI.submit(id!),
     onSuccess: () => { toast.success("Submitted for approval"); qc.invalidateQueries({ queryKey: ["document", id] }); },
@@ -550,6 +619,7 @@ export default function DocumentDetailPage() {
     onSuccess: () => {
       toast.success("Form updated.");
       setFormEditing(false);
+      formDirtyRef.current = false;
       qc.invalidateQueries({ queryKey: ["document", id] });
     },
     onError: (err: any) =>
@@ -631,9 +701,25 @@ export default function DocumentDetailPage() {
   const [releaseSaving, setReleaseSaving] = useState(false);
   const confirmRelease = useCallback(async (): Promise<boolean> => {
     const saver = metadataSaverRef.current;
-    if (!saver || !saver.isDirty) return true;
+    const hasMetadataDirty = Boolean(saver?.isDirty);
+    const hasFormDirty = formEditing && formDirtyRef.current;
+    if (!hasMetadataDirty && !hasFormDirty) return true;
     return new Promise<boolean>((resolve) => setReleasePrompt({ resolve }));
-  }, []);
+  }, [formEditing]);
+
+  const handleFormRelease = useCallback(async () => {
+    if (!(await confirmRelease())) return;
+    releaseFormLock.mutate();
+  }, [confirmRelease, releaseFormLock]);
+
+  const handleForceReleaseFormLock = useCallback(() => {
+    const holder = doc?.edit_locked_by_name ?? "another user";
+    if (!window.confirm(
+      `Release the lock held by ${holder}? Any unsaved form or detail changes ` +
+      `will not be captured. They will need to re-lock to continue editing.`
+    )) return;
+    forceReleaseFormLock.mutate();
+  }, [doc?.edit_locked_by_name, forceReleaseFormLock]);
 
   if (isLoading)
     return (
@@ -722,28 +808,13 @@ export default function DocumentDetailPage() {
     | { sections?: unknown[]; values?: Record<string, unknown> }
     | undefined;
   const isFormDocument = Boolean(formData?.sections);
-  const formDocEditable = canEdit && ["draft", "returned"].includes(doc.status);
+  const formDocEditable = canEdit;
   const budgetEnabled = Boolean((doc.metadata as any)?.sunsystems?.budget?.enabled);
   const journalEnabled = Boolean((doc.metadata as any)?.sunsystems?.journal?.enabled);
 
-  useEffect(() => {
-    if (
-      prevDocStatusRef.current === doc?.status ||
-      doc?.status !== "approved" ||
-      !journalEnabled ||
-      !isFormDocument ||
-      showJournalXml
-    ) {
-      prevDocStatusRef.current = doc?.status;
-      return;
-    }
-
-    prevDocStatusRef.current = doc.status;
-    setShowJournalXml(true);
-  }, [doc?.status, journalEnabled, isFormDocument, showJournalXml]);
-
   const startFormEdit = () => {
     setFormValues({ ...(formData?.values ?? {}) });
+    formDirtyRef.current = false;
     setFormEditing(true);
   };
   const saveForm = () => {
@@ -1268,12 +1339,67 @@ export default function DocumentDetailPage() {
           {/* In-app form (built-template document) — the form is the document; PDF below is its view */}
           {isFormDocument && (
             <div className="border border-[#C8CDD2] bg-white shadow-sm">
+              {doc.is_edit_locked && (
+                <div className="border-b border-[#C8CDD2] px-4 py-3">
+                  {lockedByMe ? (
+                    <div className="flex items-center justify-between gap-3 text-sm">
+                      <div className="flex items-center gap-2 text-[#1F2933]">
+                        <Lock className="w-4 h-4 text-[#287EAD] flex-shrink-0" />
+                        <span>
+                          <strong>You are in edit mode.</strong> Other users can only view the form until you save and release the lock.
+                        </span>
+                      </div>
+                      <button
+                        type="button"
+                        onClick={handleFormRelease}
+                        disabled={releaseFormLock.isPending}
+                        className="flex-shrink-0 inline-flex items-center gap-1.5 text-xs font-semibold text-[#1F2933] border border-[#C8CDD2] bg-white px-3 py-1.5 hover:bg-[#F5F7F8] transition-colors disabled:opacity-50"
+                      >
+                        <Unlock className="w-3.5 h-3.5" /> Release(Save)
+                      </button>
+                    </div>
+                  ) : (
+                    <div className="flex items-center justify-between gap-3 text-sm">
+                      <div className="flex items-center gap-2 text-[#1F2933]">
+                        <Lock className="w-4 h-4 text-red-600 flex-shrink-0" />
+                        <span>
+                          <strong>{doc.edit_locked_by_name ?? "Another user"}</strong> is editing this form.
+                          View-only until they release it.
+                        </span>
+                      </div>
+                      {hasAdminAccess && isLockedByOther && (
+                        <button
+                          type="button"
+                          onClick={handleForceReleaseFormLock}
+                          disabled={forceReleaseFormLock.isPending}
+                          className="flex-shrink-0 inline-flex items-center gap-1.5 text-xs font-semibold text-red-700 border border-red-300 bg-white px-3 py-1.5 hover:bg-red-50 transition-colors disabled:opacity-50"
+                        >
+                          {forceReleaseFormLock.isPending
+                            ? <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                            : <Unlock className="w-3.5 h-3.5" />}
+                          Release (admin)
+                        </button>
+                      )}
+                    </div>
+                  )}
+                </div>
+              )}
               <div className="flex items-center justify-between gap-3 border-b border-[#C8CDD2] bg-[#F5F7F8] px-4 py-2.5">
                 <div className="flex items-center gap-2 min-w-0">
                   <p className="text-sm font-bold text-[#1F2933]">Form</p>
-                  <span className="text-xs text-[#5E6870]">{formEditing ? "Editing — fill and save" : "Filled in-app"}</span>
+                  <span className="text-xs text-[#5E6870]">
+                    {formEditing
+                      ? "Editing — fill and save"
+                      : lockedByMe
+                        ? "Locked by you — open edit mode to change fields"
+                        : isLockedByOther
+                          ? "View-only — locked by another user"
+                          : formDocEditable
+                            ? "Lock the document to edit"
+                            : "Filled in-app"}
+                  </span>
                 </div>
-                <div className="flex items-center gap-2">
+                <div className="flex items-center gap-2 flex-wrap justify-end">
                   {journalEnabled && (
                     <button
                       type="button"
@@ -1294,7 +1420,32 @@ export default function DocumentDetailPage() {
                       {showFormPdf ? "Hide PDF" : "View PDF"}
                     </button>
                   )}
-                  {!formEditing && formDocEditable && (
+                  {formDocEditable && !doc.is_edit_locked && !formEditing && (
+                    <button
+                      type="button"
+                      onClick={() => acquireFormLock.mutate()}
+                      disabled={acquireFormLock.isPending}
+                      className="inline-flex items-center gap-1.5 border border-[#287EAD] px-2.5 py-1.5 text-xs font-semibold text-[#287EAD] hover:bg-[#EEF6FB] disabled:opacity-50"
+                      title="Lock (check out) to edit this form"
+                    >
+                      {acquireFormLock.isPending
+                        ? <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                        : <Lock className="h-3.5 w-3.5" />}
+                      Lock(Amend)
+                    </button>
+                  )}
+                  {lockedByMe && !formEditing && (
+                    <button
+                      type="button"
+                      onClick={handleFormRelease}
+                      disabled={releaseFormLock.isPending}
+                      className="inline-flex items-center gap-1.5 border border-[#C8CDD2] px-2.5 py-1.5 text-xs font-semibold text-[#5E6870] hover:bg-destructive/5 hover:text-destructive disabled:opacity-50"
+                      title="Release (check in)"
+                    >
+                      <Unlock className="h-3.5 w-3.5" /> Release(Save)
+                    </button>
+                  )}
+                  {!formEditing && formDocEditable && lockedByMe && (
                     <button
                       type="button"
                       onClick={startFormEdit}
@@ -1307,7 +1458,10 @@ export default function DocumentDetailPage() {
                     <>
                       <button
                         type="button"
-                        onClick={() => setFormEditing(false)}
+                        onClick={() => {
+                          setFormEditing(false);
+                          formDirtyRef.current = false;
+                        }}
                         disabled={updateFormMutation.isPending}
                         className="inline-flex items-center gap-1.5 border border-[#AEB5BB] bg-white px-2.5 py-1.5 text-xs font-semibold text-[#1F2933] hover:bg-[#F3F5F6] disabled:opacity-50"
                       >
@@ -1333,7 +1487,10 @@ export default function DocumentDetailPage() {
                 <TemplateForm
                   sections={formData?.sections ?? []}
                   values={formEditing ? formValues : (formData?.values ?? {})}
-                  onChange={(k, v) => setFormValues((prev) => ({ ...prev, [k]: v }))}
+                  onChange={(k, v) => {
+                    formDirtyRef.current = true;
+                    setFormValues((prev) => ({ ...prev, [k]: v }));
+                  }}
                   readOnly={!formEditing}
                   documentId={doc.id}
                   documentStatus={doc.status}
@@ -2113,7 +2270,7 @@ export default function DocumentDetailPage() {
             </div>
             <div className="p-5">
               <p className="text-sm text-[#5E6870]">
-                You have unsaved detail changes. Do you want to save them before checking in (releasing the lock)?
+                You have unsaved changes. Do you want to save them before checking in (releasing the lock)?
               </p>
               <div className="mt-5 flex justify-end gap-2">
                 <button
@@ -2138,7 +2295,27 @@ export default function DocumentDetailPage() {
                   onClick={async () => {
                     const saver = metadataSaverRef.current;
                     setReleaseSaving(true);
-                    const ok = saver ? await saver.save() : true;
+                    let ok = true;
+                    if (formEditing && formDirtyRef.current) {
+                      const missing = requiredFieldLabels(formData?.sections ?? [], formValues, {
+                        groupNames: user?.group_names ?? [],
+                        isAdmin: Boolean(user?.has_admin_access || user?.is_staff),
+                      }, doc?.status);
+                      if (missing.length) {
+                        toast.error(`Please fill in: ${missing.join(", ")}`);
+                        ok = false;
+                      } else {
+                        try {
+                          await updateFormMutation.mutateAsync();
+                          formDirtyRef.current = false;
+                        } catch {
+                          ok = false;
+                        }
+                      }
+                    }
+                    if (ok && saver?.isDirty) {
+                      ok = await saver.save();
+                    }
                     setReleaseSaving(false);
                     releasePrompt.resolve(ok);
                     setReleasePrompt(null);

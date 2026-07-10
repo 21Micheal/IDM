@@ -117,6 +117,18 @@ export interface TableColumn {
   referenceSource?: string;    // e.g. "users", "departments", "vendors"
   readonly?: boolean;
   hidden?: boolean;
+  /* Conditional visibility/editability — same rule-group model as
+   * TemplateField/TemplateSection (see RuleGroup below). Evaluated against
+   * top-level form values + the current process step (NOT other cells in
+   * the same row — a column is a single definition shared by every row, so
+   * its visibility is necessarily table-wide, consistent with how a whole
+   * SECTION's visibility works rather than per-field). `hidden`/`readonly`
+   * above still cover the "always" cases; these cover the "only when…"
+   * cases — e.g. hide a "Foreign Amount" column unless the currency field
+   * isn't the local currency, or make a column editable only at a specific
+   * workflow step. */
+  visibleWhen?: RuleGroup | null;
+  editableWhen?: RuleGroup | null;
   /* Calculated column value — same grammar/engine as TemplateField.calc, but
    * evaluated per table ROW: the scope is that row's other column values
    * plus every top-level form field (so a column formula can reference both
@@ -1205,6 +1217,16 @@ function FieldPreview({ field, onConfigureColumn, onAddColumn, onRemoveColumn, o
                         {c.calc?.expression && (
                           <span className="bg-emerald-50 px-1 py-0.5 text-[8px] font-bold text-emerald-700 border border-emerald-200 flex-shrink-0" title="Calculated column">ƒx</span>
                         )}
+                        {c.hidden ? (
+                          <span className="bg-slate-100 px-1 py-0.5 text-[8px] font-bold text-slate-500 border border-slate-300 flex-shrink-0" title="Column always hidden from people filling the form">hidden</span>
+                        ) : ruleGroupHasConditions(c.visibleWhen) && (
+                          <span className="bg-amber-50 px-1 py-0.5 text-[8px] font-bold text-amber-700 border border-amber-200 flex-shrink-0" title={`Column shows when ${summarizeRuleGroup(c.visibleWhen)}`}>cond</span>
+                        )}
+                        {c.readonly ? (
+                          <span className="bg-slate-100 px-1 py-0.5 text-[8px] font-bold text-slate-500 border border-slate-300 flex-shrink-0" title="Column always read-only">read-only</span>
+                        ) : ruleGroupHasConditions(c.editableWhen) && (
+                          <span className="bg-violet-50 px-1 py-0.5 text-[8px] font-bold text-violet-700 border border-violet-200 flex-shrink-0" title={`Column editable when ${summarizeRuleGroup(c.editableWhen)}`}>edit-cond</span>
+                        )}
                       </div>
                       {/* Column actions on hover */}
                       <div className="flex items-center gap-0.5 px-3.5 pb-2 opacity-0 transition group-hover/col:opacity-100">
@@ -1655,6 +1677,10 @@ function ColumnCalcFormulaEditor({ column, siblingColumns, formFields, onChange 
         rows={2}
         className={cn(iCls, "h-auto min-h-[52px] py-2 font-mono resize-none")}
       />
+      <button type="button" onClick={() => insertToken('IF(condition, "value if true", "value if false")')}
+              className="inline-flex items-center gap-1 border border-[#287EAD]/40 bg-[#EEF6FB] px-2 py-1 font-mono text-[10px] font-semibold text-[#287EAD] hover:bg-[#287EAD] hover:text-white">
+        + Insert IF(condition, …)
+      </button>
       {keyedColumns.length > 0 && (
         <div className="space-y-1">
           <span className="text-[10px] font-semibold uppercase tracking-wider text-[#5E6870]">This row's columns</span>
@@ -1715,18 +1741,19 @@ function ColumnCalcFormulaEditor({ column, siblingColumns, formFields, onChange 
         </p>
       )}
       <p className="text-[10px] text-[#8C969E]">
-        Arithmetic over column/field keys — + - * / ( ), and ROUND()/ABS()/MIN()/MAX(). SUM()/AVG()/COUNT()/COLMIN()/COLMAX() total a column across every row. Re-runs authoritatively on the server at submit time.
+        Arithmetic (+ - * / ( )), comparisons (&gt; &lt; &gt;= &lt;= == !=), and IF(condition, if_true, if_false) — e.g. IF(amount&gt;dsa_amount,"Exceeds advance","OK"). ROUND()/ABS()/MIN()/MAX() work on numbers; SUM()/AVG()/COUNT()/COLMIN()/COLMAX() total a column across every row. Re-runs authoritatively on the server at submit time.
       </p>
     </div>
   );
 }
 
 function ColumnConfigModal({
-  column, siblingColumns = [], formFields = [], onClose, onSave, onDelete,
+  column, siblingColumns = [], formFields = [], processSteps = [], onClose, onSave, onDelete,
 }: {
   column: TableColumn;
   siblingColumns?: TableColumn[];
   formFields?: TemplateField[];
+  processSteps?: { value: string; label: string }[];
   onClose: () => void;
   onSave: (col: TableColumn) => void;
   onDelete: () => void;
@@ -1909,16 +1936,20 @@ function ColumnConfigModal({
                   </select>
                 </Row>
               )}
-              <div className="flex items-center gap-6 pt-2">
-                <label className="flex items-center gap-2 text-sm text-[#1F2933]">
-                  <input type="checkbox" checked={!!draft.readonly} onChange={(e) => set({ readonly: e.target.checked })} className="h-4 w-4 accent-[#287EAD]" />
-                  Read-only
-                </label>
-                <label className="flex items-center gap-2 text-sm text-[#1F2933]">
-                  <input type="checkbox" checked={!!draft.hidden} onChange={(e) => set({ hidden: e.target.checked })} className="h-4 w-4 accent-[#287EAD]" />
-                  Hidden in preview
-                </label>
-              </div>
+              <VisibilityEditor
+                value={draft}
+                sources={formFields.map((f) => ({ key: f.key, label: f.label }))}
+                onChange={(patch) => set(patch)}
+                subject="column"
+                processSteps={processSteps}
+              />
+              <EditabilityEditor
+                value={draft}
+                sources={formFields.map((f) => ({ key: f.key, label: f.label }))}
+                onChange={(patch) => set(patch)}
+                subject="column"
+                processSteps={processSteps}
+              />
             </div>
           )}
         </div>
@@ -2265,7 +2296,7 @@ function VisibilityEditor({ value, sources, onChange, subject, groupOptions, pro
   value: VisibilityState;
   sources: { key: string; label: string }[];
   onChange: (patch: VisibilityState) => void;
-  subject: "field" | "section";
+  subject: "field" | "section" | "column";
   groupOptions?: { id: string; name: string }[];
   processSteps?: { value: string; label: string }[];
 }) {
@@ -2358,7 +2389,7 @@ function EditabilityEditor({ value, sources, onChange, subject, processSteps = [
   value: EditabilityState;
   sources: { key: string; label: string }[];
   onChange: (patch: EditabilityState) => void;
-  subject: "field" | "section";
+  subject: "field" | "section" | "column";
   processSteps?: { value: string; label: string }[];
 }) {
   const mode = editabilityModeOf(value);
@@ -2428,7 +2459,7 @@ function CalcFormulaEditor({ field, siblings, onUpdate }: {
   return (
     <InspectorRow
       label="Formula"
-      hint="Arithmetic over sibling field keys — + - * / ( ), and ROUND()/ABS()/MIN()/MAX(). This exact formula re-runs authoritatively on the server at submit time, so the stored value can't be spoofed from the browser."
+      hint="Arithmetic (+ - * / ( )), comparisons (> < >= <= == !=), and IF(condition, if_true, if_false) — e.g. IF(status==&quot;Approved&quot;,&quot;Ready&quot;,&quot;Pending&quot;). ROUND()/ABS()/MIN()/MAX() work on numbers. This exact formula re-runs authoritatively on the server at submit time, so the stored value can't be spoofed from the browser."
     >
       <div className="space-y-2 border border-[#C8CDD2] bg-white p-2.5">
         <textarea
@@ -2439,6 +2470,10 @@ function CalcFormulaEditor({ field, siblings, onUpdate }: {
           rows={2}
           className={cn(inputCls, "h-auto min-h-[52px] py-2 font-mono resize-none")}
         />
+        <button type="button" onClick={() => insertToken('IF(condition, "value if true", "value if false")')}
+                className="inline-flex items-center gap-1 border border-[#287EAD]/40 bg-[#EEF6FB] px-2 py-1 font-mono text-[10px] font-semibold text-[#287EAD] hover:bg-[#287EAD] hover:text-white">
+          + Insert IF(condition, …)
+        </button>
         {keyedSiblings.length > 0 ? (
           <div className="flex flex-wrap gap-1">
             {keyedSiblings.map((s) => (
@@ -2853,15 +2888,25 @@ function PreviewColumnInput({ col, value, onChange, row, disabled }: { col: Tabl
   }
 }
 
-function PreviewTableField({ field, readOnly = false, rows, onUpdateCell, onAddRow, onRemoveRow }: {
+function PreviewTableField({ field, readOnly = false, rows, onUpdateCell, onAddRow, onRemoveRow, values, allFields, previewStep }: {
   field: TemplateField;
   readOnly?: boolean;
   rows: Record<string, string>[];
   onUpdateCell: (rowIdx: number, colKey: string, val: string) => void;
   onAddRow: () => void;
   onRemoveRow: (rowIdx: number) => void;
+  values: Record<string, unknown>;
+  allFields: TemplateField[];
+  previewStep: string;
 }) {
-  const cols = (field.columns ?? []).filter((c) => !c.hidden);
+  // A column is a single definition shared by every row, so its visibility
+  // is table-wide (like a section), evaluated once against the top-level
+  // form values + current workflow step — not per-row. `evalVisible` /
+  // `evalEditable` are the exact same generic functions already used for
+  // fields and sections; a TableColumn now carries the same
+  // hidden/visibleWhen/readonly/editableWhen shape, so no separate logic
+  // is needed here.
+  const cols = (field.columns ?? []).filter((c) => evalVisible(c, values, allFields, previewStep));
 
   return (
     <div className="col-span-12 space-y-2">
@@ -2886,14 +2931,17 @@ function PreviewTableField({ field, readOnly = false, rows, onUpdateCell, onAddR
           <tbody>
             {rows.map((row, rowIdx) => (
               <tr key={rowIdx} className="border-b border-slate-300 last:border-0 hover:bg-slate-50 transition-colors">
-                {cols.map((col) => (
-                  <td key={col.id} className="px-3 py-2.5 border-r border-slate-300 last:border-0">
-                    <PreviewColumnInput col={col} value={row[col.key] ?? ""} row={row} disabled={readOnly} onChange={(v) => onUpdateCell(rowIdx, col.key, v)} />
-                  </td>
-                ))}
+                {cols.map((col) => {
+                  const colDisabled = readOnly || !evalEditable(col, values, allFields, previewStep);
+                  return (
+                    <td key={col.id} className="px-3 py-2.5 border-r border-slate-300 last:border-0">
+                      <PreviewColumnInput col={col} value={row[col.key] ?? ""} row={row} disabled={colDisabled} onChange={(v) => onUpdateCell(rowIdx, col.key, v)} />
+                    </td>
+                  );
+                })}
                 <td className="text-center px-1">
                   {!readOnly && rows.length > 1 && (
-                    <button onClick={() => onRemoveRow(rowIdx)} className="text-slate-300 hover:text-red-500 transition-colors p-1">
+                    <button type="button" onClick={() => onRemoveRow(rowIdx)} className="text-slate-300 hover:text-red-500 transition-colors p-1">
                       <Trash2 className="h-3.5 w-3.5" />
                     </button>
                   )}
@@ -2904,7 +2952,7 @@ function PreviewTableField({ field, readOnly = false, rows, onUpdateCell, onAddR
         </table>
       </div>
       {!readOnly && (
-        <button onClick={onAddRow} className="flex items-center gap-1.5 text-xs font-semibold text-[#287EAD] hover:text-[#1E6F99] transition-colors">
+        <button type="button" onClick={onAddRow} className="flex items-center gap-1.5 text-xs font-semibold text-[#287EAD] hover:text-[#1E6F99] transition-colors">
           <Plus className="h-3.5 w-3.5" /> Add row
         </button>
       )}
@@ -2958,11 +3006,24 @@ function evalEditable(item: EditabilityState, values: Record<string, unknown>, a
  * Client-side mirror of apps/templates_engine/conditions.py's evaluator, used
  * to drive the live Build/Preview canvas. The server recomputes the same
  * formulas authoritatively at submit time — this copy only powers what the
- * person sees while filling the form, never what gets persisted. */
-type CalcToken = { t: "num"; v: number } | { t: "ident"; v: string } | { t: "op"; v: string };
+ * person sees while filling the form, never what gets persisted.
+ *
+ * The grammar: numbers, "string literals", field/column keys, + - * / ( )
+ * with unary +/-, comparisons (> < >= <= == !=), and IF(cond, a, b) — the
+ * one place a formula can produce a STRING result (e.g. a status message)
+ * rather than just a number. ==/!= compare as strings if either side is
+ * text-natured, else numerically. No eval/exec — a small hand-written
+ * tokenizer + recursive-descent parser only. */
+export type CalcValue = number | string;
+
+type CalcToken =
+  | { t: "num"; v: number }
+  | { t: "str"; v: string }
+  | { t: "ident"; v: string }
+  | { t: "op"; v: string };
 
 function calcTokenize(expr: string): CalcToken[] {
-  const re = /\s*(?:(\d+\.\d+|\d+)|([A-Za-z_][A-Za-z0-9_]*)|([+\-*/(),]))/y;
+  const re = /\s*(?:(\d+\.\d+|\d+)|("(?:[^"\\]|\\.)*")|([A-Za-z_][A-Za-z0-9_]*)|(>=|<=|==|!=)|([+\-*/(),><]))/y;
   const tokens: CalcToken[] = [];
   let pos = 0;
   while (pos < expr.length) {
@@ -2974,59 +3035,102 @@ function calcTokenize(expr: string): CalcToken[] {
     }
     pos = re.lastIndex;
     if (m[1] !== undefined) tokens.push({ t: "num", v: parseFloat(m[1]) });
-    else if (m[2] !== undefined) tokens.push({ t: "ident", v: m[2] });
-    else if (m[3] !== undefined) tokens.push({ t: "op", v: m[3] });
+    else if (m[2] !== undefined) tokens.push({ t: "str", v: m[2].slice(1, -1).replace(/\\"/g, "\"").replace(/\\\\/g, "\\") });
+    else if (m[3] !== undefined) tokens.push({ t: "ident", v: m[3] });
+    else if (m[4] !== undefined) tokens.push({ t: "op", v: m[4] });
+    else if (m[5] !== undefined) tokens.push({ t: "op", v: m[5] });
   }
   return tokens;
 }
 
-const CALC_FUNCS: Record<string, (...args: number[]) => number> = {
-  ROUND: (a, n = 0) => { const f = Math.pow(10, Math.trunc(n)); return Math.round(a * f) / f; },
-  ABS: Math.abs,
-  MIN: (...a) => Math.min(...a),
-  MAX: (...a) => Math.max(...a),
+/** Coerce any calc VALUE (number or string) to a number for arithmetic /
+ * comparison. Never throws — an unparseable string becomes 0. */
+function toNumber(value: CalcValue | undefined): number {
+  if (typeof value === "number") return value;
+  if (typeof value === "string") { const n = parseFloat(value); return Number.isFinite(n) ? n : 0; }
+  return 0;
+}
+
+function isTruthy(value: CalcValue | undefined): boolean {
+  if (typeof value === "string") return value.trim() !== "";
+  return toNumber(value) !== 0;
+}
+
+const CALC_FUNCS: Record<string, (...args: CalcValue[]) => number> = {
+  ROUND: (a, n = 0) => { const f = Math.pow(10, Math.trunc(toNumber(n))); return Math.round(toNumber(a) * f) / f; },
+  ABS: (a) => Math.abs(toNumber(a)),
+  MIN: (...a) => Math.min(...a.map(toNumber)),
+  MAX: (...a) => Math.max(...a.map(toNumber)),
 };
 
 class CalcParser {
   private i = 0;
-  constructor(private tokens: CalcToken[], private scope: Record<string, number>) {}
+  constructor(private tokens: CalcToken[], private scope: Record<string, CalcValue>) {}
   private peek() { return this.tokens[this.i]; }
   private next() { return this.tokens[this.i++]; }
-  parse(): number {
-    const v = this.expr();
+
+  parse(): CalcValue {
+    const v = this.comparison();
     if (this.peek() !== undefined) throw new Error("Unexpected trailing input");
     return v;
   }
-  private expr(): number {
-    let v = this.term();
-    while (this.peek()?.t === "op" && (this.peek() as any).v === "+" || this.peek()?.t === "op" && (this.peek() as any).v === "-") {
+
+  private comparison(): CalcValue {
+    const left = this.arith();
+    const t = this.peek();
+    if (t?.t === "op" && [">", "<", ">=", "<=", "==", "!="].includes(t.v)) {
+      const op = this.next() as { t: "op"; v: string };
+      const right = this.arith();
+      if (op.v === "==" || op.v === "!=") {
+        const equal = (typeof left === "string" || typeof right === "string")
+          ? String(left) === String(right)
+          : toNumber(left) === toNumber(right);
+        return (op.v === "==" ? equal : !equal) ? 1 : 0;
+      }
+      const ln = toNumber(left), rn = toNumber(right);
+      if (op.v === ">") return ln > rn ? 1 : 0;
+      if (op.v === "<") return ln < rn ? 1 : 0;
+      if (op.v === ">=") return ln >= rn ? 1 : 0;
+      return ln <= rn ? 1 : 0;
+    }
+    return left;
+  }
+
+  private arith(): CalcValue {
+    let v: CalcValue = this.term();
+    while (this.peek()?.t === "op" && ((this.peek() as any).v === "+" || (this.peek() as any).v === "-")) {
       const op = (this.next() as any).v;
       const rhs = this.term();
-      v = op === "+" ? v + rhs : v - rhs;
+      v = op === "+" ? toNumber(v) + toNumber(rhs) : toNumber(v) - toNumber(rhs);
     }
     return v;
   }
-  private term(): number {
-    let v = this.factor();
+
+  private term(): CalcValue {
+    let v: CalcValue = this.factor();
     while (this.peek()?.t === "op" && ((this.peek() as any).v === "*" || (this.peek() as any).v === "/")) {
       const op = (this.next() as any).v;
       const rhs = this.factor();
-      v = op === "*" ? v * rhs : (rhs ? v / rhs : 0);
+      const rn = toNumber(rhs);
+      v = op === "*" ? toNumber(v) * rn : (rn ? toNumber(v) / rn : 0);
     }
     return v;
   }
-  private factor(): number {
+
+  private factor(): CalcValue {
     const t = this.peek();
-    if (t?.t === "op" && t.v === "-") { this.next(); return -this.factor(); }
-    if (t?.t === "op" && t.v === "+") { this.next(); return this.factor(); }
+    if (t?.t === "op" && t.v === "-") { this.next(); return -toNumber(this.factor()); }
+    if (t?.t === "op" && t.v === "+") { this.next(); return toNumber(this.factor()); }
     return this.atom();
   }
-  private atom(): number {
+
+  private atom(): CalcValue {
     const t = this.next();
     if (!t) throw new Error("Unexpected end of expression");
     if (t.t === "num") return t.v;
+    if (t.t === "str") return t.v;
     if (t.t === "op" && t.v === "(") {
-      const v = this.expr();
+      const v = this.comparison();
       const close = this.next();
       if (!close || close.t !== "op" || close.v !== ")") throw new Error("Expected ')'");
       return v;
@@ -3036,10 +3140,22 @@ class CalcParser {
       const nxt = this.peek();
       if (nxt?.t === "op" && nxt.v === "(") {
         this.next();
-        const args: number[] = [];
+        if (name.toUpperCase() === "IF") {
+          const cond = this.comparison();
+          let sep = this.next();
+          if (!sep || sep.t !== "op" || sep.v !== ",") throw new Error("IF expects 3 arguments: IF(condition, if_true, if_false)");
+          const trueVal = this.comparison();
+          sep = this.next();
+          if (!sep || sep.t !== "op" || sep.v !== ",") throw new Error("IF expects 3 arguments: IF(condition, if_true, if_false)");
+          const falseVal = this.comparison();
+          const close = this.next();
+          if (!close || close.t !== "op" || close.v !== ")") throw new Error("Expected ')'");
+          return isTruthy(cond) ? trueVal : falseVal;
+        }
+        const args: CalcValue[] = [];
         if (!(this.peek()?.t === "op" && (this.peek() as any).v === ")")) {
-          args.push(this.expr());
-          while (this.peek()?.t === "op" && (this.peek() as any).v === ",") { this.next(); args.push(this.expr()); }
+          args.push(this.comparison());
+          while (this.peek()?.t === "op" && (this.peek() as any).v === ",") { this.next(); args.push(this.comparison()); }
         }
         const close = this.next();
         if (!close || close.t !== "op" || close.v !== ")") throw new Error("Expected ')'");
@@ -3053,15 +3169,29 @@ class CalcParser {
   }
 }
 
-/** Coerce a raw field/column value into the number a calc formula should see.
- * The naive `parseFloat(value)` this replaced silently broke date arithmetic:
+/** Field/column types whose natural VALUE for a calc formula is text, not a
+ * number — passed through as a raw string rather than coerced to 0. This is
+ * what makes `category == "Travel"` or an IF() condition testing a
+ * dropdown's selection actually work, while numeric-natured types
+ * (currency, number, date, boolean, …) still coerce for arithmetic. Mirrors
+ * the server's `_TEXT_CALC_TYPES` exactly. */
+const TEXT_CALC_TYPES = new Set([
+  "text", "textarea", "email", "phone", "select", "radio", "multi_select",
+  "reference", "user", "url", "calc_text", "auto_number",
+]);
+
+/** Coerce a raw field/column value into the NUMBER a calc formula should see
+ * for arithmetic/aggregation, based on its declared type. The naive
+ * `parseFloat(value)` this replaced silently broke date arithmetic:
  * parseFloat("2026-07-12") reads as 2026 (just the leading digits), so
  * `end_date - start_date` on two dates in the same year always evaluated to
  * 0 regardless of the actual gap. Dates/datetimes now convert to a day-count
  * (days since the Unix epoch, UTC) so subtracting two dates yields the
  * number of days between them directly — matching how UniFi's own
- * `(travel_end_date-travel_start_date)+1` formula behaves. */
-function coerceScopeValue(fieldType: string | undefined, raw: unknown): number {
+ * `(travel_end_date-travel_start_date)+1` formula behaves. Always returns a
+ * number regardless of type — used for whole-column aggregates, which need
+ * a number even from a text-natured column. */
+function coerceNumeric(fieldType: string | undefined, raw: unknown): number {
   if (raw === null || raw === undefined || raw === "") return 0;
   if (fieldType === "date" || fieldType === "datetime" || fieldType === "calc_date") {
     const d = new Date(String(raw));
@@ -3078,9 +3208,18 @@ function coerceScopeValue(fieldType: string | undefined, raw: unknown): number {
   return Number.isFinite(n) ? n : 0;
 }
 
-/** Evaluate a calc expression against a { fieldKey: number } scope. Never
+/** Coerce a raw field/column value into the calc VALUE (number OR string) a
+ * formula should see, based on its declared type. Text-natured types (see
+ * TEXT_CALC_TYPES) pass through as a string so string comparisons and IF()
+ * conditions work; everything else coerces to a number via coerceNumeric. */
+function coerceScopeValue(fieldType: string | undefined, raw: unknown): CalcValue {
+  if (fieldType && TEXT_CALC_TYPES.has(fieldType)) return raw === null || raw === undefined ? "" : String(raw);
+  return coerceNumeric(fieldType, raw);
+}
+
+/** Evaluate a calc expression against a { fieldKey: value } scope. Never
  * throws — returns 0 for a malformed formula, matching the server. */
-function evaluateCalcExpression(expression: string | undefined, scope: Record<string, number>): number {
+function evaluateCalcExpression(expression: string | undefined, scope: Record<string, CalcValue>): CalcValue {
   if (!expression || !expression.trim()) return 0;
   try {
     return new CalcParser(calcTokenize(expression), scope).parse();
@@ -3089,11 +3228,12 @@ function evaluateCalcExpression(expression: string | undefined, scope: Record<st
   }
 }
 
-/** Build a { fieldKey: number } scope from the form's current (id-keyed)
+/** Build a { fieldKey: value } scope from the form's current (id-keyed)
  * values, for evaluating sibling calc expressions. Type-aware per field
- * (see coerceScopeValue) — this is what makes date-difference formulas work. */
-function buildCalcScope(allFields: TemplateField[], values: Record<string, unknown>): Record<string, number> {
-  const scope: Record<string, number> = {};
+ * (see coerceScopeValue) — this is what makes date-difference formulas AND
+ * string comparisons/IF() work. */
+function buildCalcScope(allFields: TemplateField[], values: Record<string, unknown>): Record<string, CalcValue> {
+  const scope: Record<string, CalcValue> = {};
   for (const f of allFields) {
     if (!f.key) continue;
     scope[f.key] = coerceScopeValue(f.type, values[f.id]);
@@ -3112,7 +3252,7 @@ function buildRowCalcScope(
   values: Record<string, unknown>,
   columns: TableColumn[],
   row: Record<string, string>,
-): Record<string, number> {
+): Record<string, CalcValue> {
   const scope = buildCalcScope(allFields, values);
   const colTypeByKey: Record<string, TableColumnType | undefined> = {};
   columns.forEach((c) => { colTypeByKey[c.key] = c.type; });
@@ -3129,7 +3269,9 @@ function buildRowCalcScope(
  * value computed across every row of a table, before the normal per-row
  * expression evaluator ever sees the formula. Powers the live builder
  * Preview only; the server recomputes the authoritative figure the same
- * way at submit time. */
+ * way at submit time. Aggregates always coerce to numbers via
+ * `coerceNumeric` regardless of column nature (summing text is meaningless
+ * but must not crash). */
 const AGG_CALL_RE = /\b(SUM|AVG|COUNT|COLMIN|COLMAX)\(\s*([A-Za-z_][A-Za-z0-9_]*)(?:\.([A-Za-z_][A-Za-z0-9_]*))?\s*\)/gi;
 
 /** Registry entry for one table field, used to resolve cross-table
@@ -3161,7 +3303,7 @@ function resolveRowAggregates(
       targetColType = colTypeByKey[firstIdent];
       colKey = firstIdent;
     }
-    const colValues = targetRows.map((r) => coerceScopeValue(targetColType, r[colKey]));
+    const colValues = targetRows.map((r) => coerceNumeric(targetColType, r[colKey]));
     let result = 0;
     switch (func.toUpperCase()) {
       case "SUM": result = colValues.reduce((a, b) => a + b, 0); break;
@@ -3174,7 +3316,7 @@ function resolveRowAggregates(
   });
 }
 
-function PreviewField({ field, register, errors, values, allFields, editable = true, tableRows, onUpdateTableCell, onAddTableRow, onRemoveTableRow }: {
+function PreviewField({ field, register, errors, values, allFields, editable = true, tableRows, onUpdateTableCell, onAddTableRow, onRemoveTableRow, previewStep = "draft" }: {
   field: TemplateField;
   register: UseFormRegister<Record<string, unknown>>;
   errors: FieldErrors<Record<string, unknown>>;
@@ -3185,6 +3327,7 @@ function PreviewField({ field, register, errors, values, allFields, editable = t
   onUpdateTableCell?: (tableKey: string, rowIdx: number, colKey: string, val: string) => void;
   onAddTableRow?: (tableKey: string) => void;
   onRemoveTableRow?: (tableKey: string, rowIdx: number) => void;
+  previewStep?: string;
 }) {
   if (field.hidden) return null;
   // Read-only when always-read-only or not editable at this (draft) step.
@@ -3198,6 +3341,9 @@ function PreviewField({ field, register, errors, values, allFields, editable = t
         onUpdateCell={(rowIdx, colKey, val) => onUpdateTableCell?.(field.key, rowIdx, colKey, val)}
         onAddRow={() => onAddTableRow?.(field.key)}
         onRemoveRow={(rowIdx) => onRemoveTableRow?.(field.key, rowIdx)}
+        values={values}
+        allFields={allFields}
+        previewStep={previewStep}
       />
     );
   }
@@ -3453,7 +3599,7 @@ function Preview({ sections, templateName, processSteps }: {
     for (const f of allFields) {
       if (!f.calc?.expression) continue;
       let result = evaluateCalcExpression(f.calc.expression, scope);
-      if (typeof f.calc.decimals === "number") result = Number(result.toFixed(f.calc.decimals));
+      if (typeof result === "number" && typeof f.calc.decimals === "number") result = Number(result.toFixed(f.calc.decimals));
       scope[f.key] = result; // let later formulas see this one's result
       if (values[f.id] !== result) setValue(f.id, result);
     }
@@ -3494,7 +3640,7 @@ function Preview({ sections, templateName, processSteps }: {
           for (const row of rows) {
             const scope = buildRowCalcScope(allFields, values, f.columns ?? [], row);
             let result = evaluateCalcExpression(resolvedExpr, scope);
-            if (typeof col.calc!.decimals === "number") result = Number(result.toFixed(col.calc!.decimals));
+            if (typeof result === "number" && typeof col.calc!.decimals === "number") result = Number(result.toFixed(col.calc!.decimals));
             const str = String(result);
             if (row[col.key] !== str) { row[col.key] = str; changed = true; }
           }
@@ -3542,7 +3688,7 @@ function Preview({ sections, templateName, processSteps }: {
           <pre className="overflow-auto bg-slate-900 p-5 text-xs text-emerald-400 font-mono leading-relaxed">
             {JSON.stringify(submitted, null, 2)}
           </pre>
-          <button onClick={() => { setSubmitted(null); reset(); }}
+          <button type="button" onClick={() => { setSubmitted(null); reset(); }}
                   className="mt-5 inline-flex items-center gap-1.5 border border-slate-300 bg-white px-4 py-2 text-sm font-semibold text-slate-700 hover:bg-slate-50">
             <RotateCcw className="h-4 w-4" /> Test again
           </button>
@@ -3589,7 +3735,8 @@ function Preview({ sections, templateName, processSteps }: {
                     <PreviewField field={f} register={register} errors={errors} values={values} allFields={allFields}
                                   editable={sectionEditable && evalEditable(f, values, allFields, previewStep)}
                                   tableRows={tableRows} onUpdateTableCell={updateTableCell}
-                                  onAddTableRow={addTableRow} onRemoveTableRow={removeTableRow} />
+                                  onAddTableRow={addTableRow} onRemoveTableRow={removeTableRow}
+                                  previewStep={previewStep} />
                   </div>
                 );
               })}
@@ -3641,7 +3788,7 @@ function SettingsTab({ template, onCommit, documentTypes, processSteps }: {
     "placeholder:text-[#8C969E] outline-none focus:border-[#287EAD] focus:ring-1 focus:ring-[#287EAD]";
 
   return (
-    <div className="mx-auto max-w-2xl space-y-5 p-8">
+    <div className="mx-auto max-w-4xl space-y-5 p-8">
       <div className="border border-[#C8CDD2] bg-white shadow-sm">
         <div className="border-b border-[#C8CDD2] bg-[#F3F5F6] px-5 py-3">
           <h2 className="text-sm font-bold text-[#1F2933]">Template metadata</h2>
@@ -4418,6 +4565,7 @@ export default function TemplateBuilderV2({ initial, onSave, onCancel, isSaving,
           column={configCol.column}
           siblingColumns={configCol.columns}
           formFields={template.sections.flatMap((s) => s.fields).filter((f) => f.key && f.type !== "table")}
+          processSteps={processSteps}
           onClose={() => setConfiguringColumn(null)}
           onSave={(updated) => {
             updateColumn(configCol.sectionId, configCol.fieldId, configCol.colId, updated);

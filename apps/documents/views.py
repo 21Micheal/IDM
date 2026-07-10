@@ -941,7 +941,7 @@ class DocumentViewSet(AuditMixin, viewsets.ModelViewSet):
         from types import SimpleNamespace
         from django.core.files.base import ContentFile
         from apps.search.utils import SEARCH_INDEX_EXCEPTIONS
-        from apps.documents.access import document_allows_edit
+        from apps.documents.access import document_allows_form_edit
         from apps.documents.file_streaming import user_can_edit_document
         from apps.templates_engine.tasks import generate_built_pdf
 
@@ -954,11 +954,22 @@ class DocumentViewSet(AuditMixin, viewsets.ModelViewSet):
                 {"detail": "You do not have permission to edit this document."},
                 status=status.HTTP_403_FORBIDDEN,
             )
-        if not document_allows_edit(doc, user=request.user):
+        if not document_allows_form_edit(doc, user=request.user):
             return Response(
                 {"detail": "This document cannot be edited in its current status."},
                 status=status.HTTP_400_BAD_REQUEST,
             )
+        # Same checkout gate as metadata edits: once locked (or when anyone other
+        # than the uploader edits), the caller must hold the lock.
+        holder = doc.edit_lock_holder
+        lock_required = doc.is_edit_locked or doc.uploaded_by_id != request.user.id
+        if lock_required and (holder is None or holder.id != request.user.id):
+            detail = (
+                f"This document is locked by {holder.get_full_name()}."
+                if holder
+                else "Lock (check out) the document first."
+            )
+            return Response({"detail": detail}, status=status.HTTP_423_LOCKED)
 
         import json
         from apps.documents.form_attachments import (

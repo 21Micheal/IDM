@@ -80,14 +80,28 @@ def is_editable(item: dict, values: dict, process_step: str = "draft") -> bool:
 # the single authoritative place this is (re)computed, called from both the
 # fill() required-field check and document generation (tasks.py).
 #
-# The grammar is intentionally tiny and side-effect free: numbers, field keys,
-# + - * / ( ) with the usual precedence, unary +/-, and a handful of pure
-# functions (ROUND, ABS, MIN, MAX). No arbitrary code execution (no eval/exec).
+# The grammar is intentionally small and side-effect free — no eval/exec, no
+# arbitrary code execution:
+#   - numbers, "string literals", field/column keys
+#   - + - * / ( ) with the usual precedence, unary +/-
+#   - comparisons: > < >= <= == !=  (numeric for > < >= <=; ==/!= compare as
+#     strings if either side is text-natured, else numerically)
+#   - IF(condition, value_if_true, value_if_false) — the one place a formula
+#     can produce a STRING result (e.g. a status message), not just a number
+#   - pure functions: ROUND, ABS, MIN, MAX (numeric), plus the whole-column
+#     aggregates SUM/AVG/COUNT/COLMIN/COLMAX resolved separately by
+#     ``_resolve_row_aggregates`` before this parser ever sees the formula.
+# A formula's result can therefore be either a number or a string — see
+# ``compute_calculated_values``, which stores whichever came out.
 
 import re as _re
 
 _CALC_TOKEN_RE = _re.compile(
-    r"\s*(?:(?P<num>\d+\.\d+|\d+)|(?P<ident>[A-Za-z_][A-Za-z0-9_]*)|(?P<op>[+\-*/(),]))"
+    r'\s*(?:(?P<num>\d+\.\d+|\d+)'
+    r'|(?P<str>"(?:[^"\\]|\\.)*")'
+    r"|(?P<ident>[A-Za-z_][A-Za-z0-9_]*)"
+    r"|(?P<cmp>>=|<=|==|!=)"
+    r"|(?P<op>[+\-*/(),><]))"
 )
 
 
@@ -108,25 +122,60 @@ def _calc_tokenize(expression: str):
         pos = m.end()
         if m.group("num"):
             tokens.append(("num", float(m.group("num"))))
+        elif m.group("str"):
+            raw = m.group("str")[1:-1]
+            tokens.append(("str", raw.replace('\\"', '"').replace("\\\\", "\\")))
         elif m.group("ident"):
             tokens.append(("ident", m.group("ident")))
+        elif m.group("cmp"):
+            tokens.append(("op", m.group("cmp")))
         else:
             tokens.append(("op", m.group("op")))
     return tokens
 
 
+def _to_number(value) -> float:
+    """Coerce any calc VALUE (number or string) to a float for arithmetic /
+    comparison, never raising — an unparseable string is treated as 0,
+    consistent with the evaluator's "never throws" philosophy."""
+    if isinstance(value, (int, float)):
+        return float(value)
+    if isinstance(value, str):
+        try:
+            return float(value)
+        except ValueError:
+            return 0.0
+    return 0.0
+
+
+def _is_truthy(value) -> bool:
+    if isinstance(value, str):
+        return value.strip() != ""
+    return _to_number(value) != 0
+
+
 _CALC_FUNCS = {
-    "ROUND": lambda a, n=0: round(a, int(n)),
-    "ABS": abs,
-    "MIN": lambda *a: min(a) if a else 0,
-    "MAX": lambda *a: max(a) if a else 0,
+    "ROUND": lambda a, n=0: round(_to_number(a), int(_to_number(n))),
+    "ABS": lambda a: abs(_to_number(a)),
+    "MIN": lambda *a: min((_to_number(x) for x in a), default=0.0),
+    "MAX": lambda *a: max((_to_number(x) for x in a), default=0.0),
 }
 
 
 class _CalcParser:
-    """Minimal recursive-descent parser/evaluator: expr := term (+|- term)*;
-    term := factor (*|/ factor)*; factor := (+|-)? atom; atom := number |
-    IDENT | IDENT '(' args ')' | '(' expr ')'."""
+    """Recursive-descent parser/evaluator over a small typed-value (number |
+    string) expression language:
+        expr       := comparison
+        comparison := arith ( (">"|"<"|">="|"<="|"=="|"!=") arith )?
+        arith      := term (("+"|"-") term)*
+        term       := factor (("*"|"/") factor)*
+        factor     := ("+"|"-")? atom
+        atom       := NUMBER | STRING | IDENT | IDENT "(" args ")" | "(" expr ")"
+    IF(cond, a, b) is a special-cased function: both branches are always
+    evaluated (this language is pure/side-effect-free, so there's no
+    correctness cost to skipping short-circuit evaluation) and the truthy
+    one is returned — which is what lets it return either branch's type
+    (typically a string message) rather than forcing a number."""
 
     def __init__(self, tokens, scope):
         self.tokens = tokens
@@ -142,19 +191,42 @@ class _CalcParser:
         return t
 
     def parse(self):
-        value = self._expr()
+        value = self._comparison()
         if self._peek() is not None:
             raise CalcError("Unexpected trailing input")
         return value
 
-    def _expr(self):
+    def _comparison(self):
+        left = self._arith()
+        t = self._peek()
+        if t and t[0] == "op" and t[1] in (">", "<", ">=", "<=", "==", "!="):
+            op = self._next()[1]
+            right = self._arith()
+            if op in ("==", "!="):
+                if isinstance(left, str) or isinstance(right, str):
+                    equal = str(left) == str(right)
+                else:
+                    equal = _to_number(left) == _to_number(right)
+                return 1.0 if (equal if op == "==" else not equal) else 0.0
+            ln, rn = _to_number(left), _to_number(right)
+            if op == ">":
+                return 1.0 if ln > rn else 0.0
+            if op == "<":
+                return 1.0 if ln < rn else 0.0
+            if op == ">=":
+                return 1.0 if ln >= rn else 0.0
+            return 1.0 if ln <= rn else 0.0
+        return left
+
+    def _arith(self):
         value = self._term()
         while True:
             t = self._peek()
             if t and t[0] == "op" and t[1] in ("+", "-"):
                 self._next()
                 rhs = self._term()
-                value = value + rhs if t[1] == "+" else value - rhs
+                a, b = _to_number(value), _to_number(rhs)
+                value = a + b if t[1] == "+" else a - b
             else:
                 return value
 
@@ -165,7 +237,8 @@ class _CalcParser:
             if t and t[0] == "op" and t[1] in ("*", "/"):
                 self._next()
                 rhs = self._factor()
-                value = value * rhs if t[1] == "*" else (value / rhs if rhs else 0)
+                a, b = _to_number(value), _to_number(rhs)
+                value = a * b if t[1] == "*" else (a / b if b else 0.0)
             else:
                 return value
 
@@ -173,10 +246,10 @@ class _CalcParser:
         t = self._peek()
         if t and t == ("op", "-"):
             self._next()
-            return -self._factor()
+            return -_to_number(self._factor())
         if t and t == ("op", "+"):
             self._next()
-            return self._factor()
+            return _to_number(self._factor())
         return self._atom()
 
     def _atom(self):
@@ -185,8 +258,10 @@ class _CalcParser:
             raise CalcError("Unexpected end of expression")
         if t[0] == "num":
             return t[1]
+        if t[0] == "str":
+            return t[1]
         if t == ("op", "("):
-            value = self._expr()
+            value = self._comparison()
             if self._next() != ("op", ")"):
                 raise CalcError("Expected ')'")
             return value
@@ -194,12 +269,23 @@ class _CalcParser:
             name = t[1]
             if self._peek() == ("op", "("):
                 self._next()
+                if name.upper() == "IF":
+                    cond = self._comparison()
+                    if self._next() != ("op", ","):
+                        raise CalcError("IF expects 3 arguments: IF(condition, if_true, if_false)")
+                    true_val = self._comparison()
+                    if self._next() != ("op", ","):
+                        raise CalcError("IF expects 3 arguments: IF(condition, if_true, if_false)")
+                    false_val = self._comparison()
+                    if self._next() != ("op", ")"):
+                        raise CalcError("Expected ')'")
+                    return true_val if _is_truthy(cond) else false_val
                 args = []
                 if self._peek() != ("op", ")"):
-                    args.append(self._expr())
+                    args.append(self._comparison())
                     while self._peek() == ("op", ","):
                         self._next()
-                        args.append(self._expr())
+                        args.append(self._comparison())
                 if self._next() != ("op", ")"):
                     raise CalcError("Expected ')'")
                 fn = _CALC_FUNCS.get(name.upper())
@@ -210,10 +296,9 @@ class _CalcParser:
         raise CalcError("Unexpected token")
 
 
-def _coerce_scope_value(field_type, raw):
-    """Convert one raw field/column value into the number a calc formula
-    should see, based on its declared type. Mirrors the frontend's
-    ``coerceScopeValue`` exactly.
+def _coerce_numeric(field_type, raw) -> float:
+    """Convert one raw field/column value into the NUMBER a calc formula
+    should see for arithmetic/aggregation, based on its declared type.
 
     This replaces a previous naive ``float(raw)`` coercion that silently
     broke date arithmetic: ``float("2026-07-12")`` raises (or, with the old
@@ -221,7 +306,12 @@ def _coerce_scope_value(field_type, raw):
     formulas never produced a meaningful day count. Dates/datetimes now
     convert to a day-count (days since the Unix epoch) so subtracting two
     dates yields the number of days between them directly — e.g. UniFi's own
-    ``(travel_end_date - travel_start_date) + 1`` pattern."""
+    ``(travel_end_date - travel_start_date) + 1`` pattern.
+
+    Always returns a float regardless of type — this is the coercion used
+    for whole-column aggregates (SUM/AVG/COUNT/COLMIN/COLMAX), which need a
+    number even from a text-natured column (summing text is meaningless but
+    must not crash)."""
     if raw is None or raw == "":
         return 0.0
     if field_type in ("date", "datetime", "calc_date"):
@@ -252,40 +342,56 @@ def _coerce_scope_value(field_type, raw):
         return 0.0
 
 
-def evaluate_calc_expression(expression: str, scope: dict):
-    """Evaluate a restricted arithmetic expression referencing field *keys* in
-    ``scope`` (e.g. ``total_days * daily_rate``). Non-numeric / missing values
-    coerce to 0. Never raises — any parse or evaluation error resolves to 0 so
-    a bad formula can't break document generation.
+# Field/column types whose natural VALUE for a calc formula is text, not a
+# number — passed through as a raw string rather than coerced to 0. This is
+# what makes ``category == "Travel"`` or an IF() condition testing a
+# dropdown's selection actually work, while numeric-natured types (currency,
+# number, date, boolean, …) still coerce as before for arithmetic.
+_TEXT_CALC_TYPES = {
+    "text", "textarea", "email", "phone", "select", "radio", "multi_select",
+    "reference", "user", "url", "calc_text", "auto_number",
+}
 
-    ``scope`` here is a plain (already-typed-if-the-caller-wants) value dict;
-    callers with field-type information (compute_calculated_values below)
-    should build a properly-coerced numeric scope themselves via
-    ``_coerce_scope_value`` — this entry point applies the generic numeric
-    fallback for callers that don't have type info handy."""
+
+def _coerce_scope_value(field_type, raw):
+    """Convert one raw field/column value into the calc VALUE (number OR
+    string) a formula should see, based on its declared type. Text-natured
+    types (see ``_TEXT_CALC_TYPES``) pass through as a string so string
+    comparisons (``status == "Approved"``) and IF() conditions work;
+    everything else coerces to a number via ``_coerce_numeric``."""
+    if field_type in _TEXT_CALC_TYPES:
+        return "" if raw is None else str(raw)
+    return _coerce_numeric(field_type, raw)
+
+
+def evaluate_calc_expression(expression: str, scope: dict):
+    """Evaluate a calc expression referencing field *keys* in ``scope``
+    (e.g. ``total_days * daily_rate``, or ``IF(status=="Approved","OK","")``).
+    Never raises — any parse or evaluation error resolves to 0 so a bad
+    formula can't break document generation.
+
+    ``scope`` here is a plain value dict passed through as-is (values may
+    already be str or number); callers with field-type information
+    (``compute_calculated_values`` below) should build a properly-coerced
+    scope themselves via ``_coerce_scope_value`` for correct string-vs-number
+    behavior — this generic entry point just uses whatever's already there."""
     if not expression or not isinstance(expression, str):
         return 0
-    numeric_scope = {}
-    for key, raw in (scope or {}).items():
-        try:
-            numeric_scope[key] = float(raw) if raw not in (None, "") else 0.0
-        except (TypeError, ValueError):
-            numeric_scope[key] = 0.0
     try:
         tokens = _calc_tokenize(expression)
-        return _CalcParser(tokens, numeric_scope).parse()
+        return _CalcParser(tokens, dict(scope or {})).parse()
     except (CalcError, ZeroDivisionError, IndexError):
         return 0
 
 
-def _eval_typed(expression: str, numeric_scope: dict):
-    """Run the parser against an already-numeric scope (see
+def _eval_typed(expression: str, scope: dict):
+    """Run the parser against an already-coerced scope (see
     ``_coerce_scope_value``) without re-coercing it. Never raises."""
     if not expression or not isinstance(expression, str):
         return 0
     try:
         tokens = _calc_tokenize(expression)
-        return _CalcParser(tokens, numeric_scope).parse()
+        return _CalcParser(tokens, scope).parse()
     except (CalcError, ZeroDivisionError, IndexError):
         return 0
 
@@ -345,7 +451,7 @@ def _resolve_row_aggregates(expression: str, rows, col_types: dict, all_tables: 
 
         col_type = target_col_types.get(col_key)
         col_values = [
-            _coerce_scope_value(col_type, (row or {}).get(col_key))
+            _coerce_numeric(col_type, (row or {}).get(col_key))
             for row in target_rows if isinstance(row, dict)
         ]
         if func == "SUM":
@@ -475,7 +581,7 @@ def compute_calculated_values(sections, values: dict) -> dict:
                         for ck, ctype in col_types.items():
                             row_scope[ck] = _coerce_scope_value(ctype, row.get(ck))
                         result = _eval_typed(resolved_expr, row_scope)
-                        if isinstance(decimals, int):
+                        if isinstance(decimals, int) and isinstance(result, (int, float)):
                             result = round(result, decimals)
                         row[col_key] = result
                 continue
@@ -485,9 +591,9 @@ def compute_calculated_values(sections, values: dict) -> dict:
                 continue
             result = _eval_typed(calc.get("expression", ""), top_scope)
             decimals = calc.get("decimals")
-            if isinstance(decimals, int):
+            if isinstance(decimals, int) and isinstance(result, (int, float)):
                 result = round(result, decimals)
             out[key] = result
-            top_scope[key] = result if isinstance(result, (int, float)) else 0.0
+            top_scope[key] = result
 
     return out

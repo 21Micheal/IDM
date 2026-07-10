@@ -175,6 +175,73 @@ class DocumentEditPolicyTests(TestCase):
         self.assertTrue(document_allows_edit(self.document, user=admin))
 
 
+class DocumentAllowsFormEditTests(TestCase):
+    def setUp(self):
+        self.doc_type = DocumentType.objects.create(
+            name="Imprest",
+            code="IMP",
+            reference_prefix="IMP",
+        )
+        self.user = User.objects.create_user(
+            email="finance@example.com",
+            password="pass",
+            first_name="Finance",
+            last_name="User",
+        )
+        self.document = _make_document(
+            title="Imprest claim",
+            reference_number="IMP-00001",
+            document_type=self.doc_type,
+            uploaded_by=self.user,
+            status=DocumentStatus.APPROVED,
+            metadata={
+                "form": {
+                    "sections": [
+                        {
+                            "id": "retirement",
+                            "title": "Retirement",
+                            "editableWhen": {
+                                "combinator": "and",
+                                "conditions": [
+                                    {
+                                        "source": "process_step",
+                                        "operator": "equals",
+                                        "value": DocumentStatus.APPROVED,
+                                    }
+                                ],
+                            },
+                            "fields": [{"key": "amount_retired", "type": "currency", "label": "Retired"}],
+                        }
+                    ],
+                    "values": {},
+                }
+            },
+        )
+
+    def test_approved_form_with_editable_section_allows_form_edit(self):
+        from apps.documents.access import document_allows_form_edit
+
+        self.assertTrue(document_allows_form_edit(self.document, user=self.user))
+
+    def test_approved_form_without_editable_section_blocks_form_edit(self):
+        from apps.documents.access import document_allows_form_edit
+
+        self.document.metadata = {
+            "form": {
+                "sections": [
+                    {
+                        "id": "locked",
+                        "title": "Locked",
+                        "readonly": True,
+                        "fields": [{"key": "x", "type": "text", "label": "X"}],
+                    }
+                ],
+                "values": {},
+            }
+        }
+        self.assertFalse(document_allows_form_edit(self.document, user=self.user))
+
+
 class DocumentTypeAdminGroupPermissionTests(TestCase):
     def setUp(self):
         self.client = APIClient()

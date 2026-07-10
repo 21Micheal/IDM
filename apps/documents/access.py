@@ -178,12 +178,102 @@ def document_allows_edit(document: Document, *, user=None) -> bool:
     return True
 
 
+def is_built_form_document(document: Document) -> bool:
+    """True when the document carries an in-app built-template form schema."""
+    form = (document.metadata or {}).get("form")
+    return isinstance(form, dict) and bool(form.get("sections"))
+
+
+def form_has_editable_fields(document: Document) -> bool:
+    """True when the built form exposes at least one visible, editable field at
+    the document's current process step (``status``)."""
+    form = (document.metadata or {}).get("form")
+    if not isinstance(form, dict):
+        return False
+    from apps.documents.form_attachments import descriptors_to_names
+    from apps.templates_engine.conditions import is_editable, is_visible
+
+    sections = form.get("sections") or []
+    values = form.get("values") if isinstance(form.get("values"), dict) else {}
+    process_step = document.status or "draft"
+    render_values = descriptors_to_names(values)
+
+    for section in sections:
+        if not isinstance(section, dict):
+            continue
+        if not is_visible(section, render_values, process_step):
+            continue
+        section_editable = is_editable(section, render_values, process_step)
+        for field in section.get("fields") or []:
+            if not isinstance(field, dict):
+                continue
+            if not field.get("key"):
+                continue
+            if (
+                is_visible(field, render_values, process_step)
+                and section_editable
+                and is_editable(field, render_values, process_step)
+            ):
+                return True
+    return False
+
+
+def document_allows_form_edit(document: Document, *, user=None) -> bool:
+    """Whether an in-app built-template form may be edited (stage-aware).
+
+    Creation-stage rules mirror ``document_allows_edit`` (workflow task gates).
+    Later lifecycle stages allow edits only when the form schema exposes editable
+    fields at the document's current process step — e.g. imprest retirement
+    sections that unlock after the first approval.
+    """
+    if not is_built_form_document(document):
+        return False
+    if user is not None and getattr(user, "has_admin_access", False):
+        return True
+
+    stage = resolve_access_stage(document)
+
+    if stage == ACCESS_STAGE_CREATION:
+        return document_allows_edit(document, user=user)
+
+    if not form_has_editable_fields(document):
+        return False
+
+    if stage == ACCESS_STAGE_AFTER_APPROVAL:
+        return True
+
+    if stage == ACCESS_STAGE_APPROVAL:
+        if user is None:
+            return True
+        status_lower = (document.status or "").strip().lower()
+        if status_lower == "returned":
+            return True
+        if _document_has_active_workflow(document):
+            from apps.workflows.models import WorkflowTask
+
+            return WorkflowTask.objects.filter(
+                assigned_to=user,
+                workflow_instance__document_id=document.id,
+                status__in=["in_progress"],
+            ).exists()
+        return True
+
+    return False
+
+
+def document_allows_editing_actions(document: Document, *, user=None) -> bool:
+    """Whether EDIT/UPLOAD-class actions are permitted for this document."""
+    if is_built_form_document(document):
+        return document_allows_form_edit(document, user=user)
+    return document_allows_edit(document, user=user)
+
+
 def filter_permissions_for_document(user, document: Document, permissions: set[str]) -> set[str]:
     """Remove actions the user cannot perform on this document (policy + stage)."""
     from apps.accounts.models import GroupAction
 
     perms = set(permissions)
-    if not document_allows_edit(document, user=user):
+    if not document_allows_editing_actions(document, user=user):
         perms.discard(GroupAction.EDIT.value)
         perms.discard(GroupAction.UPLOAD.value)
     return perms
