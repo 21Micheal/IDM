@@ -2066,12 +2066,14 @@ export default function UploadPage({ scanOnly = false }: UploadPageProps) {
                         placeholders: selectedTemplate.placeholders,
                         sections: selectedTemplate.sections,
                       }}
+                      values={{}}
+                      processStep="draft"
                     />
 
                     {/* Footer note */}
                     <p className="mt-5 border-t border-[#E3E7EA] pt-3 text-xs text-[#5E6870]">
                       {isBuiltTemplate
-                        ? "Click \"Fill & Create Document\" to open the full form and complete all fields."
+                        ? "Click \"Create Document\" below to open the full form and complete all fields."
                         : isDesignerDoc
                           ? "This document is generated from the template — merge fields (author, date, reference) and the details you enter are filled in automatically, then it opens for editing."
                           : "A draft Office document will be created from this template for editing."}
@@ -2185,14 +2187,9 @@ export default function UploadPage({ scanOnly = false }: UploadPageProps) {
                               </p>
                             </>
                           ) : (
-                          <button
-                            type="button"
-                            onClick={() => setShowBuiltForm(true)}
-                            className="flex w-full items-center justify-center gap-2 rounded border border-[#287EAD] bg-[#287EAD] px-4 py-2.5 text-sm font-semibold text-white hover:bg-[#1E6F99] transition-colors"
-                          >
-                            <Wand2 className="h-4 w-4" />
-                            Fill &amp; Create Document
-                          </button>
+                            <p className="rounded border border-[#A7CDE3] bg-[#EEF6FB] px-3 py-2.5 text-xs text-[#1F2933]">
+                              Click <strong>Create Document</strong> below to open the full form and complete all fields.
+                            </p>
                           )}
                         </div>
                       </>

@@ -835,10 +835,10 @@ function FormField({ field, control, errors, onChangeCb, readOnly, allValues, ed
   // Layout-only elements
   if (type === "heading") return (
     <div style={{ gridColumn: "span 12 / span 12" }}>
-      <h4 className="border-b border-border pb-1.5 pt-2 text-sm font-bold text-foreground">{label}</h4>
+      <h4 style={{ borderBottom: "1px solid #C8CDD2", paddingBottom: "6px", paddingTop: "8px", fontSize: "14px", fontWeight: "bold", color: "#1F2933" }}>{label}</h4>
     </div>
   );
-  if (type === "divider") return <div style={{ gridColumn: "span 12 / span 12" }}><hr className="border-border" /></div>;
+  if (type === "divider") return <div style={{ gridColumn: "span 12 / span 12" }}><hr style={{ borderColor: "#E5E8EB" }} /></div>;
 
   // Table handled separately (needs full width + local state)
   if (type === "table") return (
@@ -858,14 +858,14 @@ function FormField({ field, control, errors, onChangeCb, readOnly, allValues, ed
     const shown = referenceLabel(allValues[key]);
     return (
       <div style={style}>
-        <label className="mb-1.5 block text-xs font-semibold text-foreground">
+        <label style={{ marginBottom: "6px", display: "block", fontSize: "12px", fontWeight: "600", color: "#1F2933" }}>
           {label}
-          {field.required && <span className="ml-1 text-red-500">*</span>}
-          <span className="ml-2 inline-flex items-center gap-1 rounded bg-primary/10 px-1.5 py-0.5 align-middle text-[10px] font-medium text-primary">
+          {field.required && <span style={{ marginLeft: "4px", color: "#D32F2F" }}>*</span>}
+          <span style={{ marginLeft: "8px", display: "inline-flex", alignItems: "center", gap: "4px", borderRadius: "4px", backgroundColor: "#EEF6FB", paddingLeft: "6px", paddingRight: "6px", paddingTop: "4px", paddingBottom: "4px", verticalAlign: "middle", fontSize: "10px", fontWeight: "500", color: "#287EAD" }}>
             <Sparkles className="h-2.5 w-2.5" /> Auto · {formulaLabel(field.formula)}
           </span>
         </label>
-        <div className={`${inp} flex items-center bg-muted/40 text-muted-foreground`}>
+        <div className={`${inp} flex items-center`} style={{ backgroundColor: "#F6F7F8", color: "#8C969E" }}>
           {shown || <span className="italic">Filled automatically on save</span>}
         </div>
       </div>
@@ -906,11 +906,11 @@ function FormField({ field, control, errors, onChangeCb, readOnly, allValues, ed
 
   // Shared label element
   const labelEl = (
-    <label className="mb-1.5 block text-xs font-semibold text-foreground">
+    <label style={{ marginBottom: "6px", display: "block", fontSize: "12px", fontWeight: "600", color: "#1F2933" }}>
       {label}
-      {field.required && <span className="ml-1 text-red-500">*</span>}
-      {field.tooltip && <span className="ml-1 cursor-help text-muted-foreground" title={field.tooltip}>(?)</span>}
-      {help && <span className="ml-2 font-normal text-muted-foreground">{help}</span>}
+      {field.required && <span style={{ marginLeft: "4px", color: "#D32F2F" }}>*</span>}
+      {field.tooltip && <span style={{ marginLeft: "4px", cursor: "help", color: "#8C969E" }} title={field.tooltip}>(?)</span>}
+      {help && <span style={{ marginLeft: "8px", fontWeight: "400", color: "#8C969E" }}>{help}</span>}
     </label>
   );
 
@@ -1152,19 +1152,19 @@ export default function TemplateForm({ sections, values, onChange, readOnly = fa
         const sectionEditable = evalEditable(section, liveValues as TemplateFormValues, allFields, processStep);
         const sectionLocked = !readOnly && !sectionEditable;
         return (
-          <div key={section.id ?? si} className="rounded-xl border border-border bg-card shadow-sm overflow-hidden">
+          <div key={section.id ?? si} className="overflow-hidden" style={{ border: "1px solid #C8CDD2", backgroundColor: "#FFFFFF" }}>
             {/* Section header */}
-            <div className="border-b border-border bg-muted/40 px-5 py-3">
-              <h3 className="flex items-center gap-2 text-sm font-bold text-foreground">
+            <div style={{ borderBottom: "1px solid #C8CDD2", backgroundColor: "#EEF6FB", paddingLeft: "20px", paddingRight: "20px", paddingTop: "12px", paddingBottom: "12px" }}>
+              <h3 className="flex items-center gap-2 font-bold" style={{ fontSize: "14px", color: "#1F2933" }}>
                 {section.title ?? `Section ${si + 1}`}
                 {sectionLocked && (
-                  <span className="inline-flex items-center gap-1 rounded bg-muted px-1.5 py-0.5 text-[10px] font-semibold text-muted-foreground">
+                  <span className="inline-flex items-center gap-1 px-1.5 py-0.5 text-[10px] font-semibold" style={{ backgroundColor: "#F0F2F4", color: "#5E6870" }}>
                     <Lock className="h-2.5 w-2.5" /> Read-only at this step
                   </span>
                 )}
               </h3>
               {section.description && (
-                <p className="mt-0.5 text-xs text-muted-foreground">{section.description}</p>
+                <p className="mt-0.5 text-xs" style={{ color: "#8C969E" }}>{section.description}</p>
               )}
             </div>
             {/* Fields — 12-column grid */}
@@ -1182,7 +1182,7 @@ export default function TemplateForm({ sections, values, onChange, readOnly = fa
                 />
               ))}
               {visibleFields.length === 0 && (
-                <p className="col-span-12 text-sm text-muted-foreground">No fields in this section.</p>
+                <p className="col-span-12 text-sm" style={{ color: "#8C969E" }}>No fields in this section.</p>
               )}
             </div>
           </div>

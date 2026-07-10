@@ -29,12 +29,16 @@ type PreviewField = {
   options?: string[];
   columns?: PreviewColumn[];
   minRows?: number;
+  hidden?: boolean;
+  visibleWhen?: VisibleWhen | null;
 };
 type PreviewSection = {
   id?: string;
   title?: string;
   description?: string;
   fields?: PreviewField[];
+  hidden?: boolean;
+  visibleWhen?: VisibleWhen | null;
 };
 export type PreviewTemplate = {
   name: string;
@@ -45,8 +49,65 @@ export type PreviewTemplate = {
   sections?: unknown[];
 };
 
-function PreviewField({ field }: { field: PreviewField }) {
-  const box = "w-full rounded border border-slate-200 bg-slate-50 px-2.5 py-1.5 text-xs text-slate-400";
+type ConditionOperator = "equals" | "not_equals" | "is_empty" | "is_not_empty" | string;
+
+type VisibilityCondition = {
+  source?: "field" | "process_step";
+  fieldKey?: string;
+  operator: ConditionOperator;
+  value?: string;
+};
+
+type VisibleWhen =
+  | { combinator?: "and" | "or"; conditions?: VisibilityCondition[] }
+  | { fieldKey: string; operator: ConditionOperator; value?: string };
+
+function ruleConditions(vw?: VisibleWhen | null): { combinator: "and" | "or"; conditions: VisibilityCondition[] } | null {
+  if (!vw || typeof vw !== "object") return null;
+  const obj = vw as Record<string, unknown>;
+  if (Array.isArray(obj.conditions)) {
+    return { combinator: obj.combinator === "or" ? "or" : "and", conditions: obj.conditions as VisibilityCondition[] };
+  }
+  if (typeof obj.fieldKey === "string") {
+    return { combinator: "and", conditions: [{ source: "field", fieldKey: obj.fieldKey as string, operator: obj.operator as ConditionOperator, value: obj.value as string | undefined }] };
+  }
+  return null;
+}
+
+function evalCondition(c: VisibilityCondition, values: Record<string, unknown>, allFields: PreviewField[], processStep: string): boolean {
+  let sv: string;
+  if (c.source === "process_step") {
+    sv = processStep;
+  } else {
+    const sib = allFields.find((f) => f.key === c.fieldKey);
+    if (!sib) return true;
+    const v = values[sib.key ?? ""];
+    sv = v == null ? "" : String(v);
+  }
+  switch (c.operator) {
+    case "equals":       return sv === (c.value ?? "");
+    case "not_equals":   return sv !== (c.value ?? "");
+    case "is_empty":     return sv.trim() === "";
+    case "is_not_empty": return sv.trim() !== "";
+    default:             return true;
+  }
+}
+
+function evalVisible(
+  item: { hidden?: boolean; visibleWhen?: VisibleWhen | null },
+  values: Record<string, unknown>,
+  allFields: PreviewField[],
+  processStep = "draft",
+): boolean {
+  if (item.hidden) return false;
+  const g = ruleConditions(item.visibleWhen);
+  if (!g || g.conditions.length === 0) return true;
+  const results = g.conditions.map((c) => evalCondition(c, values, allFields, processStep));
+  return g.combinator === "or" ? results.some(Boolean) : results.every(Boolean);
+}
+
+function PreviewField({ field, isBuiltTemplate }: { field: PreviewField; isBuiltTemplate: boolean }) {
+  const box = `w-full ${isBuiltTemplate ? "border border-slate-200 bg-slate-50" : "rounded border border-slate-200 bg-slate-50"} px-2.5 py-1.5 text-xs text-slate-400`;
   const type = field.type ?? "text";
   const label = field.label ?? field.key ?? "Field";
 
@@ -108,7 +169,19 @@ function PreviewField({ field }: { field: PreviewField }) {
   );
 }
 
-export default function TemplatePreview({ template }: { template: PreviewTemplate }) {
+export default function TemplatePreview({ template, values = {}, processStep }: { template: PreviewTemplate; values?: Record<string, unknown>; processStep?: string }) {
+  const sections = (Array.isArray(template.sections) ? template.sections : []) as PreviewSection[];
+  const allFields = sections.flatMap((section) => section.fields ?? []);
+  const visibleSections = processStep
+    ? sections
+        .filter((section) => evalVisible(section, values, allFields, processStep))
+        .map((section) => ({
+          ...section,
+          fields: (section.fields ?? []).filter((field) => evalVisible(field, values, allFields, processStep)),
+        }))
+        .filter((section) => (section.fields ?? []).length > 0)
+    : sections;
+
   if (template.type === "uploaded") {
     const ext = (template.file_name?.split(".").pop() || "").toUpperCase();
     const count = template.placeholders?.length ?? 0;
@@ -138,17 +211,17 @@ export default function TemplatePreview({ template }: { template: PreviewTemplat
     );
   }
 
-  const sections = (Array.isArray(template.sections) ? template.sections : []) as PreviewSection[];
+  const isBuiltTemplate = template.type === "built";
   return (
     <div className="space-y-5">
-      {sections.map((section, si) => (
+      {visibleSections.map((section, si) => (
         <div key={section.id ?? si}>
           <div className="mb-2">
             <h4 className="text-sm font-bold text-slate-700">{section.title ?? `Section ${si + 1}`}</h4>
             {section.description && <p className="text-[11px] text-slate-400">{section.description}</p>}
           </div>
           <div className="grid grid-cols-2 gap-3">
-            {(section.fields ?? []).map((f, fi) => <PreviewField key={f.id ?? fi} field={f} />)}
+            {(section.fields ?? []).map((f, fi) => <PreviewField key={f.id ?? fi} field={f} isBuiltTemplate={isBuiltTemplate} />)}
           </div>
         </div>
       ))}

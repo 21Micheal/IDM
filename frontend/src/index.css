@@ -182,18 +182,25 @@
     background-color: hsl(var(--destructive) / 0.9);
   }
   .input {
-    @apply block w-full rounded-lg border px-3 py-2 text-sm shadow-sm
-           focus:outline-none focus:ring-1;
-    border-color: hsl(var(--input));
-    background-color: hsl(var(--card));
-    color: hsl(var(--foreground));
+    @apply block w-full border px-3 py-2 text-sm focus:outline-none focus:ring-1;
+    border-color: #AEB5BB;
+    background-color: #ffffff;
+    color: #1F2933;
+    border-radius: 0;
+    height: auto;
+    min-height: 36px;
   }
   .input::placeholder {
-    color: hsl(var(--muted-foreground));
+    color: #8C969E;
   }
   .input:focus {
-    border-color: hsl(var(--ring));
-    --tw-ring-color: hsl(var(--ring));
+    border-color: #287EAD;
+    --tw-ring-color: #287EAD;
+  }
+  .input:disabled {
+    background-color: #F6F7F8;
+    color: #8C969E;
+    cursor: not-allowed;
   }
   .label {
     @apply block text-sm font-medium mb-1;
