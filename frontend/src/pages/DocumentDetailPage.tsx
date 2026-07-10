@@ -247,6 +247,7 @@ export default function DocumentDetailPage() {
   const [formValues, setFormValues] = useState<Record<string, unknown>>({});
   const [showFormPdf, setShowFormPdf] = useState(false);
   const [showJournalXml, setShowJournalXml] = useState(false);
+  const prevDocStatusRef = useRef<string | undefined>();
   const [comment, setComment] = useState("");
   const [confirmRestoreId, setConfirmRestoreId] = useState<string | null>(null);
   const [auditPage, setAuditPage] = useState(1);
@@ -724,6 +725,23 @@ export default function DocumentDetailPage() {
   const formDocEditable = canEdit && ["draft", "returned"].includes(doc.status);
   const budgetEnabled = Boolean((doc.metadata as any)?.sunsystems?.budget?.enabled);
   const journalEnabled = Boolean((doc.metadata as any)?.sunsystems?.journal?.enabled);
+
+  useEffect(() => {
+    if (
+      prevDocStatusRef.current === doc?.status ||
+      doc?.status !== "approved" ||
+      !journalEnabled ||
+      !isFormDocument ||
+      showJournalXml
+    ) {
+      prevDocStatusRef.current = doc?.status;
+      return;
+    }
+
+    prevDocStatusRef.current = doc.status;
+    setShowJournalXml(true);
+  }, [doc?.status, journalEnabled, isFormDocument, showJournalXml]);
+
   const startFormEdit = () => {
     setFormValues({ ...(formData?.values ?? {}) });
     setFormEditing(true);

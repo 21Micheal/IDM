@@ -14,7 +14,7 @@ import { useState, useCallback } from "react";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import {
   AlertTriangle, CheckCircle2, Clock, Loader2,
-  RefreshCw, Receipt, ChevronDown, ChevronUp, FileCode, Lock,
+  RefreshCw, Receipt, ChevronDown, ChevronUp, FileCode, Lock, MessageSquare,
 } from "lucide-react";
 import { sunsystemsAPI, type JournalPosting } from "@/services/api";
 import { toast } from "@/components/ui/vault-toast";
@@ -63,6 +63,7 @@ function StageRow({
 }) {
   const [retrying, setRetrying] = useState(false);
   const [showRaw,  setShowRaw]  = useState(false);
+  const [showSummary, setShowSummary] = useState(false);
 
   const isPO          = posting.component === "PurchaseOrder";
   const meta          = STATUS_META[posting.status] ?? STATUS_META.pending;
@@ -70,6 +71,7 @@ function StageRow({
   const errorMessages = parseErrorMessages(posting.error || posting.message || "");
   const hasError      = posting.status === "failed" && errorMessages.length > 0;
   const rawXml        = posting.response_xml || "";
+  const hasSummary    = Boolean(posting.error || posting.message);
   const stageLabel    = posting.stage_label || (isPO ? "LPO" : `Stage ${posting.stage}`);
 
   const onRetry = useCallback(async () => {
@@ -113,29 +115,29 @@ function StageRow({
 
       {/* metadata grid */}
       {!retrying && (
-        <dl className="grid grid-cols-2 gap-x-4 gap-y-1.5 text-xs">
+        <dl className="grid grid-cols-2 gap-x-4 gap-y-2 text-sm">
           {posting.journal_number && (
             <>
-              <dt className="text-[#5E6870]">{isPO ? "SunSystems ref" : "Journal number"}</dt>
-              <dd className="font-mono font-semibold text-[#1F2933]">{posting.journal_number}</dd>
+              <dt className="text-sm font-medium text-[#475569]">{isPO ? "SunSystems ref" : "Journal number"}</dt>
+              <dd className="font-mono font-semibold text-[#0F172A]">{posting.journal_number}</dd>
             </>
           )}
           {posting.business_unit && (
             <>
-              <dt className="text-[#5E6870]">Business unit</dt>
-              <dd className="text-[#1F2933]">{posting.business_unit}</dd>
+              <dt className="text-sm font-medium text-[#475569]">Business unit</dt>
+              <dd className="font-semibold text-[#0F172A]">{posting.business_unit}</dd>
             </>
           )}
           {posting.posted_at && (
             <>
-              <dt className="text-[#5E6870]">Posted</dt>
-              <dd className="text-[#1F2933]">{new Date(posting.posted_at).toLocaleString()}</dd>
+              <dt className="text-sm font-medium text-[#475569]">Posted</dt>
+              <dd className="font-semibold text-[#0F172A]">{new Date(posting.posted_at).toLocaleString()}</dd>
             </>
           )}
           {(posting.attempts ?? 0) > 0 && (
             <>
-              <dt className="text-[#5E6870]">Attempts</dt>
-              <dd className="text-[#1F2933]">{posting.attempts}</dd>
+              <dt className="text-sm font-medium text-[#475569]">Attempts</dt>
+              <dd className="font-semibold text-[#0F172A]">{posting.attempts}</dd>
             </>
           )}
         </dl>
@@ -161,13 +163,6 @@ function StageRow({
         </div>
       )}
 
-      {/* plain message fallback */}
-      {!retrying && !hasError && (posting.error || posting.message) && (
-        <p className={`text-xs ${posting.status === "failed" ? "text-red-600" : "text-[#5E6870]"}`}>
-          {posting.error || posting.message}
-        </p>
-      )}
-
       {/* action buttons */}
       {!retrying && (
         <div className="flex items-center gap-2 flex-wrap">
@@ -181,6 +176,16 @@ function StageRow({
               Retry
             </button>
           )}
+          {hasSummary && (
+            <button
+              type="button"
+              onClick={() => setShowSummary((v) => !v)}
+              className="inline-flex items-center gap-1.5 border border-[#C8CDD2] px-3 py-1.5 text-xs font-semibold text-[#5E6870] hover:bg-[#F3F5F6]"
+            >
+              <MessageSquare className="h-3.5 w-3.5" />
+              {showSummary ? "Hide summary" : "Show summary"}
+            </button>
+          )}
           {rawXml && (
             <button
               type="button"
@@ -192,6 +197,12 @@ function StageRow({
               {showRaw ? <ChevronUp className="h-3 w-3" /> : <ChevronDown className="h-3 w-3" />}
             </button>
           )}
+        </div>
+      )}
+
+      {showSummary && !retrying && hasSummary && (
+        <div className="rounded border border-[#C8CDD2] bg-[#F8FAFB] p-3 text-sm text-[#0F172A]">
+          <p>{posting.error || posting.message}</p>
         </div>
       )}
 
