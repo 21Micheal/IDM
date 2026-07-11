@@ -31,6 +31,12 @@ x-app: &app
     REDIS_URL: redis://:${REDIS_PASSWORD}@redis:6379/0
     ELASTICSEARCH_URL: http://elasticsearch:9200
     MEDIA_ROOT: /app/media
+    HTTP_PROXY: ""
+    HTTPS_PROXY: ""
+    ALL_PROXY: ""
+    http_proxy: ""
+    https_proxy: ""
+    all_proxy: ""
     NO_PROXY: ${NO_PROXY:-localhost,127.0.0.1,db,redis,elasticsearch,sunsrv02.flaxem.int}
     no_proxy: ${NO_PROXY:-localhost,127.0.0.1,db,redis,elasticsearch,sunsrv02.flaxem.int}
   volumes:
