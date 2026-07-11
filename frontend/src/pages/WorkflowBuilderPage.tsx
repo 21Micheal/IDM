@@ -18,6 +18,7 @@ import {
 } from "lucide-react";
 import { toast } from "@/components/ui/vault-toast";
 import clsx from "clsx";
+import CustomListbox from "@/components/ui/CustomListbox";
 
 // ── Types ─────────────────────────────────────────────────────────────────────
 type AssigneeType = "group_any" | "group_all" | "group_specific";
@@ -513,15 +514,13 @@ function RuleFormFields({ values, onChange }: {
     <div className="grid grid-cols-2 gap-3">
       <div className="col-span-2">
         <Label>Workflow phase</Label>
-        <select
+        <CustomListbox
           value={values.phase}
-          onChange={e => onChange({ phase: e.target.value as WorkflowPhase })}
-          className={inp}
-        >
-          {WORKFLOW_PHASES.map(phase => (
-            <option key={phase.value} value={phase.value}>{phase.label}</option>
-          ))}
-        </select>
+          onChange={(v) => onChange({ phase: v as WorkflowPhase })}
+          options={WORKFLOW_PHASES.map((phase) => ({ value: phase.value, label: phase.label }))}
+          buttonClassName={inp}
+          ariaLabel="Workflow phase"
+        />
         <p className="text-[11px] text-muted-foreground mt-1">
           Builder forms use Request for the first approval cycle and Retirement after the first SunSystems posting is complete.
         </p>
@@ -556,13 +555,13 @@ function RuleFormFields({ values, onChange }: {
       </div>
       <div>
         <Label>Currency</Label>
-        <select
+        <CustomListbox
           value={values.currency}
-          onChange={e => onChange({ currency: e.target.value })}
-          className={inp}
-        >
-          {CURRENCIES.map(c => <option key={c} value={c}>{c}</option>)}
-        </select>
+          onChange={(v) => onChange({ currency: v })}
+          options={CURRENCIES.map((c) => ({ value: c, label: c }))}
+          buttonClassName={inp}
+          ariaLabel="Currency"
+        />
       </div>
       <div className="col-span-2">
         <Label>Label (optional)</Label>
@@ -733,10 +732,10 @@ function StepEditPanel({
           <div className="grid grid-cols-1 gap-4 p-4 rounded-lg bg-muted/40 border border-border">
             <div>
               <Label required>Approver group</Label>
-              <select
+              <CustomListbox
                 value={step.assignee_group ?? ""}
-                onChange={e => {
-                  const id = e.target.value || null;
+                onChange={(v) => {
+                  const id = v || null;
                   const g = groups.find(x => x.id === id);
                   const isHod = isHodGroupName(g?.name);
                   onChange({
@@ -748,23 +747,18 @@ function StepEditPanel({
                     assignee_user_auto: undefined,
                   });
                 }}
-                className={inp}
-              >
-                <option value="">Select group</option>
-                {groups.map(g => (
-                  <option key={g.id} value={g.id}>
-                    {isHodGroupName(g.name) ? "HOD - uploader department head" : g.name}
-                  </option>
-                ))}
-              </select>
+                options={[{ value: "", label: "Select group" }, ...groups.map((g) => ({ value: g.id, label: isHodGroupName(g.name) ? "HOD - uploader department head" : g.name }))]}
+                buttonClassName={inp}
+                ariaLabel="Approver group"
+              />
             </div>
 
             <div>
               <Label required>Assignment mode</Label>
-              <select
+              <CustomListbox
                 value={step.assignee_type}
-                onChange={e => {
-                  const next = e.target.value as AssigneeType;
+                onChange={(v) => {
+                  const next = v as AssigneeType;
                   onChange({
                     assignee_type: next,
                     assignee_user: next === "group_specific" ? step.assignee_user : null,
@@ -772,13 +766,10 @@ function StepEditPanel({
                     assignee_user_auto: next === "group_specific" ? step.assignee_user_auto : undefined,
                   });
                 }}
-                disabled={isHodGroupSelected}
-                className={inp}
-              >
-                {ASSIGNEE_MODES.map(m => (
-                  <option key={m.value} value={m.value}>{m.label} — {m.description}</option>
-                ))}
-              </select>
+                options={ASSIGNEE_MODES.map((m) => ({ value: m.value, label: `${m.label} — ${m.description}` }))}
+                buttonClassName={inp}
+                ariaLabel="Assignment mode"
+              />
               {isHodGroupSelected && (
                 <p className="text-[11px] text-muted-foreground mt-1">
                   The assignee will be picked automatically from the uploader&apos;s department head.
@@ -789,38 +780,23 @@ function StepEditPanel({
             {needsGroupMember && (
               <div>
                 <Label required>Approver</Label>
-                <select
+                <CustomListbox
                   value={step.assignee_user_auto ? "__designated__" : (step.assignee_user ?? "")}
-                  onChange={e => {
-                    const val = e.target.value;
+                  onChange={(v) => {
+                    const val = v;
                     if (val === "__designated__") {
                       const head = groupDetail?.head;
-                      onChange({
-                        assignee_user: head?.id ?? null,
-                        assignee_user_name: head?.full_name,
-                        assignee_user_auto: true,
-                      });
+                      onChange({ assignee_user: head?.id ?? null, assignee_user_name: head?.full_name, assignee_user_auto: true });
                       return;
                     }
                     const id = val || null;
                     const u = effectiveGroupMembers.find(x => x.id === id);
                     onChange({ assignee_user: id, assignee_user_name: u?.full_name, assignee_user_auto: false });
                   }}
-                  disabled={!step.assignee_group || membersLoading}
-                  className={inp}
-                >
-                  <option value="">{membersLoading ? "Loading members..." : "Select approver"}</option>
-                  {(groupDetail?.head?.id || step.assignee_user_auto) && (
-                    <option value="__designated__">
-                      Designated approver — always the group&apos;s current head
-                    </option>
-                  )}
-                  {effectiveGroupMembers.map(u => (
-                    <option key={u.id} value={u.id}>
-                      {u.full_name}{groupDetail?.head?.id === u.id ? " (current designated approver)" : ""}
-                    </option>
-                  ))}
-                </select>
+                  options={[{ value: "", label: membersLoading ? "Loading members..." : "Select approver" }, ...(groupDetail?.head?.id || step.assignee_user_auto ? [{ value: "__designated__", label: "Designated approver — always the group's current head" }] : []), ...effectiveGroupMembers.map((u) => ({ value: u.id, label: `${u.full_name}${groupDetail?.head?.id === u.id ? " (current designated approver)" : ""}` }))]}
+                  buttonClassName={inp}
+                  ariaLabel="Approver"
+                />
                 {step.assignee_user_auto ? (
                   <p className="text-[11px] text-muted-foreground mt-1">
                     Follows the group&apos;s designated approver — change it on the group and this step

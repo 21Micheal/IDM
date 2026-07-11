@@ -36,6 +36,7 @@ import TemplateForm from "@/components/templates/TemplateForm";
 import BuiltTemplateFormModal from "@/components/templates/BuiltTemplateFormModal";
 import { resolveSource, type ReferenceValue } from "@/components/templates/referenceSources";
 import { WorkspaceCommandBar } from "@/components/shared/WorkspaceCommandBar";
+import CustomListbox from "@/components/ui/CustomListbox";
 
 // ── Types ─────────────────────────────────────────────────────────────────────
 
@@ -1889,16 +1890,13 @@ export default function UploadPage({ scanOnly = false }: UploadPageProps) {
                 />
                 Use bulk mode
               </label>
-              <select
+              <CustomListbox
                 value={selectedTypeId}
-                onChange={(e) => setSelectedTypeId(e.target.value)}
-                className="input w-full"
-              >
-                <option value="">— Choose document type —</option>
-                {visibleDocTypes.map((t) => (
-                  <option key={t.id} value={t.id}>{t.name}</option>
-                ))}
-              </select>
+                onChange={(v) => setSelectedTypeId(v)}
+                options={[{ value: "", label: "— Choose document type —" }, ...visibleDocTypes.map((t) => ({ value: t.id, label: t.name }))]}
+                buttonClassName="input w-full"
+                ariaLabel="Document type"
+              />
               {selectedType?.description && (
                 <p className="mt-3 text-xs text-muted-foreground">{selectedType.description}</p>
               )}
@@ -1928,18 +1926,13 @@ export default function UploadPage({ scanOnly = false }: UploadPageProps) {
                   </label>
                   {useTemplate && (
                     <div className="mt-3 space-y-2">
-                      <select
+                      <CustomListbox
                         value={selectedTemplateId}
-                        onChange={(event) => setSelectedTemplateId(event.target.value)}
-                        className="input w-full"
-                      >
-                        <option value="">Select template</option>
-                        {typeTemplates.map((template) => (
-                          <option key={template.id} value={template.id}>
-                            {template.name} ({template.type === "uploaded" ? "Office" : "Builder"})
-                          </option>
-                        ))}
-                      </select>
+                        onChange={(v) => setSelectedTemplateId(v)}
+                        options={[{ value: "", label: "Select template" }, ...typeTemplates.map((template) => ({ value: template.id, label: `${template.name} (${template.type === "uploaded" ? "Office" : "Builder"})` }))]}
+                        buttonClassName="input w-full"
+                        ariaLabel="Template select"
+                      />
                       {typeTemplates.length === 0 && (
                         <p className="text-xs text-[#5E6870]">No active templates are configured for this document type.</p>
                       )}

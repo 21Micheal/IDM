@@ -123,8 +123,9 @@ export default function CustomListbox({
           role="listbox"
           tabIndex={-1}
           aria-label={ariaLabel}
-          className={`absolute z-50 mt-1 w-full max-h-56 overflow-auto rounded-md border border-[#C8CDD2] bg-white py-1 shadow-sm no-scrollbar ${listClassName}`}
+          className={`absolute z-50 mt-1 min-w-full w-max max-w-[22rem] max-h-56 overflow-auto overflow-x-auto rounded-md border border-[#C8CDD2] bg-white py-1 shadow-sm no-scrollbar ${listClassName}`}
           onKeyDown={onKeyDown}
+          style={{ whiteSpace: "nowrap" }}
         >
           {options.map((opt, idx) => {
             const selected = opt.value === value;
@@ -148,7 +149,7 @@ export default function CustomListbox({
                 onMouseEnter={() => setActiveIndex(idx)}
                 className={`cursor-pointer px-3 py-2 text-sm ${optionClassName} ${selected ? selectedClasses : active ? activeClasses : defaultClasses}`}
               >
-                <span className="truncate">{opt.label}</span>
+                <span style={{ whiteSpace: "nowrap" }}>{opt.label}</span>
               </li>
             );
           })}
