@@ -70,13 +70,20 @@ def get_journal_mapping(document, stage: int = 1) -> dict | None:
 
     For a legacy flat mapping (no ``stages`` array), stage 1 returns the mapping
     itself and any other stage returns None.
+
+    Stage mappings inherit the parent config's ``enabled`` flag when not
+    explicitly set on the stage object.
     """
     cfg = get_journal_config(document)
     if not cfg:
         return None
+    parent_enabled = bool(cfg.get("enabled"))
     for s in _get_stages(cfg):
         if int(s.get("stage", 1)) == stage:
-            return s
+            mapping = dict(s)
+            if "enabled" not in mapping and parent_enabled:
+                mapping["enabled"] = True
+            return mapping
     return None
 
 

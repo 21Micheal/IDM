@@ -248,7 +248,6 @@ export default function DocumentDetailPage() {
   const formDirtyRef = useRef(false);
   const [showFormPdf, setShowFormPdf] = useState(false);
   const [showJournalXml, setShowJournalXml] = useState(false);
-  const prevDocStatusRef = useRef<string | undefined>();
   const [comment, setComment] = useState("");
   const [confirmRestoreId, setConfirmRestoreId] = useState<string | null>(null);
   const [auditPage, setAuditPage] = useState(1);
@@ -511,27 +510,6 @@ export default function DocumentDetailPage() {
       formDirtyRef.current = false;
     }
   }, [doc?.is_edit_locked, doc?.edit_locked_by, user?.id, formEditing]);
-
-  // Auto-open journal XML modal when a journal-enabled form document is approved.
-  useEffect(() => {
-    const formMeta = (doc?.metadata as Record<string, any> | undefined)?.form;
-    const isForm = Boolean(formMeta?.sections);
-    const journalOn = Boolean((doc?.metadata as any)?.sunsystems?.journal?.enabled);
-
-    if (
-      prevDocStatusRef.current === doc?.status ||
-      doc?.status !== "approved" ||
-      !journalOn ||
-      !isForm ||
-      showJournalXml
-    ) {
-      prevDocStatusRef.current = doc?.status;
-      return;
-    }
-
-    prevDocStatusRef.current = doc.status;
-    setShowJournalXml(true);
-  }, [doc?.status, doc?.metadata, showJournalXml]);
 
   const acquireFormLock = useMutation({
     mutationFn: () => documentsAPI.editToken(id!),
