@@ -35,6 +35,7 @@ import {
   type WorkflowTaskFilters,
 } from "@/lib/workflowTaskFilters";
 import { WorkspaceCommandBar } from "@/components/shared/WorkspaceCommandBar";
+import CustomListbox from "@/components/ui/CustomListbox";
 
 const RECENT_DOCS_PAGE_SIZE = 5;
 const RECENT_AUDIT_PAGE_SIZE = 5;
@@ -1022,24 +1023,34 @@ export default function DashboardPage() {
                       className="h-9 w-full border border-[#AEB5BB] bg-white pl-9 pr-3 text-sm text-[#1F2933] focus:outline-none focus:ring-1 focus:ring-[#287EAD]"
                     />
                   </div>
-                  <select value={taskFilters.documentType} onChange={(e) => updateTaskFilter("documentType", e.target.value)} className="h-9 border border-[#AEB5BB] bg-white px-2 text-sm text-[#1F2933]">
-                    <option value="">All document types</option>
-                    {taskFilterOptions.documentTypes.map((option) => <option key={option.value} value={option.value}>{option.label} ({option.count})</option>)}
-                  </select>
-                  <select value={taskFilters.department} onChange={(e) => updateTaskFilter("department", e.target.value)} className="h-9 border border-[#AEB5BB] bg-white px-2 text-sm text-[#1F2933]">
-                    <option value="">All departments</option>
-                    {taskFilterOptions.departments.map((option) => <option key={option.value} value={option.value}>{option.label} ({option.count})</option>)}
-                  </select>
-                  <select value={taskFilters.fileFormat} onChange={(e) => updateTaskFilter("fileFormat", e.target.value)} className="h-9 border border-[#AEB5BB] bg-white px-2 text-sm text-[#1F2933]">
-                    <option value="">All formats</option>
-                    {taskFilterOptions.fileFormats.map((option) => <option key={option.value} value={option.value}>{option.label} ({option.count})</option>)}
-                  </select>
-                  <select value={taskFilters.urgency} onChange={(e) => updateTaskFilter("urgency", e.target.value as WorkflowTaskFilters["urgency"])} className="h-9 border border-[#AEB5BB] bg-white px-2 text-sm text-[#1F2933]">
-                    <option value="">Any urgency</option>
-                    <option value="overdue">Overdue</option>
-                    <option value="due_soon">Due in 24h</option>
-                    <option value="held">On hold</option>
-                  </select>
+                  <CustomListbox
+                    value={taskFilters.documentType}
+                    onChange={(v) => updateTaskFilter("documentType", v)}
+                    options={[{ value: "", label: "All document types" }, ...taskFilterOptions.documentTypes.map((o) => ({ value: o.value, label: `${o.label} (${o.count})` }))]}
+                    buttonClassName="h-9 border border-[#AEB5BB] bg-white px-2 text-sm text-[#1F2933]"
+                    ariaLabel="Task document type"
+                  />
+                  <CustomListbox
+                    value={taskFilters.department}
+                    onChange={(v) => updateTaskFilter("department", v)}
+                    options={[{ value: "", label: "All departments" }, ...taskFilterOptions.departments.map((o) => ({ value: o.value, label: `${o.label} (${o.count})` }))]}
+                    buttonClassName="h-9 border border-[#AEB5BB] bg-white px-2 text-sm text-[#1F2933]"
+                    ariaLabel="Task department"
+                  />
+                  <CustomListbox
+                    value={taskFilters.fileFormat}
+                    onChange={(v) => updateTaskFilter("fileFormat", v)}
+                    options={[{ value: "", label: "All formats" }, ...taskFilterOptions.fileFormats.map((o) => ({ value: o.value, label: `${o.label} (${o.count})` }))]}
+                    buttonClassName="h-9 border border-[#AEB5BB] bg-white px-2 text-sm text-[#1F2933]"
+                    ariaLabel="Task file format"
+                  />
+                  <CustomListbox
+                    value={taskFilters.urgency}
+                    onChange={(v) => updateTaskFilter("urgency", v as any)}
+                    options={[{ value: "", label: "Any urgency" }, { value: "overdue", label: "Overdue" }, { value: "due_soon", label: "Due in 24h" }, { value: "held", label: "On hold" }]}
+                    buttonClassName="h-9 border border-[#AEB5BB] bg-white px-2 text-sm text-[#1F2933]"
+                    ariaLabel="Task urgency"
+                  />
                 </div>
                 <div className="mt-2 flex flex-wrap items-center justify-between gap-2 text-xs text-[#5E6870]">
                   <div className="inline-flex items-center gap-1.5">

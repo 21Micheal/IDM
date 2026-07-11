@@ -32,6 +32,7 @@ import DocumentTemplateDesigner, {
 } from "@/pages/TemplateDesigner";
 import TemplatePreview from "@/components/templates/TemplatePreview";
 import { WorkspaceCommandBar } from "@/components/shared/WorkspaceCommandBar";
+import CustomListbox from "@/components/ui/CustomListbox";
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Types
@@ -430,11 +431,13 @@ function UploadTemplateModal({
           <div>
             <label className="block text-xs font-semibold text-slate-600 mb-1.5">Document type</label>
             <div className="flex gap-2">
-              <select value={documentTypeId} onChange={(e) => setDocumentTypeId(e.target.value)}
-                      className="h-9 flex-1 border border-[#AEB5BB] bg-white px-3 text-sm text-[#1F2933] outline-none focus:border-[#287EAD] focus:ring-1 focus:ring-[#287EAD]">
-                <option value="">Select document type</option>
-                {documentTypes.map((type) => <option key={type.id} value={type.id}>{type.name}</option>)}
-              </select>
+              <CustomListbox
+                value={documentTypeId}
+                onChange={(v) => setDocumentTypeId(v)}
+                options={[{ value: "", label: "Select document type" }, ...documentTypes.map((type) => ({ value: type.id, label: type.name }))]}
+                buttonClassName="h-9 flex-1 border border-[#AEB5BB] bg-white px-3 text-sm text-[#1F2933] outline-none focus:border-[#287EAD] focus:ring-1 focus:ring-[#287EAD]"
+                ariaLabel="Template document type"
+              />
               <button
                 type="button"
                 onClick={() => setShowCreateType(true)}

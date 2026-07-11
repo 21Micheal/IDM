@@ -41,6 +41,15 @@
   }
 }
 
+/* Hide scrollbars but keep scrollability for compact popovers/listboxes */
+.no-scrollbar {
+  -ms-overflow-style: none; /* IE and Edge */
+  scrollbar-width: none; /* Firefox */
+}
+.no-scrollbar::-webkit-scrollbar {
+  display: none; /* WebKit */
+}
+
 @layer base {
   :root {
     --background: 220 20% 94%;

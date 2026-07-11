@@ -15,6 +15,7 @@ import {
   X,
 } from "lucide-react";
 import { Link, useSearchParams } from "react-router-dom";
+import CustomListbox from "@/components/ui/CustomListbox";
 
 import { documentTypesAPI, normalizeListResponse, searchAPI } from "@/services/api";
 import type { DocumentSearchResponse, DocumentStatus, DocumentType, SearchHit } from "@/types";
@@ -99,7 +100,7 @@ function statusClass(status: string) {
     case "void":
       return "text-[#30363D]";
     default:
-      return "text-[#287EAD]";
+      return "text-[#2B86C5]";
   }
 }
 
@@ -362,7 +363,7 @@ export default function SearchPage() {
                 setPage(1);
               }}
               placeholder="Search documents, references, suppliers, or content"
-              className="h-9 w-full border border-[#AEB5BB] bg-white pl-9 pr-9 text-sm text-[#1F2933] placeholder:text-[#6E767D] focus:outline-none focus:ring-1 focus:ring-white/70"
+              className="h-9 w-full border border-[#AEB5BB] bg-white pl-9 pr-9 text-sm text-[#1F2933] placeholder:text-[#6E767D] focus:outline-none focus:border-[#2B86C5] focus:ring-1 focus:ring-[#2B86C5]/30"
               autoFocus
             />
             {searchTerm && (
@@ -377,53 +378,47 @@ export default function SearchPage() {
             )}
           </div>
 
-          <select
+          <CustomListbox
             value={statusFilter}
-            onChange={(event) => {
-              setStatusFilter(event.target.value);
+            onChange={(v) => {
+              setStatusFilter(v);
               setPage(1);
             }}
-            className="h-9 w-[155px] border border-[#AEB5BB] bg-white px-2 text-sm text-[#1F2933] focus:outline-none focus:ring-1 focus:ring-white/70"
-          >
-            <option value="">All statuses</option>
-            {STATUS_OPTIONS.map((status) => (
-              <option key={status} value={status}>
-                {statusLabel(status)}
-              </option>
-            ))}
-          </select>
+            options={[
+              { value: "", label: "All statuses" },
+              ...STATUS_OPTIONS.map((status) => ({ value: status, label: statusLabel(status) })),
+            ]}
+            buttonClassName="h-9 w-[155px] border border-[#AEB5BB] bg-white px-2 text-sm text-[#1F2933] focus:outline-none focus:border-[#2B86C5] focus:ring-1 focus:ring-[#2B86C5]/30"
+            ariaLabel="Status filter"
+          />
 
-          <select
+          <CustomListbox
             value={typeFilter}
-            onChange={(event) => {
-              setTypeFilter(event.target.value);
+            onChange={(v) => {
+              setTypeFilter(v);
               setPage(1);
             }}
-            className="h-9 w-[170px] border border-[#AEB5BB] bg-white px-2 text-sm text-[#1F2933] focus:outline-none focus:ring-1 focus:ring-white/70"
-          >
-            <option value="">All types</option>
-            {documentTypes.map((type) => (
-              <option key={type.id} value={type.name}>
-                {type.name}
-              </option>
-            ))}
-          </select>
+            options={[
+              { value: "", label: "All types" },
+              ...documentTypes.map((type) => ({ value: String(type.name), label: type.name })),
+            ]}
+            buttonClassName="h-9 w-[170px] border border-[#AEB5BB] bg-white px-2 text-sm text-[#1F2933] focus:outline-none focus:border-[#2B86C5] focus:ring-1 focus:ring-[#2B86C5]/30"
+            ariaLabel="Document type filter"
+          />
 
-          <select
+          <CustomListbox
             value={formatFilter}
-            onChange={(event) => {
-              setFormatFilter(event.target.value);
+            onChange={(v) => {
+              setFormatFilter(v);
               setPage(1);
             }}
-            className="h-9 w-[145px] border border-[#AEB5BB] bg-white px-2 text-sm text-[#1F2933] focus:outline-none focus:ring-1 focus:ring-white/70"
-          >
-            <option value="">All formats</option>
-            {FORMAT_OPTIONS.map((option) => (
-              <option key={option.value} value={option.value}>
-                {option.label}
-              </option>
-            ))}
-          </select>
+            options={[
+              { value: "", label: "All formats" },
+              ...FORMAT_OPTIONS.map((opt) => ({ value: opt.value, label: opt.label })),
+            ]}
+            buttonClassName="h-9 w-[145px] border border-[#AEB5BB] bg-white px-2 text-sm text-[#1F2933] focus:outline-none focus:border-[#2B86C5] focus:ring-1 focus:ring-[#2B86C5]/30"
+            ariaLabel="Format filter"
+          />
       </WorkspaceCommandBar>
 
       <div className="scrollbar-minimal min-h-0 flex-1 overflow-y-auto px-5 pb-8 pr-0">
@@ -436,7 +431,7 @@ export default function SearchPage() {
                 setPage(1);
               }}
               placeholder="Supplier"
-              className="h-9 border border-[#B7BEC5] bg-white px-3 text-sm focus:outline-none focus:ring-1 focus:ring-[#287EAD]"
+              className="h-9 border border-[#B7BEC5] bg-white px-3 text-sm focus:outline-none focus:border-[#2B86C5] focus:ring-1 focus:ring-[#2B86C5]/25"
             />
             <div className="grid grid-cols-2 gap-2">
               <input
@@ -446,7 +441,7 @@ export default function SearchPage() {
                   setDateFrom(event.target.value);
                   setPage(1);
                 }}
-                className="h-9 border border-[#B7BEC5] bg-white px-3 text-sm focus:outline-none focus:ring-1 focus:ring-[#287EAD]"
+                className="h-9 border border-[#B7BEC5] bg-white px-3 text-sm focus:outline-none focus:border-[#2B86C5] focus:ring-1 focus:ring-[#2B86C5]/25"
                 aria-label="From date"
               />
               <input
@@ -456,7 +451,7 @@ export default function SearchPage() {
                   setDateTo(event.target.value);
                   setPage(1);
                 }}
-                className="h-9 border border-[#B7BEC5] bg-white px-3 text-sm focus:outline-none focus:ring-1 focus:ring-[#287EAD]"
+                className="h-9 border border-[#B7BEC5] bg-white px-3 text-sm focus:outline-none focus:border-[#2B86C5] focus:ring-1 focus:ring-[#2B86C5]/25"
                 aria-label="To date"
               />
             </div>
@@ -470,7 +465,7 @@ export default function SearchPage() {
                   setPage(1);
                 }}
                 placeholder="Amount min"
-                className="h-9 border border-[#B7BEC5] bg-white px-3 text-sm focus:outline-none focus:ring-1 focus:ring-[#287EAD]"
+                className="h-9 border border-[#B7BEC5] bg-white px-3 text-sm focus:outline-none focus:border-[#2B86C5] focus:ring-1 focus:ring-[#2B86C5]/25"
               />
               <input
                 type="number"
@@ -481,7 +476,7 @@ export default function SearchPage() {
                   setPage(1);
                 }}
                 placeholder="Amount max"
-                className="h-9 border border-[#B7BEC5] bg-white px-3 text-sm focus:outline-none focus:ring-1 focus:ring-[#287EAD]"
+                className="h-9 border border-[#B7BEC5] bg-white px-3 text-sm focus:outline-none focus:border-[#2B86C5] focus:ring-1 focus:ring-[#2B86C5]/25"
               />
             </div>
             <input
@@ -491,22 +486,18 @@ export default function SearchPage() {
                 setPage(1);
               }}
               placeholder="Currency"
-              className="h-9 border border-[#B7BEC5] bg-white px-3 text-sm uppercase focus:outline-none focus:ring-1 focus:ring-[#287EAD]"
+              className="h-9 border border-[#B7BEC5] bg-white px-3 text-sm uppercase focus:outline-none focus:border-[#2B86C5] focus:ring-1 focus:ring-[#2B86C5]/25"
             />
-            <select
+            <CustomListbox
               value={sort}
-              onChange={(event) => {
-                setSort(event.target.value);
+              onChange={(v) => {
+                setSort(v);
                 setPage(1);
               }}
-              className="h-9 border border-[#B7BEC5] bg-white px-3 text-sm focus:outline-none focus:ring-1 focus:ring-[#287EAD]"
-            >
-              {SORT_OPTIONS.map((option) => (
-                <option key={option.value || "relevance"} value={option.value}>
-                  {option.label}
-                </option>
-              ))}
-            </select>
+              options={SORT_OPTIONS.map((opt) => ({ value: opt.value, label: opt.label }))}
+              buttonClassName="h-9 border border-[#B7BEC5] bg-white px-3 text-sm focus:outline-none focus:border-[#2B86C5] focus:ring-1 focus:ring-[#2B86C5]/25"
+              ariaLabel="Sort results"
+            />
             <button
               type="button"
               onClick={clearFilters}
@@ -607,7 +598,7 @@ export default function SearchPage() {
                   <div key={hit.id} className="grid grid-cols-[minmax(0,1fr)_180px_110px] gap-6 px-5 py-4 hover:bg-[#F7FAFC]">
                     <div className="min-w-0">
                       <div className="mb-2 flex flex-wrap items-center gap-x-3 gap-y-1 text-xs text-[#5E6870]">
-                        <span className="font-mono font-semibold text-[#287EAD]">{hit.reference_number || "-"}</span>
+                        <span className="font-mono font-semibold text-[#2B86C5]">{hit.reference_number || "-"}</span>
                         <span>{hit.document_type || "Unclassified"}</span>
                         <span>{formatLabel}</span>
                         {hit.supplier && (
@@ -620,7 +611,7 @@ export default function SearchPage() {
                       </div>
 
                       <Link to={`/documents/${hit.id}`} className="group inline-block max-w-full">
-                        <h3 className="truncate text-base font-semibold text-[#1F2933] group-hover:text-[#287EAD]">
+                        <h3 className="truncate text-base font-semibold text-[#1F2933] group-hover:text-[#2B86C5]">
                           <span
                             dangerouslySetInnerHTML={{
                               __html: highlightSearchText(title, debouncedSearchTerm),
@@ -662,7 +653,7 @@ export default function SearchPage() {
                     <div className="flex items-start justify-end">
                       <Link
                         to={`/documents/${hit.id}`}
-                        className="inline-flex h-8 items-center gap-2 border border-[#B7BEC5] bg-white px-3 text-sm text-[#287EAD] hover:bg-[#EEF3F7]"
+                        className="inline-flex h-8 items-center gap-2 border border-[#B7BEC5] bg-white px-3 text-sm text-[#2B86C5] hover:bg-[#EEF3F7]"
                       >
                         <Eye className="h-4 w-4" />
                         View

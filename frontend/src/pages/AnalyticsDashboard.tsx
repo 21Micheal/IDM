@@ -16,6 +16,7 @@ import { api, departmentsAPI, documentTypesAPI, normalizeListResponse } from "@/
 import { QUERY_FIVE_MIN_STALE } from "@/lib/reactQueryDefaults";
 import { exportCsv } from "@/lib/exportCsv";
 import { StatCard } from "@/components/dashboard/StatCard";
+import CustomListbox from "@/components/ui/CustomListbox";
 import type { DocumentType } from "@/types";
 import {
   BarChart, Bar, AreaChart, Area, PieChart, Pie,
@@ -526,14 +527,20 @@ function FilterBar({ filters, onChange, departments, docTypes }: {
           </button>
         ))}
       </div>
-      <select value={filters.department} onChange={(e) => onChange({ ...filters, department: e.target.value })} className={selectCls}>
-        <option value="">All departments</option>
-        {departments.map((d) => <option key={d.id} value={d.id}>{d.name}</option>)}
-      </select>
-      <select value={filters.document_type} onChange={(e) => onChange({ ...filters, document_type: e.target.value })} className={selectCls}>
-        <option value="">All document types</option>
-        {docTypes.map((t) => <option key={t.id} value={t.id}>{t.name}</option>)}
-      </select>
+      <CustomListbox
+        value={filters.department}
+        onChange={(v) => onChange({ ...filters, department: v })}
+        options={[{ value: "", label: "All departments" }, ...departments.map((d) => ({ value: d.id, label: d.name }))]}
+        buttonClassName={selectCls}
+        ariaLabel="Analytics department filter"
+      />
+      <CustomListbox
+        value={filters.document_type}
+        onChange={(v) => onChange({ ...filters, document_type: v })}
+        options={[{ value: "", label: "All document types" }, ...docTypes.map((t) => ({ value: t.id, label: t.name }))]}
+        buttonClassName={selectCls}
+        ariaLabel="Analytics document type filter"
+      />
     </div>
   );
 }

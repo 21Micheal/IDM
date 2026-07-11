@@ -21,6 +21,7 @@ import { QUERY_FIVE_MIN_STALE, QUERY_SHORT_STALE } from "@/lib/reactQueryDefault
 import { formatDocumentFileType } from "@/lib/documentFormat";
 import { preloadDocumentWorkspace } from "@/lib/routePreload";
 import { WorkspaceCommandBar } from "@/components/shared/WorkspaceCommandBar";
+import CustomListbox from "@/components/ui/CustomListbox";
 
 const PAGE_SIZE = 10;
 type BulkAction = "approve" | "reject" | "archive" | "void" | "trash";
@@ -848,48 +849,42 @@ export default function DocumentsPage({ personalOnly = false }: DocumentsPagePro
               />
             </div>
 
-            <select
+            <CustomListbox
               value={statusFilter}
-              onChange={(event) => {
+              onChange={(v) => {
                 clearUrlStatusFilter();
-                setStatusFilter(event.target.value);
+                setStatusFilter(v);
                 setPage(1);
               }}
-              className="h-9 w-[150px] border border-[#AEB5BB] bg-white px-2 text-sm text-[#1F2933] focus:outline-none focus:ring-1 focus:ring-white/70"
-            >
-              <option value="">All statuses</option>
-              {STATUS_OPTIONS.map((status) => (
-                <option key={status} value={status}>{status.replace(/_/g, " ")}</option>
-              ))}
-            </select>
+              options={[
+                { value: "", label: "All statuses" },
+                ...STATUS_OPTIONS.map((s) => ({ value: s, label: s.replace(/_/g, " ") })),
+              ]}
+              buttonClassName="h-9 w-[150px] border border-[#AEB5BB] bg-white px-2 text-sm text-[#1F2933] focus:outline-none focus:ring-1 focus:ring-white/70"
+              ariaLabel="Status filter"
+            />
 
-            <select
+            <CustomListbox
               value={typeFilter}
-              onChange={(event) => {
-                setTypeFilter(event.target.value);
+              onChange={(v) => {
+                setTypeFilter(v);
                 setPage(1);
               }}
-              className="h-9 w-[160px] border border-[#AEB5BB] bg-white px-2 text-sm text-[#1F2933] focus:outline-none focus:ring-1 focus:ring-white/70"
-            >
-              <option value="">All types</option>
-              {(typesData ?? []).map((type: any) => (
-                <option key={type.id} value={type.id}>{type.name}</option>
-              ))}
-            </select>
+              options={[{ value: "", label: "All types" }, ...(typesData ?? []).map((t: any) => ({ value: String(t.id), label: t.name }))]}
+              buttonClassName="h-9 w-[160px] border border-[#AEB5BB] bg-white px-2 text-sm text-[#1F2933] focus:outline-none focus:ring-1 focus:ring-white/70"
+              ariaLabel="Document type filter"
+            />
 
-            <select
+            <CustomListbox
               value={supplierFilter}
-              onChange={(event) => {
-                setSupplierFilter(event.target.value);
+              onChange={(v) => {
+                setSupplierFilter(v);
                 setPage(1);
               }}
-              className="h-9 w-[170px] border border-[#AEB5BB] bg-white px-2 text-sm text-[#1F2933] focus:outline-none focus:ring-1 focus:ring-white/70"
-            >
-              <option value="">All suppliers</option>
-              {supplierOptions.map((supplier) => (
-                <option key={supplier} value={supplier}>{supplier}</option>
-              ))}
-            </select>
+              options={[{ value: "", label: "All suppliers" }, ...supplierOptions.map((s) => ({ value: s, label: s }))]}
+              buttonClassName="h-9 w-[170px] border border-[#AEB5BB] bg-white px-2 text-sm text-[#1F2933] focus:outline-none focus:ring-1 focus:ring-white/70"
+              ariaLabel="Supplier filter"
+            />
 
             {(search || statusFilter || typeFilter || supplierFilter) && (
               <button
