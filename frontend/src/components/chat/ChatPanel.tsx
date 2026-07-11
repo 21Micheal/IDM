@@ -652,7 +652,7 @@ export function ChatPanel({ onClose, initialRoomId, onActiveRoomChange }: ChatPa
                 value={chatSearchQuery}
                 onChange={(e) => setChatSearchQuery(e.target.value)}
                 placeholder="Search chats"
-                className="h-9 w-full  border border-[#AEB5BB] bg-white pl-9 pr-3 text-xs outline-none transition focus:border-[#287EAD] focus:ring-1 focus:ring-[#287EAD]"
+                className="h-9 w-full  border border-[#AEB5BB] bg-white pl-9 pr-3 text-xs text-[#1F2933] outline-none transition focus:border-[#287EAD] focus:ring-1 focus:ring-[#287EAD]"
               />
             </div>
           )}
@@ -918,7 +918,7 @@ function RecipientSearchPane({
             value={recipientSearchQuery}
             onChange={(e) => setRecipientSearchQuery(e.target.value)}
             placeholder="Search people or groups"
-            className="h-10 w-full  border border-[#AEB5BB] bg-white pl-9 pr-3 text-sm outline-none transition focus:border-[#287EAD] focus:ring-1 focus:ring-[#287EAD]"
+            className="h-10 w-full  border border-[#AEB5BB] bg-white pl-9 pr-3 text-sm text-[#1F2933] outline-none transition focus:border-[#287EAD] focus:ring-1 focus:ring-[#287EAD]"
             autoFocus
           />
         </div>
