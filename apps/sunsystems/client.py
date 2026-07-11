@@ -195,6 +195,7 @@ def _build_zeep_clients(cfg: SunSystemsConfig) -> tuple[ZeepClient, ZeepClient]:
             return cached
 
         session = requests.Session()
+        session.trust_env = False
         session.auth = HTTPBasicAuth(cfg.username, cfg.password)
         session.verify = cfg.verify_tls
         transport = Transport(session=session, timeout=_DEFAULT_TIMEOUT[0], operation_timeout=_DEFAULT_TIMEOUT[1])
