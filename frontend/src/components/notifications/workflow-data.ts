@@ -111,7 +111,8 @@ export async function loadWorkflowData(documentId: string): Promise<{
     .listInstances({ document: documentId })
     .then((response) => normalizeListResponse<WorkflowInstanceRecord>(response.data))
     .catch(() => []);
-  const instance = instances[0];
+  const instance =
+    instances.find((row) => row.status === "in_progress") ?? instances[0];
 
   const template = instance?.template
     ? await workflowAPI

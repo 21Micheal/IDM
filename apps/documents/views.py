@@ -473,6 +473,8 @@ class DocumentViewSet(AuditMixin, viewsets.ModelViewSet):
 
     def retrieve(self, request, *args, **kwargs):
         instance = self.get_object()
+        self._prepare_builder_workflow_phase(instance)
+        instance.refresh_from_db(fields=["metadata", "updated_at"])
         self.record_audit(AuditEvent.DOCUMENT_VIEWED, instance, {})
         serializer = self.get_serializer(instance)
         return Response(serializer.data)
@@ -653,32 +655,13 @@ class DocumentViewSet(AuditMixin, viewsets.ModelViewSet):
         return bool(user.has_admin_access or doc.uploaded_by_id == user.id)
 
     def _prepare_builder_workflow_phase(self, doc) -> str | None:
-        meta = dict(doc.metadata or {})
-        form = meta.get("form")
-        if not isinstance(form, dict):
-            return None
+        from apps.documents.builder_workflow import sync_builder_workflow_phase
 
-        phase = "request"
         try:
-            from apps.sunsystems.models import JournalPosting, JournalPostingStatus
-
-            stage_one_posted = JournalPosting.objects.filter(
-                document=doc,
-                stage=1,
-                status=JournalPostingStatus.POSTED,
-            ).exists()
-            if stage_one_posted:
-                phase = "retirement"
+            return sync_builder_workflow_phase(doc)
         except Exception:
             logger.exception("Could not infer workflow phase for builder document %s", doc.id)
-
-        form = dict(form)
-        if form.get("workflow_phase") != phase:
-            form["workflow_phase"] = phase
-            meta["form"] = form
-            doc.metadata = meta
-            doc.save(update_fields=["metadata", "updated_at"])
-        return phase
+            return None
 
     def destroy(self, request, *args, **kwargs):
         """Move a document to Trash (soft delete) rather than removing it."""
@@ -739,20 +722,23 @@ class DocumentViewSet(AuditMixin, viewsets.ModelViewSet):
     @action(detail=True, methods=["post"])
     def submit(self, request, pk=None):
         doc = self.get_object()
-        builder_phase = self._prepare_builder_workflow_phase(doc)
-        can_submit_retirement = (
-            builder_phase == "retirement"
-            and doc.status == DocumentStatus.APPROVED
+        from apps.documents.builder_workflow import (
+            can_submit_request_workflow,
+            can_submit_retirement_workflow,
         )
-        # Rejection is terminal — it ends the workflow. Only draft and returned
-        # (sent back to the uploader for rework) documents can be (re)submitted.
-        if not can_submit_retirement and doc.status not in (
-            DocumentStatus.DRAFT,
-            DocumentStatus.RETURNED,
-            "Returned for Review",
-        ):
+
+        self._prepare_builder_workflow_phase(doc)
+        doc.refresh_from_db(fields=["metadata", "updated_at"])
+
+        can_submit_retirement = can_submit_retirement_workflow(doc, user=request.user)
+        can_submit_request = can_submit_request_workflow(doc, user=request.user)
+
+        # Rejection is terminal — it ends the workflow. Draft/returned documents
+        # start (or resume) the request phase; fully-approved builder forms in
+        # the retirement phase start the stage-2 approval cycle.
+        if not can_submit_retirement and not can_submit_request:
             return Response(
-                {"detail": "Only draft or returned documents can be submitted. Rejected documents are final."},
+                {"detail": "This document cannot be submitted in its current status."},
                 status=status.HTTP_400_BAD_REQUEST,
             )
         from apps.workflows.services import WorkflowService, WorkflowError

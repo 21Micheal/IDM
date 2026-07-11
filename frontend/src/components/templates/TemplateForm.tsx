@@ -529,7 +529,7 @@ function TableField({ field, value, onChange, readOnly, tableKey, documentId }: 
         )}
       </div>
       <div className="overflow-x-auto rounded-lg border border-border">
-        <table className="w-full text-sm">
+        <table className="min-w-max w-max text-sm">
           <thead>
             <tr className="border-b border-border bg-muted/40">
               {cols.map((col, i) => (

@@ -2913,7 +2913,7 @@ function PreviewTableField({ field, readOnly = false, rows, onUpdateCell, onAddR
       <label className="text-sm font-semibold text-slate-700">{field.label}{field.required && <span className="ml-1 text-red-500">*</span>}</label>
       {field.helpText && <p className="text-xs text-slate-500">{field.helpText}</p>}
       <div className="overflow-x-auto border border-slate-300 bg-white">
-        <table className="w-full text-sm">
+        <table className="min-w-max w-max text-sm">
           <thead>
             <tr className="border-b border-slate-300 bg-slate-100">
               {cols.map((col) => (

@@ -764,18 +764,31 @@ class WorkflowService:
             from apps.sunsystems.config import journal_posting_enabled, find_stage_to_post
             if not journal_posting_enabled(document):
                 return
-            stage = find_stage_to_post(document, outcome)
-            if stage is None:
+
+            outcomes = [outcome]
+            if (
+                WorkflowService._document_workflow_phase(document) == "retirement"
+                and outcome == "approved"
+            ):
+                # Retirement-cycle completion may use a dedicated trigger name.
+                outcomes = ["retirement_approved", "approved"]
+
+            for trigger in outcomes:
+                stage = find_stage_to_post(document, trigger)
+                if stage is None:
+                    continue
+                from apps.sunsystems.tasks import post_journal_for_document
+
+                doc_id = str(document.id)
+                _queue_after_commit(
+                    lambda did=doc_id, s=stage: post_journal_for_document.delay(did, s)
+                )
                 return
-            from apps.sunsystems.tasks import post_journal_for_document
-            doc_id = str(document.pk)
-            _queue_after_commit(
-                lambda did=doc_id, s=stage: post_journal_for_document.delay(did, s)
-            )
         except Exception:
             logger.exception(
-                "Failed to enqueue SunSystems journal posting for %s",
-                getattr(document, "pk", "?"),
+                "Failed to enqueue SunSystems journal for document %s (outcome=%s)",
+                document.id,
+                outcome,
             )
 
     @staticmethod

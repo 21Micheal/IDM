@@ -550,7 +550,11 @@ export default function DocumentDetailPage() {
 
   const submitMutation = useMutation({
     mutationFn: () => documentsAPI.submit(id!),
-    onSuccess: () => { toast.success("Submitted for approval"); qc.invalidateQueries({ queryKey: ["document", id] }); },
+    onSuccess: () => {
+      toast.success("Submitted for approval");
+      qc.invalidateQueries({ queryKey: ["document", id] });
+      qc.invalidateQueries({ queryKey: ["document-workflow", id] });
+    },
     onError: (err) => toast.error(extractApiError(err, "Submission failed")),
   });
 
@@ -813,13 +817,29 @@ export default function DocumentDetailPage() {
   const isLockedByOther = Boolean(doc.is_edit_locked && doc.edit_locked_by !== user?.id);
   const lockedByMe = Boolean(doc.is_edit_locked && doc.edit_locked_by === user?.id);
 
-  // Rejection is terminal: rejected documents cannot restart the workflow.
-  // Returned documents go back to the uploader to edit and resubmit (resumes
-  // the exact step it was at).
-  const canSubmit =
+  const isRetirementPhase = doc.builder_workflow_phase === "retirement";
+  const canSubmitRetirement = Boolean(doc.can_submit_retirement);
+  const canSubmitRequest =
     !isPersonal &&
-    (["draft", "returned"].includes(doc.status)) &&
+    !isRetirementPhase &&
+    ["draft", "returned"].includes(doc.status) &&
     (canApprove || doc.uploaded_by?.id === user?.id);
+  const canSubmit = canSubmitRequest || canSubmitRetirement;
+
+  const submitActionLabel = canSubmitRetirement
+    ? "Submit retirement"
+    : isRetirementPhase && doc.status === "returned"
+      ? "Resubmit retirement"
+      : doc.status === "returned"
+        ? "Resubmit"
+        : "Start workflow";
+  const submitActionTitle = canSubmitRetirement
+    ? "Submit retirement expenditure for approval"
+    : isRetirementPhase && doc.status === "returned"
+      ? "Resubmit retirement after rework"
+      : doc.status === "returned"
+        ? "Resubmit to resume approval"
+        : "Submit for approval workflow";
 
   const canArchiveNow =
     canArchive &&
@@ -1041,15 +1061,15 @@ export default function DocumentDetailPage() {
               onClick={() => submitMutation.mutate()}
               disabled={submitMutation.isPending}
               className={commandActionClass}
-              title={doc.status === "returned" ? "Resubmit to resume approval" : "Submit for approval workflow"}
+              title={submitActionTitle}
             >
               {submitMutation.isPending ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <Send className="w-3.5 h-3.5" />}
-              <span>{doc.status === "returned" ? "Resubmit" : "Start workflow"}</span>
+              <span>{submitActionLabel}</span>
             </button>
           ) : (
             <button disabled className={cn(commandActionDisabledClass, "hidden sm:flex")} title="Not eligible for submission">
               <Send className="w-3.5 h-3.5" />
-              <span>{doc.status === "returned" ? "Resubmit" : "Start workflow"}</span>
+              <span>{submitActionLabel}</span>
             </button>
           )}
 
@@ -1368,13 +1388,17 @@ export default function DocumentDetailPage() {
                   <span className="text-xs text-[#5E6870]">
                     {formEditing
                       ? "Editing — fill and save"
-                      : lockedByMe
+                      : canSubmitRetirement
+                        ? "Retirement stage — fill expenditure, then submit for approval"
+                        : lockedByMe
                         ? "Locked by you — open edit mode to change fields"
                         : isLockedByOther
                           ? "View-only — locked by another user"
                           : formDocEditable
                             ? "Lock the document to edit"
-                            : "Filled in-app"}
+                            : isRetirementPhase
+                              ? "Retirement stage"
+                              : "Filled in-app"}
                   </span>
                 </div>
                 <div className="flex items-center gap-2 flex-wrap justify-end">

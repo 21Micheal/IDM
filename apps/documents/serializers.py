@@ -632,6 +632,8 @@ class DocumentDetailSerializer(serializers.ModelSerializer):
     preview_pdf = serializers.SerializerMethodField()
     is_edit_locked = serializers.SerializerMethodField()
     edit_locked_by_name = serializers.SerializerMethodField()
+    builder_workflow_phase = serializers.SerializerMethodField()
+    can_submit_retirement = serializers.SerializerMethodField()
     ocr_suggestions = serializers.SerializerMethodField()
     shared_with_me = serializers.SerializerMethodField()
     share_access_level = serializers.SerializerMethodField()
@@ -653,6 +655,7 @@ class DocumentDetailSerializer(serializers.ModelSerializer):
             "is_scanned", "ocr_status", "ocr_suggestions",
             "preview_pdf", "preview_status",
             "edit_locked_by", "edit_locked_by_name", "edit_locked_at", "is_edit_locked",
+            "builder_workflow_phase", "can_submit_retirement",
             "current_version", "versions", "comments", "permissions",
             "created_at", "updated_at", "shared_with_me", "share_access_level", "signatures",
         ]
@@ -779,6 +782,22 @@ class DocumentDetailSerializer(serializers.ModelSerializer):
     def get_edit_locked_by_name(self, obj):
         holder = obj.edit_lock_holder
         return holder.get_full_name().strip() if holder else None
+
+    def get_builder_workflow_phase(self, obj):
+        form = (obj.metadata or {}).get("form")
+        if not isinstance(form, dict) or not form.get("sections"):
+            return None
+        phase = form.get("workflow_phase")
+        if phase:
+            return str(phase).strip().lower()
+        from apps.documents.builder_workflow import infer_builder_workflow_phase
+        return infer_builder_workflow_phase(obj)
+
+    def get_can_submit_retirement(self, obj):
+        from apps.documents.builder_workflow import can_submit_retirement_workflow
+        request = self.context.get("request")
+        user = getattr(request, "user", None)
+        return can_submit_retirement_workflow(obj, user=user)
 
     def get_ocr_suggestions(self, obj):
         if obj.ocr_status != OCRStatus.DONE:
