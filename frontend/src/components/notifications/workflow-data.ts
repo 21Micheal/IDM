@@ -76,6 +76,7 @@ type WorkflowTemplateRecord = {
 
 type WorkflowInstanceRecord = {
   id: string;
+  status?: string;
   document?: string;
   template?: string;
   started_at?: string;
