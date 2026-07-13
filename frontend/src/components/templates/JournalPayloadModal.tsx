@@ -25,6 +25,8 @@ type Props = {
   /** Used for the downloaded file name. */
   title?: string;
   onClose: () => void;
+  /** Available stages for multi-stage journal posting (e.g., [1, 2] for request/retirement). */
+  availableStages?: number[];
 };
 
 type View = "ssc" | "soap";
@@ -33,14 +35,21 @@ function slugify(s: string) {
   return (s || "journal").toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "").slice(0, 60);
 }
 
-export default function JournalPayloadModal({ documentId, templateId, values, mapping, sample, title, onClose }: Props) {
+function decodeHtmlEntities(text: string): string {
+  const textArea = document.createElement("textarea");
+  textArea.innerHTML = text;
+  return textArea.value;
+}
+
+export default function JournalPayloadModal({ documentId, templateId, values, mapping, sample, title, onClose, availableStages }: Props) {
   const [view, setView] = useState<View>("ssc");
+  const [stage, setStage] = useState<number>(1);
 
   const { data, isLoading, isError } = useQuery({
-    queryKey: ["sunsystems-journal-preview", documentId, templateId, JSON.stringify(values ?? {}), JSON.stringify(mapping ?? null)],
+    queryKey: ["sunsystems-journal-preview", documentId, templateId, JSON.stringify(values ?? {}), JSON.stringify(mapping ?? null), stage],
     queryFn: () =>
       sunsystemsAPI
-        .journalPreview({ document_id: documentId, template_id: templateId, values, mapping: mapping ?? undefined })
+        .journalPreview({ document_id: documentId, template_id: templateId, values, mapping: mapping ?? undefined, stage })
         .then((r) => r.data),
   });
 
@@ -53,7 +62,8 @@ export default function JournalPayloadModal({ documentId, templateId, values, ma
 
   const xml = useMemo(() => {
     if (!data?.ok) return "";
-    return view === "ssc" ? (data.ssc_xml ?? "") : (data.soap_xml ?? "");
+    const rawXml = view === "ssc" ? (data.ssc_xml ?? "") : (data.soap_xml ?? "");
+    return decodeHtmlEntities(rawXml);
   }, [data, view]);
 
   const copy = async () => {
@@ -148,16 +158,33 @@ export default function JournalPayloadModal({ documentId, templateId, values, ma
 
               {/* Toolbar */}
               <div className="flex flex-shrink-0 items-center justify-between border-b border-[#EEF0F2] px-5 py-2">
-                <div className="inline-flex overflow-hidden rounded border border-[#C8CDD2]">
-                  {(["ssc", "soap"] as View[]).map((v) => (
-                    <button
-                      key={v}
-                      onClick={() => setView(v)}
-                      className={`px-3 py-1.5 text-xs font-semibold ${view === v ? "bg-[#287EAD] text-white" : "bg-white text-[#5E6870] hover:bg-[#F3F5F6]"}`}
-                    >
-                      {v === "ssc" ? "Journal (SSC)" : "Full SOAP request"}
-                    </button>
-                  ))}
+                <div className="flex items-center gap-3">
+                  {/* Stage toggle for multi-stage workflows */}
+                  {(availableStages ?? []).length > 1 && (
+                    <div className="inline-flex overflow-hidden rounded border border-[#C8CDD2]">
+                      {availableStages!.map((s) => (
+                        <button
+                          key={s}
+                          onClick={() => setStage(s)}
+                          className={`px-3 py-1.5 text-xs font-semibold ${stage === s ? "bg-[#287EAD] text-white" : "bg-white text-[#5E6870] hover:bg-[#F3F5F6]"}`}
+                        >
+                          Stage {s}
+                        </button>
+                      ))}
+                    </div>
+                  )}
+                  {/* XML view toggle */}
+                  <div className="inline-flex overflow-hidden rounded border border-[#C8CDD2]">
+                    {(["ssc", "soap"] as View[]).map((v) => (
+                      <button
+                        key={v}
+                        onClick={() => setView(v)}
+                        className={`px-3 py-1.5 text-xs font-semibold ${view === v ? "bg-[#287EAD] text-white" : "bg-white text-[#5E6870] hover:bg-[#F3F5F6]"}`}
+                      >
+                        {v === "ssc" ? "Journal (SSC)" : "Full SOAP request"}
+                      </button>
+                    ))}
+                  </div>
                 </div>
                 <div className="flex items-center gap-2">
                   <button onClick={copy} className="inline-flex items-center gap-1.5 border border-[#AEB5BB] bg-white px-2.5 py-1.5 text-xs font-semibold text-[#1F2933] hover:bg-[#F3F5F6]">

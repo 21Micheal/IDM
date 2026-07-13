@@ -491,7 +491,7 @@ export default function DocumentDetailPage() {
 
   const { data: workflowData, isLoading: workflowDataLoading } = useQuery({
     queryKey: ["document-workflow", id],
-    queryFn: () => loadWorkflowData(id!),
+    queryFn: () => loadWorkflowData(id!, doc.builder_workflow_phase),
     enabled: !!id && !!doc && !(doc as any).is_self_upload,
     ...QUERY_SHORT_STALE,
     // Keep the visualizer in sync with approvals as they occur, then idle.
@@ -789,6 +789,12 @@ export default function DocumentDetailPage() {
   const formDocEditable = canEdit && (!isInWorkflow || isOwnerOrSubmitter);
   const budgetEnabled = Boolean((doc.metadata as any)?.sunsystems?.budget?.enabled);
   const journalEnabled = Boolean((doc.metadata as any)?.sunsystems?.journal?.enabled);
+  // Extract available journal stages for multi-stage posting
+  const journalStages = (doc.metadata as any)?.sunsystems?.journal?.stages as Array<{ stage: number; enabled?: boolean }> | undefined;
+  const availableStages = journalStages
+    ?.filter((s) => s.enabled !== false)
+    .map((s) => s.stage)
+    .sort((a, b) => a - b) || [1];
 
   const startFormEdit = () => {
     setFormValues({ ...(formData?.values ?? {}) });
@@ -825,7 +831,9 @@ export default function DocumentDetailPage() {
     !isRetirementPhase &&
     ["draft", "returned"].includes(doc.status) &&
     (canApprove || doc.uploaded_by?.id === user?.id);
-  const canSubmitRetirement = Boolean(doc.can_submit_retirement) && (canApprove || doc.uploaded_by?.id === user?.id);
+  // Disable submit retirement when document is fully approved or rejected in retirement phase
+  const isRetirementFinalized = isRetirementPhase && ["approved", "rejected"].includes(doc.status);
+  const canSubmitRetirement = Boolean(doc.can_submit_retirement) && !isRetirementFinalized && (canApprove || doc.uploaded_by?.id === user?.id);
   const canSubmit = canSubmitRequest || canSubmitRetirement;
 
   const submitActionLabel = canSubmitRetirement
@@ -1445,6 +1453,7 @@ export default function DocumentDetailPage() {
               documentId={doc.id}
               values={formEditing ? formValues : undefined}
               title={doc.title}
+              availableStages={availableStages}
               onClose={() => setShowJournalXml(false)}
             />
           )}

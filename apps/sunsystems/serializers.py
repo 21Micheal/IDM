@@ -42,6 +42,8 @@ class JournalPreviewRequestSerializer(serializers.Serializer):
     values = serializers.DictField(required=False)
     # Inline journal mapping (builder preview); falls back to template/document.
     mapping = serializers.DictField(required=False)
+    # Journal posting stage (1 = request/advance, 2 = retirement, etc.)
+    stage = serializers.IntegerField(required=False, default=1)
 
 
 class ConnectionSerializer(serializers.Serializer):
