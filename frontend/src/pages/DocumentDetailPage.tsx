@@ -15,6 +15,7 @@ import BudgetBanner from "@/components/templates/BudgetBanner";
 import JournalPostingCard from "@/components/templates/JournalPostingCard";
 import JournalPayloadModal from "@/components/templates/JournalPayloadModal";
 import { collectFormAttachments } from "@/components/templates/formAttachments";
+import { ApprovalStagesTable } from "@/components/workflow/ApprovalStagesTable";
 import WorkflowActionPanel from "@/components/workflow/WorkflowActionPanel";
 import SignatureRequestPanel from "@/components/signatures/SignatureRequestPanel";
 import { format } from "date-fns";
@@ -1444,6 +1445,13 @@ export default function DocumentDetailPage() {
                 />
               </div>
             </div>
+          )}
+
+          {isFormDocument && workflowStepsCount > 0 && (
+            <ApprovalStagesTable 
+              steps={workflowData?.steps ?? []} 
+              isLoading={workflowDataLoading} 
+            />
           )}
 
           {isFormDocument && <JournalPostingCard documentId={doc.id} />}
