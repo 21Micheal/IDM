@@ -329,7 +329,7 @@ function evalVisible(
 // Editability mirror: a field/section is editable unless always read-only
 // (`readonly`) or it has an `editableWhen` group that doesn't match at the
 // current step/values. Absent group = editable (preserves prior behaviour).
-function evalEditable(
+export function evalEditable(
   item: { readonly?: boolean; editableWhen?: VisibleWhen | null },
   values: TemplateFormValues,
   allFields: Field[],
