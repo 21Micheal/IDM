@@ -29,7 +29,7 @@ import { resolveFormula, evaluateFormula, formulaLabel } from "@/components/temp
 import { currencySymbolFor } from "@/lib/currencies";
 import { useAuthStore } from "@/store/authStore";
 import { Sparkles } from "lucide-react";
-import { buildRowCalcScope, evaluateCalcExpression, resolveRowAggregates, type CalcValue } from "@/lib/calculations";
+import { buildCalcScope, buildRowCalcScope, evaluateCalcExpression, resolveRowAggregates, type CalcValue } from "@/lib/calculations";
 
 // ── Types ─────────────────────────────────────────────────────────────────────
 
@@ -72,9 +72,18 @@ type Field = {
   min?: number; max?: number; minLength?: number; maxLength?: number;
   defaultValue?: string; readonly?: boolean; hidden?: boolean;
   formula?: string;
+  // Calculated value (see calc_number/calc_currency/calc_text/calc_date types)
+  // — auto-derived from a formula over sibling field keys, same grammar as a
+  // table column's `calc`. Recomputed live below (client preview) and
+  // authoritatively by the server at submit time.
+  calc?: { expression?: string; decimals?: number } | null;
   visibleWhen?: VisibleWhen | null;
   editableWhen?: VisibleWhen | null;
 };
+
+// Field types whose value is derived from `field.calc.expression` rather than
+// typed by the person filling the form. Mirrors the builder's CALCULATED_TYPES.
+const CALCULATED_FIELD_TYPES = new Set(["calc_number", "calc_currency", "calc_text", "calc_date"]);
 
 type SectionGroupRef = { id?: string; name?: string };
 
@@ -87,7 +96,7 @@ type Section = {
 
 /** The person filling/viewing the form, used to evaluate role-restricted
  * sections. The auth payload carries group *names* + admin flags. */
-export type FormViewer = { groupNames?: string[]; isAdmin?: boolean };
+export type FormViewer = { groupNames?: string[]; isAdmin?: boolean; canEditConditionalSections?: boolean };
 
 /** A section restricted to RBAC groups is visible only to members of those
  * groups (matched by name — the client only has names) and to admins. An empty
@@ -344,6 +353,33 @@ export function evalEditable(
   if (!g || g.conditions.length === 0) return true;
   const results = g.conditions.map((c) => evalCondition(c, values, allFields, processStep));
   return g.combinator === "or" ? results.some(Boolean) : results.every(Boolean);
+}
+
+function hasEditableRule(item: { editableWhen?: VisibleWhen | null }): boolean {
+  const g = ruleConditions(item.editableWhen);
+  return Boolean(g && g.conditions.length > 0);
+}
+
+function conditionalEditBlockedForViewer(item: { editableWhen?: VisibleWhen | null }, viewer?: FormViewer): boolean {
+  return Boolean(
+    hasEditableRule(item)
+    && viewer
+    && viewer.canEditConditionalSections === false
+    && !viewer.isAdmin
+  );
+}
+
+function evalEditableForViewer(
+  item: { readonly?: boolean; editableWhen?: VisibleWhen | null },
+  values: TemplateFormValues,
+  allFields: Field[],
+  processStep: string,
+  viewer?: FormViewer,
+): boolean {
+  if (conditionalEditBlockedForViewer(item, viewer)) {
+    return false;
+  }
+  return evalEditable(item, values, allFields, processStep);
 }
 
 // ── Table column cell ─────────────────────────────────────────────────────────
@@ -931,6 +967,36 @@ function FormField({ field, control, errors, onChangeCb, readOnly, allValues, ed
     );
   }
 
+  // Calculated fields (calc_number/calc_currency/calc_text/calc_date): always
+  // read-only — the value is derived from `field.calc.expression`, recomputed
+  // live below (client preview, mirroring the builder's own Preview) and
+  // authoritatively by the server (compute_calculated_values) at submit time.
+  // Never registered with a Controller — there's nothing for the person to type.
+  if (CALCULATED_FIELD_TYPES.has(type)) {
+    const raw = allValues[key];
+    const hasValue = raw !== undefined && raw !== null && raw !== "";
+    const symbol = type === "calc_currency" ? (field.currencySymbol ?? "KSh") : null;
+    return (
+      <div className="min-w-0" style={style}>
+        <label style={{ marginBottom: "6px", display: "block", fontSize: "12px", fontWeight: "600", color: "#1F2933" }}>
+          {label}
+          {field.required && <span style={{ marginLeft: "4px", color: "#D32F2F" }}>*</span>}
+          {field.tooltip && <span style={{ marginLeft: "4px", cursor: "help", color: "#8C969E" }} title={field.tooltip}>(?)</span>}
+        </label>
+        <div className={`${inp} flex items-center gap-1.5`} style={{ backgroundColor: "#F6F7F8", color: "#1F2933", fontWeight: 600 }}>
+          {symbol && <span style={{ color: "#8C969E", fontWeight: 500 }}>{symbol}</span>}
+          {hasValue ? (
+            String(raw)
+          ) : field.calc?.expression ? (
+            <span className="italic" style={{ color: "#8C969E", fontWeight: 400 }}>Calculating…</span>
+          ) : (
+            <span className="italic" style={{ color: "#8C969E", fontWeight: 400 }}>No formula configured</span>
+          )}
+        </div>
+      </div>
+    );
+  }
+
   // Validation rules
   const rules: Record<string, any> = {};
   if (field.required && !readOnly && type !== "boolean" && type !== "checkbox")
@@ -1131,7 +1197,7 @@ function FormField({ field, control, errors, onChangeCb, readOnly, allValues, ed
 
 // ── Main export ───────────────────────────────────────────────────────────────
 
-export default function TemplateForm({ sections, values, onChange, readOnly = false, documentId, documentStatus }: {
+export default function TemplateForm({ sections, values, onChange, readOnly = false, documentId, documentStatus, canEditConditionalSections }: {
   sections: unknown[];
   values: TemplateFormValues;
   onChange: (key: string, value: unknown) => void;
@@ -1140,6 +1206,7 @@ export default function TemplateForm({ sections, values, onChange, readOnly = fa
   // The document's current workflow status, for "process step" visibility
   // conditions. Absent (a brand-new form) is treated as "draft".
   documentStatus?: string;
+  canEditConditionalSections?: boolean;
 }) {
   const list = (Array.isArray(sections) ? sections : []) as Section[];
   const allFields = list.flatMap((s) => s.fields ?? []);
@@ -1179,6 +1246,30 @@ export default function TemplateForm({ sections, values, onChange, readOnly = fa
     }
   }, [sectionsKey, currentUser, readOnly, documentId]);
 
+  // Recompute every top-level `calc`-bearing field (calc_number/calc_currency/
+  // calc_text/calc_date) whenever any value changes — client preview only,
+  // mirroring the builder's own Preview and the server's authoritative
+  // compute_calculated_values. Resolves in template order so a later formula
+  // can reference an earlier calculated field's result. Skipped for an
+  // existing document the same way the auto-fill formula effect above is:
+  // the server already froze these at generation time, so client recompute
+  // here would just be superseded noise against a document's saved values.
+  useEffect(() => {
+    if (readOnly || documentId) return;
+    const scope = buildCalcScope(allFields, values);
+    for (const f of allFields) {
+      const k = f.key ?? f.id ?? "";
+      if (!k || !f.calc?.expression) continue;
+      let result = evaluateCalcExpression(f.calc.expression, scope);
+      if (typeof result === "number" && typeof f.calc.decimals === "number") {
+        result = Number(result.toFixed(f.calc.decimals));
+      }
+      scope[k] = result; // let a later formula see this one's result
+      if (values[k] !== result) onChange(k, result);
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [sectionsKey, JSON.stringify(values), readOnly, documentId]);
+
   // Keep a live snapshot of form values for conditional visibility
   const liveValues = { ...values, ...(watch() as TemplateFormValues), __document_id: documentId };
 
@@ -1186,6 +1277,7 @@ export default function TemplateForm({ sections, values, onChange, readOnly = fa
   const viewer: FormViewer = {
     groupNames: currentUser?.group_names ?? [],
     isAdmin: Boolean(currentUser?.has_admin_access || currentUser?.is_staff),
+    canEditConditionalSections,
   };
 
   // Current process step for "process step" visibility conditions.
@@ -1204,11 +1296,13 @@ export default function TemplateForm({ sections, values, onChange, readOnly = fa
         // Hidden / conditionally-hidden / role-restricted sections drop out entirely.
         if (!evalVisible(section, liveValues as TemplateFormValues, allFields, processStep)) return null;
         if (!sectionVisibleToViewer(section, viewer)) return null;
+        if (conditionalEditBlockedForViewer(section, viewer)) return null;
         const visibleFields = (section.fields ?? []).filter((f) =>
           evalVisible(f, liveValues as TemplateFormValues, allFields, processStep)
+          && !conditionalEditBlockedForViewer(f, viewer)
         );
         // Editability cascades: a read-only/locked section locks all its fields.
-        const sectionEditable = evalEditable(section, liveValues as TemplateFormValues, allFields, processStep);
+        const sectionEditable = evalEditableForViewer(section, liveValues as TemplateFormValues, allFields, processStep, viewer);
         const sectionLocked = !readOnly && !sectionEditable;
         return (
           <div key={section.id ?? si} className="overflow-hidden" style={{ border: "1px solid #C8CDD2", backgroundColor: "#FFFFFF" }}>
@@ -1236,7 +1330,7 @@ export default function TemplateForm({ sections, values, onChange, readOnly = fa
                   errors={errors as Record<string, any>}
                   onChangeCb={onChange}
                   readOnly={readOnly}
-                  editable={sectionEditable && evalEditable(f, liveValues as TemplateFormValues, allFields, processStep)}
+                  editable={sectionEditable && evalEditableForViewer(f, liveValues as TemplateFormValues, allFields, processStep, viewer)}
                   allValues={liveValues as TemplateFormValues}
                   processStep={processStep}
                   allFields={allFields}
@@ -1271,8 +1365,9 @@ export function requiredFieldLabels(
     // the viewer isn't a member of).
     if (!evalVisible(s, values, allFields, processStep)) continue;
     if (!sectionVisibleToViewer(s, viewer)) continue;
+    if (conditionalEditBlockedForViewer(s, viewer)) continue;
     // A read-only/locked section's fields can't be filled at this step.
-    const sectionEditable = evalEditable(s, values, allFields, processStep);
+    const sectionEditable = evalEditableForViewer(s, values, allFields, processStep, viewer);
     for (const f of s.fields ?? []) {
       const type = f.type ?? "text";
       if (type === "divider" || type === "heading") continue;
@@ -1280,8 +1375,9 @@ export function requiredFieldLabels(
       if (resolveFormula(f.formula)) continue;
       // Don't require a field the user can't see (hidden / conditionally hidden).
       if (f.hidden || !evalVisible(f, values, allFields, processStep)) continue;
+      if (conditionalEditBlockedForViewer(f, viewer)) continue;
       // Don't require a field the user can't edit at this step (read-only / locked).
-      if (!sectionEditable || !evalEditable(f, values, allFields, processStep)) continue;
+      if (!sectionEditable || !evalEditableForViewer(f, values, allFields, processStep, viewer)) continue;
       const key = f.key ?? "";
       const v   = values[key];
       if (f.required) {

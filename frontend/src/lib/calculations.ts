@@ -206,8 +206,16 @@ export interface TemplateField {
 export function buildCalcScope(allFields: TemplateField[], values: Record<string, unknown>): Record<string, CalcValue> {
   const scope: Record<string, CalcValue> = {};
   for (const f of allFields) {
-    if (!f.key || !f.id) continue;
-    scope[f.key] = coerceScopeValue(f.type, values[f.id]);
+    if (!f.key) continue;
+    // Values here are keyed by the field's KEY (see TemplateForm.tsx — every
+    // Controller/onChange call uses `field.key`, and this is what the server's
+    // compute_calculated_values reads too). This module previously indexed by
+    // `f.id`, which is never how values are stored outside the builder's own
+    // Preview (which id-keys via react-hook-form register(field.id, ...) and
+    // keeps its own separate calc engine for that reason) — that mismatch
+    // silently zeroed out every top-level sibling reference in real forms,
+    // e.g. a table column formula like `= daily_subsistence_allowance`.
+    scope[f.key] = coerceScopeValue(f.type, values[f.key]);
   }
   return scope;
 }

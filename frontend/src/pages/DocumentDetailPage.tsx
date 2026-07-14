@@ -10,7 +10,7 @@ import { WorkflowVisualizer } from "@/components/notifications/workflow-visualiz
 import OcrStatusBadge from "@/components/documents/OcrStatusBadge";
 import { AddToFolderMenu } from "@/components/documents/AddToFolderMenu";
 import MetadataEditPanel, { type MetadataSaver } from "@/components/documents/MetadataEditPanel";
-import TemplateForm, { requiredFieldLabels, evalEditable } from "@/components/templates/TemplateForm";
+import TemplateForm, { requiredFieldLabels } from "@/components/templates/TemplateForm";
 import BudgetBanner from "@/components/templates/BudgetBanner";
 import JournalPostingCard from "@/components/templates/JournalPostingCard";
 import JournalPayloadModal from "@/components/templates/JournalPayloadModal";
@@ -45,6 +45,18 @@ const AUDIT_PAGE_SIZE = 5;
 // on this cadence. React Query pauses the interval when the tab is backgrounded
 // (refetchIntervalInBackground defaults to false), so it doesn't poll needlessly.
 const LOCK_STATUS_POLL_MS = 8_000;
+
+function formHasConditionalEditability(sections?: unknown[]): boolean {
+  const list = Array.isArray(sections) ? sections : [];
+  return list.some((section: any) => {
+    if (section?.editableWhen) return true;
+    return Array.isArray(section?.fields) && section.fields.some((field: any) => Boolean(field?.editableWhen));
+  });
+}
+
+function isApprovalLockedStatus(status?: string): boolean {
+  return ["pending_approval", "on_hold"].includes(status || "");
+}
 
 const DOCUMENT_FIELD_KEYS = ["title", "supplier", "amount", "currency", "document_date", "due_date"] as const;
 type DocumentFieldKey = (typeof DOCUMENT_FIELD_KEYS)[number];
@@ -287,34 +299,18 @@ export default function DocumentDetailPage() {
       | { sections?: unknown[]; values?: Record<string, unknown> }
       | undefined;
     const isFormDocument = Boolean(formData?.sections);
-    const isInWorkflow = ["approved", "returned", "pending_approval", "on_hold"].includes(doc.status || "");
-    const isOwnerOrSubmitter = doc.uploaded_by?.id === user?.id;
+    const isOwnerOrSubmitter = doc.uploaded_by?.id === user?.id || doc.owned_by?.id === user?.id;
     const hasAdminAccess = Boolean(user?.has_admin_access);
     const canEdit = hasAdminAccess || (doc.permissions ?? []).includes("edit");
-    const formDocEditable = canEdit && (!isInWorkflow || isOwnerOrSubmitter);
-    
-    // Check if form has conditionally editable sections
-    const hasConditionallyEditableSection = formData?.sections?.some((section: any) => {
-      if (!section.editableWhen) return false;
-      const values = formData?.values ?? {};
-      const allFields = formData?.sections?.flatMap((s: any) => s.fields ?? []) ?? [];
-      return evalEditable(section, values, allFields, doc.status || "");
-    });
-    
-    // If form has conditionally editable sections, restrict edit to owner/submitter only
-    const canEditForm = hasConditionallyEditableSection 
-      ? (canEdit && isOwnerOrSubmitter)
-      : formDocEditable;
-    
-    // Only auto-enable edit mode for owner/submitter when they can edit
+    const hasConditionalEditability = formHasConditionalEditability(formData?.sections);
+    const isAfterApproval = doc.status === "approved";
+    const canEditForm = canEdit
+      && !isApprovalLockedStatus(doc.status)
+      && (!isAfterApproval || (hasConditionalEditability && (hasAdminAccess || isOwnerOrSubmitter)));
+
+    // Only auto-enable edit mode for owner/submitter when conditional sections unlock.
     if (isFormDocument && !formEditing && canEditForm) {
-      const hasEditableSection = formData?.sections?.some((section: any) => {
-        if (!section.editableWhen) return false;
-        const values = formData?.values ?? {};
-        const allFields = formData?.sections?.flatMap((s: any) => s.fields ?? []) ?? [];
-        return evalEditable(section, values, allFields, doc.status || "");
-      });
-      if (hasEditableSection) {
+      if (hasConditionalEditability) {
         setFormValues({ ...(formData?.values ?? {}) });
         formDirtyRef.current = false;
         setFormEditing(true);
@@ -506,7 +502,7 @@ export default function DocumentDetailPage() {
 
   const { data: workflowData, isLoading: workflowDataLoading } = useQuery({
     queryKey: ["document-workflow", id],
-    queryFn: () => loadWorkflowData(id!, doc.builder_workflow_phase),
+    queryFn: () => loadWorkflowData(id!, doc?.builder_workflow_phase),
     enabled: !!id && !!doc && !(doc as any).is_self_upload,
     ...QUERY_SHORT_STALE,
     // Keep the visualizer in sync with approvals as they occur, then idle.
@@ -544,6 +540,7 @@ export default function DocumentDetailPage() {
           const missing = requiredFieldLabels(formData?.sections ?? [], formValues, {
             groupNames: user?.group_names ?? [],
             isAdmin: Boolean(user?.has_admin_access || user?.is_staff),
+            canEditConditionalSections,
           }, doc?.status);
           if (missing.length) {
             toast.error(`Please fill in: ${missing.join(", ")}`);
@@ -796,26 +793,16 @@ export default function DocumentDetailPage() {
     | { sections?: unknown[]; values?: Record<string, unknown> }
     | undefined;
   const isFormDocument = Boolean(formData?.sections);
-  // For forms, editability depends on:
-  // 1. General edit permission
-  // 2. For approved/returned documents: only owner/submitter can edit
-  // 3. For conditionally editable sections (e.g., retirement): only owner/submitter can edit
-  const isInWorkflow = ["approved", "returned", "pending_approval", "on_hold"].includes(doc.status);
-  const isOwnerOrSubmitter = doc.uploaded_by?.id === user?.id;
-  const formDocEditable = canEdit && (!isInWorkflow || isOwnerOrSubmitter);
-  
-  // Check if form has conditionally editable sections (like retirement section)
-  const hasConditionallyEditableSection = formData?.sections?.some((section: any) => {
-    if (!section.editableWhen) return false;
-    const values = formData?.values ?? {};
-    const allFields = formData?.sections?.flatMap((s: any) => s.fields ?? []) ?? [];
-    return evalEditable(section, values, allFields, doc.status || "");
-  });
-  
-  // If form has conditionally editable sections, restrict edit to owner/submitter only
-  const canEditForm = hasConditionallyEditableSection 
-    ? (canEdit && isOwnerOrSubmitter)
-    : formDocEditable;
+  // Form editability mirrors the backend lifecycle policy:
+  // draft/returned/rejected use normal edit permissions; pending approval is
+  // locked; approved conditional sections (e.g. retirement) are owner-only.
+  const isOwnerOrSubmitter = doc.uploaded_by?.id === user?.id || doc.owned_by?.id === user?.id;
+  const hasConditionalEditability = formHasConditionalEditability(formData?.sections);
+  const isAfterApproval = doc.status === "approved";
+  const canEditConditionalSections = hasAdminAccess || isOwnerOrSubmitter;
+  const canEditForm = canEdit
+    && !isApprovalLockedStatus(doc.status)
+    && (!isAfterApproval || (hasConditionalEditability && canEditConditionalSections));
   const budgetEnabled = Boolean((doc.metadata as any)?.sunsystems?.budget?.enabled);
   const journalEnabled = Boolean((doc.metadata as any)?.sunsystems?.journal?.enabled);
   // Extract available journal stages for multi-stage posting
@@ -835,6 +822,7 @@ export default function DocumentDetailPage() {
     const missing = requiredFieldLabels(formData?.sections ?? [], formValues, {
       groupNames: user?.group_names ?? [],
       isAdmin: Boolean(user?.has_admin_access || user?.is_staff),
+      canEditConditionalSections,
     }, doc?.status);
     if (missing.length) { toast.error(`Please fill in: ${missing.join(", ")}`); return; }
     updateFormMutation.mutate();
@@ -1470,6 +1458,7 @@ export default function DocumentDetailPage() {
                   readOnly={!formEditing}
                   documentId={doc.id}
                   documentStatus={doc.status}
+                  canEditConditionalSections={canEditConditionalSections}
                 />
               </div>
             </div>
@@ -2284,6 +2273,7 @@ export default function DocumentDetailPage() {
                       const missing = requiredFieldLabels(formData?.sections ?? [], formValues, {
                         groupNames: user?.group_names ?? [],
                         isAdmin: Boolean(user?.has_admin_access || user?.is_staff),
+                        canEditConditionalSections,
                       }, doc?.status);
                       if (missing.length) {
                         toast.error(`Please fill in: ${missing.join(", ")}`);

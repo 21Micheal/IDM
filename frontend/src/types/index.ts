@@ -84,6 +84,7 @@ export interface Document {
   tags: Tag[];
   personal_tags?: string[];
   uploaded_by: UserSummary;
+  owned_by?: UserSummary | null;
   department?: string | null;
   department_name?: string | null;
   uploaded_by_department_name?: string | null;

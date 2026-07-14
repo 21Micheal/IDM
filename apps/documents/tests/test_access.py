@@ -223,6 +223,27 @@ class DocumentAllowsFormEditTests(TestCase):
 
         self.assertTrue(document_allows_form_edit(self.document, user=self.user))
 
+    def test_approved_form_with_editable_section_blocks_non_owner(self):
+        from apps.documents.access import document_allows_form_edit
+
+        approver = User.objects.create_user(
+            email="approver@example.com",
+            password="pass",
+            first_name="Approval",
+            last_name="User",
+        )
+
+        self.assertFalse(document_allows_form_edit(self.document, user=approver))
+
+    def test_pending_approval_form_with_editable_section_blocks_owner(self):
+        from apps.documents.access import document_allows_form_edit
+
+        self.document.status = DocumentStatus.PENDING_APPROVAL
+        self.document.save(update_fields=["status"])
+        self.document.metadata["form"]["sections"][0]["editableWhen"]["conditions"][0]["value"] = DocumentStatus.PENDING_APPROVAL
+
+        self.assertFalse(document_allows_form_edit(self.document, user=self.user))
+
     def test_approved_form_without_editable_section_blocks_form_edit(self):
         from apps.documents.access import document_allows_form_edit
 

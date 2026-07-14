@@ -619,6 +619,7 @@ class DocumentDetailSerializer(serializers.ModelSerializer):
         source="document_type", write_only=True,
     )
     uploaded_by = UserSummarySerializer(read_only=True)
+    owned_by = UserSummarySerializer(read_only=True)
     tags        = TagSerializer(many=True, read_only=True)
     personal_tags = serializers.SerializerMethodField()
     tag_ids     = serializers.PrimaryKeyRelatedField(
@@ -650,7 +651,7 @@ class DocumentDetailSerializer(serializers.ModelSerializer):
             "metadata",
             "tags", "personal_tags", "tag_ids",
             "department",
-            "uploaded_by",
+            "uploaded_by", "owned_by",
             "is_self_upload",
             "is_scanned", "ocr_status", "ocr_suggestions",
             "preview_pdf", "preview_status",
@@ -661,7 +662,7 @@ class DocumentDetailSerializer(serializers.ModelSerializer):
         ]
         read_only_fields = [
             "id", "reference_number", "file", "file_name", "file_size", "file_mime_type",
-            "checksum", "uploaded_by", "is_self_upload",
+            "checksum", "uploaded_by", "owned_by", "is_self_upload",
             "is_scanned", "ocr_status", "ocr_suggestions",
             "preview_pdf", "preview_status",
             "edit_locked_by", "edit_locked_by_name", "edit_locked_at", "is_edit_locked",
