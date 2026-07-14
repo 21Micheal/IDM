@@ -293,7 +293,21 @@ export default function DocumentDetailPage() {
     const canEdit = hasAdminAccess || (doc.permissions ?? []).includes("edit");
     const formDocEditable = canEdit && (!isInWorkflow || isOwnerOrSubmitter);
     
-    if (isFormDocument && !formEditing && isOwnerOrSubmitter && formDocEditable) {
+    // Check if form has conditionally editable sections
+    const hasConditionallyEditableSection = formData?.sections?.some((section: any) => {
+      if (!section.editableWhen) return false;
+      const values = formData?.values ?? {};
+      const allFields = formData?.sections?.flatMap((s: any) => s.fields ?? []) ?? [];
+      return evalEditable(section, values, allFields, doc.status || "");
+    });
+    
+    // If form has conditionally editable sections, restrict edit to owner/submitter only
+    const canEditForm = hasConditionallyEditableSection 
+      ? (canEdit && isOwnerOrSubmitter)
+      : formDocEditable;
+    
+    // Only auto-enable edit mode for owner/submitter when they can edit
+    if (isFormDocument && !formEditing && canEditForm) {
       const hasEditableSection = formData?.sections?.some((section: any) => {
         if (!section.editableWhen) return false;
         const values = formData?.values ?? {};
@@ -785,9 +799,23 @@ export default function DocumentDetailPage() {
   // For forms, editability depends on:
   // 1. General edit permission
   // 2. For approved/returned documents: only owner/submitter can edit
+  // 3. For conditionally editable sections (e.g., retirement): only owner/submitter can edit
   const isInWorkflow = ["approved", "returned", "pending_approval", "on_hold"].includes(doc.status);
   const isOwnerOrSubmitter = doc.uploaded_by?.id === user?.id;
   const formDocEditable = canEdit && (!isInWorkflow || isOwnerOrSubmitter);
+  
+  // Check if form has conditionally editable sections (like retirement section)
+  const hasConditionallyEditableSection = formData?.sections?.some((section: any) => {
+    if (!section.editableWhen) return false;
+    const values = formData?.values ?? {};
+    const allFields = formData?.sections?.flatMap((s: any) => s.fields ?? []) ?? [];
+    return evalEditable(section, values, allFields, doc.status || "");
+  });
+  
+  // If form has conditionally editable sections, restrict edit to owner/submitter only
+  const canEditForm = hasConditionallyEditableSection 
+    ? (canEdit && isOwnerOrSubmitter)
+    : formDocEditable;
   const budgetEnabled = Boolean((doc.metadata as any)?.sunsystems?.budget?.enabled);
   const journalEnabled = Boolean((doc.metadata as any)?.sunsystems?.journal?.enabled);
   // Extract available journal stages for multi-stage posting
@@ -1356,7 +1384,7 @@ export default function DocumentDetailPage() {
                       ? "Editing — fill and save"
                       : canSubmitRetirement
                         ? "Retirement stage — fill expenditure, then submit for approval"
-                        : formDocEditable
+                        : canEditForm
                           ? "Click Edit form to modify"
                           : isRetirementPhase
                             ? "Retirement stage"
@@ -1384,7 +1412,7 @@ export default function DocumentDetailPage() {
                       {showFormPdf ? "Hide PDF" : "View PDF"}
                     </button>
                   )}
-                  {!formEditing && formDocEditable && (
+                  {!formEditing && canEditForm && (
                     <button
                       type="button"
                       onClick={startFormEdit}

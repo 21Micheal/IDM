@@ -11,7 +11,7 @@
  *  - Table columns fully typed (currency symbol, select options, boolean, etc.)
  *  - Same public API as v1 — callers (UploadPage, DocumentDetailPage) need zero changes
  */
-import { useState, useEffect, useRef } from "react";
+import { useState, useEffect, useRef, useMemo } from "react";
 import { createPortal } from "react-dom";
 import { useForm, Controller } from "react-hook-form";
 import { useQuery } from "@tanstack/react-query";
@@ -29,6 +29,7 @@ import { resolveFormula, evaluateFormula, formulaLabel } from "@/components/temp
 import { currencySymbolFor } from "@/lib/currencies";
 import { useAuthStore } from "@/store/authStore";
 import { Sparkles } from "lucide-react";
+import { buildRowCalcScope, evaluateCalcExpression, resolveRowAggregates, type CalcValue } from "@/lib/calculations";
 
 // ── Types ─────────────────────────────────────────────────────────────────────
 
@@ -42,6 +43,9 @@ type Column = {
   currencyFromColumn?: string;
   tooltip?: string; additionalText?: string; readonly?: boolean; hidden?: boolean;
   defaultValue?: string; referenceSource?: string;
+  visibleWhen?: VisibleWhen | null;
+  editableWhen?: VisibleWhen | null;
+  calc?: { expression?: string };
 };
 
 type ConditionOperator = "equals" | "not_equals" | "is_empty" | "is_not_empty" | string;
@@ -430,6 +434,16 @@ function TableColInput({ col, value, onChange, readOnly, documentId, attachmentK
   const type = (col.type ?? "text") as ColType;
   const dis = readOnly || col.readonly;
 
+  // Calculated column - display result value like regular columns
+  if (col.calc?.expression) {
+    const sval = typeof value === "string" ? value : value == null ? "" : String(value);
+    return (
+      <div className={base}>
+        {sval || <span className="italic text-muted-foreground">—</span>}
+      </div>
+    );
+  }
+
   if (type === "file") {
     return (
       <TableFileCell value={value} onChange={onChange} disabled={dis}
@@ -492,15 +506,27 @@ function TableColInput({ col, value, onChange, readOnly, documentId, attachmentK
 
 // ── Table field ───────────────────────────────────────────────────────────────
 
-function TableField({ field, value, onChange, readOnly, tableKey, documentId }: {
+function TableField({ field, value, onChange, readOnly, tableKey, documentId, allValues, processStep, allFields }: {
   field: Field;
   value: Record<string, unknown>[];
   onChange: (rows: Record<string, unknown>[]) => void;
   readOnly?: boolean;
   tableKey: string;
   documentId?: string;
+  allValues: TemplateFormValues;
+  processStep?: string;
+  allFields: Field[];
 }) {
-  const cols = (field.columns ?? []).filter((c) => !c.hidden);
+  // Filter columns by hidden and visibleWhen conditions
+  const cols = (field.columns ?? []).filter((c) => {
+    if (c.hidden) return false;
+    // Evaluate visibleWhen condition for the column
+    if (c.visibleWhen) {
+      return evalVisible({ hidden: false, visibleWhen: c.visibleWhen }, allValues, allFields, processStep ?? "draft");
+    }
+    return true;
+  });
+
   const emptyRow = (): Record<string, unknown> => {
     const r: Record<string, unknown> = {};
     cols.forEach((c) => { if (c.defaultValue && c.key) r[c.key] = c.defaultValue; });
@@ -511,6 +537,35 @@ function TableField({ field, value, onChange, readOnly, tableKey, documentId }: 
       ? value
       : Array.from({ length: field.minRows ?? 1 }, emptyRow)
   );
+
+  // Compute calculated column values for each row
+  const computedRows = useMemo(() => {
+    const colTypeByKey: Record<string, string | undefined> = {};
+    cols.forEach((c) => { if (c.key) colTypeByKey[c.key] = c.type; });
+    
+    return rows.map((row) => {
+      const computedRow = { ...row };
+      
+      // Calculate values for columns with calc expressions
+      cols.forEach((col) => {
+        if (col.calc?.expression && col.key) {
+          try {
+            // Build scope: top-level fields + row values
+            const scope = buildRowCalcScope(allFields, allValues, cols, row as Record<string, string>);
+            // Resolve aggregates (SUM, AVG, etc.)
+            const resolvedExpr = resolveRowAggregates(col.calc.expression, rows as Record<string, string>[], colTypeByKey);
+            // Evaluate the expression
+            const result = evaluateCalcExpression(resolvedExpr, scope);
+            computedRow[col.key] = String(result);
+          } catch {
+            computedRow[col.key] = "";
+          }
+        }
+      });
+      
+      return computedRow;
+    });
+  }, [rows, cols, allFields, allValues]);
 
   const update = (ri: number, key: string, val: unknown) => {
     const next = rows.map((r, i) => i === ri ? { ...r, [key]: val } : r);
@@ -529,51 +584,53 @@ function TableField({ field, value, onChange, readOnly, tableKey, documentId }: 
         )}
       </div>
       <div className="overflow-x-auto rounded-lg border border-border">
-        <table className="min-w-max w-max text-sm">
-          <thead>
-            <tr className="border-b border-border bg-muted/40">
-              {cols.map((col, i) => (
-                <th key={col.id ?? i} title={col.tooltip}
-                    className="px-3 py-2 text-left text-[11px] font-semibold text-muted-foreground border-r border-border/50 last:border-0 whitespace-nowrap">
-                  {col.label}{col.required && <span className="text-red-400 ml-0.5">*</span>}
-                  {col.additionalText && <div className="text-[10px] font-normal opacity-70">{col.additionalText}</div>}
-                </th>
-              ))}
-              {!readOnly && <th className="w-8" />}
-            </tr>
-          </thead>
-          <tbody>
-            {rows.map((row, ri) => (
-              <tr key={ri} className="border-b border-border/40 last:border-0 hover:bg-muted/20 transition-colors">
-                {cols.map((col, ci) => {
-                  const key = col.key ?? `col_${ci}`;
-                  return (
-                    <td key={col.id ?? ci} className="px-2 py-1.5 border-r border-border/30 last:border-0">
-                      <TableColInput
-                        col={col}
-                        value={row[key] ?? ""}
-                        row={row}
-                        onChange={(v) => update(ri, key, v)}
-                        readOnly={readOnly}
-                        documentId={documentId}
-                        attachmentKey={`${tableKey}~${ri}~${key}`}
-                      />
-                    </td>
-                  );
-                })}
-                {!readOnly && (
-                  <td className="px-1 text-center">
-                    {rows.length > 1 && (
-                      <button type="button" onClick={() => removeRow(ri)} className="p-0.5 text-muted-foreground hover:text-red-500 transition-colors rounded">
-                        <Trash2 className="h-3.5 w-3.5" />
-                      </button>
-                    )}
-                  </td>
-                )}
+        <div className="min-w-max">
+          <table className="w-max text-sm">
+            <thead>
+              <tr className="border-b border-border bg-muted/40">
+                {cols.map((col, i) => (
+                  <th key={col.id ?? i} title={col.tooltip}
+                      className="w-[230px] flex-shrink-0 px-3 py-2 text-left text-[11px] font-semibold text-muted-foreground border-r border-border/50 last:border-0 whitespace-nowrap">
+                    {col.label}{col.required && <span className="text-red-400 ml-0.5">*</span>}
+                    {col.additionalText && <div className="text-[10px] font-normal opacity-70">{col.additionalText}</div>}
+                  </th>
+                ))}
+                {!readOnly && <th className="w-8 flex-shrink-0" />}
               </tr>
-            ))}
-          </tbody>
-        </table>
+            </thead>
+            <tbody>
+              {computedRows.map((row, ri) => (
+                <tr key={ri} className="border-b border-border/40 last:border-0 hover:bg-muted/20 transition-colors">
+                  {cols.map((col, ci) => {
+                    const key = col.key ?? `col_${ci}`;
+                    return (
+                      <td key={col.id ?? ci} className="w-[230px] flex-shrink-0 px-2 py-1.5 border-r border-border/30 last:border-0">
+                        <TableColInput
+                          col={col}
+                          value={row[key] ?? ""}
+                          row={row}
+                          onChange={(v) => update(ri, key, v)}
+                          readOnly={readOnly}
+                          documentId={documentId}
+                          attachmentKey={`${tableKey}~${ri}~${key}`}
+                        />
+                      </td>
+                    );
+                  })}
+                  {!readOnly && (
+                    <td className="w-8 flex-shrink-0 px-1 text-center">
+                      {rows.length > 1 && (
+                        <button type="button" onClick={() => removeRow(ri)} className="p-0.5 text-muted-foreground hover:text-red-500 transition-colors rounded">
+                          <Trash2 className="h-3.5 w-3.5" />
+                        </button>
+                      )}
+                    </td>
+                  )}
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
       </div>
       {!readOnly && (
         <button type="button" onClick={addRow} className="flex items-center gap-1.5 text-xs font-semibold text-primary hover:text-primary/80 transition-colors">
@@ -810,7 +867,7 @@ function SignatureField({ fieldKey, disabled, value, onChangeCb }: {
 const inp = "input";
 const errCls = "mt-1 flex items-center gap-1 text-xs text-red-500";
 
-function FormField({ field, control, errors, onChangeCb, readOnly, allValues, editable = true }: {
+function FormField({ field, control, errors, onChangeCb, readOnly, allValues, editable = true, processStep, allFields }: {
   field: Field;
   control: any;
   errors: Record<string, any>;
@@ -820,6 +877,8 @@ function FormField({ field, control, errors, onChangeCb, readOnly, allValues, ed
   // Effective editability at the current process step (section ∧ field). When
   // false the field is shown but locked (read-only) for this step.
   editable?: boolean;
+  processStep?: string;
+  allFields: Field[];
 }) {
   const key  = field.key ?? field.id ?? "";
   const type = field.type ?? "text";
@@ -834,11 +893,11 @@ function FormField({ field, control, errors, onChangeCb, readOnly, allValues, ed
 
   // Layout-only elements
   if (type === "heading") return (
-    <div style={{ gridColumn: "span 12 / span 12" }}>
+    <div className="min-w-0" style={{ gridColumn: "span 12 / span 12" }}>
       <h4 style={{ borderBottom: "1px solid #C8CDD2", paddingBottom: "6px", paddingTop: "8px", fontSize: "14px", fontWeight: "bold", color: "#1F2933" }}>{label}</h4>
     </div>
   );
-  if (type === "divider") return <div style={{ gridColumn: "span 12 / span 12" }}><hr style={{ borderColor: "#E5E8EB" }} /></div>;
+  if (type === "divider") return <div className="min-w-0" style={{ gridColumn: "span 12 / span 12" }}><hr style={{ borderColor: "#E5E8EB" }} /></div>;
 
   // Table handled separately (needs full width + local state)
   if (type === "table") return (
@@ -849,6 +908,9 @@ function FormField({ field, control, errors, onChangeCb, readOnly, allValues, ed
       readOnly={dis}
       tableKey={key}
       documentId={allValues.__document_id as string | undefined}
+      allValues={allValues}
+      processStep={processStep}
+      allFields={allFields}
     />
   );
 
@@ -857,13 +919,10 @@ function FormField({ field, control, errors, onChangeCb, readOnly, allValues, ed
   if (resolveFormula(field.formula)) {
     const shown = referenceLabel(allValues[key]);
     return (
-      <div style={style}>
+      <div className="min-w-0" style={style}>
         <label style={{ marginBottom: "6px", display: "block", fontSize: "12px", fontWeight: "600", color: "#1F2933" }}>
           {label}
           {field.required && <span style={{ marginLeft: "4px", color: "#D32F2F" }}>*</span>}
-          <span style={{ marginLeft: "8px", display: "inline-flex", alignItems: "center", gap: "4px", borderRadius: "4px", backgroundColor: "#EEF6FB", paddingLeft: "6px", paddingRight: "6px", paddingTop: "4px", paddingBottom: "4px", verticalAlign: "middle", fontSize: "10px", fontWeight: "500", color: "#287EAD" }}>
-            <Sparkles className="h-2.5 w-2.5" /> Auto · {formulaLabel(field.formula)}
-          </span>
         </label>
         <div className={`${inp} flex items-center`} style={{ backgroundColor: "#F6F7F8", color: "#8C969E" }}>
           {shown || <span className="italic">Filled automatically on save</span>}
@@ -890,7 +949,7 @@ function FormField({ field, control, errors, onChangeCb, readOnly, allValues, ed
   // Checkbox / boolean — inline label layout
   if (type === "boolean" || type === "checkbox") {
     return (
-      <div style={style}>
+      <div className="min-w-0" style={style}>
         <Controller control={control} name={key} render={({ field: f }) => (
           <label className="flex cursor-pointer items-center gap-2.5 text-sm text-foreground">
             <input type="checkbox" checked={Boolean(f.value)} disabled={dis}
@@ -917,7 +976,7 @@ function FormField({ field, control, errors, onChangeCb, readOnly, allValues, ed
   // Static / non-interactive types
   if (type === "signature") {
     return (
-      <div style={style}>
+      <div className="min-w-0" style={style}>
         {labelEl}
         <SignatureField
           fieldKey={key}
@@ -930,7 +989,7 @@ function FormField({ field, control, errors, onChangeCb, readOnly, allValues, ed
   }
   if (type === "file" || type === "image") {
     return (
-      <div style={style}>
+      <div className="min-w-0" style={style}>
         {labelEl}
         <FileAttachField
           label={label}
@@ -1060,7 +1119,7 @@ function FormField({ field, control, errors, onChangeCb, readOnly, allValues, ed
   }
 
   return (
-    <div style={style}>
+    <div className="min-w-0" style={style}>
       {labelEl}
       {control_el}
       {err && (
@@ -1179,6 +1238,8 @@ export default function TemplateForm({ sections, values, onChange, readOnly = fa
                   readOnly={readOnly}
                   editable={sectionEditable && evalEditable(f, liveValues as TemplateFormValues, allFields, processStep)}
                   allValues={liveValues as TemplateFormValues}
+                  processStep={processStep}
+                  allFields={allFields}
                 />
               ))}
               {visibleFields.length === 0 && (

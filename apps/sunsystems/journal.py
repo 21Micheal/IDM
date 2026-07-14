@@ -105,18 +105,36 @@ def post_journal_for_document(
     posting.method = build.method
     posting.request_xml = build.ssc_xml
 
+    # Mapping-level configuration warnings (e.g. a Retirement panel's "issued
+    # amount" field left unset, or pointing at a since-renamed/removed field)
+    # never fail the build — a malformed retirement config still produces a
+    # balanced-looking journal, just with the wrong numbers, so there's no
+    # exception to catch. Fold them into the posting's message so they're
+    # visible on the posting record regardless of outcome — this is the one
+    # thing standing between "silently posted a wrong-but-balanced journal"
+    # and someone actually noticing.
+    warning_prefix = (
+        "⚠ " + " | ".join(build.warnings) if build.warnings else ""
+    )
+
     # 2) Send it.
     own_client = client or SunSystemsClient(config)
     try:
         response_xml = own_client.execute(build.component, build.method, build.ssc_xml)
     except SunSystemsError as exc:
-        _mark(posting, JournalPostingStatus.FAILED, error=str(exc), request_xml=build.ssc_xml)
+        error_text = str(exc)
+        if warning_prefix:
+            error_text = f"{warning_prefix} | {error_text}"
+        _mark(posting, JournalPostingStatus.FAILED, error=error_text, request_xml=build.ssc_xml)
         return posting
 
     # 3) Parse the reply.
     result = parse_posting_response(build.component, response_xml)
     posting.response_xml = result.raw
-    posting.message = result.message
+    message_text = result.message
+    if warning_prefix:
+        message_text = f"{warning_prefix} | {message_text}" if message_text else warning_prefix
+    posting.message = message_text
     if result.ok:
         posting.journal_number = result.journal_number or ""
         posting.posted_at = timezone.now()
@@ -126,17 +144,20 @@ def post_journal_for_document(
             JournalPostingStatus.POSTED,
             request_xml=build.ssc_xml,
             response_xml=result.raw,
-            message=result.message,
+            message=message_text,
         )
         _write_back_to_document(document, posting)
     else:
+        error_text = result.message or "SunSystems did not return a journal number."
+        if warning_prefix:
+            error_text = f"{warning_prefix} | {error_text}"
         _mark(
             posting,
             JournalPostingStatus.FAILED,
-            error=result.message or "SunSystems did not return a journal number.",
+            error=error_text,
             request_xml=build.ssc_xml,
             response_xml=result.raw,
-            message=result.message,
+            message=message_text,
         )
     return posting
 
