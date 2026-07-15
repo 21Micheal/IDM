@@ -99,6 +99,7 @@ export interface Document {
   edit_locked_at?: string | null;
   is_edit_locked?: boolean;
   builder_workflow_phase?: "request" | "retirement" | null;
+  builder_process_step?: string | null;
   can_submit_retirement?: boolean;
   current_version: number;
   versions: DocumentVersion[];

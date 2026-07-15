@@ -55,7 +55,11 @@ function formHasConditionalEditability(sections?: unknown[]): boolean {
 }
 
 function isApprovalLockedStatus(status?: string): boolean {
-  return ["pending_approval", "on_hold"].includes(status || "");
+  return ["pending_approval", "request_pending", "retirement_pending", "on_hold"].includes(status || "");
+}
+
+function isFinalFormProcessStep(step?: string): boolean {
+  return ["fully_approved", "retirement_rejected"].includes(step || "");
 }
 
 const DOCUMENT_FIELD_KEYS = ["title", "supplier", "amount", "currency", "document_date", "due_date"] as const;
@@ -303,10 +307,12 @@ export default function DocumentDetailPage() {
     const hasAdminAccess = Boolean(user?.has_admin_access);
     const canEdit = hasAdminAccess || (doc.permissions ?? []).includes("edit");
     const hasConditionalEditability = formHasConditionalEditability(formData?.sections);
-    const isAfterApproval = doc.status === "approved";
+    const formProcessStep = doc.builder_process_step || doc.status;
+    const isRequestApproved = formProcessStep === "request_approved" || (!doc.builder_process_step && doc.status === "approved");
     const canEditForm = canEdit
-      && !isApprovalLockedStatus(doc.status)
-      && (!isAfterApproval || (hasConditionalEditability && (hasAdminAccess || isOwnerOrSubmitter)));
+      && !isApprovalLockedStatus(formProcessStep)
+      && !isFinalFormProcessStep(formProcessStep)
+      && (doc.status !== "approved" || (isRequestApproved && hasConditionalEditability && (hasAdminAccess || isOwnerOrSubmitter)));
 
     // Only auto-enable edit mode for owner/submitter when conditional sections unlock.
     if (isFormDocument && !formEditing && canEditForm) {
@@ -541,7 +547,7 @@ export default function DocumentDetailPage() {
             groupNames: user?.group_names ?? [],
             isAdmin: Boolean(user?.has_admin_access || user?.is_staff),
             canEditConditionalSections,
-          }, doc?.status);
+          }, formProcessStep);
           if (missing.length) {
             toast.error(`Please fill in: ${missing.join(", ")}`);
             throw new Error("Form validation failed");
@@ -798,11 +804,13 @@ export default function DocumentDetailPage() {
   // locked; approved conditional sections (e.g. retirement) are owner-only.
   const isOwnerOrSubmitter = doc.uploaded_by?.id === user?.id || doc.owned_by?.id === user?.id;
   const hasConditionalEditability = formHasConditionalEditability(formData?.sections);
-  const isAfterApproval = doc.status === "approved";
+  const formProcessStep = doc.builder_process_step || doc.status;
+  const isRequestApproved = formProcessStep === "request_approved" || (!doc.builder_process_step && doc.status === "approved");
   const canEditConditionalSections = hasAdminAccess || isOwnerOrSubmitter;
   const canEditForm = canEdit
-    && !isApprovalLockedStatus(doc.status)
-    && (!isAfterApproval || (hasConditionalEditability && canEditConditionalSections));
+    && !isApprovalLockedStatus(formProcessStep)
+    && !isFinalFormProcessStep(formProcessStep)
+    && (doc.status !== "approved" || (isRequestApproved && hasConditionalEditability && canEditConditionalSections));
   const budgetEnabled = Boolean((doc.metadata as any)?.sunsystems?.budget?.enabled);
   const journalEnabled = Boolean((doc.metadata as any)?.sunsystems?.journal?.enabled);
   // Extract available journal stages for multi-stage posting
@@ -823,7 +831,7 @@ export default function DocumentDetailPage() {
       groupNames: user?.group_names ?? [],
       isAdmin: Boolean(user?.has_admin_access || user?.is_staff),
       canEditConditionalSections,
-    }, doc?.status);
+    }, formProcessStep);
     if (missing.length) { toast.error(`Please fill in: ${missing.join(", ")}`); return; }
     updateFormMutation.mutate();
   };
@@ -845,12 +853,12 @@ export default function DocumentDetailPage() {
   const isRetirementPhase = doc.builder_workflow_phase === "retirement";
   const canSubmitRequest =
     !isPersonal &&
-    !isRetirementPhase &&
     ["draft", "returned"].includes(doc.status) &&
-    (canApprove || doc.uploaded_by?.id === user?.id);
-  // Disable submit retirement when document is fully approved or rejected in retirement phase
-  const isRetirementFinalized = isRetirementPhase && ["approved", "rejected"].includes(doc.status);
-  const canSubmitRetirement = Boolean(doc.can_submit_retirement) && !isRetirementFinalized && (canApprove || doc.uploaded_by?.id === user?.id);
+    (!isRetirementPhase || doc.status === "returned") &&
+    (canApprove || isOwnerOrSubmitter);
+  // Disable submit retirement after the retirement approval cycle has finished.
+  const isRetirementFinalized = isRetirementPhase && isFinalFormProcessStep(formProcessStep);
+  const canSubmitRetirement = Boolean(doc.can_submit_retirement) && !isRetirementFinalized && (canApprove || isOwnerOrSubmitter);
   const canSubmit = canSubmitRequest || canSubmitRetirement;
 
   const submitActionLabel = canSubmitRetirement
@@ -1457,7 +1465,7 @@ export default function DocumentDetailPage() {
                   }}
                   readOnly={!formEditing}
                   documentId={doc.id}
-                  documentStatus={doc.status}
+                  documentStatus={formProcessStep}
                   canEditConditionalSections={canEditConditionalSections}
                 />
               </div>
@@ -1468,6 +1476,7 @@ export default function DocumentDetailPage() {
             <ApprovalStagesTable 
               steps={workflowData?.steps ?? []} 
               isLoading={workflowDataLoading} 
+              phase={doc.builder_workflow_phase}
             />
           )}
 
@@ -2274,7 +2283,7 @@ export default function DocumentDetailPage() {
                         groupNames: user?.group_names ?? [],
                         isAdmin: Boolean(user?.has_admin_access || user?.is_staff),
                         canEditConditionalSections,
-                      }, doc?.status);
+                      }, formProcessStep);
                       if (missing.length) {
                         toast.error(`Please fill in: ${missing.join(", ")}`);
                         ok = false;

@@ -190,12 +190,13 @@ def form_has_editable_fields(document: Document) -> bool:
     form = (document.metadata or {}).get("form")
     if not isinstance(form, dict):
         return False
+    from apps.documents.builder_workflow import builder_process_step
     from apps.documents.form_attachments import descriptors_to_names
     from apps.templates_engine.conditions import is_editable, is_visible
 
     sections = form.get("sections") or []
     values = form.get("values") if isinstance(form.get("values"), dict) else {}
-    process_step = document.status or "draft"
+    process_step = builder_process_step(document)
     render_values = descriptors_to_names(values)
 
     for section in sections:
@@ -246,6 +247,13 @@ def document_allows_form_edit(document: Document, *, user=None) -> bool:
 
     if stage == ACCESS_STAGE_CREATION:
         return document_allows_edit(document, user=user)
+
+    try:
+        from apps.documents.builder_workflow import builder_process_step
+        if builder_process_step(document) in {"fully_approved", "retirement_rejected"}:
+            return False
+    except Exception:
+        pass
 
     if not form_has_editable_fields(document):
         return False

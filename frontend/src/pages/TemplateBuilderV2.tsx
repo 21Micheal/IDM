@@ -3271,6 +3271,18 @@ function PreviewTableField({ field, readOnly = false, rows, onUpdateCell, onAddR
  * the process step is treated as "draft" (the implicit start state). Field
  * values here are keyed by field id (react-hook-form register key). */
 function evalCondition(c: VisibilityCondition, values: Record<string, unknown>, allFields: TemplateField[], processStep: string): boolean {
+  const stepMatches = (actual: string, expected: string) => {
+    const a = (actual || "").trim().toLowerCase();
+    const e = (expected || "").trim().toLowerCase();
+    if (a === e) return true;
+    const aliases: Record<string, string[]> = {
+      approved: ["approved", "request_approved", "fully_approved"],
+      pending_approval: ["pending_approval", "request_pending", "retirement_pending"],
+      returned: ["returned", "retirement_returned"],
+      rejected: ["rejected", "retirement_rejected"],
+    };
+    return aliases[e]?.includes(a) ?? false;
+  };
   let sv: string;
   if (c.source === "process_step") {
     sv = processStep;
@@ -3281,8 +3293,8 @@ function evalCondition(c: VisibilityCondition, values: Record<string, unknown>, 
     sv = v == null ? "" : String(v);
   }
   switch (c.operator) {
-    case "equals":       return sv === (c.value ?? "");
-    case "not_equals":   return sv !== (c.value ?? "");
+    case "equals":       return c.source === "process_step" ? stepMatches(sv, c.value ?? "") : sv === (c.value ?? "");
+    case "not_equals":   return c.source === "process_step" ? !stepMatches(sv, c.value ?? "") : sv !== (c.value ?? "");
     case "is_empty":     return sv.trim() === "";
     case "is_not_empty": return sv.trim() !== "";
     default:             return true;
@@ -4207,9 +4219,11 @@ function FinanceSettingsCard({ template, onCommit, iCls, processSteps }: {
   const journalTableLines = fields.filter((f) => f.type === "table" && isJournalLineSource(f)).length;
   const postingKind = ui.postingKind ?? "journal";
   const purchaseAmountLabel = roleLabel("journal_amount");
-  const stageOptions = processSteps.some((s) => s.value === "approved")
-    ? processSteps
-    : [...processSteps, { value: "approved", label: "Approved" }];
+  const journalTriggerOptions = [
+    { value: "approved", label: "Request approved" },
+    { value: "retirement_approved", label: "Retirement approved" },
+    { value: "rejected", label: "Rejected" },
+  ];
   const journalBoundFields = fields.filter(isJournalLineSource);
   const journalStages = (ui.journalStages?.length ? ui.journalStages : [{ stage: 1, label: "Stage 1", postOn: "approved", fieldKeys: [] as string[] }])
     .map((s, idx) => ({
@@ -4381,7 +4395,7 @@ function FinanceSettingsCard({ template, onCommit, iCls, processSteps }: {
                               value={stage.postOn ?? "approved"}
                               onChange={(e) => updateStage(index, { postOn: e.target.value })}
                             >
-                              {stageOptions.map((s) => <option key={s.value} value={s.value}>{s.label}</option>)}
+                              {journalTriggerOptions.map((s) => <option key={s.value} value={s.value}>{s.label}</option>)}
                             </select>
                           </div>
                           <button

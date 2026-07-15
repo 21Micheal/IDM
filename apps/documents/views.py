@@ -1009,8 +1009,9 @@ class DocumentViewSet(AuditMixin, viewsets.ModelViewSet):
         # tampered request can't slip past. Locked fields are reverted to their
         # stored value; conditions are evaluated against the STORED values (a user
         # can't unlock a field within the same request that edits it).
+        from apps.documents.builder_workflow import builder_process_step
         from apps.templates_engine.conditions import is_editable
-        process_step = doc.status or "draft"
+        process_step = builder_process_step(doc)
         prior_render = descriptors_to_names(prior_values)
         owns_document = user_owns_document(request.user, doc) or getattr(request.user, "has_admin_access", False)
         owner_only_conditional_edit = process_step.strip().lower() != "returned"

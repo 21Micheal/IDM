@@ -634,6 +634,7 @@ class DocumentDetailSerializer(serializers.ModelSerializer):
     is_edit_locked = serializers.SerializerMethodField()
     edit_locked_by_name = serializers.SerializerMethodField()
     builder_workflow_phase = serializers.SerializerMethodField()
+    builder_process_step = serializers.SerializerMethodField()
     can_submit_retirement = serializers.SerializerMethodField()
     ocr_suggestions = serializers.SerializerMethodField()
     shared_with_me = serializers.SerializerMethodField()
@@ -656,7 +657,7 @@ class DocumentDetailSerializer(serializers.ModelSerializer):
             "is_scanned", "ocr_status", "ocr_suggestions",
             "preview_pdf", "preview_status",
             "edit_locked_by", "edit_locked_by_name", "edit_locked_at", "is_edit_locked",
-            "builder_workflow_phase", "can_submit_retirement",
+            "builder_workflow_phase", "builder_process_step", "can_submit_retirement",
             "current_version", "versions", "comments", "permissions",
             "created_at", "updated_at", "shared_with_me", "share_access_level", "signatures",
         ]
@@ -793,6 +794,10 @@ class DocumentDetailSerializer(serializers.ModelSerializer):
             return str(phase).strip().lower()
         from apps.documents.builder_workflow import infer_builder_workflow_phase
         return infer_builder_workflow_phase(obj)
+
+    def get_builder_process_step(self, obj):
+        from apps.documents.builder_workflow import builder_process_step
+        return builder_process_step(obj)
 
     def get_can_submit_retirement(self, obj):
         from apps.documents.builder_workflow import can_submit_retirement_workflow

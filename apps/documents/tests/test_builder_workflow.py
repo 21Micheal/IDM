@@ -3,11 +3,13 @@ from django.test import TestCase
 
 from apps.accounts.models import User
 from apps.documents.builder_workflow import (
+    builder_process_step,
     can_submit_request_workflow,
     can_submit_retirement_workflow,
     infer_builder_workflow_phase,
 )
 from apps.documents.models import Document, DocumentStatus, DocumentType
+from apps.workflows.models import WorkflowInstance, WorkflowRule, WorkflowTemplate
 
 
 def _make_document(**kwargs):
@@ -73,3 +75,28 @@ class BuilderWorkflowPhaseTests(TestCase):
         self.document.status = DocumentStatus.RETURNED
         self.document.save(update_fields=["metadata", "status", "updated_at"])
         self.assertTrue(can_submit_request_workflow(self.document, user=self.user))
+
+    def test_process_step_distinguishes_request_approved_from_fully_approved(self):
+        self.document.metadata["form"]["workflow_phase"] = "retirement"
+        self.document.save(update_fields=["metadata", "updated_at"])
+        self.assertEqual(builder_process_step(self.document), "request_approved")
+
+        template = WorkflowTemplate.objects.create(
+            name="Retirement approval",
+            document_type=self.doc_type,
+            created_by=self.user,
+        )
+        rule = WorkflowRule.objects.create(
+            document_type=self.doc_type,
+            template=template,
+            phase="retirement",
+        )
+        WorkflowInstance.objects.create(
+            document=self.document,
+            template=template,
+            rule=rule,
+            started_by=self.user,
+            status="approved",
+        )
+
+        self.assertEqual(builder_process_step(self.document), "fully_approved")

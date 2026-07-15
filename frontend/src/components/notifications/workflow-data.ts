@@ -17,6 +17,7 @@ type WorkflowTaskRecord = {
   status?: string;
   status_display?: string;
   step?: {
+    template?: string;
     name?: string;
     order?: number;
     status_label?: string;
@@ -79,6 +80,7 @@ type WorkflowInstanceRecord = {
   status?: string;
   document?: string;
   template?: string;
+  phase?: "request" | "retirement" | string;
   started_at?: string;
   started_by?: {
     full_name?: string;
@@ -112,8 +114,13 @@ export async function loadWorkflowData(documentId: string, workflowPhase?: "requ
     .listInstances({ document: documentId })
     .then((response) => normalizeListResponse<WorkflowInstanceRecord>(response.data))
     .catch(() => []);
+  const phaseMatches = (row: WorkflowInstanceRecord) =>
+    !workflowPhase || !row.phase || row.phase === workflowPhase;
   const instance =
-    instances.find((row) => row.status === "in_progress") ?? instances[0];
+    instances.find((row) => row.status === "in_progress" && phaseMatches(row)) ??
+    instances.find(phaseMatches) ??
+    instances.find((row) => row.status === "in_progress") ??
+    instances[0];
 
   const template = instance?.template
     ? await workflowAPI
@@ -123,6 +130,9 @@ export async function loadWorkflowData(documentId: string, workflowPhase?: "requ
     : undefined;
 
   let tasks = [...(instance?.tasks ?? [])];
+  if (instance?.template) {
+    tasks = tasks.filter((task) => !task.step?.template || task.step.template === instance.template);
+  }
 
   if (tasks.length === 0) {
     tasks = await workflowAPI

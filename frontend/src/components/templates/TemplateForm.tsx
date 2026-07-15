@@ -305,6 +305,18 @@ function ruleConditions(vw?: VisibleWhen | null): { combinator: "and" | "or"; co
 }
 
 function evalCondition(c: VisibilityCondition, values: TemplateFormValues, allFields: Field[], processStep: string): boolean {
+  const stepMatches = (actual: string, expected: string) => {
+    const a = (actual || "").trim().toLowerCase();
+    const e = (expected || "").trim().toLowerCase();
+    if (a === e) return true;
+    const aliases: Record<string, string[]> = {
+      approved: ["approved", "request_approved", "fully_approved"],
+      pending_approval: ["pending_approval", "request_pending", "retirement_pending"],
+      returned: ["returned", "retirement_returned"],
+      rejected: ["rejected", "retirement_rejected"],
+    };
+    return aliases[e]?.includes(a) ?? false;
+  };
   let sv: string;
   if (c.source === "process_step") {
     sv = processStep;
@@ -315,8 +327,8 @@ function evalCondition(c: VisibilityCondition, values: TemplateFormValues, allFi
     sv = v == null ? "" : String(v);
   }
   switch (c.operator) {
-    case "equals":       return sv === (c.value ?? "");
-    case "not_equals":   return sv !== (c.value ?? "");
+    case "equals":       return c.source === "process_step" ? stepMatches(sv, c.value ?? "") : sv === (c.value ?? "");
+    case "not_equals":   return c.source === "process_step" ? !stepMatches(sv, c.value ?? "") : sv !== (c.value ?? "");
     case "is_empty":     return sv.trim() === "";
     case "is_not_empty": return sv.trim() !== "";
     default:             return true;
