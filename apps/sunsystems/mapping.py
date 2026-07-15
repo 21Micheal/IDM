@@ -494,15 +494,6 @@ def _append_line(
 ) -> None:
     line_el = ET.SubElement(ledger_el, "Line")
     ET.SubElement(line_el, "AccountCode").text = resolve_value(line_spec.get("account"), values, row)
-
-    analysis = dict(mapping.get("analysis_defaults") or {})
-    analysis.update(line_spec.get("analysis") or {})
-    for n in _ANALYSIS_CODES:
-        spec = analysis.get(str(n), analysis.get(n))
-        if spec is None:
-            continue
-        ET.SubElement(line_el, f"AnalysisCode{n}").text = resolve_value(spec, values, row)
-
     ET.SubElement(line_el, "TransactionAmount").text = _amount_str(amount)
     ET.SubElement(line_el, "CurrencyCode").text = resolve_value(
         line_spec.get("currency") or mapping.get("currency"), values, row
@@ -515,6 +506,20 @@ def _append_line(
     ET.SubElement(line_el, "TransactionDate").text = resolve_value(
         line_spec.get("date") or mapping.get("date"), values, row
     )
+
+    # Analysis dimensions (AnalysisCode1..10). SunSystems ledger accounts are
+    # often configured with required analysis dimensions (PRODUCT, DEPARTMENT,
+    # PROJECT, EMPLOYEE, TAX, ...) mapped onto these ten generic slots. Any slot
+    # we don't have a real value for must still be sent — as "#" (SunSystems'
+    # wildcard/"any" analysis value) — or the posting is rejected with
+    # "Missing <X> Analysis Code (Dimension Id N)" for that account's required
+    # dimensions. `resolve_value`'s `default` kicks in both when a slot has no
+    # spec at all and when a spec resolves to an empty value.
+    analysis = dict(mapping.get("analysis_defaults") or {})
+    analysis.update(line_spec.get("analysis") or {})
+    for n in _ANALYSIS_CODES:
+        spec = analysis.get(str(n), analysis.get(n))
+        ET.SubElement(line_el, f"AnalysisCode{n}").text = resolve_value(spec, values, row, default="#")
 
     detail = line_spec.get("detail") or mapping.get("detail")
     if detail and isinstance(detail, dict):

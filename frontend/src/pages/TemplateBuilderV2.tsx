@@ -368,6 +368,11 @@ export interface SunSystemsUi {
   currencyConst?: string;
   dateFormat?: string;
   validateBalance?: boolean;
+  /** Default Analysis Code 1–10 sent on every ledger line unless a column/line
+   * binding overrides that slot. Unset slots default to "#" (SunSystems
+   * wildcard) so accounts with required analysis dimensions never reject
+   * for a missing code. Keyed "1".."10". */
+  analysisDefaults?: Record<string, string>;
   supplierCode?: string;
   purchaseTransactionType?: string;
   invoiceAddressCode?: string;
@@ -1005,6 +1010,13 @@ function compileSunSystems(template: Template): SunSystemsConfig | undefined {
   if (ui.postingType) parameters.PostingType = ui.postingType;
   for (const p of ui.parameters ?? []) if (p.name) parameters[p.name] = p.value;
 
+  const analysisDefaultsUi = ui.analysisDefaults ?? {};
+  const analysisDefaults: Record<string, unknown> = {};
+  for (let n = 1; n <= 10; n++) {
+    const v = analysisDefaultsUi[String(n)];
+    analysisDefaults[String(n)] = { const: v && v.trim() ? v.trim() : "#" };
+  }
+
   const journalStageBase = {
     component: "Journal",
     method: "Import",
@@ -1017,6 +1029,7 @@ function compileSunSystems(template: Template): SunSystemsConfig | undefined {
     ...(referenceSpec ? { reference: referenceSpec } : {}),
     ...(dateSpec ? { date: dateSpec } : {}),
     validate_balance: ui.validateBalance !== false,
+    analysis_defaults: analysisDefaults,
     lines,
   };
   const configuredStages = (ui.journalStages ?? [])
@@ -4348,6 +4361,31 @@ function FinanceSettingsCard({ template, onCommit, iCls, processSteps }: {
                 </>
               )}
             </div>
+            {postingKind === "journal" && (
+              <div className="space-y-2 border-t border-[#EEF0F2] pt-3">
+                <span className={label}>Default analysis codes (1–10)</span>
+                <p className="text-[11px] text-[#8C969E]">
+                  Sent on every ledger line. Leave as "#" unless this business unit's account
+                  structure requires a specific code for that slot — table "Analysis code" columns
+                  still override a specific slot per row.
+                </p>
+                <div className="grid grid-cols-5 gap-2">
+                  {Array.from({ length: 10 }, (_, i) => i + 1).map((n) => (
+                    <div key={n} className="space-y-1">
+                      <span className="text-[10px] font-semibold uppercase text-[#5E6870]">Code {n}</span>
+                      <input
+                        className={cn(iCls, "font-mono text-center")}
+                        value={ui.analysisDefaults?.[String(n)] ?? "#"}
+                        onChange={(e) =>
+                          setUi({ analysisDefaults: { ...(ui.analysisDefaults ?? {}), [String(n)]: e.target.value } })
+                        }
+                        maxLength={20}
+                      />
+                    </div>
+                  ))}
+                </div>
+              </div>
+            )}
             <div className="grid grid-cols-2 gap-3 text-xs">
               <div><span className={label}>Reference</span><div className="mt-1 text-[#1F2933]">{roleLabel("reference")}</div></div>
               <div><span className={label}>Transaction date</span><div className="mt-1 text-[#1F2933]">{roleLabel("transaction_date")}</div></div>
