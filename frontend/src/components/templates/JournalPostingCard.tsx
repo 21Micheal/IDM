@@ -217,21 +217,30 @@ function StageRow({
 }
 
 /* ─── main card ───────────────────────────────────────────────────────────── */
-export default function JournalPostingCard({ documentId }: { documentId: string }) {
+export default function JournalPostingCard({
+  documentId,
+  expectPosting = false,
+  watchKey,
+}: {
+  documentId: string;
+  expectPosting?: boolean;
+  watchKey?: string | number | null;
+}) {
   const qc = useQueryClient();
   // Local overrides keyed by stage — updated immediately from retry responses.
   const [localPostings, setLocalPostings] = useState<Record<number, JournalPosting>>({});
 
   const { data: serverPostings, isLoading } = useQuery({
-    queryKey: ["sunsystems-postings", documentId],
+    queryKey: ["sunsystems-postings", documentId, watchKey ?? ""],
     queryFn: () =>
       sunsystemsAPI.getPostings(documentId)
         .then((r) => r.data)
-        .catch(() => null),
+        .catch(() => [] as JournalPosting[]),
     refetchInterval: (q) => {
-      const rows = q.state.data as JournalPosting[] | null;
+      const rows = q.state.data as JournalPosting[] | undefined;
       const hasInFlight = rows?.some((p) => p.status === "posting" || p.status === "pending");
-      return hasInFlight ? 3000 : false;
+      const waitingForFirstRow = expectPosting && (!rows || rows.length === 0);
+      return hasInFlight || waitingForFirstRow ? 3000 : false;
     },
   });
 
@@ -251,7 +260,21 @@ export default function JournalPostingCard({ documentId }: { documentId: string 
 
   /* ── early exits ──────────────────────────────────────────────────────── */
   if (isLoading && postings.length === 0) return null;
-  if (postings.length === 0 || (postings[0] as any)?.status === "none") return null;
+  if (postings.length === 0 || (postings[0] as any)?.status === "none") {
+    if (!expectPosting) return null;
+    return (
+      <div className="border border-[#C8CDD2] bg-white shadow-sm">
+        <div className="flex items-center gap-2 border-b border-[#C8CDD2] bg-[#F5F7F8] px-4 py-2.5">
+          <Receipt className="h-4 w-4 text-[#287EAD]" />
+          <p className="text-sm font-bold text-[#1F2933]">SunSystems Journal</p>
+        </div>
+        <div className="flex items-center gap-2 p-4 text-sm text-[#5E6870]">
+          <Loader2 className="h-4 w-4 animate-spin text-[#287EAD]" />
+          Waiting for SunSystems posting…
+        </div>
+      </div>
+    );
+  }
 
   const isPO = postings[0]?.component === "PurchaseOrder";
 

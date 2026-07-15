@@ -1480,7 +1480,13 @@ export default function DocumentDetailPage() {
             />
           )}
 
-          {isFormDocument && <JournalPostingCard documentId={doc.id} />}
+          {isFormDocument && (
+            <JournalPostingCard
+              documentId={doc.id}
+              expectPosting={journalEnabled && ["request_approved", "fully_approved"].includes(formProcessStep)}
+              watchKey={`${formProcessStep}:${doc.updated_at}`}
+            />
+          )}
 
           {showJournalXml && (
             <JournalPayloadModal
