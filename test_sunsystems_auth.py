@@ -40,6 +40,7 @@ print("Token:", token)
 # ------------------------------------------------------------------
 payload = f"""
 <SSC>
+<SSC>
 <SunSystemsContext>
 <BusinessUnit>PK1</BusinessUnit>
 <BudgetCode>A</BudgetCode>
@@ -106,7 +107,7 @@ payload = f"""
 <AnalysisCode2>#</AnalysisCode2>
 <AnalysisCode3>#</AnalysisCode3>
 <AnalysisCode4>#</AnalysisCode4>
-<AnalysisCode6>#</AnalysisCode6>
+<AnalysisCode6>tax_code</AnalysisCode6>
 <TransactionAmount>900</TransactionAmount>
 <CurrencyCode>GBP</CurrencyCode>
 <DebitCredit>D</DebitCredit>

@@ -90,7 +90,7 @@ class WorkflowStepSerializer(serializers.ModelSerializer):
     class Meta:
         model  = WorkflowStep
         fields = [
-            "id", "order", "name", "status_label",
+            "id", "template", "order", "name", "status_label",
             "step_type",
             # approval-step fields
             "assignee_type", "assignee_group", "assignee_group_name",
@@ -591,11 +591,18 @@ class WorkflowInstanceSerializer(serializers.ModelSerializer):
     tasks      = WorkflowTaskSerializer(many=True, read_only=True)
     started_by = UserSummarySerializer(read_only=True)
     rule_label = serializers.CharField(source="rule.label", read_only=True, default="")
+    phase = serializers.SerializerMethodField()
 
     class Meta:
         model  = WorkflowInstance
         fields = [
             "id", "document", "template", "rule", "rule_label",
+            "phase",
             "status", "current_step_order",
             "started_by", "started_at", "completed_at", "tasks",
         ]
+
+    def get_phase(self, obj):
+        if obj.rule_id and obj.rule and obj.rule.phase:
+            return obj.rule.phase
+        return "request"

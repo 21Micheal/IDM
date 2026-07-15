@@ -11,7 +11,7 @@
  *  - Table columns fully typed (currency symbol, select options, boolean, etc.)
  *  - Same public API as v1 — callers (UploadPage, DocumentDetailPage) need zero changes
  */
-import { useState, useEffect, useRef } from "react";
+import { useState, useEffect, useRef, useMemo } from "react";
 import { createPortal } from "react-dom";
 import { useForm, Controller } from "react-hook-form";
 import { useQuery } from "@tanstack/react-query";
@@ -29,6 +29,7 @@ import { resolveFormula, evaluateFormula, formulaLabel } from "@/components/temp
 import { currencySymbolFor } from "@/lib/currencies";
 import { useAuthStore } from "@/store/authStore";
 import { Sparkles } from "lucide-react";
+import { buildCalcScope, buildRowCalcScope, evaluateCalcExpression, resolveRowAggregates, type CalcValue } from "@/lib/calculations";
 
 // ── Types ─────────────────────────────────────────────────────────────────────
 
@@ -42,6 +43,9 @@ type Column = {
   currencyFromColumn?: string;
   tooltip?: string; additionalText?: string; readonly?: boolean; hidden?: boolean;
   defaultValue?: string; referenceSource?: string;
+  visibleWhen?: VisibleWhen | null;
+  editableWhen?: VisibleWhen | null;
+  calc?: { expression?: string };
 };
 
 type ConditionOperator = "equals" | "not_equals" | "is_empty" | "is_not_empty" | string;
@@ -68,9 +72,18 @@ type Field = {
   min?: number; max?: number; minLength?: number; maxLength?: number;
   defaultValue?: string; readonly?: boolean; hidden?: boolean;
   formula?: string;
+  // Calculated value (see calc_number/calc_currency/calc_text/calc_date types)
+  // — auto-derived from a formula over sibling field keys, same grammar as a
+  // table column's `calc`. Recomputed live below (client preview) and
+  // authoritatively by the server at submit time.
+  calc?: { expression?: string; decimals?: number } | null;
   visibleWhen?: VisibleWhen | null;
   editableWhen?: VisibleWhen | null;
 };
+
+// Field types whose value is derived from `field.calc.expression` rather than
+// typed by the person filling the form. Mirrors the builder's CALCULATED_TYPES.
+const CALCULATED_FIELD_TYPES = new Set(["calc_number", "calc_currency", "calc_text", "calc_date"]);
 
 type SectionGroupRef = { id?: string; name?: string };
 
@@ -83,7 +96,7 @@ type Section = {
 
 /** The person filling/viewing the form, used to evaluate role-restricted
  * sections. The auth payload carries group *names* + admin flags. */
-export type FormViewer = { groupNames?: string[]; isAdmin?: boolean };
+export type FormViewer = { groupNames?: string[]; isAdmin?: boolean; canEditConditionalSections?: boolean };
 
 /** A section restricted to RBAC groups is visible only to members of those
  * groups (matched by name — the client only has names) and to admins. An empty
@@ -292,6 +305,18 @@ function ruleConditions(vw?: VisibleWhen | null): { combinator: "and" | "or"; co
 }
 
 function evalCondition(c: VisibilityCondition, values: TemplateFormValues, allFields: Field[], processStep: string): boolean {
+  const stepMatches = (actual: string, expected: string) => {
+    const a = (actual || "").trim().toLowerCase();
+    const e = (expected || "").trim().toLowerCase();
+    if (a === e) return true;
+    const aliases: Record<string, string[]> = {
+      approved: ["approved", "request_approved", "fully_approved"],
+      pending_approval: ["pending_approval", "request_pending", "retirement_pending"],
+      returned: ["returned", "retirement_returned"],
+      rejected: ["rejected", "retirement_rejected"],
+    };
+    return aliases[e]?.includes(a) ?? false;
+  };
   let sv: string;
   if (c.source === "process_step") {
     sv = processStep;
@@ -302,8 +327,8 @@ function evalCondition(c: VisibilityCondition, values: TemplateFormValues, allFi
     sv = v == null ? "" : String(v);
   }
   switch (c.operator) {
-    case "equals":       return sv === (c.value ?? "");
-    case "not_equals":   return sv !== (c.value ?? "");
+    case "equals":       return c.source === "process_step" ? stepMatches(sv, c.value ?? "") : sv === (c.value ?? "");
+    case "not_equals":   return c.source === "process_step" ? !stepMatches(sv, c.value ?? "") : sv !== (c.value ?? "");
     case "is_empty":     return sv.trim() === "";
     case "is_not_empty": return sv.trim() !== "";
     default:             return true;
@@ -329,7 +354,7 @@ function evalVisible(
 // Editability mirror: a field/section is editable unless always read-only
 // (`readonly`) or it has an `editableWhen` group that doesn't match at the
 // current step/values. Absent group = editable (preserves prior behaviour).
-function evalEditable(
+export function evalEditable(
   item: { readonly?: boolean; editableWhen?: VisibleWhen | null },
   values: TemplateFormValues,
   allFields: Field[],
@@ -340,6 +365,33 @@ function evalEditable(
   if (!g || g.conditions.length === 0) return true;
   const results = g.conditions.map((c) => evalCondition(c, values, allFields, processStep));
   return g.combinator === "or" ? results.some(Boolean) : results.every(Boolean);
+}
+
+function hasEditableRule(item: { editableWhen?: VisibleWhen | null }): boolean {
+  const g = ruleConditions(item.editableWhen);
+  return Boolean(g && g.conditions.length > 0);
+}
+
+function conditionalEditBlockedForViewer(item: { editableWhen?: VisibleWhen | null }, viewer?: FormViewer): boolean {
+  return Boolean(
+    hasEditableRule(item)
+    && viewer
+    && viewer.canEditConditionalSections === false
+    && !viewer.isAdmin
+  );
+}
+
+function evalEditableForViewer(
+  item: { readonly?: boolean; editableWhen?: VisibleWhen | null },
+  values: TemplateFormValues,
+  allFields: Field[],
+  processStep: string,
+  viewer?: FormViewer,
+): boolean {
+  if (conditionalEditBlockedForViewer(item, viewer)) {
+    return false;
+  }
+  return evalEditable(item, values, allFields, processStep);
 }
 
 // ── Table column cell ─────────────────────────────────────────────────────────
@@ -430,6 +482,16 @@ function TableColInput({ col, value, onChange, readOnly, documentId, attachmentK
   const type = (col.type ?? "text") as ColType;
   const dis = readOnly || col.readonly;
 
+  // Calculated column - display result value like regular columns
+  if (col.calc?.expression) {
+    const sval = typeof value === "string" ? value : value == null ? "" : String(value);
+    return (
+      <div className={base}>
+        {sval || <span className="italic text-muted-foreground">—</span>}
+      </div>
+    );
+  }
+
   if (type === "file") {
     return (
       <TableFileCell value={value} onChange={onChange} disabled={dis}
@@ -492,15 +554,27 @@ function TableColInput({ col, value, onChange, readOnly, documentId, attachmentK
 
 // ── Table field ───────────────────────────────────────────────────────────────
 
-function TableField({ field, value, onChange, readOnly, tableKey, documentId }: {
+function TableField({ field, value, onChange, readOnly, tableKey, documentId, allValues, processStep, allFields }: {
   field: Field;
   value: Record<string, unknown>[];
   onChange: (rows: Record<string, unknown>[]) => void;
   readOnly?: boolean;
   tableKey: string;
   documentId?: string;
+  allValues: TemplateFormValues;
+  processStep?: string;
+  allFields: Field[];
 }) {
-  const cols = (field.columns ?? []).filter((c) => !c.hidden);
+  // Filter columns by hidden and visibleWhen conditions
+  const cols = (field.columns ?? []).filter((c) => {
+    if (c.hidden) return false;
+    // Evaluate visibleWhen condition for the column
+    if (c.visibleWhen) {
+      return evalVisible({ hidden: false, visibleWhen: c.visibleWhen }, allValues, allFields, processStep ?? "draft");
+    }
+    return true;
+  });
+
   const emptyRow = (): Record<string, unknown> => {
     const r: Record<string, unknown> = {};
     cols.forEach((c) => { if (c.defaultValue && c.key) r[c.key] = c.defaultValue; });
@@ -511,6 +585,35 @@ function TableField({ field, value, onChange, readOnly, tableKey, documentId }: 
       ? value
       : Array.from({ length: field.minRows ?? 1 }, emptyRow)
   );
+
+  // Compute calculated column values for each row
+  const computedRows = useMemo(() => {
+    const colTypeByKey: Record<string, string | undefined> = {};
+    cols.forEach((c) => { if (c.key) colTypeByKey[c.key] = c.type; });
+    
+    return rows.map((row) => {
+      const computedRow = { ...row };
+      
+      // Calculate values for columns with calc expressions
+      cols.forEach((col) => {
+        if (col.calc?.expression && col.key) {
+          try {
+            // Build scope: top-level fields + row values
+            const scope = buildRowCalcScope(allFields, allValues, cols, row as Record<string, string>);
+            // Resolve aggregates (SUM, AVG, etc.)
+            const resolvedExpr = resolveRowAggregates(col.calc.expression, rows as Record<string, string>[], colTypeByKey);
+            // Evaluate the expression
+            const result = evaluateCalcExpression(resolvedExpr, scope);
+            computedRow[col.key] = String(result);
+          } catch {
+            computedRow[col.key] = "";
+          }
+        }
+      });
+      
+      return computedRow;
+    });
+  }, [rows, cols, allFields, allValues]);
 
   const update = (ri: number, key: string, val: unknown) => {
     const next = rows.map((r, i) => i === ri ? { ...r, [key]: val } : r);
@@ -529,51 +632,53 @@ function TableField({ field, value, onChange, readOnly, tableKey, documentId }: 
         )}
       </div>
       <div className="overflow-x-auto rounded-lg border border-border">
-        <table className="min-w-max w-max text-sm">
-          <thead>
-            <tr className="border-b border-border bg-muted/40">
-              {cols.map((col, i) => (
-                <th key={col.id ?? i} title={col.tooltip}
-                    className="px-3 py-2 text-left text-[11px] font-semibold text-muted-foreground border-r border-border/50 last:border-0 whitespace-nowrap">
-                  {col.label}{col.required && <span className="text-red-400 ml-0.5">*</span>}
-                  {col.additionalText && <div className="text-[10px] font-normal opacity-70">{col.additionalText}</div>}
-                </th>
-              ))}
-              {!readOnly && <th className="w-8" />}
-            </tr>
-          </thead>
-          <tbody>
-            {rows.map((row, ri) => (
-              <tr key={ri} className="border-b border-border/40 last:border-0 hover:bg-muted/20 transition-colors">
-                {cols.map((col, ci) => {
-                  const key = col.key ?? `col_${ci}`;
-                  return (
-                    <td key={col.id ?? ci} className="px-2 py-1.5 border-r border-border/30 last:border-0">
-                      <TableColInput
-                        col={col}
-                        value={row[key] ?? ""}
-                        row={row}
-                        onChange={(v) => update(ri, key, v)}
-                        readOnly={readOnly}
-                        documentId={documentId}
-                        attachmentKey={`${tableKey}~${ri}~${key}`}
-                      />
-                    </td>
-                  );
-                })}
-                {!readOnly && (
-                  <td className="px-1 text-center">
-                    {rows.length > 1 && (
-                      <button type="button" onClick={() => removeRow(ri)} className="p-0.5 text-muted-foreground hover:text-red-500 transition-colors rounded">
-                        <Trash2 className="h-3.5 w-3.5" />
-                      </button>
-                    )}
-                  </td>
-                )}
+        <div className="min-w-max">
+          <table className="w-max text-sm">
+            <thead>
+              <tr className="border-b border-border bg-muted/40">
+                {cols.map((col, i) => (
+                  <th key={col.id ?? i} title={col.tooltip}
+                      className="w-[230px] flex-shrink-0 px-3 py-2 text-left text-[11px] font-semibold text-muted-foreground border-r border-border/50 last:border-0 whitespace-nowrap">
+                    {col.label}{col.required && <span className="text-red-400 ml-0.5">*</span>}
+                    {col.additionalText && <div className="text-[10px] font-normal opacity-70">{col.additionalText}</div>}
+                  </th>
+                ))}
+                {!readOnly && <th className="w-8 flex-shrink-0" />}
               </tr>
-            ))}
-          </tbody>
-        </table>
+            </thead>
+            <tbody>
+              {computedRows.map((row, ri) => (
+                <tr key={ri} className="border-b border-border/40 last:border-0 hover:bg-muted/20 transition-colors">
+                  {cols.map((col, ci) => {
+                    const key = col.key ?? `col_${ci}`;
+                    return (
+                      <td key={col.id ?? ci} className="w-[230px] flex-shrink-0 px-2 py-1.5 border-r border-border/30 last:border-0">
+                        <TableColInput
+                          col={col}
+                          value={row[key] ?? ""}
+                          row={row}
+                          onChange={(v) => update(ri, key, v)}
+                          readOnly={readOnly}
+                          documentId={documentId}
+                          attachmentKey={`${tableKey}~${ri}~${key}`}
+                        />
+                      </td>
+                    );
+                  })}
+                  {!readOnly && (
+                    <td className="w-8 flex-shrink-0 px-1 text-center">
+                      {rows.length > 1 && (
+                        <button type="button" onClick={() => removeRow(ri)} className="p-0.5 text-muted-foreground hover:text-red-500 transition-colors rounded">
+                          <Trash2 className="h-3.5 w-3.5" />
+                        </button>
+                      )}
+                    </td>
+                  )}
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
       </div>
       {!readOnly && (
         <button type="button" onClick={addRow} className="flex items-center gap-1.5 text-xs font-semibold text-primary hover:text-primary/80 transition-colors">
@@ -810,7 +915,7 @@ function SignatureField({ fieldKey, disabled, value, onChangeCb }: {
 const inp = "input";
 const errCls = "mt-1 flex items-center gap-1 text-xs text-red-500";
 
-function FormField({ field, control, errors, onChangeCb, readOnly, allValues, editable = true }: {
+function FormField({ field, control, errors, onChangeCb, readOnly, allValues, editable = true, processStep, allFields }: {
   field: Field;
   control: any;
   errors: Record<string, any>;
@@ -820,6 +925,8 @@ function FormField({ field, control, errors, onChangeCb, readOnly, allValues, ed
   // Effective editability at the current process step (section ∧ field). When
   // false the field is shown but locked (read-only) for this step.
   editable?: boolean;
+  processStep?: string;
+  allFields: Field[];
 }) {
   const key  = field.key ?? field.id ?? "";
   const type = field.type ?? "text";
@@ -834,11 +941,11 @@ function FormField({ field, control, errors, onChangeCb, readOnly, allValues, ed
 
   // Layout-only elements
   if (type === "heading") return (
-    <div style={{ gridColumn: "span 12 / span 12" }}>
+    <div className="min-w-0" style={{ gridColumn: "span 12 / span 12" }}>
       <h4 style={{ borderBottom: "1px solid #C8CDD2", paddingBottom: "6px", paddingTop: "8px", fontSize: "14px", fontWeight: "bold", color: "#1F2933" }}>{label}</h4>
     </div>
   );
-  if (type === "divider") return <div style={{ gridColumn: "span 12 / span 12" }}><hr style={{ borderColor: "#E5E8EB" }} /></div>;
+  if (type === "divider") return <div className="min-w-0" style={{ gridColumn: "span 12 / span 12" }}><hr style={{ borderColor: "#E5E8EB" }} /></div>;
 
   // Table handled separately (needs full width + local state)
   if (type === "table") return (
@@ -849,6 +956,9 @@ function FormField({ field, control, errors, onChangeCb, readOnly, allValues, ed
       readOnly={dis}
       tableKey={key}
       documentId={allValues.__document_id as string | undefined}
+      allValues={allValues}
+      processStep={processStep}
+      allFields={allFields}
     />
   );
 
@@ -857,16 +967,43 @@ function FormField({ field, control, errors, onChangeCb, readOnly, allValues, ed
   if (resolveFormula(field.formula)) {
     const shown = referenceLabel(allValues[key]);
     return (
-      <div style={style}>
+      <div className="min-w-0" style={style}>
         <label style={{ marginBottom: "6px", display: "block", fontSize: "12px", fontWeight: "600", color: "#1F2933" }}>
           {label}
           {field.required && <span style={{ marginLeft: "4px", color: "#D32F2F" }}>*</span>}
-          <span style={{ marginLeft: "8px", display: "inline-flex", alignItems: "center", gap: "4px", borderRadius: "4px", backgroundColor: "#EEF6FB", paddingLeft: "6px", paddingRight: "6px", paddingTop: "4px", paddingBottom: "4px", verticalAlign: "middle", fontSize: "10px", fontWeight: "500", color: "#287EAD" }}>
-            <Sparkles className="h-2.5 w-2.5" /> Auto · {formulaLabel(field.formula)}
-          </span>
         </label>
         <div className={`${inp} flex items-center`} style={{ backgroundColor: "#F6F7F8", color: "#8C969E" }}>
           {shown || <span className="italic">Filled automatically on save</span>}
+        </div>
+      </div>
+    );
+  }
+
+  // Calculated fields (calc_number/calc_currency/calc_text/calc_date): always
+  // read-only — the value is derived from `field.calc.expression`, recomputed
+  // live below (client preview, mirroring the builder's own Preview) and
+  // authoritatively by the server (compute_calculated_values) at submit time.
+  // Never registered with a Controller — there's nothing for the person to type.
+  if (CALCULATED_FIELD_TYPES.has(type)) {
+    const raw = allValues[key];
+    const hasValue = raw !== undefined && raw !== null && raw !== "";
+    const symbol = type === "calc_currency" ? (field.currencySymbol ?? "KSh") : null;
+    return (
+      <div className="min-w-0" style={style}>
+        <label style={{ marginBottom: "6px", display: "block", fontSize: "12px", fontWeight: "600", color: "#1F2933" }}>
+          {label}
+          {field.required && <span style={{ marginLeft: "4px", color: "#D32F2F" }}>*</span>}
+          {field.tooltip && <span style={{ marginLeft: "4px", cursor: "help", color: "#8C969E" }} title={field.tooltip}>(?)</span>}
+        </label>
+        <div className={`${inp} flex items-center gap-1.5`} style={{ backgroundColor: "#F6F7F8", color: "#1F2933", fontWeight: 600 }}>
+          {symbol && <span style={{ color: "#8C969E", fontWeight: 500 }}>{symbol}</span>}
+          {hasValue ? (
+            String(raw)
+          ) : field.calc?.expression ? (
+            <span className="italic" style={{ color: "#8C969E", fontWeight: 400 }}>Calculating…</span>
+          ) : (
+            <span className="italic" style={{ color: "#8C969E", fontWeight: 400 }}>No formula configured</span>
+          )}
         </div>
       </div>
     );
@@ -890,7 +1027,7 @@ function FormField({ field, control, errors, onChangeCb, readOnly, allValues, ed
   // Checkbox / boolean — inline label layout
   if (type === "boolean" || type === "checkbox") {
     return (
-      <div style={style}>
+      <div className="min-w-0" style={style}>
         <Controller control={control} name={key} render={({ field: f }) => (
           <label className="flex cursor-pointer items-center gap-2.5 text-sm text-foreground">
             <input type="checkbox" checked={Boolean(f.value)} disabled={dis}
@@ -917,7 +1054,7 @@ function FormField({ field, control, errors, onChangeCb, readOnly, allValues, ed
   // Static / non-interactive types
   if (type === "signature") {
     return (
-      <div style={style}>
+      <div className="min-w-0" style={style}>
         {labelEl}
         <SignatureField
           fieldKey={key}
@@ -930,7 +1067,7 @@ function FormField({ field, control, errors, onChangeCb, readOnly, allValues, ed
   }
   if (type === "file" || type === "image") {
     return (
-      <div style={style}>
+      <div className="min-w-0" style={style}>
         {labelEl}
         <FileAttachField
           label={label}
@@ -1060,7 +1197,7 @@ function FormField({ field, control, errors, onChangeCb, readOnly, allValues, ed
   }
 
   return (
-    <div style={style}>
+    <div className="min-w-0" style={style}>
       {labelEl}
       {control_el}
       {err && (
@@ -1072,7 +1209,7 @@ function FormField({ field, control, errors, onChangeCb, readOnly, allValues, ed
 
 // ── Main export ───────────────────────────────────────────────────────────────
 
-export default function TemplateForm({ sections, values, onChange, readOnly = false, documentId, documentStatus }: {
+export default function TemplateForm({ sections, values, onChange, readOnly = false, documentId, documentStatus, canEditConditionalSections }: {
   sections: unknown[];
   values: TemplateFormValues;
   onChange: (key: string, value: unknown) => void;
@@ -1081,6 +1218,7 @@ export default function TemplateForm({ sections, values, onChange, readOnly = fa
   // The document's current workflow status, for "process step" visibility
   // conditions. Absent (a brand-new form) is treated as "draft".
   documentStatus?: string;
+  canEditConditionalSections?: boolean;
 }) {
   const list = (Array.isArray(sections) ? sections : []) as Section[];
   const allFields = list.flatMap((s) => s.fields ?? []);
@@ -1120,6 +1258,30 @@ export default function TemplateForm({ sections, values, onChange, readOnly = fa
     }
   }, [sectionsKey, currentUser, readOnly, documentId]);
 
+  // Recompute every top-level `calc`-bearing field (calc_number/calc_currency/
+  // calc_text/calc_date) whenever any value changes — client preview only,
+  // mirroring the builder's own Preview and the server's authoritative
+  // compute_calculated_values. Resolves in template order so a later formula
+  // can reference an earlier calculated field's result. Skipped for an
+  // existing document the same way the auto-fill formula effect above is:
+  // the server already froze these at generation time, so client recompute
+  // here would just be superseded noise against a document's saved values.
+  useEffect(() => {
+    if (readOnly || documentId) return;
+    const scope = buildCalcScope(allFields, values);
+    for (const f of allFields) {
+      const k = f.key ?? f.id ?? "";
+      if (!k || !f.calc?.expression) continue;
+      let result = evaluateCalcExpression(f.calc.expression, scope);
+      if (typeof result === "number" && typeof f.calc.decimals === "number") {
+        result = Number(result.toFixed(f.calc.decimals));
+      }
+      scope[k] = result; // let a later formula see this one's result
+      if (values[k] !== result) onChange(k, result);
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [sectionsKey, JSON.stringify(values), readOnly, documentId]);
+
   // Keep a live snapshot of form values for conditional visibility
   const liveValues = { ...values, ...(watch() as TemplateFormValues), __document_id: documentId };
 
@@ -1127,6 +1289,7 @@ export default function TemplateForm({ sections, values, onChange, readOnly = fa
   const viewer: FormViewer = {
     groupNames: currentUser?.group_names ?? [],
     isAdmin: Boolean(currentUser?.has_admin_access || currentUser?.is_staff),
+    canEditConditionalSections,
   };
 
   // Current process step for "process step" visibility conditions.
@@ -1145,11 +1308,13 @@ export default function TemplateForm({ sections, values, onChange, readOnly = fa
         // Hidden / conditionally-hidden / role-restricted sections drop out entirely.
         if (!evalVisible(section, liveValues as TemplateFormValues, allFields, processStep)) return null;
         if (!sectionVisibleToViewer(section, viewer)) return null;
+        if (conditionalEditBlockedForViewer(section, viewer)) return null;
         const visibleFields = (section.fields ?? []).filter((f) =>
           evalVisible(f, liveValues as TemplateFormValues, allFields, processStep)
+          && !conditionalEditBlockedForViewer(f, viewer)
         );
         // Editability cascades: a read-only/locked section locks all its fields.
-        const sectionEditable = evalEditable(section, liveValues as TemplateFormValues, allFields, processStep);
+        const sectionEditable = evalEditableForViewer(section, liveValues as TemplateFormValues, allFields, processStep, viewer);
         const sectionLocked = !readOnly && !sectionEditable;
         return (
           <div key={section.id ?? si} className="overflow-hidden" style={{ border: "1px solid #C8CDD2", backgroundColor: "#FFFFFF" }}>
@@ -1177,8 +1342,10 @@ export default function TemplateForm({ sections, values, onChange, readOnly = fa
                   errors={errors as Record<string, any>}
                   onChangeCb={onChange}
                   readOnly={readOnly}
-                  editable={sectionEditable && evalEditable(f, liveValues as TemplateFormValues, allFields, processStep)}
+                  editable={sectionEditable && evalEditableForViewer(f, liveValues as TemplateFormValues, allFields, processStep, viewer)}
                   allValues={liveValues as TemplateFormValues}
+                  processStep={processStep}
+                  allFields={allFields}
                 />
               ))}
               {visibleFields.length === 0 && (
@@ -1210,8 +1377,9 @@ export function requiredFieldLabels(
     // the viewer isn't a member of).
     if (!evalVisible(s, values, allFields, processStep)) continue;
     if (!sectionVisibleToViewer(s, viewer)) continue;
+    if (conditionalEditBlockedForViewer(s, viewer)) continue;
     // A read-only/locked section's fields can't be filled at this step.
-    const sectionEditable = evalEditable(s, values, allFields, processStep);
+    const sectionEditable = evalEditableForViewer(s, values, allFields, processStep, viewer);
     for (const f of s.fields ?? []) {
       const type = f.type ?? "text";
       if (type === "divider" || type === "heading") continue;
@@ -1219,8 +1387,9 @@ export function requiredFieldLabels(
       if (resolveFormula(f.formula)) continue;
       // Don't require a field the user can't see (hidden / conditionally hidden).
       if (f.hidden || !evalVisible(f, values, allFields, processStep)) continue;
+      if (conditionalEditBlockedForViewer(f, viewer)) continue;
       // Don't require a field the user can't edit at this step (read-only / locked).
-      if (!sectionEditable || !evalEditable(f, values, allFields, processStep)) continue;
+      if (!sectionEditable || !evalEditableForViewer(f, values, allFields, processStep, viewer)) continue;
       const key = f.key ?? "";
       const v   = values[key];
       if (f.required) {

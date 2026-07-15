@@ -102,12 +102,61 @@ def builder_workflow_in_progress(document: Document) -> bool:
         return False
 
 
+def retirement_workflow_completed(document: Document) -> bool:
+    """True once the retirement approval cycle has completed successfully."""
+    if not is_built_form_document(document):
+        return False
+    try:
+        from apps.workflows.models import WorkflowInstance
+
+        return WorkflowInstance.objects.filter(
+            document=document,
+            status="approved",
+            rule__phase="retirement",
+        ).exists()
+    except Exception:
+        return False
+
+
+def builder_process_step(document: Document) -> str:
+    """Phase-aware process step for built-form visibility/editability rules.
+
+    ``Document.status`` is intentionally lifecycle/RBAC-oriented and therefore
+    cannot distinguish "request approved, retirement now open" from "retirement
+    fully approved". This derived value is the form engine's workflow vocabulary.
+    """
+    status = (document.status or DocumentStatus.DRAFT).strip().lower()
+    if not is_built_form_document(document):
+        return status
+
+    form = (document.metadata or {}).get("form") or {}
+    phase = (form.get("workflow_phase") or infer_builder_workflow_phase(document) or "request").strip().lower()
+
+    if builder_workflow_in_progress(document):
+        return "retirement_pending" if phase == "retirement" else "request_pending"
+
+    if status == DocumentStatus.RETURNED:
+        return "retirement_returned" if phase == "retirement" else "returned"
+
+    if status == DocumentStatus.REJECTED:
+        return "retirement_rejected" if phase == "retirement" else "rejected"
+
+    if status == DocumentStatus.APPROVED:
+        if phase == "retirement" and retirement_workflow_completed(document):
+            return "fully_approved"
+        if phase == "retirement" and retirement_journal_posted(document):
+            return "fully_approved"
+        return "request_approved"
+
+    return status
+
+
 def user_may_submit_document(user, document: Document) -> bool:
     if not user or not getattr(user, "is_authenticated", False):
         return False
     if getattr(user, "has_admin_access", False):
         return True
-    if document.uploaded_by_id == user.id:
+    if document.uploaded_by_id == user.id or getattr(document, "owned_by_id", None) == user.id:
         return True
     from apps.accounts.models import GroupAction
     from apps.documents.file_streaming import user_is_involved_with_document
@@ -136,6 +185,8 @@ def can_submit_retirement_workflow(document: Document, *, user=None) -> bool:
     if (document.status or "").strip() != DocumentStatus.APPROVED:
         return False
     if builder_workflow_in_progress(document):
+        return False
+    if retirement_workflow_completed(document):
         return False
     if retirement_journal_posted(document):
         return False

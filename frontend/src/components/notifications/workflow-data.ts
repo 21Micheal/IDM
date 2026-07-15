@@ -17,6 +17,7 @@ type WorkflowTaskRecord = {
   status?: string;
   status_display?: string;
   step?: {
+    template?: string;
     name?: string;
     order?: number;
     status_label?: string;
@@ -79,6 +80,7 @@ type WorkflowInstanceRecord = {
   status?: string;
   document?: string;
   template?: string;
+  phase?: "request" | "retirement" | string;
   started_at?: string;
   started_by?: {
     full_name?: string;
@@ -100,7 +102,7 @@ type TaskHistoryRecord = {
   created_at?: string;
 };
 
-export async function loadWorkflowData(documentId: string): Promise<{
+export async function loadWorkflowData(documentId: string, workflowPhase?: "request" | "retirement" | null): Promise<{
   steps: WorkflowStep[];
   currentStep: number;
   isActive: boolean;
@@ -112,8 +114,13 @@ export async function loadWorkflowData(documentId: string): Promise<{
     .listInstances({ document: documentId })
     .then((response) => normalizeListResponse<WorkflowInstanceRecord>(response.data))
     .catch(() => []);
+  const phaseMatches = (row: WorkflowInstanceRecord) =>
+    !workflowPhase || !row.phase || row.phase === workflowPhase;
   const instance =
-    instances.find((row) => row.status === "in_progress") ?? instances[0];
+    instances.find((row) => row.status === "in_progress" && phaseMatches(row)) ??
+    instances.find(phaseMatches) ??
+    instances.find((row) => row.status === "in_progress") ??
+    instances[0];
 
   const template = instance?.template
     ? await workflowAPI
@@ -123,6 +130,9 @@ export async function loadWorkflowData(documentId: string): Promise<{
     : undefined;
 
   let tasks = [...(instance?.tasks ?? [])];
+  if (instance?.template) {
+    tasks = tasks.filter((task) => !task.step?.template || task.step.template === instance.template);
+  }
 
   if (tasks.length === 0) {
     tasks = await workflowAPI
@@ -154,7 +164,7 @@ export async function loadWorkflowData(documentId: string): Promise<{
   }));
 
   const meta = getWorkflowMeta(orderedTasks, instance);
-  const steps = buildApproverWorkflow(tasksWithHistory, template?.steps ?? []);
+  const steps = buildApproverWorkflow(tasksWithHistory, template?.steps ?? [], workflowPhase);
 
   // The workflow is still "live" (worth polling) while at least one stage is
   // running or yet to be reached, and it hasn't ended in a rejection.
@@ -178,6 +188,7 @@ export async function loadWorkflowData(documentId: string): Promise<{
 function buildApproverWorkflow(
   tasksWithHistory: Array<{ task: WorkflowTaskRecord; history: TaskHistoryRecord[] }>,
   templateSteps: WorkflowTemplateStepRecord[] = [],
+  workflowPhase?: "request" | "retirement" | null,
 ): WorkflowStep[] {
   const grouped = tasksWithHistory.reduce((map, item) => {
     const order = item.task.step?.order ?? map.size + 1;
@@ -272,6 +283,7 @@ function buildApproverWorkflow(
         isNotification: step.isNotification,
         previousName: previous?.name,
         previousIsNotification: previous?.isNotification,
+        workflowPhase,
       }),
       completedAt: step.completedAt,
       comment: step.comment,
@@ -360,20 +372,28 @@ function describeStatus({
   isNotification,
   previousName,
   previousIsNotification,
+  workflowPhase,
 }: {
   status: WorkflowStep["status"];
   isNotification: boolean;
   previousName?: string;
   previousIsNotification?: boolean;
+  workflowPhase?: "request" | "retirement" | null;
 }): string {
   switch (status) {
     case "completed":
+      if (workflowPhase === "retirement") {
+        return isNotification ? "Notification sent" : "Fully approved";
+      }
       return isNotification ? "Notification sent" : "Approved";
     case "in-progress":
       return isNotification ? "Sending notification" : "In progress";
     case "on-hold":
       return "On hold";
     case "rejected":
+      if (workflowPhase === "retirement") {
+        return "Retirement rejected";
+      }
       return "Rejected";
     case "returned":
       return "Returned for review";

@@ -84,6 +84,7 @@ export interface Document {
   tags: Tag[];
   personal_tags?: string[];
   uploaded_by: UserSummary;
+  owned_by?: UserSummary | null;
   department?: string | null;
   department_name?: string | null;
   uploaded_by_department_name?: string | null;
@@ -98,6 +99,7 @@ export interface Document {
   edit_locked_at?: string | null;
   is_edit_locked?: boolean;
   builder_workflow_phase?: "request" | "retirement" | null;
+  builder_process_step?: string | null;
   can_submit_retirement?: boolean;
   current_version: number;
   versions: DocumentVersion[];

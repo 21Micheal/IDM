@@ -114,6 +114,7 @@ def _journal_mapping_and_values(data: dict):
     mapping = data.get("mapping")
     values = data.get("values") or {}
     connection: dict = {}
+    stage = data.get("stage", 1)
 
     document_id = data.get("document_id")
     template_id = data.get("template_id")
@@ -131,7 +132,7 @@ def _journal_mapping_and_values(data: dict):
         doc = Document.objects.filter(pk=document_id).first()
         if doc:
             if mapping is None:
-                mapping = get_journal_mapping(doc)
+                mapping = get_journal_mapping(doc, stage=stage)
             if not values:
                 values = get_form_values(doc)
             if not connection:

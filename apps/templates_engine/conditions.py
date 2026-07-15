@@ -27,6 +27,19 @@ def rule_conditions(vw):
 
 
 def eval_condition(cond: dict, values: dict, process_step: str) -> bool:
+    def step_matches(actual: str, expected: str) -> bool:
+        actual = (actual or "").strip().lower()
+        expected = (expected or "").strip().lower()
+        if actual == expected:
+            return True
+        aliases = {
+            "approved": {"approved", "request_approved", "fully_approved"},
+            "pending_approval": {"pending_approval", "request_pending", "retirement_pending"},
+            "returned": {"returned", "retirement_returned"},
+            "rejected": {"rejected", "retirement_rejected"},
+        }
+        return actual in aliases.get(expected, set())
+
     if cond.get("source") == "process_step":
         sv = process_step
     else:
@@ -35,8 +48,12 @@ def eval_condition(cond: dict, values: dict, process_step: str) -> bool:
     operator = cond.get("operator")
     expected = cond.get("value") or ""
     if operator == "equals":
+        if cond.get("source") == "process_step":
+            return step_matches(sv, expected)
         return sv == expected
     if operator == "not_equals":
+        if cond.get("source") == "process_step":
+            return not step_matches(sv, expected)
         return sv != expected
     if operator == "is_empty":
         return sv.strip() == ""

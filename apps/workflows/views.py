@@ -169,6 +169,15 @@ class WorkflowTemplateViewSet(viewsets.ModelViewSet):
 
         # Draft is the implicit starting state while a document is being created.
         add(DocumentStatus.DRAFT, DocumentStatus.DRAFT.label)
+        for value, label in (
+            ("request_pending", "Request approval in progress"),
+            ("request_approved", "Request approved (retirement open)"),
+            ("retirement_pending", "Retirement approval in progress"),
+            ("retirement_returned", "Retirement returned for rework"),
+            ("fully_approved", "Fully approved"),
+            ("retirement_rejected", "Retirement rejected"),
+        ):
+            add(value, label)
 
         if doc_type:
             labels = (

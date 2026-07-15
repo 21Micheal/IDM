@@ -30,13 +30,43 @@ Mapping shape (all value slots accept a *ValueSpec*; see :func:`resolve_value`):
         { "repeat_over": "table_1", "account": {"const": "37400"}, "dc": "D",
           "amount": {"row_field": "actual_amount"},
           "description": {"row_field": "category_description"},
-          "analysis": { "6": {"field": "tax_code"} } }
+          "analysis": { "6": {"field": "tax_code"} } },
+        { "retirement": {
+            "issued_amount": {"field": "advance_amount"},
+            "spent_amount": {"table": "expenses", "column": "amount"},
+            "scenarios": {
+              "exact": {"lines": [
+                {"account": {"const": "1000"}, "dc": "C", "amount_source": "issued"},
+                {"account": {"const": "5000"}, "dc": "D", "amount_source": "spent"}
+              ]},
+              "under": {"lines": [
+                {"account": {"const": "1000"}, "dc": "C", "amount_source": "issued"},
+                {"account": {"const": "5000"}, "dc": "D", "amount_source": "spent"},
+                {"account": {"const": "1010"}, "dc": "D", "amount_source": "variance"}
+              ]},
+              "over": {"lines": [
+                {"account": {"const": "1000"}, "dc": "C", "amount_source": "spent"},
+                {"account": {"const": "5000"}, "dc": "D", "amount_source": "spent"},
+                {"account": {"const": "2000"}, "dc": "D", "amount_source": "variance"},
+                {"account": {"const": "1010"}, "dc": "C", "amount_source": "variance"}
+              ]}
+            }
+        } }
       ]
     }
 
 A *ValueSpec* is a bare literal, or a dict with one source — ``const`` / ``field``
 (header scope) / ``row_field`` (only inside a ``repeat_over`` line) — plus optional
 ``default`` and ``format`` (date reformatting).
+
+A *retirement* line (see above) is an alternative to ``repeat_over`` for a table:
+instead of emitting one line per row, it compares a header "issued/requested"
+amount against the SUM of one of the table's columns ("spent"), classifies the
+result into one of three scenarios — exact / under / over — and emits THAT
+scenario's fixed set of lines once, with each line's amount resolved from
+whichever of issued/spent/variance it names. This is the imprest/retirement
+reconciliation pattern: the exact accounts and directions are all admin-
+configured data, not hard-coded here — see :func:`_expand_retirement_lines`.
 """
 from __future__ import annotations
 
@@ -48,6 +78,12 @@ from xml.etree import ElementTree as ET
 
 # Order of <Line> children, matching the SunSystems Connect Ledger Import shape.
 _ANALYSIS_CODES = list(range(1, 11))  # AnalysisCode1 … AnalysisCode10
+
+# Below this absolute difference, "spent" and "issued" are treated as equal
+# (the "exact" scenario) rather than a fractional-cent "under"/"over" — money
+# values are 2-decimal-place amounts, so anything smaller is a rounding echo,
+# not a genuine variance.
+_RETIREMENT_EPSILON = Decimal("0.005")
 
 
 class MappingError(ValueError):
@@ -335,9 +371,104 @@ def build_purchase_order_ssc(
     )
 
 
+def _expand_retirement_lines(retirement: dict, values: dict, warnings: list[str]) -> list[dict]:
+    """Classify an imprest/retirement table against its issued/requested
+    amount and expand into the matching scenario's fixed set of ordinary
+    (non-repeating) line specs, each carrying a resolved ``const`` amount.
+
+    Scenario selection:
+      - "exact" — spent == issued (within a half-cent rounding tolerance)
+      - "under" — spent <  issued (the user returns the unspent balance)
+      - "over"  — spent >  issued (the user is owed the overspend)
+
+    The account codes, debit/credit direction, and which of
+    issued/spent/variance feeds each line are entirely admin-configured data
+    (see the ``scenarios`` shape in this module's docstring) — this function
+    only does the classification + amount arithmetic, never hard-codes a
+    business rule about which account plays which role.
+    """
+    issued_spec = retirement.get("issued_amount") or {}
+    issued = resolve_amount(issued_spec, values)
+    issued_field_key = issued_spec.get("field") if isinstance(issued_spec, dict) else None
+    if issued_field_key and issued_field_key not in (values or {}):
+        # The configured field key doesn't exist in the submitted values at
+        # all — as opposed to existing with a blank/zero value. This is the
+        # signature of a stale reference (e.g. the field was renamed after
+        # being selected here — see renameKeyEverywhere in the builder).
+        # Silently treating this as issued=0 would classify every submission
+        # as a full "overspend" and post a journal that still balances, so
+        # the mistake would otherwise go unnoticed. Surface it loudly instead.
+        warnings.append(
+            f"Retirement's issued/requested amount field '{issued_field_key}' was not "
+            f"found in the submitted form values — treated as 0. Check that the "
+            f"Retirement panel's 'Issued / requested amount field' still points at "
+            f"a field that exists on this form (it may have been renamed)."
+        )
+    elif not issued_field_key:
+        # No field was ever selected in the Retirement panel — the mapping
+        # compiled a bare {"const": "0"} fallback. Same silent-zero risk as
+        # above (every submission reads as a full overspend), just from a
+        # template that was never finished being configured rather than a
+        # rename.
+        warnings.append(
+            "Retirement's 'Issued / requested amount field' is not configured — "
+            "issued amount treated as 0. Every submission will be classified as an "
+            "overspend until a field is selected in the Retirement panel."
+        )
+
+    spent_spec = retirement.get("spent_amount") or {}
+    table_key = spent_spec.get("table")
+    column_key = spent_spec.get("column")
+    rows = values.get(table_key) if table_key else None
+    spent = Decimal("0")
+    if isinstance(rows, list):
+        for row in rows:
+            if isinstance(row, dict):
+                spent += resolve_amount({"const": row.get(column_key)}, values)
+    else:
+        warnings.append(f"Retirement table '{table_key}' has no rows; spent amount treated as 0.")
+
+    diff = spent - issued
+    if abs(diff) <= _RETIREMENT_EPSILON:
+        scenario_name = "exact"
+    elif diff < 0:
+        scenario_name = "under"
+    else:
+        scenario_name = "over"
+
+    variance = abs(diff)
+    amounts = {"issued": issued, "spent": spent, "variance": variance}
+
+    scenario = (retirement.get("scenarios") or {}).get(scenario_name) or {}
+    scenario_lines = scenario.get("lines") or []
+    if not scenario_lines:
+        warnings.append(f"Retirement scenario '{scenario_name}' has no configured lines; nothing was posted for it.")
+        return []
+
+    expanded = []
+    for line in scenario_lines:
+        if not isinstance(line, dict):
+            continue
+        source = line.get("amount_source", "spent")
+        amount_value = amounts.get(source, Decimal("0"))
+        expanded.append({
+            "account": line.get("account"),
+            "dc": line.get("dc", "D"),
+            "amount": {"const": _amount_str(amount_value)},
+            "description": line.get("description") or {"const": f"Retirement — {scenario_name} ({source})"},
+            "analysis": line.get("analysis"),
+        })
+    return expanded
+
+
 def _iter_lines(mapping: dict, values: dict, warnings: list[str]) -> Iterator[tuple[dict, dict | None]]:
     for line_spec in (mapping.get("lines") or []):
         if not isinstance(line_spec, dict):
+            continue
+        retirement = line_spec.get("retirement")
+        if retirement:
+            for expanded_spec in _expand_retirement_lines(retirement, values, warnings):
+                yield expanded_spec, None
             continue
         repeat = line_spec.get("repeat_over")
         if repeat:

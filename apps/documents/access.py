@@ -190,12 +190,13 @@ def form_has_editable_fields(document: Document) -> bool:
     form = (document.metadata or {}).get("form")
     if not isinstance(form, dict):
         return False
+    from apps.documents.builder_workflow import builder_process_step
     from apps.documents.form_attachments import descriptors_to_names
     from apps.templates_engine.conditions import is_editable, is_visible
 
     sections = form.get("sections") or []
     values = form.get("values") if isinstance(form.get("values"), dict) else {}
-    process_step = document.status or "draft"
+    process_step = builder_process_step(document)
     render_values = descriptors_to_names(values)
 
     for section in sections:
@@ -218,13 +219,24 @@ def form_has_editable_fields(document: Document) -> bool:
     return False
 
 
+def user_owns_document(user, document: Document) -> bool:
+    """True when ``user`` is the uploader or designated owner of ``document``."""
+    if user is None:
+        return False
+    return (
+        getattr(document, "uploaded_by_id", None) == getattr(user, "id", None)
+        or getattr(document, "owned_by_id", None) == getattr(user, "id", None)
+    )
+
+
 def document_allows_form_edit(document: Document, *, user=None) -> bool:
     """Whether an in-app built-template form may be edited (stage-aware).
 
     Creation-stage rules mirror ``document_allows_edit`` (workflow task gates).
-    Later lifecycle stages allow edits only when the form schema exposes editable
-    fields at the document's current process step — e.g. imprest retirement
-    sections that unlock after the first approval.
+    Later lifecycle stages allow owner-only edits when the form schema exposes
+    editable fields at the document's current process step — e.g. imprest
+    retirement sections that unlock after the first approval. Pending approval
+    remains locked; approvers act through workflow actions, not form edits.
     """
     if not is_built_form_document(document):
         return False
@@ -236,27 +248,18 @@ def document_allows_form_edit(document: Document, *, user=None) -> bool:
     if stage == ACCESS_STAGE_CREATION:
         return document_allows_edit(document, user=user)
 
+    try:
+        from apps.documents.builder_workflow import builder_process_step
+        if builder_process_step(document) in {"fully_approved", "retirement_rejected"}:
+            return False
+    except Exception:
+        pass
+
     if not form_has_editable_fields(document):
         return False
 
     if stage == ACCESS_STAGE_AFTER_APPROVAL:
-        return True
-
-    if stage == ACCESS_STAGE_APPROVAL:
-        if user is None:
-            return True
-        status_lower = (document.status or "").strip().lower()
-        if status_lower == "returned":
-            return True
-        if _document_has_active_workflow(document):
-            from apps.workflows.models import WorkflowTask
-
-            return WorkflowTask.objects.filter(
-                assigned_to=user,
-                workflow_instance__document_id=document.id,
-                status__in=["in_progress"],
-            ).exists()
-        return True
+        return user_owns_document(user, document)
 
     return False
 

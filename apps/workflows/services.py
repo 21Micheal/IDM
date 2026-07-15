@@ -761,7 +761,7 @@ class WorkflowService:
         idempotent — a stage that is already POSTED is never re-posted.
         """
         try:
-            from apps.sunsystems.config import journal_posting_enabled, find_stage_to_post
+            from apps.sunsystems.config import find_stage_to_post, get_journal_mapping, journal_posting_enabled
             if not journal_posting_enabled(document):
                 return
 
@@ -777,6 +777,17 @@ class WorkflowService:
                 stage = find_stage_to_post(document, trigger)
                 if stage is None:
                     continue
+                from apps.sunsystems.models import JournalPosting, JournalPostingStatus
+
+                posting, created = JournalPosting.objects.get_or_create(document=document, stage=stage)
+                if not created:
+                    return
+                mapping = get_journal_mapping(document, stage=stage) or {}
+                posting.status = JournalPostingStatus.PENDING
+                posting.stage_label = str(mapping.get("label") or posting.stage_label or "").strip()
+                posting.message = "Queued for SunSystems posting."
+                posting.error = ""
+                posting.save(update_fields=["status", "stage_label", "message", "error", "updated_at"])
                 from apps.sunsystems.tasks import post_journal_for_document
 
                 doc_id = str(document.id)

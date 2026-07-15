@@ -716,6 +716,7 @@ export type BudgetCheckInput = {
   document_id?: string;
   values?: Record<string, unknown>;
   mapping?: Record<string, unknown> | null;
+  stage?: number;
 };
 
 export type JournalPreviewResult = {
