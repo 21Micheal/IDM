@@ -21,9 +21,9 @@ class DocumentTemplateSerializer(serializers.ModelSerializer):
     class Meta:
         model = DocumentTemplate
         fields = [
-            "id", "name", "description", "type", "category", "tags",
+            "id", "name", "description", "type", "kind", "category", "tags",
             "document_type", "document_type_id", "document_type_name", "document_type_code",
-            "sections", "placeholders",
+            "sections", "design", "placeholders", "sunsystems",
             "file", "file_name",
             "use_count", "is_active",
             "created_by", "created_at", "updated_at",
@@ -49,8 +49,16 @@ class DocumentTemplateSerializer(serializers.ModelSerializer):
 
     def validate(self, attrs):
         template_type = attrs.get("type", getattr(self.instance, "type", "built"))
-        if template_type == "built" and not attrs.get("sections", getattr(self.instance, "sections", [])):
-            raise serializers.ValidationError({"sections": "At least one section is required."})
+        template_kind = attrs.get("kind", getattr(self.instance, "kind", "form"))
+        if template_type == "built":
+            if template_kind == "document":
+                design = attrs.get("design", getattr(self.instance, "design", {})) or {}
+                if not design.get("blocks"):
+                    raise serializers.ValidationError(
+                        {"design": "Add at least one block to the document layout."}
+                    )
+            elif not attrs.get("sections", getattr(self.instance, "sections", [])):
+                raise serializers.ValidationError({"sections": "At least one section is required."})
         if not attrs.get("document_type", getattr(self.instance, "document_type", None)):
             raise serializers.ValidationError({"document_type": "Select the document type this template belongs to."})
         return attrs

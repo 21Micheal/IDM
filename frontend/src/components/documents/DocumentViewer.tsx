@@ -7,8 +7,8 @@
  *   muted) — no raw gray/blue/amber colors.
  * • "Open in <Editor>" is now a small, minimal inline button placed next to the
  *   version pills in the header — no more big blue card.
- * • The Office editor flow exposes a single primary action button. Lock state,
- *   install banner (Linux), and helper script blurbs are kept but compacted.
+ * • The Office editor flow: "Open in <App>" is read-only until the user locks
+ *   the document; Lock (check-out) is required before editing or uploading.
  * • UploadVersionDrawer is no longer a collapsible drawer — it renders inline
  *   below the document with a regular submit button (see UploadVersionDrawer.tsx).
  *
@@ -17,8 +17,9 @@
  */
 
 import { lazy, Suspense, useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { extractApiError } from "@/lib/apiError";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { documentsAPI, dmsSettingsAPI, api, type DmsSettings } from "../../services/api";
+import { documentsAPI, dmsSettingsAPI, api, apiBaseUrl, type DmsSettings } from "../../services/api";
 import { useAuthStore } from "@/store/authStore";
 import { toast } from "@/components/ui/vault-toast";
 import {
@@ -117,10 +118,60 @@ const FAILED_CONFIRM_DELAY_MS = 1_500;
 
 function normalizeUrl(url: string | null | undefined): string | undefined {
   if (!url) return url ?? undefined;
+  // Re-host absolute API URLs onto the page origin. The backend builds file/
+  // preview URLs with request.build_absolute_uri(), which leaks the proxy's
+  // internal address (e.g. 127.0.0.1:8000) when the reverse proxy doesn't
+  // preserve the Host header (IIS/ARR). Only OUR /api/ endpoints are rewritten,
+  // so genuinely external URLs (e.g. S3) are left untouched.
+  if (/^https?:\/\//i.test(url)) {
+    try {
+      const parsed = new URL(url);
+      if (parsed.pathname.startsWith("/api/")) {
+        parsed.protocol = window.location.protocol;
+        parsed.host = window.location.host;
+        return parsed.toString();
+      }
+    } catch {
+      /* fall through to the scheme-only handling below */
+    }
+  }
   if (window.location.protocol === "https:" && url.startsWith("http://")) {
     return url.replace("http://", "https://");
   }
   return url;
+}
+
+// WebDAV URLs need different handling from normalizeUrl(). The desktop editor
+// (Word/LibreOffice) must reach the backend at the SAME origin the SPA uses for
+// its API calls — i.e. the backend or its WebDAV-capable reverse proxy. In dev
+// the page is served by the Vite dev server (e.g. :3000) while the API lives on
+// the backend (e.g. :8000); Vite's proxy does NOT forward WebDAV write methods
+// (LOCK/PUT) to the ASGI backend, so rewriting the WebDAV URL onto the PAGE
+// origin (as normalizeUrl does) makes the file open but every save fail with
+// "object cannot be created in directory". Rewriting onto the API origin routes
+// the editor straight to the backend, which speaks WebDAV. In production the API
+// and page share an origin, so this collapses to the same result.
+function getApiOrigin(): string | null {
+  try {
+    return new URL(apiBaseUrl, window.location.origin).origin;
+  } catch {
+    return null;
+  }
+}
+
+function normalizeWebdavUrl(url: string | null | undefined): string | undefined {
+  if (!url) return url ?? undefined;
+  const apiOrigin = getApiOrigin();
+  if (!apiOrigin) return normalizeUrl(url);
+  try {
+    const parsed = new URL(url, apiOrigin);
+    const target = new URL(apiOrigin);
+    parsed.protocol = target.protocol;
+    parsed.host = target.host;
+    return parsed.toString();
+  } catch {
+    return url;
+  }
 }
 
 function getFileExtension(name?: string): string {
@@ -205,10 +256,16 @@ function EditLockBanner({
   doc,
   currentUserId,
   onRelease,
+  canForceRelease = false,
+  onForceRelease,
+  forceReleasing = false,
 }: {
   doc: Document;
   currentUserId: string | undefined;
   onRelease: () => void;
+  canForceRelease?: boolean;
+  onForceRelease?: () => void;
+  forceReleasing?: boolean;
 }) {
   const isLocked     = Boolean(doc.is_edit_locked);
   const isLockedByMe = isLocked && doc.edit_locked_by === currentUserId;
@@ -217,31 +274,46 @@ function EditLockBanner({
 
   if (isLockedByMe) {
     return (
-      <div className="flex items-center justify-between gap-3 rounded-xl border border-accent/30 bg-accent/5 px-4 py-3 text-sm">
-        <div className="flex items-center gap-2 text-foreground">
-          <Lock className="w-4 h-4 text-accent flex-shrink-0" />
+      <div className="flex items-center justify-between gap-3 border border-[#BDE3F5] bg-[#EEF6FB] px-4 py-3 text-sm">
+        <div className="flex items-center gap-2 text-[#1F2933]">
+          <Lock className="w-4 h-4 text-[#287EAD] flex-shrink-0" />
           <span>
-            <strong>You are editing this document.</strong> Other users can only
-            view it until you close your editor or release the lock.
+            <strong>You are in edit mode.</strong> Other users can only view it until
+            you close your editor or release the lock.
           </span>
         </div>
         <button
           onClick={onRelease}
-          className="flex-shrink-0 inline-flex items-center gap-1.5 text-xs font-medium text-foreground border border-border rounded-lg px-3 py-1.5 hover:bg-muted transition-colors"
+          className="flex-shrink-0 inline-flex items-center gap-1.5 text-xs font-semibold text-[#1F2933] border border-[#C8CDD2] bg-white px-3 py-1.5 hover:bg-[#F5F7F8] transition-colors"
         >
-          <Unlock className="w-3.5 h-3.5" /> Release lock
+          <Unlock className="w-3.5 h-3.5" /> Release(Save)
         </button>
       </div>
     );
   }
 
   return (
-    <div className="flex items-center gap-3 rounded-xl border border-destructive/30 bg-destructive/5 px-4 py-3 text-sm">
-      <Lock className="w-4 h-4 text-destructive flex-shrink-0" />
-      <span className="text-foreground">
-        <strong>{doc.edit_locked_by_name ?? "Another user"}</strong> is currently
-        editing this document. View-only until they finish.
-      </span>
+    <div className="flex items-center justify-between gap-3 border border-red-200 bg-red-50 px-4 py-3 text-sm">
+      <div className="flex items-center gap-2 text-[#1F2933]">
+        <Lock className="w-4 h-4 text-red-600 flex-shrink-0" />
+        <span>
+          <strong>{doc.edit_locked_by_name ?? "another user"} </strong> is editing this document.
+          View-only until they release/save it.
+        </span>
+      </div>
+      {canForceRelease && onForceRelease && (
+        <button
+          onClick={onForceRelease}
+          disabled={forceReleasing}
+          className="flex-shrink-0 inline-flex items-center gap-1.5 text-xs font-semibold text-red-700 border border-red-300 bg-white px-3 py-1.5 hover:bg-red-50 transition-colors disabled:opacity-50"
+          title="Admin override: release another user's lock"
+        >
+          {forceReleasing
+            ? <Loader2 className="w-3.5 h-3.5 animate-spin" />
+            : <Unlock className="w-3.5 h-3.5" />}
+          Release (admin)
+        </button>
+      )}
     </div>
   );
 }
@@ -545,7 +617,7 @@ type OfficeEditPanelProps = {
   canEditInEditor: boolean;
   onVersionUploaded: () => void;
   showHeaderOpenButton?: boolean;
-  onOfficeEditActionChange?: (action: { label: string; enabled: boolean; onClick: () => void }) => void;
+  onBeforeRelease?: () => Promise<boolean>;
 };
 
 function OfficeEditPanel({
@@ -556,12 +628,13 @@ function OfficeEditPanel({
   canEditInEditor,
   onVersionUploaded,
   showHeaderOpenButton = true,
-  onOfficeEditActionChange,
+  onBeforeRelease,
 }: OfficeEditPanelProps) {
   const qc   = useQueryClient();
   const user = useAuthStore((s) => s.user);
 
   const [lockData, setLockData]               = useState<DocumentEditTokenResponse | null>(null);
+  const [editEditorOpen, setEditEditorOpen]     = useState(false);
   const [versionPolling, setVersionPolling]   = useState(false);
   const [previewProgress, setPreviewProgress] = useState(0);
   const [previewTakingLong, setPreviewTakingLong] = useState(false);
@@ -673,7 +746,7 @@ function OfficeEditPanel({
     mutationFn: () =>
       documentsAPI.editToken(doc.id).then((r) => ({
         ...r.data,
-        webdav_url: normalizeUrl(r.data.webdav_url) ?? r.data.webdav_url,
+        webdav_url: normalizeWebdavUrl(r.data.webdav_url) ?? r.data.webdav_url,
         file_url:   normalizeUrl(r.data.file_url)   ?? r.data.file_url,
       })),
     onSuccess: (td) => {
@@ -681,13 +754,13 @@ function OfficeEditPanel({
       startVersionPolling(doc.current_version);
       qc.invalidateQueries({ queryKey: ["document", doc.id] });
       qc.invalidateQueries({ queryKey: ["document-preview", doc.id] });
-      toast.success("Edit lock acquired. Open the document in your editor.");
+      toast.success("Locked by you. Open the document in your editor.");
     },
     onError: (err: any) => {
       if (err?.response?.status === 423) {
-        toast.error(err.response.data?.detail ?? "Document is currently locked by another user.");
+        toast.error(err.response.data?.detail ?? "Locked by another user.");
       } else {
-        toast.error("Could not acquire edit lock. Please try again.");
+        toast.error("Could not lock the document. Please try again.");
       }
     },
   });
@@ -697,10 +770,16 @@ function OfficeEditPanel({
     onSuccess: () => {
       stopVersionPolling();
       setLockData(null);
-      toast.success("Edit lock released.");
+      setEditEditorOpen(false);
+      toast.success("Released.");
       qc.invalidateQueries({ queryKey: ["document", doc.id] });
     },
   });
+
+  const handleRelease = useCallback(async () => {
+    if (onBeforeRelease && !(await onBeforeRelease())) return;
+    releaseLock.mutate();
+  }, [onBeforeRelease, releaseLock]);
 
   const retryPreviewMutation = useMutation({
     mutationFn: () =>
@@ -716,7 +795,7 @@ function OfficeEditPanel({
       });
     },
     onError: (err: any) => {
-      toast.error(err?.response?.data?.detail ?? "Could not queue preview. Please try again.");
+      toast.error(extractApiError(err, "Could not queue preview. Please try again."));
     },
   });
 
@@ -729,12 +808,24 @@ function OfficeEditPanel({
       if (typeof document !== "undefined" && document.hidden) return;
       try {
         const { data: latest } = await documentsAPI.get(doc.id);
+        let changed = false;
         if (latest.current_version > baseVersion) {
           baseVersion = latest.current_version;
           toast.success(`Version ${latest.current_version} saved from editor.`);
-          qc.invalidateQueries({ queryKey: ["document", doc.id] });
           onVersionUploaded();
+          changed = true;
         }
+        // Detect lock release from the editor (UNLOCK fires when the user closes
+        // the document). Without this the banner stays "Locked by you" until a
+        // manual page refresh, even though the lock is already gone server-side.
+        const stillLockedByMe = Boolean(latest.is_edit_locked && latest.edit_locked_by === user?.id);
+        if (!stillLockedByMe) {
+          setLockData(null);
+          setEditEditorOpen(false);
+          stopVersionPolling();
+          changed = true;
+        }
+        if (changed) qc.invalidateQueries({ queryKey: ["document", doc.id] });
       } catch { /* ignore transient errors */ }
     }, 5_000);
   };
@@ -748,6 +839,10 @@ function OfficeEditPanel({
   };
 
   useEffect(() => () => stopVersionPolling(), []);
+
+  useEffect(() => {
+    if (!lockedByMe) setEditEditorOpen(false);
+  }, [lockedByMe]);
 
   // ── Platform detection ────────────────────────────────────────────────────
   const isWindows = typeof navigator !== "undefined" && /Windows/i.test(navigator.userAgent);
@@ -783,8 +878,7 @@ function OfficeEditPanel({
     }
   };
 
-  const openInEditor = useCallback((data = lockData) => {
-    if (!data) return;
+  const launchInEditor = useCallback((data: { webdav_url: string }, editable: boolean) => {
     const { msScheme } = info as { msScheme?: string };
 
     if (isWindows) {
@@ -796,42 +890,58 @@ function OfficeEditPanel({
       const encoded = btoa(webdavUrl).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
       window.location.href = `docvault-open://${encoded}`;
     }
-  }, [handlerInstalled, info, isLinux, isWindows, lockData]);
+    if (editable) setEditEditorOpen(true);
+  }, [handlerInstalled, info, isLinux, isWindows]);
+
+  const openInEditor = useCallback((data: { webdav_url: string } | null | undefined = lockData) => {
+    if (!data) return;
+    launchInEditor(data, true);
+  }, [launchInEditor, lockData]);
+
+  // Open the live document in the desktop app READ-ONLY (no lock). Available to
+  // members without edit rights so they can view in Word/LibreOffice; the server
+  // rejects any save attempt against a read-only token.
+  const openReadOnly = useCallback(async () => {
+    try {
+      const r = await documentsAPI.readOnlyToken(doc.id);
+      const webdav_url = normalizeWebdavUrl(r.data.webdav_url) ?? r.data.webdav_url;
+      launchInEditor({ webdav_url }, false);
+    } catch {
+      toast.error("Could not open the document. Please try again.");
+    }
+  }, [doc.id, launchInEditor]);
 
   /**
-   * One-click handler used by the minimal "Open in <App>" button.
-   * If we don't yet have a lock we acquire it first, then open the editor
-   * once the mutation resolves.
+   * "Open in <App>":
+   *   • you hold the lock (or already have an edit token this session) → editable
+   *   • otherwise → read-only (no auto check-out; use Lock first to edit)
    */
-  const handleOpenClick = useCallback(() => {
-    if (lockedByOther) return;
+  const handleOpenInApp = useCallback(() => {
     if (isLinux && !handlerInstalled) {
-      toast.info("Run the one-time Linux install script before starting document editing.");
+      toast.info("Run the one-time Linux install script before opening documents in the editor.");
       return;
     }
     if (lockData) {
       openInEditor();
       return;
     }
-    acquireLock.mutate(undefined, {
-      onSuccess: (data) => {
-        openInEditor(data);
-      },
-    });
-  }, [acquireLock.mutate, handlerInstalled, isLinux, lockData, lockedByOther, openInEditor]);
+    if (lockedByMe) {
+      // Lock held (e.g. after reload) but no editor token in memory — fetch one.
+      acquireLock.mutate(undefined, { onSuccess: (data) => openInEditor(data) });
+      return;
+    }
+    openReadOnly();
+  }, [acquireLock, handlerInstalled, isLinux, lockData, lockedByMe, openInEditor, openReadOnly]);
 
-  const canShowOpenButton = canEditInEditor && !lockedByOther;
-  const openLabel = lockData || lockedByMe
-    ? `Open in ${info.app}`
-    : `Edit in ${info.app}`;
+  // Explicit check-out (no editor). This is what enables metadata "Edit details".
+  const handleLock = useCallback(() => acquireLock.mutate(), [acquireLock]);
 
-  useEffect(() => {
-    onOfficeEditActionChange?.({
-      label: openLabel,
-      enabled: canShowOpenButton,
-      onClick: handleOpenClick,
-    });
-  }, [onOfficeEditActionChange, openLabel, canShowOpenButton, handleOpenClick]);
+  const isLockedByAnyone = lockedByMe || lockedByOther;
+  // Office docs that can be opened in a desktop editor on this platform.
+  const canOpenInApp = Boolean(info.msScheme) && (isWindows || (isLinux && handlerInstalled));
+  // Whether "Open in <app>" will be read-only for this user.
+  const willOpenReadOnly = !lockedByMe && !lockData;
+  const editEditorLaunchBlocked = editEditorOpen && !willOpenReadOnly;
 
   // ─────────────────────────────────────────────────────────────────────────
   // Render
@@ -868,54 +978,69 @@ function OfficeEditPanel({
               <Clock className="w-3 h-3 animate-pulse" /> Watching for saves
             </span>
           )}
+          {editEditorLaunchBlocked && (
+            <span className="inline-flex items-center gap-1.5 text-xs text-[#5E6870] bg-[#F5F7F8] border border-[#C8CDD2] px-2 py-0.5 rounded-full">
+              <ExternalLink className="w-3 h-3" /> Open in {info.app}
+            </span>
+          )}
         </div>
 
         <div className="flex items-center gap-2 flex-wrap">
-          {canShowOpenButton && showHeaderOpenButton && (
+          {canOpenInApp && showHeaderOpenButton && (
             <button
-              onClick={handleOpenClick}
-              disabled={acquireLock.isPending}
-              className="inline-flex items-center gap-1.5 bg-[#287EAD] px-3 py-1.5 text-xs font-medium text-white transition-colors hover:bg-[#206D99] disabled:opacity-50"
-              title={openLabel}
+              onClick={handleOpenInApp}
+              disabled={acquireLock.isPending || editEditorLaunchBlocked}
+              className={`inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium transition-colors disabled:cursor-not-allowed ${
+                editEditorLaunchBlocked
+                  ? "bg-[#D3D7DA] text-[#5E6870] cursor-not-allowed"
+                  : "bg-[#287EAD] text-white hover:bg-[#206D99] disabled:opacity-50"
+              }`}
+              title={
+                editEditorLaunchBlocked
+                  ? `Already open in ${info.app}. Close it there before opening again.`
+                  : willOpenReadOnly
+                    ? `Open in ${info.app} (read-only)`
+                    : `Open in ${info.app}`
+              }
             >
               {acquireLock.isPending
                 ? <Loader2 className="w-3.5 h-3.5 animate-spin" />
                 : <ExternalLink className="w-3.5 h-3.5" />}
-              {openLabel}
+              Open in {info.app}{willOpenReadOnly ? " (read-only)" : ""}
             </button>
           )}
-          {(lockedByMe || lockData) && (
+          {canEditInEditor && !isLockedByAnyone && showHeaderOpenButton && (
             <button
-              onClick={() => releaseLock.mutate()}
-              disabled={releaseLock.isPending}
-              className="inline-flex items-center gap-1.5 border border-[#C8CDD2] px-2.5 py-1.5 text-xs font-medium text-[#5E6870] transition-colors hover:bg-destructive/5 hover:text-destructive"
+              onClick={handleLock}
+              disabled={acquireLock.isPending}
+              className="inline-flex items-center gap-1.5 border border-[#287EAD] px-3 py-1.5 text-xs font-medium text-[#287EAD] transition-colors hover:bg-[#EEF6FB] disabled:opacity-50"
+              title="Lock (check out) to edit this document or its details"
             >
-              <Unlock className="w-3.5 h-3.5" /> Release lock
+              <Lock className="w-3.5 h-3.5" /> Amend(Lock)
+            </button>
+          )}
+          {lockedByMe && (
+            <button
+              onClick={handleRelease}
+              disabled={releaseLock.isPending}
+              className="inline-flex items-center gap-1.5 border border-[#C8CDD2] px-2.5 py-1.5 text-xs font-medium text-[#5E6870] transition-colors hover:bg-destructive/5 hover:text-destructive disabled:opacity-50"
+              title="Release (check in)"
+            >
+              <Unlock className="w-3.5 h-3.5" /> Release(Save)
             </button>
           )}
         </div>
       </div>
 
-      {/* Locked-by-other notice */}
-      {lockedByOther && (
-        <div className="mx-3 flex items-center gap-3 border border-destructive/30 bg-destructive/5 px-4 py-3 text-sm text-foreground">
-          <Lock className="w-4 h-4 text-destructive flex-shrink-0" />
-          <span>
-            Editing is disabled — this document is currently locked by{" "}
-            <strong>{doc.edit_locked_by_name ?? "another user"}</strong>.
-          </span>
-        </div>
-      )}
-
       {/* Linux install one-time banner */}
-      {isLinux && canShowOpenButton && !handlerInstalled && (
+      {isLinux && canOpenInApp && !lockedByOther && !handlerInstalled && (
         <div className="mx-3 space-y-2 border border-accent/30 bg-accent/5 p-3">
           <p className="text-xs font-medium text-foreground">
             One-time setup for one-click editing on Linux
           </p>
           <p className="text-xs text-muted-foreground">
-            Before editing in {info.app}, run the install script once to register
-            the local opener. After that, editing works from the regular button.
+            Run the install script once to open documents in {info.app}. Lock the
+            document first when you need to edit or upload a new version.
           </p>
           <div className="flex items-center gap-2 flex-wrap">
             <button
@@ -1045,13 +1170,18 @@ interface Props {
     downloadHref: string;
     signedFileUrlsEnabled: boolean;
   }) => void;
+  /**
+   * Called when the user attempts to release (check in) the lock. Lets the
+   * page resolve unsaved metadata edits first (Infor-style Save / Discard /
+   * Cancel prompt). Resolve `false` to abort the release.
+   */
+  onBeforeRelease?: () => Promise<boolean>;
 }
 
-export default function DocumentViewer({ document: doc, submitSlot, hideUploadActionBar, onPreviewLinksChange }: Props) {
+export default function DocumentViewer({ document: doc, submitSlot, hideUploadActionBar, onPreviewLinksChange, onBeforeRelease }: Props) {
   const qc   = useQueryClient();
   const user = useAuthStore((s) => s.user);
   const [selectedVersionId, setSelectedVersionId] = useState<string | null>(null);
-  const [officeEditAction, setOfficeEditAction] = useState<{ label: string; enabled: boolean; onClick: () => void } | null>(null);
   const sortedVersions = useMemo(
     () => [...(doc.versions ?? [])].sort((a, b) => a.version_number - b.version_number),
     [doc.versions],
@@ -1059,7 +1189,6 @@ export default function DocumentViewer({ document: doc, submitSlot, hideUploadAc
 
   useEffect(() => {
     setSelectedVersionId(null);
-    setOfficeEditAction(null);
   }, [doc.id]);
 
   useEffect(() => {
@@ -1123,17 +1252,63 @@ export default function DocumentViewer({ document: doc, submitSlot, hideUploadAc
   const releaseLock = useMutation({
     mutationFn: () => documentsAPI.releaseLock(doc.id),
     onSuccess: () => {
-      toast.success("Edit lock released.");
+      toast.success("Released.");
       qc.invalidateQueries({ queryKey: ["document", doc.id] });
       qc.invalidateQueries({ queryKey: ["document-preview", doc.id] });
     },
   });
 
-  const onVersionUploaded = useCallback(() => {
+  const handleRelease = useCallback(async () => {
+    if (onBeforeRelease && !(await onBeforeRelease())) return;
+    releaseLock.mutate();
+  }, [onBeforeRelease, releaseLock]);
+
+  // Explicit check-out for NON-office documents (PDF/image/etc.). Office docs get
+  // their own Lock button inside OfficeEditPanel; this enables the "Edit details"
+  // tab — which is gated on holding the lock — for everything else.
+  const acquireLock = useMutation({
+    mutationFn: () => documentsAPI.editToken(doc.id),
+    onSuccess: () => {
+      toast.success("Locked by you. You can now edit the details.");
+      qc.invalidateQueries({ queryKey: ["document", doc.id] });
+    },
+    onError: (err: any) => {
+      toast.error(
+        err?.response?.status === 423
+          ? (err.response.data?.detail ?? "Locked by another user.")
+          : "Could not lock the document. Please try again.",
+      );
+    },
+  });
+
+  // Admin override: release a lock held by another user (e.g. a member who left
+  // their editor checked out and is unreachable). Gated server-side on
+  // has_admin_access; the `force` flag is ignored for non-admins.
+  const forceReleaseLock = useMutation({
+    mutationFn: () => documentsAPI.releaseLock(doc.id, true),
+    onSuccess: () => {
+      toast.success("Lock released (admin override).");
+      qc.invalidateQueries({ queryKey: ["document", doc.id] });
+      qc.invalidateQueries({ queryKey: ["document-preview", doc.id] });
+    },
+    onError: (err: any) =>
+      toast.error(extractApiError(err, "Could not release the lock.")),
+  });
+
+  const handleForceRelease = useCallback(() => {
+    const holder = doc.edit_locked_by_name ?? "another user";
+    if (!window.confirm(
+      `Release the lock held by ${holder}? Any unsaved changes in their editor ` +
+      `will not be captured. They will need to re-lock to continue editing.`
+    )) return;
+    forceReleaseLock.mutate();
+  }, [doc.edit_locked_by_name, forceReleaseLock]);
+
+  const onVersionUploaded = useCallback(async () => {
     setSelectedVersionId(null);
     clearDocumentVersionCache(doc.id);
     qc.removeQueries({ queryKey: ["document-preview", doc.id] });
-    qc.invalidateQueries({ queryKey: ["document", doc.id] });
+    await qc.refetchQueries({ queryKey: ["document", doc.id] });
     qc.invalidateQueries({ queryKey: ["document-preview", doc.id] });
   }, [qc, doc.id]);
 
@@ -1149,6 +1324,7 @@ export default function DocumentViewer({ document: doc, submitSlot, hideUploadAc
   const isOfficeByExt    = OFFICE_EXTENSIONS.has(getFileExtension(doc.file_name));
   const isOffice         = isOfficeByMime || isOfficeByExt;
   const isLockedByOther  = Boolean(doc.is_edit_locked && doc.edit_locked_by !== user?.id);
+  const lockedByMe       = Boolean(doc.is_edit_locked && doc.edit_locked_by === user?.id);
   const isImage          =
     doc.file_mime_type?.startsWith("image/") ||
     /\.(png|jpe?g|gif|webp|svg|bmp)$/i.test(doc.file_name ?? "");
@@ -1270,7 +1446,10 @@ export default function DocumentViewer({ document: doc, submitSlot, hideUploadAc
           <EditLockBanner
             doc={doc}
             currentUserId={user?.id}
-            onRelease={() => releaseLock.mutate()}
+            onRelease={handleRelease}
+            canForceRelease={Boolean(user?.has_admin_access) && isLockedByOther}
+            onForceRelease={handleForceRelease}
+            forceReleasing={forceReleaseLock.isPending}
           />
         </div>
       )}
@@ -1289,17 +1468,32 @@ export default function DocumentViewer({ document: doc, submitSlot, hideUploadAc
             </span>
           )}
         </div>
-        {officeEditAction && (
+
+        {/* Lock / Release for NON-office docs (PDF, images, …). Office docs get
+            these inside OfficeEditPanel. Locking enables the "Edit details" tab. */}
+        {!isOffice && (
           <div className="flex items-center gap-2 flex-wrap">
-            <button
-              type="button"
-              onClick={officeEditAction.onClick}
-              disabled={!officeEditAction.enabled}
-              className="border border-[#C8CDD2] bg-white px-3 py-1.5 text-xs hover:bg-[#F5F7F8] disabled:cursor-not-allowed disabled:opacity-50"
-              title={officeEditAction.label}
-            >
-              <ExternalLink className="w-3.5 h-3.5" /> {officeEditAction.label}
-            </button>
+            {canEdit && !doc.is_edit_locked && (
+              <button
+                onClick={() => acquireLock.mutate()}
+                disabled={acquireLock.isPending}
+                className="inline-flex items-center gap-1.5 border border-[#287EAD] px-3 py-1.5 text-xs font-medium text-[#287EAD] transition-colors hover:bg-[#EEF6FB] disabled:opacity-50"
+                title="Lock (check out) to edit this document's details"
+              >
+                {acquireLock.isPending ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <Lock className="w-3.5 h-3.5" />}
+                Lock(Amend)
+              </button>
+            )}
+            {lockedByMe && (
+              <button
+                onClick={handleRelease}
+                disabled={releaseLock.isPending}
+                className="inline-flex items-center gap-1.5 border border-[#C8CDD2] px-2.5 py-1.5 text-xs font-medium text-[#5E6870] transition-colors hover:bg-destructive/5 hover:text-destructive disabled:opacity-50"
+                title="Release (check in)"
+              >
+                <Unlock className="w-3.5 h-3.5" /> Release(Save)
+              </button>
+            )}
           </div>
         )}
       </div>
@@ -1374,8 +1568,8 @@ export default function DocumentViewer({ document: doc, submitSlot, hideUploadAc
             selectedVersionId={selectedVersionId}
             canEditInEditor={canEdit}
             onVersionUploaded={onVersionUploaded}
-            showHeaderOpenButton={false}
-            onOfficeEditActionChange={setOfficeEditAction}
+            showHeaderOpenButton
+            onBeforeRelease={onBeforeRelease}
           />
         </WatermarkedPreview>
       )}
@@ -1430,6 +1624,8 @@ export default function DocumentViewer({ document: doc, submitSlot, hideUploadAc
                 currentVersion={doc.current_version}
                 maxSizeMb={doc.document_type?.max_file_size_mb}
                 onVersionUploaded={onVersionUploaded}
+                disabled={!lockedByMe}
+                triggerTitle={lockedByMe ? "Upload a new version" : "Lock the document first to upload a new version"}
               />
             </Suspense>
           )}

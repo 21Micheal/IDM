@@ -7,6 +7,7 @@
  * document type metadata fields only.
  */
 import { useMutation, useQueryClient } from "@tanstack/react-query";
+import { useEffect, useState } from "react";
 import type { ReactNode } from "react";
 import {
   useForm,
@@ -21,10 +22,24 @@ import { documentsAPI } from "@/services/api";
 import { Edit2, Save, X, Loader2, Plus } from "lucide-react";
 import { toast } from "@/components/ui/vault-toast";
 import type { Document, MetadataField } from "@/types";
+import { extractApiError } from "@/lib/apiError";
+
+/** Imperative handle the page uses to flush unsaved edits before check-in. */
+export type MetadataSaver = {
+  isDirty: boolean;
+  /** Validate + save; resolves true on success, false on validation/save error. */
+  save: () => Promise<boolean>;
+};
 
 interface Props {
   document: Document;
   onClose: () => void;
+  /**
+   * Lets the parent page reach in to check dirty state and save before the
+   * document lock is released (check-in). Registered while mounted, cleared on
+   * unmount.
+   */
+  registerSaver?: (saver: MetadataSaver | null) => void;
 }
 
 type MetadataEditValues = {
@@ -163,7 +178,7 @@ function DynamicField({
   );
 }
 
-export default function MetadataEditPanel({ document: doc, onClose }: Props) {
+export default function MetadataEditPanel({ document: doc, onClose, registerSaver }: Props) {
   const qc = useQueryClient();
   const initialPersonalMetadataEntries = Object.entries(doc.metadata ?? {}).map(([key, value]) => ({
     key,
@@ -206,13 +221,22 @@ export default function MetadataEditPanel({ document: doc, onClose }: Props) {
       toast.success("Metadata updated");
       qc.invalidateQueries({ queryKey: ["document", doc.id] });
       qc.invalidateQueries({ queryKey: ["document-preview", doc.id] });
+      qc.invalidateQueries({ queryKey: ["document-audit", doc.id] });
       onClose();
     },
-    onError: (err: { response?: { data?: { detail?: string } } }) =>
-      toast.error(err?.response?.data?.detail ?? "Update failed"),
+    onError: (err) => toast.error(extractApiError(err, "Update failed")),
   });
 
-  const onSubmit = (values: MetadataEditValues) => {
+  // The document is already checked out (locked) by the time this panel opens —
+  // the lock is taken explicitly via the viewer's Lock button, not here.
+  // Closing with unsaved edits still prompts Save / Discard.
+  const [showDiscardPrompt, setShowDiscardPrompt] = useState(false);
+  const requestClose = () => {
+    if (isDirty) setShowDiscardPrompt(true);
+    else onClose();
+  };
+
+  const buildPayload = (values: MetadataEditValues): Record<string, unknown> => {
     const personalTags = (values.personal_tags ?? [])
       .map((tag) => tag.value.trim())
       .filter(Boolean);
@@ -247,8 +271,32 @@ export default function MetadataEditPanel({ document: doc, onClose }: Props) {
     if (payload.due_date === "") {
       delete payload.due_date;
     }
-    mutation.mutate(payload);
+    return payload;
   };
+
+  const onSubmit = (values: MetadataEditValues) => mutation.mutate(buildPayload(values));
+
+  // Expose dirty state + an async save to the page so it can flush unsaved
+  // edits when the user releases (checks in) the document.
+  useEffect(() => {
+    if (!registerSaver) return;
+    const save = () =>
+      new Promise<boolean>((resolve) => {
+        handleSubmit(
+          async (values) => {
+            try {
+              await mutation.mutateAsync(buildPayload(values));
+              resolve(true);
+            } catch {
+              resolve(false);
+            }
+          },
+          () => resolve(false), // validation errors → don't release
+        )();
+      });
+    registerSaver({ isDirty, save });
+    return () => registerSaver(null);
+  });
 
   return (
     <div className="h-full overflow-y-auto p-4 space-y-5">
@@ -257,7 +305,7 @@ export default function MetadataEditPanel({ document: doc, onClose }: Props) {
           <Edit2 className="w-4 h-4 text-primary" />
           <h3 className="font-semibold text-foreground text-sm">Edit document details</h3>
         </div>
-        <button type="button" onClick={onClose} className="text-muted-foreground hover:text-foreground">
+        <button type="button" onClick={requestClose} className="text-muted-foreground hover:text-foreground">
           <X className="w-4 h-4" />
         </button>
       </div>
@@ -370,11 +418,40 @@ export default function MetadataEditPanel({ document: doc, onClose }: Props) {
             {mutation.isPending && <Loader2 className="w-4 h-4 animate-spin" />}
             <Save className="w-4 h-4" /> Save changes
           </button>
-          <button type="button" onClick={onClose} className="btn-secondary">
+          <button type="button" onClick={requestClose} className="btn-secondary">
             Cancel
           </button>
         </div>
       </form>
+
+      {showDiscardPrompt && (
+        <div className="fixed inset-0 z-[60] flex items-center justify-center bg-foreground/40 backdrop-blur-sm p-4">
+          <div className="w-full max-w-sm rounded-2xl border border-border bg-card p-6 shadow-elegant">
+            <h4 className="text-base font-semibold text-foreground">Unsaved changes</h4>
+            <p className="mt-2 text-sm text-muted-foreground">
+              You have unsaved metadata changes. Save them before releasing the lock, or discard them?
+            </p>
+            <div className="mt-5 flex justify-end gap-2">
+              <button
+                type="button"
+                onClick={() => { setShowDiscardPrompt(false); onClose(); }}
+                className="btn-secondary"
+              >
+                Discard
+              </button>
+              <button
+                type="button"
+                disabled={mutation.isPending}
+                onClick={() => { setShowDiscardPrompt(false); handleSubmit(onSubmit)(); }}
+                className="btn-primary"
+              >
+                {mutation.isPending && <Loader2 className="w-4 h-4 animate-spin" />}
+                Save changes
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 }

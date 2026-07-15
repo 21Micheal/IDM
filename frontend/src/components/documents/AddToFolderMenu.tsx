@@ -134,9 +134,9 @@ export function AddToFolderMenu({ documentId, showLabel = false, className, trig
         className={clsx(
           triggerClassName ?? [
             showLabel
-              ? "inline-flex items-center gap-2 rounded-md border border-border bg-card px-2.5 py-1 text-xs font-semibold"
-              : "p-1.5 rounded-lg",
-            "text-muted-foreground hover:text-foreground hover:bg-muted transition-colors",
+              ? "inline-flex items-center gap-2 border border-[#C8CDD2] bg-white px-2.5 py-1 text-xs font-semibold"
+              : "p-1.5",
+            "text-[#5E6870] hover:text-[#1F2933] hover:bg-[#F5F7F8] transition-colors",
           ],
         )}
       >
@@ -147,10 +147,10 @@ export function AddToFolderMenu({ documentId, showLabel = false, className, trig
       {open && (
         <>
           <div className="fixed inset-0 z-40" onClick={() => setOpen(false)} />
-          <div className="absolute right-0 top-9 z-50 w-72 rounded-xl border border-border bg-card shadow-xl overflow-hidden">
-            <div className="px-3 py-2.5 border-b border-border">
-              <p className="text-xs font-semibold text-foreground">Add to folder</p>
-              <p className="mt-0.5 text-[11px] text-muted-foreground">
+          <div className="absolute right-0 top-9 z-50 w-72 border border-[#C8CDD2] bg-white shadow-xl overflow-hidden">
+            <div className="px-3 py-2.5 border-b border-[#C8CDD2] bg-[#287EAD]">
+              <p className="text-xs font-semibold text-white">Add to folder</p>
+              <p className="mt-0.5 text-[11px] text-white/75">
                 Choose an existing folder or create one here.
               </p>
             </div>
@@ -165,7 +165,7 @@ export function AddToFolderMenu({ documentId, showLabel = false, className, trig
                 <button
                   type="button"
                   onClick={() => setCreating(true)}
-                  className="mt-3 inline-flex items-center gap-1.5 rounded-md bg-primary px-3 py-1.5 text-xs font-semibold text-primary-foreground hover:bg-primary/90"
+                  className="mt-3 inline-flex items-center gap-1.5 bg-[#287EAD] px-3 py-1.5 text-xs font-semibold text-white hover:bg-[#206D99] transition-colors"
                 >
                   <Plus className="h-3.5 w-3.5" />
                   New folder
@@ -183,7 +183,7 @@ export function AddToFolderMenu({ documentId, showLabel = false, className, trig
                         type="button"
                         onClick={() => handleToggle(folder)}
                         disabled={isPending}
-                        className="flex items-center gap-2.5 w-full px-3 py-2 hover:bg-muted/60 transition-colors text-sm text-foreground"
+                        className="flex items-center gap-2.5 w-full px-3 py-2 hover:bg-[#F5F7F8] transition-colors text-sm text-[#1F2933]"
                       >
                         <FolderIcon
                           className="w-4 h-4 shrink-0"
@@ -193,7 +193,7 @@ export function AddToFolderMenu({ documentId, showLabel = false, className, trig
                         />
                         <span className="flex-1 truncate text-left">{folder.name}</span>
                         {isMember && (
-                          <Check className="w-3.5 h-3.5 text-primary shrink-0" />
+                          <Check className="w-3.5 h-3.5 text-[#287EAD] shrink-0" />
                         )}
                       </button>
                     );
@@ -204,7 +204,7 @@ export function AddToFolderMenu({ documentId, showLabel = false, className, trig
                   <button
                     type="button"
                     onClick={() => setCreating(true)}
-                    className="flex w-full items-center gap-2 border-t border-border px-3 py-2 text-sm font-medium text-primary hover:bg-primary/5"
+                    className="flex w-full items-center gap-2 border-t border-[#C8CDD2] px-3 py-2 text-sm font-medium text-[#287EAD] hover:bg-[#EEF6FB] transition-colors"
                   >
                     <Plus className="h-4 w-4" />
                     Create new folder
@@ -214,8 +214,8 @@ export function AddToFolderMenu({ documentId, showLabel = false, className, trig
             )}
 
             {creating && (
-              <div className="border-t border-border bg-muted/20 p-3">
-                <label className="mb-1 block text-[11px] font-semibold text-muted-foreground">
+              <div className="border-t border-[#C8CDD2] bg-[#F5F7F8] p-3">
+                <label className="mb-1 block text-[11px] font-semibold text-[#5E6870]">
                   New folder name
                 </label>
                 <div className="flex items-center gap-2">
@@ -237,7 +237,7 @@ export function AddToFolderMenu({ documentId, showLabel = false, className, trig
                     type="button"
                     onClick={handleCreate}
                     disabled={!folderName.trim() || isCreating}
-                    className="inline-flex h-8 w-8 items-center justify-center rounded-md bg-primary text-primary-foreground hover:bg-primary/90 disabled:opacity-50"
+                    className="inline-flex h-8 w-8 items-center justify-center bg-[#287EAD] text-white hover:bg-[#206D99] disabled:opacity-50 transition-colors"
                     title="Create folder"
                   >
                     {isCreating ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Check className="h-3.5 w-3.5" />}
@@ -248,7 +248,7 @@ export function AddToFolderMenu({ documentId, showLabel = false, className, trig
                       setCreating(false);
                       setFolderName("");
                     }}
-                    className="inline-flex h-8 w-8 items-center justify-center rounded-md border border-border bg-card text-muted-foreground hover:text-foreground"
+                    className="inline-flex h-8 w-8 items-center justify-center border border-[#C8CDD2] bg-white text-[#5E6870] hover:text-[#1F2933] transition-colors"
                     title="Cancel"
                   >
                     <X className="h-3.5 w-3.5" />

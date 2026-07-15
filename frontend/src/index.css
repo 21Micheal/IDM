@@ -4,6 +4,52 @@
 
 /* Flaxem IDM — Document Management design system. All colors HSL. */
 
+/* Minimal, unobtrusive scrollbars for in-app scroll containers (sidebar nav,
+   main content). The track is transparent and the thumb is a thin rounded
+   sliver; on hover it fades to white (near-invisible on the light surfaces).
+
+   NOTE: the WebKit rules are kept at the top level. We must NOT set the
+   standard `scrollbar-width` / `scrollbar-color` here, because Chrome/Brave 121+
+   treat those as an opt-in to the *standard* scrollbar and then ignore every
+   `::-webkit-scrollbar` rule — which silently dropped the :hover colour. The
+   standard properties are therefore scoped to engines that lack ::-webkit-
+   scrollbar (Firefox) so both worlds get a thin bar. */
+.scrollbar-minimal::-webkit-scrollbar {
+  width: 12px;
+  height: 12px;
+}
+.scrollbar-minimal::-webkit-scrollbar-track {
+  background: transparent;
+}
+.scrollbar-minimal::-webkit-scrollbar-thumb {
+  background-color: rgba(120, 130, 140, 0.35);
+  border-radius: 9999px;
+  /* transparent border + content-box clip makes the visible thumb ~4px thin */
+  border: 2px solid transparent;
+  background-clip: content-box;
+}
+.scrollbar-minimal::-webkit-scrollbar-thumb:hover {
+  background-color: rgba(200, 205, 210, 0.7);
+  background-clip: content-box;
+}
+
+/* Firefox (and any engine without ::-webkit-scrollbar support). */
+@supports not selector(::-webkit-scrollbar) {
+  .scrollbar-minimal {
+    scrollbar-width: thin;
+    scrollbar-color: rgba(120, 130, 140, 0.35) transparent;
+  }
+}
+
+/* Hide scrollbars but keep scrollability for compact popovers/listboxes */
+.no-scrollbar {
+  -ms-overflow-style: none; /* IE and Edge */
+  scrollbar-width: none; /* Firefox */
+}
+.no-scrollbar::-webkit-scrollbar {
+  display: none; /* WebKit */
+}
+
 @layer base {
   :root {
     --background: 220 20% 94%;
@@ -145,18 +191,25 @@
     background-color: hsl(var(--destructive) / 0.9);
   }
   .input {
-    @apply block w-full rounded-lg border px-3 py-2 text-sm shadow-sm
-           focus:outline-none focus:ring-1;
-    border-color: hsl(var(--input));
-    background-color: hsl(var(--card));
-    color: hsl(var(--foreground));
+    @apply block w-full border px-3 py-2 text-sm focus:outline-none focus:ring-1;
+    border-color: #AEB5BB;
+    background-color: #ffffff;
+    color: #1F2933;
+    border-radius: 0;
+    height: auto;
+    min-height: 36px;
   }
   .input::placeholder {
-    color: hsl(var(--muted-foreground));
+    color: #8C969E;
   }
   .input:focus {
-    border-color: hsl(var(--ring));
-    --tw-ring-color: hsl(var(--ring));
+    border-color: #287EAD;
+    --tw-ring-color: #287EAD;
+  }
+  .input:disabled {
+    background-color: #F6F7F8;
+    color: #8C969E;
+    cursor: not-allowed;
   }
   .label {
     @apply block text-sm font-medium mb-1;
@@ -169,7 +222,7 @@
     box-shadow: var(--shadow-card);
   }
   .badge {
-    @apply inline-flex items-center rounded-full px-2.5 py-0.5 text-xs font-medium;
+    @apply inline-flex items-center px-2 py-0.5 text-xs font-medium;
   }
 
   .admin-shell {

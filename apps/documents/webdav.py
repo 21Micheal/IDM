@@ -44,6 +44,19 @@ logger = logging.getLogger(__name__)
 _PROTOCOL_LOCKS: dict[str, dict] = {}
 
 
+def clear_protocol_lock(document_id) -> None:
+    """
+    Drop any in-process WebDAV protocol lock for a document.
+
+    Called when the application-level edit lock is released out-of-band (e.g. an
+    admin force-releases a lock held by an unreachable user). Without this, the
+    stale protocol lock would make the next user's WebDAV LOCK return 423 until it
+    expires (up to an hour). Best-effort: the store is per-process, so this only
+    clears it in the current worker — but the protocol lock also self-expires.
+    """
+    _PROTOCOL_LOCKS.pop(str(document_id), None)
+
+
 def _xml_response(body: str, status: int = 200) -> HttpResponse:
     return HttpResponse(
         body.strip(), content_type="application/xml; charset=utf-8", status=status
@@ -235,6 +248,7 @@ class DocumentWebDAVView(View):
         # Authenticating here means we never issue a 401 that triggers the
         # LibreOffice credential dialog.
         user = None
+        read_only = False
         if token:
             cached = cache.get(f"webdav_edit_token:{token}")
             if cached and str(cached.get("document_id")) == str(document_id):
@@ -243,6 +257,7 @@ class DocumentWebDAVView(View):
                     candidate = _User.objects.get(id=cached["user_id"])
                     if candidate.is_active:
                         user = candidate
+                        read_only = bool(cached.get("read_only"))
                         # Slide TTL forward on every request so long editing
                         # sessions don't lose auth after an hour.
                         cache.set(f"webdav_edit_token:{token}", cached, timeout=3600)
@@ -275,15 +290,47 @@ class DocumentWebDAVView(View):
         if not doc:
             return HttpResponse("Not Found", status=404)
 
-        if not self._can(user, doc, "edit"):
+        required = "view" if read_only else "edit"
+        if not self._can(user, doc, required):
             return HttpResponse("Forbidden", status=403)
+        # Read-only tokens may only use safe (non-writing) WebDAV methods.
+        if read_only and method not in ("head", "get", "propfind"):
+            return HttpResponse("Read-only", status=403)
 
         request.dav_user = user
         request.dav_doc  = doc
-        request.dav_href = request.build_absolute_uri(request.path)
-        return getattr(self, method, self.http_method_not_allowed)(
-            request, document_id, filename, *args, **kwargs
-        )
+        request.dav_read_only = read_only
+        # Use a host-agnostic ABSOLUTE-PATH href (no scheme/host) in every WebDAV
+        # XML response (PROPFIND resources + LOCK lockroot). build_absolute_uri()
+        # would embed request.get_host(), which behind a changeOrigin proxy is the
+        # internal upstream (e.g. backend:8000) — a host the desktop editor can't
+        # reach. The editor opens the file fine via direct GET, but then can't
+        # resolve the LOCK root / save target and fails with "object cannot be
+        # created in directory". An absolute path resolves against whatever origin
+        # the editor actually opened (localhost:3000, ngrok, prod), so it's correct
+        # under every proxy. request.path is URL-decoded, so re-encode it.
+        request.dav_href = quote(request.path, safe="/")
+        # Time each WebDAV request server-side. A save is ~7 round-trips
+        # (OPTIONS/PROPFIND/LOCK/GET/PUT/PROPFIND/UNLOCK); logging per-request
+        # server time lets you tell whether a slow save is spent in Django
+        # (storage/broker/cache) or in the network + desktop WebDAV redirector
+        # (IIS ARR, Windows WebClient, Word/LibreOffice), which the server can't
+        # speed up. Compare the sum of these to the wall-clock save time.
+        import time as _time
+        _started = _time.monotonic()
+        handler = getattr(self, method, self.http_method_not_allowed)
+        try:
+            return handler(request, document_id, filename, *args, **kwargs)
+        finally:
+            _elapsed_ms = (_time.monotonic() - _started) * 1000
+            # Editors PROPFIND every ~2s for the whole session, so only surface
+            # genuinely slow requests at INFO; everything else goes to DEBUG to
+            # avoid flooding the log.
+            _log = logger.info if _elapsed_ms >= 1000 else logger.debug
+            _log(
+                "WebDAV %s doc=%s ro=%s -> %.0fms",
+                method.upper(), document_id, read_only, _elapsed_ms,
+            )
 
     # ── OPTIONS ────────────────────────────────────────────────────────────────
 
@@ -312,7 +359,7 @@ class DocumentWebDAVView(View):
     def get(self, request, document_id, filename=""):
         doc  = request.dav_doc
         user = request.dav_user
-        if not self._can(user, doc, "edit"):
+        if not self._can(user, doc, "view"):
             return HttpResponse("Forbidden", status=403)
         try:
             content = doc.file.read()
@@ -332,7 +379,7 @@ class DocumentWebDAVView(View):
     def propfind(self, request, document_id, filename=""):
         doc  = request.dav_doc
         user = request.dav_user
-        if not self._can(user, doc, "edit"):
+        if not self._can(user, doc, "view"):
             return HttpResponse("Forbidden", status=403)
 
         depth = request.headers.get("Depth", "infinity")
@@ -462,7 +509,9 @@ class DocumentWebDAVView(View):
   </D:lockdiscovery>
 </D:prop>"""
         resp = _xml_response(xml, status=200)
-        resp["Lock-Token"] = f"<urn:uuid:{token}>"
+        resp["Lock-Token"]    = f"<urn:uuid:{token}>"
+        resp["ETag"]          = f'"{doc.checksum[:16]}"'
+        resp["Last-Modified"] = formatdate(timeval=doc.updated_at.timestamp(), usegmt=True)
         return resp
 
     # ── UNLOCK ─────────────────────────────────────────────────────────────────
@@ -509,15 +558,28 @@ class DocumentWebDAVView(View):
         user = request.dav_user
 
         if not self._can(user, doc, "edit"):
+            logger.warning(
+                "WebDAV PUT denied (no edit permission): user=%s doc=%s",
+                user.email, document_id,
+            )
             return HttpResponse("Forbidden", status=403)
 
-        # Application-level lock check
-        if doc.is_edit_locked and doc.edit_lock_holder != user:
+        # Application-level lock check — the saver MUST currently hold the lock,
+        # not merely "nobody else holds it". If the lock was released (an admin
+        # force-released an abandoned/active checkout) or expired, the editor still
+        # has a valid token and would otherwise keep saving over a document it no
+        # longer owns. Reject so a save can't land after the lock is gone.
+        if doc.edit_lock_holder != user:
             holder = doc.edit_lock_holder
-            return HttpResponse(
-                f"423 Locked by {holder.get_full_name() if holder else 'another user'}",
-                status=423,
+            logger.warning(
+                "WebDAV PUT denied (caller does not hold lock): user=%s holder=%s doc=%s",
+                user.email, getattr(holder, "email", None), document_id,
             )
+            detail = (
+                f"423 Locked by {holder.get_full_name()}" if holder
+                else "423 Your edit lock was released — re-lock the document to save."
+            )
+            return HttpResponse(detail, status=423)
 
         # WebDAV protocol lock check
         proto_lock = _PROTOCOL_LOCKS.get(str(document_id))
@@ -526,20 +588,48 @@ class DocumentWebDAVView(View):
             lock_header = request.headers.get("Lock-Token", "")
             tok = proto_lock["token"]
             if proto_lock["user_id"] != str(user.id) and tok not in if_header and tok not in lock_header:
+                logger.warning(
+                    "WebDAV PUT denied (protocol lock held by other session): "
+                    "user=%s doc=%s", user.email, document_id,
+                )
                 return HttpResponse("Locked", status=423)
 
-        content = request.body
+        # Read the raw PUT body. Prefer request.body (cached; safe if any
+        # upstream middleware already buffered the stream), but fall back to a
+        # streaming read() when the body exceeds settings.DATA_UPLOAD_MAX_MEMORY_SIZE
+        # (2.5 MB by default), which would otherwise raise RequestDataTooBig and
+        # fail every save of a larger document. On RequestDataTooBig the stream
+        # has not been consumed yet, so read() can still pull the full body.
+        from django.core.exceptions import RequestDataTooBig
+        try:
+            content = request.body
+        except RequestDataTooBig:
+            content = request.read()
+        except Exception:
+            logger.warning(
+                "WebDAV PUT: could not read request body for %s", document_id,
+                exc_info=True,
+            )
+            return HttpResponse("Bad Request", status=400)
         if not content:
+            logger.warning(
+                "WebDAV PUT: empty body for doc=%s (content_length=%s, transfer_encoding=%s)",
+                document_id,
+                request.META.get("CONTENT_LENGTH"),
+                request.META.get("HTTP_TRANSFER_ENCODING"),
+            )
             return HttpResponse("No content provided", status=400)
 
         checksum = hashlib.sha256(content).hexdigest()
         if checksum == doc.checksum:
             # Identical save — refresh lock TTL only
             doc.refresh_lock(user)
-            return HttpResponse(status=204)
+            return self._put_ok(doc)
 
         new_version = doc.current_version + 1
 
+        import time as _time
+        _t_write = _time.monotonic()
         try:
             with transaction.atomic():
                 version_file = ContentFile(content, name=doc.file_name)
@@ -570,32 +660,71 @@ class DocumentWebDAVView(View):
                 doc.refresh_from_db()
 
         except Exception as exc:
-            import logging
-            logging.getLogger(__name__).error(
-                "WebDAV PUT failed for %s: %s", document_id, exc
+            logger.error(
+                "WebDAV PUT failed for %s: %s", document_id, exc, exc_info=True
             )
             return HttpResponse("Internal Server Error", status=500)
+
+        _write_ms = (_time.monotonic() - _t_write) * 1000
 
         # Refresh application-level lock TTL
         doc.refresh_lock(user)
 
-        # Release WebDAV protocol lock (editor re-locks on next save if needed)
-        _PROTOCOL_LOCKS.pop(str(document_id), None)
+        # Keep the WebDAV protocol lock alive for the rest of the editing session
+        # (it is released on UNLOCK when the editor closes). Popping it here
+        # desynced us from the editor's model: LibreOffice/Word hold ONE lock from
+        # open to close and save repeatedly within it. After a pop, the editor's
+        # post-save PROPFIND saw an empty <lockdiscovery> — its lock had vanished —
+        # so neon re-polled to reconcile, producing the ~2s-spaced PROPFIND tail
+        # that makes a save feel slow. Refresh the TTL instead so lockdiscovery
+        # stays consistent and the editor's first post-save PROPFIND succeeds.
+        proto = _PROTOCOL_LOCKS.get(str(document_id))
+        if proto and proto.get("user_id") == str(user.id):
+            proto["expires_at"] = timezone.now() + timedelta(hours=1)
 
-        # Re-generate Office PDF preview
-        if doc.is_office_doc():
-            from .models import PreviewStatus
-            Document.objects.filter(id=doc.id).update(
-                preview_status="",
-                preview_pdf="",
+        # Post-save fan-out: reset the Office→PDF preview and queue text
+        # re-extraction / search indexing. These enqueue Celery jobs (a broker
+        # publish) and must never block or fail the editor's save — a slow or
+        # unreachable broker would otherwise stall every Ctrl+S. Best-effort and
+        # timed so a slow broker shows up clearly in the logs.
+        _t_post = _time.monotonic()
+        try:
+            if doc.is_office_doc():
+                Document.objects.filter(id=doc.id).update(
+                    preview_status="",
+                    preview_pdf="",
+                )
+            from apps.search.indexing import schedule_document_search_pipeline
+            schedule_document_search_pipeline(
+                str(doc.id),
+                reextract_content=True,
+                index_immediately=True,
             )
+        except Exception:
+            logger.warning(
+                "WebDAV PUT: post-save indexing/preview fan-out failed for %s "
+                "(save itself succeeded)", document_id, exc_info=True,
+            )
+        _post_ms = (_time.monotonic() - _t_post) * 1000
 
-        from apps.search.indexing import schedule_document_search_pipeline
-
-        schedule_document_search_pipeline(
-            str(doc.id),
-            reextract_content=True,
-            index_immediately=True,
+        logger.info(
+            "WebDAV PUT saved v%s doc=%s user=%s (%d bytes) write=%.0fms post=%.0fms",
+            new_version, document_id, user.email, len(content), _write_ms, _post_ms,
         )
 
-        return HttpResponse(status=204)
+        return self._put_ok(doc)
+
+    @staticmethod
+    def _put_ok(doc) -> HttpResponse:
+        """
+        204 response for a successful save, carrying the new ETag and
+        Last-Modified. Desktop editors (Word/LibreOffice via the Windows
+        WebClient) otherwise can't learn the saved state from the PUT itself and
+        fall back to a burst of confirmation PROPFINDs — the slow ~2s-spaced
+        tail you see after every save. Echoing validators here lets the client
+        accept the save immediately and skip (most of) that round-tripping.
+        """
+        resp = HttpResponse(status=204)
+        resp["ETag"]          = f'"{doc.checksum[:16]}"'
+        resp["Last-Modified"] = formatdate(timeval=doc.updated_at.timestamp(), usegmt=True)
+        return resp

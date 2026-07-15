@@ -400,15 +400,25 @@ class DocumentViewSet(AuditMixin, viewsets.ModelViewSet):
     filter_backends    = [DjangoFilterBackend, SearchFilter, OrderingFilter]
     filterset_class    = DocumentFilter
     search_fields      = ["title", "reference_number", "supplier", "extracted_text"]
-    ordering_fields    = ["created_at", "document_date", "amount", "title", "reference_number"]
+    ordering_fields    = ["created_at", "updated_at", "document_date", "amount", "title", "reference_number"]
     ordering           = ["-created_at"]
     parser_classes     = [MultiPartParser, FormParser, JSONParser]
+
+    def get_object(self):
+        # Resolve a single document by id even when it is an UNCLASS draft that
+        # listings hide. Object-level permission checks (and the involvement
+        # scoping in get_queryset) still apply, so this only affects whether a
+        # hidden-from-lists draft is reachable by direct id, not who may see it.
+        self._include_unclassified = True
+        try:
+            return super().get_object()
+        finally:
+            self._include_unclassified = False
 
     def get_queryset(self):
         user = self.request.user
         qs   = (
             Document.objects
-            .exclude(document_type__code="UNCLASS")
             .select_related(
                 "document_type",
                 "uploaded_by",
@@ -418,6 +428,12 @@ class DocumentViewSet(AuditMixin, viewsets.ModelViewSet):
             )
             .prefetch_related("tags", "versions", "workflow_instance__tasks__step")
         )
+        # UNCLASS placeholders are hidden from every listing, but single-object
+        # lookups (retrieve/preview_url/file) opt in via get_object() so the
+        # bulk-review screen can preview unreviewed email/scan drafts. Access is
+        # still gated by the involvement filter below + object-level checks.
+        if not getattr(self, "_include_unclassified", False):
+            qs = qs.exclude(document_type__code="UNCLASS")
         # A "sees all documents" group (e.g. auditors) gets full visibility; what
         # they can DO is still governed by the object-level permission checks.
         if not user.has_admin_access and not user.sees_all_documents:
@@ -457,6 +473,8 @@ class DocumentViewSet(AuditMixin, viewsets.ModelViewSet):
 
     def retrieve(self, request, *args, **kwargs):
         instance = self.get_object()
+        self._prepare_builder_workflow_phase(instance)
+        instance.refresh_from_db(fields=["metadata", "updated_at"])
         self.record_audit(AuditEvent.DOCUMENT_VIEWED, instance, {})
         serializer = self.get_serializer(instance)
         return Response(serializer.data)
@@ -550,6 +568,32 @@ class DocumentViewSet(AuditMixin, viewsets.ModelViewSet):
             status=status.HTTP_201_CREATED,
         )
 
+    @action(detail=False, methods=["get"])
+    def suppliers(self, request):
+        """
+        Distinct, non-empty supplier names across the (live) documents the user
+        can see. Powers the supplier filter dropdown on the Documents page, which
+        must list every supplier in the system — not just those on the page.
+        """
+        names = (
+            self.get_queryset()
+            .filter(deleted_at__isnull=True)
+            .exclude(supplier__isnull=True)
+            .exclude(supplier__exact="")
+            .values_list("supplier", flat=True)
+            .distinct()
+        )
+        # Collapse case/whitespace variants while keeping a clean display form.
+        seen, result = set(), []
+        for name in names:
+            cleaned = (name or "").strip()
+            key = cleaned.lower()
+            if not key or key in seen:
+                continue
+            seen.add(key)
+            result.append(cleaned)
+        return Response(sorted(result, key=str.lower))
+
     @action(detail=False, methods=["get"], url_path="duplicate-check")
     def duplicate_check(self, request):
         dms_settings = DMSSettings.load()
@@ -578,7 +622,9 @@ class DocumentViewSet(AuditMixin, viewsets.ModelViewSet):
 
         duplicate_doc = (
             Document.objects
-            .filter(checksum=checksum, uploaded_by=request.user)
+            # Ignore trashed (soft-deleted) documents so a file in Trash does not
+            # block re-uploading the same content.
+            .filter(checksum=checksum, uploaded_by=request.user, deleted_at__isnull=True)
             .exclude(file="")
             .select_related("uploaded_by")
             .order_by("created_at")
@@ -608,6 +654,15 @@ class DocumentViewSet(AuditMixin, viewsets.ModelViewSet):
     def _can_manage_trash(self, doc, user) -> bool:
         return bool(user.has_admin_access or doc.uploaded_by_id == user.id)
 
+    def _prepare_builder_workflow_phase(self, doc) -> str | None:
+        from apps.documents.builder_workflow import sync_builder_workflow_phase
+
+        try:
+            return sync_builder_workflow_phase(doc)
+        except Exception:
+            logger.exception("Could not infer workflow phase for builder document %s", doc.id)
+            return None
+
     def destroy(self, request, *args, **kwargs):
         """Move a document to Trash (soft delete) rather than removing it."""
         doc = self.get_object()
@@ -622,6 +677,9 @@ class DocumentViewSet(AuditMixin, viewsets.ModelViewSet):
         Document.objects.filter(id=doc.id).update(
             deleted_at=timezone.now(), deleted_by=request.user, updated_at=timezone.now()
         )
+        # Pull it out of the search index so a trashed doc stops showing in results.
+        from apps.search.indexing import queue_deindex_document
+        queue_deindex_document(str(doc.id))
         self.record_audit("document.deleted", doc, {"trashed": True})
         return Response(status=status.HTTP_204_NO_CONTENT)
 
@@ -636,6 +694,9 @@ class DocumentViewSet(AuditMixin, viewsets.ModelViewSet):
         Document.objects.filter(id=doc.id).update(
             deleted_at=None, deleted_by=None, updated_at=timezone.now()
         )
+        # Put it back in the search index now that it's live again.
+        from apps.search.indexing import queue_index_document
+        queue_index_document(str(doc.id))
         self.record_audit("document.restored", doc)
         doc.refresh_from_db()
         return Response(DocumentDetailSerializer(doc, context={"request": request}).data)
@@ -650,22 +711,34 @@ class DocumentViewSet(AuditMixin, viewsets.ModelViewSet):
             )
         if not self._can_manage_trash(doc, request.user):
             return Response({"detail": "Not permitted."}, status=status.HTTP_403_FORBIDDEN)
+        doc_id = str(doc.id)
         self.record_audit("document.purged", doc, {"reference": doc.reference_number})
         doc.hard_delete()
+        # Remove the now-orphaned search-index entry so it can't 404 on open.
+        from apps.search.indexing import queue_deindex_document
+        queue_deindex_document(doc_id)
         return Response(status=status.HTTP_204_NO_CONTENT)
 
     @action(detail=True, methods=["post"])
     def submit(self, request, pk=None):
         doc = self.get_object()
-        # Rejection is terminal — it ends the workflow. Only draft and returned
-        # (sent back to the uploader for rework) documents can be (re)submitted.
-        if doc.status not in (
-            DocumentStatus.DRAFT,
-            DocumentStatus.RETURNED,
-            "Returned for Review",
-        ):
+        from apps.documents.builder_workflow import (
+            can_submit_request_workflow,
+            can_submit_retirement_workflow,
+        )
+
+        self._prepare_builder_workflow_phase(doc)
+        doc.refresh_from_db(fields=["metadata", "updated_at"])
+
+        can_submit_retirement = can_submit_retirement_workflow(doc, user=request.user)
+        can_submit_request = can_submit_request_workflow(doc, user=request.user)
+
+        # Rejection is terminal — it ends the workflow. Draft/returned documents
+        # start (or resume) the request phase; fully-approved builder forms in
+        # the retirement phase start the stage-2 approval cycle.
+        if not can_submit_retirement and not can_submit_request:
             return Response(
-                {"detail": "Only draft or returned documents can be submitted. Rejected documents are final."},
+                {"detail": "This document cannot be submitted in its current status."},
                 status=status.HTTP_400_BAD_REQUEST,
             )
         from apps.workflows.services import WorkflowService, WorkflowError
@@ -708,17 +781,70 @@ class DocumentViewSet(AuditMixin, viewsets.ModelViewSet):
                 {"detail": "This document cannot be edited in its current status."},
                 status=status.HTTP_400_BAD_REQUEST,
             )
+        # Editing details requires holding the checkout lock, so a save can't land
+        # after the lock was released (admin force-release) or expired — which
+        # would otherwise let a revoked editor keep writing. The one exception is
+        # the uploader doing initial setup on their own still-unlocked document
+        # (the post-upload "confirm details" flow takes no lock); once the doc is
+        # locked, or anyone other than the uploader edits, the lock is required.
+        holder = doc.edit_lock_holder
+        lock_required = doc.is_edit_locked or doc.uploaded_by_id != request.user.id
+        if lock_required and (holder is None or holder.id != request.user.id):
+            detail = (
+                f"This document is locked by {holder.get_full_name()}."
+                if holder
+                else "Your edit lock was released. Re-lock the document to edit its details."
+            )
+            return Response({"detail": detail}, status=status.HTTP_423_LOCKED)
         serializer = DocumentMetadataEditSerializer(
             doc, data=request.data, partial=True, context={"request": request}
         )
         serializer.is_valid(raise_exception=True)
+
+        from apps.documents.metadata_audit import (
+            diff_metadata_snapshots,
+            snapshot_document_metadata,
+        )
+
+        doc = (
+            Document.objects
+            .select_related("document_type")
+            .prefetch_related("tags", "document_type__metadata_fields")
+            .get(pk=doc.pk)
+        )
+        before_snapshot = snapshot_document_metadata(doc)
         serializer.save()
-        self.record_audit("document.updated", doc)
+        doc = (
+            Document.objects
+            .select_related("document_type")
+            .prefetch_related("tags", "document_type__metadata_fields")
+            .get(pk=doc.pk)
+        )
+        metadata_edits = diff_metadata_snapshots(before_snapshot, snapshot_document_metadata(doc))
+        audit_changes = {"metadata_edits": metadata_edits} if metadata_edits else None
+        self.record_audit("document.updated", doc, audit_changes)
         return Response(DocumentDetailSerializer(doc, context={"request": request}).data)
+
+    def _require_edit_lock(self, doc, user):
+        """Return a 423 Response if `user` does not hold the document's edit lock,
+        else None. Version-mutating actions (new version, restore) require holding
+        the lock — the same checkout that gates editing the details/file."""
+        holder = doc.edit_lock_holder
+        if holder is not None and holder.id == user.id:
+            return None
+        detail = (
+            f"This document is locked by {holder.get_full_name()}."
+            if holder
+            else "Lock (check out) the document first."
+        )
+        return Response({"detail": detail}, status=status.HTTP_423_LOCKED)
 
     @action(detail=True, methods=["post"], parser_classes=[MultiPartParser])
     def upload_version(self, request, pk=None):
         doc  = self.get_object()
+        lock_block = self._require_edit_lock(doc, request.user)
+        if lock_block:
+            return lock_block
         file = request.FILES.get("file")
         if not file:
             return Response({"detail": "No file provided."}, status=400)
@@ -750,33 +876,33 @@ class DocumentViewSet(AuditMixin, viewsets.ModelViewSet):
             change_summary=request.data.get("change_summary", ""),
             created_by=request.user,
         )
-        file.seek(0)
-        doc.file = file
-        doc.file_name = file.name
-        doc.file_size = file.size
-        guessed_mime, _ = mimetypes.guess_type(file.name)
+        guessed_mime, _ = mimetypes.guess_type(version.file_name)
         incoming_mime = getattr(file, "content_type", "") or guessed_mime or ""
+        new_mime = doc.file_mime_type
         if incoming_mime and incoming_mime != "application/octet-stream":
-            doc.file_mime_type = incoming_mime
-        doc.checksum = checksum
-        doc.current_version = new_version
-        
-        doc.preview_status = ""
+            new_mime = incoming_mime
+
+        # Point the document at the version's stored path. The raw UploadedFile
+        # still carries the client filename (e.g. "report.pdf"), not the storage
+        # key (e.g. "versions/report.pdf") — using it here made current-version
+        # previews 404 while per-version tabs still worked.
         Document.objects.filter(id=doc.id).update(
-            file=doc.file.name,
-            file_name=doc.file_name,
-            file_size=doc.file_size,
-            file_mime_type=doc.file_mime_type,
-            checksum=doc.checksum,
-            current_version=doc.current_version,
+            file=version.file.name,
+            file_name=version.file_name,
+            file_size=version.file_size,
+            file_mime_type=new_mime,
+            checksum=checksum,
+            current_version=new_version,
             preview_pdf="",
             preview_status="",
             updated_at=timezone.now(),
         )
         cache.delete(_preview_error_cache_key(str(doc.id)))
         cache.delete(_preview_start_cache_key(str(doc.id)))
-        
+
+        doc.refresh_from_db()
         self._queue_office_preview(doc)
+        self._queue_office_version_preview(version)
         self.record_audit("document.version_uploaded", doc, {"version": new_version})
 
         from apps.search.indexing import schedule_document_search_pipeline
@@ -801,7 +927,7 @@ class DocumentViewSet(AuditMixin, viewsets.ModelViewSet):
         from types import SimpleNamespace
         from django.core.files.base import ContentFile
         from apps.search.utils import SEARCH_INDEX_EXCEPTIONS
-        from apps.documents.access import document_allows_edit
+        from apps.documents.access import document_allows_form_edit, user_owns_document
         from apps.documents.file_streaming import user_can_edit_document
         from apps.templates_engine.tasks import generate_built_pdf
 
@@ -814,11 +940,22 @@ class DocumentViewSet(AuditMixin, viewsets.ModelViewSet):
                 {"detail": "You do not have permission to edit this document."},
                 status=status.HTTP_403_FORBIDDEN,
             )
-        if not document_allows_edit(doc, user=request.user):
+        if not document_allows_form_edit(doc, user=request.user):
             return Response(
                 {"detail": "This document cannot be edited in its current status."},
                 status=status.HTTP_400_BAD_REQUEST,
             )
+        # Same checkout gate as metadata edits: once locked (or when anyone other
+        # than the uploader edits), the caller must hold the lock.
+        holder = doc.edit_lock_holder
+        lock_required = doc.is_edit_locked or doc.uploaded_by_id != request.user.id
+        if lock_required and (holder is None or holder.id != request.user.id):
+            detail = (
+                f"This document is locked by {holder.get_full_name()}."
+                if holder
+                else "Lock (check out) the document first."
+            )
+            return Response({"detail": detail}, status=status.HTTP_423_LOCKED)
 
         import json
         from apps.documents.form_attachments import (
@@ -864,6 +1001,39 @@ class DocumentViewSet(AuditMixin, viewsets.ModelViewSet):
                 attachments[key] = descriptor
 
         sections = form.get("sections") or []
+
+        # ── Editability enforcement (the "Security" axis) ──────────────────────
+        # A field/section can be marked read-only or "editable only when <process
+        # step / field> matches". At the document's current step, any locked field
+        # must not change — the client disables it, but we re-assert it here so a
+        # tampered request can't slip past. Locked fields are reverted to their
+        # stored value; conditions are evaluated against the STORED values (a user
+        # can't unlock a field within the same request that edits it).
+        from apps.documents.builder_workflow import builder_process_step
+        from apps.templates_engine.conditions import is_editable
+        process_step = builder_process_step(doc)
+        prior_render = descriptors_to_names(prior_values)
+        owns_document = user_owns_document(request.user, doc) or getattr(request.user, "has_admin_access", False)
+        owner_only_conditional_edit = process_step.strip().lower() != "returned"
+        locked_keys = set()
+        for section in sections:
+            section_editable = is_editable(section, prior_render, process_step)
+            if section.get("editableWhen") and owner_only_conditional_edit and not owns_document:
+                section_editable = False
+            for f in section.get("fields", []):
+                key = f.get("key")
+                if not key:
+                    continue
+                field_editable = is_editable(f, prior_render, process_step)
+                if f.get("editableWhen") and owner_only_conditional_edit and not owns_document:
+                    field_editable = False
+                if not (section_editable and field_editable):
+                    locked_keys.add(key)
+        for key in locked_keys:
+            if key in prior_values:
+                values[key] = prior_values[key]
+            else:
+                values.pop(key, None)
 
         # Re-derive picked reference/user labels server-side from their ids.
         values = reconcile_references(values, sections, default_reference_resolver)
@@ -953,6 +1123,9 @@ class DocumentViewSet(AuditMixin, viewsets.ModelViewSet):
     @action(detail=True, methods=["post"])
     def restore_version(self, request, pk=None):
         doc = self.get_object()
+        lock_block = self._require_edit_lock(doc, request.user)
+        if lock_block:
+            return lock_block
         version_id = request.data.get("version_id")
         version = get_object_or_404(DocumentVersion, id=version_id, document=doc)
 
@@ -1471,6 +1644,50 @@ class DocumentViewSet(AuditMixin, viewsets.ModelViewSet):
             "mime_type":   doc.file_mime_type,
         })
 
+    @action(detail=True, methods=["post"])
+    def read_only_token(self, request, pk=None):
+        """
+        Issue a short-lived WebDAV token to open the document in a desktop editor
+        READ-ONLY — no edit lock is taken. The WebDAV layer rejects writes
+        (PUT/LOCK) for read-only tokens, so members without edit rights can open
+        the live file in Word/LibreOffice to view it without changing it.
+        """
+        doc = self.get_object()  # get_queryset already enforces visibility
+        # Opening read-only in a desktop editor is a view action — the WebDAV
+        # layer issues this token with read_only=True and rejects every write
+        # method (PUT/LOCK), so it must gate on VIEW, not DOWNLOAD. Requiring
+        # download here 403'd members who can see a locked doc but lack download.
+        if not user_can_view_document(request.user, doc):
+            return Response({"detail": "View not permitted."}, status=403)
+
+        webdav_token = secrets.token_hex(32)
+        cache.set(
+            f"webdav_edit_token:{webdav_token}",
+            {
+                "user_id": str(request.user.id),
+                "document_id": str(doc.id),
+                "read_only": True,
+            },
+            timeout=3600,
+        )
+
+        api_base = request.build_absolute_uri("/api/v1").rstrip("/")
+        parsed = urlparse(api_base)
+        webdav_path = (
+            f"{parsed.path}/documents/webdav/{doc.id}"
+            f"/{webdav_token}"
+            f"/{urlquote(doc.file_name, safe='')}"
+        )
+        webdav_url = urlunparse(parsed._replace(path=webdav_path, query="", fragment=""))
+
+        return Response({
+            "webdav_url":  webdav_url,
+            "read_only":   True,
+            "doc_id":      str(doc.id),
+            "file_name":   doc.file_name,
+            "mime_type":   doc.file_mime_type,
+        })
+
     def _get_open_script_content(self, filename, open_url):
         safe_filename = filename.replace("'", "\\'")
         return f"""#!/usr/bin/env bash
@@ -1627,6 +1844,12 @@ echo "✓ DocVault LibreOffice integration installed."
         if not doc.release_lock(user=request.user, force=force):
             return Response({"detail": "Lock held by another user."}, status=423)
 
+        # Also drop the in-process WebDAV protocol lock so the next editor can
+        # LOCK immediately instead of waiting for the stale lock to expire —
+        # important for admin force-release of an abandoned checkout.
+        from .webdav import clear_protocol_lock
+        clear_protocol_lock(doc.id)
+
         self.record_audit(AuditEvent.DOCUMENT_EDIT_LOCK_RELEASED, doc)
         return Response({"detail": "Lock released."})
 
@@ -1720,11 +1943,15 @@ echo "✓ DocVault LibreOffice integration installed."
     @action(detail=True, methods=["get"])
     def audit_trail(self, request, pk=None):
         from apps.audit.serializers import AuditLogSerializer
-        from apps.audit.models import AuditLog
+        from apps.audit.models import AuditLog, LOW_SIGNAL_AUDIT_EVENTS
         doc = self.get_object()
+        # Hide low-signal events (views, previews, transient queue/lock states)
+        # that only clutter the per-document trail. The full immutable log is
+        # still available to admins on the system audit page.
         logs = (
             AuditLog.objects
             .filter(object_type="Document", object_id=str(doc.id))
+            .exclude(event__in=LOW_SIGNAL_AUDIT_EVENTS)
             .select_related("actor")
             .order_by("-timestamp")
         )
@@ -1802,6 +2029,8 @@ echo "✓ DocVault LibreOffice integration installed."
                     Document.objects.filter(id=doc.id).update(
                         deleted_at=timezone.now(), deleted_by=request.user, updated_at=timezone.now()
                     )
+                    from apps.search.indexing import queue_deindex_document
+                    queue_deindex_document(str(doc.id))
                     self.record_audit("document.deleted", doc, {"bulk_action": True, "trashed": True})
                 elif act == "restore":
                     if not doc.deleted_at:
@@ -1811,14 +2040,19 @@ echo "✓ DocVault LibreOffice integration installed."
                     Document.objects.filter(id=doc.id).update(
                         deleted_at=None, deleted_by=None, updated_at=timezone.now()
                     )
+                    from apps.search.indexing import queue_index_document
+                    queue_index_document(str(doc.id))
                     self.record_audit("document.restored", doc, {"bulk_action": True})
                 elif act == "purge":
                     if not doc.deleted_at:
                         raise ValueError("Only documents in Trash can be permanently deleted.")
                     if not self._can_manage_trash(doc, request.user):
                         raise ValueError("Not permitted.")
+                    purge_id = str(doc.id)
                     self.record_audit("document.purged", doc, {"bulk_action": True, "reference": doc.reference_number})
                     doc.hard_delete()
+                    from apps.search.indexing import queue_deindex_document
+                    queue_deindex_document(purge_id)
                 results.append({"id": str(doc_id), "success": True})
             except (WorkflowError, ValueError, AttributeError) as exc:
                 results.append({"id": str(doc_id), "success": False, "detail": str(exc)})
@@ -1936,11 +2170,26 @@ echo "✓ DocVault LibreOffice integration installed."
 
     @action(detail=False, methods=["post"], url_path="download_selected")
     def download_selected(self, request):
-        """Bulk-download the selected documents as a single ZIP file."""
+        """
+        Bulk-download selected documents.
+
+        Body:
+          document_ids: list[str]  — required
+          format:       str        — "original" (default) | "pdf" | "merged_pdf"
+
+        Formats:
+          original    → ZIP of original files (existing behaviour)
+          pdf         → ZIP where every file is converted to its PDF representation
+          merged_pdf  → single merged PDF (stitched in selection order)
+        """
         from django.http import HttpResponse
-        from .bundling import collect_document_files, zip_items
+        from .bundling import collect_document_files, collect_document_files_as_pdf, zip_items, stitch_items_to_pdf
 
         doc_ids = request.data.get("document_ids") or []
+        fmt = (request.data.get("format") or "original").strip().lower()
+        if fmt not in ("original", "pdf", "merged_pdf"):
+            fmt = "original"
+
         if not isinstance(doc_ids, list) or not doc_ids:
             return Response({"detail": "No documents selected."}, status=400)
         if len(doc_ids) > 100:
@@ -1952,21 +2201,119 @@ echo "✓ DocVault LibreOffice integration installed."
         order = {str(doc_id): idx for idx, doc_id in enumerate(doc_ids)}
         documents.sort(key=lambda d: order.get(str(d.id), len(order)))
 
-        items, skipped = collect_document_files(documents, request.user)
+        if fmt == "pdf":
+            items, skipped = collect_document_files_as_pdf(documents, request.user)
+        else:
+            items, skipped = collect_document_files(documents, request.user)
+
         if not items:
             return Response(
                 {"detail": "No selected documents could be downloaded.", "skipped": skipped},
                 status=400,
             )
 
+        if fmt == "merged_pdf":
+            pdf_bytes, stitch_skipped = stitch_items_to_pdf(items)
+            skipped.extend(stitch_skipped)
+            if not pdf_bytes:
+                return Response(
+                    {"detail": "Could not produce a merged PDF. Ensure documents have PDF previews.", "skipped": skipped},
+                    status=400,
+                )
+            for item in items:
+                self.record_audit("document.downloaded", item["document"], {"bulk_action": True, "via": "merged_pdf"})
+            response = HttpResponse(pdf_bytes, content_type="application/pdf")
+            response["Content-Disposition"] = 'attachment; filename="documents-merged.pdf"'
+            response["X-Skipped-Count"] = str(len(skipped))
+            return response
+
+        # ZIP download (original or pdf-converted)
         zip_bytes = zip_items(items)
         for item in items:
-            self.record_audit("document.downloaded", item["document"], {"bulk_action": True, "via": "zip"})
+            via = "zip_pdf" if fmt == "pdf" else "zip"
+            self.record_audit("document.downloaded", item["document"], {"bulk_action": True, "via": via})
 
+        filename = "documents-pdf.zip" if fmt == "pdf" else "documents.zip"
         response = HttpResponse(zip_bytes, content_type="application/zip")
-        response["Content-Disposition"] = 'attachment; filename="documents.zip"'
+        response["Content-Disposition"] = f'attachment; filename="{filename}"'
         response["X-Skipped-Count"] = str(len(skipped))
         return response
+
+    @action(detail=True, methods=["get"], url_path="download_as_pdf")
+    def download_as_pdf(self, request, pk=None):
+        """
+        Download a single document as PDF.
+
+        Strategy:
+          - Already a PDF  → stream the original file.
+          - Office doc     → stream the generated preview PDF (if available).
+          - Image          → convert to single-page PDF via PIL.
+          - Other formats  → 400 (no PDF representation).
+        """
+        from django.http import HttpResponse
+
+        doc = self.get_object()
+        if not user_can_download_document(request.user, doc):
+            return Response({"detail": "Download not permitted."}, status=403)
+
+        mime = (doc.file_mime_type or "").lower()
+        filename = doc.file_name or "document"
+
+        # PDFs served directly.
+        if mime == "application/pdf" or filename.lower().endswith(".pdf"):
+            try:
+                from .file_streaming import read_document_bytes
+                raw, content_type, name = read_document_bytes(doc, version=None, use_preview=False)
+            except FileNotFoundError as exc:
+                return Response({"detail": str(exc)}, status=404)
+            stem = filename.rsplit(".", 1)[0] if "." in filename else filename
+            self.record_audit(AuditEvent.DOCUMENT_DOWNLOADED, doc, {"format": "pdf"})
+            response = HttpResponse(raw, content_type="application/pdf")
+            response["Content-Disposition"] = f'attachment; filename="{stem}.pdf"'
+            return response
+
+        # Office documents: use the preview PDF.
+        if doc.is_office_doc() and doc.preview_pdf:
+            try:
+                with doc.preview_pdf.open("rb") as fh:
+                    pdf_bytes = fh.read()
+                stem = filename.rsplit(".", 1)[0] if "." in filename else filename
+                self.record_audit(AuditEvent.DOCUMENT_DOWNLOADED, doc, {"format": "pdf", "via": "preview"})
+                response = HttpResponse(pdf_bytes, content_type="application/pdf")
+                response["Content-Disposition"] = f'attachment; filename="{stem}.pdf"'
+                return response
+            except Exception:
+                return Response(
+                    {"detail": "PDF preview is not ready yet. Try again after preview generation completes."},
+                    status=400,
+                )
+
+        # Images: convert via PIL.
+        if mime.startswith("image/") or filename.lower().endswith((".png", ".jpg", ".jpeg", ".tif", ".tiff", ".bmp", ".gif")):
+            try:
+                import io as _io
+                from PIL import Image
+                from .file_streaming import read_document_bytes
+                raw, _, _ = read_document_bytes(doc, version=None, use_preview=False)
+                img = Image.open(_io.BytesIO(raw))
+                if img.mode not in ("RGB", "L"):
+                    img = img.convert("RGB")
+                out = _io.BytesIO()
+                img.save(out, "PDF")
+                stem = filename.rsplit(".", 1)[0] if "." in filename else filename
+                self.record_audit(AuditEvent.DOCUMENT_DOWNLOADED, doc, {"format": "pdf", "via": "pil"})
+                response = HttpResponse(out.getvalue(), content_type="application/pdf")
+                response["Content-Disposition"] = f'attachment; filename="{stem}.pdf"'
+                return response
+            except Exception:
+                return Response({"detail": "Could not convert this image to PDF."}, status=400)
+
+        # No PDF representation.
+        return Response(
+            {"detail": "This document format cannot be converted to PDF. "
+                       "For Office documents, wait for the preview to finish generating."},
+            status=400,
+        )
 
     @action(detail=False, methods=["post"], url_path="share_selected")
     def share_selected(self, request):

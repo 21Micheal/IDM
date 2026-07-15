@@ -5,16 +5,18 @@
 //  • Executive KPI row with period-over-period trends (/analytics/overview).
 //  • Six cards: SLA breach trend, status distribution, approval turnaround,
 //    department activity, document volume by type, top uploaders.
-//  • Per-card states (skeleton / empty / error+retry) and CSV export.
+//  • Per-card states (skeleton / empty / error+retry) and export (CSV / PNG / SVG).
 //  Access: admins + HOD (department heads).
 
-import { useMemo, useState, useEffect } from "react";
+import { useMemo, useState, useEffect, useRef } from "react";
 import { Link } from "react-router-dom";
+import { toPng, toSvg } from "html-to-image";
 import { useQuery, type UseQueryResult } from "@tanstack/react-query";
 import { api, departmentsAPI, documentTypesAPI, normalizeListResponse } from "@/services/api";
 import { QUERY_FIVE_MIN_STALE } from "@/lib/reactQueryDefaults";
 import { exportCsv } from "@/lib/exportCsv";
 import { StatCard } from "@/components/dashboard/StatCard";
+import CustomListbox from "@/components/ui/CustomListbox";
 import type { DocumentType } from "@/types";
 import {
   BarChart, Bar, AreaChart, Area, PieChart, Pie,
@@ -24,6 +26,7 @@ import {
 import {
   AlertTriangle, Clock, FileBarChart, FileText, CheckCircle2, Hourglass,
   Users, Building2, PieChart as PieIcon, Download, Loader2, RefreshCw, Inbox, ShieldCheck,
+  Image as ImageIcon, Code,
 } from "lucide-react";
 
 /* ── Types ─────────────────────────────────────────────────────────────────── */
@@ -101,7 +104,7 @@ function ChartTooltip({ active, payload, label, formatter }: {
 }) {
   if (!active || !payload?.length) return null;
   return (
-    <div className="rounded-xl border border-border bg-card px-3 py-2.5 text-xs shadow-lg" style={{ minWidth: 150 }}>
+    <div className="border border-[#C8CDD2] bg-white px-3 py-2.5 text-xs shadow-lg" style={{ minWidth: 150 }}>
       {label && <p className="mb-1.5 border-b border-border pb-1 font-semibold text-foreground">{label}</p>}
       {payload.map((p, i) => (
         <div key={i} className="flex items-center justify-between gap-4 py-0.5">
@@ -112,6 +115,96 @@ function ChartTooltip({ active, payload, label, formatter }: {
           <span className="font-semibold text-foreground">{formatter ? formatter(p.name, p.value) : p.value}</span>
         </div>
       ))}
+    </div>
+  );
+}
+
+/* Export dropdown: chart data (CSV) plus the rendered chart as a raster (PNG)
+   or vector (SVG) image. The image is snapshotted from the live card body, so
+   it includes legends, chips and labels — not just the bare <svg>. */
+const IMG_EXPORT_OPTS = { backgroundColor: "#ffffff", pixelRatio: 2, cacheBust: true };
+
+function downloadDataUrl(dataUrl: string, filename: string) {
+  const anchor = document.createElement("a");
+  anchor.href = dataUrl;
+  anchor.download = filename;
+  document.body.appendChild(anchor);
+  anchor.click();
+  anchor.remove();
+}
+
+function ExportMenu({ name, captureRef, getRows, disabled }: {
+  name: string;
+  captureRef: React.RefObject<HTMLDivElement>;
+  getRows?: () => Array<Record<string, unknown>>;
+  disabled?: boolean;
+}) {
+  const [open, setOpen] = useState(false);
+  const [busy, setBusy] = useState(false);
+  const wrapRef = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    if (!open) return;
+    const onDoc = (e: MouseEvent) => {
+      if (wrapRef.current && !wrapRef.current.contains(e.target as Node)) setOpen(false);
+    };
+    document.addEventListener("mousedown", onDoc);
+    return () => document.removeEventListener("mousedown", onDoc);
+  }, [open]);
+
+  const rows = getRows?.() ?? [];
+
+  const exportImage = async (kind: "png" | "svg") => {
+    const node = captureRef.current;
+    if (!node) return;
+    setBusy(true);
+    try {
+      const dataUrl =
+        kind === "png" ? await toPng(node, IMG_EXPORT_OPTS) : await toSvg(node, IMG_EXPORT_OPTS);
+      downloadDataUrl(dataUrl, `${name}.${kind}`);
+    } catch (err) {
+      console.error("Chart image export failed", err);
+      window.alert("Sorry — exporting the chart image failed. Please try again.");
+    } finally {
+      setBusy(false);
+      setOpen(false);
+    }
+  };
+
+  const itemCls =
+    "flex w-full items-center gap-2 px-3 py-2 text-left text-xs text-[#1F2933] transition hover:bg-[#F0F5F8] disabled:cursor-not-allowed disabled:opacity-40";
+
+  return (
+    <div ref={wrapRef} className="relative">
+      <button
+        type="button"
+        onClick={() => setOpen((v) => !v)}
+        disabled={disabled || busy}
+        title="Export chart"
+        className="border border-white/30 p-1.5 text-white/75 transition hover:bg-white/10 disabled:opacity-40"
+      >
+        {busy ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Download className="h-3.5 w-3.5" />}
+      </button>
+      {open && (
+        <div className="absolute right-0 z-20 mt-1 w-44 border border-[#C8CDD2] bg-white py-1 shadow-lg">
+          {getRows && (
+            <button
+              type="button"
+              disabled={rows.length === 0}
+              className={itemCls}
+              onClick={() => { exportCsv(name, rows); setOpen(false); }}
+            >
+              <FileText className="h-3.5 w-3.5 text-[#287EAD]" /> CSV (data)
+            </button>
+          )}
+          <button type="button" className={itemCls} onClick={() => exportImage("png")}>
+            <ImageIcon className="h-3.5 w-3.5 text-[#287EAD]" /> PNG image
+          </button>
+          <button type="button" className={itemCls} onClick={() => exportImage("svg")}>
+            <Code className="h-3.5 w-3.5 text-[#287EAD]" /> SVG (vector)
+          </button>
+        </div>
+      )}
     </div>
   );
 }
@@ -129,51 +222,47 @@ function ChartCard<T>({
   children: (data: T) => React.ReactNode;
 }) {
   const { data, isLoading, isError, refetch, isFetching } = query;
-  const rows = data && exportRows ? exportRows(data) : [];
   const isEmpty = !isLoading && !isError && Array.isArray(data) && (data as any[]).length === 0;
+  const bodyRef = useRef<HTMLDivElement>(null);
 
   return (
-    <div className="flex flex-col overflow-hidden rounded-xl border border-border bg-card" style={{ boxShadow: "var(--shadow-card)" }}>
-      <div className="flex flex-wrap items-start justify-between gap-3 border-b border-border px-5 py-4">
-        <div className="flex items-center gap-3">
-          <div className="flex h-9 w-9 shrink-0 items-center justify-center rounded-lg text-white" style={{ background: BRAND.primary }}>
-            <Icon className="h-4 w-4" />
-          </div>
+    <div className="flex flex-col overflow-hidden border border-[#C8CDD2] bg-white">
+      {/* BI-style blue header strip */}
+      <div className="flex flex-wrap items-center justify-between gap-2 bg-[#287EAD] px-4 py-2.5">
+        <div className="flex items-center gap-2.5">
+          <Icon className="h-4 w-4 text-white/80 shrink-0" />
           <div>
-            <h3 className="text-sm font-semibold text-foreground">{title}</h3>
-            <p className="text-xs text-muted-foreground">{subtitle}</p>
+            <h3 className="text-sm font-semibold text-white leading-tight">{title}</h3>
+            <p className="text-[11px] text-white/65 leading-tight">{subtitle}</p>
           </div>
         </div>
         <div className="flex items-center gap-2">
           {headerExtra}
-          {isFetching && !isLoading && <Loader2 className="h-3.5 w-3.5 animate-spin text-muted-foreground" />}
-          {exportRows && exportName && (
-            <button
-              type="button"
-              onClick={() => data && exportCsv(exportName, exportRows(data))}
-              disabled={!data || rows.length === 0}
-              title="Export CSV"
-              className="rounded-md border border-border bg-card p-1.5 text-muted-foreground transition hover:text-foreground disabled:opacity-40"
-            >
-              <Download className="h-3.5 w-3.5" />
-            </button>
+          {isFetching && !isLoading && <Loader2 className="h-3.5 w-3.5 animate-spin text-white/70" />}
+          {exportName && (
+            <ExportMenu
+              name={exportName}
+              captureRef={bodyRef}
+              getRows={data && exportRows ? () => exportRows(data) : undefined}
+              disabled={isLoading || isError || isEmpty || !data}
+            />
           )}
         </div>
       </div>
 
-      <div className="flex-1 p-5">
+      <div ref={bodyRef} className="flex-1 p-4">
         {isLoading ? (
-          <div className="h-[260px] animate-pulse rounded-lg bg-muted/50" />
+          <div className="h-[260px] animate-pulse bg-[#F5F7F8]" />
         ) : isError ? (
-          <div className="flex h-[260px] flex-col items-center justify-center gap-3 text-sm text-muted-foreground">
-            <AlertTriangle className="h-6 w-6 text-destructive" />
+          <div className="flex h-[260px] flex-col items-center justify-center gap-3 text-sm text-[#5E6870]">
+            <AlertTriangle className="h-6 w-6 text-red-500" />
             Could not load this chart.
-            <button onClick={() => refetch()} className="inline-flex items-center gap-1.5 rounded-md border border-border px-3 py-1.5 text-xs font-semibold text-foreground hover:bg-muted">
+            <button onClick={() => refetch()} className="inline-flex items-center gap-1.5 border border-[#C8CDD2] px-3 py-1.5 text-xs font-semibold text-[#1F2933] hover:bg-[#F5F7F8]">
               <RefreshCw className="h-3.5 w-3.5" /> Retry
             </button>
           </div>
         ) : isEmpty ? (
-          <div className="flex h-[260px] flex-col items-center justify-center gap-2 text-sm text-muted-foreground">
+          <div className="flex h-[260px] flex-col items-center justify-center gap-2 text-sm text-[#5E6870]">
             <Inbox className="h-7 w-7 opacity-40" />
             No data for the selected filters.
           </div>
@@ -205,7 +294,7 @@ function KpiRow({ query }: { query: UseQueryResult<Overview> }) {
   if (isLoading) {
     return (
       <div className="grid grid-cols-2 gap-3 lg:grid-cols-3 xl:grid-cols-6">
-        {Array.from({ length: 6 }).map((_, i) => <div key={i} className="h-24 animate-pulse rounded-xl bg-card" />)}
+        {Array.from({ length: 6 }).map((_, i) => <div key={i} className="h-24 animate-pulse bg-[#2A3040]" />)}
       </div>
     );
   }
@@ -356,7 +445,7 @@ function VolumeChart({ data }: { data: VolumeItem[] }) {
     <>
       <div className="mb-4 flex flex-wrap gap-2">
         {docTypes.map((t, i) => (
-          <div key={t} className="flex items-center gap-1.5 rounded-full border border-border bg-card px-2.5 py-1 text-[11px] font-semibold">
+          <div key={t} className="flex items-center gap-1.5 border border-[#C8CDD2] bg-[#F5F7F8] px-2.5 py-1 text-[11px] font-semibold">
             <span className="inline-block h-2 w-2 rounded-full" style={{ background: colorFor(t, i) }} />
             <span className="text-muted-foreground">{t}</span>
             <span className="text-foreground">{totals[t]}</span>
@@ -407,8 +496,8 @@ function UploadersList({ data }: { data: UploaderItem[] }) {
                 <span className="font-medium" style={{ color: approvedPct >= 80 ? BRAND.teal : BRAND.warning }}>{approvedPct}% approved</span>
                 {p.rejected > 0 && <><span className="text-muted-foreground">·</span><span className="font-medium" style={{ color: BRAND.danger }}>{p.rejected} rejected</span></>}
               </div>
-              <div className="mt-1.5 h-1.5 w-full overflow-hidden rounded-full bg-muted">
-                <div className="h-full rounded-full transition-all duration-500" style={{ width: `${barWidth}%`, background: BRAND.accent, opacity: 0.75 }} />
+              <div className="mt-1.5 h-1 w-full overflow-hidden bg-[#E3E7EA]">
+                <div className="h-full transition-all duration-500" style={{ width: `${barWidth}%`, background: BRAND.accent, opacity: 0.85 }} />
               </div>
             </div>
           </div>
@@ -426,25 +515,32 @@ function FilterBar({ filters, onChange, departments, docTypes }: {
   docTypes: DocumentType[];
 }) {
   const periods: Period[] = [3, 6, 12];
-  const selectCls = "h-9 rounded-lg border border-border bg-card px-3 text-sm text-foreground outline-none focus:border-primary";
+  const selectCls = "h-8 border border-[#AEB5BB] bg-white px-2.5 text-sm text-[#1F2933] outline-none focus:border-[#287EAD]";
   return (
-    <div className="flex flex-wrap items-center gap-3">
-      <div className="inline-flex rounded-lg border border-border bg-muted/40 p-0.5">
+    <div className="flex flex-wrap items-center gap-2">
+      {/* Period toggle */}
+      <div className="inline-flex border border-[#AEB5BB] bg-white">
         {periods.map((p) => (
           <button key={p} type="button" onClick={() => onChange({ ...filters, months: p })}
-            className={`rounded-md px-3 py-1 text-[11px] font-semibold uppercase tracking-wide transition-all ${filters.months === p ? "bg-card text-foreground shadow-sm" : "text-muted-foreground hover:text-foreground"}`}>
+            className={`px-3 py-1 text-[11px] font-semibold uppercase tracking-wide transition-colors ${filters.months === p ? "bg-[#287EAD] text-white" : "text-[#5E6870] hover:text-[#1F2933]"}`}>
             {p}m
           </button>
         ))}
       </div>
-      <select value={filters.department} onChange={(e) => onChange({ ...filters, department: e.target.value })} className={selectCls}>
-        <option value="">All departments</option>
-        {departments.map((d) => <option key={d.id} value={d.id}>{d.name}</option>)}
-      </select>
-      <select value={filters.document_type} onChange={(e) => onChange({ ...filters, document_type: e.target.value })} className={selectCls}>
-        <option value="">All document types</option>
-        {docTypes.map((t) => <option key={t.id} value={t.id}>{t.name}</option>)}
-      </select>
+      <CustomListbox
+        value={filters.department}
+        onChange={(v) => onChange({ ...filters, department: v })}
+        options={[{ value: "", label: "All departments" }, ...departments.map((d) => ({ value: d.id, label: d.name }))]}
+        buttonClassName={selectCls}
+        ariaLabel="Analytics department filter"
+      />
+      <CustomListbox
+        value={filters.document_type}
+        onChange={(v) => onChange({ ...filters, document_type: v })}
+        options={[{ value: "", label: "All document types" }, ...docTypes.map((t) => ({ value: t.id, label: t.name }))]}
+        buttonClassName={selectCls}
+        ariaLabel="Analytics document type filter"
+      />
     </div>
   );
 }
@@ -474,48 +570,59 @@ export default function AnalyticsDashboardPage() {
   const uploaders = useAnalytics<UploaderItem[]>("uploaders", "top-uploaders", filters);
 
   return (
-    <div className="-m-6 min-h-[calc(100vh-3.5rem)] bg-[#EDEDED] text-[#1F2933]">
+    <div className="-m-6 min-h-[calc(100vh-3.5rem)] bg-[#1A1F26] text-[#1F2933]">
+      {/* Page header */}
       <div className="flex min-h-[69px] flex-col gap-3 bg-[#287EAD] px-5 py-3 text-white lg:flex-row lg:items-center lg:justify-between">
         <div>
-          <p className="text-[11px] font-semibold uppercase tracking-[0.2em] text-white/70">Manager workspace</p>
-          <h1 className="mt-1 text-xl font-semibold tracking-tight">Analytics</h1>
+          <p className="text-[11px] font-semibold uppercase tracking-[0.2em] text-white/65">Manager workspace</p>
+          <h1 className="mt-0.5 text-xl font-semibold tracking-tight">Analytics</h1>
         </div>
-        <Link to="/" className="inline-flex h-9 items-center justify-center border border-white/20 bg-[#206D99] px-4 text-sm font-semibold text-white hover:bg-[#1B5F86]">
-          Back to dashboard
-        </Link>
+        <div className="flex items-center gap-3">
+          <FilterBar filters={filters} onChange={setFilters} departments={departments} docTypes={docTypes} />
+          <Link to="/" className="inline-flex h-8 items-center justify-center border border-white/20 bg-white/10 px-4 text-sm font-semibold text-white hover:bg-white/20">
+            ← Dashboard
+          </Link>
+        </div>
       </div>
 
-      <div className="space-y-4 p-4 pr-8">
-        <FilterBar filters={filters} onChange={setFilters} departments={departments} docTypes={docTypes} />
-
+      {/* Sub-header: KPI strip on dark canvas */}
+      <div className="border-b border-[#2D3440] bg-[#20262D] px-5 py-3">
         <KpiRow query={overview} />
+      </div>
 
-        <div className="grid grid-cols-1 gap-4 xl:grid-cols-2">
+      {/* Chart grid */}
+      <div className="grid grid-cols-1 gap-px bg-[#2D3440] p-px xl:grid-cols-2">
+        <div className="bg-white">
           <ChartCard icon={AlertTriangle} title="SLA Breach Rate" subtitle="% of completed approvals that exceeded SLA per month"
             query={sla} exportName="sla-breach-rate" exportRows={(d) => d as any}>
             {(d) => <SlaBreachChart data={d} />}
           </ChartCard>
-
+        </div>
+        <div className="bg-white">
           <ChartCard icon={PieIcon} title="Status Distribution" subtitle="Documents by status in the selected period"
             query={status} exportName="status-distribution" exportRows={(d) => d as any}>
             {(d) => <StatusDonut data={d} />}
           </ChartCard>
-
+        </div>
+        <div className="bg-white">
           <ChartCard icon={Clock} title="Approval Turnaround" subtitle="Average hours per workflow step vs SLA target"
             query={turnaround} exportName="approval-turnaround" exportRows={(d) => d as any}>
             {(d) => <TurnaroundChart data={d} />}
           </ChartCard>
-
+        </div>
+        <div className="bg-white">
           <ChartCard icon={Building2} title="Department Activity" subtitle="Approvals, pending and rejections by department"
             query={dept} exportName="department-activity" exportRows={(d) => d as any}>
             {(d) => <DepartmentChart data={d} />}
           </ChartCard>
-
+        </div>
+        <div className="bg-white">
           <ChartCard icon={FileBarChart} title="Document Volume by Type" subtitle="Monthly upload breakdown across categories"
             query={volume} exportName="document-volume" exportRows={(d) => d as any}>
             {(d) => <VolumeChart data={d} />}
           </ChartCard>
-
+        </div>
+        <div className="bg-white">
           <ChartCard icon={Users} title="Top Uploaders" subtitle="Staff ranked by submissions this period"
             query={uploaders} exportName="top-uploaders" exportRows={(d) => d as any}>
             {(d) => <UploadersList data={d} />}

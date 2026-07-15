@@ -18,11 +18,14 @@
  */
 
 import { useState } from "react";
+import { extractApiError } from "@/lib/apiError";
 import { useNavigate } from "react-router-dom";
 import { useMutation, useQueryClient } from "@tanstack/react-query";
 import { templatesAPI } from "@/services/api";
 import { requiredFieldLabels } from "@/components/templates/TemplateForm";
+import { useAuthStore } from "@/store/authStore";
 import TemplateForm from "@/components/templates/TemplateForm";
+import BudgetBanner from "@/components/templates/BudgetBanner";
 import { collectFormAttachments } from "@/components/templates/formAttachments";
 import { toast } from "@/components/ui/vault-toast";
 import { X, Loader2, CheckCircle, FileText, LayoutTemplate, Paperclip } from "lucide-react";
@@ -37,6 +40,7 @@ type DocumentTemplateOption = {
   document_type?: string;
   document_type_id?: string;
   sections?: unknown[];
+  sunsystems?: { budget?: Record<string, unknown>; journal?: Record<string, unknown> } | null;
 };
 
 type Props = {
@@ -59,6 +63,7 @@ export default function BuiltTemplateFormModal({
 }: Props) {
   const navigate = useNavigate();
   const queryClient = useQueryClient();
+  const currentUser = useAuthStore((s) => s.user);
 
   // Prefer whatever the user typed on the upload page, fall back to template name
   const [title, setTitle] = useState(
@@ -105,8 +110,7 @@ export default function BuiltTemplateFormModal({
     },
     onError: (err: any) => {
       setUploadingFiles(false);
-      const msg = err?.response?.data?.detail || err?.response?.data?.values || "Could not create document.";
-      toast.error(Array.isArray(msg) ? msg.join(", ") : String(msg));
+      toast.error(extractApiError(err, "Could not create document."));
     },
   });
 
@@ -118,7 +122,10 @@ export default function BuiltTemplateFormModal({
     // Validate required fields — File fields become filename placeholders so a
     // picked file counts as filled.
     const { jsonValues } = collectFormAttachments(values);
-    const missing = requiredFieldLabels(template.sections ?? [], jsonValues);
+    const missing = requiredFieldLabels(template.sections ?? [], jsonValues, {
+      groupNames: currentUser?.group_names ?? [],
+      isAdmin: Boolean(currentUser?.has_admin_access || currentUser?.is_staff),
+    });
     if (missing.length) {
       toast.error(`Please fill in: ${missing.join(", ")}`);
       return;
@@ -202,11 +209,22 @@ export default function BuiltTemplateFormModal({
             </p>
           </div>
         ) : (
-          <TemplateForm
-            sections={template.sections ?? []}
-            values={values}
-            onChange={(key, val) => setValues((prev) => ({ ...prev, [key]: val }))}
-          />
+          <div className="space-y-4">
+            {Boolean((template.sunsystems?.budget as any)?.enabled) && (
+              <BudgetBanner
+                values={values}
+                templateId={template.id}
+                mapping={template.sunsystems?.budget ?? null}
+                sections={template.sections ?? []}
+                enabled
+              />
+            )}
+            <TemplateForm
+              sections={template.sections ?? []}
+              values={values}
+              onChange={(key, val) => setValues((prev) => ({ ...prev, [key]: val }))}
+            />
+          </div>
         )}
       </div>
 

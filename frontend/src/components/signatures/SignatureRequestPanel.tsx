@@ -4,12 +4,13 @@
  * Decline; the requester sees progress and can Cancel; others see who's pending.
  */
 import { useState } from "react";
+import { extractApiError } from "@/lib/apiError";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { signatureRequestsAPI } from "@/services/api";
 import { toast } from "@/components/ui/vault-toast";
 import { CheckCircle2, Clock, XCircle, Loader2, FileSignature, X } from "lucide-react";
 import clsx from "clsx";
-import SignaturePlacementModal, { type SignaturePlacement } from "./SignaturePlacementModal";
+import SignaturePlacementModal, { type SignaturePlacementResult } from "./SignaturePlacementModal";
 
 interface Signer {
   id: string;
@@ -60,22 +61,24 @@ export default function SignatureRequestPanel({ documentId }: { documentId: stri
     qc.invalidateQueries({ queryKey: ["signature-request", documentId] });
     qc.invalidateQueries({ queryKey: ["document", documentId] });
     qc.invalidateQueries({ queryKey: ["notifications"] });
+    // Refresh the "Awaiting my signature" list + nav badge (count) after signing.
+    qc.invalidateQueries({ queryKey: ["signature-requests"] });
   };
 
   const signMutation = useMutation({
-    mutationFn: (placement: SignaturePlacement) => signatureRequestsAPI.sign(req!.id, placement),
+    mutationFn: (result: SignaturePlacementResult) => signatureRequestsAPI.sign(req!.id, result),
     onSuccess: () => { toast.success("Document signed"); setShowSign(false); refresh(); },
-    onError: (e: any) => toast.error(e?.response?.data?.detail ?? "Could not sign"),
+    onError: (e: any) => toast.error(extractApiError(e, "Could not sign")),
   });
   const declineMutation = useMutation({
     mutationFn: () => signatureRequestsAPI.decline(req!.id, reason.trim()),
     onSuccess: () => { toast.success("Signature declined"); setDeclining(false); setReason(""); refresh(); },
-    onError: (e: any) => toast.error(e?.response?.data?.detail ?? "Could not decline"),
+    onError: (e: any) => toast.error(extractApiError(e, "Could not decline")),
   });
   const cancelMutation = useMutation({
     mutationFn: () => signatureRequestsAPI.cancel(req!.id),
     onSuccess: () => { toast.success("Request cancelled"); refresh(); },
-    onError: (e: any) => toast.error(e?.response?.data?.detail ?? "Could not cancel"),
+    onError: (e: any) => toast.error(extractApiError(e, "Could not cancel")),
   });
 
   if (!req) return null;

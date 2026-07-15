@@ -1,5 +1,6 @@
 // src/components/profile/SignaturePanel.tsx
 import { useEffect, useMemo, useRef, useState } from "react";
+import { extractApiError } from "@/lib/apiError";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import {
   FileSignature, PenLine, Type as TypeIcon, Upload, Undo2,
@@ -302,7 +303,7 @@ export default function SignaturePanel() {
       setUploadedFile(null); setUploadedPreview(null); commitStrokes([]);
     },
     onError: (err: any) =>
-      toast.error(err?.response?.data?.detail || err?.message || "Failed to save signature"),
+      toast.error(extractApiError(err, err?.message || "Failed to save signature")),
   });
 
   const deleteMutation = useMutation({
@@ -311,7 +312,7 @@ export default function SignaturePanel() {
       toast.success("Signature removed");
       qc.invalidateQueries({ queryKey: ["profile-signature"] });
     },
-    onError: () => toast.error("Failed to remove signature"),
+    onError: (err) => toast.error(extractApiError(err, "Failed to remove signature")),
   });
 
   const canSave = useMemo(() => {

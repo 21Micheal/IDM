@@ -6,6 +6,7 @@ import { notificationsAPI, normalizeListResponse } from "@/services/api";
 import type { Notification } from "@/types";
 import { NotificationList, inferNotificationPriority } from "@/components/notifications/notifications-list";
 import clsx from "clsx";
+import { WorkspaceCommandBar } from "@/components/shared/WorkspaceCommandBar";
 
 type Filter = "unread" | "all" | "urgent";
 const TASK_NOTIFICATION_TYPES = new Set(["task_assigned", "task_sla_warning", "task_overdue"]);
@@ -63,22 +64,10 @@ export default function NotificationsPage() {
   ];
 
   return (
-    <div className="-m-6 min-h-[calc(100vh-3.5rem)] bg-[#EDEDED]">
-      <div className="border-b border-[#206D99] bg-[#287EAD] px-6 py-4 text-white">
-        <div className="flex flex-col gap-3 lg:flex-row lg:items-center lg:justify-between">
-          <div className="flex items-center gap-3">
-            <div className="flex h-10 w-10 items-center justify-center border border-white/25 bg-white/10">
-              <Bell className="h-5 w-5 text-white" />
-            </div>
-            <div>
-              <h1 className="text-xl font-semibold">Notifications</h1>
-              <p className="mt-0.5 text-sm text-white/75">
-                Document updates, shared items, and operational alerts.
-              </p>
-            </div>
-          </div>
-
-          <div className="flex flex-wrap items-center gap-2">
+    <div className="flex h-full flex-col bg-[#EDEDED]">
+      <WorkspaceCommandBar
+        actions={
+          <>
             <div className="flex border border-white/25 bg-white/10">
               {filters.map((item) => (
                 <button
@@ -116,11 +105,21 @@ export default function NotificationsPage() {
               )}
               Mark all read
             </button>
-          </div>
+          </>
+        }
+      >
+        <div className="flex h-10 w-10 items-center justify-center border border-white/25 bg-white/10">
+          <Bell className="h-5 w-5 text-white" />
         </div>
-      </div>
+        <div>
+          <h1 className="text-xl font-semibold">Notifications</h1>
+          <p className="mt-0.5 text-sm text-white/75">
+            Document updates, shared items, and operational alerts.
+          </p>
+        </div>
+      </WorkspaceCommandBar>
 
-      <div className="p-4 pr-8">
+      <div className="scrollbar-minimal min-h-0 flex-1 overflow-y-auto p-5 pr-0">
         <NotificationList
           notifications={visibleNotifications}
           isLoading={isLoading}

@@ -1,4 +1,8 @@
-import { useState, useCallback, useEffect, useMemo, useRef, type MouseEvent, type ReactNode } from "react";
+import { useState, useCallback, useEffect, useMemo, useRef, lazy, Suspense, type MouseEvent, type ReactNode } from "react";
+import { useAuthStore } from "@/store/authStore";
+
+// The PDF editor pulls in pdf-lib + pdfjs, so load it only when actually opened.
+const PdfEditor = lazy(() => import("@/components/pdf-editor"));
 import { useLocation, useNavigate } from "react-router-dom";
 import { useDropzone, type FileRejection } from "react-dropzone";
 import {
@@ -13,22 +17,26 @@ import {
   type Path,
   type UseFormRegister,
 } from "react-hook-form";
-import { documentsAPI, documentTypesAPI, normalizeListResponse, templatesAPI } from "@/services/api";
+import { documentsAPI, documentTypesAPI, normalizeListResponse, templatesAPI, profileAPI } from "@/services/api";
 import {
   Upload, File, X, Loader2, ArrowRight, CheckCircle, Plus, Lock,
   Info, ScanLine, Sparkles, AlertCircle, ChevronRight, ShieldAlert,
-  Cpu, List, FileText, Tags, LayoutTemplate, Wand2,
+  Cpu, List, FileText, Tags, LayoutTemplate, Wand2, Pencil,
 } from "lucide-react";
 import { toast } from "@/components/ui/vault-toast";
 import type { DocumentType, MetadataField } from "@/types";
 import clsx from "clsx";
 import { QUERY_FIVE_MIN_STALE } from "@/lib/reactQueryDefaults";
+import { extractApiError } from "@/lib/apiError";
 import { deriveDocumentTypeConfig } from "@/lib/documentTypeConfig";
 import { applyOcrToFields, sanitizeOcrFields, type OcrFields } from "@/lib/ocrFieldMatcher";
 import BulkScanPage from "@/pages/BulkScanPage";
 import TemplatePreview from "@/components/templates/TemplatePreview";
 import TemplateForm from "@/components/templates/TemplateForm";
 import BuiltTemplateFormModal from "@/components/templates/BuiltTemplateFormModal";
+import { resolveSource, type ReferenceValue } from "@/components/templates/referenceSources";
+import { WorkspaceCommandBar } from "@/components/shared/WorkspaceCommandBar";
+import CustomListbox from "@/components/ui/CustomListbox";
 
 // ── Types ─────────────────────────────────────────────────────────────────────
 
@@ -41,11 +49,17 @@ type DocumentTemplateOption = {
   name: string;
   description?: string;
   type: "built" | "uploaded";
+  /** Sub-kind for type="built": "form" (interactive) vs "document" (designer layout). */
+  kind?: "form" | "document";
   document_type?: string;
   document_type_id?: string;
   file_name?: string;
   placeholders?: string[];
   sections?: unknown[];
+  /** Designer ("document") layout — `references` drives the fill-time document pickers. */
+  design?: { references?: Array<{ key: string; label: string }> };
+  /** SunSystems integration mapping (budget check / journal posting). */
+  sunsystems?: { budget?: Record<string, unknown>; journal?: Record<string, unknown> } | null;
 };
 
 type UploadFormValues = {
@@ -713,6 +727,70 @@ function InforFieldRow({
   );
 }
 
+// Picker for a designer template's document-reference field: search and select a
+// related document; the picked {id,label,source} is pulled through on create.
+function DocumentReferencePicker({ label, value, onChange }: {
+  label: string;
+  value?: ReferenceValue;
+  onChange: (v: ReferenceValue | undefined) => void;
+}) {
+  const [q, setQ] = useState("");
+  const [open, setOpen] = useState(false);
+  const [options, setOptions] = useState<{ id: string; label: string }[]>([]);
+  const [loading, setLoading] = useState(false);
+  const source = resolveSource("documents");
+
+  useEffect(() => {
+    if (!open) return;
+    let cancelled = false;
+    setLoading(true);
+    const t = setTimeout(async () => {
+      try {
+        const opts = source ? await source.fetch(q) : [];
+        if (!cancelled) setOptions(opts);
+      } catch {
+        if (!cancelled) setOptions([]);
+      } finally {
+        if (!cancelled) setLoading(false);
+      }
+    }, 250);
+    return () => { cancelled = true; clearTimeout(t); };
+  }, [q, open, source]);
+
+  return (
+    <div className="relative">
+      <label className="mb-1.5 block text-xs font-semibold text-foreground">{label}</label>
+      {value ? (
+        <div className="flex items-center justify-between gap-2 rounded border border-[#287EAD]/30 bg-[#EEF6FB] px-3 py-2 text-sm">
+          <span className="truncate text-[#1F2933]">{value.label}</span>
+          <button type="button" onClick={() => onChange(undefined)} className="shrink-0 text-xs font-semibold text-[#5E6870] hover:text-red-600">Change</button>
+        </div>
+      ) : (
+        <>
+          <input
+            value={q}
+            onFocus={() => setOpen(true)}
+            onChange={(e) => { setQ(e.target.value); setOpen(true); }}
+            placeholder="Search documents…"
+            className="input w-full"
+          />
+          {open && (
+            <div className="absolute z-30 mt-1 max-h-56 w-full overflow-y-auto rounded border border-[#C8CDD2] bg-white shadow-lg">
+              {loading && <p className="px-3 py-2 text-xs text-[#8C969E]">Searching…</p>}
+              {!loading && options.length === 0 && <p className="px-3 py-2 text-xs text-[#8C969E]">No matching documents</p>}
+              {options.map((o) => (
+                <button key={o.id} type="button"
+                        onClick={() => { onChange({ id: o.id, label: o.label, source: "documents" }); setOpen(false); setQ(""); }}
+                        className="block w-full truncate px-3 py-2 text-left text-sm hover:bg-[#EEF6FB]">{o.label}</button>
+              ))}
+            </div>
+          )}
+        </>
+      )}
+    </div>
+  );
+}
+
 function TemplateFillSection({ template, register, values, onChange }: {
   template: DocumentTemplateOption;
   register: UseFormRegister<UploadFormValues>;
@@ -813,18 +891,33 @@ function getCapturePreviewKind(file: File | null | undefined): CapturePreviewKin
   return "other";
 }
 
+// Office / HTML documents the editor can open by converting to PDF first.
+const OFFICE_EDIT_EXT = /\.(docx?|docm|dotx?|rtf|odt|xlsx?|xlsm|xlsb|ods|csv|pptx?|pptm|ppsx?|odp|html?|txt)$/i;
+function isOfficeEditable(file: File | null | undefined): boolean {
+  if (!file) return false;
+  return OFFICE_EDIT_EXT.test(file.name)
+    || /(officedocument|opendocument|msword|ms-excel|ms-powerpoint|text\/html)/i.test(file.type);
+}
+function isHtmlFile(file: File): boolean {
+  return /\.html?$/i.test(file.name) || file.type === "text/html";
+}
+
 function CapturePreviewPane({
   file,
   previewUrl,
   stateLabel,
   progress,
   compact = false,
+  onEditPdf,
+  editLabel = "Edit PDF",
 }: {
   file: File | null;
   previewUrl: string | null;
   stateLabel?: string;
   progress?: number;
   compact?: boolean;
+  onEditPdf?: () => void;
+  editLabel?: string;
 }) {
   const kind = getCapturePreviewKind(file);
   const previewHeight = compact ? COMPACT_PREVIEW_HEIGHT : PREVIEW_HEIGHT;
@@ -838,11 +931,23 @@ function CapturePreviewPane({
           <p className="text-sm font-bold text-[#1F2933]">Document preview</p>
           <p className="truncate text-xs text-[#5E6870]">{file?.name || "No file selected"}</p>
         </div>
-        {stateLabel && (
-          <span className="shrink-0 border border-[#C8CDD2] bg-white px-2 py-1 text-[11px] font-semibold text-[#5E6870]">
-            {stateLabel}
-          </span>
-        )}
+        <div className="flex shrink-0 items-center gap-2">
+          {onEditPdf && (
+            <button
+              type="button"
+              onClick={onEditPdf}
+              className="inline-flex items-center gap-1.5 border border-[#287EAD] bg-white px-2.5 py-1 text-[11px] font-semibold text-[#287EAD] hover:bg-[#EEF6FB]"
+            >
+              <Pencil className="h-3.5 w-3.5" />
+              {editLabel}
+            </button>
+          )}
+          {stateLabel && (
+            <span className="border border-[#C8CDD2] bg-white px-2 py-1 text-[11px] font-semibold text-[#5E6870]">
+              {stateLabel}
+            </span>
+          )}
+        </div>
       </div>
 
       {progress !== undefined && progress > 0 && (
@@ -891,7 +996,14 @@ export default function UploadPage({ scanOnly = false }: UploadPageProps) {
   const location     = useLocation();
   const queryClient  = useQueryClient();
 
+  const user = useAuthStore((s) => s.user);
   const [droppedFile,      setDroppedFile]      = useState<File | null>(null);
+  const [showPdfEditor,    setShowPdfEditor]    = useState(false);
+  // PDF bytes to open the editor with (set when an Office file is converted on
+  // open); null means open the staged file directly (it's already a PDF).
+  const [editorBytes,      setEditorBytes]      = useState<Uint8Array | null>(null);
+  const [editorIsOffice,   setEditorIsOffice]   = useState(false);
+  const [convertingForEditor, setConvertingForEditor] = useState(false);
   const [selectedTypeId,   setSelectedTypeId]   = useState("");
   const [uploadProgress,   setUploadProgress]   = useState(0);
   const [isScanned,        setIsScanned]         = useState(scanOnly);
@@ -945,6 +1057,10 @@ export default function UploadPage({ scanOnly = false }: UploadPageProps) {
   });
 
   const visibleDocTypes = useMemo(
+    // Keep types whose workflow isn't fully configured: approval routing is
+    // amount-rule based and the primary template is only a fallback, so a type
+    // with no primary template may still route via its rules. Documents that
+    // truly have no workflow are caught when submitting for approval.
     () => scanOnly
       ? docTypes.filter((type) => !deriveDocumentTypeConfig(type).isPersonalType)
       : docTypes,
@@ -975,7 +1091,13 @@ export default function UploadPage({ scanOnly = false }: UploadPageProps) {
   const [showBuiltForm, setShowBuiltForm] = useState(false);
   useEffect(() => { setShowBuiltForm(false); }, [selectedTemplateId]);
 
-  const isBuiltTemplate = selectedTemplate?.type === "built";
+  // "Built form" templates (interactive, completed via the full-screen modal).
+  const isBuiltTemplate = selectedTemplate?.type === "built" && selectedTemplate?.kind !== "document";
+  // Designer ("document"-kind) templates: admin-standardised layouts whose merge
+  // fields auto-populate (author, date, reference, the document-type metadata the
+  // user enters). Users do NOT fill placeholders — they only supply metadata and
+  // click Create, then edit the generated file in the viewer.
+  const isDesignerDoc = selectedTemplate?.type === "built" && selectedTemplate?.kind === "document";
 
   const isOcrFlow      = isScanned && !isSelfUpload;
   const showManualForm = !isOcrFlow && Boolean(selectedTypeId) && scanStage === "idle";
@@ -1176,6 +1298,111 @@ export default function UploadPage({ scanOnly = false }: UploadPageProps) {
     if (file) setDroppedFile(file);
   }, []);
 
+  // Open the editor. PDFs open directly; Office/HTML files are converted to PDF
+  // on the backend first (the upload then proceeds as a PDF).
+  const handleEditClick = useCallback(async () => {
+    const file = droppedFile;
+    if (!file) return;
+    if (file.type === "application/pdf") {
+      setEditorBytes(null);
+      setEditorIsOffice(false);
+      setShowPdfEditor(true);
+      return;
+    }
+    setConvertingForEditor(true);
+    try {
+      const fd = new FormData();
+      fd.append("type", "convert");
+      fd.append("target", isHtmlFile(file) ? "html-to-pdf" : "office-to-pdf");
+      fd.append("file", file, file.name);
+      const res = await documentsAPI.pdfTool(fd);
+      const bytes = new Uint8Array(await (res.data as Blob).arrayBuffer());
+      setEditorBytes(bytes);
+      setEditorIsOffice(true);
+      setShowPdfEditor(true);
+    } catch (err) {
+      let message = "Couldn't convert this document for editing.";
+      const data = (err as { response?: { data?: unknown } })?.response?.data;
+      if (data instanceof Blob) {
+        try { message = JSON.parse(await data.text())?.detail || message; } catch { /* keep default */ }
+      } else {
+        message = extractApiError(err, message);
+      }
+      toast.error(message);
+    } finally {
+      setConvertingForEditor(false);
+    }
+  }, [droppedFile]);
+
+  // Receive the edited PDF back from the editor and stage it for upload in place
+  // of the original. The preview + (empty) title refresh via the droppedFile effect.
+  const handleEditedPdf = useCallback(
+    ({ blobs }: { blobs: Array<{ name: string; bytes: Uint8Array; mime: string }> }) => {
+      const out = blobs[0];
+      if (!out) return;
+      // The editor hands back either the edited PDF or a converted file
+      // (e.g. .docx). Stage it under the original base name with the new
+      // extension/type so the upload proceeds with that document.
+      const ext = out.name.match(/\.[^./\\]+$/)?.[0] || ".pdf";
+      const baseName = (droppedFile?.name ?? "document").replace(/\.[^./\\]+$/, "");
+      const mime = out.mime || "application/pdf";
+      // `File` from lucide-react shadows the DOM constructor here, so use globalThis.
+      const staged = new globalThis.File([out.bytes as BlobPart], `${baseName}${ext}`, { type: mime });
+      setDroppedFile(staged);
+      setShowPdfEditor(false);
+      setEditorBytes(null);
+      setEditorIsOffice(false);
+      toast.success(
+        ext.toLowerCase() === ".pdf"
+          ? "Edited PDF applied to this upload."
+          : `Converted ${ext.slice(1).toUpperCase()} applied to this upload.`,
+      );
+    },
+    [droppedFile],
+  );
+
+  // The user's saved signature, offered for one-click reuse in the editor's
+  // Sign tool. Fetched only once the editor is opened.
+  const { data: savedSignatureData } = useQuery({
+    queryKey: ["profile-signature"],
+    queryFn: () => profileAPI.getSignature().then((r) => r.data.signature ?? null),
+    enabled: showPdfEditor,
+    ...QUERY_FIVE_MIN_STALE,
+  });
+  const savedSignatures = useMemo(() => {
+    const src = savedSignatureData?.image_data || savedSignatureData?.image_url;
+    return src ? [{ id: String(savedSignatureData.id), src, label: "Saved signature" }] : [];
+  }, [savedSignatureData]);
+
+  // Server-side PDF editor jobs (compress / convert). Returns the processed
+  // bytes for the editor to download, or null with a toast on failure.
+  const handlePdfJob = useCallback(
+    async (job: { type: string; bytes: Uint8Array; filename: string; params: Record<string, unknown> }) => {
+      const fd = new FormData();
+      fd.append("type", job.type);
+      fd.append("file", new globalThis.Blob([job.bytes as BlobPart], { type: "application/pdf" }), job.filename || "document.pdf");
+      for (const [k, v] of Object.entries(job.params ?? {})) {
+        if (v != null) fd.append(k, String(v));
+      }
+      try {
+        const res = await documentsAPI.pdfTool(fd);
+        return new Uint8Array(await (res.data as Blob).arrayBuffer());
+      } catch (err) {
+        // The error body is a Blob (JSON) because the request used responseType:"blob".
+        let message = "This operation isn't available right now.";
+        const data = (err as { response?: { data?: unknown } })?.response?.data;
+        if (data instanceof Blob) {
+          try { message = JSON.parse(await data.text())?.detail || message; } catch { /* keep default */ }
+        } else {
+          message = extractApiError(err, message);
+        }
+        toast.error(message);
+        return null;
+      }
+    },
+    [],
+  );
+
   const onDropRejected = useCallback((rejections: FileRejection[]) => {
     const err = rejections[0]?.errors?.[0];
     if (err?.code === "file-too-large") {
@@ -1216,8 +1443,8 @@ export default function UploadPage({ scanOnly = false }: UploadPageProps) {
         navigate(`/documents/${data.id}`);
       }
     },
-    onError: () => {
-      toast.error("Upload failed. Please try again.");
+    onError: (err) => {
+      toast.error(extractApiError(err, "Upload failed. Please try again."));
       setUploadProgress(0);
       setScanStage("idle");
     },
@@ -1231,8 +1458,8 @@ export default function UploadPage({ scanOnly = false }: UploadPageProps) {
       toast.success("Details confirmed and saved.");
       navigate(`/documents/${id}`);
     },
-    onError: () => {
-      toast.error("Could not save details. Please try again.");
+    onError: (err) => {
+      toast.error(extractApiError(err, "Could not save details. Please try again."));
       setScanStage("ocr_done");
     },
   });
@@ -1275,11 +1502,12 @@ export default function UploadPage({ scanOnly = false }: UploadPageProps) {
         toast.error("Please select a template");
         return;
       }
-      const isUploaded = selectedTemplate.type === "uploaded";
-
-      // Built templates are filled via the full-screen modal — guard against
-      // accidentally reaching this path without going through it.
-      if (!isUploaded) {
+      // Office uploads AND designer ("document"-kind) templates are filled here
+      // with {{merge_field}} values and rendered to an editable file. Built FORM
+      // templates are completed via the full-screen modal instead.
+      const usesPlaceholders =
+        selectedTemplate.type === "uploaded" || selectedTemplate.kind === "document";
+      if (!usesPlaceholders) {
         setShowBuiltForm(true);
         return;
       }
@@ -1450,39 +1678,44 @@ export default function UploadPage({ scanOnly = false }: UploadPageProps) {
 
   return (
     <>
-    <div className="-m-6 min-h-[calc(100vh-3.5rem)] bg-[#EDEDED] text-[#1F2933]">
-      <div className="flex h-[69px] items-center justify-between gap-4 bg-[#287EAD] px-5 pr-8 text-white">
+    <div className="flex h-full flex-col bg-[#EDEDED] text-[#1F2933]">
+      <WorkspaceCommandBar
+        actions={
+          <div className="hidden items-center gap-3 text-xs text-white/80 md:flex">
+            <label className="inline-flex cursor-pointer items-center gap-2 border border-white/30 px-2.5 py-1.5 font-semibold">
+              <input
+                type="checkbox"
+                checked={bulkMode}
+                onChange={(event) => {
+                  setBulkMode(event.target.checked);
+                  if (event.target.checked) {
+                    navigate(`${scanOnly ? "/documents/scan" : "/documents/upload"}?mode=bulk`, { replace: true });
+                  }
+                }}
+                className="h-3.5 w-3.5"
+              />
+              Bulk mode
+            </label>
+            <span className="border border-white/30 px-2 py-1">{selectedType?.name || "No type selected"}</span>
+            <span className="border border-white/30 px-2 py-1">
+              {useTemplate ? (selectedTemplate ? "Template selected" : "Awaiting template") : droppedFile ? "File attached" : "Awaiting file"}
+            </span>
+          </div>
+        }
+      >
         <div className="min-w-0">
           <h1 className="text-lg font-semibold tracking-tight">{scanOnly ? "Scan Document" : "Upload Document"}</h1>
           <p className="mt-0.5 text-xs text-white/75">
             {scanOnly ? "Review the file beside OCR results before saving." : "Attach a file, preview it, then complete the document details."}
           </p>
         </div>
-        <div className="hidden items-center gap-3 text-xs text-white/80 md:flex">
-          <label className="inline-flex cursor-pointer items-center gap-2 border border-white/30 px-2.5 py-1.5 font-semibold">
-            <input
-              type="checkbox"
-              checked={bulkMode}
-              onChange={(event) => {
-                setBulkMode(event.target.checked);
-                if (event.target.checked) {
-                  navigate(`${scanOnly ? "/documents/scan" : "/documents/upload"}?mode=bulk`, { replace: true });
-                }
-              }}
-              className="h-3.5 w-3.5"
-            />
-            Bulk mode
-          </label>
-          <span className="border border-white/30 px-2 py-1">{selectedType?.name || "No type selected"}</span>
-          <span className="border border-white/30 px-2 py-1">
-            {useTemplate ? (selectedTemplate ? "Template selected" : "Awaiting template") : droppedFile ? "File attached" : "Awaiting file"}
-          </span>
-        </div>
-      </div>
+      </WorkspaceCommandBar>
+
+      <div className="scrollbar-minimal min-h-0 flex-1 overflow-y-auto">
 
       {/* ── OCR wait / review / submitting ──────────────────────────────── */}
       {isOcrFlow && scanStage !== "idle" && scanStage !== "uploading" && (
-        <div className="grid gap-4 p-5 pr-8 lg:grid-cols-12">
+        <div className="grid gap-4 p-5 pr-0 lg:grid-cols-12">
           <div className="lg:col-span-7 2xl:col-span-8">
             <CapturePreviewPane
               file={droppedFile}
@@ -1635,7 +1868,7 @@ export default function UploadPage({ scanOnly = false }: UploadPageProps) {
 
       {/* ── Main upload layout ─────────────────────────────────────────── */}
       {(scanStage === "idle" || scanStage === "uploading") && (
-        <div className="grid grid-cols-1 gap-5 p-5 pr-8 xl:grid-cols-12">
+        <div className="grid grid-cols-1 gap-5 p-5 pr-0 xl:grid-cols-12">
           {/* Left column — controls */}
           <div className={clsx(droppedFile ? "order-2 xl:col-span-3" : useTemplate ? "xl:col-span-4" : "xl:col-start-2 xl:col-span-4", "space-y-4")}>
             {/* Step 1 — Document Type */}
@@ -1657,16 +1890,13 @@ export default function UploadPage({ scanOnly = false }: UploadPageProps) {
                 />
                 Use bulk mode
               </label>
-              <select
+              <CustomListbox
                 value={selectedTypeId}
-                onChange={(e) => setSelectedTypeId(e.target.value)}
-                className="input w-full"
-              >
-                <option value="">— Choose document type —</option>
-                {visibleDocTypes.map((t) => (
-                  <option key={t.id} value={t.id}>{t.name}</option>
-                ))}
-              </select>
+                onChange={(v) => setSelectedTypeId(v)}
+                options={[{ value: "", label: "— Choose document type —" }, ...visibleDocTypes.map((t) => ({ value: t.id, label: t.name }))]}
+                buttonClassName="input w-full"
+                ariaLabel="Document type"
+              />
               {selectedType?.description && (
                 <p className="mt-3 text-xs text-muted-foreground">{selectedType.description}</p>
               )}
@@ -1696,18 +1926,13 @@ export default function UploadPage({ scanOnly = false }: UploadPageProps) {
                   </label>
                   {useTemplate && (
                     <div className="mt-3 space-y-2">
-                      <select
+                      <CustomListbox
                         value={selectedTemplateId}
-                        onChange={(event) => setSelectedTemplateId(event.target.value)}
-                        className="input w-full"
-                      >
-                        <option value="">Select template</option>
-                        {typeTemplates.map((template) => (
-                          <option key={template.id} value={template.id}>
-                            {template.name} ({template.type === "uploaded" ? "Office" : "Builder"})
-                          </option>
-                        ))}
-                      </select>
+                        onChange={(v) => setSelectedTemplateId(v)}
+                        options={[{ value: "", label: "Select template" }, ...typeTemplates.map((template) => ({ value: template.id, label: `${template.name} (${template.type === "uploaded" ? "Office" : "Builder"})` }))]}
+                        buttonClassName="input w-full"
+                        ariaLabel="Template select"
+                      />
                       {typeTemplates.length === 0 && (
                         <p className="text-xs text-[#5E6870]">No active templates are configured for this document type.</p>
                       )}
@@ -1790,6 +2015,12 @@ export default function UploadPage({ scanOnly = false }: UploadPageProps) {
                 previewUrl={pdfPreviewUrl}
                 stateLabel={isScanned ? "Ready to scan" : "Ready"}
                 compact={false}
+                onEditPdf={
+                  droppedFile.type === "application/pdf" || isOfficeEditable(droppedFile)
+                    ? handleEditClick
+                    : undefined
+                }
+                editLabel={droppedFile.type === "application/pdf" ? "Edit PDF" : "Edit as PDF"}
               />
             </div>
           )}
@@ -1808,11 +2039,11 @@ export default function UploadPage({ scanOnly = false }: UploadPageProps) {
                   {selectedTemplate && (
                     <span className={clsx(
                       "flex-shrink-0 rounded px-2 py-0.5 text-[10px] font-semibold uppercase tracking-wider border",
-                      isBuiltTemplate
+                      isBuiltTemplate || isDesignerDoc
                         ? "bg-[#EEF6FB] text-[#287EAD] border-[#287EAD]/30"
                         : "bg-amber-50 text-amber-700 border-amber-200",
                     )}>
-                      {isBuiltTemplate ? "Builder" : "Office"}
+                      {isBuiltTemplate ? "Builder" : isDesignerDoc ? "Document" : "Office"}
                     </span>
                   )}
                 </div>
@@ -1828,13 +2059,17 @@ export default function UploadPage({ scanOnly = false }: UploadPageProps) {
                         placeholders: selectedTemplate.placeholders,
                         sections: selectedTemplate.sections,
                       }}
+                      values={{}}
+                      processStep="draft"
                     />
 
                     {/* Footer note */}
                     <p className="mt-5 border-t border-[#E3E7EA] pt-3 text-xs text-[#5E6870]">
                       {isBuiltTemplate
-                        ? "Click \"Fill & Create Document\" to open the full form and complete all fields."
-                        : "A draft Office document will be created from this template for editing."}
+                        ? "Click \"Create Document\" below to open the full form and complete all fields."
+                        : isDesignerDoc
+                          ? "This document is generated from the template — merge fields (author, date, reference) and the details you enter are filled in automatically, then it opens for editing."
+                          : "A draft Office document will be created from this template for editing."}
                     </p>
                   </div>
                 ) : (
@@ -1875,9 +2110,12 @@ export default function UploadPage({ scanOnly = false }: UploadPageProps) {
                     )}
                   </div>
 
-                  {/* Built template: metadata fields persist, CTA appended below */}
+                  {/* Built form & designer-document templates: show the document-type
+                      metadata fields (the only thing a user fills). Forms then open
+                      the full-screen form; designer documents auto-fill merge fields
+                      and are generated by the "Create Document" button below. */}
                   {useTemplate && selectedTemplate ? (
-                    isBuiltTemplate ? (
+                    (isBuiltTemplate || isDesignerDoc) ? (
                       <>
                         {/* Document type metadata fields — same as normal upload */}
                         {hasMetadata && (
@@ -1905,7 +2143,7 @@ export default function UploadPage({ scanOnly = false }: UploadPageProps) {
                           </div>
                         )}
 
-                        {/* Document title + single launch button */}
+                        {/* Document title + (forms only) the launch button */}
                         <div className="space-y-3 border-t border-border/60 pt-5">
                           <div className="space-y-1.5">
                             <label className="block text-xs font-semibold uppercase tracking-wider text-[#5E6870]">Document title</label>
@@ -1915,18 +2153,41 @@ export default function UploadPage({ scanOnly = false }: UploadPageProps) {
                               placeholder={selectedTemplate.name}
                             />
                           </div>
-                          <button
-                            type="button"
-                            onClick={() => setShowBuiltForm(true)}
-                            className="flex w-full items-center justify-center gap-2 rounded border border-[#287EAD] bg-[#287EAD] px-4 py-2.5 text-sm font-semibold text-white hover:bg-[#1E6F99] transition-colors"
-                          >
-                            <Wand2 className="h-4 w-4" />
-                            Fill &amp; Create Document
-                          </button>
+                          {isDesignerDoc ? (
+                            <>
+                              {(selectedTemplate.design?.references ?? []).length > 0 && (
+                                <div className="space-y-3 border border-[#C8CDD2] bg-white p-3">
+                                  <p className="text-xs font-semibold uppercase tracking-wider text-muted-foreground">Linked documents</p>
+                                  {(selectedTemplate.design?.references ?? []).map((r) => (
+                                    <DocumentReferencePicker
+                                      key={r.key}
+                                      label={r.label}
+                                      value={templateValues[r.key] as ReferenceValue | undefined}
+                                      onChange={(v) => setTemplateValues((prev) => {
+                                        const next = { ...prev };
+                                        if (v) next[r.key] = v; else delete next[r.key];
+                                        return next;
+                                      })}
+                                    />
+                                  ))}
+                                </div>
+                              )}
+                              <p className="border border-[#A7CDE3] bg-[#EEF6FB] px-3 py-2.5 text-xs text-[#1F2933]">
+                                This is an admin-standardised template. Its merge fields
+                                (author, date, reference, and the details above) are
+                                filled in automatically — click <strong>Create Document</strong> below
+                                to generate it and open it in the editor.
+                              </p>
+                            </>
+                          ) : (
+                            <p className="rounded border border-[#A7CDE3] bg-[#EEF6FB] px-3 py-2.5 text-xs text-[#1F2933]">
+                              Click <strong>Create Document</strong> below to open the full form and complete all fields.
+                            </p>
+                          )}
                         </div>
                       </>
                     ) : (
-                      // Office templates — keep the existing TemplateFillSection
+                      // Office templates — manual {{placeholder}} fill
                       <TemplateFillSection
                         template={selectedTemplate}
                         register={register}
@@ -2209,6 +2470,7 @@ export default function UploadPage({ scanOnly = false }: UploadPageProps) {
           )}
         </div>
       )}
+      </div>
     </div>
 
     {/* ── Built template form modal ─────────────────────────────────────────── */}
@@ -2221,6 +2483,60 @@ export default function UploadPage({ scanOnly = false }: UploadPageProps) {
         initialValues={templateBaseValuesFromForm(getValues() as Record<string, unknown>)}
         onClose={() => setShowBuiltForm(false)}
       />
+    )}
+
+    {/* ── PDF editor (pre-upload) ────────────────────────────────────────────── */}
+    {showPdfEditor && droppedFile && (
+      <div className="fixed inset-0 z-[70] flex flex-col bg-white">
+        <div className="flex items-center justify-between gap-3 border-b border-[#C8CDD2] bg-[#F5F7F8] px-4 py-2">
+          <div className="min-w-0">
+            <p className="text-sm font-bold text-[#1F2933]">Edit before upload</p>
+            <p className="truncate text-xs text-[#5E6870]">
+              {editorIsOffice
+                ? <>Converted to PDF · <span className="font-semibold">Save</span> uploads it as a PDF · {droppedFile.name}</>
+                : <><span className="font-semibold">Save</span> applies your edits to this upload · {droppedFile.name}</>}
+            </p>
+          </div>
+          <button
+            type="button"
+            onClick={() => { setShowPdfEditor(false); setEditorBytes(null); setEditorIsOffice(false); }}
+            className="inline-flex shrink-0 items-center gap-1.5 border border-[#C8CDD2] bg-white px-3 py-1.5 text-sm font-semibold text-[#5E6870] hover:bg-[#EEF3F7]"
+          >
+            <X className="h-4 w-4" /> Close without saving
+          </button>
+        </div>
+        <div className="min-h-0 flex-1">
+          <Suspense
+            fallback={
+              <div className="flex h-full items-center justify-center">
+                <Loader2 className="h-6 w-6 animate-spin text-[#287EAD]" />
+              </div>
+            }
+          >
+            <PdfEditor
+              initialFiles={[editorIsOffice && editorBytes ? editorBytes : droppedFile]}
+              signerName={[user?.first_name, user?.last_name].filter(Boolean).join(" ")}
+              savedSignatures={savedSignatures}
+              onSave={handleEditedPdf}
+              onJob={handlePdfJob}
+              disabledTools={editorIsOffice
+                ? ["split", "protect", "unlock", "convert"]
+                : ["split", "protect", "unlock"]}
+              className="h-full"
+            />
+          </Suspense>
+        </div>
+      </div>
+    )}
+
+    {/* Converting an Office/HTML file to PDF before the editor opens */}
+    {convertingForEditor && (
+      <div className="fixed inset-0 z-[75] flex items-center justify-center bg-black/30">
+        <div className="flex items-center gap-3 rounded-xl bg-white px-6 py-4 shadow-2xl">
+          <Loader2 className="h-5 w-5 animate-spin text-[#287EAD]" />
+          <span className="text-sm font-medium">Converting to PDF for editing…</span>
+        </div>
+      </div>
     )}
     </>
   );

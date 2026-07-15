@@ -60,7 +60,10 @@ Queue assignments (unchanged):
                                                don't starve text-indexing jobs.
 """
 import logging
-import fcntl
+try:
+    import fcntl  # POSIX-only file locking; absent on Windows
+except ImportError:  # pragma: no cover - Windows
+    fcntl = None
 import os
 import shutil
 import signal
@@ -550,6 +553,33 @@ def _pdf_filter_for(source_path: Path) -> str:
     return "pdf:writer_pdf_Export"
 
 
+def _kill_process_tree(proc, force: bool = False) -> None:
+    """
+    Terminate a process and its children, cross-platform.
+
+    POSIX: signal the process group (LibreOffice forks soffice.bin). Windows:
+    `taskkill /T` walks the tree. Used to clean up a timed-out conversion.
+    """
+    if os.name == "nt":
+        try:
+            subprocess.run(
+                ["taskkill", "/F", "/T", "/PID", str(proc.pid)],
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+            )
+        except Exception:
+            try:
+                proc.kill()
+            except Exception:
+                pass
+        return
+    sig = signal.SIGKILL if force else signal.SIGTERM
+    try:
+        os.killpg(os.getpgid(proc.pid), sig)
+    except (ProcessLookupError, OSError):
+        pass
+
+
 def _convert_office_to_pdf(
     soffice_bin: str,
     source_path: Path,
@@ -604,13 +634,19 @@ def _convert_office_to_pdf(
 
     logger.info("LibreOffice cmd: %s", " ".join(cmd))
 
+    # New process group so we can kill LibreOffice + its children on timeout.
+    if os.name == "nt":
+        popen_kwargs = {"creationflags": subprocess.CREATE_NEW_PROCESS_GROUP}
+    else:
+        popen_kwargs = {"start_new_session": True}
+
     # Capture stderr so conversion errors appear in Celery logs instead of /dev/null
     proc = subprocess.Popen(
         cmd,
         stdout=subprocess.PIPE,
         stderr=subprocess.STDOUT,
         env=env,
-        start_new_session=True,
+        **popen_kwargs,
     )
     try:
         deadline = time.monotonic() + timeout
@@ -644,17 +680,11 @@ def _convert_office_to_pdf(
                 except Exception:
                     pass
                 logger.error("LibreOffice conversion timed out after %ds", timeout)
-                try:
-                    os.killpg(os.getpgid(proc.pid), signal.SIGTERM)
-                except (ProcessLookupError, OSError):
-                    pass
+                _kill_process_tree(proc)
                 try:
                     proc.wait(timeout=5)
                 except subprocess.TimeoutExpired:
-                    try:
-                        os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
-                    except (ProcessLookupError, OSError):
-                        pass
+                    _kill_process_tree(proc, force=True)
                     proc.wait()
                 return False
 
@@ -744,7 +774,11 @@ def _convert_office_source_to_pdf_bytes(
             # from a previously killed run before converting.
             lock_path = persistent_profile / ".preview.lock"
             with open(lock_path, "w") as lock_file:
-                fcntl.flock(lock_file, fcntl.LOCK_EX)
+                # POSIX: serialise concurrent conversions on the shared profile.
+                # Windows: Celery runs the preview worker solo (one task at a
+                # time), so no cross-process lock is needed.
+                if fcntl is not None:
+                    fcntl.flock(lock_file, fcntl.LOCK_EX)
                 _clear_stale_lo_locks(persistent_profile)
                 if heartbeat:
                     heartbeat()
@@ -1329,3 +1363,44 @@ def _trigger_index(document_id: str) -> None:
             "_trigger_index: could not queue indexing for %s: %s",
             document_id, exc,
         )
+
+
+@shared_task(bind=True, max_retries=0, queue="default")
+def run_migration_job(self, job_id: str):
+    """Run an Infor IDM → fseDMS migration job in the background.
+
+    Thin Celery wrapper around ``apps.documents.migration.run_migration_job``;
+    that helper owns all status/counter/log bookkeeping and never lets a single
+    item failure abort the batch, so there is nothing to retry here.
+    """
+    from .migration import run_migration_job as _run
+    return str(_run(job_id).id)
+
+
+@shared_task(bind=True, max_retries=0, queue="default")
+def poll_mailbox(self, mailbox_id: str):
+    """Poll one IMAP mailbox and ingest new messages.
+
+    Thin Celery wrapper around ``apps.documents.email_ingestion.run_mailbox_poll``;
+    that helper owns all status/counter bookkeeping and never lets a single
+    message failure abort the poll, so there is nothing to retry here.
+    """
+    from .email_ingestion import run_mailbox_poll
+    return str(run_mailbox_poll(mailbox_id).id)
+
+
+@shared_task(queue="default")
+def poll_active_mailboxes():
+    """Fan out a poll task for every active mailbox.
+
+    Scheduled by Celery beat. Each mailbox is polled in its own task so one slow
+    or unreachable server does not hold up the others.
+    """
+    from .models import Mailbox
+
+    mailbox_ids = list(
+        Mailbox.objects.filter(is_active=True).values_list("id", flat=True)
+    )
+    for mailbox_id in mailbox_ids:
+        poll_mailbox.delay(str(mailbox_id))
+    return len(mailbox_ids)

@@ -34,6 +34,8 @@ import {
   hasWorkflowTaskFilters,
   type WorkflowTaskFilters,
 } from "@/lib/workflowTaskFilters";
+import { WorkspaceCommandBar } from "@/components/shared/WorkspaceCommandBar";
+import CustomListbox from "@/components/ui/CustomListbox";
 
 const RECENT_DOCS_PAGE_SIZE = 5;
 const RECENT_AUDIT_PAGE_SIZE = 5;
@@ -54,6 +56,8 @@ type DashboardAuditEvent = {
   actor_email?: string;
   timestamp: string;
   object_repr?: string;
+  object_type?: string;
+  changes?: Record<string, unknown> | null;
 };
 
 type StorageStats = {
@@ -282,7 +286,11 @@ const EVENT_VERB_MAP: Record<string, string> = {
   "user.logout": "signed out",
   "user.login_failed": "failed to sign in",
   "user.password_changed": "changed their password",
-  "user.created": "was added",
+  "user.created": "added the user",
+  "user.deleted": "removed the user",
+  "user.password_reset": "reset the password for",
+  "user.activated": "activated the account of",
+  "user.deactivated": "deactivated the account of",
   "user.updated": "updated their profile",
   "document.created": "uploaded",
   "document.bulk_uploaded": "bulk uploaded",
@@ -319,11 +327,42 @@ const EVENT_VERB_MAP: Record<string, string> = {
 
 const VERB_RE = /(submitted|uploaded|edited|updated|created|deleted|approved|rejected|downloaded|viewed|previewed|printed|shared|failed|queued|completed|logged in|logged out|signed in|signed out|enabled|disabled|returned|held|released|archived|added|delegated|reassigned|exported)\b/i;
 
+// `permission.changed` is reused for a range of admin/account actions (create
+// user, reset password, activate/deactivate, delete, group/role tweaks…). The
+// specific action lives in `changes.action`, so translate that into a proper
+// verb + target instead of the meaningless "changed permissions" fallback.
+function describePermissionChange(event: DashboardAuditEvent): { verb: string; target: string } {
+  const changes = (event.changes ?? {}) as Record<string, unknown>;
+  const action = typeof changes.action === "string" ? changes.action : "";
+  const objectType = event.object_type ?? "";
+  const target = cleanAuditTitle(event.object_repr || "");
+
+  switch (action) {
+    case "created": return { verb: "added the user", target };
+    case "deleted": return { verb: "removed the user", target };
+    case "password_reset": return { verb: "reset the password for", target };
+    case "activated": return { verb: "activated the account of", target };
+    case "deactivated": return { verb: "deactivated the account of", target };
+    case "reassign_active_tasks": return { verb: "reassigned active tasks from", target };
+    case "duplicated_from": return { verb: "duplicated group", target };
+  }
+  if ("mfa" in changes) return { verb: changes.mfa ? "enabled MFA" : "disabled MFA", target: "" };
+  if (objectType === "UserSignature") return { verb: "updated their signature", target: "" };
+  if (objectType === "UserGroup") return { verb: "updated group", target };
+  if (objectType === "User") return { verb: "updated the account of", target };
+  return { verb: "updated permissions", target };
+}
+
 function formatAuditSummary(event: DashboardAuditEvent): AuditSummaryParts {
   const actor = deriveActorName(event);
   const code = String(event.event ?? "").toLowerCase();
   const summary = (event.summary || "").trim();
   const objectTitle = cleanAuditTitle(event.object_repr || "");
+
+  if (code === "permission.changed") {
+    const { verb, target } = describePermissionChange(event);
+    return { actor, verb, target };
+  }
 
   const mappedVerb = EVENT_VERB_MAP[code];
   if (mappedVerb) {
@@ -403,7 +442,9 @@ export default function DashboardPage() {
       documentsAPI.list({
         page: recentDocsPage,
         page_size: RECENT_DOCS_PAGE_SIZE,
-        ordering: "-updated_at",
+        // Most-recently-touched first (covers both new uploads and edits to
+        // older documents); created_at breaks ties for stable pagination.
+        ordering: "-updated_at,-created_at",
       }).then((r) => r.data as PaginatedResponse<Document>),
     ...QUERY_SHORT_STALE,
   });
@@ -696,17 +737,27 @@ export default function DashboardPage() {
   // ── Render ────────────────────────────────────────────────────────────────
 
   return (
-    <div className="-m-6 min-h-[calc(100vh-3.5rem)] bg-[#EDEDED] text-[#1F2933]">
-      <div className="flex min-h-[69px] flex-col gap-3 bg-[#287EAD] px-5 py-3 text-white xl:flex-row xl:items-center xl:justify-between">
-        <div className="min-w-0">
+    <div className="flex h-full flex-col bg-[#EDEDED] text-[#1F2933]">
+      <WorkspaceCommandBar
+        actions={
+          <button
+            type="button"
+            onClick={handleDashboardSearch}
+            className="inline-flex h-9 items-center justify-center gap-2 border border-white/20 bg-[#206D99] px-4 text-sm font-semibold text-white transition-colors hover:bg-[#1B5F86]"
+          >
+            <Search className="w-4 h-4" />
+            Search
+          </button>
+        }
+      >
+        <div className="min-w-0 shrink-0">
           <p className="text-[11px] font-semibold uppercase tracking-[0.2em] text-white/70">Operations workspace</p>
           <h1 className="mt-1 text-xl font-semibold tracking-tight">
             {user?.first_name ? `Welcome, ${user.first_name}` : "Document Operations"}
           </h1>
         </div>
 
-        <div className="flex min-w-0 flex-1 flex-col gap-2 xl:max-w-3xl xl:flex-row xl:items-start">
-          <div ref={dashboardSearchRef} className="relative min-w-0 flex-1">
+        <div ref={dashboardSearchRef} className="relative ml-auto w-full min-w-0 max-w-2xl">
             <div className="relative">
               <span className="pointer-events-none absolute left-3 top-1/2 -translate-y-1/2 text-[#5E6870]">
                 <Search className="w-4 h-4" />
@@ -892,18 +943,9 @@ export default function DashboardPage() {
             )}
           </div>
 
-          <button
-            type="button"
-            onClick={handleDashboardSearch}
-            className="inline-flex h-9 items-center justify-center gap-2 border border-white/20 bg-[#206D99] px-4 text-sm font-semibold text-white transition-colors hover:bg-[#1B5F86]"
-          >
-            <Search className="w-4 h-4" />
-            Search
-          </button>
-        </div>
-      </div>
+      </WorkspaceCommandBar>
 
-      <div className="space-y-4 p-4 pr-8">
+      <div className="scrollbar-minimal min-h-0 flex-1 space-y-4 overflow-y-auto p-5 pr-0">
         <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 xl:grid-cols-4">
           <StatCard
             title="Total Documents"
@@ -981,24 +1023,34 @@ export default function DashboardPage() {
                       className="h-9 w-full border border-[#AEB5BB] bg-white pl-9 pr-3 text-sm text-[#1F2933] focus:outline-none focus:ring-1 focus:ring-[#287EAD]"
                     />
                   </div>
-                  <select value={taskFilters.documentType} onChange={(e) => updateTaskFilter("documentType", e.target.value)} className="h-9 border border-[#AEB5BB] bg-white px-2 text-sm text-[#1F2933]">
-                    <option value="">All document types</option>
-                    {taskFilterOptions.documentTypes.map((option) => <option key={option.value} value={option.value}>{option.label} ({option.count})</option>)}
-                  </select>
-                  <select value={taskFilters.department} onChange={(e) => updateTaskFilter("department", e.target.value)} className="h-9 border border-[#AEB5BB] bg-white px-2 text-sm text-[#1F2933]">
-                    <option value="">All departments</option>
-                    {taskFilterOptions.departments.map((option) => <option key={option.value} value={option.value}>{option.label} ({option.count})</option>)}
-                  </select>
-                  <select value={taskFilters.fileFormat} onChange={(e) => updateTaskFilter("fileFormat", e.target.value)} className="h-9 border border-[#AEB5BB] bg-white px-2 text-sm text-[#1F2933]">
-                    <option value="">All formats</option>
-                    {taskFilterOptions.fileFormats.map((option) => <option key={option.value} value={option.value}>{option.label} ({option.count})</option>)}
-                  </select>
-                  <select value={taskFilters.urgency} onChange={(e) => updateTaskFilter("urgency", e.target.value as WorkflowTaskFilters["urgency"])} className="h-9 border border-[#AEB5BB] bg-white px-2 text-sm text-[#1F2933]">
-                    <option value="">Any urgency</option>
-                    <option value="overdue">Overdue</option>
-                    <option value="due_soon">Due in 24h</option>
-                    <option value="held">On hold</option>
-                  </select>
+                  <CustomListbox
+                    value={taskFilters.documentType}
+                    onChange={(v) => updateTaskFilter("documentType", v)}
+                    options={[{ value: "", label: "All document types" }, ...taskFilterOptions.documentTypes.map((o) => ({ value: o.value, label: `${o.label} (${o.count})` }))]}
+                    buttonClassName="h-9 border border-[#AEB5BB] bg-white px-2 text-sm text-[#1F2933]"
+                    ariaLabel="Task document type"
+                  />
+                  <CustomListbox
+                    value={taskFilters.department}
+                    onChange={(v) => updateTaskFilter("department", v)}
+                    options={[{ value: "", label: "All departments" }, ...taskFilterOptions.departments.map((o) => ({ value: o.value, label: `${o.label} (${o.count})` }))]}
+                    buttonClassName="h-9 border border-[#AEB5BB] bg-white px-2 text-sm text-[#1F2933]"
+                    ariaLabel="Task department"
+                  />
+                  <CustomListbox
+                    value={taskFilters.fileFormat}
+                    onChange={(v) => updateTaskFilter("fileFormat", v)}
+                    options={[{ value: "", label: "All formats" }, ...taskFilterOptions.fileFormats.map((o) => ({ value: o.value, label: `${o.label} (${o.count})` }))]}
+                    buttonClassName="h-9 border border-[#AEB5BB] bg-white px-2 text-sm text-[#1F2933]"
+                    ariaLabel="Task file format"
+                  />
+                  <CustomListbox
+                    value={taskFilters.urgency}
+                    onChange={(v) => updateTaskFilter("urgency", v as any)}
+                    options={[{ value: "", label: "Any urgency" }, { value: "overdue", label: "Overdue" }, { value: "due_soon", label: "Due in 24h" }, { value: "held", label: "On hold" }]}
+                    buttonClassName="h-9 border border-[#AEB5BB] bg-white px-2 text-sm text-[#1F2933]"
+                    ariaLabel="Task urgency"
+                  />
                 </div>
                 <div className="mt-2 flex flex-wrap items-center justify-between gap-2 text-xs text-[#5E6870]">
                   <div className="inline-flex items-center gap-1.5">

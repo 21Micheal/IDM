@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
+import { extractApiError } from "@/lib/apiError";
 import { useNavigate } from "react-router-dom";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import {
@@ -30,6 +31,7 @@ import {
   buildReviewStateFromBatchItem,
   reviewStateToSubmitItem,
 } from "@/components/documents/bulk/bulkUploadUtils";
+import { WorkspaceCommandBar } from "@/components/shared/WorkspaceCommandBar";
 
 type Stage = "select" | "processing" | "review" | "complete";
 
@@ -38,6 +40,13 @@ const POLL_MS = 3000;
 type BulkScanPageProps = {
   scanMode?: boolean;
   onSingleMode?: () => void;
+  /**
+   * Open an already-created batch (e.g. from the pending-review queue or email
+   * ingestion) and jump straight to its review, instead of starting a new
+   * upload. The batch is polled and, once in "review", the per-document review
+   * panel renders exactly as for a freshly uploaded batch.
+   */
+  initialBatchId?: string;
 };
 
 async function calculateFileSha256(file: File): Promise<string> {
@@ -48,15 +57,17 @@ async function calculateFileSha256(file: File): Promise<string> {
     .join("");
 }
 
-export default function BulkScanPage({ scanMode = true, onSingleMode }: BulkScanPageProps) {
+export default function BulkScanPage({ scanMode = true, onSingleMode, initialBatchId }: BulkScanPageProps) {
   const navigate = useNavigate();
   const queryClient = useQueryClient();
 
-  const [stage, setStage] = useState<Stage>("select");
+  // When opening an existing batch, start in "processing" so the status poll
+  // runs and transitions to "review" on its own.
+  const [stage, setStage] = useState<Stage>(initialBatchId ? "processing" : "select");
   const [selectedTypeId, setSelectedTypeId] = useState("");
   const [isRelatedSet, setIsRelatedSet] = useState(false);
   const [files, setFiles] = useState<File[]>([]);
-  const [batchId, setBatchId] = useState<string | null>(null);
+  const [batchId, setBatchId] = useState<string | null>(initialBatchId ?? null);
   const [uploadProgress, setUploadProgress] = useState(0);
   const [reviewStates, setReviewStates] = useState<BulkDocReviewState[]>([]);
   const [completedBatch, setCompletedBatch] = useState<BulkUploadBatch | null>(null);
@@ -74,7 +85,11 @@ export default function BulkScanPage({ scanMode = true, onSingleMode }: BulkScan
   });
 
   const visibleDocTypes = useMemo(
-    () => docTypes.filter((type) => !deriveDocumentTypeConfig(type).isPersonalType && type.code !== "UNCLASS"),
+    // A type with no primary template may still route via amount-based rules,
+    // so don't hide it here; the "no workflow" case is reported at submission.
+    () => docTypes.filter((type) =>
+      !deriveDocumentTypeConfig(type).isPersonalType && type.code !== "UNCLASS"
+    ),
     [docTypes],
   );
   const selectedType = visibleDocTypes.find((t) => t.id === selectedTypeId);
@@ -175,8 +190,8 @@ export default function BulkScanPage({ scanMode = true, onSingleMode }: BulkScan
         setStage("processing");
       }
     },
-    onError: () => {
-      toast.error("Bulk upload failed. Please try again.");
+    onError: (err) => {
+      toast.error(extractApiError(err, "Bulk upload failed. Please try again."));
       setUploadProgress(0);
       setStage("select");
     },
@@ -195,8 +210,8 @@ export default function BulkScanPage({ scanMode = true, onSingleMode }: BulkScan
       queryClient.invalidateQueries({ queryKey: ["documents"] });
       toast.success("Batch submitted successfully.");
     },
-    onError: () => {
-      toast.error("Could not submit the batch. Please try again.");
+    onError: (err) => {
+      toast.error(extractApiError(err, "Could not submit the batch. Please try again."));
     },
   });
 
@@ -215,8 +230,8 @@ export default function BulkScanPage({ scanMode = true, onSingleMode }: BulkScan
       setLocalPreviews({});
       toast.success("Review canceled and draft batch discarded.");
     },
-    onError: () => {
-      toast.error("Could not cancel the review. Please try again.");
+    onError: (err) => {
+      toast.error(extractApiError(err, "Could not cancel the review. Please try again."));
     },
   });
 
@@ -280,8 +295,30 @@ export default function BulkScanPage({ scanMode = true, onSingleMode }: BulkScan
   const activeBatch = polledBatch ?? (createMutation.data as BulkUploadBatch | undefined);
 
   return (
-    <div className="-m-6 min-h-[calc(100vh-3.5rem)] bg-[#EDEDED] text-[#1F2933]">
-      <div className="flex h-[69px] items-center justify-between gap-4 bg-[#287EAD] px-5 pr-8 text-white">
+    <div className="flex h-full flex-col bg-[#EDEDED] text-[#1F2933]">
+      <WorkspaceCommandBar
+        actions={
+          <div className="hidden items-center gap-3 text-xs text-white/80 md:flex">
+            {onSingleMode && (
+              <label className="inline-flex cursor-pointer items-center gap-2 border border-white/30 px-2.5 py-1.5 font-semibold">
+                <input
+                  type="checkbox"
+                  checked
+                  onChange={(event) => {
+                    if (!event.target.checked) onSingleMode();
+                  }}
+                  className="h-3.5 w-3.5"
+                />
+                Bulk mode
+              </label>
+            )}
+            <span className="border border-white/30 px-2 py-1">
+              {isRelatedSet ? "Related set" : selectedType?.name || "No type selected"}
+            </span>
+            <span className="border border-white/30 px-2 py-1">{files.length} file{files.length === 1 ? "" : "s"}</span>
+          </div>
+        }
+      >
         <div className="min-w-0">
           <h1 className="flex items-center gap-2 text-lg font-semibold tracking-tight">
             <ScanLine className="h-5 w-5" />
@@ -293,26 +330,9 @@ export default function BulkScanPage({ scanMode = true, onSingleMode }: BulkScan
               : "Upload several files, preview each one, then choose its type and details during review."}
           </p>
         </div>
-        <div className="hidden items-center gap-3 text-xs text-white/80 md:flex">
-          {onSingleMode && (
-            <label className="inline-flex cursor-pointer items-center gap-2 border border-white/30 px-2.5 py-1.5 font-semibold">
-              <input
-                type="checkbox"
-                checked
-                onChange={(event) => {
-                  if (!event.target.checked) onSingleMode();
-                }}
-                className="h-3.5 w-3.5"
-              />
-              Bulk mode
-            </label>
-          )}
-          <span className="border border-white/30 px-2 py-1">
-            {isRelatedSet ? "Related set" : selectedType?.name || "No type selected"}
-          </span>
-          <span className="border border-white/30 px-2 py-1">{files.length} file{files.length === 1 ? "" : "s"}</span>
-        </div>
-      </div>
+      </WorkspaceCommandBar>
+
+      <div className="scrollbar-minimal min-h-0 flex-1 overflow-y-auto">
 
       <Dialog open={duplicateDialogOpen} onOpenChange={setDuplicateDialogOpen}>
         <DialogContent>
@@ -370,7 +390,7 @@ export default function BulkScanPage({ scanMode = true, onSingleMode }: BulkScan
       </Dialog>
 
       {stage === "select" && (
-        <div className="grid grid-cols-1 gap-5 p-5 pr-8 lg:grid-cols-12">
+        <div className="grid grid-cols-1 gap-5 p-5 pr-0 lg:grid-cols-12">
           <div className="space-y-5 lg:col-span-4">
             <div className="border border-[#C8CDD2] bg-white p-5">
               <h2 className="mb-4 font-semibold text-[#1F2933]">1. Batch mode</h2>
@@ -487,7 +507,7 @@ export default function BulkScanPage({ scanMode = true, onSingleMode }: BulkScan
       )}
 
       {stage === "processing" && activeBatch && (
-        <div className="p-5 pr-8">
+        <div className="p-5 pr-0">
           <BulkProcessingPanel
             batch={activeBatch}
             uploadProgress={uploadProgress}
@@ -498,7 +518,7 @@ export default function BulkScanPage({ scanMode = true, onSingleMode }: BulkScan
       )}
 
       {stage === "review" && (selectedType || isRelatedSet || polledBatch?.document_type) && reviewStates.length > 0 && (
-        <div className="p-5 pr-8">
+        <div className="p-5 pr-0">
           <BulkReviewPanel
             documentType={polledBatch?.document_type ?? selectedType ?? visibleDocTypes[0]}
             documentTypes={visibleDocTypes}
@@ -520,7 +540,7 @@ export default function BulkScanPage({ scanMode = true, onSingleMode }: BulkScan
       )}
 
       {stage === "complete" && completedBatch && (
-        <div className="m-5 mr-8 border border-[#C8CDD2] bg-white p-10 text-center">
+        <div className="m-5 mr-0 border border-[#C8CDD2] bg-white p-10 text-center">
           <CheckCircle className="mx-auto mb-4 h-14 w-14 text-[#287EAD]" />
           <h2 className="mb-2 text-2xl font-bold text-[#1F2933]">Batch complete</h2>
           <p className="mb-6 text-[#5E6870]">
@@ -563,11 +583,12 @@ export default function BulkScanPage({ scanMode = true, onSingleMode }: BulkScan
       )}
 
       {stage === "review" && reviewStates.length === 0 && (
-        <div className="m-5 mr-8 flex items-center gap-2 border border-amber-200 bg-amber-50 p-4 text-amber-700">
+        <div className="m-5 mr-0 flex items-center gap-2 border border-amber-200 bg-amber-50 p-4 text-amber-700">
           <AlertCircle className="w-5 h-5" />
           No documents available for review.
         </div>
       )}
+      </div>
     </div>
   );
 }

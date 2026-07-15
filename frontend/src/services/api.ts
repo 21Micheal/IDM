@@ -1,5 +1,5 @@
 import axios, { AxiosError, InternalAxiosRequestConfig } from "axios";
-import { useAuthStore } from "@/store/authStore";
+import { useAuthStore, applyServerSessionPolicy } from "@/store/authStore";
 import type {
   DocumentEditTokenResponse,
   DocumentPreviewResponse,
@@ -51,12 +51,15 @@ export type OcrSuggestionsResponse = {
 };
 
 export type DmsSettings = {
+  organization_name: string;
+  organization_address: string;
   watermark_enabled: boolean;
   watermark_text: string;
   watermark_opacity: number;
   watermark_position: "diagonal" | "center" | "footer";
   watermark_apply_to_previews: boolean;
   allow_duplicate_uploads: boolean;
+  purge_trashed_duplicates_on_reupload: boolean;
   signed_file_urls_enabled: boolean;
   auto_archive_enabled: boolean;
   auto_archive_after_days: number;
@@ -64,6 +67,9 @@ export type DmsSettings = {
   trash_retention_days: number;
   rbac_single_stage: boolean;
   require_metadata_on_upload: boolean;
+  session_lifetime_minutes: number;
+  session_idle_timeout_minutes: number;
+  session_warning_minutes: number;
   updated_at?: string;
 };
 
@@ -128,9 +134,17 @@ if (import.meta.env.DEV) {
   console.warn('API Base URL resolved to:', apiBaseUrl);
 }
 
+// A default ceiling for ordinary JSON requests. Normal calls finish in well
+// under a second; this just prevents a slow/overloaded backend from leaving a
+// request hanging indefinitely — which, under high traffic, would exhaust the
+// browser's ~6-connections-per-host budget and stall the rest of the UI.
+// Uploads and blob downloads are exempted in the request interceptor below.
+const DEFAULT_REQUEST_TIMEOUT_MS = 60_000;
+
 export const api = axios.create({
   baseURL: apiBaseUrl,
   headers: { "Content-Type": "application/json" },
+  timeout: DEFAULT_REQUEST_TIMEOUT_MS,
 });
 
 let refreshPromise: Promise<string> | null = null;
@@ -151,6 +165,8 @@ async function refreshAccessToken(): Promise<string> {
         `${api.defaults.baseURL}/token/refresh/`,
         { refresh: refreshToken }
       );
+      // Pick up any admin change to the session policy on each refresh.
+      applyServerSessionPolicy(data.session_policy);
       useAuthStore.getState().setTokens(data.access, data.refresh ?? refreshToken);
       return data.access as string;
     })().finally(() => {
@@ -171,6 +187,17 @@ api.interceptors.request.use((config: InternalAxiosRequestConfig) => {
 
   const token = authState.accessToken;
   if (token) config.headers.Authorization = `Bearer ${token}`;
+
+  // File uploads (FormData) and binary downloads (blob) can legitimately run
+  // far longer than a JSON call — large files on slow links. Disable the
+  // default timeout for them so the ceiling only ever applies to normal API
+  // traffic. An explicit per-request timeout still wins if one was set.
+  const isUpload = config.data instanceof FormData;
+  const isBlob = config.responseType === "blob";
+  if ((isUpload || isBlob) && config.timeout === DEFAULT_REQUEST_TIMEOUT_MS) {
+    config.timeout = 0;
+  }
+
   if (config.data instanceof FormData) {
     const headers = config.headers as unknown as {
       delete?: (key: string) => void;
@@ -236,6 +263,9 @@ export const authAPI = {
 export const documentsAPI = {
   list: (params?: Record<string, unknown>) =>
     api.get("/documents/", { params }),
+
+  /** Distinct supplier names across all documents the user can see. */
+  suppliers: () => api.get<string[]>("/documents/suppliers/"),
 
   /**
    * List only the current user's personal (self-upload) documents.
@@ -383,9 +413,25 @@ export const documentsAPI = {
     message?: string;
   }) => api.post("/documents/email_selected/", data),
 
-  /** Bulk-download selected documents as a single ZIP (returns a Blob). */
+  /** Bulk-download selected documents as a ZIP of original files (returns a Blob). */
   downloadSelected: (documentIds: string[]) =>
-    api.post("/documents/download_selected/", { document_ids: documentIds }, { responseType: "blob" }),
+    api.post("/documents/download_selected/", { document_ids: documentIds, format: "original" }, { responseType: "blob" }),
+
+  /** Bulk-download selected documents as a ZIP where each file is converted to PDF (returns a Blob). */
+  downloadSelectedAsPdf: (documentIds: string[]) =>
+    api.post("/documents/download_selected/", { document_ids: documentIds, format: "pdf" }, { responseType: "blob" }),
+
+  /** Bulk-download selected documents stitched into one merged PDF (returns a Blob). */
+  downloadSelectedMergedPdf: (documentIds: string[]) =>
+    api.post("/documents/download_selected/", { document_ids: documentIds, format: "merged_pdf" }, { responseType: "blob" }),
+
+  /** Download a single document as PDF (original if already PDF, preview for Office, PIL-converted for images). */
+  downloadAsPdf: (id: string) =>
+    api.get(`/documents/${id}/download_as_pdf/`, { responseType: "blob" }),
+
+  /** Run a server-side PDF editor job (compress / convert); returns a Blob. */
+  pdfTool: (formData: FormData) =>
+    api.post("/documents/pdf-tool/", formData, { responseType: "blob" }),
 
   shareSelected: (data: {
     document_ids: string[];
@@ -450,6 +496,12 @@ export const documentsAPI = {
   editToken: (id: string) =>
     api.post<DocumentEditTokenResponse>(`/documents/${id}/edit_token/`),
 
+  /** Get a read-only WebDAV URL to open the doc in a desktop editor — no lock. POST. */
+  readOnlyToken: (id: string) =>
+    api.post<{ webdav_url: string; read_only: true; doc_id: string; file_name: string; mime_type: string }>(
+      `/documents/${id}/read_only_token/`,
+    ),
+
   /**
    * Download the one-time install script that registers the docvault-open://
    * protocol handler with xdg-open and Chrome on Linux.
@@ -491,6 +543,25 @@ export const bulkUploadAPI = {
     api.post(`/documents/bulk-uploads/${id}/review/`, { documents }),
 
   cancel: (id: string) => api.post(`/documents/bulk-uploads/${id}/cancel/`),
+
+  // Pending-review queue: the user's batches (email ingestion + bulk scans).
+  // Defaults server-side to processing/review; pass status to widen/narrow.
+  list: (params?: { status?: string }) =>
+    api.get<BulkUploadSummary[]>("/documents/bulk-uploads/", { params }),
+};
+
+export type BulkUploadSummary = {
+  id: string;
+  document_type: { id: string; name: string; code: string } | null;
+  mode: "same_type" | "related_set";
+  status: "pending" | "uploading" | "processing" | "review" | "completed" | "failed";
+  total_files: number;
+  successful_uploads: number;
+  failed_uploads: number;
+  created_at: string;
+  updated_at: string;
+  source: "email" | "scan";
+  email: { sender: string; subject: string; received_at: string | null } | null;
 };
 
 export const dmsSettingsAPI = {
@@ -515,13 +586,367 @@ export const searchAPI = {
   search: (payload: unknown) => api.post("/search/", payload),
 };
 
+// ── Infor IDM migration ───────────────────────────────────────────────────────
+export type MigrationConnection = {
+  api_url?: string;
+  token_url?: string;
+  tenant?: string;
+  client_id?: string;
+  client_secret?: string;
+  saak?: string;
+  sask?: string;
+  scope?: string;
+  idm_path?: string;
+  verify_tls?: boolean;
+};
+
+export type MigrationJobStatus =
+  | "draft" | "queued" | "running" | "completed" | "partial" | "failed" | "cancelled";
+
+export type MigrationLogEntry = {
+  ion_id?: string | null;
+  reference_number?: string;
+  document_id?: string;
+  status?: "imported" | "skipped" | "failed";
+  detail?: string;
+};
+
+export type MigrationJob = {
+  id: string;
+  name: string;
+  connection: MigrationConnection;
+  source_query: string;
+  target_document_type: string | null;
+  target_document_type_name?: string | null;
+  include_attributes: boolean;
+  max_documents: number;
+  status: MigrationJobStatus;
+  total_items: number;
+  processed_items: number;
+  succeeded_items: number;
+  failed_items: number;
+  skipped_items: number;
+  log?: MigrationLogEntry[];
+  error?: string;
+  created_by?: string | null;
+  created_by_name?: string | null;
+  created_at: string;
+  updated_at: string;
+  started_at?: string | null;
+  finished_at?: string | null;
+  has_client_secret?: boolean;
+  has_sask?: boolean;
+};
+
+export type MigrationJobInput = {
+  name: string;
+  connection?: MigrationConnection;
+  source_query?: string;
+  target_document_type?: string | null;
+  include_attributes?: boolean;
+  max_documents?: number;
+};
+
+export const migrationAPI = {
+  list: () => api.get<MigrationJob[]>("/documents/migrations/"),
+  get: (id: string) => api.get<MigrationJob>(`/documents/migrations/${id}/`),
+  status: (id: string) => api.get<MigrationJob>(`/documents/migrations/${id}/status/`),
+  create: (data: MigrationJobInput) =>
+    api.post<MigrationJob>("/documents/migrations/", data),
+  update: (id: string, data: Partial<MigrationJobInput>) =>
+    api.patch<MigrationJob>(`/documents/migrations/${id}/`, data),
+  delete: (id: string) => api.delete(`/documents/migrations/${id}/`),
+  run: (id: string) => api.post<MigrationJob>(`/documents/migrations/${id}/run/`, {}),
+  testConnection: (connection: MigrationConnection) =>
+    api.post<{ ok: boolean; tenant?: string; api_url?: string; detail?: string }>(
+      "/documents/migrations/test_connection/",
+      { connection },
+    ),
+  connectionDefaults: () =>
+    api.get<{ connection: MigrationConnection; has_client_secret: boolean; has_sask: boolean }>(
+      "/documents/migrations/connection_defaults/",
+    ),
+};
+
+// ── Infor SunSystems (budget checks + journal posting) ────────────────────────
+export type BudgetResult = {
+  ok: boolean;
+  available: boolean;
+  account: string;
+  currency: string;
+  budget: string;
+  actual: string;
+  commitment: string;
+  remaining: string;
+  requested: string;
+  over_by: string;
+  mode: "warn" | "block" | string;
+  message: string;
+  stub: boolean;
+};
+
+export type JournalPostingStatus =
+  | "pending" | "posting" | "posted" | "failed" | "skipped" | "none";
+
+export type JournalPosting = {
+  id: string;
+  document_id: string;
+  stage: number;
+  stage_label: string;
+  status: JournalPostingStatus;
+  attempts: number;
+  component: string;
+  method: string;
+  business_unit: string;
+  journal_number: string;
+  message: string;
+  error: string;
+  request_xml: string;
+  response_xml: string;
+  posted_at: string | null;
+  posted_by_name: string | null;
+  created_at: string;
+  updated_at: string;
+  detail?: string;
+  mapping_refreshed?: boolean;
+};
+
+export type BudgetCheckInput = {
+  template_id?: string;
+  document_id?: string;
+  values?: Record<string, unknown>;
+  mapping?: Record<string, unknown> | null;
+  stage?: number;
+};
+
+export type JournalPreviewResult = {
+  ok: boolean;
+  enabled: boolean;
+  component?: string;
+  method?: string;
+  business_unit?: string;
+  ssc_xml?: string;
+  soap_xml?: string;
+  line_count?: number;
+  debit_total?: string;
+  credit_total?: string;
+  balanced?: boolean;
+  warnings?: string[];
+  error?: string | null;
+};
+
+export type SunSystemsConnection = {
+  base_url?: string;
+  security_path?: string;
+  executor_path?: string;
+  username?: string;
+  password?: string;
+  business_unit?: string;
+  budget_code?: string;
+  verify_tls?: boolean;
+  clear_password?: boolean;
+};
+
+export type SunSystemsConnectionResponse = {
+  connection: SunSystemsConnection;   // admin-saved values (password redacted)
+  effective: SunSystemsConnection;    // what is actually used (env folded in)
+  env_defaults: SunSystemsConnection; // SUNSYSTEMS_* env defaults (redacted)
+  has_password: boolean;
+  updated_at: string | null;
+};
+
+export const sunsystemsAPI = {
+  budgetCheck: (input: BudgetCheckInput) =>
+    api.post<BudgetResult>("/sunsystems/budget-check/", input),
+  journalPreview: (input: BudgetCheckInput) =>
+    api.post<JournalPreviewResult>("/sunsystems/journal-preview/", input),
+  getConnection: () =>
+    api.get<SunSystemsConnectionResponse>("/sunsystems/connection/"),
+  updateConnection: (conn: SunSystemsConnection) =>
+    api.put<{ connection: SunSystemsConnection; effective: SunSystemsConnection }>(
+      "/sunsystems/connection/", conn),
+  testConnection: (conn: SunSystemsConnection) =>
+    api.post<{ ok: boolean; detail?: string; base_url?: string; token_acquired?: boolean }>(
+      "/sunsystems/connection/test/", { connection: conn }),
+  getPostings: (documentId: string) =>
+    api.get<JournalPosting[]>(`/sunsystems/postings/${documentId}/`),
+  retryPosting: (documentId: string, stage = 1) =>
+    api.post<JournalPosting>(`/sunsystems/postings/${documentId}/retry/`, { stage }),
+};
+
+// ── Email ingestion (IMAP mailboxes) ──────────────────────────────────────────
+export type MailboxProtocol = "imap" | "graph";
+
+export type MailboxConnection = {
+  // IMAP
+  host?: string;
+  port?: number;
+  use_ssl?: boolean;
+  username?: string;
+  password?: string;
+  folder?: string;
+  verify_tls?: boolean;
+  // Microsoft Graph
+  tenant_id?: string;
+  client_id?: string;
+  client_secret?: string;
+  mailbox?: string;
+};
+
+export type MailboxPollStatus = "idle" | "polling" | "ok" | "error";
+
+export type IngestedEmail = {
+  id: string;
+  message_id: string;
+  imap_uid: number;
+  sender: string;
+  subject: string;
+  received_at?: string | null;
+  status: "imported" | "skipped" | "partial" | "failed";
+  attachment_count: number;
+  documents_created: number;
+  detail: string;
+  bulk_upload?: string | null;
+  created_at: string;
+};
+
+export type Mailbox = {
+  id: string;
+  name: string;
+  protocol: MailboxProtocol;
+  connection: MailboxConnection;
+  last_seen_cursor?: string;
+  default_document_type: string | null;
+  default_document_type_name?: string | null;
+  auto_classify: boolean;
+  sender_supplier_map: Record<string, string>;
+  sender_allowlist: string[];
+  allowed_attachment_extensions: string[];
+  related_set_attachments: boolean;
+  ingest_history: boolean;
+  ingest_since: string | null;
+  max_messages_per_poll: number;
+  is_active: boolean;
+  poll_status: MailboxPollStatus;
+  last_polled_at?: string | null;
+  last_error?: string;
+  consecutive_failures?: number;
+  email_counts?: {
+    imported: number;
+    partial: number;
+    skipped: number;
+    failed: number;
+    total: number;
+  } | null;
+  last_seen_uid: number;
+  last_imported_count: number;
+  last_skipped_count: number;
+  last_failed_count: number;
+  created_by?: string | null;
+  created_by_name?: string | null;
+  created_at: string;
+  updated_at: string;
+  has_password?: boolean;
+  recent_emails?: IngestedEmail[] | null;
+};
+
+export type MailboxInput = {
+  name: string;
+  protocol?: MailboxProtocol;
+  connection?: MailboxConnection;
+  default_document_type?: string | null;
+  auto_classify?: boolean;
+  sender_supplier_map?: Record<string, string>;
+  sender_allowlist?: string[];
+  allowed_attachment_extensions?: string[];
+  related_set_attachments?: boolean;
+  ingest_history?: boolean;
+  ingest_since?: string | null;
+  max_messages_per_poll?: number;
+  is_active?: boolean;
+};
+
+export const mailboxAPI = {
+  list: () => api.get<Mailbox[]>("/documents/mailboxes/"),
+  get: (id: string) => api.get<Mailbox>(`/documents/mailboxes/${id}/`),
+  status: (id: string) => api.get<Mailbox>(`/documents/mailboxes/${id}/status/`),
+  create: (data: MailboxInput) => api.post<Mailbox>("/documents/mailboxes/", data),
+  update: (id: string, data: Partial<MailboxInput>) =>
+    api.patch<Mailbox>(`/documents/mailboxes/${id}/`, data),
+  delete: (id: string) => api.delete(`/documents/mailboxes/${id}/`),
+  poll: (id: string) => api.post<Mailbox>(`/documents/mailboxes/${id}/poll/`, {}),
+  testConnection: (connection: MailboxConnection, protocol: MailboxProtocol = "imap") =>
+    api.post<{ ok: boolean; host?: string; folder?: string; mailbox?: string; detail?: string }>(
+      "/documents/mailboxes/test_connection/",
+      { connection, protocol },
+    ),
+  connectionDefaults: (protocol: MailboxProtocol = "imap") =>
+    api.get<{ connection: MailboxConnection; has_password: boolean }>(
+      "/documents/mailboxes/connection_defaults/",
+      { params: { protocol } },
+    ),
+  stats: (days = 30) =>
+    api.get<MailboxStats>("/documents/mailboxes/stats/", { params: { days } }),
+};
+
+export type MailboxStats = {
+  days: number;
+  daily: { date: string; imported: number; skipped: number; failed: number }[];
+  totals: { imported: number; skipped: number; failed: number; documents: number; total: number };
+  mailboxes: {
+    id: string;
+    name: string;
+    protocol: MailboxProtocol;
+    poll_status: MailboxPollStatus;
+    is_active: boolean;
+    consecutive_failures: number;
+    last_polled_at: string | null;
+    imported: number;
+    skipped: number;
+    failed: number;
+    documents: number;
+  }[];
+};
+
+// ── Signing payload (structurally matches SignaturePlacementResult from
+// SignaturePlacementModal) — kept local so this module stays decoupled from UI.
+export type SignSubmission = {
+  items: unknown[];
+  timezone?: string;
+  useNewSignature?: boolean;
+  signatureImage?: string | null;
+};
+
+/** Build the multipart body the sign / approve endpoints expect from a placement
+ *  result: the placed `items`, optional `timezone`, and (only when the signer
+ *  drew a one-off signature) `use_new_signature` + `signature_image`. */
+function buildSignatureForm(result: SignSubmission, extra?: Record<string, string>): FormData {
+  const fd = new FormData();
+  fd.append("items", JSON.stringify(result.items ?? []));
+  if (result.timezone) fd.append("timezone", result.timezone);
+  if (result.useNewSignature && result.signatureImage) {
+    fd.append("use_new_signature", "true");
+    fd.append("signature_image", result.signatureImage);
+  }
+  for (const [k, v] of Object.entries(extra ?? {})) fd.append(k, v);
+  return fd;
+}
+
 export const workflowAPI = {
   // Templates
   listTemplates: () => api.get("/workflows/templates/"),
   getTemplate: (id: string) => api.get(`/workflows/templates/${id}/`),
+  // Process steps (statuses) a document of `documentTypeId` can be in — drives
+  // "process step equals …" visibility conditions in the form builder.
+  processSteps: (documentTypeId?: string) =>
+    api.get("/workflows/templates/process-steps/", {
+      params: documentTypeId ? { document_type: documentTypeId } : {},
+    }),
   createTemplate: (data: unknown) => api.post("/workflows/templates/", data),
   updateTemplate: (id: string, data: unknown) =>
     api.put(`/workflows/templates/${id}/`, data),
+
+  deleteTemplate: (id: string) => api.delete(`/workflows/templates/${id}/`),
 
   duplicateTemplate: (id: string, name?: string) =>
     api.post(
@@ -552,15 +977,12 @@ export const workflowAPI = {
   myTasks: () => api.get("/workflows/tasks/my_tasks/"),
   listTasks: (params?: Record<string, unknown>) =>
     api.get("/workflows/tasks/", { params }),
-  approveTask: (
-    id: string,
-    comment = "",
-    signaturePlacement?: { page_number: number; x_percent: number; y_percent: number; width_percent?: number },
-  ) =>
-    api.post(`/workflows/tasks/${id}/approve/`, {
-      comment,
-      ...(signaturePlacement ? { signature_placement: signaturePlacement } : {}),
-    }),
+  approveTask: (id: string, comment = "", result?: SignSubmission) =>
+    result
+      ? api.post(`/workflows/tasks/${id}/approve/`, buildSignatureForm(result, { comment }), {
+          headers: { "Content-Type": undefined },
+        })
+      : api.post(`/workflows/tasks/${id}/approve/`, { comment }),
   rejectTask: (id: string, comment: string) =>
     api.post(`/workflows/tasks/${id}/reject/`, { comment }),
   returnForReview: (id: string, comment: string) =>
@@ -575,9 +997,19 @@ export const workflowAPI = {
   taskHistory: (id: string) => api.get(`/workflows/tasks/${id}/history/`),
 };
 
+export interface NotificationSummary {
+  unread_notifications: number;
+  unread_task_alerts: number;
+  pending_tasks: number;
+  incoming_signatures: number;
+}
+
 export const notificationsAPI = {
   list: (params?: { is_read?: boolean }) => api.get("/notifications/", { params }),
   unreadCount: () => api.get("/notifications/unread_count/"),
+  // Consolidated badge counts for the app shell — one cheap request instead of
+  // separately polling notifications, workflow tasks and signature requests.
+  summary: () => api.get<NotificationSummary>("/notifications/summary/"),
   markRead: (id: string) =>
     api.patch(`/notifications/${id}/`, { is_read: true }),
   markUnread: (id: string) =>
@@ -595,6 +1027,9 @@ export const documentApi = {
 export const signatureRequestsAPI = {
   list: (params?: { box?: "incoming" | "sent"; document?: string }) =>
     api.get("/documents/signature-requests/", { params }),
+  /** Count of requests still awaiting the current user's signature (nav badge). */
+  incomingCount: () =>
+    api.get<{ count: number }>("/documents/signature-requests/incoming_count/"),
   get: (id: string) => api.get(`/documents/signature-requests/${id}/`),
   create: (data: {
     file: File;
@@ -613,8 +1048,10 @@ export const signatureRequestsAPI = {
       headers: { "Content-Type": undefined },
     });
   },
-  sign: (id: string, placement: { page_number: number; x_percent: number; y_percent: number; width_percent?: number }) =>
-    api.post(`/documents/signature-requests/${id}/sign/`, { placement }),
+  sign: (id: string, result: SignSubmission) =>
+    api.post(`/documents/signature-requests/${id}/sign/`, buildSignatureForm(result), {
+      headers: { "Content-Type": undefined },
+    }),
   decline: (id: string, reason: string) =>
     api.post(`/documents/signature-requests/${id}/decline/`, { reason }),
   cancel: (id: string) => api.post(`/documents/signature-requests/${id}/cancel/`),
@@ -646,6 +1083,16 @@ export const usersAPI = {
   resetPassword: (id: string) => api.post(`/users/${id}/reset-password/`),
   toggleActive: (id: string) => api.post(`/users/${id}/toggle_active/`),
   delegations: (id: string) => api.get(`/users/${id}/delegations/`),
+  createDelegation: (
+    delegatorId: string,
+    data: {
+      delegate_id: string;
+      starts_at: string;
+      ends_at: string;
+      comment: string;
+      document_type_id?: string | null;
+    },
+  ) => api.post("/delegations/", { ...data, delegator_id: delegatorId }),
   reassignActiveTasks: (id: string, toUserId: string) =>
     api.post(`/users/${id}/reassign-active-tasks/`, { to_user_id: toUserId }),
 };
@@ -666,14 +1113,24 @@ export const profileAPI = {
   // MFA is now default, but we keep toggle for admin flexibility
   toggleMFA: (enable = true) => api.post("/auth/mfa/", { enable }),
   listDelegations: () => api.get("/delegations/"),
-  createDelegation: (data: { delegate_id: string; starts_at: string; ends_at: string; comment: string; document_type_id?: string | null }) =>
-    api.post("/delegations/", data),
+  createDelegation: (data: {
+    delegate_id: string;
+    starts_at: string;
+    ends_at: string;
+    comment: string;
+    document_type_id?: string | null;
+    delegator_id?: string;
+  }) => api.post("/delegations/", data),
   updateDelegation: (
     id: string,
     data: Partial<{ delegate_id: string; starts_at: string; ends_at: string; comment: string; is_active: boolean; document_type_id?: string | null }>,
   ) => api.patch(`/delegations/${id}/`, data),
   deleteDelegation: (id: string) => api.delete(`/delegations/${id}/`),
-  delegationCandidates: () => api.get("/delegations/candidates/"),
+  dismissDelegation: (id: string) => api.post(`/delegations/${id}/dismiss/`),
+  delegationCandidates: (excludeUserId?: string) =>
+    api.get("/delegations/candidates/", {
+      params: excludeUserId ? { exclude: excludeUserId } : undefined,
+    }),
   getPreferences: () => api.get("/auth/preferences/"),
   updatePreferences: (data: {
     date_format?: string;

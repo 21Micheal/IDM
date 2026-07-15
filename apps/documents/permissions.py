@@ -146,8 +146,8 @@ class HasDocumentPermission(permissions.BasePermission):
             GroupAction.EDIT.value,
             GroupAction.UPLOAD.value,
         ):
-            from apps.documents.access import document_allows_edit
-            if not document_allows_edit(obj, user=request.user):
+            from apps.documents.access import document_allows_editing_actions
+            if not document_allows_editing_actions(obj, user=request.user):
                 return False
 
         return allowed
@@ -182,6 +182,7 @@ class HasDocumentPermission(permissions.BasePermission):
             "partial_update":  GroupAction.EDIT.value,
             "update":          GroupAction.EDIT.value,
             "edit_metadata":   GroupAction.EDIT.value,
+            "update_form":     GroupAction.EDIT.value,
             "upload_version":  GroupAction.EDIT.value,
             "restore_version": GroupAction.EDIT.value,
             "submit":          GroupAction.SUBMIT.value,

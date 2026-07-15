@@ -333,6 +333,469 @@ def generate_built_docx(template, values) -> bytes:
     return buf.getvalue()
 
 
+# ─── Document designer (WYSIWYG block layout) → DOCX ─────────────────────────
+
+_TOKEN_RE = re.compile(r"\{\{([a-zA-Z0-9_]+)\}\}")
+# User placeholders the admin marks for the recipient to fill when editing the
+# generated document, e.g. [[Amount]]. Rendered as highlighted fill-in markers.
+_PLACEHOLDER_RE = re.compile(r"\[\[([^\]]+)\]\]")
+
+
+def _designer_add_text(paragraph, raw, values, *, size=None, color=None,
+                       bold=None, italic=None, underline=None, font=None):
+    """
+    Emit runs into a paragraph for a designer text string. {{merge_fields}} are
+    substituted to static text; [[user placeholders]] become highlighted runs the
+    recipient fills in when editing the generated document.
+    """
+    from docx.shared import Pt
+    from docx.enum.text import WD_COLOR_INDEX
+
+    substituted = _subst_tokens(raw, values)
+    if not substituted:
+        return
+    # re.split with a capture group yields: [text, label, text, label, ...] — the
+    # odd indices are the placeholder labels.
+    for i, part in enumerate(_PLACEHOLDER_RE.split(substituted)):
+        if not part:
+            continue
+        run = paragraph.add_run(part)
+        is_placeholder = i % 2 == 1
+        if size:
+            run.font.size = Pt(size)
+        if font:
+            run.font.name = font
+        if bold is not None:
+            run.bold = bold
+        if italic is not None:
+            run.italic = italic
+        if underline is not None:
+            run.underline = underline
+        if is_placeholder:
+            run.font.highlight_color = WD_COLOR_INDEX.YELLOW
+        elif color is not None:
+            run.font.color.rgb = color
+
+
+def _subst_tokens(text, values, keep_page=False):
+    """Replace {{key}} with values. When keep_page is True, leave {{page}} and
+    {{pages}} intact so they can become Word page-number fields."""
+    if not text:
+        return ""
+
+    def repl(m):
+        key = m.group(1)
+        if keep_page and key in ("page", "pages"):
+            return m.group(0)
+        val = values.get(key)
+        return "" if val is None else str(val)
+
+    return _TOKEN_RE.sub(repl, str(text))
+
+
+def _designer_hex_to_rgb(hexstr, default="1F2933"):
+    from docx.shared import RGBColor
+    s = (hexstr or "").lstrip("#")
+    if len(s) != 6:
+        s = default
+    try:
+        return RGBColor(int(s[0:2], 16), int(s[2:4], 16), int(s[4:6], 16))
+    except ValueError:
+        return RGBColor(0x1F, 0x29, 0x33)
+
+
+def _designer_font_family(css):
+    if not css:
+        return None
+    first = css.split(",")[0].strip().strip("'\"")
+    return first or None
+
+
+def _designer_add_page_field(paragraph, instr):
+    """Append a Word field (PAGE / NUMPAGES) to a paragraph."""
+    from docx.oxml import OxmlElement
+    from docx.oxml.ns import qn
+
+    fld = OxmlElement("w:fldSimple")
+    fld.set(qn("w:instr"), instr)
+    run = OxmlElement("w:r")
+    t = OxmlElement("w:t")
+    t.text = "1"
+    run.append(t)
+    fld.append(run)
+    paragraph._p.append(fld)
+
+
+def _designer_band_runs(paragraph, text, values):
+    """Render header/footer band text into a paragraph, turning {{page}} /
+    {{pages}} into live Word fields and substituting other tokens."""
+    rendered = _subst_tokens(text, values, keep_page=True)
+    for part in re.split(r"(\{\{page\}\}|\{\{pages\}\})", rendered):
+        if part == "{{page}}":
+            _designer_add_page_field(paragraph, "PAGE")
+        elif part == "{{pages}}":
+            _designer_add_page_field(paragraph, "NUMPAGES")
+        elif part:
+            paragraph.add_run(part)
+
+
+def _designer_clear_table_borders(table):
+    from docx.oxml import OxmlElement
+    from docx.oxml.ns import qn
+
+    tblPr = table._tbl.tblPr
+    borders = OxmlElement("w:tblBorders")
+    for edge in ("top", "left", "bottom", "right", "insideH", "insideV"):
+        el = OxmlElement(f"w:{edge}")
+        el.set(qn("w:val"), "none")
+        borders.append(el)
+    tblPr.append(borders)
+
+
+def _designer_merge_values(values, *, user, reference_number, title):
+    """
+    Resolve a designer ("document") template's merge fields. These templates are
+    NOT filled by the user with placeholders — their {{tokens}} auto-populate
+    from the acting user, the current date, the assigned reference, the document
+    title, and any document-type metadata the user supplied at upload.
+
+    User-supplied values (the document-type metadata) take precedence; the
+    context defaults below only fill tokens that were left blank. Advanced
+    sources (per-field formulas, document references) are a later enhancement.
+    """
+    from django.utils import timezone
+    from apps.documents.form_formulas import resolve_formula
+
+    resolved = dict(values or {})
+    now = timezone.localtime()
+
+    # Canonical formula vocabulary — shared with the form builder so the same
+    # formula keys resolve identically in both. The designer's "formula picker"
+    # inserts these keys directly.
+    formula = {
+        key: resolve_formula(key, user=user, reference_number=reference_number, now=now)
+        for key in (
+            "current_user", "current_user_email", "current_user_department",
+            "today", "now", "reference_number",
+        )
+    }
+
+    # Organization identity from DMS settings (auto-fills company merge fields).
+    org_name = org_address = ""
+    try:
+        from apps.documents.models import DMSSettings
+        settings_row = DMSSettings.objects.first()
+        if settings_row:
+            org_name = settings_row.organization_name or ""
+            org_address = settings_row.organization_address or ""
+    except Exception:
+        pass
+
+    defaults = {
+        # Canonical formula keys.
+        **formula,
+        # Friendly aliases (and designer-specific fields) → same resolved values.
+        "author_name": formula["current_user"],
+        "author_email": formula["current_user_email"],
+        "user_name": formula["current_user"],
+        "prepared_by": formula["current_user"],
+        "department": formula["current_user_department"],
+        "document_date": formula["today"],
+        "date": formula["today"],
+        "document_no": reference_number,
+        "document_number": reference_number,
+        "company_name": org_name,
+        "company_address": org_address,
+        "organization_name": org_name,
+        "document_title": title,
+        "title": title,
+    }
+    for key, value in defaults.items():
+        current = resolved.get(key)
+        if value and (current is None or (isinstance(current, str) and not current.strip())):
+            resolved[key] = value
+
+    # ── Document references ───────────────────────────────────────────────────
+    # A value picked from a related document ({id,label,source}) resolves to its
+    # label for {{key}}, and pulls common fields for {{key__field}} — e.g.
+    # {{related_po}}, {{related_po__supplier}}, {{related_po__reference_number}}.
+    from apps.documents.form_attachments import is_reference_value
+    from apps.documents.models import Document as _RefDoc
+    for key, val in list(resolved.items()):
+        if not is_reference_value(val):
+            continue
+        resolved[key] = val.get("label", "") or ""
+        ref_id = val.get("id")
+        if not ref_id:
+            continue
+        try:
+            ref_doc = _RefDoc.objects.filter(pk=ref_id).first()
+        except Exception:
+            ref_doc = None
+        if not ref_doc:
+            continue
+        # Authoritative label from the referenced document (don't trust the client).
+        resolved[key] = (
+            f"{ref_doc.title} ({ref_doc.reference_number})"
+            if ref_doc.reference_number else (ref_doc.title or "")
+        )
+        amt = getattr(ref_doc, "amount", None)
+        dd = getattr(ref_doc, "document_date", None)
+        resolved[f"{key}__reference_number"] = ref_doc.reference_number or ""
+        resolved[f"{key}__title"] = ref_doc.title or ""
+        resolved[f"{key}__supplier"] = getattr(ref_doc, "supplier", "") or ""
+        resolved[f"{key}__amount"] = str(amt) if amt is not None else ""
+        resolved[f"{key}__currency"] = getattr(ref_doc, "currency", "") or ""
+        resolved[f"{key}__document_date"] = dd.strftime("%d %b %Y") if dd else ""
+        for mk, mv in (getattr(ref_doc, "metadata", None) or {}).items():
+            if isinstance(mv, (str, int, float)):
+                resolved.setdefault(f"{key}__{mk}", str(mv))
+
+    return resolved
+
+
+def generate_designer_docx(design, values) -> bytes:
+    """
+    Render a WYSIWYG document-designer template (block layout) to an editable
+    DOCX, substituting {{tokens}} from `values`. Faithful-but-approximate to the
+    on-screen designer; the output follows the normal Office editing lifecycle.
+    """
+    from docx import Document
+    from docx.shared import Pt, Mm, RGBColor
+    from docx.enum.text import WD_ALIGN_PARAGRAPH
+    from docx.enum.section import WD_ORIENT
+    from docx.oxml.ns import qn
+    from docx.oxml import OxmlElement
+
+    design = design or {}
+    theme = design.get("theme", {}) or {}
+    page = design.get("page", {}) or {}
+    blocks = design.get("blocks", []) or []
+
+    body_font = _designer_font_family(theme.get("fontFamily")) or "Calibri"
+    heading_font = _designer_font_family(theme.get("headingFamily")) or body_font
+    base_px = theme.get("baseFontSize") or 13
+    base_pt = max(8, round(float(base_px) * 0.75))
+    text_rgb = _designer_hex_to_rgb(theme.get("textColor"), "1F2933")
+    heading_rgb = _designer_hex_to_rgb(theme.get("headingColor"), "0F2A3A")
+    accent_rgb = _designer_hex_to_rgb(theme.get("accentColor"), "287EAD")
+
+    px_to_pt = lambda px, fallback: max(8, round(float(px) * 0.75)) if px else fallback
+
+    doc = Document()
+
+    # Base style
+    normal = doc.styles["Normal"]
+    normal.font.name = body_font
+    normal.font.size = Pt(base_pt)
+    normal.font.color.rgb = text_rgb
+
+    ALIGN = {
+        "left": WD_ALIGN_PARAGRAPH.LEFT, "center": WD_ALIGN_PARAGRAPH.CENTER,
+        "right": WD_ALIGN_PARAGRAPH.RIGHT, "justify": WD_ALIGN_PARAGRAPH.JUSTIFY,
+    }
+
+    # ── Page setup ──────────────────────────────────────────────────────────
+    PAGE_DIMS = {"A4": (210, 297), "Letter": (216, 279), "Legal": (216, 356)}
+    w_mm, h_mm = PAGE_DIMS.get(page.get("size", "A4"), (210, 297))
+    margin = page.get("margin", {}) or {}
+    for section in doc.sections:
+        if page.get("orientation") == "landscape":
+            section.orientation = WD_ORIENT.LANDSCAPE
+            section.page_width, section.page_height = Mm(h_mm), Mm(w_mm)
+        else:
+            section.page_width, section.page_height = Mm(w_mm), Mm(h_mm)
+        section.top_margin = Mm(margin.get("top", 20))
+        section.bottom_margin = Mm(margin.get("bottom", 20))
+        section.left_margin = Mm(margin.get("left", 18))
+        section.right_margin = Mm(margin.get("right", 18))
+
+    # ── Header / footer bands (left / center / right) ───────────────────────
+    def render_band(band, container):
+        if not band or not band.get("enabled"):
+            return
+        content = band.get("content", {}) or {}
+        table = container.add_table(rows=1, cols=3, width=Mm(w_mm - margin.get("left", 18) - margin.get("right", 18)))
+        _designer_clear_table_borders(table)
+        cells = table.rows[0].cells
+        for cell, (slot, align) in zip(cells, (("left", "left"), ("center", "center"), ("right", "right"))):
+            para = cell.paragraphs[0]
+            para.alignment = ALIGN[align]
+            _designer_band_runs(para, content.get(slot, ""), values)
+
+    section = doc.sections[0]
+    render_band(design.get("header"), section.header)
+    render_band(design.get("footer"), section.footer)
+
+    # ── Blocks ──────────────────────────────────────────────────────────────
+    def add_text(paragraph, raw, **style):
+        _designer_add_text(paragraph, raw, values, **style)
+
+    for b in blocks:
+        btype = b.get("type")
+        align = ALIGN.get(b.get("align", "left"), WD_ALIGN_PARAGRAPH.LEFT)
+
+        if btype == "heading":
+            level = b.get("level", 2)
+            size = px_to_pt(b.get("fontSize"), {1: 18, 2: 14, 3: 12}.get(level, 14))
+            p = doc.add_paragraph()
+            p.alignment = align
+            add_text(p, b.get("text", ""), size=size, font=heading_font, bold=True,
+                     color=_designer_hex_to_rgb(b.get("color")) if b.get("color") else heading_rgb)
+
+        elif btype in ("paragraph", "quote"):
+            p = doc.add_paragraph()
+            p.alignment = align
+            add_text(p, b.get("text", ""), size=px_to_pt(b.get("fontSize"), None),
+                     color=_designer_hex_to_rgb(b.get("color")) if b.get("color") else None,
+                     bold=b.get("bold"), italic=b.get("italic") or (btype == "quote"),
+                     underline=b.get("underline"))
+
+        elif btype in ("bulleted_list", "numbered_list"):
+            style = "List Bullet" if btype == "bulleted_list" else "List Number"
+            for item in b.get("items", []) or []:
+                p = doc.add_paragraph(style=style)
+                add_text(p, item)
+
+        elif btype == "key_value":
+            pairs = b.get("pairs", []) or []
+            if pairs:
+                table = doc.add_table(rows=len(pairs), cols=2)
+                _designer_clear_table_borders(table)
+                for i, pair in enumerate(pairs):
+                    lc, vc = table.rows[i].cells
+                    add_text(lc.paragraphs[0], pair.get("label", ""), bold=True)
+                    add_text(vc.paragraphs[0], pair.get("value", ""))
+
+        elif btype == "data_table":
+            cols = b.get("columns", []) or []
+            if cols:
+                if b.get("bound"):
+                    # Bound to a collection if one was supplied (one row per
+                    # record); otherwise emit blank fillable rows for the user to
+                    # complete when editing the generated document.
+                    source = values.get(b.get("sourceKey") or "")
+                    if isinstance(source, list) and source:
+                        rows = [
+                            [str((rec or {}).get(c.get("key", ""), "")) for c in cols]
+                            for rec in source
+                        ]
+                    else:
+                        n = max(1, int(b.get("fillRows") or 3))
+                        rows = [["" for _ in cols] for _ in range(n)]
+                else:
+                    rows = b.get("rows", []) or []
+                table = doc.add_table(rows=1, cols=len(cols))
+                table.style = "Table Grid" if b.get("bordered", True) else "Light List"
+                for i, col in enumerate(cols):
+                    cell = table.rows[0].cells[i]
+                    run = cell.paragraphs[0].add_run(col.get("label", ""))
+                    run.bold = True
+                for row in rows:
+                    cells = table.add_row().cells
+                    for i, _col in enumerate(cols):
+                        val = row[i] if i < len(row) else ""
+                        add_text(cells[i].paragraphs[0], val)
+
+        elif btype == "two_column":
+            table = doc.add_table(rows=1, cols=2)
+            _designer_clear_table_borders(table)
+            lc, rc = table.rows[0].cells
+            add_text(lc.paragraphs[0], b.get("left", ""))
+            add_text(rc.paragraphs[0], b.get("right", ""))
+
+        elif btype == "divider":
+            p = doc.add_paragraph()
+            pPr = p._p.get_or_add_pPr()
+            pBdr = OxmlElement("w:pBdr")
+            bottom = OxmlElement("w:bottom")
+            bottom.set(qn("w:val"), "single")
+            bottom.set(qn("w:sz"), "6")
+            bottom.set(qn("w:space"), "1")
+            bottom.set(qn("w:color"), "C8CDD2")
+            pBdr.append(bottom)
+            pPr.append(pBdr)
+
+        elif btype == "spacer":
+            p = doc.add_paragraph()
+            p.paragraph_format.space_after = Pt(px_to_pt(b.get("height", 24), 18))
+
+        elif btype == "page_break":
+            doc.add_page_break()
+
+        elif btype == "signature":
+            sigs = b.get("signatories", []) or []
+            if sigs:
+                # Lay out up to 3 signatories per row, wrapping into more rows for
+                # additional approvers. Each cell: role, a signing line, then the
+                # Name/Date fields (which may be {{auto-fill}}, [[placeholders]] or
+                # plain text).
+                per_row = 3
+                for start in range(0, len(sigs), per_row):
+                    chunk = sigs[start:start + per_row]
+                    table = doc.add_table(rows=1, cols=len(chunk))
+                    _designer_clear_table_borders(table)
+                    for i, s in enumerate(chunk):
+                        cell = table.rows[0].cells[i]
+                        cell.paragraphs[0].add_run(s.get("role", "")).bold = True
+                        cell.add_paragraph()  # signing space
+                        cell.add_paragraph().add_run("_______________________")
+                        lbl = cell.add_paragraph().add_run("Signature")
+                        lbl.italic = True
+                        lbl.font.size = Pt(8)
+                        if s.get("nameToken"):
+                            p = cell.add_paragraph()
+                            p.add_run("Name: ").bold = True
+                            add_text(p, s.get("nameToken"))
+                        if s.get("dateToken"):
+                            p = cell.add_paragraph()
+                            p.add_run("Date: ").bold = True
+                            add_text(p, s.get("dateToken"))
+                    doc.add_paragraph()  # spacing between signatory rows
+
+        elif btype in ("image", "logo"):
+            # Admin-uploaded images arrive as base64 data URLs embedded in the
+            # template; decode and embed them. Fall back to a light text marker
+            # for a missing/URL-only source.
+            from docx.shared import Emu
+            raw_img = _decode_data_url_image(b.get("src"))
+            width_px = b.get("width") or 160
+            emu_width = Emu(int(float(width_px) / 96 * 914400))  # 96 px/inch
+
+            def _place_image(paragraph):
+                if raw_img:
+                    try:
+                        paragraph.add_run().add_picture(BytesIO(raw_img), width=emu_width)
+                        return
+                    except Exception:
+                        pass
+                add_text(paragraph, _subst_tokens(b.get("alt", ""), values) or ("Logo" if btype == "logo" else "Image"), italic=True)
+
+            side = b.get("float") or "none"
+            if side in ("left", "right"):
+                # Side-by-side: borderless 1×2 table — image in one cell, the
+                # `beside` content in the other. This is the Word-native way to
+                # place text alongside an image (docx has no CSS float/wrap).
+                table = doc.add_table(rows=1, cols=2)
+                _designer_clear_table_borders(table)
+                img_mm = min(w_mm - margin.get("left", 18) - margin.get("right", 18) - 10,
+                             max(10, float(width_px) / 96 * 25.4))
+                img_cell, text_cell = table.rows[0].cells
+                if side == "right":
+                    img_cell, text_cell = text_cell, img_cell
+                img_cell.width = Mm(img_mm)
+                _place_image(img_cell.paragraphs[0])
+                add_text(text_cell.paragraphs[0], b.get("beside", ""))
+            else:
+                p = doc.add_paragraph()
+                p.alignment = align
+                _place_image(p)
+
+    buf = BytesIO()
+    doc.save(buf)
+    return buf.getvalue()
+
+
 # ─── Uploaded template fillers ───────────────────────────────────────────────
 
 def fill_docx_template(template, values) -> bytes:
@@ -395,6 +858,67 @@ def fill_xlsx_template(template, values) -> bytes:
     return buf.getvalue()
 
 
+def _replace_placeholder_in_pptx_paragraph(para, values: dict):
+    """
+    Replace {{key}} placeholders in a python-pptx paragraph, stitching text
+    across runs (PowerPoint, like Word, often splits a placeholder over several
+    runs). The merged text is written back into the first run; the rest cleared.
+    """
+    runs = para.runs
+    if not runs:
+        return
+    full_text = "".join(run.text for run in runs)
+    if "{{" not in full_text:
+        return
+
+    def replacer(match):
+        val = values.get(match.group(1))
+        return "" if val is None else str(val)
+
+    new_text = re.sub(r"\{\{([a-zA-Z0-9_]+)\}\}", replacer, full_text)
+    if new_text == full_text:
+        return
+    runs[0].text = new_text
+    for run in runs[1:]:
+        run.text = ""
+
+
+def fill_pptx_template(template, values) -> bytes:
+    """Fill an uploaded PPTX template with placeholder values."""
+    from pptx import Presentation
+
+    prs = Presentation(template.file.path)
+    for slide in prs.slides:
+        for shape in slide.shapes:
+            if shape.has_text_frame:
+                for para in shape.text_frame.paragraphs:
+                    _replace_placeholder_in_pptx_paragraph(para, values)
+            if shape.has_table:
+                for row in shape.table.rows:
+                    for cell in row.cells:
+                        for para in cell.text_frame.paragraphs:
+                            _replace_placeholder_in_pptx_paragraph(para, values)
+
+    buf = BytesIO()
+    prs.save(buf)
+    return buf.getvalue()
+
+
+def pptx_to_pdf(pptx_bytes: bytes) -> bytes:
+    """Convert PPTX to PDF using LibreOffice headless."""
+    from apps.documents.tasks import _convert_office_source_to_pdf_bytes
+
+    with tempfile.NamedTemporaryFile(suffix=".pptx", delete=False) as f:
+        f.write(pptx_bytes)
+        tmp_path = f.name
+    try:
+        return _convert_office_source_to_pdf_bytes(
+            Path(tmp_path), soffice_bin="libreoffice", timeout=60
+        )
+    finally:
+        os.unlink(tmp_path)
+
+
 def docx_to_pdf(docx_bytes: bytes) -> bytes:
     """Convert DOCX to PDF using LibreOffice headless."""
     from apps.documents.tasks import _convert_office_source_to_pdf_bytes
@@ -437,16 +961,43 @@ def generate_document_from_template_sync(template, values, fmt, title, user, typ
     import hashlib
 
     is_xlsx = template.file_name.endswith((".xlsx", ".xls")) if template.file_name else False
+    is_pptx = template.file_name.endswith((".pptx", ".ppt")) if template.file_name else False
+    kind = getattr(template, "kind", "form") or "form"
 
     # Reserve the reference up front so a `reference_number` formula can use it.
     reference_number = _generate_unique_reference(template.document_type)
 
-    if template.type == "built":
+    if template.type == "built" and kind == "document":
+        # WYSIWYG document designer: merge fields auto-populate from the user,
+        # date, reference and the document-type metadata — the user fills no
+        # placeholders. Render the block layout to an editable DOCX (or PDF on
+        # request) so the result follows the normal Office lifecycle.
+        merge_values = _designer_merge_values(
+            values, user=user, reference_number=reference_number, title=title
+        )
+        render_values = descriptors_to_names(merge_values)
+        docx_content = generate_designer_docx(template.design, render_values)
+        if fmt == "pdf":
+            content = docx_to_pdf(docx_content)
+            filename = f"{title}.pdf"
+            content_type = "application/pdf"
+        else:
+            content = docx_content
+            filename = f"{title}.docx"
+            content_type = "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+
+    elif template.type == "built":
         # Freeze auto-fill formula values authoritatively (creator, submit time,
         # assigned reference) into the stored form values.
         values = apply_formulas(
             values, template.sections, user=user, reference_number=reference_number
         )
+        # Freeze calculated fields (e.g. "total_days * daily_rate") the same
+        # way — computed server-side from the (now formula-frozen) values so
+        # the stored document and the rendered file always agree, regardless
+        # of what the client last had on screen.
+        from apps.templates_engine.conditions import compute_calculated_values
+        values = compute_calculated_values(template.sections, values)
         # The stored form.values keeps structured attachment descriptors and
         # reference {id,label} objects; the rendered file shows display strings.
         render_values = descriptors_to_names(values)
@@ -470,6 +1021,16 @@ def generate_document_from_template_sync(template, values, fmt, title, user, typ
                 content = xlsx_content
                 filename = f"{title}.xlsx"
                 content_type = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+        elif is_pptx:
+            pptx_content = fill_pptx_template(template, values)
+            if fmt == "pdf":
+                content = pptx_to_pdf(pptx_content)
+                filename = f"{title}.pdf"
+                content_type = "application/pdf"
+            else:
+                content = pptx_content
+                filename = f"{title}.pptx"
+                content_type = "application/vnd.openxmlformats-officedocument.presentationml.presentation"
         else:
             docx_content = fill_docx_template(template, values)
             if fmt == "pdf":
@@ -488,15 +1049,23 @@ def generate_document_from_template_sync(template, values, fmt, title, user, typ
         "template_name": template.name,
         **_form_values_for_metadata(values),
     }
-    if template.type == "built":
-        # Built templates are interactive forms: store the schema snapshot + the
-        # entered values so the document IS the filled form and can be re-rendered
-        # / edited in-app (no external editor). The generated file is just a view.
+    if template.type == "built" and kind == "form":
+        # Built FORM templates are interactive forms: store the schema snapshot +
+        # the entered values so the document IS the filled form and can be
+        # re-rendered / edited in-app (no external editor). The generated file is
+        # just a view. Designer ("document") templates render a static editable
+        # file instead and follow the normal Office lifecycle — no form snapshot.
         doc_metadata["form"] = {
             "template_id": str(template.id),
             "sections": template.sections,
             "values": values,
         }
+        # Snapshot the SunSystems integration mapping (journal/budget) onto the
+        # document so budget checks and journal posting depend on the document
+        # alone and survive later template edits. See apps/sunsystems/config.py.
+        ss_mapping = getattr(template, "sunsystems", None)
+        if isinstance(ss_mapping, dict) and ss_mapping:
+            doc_metadata["sunsystems"] = ss_mapping
 
     create_kwargs = dict(
         title=title,

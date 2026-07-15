@@ -87,6 +87,7 @@ INSTALLED_APPS = [
     "apps.notifications",
     "apps.chat",
     "apps.templates_engine",
+    "apps.sunsystems",
 ]
 
 MIDDLEWARE = [
@@ -108,19 +109,43 @@ WSGI_APPLICATION = "IDM.wsgi.application"
 ASGI_APPLICATION = "IDM.asgi.application"
 
 # ── Database ────────────────────────────────────────────────────────────────
-DATABASES = {
-    "default": dj_database_url.parse(
-        env("DATABASE_URL"),
-        conn_max_age=600,
-        engine="django.db.backends.mysql",
-    )
-}
+# DB_ENGINE lets the same codebase run on Linux/MySQL (default) and native
+# Windows/MS SQL Server. MySQL keeps the DATABASE_URL form; MS SQL is configured
+# from discrete vars (dj-database-url has no clean mssql scheme) via the
+# mssql-django backend + Microsoft ODBC Driver.
+DB_ENGINE = env("DB_ENGINE", default="mysql").lower()
 
-# MySQL options to avoid charset warnings and ensure strict mode
-DATABASES["default"]["OPTIONS"] = {
-    "charset": "utf8mb4",
-    "init_command": "SET sql_mode='STRICT_TRANS_TABLES'",
-}
+if DB_ENGINE in ("mssql", "sqlserver"):
+    DATABASES = {
+        "default": {
+            "ENGINE": "mssql",
+            "NAME": env("DB_NAME", default="idm_db"),
+            "USER": env("DB_USER", default=""),          # blank = Windows/trusted auth
+            "PASSWORD": env("DB_PASSWORD", default=""),
+            "HOST": env("DB_HOST", default="localhost"),
+            "PORT": env("DB_PORT", default=""),
+            "CONN_MAX_AGE": env.int("DB_CONN_MAX_AGE", default=600),
+            "OPTIONS": {
+                "driver": env("DB_ODBC_DRIVER", default="ODBC Driver 18 for SQL Server"),
+                # SQL auth over a self-signed cert by default; for Windows auth set
+                # DB_EXTRA_PARAMS=Trusted_Connection=yes (and leave DB_USER blank).
+                "extra_params": env("DB_EXTRA_PARAMS", default="TrustServerCertificate=yes"),
+            },
+        }
+    }
+else:
+    DATABASES = {
+        "default": dj_database_url.parse(
+            env("DATABASE_URL"),
+            conn_max_age=600,
+            engine="django.db.backends.mysql",
+        )
+    }
+    # MySQL options to avoid charset warnings and ensure strict mode
+    DATABASES["default"]["OPTIONS"] = {
+        "charset": "utf8mb4",
+        "init_command": "SET sql_mode='STRICT_TRANS_TABLES'",
+    }
 
 # ── Auth & JWT ───────────────────────────────────────────────────────────────
 AUTH_USER_MODEL = "accounts.User"
@@ -212,6 +237,10 @@ CELERY_TASK_ROUTES = {
     "apps.documents.tasks.generate_document_preview": {"queue": "preview"},
     "apps.documents.tasks.auto_archive_documents": {"queue": "default"},
     "apps.documents.tasks.empty_trash": {"queue": "default"},
+    "apps.documents.tasks.run_migration_job": {"queue": "default"},
+    "apps.documents.tasks.poll_mailbox": {"queue": "default"},
+    "apps.documents.tasks.poll_active_mailboxes": {"queue": "default"},
+    "apps.sunsystems.tasks.post_journal_for_document": {"queue": "default"},
 }
 WORKFLOW_SLA_WARNING_HOURS = env.int("WORKFLOW_SLA_WARNING_HOURS", default=4)
 WORKFLOW_HOLD_WARNING_HOURS = env.int("WORKFLOW_HOLD_WARNING_HOURS", default=2)
@@ -240,12 +269,23 @@ CELERY_BEAT_SCHEDULE = {
         "task": "apps.notifications.tasks.remind_pending_signatures",
         "schedule": 24 * 60 * 60,
     },
+    "mailbox-email-ingestion-poll": {
+        "task": "apps.documents.tasks.poll_active_mailboxes",
+        "schedule": env.int("IMAP_POLL_INTERVAL_SECONDS", default=5 * 60),
+    },
 }
 
 # ── Elasticsearch ─────────────────────────────────────────────────────────────
+# Full-text search via Elasticsearch is optional. When ELASTICSEARCH_ENABLED is
+# False (e.g. lean native-Windows installs), index sync is skipped and the search
+# API falls back to a database query — no ES server required. The ES client libs
+# stay installed (pure Python) but never contact a server.
+ELASTICSEARCH_ENABLED = env.bool("ELASTICSEARCH_ENABLED", default=True)
 ELASTICSEARCH_DSL = {
     "default": {"hosts": env("ELASTICSEARCH_URL", default="http://localhost:9200")},
 }
+# Turn off django-elasticsearch-dsl's auto-indexing signal processor when off.
+ELASTICSEARCH_DSL_AUTOSYNC = ELASTICSEARCH_ENABLED
 
 # ── OCR ───────────────────────────────────────────────────────────────────────
 OCR_ENGINE = env("OCR_ENGINE", default="paddle")
@@ -265,6 +305,67 @@ OCR_PADDLE_USE_ANGLE_CLS = env.bool("OCR_PADDLE_USE_ANGLE_CLS", default=True)
 # spaCy NER post-processing settings
 OCR_SPACY_ENABLED = env.bool("OCR_SPACY_ENABLED", default=True)
 OCR_SPACY_MODEL = env("OCR_SPACY_MODEL", default="en_core_web_sm")
+
+# ── Infor IDM migration (ION API) ───────────────────────────────────────────
+# Default ION connection settings used to migrate documents out of Infor IDM.
+# Each MigrationJob may override these in its own `connection` JSON; anything
+# left blank on a job falls back to the environment defaults exposed here.
+ION_API_URL       = env("ION_API_URL", default="")        # gateway base, ends with tenant: https://.../TENANT/
+ION_TOKEN_URL     = env("ION_TOKEN_URL", default="")      # full OAuth2 token endpoint (pu + ot)
+ION_TENANT        = env("ION_TENANT", default="")
+ION_CLIENT_ID     = env("ION_CLIENT_ID", default="")
+ION_CLIENT_SECRET = env("ION_CLIENT_SECRET", default="")
+ION_SAAK          = env("ION_SAAK", default="")           # service account access key
+ION_SASK          = env("ION_SASK", default="")           # service account secret key
+ION_SCOPE         = env("ION_SCOPE", default="")
+ION_IDM_PATH      = env("ION_IDM_PATH", default="IDM/api") # IDM REST path under the gateway
+ION_VERIFY_TLS    = env.bool("ION_VERIFY_TLS", default=True)
+
+# ── Email ingestion (IMAP) ──────────────────────────────────────────────────
+# Default IMAP connection settings used to ingest documents from a mailbox.
+# Each Mailbox may override these in its own `connection` JSON; anything left
+# blank on a mailbox falls back to the environment defaults exposed here.
+# poll_active_mailboxes (Celery beat) polls every active mailbox on the
+# IMAP_POLL_INTERVAL_SECONDS schedule defined in CELERY_BEAT_SCHEDULE above.
+IMAP_HOST       = env("IMAP_HOST", default="")
+IMAP_PORT       = env.int("IMAP_PORT", default=993)
+IMAP_USE_SSL    = env.bool("IMAP_USE_SSL", default=True)
+IMAP_USERNAME   = env("IMAP_USERNAME", default="")
+IMAP_PASSWORD   = env("IMAP_PASSWORD", default="")
+IMAP_FOLDER     = env("IMAP_FOLDER", default="INBOX")
+IMAP_VERIFY_TLS = env.bool("IMAP_VERIFY_TLS", default=True)
+
+# ── Infor SunSystems (SunSystems Connect / SSC web services) ─────────────────
+# Default connection used to reach a SunSystems Connect SOAP gateway for budget
+# inquiries and journal (Ledger Import) postings. Two SOAP endpoints under one
+# base URL: SecurityProvider (authenticate -> token) and ComponentExecutor (run
+# a component/method with an <SSC> payload). A per-template mapping may override
+# the business unit / budget code; anything left blank falls back to these env
+# defaults. See apps/sunsystems/client.py.
+SUNSYSTEMS_BASE_URL       = env("SUNSYSTEMS_BASE_URL", default="http://sunsrv02.flaxem.int:81/sunsystems-connect/wsdl")
+SUNSYSTEMS_SECURITY_PATH  = env("SUNSYSTEMS_SECURITY_PATH", default="SecurityProvider")
+SUNSYSTEMS_EXECUTOR_PATH  = env("SUNSYSTEMS_EXECUTOR_PATH", default="ComponentExecutor")
+SUNSYSTEMS_USERNAME       = env("SUNSYSTEMS_USERNAME", default="")
+SUNSYSTEMS_PASSWORD       = env("SUNSYSTEMS_PASSWORD", default="")
+SUNSYSTEMS_BUSINESS_UNIT  = env("SUNSYSTEMS_BUSINESS_UNIT", default="")   # default SunSystemsContext/BusinessUnit
+SUNSYSTEMS_BUDGET_CODE    = env("SUNSYSTEMS_BUDGET_CODE", default="A")    # default SunSystemsContext/BudgetCode
+SUNSYSTEMS_VERIFY_TLS     = env.bool("SUNSYSTEMS_VERIFY_TLS", default=True)
+# Until a real SunSystems Connect budget-inquiry sample is wired, budget checks
+# return a deterministic stub answer so the form UI is fully functional. Flip to
+# False once apps/sunsystems/budget.py:_real_budget_query is implemented.
+SUNSYSTEMS_BUDGET_STUB    = env.bool("SUNSYSTEMS_BUDGET_STUB", default=True)
+
+# ── Email ingestion (Microsoft Graph) ───────────────────────────────────────
+# Optional default Microsoft 365 / Outlook connection used by Graph mailboxes.
+# App-only auth (OAuth2 client credentials); the Azure app registration needs
+# the application permission Mail.Read with admin consent. Per-mailbox
+# `connection` JSON overrides any blank fields here.
+GRAPH_TENANT_ID     = env("GRAPH_TENANT_ID", default="")
+GRAPH_CLIENT_ID     = env("GRAPH_CLIENT_ID", default="")
+GRAPH_CLIENT_SECRET = env("GRAPH_CLIENT_SECRET", default="")
+GRAPH_MAILBOX       = env("GRAPH_MAILBOX", default="")        # user principal name / email to read
+GRAPH_FOLDER        = env("GRAPH_FOLDER", default="inbox")
+GRAPH_VERIFY_TLS    = env.bool("GRAPH_VERIFY_TLS", default=True)
 
 # ── IDP (Intelligent Document Processing) ───────────────────────────────────
 # Provider selection:
@@ -400,6 +501,6 @@ TEMPLATES = [
 
 DEFAULT_AUTO_FIELD = "django.db.models.BigAutoField"
 LANGUAGE_CODE = "en-us"
-TIME_ZONE = "UTC"
+TIME_ZONE = "Africa/Nairobi"
 USE_I18N = True
 USE_TZ = True

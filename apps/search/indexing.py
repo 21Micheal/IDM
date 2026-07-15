@@ -29,6 +29,15 @@ def _delay_after_commit(task, *args, **kwargs) -> None:
 
 
 def queue_index_document(document_id: str) -> None:
+    from django.conf import settings
+
+    # When Elasticsearch is disabled (e.g. native-Windows installs), there is no
+    # index to maintain — the search API reads live rows instead. OCR/text
+    # extraction (queue_content_extraction) still runs, so extracted_text — which
+    # the DB search reads — stays populated.
+    if not getattr(settings, "ELASTICSEARCH_ENABLED", True):
+        return
+
     try:
         from apps.search.tasks import index_document
 
@@ -36,6 +45,30 @@ def queue_index_document(document_id: str) -> None:
     except Exception as exc:
         logger.warning(
             "queue_index_document: could not queue indexing for %s: %s",
+            document_id,
+            exc,
+        )
+
+
+def queue_deindex_document(document_id: str) -> None:
+    """Remove a document from the search index after it is trashed or purged.
+
+    Without this, soft-deleted (Trash) and hard-deleted documents linger in
+    Elasticsearch and keep surfacing in search — trashed ones show up as stale
+    duplicates, purged ones 404 when opened because the DB row is gone.
+    """
+    from django.conf import settings
+
+    if not getattr(settings, "ELASTICSEARCH_ENABLED", True):
+        return
+
+    try:
+        from apps.search.tasks import deindex_document
+
+        _delay_after_commit(deindex_document, str(document_id))
+    except Exception as exc:
+        logger.warning(
+            "queue_deindex_document: could not queue de-indexing for %s: %s",
             document_id,
             exc,
         )

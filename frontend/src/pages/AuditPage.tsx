@@ -20,6 +20,7 @@ import { format, subDays, isToday, isYesterday, formatDistanceToNow } from "date
 import { useAuthStore } from "@/store/authStore";
 import { toast } from "@/components/ui/vault-toast";
 import { QUERY_SHORT_STALE } from "@/lib/reactQueryDefaults";
+import { WorkspaceCommandBar } from "@/components/shared/WorkspaceCommandBar";
 
 export default function AuditPage() {
   const [searchTerm, setSearchTerm] = useState("");
@@ -196,9 +197,18 @@ export default function AuditPage() {
   }, [data]);
 
   return (
-    <div className="-m-6 min-h-[calc(100vh-3.5rem)] bg-[#EDEDED] text-[#1F2933]">
+    <div className="flex h-full flex-col bg-[#EDEDED] text-[#1F2933]">
       {/* Header */}
-      <div className="flex h-[69px] items-center justify-between gap-4 bg-[#287EAD] px-5 pr-8 text-white">
+      <WorkspaceCommandBar
+        actions={
+          user?.has_admin_access ? (
+            <button onClick={exportAudit} className="flex items-center gap-2 border border-white/40 bg-white px-3 py-2 text-sm font-semibold text-[#287EAD] hover:bg-[#EEF6FB]">
+              <Download className="w-4 h-4" />
+              Export CSV
+            </button>
+          ) : null
+        }
+      >
         <div className="min-w-0">
           <div className="flex items-center gap-3">
             <ShieldCheck className="h-5 w-5" />
@@ -229,17 +239,10 @@ export default function AuditPage() {
               : "A simple feed of recent actions on your documents — approvals, views, and uploads."}
           </p>
         </div>
-
-        {user?.has_admin_access && (
-          <button onClick={exportAudit} className="flex items-center gap-2 border border-white/40 bg-white px-3 py-2 text-sm font-semibold text-[#287EAD] hover:bg-[#EEF6FB]">
-            <Download className="w-4 h-4" />
-            Export CSV
-          </button>
-        )}
-      </div>
+      </WorkspaceCommandBar>
 
       {/* Filters: full controls for admins, simplified note for regular users */}
-      <div className="p-5 pr-8">
+      <div className="scrollbar-minimal min-h-0 flex-1 overflow-y-auto p-5 pr-0">
       {user?.has_admin_access ? (
         <div className="mb-5 border border-[#C8CDD2] bg-white p-4">
           <div className="flex items-center justify-between mb-5">

@@ -1,4 +1,5 @@
-import { Suspense, useState, useEffect, useRef, useCallback, useMemo } from "react";
+import { Suspense, useState, useEffect, useRef, useCallback } from "react";
+import { extractApiError } from "@/lib/apiError";
 import { useParams, useNavigate } from "react-router-dom";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { api, documentsAPI, workflowAPI } from "@/services/api";
@@ -8,31 +9,58 @@ import { WorkflowVisualizer } from "@/components/notifications/workflow-visualiz
 // StatusBadge not used in this file
 import OcrStatusBadge from "@/components/documents/OcrStatusBadge";
 import { AddToFolderMenu } from "@/components/documents/AddToFolderMenu";
-import MetadataEditPanel from "@/components/documents/MetadataEditPanel";
+import MetadataEditPanel, { type MetadataSaver } from "@/components/documents/MetadataEditPanel";
 import TemplateForm, { requiredFieldLabels } from "@/components/templates/TemplateForm";
+import BudgetBanner from "@/components/templates/BudgetBanner";
+import JournalPostingCard from "@/components/templates/JournalPostingCard";
+import JournalPayloadModal from "@/components/templates/JournalPayloadModal";
 import { collectFormAttachments } from "@/components/templates/formAttachments";
+import { ApprovalStagesTable } from "@/components/workflow/ApprovalStagesTable";
 import WorkflowActionPanel from "@/components/workflow/WorkflowActionPanel";
 import SignatureRequestPanel from "@/components/signatures/SignatureRequestPanel";
 import { format } from "date-fns";
 import {
   ArrowLeft, Send, MessageSquare, ShieldCheck,
-  Loader2, RotateCcw, Edit2, Lock, Info, Download,
-  AlertTriangle, ScanLine, RefreshCw,
-  Printer, Trash2, X, Check, Link2, Plus, ExternalLink, Columns2, Eye, EyeOff, Archive
+  Loader2, RotateCcw, Edit2, Lock, Unlock, Info, Download,
+  AlertTriangle, ScanLine, RefreshCw, ChevronDown, FileText,
+  Printer, Trash2, X, Check, ExternalLink, Columns2, Eye, EyeOff, Archive, FileCode, MoreHorizontal, Save
 } from "lucide-react";
 import { toast } from "@/components/ui/vault-toast";
 import { useAuthStore } from "@/store/authStore";
-import type { Document, DocumentRelationType, DocumentRelationship, DocumentRelationshipSuggestion, MetadataField } from "@/types";
+import type { Document, DocumentRelationship, DocumentRelationshipSuggestion, MetadataField } from "@/types";
 import { clsx as cn } from "clsx";
 import { QUERY_SHORT_STALE } from "@/lib/reactQueryDefaults";
 import { formatDocumentFileType } from "@/lib/documentFormat";
 import { loadWorkflowData } from "@/components/notifications/workflow-data";
+import { WorkspaceCommandBar } from "@/components/shared/WorkspaceCommandBar";
 
 import { StarButton } from "@/components/documents/StarButton";
 
 import { clearDocumentVersionCache, getCachedVersionPreview, getPreviewCacheKey, setCachedVersionPreview } from "@/utils/versionPreviewCache";
 
 const AUDIT_PAGE_SIZE = 5;
+
+// Keep the open document's lock state (and other server-side changes) current for
+// every viewer without a manual refresh: while the detail page is focused, refetch
+// on this cadence. React Query pauses the interval when the tab is backgrounded
+// (refetchIntervalInBackground defaults to false), so it doesn't poll needlessly.
+const LOCK_STATUS_POLL_MS = 8_000;
+
+function formHasConditionalEditability(sections?: unknown[]): boolean {
+  const list = Array.isArray(sections) ? sections : [];
+  return list.some((section: any) => {
+    if (section?.editableWhen) return true;
+    return Array.isArray(section?.fields) && section.fields.some((field: any) => Boolean(field?.editableWhen));
+  });
+}
+
+function isApprovalLockedStatus(status?: string): boolean {
+  return ["pending_approval", "request_pending", "retirement_pending", "on_hold"].includes(status || "");
+}
+
+function isFinalFormProcessStep(step?: string): boolean {
+  return ["fully_approved", "retirement_rejected"].includes(step || "");
+}
 
 const DOCUMENT_FIELD_KEYS = ["title", "supplier", "amount", "currency", "document_date", "due_date"] as const;
 type DocumentFieldKey = (typeof DOCUMENT_FIELD_KEYS)[number];
@@ -126,37 +154,67 @@ function getCommandStatusClass(status: string) {
 }
 
 function describeAuditEvent(event: string) {
-  const normalized = event.replace(/_/g, " ").toLowerCase();
+  const normalized = event.replace(/\./g, " ").replace(/_/g, " ").trim().toLowerCase();
   switch (normalized) {
-    case "created":
+    case "document created":
       return "was created";
-    case "updated":
-      return "was updated";
+    case "document updated":
+      return "was edited";
     case "metadata updated":
       return "metadata was updated";
-    case "file uploaded":
     case "document uploaded":
+    case "file uploaded":
       return "was uploaded";
-    case "file downloaded":
     case "document downloaded":
+    case "file downloaded":
       return "was downloaded";
-    case "reviewed":
+    case "document reviewed":
       return "was reviewed";
     case "workflow started":
       return "workflow was started";
+    case "document version restored":
     case "version restored":
       return "version was restored";
+    case "created":
+      return "was created";
+    case "updated":
+      return "was edited";
     default:
       return normalized;
   }
 }
 
-const RELATIONSHIP_OPTIONS: { value: DocumentRelationType; label: string; helper: string }[] = [
-  { value: "supports", label: "Supports", helper: "This document provides evidence for the selected document." },
-  { value: "references", label: "References", helper: "This document cites or depends on the selected document." },
-  { value: "supersedes", label: "Supersedes", helper: "This document replaces the selected document." },
-  { value: "linked-to", label: "Linked to", helper: "General business link between both records." },
-];
+type AuditMetadataEdit = {
+  key: string;
+  field: string;
+  old: string;
+  new: string;
+};
+
+function AuditMetadataEditList({ edits }: { edits: AuditMetadataEdit[] }) {
+  if (!edits.length) return null;
+
+  return (
+    <ul className="mt-2 space-y-1.5 border-l-2 border-[#287EAD] bg-[#F5F7F8] px-2 py-1.5">
+      {edits.map((edit) => (
+        <li key={edit.key} className="text-sm leading-relaxed text-[#1F2933]">
+          <span className="font-medium">{edit.field}: </span>
+          {edit.old ? (
+            <span className="line-through text-[#5E6870]">{edit.old}</span>
+          ) : null}
+          {edit.old && edit.new ? (
+            <span className="mx-1.5 text-[#5E6870]">→</span>
+          ) : null}
+          {edit.new ? (
+            <span className="font-medium text-[#1F2933]">{edit.new}</span>
+          ) : edit.old ? (
+            <span className="italic text-[#5E6870]">(cleared)</span>
+          ) : null}
+        </li>
+      ))}
+    </ul>
+  );
+}
 
 function describeRelationship(relationship: DocumentRelationship) {
   const label = relationship.relation_type_label || relationship.relation_type.replace(/-/g, " ");
@@ -189,6 +247,10 @@ type DocumentAuditLog = {
   actor_name?: string;
   ip_address?: string;
   timestamp: string;
+  changes?: {
+    metadata_edits?: AuditMetadataEdit[];
+    [key: string]: unknown;
+  };
 };
 
 export default function DocumentDetailPage() {
@@ -200,7 +262,9 @@ export default function DocumentDetailPage() {
   const [activeTab, setActiveTab] = useState<TabId>("attributes");
   const [formEditing, setFormEditing] = useState(false);
   const [formValues, setFormValues] = useState<Record<string, unknown>>({});
+  const formDirtyRef = useRef(false);
   const [showFormPdf, setShowFormPdf] = useState(false);
+  const [showJournalXml, setShowJournalXml] = useState(false);
   const [comment, setComment] = useState("");
   const [confirmRestoreId, setConfirmRestoreId] = useState<string | null>(null);
   const [auditPage, setAuditPage] = useState(1);
@@ -210,11 +274,15 @@ export default function DocumentDetailPage() {
     signedFileUrlsEnabled: false,
   });
   const [workflowActionCompleted, setWorkflowActionCompleted] = useState(false);
-  const [relationshipSearch, setRelationshipSearch] = useState("");
-  const [relationshipTargetId, setRelationshipTargetId] = useState("");
-  const [relationshipType, setRelationshipType] = useState<DocumentRelationType>("references");
-  const [relationshipNote, setRelationshipNote] = useState("");
   const [compareDocumentId, setCompareDocumentId] = useState<string | null>(null);
+  const [showDownloadTray, setShowDownloadTray] = useState(false);
+  const [showMoreMenu, setShowMoreMenu] = useState(false);
+  const [downloadingPdf, setDownloadingPdf] = useState(false);
+  // Removing a confirmed link is intentional-only: a type-to-confirm dialog guards it.
+  const [relationshipToRemove, setRelationshipToRemove] = useState<DocumentRelationship | null>(null);
+  const [removeConfirmText, setRemoveConfirmText] = useState("");
+  const downloadTrayRef = useRef<HTMLDivElement | null>(null);
+  const moreMenuRef = useRef<HTMLDivElement | null>(null);
   const printFrameRef = useRef<HTMLIFrameElement | null>(null);
 
   const pollRef = useRef<ReturnType<typeof setInterval> | null>(null);
@@ -224,7 +292,37 @@ export default function DocumentDetailPage() {
     queryFn: () => documentsAPI.get(id!).then((r) => r.data),
     enabled: !!id,
     ...QUERY_SHORT_STALE,
+    // Surface lock/release (and other) changes made by other users automatically.
+    refetchInterval: LOCK_STATUS_POLL_MS,
   });
+
+  // ── Auto-enable edit mode for conditionally editable sections ─────────────
+  useEffect(() => {
+    if (!doc) return;
+    const formData = (doc.metadata as Record<string, any> | undefined)?.form as
+      | { sections?: unknown[]; values?: Record<string, unknown> }
+      | undefined;
+    const isFormDocument = Boolean(formData?.sections);
+    const isOwnerOrSubmitter = doc.uploaded_by?.id === user?.id || doc.owned_by?.id === user?.id;
+    const hasAdminAccess = Boolean(user?.has_admin_access);
+    const canEdit = hasAdminAccess || (doc.permissions ?? []).includes("edit");
+    const hasConditionalEditability = formHasConditionalEditability(formData?.sections);
+    const formProcessStep = doc.builder_process_step || doc.status;
+    const isRequestApproved = formProcessStep === "request_approved" || (!doc.builder_process_step && doc.status === "approved");
+    const canEditForm = canEdit
+      && !isApprovalLockedStatus(formProcessStep)
+      && !isFinalFormProcessStep(formProcessStep)
+      && (doc.status !== "approved" || (isRequestApproved && hasConditionalEditability && (hasAdminAccess || isOwnerOrSubmitter)));
+
+    // Only auto-enable edit mode for owner/submitter when conditional sections unlock.
+    if (isFormDocument && !formEditing && canEditForm) {
+      if (hasConditionalEditability) {
+        setFormValues({ ...(formData?.values ?? {}) });
+        formDirtyRef.current = false;
+        setFormEditing(true);
+      }
+    }
+  }, [doc, user, formEditing]);
 
   // ── Document status polling ────────────────────────────────────────────────
   const ocrStatus = (doc as any)?.ocr_status as string | undefined;
@@ -285,10 +383,11 @@ export default function DocumentDetailPage() {
     });
   }, [doc?.id, doc?.current_version, qc]);
 
-  const handleVersionUploaded = useCallback(() => {
+  const handleVersionUploaded = useCallback(async () => {
     if (!id) return;
     clearDocumentVersionCache(id);
-    qc.invalidateQueries({ queryKey: ["document", id] });
+    qc.removeQueries({ queryKey: ["document-preview", id] });
+    await qc.refetchQueries({ queryKey: ["document", id] });
     qc.invalidateQueries({ queryKey: ["document-preview", id] });
   }, [id, qc]);
 
@@ -400,18 +499,6 @@ export default function DocumentDetailPage() {
     ...QUERY_SHORT_STALE,
   });
 
-  const { data: relationshipSearchData, isFetching: relationshipSearchLoading } = useQuery({
-    queryKey: ["documents", "relationship-search", relationshipSearch],
-    queryFn: () =>
-      documentsAPI.list({
-        search: relationshipSearch,
-        page_size: 8,
-        is_self_upload: false,
-      }).then((r) => r.data),
-    enabled: relationshipSearch.trim().length >= 2,
-    ...QUERY_SHORT_STALE,
-  });
-
   const { data: compareDoc } = useQuery<Document>({
     queryKey: ["document", compareDocumentId],
     queryFn: () => documentsAPI.get(compareDocumentId!).then((r) => r.data),
@@ -421,9 +508,11 @@ export default function DocumentDetailPage() {
 
   const { data: workflowData, isLoading: workflowDataLoading } = useQuery({
     queryKey: ["document-workflow", id],
-    queryFn: () => loadWorkflowData(id!),
+    queryFn: () => loadWorkflowData(id!, doc?.builder_workflow_phase),
     enabled: !!id && !!doc && !(doc as any).is_self_upload,
     ...QUERY_SHORT_STALE,
+    // Keep the visualizer in sync with approvals as they occur, then idle.
+    refetchInterval: (query) => (query.state.data?.isActive ? 15_000 : false),
   });
   const workflowStepsCount = workflowData?.steps?.length ?? 0;
 
@@ -447,9 +536,35 @@ export default function DocumentDetailPage() {
   }, [activeTask]);
 
   const submitMutation = useMutation({
-    mutationFn: () => documentsAPI.submit(id!),
-    onSuccess: () => { toast.success("Submitted for approval"); qc.invalidateQueries({ queryKey: ["document", id] }); },
-    onError: () => toast.error("Submission failed"),
+    mutationFn: async () => {
+      // If form has unsaved changes, prompt to save first
+      if (formEditing && formDirtyRef.current && isFormDocument) {
+        const shouldSave = window.confirm(
+          "You have unsaved changes in the form. Do you want to save them before submitting?"
+        );
+        if (shouldSave) {
+          const missing = requiredFieldLabels(formData?.sections ?? [], formValues, {
+            groupNames: user?.group_names ?? [],
+            isAdmin: Boolean(user?.has_admin_access || user?.is_staff),
+            canEditConditionalSections,
+          }, formProcessStep);
+          if (missing.length) {
+            toast.error(`Please fill in: ${missing.join(", ")}`);
+            throw new Error("Form validation failed");
+          }
+          await updateFormMutation.mutateAsync();
+        }
+      }
+      return documentsAPI.submit(id!);
+    },
+    onSuccess: () => {
+      toast.success("Submitted for approval");
+      setFormEditing(false);
+      formDirtyRef.current = false;
+      qc.invalidateQueries({ queryKey: ["document", id] });
+      qc.invalidateQueries({ queryKey: ["document-workflow", id] });
+    },
+    onError: (err) => toast.error(extractApiError(err, "Submission failed")),
   });
 
   const archiveMutation = useMutation({
@@ -460,7 +575,7 @@ export default function DocumentDetailPage() {
   const commentMutation = useMutation({
     mutationFn: (content: string) => documentsAPI.addComment(id!, content),
     onSuccess: () => { setComment(""); qc.invalidateQueries({ queryKey: ["document", id] }); },
-    onError: () => toast.error("Failed to add comment"),
+    onError: (err) => toast.error(extractApiError(err, "Failed to add comment")),
   });
 
   const restoreMutation = useMutation({
@@ -472,7 +587,7 @@ export default function DocumentDetailPage() {
       qc.invalidateQueries({ queryKey: ["document-preview", id] });
       clearDocumentVersionCache(id!);
     },
-    onError: () => { toast.error("Restore failed."); setConfirmRestoreId(null); },
+    onError: (err) => { toast.error(extractApiError(err, "Restore failed.")); setConfirmRestoreId(null); },
   });
 
   const reOcrMutation = useMutation({
@@ -481,7 +596,7 @@ export default function DocumentDetailPage() {
       toast.info("OCR queued. Text will be updated shortly.");
       qc.invalidateQueries({ queryKey: ["document", id] });
     },
-    onError: () => toast.error("Could not queue OCR. Please try again."),
+    onError: (err) => toast.error(extractApiError(err, "Could not queue OCR. Please try again.")),
   });
 
   const updateFormMutation = useMutation({
@@ -495,10 +610,25 @@ export default function DocumentDetailPage() {
     onSuccess: () => {
       toast.success("Form updated.");
       setFormEditing(false);
+      formDirtyRef.current = false;
       qc.invalidateQueries({ queryKey: ["document", id] });
     },
     onError: (err: any) =>
-      toast.error(err?.response?.data?.detail || "Could not update the form."),
+      toast.error(extractApiError(err, "Could not update the form.")),
+  });
+
+  const saveFormAsDraftMutation = useMutation({
+    mutationFn: () => {
+      const { jsonValues, attachments } = collectFormAttachments(formValues);
+      return documentsAPI.updateForm(id!, jsonValues, attachments);
+    },
+    onSuccess: () => {
+      toast.success("Saved as draft.");
+      formDirtyRef.current = false;
+      qc.invalidateQueries({ queryKey: ["document", id] });
+    },
+    onError: (err: any) =>
+      toast.error(extractApiError(err, "Failed to save draft")),
   });
 
   const deleteMutation = useMutation({
@@ -509,28 +639,7 @@ export default function DocumentDetailPage() {
       navigate("/documents");
     },
     onError: (err: any) =>
-      toast.error(err?.response?.data?.detail || "Could not delete document."),
-  });
-
-  const addRelationshipMutation = useMutation({
-    mutationFn: () =>
-      documentsAPI.addRelationship(id!, {
-        target_document_id: relationshipTargetId,
-        relation_type: relationshipType,
-        note: relationshipNote.trim(),
-      }),
-    onSuccess: () => {
-      toast.success("Document relationship added.");
-      setRelationshipSearch("");
-      setRelationshipTargetId("");
-      setRelationshipType("references");
-      setRelationshipNote("");
-      qc.invalidateQueries({ queryKey: ["document-relationships", id] });
-      qc.invalidateQueries({ queryKey: ["document-audit", id] });
-    },
-    onError: (err: any) => {
-      toast.error(err?.response?.data?.detail ?? "Could not link the selected document.");
-    },
+      toast.error(extractApiError(err, "Could not delete document.")),
   });
 
   const confirmRelationshipSuggestionMutation = useMutation({
@@ -547,7 +656,7 @@ export default function DocumentDetailPage() {
       qc.invalidateQueries({ queryKey: ["document-audit", id] });
     },
     onError: (err: any) => {
-      toast.error(err?.response?.data?.detail ?? "Could not confirm the suggested link.");
+      toast.error(extractApiError(err, "Could not confirm the suggested link."));
     },
   });
 
@@ -555,36 +664,53 @@ export default function DocumentDetailPage() {
     mutationFn: (relationshipId: string) => documentsAPI.deleteRelationship(id!, relationshipId),
     onSuccess: () => {
       toast.success("Document relationship removed.");
+      setRelationshipToRemove(null);
+      setRemoveConfirmText("");
       qc.invalidateQueries({ queryKey: ["document-relationships", id] });
       qc.invalidateQueries({ queryKey: ["document-audit", id] });
     },
-    onError: () => toast.error("Could not remove document relationship."),
+    onError: (err) => toast.error(extractApiError(err, "Could not remove document relationship.")),
   });
-  // Keep derived hooks/values above early returns so hook order remains stable
-  const relationshipSearchResults = useMemo<Document[]>(() => {
-    const raw = (relationshipSearchData?.results ?? []) as Document[];
-    const filtered = raw.filter((candidate) => {
-      if (!doc?.id) return false;
-      if (candidate.id === doc.id) return false;
-      if (candidate.is_self_upload) return false;
-      // Remove candidates that are already related with the same relation type
-      if (relationships.some((relationship) => (
-        relationship.related_document.id === candidate.id &&
-        relationship.relation_type === relationshipType
-      ))) return false;
-
-      // If a search term exists, ensure candidate matches it in title, reference, or supplier
-      const q = relationshipSearch.trim().toLowerCase();
-      if (q.length >= 2) {
-        const hay = [candidate.title, candidate.reference_number, candidate.supplier, candidate.document_type_name]
-          .filter(Boolean).join(" ").toLowerCase();
-        if (!hay.includes(q)) return false;
+  // Close download tray on outside click. Must stay above the early returns
+  // below so hook order is stable across loading/loaded renders (React #310).
+  useEffect(() => {
+    if (!showDownloadTray) return;
+    const handler = (e: MouseEvent) => {
+      if (downloadTrayRef.current && !downloadTrayRef.current.contains(e.target as Node)) {
+        setShowDownloadTray(false);
       }
+    };
+    document.addEventListener("mousedown", handler);
+    return () => document.removeEventListener("mousedown", handler);
+  }, [showDownloadTray]);
 
-      return true;
-    });
-    return filtered;
-  }, [relationshipSearchData, doc?.id, relationships, relationshipType, relationshipSearch]);
+  useEffect(() => {
+    if (!showMoreMenu) return;
+    const handler = (e: MouseEvent) => {
+      if (moreMenuRef.current && !moreMenuRef.current.contains(e.target as Node)) {
+        setShowMoreMenu(false);
+      }
+    };
+    document.addEventListener("mousedown", handler);
+    return () => document.removeEventListener("mousedown", handler);
+  }, [showMoreMenu]);
+
+  // ── Check-in (release) coordination ──────────────────────────────────────
+  // The edit panel registers a saver so that releasing the lock can flush any
+  // unsaved metadata edits first (Infor-style Save / Discard / Cancel prompt).
+  const metadataSaverRef = useRef<MetadataSaver | null>(null);
+  const registerMetadataSaver = useCallback((s: MetadataSaver | null) => {
+    metadataSaverRef.current = s;
+  }, []);
+  const [releasePrompt, setReleasePrompt] = useState<{ resolve: (proceed: boolean) => void } | null>(null);
+  const [releaseSaving, setReleaseSaving] = useState(false);
+  const confirmRelease = useCallback(async (): Promise<boolean> => {
+    const saver = metadataSaverRef.current;
+    const hasMetadataDirty = Boolean(saver?.isDirty);
+    const hasFormDirty = formEditing && formDirtyRef.current;
+    if (!hasMetadataDirty && !hasFormDirty) return true;
+    return new Promise<boolean>((resolve) => setReleasePrompt({ resolve }));
+  }, [formEditing]);
 
   if (isLoading)
     return (
@@ -647,7 +773,6 @@ export default function DocumentDetailPage() {
       relationship.relation_type === suggestion.relation_type
     ))
   ));
-  const selectedRelationshipTarget = relationshipSearchResults.find((candidate) => candidate.id === relationshipTargetId);
   const isPersonal = Boolean((doc as any).is_self_upload);
   const isScanned = Boolean((doc as any).is_scanned);
   const personalTags = doc.personal_tags ?? [];
@@ -674,15 +799,45 @@ export default function DocumentDetailPage() {
     | { sections?: unknown[]; values?: Record<string, unknown> }
     | undefined;
   const isFormDocument = Boolean(formData?.sections);
-  const formDocEditable = canEdit && ["draft", "returned"].includes(doc.status);
+  // Form editability mirrors the backend lifecycle policy:
+  // draft/returned/rejected use normal edit permissions; pending approval is
+  // locked; approved conditional sections (e.g. retirement) are owner-only.
+  const isOwnerOrSubmitter = doc.uploaded_by?.id === user?.id || doc.owned_by?.id === user?.id;
+  const hasConditionalEditability = formHasConditionalEditability(formData?.sections);
+  const formProcessStep = doc.builder_process_step || doc.status;
+  const isRequestApproved = formProcessStep === "request_approved" || (!doc.builder_process_step && doc.status === "approved");
+  const canEditConditionalSections = hasAdminAccess || isOwnerOrSubmitter;
+  const canEditForm = canEdit
+    && !isApprovalLockedStatus(formProcessStep)
+    && !isFinalFormProcessStep(formProcessStep)
+    && (doc.status !== "approved" || (isRequestApproved && hasConditionalEditability && canEditConditionalSections));
+  const budgetEnabled = Boolean((doc.metadata as any)?.sunsystems?.budget?.enabled);
+  const journalEnabled = Boolean((doc.metadata as any)?.sunsystems?.journal?.enabled);
+  // Extract available journal stages for multi-stage posting
+  const journalStages = (doc.metadata as any)?.sunsystems?.journal?.stages as Array<{ stage: number; enabled?: boolean }> | undefined;
+  const availableStages = journalStages
+    ?.filter((s) => s.enabled !== false)
+    .map((s) => s.stage)
+    .sort((a, b) => a - b) || [1];
+
   const startFormEdit = () => {
     setFormValues({ ...(formData?.values ?? {}) });
+    formDirtyRef.current = false;
     setFormEditing(true);
   };
+
   const saveForm = () => {
-    const missing = requiredFieldLabels(formData?.sections ?? [], formValues);
+    const missing = requiredFieldLabels(formData?.sections ?? [], formValues, {
+      groupNames: user?.group_names ?? [],
+      isAdmin: Boolean(user?.has_admin_access || user?.is_staff),
+      canEditConditionalSections,
+    }, formProcessStep);
     if (missing.length) { toast.error(`Please fill in: ${missing.join(", ")}`); return; }
     updateFormMutation.mutate();
+  };
+
+  const saveFormAsDraft = () => {
+    saveFormAsDraftMutation.mutate();
   };
   const canApprove = hasAdminAccess || permissions.includes("approve");
   const canArchive = hasAdminAccess || permissions.includes("archive");
@@ -691,22 +846,42 @@ export default function DocumentDetailPage() {
   const canReOcr = hasAdminAccess || (isScanned && permissions.includes("upload"));
   const canDownload = hasAdminAccess || permissions.includes("download");
   const ocrQuality = getOcrQuality(doc.metadata);
+  // Document-level lock state (for version upload/restore, not form editing)
   const isLockedByOther = Boolean(doc.is_edit_locked && doc.edit_locked_by !== user?.id);
+  const lockedByMe = Boolean(doc.is_edit_locked && doc.edit_locked_by === user?.id);
 
-  // Rejection is terminal: rejected documents cannot restart the workflow.
-  // Returned documents go back to the uploader to edit and resubmit (resumes
-  // the exact step it was at).
-  const canSubmit =
+  const isRetirementPhase = doc.builder_workflow_phase === "retirement";
+  const canSubmitRequest =
     !isPersonal &&
-    (["draft", "returned"].includes(doc.status)) &&
-    (canApprove || doc.uploaded_by?.id === user?.id);
+    ["draft", "returned"].includes(doc.status) &&
+    (!isRetirementPhase || doc.status === "returned") &&
+    (canApprove || isOwnerOrSubmitter);
+  // Disable submit retirement after the retirement approval cycle has finished.
+  const isRetirementFinalized = isRetirementPhase && isFinalFormProcessStep(formProcessStep);
+  const canSubmitRetirement = Boolean(doc.can_submit_retirement) && !isRetirementFinalized && (canApprove || isOwnerOrSubmitter);
+  const canSubmit = canSubmitRequest || canSubmitRetirement;
+
+  const submitActionLabel = canSubmitRetirement
+    ? "Submit retirement"
+    : isRetirementPhase && doc.status === "returned"
+      ? "Resubmit retirement"
+      : doc.status === "returned"
+        ? "Resubmit"
+        : "Start workflow";
+  const submitActionTitle = canSubmitRetirement
+    ? "Submit retirement expenditure for approval"
+    : isRetirementPhase && doc.status === "returned"
+      ? "Resubmit retirement after rework"
+      : doc.status === "returned"
+        ? "Resubmit to resume approval"
+        : "Submit for approval workflow";
 
   const canArchiveNow =
     canArchive &&
     !["archived", "void"].includes(doc.status) &&
     (isPersonal || doc.status === "approved");
   const commandActionClass = "flex h-8 items-center gap-1 px-2 text-white/80 transition-colors hover:bg-white/10 hover:text-white disabled:cursor-not-allowed disabled:opacity-40";
-  const commandActionDisabledClass = "flex h-8 cursor-not-allowed items-center gap-1 px-2 text-white/80 opacity-40";
+  const commandActionDisabledClass = "flex h-8 cursor-not-allowed items-center gap-1 px-2 text-white/55 opacity-60";
 
   const isDraftOrRejected = ["draft", "rejected", "returned"].includes(doc.status);
   // Delete to Trash: creation-stage documents the user is allowed to delete.
@@ -728,7 +903,7 @@ export default function DocumentDetailPage() {
     { id: "comments", label: `Comments (${doc.comments?.length ?? 0})` },
     { id: "audit", label: "Audit trail" },
     ...(isDraftOrRejected
-      ? [{ id: "edit" as const, label: "Edit details", disabled: !canEdit }]
+      ? [{ id: "edit" as const, label: "Edit details", disabled: !canEdit || !lockedByMe }]
       : []),
   ];
 
@@ -758,6 +933,31 @@ export default function DocumentDetailPage() {
       await downloadBlobFromUrl(viewerLinks.downloadHref, doc?.file_name || "document");
     } catch {
       toast.error("Could not download this document.");
+    }
+  };
+
+  const handleDownloadAsPdf = async () => {
+    if (!canDownload || !id) return;
+    setDownloadingPdf(true);
+    setShowDownloadTray(false);
+    try {
+      const res = await documentsAPI.downloadAsPdf(id);
+      const disposition = String(res.headers?.["content-disposition"] ?? "");
+      const match = disposition.match(/filename\*?=(?:UTF-8'')?["']?([^"';]+)["']?/i);
+      const stem = (doc?.file_name || "document").replace(/\.[^.]+$/, "");
+      const filename = match?.[1] ? decodeURIComponent(match[1]) : `${stem}.pdf`;
+      const blobUrl = URL.createObjectURL(new Blob([res.data], { type: "application/pdf" }));
+      const link = document.createElement("a");
+      link.href = blobUrl;
+      link.download = filename;
+      document.body.appendChild(link);
+      link.click();
+      link.remove();
+      window.setTimeout(() => URL.revokeObjectURL(blobUrl), 1000);
+    } catch (err: any) {
+      toast.error("Could not download as PDF. The PDF preview may not be ready yet.");
+    } finally {
+      setDownloadingPdf(false);
     }
   };
 
@@ -841,7 +1041,7 @@ export default function DocumentDetailPage() {
   let lastDateHeader = "";
 
   return (
-    <div className="-m-6 min-h-[calc(100vh-3.5rem)] bg-[#EDEDED] text-[#1F2933]">
+    <div className="flex h-full flex-col bg-[#EDEDED] text-[#1F2933]">
       <iframe ref={printFrameRef} title="Printable document" className="hidden" />
 
       {workflowActionCompleted && !activeTask && (
@@ -850,17 +1050,16 @@ export default function DocumentDetailPage() {
           <p className="mt-1">This document has moved to the next stage and is no longer actionable from your current access level.</p>
         </div>
       )}
-      <div className="flex min-h-[69px] flex-col gap-3 bg-[#287EAD] px-5 py-3 text-xs text-white xl:flex-row xl:items-center xl:justify-between">
-        <div className="flex min-w-0 flex-col gap-2 sm:flex-row sm:items-center">
+      <WorkspaceCommandBar className="text-xs">
           <button
             onClick={() => navigate(-1)}
-            className="flex h-9 items-center gap-1 border border-white/20 bg-[#206D99] px-3 text-xs text-white/85 transition-colors hover:text-white"
+            className="flex h-9 shrink-0 items-center gap-1 border border-white/20 bg-[#206D99] px-3 text-xs text-white/85 transition-colors hover:text-white"
           >
             <ArrowLeft className="w-3.5 h-3.5" /> Back
           </button>
-          <div className="min-w-0">
-            <div className="flex flex-wrap items-center gap-2 text-white">
-              <h1 className="max-w-[28rem] truncate text-base font-semibold">{doc.title}</h1>
+          <div className="min-w-0 overflow-hidden">
+            <div className="flex min-w-0 items-center gap-2 text-white">
+              <h1 className="min-w-0 max-w-[28rem] truncate text-base font-semibold">{doc.title}</h1>
               <span className={cn(
                 "inline-flex items-center border px-2.5 py-0.5 text-xs font-bold shadow-sm",
                 getCommandStatusClass(doc.status),
@@ -879,34 +1078,33 @@ export default function DocumentDetailPage() {
               )}
               {doc.is_edit_locked && (
                 <span className="inline-flex animate-fade-in items-center gap-1 border border-amber-200 bg-amber-100 px-2 py-0.5 text-[10px] font-semibold text-amber-800">
-                  <Lock className="w-2.5 h-2.5" /> Checked Out By {doc.edit_locked_by_name || "User"}
+                  <Lock className="w-2.5 h-2.5" /> Locked By {doc.edit_locked_by_name || "User"}
                 </span>
               )}
             </div>
-            <div className="mt-1 flex flex-wrap items-center gap-2 text-[11px] text-white/75">
-              <span className="max-w-[20rem] truncate font-medium">{doc.file_name}</span>
+            <div className="mt-1 flex min-w-0 items-center gap-2 overflow-hidden whitespace-nowrap text-[11px] text-white/75">
+              <span className="max-w-[20rem] shrink-0 truncate font-medium">{doc.file_name}</span>
               <span>{formatBytes(doc.file_size)}</span>
               <span>{doc.current_version ? `v${doc.current_version}` : "—"}</span>
               <span>{doc.reference_number}</span>
             </div>
           </div>
-        </div>
 
-        <div className="flex w-full flex-wrap items-center justify-start gap-1.5 font-medium text-white/80 xl:w-auto xl:justify-end">
+        <div className="ml-auto flex shrink-0 items-center gap-1.5 text-xs font-semibold">
           {canSubmit ? (
             <button
               onClick={() => submitMutation.mutate()}
               disabled={submitMutation.isPending}
               className={commandActionClass}
-              title={doc.status === "returned" ? "Resubmit to resume approval" : "Submit for approval workflow"}
+              title={submitActionTitle}
             >
               {submitMutation.isPending ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <Send className="w-3.5 h-3.5" />}
-              <span>{doc.status === "returned" ? "Resubmit" : "Start workflow"}</span>
+              <span>{submitActionLabel}</span>
             </button>
           ) : (
             <button disabled className={cn(commandActionDisabledClass, "hidden sm:flex")} title="Not eligible for submission">
               <Send className="w-3.5 h-3.5" />
-              <span>{doc.status === "returned" ? "Resubmit" : "Start workflow"}</span>
+              <span>{submitActionLabel}</span>
             </button>
           )}
 
@@ -928,41 +1126,75 @@ export default function DocumentDetailPage() {
 
           <div className="mx-1 hidden h-5 w-px bg-white/20 sm:block" />
 
-          {canDownload && viewerLinks.downloadHref && viewerLinks.signedFileUrlsEnabled ? (
-            <a
-              href={viewerLinks.downloadHref}
-              download
-              className={commandActionClass}
-              title="Download current document"
-            >
-              <Download className="w-3.5 h-3.5" />
-              <span>Download</span>
-            </a>
-          ) : canDownload && viewerLinks.downloadHref ? (
-            <button
-              type="button"
-              onClick={handleDownloadDocument}
-              className={commandActionClass}
-              title="Download current document"
-            >
-              <Download className="w-3.5 h-3.5" />
-              <span>Download</span>
-            </button>
-          ) : (
-            <button
-              disabled
-              className={commandActionDisabledClass}
-              title={canDownload ? "Preview not ready yet" : "Download permission required"}
-            >
-              <Download className="w-3.5 h-3.5" />
-              <span>Download</span>
-            </button>
-          )}
+          {/* Download split button with format tray */}
+          <div ref={downloadTrayRef} className="relative" id="download-tray">
+            {canDownload && viewerLinks.downloadHref ? (
+              <button
+                type="button"
+                onClick={() => setShowDownloadTray((v) => !v)}
+                className={cn(commandActionClass, showDownloadTray && "bg-white/10 text-white")}
+                title="Download options"
+                aria-haspopup="true"
+                aria-expanded={showDownloadTray}
+              >
+                <Download className="w-3.5 h-3.5" />
+                <span>Download</span>
+                <ChevronDown className={cn("w-3 h-3 transition-transform", showDownloadTray && "rotate-180")} />
+              </button>
+            ) : (
+              <button
+                disabled
+                className={commandActionDisabledClass}
+                title={canDownload ? "Preview not ready yet" : "Download permission required"}
+              >
+                <Download className="w-3.5 h-3.5" />
+                <span>Download</span>
+                <ChevronDown className="w-3 h-3" />
+              </button>
+            )}
 
+            {showDownloadTray && canDownload && viewerLinks.downloadHref && (
+              <div
+                className="absolute right-0 top-full z-50 mt-1 w-56 overflow-hidden border border-[#C8CDD2] bg-white shadow-lg"
+                style={{ minWidth: "14rem" }}
+              >
+                <p className="border-b border-[#E3E7EA] bg-[#F5F7F8] px-3 py-1.5 text-[10px] font-semibold uppercase tracking-wider text-[#5E6870]">
+                  Download as
+                </p>
+                {/* Original format — authenticated blob fetch (same approach as
+                    the working merge download); carries JWT, so it works for all
+                    document types regardless of signed-URL settings. */}
+                <button
+                  type="button"
+                  onClick={() => { setShowDownloadTray(false); handleDownloadDocument(); }}
+                  className="flex w-full items-center gap-2.5 px-3 py-2.5 text-sm text-[#1F2933] hover:bg-[#EEF6FB] hover:text-[#287EAD]"
+                >
+                  <Download className="h-4 w-4 shrink-0 text-[#5E6870]" />
+                  <span className="font-medium">Original format</span>
+                </button>
+                {/* Download as PDF — hits the backend convert endpoint, which
+                    handles office (preview PDF) and images (PIL → PDF). */}
+                <button
+                  type="button"
+                  onClick={() => { setShowDownloadTray(false); handleDownloadAsPdf(); }}
+                  disabled={downloadingPdf}
+                  className="flex w-full items-center gap-2.5 px-3 py-2.5 text-sm text-[#1F2933] hover:bg-[#EEF6FB] hover:text-[#287EAD] disabled:cursor-not-allowed disabled:opacity-50"
+                >
+                  {downloadingPdf
+                    ? <Loader2 className="h-4 w-4 shrink-0 animate-spin text-[#5E6870]" />
+                    : <FileText className="h-4 w-4 shrink-0 text-[#5E6870]" />}
+                  <span className="font-medium">Download as PDF</span>
+                </button>
+              </div>
+            )}
+          </div>
+
+          {/* Secondary actions — shown inline on wide screens, and collapsed
+              into the "More" menu below xl so the bar never overflows. */}
           <button
             onClick={handlePrintDocument}
             disabled={!canDownload || (!viewerLinks.openInNewTabUrl && !viewerLinks.downloadHref)}
-            className={commandActionClass}
+            className={cn(commandActionClass, "hidden xl:flex")}
             title={canDownload ? "Print document" : "Print permission required"}
           >
             <Printer className="w-3.5 h-3.5" />
@@ -970,14 +1202,16 @@ export default function DocumentDetailPage() {
           </button>
 
           {canUploadVersion && !isLockedByOther && (
-            <Suspense fallback={<span className="inline-flex items-center gap-1 px-2 py-1 rounded bg-muted/10 text-xs text-muted-foreground">Loading…</span>}>
+            <Suspense fallback={<span className="hidden h-8 items-center px-2 text-xs text-white/70 xl:inline-flex">Loading…</span>}>
               <UploadVersionDrawer
                 documentId={doc.id}
                 currentVersion={doc.current_version}
                 maxSizeMb={doc.document_type?.max_file_size_mb}
                 onVersionUploaded={handleVersionUploaded}
-                triggerClassName={commandActionClass}
+                triggerClassName={cn(commandActionClass, "hidden xl:flex")}
                 triggerIconClassName="w-3.5 h-3.5"
+                disabled={!lockedByMe}
+                triggerTitle={lockedByMe ? "Upload a new version" : "Lock the document first to upload a new version"}
               />
             </Suspense>
           )}
@@ -986,11 +1220,11 @@ export default function DocumentDetailPage() {
             <button
               onClick={() => archiveMutation.mutate()}
               disabled={archiveMutation.isPending}
-              className={commandActionClass}
+              className={cn(commandActionClass, "hidden xl:flex")}
               title="Archive document"
             >
               {archiveMutation.isPending ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <Archive className="w-3.5 h-3.5" />}
-              <span className="sr-only sm:not-sr-only">Archive</span>
+              <span>Archive</span>
             </button>
           )}
 
@@ -1000,19 +1234,89 @@ export default function DocumentDetailPage() {
                 if (window.confirm("Move this document to Trash? You can restore it later.")) deleteMutation.mutate();
               }}
               disabled={deleteMutation.isPending}
-              className="flex h-8 items-center gap-1 px-2 transition-colors hover:bg-white/10 hover:text-white disabled:opacity-50"
+              className={cn(commandActionClass, "hidden xl:flex")}
               title="Move to Trash"
             >
               {deleteMutation.isPending ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <Trash2 className="w-3.5 h-3.5" />}
-              <span className="sr-only sm:not-sr-only">Delete</span>
+              <span>Delete</span>
             </button>
           )}
+
+          <div ref={moreMenuRef} className="relative xl:hidden">
+            <button
+              type="button"
+              onClick={() => setShowMoreMenu((v) => !v)}
+              className={cn(commandActionClass, showMoreMenu && "bg-white/10 text-white")}
+              title="More actions"
+              aria-haspopup="true"
+              aria-expanded={showMoreMenu}
+            >
+              <MoreHorizontal className="w-3.5 h-3.5" />
+              <span className="hidden sm:inline">More</span>
+            </button>
+
+            {showMoreMenu && (
+              <div className="absolute right-0 top-full z-50 mt-1 w-56 overflow-hidden border border-[#C8CDD2] bg-white shadow-lg">
+                <button
+                  type="button"
+                  onClick={() => { setShowMoreMenu(false); handlePrintDocument(); }}
+                  disabled={!canDownload || (!viewerLinks.openInNewTabUrl && !viewerLinks.downloadHref)}
+                  className="flex w-full items-center gap-2.5 px-3 py-2.5 text-sm text-[#1F2933] hover:bg-[#EEF6FB] hover:text-[#287EAD] disabled:cursor-not-allowed disabled:opacity-50"
+                >
+                  <Printer className="h-4 w-4 shrink-0 text-[#5E6870]" />
+                  <span className="font-medium">Print</span>
+                </button>
+
+                {canUploadVersion && !isLockedByOther && (
+                  <Suspense fallback={null}>
+                    <UploadVersionDrawer
+                      documentId={doc.id}
+                      currentVersion={doc.current_version}
+                      maxSizeMb={doc.document_type?.max_file_size_mb}
+                      onVersionUploaded={handleVersionUploaded}
+                      triggerClassName="flex w-full items-center gap-2.5 px-3 py-2.5 text-sm text-[#1F2933] hover:bg-[#EEF6FB] hover:text-[#287EAD] disabled:cursor-not-allowed disabled:opacity-50"
+                      triggerIconClassName="h-4 w-4 shrink-0 text-[#5E6870]"
+                      disabled={!lockedByMe}
+                      triggerTitle={lockedByMe ? "Upload a new version" : "Lock the document first to upload a new version"}
+                    />
+                  </Suspense>
+                )}
+
+                {canArchiveNow && (
+                  <button
+                    type="button"
+                    onClick={() => { setShowMoreMenu(false); archiveMutation.mutate(); }}
+                    disabled={archiveMutation.isPending}
+                    className="flex w-full items-center gap-2.5 px-3 py-2.5 text-sm text-[#1F2933] hover:bg-[#EEF6FB] hover:text-[#287EAD] disabled:opacity-50"
+                  >
+                    {archiveMutation.isPending ? <Loader2 className="h-4 w-4 shrink-0 animate-spin text-[#5E6870]" /> : <Archive className="h-4 w-4 shrink-0 text-[#5E6870]" />}
+                    <span className="font-medium">Archive</span>
+                  </button>
+                )}
+
+                {canDelete && (
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setShowMoreMenu(false);
+                      if (window.confirm("Move this document to Trash? You can restore it later.")) deleteMutation.mutate();
+                    }}
+                    disabled={deleteMutation.isPending}
+                    className="flex w-full items-center gap-2.5 px-3 py-2.5 text-sm text-[#B42318] hover:bg-[#FEECEA] disabled:opacity-50"
+                  >
+                    {deleteMutation.isPending ? <Loader2 className="h-4 w-4 shrink-0 animate-spin" /> : <Trash2 className="h-4 w-4 shrink-0" />}
+                    <span className="font-medium">Delete</span>
+                  </button>
+                )}
+              </div>
+            )}
+          </div>
         </div>
-      </div>
+      </WorkspaceCommandBar>
 
       {/* Enterprise workspace: preview left, document intelligence right */}
       <div className={cn(
-        "grid grid-cols-1 items-start gap-4 p-4 pr-8 lg:grid-cols-12",
+        "scrollbar-minimal grid min-h-0 flex-1 grid-cols-1 items-start gap-4 overflow-y-auto p-4 pr-8 lg:grid-cols-12",
         compareDoc && "xl:grid-cols-12",
       )}>
 
@@ -1071,9 +1375,29 @@ export default function DocumentDetailPage() {
               <div className="flex items-center justify-between gap-3 border-b border-[#C8CDD2] bg-[#F5F7F8] px-4 py-2.5">
                 <div className="flex items-center gap-2 min-w-0">
                   <p className="text-sm font-bold text-[#1F2933]">Form</p>
-                  <span className="text-xs text-[#5E6870]">{formEditing ? "Editing — fill and save" : "Filled in-app"}</span>
+                  <span className="text-xs text-[#5E6870]">
+                    {formEditing
+                      ? "Editing — fill and save"
+                      : canSubmitRetirement
+                        ? "Retirement stage — fill expenditure, then submit for approval"
+                        : canEditForm
+                          ? "Click Edit form to modify"
+                          : isRetirementPhase
+                            ? "Retirement stage"
+                            : "Filled in-app"}
+                  </span>
                 </div>
-                <div className="flex items-center gap-2">
+                <div className="flex items-center gap-2 flex-wrap justify-end">
+                  {journalEnabled && (
+                    <button
+                      type="button"
+                      onClick={() => setShowJournalXml(true)}
+                      title="Preview the exact SunSystems journal XML this form will post"
+                      className="inline-flex items-center gap-1.5 border border-[#AEB5BB] bg-white px-2.5 py-1.5 text-xs font-semibold text-[#1F2933] hover:bg-[#F3F5F6]"
+                    >
+                      <FileCode className="h-3.5 w-3.5" /> Journal XML
+                    </button>
+                  )}
                   {!formEditing && (
                     <button
                       type="button"
@@ -1084,7 +1408,7 @@ export default function DocumentDetailPage() {
                       {showFormPdf ? "Hide PDF" : "View PDF"}
                     </button>
                   )}
-                  {!formEditing && formDocEditable && (
+                  {!formEditing && canEditForm && (
                     <button
                       type="button"
                       onClick={startFormEdit}
@@ -1097,11 +1421,23 @@ export default function DocumentDetailPage() {
                     <>
                       <button
                         type="button"
-                        onClick={() => setFormEditing(false)}
-                        disabled={updateFormMutation.isPending}
+                        onClick={() => {
+                          setFormEditing(false);
+                          formDirtyRef.current = false;
+                        }}
+                        disabled={updateFormMutation.isPending || saveFormAsDraftMutation.isPending}
                         className="inline-flex items-center gap-1.5 border border-[#AEB5BB] bg-white px-2.5 py-1.5 text-xs font-semibold text-[#1F2933] hover:bg-[#F3F5F6] disabled:opacity-50"
                       >
                         <X className="h-3.5 w-3.5" /> Cancel
+                      </button>
+                      <button
+                        type="button"
+                        onClick={saveFormAsDraft}
+                        disabled={saveFormAsDraftMutation.isPending}
+                        className="inline-flex items-center gap-1.5 border border-[#AEB5BB] bg-white px-2.5 py-1.5 text-xs font-semibold text-[#1F2933] hover:bg-[#F3F5F6] disabled:opacity-50"
+                      >
+                        {saveFormAsDraftMutation.isPending ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Save className="h-3.5 w-3.5" />}
+                        Save draft
                       </button>
                       <button
                         type="button"
@@ -1116,16 +1452,50 @@ export default function DocumentDetailPage() {
                   )}
                 </div>
               </div>
-              <div className="p-5">
+              <div className="p-5 space-y-4">
+                {budgetEnabled && formEditing && (
+                  <BudgetBanner values={formValues} documentId={doc.id} sections={formData?.sections ?? []} enabled />
+                )}
                 <TemplateForm
                   sections={formData?.sections ?? []}
                   values={formEditing ? formValues : (formData?.values ?? {})}
-                  onChange={(k, v) => setFormValues((prev) => ({ ...prev, [k]: v }))}
+                  onChange={(k, v) => {
+                    formDirtyRef.current = true;
+                    setFormValues((prev) => ({ ...prev, [k]: v }));
+                  }}
                   readOnly={!formEditing}
                   documentId={doc.id}
+                  documentStatus={formProcessStep}
+                  canEditConditionalSections={canEditConditionalSections}
                 />
               </div>
             </div>
+          )}
+
+          {isFormDocument && workflowStepsCount > 0 && (
+            <ApprovalStagesTable 
+              steps={workflowData?.steps ?? []} 
+              isLoading={workflowDataLoading} 
+              phase={doc.builder_workflow_phase}
+            />
+          )}
+
+          {isFormDocument && (
+            <JournalPostingCard
+              documentId={doc.id}
+              expectPosting={journalEnabled && ["request_approved", "fully_approved"].includes(formProcessStep)}
+              watchKey={`${formProcessStep}:${doc.updated_at}`}
+            />
+          )}
+
+          {showJournalXml && (
+            <JournalPayloadModal
+              documentId={doc.id}
+              values={formEditing ? formValues : undefined}
+              title={doc.title}
+              availableStages={availableStages}
+              onClose={() => setShowJournalXml(false)}
+            />
           )}
 
           <div className={cn(
@@ -1145,6 +1515,7 @@ export default function DocumentDetailPage() {
                   submitSlot={null}
                   hideUploadActionBar
                   onPreviewLinksChange={handlePreviewLinksChange}
+                  onBeforeRelease={confirmRelease}
                 />
               </Suspense>
             </div>
@@ -1376,7 +1747,7 @@ export default function DocumentDetailPage() {
                 <div className="border-b border-[#C8CDD2] pb-3">
                   <p className="text-sm font-bold uppercase tracking-wider text-[#5E6870]">Document relationships</p>
                   <p className="mt-1 text-sm text-[#5E6870]">
-                    Make procurement chains explicit: PO, invoice, GRN, contract, and supporting documents.
+                    Links are detected automatically from the rules configured on the document type. Confirm the suggested matches to add them to the procurement chain.
                   </p>
                 </div>
 
@@ -1434,7 +1805,7 @@ export default function DocumentDetailPage() {
                 <div className="space-y-2">
                   {relationships.length === 0 ? (
                     <div className="border border-[#C8CDD2] bg-[#F5F7F8] px-4 py-8 text-center text-sm text-[#5E6870]">
-                      No related documents linked yet.
+                      No related documents yet. Matches are detected automatically from the configured rules and appear here for confirmation.
                     </div>
                   ) : (
                     <div className="divide-y divide-[#D3D7DA] border border-[#C8CDD2] bg-white">
@@ -1466,9 +1837,8 @@ export default function DocumentDetailPage() {
                               {canEdit && (
                                 <button
                                   type="button"
-                                  onClick={() => deleteRelationshipMutation.mutate(relationship.id)}
-                                  disabled={deleteRelationshipMutation.isPending}
-                                  className="shrink-0 p-1 text-[#5E6870] hover:text-red-700 disabled:opacity-40"
+                                  onClick={() => { setRelationshipToRemove(relationship); setRemoveConfirmText(""); }}
+                                  className="shrink-0 p-1 text-[#5E6870] hover:text-red-700"
                                   title="Remove relationship"
                                 >
                                   <X className="h-4 w-4" />
@@ -1505,107 +1875,6 @@ export default function DocumentDetailPage() {
                   )}
                 </div>
 
-                {canEdit && (
-                  <div className="space-y-3 border border-[#C8CDD2] bg-[#F5F7F8] p-3">
-                    <div className="flex items-center gap-2">
-                      <Link2 className="h-4 w-4 text-[#287EAD]" />
-                      <p className="text-sm font-bold text-[#1F2933]">Link another document</p>
-                    </div>
-
-                    <div>
-                      <label className="text-sm font-semibold text-[#1F2933]">Relationship type</label>
-                      <select
-                        value={relationshipType}
-                        onChange={(event) => {
-                          setRelationshipType(event.target.value as DocumentRelationType);
-                          setRelationshipTargetId("");
-                        }}
-                        className="mt-2 h-9 w-full border border-[#AEB5BB] bg-white px-2 text-sm text-[#1F2933] focus:outline-none focus:ring-1 focus:ring-[#287EAD]"
-                      >
-                        {RELATIONSHIP_OPTIONS.map((option) => (
-                          <option key={option.value} value={option.value}>{option.label}</option>
-                        ))}
-                      </select>
-                      <p className="mt-1 text-xs text-[#5E6870]">
-                        {RELATIONSHIP_OPTIONS.find((option) => option.value === relationshipType)?.helper}
-                      </p>
-                    </div>
-
-                    <div>
-                      <label className="text-sm font-semibold text-[#1F2933]">Find document</label>
-                      <input
-                        value={relationshipSearch}
-                        onChange={(event) => {
-                          setRelationshipSearch(event.target.value);
-                          setRelationshipTargetId("");
-                        }}
-                        placeholder="Search title, reference, supplier, or text"
-                        className="mt-2 h-9 w-full border border-[#AEB5BB] bg-white px-3 text-sm text-[#1F2933] focus:outline-none focus:ring-1 focus:ring-[#287EAD]"
-                      />
-                    </div>
-
-                    {relationshipSearch.trim().length >= 2 && (
-                      <div className="max-h-52 overflow-y-auto border border-[#C8CDD2] bg-white">
-                        {relationshipSearchLoading ? (
-                          <div className="flex items-center gap-2 px-3 py-4 text-sm text-[#5E6870]">
-                            <Loader2 className="h-4 w-4 animate-spin" />
-                            Searching documents…
-                          </div>
-                        ) : relationshipSearchResults.length === 0 ? (
-                          <div className="px-3 py-4 text-center text-sm text-[#5E6870]">No eligible documents found.</div>
-                        ) : relationshipSearchResults.map((candidate) => (
-                          <label
-                            key={candidate.id}
-                            className={cn(
-                              "grid cursor-pointer grid-cols-[auto_1fr] gap-3 border-b border-[#D3D7DA] px-3 py-2 last:border-b-0 hover:bg-[#F5F7F8]",
-                              relationshipTargetId === candidate.id && "bg-[#EEF6FB]",
-                            )}
-                          >
-                            <input
-                              type="radio"
-                              name="relationship-target"
-                              checked={relationshipTargetId === candidate.id}
-                              onChange={() => setRelationshipTargetId(candidate.id)}
-                              className="mt-1"
-                            />
-                            <span className="min-w-0">
-                              <span className="block truncate text-sm font-semibold text-[#1F2933]">{candidate.title}</span>
-                              <span className="block truncate text-xs text-[#5E6870]">
-                                {candidate.reference_number} · {candidate.document_type_name || candidate.document_type?.name || "Document"}
-                              </span>
-                            </span>
-                          </label>
-                        ))}
-                      </div>
-                    )}
-
-                    <div>
-                      <label className="text-sm font-semibold text-[#1F2933]">Note</label>
-                      <textarea
-                        value={relationshipNote}
-                        onChange={(event) => setRelationshipNote(event.target.value)}
-                        rows={2}
-                        placeholder="Optional context for this link"
-                        className="mt-2 block w-full border border-[#AEB5BB] bg-white px-3 py-2 text-sm text-[#1F2933] focus:outline-none focus:ring-1 focus:ring-[#287EAD]"
-                      />
-                    </div>
-
-                    <div className="flex items-center justify-between gap-3">
-                      <span className="min-w-0 truncate text-xs text-[#5E6870]">
-                        {selectedRelationshipTarget ? selectedRelationshipTarget.reference_number : "Select a document to link"}
-                      </span>
-                      <button
-                        type="button"
-                        onClick={() => addRelationshipMutation.mutate()}
-                        disabled={!relationshipTargetId || addRelationshipMutation.isPending}
-                        className="inline-flex items-center gap-2 bg-[#287EAD] px-3 py-2 text-sm font-semibold text-white hover:bg-[#206D99] disabled:cursor-not-allowed disabled:opacity-50"
-                      >
-                        {addRelationshipMutation.isPending ? <Loader2 className="h-4 w-4 animate-spin" /> : <Plus className="h-4 w-4" />}
-                        Add link
-                      </button>
-                    </div>
-                  </div>
-                )}
               </div>
             )}
 
@@ -1756,8 +2025,12 @@ export default function DocumentDetailPage() {
                                 ) : (
                                   <button
                                     onClick={() => setConfirmRestoreId(v.id)}
-                                    className="inline-flex items-center gap-1 border border-[#C8CDD2] bg-white px-2.5 py-1.5 text-xs font-semibold text-[#1F2933] hover:bg-[#F5F7F8]"
-                                    title="Restore to this version"
+                                    disabled={!lockedByMe}
+                                    className={cn(
+                                      "inline-flex items-center gap-1 border border-[#C8CDD2] bg-white px-2.5 py-1.5 text-xs font-semibold text-[#1F2933] hover:bg-[#F5F7F8]",
+                                      !lockedByMe && "cursor-not-allowed opacity-50 hover:bg-white",
+                                    )}
+                                    title={lockedByMe ? "Restore to this version" : "Lock the document first to restore a version"}
                                   >
                                     <RotateCcw className="h-3.5 w-3.5" /> Restore
                                   </button>
@@ -1891,11 +2164,13 @@ export default function DocumentDetailPage() {
                               <p className="text-sm leading-normal text-[#1F2933]">
                                 <span className="font-bold text-[#287EAD]">{doc.reference_number}</span> {describeAuditEvent(log.event)} by <span className="font-semibold">{log.actor_name || "System"}</span>
                               </p>
-                              {log.summary && (
+                              {log.changes?.metadata_edits?.length ? (
+                                <AuditMetadataEditList edits={log.changes.metadata_edits} />
+                              ) : log.summary ? (
                                 <p className="mt-2 whitespace-pre-wrap border-l-2 border-[#287EAD] bg-[#F5F7F8] px-2 py-1.5 text-sm leading-relaxed text-[#5E6870]">
                                   {log.summary}
                                 </p>
-                              )}
+                              ) : null}
                               <div className="mt-2 flex flex-wrap items-center gap-2 text-xs font-mono text-[#5E6870]">
                                 <span>{log.ip_address || "System"}</span>
                                 <span>·</span>
@@ -1949,15 +2224,13 @@ export default function DocumentDetailPage() {
                   <h3 className="text-sm font-bold uppercase tracking-wider text-muted-foreground">
                     Edit Properties
                   </h3>
-                  <button
-                    onClick={() => setActiveTab("properties")}
-                    className="text-sm font-semibold text-muted-foreground transition-colors hover:text-foreground hover:underline"
-                  >
-                    Cancel
-                  </button>
                 </div>
                 <Suspense fallback={<div className="p-4 text-sm text-muted-foreground">Loading editor…</div>}>
-                  <MetadataEditPanel document={doc} onClose={() => setActiveTab("properties")} />
+                  <MetadataEditPanel
+                    document={doc}
+                    onClose={() => setActiveTab("properties")}
+                    registerSaver={registerMetadataSaver}
+                  />
                 </Suspense>
               </div>
             )}
@@ -1974,6 +2247,152 @@ export default function DocumentDetailPage() {
         </div>
 
       </div>
+
+      {/* Check-in: unsaved metadata edits prompt (fires on Release) */}
+      {releasePrompt && (
+        <div className="fixed inset-0 z-[60] flex items-center justify-center bg-black/50 p-4">
+          <div className="w-full max-w-sm border border-[#C8CDD2] bg-white shadow-xl">
+            {/* Header */}
+            <div className="border-b border-[#C8CDD2] bg-[#287EAD] px-5 py-4">
+              <h4 className="text-base font-semibold text-white">Save changes?</h4>
+            </div>
+            <div className="p-5">
+              <p className="text-sm text-[#5E6870]">
+                You have unsaved changes. Do you want to save them before checking in (releasing the lock)?
+              </p>
+              <div className="mt-5 flex justify-end gap-2">
+                <button
+                  type="button"
+                  disabled={releaseSaving}
+                  onClick={() => { releasePrompt.resolve(false); setReleasePrompt(null); }}
+                  className="border border-[#C8CDD2] bg-white px-4 py-2 text-sm font-medium text-[#1F2933] hover:bg-[#F5F7F8] transition-colors disabled:opacity-50"
+                >
+                  Cancel
+                </button>
+                <button
+                  type="button"
+                  disabled={releaseSaving}
+                  onClick={() => { releasePrompt.resolve(true); setReleasePrompt(null); }}
+                  className="border border-[#C8CDD2] bg-white px-4 py-2 text-sm font-medium text-[#1F2933] hover:bg-[#F5F7F8] transition-colors disabled:opacity-50"
+                >
+                  Discard
+                </button>
+                <button
+                  type="button"
+                  disabled={releaseSaving}
+                  onClick={async () => {
+                    const saver = metadataSaverRef.current;
+                    setReleaseSaving(true);
+                    let ok = true;
+                    if (formEditing && formDirtyRef.current) {
+                      const missing = requiredFieldLabels(formData?.sections ?? [], formValues, {
+                        groupNames: user?.group_names ?? [],
+                        isAdmin: Boolean(user?.has_admin_access || user?.is_staff),
+                        canEditConditionalSections,
+                      }, formProcessStep);
+                      if (missing.length) {
+                        toast.error(`Please fill in: ${missing.join(", ")}`);
+                        ok = false;
+                      } else {
+                        try {
+                          await updateFormMutation.mutateAsync();
+                          formDirtyRef.current = false;
+                        } catch {
+                          ok = false;
+                        }
+                      }
+                    }
+                    if (ok && saver?.isDirty) {
+                      ok = await saver.save();
+                    }
+                    setReleaseSaving(false);
+                    releasePrompt.resolve(ok);
+                    setReleasePrompt(null);
+                  }}
+                  className="inline-flex items-center gap-2 bg-[#287EAD] px-4 py-2 text-sm font-medium text-white hover:bg-[#206D99] transition-colors disabled:opacity-50"
+                >
+                  {releaseSaving && <Loader2 className="w-4 h-4 animate-spin" />}
+                  Save &amp; check in
+                </button>
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {relationshipToRemove && (() => {
+        const related = relationshipToRemove.related_document;
+        const canConfirm =
+          removeConfirmText.trim().toLowerCase() === "remove" && !deleteRelationshipMutation.isPending;
+        return (
+          <div className="fixed inset-0 z-[60] flex items-center justify-center bg-black/50 p-4">
+            <div className="w-full max-w-md border border-[#C8CDD2] bg-white shadow-xl">
+              {/* Header */}
+              <div className="flex items-center gap-3 border-b border-[#C8CDD2] bg-[#287EAD] px-5 py-4">
+                <div className="flex h-9 w-9 shrink-0 items-center justify-center border border-white/25 bg-white/10">
+                  <Trash2 className="h-4 w-4 text-white" />
+                </div>
+                <div>
+                  <h4 className="text-base font-semibold text-white">Remove this link?</h4>
+                  <p className="text-xs text-white/75 mt-0.5">This action cannot be undone automatically.</p>
+                </div>
+              </div>
+
+              <div className="p-5 space-y-4">
+                <p className="text-sm text-[#5E6870]">
+                  This removes the relationship between the two documents. The system may re-suggest it later if it still matches the configured rules.
+                </p>
+
+                <div className="border border-[#C8CDD2] bg-[#F5F7F8] px-4 py-3">
+                  <p className="text-xs font-semibold uppercase tracking-wide text-[#287EAD]">
+                    {describeRelationship(relationshipToRemove)}
+                  </p>
+                  <p className="mt-1 truncate text-sm font-bold text-[#1F2933]" title={related.title}>
+                    {related.title}
+                  </p>
+                  <p className="mt-0.5 truncate font-mono text-xs text-[#5E6870]">
+                    {related.reference_number}
+                  </p>
+                </div>
+
+                <div>
+                  <label className="text-sm text-[#5E6870]">
+                    Type <span className="font-mono font-semibold text-[#1F2933]">remove</span> to confirm
+                  </label>
+                  <input
+                    value={removeConfirmText}
+                    onChange={(e) => setRemoveConfirmText(e.target.value)}
+                    className="mt-2 h-9 w-full border border-[#AEB5BB] bg-white px-3 text-sm text-[#1F2933] outline-none focus:border-[#287EAD] focus:ring-1 focus:ring-[#287EAD]"
+                    placeholder="remove"
+                    autoFocus
+                    onKeyDown={(e) => { if (e.key === "Enter" && canConfirm) deleteRelationshipMutation.mutate(relationshipToRemove.id); }}
+                  />
+                </div>
+
+                <div className="flex justify-end gap-2 pt-1 border-t border-[#C8CDD2]">
+                  <button
+                    type="button"
+                    disabled={deleteRelationshipMutation.isPending}
+                    onClick={() => { setRelationshipToRemove(null); setRemoveConfirmText(""); }}
+                    className="border border-[#C8CDD2] bg-white px-4 py-2 text-sm font-medium text-[#1F2933] hover:bg-[#F5F7F8] transition-colors"
+                  >
+                    Cancel
+                  </button>
+                  <button
+                    type="button"
+                    disabled={!canConfirm}
+                    onClick={() => deleteRelationshipMutation.mutate(relationshipToRemove.id)}
+                    className="inline-flex items-center gap-2 bg-red-600 px-4 py-2 text-sm font-medium text-white hover:bg-red-700 disabled:cursor-not-allowed disabled:opacity-50 transition-colors"
+                  >
+                    {deleteRelationshipMutation.isPending ? <Loader2 className="h-4 w-4 animate-spin" /> : <Trash2 className="h-4 w-4" />}
+                    Remove link
+                  </button>
+                </div>
+              </div>
+            </div>
+          </div>
+        );
+      })()}
     </div>
   );
 }

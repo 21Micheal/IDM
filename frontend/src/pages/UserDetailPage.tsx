@@ -1,4 +1,5 @@
 import { useEffect, useState } from "react";
+import { extractApiError } from "@/lib/apiError";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useNavigate, useParams } from "react-router-dom";
 import { usersAPI, departmentsAPI, profileAPI } from "@/services/api";
@@ -22,6 +23,12 @@ import {
   CalendarClock,
 } from "lucide-react";
 import { toast } from "@/components/ui/vault-toast";
+import { TemporaryPasswordModal } from "@/components/users/TemporaryPasswordModal";
+import {
+  DelegationList,
+  DelegationScheduleForm,
+  type DelegationRecord,
+} from "@/components/users/DelegationManager";
 import { format } from "date-fns";
 
 interface Department {
@@ -45,21 +52,12 @@ interface User {
   created_at: string;
 }
 
-interface Delegation {
-  id: string;
-  delegate: { id: string; full_name?: string; email: string };
-  starts_at: string;
-  ends_at: string;
-  comment: string;
-  is_active: boolean;
-  is_current: boolean;
-}
-
 export default function UserDetailPage() {
   const { id = "" } = useParams();
   const navigate = useNavigate();
   const qc = useQueryClient();
   const [reassignTo, setReassignTo] = useState("");
+  const [resetPassword, setResetPassword] = useState<string | null>(null);
 
   const { data: user, isLoading } = useQuery<User>({
     queryKey: ["users", "detail", id],
@@ -80,11 +78,10 @@ export default function UserDetailPage() {
     staleTime: 1000 * 60 * 5,
   });
 
-  const { data: delegations = [] } = useQuery<Delegation[]>({
+  const { data: delegations = [] } = useQuery<DelegationRecord[]>({
     queryKey: ["users", "delegations", id],
     queryFn: () => usersAPI.delegations(id).then((r) => r.data),
     enabled: Boolean(id),
-    staleTime: 1000 * 60 * 2,
   });
 
   const [form, setForm] = useState({
@@ -117,13 +114,22 @@ export default function UserDetailPage() {
       qc.invalidateQueries({ queryKey: ["users"] });
       qc.invalidateQueries({ queryKey: ["users", "detail", id] });
     },
-    onError: () => toast.error("Failed to update user"),
+    onError: (err) => toast.error(extractApiError(err, "Failed to update user")),
   });
 
   const resetPwMutation = useMutation({
     mutationFn: () => usersAPI.resetPassword(id),
-    onSuccess: () => toast.success("Temporary password generated and emailed"),
-    onError: () => toast.error("Failed to reset password"),
+    onSuccess: (res: any) => {
+      const temp = res?.data?.temporary_password;
+      if (temp) {
+        // Surface the password to the admin — outbound email may not be
+        // delivered, so this is the reliable channel to hand it to the user.
+        setResetPassword(temp);
+      } else {
+        toast.success("Temporary password generated and emailed");
+      }
+    },
+    onError: (err) => toast.error(extractApiError(err, "Failed to reset password")),
   });
 
   const toggleActiveMutation = useMutation({
@@ -133,7 +139,7 @@ export default function UserDetailPage() {
       qc.invalidateQueries({ queryKey: ["users"], exact: false });
       qc.invalidateQueries({ queryKey: ["users", "detail", id], exact: true });
     },
-    onError: () => toast.error("Failed to toggle status"),
+    onError: (err) => toast.error(extractApiError(err, "Failed to toggle status")),
   });
 
   const reassignMutation = useMutation({
@@ -142,7 +148,7 @@ export default function UserDetailPage() {
       toast.success(res.data.detail || "Tasks reassigned");
       setReassignTo("");
     },
-    onError: () => toast.error("Failed to reassign active tasks"),
+    onError: (err) => toast.error(extractApiError(err, "Failed to reassign active tasks")),
   });
 
   const disableDelegationMutation = useMutation({
@@ -153,7 +159,29 @@ export default function UserDetailPage() {
       qc.invalidateQueries({ queryKey: ["users", "delegations", id] });
       qc.invalidateQueries({ queryKey: ["delegations"] });
     },
-    onError: () => toast.error("Failed to disable delegation"),
+    onError: (err) => toast.error(extractApiError(err, "Failed to disable delegation")),
+  });
+
+  const dismissDelegationMutation = useMutation({
+    mutationFn: (delegationId: string) =>
+      profileAPI.dismissDelegation(delegationId),
+    onMutate: async (delegationId) => {
+      await qc.cancelQueries({ queryKey: ["users", "delegations", id] });
+      const previous = qc.getQueryData<DelegationRecord[]>(["users", "delegations", id]);
+      qc.setQueryData<DelegationRecord[]>(["users", "delegations", id], (old) =>
+        (old ?? []).filter((d) => d.id !== delegationId)
+      );
+      return { previous };
+    },
+    onError: (err, delegationId, context: any) => {
+      toast.error(extractApiError(err, "Failed to dismiss delegation"));
+      if (context?.previous) {
+        qc.setQueryData(["users", "delegations", id], context.previous);
+      }
+    },
+    onSettled: () => {
+      qc.refetchQueries({ queryKey: ["users", "delegations", id] });
+    },
   });
 
   const reassignCandidates = users.filter((u) => u.id !== id && u.is_active);
@@ -453,76 +481,41 @@ export default function UserDetailPage() {
 
       {/* Delegations */}
       <section className="rounded-2xl border border-border bg-card shadow-sm">
-        <header className="px-6 py-4 border-b border-border flex items-center justify-between">
-          <div>
-            <h2 className="font-semibold text-foreground flex items-center gap-2">
-              <CalendarClock className="w-4 h-4 text-muted-foreground" />
-              Delegations
-            </h2>
-          </div>
-          <span className="text-xs text-muted-foreground">
-            {delegations.length} configured
-          </span>
+        <header className="px-6 py-4 border-b border-border">
+          <h2 className="font-semibold text-foreground flex items-center gap-2">
+            <CalendarClock className="w-4 h-4 text-muted-foreground" />
+            Delegations
+          </h2>
+          <p className="text-xs text-muted-foreground mt-1">
+            Schedule out-of-office task delegation on behalf of {user.full_name}.
+          </p>
         </header>
 
-        <div className="p-6 space-y-3">
-          {!delegations.length && (
-            <div className="rounded-lg border border-dashed border-border bg-muted/20 px-6 py-10 text-center">
-              <CalendarClock className="w-6 h-6 text-muted-foreground/60 mx-auto mb-2" />
-              <p className="text-sm text-muted-foreground">
-                No delegations configured for this user.
-              </p>
-            </div>
-          )}
-
-          {delegations.map((d) => {
-            const status = d.is_current
-              ? { label: "Active now", tone: "bg-emerald-500/10 text-emerald-600 border-emerald-500/20" }
-              : d.is_active
-              ? { label: "Scheduled", tone: "bg-primary/10 text-primary border-primary/20" }
-              : { label: "Disabled", tone: "bg-muted text-muted-foreground border-border" };
-
-            return (
-              <div
-                key={d.id}
-                className="rounded-xl border border-border bg-background hover:border-muted-foreground/20 transition-colors p-4 flex flex-col sm:flex-row sm:items-center justify-between gap-3"
-              >
-                <div className="min-w-0">
-                  <div className="flex items-center gap-2 flex-wrap">
-                    <p className="font-medium text-foreground truncate">
-                      {d.delegate.full_name || d.delegate.email}
-                    </p>
-                    <span
-                      className={`inline-flex items-center rounded-full px-2 py-0.5 text-[10px] font-medium border ${status.tone}`}
-                    >
-                      {status.label}
-                    </span>
-                  </div>
-                  <p className="text-xs text-muted-foreground mt-1">
-                    {format(new Date(d.starts_at), "dd MMM yyyy HH:mm")} →{" "}
-                    {format(new Date(d.ends_at), "dd MMM yyyy HH:mm")}
-                  </p>
-                  {d.comment && (
-                    <p className="text-xs text-muted-foreground mt-1 italic">
-                      "{d.comment}"
-                    </p>
-                  )}
-                </div>
-                {d.is_active && (
-                  <button
-                    onClick={() => disableDelegationMutation.mutate(d.id)}
-                    disabled={disableDelegationMutation.isPending}
-                    className="inline-flex items-center gap-1.5 h-9 px-3 rounded-lg border border-border bg-background text-xs font-medium hover:bg-muted transition-colors disabled:opacity-70 self-start sm:self-auto"
-                  >
-                    <CircleSlash className="w-3.5 h-3.5" />
-                    Disable
-                  </button>
-                )}
-              </div>
-            );
-          })}
+        <div className="p-6 space-y-6">
+          <DelegationScheduleForm
+            delegatorId={id}
+            delegatorName={user.full_name}
+            onCreated={() => qc.invalidateQueries({ queryKey: ["users", "delegations", id] })}
+          />
+          <DelegationList
+            delegations={delegations}
+            onDisable={(delegationId) => disableDelegationMutation.mutate(delegationId)}
+            onDismiss={(delegationId) => dismissDelegationMutation.mutate(delegationId)}
+            disablePending={disableDelegationMutation.isPending}
+            dismissPending={dismissDelegationMutation.isPending}
+            emptyMessage="No delegations configured for this user."
+          />
         </div>
       </section>
+
+      {resetPassword && (
+        <TemporaryPasswordModal
+          temporary_password={resetPassword}
+          title="Password Reset"
+          subtitle={`New temporary password for ${user.full_name}`}
+          onClose={() => setResetPassword(null)}
+        />
+      )}
     </div>
   );
 }

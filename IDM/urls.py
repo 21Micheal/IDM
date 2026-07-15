@@ -2,7 +2,7 @@ from django.contrib import admin
 from django.urls import path, include
 from django.conf import settings
 from django.conf.urls.static import static
-from rest_framework_simplejwt.views import TokenRefreshView
+from apps.accounts.views import SessionTokenRefreshView
 from apps.documents.storage_views import StorageStatsView
 from apps.documents.views import DocumentVolumeView, TopUploadersView
 from apps.workflows.views import ApprovalTurnaroundView, SlaBreachRateView
@@ -37,6 +37,9 @@ urlpatterns = [
     # Templates engine
     path("api/v1/templates/", include("apps.templates_engine.urls")),
 
+    # Infor SunSystems integration (budget checks + journal posting)
+    path("api/v1/sunsystems/", include("apps.sunsystems.urls")),
+
     # Storage stats
     path("api/v1/storage/stats/", StorageStatsView.as_view(), name="storage-stats"),
     path("api/v1/analytics/approval-turnaround/", ApprovalTurnaroundView.as_view(), name="analytics-approval-turnaround"),
@@ -48,7 +51,7 @@ urlpatterns = [
     path("api/v1/analytics/department-activity/", DepartmentActivityView.as_view(), name="analytics-department-activity"),
 
     # JWT refresh
-    path("api/v1/token/refresh/", TokenRefreshView.as_view(), name="token_refresh"),
+    path("api/v1/token/refresh/", SessionTokenRefreshView.as_view(), name="token_refresh"),
 
 ]
 

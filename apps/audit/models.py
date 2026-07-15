@@ -43,8 +43,28 @@ class AuditEvent(models.TextChoices):
     USER_LOGIN = "user.login", "User Login"
     USER_LOGIN_FAILED = "user.login_failed", "Login Failed"
     USER_MFA_ENABLED = "user.mfa_enabled", "MFA Enabled"
+    USER_CREATED = "user.created", "User Created"
+    USER_DELETED = "user.deleted", "User Deleted"
+    USER_PASSWORD_RESET = "user.password_reset", "User Password Reset"
+    USER_ACTIVATED = "user.activated", "User Activated"
+    USER_DEACTIVATED = "user.deactivated", "User Deactivated"
     PERMISSION_CHANGED = "permission.changed", "Permission Changed"
     AUDIT_EXPORTED = "audit.exported", "Audit Log Exported"
+
+
+# Low-signal, high-volume events (views, inline previews, transient queue/lock
+# states). They stay in the immutable log and the admin system audit, but are
+# hidden from the curated, user-facing trails (per-document Audit tab and the
+# non-admin activity feed) where they only add noise.
+LOW_SIGNAL_AUDIT_EVENTS = frozenset({
+    AuditEvent.DOCUMENT_VIEWED,
+    AuditEvent.DOCUMENT_PREVIEWED,
+    AuditEvent.DOCUMENT_PREVIEW_QUEUED,
+    AuditEvent.DOCUMENT_VERSION_PREVIEW_QUEUED,
+    AuditEvent.DOCUMENT_OCR_QUEUED,
+    AuditEvent.DOCUMENT_EDIT_LOCK_ACQUIRED,
+    AuditEvent.DOCUMENT_EDIT_LOCK_RELEASED,
+})
 
 
 class AuditLog(models.Model):

@@ -191,7 +191,13 @@ alias dcu='docker compose --env-file .env.uat -f docker-compose.uat.yml'
 dcu logs -f backend celery_worker   # tail logs
 dcu restart backend                 # restart a service
 dcu down                            # stop (keeps data volumes)
-dcu up -d --build                   # ship new code: pull/checkout, then this
+
+# Ship new code — preferred: prunes safely, then builds & deploys
+git pull                            # or: git checkout <branch>
+./scripts/deploy-uat.sh
+
+# …equivalent manual build if you skip the script:
+dcu up -d --build
 
 # Backups (mysql + uploaded files)
 dcu exec -T db sh -c 'exec mysqldump -uroot -p"$MYSQL_ROOT_PASSWORD" idm_db' > idm_$(date +%F).sql
@@ -200,6 +206,27 @@ docker run --rm -v idm_media_files:/m -v "$PWD":/b alpine tar czf /b/media_$(dat
 
 > **Snapshot the VM** in Hyper-V before each redeploy — instant rollback if a
 > UAT build goes sideways.
+
+### Disk hygiene (avoids the `no space left on device` build failure)
+
+Every `dcu up -d --build` creates a fresh `idm-app:uat` and leaves the previous
+one as a **dangling image**; BuildKit's layer cache also grows over time. Left
+alone, the disk fills and image *export* fails mid-build. `./scripts/deploy-uat.sh`
+handles this each deploy — before building it removes dangling images and caps
+the build cache (`BUILD_CACHE_BUDGET`, default `10GB`), and after building it
+drops the freshly-orphaned image. The named data volumes (`mysql_data`,
+`media_files`, `es_data`, …) are **never** touched.
+
+If you ever need to reclaim space by hand:
+
+```bash
+docker image prune -f                       # dangling images only
+docker builder prune -f --keep-storage 10GB # trim cache to a budget
+df -h /
+```
+
+> ⚠️ **Never** run `docker system prune --volumes` or `docker volume prune`
+> here — that deletes MySQL/media/ES data. Stick to `image`/`builder` prune.
 
 ---
 

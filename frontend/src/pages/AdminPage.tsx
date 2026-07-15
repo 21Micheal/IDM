@@ -1,10 +1,14 @@
 import { useMemo, useState } from "react";
+import { extractApiError } from "@/lib/apiError";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { dmsSettingsAPI, type DmsSettings } from "@/services/api";
 import { toast } from "@/components/ui/vault-toast";
 import {
   Archive,
+  BellRing,
+  Building2,
   ClipboardCheck,
+  Clock,
   Copy,
   Droplets,
   Link2,
@@ -12,11 +16,12 @@ import {
   RotateCcw,
   Save,
   ShieldCheck,
+  Timer,
   Trash2,
 } from "lucide-react";
 import clsx from "clsx";
 
-type SectionId = "preview" | "lifecycle" | "governance";
+type SectionId = "preview" | "lifecycle" | "governance" | "security";
 
 const inputCls =
   "h-9 border border-[#AEB5BB] bg-white px-3 text-sm text-[#1F2933] outline-none focus:border-[#287EAD] focus:ring-1 focus:ring-[#287EAD]";
@@ -49,7 +54,23 @@ const sections: Array<{
     description: "Duplicates, metadata, and stage access",
     icon: ShieldCheck,
   },
+  {
+    id: "security",
+    title: "Security",
+    description: "Session lifetime and inactivity sign-out",
+    icon: Clock,
+  },
 ];
+
+/** Render a minutes value as a human-friendly "Xh Ym" / "X min" string. */
+function formatMinutes(total: number): string {
+  if (!total || total <= 0) return "disabled";
+  const hours = Math.floor(total / 60);
+  const minutes = total % 60;
+  if (hours && minutes) return `${hours}h ${minutes}m`;
+  if (hours) return `${hours}h`;
+  return `${minutes} min`;
+}
 
 function SettingToggle({
   checked,
@@ -146,7 +167,7 @@ function SettingsWorkspace() {
       qc.setQueryData(["dms-settings"], saved);
       toast.success("DMS settings saved.");
     },
-    onError: () => toast.error("Could not save DMS settings."),
+    onError: (err) => toast.error(extractApiError(err, "Could not save DMS settings.")),
   });
 
   const update = <K extends keyof DmsSettings>(key: K, value: DmsSettings[K]) => {
@@ -165,6 +186,13 @@ function SettingsWorkspace() {
       { label: "Watermark", value: settings.watermark_enabled ? "Enabled" : "Off" },
       { label: "Duplicates", value: settings.allow_duplicate_uploads ? "Allowed" : "Blocked" },
       { label: "Access mode", value: settings.rbac_single_stage ? "Global" : "Stage-based" },
+      { label: "Session", value: formatMinutes(settings.session_lifetime_minutes) },
+      {
+        label: "Idle out",
+        value: settings.session_idle_timeout_minutes > 0
+          ? formatMinutes(settings.session_idle_timeout_minutes)
+          : "Off",
+      },
     ];
   }, [settings]);
 
@@ -389,6 +417,33 @@ function SettingsWorkspace() {
           {activeSection === "governance" && (
             <>
               <SettingBlock
+                icon={Building2}
+                title="Organization identity"
+                description="Used to auto-fill {{company_name}} / {{company_address}} merge fields in document templates."
+              >
+                <div className="grid gap-4 sm:grid-cols-2">
+                  <label>
+                    <span className="mb-1.5 block text-xs font-semibold uppercase tracking-wider text-[#5E6870]">Organization name</span>
+                    <input
+                      className={`${inputCls} w-full`}
+                      value={settings.organization_name ?? ""}
+                      onChange={(event) => update("organization_name", event.target.value)}
+                      placeholder="e.g. Fairfield Systems Ltd"
+                    />
+                  </label>
+                  <label>
+                    <span className="mb-1.5 block text-xs font-semibold uppercase tracking-wider text-[#5E6870]">Organization address</span>
+                    <input
+                      className={`${inputCls} w-full`}
+                      value={settings.organization_address ?? ""}
+                      onChange={(event) => update("organization_address", event.target.value)}
+                      placeholder="e.g. 12 Market St, Nairobi"
+                    />
+                  </label>
+                </div>
+              </SettingBlock>
+
+              <SettingBlock
                 icon={Copy}
                 title="Duplicate uploads"
                 description="Choose whether users may upload the same file checksum more than once."
@@ -399,11 +454,20 @@ function SettingsWorkspace() {
                   label="Allow duplicate uploads"
                   description="When off, duplicate files uploaded by the same user are blocked before storage."
                 />
+                <SettingToggle
+                  checked={settings.purge_trashed_duplicates_on_reupload}
+                  onChange={(checked) => update("purge_trashed_duplicates_on_reupload", checked)}
+                  label="Replace trashed copies on re-upload"
+                  description="A document in Trash never blocks a re-upload. With this on, re-uploading the same file also permanently removes the uploader's trashed copy, instead of leaving both."
+                />
                 <InfoNote>
                   Current mode:{" "}
                   <span className="font-semibold text-[#1F2933]">
                     {settings.allow_duplicate_uploads ? "duplicates allowed" : "duplicates blocked"}
                   </span>
+                  {settings.purge_trashed_duplicates_on_reupload && (
+                    <> · re-uploads replace the trashed copy</>
+                  )}
                 </InfoNote>
               </SettingBlock>
 
@@ -437,6 +501,116 @@ function SettingsWorkspace() {
                 />
                 <InfoNote>
                   Required metadata is checked against each document type&apos;s admin-defined required fields.
+                </InfoNote>
+              </SettingBlock>
+            </>
+          )}
+
+          {activeSection === "security" && (
+            <>
+              <SettingBlock
+                icon={Clock}
+                title="Session lifetime"
+                description="The maximum time a signed-in session stays valid before users must sign in again, regardless of activity."
+              >
+                <label className="block">
+                  <span className="mb-1.5 block text-xs font-semibold uppercase tracking-wider text-[#5E6870]">
+                    Sign users out after
+                  </span>
+                  <div className="flex items-center gap-2">
+                    <input
+                      type="number"
+                      min={5}
+                      className={`${inputCls} w-32`}
+                      value={settings.session_lifetime_minutes}
+                      onChange={(event) =>
+                        update("session_lifetime_minutes", Math.max(5, Number(event.target.value) || 5))
+                      }
+                    />
+                    <span className="text-sm text-[#5E6870]">
+                      minutes since sign-in · {formatMinutes(settings.session_lifetime_minutes)}
+                    </span>
+                  </div>
+                </label>
+                <InfoNote>
+                  This is the absolute cap. When it elapses the session ends even if the user is active, and they
+                  are returned to the sign-in screen.
+                </InfoNote>
+              </SettingBlock>
+
+              <SettingBlock
+                icon={Timer}
+                title="Inactivity timeout"
+                description="Sign users out after a period with no interaction (mouse, keyboard, scrolling, or navigation)."
+              >
+                <label className="block">
+                  <span className="mb-1.5 block text-xs font-semibold uppercase tracking-wider text-[#5E6870]">
+                    Sign idle users out after
+                  </span>
+                  <div className="flex items-center gap-2">
+                    <input
+                      type="number"
+                      min={0}
+                      max={settings.session_lifetime_minutes}
+                      className={`${inputCls} w-32`}
+                      value={settings.session_idle_timeout_minutes}
+                      onChange={(event) =>
+                        update(
+                          "session_idle_timeout_minutes",
+                          Math.max(0, Number(event.target.value) || 0),
+                        )
+                      }
+                    />
+                    <span className="text-sm text-[#5E6870]">
+                      minutes of inactivity ·{" "}
+                      {settings.session_idle_timeout_minutes > 0
+                        ? formatMinutes(settings.session_idle_timeout_minutes)
+                        : "disabled"}
+                    </span>
+                  </div>
+                </label>
+                <InfoNote>
+                  Set to <span className="font-semibold text-[#1F2933]">0</span> to disable the inactivity timeout —
+                  only the absolute session lifetime will apply. The idle timeout cannot exceed the session
+                  lifetime.
+                </InfoNote>
+              </SettingBlock>
+
+              <SettingBlock
+                icon={BellRing}
+                title="Expiry warning"
+                description="Warn users before their session ends, with the option to stay signed in when the timeout is due to inactivity."
+              >
+                <label className="block">
+                  <span className="mb-1.5 block text-xs font-semibold uppercase tracking-wider text-[#5E6870]">
+                    Show the warning before expiry
+                  </span>
+                  <div className="flex items-center gap-2">
+                    <input
+                      type="number"
+                      min={0}
+                      max={settings.session_lifetime_minutes}
+                      className={`${inputCls} w-32`}
+                      value={settings.session_warning_minutes}
+                      onChange={(event) =>
+                        update(
+                          "session_warning_minutes",
+                          Math.max(0, Number(event.target.value) || 0),
+                        )
+                      }
+                    />
+                    <span className="text-sm text-[#5E6870]">
+                      minutes before sign-out ·{" "}
+                      {settings.session_warning_minutes > 0
+                        ? formatMinutes(settings.session_warning_minutes)
+                        : "disabled"}
+                    </span>
+                  </div>
+                </label>
+                <InfoNote>
+                  Set to <span className="font-semibold text-[#1F2933]">0</span> to disable the warning. For very short
+                  timeouts the warning is automatically capped to half the remaining window so it never appears the
+                  instant a session begins.
                 </InfoNote>
               </SettingBlock>
             </>

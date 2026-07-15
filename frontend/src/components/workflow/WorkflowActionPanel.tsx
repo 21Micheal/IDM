@@ -12,6 +12,7 @@
  *   ▶ Release hold (only shown when task is currently held)
  */
 import { useState } from "react";
+import { extractApiError } from "@/lib/apiError";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { documentsAPI, workflowAPI } from "@/services/api";
 import {
@@ -23,7 +24,7 @@ import { toast } from "@/components/ui/vault-toast";
 import { useAuthStore } from "@/store/authStore";
 import { formatDistanceToNow, format } from "date-fns";
 import clsx from "clsx";
-import SignaturePlacementModal, { type SignaturePlacement } from "@/components/signatures/SignaturePlacementModal";
+import SignaturePlacementModal, { type SignaturePlacementResult } from "@/components/signatures/SignaturePlacementModal";
 
 // ── Types ─────────────────────────────────────────────────────────────────────
 interface WorkflowTask {
@@ -203,6 +204,9 @@ export default function WorkflowActionPanel({ task, documentId, onCompleted }: P
     "approve" | "reject" | "return" | "hold" | null
   >(null);
   const [showSignaturePlacement, setShowSignaturePlacement] = useState(false);
+  // Captured signature (placement + image) from the explicit "Sign document"
+  // step; applied when the approver then confirms the approval.
+  const [signedResult, setSignedResult] = useState<SignaturePlacementResult | null>(null);
   const [optimisticAction, setOptimisticAction] = useState<WorkflowActionKind | null>(null);
   const [comment, setComment]   = useState("");
   const [holdHours, setHoldHours] = useState(24);
@@ -231,6 +235,7 @@ export default function WorkflowActionPanel({ task, documentId, onCompleted }: P
     qc.invalidateQueries({ queryKey: ["workflow", "my-tasks"] });
     qc.invalidateQueries({ queryKey: ["document", documentId] });
     qc.invalidateQueries({ queryKey: ["document-workflow", documentId] });
+    qc.invalidateQueries({ queryKey: ["sunsystems-postings", documentId] });
     qc.invalidateQueries({ queryKey: ["notification-workflow", documentId] });
     qc.invalidateQueries({ queryKey: ["documents"] });
     qc.invalidateQueries({ queryKey: ["notifications"] });
@@ -239,6 +244,7 @@ export default function WorkflowActionPanel({ task, documentId, onCompleted }: P
     qc.invalidateQueries({ queryKey: ["documents", "completed"] });
     void qc.refetchQueries({ queryKey: ["document", documentId], type: "active" });
     void qc.refetchQueries({ queryKey: ["document-workflow", documentId], type: "active" });
+    void qc.refetchQueries({ queryKey: ["sunsystems-postings", documentId], type: "active" });
     void qc.refetchQueries({ queryKey: ["workflow", "my-tasks"], type: "active" });
     void qc.fetchQuery({
       queryKey: ["document", documentId],
@@ -287,11 +293,11 @@ export default function WorkflowActionPanel({ task, documentId, onCompleted }: P
   };
 
   const approveMutation = useMutation({
-    mutationFn: (placement?: SignaturePlacement) => workflowAPI.approveTask(task.id, comment, placement),
+    mutationFn: (result?: SignaturePlacementResult) => workflowAPI.approveTask(task.id, comment, result ?? undefined),
     onMutate: () => beginOptimisticAction("approve"),
     onSuccess: () => { toast.success("Document approved"); completeAction(); },
     onError:   (e: { response?: { data?: { detail?: string } } }) =>
-      failAction(e?.response?.data?.detail ?? "Approval failed"),
+      failAction(extractApiError(e, "Approval failed")),
   });
 
   const rejectMutation = useMutation({
@@ -299,7 +305,7 @@ export default function WorkflowActionPanel({ task, documentId, onCompleted }: P
     onMutate: () => beginOptimisticAction("reject"),
     onSuccess: () => { toast.success("Document rejected"); completeAction(); },
     onError:   (e: { response?: { data?: { detail?: string } } }) =>
-      failAction(e?.response?.data?.detail ?? "Rejection failed"),
+      failAction(extractApiError(e, "Rejection failed")),
   });
 
   const returnMutation = useMutation({
@@ -310,7 +316,7 @@ export default function WorkflowActionPanel({ task, documentId, onCompleted }: P
       completeAction();
     },
     onError: (e: { response?: { data?: { detail?: string } } }) =>
-      failAction(e?.response?.data?.detail ?? "Return failed"),
+      failAction(extractApiError(e, "Return failed")),
   });
 
   const holdMutation = useMutation({
@@ -321,7 +327,7 @@ export default function WorkflowActionPanel({ task, documentId, onCompleted }: P
       completeAction();
     },
     onError: (e: { response?: { data?: { detail?: string } } }) =>
-      failAction(e?.response?.data?.detail ?? "Hold failed"),
+      failAction(extractApiError(e, "Hold failed")),
   });
 
   const releaseMutation = useMutation({
@@ -329,7 +335,7 @@ export default function WorkflowActionPanel({ task, documentId, onCompleted }: P
     onMutate: () => beginOptimisticAction("release"),
     onSuccess: () => { toast.success("Hold released"); completeAction(); },
     onError:   (e: { response?: { data?: { detail?: string } } }) =>
-      failAction(e?.response?.data?.detail ?? "Release failed"),
+      failAction(extractApiError(e, "Release failed")),
   });
 
   const isHeld     = task.status === "held";
@@ -339,14 +345,17 @@ export default function WorkflowActionPanel({ task, documentId, onCompleted }: P
   const anyPending = approveMutation.isPending || rejectMutation.isPending ||
                      returnMutation.isPending  || holdMutation.isPending;
 
-  const resetForm = () => { setComment(""); setHoldHours(24); setActiveAction(null); };
+  const resetForm = () => { setComment(""); setHoldHours(24); setActiveAction(null); setSignedResult(null); };
 
-  const beginApproval = () => {
-    if (task.requires_signature) {
+  // Approval is the final confirm. If the step requires a signature it must be
+  // captured first (via the explicit "Sign document" step), so it's applied
+  // atomically with the approval — no signed version is created if they back out.
+  const confirmApproval = () => {
+    if (task.requires_signature && !signedResult) {
       setShowSignaturePlacement(true);
       return;
     }
-    approveMutation.mutate(undefined);
+    approveMutation.mutate(signedResult ?? undefined);
   };
 
   if (optimisticAction === "approve" || optimisticAction === "reject" || optimisticAction === "return") {
@@ -368,10 +377,10 @@ export default function WorkflowActionPanel({ task, documentId, onCompleted }: P
           documentTitle={task.document_title}
           documentRef={task.document_ref}
           note={comment ? `Approval note: ${comment}` : undefined}
-          confirmLabel="Confirm signature and approve"
+          confirmLabel="Save signature"
           onCancel={() => setShowSignaturePlacement(false)}
-          onConfirm={(placement) => approveMutation.mutate(placement)}
-          isSubmitting={approveMutation.isPending}
+          onConfirm={(result) => { setSignedResult(result); setShowSignaturePlacement(false); }}
+          isSubmitting={false}
         />
       )}
       {/* Panel header */}
@@ -475,12 +484,6 @@ export default function WorkflowActionPanel({ task, documentId, onCompleted }: P
       {activeAction === "approve" && (
         <div className="space-y-3 border border-border rounded-xl p-4 bg-muted/15">
           <p className="text-sm font-medium text-foreground">Approve document</p>
-          {task.requires_signature && (
-            <div className="flex items-start gap-2 text-xs text-primary bg-primary/5 rounded-lg px-3 py-2 border border-primary/20">
-              <FileSignature className="w-4 h-4 mt-0.5 flex-shrink-0" />
-              <span>Your saved signature will be stamped onto the PDF when you confirm.</span>
-            </div>
-          )}
           <div>
             <label className="label text-xs">Comment (optional)</label>
             <textarea
@@ -492,11 +495,46 @@ export default function WorkflowActionPanel({ task, documentId, onCompleted }: P
               autoFocus
             />
           </div>
+
+          {/* Explicit signing step — required before approval can complete. */}
+          {task.requires_signature && (
+            signedResult ? (
+              <div className="flex items-center justify-between gap-2 text-xs bg-green-50 text-green-700 rounded-lg px-3 py-2 border border-green-200">
+                <span className="flex items-center gap-2">
+                  <CheckCircle className="w-4 h-4 flex-shrink-0" />
+                  Signature placed — it will be applied when you confirm.
+                </span>
+                <button
+                  type="button"
+                  onClick={() => setShowSignaturePlacement(true)}
+                  className="font-medium underline hover:no-underline"
+                >
+                  Re-sign
+                </button>
+              </div>
+            ) : (
+              <div className="space-y-2">
+                <div className="flex items-start gap-2 text-xs text-primary bg-primary/5 rounded-lg px-3 py-2 border border-primary/20">
+                  <FileSignature className="w-4 h-4 mt-0.5 flex-shrink-0" />
+                  <span>This step requires your signature. Sign the document first, then confirm the approval to apply it.</span>
+                </div>
+                <button
+                  type="button"
+                  onClick={() => setShowSignaturePlacement(true)}
+                  className="w-full flex items-center justify-center gap-1.5 px-4 py-2 rounded-lg border border-primary bg-primary text-primary-foreground text-sm font-medium hover:bg-primary/90"
+                >
+                  <FileSignature className="w-4 h-4" /> Sign document
+                </button>
+              </div>
+            )
+          )}
+
           <div className="flex gap-2">
             <button
-              onClick={beginApproval}
-              disabled={anyPending}
-              className="flex items-center gap-1.5 px-4 py-2 rounded-lg border border-primary/30 bg-primary/10 text-primary text-sm font-medium hover:bg-primary/15 disabled:opacity-50"
+              onClick={confirmApproval}
+              disabled={anyPending || (task.requires_signature && !signedResult)}
+              title={task.requires_signature && !signedResult ? "Sign the document first" : "Confirm approval"}
+              className="flex items-center gap-1.5 px-4 py-2 rounded-lg border border-primary/30 bg-primary/10 text-primary text-sm font-medium hover:bg-primary/15 disabled:opacity-50 disabled:cursor-not-allowed"
             >
               {approveMutation.isPending && <Loader2 className="w-3.5 h-3.5 animate-spin" />}
               Confirm approval

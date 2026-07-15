@@ -1,6 +1,12 @@
 """
 apps/workflows/serializers.py
-Adds WorkflowTaskActionSerializer. Everything else unchanged from previous version.
+Adds:
+  - step_type, notify_user, notify_email, notification_subject, notification_message
+    on WorkflowStepSerializer / WorkflowStepWriteSerializer
+  - approver_email_subject, approver_email_body on WorkflowStepSerializer /
+    WorkflowStepWriteSerializer (custom email override for approval steps)
+  - Relaxed validation: notification steps skip assignee_group requirement.
+Everything else unchanged from previous version.
 """
 from rest_framework import serializers
 from django.db.models import Q
@@ -79,17 +85,25 @@ class WorkflowStepSerializer(serializers.ModelSerializer):
     assignee_group_name = serializers.SerializerMethodField()
     assignee_user = serializers.SerializerMethodField()
     assignee_user_name = serializers.SerializerMethodField()
+    notify_user_name = serializers.SerializerMethodField()
 
     class Meta:
         model  = WorkflowStep
         fields = [
-            "id", "order", "name", "status_label",
+            "id", "template", "order", "name", "status_label",
+            "step_type",
+            # approval-step fields
             "assignee_type", "assignee_group", "assignee_group_name",
             "assignee_user", "assignee_user_name", "assignee_user_auto",
             "sla_hours", "allow_resubmit",
             "allow_approve", "allow_reject", "allow_return",
             "requires_signature",
             "instructions",
+            # custom approver email
+            "approver_email_subject", "approver_email_body",
+            # notification-step fields
+            "notify_user", "notify_user_name", "notify_email",
+            "notification_subject", "notification_message",
         ]
 
     def get_assignee_type(self, obj):
@@ -121,10 +135,18 @@ class WorkflowStepSerializer(serializers.ModelSerializer):
             return None
         return None
 
+    def get_notify_user_name(self, obj):
+        try:
+            if obj.notify_user_id and obj.notify_user:
+                return obj.notify_user.get_full_name() or obj.notify_user.email
+        except ObjectDoesNotExist:
+            return None
+        return None
+
 
 class WorkflowStepWriteSerializer(serializers.ModelSerializer):
     id = serializers.UUIDField(required=False)
-    assignee_type = serializers.CharField()
+    assignee_type = serializers.CharField(default="group_any")
     assignee_group = FlexibleGroupField(
         queryset=UserGroup.objects.filter(is_active=True),
         required=False,
@@ -135,30 +157,82 @@ class WorkflowStepWriteSerializer(serializers.ModelSerializer):
         required=False,
         allow_null=True,
     )
+    notify_user = FlexibleUserField(
+        queryset=User.objects.filter(is_active=True),
+        required=False,
+        allow_null=True,
+    )
+
     class Meta:
         model  = WorkflowStep
         fields = [
             "id", "name", "status_label",
+            "step_type",
+            # approval-step
             "assignee_type", "assignee_group", "assignee_user", "assignee_user_auto",
             "sla_hours", "allow_resubmit",
             "allow_approve", "allow_reject", "allow_return",
             "requires_signature",
             "instructions",
+            # custom approver email
+            "approver_email_subject", "approver_email_body",
+            # notification-step
+            "notify_user", "notify_email",
+            "notification_subject", "notification_message",
         ]
         extra_kwargs = {
-            "instructions":  {"required": False, "allow_blank": True},
+            "instructions":            {"required": False, "allow_blank": True},
+            "step_type":               {"required": False},
+            "approver_email_subject":  {"required": False, "allow_blank": True},
+            "approver_email_body":     {"required": False, "allow_blank": True},
+            "notify_email":            {"required": False, "allow_blank": True},
+            "notification_subject":    {"required": False, "allow_blank": True},
+            "notification_message":    {"required": False, "allow_blank": True},
         }
 
     def to_internal_value(self, data):
         UserGroup.ensure_hod_group()
         mutable = dict(data)
-        mutable["assignee_type"] = normalize_assignee_type(mutable.get("assignee_type"))
+        mutable["assignee_type"] = normalize_assignee_type(mutable.get("assignee_type", "group_any"))
         return super().to_internal_value(mutable)
 
     def validate(self, attrs):
-        assignee_type = attrs.get("assignee_type", getattr(self.instance, "assignee_type", None))
+        step_type = attrs.get("step_type", getattr(self.instance, "step_type", "approval")) or "approval"
+
+        # ── Notification step validation ──────────────────────────────────────
+        if step_type == "notification":
+            notify_user  = attrs.get("notify_user",  getattr(self.instance, "notify_user",  None))
+            notify_email = (attrs.get("notify_email", getattr(self.instance, "notify_email", "")) or "").strip()
+            subject      = (attrs.get("notification_subject", getattr(self.instance, "notification_subject", "")) or "").strip()
+            message      = (attrs.get("notification_message", getattr(self.instance, "notification_message", "")) or "").strip()
+
+            if not notify_user and not notify_email:
+                raise serializers.ValidationError(
+                    {"notify_user": "Notification steps require either a recipient user or an email address."}
+                )
+            if not subject:
+                raise serializers.ValidationError(
+                    {"notification_subject": "A subject is required for notification steps."}
+                )
+            if not message:
+                raise serializers.ValidationError(
+                    {"notification_message": "A message body is required for notification steps."}
+                )
+            # Notification steps don't need approval semantics — clear them
+            attrs.setdefault("assignee_group", None)
+            attrs.setdefault("assignee_user", None)
+            attrs["allow_approve"]       = False
+            attrs["allow_reject"]        = False
+            attrs["allow_return"]        = False
+            attrs["allow_resubmit"]      = False
+            attrs["requires_signature"]  = False
+            attrs["assignee_user_auto"]  = False
+            return attrs
+
+        # ── Approval step validation ──────────────────────────────────────────
+        assignee_type  = attrs.get("assignee_type", getattr(self.instance, "assignee_type", None))
         assignee_group = attrs.get("assignee_group", getattr(self.instance, "assignee_group", None))
-        assignee_user = attrs.get("assignee_user", getattr(self.instance, "assignee_user", None))
+        assignee_user  = attrs.get("assignee_user",  getattr(self.instance, "assignee_user",  None))
 
         if assignee_type in ("group_any", "group_all", "group_specific"):
             if assignee_group is None:
@@ -189,11 +263,11 @@ class WorkflowStepWriteSerializer(serializers.ModelSerializer):
                     {"assignee_user": "The selected user is not an active member of the selected group."}
                 )
 
-        # At least one approver action must be allowed
-        allow_approve = attrs.get("allow_approve", getattr(self.instance, "allow_approve", True))
-        allow_reject  = attrs.get("allow_reject",  getattr(self.instance, "allow_reject",  True))
-        allow_return  = attrs.get("allow_return",  getattr(self.instance, "allow_return",  True))
+        allow_approve      = attrs.get("allow_approve",      getattr(self.instance, "allow_approve",      True))
+        allow_reject       = attrs.get("allow_reject",       getattr(self.instance, "allow_reject",       True))
+        allow_return       = attrs.get("allow_return",       getattr(self.instance, "allow_return",       True))
         requires_signature = attrs.get("requires_signature", getattr(self.instance, "requires_signature", False))
+
         if not any([allow_approve, allow_reject, allow_return]):
             raise serializers.ValidationError(
                 {"allow_approve": "At least one approver action (approve, reject, or send back) must be enabled."}
@@ -216,6 +290,7 @@ class WorkflowTemplateSerializer(serializers.ModelSerializer):
         model  = WorkflowTemplate
         fields = [
             "id", "name", "description", "document_type", "document_type_name", "is_active",
+            "notify_uploader_on_approval", "email_templates",
             "steps", "step_count", "created_by", "created_at", "updated_at",
         ]
         read_only_fields = ["id", "step_count", "created_by", "created_at", "updated_at"]
@@ -232,10 +307,12 @@ class WorkflowTemplateWriteSerializer(serializers.ModelSerializer):
 
     class Meta:
         model  = WorkflowTemplate
-        fields = ["name", "description", "document_type", "is_active", "steps"]
+        fields = ["name", "description", "document_type", "is_active", "notify_uploader_on_approval", "email_templates", "steps"]
         extra_kwargs = {
-            "is_active": {"required": False},
-            "document_type": {"required": False, "allow_null": True},
+            "is_active":                    {"required": False},
+            "document_type":                {"required": False, "allow_null": True},
+            "notify_uploader_on_approval":  {"required": False},
+            "email_templates":              {"required": False},
         }
 
     def validate_name(self, value):
@@ -256,6 +333,24 @@ class WorkflowTemplateWriteSerializer(serializers.ModelSerializer):
             raise serializers.ValidationError(
                 {"document_type": "Templates with routing rules must remain assigned to a document type."}
             )
+
+        raw_templates = attrs.get("email_templates")
+        if raw_templates is not None and not isinstance(raw_templates, dict):
+            raise serializers.ValidationError(
+                {"email_templates": "Email templates must be a JSON object."}
+            )
+
+        # Require at least one approval step (notification-only templates make no sense)
+        steps_data = attrs.get("steps")
+        if steps_data is not None:
+            has_approval = any(
+                (s.get("step_type") or "approval") == "approval"
+                for s in steps_data
+            )
+            if not has_approval:
+                raise serializers.ValidationError(
+                    {"steps": "A workflow template must have at least one approval step."}
+                )
 
         return attrs
 
@@ -361,19 +456,21 @@ class WorkflowRuleSerializer(serializers.ModelSerializer):
             "id", "document_type", "document_type_name",
             "template", "template_name",
             "template_document_type",
-            "amount_min", "amount_max", "currency", "label", "is_active",
+            "phase", "amount_min", "amount_max", "currency", "label", "is_active",
         ]
         read_only_fields = ["id", "document_type", "template_name", "document_type_name", "template_document_type"]
         extra_kwargs = {
-            "label": {"required": False, "allow_blank": True},
+            "phase":     {"required": False, "allow_blank": True},
+            "label":     {"required": False, "allow_blank": True},
             "is_active": {"required": False},
         }
 
     def validate(self, attrs):
-        template = attrs.get("template", getattr(self.instance, "template", None))
+        template   = attrs.get("template",   getattr(self.instance, "template",   None))
         amount_min = attrs.get("amount_min", getattr(self.instance, "amount_min", 0))
         amount_max = attrs.get("amount_max", getattr(self.instance, "amount_max", None))
-        currency = (attrs.get("currency", getattr(self.instance, "currency", "USD")) or "USD").upper()
+        currency   = (attrs.get("currency",  getattr(self.instance, "currency",   "USD")) or "USD").upper()
+        phase      = (attrs.get("phase", getattr(self.instance, "phase", WorkflowRule.DEFAULT_PHASE)) or WorkflowRule.DEFAULT_PHASE).strip().lower()
 
         if template is None:
             raise serializers.ValidationError({"template": "A template is required."})
@@ -392,6 +489,7 @@ class WorkflowRuleSerializer(serializers.ModelSerializer):
             .filter(
                 document_type=document_type,
                 template__document_type=document_type,
+                phase=phase,
                 currency=currency,
                 is_active=True,
             )
@@ -400,9 +498,6 @@ class WorkflowRuleSerializer(serializers.ModelSerializer):
         for rule in overlaps:
             other_min = rule.amount_min
             other_max = rule.amount_max
-            # Two ranges [amount_min, amount_max] and [other_min, other_max]
-            # (None = unbounded above) overlap iff each begins at or before the
-            # other ends: amount_min <= other_max AND other_min <= amount_max.
             a_reaches_b = other_max is None or amount_min <= other_max
             b_reaches_a = amount_max is None or other_min <= amount_max
             if a_reaches_b and b_reaches_a:
@@ -412,6 +507,7 @@ class WorkflowRuleSerializer(serializers.ModelSerializer):
 
         attrs["document_type"] = document_type
         attrs["currency"] = currency
+        attrs["phase"] = phase
         return attrs
 
 
@@ -457,10 +553,24 @@ class WorkflowTaskSerializer(serializers.ModelSerializer):
     file_mime_type = serializers.CharField(source="workflow_instance.document.file_mime_type", read_only=True)
     status_display = serializers.CharField(source="get_status_display", read_only=True)
     requires_signature = serializers.BooleanField(source="step.requires_signature", read_only=True)
+    is_delegated = serializers.SerializerMethodField()
+    delegated_from = serializers.SerializerMethodField()
 
     def get_uploaded_by_name(self, obj):
         uploader = obj.workflow_instance.document.uploaded_by
         return uploader.get_full_name() or uploader.email
+
+    def get_is_delegated(self, obj):
+        request = self.context.get("request")
+        if not request or not getattr(request.user, "is_authenticated", False):
+            return False
+        from apps.accounts.delegation import user_can_action_task_via_delegation
+        return user_can_action_task_via_delegation(request.user, obj)
+
+    def get_delegated_from(self, obj):
+        if not self.get_is_delegated(obj):
+            return None
+        return UserSummarySerializer(obj.assigned_to).data
 
     class Meta:
         model  = WorkflowTask
@@ -473,6 +583,7 @@ class WorkflowTaskSerializer(serializers.ModelSerializer):
             "document_id", "document_ref", "document_title", "document_type_name",
             "document_department_name", "uploaded_by_name", "uploader_department_name",
             "file_name", "file_mime_type",
+            "is_delegated", "delegated_from",
         ]
 
 
@@ -480,11 +591,18 @@ class WorkflowInstanceSerializer(serializers.ModelSerializer):
     tasks      = WorkflowTaskSerializer(many=True, read_only=True)
     started_by = UserSummarySerializer(read_only=True)
     rule_label = serializers.CharField(source="rule.label", read_only=True, default="")
+    phase = serializers.SerializerMethodField()
 
     class Meta:
         model  = WorkflowInstance
         fields = [
             "id", "document", "template", "rule", "rule_label",
+            "phase",
             "status", "current_step_order",
             "started_by", "started_at", "completed_at", "tasks",
         ]
+
+    def get_phase(self, obj):
+        if obj.rule_id and obj.rule and obj.rule.phase:
+            return obj.rule.phase
+        return "request"

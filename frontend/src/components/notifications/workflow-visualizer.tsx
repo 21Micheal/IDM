@@ -230,18 +230,31 @@ function nodePalette(node: WorkflowStep) {
   return NODE_PALETTE[index % NODE_PALETTE.length];
 }
 
+/** Upcoming / unreached steps read as inactive, so they stay neutral grey. */
+function isInactiveStatus(status: WorkflowStatus) {
+  return status === "pending" || status === "skipped";
+}
+
 function nodeFill(node: WorkflowStep) {
-  if (node.status === "pending") {
-    const { fill } = nodePalette(node);
-    return fill;
-  }
   return TONE[node.status].fill;
 }
 
+/**
+ * Accent colour for a node's border, left bar and header tint. Reached steps
+ * keep a soft colourful tint to mark the active path; upcoming/unreached steps
+ * stay muted grey so they don't compete with the live stage.
+ */
+function nodeAccent(node: WorkflowStep) {
+  if (isInactiveStatus(node.status)) return TONE[node.status].accent;
+  return nodePalette(node).accent;
+}
+
 function statusLabel(node: WorkflowStep) {
-  if (node.status === "in-progress") return "In progress";
-  if (node.status === "on-hold") return "On hold";
-  if (node.status === "pending") return node.statusDisplay ?? "Awaiting approval";
+  // The data layer already resolves a position-aware label (e.g. "In progress",
+  // "Approved", "Awaiting Finance approval"); fall back to the tone default only
+  // for structural nodes (start/end) that carry no display text.
+  const custom = node.statusDisplay?.trim();
+  if (custom) return custom;
   return TONE[node.status].label;
 }
 
@@ -483,12 +496,12 @@ function NodeShape({
   /* Task rectangles */
   const lx = node.x - NODE_W / 2;
   const ty2 = node.y - NODE_H / 2;
-  const palette = nodePalette(node);
+  const accent = nodeAccent(node);
   const shadow = hovered
     ? "drop-shadow(0 6px 16px rgba(0,0,0,0.14))"
     : "drop-shadow(0 2px 4px rgba(0,0,0,0.06))";
   const sw = node.status === "in-progress" ? 2.5 : 1.5;
-  const borderColor = selected ? tone.stroke : palette.accent;
+  const borderColor = selected ? tone.stroke : accent;
 
   return (
     <g transform={`translate(${lx},${ty2})`} {...handlers} style={{ cursor: "pointer" }}>
@@ -502,10 +515,10 @@ function NodeShape({
         strokeWidth={sw}
         style={{ filter: shadow, transition: "filter 0.15s" }}
       />
-      <rect x={0} y={0} width={NODE_W} height={24} rx={10} fill={palette.accent} opacity={0.08} />
+      <rect x={0} y={0} width={NODE_W} height={24} rx={10} fill={accent} opacity={0.08} />
 
       {/* Left accent bar */}
-      <rect width={7} height={NODE_H} rx={3} fill={palette.accent} />
+      <rect width={7} height={NODE_H} rx={3} fill={accent} />
 
       {/* Top-right status dot */}
       <circle cx={NODE_W - 16} cy={16} r={12} fill={tone.stroke} />

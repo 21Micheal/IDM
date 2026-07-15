@@ -1,6 +1,8 @@
 """
 apps/accounts/views.py
 """
+import logging
+
 from django.contrib.auth import authenticate
 from django.contrib.auth.password_validation import validate_password
 from django.core.exceptions import ValidationError as DjangoValidationError
@@ -23,9 +25,89 @@ from .serializers import (
     UserGroupSerializer, GroupPermissionSerializer, UserGroupMembershipSerializer, UserDelegationSerializer,
     UserPreferenceSerializer, UserSignatureSerializer,
 )
-from apps.notifications.tasks import _create_notification, _send_email
+from apps.notifications.tasks import (
+    _create_notification,
+    _send_email,
+    notify_delegation_activated,
+)
+from apps.accounts.delegation import tasks_for_delegation
 from .email_otp import send_otp_email
 from apps.audit.models import AuditLog, AuditEvent
+
+logger = logging.getLogger(__name__)
+
+
+# ── Session policy ────────────────────────────────────────────────────────────
+# The session lifetime (formerly a hardcoded ~6h) is admin-configurable via the
+# DMS settings. We expose the policy to the client at sign-in / refresh so the
+# frontend can enforce the absolute lifetime and the inactivity (idle) timeout,
+# and we pin each refresh token's expiry to the configured absolute lifetime so
+# the backend never trusts a session for longer than the policy allows.
+
+def get_session_policy() -> dict:
+    """Current session policy as a plain dict for API responses."""
+    from datetime import timedelta
+    from apps.documents.models import DMSSettings
+
+    settings = DMSSettings.load()
+    return {
+        "session_lifetime_minutes": settings.session_lifetime_minutes,
+        "session_idle_timeout_minutes": settings.session_idle_timeout_minutes,
+        "session_warning_minutes": settings.session_warning_minutes,
+    }
+
+
+def issue_refresh_for_user(user) -> RefreshToken:
+    """RefreshToken whose lifetime matches the configured session lifetime."""
+    from datetime import timedelta
+
+    refresh = RefreshToken.for_user(user)
+    lifetime = get_session_policy()["session_lifetime_minutes"]
+    if lifetime:
+        refresh.set_exp(lifetime=timedelta(minutes=lifetime))
+    return refresh
+
+
+from rest_framework_simplejwt.views import TokenRefreshView
+from rest_framework_simplejwt.serializers import TokenRefreshSerializer
+from rest_framework_simplejwt.settings import api_settings as jwt_settings
+
+
+class SessionTokenRefreshSerializer(TokenRefreshSerializer):
+    """Refresh serializer that pins rotated refresh tokens to the configured
+    absolute session lifetime instead of the static SIMPLE_JWT setting."""
+
+    def validate(self, attrs):
+        from datetime import timedelta
+
+        refresh = self.token_class(attrs["refresh"])
+        data = {"access": str(refresh.access_token)}
+
+        if jwt_settings.ROTATE_REFRESH_TOKENS:
+            if jwt_settings.BLACKLIST_AFTER_ROTATION:
+                try:
+                    refresh.blacklist()
+                except AttributeError:
+                    pass
+            refresh.set_jti()
+            refresh.set_iat()
+            refresh.set_exp()
+            lifetime = get_session_policy()["session_lifetime_minutes"]
+            if lifetime:
+                refresh.set_exp(lifetime=timedelta(minutes=lifetime))
+            data["refresh"] = str(refresh)
+
+        return data
+
+
+class SessionTokenRefreshView(TokenRefreshView):
+    serializer_class = SessionTokenRefreshSerializer
+
+    def post(self, request, *args, **kwargs):
+        response = super().post(request, *args, **kwargs)
+        if response.status_code == 200:
+            response.data["session_policy"] = get_session_policy()
+        return response
 
 
 # ── Permission helpers ────────────────────────────────────────────────────────
@@ -54,26 +136,9 @@ class LoginView(APIView):
         email    = request.data.get("email", "").strip().lower()
         password = request.data.get("password", "").strip()
 
-        print(f"DEBUG: Attempting login for {email} with password length {len(password)}")
-
-        # Check if user exists
-        try:
-            user_obj = User.objects.get(email=email)
-            print(f"DEBUG: User found: {user_obj.email}, active: {user_obj.is_active}, has_password: {bool(user_obj.password)}")
-            print(f"DEBUG: Password hash starts with: {user_obj.password[:10] if user_obj.password else 'None'}")
-            # Manual password check
-            if user_obj.check_password(password):
-                print(f"DEBUG: Manual password check PASSED for {email}")
-            else:
-                print(f"DEBUG: Manual password check FAILED for {email}")
-        except User.DoesNotExist:
-            print(f"DEBUG: User {email} does not exist")
-            user_obj = None
-
         user = authenticate(request, username=email, password=password)
 
         if not user:
-            print(f"DEBUG: Authentication failed for {email}")
             AuditLog.objects.create(
                 event=AuditEvent.USER_LOGIN_FAILED,
                 object_type="User",
@@ -94,10 +159,8 @@ class LoginView(APIView):
         # Since MFA is now default, always send OTP
         try:
             send_otp_email(user, purpose="login")
-        except Exception as e:
-            print(f"ERROR: Failed to send OTP email to {user.email}: {type(e).__name__}: {str(e)}")
-            import traceback
-            traceback.print_exc()
+        except Exception:
+            logger.exception("Failed to send login OTP email to %s", user.email)
             return Response(
                 {"detail": "Could not send OTP email. Contact your administrator."},
                 status=503,
@@ -140,7 +203,7 @@ class VerifyOTPView(APIView):
         user.last_login = timezone.now()
         user.save(update_fields=["last_login"])
 
-        refresh = RefreshToken.for_user(user)
+        refresh = issue_refresh_for_user(user)
 
         AuditLog.objects.create(
             event=AuditEvent.USER_LOGIN,
@@ -157,6 +220,7 @@ class VerifyOTPView(APIView):
             "refresh":              str(refresh),
             "must_change_password": user.must_change_password,
             "user":                 UserSerializer(user).data,
+            "session_policy":       get_session_policy(),
         })
 
 
@@ -189,6 +253,13 @@ class MeView(generics.RetrieveUpdateAPIView):
         if self.request.method in ("PUT", "PATCH"):
             return UserUpdateSerializer
         return UserSerializer
+
+    def retrieve(self, request, *args, **kwargs):
+        # Piggyback the current session policy so the SPA can pick up admin
+        # changes to session lifetime / idle timeout without re-authenticating.
+        response = super().retrieve(request, *args, **kwargs)
+        response.data["session_policy"] = get_session_policy()
+        return response
 
 
 class ChangePasswordView(APIView):
@@ -391,7 +462,7 @@ class UserViewSet(viewsets.ModelViewSet):
 
         # Log the creation
         AuditLog.objects.create(
-            event=AuditEvent.PERMISSION_CHANGED,
+            event=AuditEvent.USER_CREATED,
             actor=request.user,
             object_type="User",
             object_id=str(user.id),
@@ -415,10 +486,10 @@ class UserViewSet(viewsets.ModelViewSet):
 
         try:
             send_mail(
-                subject="Access Granted: Your DocVault Account",
+                subject="Access Granted: Your FseDMS Account",
                 message=f"""Hello {user.first_name},
 
-Your DocVault account has been created by an administrator.
+Your FseDMS account has been created by an administrator.
 
 Credentials:
     Login ID:  {user.email}
@@ -432,15 +503,14 @@ Login here: {frontend_url}
 
 If you did not expect this account, please contact your administrator immediately.
 
-— DocVault Administration
+— FseDMS Administration
 """,
                 from_email=settings.DEFAULT_FROM_EMAIL,
                 recipient_list=[user.email],
                 fail_silently=False,   # Changed to False so you notice if email fails
             )
-        except Exception as e:
-            # Log the email failure to server console
-            print(f"Failed to send welcome email to {user.email}: {e}")
+        except Exception:
+            logger.exception("Failed to send welcome email to %s", user.email)
 
     def perform_destroy(self, instance):
         if instance == self.request.user:
@@ -452,7 +522,7 @@ If you did not expect this account, please contact your administrator immediatel
         try:
             instance.delete()
             AuditLog.objects.create(
-                event=AuditEvent.PERMISSION_CHANGED,
+                event=AuditEvent.USER_DELETED,
                 actor=self.request.user,
                 object_type="User",
                 object_id=uid,
@@ -466,7 +536,7 @@ If you did not expect this account, please contact your administrator immediatel
                 "Consider deactivating their account instead."
             )
 
-    @action(detail=True, methods=["post"])
+    @action(detail=True, methods=["post"], url_path="reset-password")
     def reset_password(self, request, pk=None):
         user = self.get_object()
         temp_password = get_random_string(
@@ -480,31 +550,41 @@ If you did not expect this account, please contact your administrator immediatel
         # Email the new temp password
         from django.core.mail import send_mail
         from django.conf import settings
+
+        frontend_url = getattr(settings, "FRONTEND_URL", "http://localhost:3000")
         try:
             send_mail(
-                subject="DocVault — your password has been reset",
+                subject="FseDMS — your password has been reset",
                 message=f"""Hello {user.first_name},
 
 Your password has been reset by an administrator.
 
-  Temporary password: {temp_password}
+Credentials:
+    Login ID:           {user.email}
+    Temporary password: {temp_password}
 
-You will be required to set a new password when you next log in.
+Next steps:
+1. Go to {frontend_url} and sign in with the Login ID and temporary password above.
+2. Check your email for a one-time security code (OTP) and enter it to continue.
+3. You will then be prompted to set a new strong password of your own.
 
-— DocVault Administration
+For your security, the temporary password works only until you set a new one.
+If you did not expect this reset, contact your administrator immediately.
+
+— FseDMS Administration
 """,
-                from_email=getattr(settings, "DEFAULT_FROM_EMAIL", "noreply@docvault.local"),
+                from_email=getattr(settings, "DEFAULT_FROM_EMAIL", "noreply@flaxem.local"),
                 recipient_list=[user.email],
                 fail_silently=False,
             )
-        except Exception as e:
-            print(f"Failed to send password reset email to {user.email}: {e}")
+        except Exception:
+            logger.exception("Failed to send password reset email to %s", user.email)
 
         AuditLog.objects.create(
-            event=AuditEvent.PERMISSION_CHANGED,
+            event=AuditEvent.USER_PASSWORD_RESET,
             actor=request.user,
-            object_type="User", 
-            object_id=str(user.id), 
+            object_type="User",
+            object_id=str(user.id),
             object_repr=user.email,
             changes={"action": "password_reset"},
             ip_address=request.META.get("REMOTE_ADDR"),
@@ -522,10 +602,10 @@ You will be required to set a new password when you next log in.
         user.is_active = not user.is_active
         user.save(update_fields=["is_active"])
         AuditLog.objects.create(
-            event=AuditEvent.PERMISSION_CHANGED,
+            event=AuditEvent.USER_ACTIVATED if user.is_active else AuditEvent.USER_DEACTIVATED,
             actor=request.user,
-            object_type="User", 
-            object_id=str(user.id), 
+            object_type="User",
+            object_id=str(user.id),
             object_repr=user.email,
             changes={"action": "activated" if user.is_active else "deactivated"},
             ip_address=request.META.get("REMOTE_ADDR"),
@@ -797,7 +877,7 @@ class UserDelegationViewSet(viewsets.ModelViewSet):
 
     def get_queryset(self):
         user = self.request.user
-        qs = UserDelegation.objects.select_related("delegator", "delegate")
+        qs = UserDelegation.objects.select_related("delegator", "delegate").filter(dismissed_at__isnull=True)
         if user.has_admin_access:
             if delegator := self.request.query_params.get("delegator"):
                 qs = qs.filter(delegator_id=delegator)
@@ -817,7 +897,9 @@ class UserDelegationViewSet(viewsets.ModelViewSet):
             raise exceptions.PermissionDenied("You can only create delegations for yourself.")
 
         delegation = serializer.save(delegator=delegator, created_by=user)
+        self._notify_delegator_of_delegation(delegation)
         self._notify_delegate_of_delegation(delegation)
+        self._schedule_delegation_task_alerts(delegation)
 
         AuditLog.objects.create(
             event=AuditEvent.WORKFLOW_DELEGATED,
@@ -836,27 +918,99 @@ class UserDelegationViewSet(viewsets.ModelViewSet):
             ip_address=self.request.META.get("REMOTE_ADDR"),
         )
 
-    def _notify_delegate_of_delegation(self, delegation: UserDelegation) -> None:
+    def _delegation_window(self, delegation: UserDelegation) -> tuple[str, str]:
         start = delegation.starts_at.strftime("%d %b %Y %H:%M UTC")
         end = delegation.ends_at.strftime("%d %b %Y %H:%M UTC")
-        message = (
-            f"You have been delegated workflow tasks by {delegation.delegator.get_full_name()} "
-            f"from {start} to {end}. Reason: {delegation.comment.strip()}"
-        )
+        return start, end
+
+    def _delegation_scope_label(self, delegation: UserDelegation) -> str:
+        if delegation.document_type_id:
+            return f" ({delegation.document_type.name} tasks only)"
+        return ""
+
+    def _notify_delegator_of_delegation(self, delegation: UserDelegation) -> None:
+        start, end = self._delegation_window(delegation)
+        delegate_name = delegation.delegate.get_full_name() or delegation.delegate.email
+        scope = self._delegation_scope_label(delegation)
+        created_by = delegation.created_by
+        actor = created_by or delegation.delegator
+        actor_name = actor.get_full_name() or actor.email
+
+        if created_by and created_by.id != delegation.delegator_id:
+            message = (
+                f"{actor_name} scheduled delegation of your workflow tasks{scope} to "
+                f"{delegate_name} from {start} to {end}."
+            )
+            if delegation.comment.strip():
+                message += f" Reason: {delegation.comment.strip()}"
+        else:
+            message = (
+                f"You delegated your workflow tasks{scope} to {delegate_name} "
+                f"from {start} to {end}."
+            )
+            if delegation.comment.strip():
+                message += f" Reason: {delegation.comment.strip()}"
+
         link = "/profile"
+        _create_notification(delegation.delegator, message, link, "delegation")
+        _send_email(
+            delegation.delegator,
+            subject=f"DMS — Workflow delegation to {delegate_name}",
+            body=(
+                f"Hello {delegation.delegator.first_name},\n\n"
+                f"{message}\n\n"
+                f"Delegate: {delegate_name} ({delegation.delegate.email})\n"
+                f"  From: {start}\n"
+                f"  To:   {end}\n"
+                + (f"  Reason: {delegation.comment.strip()}\n" if delegation.comment.strip() else "")
+                + "\nYou can review or change this delegation from your profile.\n"
+            ),
+        )
+
+    def _notify_delegate_of_delegation(self, delegation: UserDelegation) -> None:
+        start, end = self._delegation_window(delegation)
+        delegator_name = delegation.delegator.get_full_name() or delegation.delegator.email
+        scope = self._delegation_scope_label(delegation)
+        link = "/workflow"
+
+        if delegation.is_current:
+            message = (
+                f"{delegator_name} has delegated workflow tasks{scope} to you "
+                f"(active now until {end})."
+            )
+        else:
+            message = (
+                f"{delegator_name} will delegate workflow tasks{scope} to you "
+                f"from {start} to {end}."
+            )
+        if delegation.comment.strip():
+            message += f" Reason: {delegation.comment.strip()}"
 
         _create_notification(delegation.delegate, message, link, "delegation")
         _send_email(
             delegation.delegate,
-            subject=f"DMS — New delegation from {delegation.delegator.get_full_name()}",
+            subject=f"DMS — Workflow delegation from {delegator_name}",
             body=(
                 f"Hello {delegation.delegate.first_name},\n\n"
-                f"{delegation.delegator.get_full_name()} has delegated workflow tasks to you.\n\n"
-                f"  From: {start}\n"
-                f"  To:   {end}\n"
-                f"  Reason: {delegation.comment.strip()}\n\n"
-                f"Please log in to DMS to view your delegated workload.\n"
+                f"{message}\n\n"
+                f"Please log in to DMS and open Workflow to view your delegated workload.\n"
             ),
+        )
+
+    def _schedule_delegation_task_alerts(self, delegation: UserDelegation) -> None:
+        if not delegation.is_active:
+            return
+        delegation_id = str(delegation.id)
+        if delegation.is_current:
+            # Use countdown=0 for immediate async processing
+            notify_delegation_activated.apply_async(
+                args=[delegation_id],
+                countdown=0,
+            )
+            return
+        notify_delegation_activated.apply_async(
+            args=[delegation_id],
+            eta=delegation.starts_at,
         )
 
     def perform_update(self, serializer):
@@ -872,7 +1026,42 @@ class UserDelegationViewSet(viewsets.ModelViewSet):
             raise exceptions.PermissionDenied("You can only remove your own delegations.")
         instance.delete()
 
+    @action(detail=True, methods=["post"])
+    def dismiss(self, request, pk=None):
+        """Dismiss an ended delegation so it no longer appears in the list."""
+        # Use unfiltered queryset to access even dismissed delegations
+        instance = UserDelegation.objects.select_related("delegator", "delegate").get(pk=pk)
+        user = self.request.user
+        
+        # Check permissions: admin or delegator can dismiss
+        if not user.has_admin_access and instance.delegator_id != user.id:
+            raise exceptions.PermissionDenied("You can only dismiss your own delegations.")
+        
+        # Only allow dismissing ended/inactive delegations
+        if instance.is_active and instance.is_current:
+            return Response(
+                {"detail": "Cannot dismiss an active delegation. Disable it first."},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+        
+        if instance.dismissed_at:
+            return Response(
+                {"detail": "This delegation has already been dismissed."},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+        
+        instance.dismissed_at = timezone.now()
+        instance.save(update_fields=["dismissed_at"])
+        
+        return Response({"detail": "Delegation dismissed successfully."})
+
     @action(detail=False, methods=["get"])
     def candidates(self, request):
-        users = User.objects.filter(is_active=True).exclude(id=request.user.id).order_by("first_name", "last_name")
+        exclude_raw = (request.query_params.get("exclude") or "").strip()
+        exclude_id = exclude_raw or str(request.user.id)
+        users = (
+            User.objects.filter(is_active=True)
+            .exclude(id=exclude_id)
+            .order_by("first_name", "last_name")
+        )
         return Response(UserSummarySerializer(users, many=True).data)

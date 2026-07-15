@@ -45,6 +45,7 @@ export interface MetadataField {
   key?: string; // Alias for field_key (used in some contexts)
   field_type: "text" | "varchar" | "number" | "date" | "currency" | "select" | "boolean" | "textarea";
   is_required: boolean;
+  is_unique?: boolean;
   is_searchable?: boolean;
   select_options?: string[] | null;
   default_value?: string;
@@ -83,6 +84,7 @@ export interface Document {
   tags: Tag[];
   personal_tags?: string[];
   uploaded_by: UserSummary;
+  owned_by?: UserSummary | null;
   department?: string | null;
   department_name?: string | null;
   uploaded_by_department_name?: string | null;
@@ -96,6 +98,9 @@ export interface Document {
   edit_locked_by_name?: string | null;
   edit_locked_at?: string | null;
   is_edit_locked?: boolean;
+  builder_workflow_phase?: "request" | "retirement" | null;
+  builder_process_step?: string | null;
+  can_submit_retirement?: boolean;
   current_version: number;
   versions: DocumentVersion[];
   comments?: DocumentComment[];
@@ -239,11 +244,13 @@ export interface WorkflowTask {
   held_until?: string | null;
   status_display?: string;
   requires_signature?: boolean;
+  is_delegated?: boolean;
+  delegated_from?: UserSummary | null;
 }
 
 export interface Notification {
   id: string;
-  type: "task_assigned" | "workflow_complete" | "document_returned" | "document_held" | "hold_released" | "hold_ending" | "hold_expired" | "task_sla_warning" | "task_overdue" | "workflow_action" | "document_shared";
+  type: "task_assigned" | "workflow_complete" | "document_returned" | "document_held" | "hold_released" | "hold_ending" | "hold_expired" | "task_sla_warning" | "task_overdue" | "workflow_action" | "document_shared" | "delegation";
   message: string;
   link: string;
   is_read: boolean;

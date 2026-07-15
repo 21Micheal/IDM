@@ -21,6 +21,9 @@ from .folder_views import (
     DocumentFavouriteViewSet,
 )
 from .signature_views import SignatureRequestViewSet
+from .pdf_tools_views import PdfToolView
+from .migration_views import MigrationJobViewSet
+from .mailbox_views import MailboxViewSet
 
 router = DefaultRouter()
 router.register(r"bulk-uploads", BulkUploadViewSet, basename="bulk-upload")
@@ -29,6 +32,8 @@ router.register(r"folders",      DocumentFolderViewSet,     basename="document-f
 router.register(r"folder-items", DocumentFolderItemViewSet, basename="folder-item")
 router.register(r"favourites",   DocumentFavouriteViewSet,  basename="document-favourite")
 router.register(r"signature-requests", SignatureRequestViewSet, basename="signature-request")
+router.register(r"migrations",   MigrationJobViewSet,       basename="migration-job")
+router.register(r"mailboxes",    MailboxViewSet,            basename="mailbox")
 # Register documents last so its empty-prefix doesn't shadow the others
 router.register(r"",             DocumentViewSet,           basename="document")
 
@@ -76,6 +81,13 @@ urlpatterns = [
         "settings/",
         DMSSettingsView.as_view(),
         name="document-settings",
+    ),
+    # In-app PDF editor server-side jobs (compress / convert). Must precede the
+    # router so it isn't captured as a document <pk>.
+    path(
+        "pdf-tool/",
+        PdfToolView.as_view(),
+        name="document-pdf-tool",
     ),
     *router.urls,
 ]

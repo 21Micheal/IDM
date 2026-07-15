@@ -375,8 +375,9 @@ class UserDelegationSerializer(serializers.ModelSerializer):
             "is_active",
             "is_current",
             "created_at",
+            "dismissed_at",
         ]
-        read_only_fields = ["id", "delegator", "delegate", "document_type", "document_type_name", "is_current", "created_at"]
+        read_only_fields = ["id", "delegator", "delegate", "document_type", "document_type_name", "is_current", "created_at", "dismissed_at"]
 
     def validate(self, attrs):
         comment = attrs.get("comment")

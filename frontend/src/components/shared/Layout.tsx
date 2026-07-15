@@ -15,14 +15,15 @@ import {
   LayoutDashboard, FileText, Upload, Search,
   Workflow, Settings, LogOut,
   Bell, Users, Building2, UserRoundCog, Shield,
-  ChevronDown, ChevronRight, Archive, ScanLine, Loader2, UserCheck, Monitor, Lock, History, Trash2,
-  BellRing, CircleUserRound, ClipboardCheck, Inbox, ArrowRight, FileSignature, LayoutTemplate,
+  ChevronDown, ChevronRight, ChevronLeft, Archive, ScanLine, Loader2, UserCheck, Monitor, Lock, History, Trash2,
+  BellRing, CircleUserRound, ClipboardCheck, Inbox, ArrowRight, FileSignature, LayoutTemplate, Database,
+  Plug,
 } from "lucide-react";
 import { useAuthStore } from "../../store/authStore";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { notificationsAPI, workflowAPI } from "../../services/api";
 import { FlaxemLogo } from "./FlaxemLogo";
-import { QUERY_SHORT_STALE } from "@/lib/reactQueryDefaults";
+import { QUERY_ONE_MINUTE_STALE } from "@/lib/reactQueryDefaults";
 import { preloadCommonRoutes, preloadRouteForPath } from "@/lib/routePreload";
 import { FolderTree } from "@/components/folders/FolderTree";
 import clsx from "clsx";
@@ -65,6 +66,20 @@ function navTarget(to: string) {
   };
 }
 
+// Content-heavy routes that open with the sidebar collapsed (full-width canvas)
+// by default. The user can still toggle the sidebar back open on these pages.
+function isFullWidthByDefaultRoute(pathname: string): boolean {
+  if (pathname === "/admin/templates" || pathname === "/workflow/builder") return true;
+  // Single-document workspace: /documents/:id (not the upload/scan/review/etc.)
+  const seg = pathname.split("/")[2] ?? "";
+  return (
+    pathname.startsWith("/documents/") &&
+    Boolean(seg) &&
+    !["upload", "scan", "review", "trash", "folders"].includes(seg) &&
+    !pathname.slice("/documents/".length).includes("/")
+  );
+}
+
 // ── Navigation structure (unchanged) ─────────────────────────────────────────
 
 const mainNav: NavEntry[] = [
@@ -79,6 +94,7 @@ const mainNav: NavEntry[] = [
       { to: "/documents?status=archived", icon: Archive,  label: "Archived" },
       { to: "/documents/upload",          icon: Upload,   label: "Upload" },
       { to: "/documents/scan",            icon: ScanLine, label: "Scan" },
+      { to: "/documents/review",          icon: ClipboardCheck, label: "Pending review" },
       { to: "/documents/trash",           icon: Trash2,   label: "Trash" },
       { to: "/search",                    icon: Search,   label: "Search" },
     ],
@@ -111,6 +127,9 @@ const adminNav: NavLeaf[] = [
   { to: "/admin/departments", icon: Building2, label: "Departments", allowedRoles: ["admin"] },
   { to: "/admin/groups",      icon: Shield,    label: "Groups",      allowedRoles: ["admin"] },
   { to: "/admin/settings",    icon: Settings,  label: "Settings",    allowedRoles: ["admin"] },
+  { to: "/admin/migration",   icon: Database,  label: "IDM Migration", allowedRoles: ["admin"] },
+  { to: "/admin/mailboxes",   icon: Inbox,     label: "Email Ingestion", allowedRoles: ["admin"] },
+  { to: "/admin/sunsystems",  icon: Plug,      label: "SunSystems", allowedRoles: ["admin"] },
   { to: "/workflow/builder", icon: Settings, label: "Workflow Builder", allowedRoles: ["admin"] },
 ];
 
@@ -203,11 +222,14 @@ function SidebarGroup({
 
 // ── ProfileMenu (unchanged) ───────────────────────────────────────────────────
 
-function ProfileMenu() {
+function ProfileMenu({ variant = "light" }: { variant?: "light" | "blue" }) {
   const { user, logout } = useAuthStore();
   const _navigate = useNavigate();
   void _navigate;
   const [open, setOpen] = useState(false);
+  const buttonClassName = variant === "blue"
+    ? "flex h-9 w-9 items-center justify-center text-white/85 transition-colors hover:bg-white/10 hover:text-white"
+    : "flex h-9 w-9 items-center justify-center border border-[#C8CDD2] bg-white text-[#5E6870] transition-colors hover:bg-[#EEF6FB] hover:text-[#287EAD]";
 
   useEffect(() => {
     if (!open) return;
@@ -224,7 +246,7 @@ function ProfileMenu() {
     <div className="relative">
       <button
         onClick={() => setOpen(!open)}
-        className="flex h-9 w-9 items-center justify-center border border-[#C8CDD2] bg-white text-[#5E6870] transition-colors hover:bg-[#EEF6FB] hover:text-[#287EAD]"
+        className={buttonClassName}
         title="Profile"
         aria-label="Open profile menu"
       >
@@ -265,14 +287,26 @@ function ProfileMenu() {
 function NotificationsTray({
   notifications,
   tasks,
+  attentionCount,
+  variant = "light",
 }: {
   notifications?: { id: string; type: string; message: string; link?: string; is_read: boolean; created_at: string }[];
   tasks: unknown[];
+  attentionCount: number;
+  variant?: "light" | "blue";
 }) {
   const _navigate = useNavigate();
   void _navigate;
   const queryClient = useQueryClient();
   const [open, setOpen] = useState(false);
+
+  // The tray's list data is no longer polled (badge counts come from the
+  // summary endpoint), so refresh it whenever the user opens the tray.
+  useEffect(() => {
+    if (!open) return;
+    queryClient.invalidateQueries({ queryKey: ["notifications"] });
+    queryClient.invalidateQueries({ queryKey: ["workflow", "my-tasks"] });
+  }, [open, queryClient]);
   const markReadMutation = useMutation({
     mutationFn: (id: string) => notificationsAPI.markRead(id),
     onMutate: async (id: string) => {
@@ -325,7 +359,8 @@ function NotificationsTray({
     due_at?: string | null;
     workflow_instance?: { document?: { title?: string; reference_number?: string } };
   }[];
-  const attentionCount = noticeUnreadCount + taskAlertUnreadCount + tasks.length;
+  // attentionCount (the bell badge) is supplied by the parent from the summary
+  // endpoint; the per-section counts below come from the lists shown when open.
 
   useEffect(() => {
     if (!open) return;
@@ -350,12 +385,15 @@ function NotificationsTray({
     setOpen(false);
     _navigate("/workflow");
   };
+  const buttonClassName = variant === "blue"
+    ? "relative flex h-9 w-9 items-center justify-center text-white/85 transition-colors hover:bg-white/10 hover:text-white"
+    : "relative flex h-9 w-9 items-center justify-center border border-[#C8CDD2] bg-white text-[#5E6870] transition-colors hover:bg-[#EEF6FB] hover:text-[#287EAD]";
 
   return (
     <div className="relative">
       <button
         onClick={() => setOpen((value) => !value)}
-        className="relative flex h-9 w-9 items-center justify-center border border-[#C8CDD2] bg-white text-[#5E6870] transition-colors hover:bg-[#EEF6FB] hover:text-[#287EAD]"
+        className={buttonClassName}
         title="Notifications and tasks"
         aria-label="Open notifications and tasks tray"
       >
@@ -525,19 +563,8 @@ function SidebarProfile() {
   );
 }
 
-// ── Layout ────────────────────────────────────────────────────────────────────
-
-export default function Layout() {
-  const { user } = useAuthStore();
-  const _navigate = useNavigate();
-  void _navigate;
-  const location = useLocation();
-  const mainRef = useRef<HTMLElement | null>(null);
-  const hasAdminAccess = Boolean(user?.has_admin_access);
+export function WorkspaceHeaderActions({ variant = "light" }: { variant?: "light" | "blue" }) {
   const [idleReady, setIdleReady] = useState(false);
-  // ── NEW: folder panel toggle ──────────────────────────────────────────────
-  const [_foldersExpanded, _setFoldersExpanded] = useState(true);
-  void _foldersExpanded; void _setFoldersExpanded;
 
   useEffect(() => {
     let fallbackTimer: ReturnType<typeof setTimeout> | null = null;
@@ -555,26 +582,167 @@ export default function Layout() {
     return () => { if (fallbackTimer) clearTimeout(fallbackTimer); };
   }, []);
 
+  const { data: summary } = useQuery({
+    queryKey: ["notifications", "summary"],
+    queryFn: () => notificationsAPI.summary().then((r) => r.data),
+    refetchInterval: 60_000,
+    enabled: idleReady,
+    ...QUERY_ONE_MINUTE_STALE,
+  });
+
   const { data: notifications } = useQuery({
     queryKey: ["notifications"],
     queryFn: () => notificationsAPI.list().then((r) => r.data.results ?? r.data),
-    refetchInterval: 30_000,
     enabled: idleReady,
-    ...QUERY_SHORT_STALE,
+    ...QUERY_ONE_MINUTE_STALE,
   });
 
   const { data: myTasks = [] } = useQuery({
     queryKey: ["workflow", "my-tasks"],
     queryFn: () => workflowAPI.myTasks().then((r) => r.data.results ?? r.data),
-    refetchInterval: 30_000,
     enabled: idleReady,
-    ...QUERY_SHORT_STALE,
+    ...QUERY_ONE_MINUTE_STALE,
   });
 
-  const unread = (notifications as { is_read: boolean; type: string }[] | undefined)
-    ?.filter((n) => !n.is_read && !TASK_NOTIFICATION_TYPES.has(n.type)).length ?? 0;
+  const trayAttentionCount =
+    (summary?.unread_notifications ?? 0) +
+    (summary?.unread_task_alerts ?? 0) +
+    (summary?.pending_tasks ?? 0);
+  const isBlue = variant === "blue";
 
-  const pendingTasksCount = (myTasks as unknown[]).length;
+  return (
+    <div className="flex shrink-0 items-center gap-2">
+      {idleReady ? (
+        <Suspense fallback={null}>
+          <ChatLauncher variant={variant} />
+        </Suspense>
+      ) : null}
+      <NotificationsTray
+        notifications={notifications as any}
+        tasks={myTasks as unknown[]}
+        attentionCount={trayAttentionCount}
+        variant={variant}
+      />
+      {!isBlue && <div className="mx-1 h-6 w-px bg-[#C8CDD2]" />}
+      <ProfileMenu variant={variant} />
+    </div>
+  );
+}
+
+// ── Layout ────────────────────────────────────────────────────────────────────
+
+export default function Layout() {
+  const { user } = useAuthStore();
+  const _navigate = useNavigate();
+  void _navigate;
+  const location = useLocation();
+  const mainRef = useRef<HTMLElement | null>(null);
+  const hasAdminAccess = Boolean(user?.has_admin_access);
+  const [idleReady, setIdleReady] = useState(false);
+  // ── NEW: folder panel toggle ──────────────────────────────────────────────
+  const [_foldersExpanded, _setFoldersExpanded] = useState(true);
+  void _foldersExpanded; void _setFoldersExpanded;
+
+  // ── Sidebar collapse. `collapsePref` is the user's remembered choice for
+  // regular pages (persisted). The effective collapsed state is DERIVED during
+  // render — not stored in an effect — so a navigation paints the new page at
+  // the correct width on the first frame (one smooth slide, no snap-then-slide).
+  const [collapsePref, setCollapsePref] = useState<boolean>(() => {
+    if (typeof window === "undefined") return false;
+    try { return window.localStorage.getItem("sidebarCollapsed") === "1"; } catch { return false; }
+  });
+  // A manual toggle is remembered against the path it was made on, so it applies
+  // for that visit but never leaks onto the next page.
+  const [sidebarOverride, setSidebarOverride] = useState<{ path: string; collapsed: boolean } | null>(null);
+  useEffect(() => {
+    try { window.localStorage.setItem("sidebarCollapsed", collapsePref ? "1" : "0"); } catch { /* ignore */ }
+  }, [collapsePref]);
+
+  const routeDefaultCollapsed = isFullWidthByDefaultRoute(location.pathname) ? true : collapsePref;
+  const sidebarCollapsed =
+    sidebarOverride && sidebarOverride.path === location.pathname
+      ? sidebarOverride.collapsed
+      : routeDefaultCollapsed;
+
+  const toggleSidebar = () => {
+    const next = !sidebarCollapsed;
+    setSidebarOverride({ path: location.pathname, collapsed: next });
+    // On regular pages the toggle is also the lasting preference; on the
+    // collapse-by-default routes it's only an override for the current visit.
+    if (!isFullWidthByDefaultRoute(location.pathname)) setCollapsePref(next);
+  };
+
+  useEffect(() => {
+    let fallbackTimer: ReturnType<typeof setTimeout> | null = null;
+    let idleHandle: number | null = null;
+    const markReady = () => setIdleReady(true);
+    if (typeof window !== "undefined" && "requestIdleCallback" in window) {
+      idleHandle = (window as any).requestIdleCallback(markReady, { timeout: 1500 });
+      fallbackTimer = setTimeout(markReady, 1600);
+      return () => {
+        if (idleHandle !== null) (window as any).cancelIdleCallback(idleHandle);
+        if (fallbackTimer) clearTimeout(fallbackTimer);
+      };
+    }
+    fallbackTimer = setTimeout(markReady, 500);
+    return () => { if (fallbackTimer) clearTimeout(fallbackTimer); };
+  }, []);
+
+  // All sidebar/bell badge counts come from a single consolidated endpoint that
+  // runs on every authenticated page. This is the app's constant background
+  // load multiplier, so it's one cheap COUNT request (not three row-fetching
+  // polls) every 60s. (react-query pauses it while the tab is backgrounded.)
+  const { data: summary } = useQuery({
+    queryKey: ["notifications", "summary"],
+    queryFn: () => notificationsAPI.summary().then((r) => r.data),
+    refetchInterval: 60_000,
+    enabled: idleReady,
+    ...QUERY_ONE_MINUTE_STALE,
+  });
+
+  // The notification + task *lists* only feed the expanded tray, so they're no
+  // longer polled — they load once and the tray refetches them when opened.
+  const { data: notifications } = useQuery({
+    queryKey: ["notifications"],
+    queryFn: () => notificationsAPI.list().then((r) => r.data.results ?? r.data),
+    enabled: idleReady,
+    ...QUERY_ONE_MINUTE_STALE,
+  });
+
+  const { data: myTasks = [] } = useQuery({
+    queryKey: ["workflow", "my-tasks"],
+    queryFn: () => workflowAPI.myTasks().then((r) => r.data.results ?? r.data),
+    enabled: idleReady,
+    ...QUERY_ONE_MINUTE_STALE,
+  });
+
+  const unread = summary?.unread_notifications ?? 0;
+  const pendingTasksCount = summary?.pending_tasks ?? 0;
+  const signatureCount = summary?.incoming_signatures ?? 0;
+  const documentsRouteSegment = location.pathname.split("/")[2] ?? "";
+  const usesWorkspaceCommandBar =
+    location.pathname === "/" ||
+    location.pathname === "/notifications" ||
+    location.pathname === "/search" ||
+    location.pathname === "/workflow" ||
+    location.pathname === "/audit" ||
+    location.pathname === "/admin/templates" ||
+    location.pathname === "/documents" ||
+    location.pathname === "/documents/upload" ||
+    location.pathname === "/documents/scan" ||
+    location.pathname === "/documents/trash" ||
+    (
+      location.pathname.startsWith("/documents/") &&
+      Boolean(documentsRouteSegment) &&
+      !["upload", "scan", "review", "trash", "folders"].includes(documentsRouteSegment) &&
+      !location.pathname.slice("/documents/".length).includes("/")
+    );
+  // Bell badge: every unread notification (notices + task alerts) plus pending
+  // tasks — mirrors what the tray used to sum from the now-unpolled lists.
+  const trayAttentionCount =
+    (summary?.unread_notifications ?? 0) +
+    (summary?.unread_task_alerts ?? 0) +
+    (summary?.pending_tasks ?? 0);
 
   useEffect(() => {
     mainRef.current?.scrollTo({ top: 0, behavior: "auto" });
@@ -591,11 +759,15 @@ export default function Layout() {
   }, [idleReady]);
 
   return (
-    <div className="flex h-screen bg-background text-foreground">
+    <div className="relative flex h-screen bg-background text-foreground">
 
       {/* ── Sidebar ────────────────────────────────────────────────────── */}
       <aside
-        className="flex w-[270px] flex-shrink-0 flex-col border-r border-[#C8CDD2] bg-[#F2F3F4] text-[#1F2933]"
+        className={clsx(
+          "flex flex-shrink-0 flex-col overflow-hidden bg-[#F2F3F4] text-[#1F2933]",
+          sidebarCollapsed ? "w-0 border-r-0" : "w-[270px]",
+          !sidebarCollapsed && !usesWorkspaceCommandBar && "border-r border-[#C8CDD2]",
+        )}
       >
         {/* Logo */}
         <div className="flex h-[69px] items-center border-b border-[#206D99] bg-[#287EAD] px-4">
@@ -605,7 +777,7 @@ export default function Layout() {
         </div>
 
         {/* Nav — scrollable, two sections split by a divider */}
-        <nav className="flex-1 overflow-y-auto">
+        <nav className="scrollbar-minimal flex-1 overflow-y-auto">
           {/* ── Primary nav ─────────────────────────────────────────────── */}
           <div className="space-y-0.5 px-2 py-3">
             {mainNav.map((entry) => {
@@ -623,7 +795,10 @@ export default function Layout() {
               }
               const { to, icon: Icon, label, exact, allowedRoles } = entry;
               if (allowedRoles && !hasAdminAccess) return null;
-              const badgeValue = to === "/notifications" ? unread : to === "/workflow" ? pendingTasksCount : undefined;
+              const badgeValue = to === "/notifications" ? unread
+                : to === "/workflow" ? pendingTasksCount
+                : to === "/request-signature" ? (signatureCount || undefined)
+                : undefined;
               return (
                 <NavLink
                   key={to}
@@ -717,23 +892,49 @@ export default function Layout() {
         <SidebarProfile />
       </aside>
 
+      {/* ── Sidebar collapse / expand toggle ─────────────────────────────
+          Sits on the sidebar↔content boundary and slides with it. Collapsing
+          drops the sidebar to 0 width so the workspace spans the full width. */}
+      <button
+        type="button"
+        onClick={toggleSidebar}
+        className={clsx(
+          "absolute top-1/2 z-40 flex h-7 w-7 -translate-y-1/2 items-center justify-center rounded-full border border-[#C8CDD2] bg-white text-[#5E6870] shadow-md transition-[background-color,color,border-color] duration-200 ease-in-out hover:border-[#287EAD] hover:bg-[#EEF6FB] hover:text-[#287EAD]",
+          sidebarCollapsed ? "left-0" : "left-[258px]",
+        )}
+        title={sidebarCollapsed ? "Expand sidebar" : "Collapse sidebar"}
+        aria-label={sidebarCollapsed ? "Expand sidebar" : "Collapse sidebar"}
+        aria-expanded={!sidebarCollapsed}
+      >
+        {sidebarCollapsed ? <ChevronRight className="h-4 w-4" /> : <ChevronLeft className="h-4 w-4" />}
+      </button>
+
       {/* ── Main area (unchanged) ──────────────────────────────────── */}
       <div className="flex-1 flex flex-col min-w-0">
-        <header className="flex h-14 flex-shrink-0 items-center justify-end gap-2 border-b border-[#C8CDD2] bg-white px-6">
-          {idleReady ? (
-            <Suspense fallback={null}>
-              <ChatLauncher />
-            </Suspense>
-          ) : null}
-          <NotificationsTray
-            notifications={notifications as any}
-            tasks={myTasks as unknown[]}
-          />
-          <div className="mx-1 h-6 w-px bg-[#C8CDD2]" />
-          <ProfileMenu />
-        </header>
+        {!usesWorkspaceCommandBar && (
+          <header className="flex h-14 flex-shrink-0 items-center justify-end gap-2 border-b border-[#C8CDD2] bg-white px-6">
+            {idleReady ? (
+              <Suspense fallback={null}>
+                <ChatLauncher />
+              </Suspense>
+            ) : null}
+            <NotificationsTray
+              notifications={notifications as any}
+              tasks={myTasks as unknown[]}
+              attentionCount={trayAttentionCount}
+            />
+            <div className="mx-1 h-6 w-px bg-[#C8CDD2]" />
+            <ProfileMenu />
+          </header>
+        )}
 
-        <main ref={mainRef} className="flex-1 overflow-y-auto p-6 bg-background">
+        <main
+          ref={mainRef}
+          className={clsx(
+            "scrollbar-minimal flex-1 overflow-y-auto bg-background",
+            usesWorkspaceCommandBar ? "p-0" : "p-6",
+          )}
+        >
           <Suspense fallback={<ContentFallback />}>
             <Outlet />
           </Suspense>

@@ -1,6 +1,8 @@
 // src/pages/ForceChangePasswordPage.tsx
 "use client";
 import { useState } from "react";
+import { useQueryClient } from "@tanstack/react-query";
+import { extractApiError } from "@/lib/apiError";
 import { useNavigate } from "react-router-dom";
 import { useForm } from "react-hook-form";
 import { zodResolver } from "@hookform/resolvers/zod";
@@ -46,6 +48,7 @@ function getStrength(pw: string): { score: number; label: string; color: string 
 
 export default function ForceChangePasswordPage() {
   const navigate = useNavigate();
+  const qc = useQueryClient();
   const { setUser } = useAuthStore();
   const [showOld, setShowOld] = useState(false);
   const [showNew, setShowNew] = useState(false);
@@ -71,18 +74,33 @@ export default function ForceChangePasswordPage() {
     setLoading(true);
     try {
       await profileAPI.changePassword(values.old_password, values.new_password);
-      const { data: me } = await authAPI.me();
-      setUser(me);
-      toast.success("Password updated successfully! Welcome to Flaxem.");
-      navigate("/", { replace: true });
     } catch (err: any) {
-      const detail = err?.response?.data?.detail;
-      toast.error(
-        Array.isArray(detail) ? detail.join(" ") : detail || "Failed to update password"
-      );
-    } finally {
+      // The change itself failed — the temporary password still works, so let
+      // the user correct and retry.
+      toast.error(extractApiError(err, "Failed to update password"));
       setLoading(false);
+      return;
     }
+
+    // Password is now changed on the server. A background /auth/me refetch (e.g.
+    // SessionSync's refetchOnWindowFocus) may still be in flight carrying the old
+    // must_change_password=true; if it lands after we navigate it would bounce
+    // the user straight back here. Cancel it and seed the cache with fresh data.
+    await qc.cancelQueries({ queryKey: ["auth", "me"] });
+    try {
+      const { data: me } = await authAPI.me();
+      qc.setQueryData(["auth", "me"], me);
+      setUser(me);
+    } catch {
+      // Profile re-fetch failed, but the password change already succeeded.
+      // Clear the flag locally so the guard doesn't send us back to this page.
+      const current = useAuthStore.getState().user;
+      if (current) setUser({ ...current, must_change_password: false });
+    }
+
+    toast.success("Password updated successfully! Welcome to Flaxem.");
+    navigate("/", { replace: true });
+    setLoading(false);
   };
 
   const inputBase =

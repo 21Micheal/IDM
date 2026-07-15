@@ -5,6 +5,11 @@ from rest_framework.response import Response
 
 from .models import Notification
 
+# Notification types that represent workflow tasks. These are surfaced under the
+# task badge rather than the general "notices" bell count.
+TASK_NOTIFICATION_TYPES = ("task_assigned", "task_sla_warning", "task_overdue")
+
+
 class NotificationSerializer(serializers.ModelSerializer):
     class Meta:
         model = Notification
@@ -57,6 +62,46 @@ class NotificationViewSet(
     @action(detail=False, methods=["get"])
     def unread_count(self, request):
         return Response({"unread_count": self.get_queryset().filter(is_read=False).count()})
+
+    @action(detail=False, methods=["get"])
+    def summary(self, request):
+        """Consolidated badge counts for the app shell — one cheap request that
+        replaces separate polls for unread notifications, workflow tasks and
+        incoming signature requests. Every value is an indexed COUNT, so this is
+        far lighter than fetching and serializing the rows just to size a badge
+        (and, unlike the old client-side count, it is not capped at one page).
+        """
+        # Local imports keep this cross-app action free of import-time cycles.
+        from apps.documents.models import SignatureRequest, SignatureRequestSigner
+        from apps.accounts.delegation import tasks_visible_to_user
+
+        user = request.user
+        base = Notification.objects.filter(recipient=user, is_read=False)
+        # Task-type notifications surface under the task badge, not the bell's
+        # "notices" count — mirror the split the client used to do by hand.
+        unread_task_alerts = base.filter(type__in=TASK_NOTIFICATION_TYPES).count()
+        unread_notifications = base.count() - unread_task_alerts
+
+        pending_tasks = tasks_visible_to_user(user).count()
+
+        incoming_signatures = (
+            SignatureRequest.objects.filter(
+                signers__signer=user,
+                signers__status=SignatureRequestSigner.Status.PENDING,
+                status=SignatureRequest.Status.PENDING,
+            )
+            .distinct()
+            .count()
+        )
+
+        return Response(
+            {
+                "unread_notifications": unread_notifications,
+                "unread_task_alerts": unread_task_alerts,
+                "pending_tasks": pending_tasks,
+                "incoming_signatures": incoming_signatures,
+            }
+        )
 
 
 def _parse_bool(value: str) -> bool | None:

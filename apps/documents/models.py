@@ -138,6 +138,13 @@ class MetadataField(models.Model):
     key            = models.SlugField(max_length=100)
     field_type     = models.CharField(max_length=20, choices=FIELD_TYPES, default="text")
     is_required    = models.BooleanField(default=False)
+    is_unique      = models.BooleanField(
+        default=False,
+        help_text=(
+            "When set, the value entered for this attribute (e.g. a reference "
+            "number) must not match any other document of the same type."
+        ),
+    )
     is_searchable  = models.BooleanField(default=True)
     select_options = models.JSONField(default=list, blank=True)
     default_value  = models.CharField(max_length=255, blank=True)
@@ -257,6 +264,12 @@ class DMSSettings(models.Model):
         FOOTER = "footer", "Footer"
 
     id = models.PositiveSmallIntegerField(primary_key=True, default=1, editable=False)
+
+    # Organization identity — used to auto-fill {{company_name}} / {{company_address}}
+    # merge fields in designer document templates.
+    organization_name = models.CharField(max_length=200, blank=True, default="")
+    organization_address = models.TextField(blank=True, default="")
+
     watermark_enabled = models.BooleanField(default=False)
     watermark_text = models.CharField(max_length=120, default="CONFIDENTIAL", blank=True)
     watermark_opacity = models.PositiveSmallIntegerField(default=15)
@@ -268,6 +281,10 @@ class DMSSettings(models.Model):
     watermark_apply_to_previews = models.BooleanField(default=True)
 
     allow_duplicate_uploads = models.BooleanField(default=False)
+    # When duplicates are blocked, a document sitting in Trash never counts as a
+    # duplicate. With this on, re-uploading identical content also permanently
+    # removes the uploader's trashed copy so no stale duplicate is left behind.
+    purge_trashed_duplicates_on_reupload = models.BooleanField(default=False)
     signed_file_urls_enabled = models.BooleanField(
         default=False,
         help_text="Issue short-lived signed file URLs for browser contexts that cannot send Authorization headers.",
@@ -287,6 +304,31 @@ class DMSSettings(models.Model):
     rbac_single_stage = models.BooleanField(default=False)
 
     require_metadata_on_upload = models.BooleanField(default=True)
+
+    # Session policy — replaces the previously hardcoded ~6h logout. Two
+    # independent controls:
+    #   * session_lifetime_minutes  — absolute maximum a session may live from
+    #     sign-in, regardless of activity. Enforced via the refresh-token
+    #     lifetime and the frontend session clock.
+    #   * session_idle_timeout_minutes — log a user out after this many minutes
+    #     with no interaction. 0 disables the idle timeout (only the absolute
+    #     lifetime applies).
+    session_lifetime_minutes = models.PositiveIntegerField(
+        default=360,
+        help_text="Absolute maximum session duration from sign-in, in minutes.",
+    )
+    session_idle_timeout_minutes = models.PositiveIntegerField(
+        default=30,
+        help_text="Sign users out after this many minutes of inactivity. 0 disables the idle timeout.",
+    )
+    #   * session_warning_minutes — show a "session about to expire" warning this
+    #     many minutes before sign-out, with an option to extend (idle case). 0
+    #     disables the warning.
+    session_warning_minutes = models.PositiveIntegerField(
+        default=3,
+        help_text="Warn users this many minutes before their session ends. 0 disables the warning.",
+    )
+
     bulk_scan_submit_for_approval = models.BooleanField(
         default=False,
         help_text="When enabled, reviewed bulk scan documents are immediately submitted to approval workflows.",
@@ -318,6 +360,19 @@ class DMSSettings(models.Model):
             self.auto_archive_after_days = 1
         if self.trash_retention_days < 1:
             self.trash_retention_days = 1
+        # Keep the session policy sane: an absolute lifetime of at least 5
+        # minutes, and an idle timeout that never outlives that absolute cap.
+        if self.session_lifetime_minutes < 5:
+            self.session_lifetime_minutes = 5
+        if self.session_idle_timeout_minutes < 0:
+            self.session_idle_timeout_minutes = 0
+        if self.session_idle_timeout_minutes > self.session_lifetime_minutes:
+            self.session_idle_timeout_minutes = self.session_lifetime_minutes
+        # The pre-expiry warning must fire within the session window, so cap it
+        # at the absolute lifetime (the client further limits it to half the
+        # relevant window so short timeouts don't warn the instant they begin).
+        if self.session_warning_minutes > self.session_lifetime_minutes:
+            self.session_warning_minutes = self.session_lifetime_minutes
         super().save(*args, **kwargs)
 
     @classmethod
@@ -487,6 +542,19 @@ class Document(models.Model):
 
     def __str__(self):
         return f"[{self.reference_number}] {self.title}"
+
+    def save(self, *args, **kwargs):
+        # Default the document's department to the uploader's on first creation so
+        # "department activity" reflects real org structure. It stays independently
+        # re-assignable afterwards — this only fills it when blank at creation.
+        if self._state.adding and self.department_id is None and self.uploaded_by_id:
+            from apps.accounts.models import User
+            self.department_id = (
+                User.objects.filter(pk=self.uploaded_by_id)
+                .values_list("department_id", flat=True)
+                .first()
+            )
+        super().save(*args, **kwargs)
 
     def hard_delete(self):
         """Permanently remove the document, its versions, and their stored files."""
@@ -1058,6 +1126,415 @@ class SignatureRequestSigner(models.Model):
     class Meta:
         ordering        = ["order", "id"]
         unique_together = [("request", "signer")]
+        indexes = [
+            # Backs the incoming-signature badge count (signer + status filter),
+            # polled by the app shell.
+            models.Index(fields=["signer", "status"]),
+        ]
 
     def __str__(self):
         return f"{self.signer_id} → {self.request_id} ({self.status})"
+
+
+class MigrationJobStatus(models.TextChoices):
+    """Lifecycle of an Infor IDM → fseDMS migration run."""
+    DRAFT      = "draft",      "Draft"
+    QUEUED     = "queued",     "Queued"
+    RUNNING    = "running",    "Running"
+    COMPLETED  = "completed",  "Completed"
+    PARTIAL    = "partial",    "Completed with errors"
+    FAILED     = "failed",     "Failed"
+    CANCELLED  = "cancelled",  "Cancelled"
+
+
+class MigrationJob(models.Model):
+    """
+    A migration of documents from Infor IDM (reached over the ION API) into
+    this DMS.
+
+    The job owns three concerns:
+
+    * **connection** – the ION API credentials/endpoints used to reach IDM.
+      Stored as JSON so the exact shape can evolve as we learn the real ION
+      tenant configuration. Secret values (``client_secret``/``password``/
+      ``sask``) are write-only at the API layer and redacted on read.
+    * **selection** – ``source_query`` is the IDM query (AQL/OData-style) that
+      decides *which* documents are pulled. Empty means "the connector's
+      default", which the client may interpret as "everything it can list".
+    * **mapping & results** – ``target_document_type`` is the fseDMS type that
+      imported documents are filed under (a single fallback type for now;
+      per-IDM-type mapping can be layered on later). ``include_attributes``
+      controls whether IDM attributes are copied into ``Document.metadata``.
+      The running task updates the counters and appends per-item outcomes to
+      ``log`` so the UI can show progress and surface failures.
+
+    NB: actual IDM field/attribute mapping is intentionally thin and lives in
+    ``apps.documents.migration`` so it can be tuned once the real ION response
+    shapes are confirmed.
+    """
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    name = models.CharField(max_length=200)
+
+    connection = models.JSONField(
+        default=dict,
+        blank=True,
+        help_text=(
+            "ION API connection settings: api_url, tenant, token_url, "
+            "client_id, client_secret, saak, sask, scope, etc."
+        ),
+    )
+    source_query = models.TextField(
+        blank=True,
+        help_text="IDM query selecting which documents to migrate. Empty = connector default.",
+    )
+
+    target_document_type = models.ForeignKey(
+        DocumentType,
+        null=True,
+        blank=True,
+        on_delete=models.SET_NULL,
+        related_name="migration_jobs",
+        help_text="fseDMS document type imported documents are filed under.",
+    )
+    include_attributes = models.BooleanField(
+        default=True,
+        help_text="Copy IDM attributes/metadata into each imported document's metadata.",
+    )
+    # Hard cap so an exploratory run can't accidentally pull an entire archive.
+    max_documents = models.PositiveIntegerField(
+        default=0,
+        help_text="Optional ceiling on documents imported in one run. 0 = no limit.",
+    )
+
+    status = models.CharField(
+        max_length=20,
+        choices=MigrationJobStatus.choices,
+        default=MigrationJobStatus.DRAFT,
+        db_index=True,
+    )
+
+    total_items     = models.PositiveIntegerField(default=0)
+    processed_items = models.PositiveIntegerField(default=0)
+    succeeded_items = models.PositiveIntegerField(default=0)
+    failed_items    = models.PositiveIntegerField(default=0)
+    skipped_items   = models.PositiveIntegerField(default=0)
+
+    # Append-only list of {ion_id, reference_number?, status, detail} dicts.
+    log   = models.JSONField(default=list, blank=True)
+    error = models.TextField(blank=True)
+
+    created_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        null=True,
+        on_delete=models.SET_NULL,
+        related_name="migration_jobs",
+    )
+    created_at  = models.DateTimeField(auto_now_add=True)
+    updated_at  = models.DateTimeField(auto_now=True)
+    started_at  = models.DateTimeField(null=True, blank=True)
+    finished_at = models.DateTimeField(null=True, blank=True)
+
+    class Meta:
+        ordering = ["-created_at"]
+        indexes = [
+            models.Index(fields=["status", "created_at"]),
+        ]
+
+    def __str__(self):
+        return f"MigrationJob {self.name} ({self.status})"
+
+    def append_log(self, entry: dict) -> None:
+        """Append one per-item outcome. Caller is responsible for saving."""
+        log = list(self.log or [])
+        log.append(entry)
+        self.log = log
+
+
+# ── Email ingestion ────────────────────────────────────────────────────────────
+
+class MailboxPollStatus(models.TextChoices):
+    """Outcome of the most recent poll of a mailbox."""
+    IDLE    = "idle",    "Idle"
+    POLLING = "polling", "Polling"
+    OK      = "ok",      "Last poll succeeded"
+    ERROR   = "error",   "Last poll failed"
+
+
+class Mailbox(models.Model):
+    """
+    An IMAP mailbox the system watches for inbound documents.
+
+    Email ingestion is the server-side sibling of an upload: a poll connects to
+    the mailbox, pulls unseen messages, and turns each message's attachments
+    into ``DocumentStatus.DRAFT`` documents that land in the bulk-upload review
+    queue. A human confirms the document type and metadata there before the
+    normal amount-threshold workflow rules pick an approval template — email
+    metadata is machine-guessed, so it never auto-starts a workflow.
+
+    Configuration mirrors :class:`MigrationJob`:
+
+    * **connection** – IMAP settings as JSON so the shape can evolve. The
+      ``password`` is write-only at the API layer (accepted on save, redacted on
+      read), exactly like the ION ``sask``.
+    * **routing** – ``default_document_type`` files every attachment under one
+      type (the reliable, zero-ML path: one mailbox per type). When null,
+      attachments land under the shared ``UNCLASS`` placeholder for the reviewer
+      to classify. ``auto_classify`` is an opt-in hook for inferring the type
+      from content; until a classifier is wired it falls back to the default.
+    * **enrichment** – ``sender_supplier_map`` pre-fills the supplier from the
+      sender address/domain (structured data the OCR can't match as reliably).
+    * **related_set_attachments** – when an email carries several attachments
+      (e.g. an invoice with its PO and delivery note), import them as one
+      related set so the reviewer sees them together.
+
+    Per-message state and idempotency live on :class:`IngestedEmail`; this model
+    only carries connection, routing, and last-poll bookkeeping.
+    """
+
+    class Protocol(models.TextChoices):
+        IMAP  = "imap",  "IMAP"
+        GRAPH = "graph", "Microsoft Graph"
+
+    id   = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    name = models.CharField(max_length=200)
+
+    protocol = models.CharField(
+        max_length=10,
+        choices=Protocol.choices,
+        default=Protocol.IMAP,
+        db_index=True,
+        help_text="Mail backend used to reach this mailbox.",
+    )
+    connection = models.JSONField(
+        default=dict,
+        blank=True,
+        help_text=(
+            "Connection settings. IMAP: host, port, use_ssl, username, password, "
+            "folder. Microsoft Graph: tenant_id, client_id, client_secret, "
+            "mailbox (user principal name), folder."
+        ),
+    )
+
+    default_document_type = models.ForeignKey(
+        DocumentType,
+        null=True,
+        blank=True,
+        on_delete=models.SET_NULL,
+        related_name="mailboxes",
+        help_text="Document type imported attachments are filed under. Null = UNCLASS placeholder.",
+    )
+    auto_classify = models.BooleanField(
+        default=False,
+        help_text="Attempt to infer the document type from content instead of always using the default.",
+    )
+    sender_supplier_map = models.JSONField(
+        default=dict,
+        blank=True,
+        help_text="Map of sender email/domain -> supplier name, used to pre-fill the supplier field.",
+    )
+    sender_allowlist = models.JSONField(
+        default=list,
+        blank=True,
+        help_text=(
+            "If non-empty, only emails whose sender address/domain appears here "
+            "are ingested; everything else is skipped. Empty = accept all senders."
+        ),
+    )
+    related_set_attachments = models.BooleanField(
+        default=True,
+        help_text="Import a multi-attachment email as one related document set.",
+    )
+    allowed_attachment_extensions = models.JSONField(
+        default=list,
+        blank=True,
+        help_text=(
+            "If non-empty, only attachments with these file extensions are "
+            "imported (e.g. ['pdf', 'png']); others are ignored. Empty = all."
+        ),
+    )
+    ingest_history = models.BooleanField(
+        default=False,
+        help_text=(
+            "Import messages already in the mailbox at the time it is created. "
+            "Off (default) ingests only mail that arrives afterwards, so a busy "
+            "existing inbox doesn't pull its whole backlog on the first poll."
+        ),
+    )
+    ingest_since = models.DateField(
+        null=True,
+        blank=True,
+        help_text="Only import messages received on or after this date. Blank = no date limit.",
+    )
+    # Defence against an exploratory poll dragging in a huge backlog at once.
+    max_messages_per_poll = models.PositiveIntegerField(
+        default=50,
+        help_text="Ceiling on messages processed in one poll. 0 = no limit.",
+    )
+
+    is_active = models.BooleanField(
+        default=True,
+        db_index=True,
+        help_text="Only active mailboxes are polled by the scheduled job.",
+    )
+
+    poll_status   = models.CharField(
+        max_length=20,
+        choices=MailboxPollStatus.choices,
+        default=MailboxPollStatus.IDLE,
+        db_index=True,
+    )
+    last_polled_at = models.DateTimeField(null=True, blank=True)
+    last_error     = models.TextField(blank=True)
+    # IMAP UID of the highest message seen, so each poll only fetches newer mail.
+    last_seen_uid  = models.PositiveBigIntegerField(default=0)
+    # Microsoft Graph cursor: ISO receivedDateTime of the last message processed
+    # (Graph has no monotonic UID). Empty until the first Graph poll runs.
+    last_seen_cursor = models.CharField(max_length=64, blank=True, default="")
+
+    # Aggregate counters for the most recent poll (per-email detail is on IngestedEmail).
+    last_imported_count = models.PositiveIntegerField(default=0)
+    last_skipped_count  = models.PositiveIntegerField(default=0)
+    last_failed_count   = models.PositiveIntegerField(default=0)
+    # Number of consecutive failed polls; reset to 0 on any success. Used to
+    # alert the owner once per outage rather than on every failed poll.
+    consecutive_failures = models.PositiveIntegerField(default=0)
+
+    created_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        null=True,
+        on_delete=models.SET_NULL,
+        related_name="mailboxes",
+        help_text="Owner that imported documents are attributed to.",
+    )
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ["name"]
+        verbose_name_plural = "mailboxes"
+        indexes = [
+            models.Index(fields=["is_active", "poll_status"]),
+        ]
+
+    def __str__(self):
+        return f"Mailbox {self.name}"
+
+    def supplier_for_sender(self, sender: str) -> str:
+        """Resolve a supplier name from a sender address via ``sender_supplier_map``.
+
+        Matches the full address first (``billing@acme.com``), then the bare
+        domain (``acme.com``). Matching is case-insensitive. Returns "" when no
+        rule applies, so the reviewer/OCR fills supplier instead.
+        """
+        if not sender or not isinstance(self.sender_supplier_map, dict):
+            return ""
+        addr = sender.strip().lower()
+        lookup = {str(k).strip().lower(): v for k, v in self.sender_supplier_map.items()}
+        if addr in lookup:
+            return str(lookup[addr] or "")
+        domain = addr.rsplit("@", 1)[-1] if "@" in addr else addr
+        return str(lookup.get(domain, "") or "")
+
+    def attachment_allowed(self, filename: str) -> bool:
+        """Whether an attachment's extension passes the per-mailbox filter.
+
+        An empty filter accepts everything (the default). Extensions are matched
+        case-insensitively, with or without a leading dot.
+        """
+        allowed = [
+            str(x).strip().lower().lstrip(".")
+            for x in (self.allowed_attachment_extensions or [])
+            if str(x).strip()
+        ]
+        if not allowed:
+            return True
+        ext = os.path.splitext(filename or "")[1].lower().lstrip(".")
+        return ext in allowed
+
+    def is_sender_allowed(self, sender: str) -> bool:
+        """Whether a sender passes the allowlist.
+
+        An empty allowlist accepts everyone (the default). Otherwise the sender's
+        full address (``ap@acme.com``) or bare domain (``acme.com``) must appear
+        in the list. Matching is case-insensitive.
+        """
+        allow = [str(x).strip().lower() for x in (self.sender_allowlist or []) if str(x).strip()]
+        if not allow:
+            return True
+        if not sender:
+            return False
+        addr = sender.strip().lower()
+        domain = addr.rsplit("@", 1)[-1] if "@" in addr else addr
+        return addr in allow or domain in allow
+
+
+class IngestedEmail(models.Model):
+    """
+    Record of one email processed by a :class:`Mailbox` poll.
+
+    Two jobs:
+
+    * **idempotency** – polls re-see messages, so ``message_id`` is unique per
+      mailbox; a message already recorded is never imported twice. (Attachment
+      content is additionally deduped by ``Document.checksum`` downstream.)
+    * **audit/provenance** – keeps the sender/subject/received metadata and the
+      original ``.eml`` for compliance, and links to the ``BulkUpload`` whose
+      review queue the resulting drafts landed in.
+    """
+
+    class Status(models.TextChoices):
+        IMPORTED = "imported", "Imported"
+        SKIPPED  = "skipped",  "Skipped"
+        PARTIAL  = "partial",  "Imported with errors"
+        FAILED   = "failed",   "Failed"
+
+    id      = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    mailbox = models.ForeignKey(
+        Mailbox, on_delete=models.CASCADE, related_name="ingested_emails"
+    )
+
+    message_id  = models.CharField(max_length=512, db_index=True)
+    imap_uid    = models.PositiveBigIntegerField(default=0)
+    sender      = models.CharField(max_length=320, blank=True)
+    subject     = models.CharField(max_length=512, blank=True)
+    received_at = models.DateTimeField(null=True, blank=True)
+
+    raw_email = models.FileField(
+        upload_to="ingested_emails/",
+        blank=True,
+        null=True,
+        help_text="Original RFC-822 message stored for compliance/audit.",
+    )
+
+    status            = models.CharField(
+        max_length=20, choices=Status.choices, default=Status.IMPORTED, db_index=True
+    )
+    attachment_count  = models.PositiveSmallIntegerField(default=0)
+    documents_created = models.PositiveSmallIntegerField(default=0)
+    detail            = models.TextField(blank=True)
+
+    bulk_upload = models.ForeignKey(
+        "BulkUpload",
+        null=True,
+        blank=True,
+        on_delete=models.SET_NULL,
+        related_name="ingested_emails",
+    )
+
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        ordering = ["-created_at"]
+        constraints = [
+            models.UniqueConstraint(
+                fields=["mailbox", "message_id"],
+                name="uniq_mailbox_message_id",
+            ),
+        ]
+        indexes = [
+            models.Index(fields=["mailbox", "status"]),
+        ]
+
+    def __str__(self):
+        return f"IngestedEmail {self.message_id} ({self.status})"

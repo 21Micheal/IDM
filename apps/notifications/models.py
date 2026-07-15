@@ -20,6 +20,8 @@ class Notification(models.Model):
         ("signature_signed", "Signature Added"),
         ("signature_declined", "Signature Declined"),
         ("signature_completed", "Signatures Complete"),
+        ("mailbox_poll_failed", "Mailbox Poll Failed"),
+        ("mailbox_ingested", "Mailbox Documents Ingested"),
     ]
 
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)

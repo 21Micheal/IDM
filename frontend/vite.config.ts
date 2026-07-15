@@ -25,6 +25,38 @@ export default defineConfig({
             return "pdfjs";
           }
           if (id.includes("node_modules")) {
+            // ── Heavy, page-specific libraries ──────────────────────────────
+            // These are only used by a handful of lazy routes. Keeping each in
+            // its own chunk means the dashboard / first paint no longer pays
+            // for them — they load on demand with the page that needs them.
+            // (Previously they were swept into the catch-all `vendor` chunk,
+            // which `zustand` forced to load eagerly on every page.)
+            // pdf-lib ships its bulk in separate scoped packages
+            // (@pdf-lib/standard-fonts is ~97kB gz alone) and pulls in `pako`.
+            // Match all of them — `/pdf-lib/` alone misses the `@pdf-lib/*`
+            // scope and strands them in the eager catch-all vendor.
+            if (
+              id.includes("/pdf-lib/") ||
+              id.includes("@pdf-lib/") ||
+              id.includes("/pako/")
+            ) {
+              return "pdf-lib-vendor";          // DocumentViewer, PDF editor
+            }
+            if (id.includes("@dnd-kit")) {
+              return "dnd-vendor";              // Workflow builder, signature placement
+            }
+            if (id.includes("@radix-ui")) {
+              return "radix-vendor";            // Dialog/modal primitives
+            }
+            // react-dropzone + its runtime deps (file-selector / attr-accept).
+            if (
+              id.includes("/react-dropzone/") ||
+              id.includes("/file-selector/") ||
+              id.includes("/attr-accept/")
+            ) {
+              return "dropzone-vendor";         // Upload / bulk-scan pages
+            }
+
             if (
               id.includes("/react/") ||
               id.includes("/react-dom/") ||
@@ -39,7 +71,22 @@ export default defineConfig({
             if (id.includes("@tanstack/react-query")) {
               return "query-vendor";
             }
-            if (id.includes("recharts") || id.includes("d3-")) {
+            // sonner + react-toastify are only used by the (lazy) template
+            // pages — keep them out of the eagerly-loaded catch-all vendor.
+            if (id.includes("/sonner/") || id.includes("/react-toastify/")) {
+              return "toast-vendor";
+            }
+            // recharts pulls in lodash + helpers; route them all to the charts
+            // chunk so they load lazily with the Analytics page only, instead
+            // of being stranded (and eagerly loaded) in the catch-all vendor.
+            if (
+              id.includes("recharts") ||
+              id.includes("d3-") ||
+              id.includes("/lodash/") ||
+              id.includes("/react-smooth/") ||
+              id.includes("/victory-vendor/") ||
+              id.includes("/decimal.js-light/")
+            ) {
               return "charts-vendor";
             }
             if (

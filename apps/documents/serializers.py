@@ -47,6 +47,56 @@ DOCUMENT_COLUMN_METADATA_KEYS = {
 logger = logging.getLogger(__name__)
 
 
+def _check_unique_metadata(doc_type, attrs, *, exclude_pk=None):
+    """
+    Enforce per-attribute uniqueness for a document type.
+
+    Any metadata field flagged ``is_unique`` (e.g. a reference / invoice number)
+    must not repeat a value already used by another document of the same type.
+    Column-backed keys (title, supplier, amount, …) are compared against the
+    document column; everything else against the ``metadata`` JSON. Trashed
+    documents and the document being edited (``exclude_pk``) are ignored.
+    """
+    if not doc_type:
+        return
+
+    unique_fields = list(doc_type.metadata_fields.filter(is_unique=True))
+    if not unique_fields:
+        return
+
+    metadata = attrs.get("metadata")
+    metadata = metadata if isinstance(metadata, dict) else {}
+    errors = {}
+
+    for field in unique_fields:
+        key = field.key
+        if key in DOCUMENT_COLUMN_METADATA_KEYS:
+            value = attrs.get(key)
+            lookup = {key: value}
+        else:
+            value = metadata.get(key)
+            lookup = {f"metadata__{key}": value}
+
+        if value in (None, "") or (isinstance(value, str) and not value.strip()):
+            continue
+
+        clash = (
+            Document.objects
+            .filter(document_type=doc_type, deleted_at__isnull=True, **lookup)
+        )
+        if exclude_pk:
+            clash = clash.exclude(pk=exclude_pk)
+
+        if clash.exists():
+            errors[key] = (
+                f"{field.label} must be unique — \"{value}\" is already used by "
+                "another document of this type."
+            )
+
+    if errors:
+        raise serializers.ValidationError(errors)
+
+
 def _generate_unique_reference(doc_type: DocumentType) -> str:
     if doc_type.code == "UNCLASS":
         while True:
@@ -106,7 +156,11 @@ def _find_existing_document_for_checksum(
 ):
     if not checksum:
         return None
-    qs = Document.objects.filter(checksum=checksum).exclude(file="")
+    # Trashed (soft-deleted) documents must not count as duplicates — a user
+    # should be able to re-upload a file they have sent to Trash.
+    qs = Document.objects.filter(
+        checksum=checksum, deleted_at__isnull=True
+    ).exclude(file="")
     if uploaded_by is not None:
         qs = qs.filter(uploaded_by=uploaded_by)
     if exclude_document_id:
@@ -179,12 +233,15 @@ class DMSSettingsSerializer(serializers.ModelSerializer):
     class Meta:
         model = DMSSettings
         fields = [
+            "organization_name",
+            "organization_address",
             "watermark_enabled",
             "watermark_text",
             "watermark_opacity",
             "watermark_position",
             "watermark_apply_to_previews",
             "allow_duplicate_uploads",
+            "purge_trashed_duplicates_on_reupload",
             "signed_file_urls_enabled",
             "auto_archive_enabled",
             "auto_archive_after_days",
@@ -192,6 +249,9 @@ class DMSSettingsSerializer(serializers.ModelSerializer):
             "trash_retention_days",
             "rbac_single_stage",
             "require_metadata_on_upload",
+            "session_lifetime_minutes",
+            "session_idle_timeout_minutes",
+            "session_warning_minutes",
             "bulk_scan_submit_for_approval",
             "access_stages",
             "updated_at",
@@ -213,11 +273,51 @@ class DMSSettingsSerializer(serializers.ModelSerializer):
             raise serializers.ValidationError("Auto-archive age must be at least 1 day.")
         return value
 
+    def validate_session_lifetime_minutes(self, value):
+        if value < 5:
+            raise serializers.ValidationError("Session lifetime must be at least 5 minutes.")
+        return value
+
+    def validate_session_idle_timeout_minutes(self, value):
+        if value < 0:
+            raise serializers.ValidationError("Idle timeout cannot be negative.")
+        return value
+
+    def validate_session_warning_minutes(self, value):
+        if value < 0:
+            raise serializers.ValidationError("Warning lead time cannot be negative.")
+        return value
+
+    def validate(self, attrs):
+        lifetime = attrs.get(
+            "session_lifetime_minutes",
+            getattr(self.instance, "session_lifetime_minutes", None),
+        )
+        idle = attrs.get(
+            "session_idle_timeout_minutes",
+            getattr(self.instance, "session_idle_timeout_minutes", None),
+        )
+        if lifetime is not None and idle:
+            if idle > lifetime:
+                raise serializers.ValidationError(
+                    {"session_idle_timeout_minutes": "Idle timeout cannot exceed the session lifetime."}
+                )
+        warning = attrs.get(
+            "session_warning_minutes",
+            getattr(self.instance, "session_warning_minutes", None),
+        )
+        if lifetime is not None and warning:
+            if warning > lifetime:
+                raise serializers.ValidationError(
+                    {"session_warning_minutes": "Warning lead time cannot exceed the session lifetime."}
+                )
+        return attrs
+
 class MetadataFieldSerializer(serializers.ModelSerializer):
     class Meta:
         model  = MetadataField
         fields = [
-            "id", "label", "key", "field_type", "is_required",
+            "id", "label", "key", "field_type", "is_required", "is_unique",
             "is_searchable", "select_options", "default_value", "help_text", "order",
         ]
 
@@ -227,7 +327,7 @@ class MetadataFieldWriteSerializer(serializers.ModelSerializer):
     class Meta:
         model  = MetadataField
         fields = [
-            "label", "field_key", "field_type", "is_required",
+            "label", "field_key", "field_type", "is_required", "is_unique",
             "is_searchable", "select_options", "default_value", "help_text", "order",
         ]
 
@@ -519,6 +619,7 @@ class DocumentDetailSerializer(serializers.ModelSerializer):
         source="document_type", write_only=True,
     )
     uploaded_by = UserSummarySerializer(read_only=True)
+    owned_by = UserSummarySerializer(read_only=True)
     tags        = TagSerializer(many=True, read_only=True)
     personal_tags = serializers.SerializerMethodField()
     tag_ids     = serializers.PrimaryKeyRelatedField(
@@ -532,6 +633,9 @@ class DocumentDetailSerializer(serializers.ModelSerializer):
     preview_pdf = serializers.SerializerMethodField()
     is_edit_locked = serializers.SerializerMethodField()
     edit_locked_by_name = serializers.SerializerMethodField()
+    builder_workflow_phase = serializers.SerializerMethodField()
+    builder_process_step = serializers.SerializerMethodField()
+    can_submit_retirement = serializers.SerializerMethodField()
     ocr_suggestions = serializers.SerializerMethodField()
     shared_with_me = serializers.SerializerMethodField()
     share_access_level = serializers.SerializerMethodField()
@@ -548,17 +652,18 @@ class DocumentDetailSerializer(serializers.ModelSerializer):
             "metadata",
             "tags", "personal_tags", "tag_ids",
             "department",
-            "uploaded_by",
+            "uploaded_by", "owned_by",
             "is_self_upload",
             "is_scanned", "ocr_status", "ocr_suggestions",
             "preview_pdf", "preview_status",
             "edit_locked_by", "edit_locked_by_name", "edit_locked_at", "is_edit_locked",
+            "builder_workflow_phase", "builder_process_step", "can_submit_retirement",
             "current_version", "versions", "comments", "permissions",
             "created_at", "updated_at", "shared_with_me", "share_access_level", "signatures",
         ]
         read_only_fields = [
             "id", "reference_number", "file", "file_name", "file_size", "file_mime_type",
-            "checksum", "uploaded_by", "is_self_upload",
+            "checksum", "uploaded_by", "owned_by", "is_self_upload",
             "is_scanned", "ocr_status", "ocr_suggestions",
             "preview_pdf", "preview_status",
             "edit_locked_by", "edit_locked_by_name", "edit_locked_at", "is_edit_locked",
@@ -680,6 +785,26 @@ class DocumentDetailSerializer(serializers.ModelSerializer):
         holder = obj.edit_lock_holder
         return holder.get_full_name().strip() if holder else None
 
+    def get_builder_workflow_phase(self, obj):
+        form = (obj.metadata or {}).get("form")
+        if not isinstance(form, dict) or not form.get("sections"):
+            return None
+        phase = form.get("workflow_phase")
+        if phase:
+            return str(phase).strip().lower()
+        from apps.documents.builder_workflow import infer_builder_workflow_phase
+        return infer_builder_workflow_phase(obj)
+
+    def get_builder_process_step(self, obj):
+        from apps.documents.builder_workflow import builder_process_step
+        return builder_process_step(obj)
+
+    def get_can_submit_retirement(self, obj):
+        from apps.documents.builder_workflow import can_submit_retirement_workflow
+        request = self.context.get("request")
+        user = getattr(request, "user", None)
+        return can_submit_retirement_workflow(obj, user=user)
+
     def get_ocr_suggestions(self, obj):
         if obj.ocr_status != OCRStatus.DONE:
             return None
@@ -715,6 +840,14 @@ class DocumentMetadataEditSerializer(serializers.ModelSerializer):
             "title", "supplier", "amount", "currency",
             "document_date", "due_date", "metadata", "tag_ids", "personal_tags",
         ]
+
+    def validate(self, attrs):
+        instance = self.instance
+        if instance is not None:
+            _check_unique_metadata(
+                instance.document_type, attrs, exclude_pk=instance.pk
+            )
+        return attrs
 
     def update(self, instance, validated_data):
 
@@ -857,6 +990,10 @@ class DocumentUploadSerializer(serializers.ModelSerializer):
             raise serializers.ValidationError(
                 {"document_type_id": "Document type is required for workflow documents."}
             )
+        # Uniqueness applies to every workflow upload, including scanned/OCR ones,
+        # regardless of whether metadata is otherwise mandatory.
+        if not attrs.get("is_self_upload"):
+            _check_unique_metadata(attrs.get("document_type"), attrs)
         return attrs
 
     def create(self, validated_data):
@@ -932,6 +1069,24 @@ class DocumentUploadSerializer(serializers.ModelSerializer):
         validated_data["checksum"] = checksum
 
         dms_settings = DMSSettings.load()
+
+        # Trashed copies never block a re-upload. If the admin opted in, also
+        # permanently remove the uploader's trashed copies of this exact file so
+        # a re-upload replaces the trashed version instead of leaving a stale one.
+        if dms_settings.purge_trashed_duplicates_on_reupload:
+            trashed_duplicates = (
+                Document.objects
+                .filter(checksum=checksum, uploaded_by=request.user, deleted_at__isnull=False)
+                .exclude(file="")
+            )
+            for trashed in trashed_duplicates:
+                try:
+                    trashed.hard_delete()
+                except Exception:
+                    logger.exception(
+                        "Failed to purge trashed duplicate %s on re-upload", trashed.id
+                    )
+
         same_user_duplicate = None
         if not dms_settings.allow_duplicate_uploads:
             same_user_duplicate = _find_existing_document_for_checksum(
@@ -1449,6 +1604,44 @@ class BulkUploadSerializer(serializers.ModelSerializer):
             "created_at",
             "updated_at",
         ]
+
+
+class BulkUploadSummarySerializer(serializers.ModelSerializer):
+    """Lightweight batch row for the 'pending review' queue.
+
+    Reports where the batch came from (``email`` ingestion vs a ``scan``/manual
+    bulk upload) and, for email, the originating message so the reviewer has
+    context before opening it. Relies on ``ingested_emails`` being prefetched.
+    """
+
+    document_type = DocumentTypeSerializer(read_only=True)
+    source = serializers.SerializerMethodField()
+    email = serializers.SerializerMethodField()
+
+    class Meta:
+        model = BulkUpload
+        fields = [
+            "id", "document_type", "mode", "status",
+            "total_files", "successful_uploads", "failed_uploads",
+            "created_at", "updated_at", "source", "email",
+        ]
+
+    def _first_email(self, obj):
+        emails = list(obj.ingested_emails.all())
+        return emails[0] if emails else None
+
+    def get_source(self, obj) -> str:
+        return "email" if self._first_email(obj) else "scan"
+
+    def get_email(self, obj):
+        ie = self._first_email(obj)
+        if not ie:
+            return None
+        return {
+            "sender": ie.sender,
+            "subject": ie.subject,
+            "received_at": ie.received_at.isoformat() if ie.received_at else None,
+        }
 
 
 class BulkUploadCreateSerializer(serializers.Serializer):

@@ -2,6 +2,7 @@
 "use client";
 
 import { useState } from "react";
+import { extractApiError } from "@/lib/apiError";
 import { useNavigate } from "react-router-dom";
 import { useQueryClient } from "@tanstack/react-query";
 import { useForm } from "react-hook-form";
@@ -17,9 +18,9 @@ import {
   workflowAPI,
 } from "@/services/api";
 
-import { useAuthStore } from "@/store/authStore";
+import { useAuthStore, applyServerSessionPolicy } from "@/store/authStore";
 import { toast } from "@/components/ui/vault-toast";
-import type { AuthUser } from "@/store/authStore";
+import type { AuthUser, ServerSessionPolicy } from "@/store/authStore";
 
 const credSchema = z.object({
   email: z.string().email("Please enter a valid email address."),
@@ -54,7 +55,11 @@ export default function LoginPage() {
     refresh: string;
     must_change_password?: boolean;
     user?: AuthUser;
+    session_policy?: ServerSessionPolicy;
   }) => {
+    // Apply the configured session policy before starting the session clock so
+    // the absolute deadline uses the admin-defined lifetime, not the fallback.
+    applyServerSessionPolicy(tokenData.session_policy);
     setTokens(tokenData.access, tokenData.refresh);
 
     if (tokenData.user) {
@@ -116,7 +121,7 @@ export default function LoginPage() {
         await completeLogin(data);
       }
     } catch (err: any) {
-      toast.error(err?.response?.data?.detail || "Invalid email or password.");
+      toast.error(extractApiError(err, "Invalid email or password."));
     } finally {
       setLoading(false);
     }
@@ -128,7 +133,7 @@ export default function LoginPage() {
       const { data } = await authAPI.verifyOTP(pendingUserId, values.otp);
       await completeLogin(data);
     } catch (err: any) {
-      toast.error(err?.response?.data?.detail || "Invalid or expired verification code.");
+      toast.error(extractApiError(err, "Invalid or expired verification code."));
     } finally {
       setLoading(false);
     }

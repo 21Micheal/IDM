@@ -20,6 +20,30 @@ def _request_bool(value) -> bool:
     return str(value).strip().lower() in {"1", "true", "yes", "on"}
 
 
+from apps.templates_engine.conditions import (  # noqa: E402
+    is_visible as _eval_visible, is_editable, compute_calculated_values,
+)
+
+
+def _section_visible_to_user(section: dict, group_ids: set, group_names: set, is_admin: bool) -> bool:
+    """Role-restricted sections (``visibleToGroups``) are visible only to members
+    of the listed groups and to admins. Matched by id first (canonical), then by
+    name (the stored label / what the client matches on). Empty = everyone."""
+    groups = section.get("visibleToGroups") or []
+    if not groups:
+        return True
+    if is_admin:
+        return True
+    for g in groups:
+        if not isinstance(g, dict):
+            continue
+        if g.get("id") and str(g["id"]) in group_ids:
+            return True
+        if g.get("name") and g["name"] in group_names:
+            return True
+    return False
+
+
 def extract_placeholders(file):
     """
     Scan a DOCX/XLSX for {{key}} patterns and return the unique keys.
@@ -56,6 +80,21 @@ def extract_placeholders(file):
                 for cell in row:
                     if isinstance(cell, str):
                         found.update(pattern.findall(cell))
+
+    elif file.name.endswith((".pptx", ".ppt")):
+        from pptx import Presentation
+        prs = Presentation(file)
+        for slide in prs.slides:
+            for shape in slide.shapes:
+                if shape.has_text_frame:
+                    for para in shape.text_frame.paragraphs:
+                        # Join run text so split placeholders are still matched.
+                        found.update(pattern.findall("".join(r.text for r in para.runs)))
+                if shape.has_table:
+                    for row in shape.table.rows:
+                        for cell in row.cells:
+                            for para in cell.text_frame.paragraphs:
+                                found.update(pattern.findall("".join(r.text for r in para.runs)))
 
     return sorted(found)
 
@@ -137,10 +176,12 @@ class DocumentTemplateViewSet(viewsets.ModelViewSet):
             name=f"{original.name} (Copy)",
             description=original.description,
             type=original.type,
+            kind=original.kind,
             category=original.category,
             document_type=original.document_type,
             tags=original.tags,
             sections=original.sections,
+            design=original.design,
             placeholders=original.placeholders,
             file=original.file,
             file_name=original.file_name,
@@ -181,6 +222,13 @@ class DocumentTemplateViewSet(viewsets.ModelViewSet):
         # stored values are trustworthy (a stale/spoofed client label can't persist).
         values = reconcile_references(values, template.sections, default_reference_resolver)
 
+        # Recompute every `calc`-bearing field (e.g. "total_days * daily_rate")
+        # authoritatively from the raw values — never trust a client-submitted
+        # calculated figure. Must run before `generation_values` is derived so
+        # both the required-field check and the stored usage snapshot see the
+        # server-computed numbers.
+        values = compute_calculated_values(template.sections, values)
+
         # `values` already carries filename placeholders for any file fields
         # (simple fields or file columns inside a table); the actual files arrive
         # as multipart uploads and are attached after the document is created.
@@ -204,14 +252,33 @@ class DocumentTemplateViewSet(viewsets.ModelViewSet):
         if fmt not in ("pdf", "docx"):
             raise ValidationError({"output_format": "Must be 'pdf' or 'docx'."})
 
-        # Validate required fields for built templates. Auto-fill (formula) fields
-        # are skipped — the server fills them authoritatively on create.
-        if template.type == "built" and not draft_from_template:
+        # Validate required fields for built FORM templates. Designer ("document")
+        # templates have no interactive fields — their merge values are optional
+        # placeholders. Auto-fill (formula) fields are skipped — the server fills
+        # them authoritatively on create.
+        if template.type == "built" and template.kind == "form" and not draft_from_template:
+            # Mirror the frontend's visibility rules: a field is only required if
+            # both it and its section are actually shown — not always-hidden, any
+            # conditional-visibility rule is satisfied, and (for role-restricted
+            # sections) the requester is a member. The user can't fill what they
+            # can't see, so the server must not demand it.
+            group_ids = {
+                str(gid) for gid in request.user.group_memberships.values_list("group_id", flat=True)
+            }
+            group_names = set(
+                request.user.group_memberships.select_related("group")
+                .values_list("group__name", flat=True)
+            )
+            is_admin = bool(getattr(request.user, "has_admin_access", False))
             all_fields = [
                 f for section in template.sections
+                if _eval_visible(section, generation_values)
+                and _section_visible_to_user(section, group_ids, group_names, is_admin)
+                and is_editable(section, generation_values)
                 for f in section.get("fields", [])
                 if f.get("required") and f.get("type") not in ("divider", "heading")
-                and not f.get("formula")
+                and not f.get("formula") and not f.get("calc") and _eval_visible(f, generation_values)
+                and is_editable(f, generation_values)
             ]
             missing = [f["label"] for f in all_fields if not generation_values.get(f["key"])]
             if missing:

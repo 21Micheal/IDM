@@ -49,7 +49,7 @@ export default function StatusBadge({ status }: { status: string }) {
       <span className={clsx("badge", TONE[tone])}>
         <span
           className={clsx(
-            "mr-1.5 h-1.5 w-1.5 rounded-full",
+            "mr-1.5 inline-block h-1.5 w-1.5 shrink-0",
             tone === "success"  && "bg-teal",
             tone === "warning"  && "bg-accent",
             tone === "danger"   && "bg-destructive",
@@ -66,7 +66,7 @@ export default function StatusBadge({ status }: { status: string }) {
   // Free-form workflow step label (e.g. "Pending Finance Review") → warning tone
   return (
     <span className={clsx("badge", TONE.warning)}>
-      <span className="mr-1.5 h-1.5 w-1.5 rounded-full bg-accent" />
+      <span className="mr-1.5 inline-block h-1.5 w-1.5 shrink-0 bg-accent" />
       {status}
     </span>
   );

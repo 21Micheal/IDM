@@ -28,7 +28,11 @@ from .serializers import (
     WorkflowTaskActionSerializer,
 )
 from .services import WorkflowService, WorkflowError
-from apps.accounts.models import UserDelegation
+from apps.accounts.delegation import (
+    delegated_tasks_q,
+    tasks_visible_to_user,
+    user_can_action_task_via_delegation,
+)
 from apps.accounts.views import IsGroupAdmin
 from apps.documents.analytics import IsAnalyticsViewer
 
@@ -64,9 +68,37 @@ class WorkflowTemplateViewSet(viewsets.ModelViewSet):
     def perform_create(self, serializer):
         serializer.save(created_by=self.request.user)
 
-    def perform_destroy(self, instance):
-        instance.is_active = False
-        instance.save(update_fields=["is_active"])
+    def destroy(self, request, *args, **kwargs):
+        """
+        Permanently delete a workflow template, its steps and routing rules.
+
+        Templates that have already been used to run a workflow on a document are
+        referenced by WorkflowInstance with on_delete=PROTECT — deleting them would
+        destroy that approval history, so those are refused with a clear message.
+        """
+        instance = self.get_object()
+        used_by = WorkflowInstance.objects.filter(template=instance).count()
+        if used_by:
+            return Response(
+                {
+                    "detail": (
+                        f"This workflow has already processed {used_by} "
+                        f"document{'s' if used_by != 1 else ''} and cannot be "
+                        "permanently deleted without destroying their approval "
+                        "history."
+                    )
+                },
+                status=status.HTTP_409_CONFLICT,
+            )
+
+        with transaction.atomic():
+            # Routing rules reference the template with on_delete=PROTECT, so they
+            # must be removed first. Steps cascade automatically, and any document
+            # type pointing here as its primary template is detached (SET_NULL).
+            instance.rules.all().delete()
+            instance.delete()
+
+        return Response(status=status.HTTP_204_NO_CONTENT)
 
     @action(detail=True, methods=["post"])
     def duplicate(self, request, pk=None):
@@ -113,13 +145,67 @@ class WorkflowTemplateViewSet(viewsets.ModelViewSet):
                     s.save(update_fields=["order"])
         return Response(WorkflowTemplateSerializer(template, context={"request": request}).data)
 
+    @action(detail=False, methods=["get"], url_path="process-steps")
+    def process_steps(self, request):
+        """List the process steps (statuses) a document of a given type can be in.
+
+        Used by the form builder to populate "process step equals …" conditions
+        for section/field visibility. Combines the per-step ``status_label``s of
+        the active workflow template(s) routed to that document type with the
+        standard lifecycle statuses every document can reach. ``value`` is what a
+        document's ``status`` field actually holds at runtime; ``label`` is for
+        display. Pass ``?document_type=<id>``; without it, only the standard
+        statuses are returned."""
+        from apps.documents.models import DocumentStatus
+
+        doc_type = request.query_params.get("document_type")
+        steps: list[dict] = []
+        seen: set = set()
+
+        def add(value: str, label: str):
+            if value and value not in seen:
+                seen.add(value)
+                steps.append({"value": value, "label": label})
+
+        # Draft is the implicit starting state while a document is being created.
+        add(DocumentStatus.DRAFT, DocumentStatus.DRAFT.label)
+        for value, label in (
+            ("request_pending", "Request approval in progress"),
+            ("request_approved", "Request approved (retirement open)"),
+            ("retirement_pending", "Retirement approval in progress"),
+            ("retirement_returned", "Retirement returned for rework"),
+            ("fully_approved", "Fully approved"),
+            ("retirement_rejected", "Retirement rejected"),
+        ):
+            add(value, label)
+
+        if doc_type:
+            labels = (
+                WorkflowStep.objects
+                .filter(template__document_type_id=doc_type, template__is_active=True)
+                .order_by("template__id", "order")
+                .values_list("status_label", "name")
+            )
+            for status_label, name in labels:
+                add(status_label, f"{name} · {status_label}" if name and name != status_label else status_label)
+
+        # Standard terminal / lifecycle statuses a document can also carry.
+        for st in (
+            DocumentStatus.PENDING_REVIEW, DocumentStatus.PENDING_APPROVAL,
+            DocumentStatus.RETURNED, DocumentStatus.APPROVED,
+            DocumentStatus.REJECTED, DocumentStatus.ARCHIVED, DocumentStatus.VOID,
+        ):
+            add(st, st.label)
+
+        return Response(steps)
+
 
 # ── Rules ──────────────────────────────────────────────────────────────────────
 
 class WorkflowRuleViewSet(viewsets.ModelViewSet):
     serializer_class = WorkflowRuleSerializer
     filter_backends  = [OrderingFilter]
-    ordering         = ["document_type", "amount_min", "amount_max"]
+    ordering         = ["document_type", "phase", "amount_min", "amount_max"]
 
     def get_queryset(self):
         qs = (
@@ -131,6 +217,8 @@ class WorkflowRuleViewSet(viewsets.ModelViewSet):
             qs = qs.filter(document_type__id=dt)
         if tmpl := self.request.query_params.get("template"):
             qs = qs.filter(template__id=tmpl)
+        if phase := self.request.query_params.get("phase"):
+            qs = qs.filter(phase=(phase or "").strip().lower())
         return qs
 
     def get_permissions(self):
@@ -198,47 +286,24 @@ class WorkflowTaskViewSet(viewsets.ReadOnlyModelViewSet):
             return qs.filter(
                 models.Q(assigned_to=user) |
                 models.Q(workflow_instance__started_by=user) |
-                models.Q(workflow_instance__document__uploaded_by=user)
+                models.Q(workflow_instance__document__uploaded_by=user) |
+                delegated_tasks_q(user),
             ).distinct()
 
         if user.has_admin_access:
             if s := self.request.query_params.get("status"):
                 qs = qs.filter(status=s)
             return qs
-        now = timezone.now()
-        delegate_for_user_ids = list(
-            UserDelegation.objects.filter(
-                delegate=user,
-                is_active=True,
-                starts_at__lte=now,
-                ends_at__gte=now,
-            ).values_list("delegator_id", flat=True)
-        )
-        # Non-admin users can see their own active tasks plus delegated tasks.
-        return qs.filter(
-            models.Q(assigned_to=user) | models.Q(assigned_to_id__in=delegate_for_user_ids),
-            status__in=["in_progress", "held"],
-        )
+        visible = tasks_visible_to_user(user).filter(pk__in=qs.values("pk"))
+        return qs.filter(pk__in=visible.values("pk")).distinct()
 
     @action(detail=False, methods=["get"], url_path="my_tasks")
     def my_tasks(self, request):
-        now = timezone.now()
-        delegate_for_user_ids = list(
-            UserDelegation.objects.filter(
-                delegate=request.user,
-                is_active=True,
-                starts_at__lte=now,
-                ends_at__gte=now,
-            ).values_list("delegator_id", flat=True)
-        )
         tasks = (
-            WorkflowTask.objects
-            .filter(
-                models.Q(assigned_to=request.user) | models.Q(assigned_to_id__in=delegate_for_user_ids),
-                status__in=["in_progress", "held"],
-            )
+            tasks_visible_to_user(request.user)
             .select_related(
                 "step",
+                "assigned_to",
                 "workflow_instance__document",
                 "workflow_instance__document__document_type",
                 "workflow_instance__document__department",
@@ -247,7 +312,9 @@ class WorkflowTaskViewSet(viewsets.ReadOnlyModelViewSet):
             )
             .order_by("due_at")
         )
-        return Response(WorkflowTaskSerializer(tasks, many=True).data)
+        return Response(
+            WorkflowTaskSerializer(tasks, many=True, context={"request": request}).data
+        )
 
     # ── Approve ────────────────────────────────────────────────────────────
 
@@ -257,6 +324,21 @@ class WorkflowTaskViewSet(viewsets.ReadOnlyModelViewSet):
         if not task.step.allow_approve:
             return Response({"detail": "Approve is not permitted for this step."}, status=403)
         self._check_permission(task, request.user)
+
+        # Sejda-style multi-item signing (signature + optional name/date/text),
+        # shared with the signature-request flow. `items` is a JSON array; an
+        # ad-hoc drawn signature arrives as use_new_signature + signature_image.
+        # A bare `signature_placement` is still accepted from older clients.
+        import json as _json
+        items = request.data.get("items")
+        if isinstance(items, str):
+            try:
+                items = _json.loads(items) if items.strip() else None
+            except _json.JSONDecodeError:
+                items = None
+        use_new_signature = str(request.data.get("use_new_signature", "")).lower() in ("1", "true", "yes", "on")
+        signature_image = request.data.get("signature_image") if use_new_signature else None
+
         try:
             WorkflowService.approve(
                 task,
@@ -264,6 +346,9 @@ class WorkflowTaskViewSet(viewsets.ReadOnlyModelViewSet):
                 request.data.get("comment", ""),
                 request=request,
                 signature_placement=request.data.get("signature_placement"),
+                items=items,
+                use_new_signature=use_new_signature,
+                signature_image=signature_image,
             )
         except WorkflowError as exc:
             return Response({"detail": str(exc)}, status=400)
@@ -361,16 +446,12 @@ class WorkflowTaskViewSet(viewsets.ReadOnlyModelViewSet):
     # ── Helper ─────────────────────────────────────────────────────────────
 
     def _check_permission(self, task, user):
-        has_active_delegation = UserDelegation.objects.filter(
-            delegator=task.assigned_to,
-            delegate=user,
-            is_active=True,
-            starts_at__lte=timezone.now(),
-            ends_at__gte=timezone.now(),
-        ).exists()
-        if task.assigned_to != user and not user.has_admin_access and not has_active_delegation:
-            from rest_framework.exceptions import PermissionDenied
-            raise PermissionDenied("You are not authorised to action this task.")
+        if task.assigned_to == user or user.has_admin_access:
+            return
+        if user_can_action_task_via_delegation(user, task):
+            return
+        from rest_framework.exceptions import PermissionDenied
+        raise PermissionDenied("You are not authorised to action this task.")
 
 
 class ApprovalTurnaroundView(APIView):
