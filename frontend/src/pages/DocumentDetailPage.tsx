@@ -23,7 +23,8 @@ import {
   ArrowLeft, Send, MessageSquare, ShieldCheck,
   Loader2, RotateCcw, Edit2, Lock, Unlock, Info, Download,
   AlertTriangle, ScanLine, RefreshCw, ChevronDown, FileText,
-  Printer, Trash2, X, Check, ExternalLink, Columns2, Eye, EyeOff, Archive, FileCode, MoreHorizontal, Save
+  Printer, Trash2, X, Check, ExternalLink, Columns2, Eye, EyeOff, Archive, FileCode, MoreHorizontal, Save,
+  PanelRightOpen, PanelRightClose,
 } from "lucide-react";
 import { toast } from "@/components/ui/vault-toast";
 import { useAuthStore } from "@/store/authStore";
@@ -263,6 +264,9 @@ export default function DocumentDetailPage() {
   const [formEditing, setFormEditing] = useState(false);
   const [formValues, setFormValues] = useState<Record<string, unknown>>({});
   const formDirtyRef = useRef(false);
+  // For form documents: details panel starts collapsed (full-screen form). For
+  // regular documents this toggle is never shown and the panel is always visible.
+  const [detailsOpen, setDetailsOpen] = useState(false);
   const [showFormPdf, setShowFormPdf] = useState(false);
   const [showJournalXml, setShowJournalXml] = useState(false);
   const [comment, setComment] = useState("");
@@ -799,6 +803,8 @@ export default function DocumentDetailPage() {
     | { sections?: unknown[]; values?: Record<string, unknown> }
     | undefined;
   const isFormDocument = Boolean(formData?.sections);
+  // True when a form doc is in full-width mode (details panel hidden).
+  const formFullScreen = isFormDocument && !detailsOpen;
   // Form editability mirrors the backend lifecycle policy:
   // draft/returned/rejected use normal edit permissions; pending approval is
   // locked; approved conditional sections (e.g. retirement) are owner-only.
@@ -1316,14 +1322,32 @@ export default function DocumentDetailPage() {
 
       {/* Enterprise workspace: preview left, document intelligence right */}
       <div className={cn(
-        "scrollbar-minimal grid min-h-0 flex-1 grid-cols-1 items-start gap-4 overflow-y-auto p-4 pr-8 lg:grid-cols-12",
+        "scrollbar-minimal relative grid min-h-0 flex-1 grid-cols-1 items-start gap-4 overflow-y-auto p-4 lg:grid-cols-12",
         compareDoc && "xl:grid-cols-12",
+        formFullScreen ? "pr-12" : "pr-8",
       )}>
 
-        {/* Column 1: Document Viewer (Left) */}
+        {/* Details-panel toggle — pinned to the right edge, only for form docs */}
+        {isFormDocument && !compareDoc && (
+          <button
+            type="button"
+            onClick={() => setDetailsOpen((o) => !o)}
+            title={detailsOpen ? "Hide details panel" : "Show details panel"}
+            className="absolute right-0 top-0 z-20 flex h-10 w-10 items-center justify-center border-l border-b border-[#C8CDD2] bg-white text-[#5E6870] hover:bg-[#EEF6FB] hover:text-[#287EAD] transition-colors"
+          >
+            {detailsOpen
+              ? <PanelRightClose className="h-4 w-4" />
+              : <PanelRightOpen className="h-4 w-4" />}
+          </button>
+        )}
+
+        {/* Column 1: Document Viewer / Form (Left — expands to full-width for forms) */}
         <div className={cn(
           "space-y-4",
-          compareDoc ? "lg:col-span-8 xl:col-span-8" : activeTab === "workflow" ? "lg:col-span-6" : "lg:col-span-8",
+          compareDoc ? "lg:col-span-8 xl:col-span-8"
+            : formFullScreen ? "lg:col-span-12"
+            : activeTab === "workflow" ? "lg:col-span-6"
+            : "lg:col-span-8",
         )}>
 
           {/* Active Notifications / Status Banners */}
@@ -1372,10 +1396,14 @@ export default function DocumentDetailPage() {
           {/* In-app form (built-template document) — the form is the document; PDF below is its view */}
           {isFormDocument && (
             <div className="border border-[#C8CDD2] bg-white shadow-sm">
-              <div className="flex items-center justify-between gap-3 border-b border-[#C8CDD2] bg-[#F5F7F8] px-4 py-2.5">
+              {/* Header bar — Infor-style dark gray when full-screen, flat light-gray when panel is open */}
+              <div className={cn(
+                "flex items-center justify-between gap-3 border-b border-[#C8CDD2] px-4 py-2.5",
+                formFullScreen ? "bg-[#50545A]" : "bg-[#F5F7F8]",
+              )}>
                 <div className="flex items-center gap-2 min-w-0">
-                  <p className="text-sm font-bold text-[#1F2933]">Form</p>
-                  <span className="text-xs text-[#5E6870]">
+                  <p className={cn("text-sm font-bold", formFullScreen ? "text-white" : "text-[#1F2933]")}>Form</p>
+                  <span className={cn("text-xs", formFullScreen ? "text-white/70" : "text-[#5E6870]")}>
                     {formEditing
                       ? "Editing — fill and save"
                       : canSubmitRetirement
@@ -1391,9 +1419,15 @@ export default function DocumentDetailPage() {
                   {journalEnabled && (
                     <button
                       type="button"
-                      onClick={() => setShowJournalXml(true)}
+                      onClick={() => setShowJournalXml((s) => !s)}
                       title="Preview the exact SunSystems journal XML this form will post"
-                      className="inline-flex items-center gap-1.5 border border-[#AEB5BB] bg-white px-2.5 py-1.5 text-xs font-semibold text-[#1F2933] hover:bg-[#F3F5F6]"
+                      className={cn(
+                        "inline-flex items-center gap-1.5 px-2.5 py-1.5 text-xs font-semibold",
+                        formFullScreen
+                          ? "border border-white/30 bg-white/10 text-white hover:bg-white/20"
+                          : "border border-[#AEB5BB] bg-white text-[#1F2933] hover:bg-[#F3F5F6]",
+                        showJournalXml && (formFullScreen ? "bg-white/20" : "bg-[#EEF6FB] text-[#287EAD] border-[#287EAD]/50"),
+                      )}
                     >
                       <FileCode className="h-3.5 w-3.5" /> Journal XML
                     </button>
@@ -1402,7 +1436,12 @@ export default function DocumentDetailPage() {
                     <button
                       type="button"
                       onClick={() => setShowFormPdf((s) => !s)}
-                      className="inline-flex items-center gap-1.5 border border-[#AEB5BB] bg-white px-2.5 py-1.5 text-xs font-semibold text-[#1F2933] hover:bg-[#F3F5F6]"
+                      className={cn(
+                        "inline-flex items-center gap-1.5 px-2.5 py-1.5 text-xs font-semibold",
+                        formFullScreen
+                          ? "border border-white/30 bg-white/10 text-white hover:bg-white/20"
+                          : "border border-[#AEB5BB] bg-white text-[#1F2933] hover:bg-[#F3F5F6]",
+                      )}
                     >
                       {showFormPdf ? <EyeOff className="h-3.5 w-3.5" /> : <Eye className="h-3.5 w-3.5" />}
                       {showFormPdf ? "Hide PDF" : "View PDF"}
@@ -1412,7 +1451,12 @@ export default function DocumentDetailPage() {
                     <button
                       type="button"
                       onClick={startFormEdit}
-                      className="inline-flex items-center gap-1.5 border border-[#287EAD] px-2.5 py-1.5 text-xs font-semibold text-[#287EAD] hover:bg-[#EEF6FB]"
+                      className={cn(
+                        "inline-flex items-center gap-1.5 px-2.5 py-1.5 text-xs font-semibold",
+                        formFullScreen
+                          ? "border border-white bg-white text-[#287EAD] hover:bg-white/90"
+                          : "border border-[#287EAD] text-[#287EAD] hover:bg-[#EEF6FB]",
+                      )}
                     >
                       <Edit2 className="h-3.5 w-3.5" /> Edit form
                     </button>
@@ -1426,7 +1470,12 @@ export default function DocumentDetailPage() {
                           formDirtyRef.current = false;
                         }}
                         disabled={updateFormMutation.isPending || saveFormAsDraftMutation.isPending}
-                        className="inline-flex items-center gap-1.5 border border-[#AEB5BB] bg-white px-2.5 py-1.5 text-xs font-semibold text-[#1F2933] hover:bg-[#F3F5F6] disabled:opacity-50"
+                        className={cn(
+                          "inline-flex items-center gap-1.5 px-2.5 py-1.5 text-xs font-semibold disabled:opacity-50",
+                          formFullScreen
+                            ? "border border-white/30 bg-white/10 text-white hover:bg-white/20"
+                            : "border border-[#AEB5BB] bg-white text-[#1F2933] hover:bg-[#F3F5F6]",
+                        )}
                       >
                         <X className="h-3.5 w-3.5" /> Cancel
                       </button>
@@ -1434,7 +1483,12 @@ export default function DocumentDetailPage() {
                         type="button"
                         onClick={saveFormAsDraft}
                         disabled={saveFormAsDraftMutation.isPending}
-                        className="inline-flex items-center gap-1.5 border border-[#AEB5BB] bg-white px-2.5 py-1.5 text-xs font-semibold text-[#1F2933] hover:bg-[#F3F5F6] disabled:opacity-50"
+                        className={cn(
+                          "inline-flex items-center gap-1.5 px-2.5 py-1.5 text-xs font-semibold disabled:opacity-50",
+                          formFullScreen
+                            ? "border border-white/30 bg-white/10 text-white hover:bg-white/20"
+                            : "border border-[#AEB5BB] bg-white text-[#1F2933] hover:bg-[#F3F5F6]",
+                        )}
                       >
                         {saveFormAsDraftMutation.isPending ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Save className="h-3.5 w-3.5" />}
                         Save draft
@@ -1443,7 +1497,12 @@ export default function DocumentDetailPage() {
                         type="button"
                         onClick={saveForm}
                         disabled={updateFormMutation.isPending}
-                        className="inline-flex items-center gap-1.5 bg-[#287EAD] px-3 py-1.5 text-xs font-semibold text-white hover:bg-[#1E6F99] disabled:opacity-50"
+                        className={cn(
+                          "inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-semibold disabled:opacity-50",
+                          formFullScreen
+                            ? "bg-white text-[#287EAD] hover:bg-white/90"
+                            : "bg-[#287EAD] text-white hover:bg-[#1E6F99]",
+                        )}
                       >
                         {updateFormMutation.isPending ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Check className="h-3.5 w-3.5" />}
                         Save form
@@ -1452,7 +1511,8 @@ export default function DocumentDetailPage() {
                   )}
                 </div>
               </div>
-              <div className="p-5 space-y-4">
+              {/* Form body — full-width with light padding when full-screen */}
+              <div className={cn("space-y-4", formFullScreen ? "px-4 py-4" : "p-5")}>
                 {budgetEnabled && formEditing && (
                   <BudgetBanner values={formValues} documentId={doc.id} sections={formData?.sections ?? []} enabled />
                 )}
@@ -1472,23 +1532,8 @@ export default function DocumentDetailPage() {
             </div>
           )}
 
-          {isFormDocument && workflowStepsCount > 0 && (
-            <ApprovalStagesTable 
-              steps={workflowData?.steps ?? []} 
-              isLoading={workflowDataLoading} 
-              phase={doc.builder_workflow_phase}
-            />
-          )}
-
-          {isFormDocument && (
-            <JournalPostingCard
-              documentId={doc.id}
-              expectPosting={journalEnabled && ["request_approved", "fully_approved"].includes(formProcessStep)}
-              watchKey={`${formProcessStep}:${doc.updated_at}`}
-            />
-          )}
-
-          {showJournalXml && (
+          {/* Journal XML modal */}
+          {isFormDocument && showJournalXml && (
             <JournalPayloadModal
               documentId={doc.id}
               values={formEditing ? formValues : undefined}
@@ -1498,61 +1543,140 @@ export default function DocumentDetailPage() {
             />
           )}
 
-          <div className={cn(
-            "grid gap-3",
-            compareDoc && "xl:grid-cols-2",
-            // For form documents the form is primary; the PDF is on-demand.
-            isFormDocument && !showFormPdf && "hidden",
-          )}>
-            <div className="border border-[#C8CDD2] bg-white shadow-sm">
-              <Suspense fallback={
-                <div className="flex min-h-[32rem] items-center justify-center bg-white">
-                  <Loader2 className="h-8 w-8 animate-spin text-[#287EAD]" />
-                </div>
-              }>
-                <DocumentViewer
-                  document={doc}
-                  submitSlot={null}
-                  hideUploadActionBar
-                  onPreviewLinksChange={handlePreviewLinksChange}
-                  onBeforeRelease={confirmRelease}
-                />
-              </Suspense>
-            </div>
-
-            {compareDoc && (
-              <div className="border border-[#C8CDD2] bg-white shadow-sm">
-                <div className="flex min-h-[44px] items-center justify-between gap-3 border-b border-[#C8CDD2] bg-[#F5F7F8] px-3 py-2">
-                  <div className="min-w-0">
-                    <p className="truncate text-sm font-bold text-[#1F2933]" title={compareDoc.title}>{compareDoc.title}</p>
-                    <p className="text-xs text-[#5E6870]">{compareDoc.reference_number} · {compareDoc.document_type?.name || compareDoc.document_type_name || "Document"}</p>
+          {/* ── Unified bottom row: action panel + approval stages + journal ── */}
+          {isFormDocument && (activeTask || workflowStepsCount > 0 || journalEnabled) && (
+            <div className={cn(
+              "grid gap-3",
+              activeTask && workflowStepsCount > 0 ? "lg:grid-cols-3"
+              : (activeTask || workflowStepsCount > 0) ? "lg:grid-cols-2"
+              : ""
+            )}>
+              {/* Action panel — only visible when this user has a pending task */}
+              {activeTask && (
+                <div className="border border-[#C8CDD2] bg-white shadow-sm">
+                  <div className="flex items-center gap-2 border-b border-[#C8CDD2] bg-[#F5F7F8] px-3 py-1.5">
+                    <p className="text-xs font-bold text-[#1F2933]">Action required</p>
+                    <span className="border border-amber-200 bg-amber-50 px-1.5 py-0.5 text-[10px] font-bold text-amber-800">
+                      Pending your review
+                    </span>
                   </div>
+                  <div className="p-3">
+                    <Suspense fallback={<div className="text-xs text-[#5E6870]">Loading…</div>}>
+                      <WorkflowActionPanel
+                        task={activeTask}
+                        documentId={id!}
+                        onCompleted={() => setWorkflowActionCompleted(true)}
+                      />
+                    </Suspense>
+                  </div>
+                </div>
+              )}
+
+              {/* Approval stages */}
+              {workflowStepsCount > 0 && (
+                <ApprovalStagesTable
+                  steps={workflowData?.steps ?? []}
+                  isLoading={workflowDataLoading}
+                  phase={doc.builder_workflow_phase}
+                />
+              )}
+
+              {/* Journal posting */}
+              <JournalPostingCard
+                documentId={doc.id}
+                expectPosting={journalEnabled && ["request_approved", "fully_approved"].includes(formProcessStep)}
+                watchKey={`${formProcessStep}:${doc.updated_at}`}
+              />
+            </div>
+          )}
+
+          {/* PDF modal overlay — pops up when View PDF is clicked */}
+          {isFormDocument && showFormPdf && (
+            <div className="fixed inset-0 z-50 flex items-start justify-center bg-black/60 p-4 pt-12 overflow-y-auto">
+              <div className="relative w-full max-w-4xl">
+                <div className="flex items-center justify-between gap-3 border border-b-0 border-[#C8CDD2] bg-[#50545A] px-4 py-2.5">
+                  <p className="text-sm font-bold text-white">Form PDF Preview</p>
                   <button
                     type="button"
-                    onClick={() => setCompareDocumentId(null)}
-                    className="shrink-0 p-1 text-[#5E6870] hover:text-[#1F2933]"
-                    title="Close concurrent preview"
+                    onClick={() => setShowFormPdf(false)}
+                    className="flex items-center gap-1.5 border border-white/30 bg-white/10 px-2.5 py-1.5 text-xs font-semibold text-white hover:bg-white/20"
                   >
-                    <X className="h-4 w-4" />
+                    <X className="h-3.5 w-3.5" /> Close
                   </button>
                 </div>
+                <div className="border border-[#C8CDD2] bg-white shadow-xl">
+                  <Suspense fallback={
+                    <div className="flex min-h-[32rem] items-center justify-center bg-white">
+                      <Loader2 className="h-8 w-8 animate-spin text-[#287EAD]" />
+                    </div>
+                  }>
+                    <DocumentViewer
+                      document={doc}
+                      submitSlot={null}
+                      hideUploadActionBar
+                      onPreviewLinksChange={handlePreviewLinksChange}
+                      onBeforeRelease={confirmRelease}
+                    />
+                  </Suspense>
+                </div>
+              </div>
+            </div>
+          )}
+
+          {/* Non-form document primary viewer + optional comparison viewer */}
+          {!isFormDocument && (
+            <div className={cn("grid gap-3", compareDoc && "xl:grid-cols-2")}>
+              <div className="border border-[#C8CDD2] bg-white shadow-sm">
                 <Suspense fallback={
                   <div className="flex min-h-[32rem] items-center justify-center bg-white">
                     <Loader2 className="h-8 w-8 animate-spin text-[#287EAD]" />
                   </div>
                 }>
                   <DocumentViewer
-                    document={compareDoc}
+                    document={doc}
                     submitSlot={null}
                     hideUploadActionBar
+                    onPreviewLinksChange={handlePreviewLinksChange}
+                    onBeforeRelease={confirmRelease}
                   />
                 </Suspense>
               </div>
-            )}
-          </div>
+
+              {compareDoc && (
+                <div className="border border-[#C8CDD2] bg-white shadow-sm">
+                  <div className="flex min-h-[44px] items-center justify-between gap-3 border-b border-[#C8CDD2] bg-[#F5F7F8] px-3 py-2">
+                    <div className="min-w-0">
+                      <p className="truncate text-sm font-bold text-[#1F2933]" title={compareDoc.title}>{compareDoc.title}</p>
+                      <p className="text-xs text-[#5E6870]">{compareDoc.reference_number} · {compareDoc.document_type?.name || compareDoc.document_type_name || "Document"}</p>
+                    </div>
+                    <button
+                      type="button"
+                      onClick={() => setCompareDocumentId(null)}
+                      className="shrink-0 p-1 text-[#5E6870] hover:text-[#1F2933]"
+                      title="Close concurrent preview"
+                    >
+                      <X className="h-4 w-4" />
+                    </button>
+                  </div>
+                  <Suspense fallback={
+                    <div className="flex min-h-[32rem] items-center justify-center bg-white">
+                      <Loader2 className="h-8 w-8 animate-spin text-[#287EAD]" />
+                    </div>
+                  }>
+                    <DocumentViewer
+                      document={compareDoc}
+                      submitSlot={null}
+                      hideUploadActionBar
+                    />
+                  </Suspense>
+                </div>
+              )}
+            </div>
+          )}
         </div>
 
-        {/* Column 2: Details & Properties Tabs (Right) */}
+        {/* Column 2: Details & Properties Tabs (Right) — hidden when form is full-screen */}
+        {(!formFullScreen || compareDoc) && (
         <div className={cn("space-y-3", activeTab === "workflow" && !compareDoc ? "lg:col-span-6" : "lg:col-span-4")}>
 
           {/* Tab Selection Row */}
@@ -2245,6 +2369,7 @@ export default function DocumentDetailPage() {
             </Suspense>
           )}
         </div>
+        )}
 
       </div>
 

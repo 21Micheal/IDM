@@ -360,9 +360,9 @@ export default function WorkflowActionPanel({ task, documentId, onCompleted }: P
 
   if (optimisticAction === "approve" || optimisticAction === "reject" || optimisticAction === "return") {
     return (
-      <div className="rounded-2xl border border-border bg-background p-4">
-        <div className="flex items-center gap-3 text-sm text-foreground">
-          <Loader2 className="h-4 w-4 animate-spin text-primary" />
+      <div className="border border-[#C8CDD2] bg-[#F5F7F8] p-4">
+        <div className="flex items-center gap-3 text-sm text-[#1F2933]">
+          <Loader2 className="h-4 w-4 animate-spin text-[#287EAD]" />
           Updating workflow state...
         </div>
       </div>
@@ -370,7 +370,7 @@ export default function WorkflowActionPanel({ task, documentId, onCompleted }: P
   }
 
   return (
-    <div className="rounded-2xl border border-border bg-background p-4 space-y-4">
+    <div className="border border-[#C8CDD2] bg-[#F5F7F8] p-4 space-y-4">
       {showSignaturePlacement && (
         <SignaturePlacementModal
           documentId={documentId}
@@ -426,63 +426,63 @@ export default function WorkflowActionPanel({ task, documentId, onCompleted }: P
         </div>
       )}
 
-      {/* Hold release — shown at top when held */}
+      {/* Hold release — slim bar when held */}
       {isHeld && (
         <button
           onClick={() => releaseMutation.mutate()}
           disabled={releaseMutation.isPending}
-          className="w-full flex items-center justify-center gap-2 px-4 py-2.5 rounded-lg border border-blue-200 bg-blue-100 text-blue-800 text-sm font-medium hover:bg-blue-200 disabled:opacity-50 transition-colors"
+          className="inline-flex items-center gap-1.5 border border-sky-200 bg-sky-50 px-3 py-1.5 text-xs font-semibold text-sky-700 hover:bg-sky-100 disabled:opacity-50 transition-colors"
         >
           {releaseMutation.isPending
-            ? <Loader2 className="w-4 h-4 animate-spin" />
-            : <PlayCircle className="w-4 h-4" />}
+            ? <Loader2 className="w-3.5 h-3.5 animate-spin" />
+            : <PlayCircle className="w-3.5 h-3.5" />}
           Release hold early
         </button>
       )}
 
-      {/* Action buttons — shown when task is active */}
+      {/* Action buttons — inline compact row, UniPI style */}
       {isActive && !activeAction && (
-        <div className="grid grid-cols-2 gap-2">
-          {task.step?.allow_approve !== false && (
+        <div className="flex items-center gap-2 flex-wrap">
+          {task.step?.allow_return !== false && (
             <button
-              onClick={() => setActiveAction("approve")}
-              className="flex items-center justify-center gap-1.5 px-3 py-2.5 rounded-lg border border-teal-200 bg-teal-50 text-teal-700 text-sm font-medium hover:bg-teal-100 transition-colors"
-              title="Approve this document"
+              onClick={() => setActiveAction("return")}
+              title="Return for review"
+              className="inline-flex items-center gap-1.5 border border-[#C8CDD2] bg-white px-3 py-1.5 text-xs font-semibold text-[#5E6870] hover:bg-[#F5F7F8] transition-colors"
             >
-              <CheckCircle className="w-4 h-4" /> Approve
+              <RotateCcw className="w-3.5 h-3.5" /> Send back
             </button>
           )}
           {task.step?.allow_reject !== false && (
             <button
               onClick={() => setActiveAction("reject")}
-              className="flex items-center justify-center gap-1.5 px-3 py-2.5 rounded-lg border border-red-200 bg-red-50 text-red-700 text-sm font-medium hover:bg-red-100 transition-colors"
-              title="Reject this document — requires comment"
+              title="Reject"
+              className="inline-flex items-center gap-1.5 bg-[#6C737A] px-3 py-1.5 text-xs font-semibold text-white hover:bg-[#5E6870] transition-colors"
             >
-              <XCircle className="w-4 h-4" /> Reject
-            </button>
-          )}
-          {task.step?.allow_return !== false && (
-            <button
-              onClick={() => setActiveAction("return")}
-              className="flex items-center justify-center gap-1.5 px-3 py-2.5 rounded-lg border border-amber-200 bg-amber-50 text-amber-800 text-sm font-medium hover:bg-amber-100 transition-colors"
-              title="Return for review — sends back for rework"
-            >
-              <RotateCcw className="w-4 h-4" /> Return for review
+              <XCircle className="w-3.5 h-3.5" /> Reject
             </button>
           )}
           <button
             onClick={() => setActiveAction("hold")}
-            className="flex items-center justify-center gap-1.5 px-3 py-2.5 rounded-lg border border-blue-200 bg-blue-50 text-blue-700 text-sm font-medium hover:bg-blue-100 transition-colors"
-            title="Pause processing and place on hold"
+            title="Place on hold"
+            className="inline-flex items-center gap-1.5 border border-[#AEB5BB] bg-white px-3 py-1.5 text-xs font-semibold text-[#5E6870] hover:bg-[#F5F7F8] transition-colors"
           >
-            <PauseCircle className="w-4 h-4" /> Place on hold
+            <PauseCircle className="w-3.5 h-3.5" /> Hold
           </button>
+          {task.step?.allow_approve !== false && (
+            <button
+              onClick={() => setActiveAction("approve")}
+              title="Approve"
+              className="inline-flex items-center gap-1.5 bg-[#287EAD] px-3 py-1.5 text-xs font-semibold text-white hover:bg-[#1E6F99] transition-colors"
+            >
+              <CheckCircle className="w-3.5 h-3.5" /> Approve
+            </button>
+          )}
         </div>
       )}
 
-      {/* ── Approve form ───────────────────────────────────────────────── */}
+      {/* ── Approve form ─────────────────────────────────────────────────── */}
       {activeAction === "approve" && (
-        <div className="space-y-3 border border-border rounded-xl p-4 bg-muted/15">
+        <div className="space-y-3 border border-[#C8CDD2] p-4 bg-white">
           <p className="text-sm font-medium text-foreground">Approve document</p>
           <div>
             <label className="label text-xs">Comment (optional)</label>
@@ -534,19 +534,19 @@ export default function WorkflowActionPanel({ task, documentId, onCompleted }: P
               onClick={confirmApproval}
               disabled={anyPending || (task.requires_signature && !signedResult)}
               title={task.requires_signature && !signedResult ? "Sign the document first" : "Confirm approval"}
-              className="flex items-center gap-1.5 px-4 py-2 rounded-lg border border-primary/30 bg-primary/10 text-primary text-sm font-medium hover:bg-primary/15 disabled:opacity-50 disabled:cursor-not-allowed"
+              className="inline-flex items-center gap-1.5 bg-[#287EAD] px-3 py-1.5 text-xs font-semibold text-white hover:bg-[#1E6F99] disabled:opacity-50 disabled:cursor-not-allowed"
             >
               {approveMutation.isPending && <Loader2 className="w-3.5 h-3.5 animate-spin" />}
               Confirm approval
             </button>
-            <button onClick={resetForm} className="btn-secondary text-sm">Cancel</button>
+            <button onClick={resetForm} className="inline-flex items-center border border-[#C8CDD2] bg-white px-3 py-1.5 text-xs font-semibold text-[#5E6870] hover:bg-[#F5F7F8]">Cancel</button>
           </div>
         </div>
       )}
 
-      {/* ── Reject form ────────────────────────────────────────────────── */}
+      {/* ── Reject form ───────────────────────────────────────────────── */}
       {activeAction === "reject" && (
-        <div className="space-y-3 border border-border rounded-xl p-4 bg-muted/15">
+        <div className="space-y-3 border border-[#C8CDD2] p-4 bg-white">
           <p className="text-sm font-medium text-foreground">Reject document</p>
           <div>
             <label className="label text-xs">Rejection reason <span className="text-red-500">*</span></label>
@@ -566,19 +566,19 @@ export default function WorkflowActionPanel({ task, documentId, onCompleted }: P
                 rejectMutation.mutate();
               }}
               disabled={anyPending}
-              className="flex items-center gap-1.5 px-4 py-2 rounded-lg border border-destructive/20 bg-destructive/10 text-destructive text-sm font-medium hover:bg-destructive/15 disabled:opacity-50"
+              className="inline-flex items-center gap-1.5 bg-[#6C737A] px-3 py-1.5 text-xs font-semibold text-white hover:bg-[#5E6870] disabled:opacity-50"
             >
               {rejectMutation.isPending && <Loader2 className="w-3.5 h-3.5 animate-spin" />}
               Confirm rejection
             </button>
-            <button onClick={resetForm} className="btn-secondary text-sm">Cancel</button>
+            <button onClick={resetForm} className="inline-flex items-center border border-[#C8CDD2] bg-white px-3 py-1.5 text-xs font-semibold text-[#5E6870] hover:bg-[#F5F7F8]">Cancel</button>
           </div>
         </div>
       )}
 
       {/* ── Return for review form ─────────────────────────────────────── */}
       {activeAction === "return" && (
-        <div className="space-y-3 border border-border rounded-xl p-4 bg-muted/15">
+        <div className="space-y-3 border border-[#C8CDD2] p-4 bg-white">
           <div>
             <p className="text-sm font-medium text-foreground">Return for review</p>
             <p className="text-xs text-muted-foreground mt-0.5">
@@ -604,19 +604,19 @@ export default function WorkflowActionPanel({ task, documentId, onCompleted }: P
                 returnMutation.mutate();
               }}
               disabled={anyPending}
-              className="flex items-center gap-1.5 px-4 py-2 rounded-lg border border-amber-300 bg-amber-100 text-amber-800 text-sm font-medium hover:bg-amber-200 disabled:opacity-50"
+              className="inline-flex items-center gap-1.5 border border-[#C8CDD2] bg-white px-3 py-1.5 text-xs font-semibold text-[#1F2933] hover:bg-[#F5F7F8] disabled:opacity-50"
             >
               {returnMutation.isPending && <Loader2 className="w-3.5 h-3.5 animate-spin" />}
-              Return document
+              Send back
             </button>
-            <button onClick={resetForm} className="btn-secondary text-sm">Cancel</button>
+            <button onClick={resetForm} className="inline-flex items-center border border-[#C8CDD2] bg-white px-3 py-1.5 text-xs font-semibold text-[#5E6870] hover:bg-[#F5F7F8]">Cancel</button>
           </div>
         </div>
       )}
 
-      {/* ── Hold form ──────────────────────────────────────────────────── */}
+      {/* ── Hold form ─────────────────────────────────────────────────── */}
       {activeAction === "hold" && (
-        <div className="space-y-3 border border-border rounded-xl p-4 bg-muted/15">
+        <div className="space-y-3 border border-[#C8CDD2] p-4 bg-white">
           <div>
             <p className="text-sm font-medium text-foreground">Place on hold</p>
             <p className="text-xs text-muted-foreground mt-0.5">
@@ -681,13 +681,13 @@ export default function WorkflowActionPanel({ task, documentId, onCompleted }: P
                 holdMutation.mutate();
               }}
               disabled={anyPending}
-              className="flex items-center gap-1.5 px-4 py-2 rounded-lg border border-blue-200 bg-blue-100 text-blue-800 text-sm font-medium hover:bg-blue-200 disabled:opacity-50"
+              className="inline-flex items-center gap-1.5 border border-sky-200 bg-sky-50 px-3 py-1.5 text-xs font-semibold text-sky-700 hover:bg-sky-100 disabled:opacity-50"
             >
               {holdMutation.isPending && <Loader2 className="w-3.5 h-3.5 animate-spin" />}
               <Clock className="w-3.5 h-3.5" />
               Confirm hold
             </button>
-            <button onClick={resetForm} className="btn-secondary text-sm">Cancel</button>
+            <button onClick={resetForm} className="inline-flex items-center border border-[#C8CDD2] bg-white px-3 py-1.5 text-xs font-semibold text-[#5E6870] hover:bg-[#F3F5F6]">Cancel</button>
           </div>
         </div>
       )}
