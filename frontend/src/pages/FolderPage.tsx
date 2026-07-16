@@ -10,7 +10,7 @@
  *   - "Add documents" search modal
  */
 
-import { useState } from "react";
+import { useState, useRef, KeyboardEvent } from "react";
 import { useParams, useNavigate, Link } from "react-router-dom";
 import {
   useQuery, useMutation, useQueryClient,
@@ -316,13 +316,65 @@ function DocumentCard({
   );
 }
 
+// ─── SubfolderInlineInput ─────────────────────────────────────────────────────
+
+function SubfolderInlineInput({
+  onConfirm,
+  onCancel,
+}: {
+  onConfirm: (name: string) => void;
+  onCancel: () => void;
+}) {
+  const [val, setVal] = useState("");
+  const ref = useRef<HTMLInputElement>(null);
+
+  const commit = () => {
+    const trimmed = val.trim();
+    if (trimmed) onConfirm(trimmed);
+    else onCancel();
+  };
+
+  const onKey = (e: KeyboardEvent<HTMLInputElement>) => {
+    if (e.key === "Enter") commit();
+    if (e.key === "Escape") onCancel();
+  };
+
+  return (
+    <div className="flex items-center gap-3 border border-[#287EAD] bg-white p-4">
+      <div className="flex h-10 w-10 items-center justify-center border border-[#C8CDD2] bg-[#EEF6FB] text-[#287EAD] shrink-0">
+        <Folder className="w-5 h-5" />
+      </div>
+      <input
+        ref={ref}
+        autoFocus
+        className="flex-1 min-w-0 border-b border-[#287EAD] bg-transparent text-sm text-foreground outline-none placeholder:text-muted-foreground py-0.5"
+        placeholder="Folder name…"
+        value={val}
+        onChange={(e) => setVal(e.target.value)}
+        onKeyDown={onKey}
+        onBlur={commit}
+      />
+    </div>
+  );
+}
+
 // ─── FolderPage (exported) ────────────────────────────────────────────────────
 
 export default function FolderPage() {
   const { folderId } = useParams<{ folderId: string }>();
   const navigate     = useNavigate();
   const qc           = useQueryClient();
-  const [showAdd, setShowAdd] = useState(false);
+  const [showAdd, setShowAdd]               = useState(false);
+  const [addingSubfolder, setAddingSubfolder] = useState(false);
+
+  const createSubfolder = useMutation({
+    mutationFn: (name: string) =>
+      foldersAPI.create({ name, parent: folderId! }),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ["folders", "tree"] });
+      qc.invalidateQueries({ queryKey: ["folder", folderId] });
+    },
+  });
 
   // Folder meta
   const { data: folder, isLoading: folderLoading } = useQuery({
@@ -438,18 +490,29 @@ export default function FolderPage() {
           </h2>
           <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 gap-3">
             {!folder.is_favourites && (
-              <button
-                type="button"
-                className="group flex items-center gap-3 border border-dashed border-[#C8CDD2] bg-white p-4 hover:border-[#287EAD]/40 hover:bg-[#F5F7F8] transition-colors text-left"
-              >
-                <div className="flex h-10 w-10 items-center justify-center border border-[#C8CDD2] bg-[#EEF6FB] text-[#287EAD] shrink-0">
-                  <Plus className="w-5 h-5" />
-                </div>
-                <div className="flex-1 min-w-0">
-                  <p className="text-sm font-semibold text-foreground truncate">New Folder</p>
-                  <p className="text-[11px] text-muted-foreground truncate">Create subdirectory</p>
-                </div>
-              </button>
+              addingSubfolder ? (
+                <SubfolderInlineInput
+                  onConfirm={(name) => {
+                    createSubfolder.mutate(name);
+                    setAddingSubfolder(false);
+                  }}
+                  onCancel={() => setAddingSubfolder(false)}
+                />
+              ) : (
+                <button
+                  type="button"
+                  onClick={() => setAddingSubfolder(true)}
+                  className="group flex items-center gap-3 border border-dashed border-[#C8CDD2] bg-white p-4 hover:border-[#287EAD]/40 hover:bg-[#F5F7F8] transition-colors text-left"
+                >
+                  <div className="flex h-10 w-10 items-center justify-center border border-[#C8CDD2] bg-[#EEF6FB] text-[#287EAD] shrink-0">
+                    <Plus className="w-5 h-5" />
+                  </div>
+                  <div className="flex-1 min-w-0">
+                    <p className="text-sm font-semibold text-foreground truncate">New Folder</p>
+                    <p className="text-[11px] text-muted-foreground truncate">Create subdirectory</p>
+                  </div>
+                </button>
+              )
             )}
 
             {subfolders.map((sf) => (

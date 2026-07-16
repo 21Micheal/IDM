@@ -328,6 +328,21 @@ export default function DocumentDetailPage() {
     }
   }, [doc, user, formEditing]);
 
+  // ── Global Escape key — dismiss any open overlay / tray / panel ───────────
+  useEffect(() => {
+    const onKeyDown = (e: KeyboardEvent) => {
+      if (e.key !== "Escape") return;
+      // Close in priority order: innermost / most recently opened first.
+      if (showFormPdf)       { setShowFormPdf(false);      return; }
+      if (showJournalXml)    { setShowJournalXml(false);   return; }
+      if (showDownloadTray)  { setShowDownloadTray(false); return; }
+      if (showMoreMenu)      { setShowMoreMenu(false);      return; }
+      if (compareDocumentId) { setCompareDocumentId(null); return; }
+    };
+    document.addEventListener("keydown", onKeyDown);
+    return () => document.removeEventListener("keydown", onKeyDown);
+  }, [showFormPdf, showJournalXml, showDownloadTray, showMoreMenu, compareDocumentId]);
+
   // ── Document status polling ────────────────────────────────────────────────
   const ocrStatus = (doc as any)?.ocr_status as string | undefined;
   const ocrActive = ocrStatus === "pending" || ocrStatus === "processing";
