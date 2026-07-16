@@ -270,17 +270,59 @@ class DocumentTemplateViewSet(viewsets.ModelViewSet):
                 .values_list("group__name", flat=True)
             )
             is_admin = bool(getattr(request.user, "has_admin_access", False))
-            all_fields = [
-                f for section in template.sections
+
+            visible_editable_sections = [
+                section for section in template.sections
                 if _eval_visible(section, generation_values)
                 and _section_visible_to_user(section, group_ids, group_names, is_admin)
                 and is_editable(section, generation_values)
+            ]
+
+            all_fields = [
+                f for section in visible_editable_sections
                 for f in section.get("fields", [])
                 if f.get("required") and f.get("type") not in ("divider", "heading")
-                and not f.get("formula") and not f.get("calc") and _eval_visible(f, generation_values)
+                and not f.get("formula") and not f.get("calc")
+                and _eval_visible(f, generation_values)
                 and is_editable(f, generation_values)
             ]
             missing = [f["label"] for f in all_fields if not generation_values.get(f["key"])]
+
+            # Table COLUMNS carry their own independent `required` flag (the
+            # table field itself is rarely marked required — its columns are).
+            # Mirrors the frontend's requiredFieldLabels table-column check
+            # (TemplateForm.tsx): only a column that is itself visible/editable
+            # at this step is enforced, and zero rows means every required
+            # column in that table is missing. This closes the same gap the
+            # client-side check had — without it, a required column could be
+            # bypassed by calling this endpoint directly.
+            table_fields = [
+                f for section in visible_editable_sections
+                for f in section.get("fields", [])
+                if f.get("type") == "table"
+                and _eval_visible(f, generation_values)
+                and is_editable(f, generation_values)
+            ]
+            for f in table_fields:
+                rows = generation_values.get(f.get("key")) or []
+                if not isinstance(rows, list):
+                    rows = []
+                for col in f.get("columns", []) or []:
+                    col_key = col.get("key")
+                    if not col.get("required") or not col_key:
+                        continue
+                    if not _eval_visible(col, generation_values) or not is_editable(col, generation_values):
+                        continue
+                    missing_in_any_row = (
+                        len(rows) == 0
+                        or any(
+                            not isinstance(row, dict) or str(row.get(col_key, "")).strip() == ""
+                            for row in rows
+                        )
+                    )
+                    if missing_in_any_row:
+                        missing.append(f"{f.get('label', f.get('key'))} — {col.get('label', col_key)}")
+
             if missing:
                 raise ValidationError(
                     {"values": f"Required fields missing: {', '.join(missing)}"}

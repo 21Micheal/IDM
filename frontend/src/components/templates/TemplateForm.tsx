@@ -1485,7 +1485,35 @@ export function requiredFieldLabels(
       // Don't require a field the user can't edit at this step (read-only / locked).
       if (!sectionEditable || !evalEditableForViewer(f, values, allFields, processStep, viewer)) continue;
       const key = f.key ?? "";
-      const v   = values[key];
+
+      // Table fields: validate REQUIRED COLUMNS the same way a top-level field
+      // is validated. A column can be individually hidden/conditionally shown
+      // (`hidden`/`visibleWhen`) and read-only/conditionally editable
+      // (`readonly`/`editableWhen`) — only a column the person can actually see
+      // and edit is enforced, mirroring the field-level rule just above. A
+      // required column with zero rows (nothing entered yet) counts as missing,
+      // same as an empty scalar field.
+      if (type === "table") {
+        const rows = Array.isArray(values[key]) ? (values[key] as Record<string, unknown>[]) : [];
+        for (const col of f.columns ?? []) {
+          if (!col.required || !col.key) continue;
+          if (col.hidden || !evalVisible(col, values, allFields, processStep)) continue;
+          if (!evalEditable(col, values, allFields, processStep)) continue;
+          const colKey = col.key;
+          const missingInAnyRow =
+            rows.length === 0 ||
+            rows.some((row) => {
+              const v = row?.[colKey];
+              return v === undefined || v === null || (typeof v === "string" && v.trim() === "");
+            });
+          if (missingInAnyRow) {
+            missing.push(`${f.label ?? key} — ${col.label ?? colKey}`);
+          }
+        }
+        continue; // tables have no scalar `required`/regex of their own
+      }
+
+      const v = values[key];
       if (f.required) {
         const empty =
           v === undefined || v === null ||
