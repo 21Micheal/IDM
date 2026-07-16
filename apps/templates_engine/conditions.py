@@ -578,31 +578,36 @@ def compute_calculated_values(sections, values: dict) -> dict:
                     continue
                 rows = table_info["rows"]
                 col_types = table_info["col_types"]
+                calc_columns = table_info["calc_columns"]
 
-                for col in table_info["calc_columns"]:
-                    col_key = col["key"]
-                    calc = col["calc"]
-                    decimals = calc.get("decimals")
-                    # Aggregates are the same value for every row, so resolve
-                    # them once per column (against the column's current
-                    # state — including any earlier calculated columns
-                    # already written into `rows` this pass, and any other
-                    # table's current state via `all_tables`).
-                    resolved_expr = _resolve_row_aggregates(
-                        calc.get("expression", ""), rows, col_types, all_tables
-                    )
-                    for row in rows:
-                        if not isinstance(row, dict):
-                            continue
-                        row_scope = dict(top_scope)
-                        for ck, ctype in col_types.items():
-                            row_scope[ck] = _coerce_scope_value(ctype, row.get(ck))
-                        result = _eval_typed(resolved_expr, row_scope)
-                        if isinstance(decimals, int) and isinstance(result, (int, float)):
-                            result = round(result, decimals)
-                        row[col_key] = result
+                # Same rationale as the client (calculations.ts evaluateTableColumnFormulas):
+                # resolve in multiple full passes so a calc column can reference another
+                # calc column regardless of declaration order in the table. Bounded by
+                # len(calc_columns) so a circular formula just stops changing.
+                for _pass in range(len(calc_columns)):
+                    changed = False
+                    for col in calc_columns:
+                        col_key = col["key"]
+                        calc = col["calc"]
+                        decimals = calc.get("decimals")
+                        resolved_expr = _resolve_row_aggregates(
+                            calc.get("expression", ""), rows, col_types, all_tables
+                        )
+                        for row in rows:
+                            if not isinstance(row, dict):
+                                continue
+                            row_scope = dict(top_scope)
+                            for ck, ctype in col_types.items():
+                                row_scope[ck] = _coerce_scope_value(ctype, row.get(ck))
+                            result = _eval_typed(resolved_expr, row_scope)
+                            if isinstance(decimals, int) and isinstance(result, (int, float)):
+                                result = round(result, decimals)
+                            if row.get(col_key) != result:
+                                changed = True
+                            row[col_key] = result
+                    if not changed:
+                        break
                 continue
-
             calc = field.get("calc")
             if not calc:
                 continue
