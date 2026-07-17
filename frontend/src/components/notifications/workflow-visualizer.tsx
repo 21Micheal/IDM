@@ -494,34 +494,30 @@ function NodeShape({
   }
 
   /* Task rectangles */
-  const lx = node.x - NODE_W / 2;
-  const ty2 = node.y - NODE_H / 2;
-  const accent = nodeAccent(node);
+  const lx   = node.x - NODE_W / 2;
+  const ty2  = node.y - NODE_H / 2;
+  const taskTone = TONE[node.status];
   const shadow = hovered
     ? "drop-shadow(0 6px 16px rgba(0,0,0,0.14))"
     : "drop-shadow(0 2px 4px rgba(0,0,0,0.06))";
-  const sw = node.status === "in-progress" ? 2.5 : 1.5;
-  const borderColor = selected ? tone.stroke : accent;
+  const sw          = node.status === "in-progress" ? 2.5 : 1.5;
+  const borderColor = selected ? taskTone.fillDark : taskTone.stroke;
 
   return (
     <g transform={`translate(${lx},${ty2})`} {...handlers} style={{ cursor: "pointer" }}>
-      {/* Card background */}
+      {/* Card background — square corners */}
       <rect
         width={NODE_W}
         height={NODE_H}
-        rx={10}
-        fill={nodeFill(node)}
+        rx={0}
+        fill={taskTone.fill}
         stroke={borderColor}
         strokeWidth={sw}
         style={{ filter: shadow, transition: "filter 0.15s" }}
       />
-      <rect x={0} y={0} width={NODE_W} height={24} rx={10} fill={accent} opacity={0.08} />
 
-      {/* Left accent bar */}
-      <rect width={7} height={NODE_H} rx={3} fill={accent} />
-
-      {/* Top-right status dot */}
-      <circle cx={NODE_W - 16} cy={16} r={12} fill={tone.stroke} />
+      {/* Top-right status indicator — square */}
+      <rect x={NODE_W - 30} y={0} width={28} height={28} fill={taskTone.stroke} />
       <foreignObject x={NODE_W - 28} y={4} width={24} height={24}>
         <div
           style={{
@@ -539,20 +535,20 @@ function NodeShape({
 
       {/* Step name */}
       <text
-        x={18}
-        y={26}
+        x={12}
+        y={22}
         style={{
           fontSize: 13,
           fontWeight: 700,
-          fill: tone.text,
+          fill: taskTone.text,
           fontFamily: "inherit",
         }}
       >
-        {truncate(node.name, 26)}
+        {truncate(node.name, 24)}
       </text>
 
       {/* Approver row */}
-      <foreignObject x={16} y={34} width={NODE_W - 24} height={20}>
+      <foreignObject x={12} y={30} width={NODE_W - 24} height={20}>
         <div
           style={{
             display: "flex",
@@ -575,10 +571,10 @@ function NodeShape({
       </foreignObject>
 
       {/* Divider */}
-      <line x1={8} y1={60} x2={NODE_W - 8} y2={60} stroke="#e2e8f0" strokeWidth={1} />
+      <line x1={0} y1={56} x2={NODE_W} y2={56} stroke={taskTone.badgeBorder} strokeWidth={1} />
 
       {/* Footer: badge + timestamp */}
-      <foreignObject x={12} y={64} width={NODE_W - 16} height={30}>
+      <foreignObject x={8} y={60} width={NODE_W - 16} height={34}>
         <div
           style={{
             display: "flex",
@@ -591,12 +587,12 @@ function NodeShape({
             style={{
               display: "inline-flex",
               alignItems: "center",
-              borderRadius: 99,
-              padding: "2px 8px",
+              borderRadius: 0,
+              padding: "2px 7px",
               fontWeight: 600,
-              background: tone.badgeBg,
-              color: tone.badgeText,
-              border: `1px solid ${tone.badgeBorder}`,
+              background: taskTone.badgeBg,
+              color: taskTone.badgeText,
+              border: `1px solid ${taskTone.badgeBorder}`,
               letterSpacing: "0.02em",
             }}
           >
@@ -612,14 +608,14 @@ function NodeShape({
 
       {/* Comment indicator */}
       {node.comment && (
-        <foreignObject x={NODE_W - 30} y={NODE_H - 24} width={20} height={20}>
+        <foreignObject x={NODE_W - 28} y={NODE_H - 22} width={20} height={18}>
           <div
             style={{
               display: "flex",
               alignItems: "center",
               justifyContent: "center",
               background: "#f9fafb",
-              borderRadius: 4,
+              borderRadius: 0,
               width: "100%",
               height: "100%",
               color: "#6b7280",
@@ -680,7 +676,7 @@ function Edge({
             y={ly - 9}
             width={32}
             height={18}
-            rx={4}
+            rx={0}
             fill="white"
             stroke={color}
             strokeWidth={1}
