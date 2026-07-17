@@ -536,17 +536,20 @@ export default function DocumentDetailPage() {
   const workflowStepsCount = workflowData?.steps?.length ?? 0;
 
   useEffect(() => {
-    if (!activeTaskInitializedRef.current && activeTask) {
+    const isFormDocumentForTab = Boolean((doc?.metadata as Record<string, any> | undefined)?.form?.sections);
+    if (!activeTaskInitializedRef.current && activeTask && !isFormDocumentForTab) {
       activeTaskInitializedRef.current = true;
       setActiveTab("workflow");
     }
-  }, [activeTask]);
+  }, [activeTask, doc]);
 
   useEffect(() => {
-    if (!activeTask && activeTab === "workflow" && workflowStepsCount === 0) {
+    const isFormDocumentForTab = Boolean((doc?.metadata as Record<string, any> | undefined)?.form?.sections);
+    const workflowTabHidden = isFormDocumentForTab && (detailsOpen || showFormPdf);
+    if (activeTab === "workflow" && (workflowTabHidden || (!activeTask && workflowStepsCount === 0))) {
       setActiveTab("attributes");
     }
-  }, [activeTask, activeTab, workflowStepsCount]);
+  }, [activeTask, activeTab, workflowStepsCount, doc, detailsOpen, showFormPdf]);
 
   useEffect(() => {
     if (activeTask) {
@@ -912,7 +915,8 @@ export default function DocumentDetailPage() {
   const auditCount = auditLogs?.count ?? 0;
   const auditPages = Math.max(1, Math.ceil(auditCount / AUDIT_PAGE_SIZE));
   const sortedDocumentVersions = [...(doc.versions ?? [])].sort((a, b) => a.version_number - b.version_number);
-  const workflowAvailable = !isPersonal && (Boolean(activeTask) || workflowDataLoading || workflowStepsCount > 0);
+  const hideWorkflowTabForForm = isFormDocument && (detailsOpen || showFormPdf);
+  const workflowAvailable = !hideWorkflowTabForForm && !isPersonal && (Boolean(activeTask) || workflowDataLoading || workflowStepsCount > 0);
 
   const tabs: { id: TabId; label: string; disabled?: boolean }[] = [
     ...(workflowAvailable ? [{ id: "workflow" as const, label: "Workflow" }] : []),
@@ -1339,6 +1343,7 @@ export default function DocumentDetailPage() {
       <div className={cn(
         "scrollbar-minimal relative grid min-h-0 flex-1 grid-cols-1 items-start gap-4 overflow-y-auto p-4 lg:grid-cols-12",
         compareDoc && "xl:grid-cols-12",
+        isFormDocument && activeTask && "pb-24",
         formFullScreen ? "pr-12" : "pr-8",
       )}>
 
@@ -1558,50 +1563,39 @@ export default function DocumentDetailPage() {
             />
           )}
 
-          {/* ── Unified bottom row: action panel + approval stages + journal ── */}
+          {/* ── Workflow context + journal status ── */}
           {isFormDocument && (activeTask || workflowStepsCount > 0 || journalEnabled) && (
-            <div className={cn(
-              "grid gap-3",
-              activeTask && workflowStepsCount > 0 ? "lg:grid-cols-3"
-              : (activeTask || workflowStepsCount > 0) ? "lg:grid-cols-2"
-              : ""
-            )}>
-              {/* Action panel — only visible when this user has a pending task */}
-              {activeTask && (
-                <div className="border border-[#C8CDD2] bg-white shadow-sm">
-                  <div className="flex items-center gap-2 border-b border-[#C8CDD2] bg-[#F5F7F8] px-3 py-1.5">
-                    <p className="text-xs font-bold text-[#1F2933]">Action required</p>
-                    <span className="border border-amber-200 bg-amber-50 px-1.5 py-0.5 text-[10px] font-bold text-amber-800">
-                      Pending your review
-                    </span>
-                  </div>
-                  <div className="p-3">
-                    <Suspense fallback={<div className="text-xs text-[#5E6870]">Loading…</div>}>
-                      <WorkflowActionPanel
-                        task={activeTask}
-                        documentId={id!}
-                        onCompleted={() => setWorkflowActionCompleted(true)}
-                      />
-                    </Suspense>
-                  </div>
+            <div className="space-y-3">
+              {(workflowStepsCount > 0 || journalEnabled) && (
+                <div className={cn("grid gap-3", workflowStepsCount > 0 && journalEnabled ? "lg:grid-cols-2" : "")}>
+                  {workflowStepsCount > 0 && (
+                    <ApprovalStagesTable
+                      steps={workflowData?.steps ?? []}
+                      isLoading={workflowDataLoading}
+                      phase={doc.builder_workflow_phase}
+                    />
+                  )}
+
+                  <JournalPostingCard
+                    documentId={doc.id}
+                    expectPosting={journalEnabled && ["request_approved", "fully_approved"].includes(formProcessStep)}
+                    watchKey={`${formProcessStep}:${doc.updated_at}`}
+                  />
                 </div>
               )}
+            </div>
+          )}
 
-              {/* Approval stages */}
-              {workflowStepsCount > 0 && (
-                <ApprovalStagesTable
-                  steps={workflowData?.steps ?? []}
-                  isLoading={workflowDataLoading}
-                  phase={doc.builder_workflow_phase}
+          {isFormDocument && activeTask && (
+            <div className="fixed bottom-0 left-[var(--app-sidebar-width)] right-0 z-40 border-t border-[#C8CDD2] bg-[#EDEDED]/95 backdrop-blur-sm">
+              <Suspense fallback={<div className="px-4 py-3 text-xs text-[#5E6870]">Loading actions...</div>}>
+                <WorkflowActionPanel
+                  task={activeTask}
+                  documentId={id!}
+                  variant="bar"
+                  onCompleted={() => setWorkflowActionCompleted(true)}
                 />
-              )}
-
-              {/* Journal posting */}
-              <JournalPostingCard
-                documentId={doc.id}
-                expectPosting={journalEnabled && ["request_approved", "fully_approved"].includes(formProcessStep)}
-                watchKey={`${formProcessStep}:${doc.updated_at}`}
-              />
+              </Suspense>
             </div>
           )}
 
@@ -1630,7 +1624,7 @@ export default function DocumentDetailPage() {
                       submitSlot={null}
                       hideUploadActionBar
                       onPreviewLinksChange={handlePreviewLinksChange}
-                      onBeforeRelease={confirmRelease}
+                      disableLocking
                     />
                   </Suspense>
                 </div>

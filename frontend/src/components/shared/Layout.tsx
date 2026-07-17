@@ -759,7 +759,10 @@ export default function Layout() {
   }, [idleReady]);
 
   return (
-    <div className="relative flex h-screen bg-background text-foreground">
+    <div
+      className="relative flex h-screen bg-background text-foreground"
+      style={{ "--app-sidebar-width": sidebarCollapsed ? "0px" : "270px" } as React.CSSProperties}
+    >
 
       {/* ── Sidebar ────────────────────────────────────────────────────── */}
       <aside

@@ -56,6 +56,7 @@ interface Props {
   task: WorkflowTask;
   documentId: string;
   onCompleted?: () => void;
+  variant?: "panel" | "bar";
 }
 
 type WorkflowActionKind = "approve" | "reject" | "return" | "hold" | "release";
@@ -196,7 +197,7 @@ function TaskHistoryDrawer({ taskId, task, currentUserId: _currentUserId }: { ta
 }
 
 // ── Main panel ────────────────────────────────────────────────────────────────
-export default function WorkflowActionPanel({ task, documentId, onCompleted }: Props) {
+export default function WorkflowActionPanel({ task, documentId, onCompleted, variant = "panel" }: Props) {
   const qc = useQueryClient();
   const currentUser = useAuthStore((s) => s.user);
 
@@ -340,6 +341,7 @@ export default function WorkflowActionPanel({ task, documentId, onCompleted }: P
 
   const isHeld     = task.status === "held";
   const isActive   = task.status === "in_progress";
+  const isBar = variant === "bar";
   const _isActionable = isHeld || isActive;
   void _isActionable;
   const anyPending = approveMutation.isPending || rejectMutation.isPending ||
@@ -360,11 +362,285 @@ export default function WorkflowActionPanel({ task, documentId, onCompleted }: P
 
   if (optimisticAction === "approve" || optimisticAction === "reject" || optimisticAction === "return") {
     return (
-      <div className="border border-[#C8CDD2] bg-[#F5F7F8] p-4">
+      <div className={clsx(isBar ? "px-4 py-3" : "border border-[#C8CDD2] bg-[#F5F7F8] p-4")}>
         <div className="flex items-center gap-3 text-sm text-[#1F2933]">
           <Loader2 className="h-4 w-4 animate-spin text-[#287EAD]" />
           Updating workflow state...
         </div>
+      </div>
+    );
+  }
+
+  if (isBar) {
+    return (
+      <div className="relative px-4 py-3">
+        {showSignaturePlacement && (
+          <SignaturePlacementModal
+            documentId={documentId}
+            documentTitle={task.document_title}
+            documentRef={task.document_ref}
+            note={comment ? `Approval note: ${comment}` : undefined}
+            confirmLabel="Save signature"
+            onCancel={() => setShowSignaturePlacement(false)}
+            onConfirm={(result) => { setSignedResult(result); setShowSignaturePlacement(false); }}
+            isSubmitting={false}
+          />
+        )}
+
+        <div className="flex flex-col gap-3 lg:flex-row lg:items-center lg:justify-between">
+          <div className="min-w-0">
+            <div className="flex flex-wrap items-center gap-2">
+              <span
+                className={clsx(
+                  "h-2 w-2 shrink-0",
+                  isHeld ? "bg-blue-500" : "bg-amber-500",
+                )}
+              />
+              <p className="truncate text-sm font-bold text-[#1F2933]">{task.step.name}</p>
+              <span className="bg-[#F5F7F8] px-1.5 py-0.5 text-[10px] font-bold uppercase tracking-wider text-[#5E6870]">
+                {task.status_display}
+              </span>
+              {isHeld && task.held_until && (
+                <span className="text-xs font-semibold text-blue-700">
+                  Auto-releases {formatDistanceToNow(new Date(task.held_until), { addSuffix: true })}
+                </span>
+              )}
+              {task.due_at && !isHeld && (
+                <span className={clsx("text-xs font-semibold", new Date(task.due_at) < new Date() ? "text-red-700" : "text-[#5E6870]")}>
+                  Due {formatDistanceToNow(new Date(task.due_at), { addSuffix: true })}
+                </span>
+              )}
+            </div>
+            <div className="mt-1 flex flex-wrap items-center gap-3 text-xs text-[#5E6870]">
+              {task.step.instructions && (
+                <p className="line-clamp-1 max-w-3xl">
+                  <span className="font-semibold text-[#3F474F]">Instructions: </span>{task.step.instructions}
+                </p>
+              )}
+              {task.requires_signature && (
+                <span className="inline-flex items-center gap-1 font-semibold text-[#287EAD]">
+                  <FileSignature className="h-3.5 w-3.5" /> Signature required
+                </span>
+              )}
+              <TaskHistoryDrawer taskId={task.id} task={task} currentUserId={currentUser?.id || ""} />
+            </div>
+          </div>
+
+          <div className="flex shrink-0 flex-wrap items-center justify-end gap-2">
+            {isHeld && (
+              <button
+                onClick={() => releaseMutation.mutate()}
+                disabled={releaseMutation.isPending}
+                className="inline-flex h-8 items-center gap-1.5 bg-sky-50 px-3 text-xs font-semibold text-sky-700 hover:bg-sky-100 disabled:opacity-50"
+              >
+                {releaseMutation.isPending
+                  ? <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                  : <PlayCircle className="h-3.5 w-3.5" />}
+                Release hold
+              </button>
+            )}
+            {isActive && (
+              <>
+                {task.step?.allow_return !== false && (
+                  <button
+                    onClick={() => setActiveAction("return")}
+                    className="inline-flex h-8 items-center gap-1.5 bg-white px-3 text-xs font-semibold text-[#5E6870] hover:bg-[#F5F7F8]"
+                  >
+                    <RotateCcw className="h-3.5 w-3.5" /> Send back
+                  </button>
+                )}
+                {task.step?.allow_reject !== false && (
+                  <button
+                    onClick={() => setActiveAction("reject")}
+                    className="inline-flex h-8 items-center gap-1.5 bg-[#6C737A] px-3 text-xs font-semibold text-white hover:bg-[#5E6870]"
+                  >
+                    <XCircle className="h-3.5 w-3.5" /> Reject
+                  </button>
+                )}
+                <button
+                  onClick={() => setActiveAction("hold")}
+                  className="inline-flex h-8 items-center gap-1.5 bg-white px-3 text-xs font-semibold text-[#5E6870] hover:bg-[#F5F7F8]"
+                >
+                  <PauseCircle className="h-3.5 w-3.5" /> Hold
+                </button>
+                {task.step?.allow_approve !== false && (
+                  <button
+                    onClick={() => setActiveAction("approve")}
+                    className="inline-flex h-8 items-center gap-1.5 bg-[#287EAD] px-3 text-xs font-semibold text-white hover:bg-[#1E6F99]"
+                  >
+                    <CheckCircle className="h-3.5 w-3.5" /> Approve
+                  </button>
+                )}
+              </>
+            )}
+          </div>
+        </div>
+
+        {activeAction && (
+          <div className="absolute bottom-full right-3 z-40 mb-2 w-[min(92vw,28rem)] border border-[#AEB5BB] bg-white p-4 shadow-2xl">
+            {activeAction === "approve" && (
+              <div className="space-y-3">
+                <p className="text-sm font-bold text-[#1F2933]">Approve document</p>
+                <div>
+                  <label className="label text-xs">Comment (optional)</label>
+                  <textarea
+                    value={comment}
+                    onChange={(e) => setComment(e.target.value)}
+                    rows={2}
+                    className="input text-sm"
+                    placeholder="Add an approval note..."
+                    autoFocus
+                  />
+                </div>
+                {task.requires_signature && (
+                  signedResult ? (
+                    <div className="flex items-center justify-between gap-2 border border-green-200 bg-green-50 px-3 py-2 text-xs text-green-700">
+                      <span className="inline-flex items-center gap-2">
+                        <CheckCircle className="h-4 w-4" /> Signature placed.
+                      </span>
+                      <button type="button" onClick={() => setShowSignaturePlacement(true)} className="font-bold underline">
+                        Re-sign
+                      </button>
+                    </div>
+                  ) : (
+                    <button
+                      type="button"
+                      onClick={() => setShowSignaturePlacement(true)}
+                      className="flex w-full items-center justify-center gap-1.5 border border-[#287EAD] bg-[#287EAD] px-4 py-2 text-sm font-bold text-white hover:bg-[#206D99]"
+                    >
+                      <FileSignature className="h-4 w-4" /> Sign document
+                    </button>
+                  )
+                )}
+                <div className="flex justify-end gap-2">
+                  <button onClick={resetForm} className="border border-[#C8CDD2] bg-white px-3 py-1.5 text-xs font-bold text-[#5E6870] hover:bg-[#F5F7F8]">Cancel</button>
+                  <button
+                    onClick={confirmApproval}
+                    disabled={anyPending || (task.requires_signature && !signedResult)}
+                    className="inline-flex items-center gap-1.5 bg-[#287EAD] px-3 py-1.5 text-xs font-bold text-white hover:bg-[#206D99] disabled:opacity-50"
+                  >
+                    {approveMutation.isPending && <Loader2 className="h-3.5 w-3.5 animate-spin" />}
+                    Confirm approval
+                  </button>
+                </div>
+              </div>
+            )}
+
+            {activeAction === "reject" && (
+              <div className="space-y-3">
+                <p className="text-sm font-bold text-[#1F2933]">Reject document</p>
+                <div>
+                  <label className="label text-xs">Rejection reason <span className="text-red-600">*</span></label>
+                  <textarea
+                    value={comment}
+                    onChange={(e) => setComment(e.target.value)}
+                    rows={3}
+                    className="input text-sm"
+                    placeholder="Explain why this document is being rejected..."
+                    autoFocus
+                  />
+                </div>
+                <div className="flex justify-end gap-2">
+                  <button onClick={resetForm} className="border border-[#C8CDD2] bg-white px-3 py-1.5 text-xs font-bold text-[#5E6870] hover:bg-[#F5F7F8]">Cancel</button>
+                  <button
+                    onClick={() => {
+                      if (!comment.trim()) { toast.error("Comment required"); return; }
+                      rejectMutation.mutate();
+                    }}
+                    disabled={anyPending}
+                    className="inline-flex items-center gap-1.5 bg-[#6C737A] px-3 py-1.5 text-xs font-bold text-white hover:bg-[#5E6870] disabled:opacity-50"
+                  >
+                    {rejectMutation.isPending && <Loader2 className="h-3.5 w-3.5 animate-spin" />}
+                    Confirm rejection
+                  </button>
+                </div>
+              </div>
+            )}
+
+            {activeAction === "return" && (
+              <div className="space-y-3">
+                <div>
+                  <p className="text-sm font-bold text-[#1F2933]">Return for review</p>
+                  <p className="mt-0.5 text-xs text-[#5E6870]">The requester will see this note and can resubmit after rework.</p>
+                </div>
+                <div>
+                  <label className="label text-xs">What needs to be fixed? <span className="text-red-600">*</span></label>
+                  <textarea
+                    value={comment}
+                    onChange={(e) => setComment(e.target.value)}
+                    rows={3}
+                    className="input text-sm"
+                    placeholder="Be specific..."
+                    autoFocus
+                  />
+                </div>
+                <div className="flex justify-end gap-2">
+                  <button onClick={resetForm} className="border border-[#C8CDD2] bg-white px-3 py-1.5 text-xs font-bold text-[#5E6870] hover:bg-[#F5F7F8]">Cancel</button>
+                  <button
+                    onClick={() => {
+                      if (!comment.trim()) { toast.error("Please explain what needs to be fixed"); return; }
+                      returnMutation.mutate();
+                    }}
+                    disabled={anyPending}
+                    className="inline-flex items-center gap-1.5 border border-[#C8CDD2] bg-white px-3 py-1.5 text-xs font-bold text-[#1F2933] hover:bg-[#F5F7F8] disabled:opacity-50"
+                  >
+                    {returnMutation.isPending && <Loader2 className="h-3.5 w-3.5 animate-spin" />}
+                    Send back
+                  </button>
+                </div>
+              </div>
+            )}
+
+            {activeAction === "hold" && (
+              <div className="space-y-3">
+                <div>
+                  <p className="text-sm font-bold text-[#1F2933]">Place on hold</p>
+                  <p className="mt-0.5 text-xs text-[#5E6870]">The task auto-resumes after the selected hold period.</p>
+                </div>
+                <div>
+                  <label className="label text-xs">Reason for hold <span className="text-red-600">*</span></label>
+                  <textarea
+                    value={comment}
+                    onChange={(e) => setComment(e.target.value)}
+                    rows={2}
+                    className="input text-sm"
+                    placeholder="e.g. Awaiting supplier clarification..."
+                    autoFocus
+                  />
+                </div>
+                <div>
+                  <label className="label text-xs">Hold duration</label>
+                  <div className="flex items-center gap-2">
+                    <input
+                      type="number"
+                      min={1}
+                      max={720}
+                      value={holdHours}
+                      onChange={(e) => setHoldHours(Math.max(1, Math.min(720, Number(e.target.value))))}
+                      className="input w-24 text-sm"
+                    />
+                    <span className="text-sm text-[#5E6870]">hours</span>
+                  </div>
+                </div>
+                <div className="flex justify-end gap-2">
+                  <button onClick={resetForm} className="border border-[#C8CDD2] bg-white px-3 py-1.5 text-xs font-bold text-[#5E6870] hover:bg-[#F5F7F8]">Cancel</button>
+                  <button
+                    onClick={() => {
+                      if (!comment.trim()) { toast.error("Please provide a reason for the hold"); return; }
+                      holdMutation.mutate();
+                    }}
+                    disabled={anyPending}
+                    className="inline-flex items-center gap-1.5 border border-sky-200 bg-sky-50 px-3 py-1.5 text-xs font-bold text-sky-700 hover:bg-sky-100 disabled:opacity-50"
+                  >
+                    {holdMutation.isPending && <Loader2 className="h-3.5 w-3.5 animate-spin" />}
+                    <Clock className="h-3.5 w-3.5" />
+                    Confirm hold
+                  </button>
+                </div>
+              </div>
+            )}
+          </div>
+        )}
       </div>
     );
   }

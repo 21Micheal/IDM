@@ -945,17 +945,10 @@ class DocumentViewSet(AuditMixin, viewsets.ModelViewSet):
                 {"detail": "This document cannot be edited in its current status."},
                 status=status.HTTP_400_BAD_REQUEST,
             )
-        # Same checkout gate as metadata edits: once locked (or when anyone other
-        # than the uploader edits), the caller must hold the lock.
-        holder = doc.edit_lock_holder
-        lock_required = doc.is_edit_locked or doc.uploaded_by_id != request.user.id
-        if lock_required and (holder is None or holder.id != request.user.id):
-            detail = (
-                f"This document is locked by {holder.get_full_name()}."
-                if holder
-                else "Lock (check out) the document first."
-            )
-            return Response({"detail": detail}, status=status.HTTP_423_LOCKED)
+        # Form documents are edited in-app (not via an external editor) and
+        # manage concurrency through document_allows_form_edit() and per-field
+        # editability conditions.  The file-level checkout lock is for external
+        # editors (Office, WebDAV) and must NOT be required here.
 
         import json
         from apps.documents.form_attachments import (
