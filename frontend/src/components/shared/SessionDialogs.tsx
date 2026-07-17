@@ -5,16 +5,20 @@ import { useSessionUiStore } from "@/store/sessionUiStore";
 import { authAPI } from "@/services/api";
 
 function formatCountdown(ms: number): string {
-  const total = Math.max(0, Math.ceil(ms / 1000));
+  const total   = Math.max(0, Math.ceil(ms / 1000));
   const minutes = Math.floor(total / 60);
   const seconds = total % 60;
   if (minutes === 0) return `${seconds} second${seconds !== 1 ? "s" : ""}`;
   return `${minutes} minute${minutes !== 1 ? "s" : ""} ${seconds} second${seconds !== 1 ? "s" : ""}`;
 }
 
+// ── Shared wrapper — backdrop + top-anchored card ────────────────────────────
+const backdropClass = "fixed inset-0 z-[200] bg-black/40 flex items-start justify-center pt-[10vh] px-4";
+const cardClass     = "w-full max-w-sm border border-[#C8CDD2] bg-white shadow-2xl";
+
 /**
  * Shown after the user has been signed out because their session expired.
- * Blocks the page; only the OK button dismisses it.
+ * No backdrop — floats above the page. Only the button dismisses it.
  */
 function SessionExpiredModal() {
   const expiredNotice = useSessionUiStore((s) => s.expiredNotice);
@@ -23,29 +27,22 @@ function SessionExpiredModal() {
   if (!expiredNotice) return null;
 
   return (
-    <div
-      role="alertdialog"
-      aria-modal="true"
-      aria-labelledby="session-expired-title"
-      className="fixed inset-0 z-[200] flex items-center justify-center bg-black/30 px-4"
-    >
-      <div className="w-full max-w-sm border border-[#C8CDD2] bg-white shadow-2xl">
-        {/* body */}
-        <div className="px-6 py-6 text-center">
-          <h2
-            id="session-expired-title"
-            className="text-sm font-bold text-[#1F2933]"
-          >
+    <div className={backdropClass}>
+      <div
+        role="alertdialog"
+        aria-modal="true"
+        aria-labelledby="session-expired-title"
+        className={cardClass}
+      >
+        <div className="px-6 pt-5 pb-4">
+          <h2 id="session-expired-title" className="text-sm font-bold text-[#1F2933]">
             Your session has expired
           </h2>
-          <p className="mt-2 text-xs leading-relaxed text-[#5E6870]">
-            You have been signed out automatically. Please sign in again to
-            continue.
+          <p className="mt-1.5 text-xs leading-relaxed text-[#5E6870]">
+            You have been signed out automatically. Please sign in again to continue.
           </p>
         </div>
-
-        {/* footer */}
-        <div className="border-t border-[#C8CDD2] px-6 py-3 flex justify-center">
+        <div className="flex justify-center pb-5">
           <button
             type="button"
             onClick={dismiss}
@@ -62,7 +59,7 @@ function SessionExpiredModal() {
 
 /**
  * Shown a few minutes before the session ends.
- * The idle window can be extended in place; the absolute cap cannot.
+ * Idle windows can be extended; the absolute lifetime cap cannot.
  */
 function SessionExpiryWarning() {
   const isAuthenticated  = useAuthStore((s) => s.isAuthenticated);
@@ -73,8 +70,8 @@ function SessionExpiryWarning() {
   const warningMinutes   = useAuthStore((s) => s.sessionPolicy.warningMinutes);
   const recordActivity   = useAuthStore((s) => s.recordActivity);
 
-  const [now, setNow] = useState(() => Date.now());
-  const [dismissedDeadline, setDismissedDeadline] = useState<number | null>(null);
+  const [now, setNow]                       = useState(() => Date.now());
+  const [dismissedDeadline, setDismissed]   = useState<number | null>(null);
 
   useEffect(() => {
     const id = window.setInterval(() => setNow(Date.now()), 1000);
@@ -82,23 +79,20 @@ function SessionExpiryWarning() {
   }, []);
 
   const view = useMemo(() => {
-    if (!isAuthenticated) return null;
-    if (warningMinutes <= 0) return null;
+    if (!isAuthenticated || warningMinutes <= 0) return null;
 
-    const idleMs       = idleMinutes > 0 ? idleMinutes * 60 * 1000 : Infinity;
-    const idleDeadline = idleMs !== Infinity && lastActivityAt ? lastActivityAt + idleMs : Infinity;
+    const idleMs           = idleMinutes > 0 ? idleMinutes * 60 * 1000 : Infinity;
+    const idleDeadline     = idleMs !== Infinity && lastActivityAt ? lastActivityAt + idleMs : Infinity;
     const absoluteDeadline = sessionExpiresAt ?? Infinity;
-    const deadline     = Math.min(idleDeadline, absoluteDeadline);
+    const deadline         = Math.min(idleDeadline, absoluteDeadline);
     if (!Number.isFinite(deadline)) return null;
 
     const limitedByIdle = idleDeadline <= absoluteDeadline;
     const fullWindow    = limitedByIdle ? idleMs : lifetimeMinutes * 60 * 1000;
     const lead          = Math.min(warningMinutes * 60 * 1000, Math.floor(fullWindow / 2));
+    const remaining     = deadline - now;
 
-    const remaining = deadline - now;
-    const visible   = remaining > 0 && remaining <= lead && dismissedDeadline !== deadline;
-    if (!visible) return null;
-
+    if (remaining <= 0 || remaining > lead || dismissedDeadline === deadline) return null;
     return { remaining, limitedByIdle, deadline };
   }, [
     isAuthenticated, idleMinutes, lifetimeMinutes, warningMinutes,
@@ -110,29 +104,22 @@ function SessionExpiryWarning() {
   const extend = () => {
     recordActivity();
     authAPI.me().catch(() => {});
-    setDismissedDeadline(view.deadline);
+    setDismissed(view.deadline);
   };
 
   return (
-    <div
-      className="fixed inset-0 z-[150] flex items-center justify-center bg-black/30 px-4"
-      aria-live="polite"
-    >
+    <div className={backdropClass}>
       <div
         role="alertdialog"
         aria-modal="false"
         aria-labelledby="session-warning-title"
-        className="w-full max-w-sm border border-[#C8CDD2] bg-white shadow-2xl"
+        className={cardClass}
       >
-        {/* body */}
-        <div className="px-6 py-6 text-center">
-          <h2
-            id="session-warning-title"
-            className="text-sm font-bold text-[#1F2933]"
-          >
+        <div className="px-6 pt-5 pb-4">
+          <h2 id="session-warning-title" className="text-sm font-bold text-[#1F2933]">
             Your session is expiring soon
           </h2>
-          <p className="mt-2 text-xs leading-relaxed text-[#5E6870]">
+          <p className="mt-1.5 text-xs leading-relaxed text-[#5E6870]">
             {view.limitedByIdle ? (
               <>
                 You will be logged out in{" "}
@@ -153,12 +140,11 @@ function SessionExpiryWarning() {
           </p>
         </div>
 
-        {/* footer */}
-        <div className="border-t border-[#C8CDD2] px-6 py-3 flex items-center justify-center gap-3">
+        <div className="flex items-center justify-center gap-3 pb-5">
           <button
             type="button"
-            onClick={() => setDismissedDeadline(view.deadline)}
-            className="inline-flex items-center border border-[#C8CDD2] bg-white px-4 py-2 text-xs font-semibold text-[#5E6870] hover:bg-[#F5F7F8] transition-colors"
+            onClick={() => setDismissed(view.deadline)}
+            className="inline-flex items-center border border-[#C8CDD2] bg-white px-4 py-1.5 text-xs font-semibold text-[#5E6870] hover:bg-[#F5F7F8] transition-colors"
           >
             Dismiss
           </button>
