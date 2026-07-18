@@ -10,21 +10,16 @@ import { WorkflowVisualizer } from "@/components/notifications/workflow-visualiz
 import OcrStatusBadge from "@/components/documents/OcrStatusBadge";
 import { AddToFolderMenu } from "@/components/documents/AddToFolderMenu";
 import MetadataEditPanel, { type MetadataSaver } from "@/components/documents/MetadataEditPanel";
-import TemplateForm, { requiredFieldLabels } from "@/components/templates/TemplateForm";
-import BudgetBanner from "@/components/templates/BudgetBanner";
-import JournalPostingCard from "@/components/templates/JournalPostingCard";
-import JournalPayloadModal from "@/components/templates/JournalPayloadModal";
-import { collectFormAttachments } from "@/components/templates/formAttachments";
 import { ApprovalStagesTable } from "@/components/workflow/ApprovalStagesTable";
 import WorkflowActionPanel from "@/components/workflow/WorkflowActionPanel";
 import SignatureRequestPanel from "@/components/signatures/SignatureRequestPanel";
+import JournalPostingCard from "@/components/templates/JournalPostingCard";
 import { format } from "date-fns";
 import {
   ArrowLeft, Send, MessageSquare, ShieldCheck,
   Loader2, RotateCcw, Edit2, Lock, Unlock, Info, Download,
   AlertTriangle, ScanLine, RefreshCw, ChevronDown, FileText,
   Printer, Trash2, X, Check, ExternalLink, Columns2, Eye, EyeOff, Archive, FileCode, MoreHorizontal, Save,
-  PanelRightOpen, PanelRightClose,
 } from "lucide-react";
 import { toast } from "@/components/ui/vault-toast";
 import { useAuthStore } from "@/store/authStore";
@@ -46,22 +41,6 @@ const AUDIT_PAGE_SIZE = 5;
 // on this cadence. React Query pauses the interval when the tab is backgrounded
 // (refetchIntervalInBackground defaults to false), so it doesn't poll needlessly.
 const LOCK_STATUS_POLL_MS = 8_000;
-
-function formHasConditionalEditability(sections?: unknown[]): boolean {
-  const list = Array.isArray(sections) ? sections : [];
-  return list.some((section: any) => {
-    if (section?.editableWhen) return true;
-    return Array.isArray(section?.fields) && section.fields.some((field: any) => Boolean(field?.editableWhen));
-  });
-}
-
-function isApprovalLockedStatus(status?: string): boolean {
-  return ["pending_approval", "request_pending", "retirement_pending", "on_hold"].includes(status || "");
-}
-
-function isFinalFormProcessStep(step?: string): boolean {
-  return ["fully_approved", "retirement_rejected"].includes(step || "");
-}
 
 const DOCUMENT_FIELD_KEYS = ["title", "supplier", "amount", "currency", "document_date", "due_date"] as const;
 type DocumentFieldKey = (typeof DOCUMENT_FIELD_KEYS)[number];
@@ -261,13 +240,6 @@ export default function DocumentDetailPage() {
   const user = useAuthStore((s) => s.user);
 
   const [activeTab, setActiveTab] = useState<TabId>("attributes");
-  const [formEditing, setFormEditing] = useState(false);
-  const [formValues, setFormValues] = useState<Record<string, unknown>>({});
-  const formDirtyRef = useRef(false);
-  // For form documents: details panel starts collapsed (full-screen form). For
-  // regular documents this toggle is never shown and the panel is always visible.
-  const [detailsOpen, setDetailsOpen] = useState(false);
-  const [showFormPdf, setShowFormPdf] = useState(false);
   const [showJournalXml, setShowJournalXml] = useState(false);
   const [comment, setComment] = useState("");
   const [confirmRestoreId, setConfirmRestoreId] = useState<string | null>(null);
@@ -300,40 +272,19 @@ export default function DocumentDetailPage() {
     refetchInterval: LOCK_STATUS_POLL_MS,
   });
 
-  // ── Auto-enable edit mode for conditionally editable sections ─────────────
+  // Redirect form documents to the dedicated Forms page
   useEffect(() => {
-    if (!doc) return;
-    const formData = (doc.metadata as Record<string, any> | undefined)?.form as
-      | { sections?: unknown[]; values?: Record<string, unknown> }
-      | undefined;
-    const isFormDocument = Boolean(formData?.sections);
-    const isOwnerOrSubmitter = doc.uploaded_by?.id === user?.id || doc.owned_by?.id === user?.id;
-    const hasAdminAccess = Boolean(user?.has_admin_access);
-    const canEdit = hasAdminAccess || (doc.permissions ?? []).includes("edit");
-    const hasConditionalEditability = formHasConditionalEditability(formData?.sections);
-    const formProcessStep = doc.builder_process_step || doc.status;
-    const isRequestApproved = formProcessStep === "request_approved" || (!doc.builder_process_step && doc.status === "approved");
-    const canEditForm = canEdit
-      && !isApprovalLockedStatus(formProcessStep)
-      && !isFinalFormProcessStep(formProcessStep)
-      && (doc.status !== "approved" || (isRequestApproved && hasConditionalEditability && (hasAdminAccess || isOwnerOrSubmitter)));
-
-    // Only auto-enable edit mode for owner/submitter when conditional sections unlock.
-    if (isFormDocument && !formEditing && canEditForm) {
-      if (hasConditionalEditability) {
-        setFormValues({ ...(formData?.values ?? {}) });
-        formDirtyRef.current = false;
-        setFormEditing(true);
-      }
+    if (doc && (doc as any).metadata?.form?.sections) {
+      navigate(`/forms/${doc.id}`, { replace: true });
     }
-  }, [doc, user, formEditing]);
+  }, [doc, navigate]);
+
 
   // ── Global Escape key — dismiss any open overlay / tray / panel ───────────
   useEffect(() => {
     const onKeyDown = (e: KeyboardEvent) => {
       if (e.key !== "Escape") return;
       // Close in priority order: innermost / most recently opened first.
-      if (showFormPdf)       { setShowFormPdf(false);      return; }
       if (showJournalXml)    { setShowJournalXml(false);   return; }
       if (showDownloadTray)  { setShowDownloadTray(false); return; }
       if (showMoreMenu)      { setShowMoreMenu(false);      return; }
@@ -341,7 +292,7 @@ export default function DocumentDetailPage() {
     };
     document.addEventListener("keydown", onKeyDown);
     return () => document.removeEventListener("keydown", onKeyDown);
-  }, [showFormPdf, showJournalXml, showDownloadTray, showMoreMenu, compareDocumentId]);
+  }, [showJournalXml, showDownloadTray, showMoreMenu, compareDocumentId]);
 
   // ── Document status polling ────────────────────────────────────────────────
   const ocrStatus = (doc as any)?.ocr_status as string | undefined;
@@ -533,23 +484,21 @@ export default function DocumentDetailPage() {
     // Keep the visualizer in sync with approvals as they occur, then idle.
     refetchInterval: (query) => (query.state.data?.isActive ? 15_000 : false),
   });
+
   const workflowStepsCount = workflowData?.steps?.length ?? 0;
 
   useEffect(() => {
-    const isFormDocumentForTab = Boolean((doc?.metadata as Record<string, any> | undefined)?.form?.sections);
-    if (!activeTaskInitializedRef.current && activeTask && !isFormDocumentForTab) {
+    if (!activeTaskInitializedRef.current && activeTask) {
       activeTaskInitializedRef.current = true;
       setActiveTab("workflow");
     }
   }, [activeTask, doc]);
 
   useEffect(() => {
-    const isFormDocumentForTab = Boolean((doc?.metadata as Record<string, any> | undefined)?.form?.sections);
-    const workflowTabHidden = isFormDocumentForTab && (detailsOpen || showFormPdf);
-    if (activeTab === "workflow" && (workflowTabHidden || (!activeTask && workflowStepsCount === 0))) {
+    if (activeTab === "workflow" && !activeTask && workflowStepsCount === 0) {
       setActiveTab("attributes");
     }
-  }, [activeTask, activeTab, workflowStepsCount, doc, detailsOpen, showFormPdf]);
+  }, [activeTask, activeTab, workflowStepsCount]);
 
   useEffect(() => {
     if (activeTask) {
@@ -558,31 +507,9 @@ export default function DocumentDetailPage() {
   }, [activeTask]);
 
   const submitMutation = useMutation({
-    mutationFn: async () => {
-      // If form has unsaved changes, prompt to save first
-      if (formEditing && formDirtyRef.current && isFormDocument) {
-        const shouldSave = window.confirm(
-          "You have unsaved changes in the form. Do you want to save them before submitting?"
-        );
-        if (shouldSave) {
-          const missing = requiredFieldLabels(formData?.sections ?? [], formValues, {
-            groupNames: user?.group_names ?? [],
-            isAdmin: Boolean(user?.has_admin_access || user?.is_staff),
-            canEditConditionalSections,
-          }, formProcessStep);
-          if (missing.length) {
-            toast.error(`Please fill in: ${missing.join(", ")}`);
-            throw new Error("Form validation failed");
-          }
-          await updateFormMutation.mutateAsync();
-        }
-      }
-      return documentsAPI.submit(id!);
-    },
+    mutationFn: () => documentsAPI.submit(id!),
     onSuccess: () => {
       toast.success("Submitted for approval");
-      setFormEditing(false);
-      formDirtyRef.current = false;
       qc.invalidateQueries({ queryKey: ["document", id] });
       qc.invalidateQueries({ queryKey: ["document-workflow", id] });
     },
@@ -619,38 +546,6 @@ export default function DocumentDetailPage() {
       qc.invalidateQueries({ queryKey: ["document", id] });
     },
     onError: (err) => toast.error(extractApiError(err, "Could not queue OCR. Please try again.")),
-  });
-
-  const updateFormMutation = useMutation({
-    mutationFn: () => {
-      // Split newly picked files (simple fields + table file cells) out of the
-      // form values; they upload as attachments. Existing attachment descriptors
-      // stay in the JSON values so the backend preserves them.
-      const { jsonValues, attachments } = collectFormAttachments(formValues);
-      return documentsAPI.updateForm(id!, jsonValues, attachments);
-    },
-    onSuccess: () => {
-      toast.success("Form updated.");
-      setFormEditing(false);
-      formDirtyRef.current = false;
-      qc.invalidateQueries({ queryKey: ["document", id] });
-    },
-    onError: (err: any) =>
-      toast.error(extractApiError(err, "Could not update the form.")),
-  });
-
-  const saveFormAsDraftMutation = useMutation({
-    mutationFn: () => {
-      const { jsonValues, attachments } = collectFormAttachments(formValues);
-      return documentsAPI.updateForm(id!, jsonValues, attachments);
-    },
-    onSuccess: () => {
-      toast.success("Saved as draft.");
-      formDirtyRef.current = false;
-      qc.invalidateQueries({ queryKey: ["document", id] });
-    },
-    onError: (err: any) =>
-      toast.error(extractApiError(err, "Failed to save draft")),
   });
 
   const deleteMutation = useMutation({
@@ -728,11 +623,9 @@ export default function DocumentDetailPage() {
   const [releaseSaving, setReleaseSaving] = useState(false);
   const confirmRelease = useCallback(async (): Promise<boolean> => {
     const saver = metadataSaverRef.current;
-    const hasMetadataDirty = Boolean(saver?.isDirty);
-    const hasFormDirty = formEditing && formDirtyRef.current;
-    if (!hasMetadataDirty && !hasFormDirty) return true;
+    if (!saver?.isDirty) return true;
     return new Promise<boolean>((resolve) => setReleasePrompt({ resolve }));
-  }, [formEditing]);
+  }, []);
 
   if (isLoading)
     return (
@@ -816,25 +709,6 @@ export default function DocumentDetailPage() {
   const canEdit = hasAdminAccess || permissions.includes("edit");
   const canComment = hasAdminAccess || permissions.includes("comment");
 
-  // In-app form (built-template document): schema + values live on metadata.form.
-  const formData = (doc.metadata as Record<string, any> | undefined)?.form as
-    | { sections?: unknown[]; values?: Record<string, unknown> }
-    | undefined;
-  const isFormDocument = Boolean(formData?.sections);
-  // True when a form doc is in full-width mode (details panel hidden).
-  const formFullScreen = isFormDocument && !detailsOpen;
-  // Form editability mirrors the backend lifecycle policy:
-  // draft/returned/rejected use normal edit permissions; pending approval is
-  // locked; approved conditional sections (e.g. retirement) are owner-only.
-  const isOwnerOrSubmitter = doc.uploaded_by?.id === user?.id || doc.owned_by?.id === user?.id;
-  const hasConditionalEditability = formHasConditionalEditability(formData?.sections);
-  const formProcessStep = doc.builder_process_step || doc.status;
-  const isRequestApproved = formProcessStep === "request_approved" || (!doc.builder_process_step && doc.status === "approved");
-  const canEditConditionalSections = hasAdminAccess || isOwnerOrSubmitter;
-  const canEditForm = canEdit
-    && !isApprovalLockedStatus(formProcessStep)
-    && !isFinalFormProcessStep(formProcessStep)
-    && (doc.status !== "approved" || (isRequestApproved && hasConditionalEditability && canEditConditionalSections));
   const budgetEnabled = Boolean((doc.metadata as any)?.sunsystems?.budget?.enabled);
   const journalEnabled = Boolean((doc.metadata as any)?.sunsystems?.journal?.enabled);
   // Extract available journal stages for multi-stage posting
@@ -844,25 +718,6 @@ export default function DocumentDetailPage() {
     .map((s) => s.stage)
     .sort((a, b) => a - b) || [1];
 
-  const startFormEdit = () => {
-    setFormValues({ ...(formData?.values ?? {}) });
-    formDirtyRef.current = false;
-    setFormEditing(true);
-  };
-
-  const saveForm = () => {
-    const missing = requiredFieldLabels(formData?.sections ?? [], formValues, {
-      groupNames: user?.group_names ?? [],
-      isAdmin: Boolean(user?.has_admin_access || user?.is_staff),
-      canEditConditionalSections,
-    }, formProcessStep);
-    if (missing.length) { toast.error(`Please fill in: ${missing.join(", ")}`); return; }
-    updateFormMutation.mutate();
-  };
-
-  const saveFormAsDraft = () => {
-    saveFormAsDraftMutation.mutate();
-  };
   const canApprove = hasAdminAccess || permissions.includes("approve");
   const canArchive = hasAdminAccess || permissions.includes("archive");
   const canRestoreVersion = hasAdminAccess || permissions.includes("upload");
@@ -874,31 +729,10 @@ export default function DocumentDetailPage() {
   const isLockedByOther = Boolean(doc.is_edit_locked && doc.edit_locked_by !== user?.id);
   const lockedByMe = Boolean(doc.is_edit_locked && doc.edit_locked_by === user?.id);
 
-  const isRetirementPhase = doc.builder_workflow_phase === "retirement";
-  const canSubmitRequest =
-    !isPersonal &&
-    ["draft", "returned"].includes(doc.status) &&
-    (!isRetirementPhase || doc.status === "returned") &&
-    (canApprove || isOwnerOrSubmitter);
-  // Disable submit retirement after the retirement approval cycle has finished.
-  const isRetirementFinalized = isRetirementPhase && isFinalFormProcessStep(formProcessStep);
-  const canSubmitRetirement = Boolean(doc.can_submit_retirement) && !isRetirementFinalized && (canApprove || isOwnerOrSubmitter);
-  const canSubmit = canSubmitRequest || canSubmitRetirement;
+  const canSubmit = !isPersonal && ["draft", "returned"].includes(doc.status) && (canApprove || isOwnerOrSubmitter);
 
-  const submitActionLabel = canSubmitRetirement
-    ? "Submit retirement"
-    : isRetirementPhase && doc.status === "returned"
-      ? "Resubmit retirement"
-      : doc.status === "returned"
-        ? "Resubmit"
-        : "Start workflow";
-  const submitActionTitle = canSubmitRetirement
-    ? "Submit retirement expenditure for approval"
-    : isRetirementPhase && doc.status === "returned"
-      ? "Resubmit retirement after rework"
-      : doc.status === "returned"
-        ? "Resubmit to resume approval"
-        : "Submit for approval workflow";
+  const submitActionLabel = doc.status === "returned" ? "Resubmit" : "Start workflow";
+  const submitActionTitle = doc.status === "returned" ? "Resubmit to resume approval" : "Start approval workflow";
 
   const canArchiveNow =
     canArchive &&
@@ -915,8 +749,7 @@ export default function DocumentDetailPage() {
   const auditCount = auditLogs?.count ?? 0;
   const auditPages = Math.max(1, Math.ceil(auditCount / AUDIT_PAGE_SIZE));
   const sortedDocumentVersions = [...(doc.versions ?? [])].sort((a, b) => a.version_number - b.version_number);
-  const hideWorkflowTabForForm = isFormDocument && (detailsOpen || showFormPdf);
-  const workflowAvailable = !hideWorkflowTabForForm && !isPersonal && (Boolean(activeTask) || workflowDataLoading || workflowStepsCount > 0);
+  const workflowAvailable = !isPersonal && (Boolean(activeTask) || workflowDataLoading || workflowStepsCount > 0);
 
   const tabs: { id: TabId; label: string; disabled?: boolean }[] = [
     ...(workflowAvailable ? [{ id: "workflow" as const, label: "Workflow" }] : []),
@@ -1070,9 +903,31 @@ export default function DocumentDetailPage() {
       <iframe ref={printFrameRef} title="Printable document" className="hidden" />
 
       {workflowActionCompleted && !activeTask && (
-        <div className="mx-5 mt-4 border border-[#C8CDD2] bg-white px-4 py-4 text-sm text-[#5E6870]">
-          <p className="font-semibold text-foreground">Workflow action complete</p>
-          <p className="mt-1">This document has moved to the next stage and is no longer actionable from your current access level.</p>
+        <div className="fixed inset-0 z-[200] bg-black/40 flex items-start justify-center pt-[10vh] px-4">
+          <div
+            role="alertdialog"
+            aria-modal="true"
+            aria-labelledby="workflow-complete-title"
+            className="w-full max-w-sm border border-[#C8CDD2] bg-white shadow-2xl"
+          >
+            <div className="px-6 pt-5 pb-4">
+              <h2 id="workflow-complete-title" className="text-sm font-bold text-[#1F2933]">
+                Workflow action complete
+              </h2>
+              <p className="mt-1.5 text-xs leading-relaxed text-[#5E6870]">
+                This document has moved to the next stage and is no longer actionable from your current access level.
+              </p>
+            </div>
+            <div className="flex justify-center pb-5">
+              <button
+                type="button"
+                onClick={() => navigate("/tasks")}
+                className="inline-flex items-center bg-[#287EAD] px-5 py-2 text-sm font-semibold text-white hover:bg-[#1E6F99] transition-colors"
+              >
+                OK
+              </button>
+            </div>
+          </div>
         </div>
       )}
       <WorkspaceCommandBar className="text-xs">
@@ -1343,29 +1198,14 @@ export default function DocumentDetailPage() {
       <div className={cn(
         "scrollbar-minimal relative grid min-h-0 flex-1 grid-cols-1 items-start gap-4 overflow-y-auto p-4 lg:grid-cols-12",
         compareDoc && "xl:grid-cols-12",
-        isFormDocument && activeTask && "pb-24",
-        formFullScreen ? "pr-12" : "pr-8",
+        activeTask && "pb-24",
+        "pr-8",
       )}>
-
-        {/* Details-panel toggle — pinned to the right edge, only for form docs */}
-        {isFormDocument && !compareDoc && (
-          <button
-            type="button"
-            onClick={() => setDetailsOpen((o) => !o)}
-            title={detailsOpen ? "Hide details panel" : "Show details panel"}
-            className="absolute right-0 top-0 z-20 flex h-10 w-10 items-center justify-center border-l border-b border-[#C8CDD2] bg-white text-[#5E6870] hover:bg-[#EEF6FB] hover:text-[#287EAD] transition-colors"
-          >
-            {detailsOpen
-              ? <PanelRightClose className="h-4 w-4" />
-              : <PanelRightOpen className="h-4 w-4" />}
-          </button>
-        )}
 
         {/* Column 1: Document Viewer / Form (Left — expands to full-width for forms) */}
         <div className={cn(
           "space-y-4",
           compareDoc ? "lg:col-span-8 xl:col-span-8"
-            : formFullScreen ? "lg:col-span-12"
             : activeTab === "workflow" ? "lg:col-span-6"
             : "lg:col-span-8",
         )}>
@@ -1413,180 +1253,28 @@ export default function DocumentDetailPage() {
             </div>
           )}
 
-          {/* In-app form (built-template document) — the form is the document; PDF below is its view */}
-          {isFormDocument && (
-            <div className="border border-[#C8CDD2] bg-white shadow-sm">
-              {/* Header bar — Infor-style dark gray when full-screen, flat light-gray when panel is open */}
-              <div className={cn(
-                "flex items-center justify-between gap-3 border-b border-[#C8CDD2] px-4 py-2.5",
-                formFullScreen ? "bg-[#50545A]" : "bg-[#F5F7F8]",
-              )}>
-                <div className="flex items-center gap-2 min-w-0">
-                  <p className={cn("text-sm font-bold", formFullScreen ? "text-white" : "text-[#1F2933]")}>Form</p>
-                  <span className={cn("text-xs", formFullScreen ? "text-white/70" : "text-[#5E6870]")}>
-                    {formEditing
-                      ? "Editing — fill and save"
-                      : canSubmitRetirement
-                        ? "Retirement stage — fill expenditure, then submit for approval"
-                        : canEditForm
-                          ? "Click Edit form to modify"
-                          : isRetirementPhase
-                            ? "Retirement stage"
-                            : "Filled in-app"}
-                  </span>
-                </div>
-                <div className="flex items-center gap-2 flex-wrap justify-end">
-                  {journalEnabled && (
-                    <button
-                      type="button"
-                      onClick={() => setShowJournalXml((s) => !s)}
-                      title="Preview the exact SunSystems journal XML this form will post"
-                      className={cn(
-                        "inline-flex items-center gap-1.5 px-2.5 py-1.5 text-xs font-semibold",
-                        formFullScreen
-                          ? "border border-white/30 bg-white/10 text-white hover:bg-white/20"
-                          : "border border-[#AEB5BB] bg-white text-[#1F2933] hover:bg-[#F3F5F6]",
-                        showJournalXml && (formFullScreen ? "bg-white/20" : "bg-[#EEF6FB] text-[#287EAD] border-[#287EAD]/50"),
-                      )}
-                    >
-                      <FileCode className="h-3.5 w-3.5" /> Journal XML
-                    </button>
-                  )}
-                  {!formEditing && (
-                    <button
-                      type="button"
-                      onClick={() => setShowFormPdf((s) => !s)}
-                      className={cn(
-                        "inline-flex items-center gap-1.5 px-2.5 py-1.5 text-xs font-semibold",
-                        formFullScreen
-                          ? "border border-white/30 bg-white/10 text-white hover:bg-white/20"
-                          : "border border-[#AEB5BB] bg-white text-[#1F2933] hover:bg-[#F3F5F6]",
-                      )}
-                    >
-                      {showFormPdf ? <EyeOff className="h-3.5 w-3.5" /> : <Eye className="h-3.5 w-3.5" />}
-                      {showFormPdf ? "Hide PDF" : "View PDF"}
-                    </button>
-                  )}
-                  {!formEditing && canEditForm && (
-                    <button
-                      type="button"
-                      onClick={startFormEdit}
-                      className={cn(
-                        "inline-flex items-center gap-1.5 px-2.5 py-1.5 text-xs font-semibold",
-                        formFullScreen
-                          ? "border border-white bg-white text-[#287EAD] hover:bg-white/90"
-                          : "border border-[#287EAD] text-[#287EAD] hover:bg-[#EEF6FB]",
-                      )}
-                    >
-                      <Edit2 className="h-3.5 w-3.5" /> Edit form
-                    </button>
-                  )}
-                  {formEditing && (
-                    <>
-                      <button
-                        type="button"
-                        onClick={() => {
-                          setFormEditing(false);
-                          formDirtyRef.current = false;
-                        }}
-                        disabled={updateFormMutation.isPending || saveFormAsDraftMutation.isPending}
-                        className={cn(
-                          "inline-flex items-center gap-1.5 px-2.5 py-1.5 text-xs font-semibold disabled:opacity-50",
-                          formFullScreen
-                            ? "border border-white/30 bg-white/10 text-white hover:bg-white/20"
-                            : "border border-[#AEB5BB] bg-white text-[#1F2933] hover:bg-[#F3F5F6]",
-                        )}
-                      >
-                        <X className="h-3.5 w-3.5" /> Cancel
-                      </button>
-                      <button
-                        type="button"
-                        onClick={saveFormAsDraft}
-                        disabled={saveFormAsDraftMutation.isPending}
-                        className={cn(
-                          "inline-flex items-center gap-1.5 px-2.5 py-1.5 text-xs font-semibold disabled:opacity-50",
-                          formFullScreen
-                            ? "border border-white/30 bg-white/10 text-white hover:bg-white/20"
-                            : "border border-[#AEB5BB] bg-white text-[#1F2933] hover:bg-[#F3F5F6]",
-                        )}
-                      >
-                        {saveFormAsDraftMutation.isPending ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Save className="h-3.5 w-3.5" />}
-                        Save draft
-                      </button>
-                      <button
-                        type="button"
-                        onClick={saveForm}
-                        disabled={updateFormMutation.isPending}
-                        className={cn(
-                          "inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-semibold disabled:opacity-50",
-                          formFullScreen
-                            ? "bg-white text-[#287EAD] hover:bg-white/90"
-                            : "bg-[#287EAD] text-white hover:bg-[#1E6F99]",
-                        )}
-                      >
-                        {updateFormMutation.isPending ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Check className="h-3.5 w-3.5" />}
-                        Save form
-                      </button>
-                    </>
-                  )}
-                </div>
-              </div>
-              {/* Form body — full-width with light padding when full-screen */}
-              <div className={cn("space-y-4", formFullScreen ? "px-4 py-4" : "p-5")}>
-                {budgetEnabled && formEditing && (
-                  <BudgetBanner values={formValues} documentId={doc.id} sections={formData?.sections ?? []} enabled />
-                )}
-                <TemplateForm
-                  sections={formData?.sections ?? []}
-                  values={formEditing ? formValues : (formData?.values ?? {})}
-                  onChange={(k, v) => {
-                    formDirtyRef.current = true;
-                    setFormValues((prev) => ({ ...prev, [k]: v }));
-                  }}
-                  readOnly={!formEditing}
-                  documentId={doc.id}
-                  documentStatus={formProcessStep}
-                  canEditConditionalSections={canEditConditionalSections}
-                />
-              </div>
-            </div>
-          )}
-
           {/* Journal XML modal */}
-          {isFormDocument && showJournalXml && (
+          {showJournalXml && (
             <JournalPayloadModal
               documentId={doc.id}
-              values={formEditing ? formValues : undefined}
               title={doc.title}
               availableStages={availableStages}
               onClose={() => setShowJournalXml(false)}
             />
           )}
 
-          {/* ── Workflow context + journal status ── */}
-          {isFormDocument && (activeTask || workflowStepsCount > 0 || journalEnabled) && (
+          {/* ── Journal status ── */}
+          {journalEnabled && (
             <div className="space-y-3">
-              {(workflowStepsCount > 0 || journalEnabled) && (
-                <div className={cn("grid gap-3", workflowStepsCount > 0 && journalEnabled ? "lg:grid-cols-2" : "")}>
-                  {workflowStepsCount > 0 && (
-                    <ApprovalStagesTable
-                      steps={workflowData?.steps ?? []}
-                      isLoading={workflowDataLoading}
-                      phase={doc.builder_workflow_phase}
-                    />
-                  )}
-
-                  <JournalPostingCard
-                    documentId={doc.id}
-                    expectPosting={journalEnabled && ["request_approved", "fully_approved"].includes(formProcessStep)}
-                    watchKey={`${formProcessStep}:${doc.updated_at}`}
-                  />
-                </div>
-              )}
+              <JournalPostingCard
+                documentId={doc.id}
+                expectPosting={journalEnabled && ["request_approved", "fully_approved"].includes(doc.status)}
+                watchKey={`${doc.status}:${doc.updated_at}`}
+              />
             </div>
           )}
 
-          {isFormDocument && activeTask && (
+          {activeTask && (
             <div className="fixed bottom-0 left-[var(--app-sidebar-width)] right-0 z-40 border-t border-[#C8CDD2] bg-[#EDEDED]/95 backdrop-blur-sm">
               <Suspense fallback={<div className="px-4 py-3 text-xs text-[#5E6870]">Loading actions...</div>}>
                 <WorkflowActionPanel
@@ -1599,42 +1287,8 @@ export default function DocumentDetailPage() {
             </div>
           )}
 
-          {/* PDF modal overlay — pops up when View PDF is clicked */}
-          {isFormDocument && showFormPdf && (
-            <div className="fixed inset-0 z-50 flex items-start justify-center bg-black/60 p-4 pt-12 overflow-y-auto">
-              <div className="relative w-full max-w-4xl">
-                <div className="flex items-center justify-between gap-3 border border-b-0 border-[#C8CDD2] bg-[#50545A] px-4 py-2.5">
-                  <p className="text-sm font-bold text-white">Form PDF Preview</p>
-                  <button
-                    type="button"
-                    onClick={() => setShowFormPdf(false)}
-                    className="flex items-center gap-1.5 border border-white/30 bg-white/10 px-2.5 py-1.5 text-xs font-semibold text-white hover:bg-white/20"
-                  >
-                    <X className="h-3.5 w-3.5" /> Close
-                  </button>
-                </div>
-                <div className="border border-[#C8CDD2] bg-white shadow-xl">
-                  <Suspense fallback={
-                    <div className="flex min-h-[32rem] items-center justify-center bg-white">
-                      <Loader2 className="h-8 w-8 animate-spin text-[#287EAD]" />
-                    </div>
-                  }>
-                    <DocumentViewer
-                      document={doc}
-                      submitSlot={null}
-                      hideUploadActionBar
-                      onPreviewLinksChange={handlePreviewLinksChange}
-                      disableLocking
-                    />
-                  </Suspense>
-                </div>
-              </div>
-            </div>
-          )}
-
           {/* Non-form document primary viewer + optional comparison viewer */}
-          {!isFormDocument && (
-            <div className={cn("grid gap-3", compareDoc && "xl:grid-cols-2")}>
+          <div className={cn("grid gap-3", compareDoc && "xl:grid-cols-2")}>
               <div className="border border-[#C8CDD2] bg-white shadow-sm">
                 <Suspense fallback={
                   <div className="flex min-h-[32rem] items-center justify-center bg-white">
@@ -1681,11 +1335,9 @@ export default function DocumentDetailPage() {
                 </div>
               )}
             </div>
-          )}
         </div>
 
-        {/* Column 2: Details & Properties Tabs (Right) — hidden when form is full-screen */}
-        {(!formFullScreen || compareDoc) && (
+        {/* Column 2: Details & Properties Tabs (Right) */}
         <div className={cn("space-y-3", activeTab === "workflow" && !compareDoc ? "lg:col-span-6" : "lg:col-span-4")}>
 
           {/* Tab Selection Row */}
@@ -2368,8 +2020,6 @@ export default function DocumentDetailPage() {
               </div>
             )}
 
-          </div>
-
           {/* Ad-hoc signature request panel — below the details so the document
               preview on the left stays uninterrupted. */}
           {(doc.document_type?.code === "SIGREQ" || doc.document_type_name === "Signature request") && (
@@ -2378,7 +2028,7 @@ export default function DocumentDetailPage() {
             </Suspense>
           )}
         </div>
-        )}
+        </div>
 
       </div>
 
@@ -2418,24 +2068,6 @@ export default function DocumentDetailPage() {
                     const saver = metadataSaverRef.current;
                     setReleaseSaving(true);
                     let ok = true;
-                    if (formEditing && formDirtyRef.current) {
-                      const missing = requiredFieldLabels(formData?.sections ?? [], formValues, {
-                        groupNames: user?.group_names ?? [],
-                        isAdmin: Boolean(user?.has_admin_access || user?.is_staff),
-                        canEditConditionalSections,
-                      }, formProcessStep);
-                      if (missing.length) {
-                        toast.error(`Please fill in: ${missing.join(", ")}`);
-                        ok = false;
-                      } else {
-                        try {
-                          await updateFormMutation.mutateAsync();
-                          formDirtyRef.current = false;
-                        } catch {
-                          ok = false;
-                        }
-                      }
-                    }
                     if (ok && saver?.isDirty) {
                       ok = await saver.save();
                     }

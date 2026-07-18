@@ -30,6 +30,7 @@ class DocumentFilter(django_filters.FilterSet):
     reference     = django_filters.CharFilter(field_name="reference_number", lookup_expr="icontains")
     is_self_upload = django_filters.BooleanFilter()   # ← new: ?is_self_upload=true/false
     personal_tag  = django_filters.CharFilter(method="filter_personal_tag")
+    is_form       = django_filters.BooleanFilter(method="filter_is_form")
 
     class Meta:
         model  = Document
@@ -37,7 +38,7 @@ class DocumentFilter(django_filters.FilterSet):
             "status", "document_type", "supplier", "date_from", "date_to",
             "created_from", "created_to", "updated_from", "updated_to", "approved_from", "approved_to",
             "amount_min", "amount_max", "tags", "personal_tag", "department", "reference",
-            "is_self_upload",
+            "is_self_upload", "is_form",
         ]
 
     def filter_personal_tag(self, queryset, name, value):
@@ -54,6 +55,10 @@ class DocumentFilter(django_filters.FilterSet):
             ]
             return qs.filter(pk__in=matching)
         return qs.filter(metadata__personal_tags__contains=[value])
+
+    def filter_is_form(self, queryset, name, value):
+        has_sections = queryset.filter(metadata__form__sections__isnull=False)
+        return has_sections if value else queryset.exclude(id__in=has_sections.values("id"))
 
     def filter_status(self, queryset, name, value):
         values = [item.strip() for item in str(value).split(",") if item.strip()]

@@ -32,8 +32,6 @@ import { deriveDocumentTypeConfig } from "@/lib/documentTypeConfig";
 import { applyOcrToFields, sanitizeOcrFields, type OcrFields } from "@/lib/ocrFieldMatcher";
 import BulkScanPage from "@/pages/BulkScanPage";
 import TemplatePreview from "@/components/templates/TemplatePreview";
-import TemplateForm from "@/components/templates/TemplateForm";
-import BuiltTemplateFormModal from "@/components/templates/BuiltTemplateFormModal";
 import { resolveSource, type ReferenceValue } from "@/components/templates/referenceSources";
 import { WorkspaceCommandBar } from "@/components/shared/WorkspaceCommandBar";
 import CustomListbox from "@/components/ui/CustomListbox";
@@ -836,13 +834,9 @@ function TemplateFillSection({ template, register, values, onChange }: {
           </p>
         )
       ) : (
-        // Built templates are interactive forms — filled in-app, never in an external editor.
-        <div>
-          <p className="mb-3 text-xs font-semibold uppercase tracking-wider text-muted-foreground">
-            Fill in the form
-          </p>
-          <TemplateForm sections={template.sections ?? []} values={values} onChange={onChange} />
-        </div>
+        <p className="text-sm text-muted-foreground">
+          Built templates should be filled via the Forms area. Please use the Forms page for this template type.
+        </p>
       )}
     </div>
   );
@@ -1056,14 +1050,21 @@ export default function UploadPage({ scanOnly = false }: UploadPageProps) {
     ...QUERY_FIVE_MIN_STALE,
   });
 
+  const FORM_ONLY_MATCHERS = ["imprest"];
+  function isFormOnlyDocType(t: any) {
+    const code = String(t?.code || "").toLowerCase();
+    const name = String(t?.name || "").toLowerCase();
+    return FORM_ONLY_MATCHERS.some((m) => code.includes(m) || name.includes(m));
+  }
+
   const visibleDocTypes = useMemo(
     // Keep types whose workflow isn't fully configured: approval routing is
     // amount-rule based and the primary template is only a fallback, so a type
     // with no primary template may still route via its rules. Documents that
     // truly have no workflow are caught when submitting for approval.
-    () => scanOnly
-      ? docTypes.filter((type) => !deriveDocumentTypeConfig(type).isPersonalType)
-      : docTypes,
+    () => docTypes.filter((t) =>
+      !isFormOnlyDocType(t) && (!scanOnly || !deriveDocumentTypeConfig(t).isPersonalType)
+    ),
     [docTypes, scanOnly],
   );
   const selectedType = visibleDocTypes.find((t) => t.id === selectedTypeId);
@@ -1075,10 +1076,12 @@ export default function UploadPage({ scanOnly = false }: UploadPageProps) {
   const { data: typeTemplates = [] } = useQuery<unknown, Error, DocumentTemplateOption[]>({
     queryKey: ["templates", "document-type", selectedTypeId],
     queryFn: () => templatesAPI.list({ document_type_id: selectedTypeId }).then((r) => r.data as unknown),
-    select: (data) => normalizeListResponse<DocumentTemplateOption>(data).map((template) => ({
-      ...template,
-      document_type_id: template.document_type_id || template.document_type,
-    })),
+    select: (data) => normalizeListResponse<DocumentTemplateOption>(data)
+      .filter((t) => !(t.type === "built" && t.kind !== "document")) // built forms live in /forms only
+      .map((template) => ({
+        ...template,
+        document_type_id: template.document_type_id || template.document_type,
+      })),
     enabled: canUseTemplate && useTemplate,
     ...QUERY_FIVE_MIN_STALE,
   });
@@ -1088,10 +1091,9 @@ export default function UploadPage({ scanOnly = false }: UploadPageProps) {
   // form's field values (strings, booleans, table-row arrays). Filled in-app.
   const [templateValues, setTemplateValues] = useState<Record<string, unknown>>({});
   useEffect(() => { setTemplateValues({}); }, [selectedTemplateId]);
-  const [showBuiltForm, setShowBuiltForm] = useState(false);
-  useEffect(() => { setShowBuiltForm(false); }, [selectedTemplateId]);
 
   // "Built form" templates (interactive, completed via the full-screen modal).
+  // These should now be handled via the Forms page, not UploadPage.
   const isBuiltTemplate = selectedTemplate?.type === "built" && selectedTemplate?.kind !== "document";
   // Designer ("document"-kind) templates: admin-standardised layouts whose merge
   // fields auto-populate (author, date, reference, the document-type metadata the
@@ -1504,11 +1506,11 @@ export default function UploadPage({ scanOnly = false }: UploadPageProps) {
       }
       // Office uploads AND designer ("document"-kind) templates are filled here
       // with {{merge_field}} values and rendered to an editable file. Built FORM
-      // templates are completed via the full-screen modal instead.
+      // templates should be completed via the Forms page, not UploadPage.
       const usesPlaceholders =
         selectedTemplate.type === "uploaded" || selectedTemplate.kind === "document";
       if (!usesPlaceholders) {
-        setShowBuiltForm(true);
+        toast.error("Built templates should be filled via the Forms page. Please navigate to /forms to use this template.");
         return;
       }
 
@@ -2472,18 +2474,6 @@ export default function UploadPage({ scanOnly = false }: UploadPageProps) {
       )}
       </div>
     </div>
-
-    {/* ── Built template form modal ─────────────────────────────────────────── */}
-    {showBuiltForm && selectedTemplate && (
-      <BuiltTemplateFormModal
-        template={selectedTemplate}
-        documentTypeId={selectedTypeId}
-        documentTypeName={selectedType?.name}
-        initialTitle={getValues("title")}
-        initialValues={templateBaseValuesFromForm(getValues() as Record<string, unknown>)}
-        onClose={() => setShowBuiltForm(false)}
-      />
-    )}
 
     {/* ── PDF editor (pre-upload) ────────────────────────────────────────────── */}
     {showPdfEditor && droppedFile && (

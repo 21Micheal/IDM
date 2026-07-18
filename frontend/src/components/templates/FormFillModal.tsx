@@ -1,20 +1,16 @@
 /**
- * BuiltTemplateFormModal
+ * FormFillModal
  *
- * Full-screen form experience for filling a "built" (builder-defined) template
- * before creating a document.
+ * Forms-area counterpart to components/templates/BuiltTemplateFormModal.
+ * Nearly identical (same fill/attachment/validation flow) — the only
+ * behavioural difference is that on success it lands the person on
+ * `/forms/:id` (the new dedicated Forms detail page) instead of
+ * `/documents/:id`, so a form created here stays inside the Forms area.
  *
- * Layout: header (template name + editable title + close) → scrollable TemplateForm
- *         → sticky footer (Cancel | Create Document)
- *
- * Field handling:
- *   • Text / number / select / boolean / table / signature  → sent as JSON in `values`
- *   • file / image fields  → collected as File objects and sent with the create
- *     request as form attachments. They are not document versions.
- *
- * Title persistence:
- *   • `initialTitle` is forwarded from the upload page title input so users don't
- *     have to retype what they already entered.
+ * This is intentionally a separate component rather than an edit to
+ * BuiltTemplateFormModal so this pass doesn't touch existing files — once the
+ * old Documents-side form handling is removed, the two can be collapsed back
+ * into one (BuiltTemplateFormModal taking a `basePath` prop, e.g.).
  */
 
 import { useState } from "react";
@@ -29,8 +25,6 @@ import BudgetBanner from "@/components/templates/BudgetBanner";
 import { collectFormAttachments } from "@/components/templates/formAttachments";
 import { toast } from "@/components/ui/vault-toast";
 import { X, Loader2, CheckCircle, FileText, LayoutTemplate, Paperclip } from "lucide-react";
-
-// ── Types ─────────────────────────────────────────────────────────────────────
 
 type DocumentTemplateOption = {
   id: string;
@@ -52,9 +46,7 @@ type Props = {
   onClose: () => void;
 };
 
-// ── Main modal ────────────────────────────────────────────────────────────────
-
-export default function BuiltTemplateFormModal({
+export default function FormFillModal({
   template,
   documentTypeId,
   initialTitle,
@@ -65,10 +57,7 @@ export default function BuiltTemplateFormModal({
   const queryClient = useQueryClient();
   const currentUser = useAuthStore((s) => s.user);
 
-  // Prefer whatever the user typed on the upload page, fall back to template name
-  const [title, setTitle] = useState(
-    (initialTitle ?? "").trim() || template.name
-  );
+  const [title, setTitle] = useState((initialTitle ?? "").trim() || template.name);
   const [values, setValues] = useState<Record<string, unknown>>(() => initialValues);
   const [uploadingFiles, setUploadingFiles] = useState(false);
 
@@ -104,23 +93,22 @@ export default function BuiltTemplateFormModal({
       return data.document_id as string;
     },
     onSuccess: (docId) => {
+      queryClient.invalidateQueries({ queryKey: ["forms"] });
       queryClient.invalidateQueries({ queryKey: ["documents"] });
-      toast.success("Document created from template.");
-      navigate(`/documents/${docId}`);
+      toast.success("Form created.");
+      navigate(`/forms/${docId}`);
     },
     onError: (err: any) => {
       setUploadingFiles(false);
-      toast.error(extractApiError(err, "Could not create document."));
+      toast.error(extractApiError(err, "Could not create the form."));
     },
   });
 
   const handleCreate = () => {
     if (!title.trim()) {
-      toast.error("Please enter a document title.");
+      toast.error("Please enter a form title.");
       return;
     }
-    // Validate required fields — File fields become filename placeholders so a
-    // picked file counts as filled.
     const { jsonValues } = collectFormAttachments(values);
     const missing = requiredFieldLabels(template.sections ?? [], jsonValues, {
       groupNames: currentUser?.group_names ?? [],
@@ -133,42 +121,34 @@ export default function BuiltTemplateFormModal({
     createMutation.mutate();
   };
 
-  // Count pending file attachments (simple fields + table cells) for the badge.
   const fileCount = collectFormAttachments(values).attachments.length;
 
   return (
     <div className="fixed inset-0 z-50 flex flex-col bg-[#EDEDED]">
-
-      {/* ── Header ─────────────────────────────────────────────────────────── */}
       <div className="flex h-[60px] flex-shrink-0 items-center gap-4 border-b border-[#C8CDD2] bg-[#287EAD] px-5 pr-6 text-white">
-        {/* Template identity */}
         <div className="flex items-center gap-3 flex-shrink-0">
           <div className="flex h-8 w-8 flex-shrink-0 items-center justify-center rounded bg-white/20">
             <LayoutTemplate className="h-4 w-4" />
           </div>
           <div className="hidden sm:block">
             <p className="text-[10px] font-semibold text-white/60 uppercase tracking-widest leading-none mb-0.5">
-              Fill Template
+              New Form
             </p>
-            <h1 className="truncate text-sm font-bold leading-tight max-w-[180px]">
-              {template.name}
-            </h1>
+            <h1 className="truncate text-sm font-bold leading-tight max-w-[180px]">{template.name}</h1>
           </div>
         </div>
 
-        {/* Document title input — grows to fill */}
         <div className="flex flex-1 items-center gap-2 rounded border border-white/30 bg-white/10 px-3 py-1.5 min-w-0">
           <FileText className="h-3.5 w-3.5 flex-shrink-0 text-white/70" />
           <input
             value={title}
             onChange={(e) => setTitle(e.target.value)}
             className="min-w-0 flex-1 bg-transparent text-sm text-white placeholder:text-white/50 outline-none"
-            placeholder="Document title…"
+            placeholder="Form title…"
             onKeyDown={(e) => e.key === "Enter" && handleCreate()}
           />
         </div>
 
-        {/* File count badge */}
         {fileCount > 0 && (
           <div className="flex-shrink-0 flex items-center gap-1.5 rounded border border-white/30 bg-white/10 px-2.5 py-1 text-xs font-semibold text-white">
             <Paperclip className="h-3.5 w-3.5" />
@@ -176,17 +156,11 @@ export default function BuiltTemplateFormModal({
           </div>
         )}
 
-        {/* Close */}
-        <button
-          onClick={onClose}
-          className="flex-shrink-0 rounded p-1.5 text-white/70 hover:bg-white/15 hover:text-white transition-colors"
-          title="Cancel"
-        >
+        <button onClick={onClose} className="flex-shrink-0 rounded p-1.5 text-white/70 hover:bg-white/15 hover:text-white transition-colors" title="Cancel">
           <X className="h-5 w-5" />
         </button>
       </div>
 
-      {/* ── Sub-header — instructions ───────────────────────────────────────── */}
       <div className="flex-shrink-0 border-b border-[#C8CDD2] bg-white px-6 py-2.5">
         <p className="text-xs text-[#5E6870]">
           Complete all required fields — marked <span className="text-red-500 font-semibold">*</span>.
@@ -198,7 +172,6 @@ export default function BuiltTemplateFormModal({
         </p>
       </div>
 
-      {/* ── Scrollable form ─────────────────────────────────────────────────── */}
       <div className="flex-1 overflow-y-auto px-6 py-6">
         {sections.length === 0 ? (
           <div className="flex flex-col items-center justify-center py-24 text-center">
@@ -228,19 +201,12 @@ export default function BuiltTemplateFormModal({
         )}
       </div>
 
-      {/* ── Sticky footer ───────────────────────────────────────────────────── */}
       <div className="flex-shrink-0 flex items-center justify-between border-t border-[#C8CDD2] bg-white px-6 py-4">
-        <button
-          onClick={onClose}
-          className="px-5 py-2 text-sm font-semibold text-[#5E6870] hover:text-[#1F2933] border border-[#C8CDD2] bg-white hover:bg-[#F7F8F9] transition-colors rounded"
-        >
+        <button onClick={onClose} className="px-5 py-2 text-sm font-semibold text-[#5E6870] hover:text-[#1F2933] border border-[#C8CDD2] bg-white hover:bg-[#F7F8F9] transition-colors rounded">
           Cancel
         </button>
-        <button
-          onClick={handleCreate}
-          disabled={isPending}
-          className="flex items-center gap-2 rounded bg-[#287EAD] px-7 py-2 text-sm font-semibold text-white hover:bg-[#1E6F99] transition-colors disabled:opacity-60"
-        >
+        <button onClick={handleCreate} disabled={isPending}
+          className="flex items-center gap-2 rounded bg-[#287EAD] px-7 py-2 text-sm font-semibold text-white hover:bg-[#1E6F99] transition-colors disabled:opacity-60">
           {isPending ? (
             <>
               <Loader2 className="h-4 w-4 animate-spin" />
@@ -249,7 +215,7 @@ export default function BuiltTemplateFormModal({
           ) : (
             <>
               <CheckCircle className="h-4 w-4" />
-              Create Document
+              Create Form
             </>
           )}
         </button>

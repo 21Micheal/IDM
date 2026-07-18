@@ -72,7 +72,8 @@ function StageRow({
   const hasError      = posting.status === "failed" && errorMessages.length > 0;
   const rawXml        = posting.response_xml || "";
   const hasSummary    = Boolean(posting.error || posting.message);
-  const stageLabel    = posting.stage_label || (isPO ? "LPO" : `Stage ${posting.stage}`);
+  // Prioritize custom stage labels for stages 1 and 2
+  const stageLabel    = (isPO ? "LPO" : posting.stage === 1 ? "Stage 1-Initial" : posting.stage === 2 ? "Stage 2-Retirement" : posting.stage_label || `Stage ${posting.stage}`);
 
   const onRetry = useCallback(async () => {
     setRetrying(true);

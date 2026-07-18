@@ -81,11 +81,7 @@ export function ApprovalStagesTable({ steps = [], isLoading, phase }: ApprovalSt
   }
 
   if (!steps.length) {
-    return (
-      <div className="flex items-center justify-center border border-dashed border-[#C8CDD2] bg-[#F5F7F8] p-6 text-sm text-[#5E6870]">
-        No approval stages to display.
-      </div>
-    );
+    return null;
   }
 
   // Filter out structural nodes (start, end, gateway) - only show task nodes

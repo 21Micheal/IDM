@@ -7,7 +7,7 @@ import {
   loadWorkflowData,
   type WorkflowNotificationContext,
 } from "@/components/notifications/workflow-data";
-import { notificationsAPI, normalizeListResponse } from "@/services/api";
+import { notificationsAPI, normalizeListResponse, documentsAPI } from "@/services/api";
 import type { Notification } from "@/types";
 import {
   getDocumentIdFromLink,
@@ -60,7 +60,15 @@ export default function NotificationWorkflowPage() {
     refetchOnWindowFocus: true,
   });
 
-  const viewDocumentLink = notificationContext?.viewDocumentLink || `/documents/${documentId}`;
+  const { data: doc } = useQuery({
+    queryKey: ["document", documentId],
+    queryFn: () => documentsAPI.get(documentId).then((r) => r.data),
+    enabled: !!documentId,
+    staleTime: 60_000,
+  });
+
+  const isForm = Boolean(doc?.metadata?.form?.sections || doc?.is_form);
+  const viewDocumentLink = notificationContext?.viewDocumentLink || (isForm ? `/forms/${documentId}` : `/documents/${documentId}`);
 
   return (
     <div className="-m-6 flex min-h-[calc(100vh-3.5rem)] flex-col bg-[#EDEDED]">

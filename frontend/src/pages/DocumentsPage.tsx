@@ -463,6 +463,7 @@ export default function DocumentsPage({ personalOnly = false }: DocumentsPagePro
     status: isArchiveView ? "archived" : personalOnly ? undefined : statusFilter || undefined,
     document_type: isArchiveView || personalOnly ? undefined : typeFilter || undefined,
     supplier: isArchiveView || personalOnly ? undefined : supplierFilter || undefined,
+    is_form: false,
     ordering: `${sortDir === "desc" ? "-" : ""}${sort}`,
     page,
     page_size: PAGE_SIZE,
@@ -527,6 +528,7 @@ export default function DocumentsPage({ personalOnly = false }: DocumentsPagePro
       status: isArchiveView ? "archived" : personalOnly ? undefined : statusFilter || undefined,
       document_type: isArchiveView || personalOnly ? undefined : typeFilter || undefined,
       supplier: isArchiveView || personalOnly ? undefined : supplierFilter || undefined,
+      is_form: false,
       ordering: `${sortDir === "desc" ? "-" : ""}${sort}`,
       page_size: PAGE_SIZE,
     };

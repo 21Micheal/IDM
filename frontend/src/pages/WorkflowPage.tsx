@@ -17,6 +17,7 @@ import {
   getTaskDocumentTitle,
   getTaskDocumentType,
   getTaskUploaderName,
+  getTaskIsForm,
   hasWorkflowTaskFilters,
   type WorkflowTaskFilters,
 } from "@/lib/workflowTaskFilters";
@@ -242,6 +243,7 @@ export default function WorkflowPage() {
           const documentFormat = getTaskDocumentFormat(task);
           const department = getTaskDepartment(task);
           const uploaderName = getTaskUploaderName(task);
+          const isForm = getTaskIsForm(task);
 
           const isOverdue = task.due_at && new Date(task.due_at) < new Date();
 
@@ -250,7 +252,9 @@ export default function WorkflowPage() {
               key={task.id}
               type="button"
               onClick={() => {
-                if (documentId) navigate(`/documents/${documentId}`);
+                if (documentId) {
+                  navigate(isForm ? `/forms/${documentId}` : `/documents/${documentId}`);
+                }
               }}
               className="flex w-full items-start gap-4 border border-[#C8CDD2] bg-white p-4 text-left transition-colors hover:bg-[#F5F7F8]"
             >

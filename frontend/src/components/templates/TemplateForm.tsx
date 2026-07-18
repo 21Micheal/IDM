@@ -1397,13 +1397,17 @@ function TemplateForm({ sections, values, onChange, readOnly = false, documentId
   return (
     <div className="space-y-6">
       {list.map((section, si) => {
-        // Hidden / conditionally-hidden / role-restricted sections drop out entirely.
+        // Hidden / conditionally-hidden / role-restricted sections drop out
+        // entirely. Whether the viewer is ALLOWED TO EDIT a conditionally-
+        // editable section/field is a different axis — handled below via
+        // `sectionEditable` / `evalEditableForViewer`, which locks the
+        // controls to read-only. It must never also hide the section, or an
+        // approver reviewing the document loses visibility into content
+        // they're specifically there to review.
         if (!evalVisible(section, liveValues as TemplateFormValues, allFields, processStep)) return null;
         if (!sectionVisibleToViewer(section, viewer)) return null;
-        if (conditionalEditBlockedForViewer(section, viewer)) return null;
         const visibleFields = (section.fields ?? []).filter((f) =>
           evalVisible(f, liveValues as TemplateFormValues, allFields, processStep)
-          && !conditionalEditBlockedForViewer(f, viewer)
         );
         // Editability cascades: a read-only/locked section locks all its fields.
         const sectionEditable = evalEditableForViewer(section, liveValues as TemplateFormValues, allFields, processStep, viewer);

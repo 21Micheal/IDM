@@ -96,6 +96,11 @@ export function getTaskDocumentId(task: WorkflowTask) {
   return getTaskDocument(task)?.id || task.document_id;
 }
 
+export function getTaskIsForm(task: WorkflowTask) {
+  const doc = getTaskDocument(task);
+  return Boolean(doc?.metadata?.form?.sections || doc?.is_form);
+}
+
 function isDueSoon(task: WorkflowTask, now = new Date()) {
   if (!task.due_at) return false;
   const dueDate = new Date(task.due_at);
