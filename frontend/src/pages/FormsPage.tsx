@@ -5,55 +5,52 @@
  * imprest requests, retirements, etc.) — separated out from the generic
  * Documents area per the July 2026 forms rework.
  *
- * This revision fixes three bugs from the previous pass:
+ * Pass 5 — corpus-wide filtering/pagination:
+ * Every earlier pass fetched the TABLE from a server-paginated query
+ * (PAGE_SIZE rows) and applied department/requester/date/amount/stage/type
+ * filters CLIENT-SIDE on top of that already-narrow slice — so a matching
+ * form sitting on page 2 of the server results could vanish from a client
+ * filter's view entirely, and row numbering only ever counted within one
+ * server page. Restructured around a single pool query (same
+ * `STATS_POOL_SIZE`-capped fetch the stat cards already used) that now
+ * doubles as the source for the table: EVERY filter (search, status, stage,
+ * type, variance, department, requester, date, amount) runs client-side
+ * against that one pool, then the filtered result is paginated client-side.
+ * Numbering and pagination are now consistent with what's actually being
+ * filtered — "row 11" really is the 11th matching form, not the 11th row of
+ * whatever the server happened to hand back. The tradeoff (documented at
+ * STATS_POOL_SIZE below) is the same one already accepted for the stat
+ * cards: this covers up to STATS_POOL_SIZE forms, not the literal entire
+ * corpus. Ask the backend for a real filtering/aggregate endpoint once forms
+ * comfortably exceed that.
  *
- *   1. Stat cards (and the status chips) were computed from `allRows`, which
- *      is only the CURRENT PAGE of the paginated table query (PAGE_SIZE=25).
- *      Any pending-approval or ready-for-retirement form sitting on page 2+
- *      simply never got counted — "doesn't recognise pending approvals" was
- *      this, not a logic bug in isPendingApproval itself. Fixed by adding a
- *      separate, unpaginated "stats pool" query (`page_size: 500`, no
- *      status/search filter) that the cards/chips/filter-option lists are
- *      now computed from, independent of the table's own pagination. 500 is
- *      a practical cap, not a real fix — once forms comfortably exceed that,
- *      ask the backend for a real `/forms/summary/`-style aggregate endpoint
- *      instead of computing this client-side at all.
- *
- *   2. "Ready for retirement" also matched `builder_workflow_phase ===
- *      "retirement" && status === "approved"` in addition to
- *      `can_submit_retirement`. That phase+status combo isn't unique to
- *      "awaiting retirement submission" — it also matches a retirement
- *      that's already been submitted-and-approved (fully closed out), so it
- *      double-counted. `can_submit_retirement` is the backend's own,
- *      already-correct answer to "is this specific thing true right now" —
- *      trust it alone.
- *
- *   3. There are two distinct approval stages per form — request and
- *      retirement (see builder_workflow_phase) — but the old "All document
- *      types" filter offered document TYPES, which is useless here (every
- *      form is document type Imprest). Replaced with a "Request / Retirement"
- *      form-stage filter, since that's the distinction that actually varies
- *      form-to-form. The "Pending Approval" card/count is now scoped to the
- *      REQUEST stage only, to stay a distinct, non-overlapping number from
- *      the Ready-for-Retirement card (a request-stage-pending form is never
- *      also ready for retirement, and vice versa).
- *
- * Other notes carried over from pass 1 (still true):
+ * Other notes carried over from earlier passes (still true):
  *   - `documentsAPI.list({ is_form: true, ... })` — `is_form` isn't a real
  *     backend filter yet; this page also filters client-side on
  *     `metadata.form.sections` as a safety net regardless.
- *   - "Over/Under expenditure" (retirement variance) reads
- *     `metadata.form.retirement_variance`, which the backend doesn't
- *     populate yet — pending the shared apps/sunsystems mapping/posting
- *     files. Renders "—" until then.
  *   - RBAC relies entirely on the backend's existing document-list scoping.
+ *   - "Ready for retirement" trusts `doc.can_submit_retirement` alone (the
+ *     backend's own answer to "is this true right now").
+ *   - "Pending Approval" is scoped to the REQUEST stage only, kept disjoint
+ *     from "Ready for Retirement" so the three stat cards never overlap.
+ *   - Amount prefers `metadata.form.requested_amount` (backend-resolved from
+ *     the template's SunSystems retirement mapping — see
+ *     apps/sunsystems/variance.py's get_requested_amount), falling back to
+ *     the legacy `doc.amount` column, then guessed field-key names.
+ *   - Description has no admin-designated source anywhere in the mapping
+ *     schema, so it's still a guessed field-key list — flagged inline.
+ *   - "Name" is the form's own title — what the person typed when creating
+ *     it (FormFillModal defaults that input to the template's name, but it's
+ *     editable, so it's the DOCUMENT's title, not a template lookup). The
+ *     "type" filter/column-adjacent template list is a SEPARATE concept —
+ *     which template (LPO, Journal, etc.) the form's schema came from.
  */
 
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { Link } from "react-router-dom";
 import { useQuery } from "@tanstack/react-query";
 import { extractApiError } from "@/lib/apiError";
-import { documentsAPI } from "@/services/api";
+import { documentsAPI, documentTypesAPI, templatesAPI, normalizeListResponse } from "@/services/api";
 import { format } from "date-fns";
 import { cn } from "@/lib/utils";
 import {
@@ -67,10 +64,10 @@ import NewFormModal from "@/components/templates/FormUploadPage";
 
 // ── Local helpers ─────────────────────────────────────────────────────────────
 
-const PAGE_SIZE = 25;
-// The pool used ONLY for stat cards / chip counts / filter-option lists, kept
-// independent of the table's own pagination (see fix #1 above). Not a true
-// "fetch everything" — a practical cap until there's a real backend summary.
+const PAGE_SIZE = 10;
+// The single pool this whole page (stat cards, chips, filters, AND the table)
+// is computed from. Not a true "fetch everything" — a practical cap until
+// there's a real backend summary/filter endpoint.
 const STATS_POOL_SIZE = 500;
 
 const STATUS_CHIPS: { value: string; label: string }[] = [
@@ -83,11 +80,34 @@ const STATUS_CHIPS: { value: string; label: string }[] = [
   { value: "archived", label: "Archived" },
 ];
 
-const PHASE_OPTIONS: { value: string; label: string }[] = [
-  { value: "", label: "All form types" },
-  { value: "request", label: "Imprest Request" },
-  { value: "retirement", label: "Imprest Retirement" },
+// "Stage" (request vs retirement) is a separate axis from "type" — Imprest
+// covers several distinct FORM TEMPLATES (LPO, Journal, etc. — see
+// imprestTemplates below), each of which independently goes through both
+// stages. Kept as its own filter rather than folded into the type dropdown.
+const STAGE_OPTIONS: { value: string; label: string }[] = [
+  { value: "", label: "All stages" },
+  { value: "request", label: "Request" },
+  { value: "retirement", label: "Retirement" },
 ];
+
+const VARIANCE_OPTIONS: { value: string; label: string }[] = [
+  { value: "", label: "All variance" },
+  { value: "over", label: "Overspent" },
+  { value: "under", label: "Underspent" },
+];
+
+// Matches the Imprest document type by code/name, same heuristic
+// NewFormModal.tsx uses — there's no first-class "is this an Imprest type"
+// flag on DocumentType yet.
+const IMPREST_MATCHERS = ["imprest"];
+function isImprestDocType(t: any): boolean {
+  const code = String(t?.code || "").toLowerCase();
+  const name = String(t?.name || "").toLowerCase();
+  return IMPREST_MATCHERS.some((m) => code.includes(m) || name.includes(m));
+}
+function isBuiltForm(t: any): boolean {
+  return t?.type === "built" && t?.kind !== "document";
+}
 
 function isFormDocument(doc: any): boolean {
   return Boolean(doc?.metadata?.form?.sections);
@@ -97,6 +117,12 @@ function getFormValues(doc: any): Record<string, unknown> {
   return doc?.metadata?.form?.values ?? {};
 }
 
+// There's no admin-designated "this is the description field" concept
+// anywhere in the SunSystems mapping schema (unlike the amount — see
+// getFormAmount below) — so this list is a guess at common field-key names,
+// not an authoritative lookup. If your imprest template's purpose/reason
+// field uses a different key, add it here (or better: tell me the actual
+// key and I'll wire it in directly).
 const DESCRIPTION_KEYS = ["description", "purpose", "purpose_of_travel", "reason", "details", "activity"];
 function getFormDescription(doc: any): string {
   const values = getFormValues(doc);
@@ -117,16 +143,34 @@ function getFormRequester(doc: any): string {
   return doc?.uploaded_by?.full_name || doc?.uploaded_by?.email || doc?.owned_by?.full_name || "—";
 }
 
+// "Name" — the form's OWN title, i.e. what the person typed when creating it.
+// FormFillModal pre-fills that input with the template's name, but it's an
+// editable field on the document (`doc.title`), not a fixed template lookup —
+// so this reads the document's title directly, not metadata.form.template_id.
+function getFormName(doc: any): string {
+  return doc?.title || doc?.reference_number || "—";
+}
+
 function getFormAmount(doc: any): number | null {
+  // Authoritative: the field the template's SunSystems retirement mapping
+  // names as "issued/requested amount" (see apps/sunsystems/variance.py's
+  // get_requested_amount) — synced onto metadata.form.requested_amount from
+  // the request phase onward, no field-name guessing involved. Only absent
+  // when the imprest template has no retirement mapping configured at all.
+  const requested = Number(doc?.metadata?.form?.requested_amount);
+  if (Number.isFinite(requested) && requested > 0) return requested;
+  // Legacy fallback: documents created before Forms was split out of the
+  // regular upload flow may still carry a top-level `amount` from that
+  // page's old "Amount" field. New forms never set this column.
   const amt = Number(doc?.amount);
   if (Number.isFinite(amt) && amt > 0) return amt;
+  // Last resort — guessed field-key names, for a form whose template has no
+  // retirement mapping configured (so there's nothing authoritative above).
   const values = getFormValues(doc);
-  const alt = Number((values as any)?.amount ?? (values as any)?.total ?? (values as any)?.total_amount);
+  const alt = Number((values as any)?.amount ?? (values as any)?.total ?? (values as any)?.total_amount ?? (values as any)?.requested_amount);
   return Number.isFinite(alt) && alt > 0 ? alt : null;
 }
 
-/** Imprest retirement variance — see backend TODO note at the top of this
- * file. Reads a field the backend doesn't populate yet; stays "—" until then. */
 function getFormVariance(doc: any): { amount: number; kind: "over" | "under" } | null {
   const v = doc?.metadata?.form?.retirement_variance;
   if (!v || typeof v !== "object") return null;
@@ -135,17 +179,18 @@ function getFormVariance(doc: any): { amount: number; kind: "over" | "under" } |
   return { amount: Math.abs(amount), kind: v.kind === "under" || amount < 0 ? "under" : "over" };
 }
 
-// A form has exactly two approval stages — request and retirement — tracked
+// A form has exactly two approval STAGES — request and retirement — tracked
 // by builder_workflow_phase. Absent/undefined means it hasn't reached the
-// retirement stage yet, i.e. it's still a "request" form.
-function getFormPhase(doc: any): "request" | "retirement" {
+// retirement stage yet, i.e. it's still at the "request" stage. (Distinct
+// from "type"/template — see the type filter below.)
+function getFormStage(doc: any): "request" | "retirement" {
   return doc?.builder_workflow_phase === "retirement" ? "retirement" : "request";
 }
 
 // The backend already computes exactly this ("can this document's retirement
-// be submitted right now") — trust it alone. Layering on a
-// phase+status guess double-counted retirements that were already submitted
-// (and therefore no longer "ready" to submit).
+// be submitted right now") — trust it alone. Layering on a phase+status
+// guess double-counted retirements that were already submitted (and
+// therefore no longer "ready" to submit).
 function isReadyForRetirement(doc: any): boolean {
   return Boolean(doc.can_submit_retirement);
 }
@@ -155,7 +200,7 @@ function isReadyForRetirement(doc: any): boolean {
 // three stat cards never overlap.
 const REQUEST_PENDING_STATUSES = ["pending_approval", "request_pending", "on_hold"];
 function isPendingRequestApproval(doc: any): boolean {
-  if (getFormPhase(doc) === "retirement") return false;
+  if (getFormStage(doc) === "retirement") return false;
   const step = doc.builder_process_step || doc.status;
   return REQUEST_PENDING_STATUSES.includes(step);
 }
@@ -174,7 +219,9 @@ function formatMoney(amount: number | null, currency?: string) {
 export default function FormsPage() {
   const [search, setSearch] = useState("");
   const [statusFilter, setStatusFilter] = useState("");
-  const [phaseFilter, setPhaseFilter] = useState("");
+  const [stageFilter, setStageFilter] = useState("");
+  const [templateFilter, setTemplateFilter] = useState("");
+  const [varianceFilter, setVarianceFilter] = useState("");
   const [departmentFilter, setDepartmentFilter] = useState("");
   const [requesterFilter, setRequesterFilter] = useState("");
   const [dateFrom, setDateFrom] = useState("");
@@ -184,32 +231,31 @@ export default function FormsPage() {
   const [page, setPage] = useState(1);
   const [showNewFormModal, setShowNewFormModal] = useState(false);
 
-  // ── Table query — paginated, respects the server-side filters ─────────────
-  const { data, isLoading, error } = useQuery({
-    queryKey: ["forms", "list", { search, statusFilter, page }],
-    queryFn: () =>
-      documentsAPI.list({
-        is_form: true,
-        search: search || undefined,
-        status: statusFilter || undefined,
-        ordering: "-created_at",
-        page,
-        page_size: PAGE_SIZE,
-      }).then((r) => r.data),
-    staleTime: 15_000,
+  // ── Imprest templates (LPO, Journal, etc.) — for the type filter. Imprest
+  // is one document type with several form templates under it; this is
+  // unrelated to the request/retirement stage above, and unrelated to a
+  // form's own (user-typed) Name.
+  const { data: docTypes = [] } = useQuery({
+    queryKey: ["document-types"],
+    queryFn: () => documentTypesAPI.list().then((r) => r.data as unknown),
+    select: (data) => normalizeListResponse<any>(data),
+    staleTime: 5 * 60_000,
+  });
+  const imprestType = useMemo(() => docTypes.find(isImprestDocType) ?? null, [docTypes]);
+
+  const { data: imprestTemplates = [] } = useQuery({
+    queryKey: ["templates", "document-type", imprestType?.id],
+    queryFn: () => templatesAPI.list({ document_type_id: imprestType!.id }).then((r) => r.data as unknown),
+    select: (data) => normalizeListResponse<any>(data).filter(isBuiltForm),
+    enabled: Boolean(imprestType?.id),
+    staleTime: 5 * 60_000,
   });
 
-  const allRows = useMemo(() => {
-    const results = (data?.results ?? []) as any[];
-    return results.filter(isFormDocument);
-  }, [data]);
-
-  // ── Stats pool — a separate, larger, unfiltered fetch used ONLY for the
-  // stat cards, status chip counts, and department/requester option lists.
-  // Independent of the table's pagination/status filter/search — see fix #1
-  // in the file header for why that separation matters.
-  const { data: statsData } = useQuery({
-    queryKey: ["forms", "stats-pool"],
+  // ── The one pool everything on this page reads from — see the "Pass 5"
+  // note at the top of the file for why this replaced a server-paginated
+  // table query + a separate stats-only query.
+  const { data: poolData, isLoading, error } = useQuery({
+    queryKey: ["forms", "pool"],
     queryFn: () =>
       documentsAPI.list({
         is_form: true,
@@ -217,62 +263,123 @@ export default function FormsPage() {
         page: 1,
         page_size: STATS_POOL_SIZE,
       }).then((r) => r.data),
-    staleTime: 30_000,
+    staleTime: 15_000,
   });
-  const statsRows = useMemo(() => {
-    const results = (statsData?.results ?? []) as any[];
+  const poolRows = useMemo(() => {
+    const results = (poolData?.results ?? []) as any[];
     return results.filter(isFormDocument);
-  }, [statsData]);
+  }, [poolData]);
 
   const departmentOptions = useMemo(
-    () => Array.from(new Set(statsRows.map(getFormDepartment).filter((d) => d !== "—"))).sort((a, b) => a.localeCompare(b)),
-    [statsRows],
+    () => Array.from(new Set(poolRows.map(getFormDepartment).filter((d) => d !== "—"))).sort((a, b) => a.localeCompare(b)),
+    [poolRows],
   );
   const requesterOptions = useMemo(() => {
     const map = new Map<string, string>();
-    statsRows.forEach((doc) => {
+    poolRows.forEach((doc) => {
       const id = doc.uploaded_by?.id;
       if (id) map.set(id, getFormRequester(doc));
     });
     return Array.from(map.entries());
-  }, [statsRows]);
+  }, [poolRows]);
 
+  // Every filter runs against the SAME pool — corpus-wide (up to
+  // STATS_POOL_SIZE), not "whatever page the server handed back".
   const filteredRows = useMemo(() => {
-    return allRows.filter((doc) => {
-      if (phaseFilter && getFormPhase(doc) !== phaseFilter) return false;
+    const q = search.trim().toLowerCase();
+    return poolRows.filter((doc) => {
+      if (q) {
+        const title = String(doc.title || "").toLowerCase();
+        const ref = String(doc.reference_number || "").toLowerCase();
+        if (!title.includes(q) && !ref.includes(q)) return false;
+      }
+      if (statusFilter && doc.status !== statusFilter) return false;
+      if (stageFilter && getFormStage(doc) !== stageFilter) return false;
+      if (templateFilter && String(doc?.metadata?.form?.template_id ?? "") !== templateFilter) return false;
+      if (varianceFilter) {
+        const v = getFormVariance(doc);
+        if (!v || v.kind !== varianceFilter) return false;
+      }
       if (departmentFilter && getFormDepartment(doc) !== departmentFilter) return false;
       if (requesterFilter && doc.uploaded_by?.id !== requesterFilter) return false;
-      if (dateFrom && new Date(doc.document_date || doc.created_at) < new Date(dateFrom)) return false;
-      if (dateTo && new Date(doc.document_date || doc.created_at) > new Date(dateTo)) return false;
+      if (dateFrom && new Date(doc.created_at) < new Date(dateFrom)) return false;
+      if (dateTo && new Date(doc.created_at) > new Date(dateTo)) return false;
       const amt = getFormAmount(doc);
       if (amountMin && (amt === null || amt < Number(amountMin))) return false;
       if (amountMax && (amt === null || amt > Number(amountMax))) return false;
       return true;
     });
-  }, [allRows, phaseFilter, departmentFilter, requesterFilter, dateFrom, dateTo, amountMin, amountMax]);
+  }, [
+    poolRows, search, statusFilter, stageFilter, templateFilter, varianceFilter,
+    departmentFilter, requesterFilter, dateFrom, dateTo, amountMin, amountMax,
+  ]);
 
-  // Status chip counts — from the stats pool, not the paginated table.
+  // Reset to page 1 whenever any filter narrows/widens the result set —
+  // otherwise you can land on an empty page 3 after a filter shrinks the list.
+  useEffect(() => { setPage(1); }, [
+    search, statusFilter, stageFilter, templateFilter, varianceFilter,
+    departmentFilter, requesterFilter, dateFrom, dateTo, amountMin, amountMax,
+  ]);
+
+  const totalPages = Math.max(1, Math.ceil(filteredRows.length / PAGE_SIZE));
+  const pageRows = useMemo(() => {
+    const start = (page - 1) * PAGE_SIZE;
+    return filteredRows.slice(start, start + PAGE_SIZE);
+  }, [filteredRows, page]);
+
+  // Status chip counts — from the pool, corpus-wide (not the current filtered
+  // page). Each chip counts against every filter EXCEPT status itself, so the
+  // numbers reflect "if you clicked this chip" rather than double-applying
+  // the currently-selected status.
   const statusCounts = useMemo(() => {
+    const withoutStatus = poolRows.filter((doc) => {
+      const q = search.trim().toLowerCase();
+      if (q) {
+        const title = String(doc.title || "").toLowerCase();
+        const ref = String(doc.reference_number || "").toLowerCase();
+        if (!title.includes(q) && !ref.includes(q)) return false;
+      }
+      if (stageFilter && getFormStage(doc) !== stageFilter) return false;
+      if (templateFilter && String(doc?.metadata?.form?.template_id ?? "") !== templateFilter) return false;
+      if (varianceFilter) {
+        const v = getFormVariance(doc);
+        if (!v || v.kind !== varianceFilter) return false;
+      }
+      if (departmentFilter && getFormDepartment(doc) !== departmentFilter) return false;
+      if (requesterFilter && doc.uploaded_by?.id !== requesterFilter) return false;
+      if (dateFrom && new Date(doc.created_at) < new Date(dateFrom)) return false;
+      if (dateTo && new Date(doc.created_at) > new Date(dateTo)) return false;
+      const amt = getFormAmount(doc);
+      if (amountMin && (amt === null || amt < Number(amountMin))) return false;
+      if (amountMax && (amt === null || amt > Number(amountMax))) return false;
+      return true;
+    });
     const counts: Record<string, number> = {};
     for (const chip of STATUS_CHIPS) {
-      counts[chip.value] = chip.value ? statsRows.filter((d) => d.status === chip.value).length : statsRows.length;
+      counts[chip.value] = chip.value ? withoutStatus.filter((d) => d.status === chip.value).length : withoutStatus.length;
     }
     return counts;
-  }, [statsRows]);
+  }, [
+    poolRows, search, stageFilter, templateFilter, varianceFilter,
+    departmentFilter, requesterFilter, dateFrom, dateTo, amountMin, amountMax,
+  ]);
 
-  // Stat cards — also from the stats pool. "Total forms" prefers the
-  // server's own matching count (true total, not capped by STATS_POOL_SIZE)
-  // and falls back to what we actually fetched if that's ever missing.
-  const totalFormsCount = statsData?.count ?? statsRows.length;
-  const pendingCount = useMemo(() => statsRows.filter(isPendingRequestApproval).length, [statsRows]);
-  const readyForRetirementCount = useMemo(() => statsRows.filter(isReadyForRetirement).length, [statsRows]);
+  // Stat cards — always corpus-wide regardless of the filters above (these
+  // are meant as fixed "needs attention" counters, not filter-reactive).
+  // "Total forms" prefers the server's own matching count (true total, not
+  // capped by STATS_POOL_SIZE) and falls back to what we actually fetched.
+  const totalFormsCount = poolData?.count ?? poolRows.length;
+  const pendingCount = useMemo(() => poolRows.filter(isPendingRequestApproval).length, [poolRows]);
+  const readyForRetirementCount = useMemo(() => poolRows.filter(isReadyForRetirement).length, [poolRows]);
 
-  const activeFilterCount = [statusFilter, phaseFilter, departmentFilter, requesterFilter, dateFrom, dateTo, amountMin, amountMax]
-    .filter(Boolean).length;
+  const activeFilterCount = [
+    statusFilter, stageFilter, templateFilter, varianceFilter, departmentFilter,
+    requesterFilter, dateFrom, dateTo, amountMin, amountMax,
+  ].filter(Boolean).length;
 
   const clearFilters = () => {
-    setSearch(""); setStatusFilter(""); setPhaseFilter(""); setDepartmentFilter("");
-    setRequesterFilter(""); setDateFrom(""); setDateTo(""); setAmountMin(""); setAmountMax("");
+    setSearch(""); setStatusFilter(""); setStageFilter(""); setTemplateFilter(""); setVarianceFilter("");
+    setDepartmentFilter(""); setRequesterFilter(""); setDateFrom(""); setDateTo(""); setAmountMin(""); setAmountMax("");
     setPage(1);
   };
 
@@ -326,7 +433,7 @@ export default function FormsPage() {
             <button
               key={chip.value || "all"}
               type="button"
-              onClick={() => { setStatusFilter(chip.value); setPage(1); }}
+              onClick={() => setStatusFilter(chip.value)}
               className={cn(
                 "inline-flex items-center gap-1.5 border px-2.5 py-1 text-xs font-semibold transition-colors",
                 statusFilter === chip.value
@@ -350,17 +457,31 @@ export default function FormsPage() {
             <SearchIcon className="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-[#5E6870]" />
             <input
               value={search}
-              onChange={(e) => { setSearch(e.target.value); setPage(1); }}
-              placeholder="Search forms by title…"
+              onChange={(e) => setSearch(e.target.value)}
+              placeholder="Search forms by title or reference…"
               className="h-9 w-full border border-[#AEB5BB] bg-white pl-9 pr-3 text-sm text-[#1F2933] placeholder:text-[#8C969E] focus:outline-none focus:ring-1 focus:ring-[#287EAD]"
             />
           </div>
           <CustomListbox
-            value={phaseFilter}
-            onChange={setPhaseFilter}
-            options={PHASE_OPTIONS}
+            value={stageFilter}
+            onChange={setStageFilter}
+            options={STAGE_OPTIONS}
+            buttonClassName="h-9 w-[150px] border border-[#AEB5BB] bg-white px-2 text-sm text-[#1F2933]"
+            ariaLabel="Stage filter"
+          />
+          <CustomListbox
+            value={templateFilter}
+            onChange={setTemplateFilter}
+            options={[{ value: "", label: "All form types" }, ...imprestTemplates.map((t: any) => ({ value: String(t.id), label: t.name }))]}
             buttonClassName="h-9 w-[190px] border border-[#AEB5BB] bg-white px-2 text-sm text-[#1F2933]"
             ariaLabel="Form type filter"
+          />
+          <CustomListbox
+            value={varianceFilter}
+            onChange={setVarianceFilter}
+            options={VARIANCE_OPTIONS}
+            buttonClassName="h-9 w-[170px] border border-[#AEB5BB] bg-white px-2 text-sm text-[#1F2933]"
+            ariaLabel="Variance filter"
           />
           <CustomListbox
             value={departmentFilter}
@@ -405,7 +526,7 @@ export default function FormsPage() {
             </button>
           )}
           <span className="ml-auto text-xs text-[#5E6870]">
-            {isLoading ? "Loading…" : `${filteredRows.length} of ${allRows.length} loaded forms`}
+            {isLoading ? "Loading…" : `${filteredRows.length} matching form${filteredRows.length === 1 ? "" : "s"}`}
           </span>
         </div>
       </div>
@@ -413,14 +534,16 @@ export default function FormsPage() {
       {/* ── Summary report table ── */}
       <div className="overflow-hidden border border-[#C8CDD2] bg-white">
         <div className="overflow-x-auto">
-          <table className="w-full min-w-[1100px] text-sm">
+          <table className="w-full min-w-[1300px] text-sm">
             <thead>
               <tr className="border-b border-[#AEB5BB] bg-[#50545A] text-left text-xs font-semibold text-white">
+                <th className="w-12 border-r border-[#858A90] px-3 py-3">#</th>
                 <th className="border-r border-[#858A90] px-3 py-3">Reference</th>
+                <th className="border-r border-[#858A90] px-3 py-3">Name</th>
                 <th className="border-r border-[#858A90] px-3 py-3">Requester</th>
                 <th className="border-r border-[#858A90] px-3 py-3">Department</th>
                 <th className="border-r border-[#858A90] px-3 py-3">Description</th>
-                <th className="border-r border-[#858A90] px-3 py-3">Date</th>
+                <th className="border-r border-[#858A90] px-3 py-3">Creation Date</th>
                 <th className="border-r border-[#858A90] px-3 py-3">Amount</th>
                 <th className="border-r border-[#858A90] px-3 py-3">Approval status</th>
                 <th className="border-r border-[#858A90] px-3 py-3">Variance</th>
@@ -431,7 +554,7 @@ export default function FormsPage() {
               {isLoading ? (
                 Array.from({ length: 6 }).map((_, i) => (
                   <tr key={i} className="h-[44px] border-b border-[#D3D7DA]">
-                    {Array.from({ length: 9 }).map((__, j) => (
+                    {Array.from({ length: 11 }).map((__, j) => (
                       <td key={j} className="border-r border-[#D3D7DA] px-3">
                         <div className="h-3 w-2/3 animate-pulse bg-[#E1E5E8]" />
                       </td>
@@ -440,35 +563,40 @@ export default function FormsPage() {
                 ))
               ) : error ? (
                 <tr>
-                  <td colSpan={9} className="py-16 text-center text-red-600">
+                  <td colSpan={11} className="py-16 text-center text-red-600">
                     {extractApiError(error, "Could not load forms.")}
                   </td>
                 </tr>
-              ) : filteredRows.length === 0 ? (
+              ) : pageRows.length === 0 ? (
                 <tr>
-                  <td colSpan={9} className="py-20 text-center text-[#5E6870]">
+                  <td colSpan={11} className="py-20 text-center text-[#5E6870]">
                     <FileWarning className="mx-auto mb-3 h-10 w-10 text-[#AEB5BB]" />
                     No forms match the current filters.
                   </td>
                 </tr>
               ) : (
-                filteredRows.map((doc) => {
+                pageRows.map((doc, idx) => {
                   const variance = getFormVariance(doc);
                   const amount = getFormAmount(doc);
+                  // Corpus-wide sequence: position within the FULL filtered
+                  // result set, not just this page's slice of it.
+                  const rowNumber = (page - 1) * PAGE_SIZE + idx + 1;
                   return (
                     <tr key={doc.id} className="h-[46px] border-b border-[#D3D7DA] bg-white hover:bg-[#F5F7F8]">
+                      <td className="border-r border-[#D3D7DA] px-3 text-[#5E6870]">{rowNumber}</td>
                       <td className="border-r border-[#D3D7DA] px-3">
                         <Link to={`/forms/${doc.id}`} className="font-mono text-xs font-semibold text-[#2B86C5] hover:underline">
                           {doc.reference_number}
                         </Link>
                       </td>
+                      <td className="border-r border-[#D3D7DA] px-3">{getFormName(doc)}</td>
                       <td className="border-r border-[#D3D7DA] px-3">{getFormRequester(doc)}</td>
                       <td className="border-r border-[#D3D7DA] px-3">{getFormDepartment(doc)}</td>
                       <td className="max-w-[240px] truncate border-r border-[#D3D7DA] px-3" title={getFormDescription(doc)}>
                         {getFormDescription(doc)}
                       </td>
                       <td className="border-r border-[#D3D7DA] px-3 whitespace-nowrap">
-                        {format(new Date(doc.document_date || doc.created_at), "dd MMM yyyy")}
+                        {format(new Date(doc.created_at), "dd MMM yyyy")}
                       </td>
                       <td className="border-r border-[#D3D7DA] px-3 font-mono">{formatMoney(amount, doc.currency)}</td>
                       <td className="border-r border-[#D3D7DA] px-3"><StatusBadge status={doc.status} /></td>
@@ -498,16 +626,16 @@ export default function FormsPage() {
           </table>
         </div>
 
-        {data && data.count > PAGE_SIZE && (
+        {filteredRows.length > PAGE_SIZE && (
           <div className="flex items-center justify-between border-t border-[#C8CDD2] bg-[#F5F7F8] px-4 py-2.5 text-xs text-[#5E6870]">
             <span>
-              Page {page} of {Math.max(1, Math.ceil(data.count / PAGE_SIZE))} · {data.count.toLocaleString()} total forms on server
-              (filters above narrow what's already loaded on this page — status/search are sent server-side, the rest filter client-side).
+              Page {page} of {totalPages} · {filteredRows.length.toLocaleString()} matching forms
+              {activeFilterCount > 0 || search || statusFilter ? " (filtered)" : ""}
             </span>
             <div className="flex items-center gap-2">
               <button onClick={() => setPage((p) => Math.max(1, p - 1))} disabled={page === 1}
                 className="border border-[#C8CDD2] bg-white px-3 py-1 disabled:opacity-40">Previous</button>
-              <button onClick={() => setPage((p) => p + 1)} disabled={page * PAGE_SIZE >= data.count}
+              <button onClick={() => setPage((p) => Math.min(totalPages, p + 1))} disabled={page >= totalPages}
                 className="border border-[#C8CDD2] bg-white px-3 py-1 disabled:opacity-40">Next</button>
             </div>
           </div>

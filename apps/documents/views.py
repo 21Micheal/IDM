@@ -655,13 +655,18 @@ class DocumentViewSet(AuditMixin, viewsets.ModelViewSet):
         return bool(user.has_admin_access or doc.uploaded_by_id == user.id)
 
     def _prepare_builder_workflow_phase(self, doc) -> str | None:
-        from apps.documents.builder_workflow import sync_builder_workflow_phase
+        from apps.documents.builder_workflow import sync_builder_workflow_phase, sync_retirement_variance
 
         try:
-            return sync_builder_workflow_phase(doc)
+            phase = sync_builder_workflow_phase(doc)
         except Exception:
             logger.exception("Could not infer workflow phase for builder document %s", doc.id)
-            return None
+            phase = None
+        try:
+            sync_retirement_variance(doc)
+        except Exception:
+            logger.exception("Could not sync retirement variance for builder document %s", doc.id)
+        return phase
 
     def destroy(self, request, *args, **kwargs):
         """Move a document to Trash (soft delete) rather than removing it."""
@@ -1076,6 +1081,11 @@ class DocumentViewSet(AuditMixin, viewsets.ModelViewSet):
         from apps.search.indexing import schedule_document_search_pipeline
 
         schedule_document_search_pipeline(str(doc.id), reextract_content=True, index_immediately=True)
+        from apps.documents.builder_workflow import sync_retirement_variance
+        try:
+            sync_retirement_variance(doc)
+        except Exception:
+            logger.exception("Could not sync retirement variance after form update for %s", doc.id)
         return Response(DocumentDetailSerializer(doc, context={"request": request}).data)
 
     @action(detail=True, methods=["get"], url_path=r"form_attachment/(?P<field_key>[^/.]+)")

@@ -36,6 +36,7 @@ import { format } from "date-fns";
 import {
   ArrowLeft, Send, Loader2, Edit2, Info, FileCode, Eye, EyeOff, Check, X, Save,
   MessageSquare, Download, AlertTriangle, ShieldCheck, PanelRightOpen, PanelRightClose,
+  TrendingUp, TrendingDown, CheckCircle2,
 } from "lucide-react";
 import { toast } from "@/components/ui/vault-toast";
 import { useAuthStore } from "@/store/authStore";
@@ -65,6 +66,26 @@ function formatBytes(b: number) {
   if (b < 1024 * 1024) return `${(b / 1024).toFixed(1)} KB`;
   return `${(b / 1024 / 1024).toFixed(1)} MB`;
 }
+
+function formatMoney(amount: number, currency?: string) {
+  try {
+    return new Intl.NumberFormat("en-US", { style: "currency", currency: currency || "KES" }).format(amount);
+  } catch {
+    return `${currency ?? ""} ${amount.toLocaleString()}`.trim();
+  }
+}
+
+/** Mirrors what apps.sunsystems.variance.compute_retirement_variance persists
+ * onto metadata.form.retirement_variance (see backend note on the banner
+ * below) — kept as a local type since this page reads the raw `doc.metadata`
+ * JSON directly rather than through a typed serializer. */
+type RetirementVariance = {
+  scenario?: "exact" | "under" | "over";
+  kind?: "under" | "over" | null;
+  amount?: string;
+  issued?: string;
+  spent?: string;
+};
 
 type TabId = "workflow" | "details" | "history" | "comments" | "audit";
 
@@ -420,6 +441,40 @@ export default function FormDetailPage() {
               />
             </div>
           </div>
+
+          {/* Retirement variance — populated server-side by
+              apps.sunsystems.variance.compute_retirement_variance whenever a
+              retirement mapping is configured on this form's template. Absent
+              (renders nothing) for a request-only form, or before any form
+              values exist to classify. */}
+          {isRetirementPhase && (() => {
+            const variance = (doc.metadata as any)?.form?.retirement_variance as RetirementVariance | undefined;
+            if (!variance) return null;
+            const amount = Number(variance.amount ?? 0);
+            if (!variance.kind || !Number.isFinite(amount) || amount === 0) {
+              return (
+                <div className="flex items-center gap-2 border border-emerald-200 bg-emerald-50 px-4 py-2.5 text-sm text-emerald-800">
+                  <CheckCircle2 className="h-4 w-4 flex-shrink-0" />
+                  <span>Retirement matches the issued amount exactly — nothing over or under.</span>
+                </div>
+              );
+            }
+            const isOver = variance.kind === "over";
+            return (
+              <div className={cn(
+                "flex items-center gap-3 border px-4 py-2.5 text-sm",
+                isOver ? "border-red-200 bg-red-50 text-red-800" : "border-amber-200 bg-amber-50 text-amber-800",
+              )}>
+                {isOver ? <TrendingUp className="h-4 w-4 flex-shrink-0" /> : <TrendingDown className="h-4 w-4 flex-shrink-0" />}
+                <div>
+                  <p className="font-semibold">{isOver ? "Overspent" : "Underspent"} by {formatMoney(amount, doc.currency)}</p>
+                  <p className="text-xs opacity-80">
+                    Issued {formatMoney(Number(variance.issued ?? 0), doc.currency)} · Spent {formatMoney(Number(variance.spent ?? 0), doc.currency)}
+                  </p>
+                </div>
+              </div>
+            );
+          })()}
 
           {showJournalXml && (
             <JournalPayloadModal
