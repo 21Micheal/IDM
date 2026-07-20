@@ -52,6 +52,7 @@ type DocumentTemplateOption = {
   document_type?: string;
   document_type_id?: string;
   file_name?: string;
+  file_url?: string;
   placeholders?: string[];
   sections?: unknown[];
   /** Designer ("document") layout — `references` drives the fill-time document pickers. */
@@ -850,11 +851,16 @@ function SelectedFileDropHint({
   file,
   isDragActive,
   onRemove,
+  onEditPdf,
+  editLabel = "Edit PDF",
 }: {
   file: File;
   isDragActive: boolean;
   onRemove: (event: MouseEvent<HTMLButtonElement>) => void;
+  onEditPdf?: () => void;
+  editLabel?: string;
 }) {
+  const canEdit = onEditPdf && isOfficeEditable(file);
   return (
     <div className="mt-6 flex flex-col items-center text-center">
       <div className="relative mb-3 h-9 w-9 text-muted-foreground">
@@ -869,13 +875,25 @@ function SelectedFileDropHint({
       <p className="mt-2 text-xs text-muted-foreground">
         {file.name} · {(file.size / (1024 * 1024)).toFixed(2)} MB
       </p>
-      <button
-        type="button"
-        onClick={onRemove}
-        className="mt-3 inline-flex items-center gap-1 text-xs font-medium text-destructive hover:text-destructive/80"
-      >
-        <X className="w-3.5 h-3.5" /> Remove
-      </button>
+      <div className="mt-3 flex items-center gap-2">
+        {canEdit && (
+          <button
+            type="button"
+            onClick={(e) => { e.stopPropagation(); onEditPdf(); }}
+            className="inline-flex items-center gap-1.5 border border-[#287EAD] bg-white px-2.5 py-1 text-[11px] font-semibold text-[#287EAD] hover:bg-[#EEF6FB]"
+          >
+            <Pencil className="h-3.5 w-3.5" />
+            {editLabel}
+          </button>
+        )}
+        <button
+          type="button"
+          onClick={onRemove}
+          className="inline-flex items-center gap-1 text-xs font-medium text-destructive hover:text-destructive/80"
+        >
+          <X className="w-3.5 h-3.5" /> Remove
+        </button>
+      </div>
     </div>
   );
 }
@@ -954,31 +972,23 @@ function CapturePreviewPane({
         </div>
       )}
 
-      <div className={clsx("bg-[#EDEDED] p-3", previewMinHeight)}>
-        {pdfSrc && kind === "pdf" ? (
-          <div className={clsx("mx-auto w-full max-w-[920px] border border-[#C8CDD2] bg-white", previewHeight)}>
-            <iframe
-              src={pdfSrc}
-              className="h-full w-full bg-white"
-              title="PDF preview"
-            />
-          </div>
-        ) : previewUrl && kind === "image" ? (
-          <div className={clsx("mx-auto flex w-full max-w-[920px] items-center justify-center overflow-auto border border-[#C8CDD2] bg-white", previewHeight)}>
-            <img src={previewUrl} alt="Document preview" className="max-h-full max-w-full object-contain" />
-          </div>
-        ) : (
-          <div className={clsx("mx-auto flex w-full max-w-[920px] flex-col items-center justify-center border border-dashed border-[#C8CDD2] bg-white text-center", previewHeight)}>
-            {kind === "other" && file ? <File className="mb-3 h-12 w-12 text-[#5E6870]" /> : <Upload className="mb-3 h-12 w-12 text-[#5E6870]" />}
-            <p className="text-sm font-semibold text-[#1F2933]">
-              {file ? "Inline preview is not available for this format" : "Select a file to preview"}
-            </p>
-            <p className="mt-1 max-w-xs text-xs text-[#5E6870]">
-              PDF and image scans can be reviewed beside the extracted fields.
-            </p>
-          </div>
-        )}
-      </div>
+      {(pdfSrc && kind === "pdf") || (previewUrl && kind === "image") ? (
+        <div className={clsx("bg-[#EDEDED] p-3", previewMinHeight)}>
+          {pdfSrc && kind === "pdf" ? (
+            <div className={clsx("mx-auto w-full max-w-[920px] border border-[#C8CDD2] bg-white", previewHeight)}>
+              <iframe
+                src={pdfSrc}
+                className="h-full w-full bg-white"
+                title="PDF preview"
+              />
+            </div>
+          ) : previewUrl && kind === "image" ? (
+            <div className={clsx("mx-auto flex w-full max-w-[920px] items-center justify-center overflow-auto border border-[#C8CDD2] bg-white", previewHeight)}>
+              <img src={previewUrl} alt="Document preview" className="max-h-full max-w-full object-contain" />
+            </div>
+          ) : null}
+        </div>
+      ) : null}
     </div>
   );
 }
@@ -1876,7 +1886,14 @@ export default function UploadPage({ scanOnly = false }: UploadPageProps) {
       {(scanStage === "idle" || scanStage === "uploading") && (
         <div className="grid grid-cols-1 gap-5 p-5 pr-0 xl:grid-cols-12">
           {/* Left column — controls */}
-          <div className={clsx(droppedFile ? "order-2 xl:col-span-3" : useTemplate ? "xl:col-span-4" : "xl:col-start-2 xl:col-span-4", "space-y-4")}>
+          <div className={clsx(
+            droppedFile && (getCapturePreviewKind(droppedFile) === "pdf" || getCapturePreviewKind(droppedFile) === "image")
+              ? "order-2 xl:col-span-3"
+              : selectedTemplate && !droppedFile && selectedTemplate.kind !== "document"
+                ? "xl:col-span-4"
+                : "xl:col-start-2 xl:col-span-4",
+            "space-y-4"
+          )}>
             {/* Step 1 — Document Type */}
             <div className="border border-[#C8CDD2] bg-white p-4">
               <h2 className="mb-3 flex items-center gap-2 text-sm font-semibold text-[#1F2933]">
@@ -1976,6 +1993,8 @@ export default function UploadPage({ scanOnly = false }: UploadPageProps) {
                     file={droppedFile}
                     isDragActive={isDragActive}
                     onRemove={(e) => { e.stopPropagation(); setDroppedFile(null); setPdfPreviewUrl(null); }}
+                    onEditPdf={handleEditClick}
+                    editLabel={isOfficeEditable(droppedFile) ? "Edit Document" : "Edit PDF"}
                   />
                 ) : (
                   <>
@@ -2013,8 +2032,8 @@ export default function UploadPage({ scanOnly = false }: UploadPageProps) {
             )}
           </div>
 
-          {/* Centre column — document preview (visible when file selected) */}
-          {droppedFile && (
+          {/* Centre column — document preview (visible when file selected and displayable) */}
+          {droppedFile && (getCapturePreviewKind(droppedFile) === "pdf" || getCapturePreviewKind(droppedFile) === "image") && (
             <div className="order-1 xl:col-span-6">
               <CapturePreviewPane
                 file={droppedFile}
@@ -2030,8 +2049,8 @@ export default function UploadPage({ scanOnly = false }: UploadPageProps) {
               />
             </div>
           )}
-          {/* Centre column — template preview (built template selected) */}
-          {useTemplate && !droppedFile && (
+          {/* Centre column — template preview (template selected, but not document templates) */}
+          {selectedTemplate && !droppedFile && selectedTemplate.kind !== "document" && (
             <div className="order-1 xl:col-span-5">
               <div className={clsx("flex flex-col border border-[#C8CDD2] bg-white", PREVIEW_MIN_HEIGHT)}>
                 {/* Header */}
@@ -2062,6 +2081,7 @@ export default function UploadPage({ scanOnly = false }: UploadPageProps) {
                         type: selectedTemplate.type,
                         description: selectedTemplate.description,
                         file_name: selectedTemplate.file_name,
+                        file_url: selectedTemplate.file_url,
                         placeholders: selectedTemplate.placeholders,
                         sections: selectedTemplate.sections,
                       }}
@@ -2094,7 +2114,13 @@ export default function UploadPage({ scanOnly = false }: UploadPageProps) {
           )}
 
           {/* Right column — form / OCR idle */}
-          <div className={clsx(droppedFile ? "order-3 xl:col-span-3" : useTemplate ? "order-3 xl:col-span-3" : "xl:col-start-7 xl:col-span-5")}>
+          <div className={clsx(
+            droppedFile && (getCapturePreviewKind(droppedFile) === "pdf" || getCapturePreviewKind(droppedFile) === "image")
+              ? "order-3 xl:col-span-3"
+              : selectedTemplate && !droppedFile && selectedTemplate.kind !== "document"
+                ? "order-3 xl:col-span-3"
+                : "xl:col-start-7 xl:col-span-5"
+          )}>
             {showManualForm && (
               <div
                 className={clsx(

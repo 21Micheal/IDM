@@ -45,6 +45,7 @@ export type PreviewTemplate = {
   type: "built" | "uploaded";
   description?: string;
   file_name?: string;
+  file_url?: string;
   placeholders?: string[];
   sections?: unknown[];
 };
@@ -185,17 +186,28 @@ export default function TemplatePreview({ template, values = {}, processStep }: 
   if (template.type === "uploaded") {
     const ext = (template.file_name?.split(".").pop() || "").toUpperCase();
     const count = template.placeholders?.length ?? 0;
+    const isPdf = ext === "PDF";
     return (
       <div className="space-y-4">
-        <div className="flex items-center gap-3 rounded-xl border border-slate-200 bg-white p-4">
-          <div className="flex h-12 w-12 flex-shrink-0 items-center justify-center rounded-lg bg-[#EEF6FB] text-[#287EAD]">
-            <FileText className="h-6 w-6" />
+        {template.file_url && isPdf ? (
+          <div className="border border-slate-200 bg-white p-4">
+            <iframe
+              src={`${template.file_url}#toolbar=1&navpanes=0&scrollbar=1&view=FitV`}
+              className="h-[400px] w-full bg-white"
+              title="Template preview"
+            />
           </div>
-          <div className="min-w-0">
-            <p className="truncate text-sm font-semibold text-slate-800">{template.file_name || template.name}</p>
-            <p className="text-xs text-slate-400">{ext || "Office"} template · {count} placeholder{count !== 1 ? "s" : ""}</p>
+        ) : (
+          <div className="flex items-center gap-3 rounded-xl border border-slate-200 bg-white p-4">
+            <div className="flex h-12 w-12 flex-shrink-0 items-center justify-center rounded-lg bg-[#EEF6FB] text-[#287EAD]">
+              <FileText className="h-6 w-6" />
+            </div>
+            <div className="min-w-0">
+              <p className="truncate text-sm font-semibold text-slate-800">{template.file_name || template.name}</p>
+              <p className="text-xs text-slate-400">{ext || "Office"} template · {count} placeholder{count !== 1 ? "s" : ""}</p>
+            </div>
           </div>
-        </div>
+        )}
         {count > 0 && (
           <div>
             <p className="mb-2 text-[11px] font-semibold uppercase tracking-wider text-slate-400">Placeholders</p>
