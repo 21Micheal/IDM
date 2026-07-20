@@ -71,6 +71,14 @@ def compute_retirement_variance(document) -> dict | None:
           "amount": "0.00",                  # |spent - issued|, always non-negative
           "issued": "0.00",
           "spent": "0.00",
+          "description": "Fuel; Accommodation",  # from the spent table's
+                                                  # description column (see
+                                                  # spent_amount.description_column
+                                                  # in mapping.py) — the SAME
+                                                  # admin-configured text the
+                                                  # journal payload's "spent"
+                                                  # line uses, not a guessed
+                                                  # field-key on our end.
         }
 
     `kind` / `amount` are exactly what FormsPage.tsx's getFormVariance() and
@@ -85,6 +93,17 @@ def compute_retirement_variance(document) -> dict | None:
     if not values:
         return None
 
+    # Check if the spent table has any rows before computing variance.
+    # If the retirement hasn't been submitted yet, the spent table will be empty
+    # and computing variance would incorrectly classify everything as "underspent".
+    spent_spec = retirement.get("spent_amount") or {}
+    table_key = spent_spec.get("table")
+    if table_key:
+        rows = values.get(table_key)
+        if not isinstance(rows, list) or len(rows) == 0:
+            # No retirement data submitted yet - don't compute variance
+            return None
+
     classified = classify_retirement(retirement, values)
     scenario = classified["scenario"]
 
@@ -94,6 +113,7 @@ def compute_retirement_variance(document) -> dict | None:
         "amount": _amount_str(classified["variance"]),
         "issued": _amount_str(classified["issued"]),
         "spent": _amount_str(classified["spent"]),
+        "description": classified.get("description") or "",
     }
 
 

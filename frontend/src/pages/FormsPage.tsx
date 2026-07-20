@@ -24,6 +24,24 @@
  * corpus. Ask the backend for a real filtering/aggregate endpoint once forms
  * comfortably exceed that.
  *
+ * Pass 6 — stop guessing what a proper mapping already answers:
+ * `apps/sunsystems/variance.py`'s compute_retirement_variance() now also
+ * resolves the spent table's description (the SAME admin-configured column
+ * the Stage 2 journal payload's line description already uses — see
+ * mapping.py's classify_retirement/spent_amount.description_column) and
+ * persists it onto `metadata.form.retirement_variance.description`.
+ * getFormDescription() now prefers that over the guessed DESCRIPTION_KEYS
+ * list, for the same reason getFormAmount() prefers `requested_amount` over
+ * guessed keys: the mapping is admin-configured and stays correct however a
+ * field gets renamed in the builder, whereas a hardcoded frontend key
+ * breaks the moment it does. (Guessed keys remain as a last-resort fallback
+ * for request-phase forms — this description is retirement-only, same as
+ * the variance itself — or a template with no retirement mapping at all.)
+ * Also removed the previous pass's client-side variance fallback (guessing
+ * a spent TABLE + COLUMN key): unlike a single scalar field, getting either
+ * wrong there risks showing an approver an outright incorrect Over/Under
+ * figure, not just a blank cell — so variance stays backend-only.
+ *
  * Other notes carried over from earlier passes (still true):
  *   - `documentsAPI.list({ is_form: true, ... })` — `is_form` isn't a real
  *     backend filter yet; this page also filters client-side on
@@ -37,8 +55,6 @@
  *     the template's SunSystems retirement mapping — see
  *     apps/sunsystems/variance.py's get_requested_amount), falling back to
  *     the legacy `doc.amount` column, then guessed field-key names.
- *   - Description has no admin-designated source anywhere in the mapping
- *     schema, so it's still a guessed field-key list — flagged inline.
  *   - "Name" is the form's own title — what the person typed when creating
  *     it (FormFillModal defaults that input to the template's name, but it's
  *     editable, so it's the DOCUMENT's title, not a template lookup). The
@@ -117,14 +133,23 @@ function getFormValues(doc: any): Record<string, unknown> {
   return doc?.metadata?.form?.values ?? {};
 }
 
-// There's no admin-designated "this is the description field" concept
-// anywhere in the SunSystems mapping schema (unlike the amount — see
-// getFormAmount below) — so this list is a guess at common field-key names,
-// not an authoritative lookup. If your imprest template's purpose/reason
-// field uses a different key, add it here (or better: tell me the actual
-// key and I'll wire it in directly).
-const DESCRIPTION_KEYS = ["description", "purpose", "purpose_of_travel", "reason", "details", "activity"];
+// Guessed field-key names — ONLY a last resort for a form whose template
+// has no retirement mapping configured at all, or one still in the request
+// phase (the mapping-driven description below only exists once expense rows
+// are entered at retirement). Not authoritative — breaks if an admin renames
+// the field. Prefer getFormDescription()'s backend-resolved value below.
+const DESCRIPTION_KEYS = ["description", "purpose", "purpose_of_travel", "reason", "details", "activity", "short_text_j1lo", "short_text_ca8g"];
 function getFormDescription(doc: any): string {
+  // Authoritative: the spent table's description column, resolved server-side
+  // by apps/sunsystems/variance.py's compute_retirement_variance (the SAME
+  // admin-configured column the Stage 2 journal payload's line description
+  // uses — see mapping.py's classify_retirement/spent_amount.description_column).
+  // Dynamic regardless of how the admin names/renames the actual field, unlike
+  // the guessed keys below. Only present once the form has reached retirement.
+  const mapped = doc?.metadata?.form?.retirement_variance?.description;
+  if (typeof mapped === "string" && mapped.trim()) return mapped.trim();
+  // Fallback — guessed keys, for request-phase forms or templates with no
+  // retirement mapping configured (nothing authoritative to read above).
   const values = getFormValues(doc);
   for (const key of DESCRIPTION_KEYS) {
     const v = values[key];
@@ -167,16 +192,27 @@ function getFormAmount(doc: any): number | null {
   // Last resort — guessed field-key names, for a form whose template has no
   // retirement mapping configured (so there's nothing authoritative above).
   const values = getFormValues(doc);
-  const alt = Number((values as any)?.amount ?? (values as any)?.total ?? (values as any)?.total_amount ?? (values as any)?.requested_amount);
+  const alt = Number((values as any)?.amount ?? (values as any)?.total ?? (values as any)?.total_amount ?? (values as any)?.requested_amount ?? (values as any)?.advance_amount);
   return Number.isFinite(alt) && alt > 0 ? alt : null;
 }
 
+// Variance is backend-only, deliberately — apps/sunsystems/variance.py
+// resolves issued/spent (and now description) straight from the template's
+// admin-configured SunSystems retirement mapping (issued_amount field,
+// spent_amount table+column), which stays correct however fields get
+// renamed in the builder. A client-side guess would need to know which
+// TABLE and which COLUMN hold the spend, and getting either wrong risks
+// showing an approver an incorrect Over/Under figure — worse than showing
+// nothing — so unlike amount/description there's no local fallback here.
+// If this is empty for a retirement-stage form, the template's Retirement
+// panel (issued_amount/spent_amount) most likely isn't configured yet — see
+// apps/sunsystems/variance.py's module docstring.
 function getFormVariance(doc: any): { amount: number; kind: "over" | "under" } | null {
-  const v = doc?.metadata?.form?.retirement_variance;
-  if (!v || typeof v !== "object") return null;
-  const amount = Number(v.amount);
-  if (!Number.isFinite(amount) || amount === 0) return null;
-  return { amount: Math.abs(amount), kind: v.kind === "under" || amount < 0 ? "under" : "over" };
+  const backend = doc?.metadata?.form?.retirement_variance ?? doc?.form_summary?.retirement_variance;
+  if (!backend || typeof backend !== "object") return null;
+  const amount = Number(backend.amount);
+  if (!Number.isFinite(amount) || amount === 0) return null; // exact, or nothing computed — nothing to flag
+  return { amount: Math.abs(amount), kind: backend.kind === "under" || amount < 0 ? "under" : "over" };
 }
 
 // A form has exactly two approval STAGES — request and retirement — tracked
