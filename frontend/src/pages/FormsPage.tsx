@@ -123,7 +123,7 @@ function getFormValues(doc: any): Record<string, unknown> {
 // not an authoritative lookup. If your imprest template's purpose/reason
 // field uses a different key, add it here (or better: tell me the actual
 // key and I'll wire it in directly).
-const DESCRIPTION_KEYS = ["description", "purpose", "purpose_of_travel", "reason", "details", "activity"];
+const DESCRIPTION_KEYS = ["description", "purpose", "purpose_of_travel", "reason", "details", "activity", "short_text_j1lo", "short_text_ca8g"];
 function getFormDescription(doc: any): string {
   const values = getFormValues(doc);
   for (const key of DESCRIPTION_KEYS) {
@@ -167,12 +167,13 @@ function getFormAmount(doc: any): number | null {
   // Last resort — guessed field-key names, for a form whose template has no
   // retirement mapping configured (so there's nothing authoritative above).
   const values = getFormValues(doc);
-  const alt = Number((values as any)?.amount ?? (values as any)?.total ?? (values as any)?.total_amount ?? (values as any)?.requested_amount);
+  const alt = Number((values as any)?.amount ?? (values as any)?.total ?? (values as any)?.total_amount ?? (values as any)?.requested_amount ?? (values as any)?.advance_amount);
   return Number.isFinite(alt) && alt > 0 ? alt : null;
 }
 
 function getFormVariance(doc: any): { amount: number; kind: "over" | "under" } | null {
-  const v = doc?.metadata?.form?.retirement_variance;
+  // Check both metadata.form.retirement_variance and form_summary.retirement_variance
+  const v = doc?.metadata?.form?.retirement_variance ?? doc?.form_summary?.retirement_variance;
   if (!v || typeof v !== "object") return null;
   const amount = Number(v.amount);
   if (!Number.isFinite(amount) || amount === 0) return null;

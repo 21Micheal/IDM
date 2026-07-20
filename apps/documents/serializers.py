@@ -643,7 +643,22 @@ class DocumentListSerializer(serializers.ModelSerializer):
             return None
         form = obj.metadata["form"]
         values = form.get("values") if isinstance(form.get("values"), dict) else {}
-        return {"values": values, "retirement_variance": form.get("retirement_variance")}
+        variance = form.get("retirement_variance")
+        # If variance is not set but document is at retirement phase, try to compute it
+        if not variance:
+            phase = form.get("workflow_phase")
+            if phase == "retirement":
+                try:
+                    from apps.documents.builder_workflow import infer_builder_workflow_phase
+                    from apps.sunsystems.variance import compute_retirement_variance
+                    # Infer phase if not set
+                    if not phase:
+                        phase = infer_builder_workflow_phase(obj)
+                    if phase == "retirement":
+                        variance = compute_retirement_variance(obj)
+                except Exception:
+                    variance = None
+        return {"values": values, "retirement_variance": variance}
 
 
 class DocumentDetailSerializer(serializers.ModelSerializer):
