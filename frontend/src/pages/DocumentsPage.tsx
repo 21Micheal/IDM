@@ -850,60 +850,60 @@ export default function DocumentsPage({ personalOnly = false }: DocumentsPagePro
                 className="h-9 w-full border border-[#AEB5BB] bg-white pl-9 pr-3 text-sm text-[#1F2933] placeholder:text-[#6E767D] focus:outline-none focus:ring-1 focus:ring-white/70"
               />
             </div>
+              <div className="w-full flex items-center gap-2">
+                <div className="flex items-center gap-2">
+                  <CustomListbox
+                    value={statusFilter}
+                    onChange={(v) => {
+                      clearUrlStatusFilter();
+                      setStatusFilter(v);
+                      setPage(1);
+                    }}
+                    options={[{ value: "", label: "All statuses" }, ...STATUS_OPTIONS.map((s) => ({ value: s, label: s.replace(/_/g, " ") }))]}
+                    buttonClassName="h-9 w-[140px] border border-[#AEB5BB] bg-white px-2 text-sm text-[#1F2933]"
+                    ariaLabel="Status filter"
+                  />
 
-            <CustomListbox
-              value={statusFilter}
-              onChange={(v) => {
-                clearUrlStatusFilter();
-                setStatusFilter(v);
-                setPage(1);
-              }}
-              options={[
-                { value: "", label: "All statuses" },
-                ...STATUS_OPTIONS.map((s) => ({ value: s, label: s.replace(/_/g, " ") })),
-              ]}
-              buttonClassName="h-9 w-[150px] border border-[#AEB5BB] bg-white px-2 text-sm text-[#1F2933] focus:outline-none focus:ring-1 focus:ring-white/70"
-              ariaLabel="Status filter"
-            />
+                  <CustomListbox
+                    value={typeFilter}
+                    onChange={(v) => {
+                      setTypeFilter(v);
+                      setPage(1);
+                    }}
+                    options={[{ value: "", label: "All types" }, ...(typesData ?? []).map((t: any) => ({ value: String(t.id), label: t.name }))]}
+                    buttonClassName="h-9 w-[150px] border border-[#AEB5BB] bg-white px-2 text-sm text-[#1F2933]"
+                    ariaLabel="Document type filter"
+                  />
 
-            <CustomListbox
-              value={typeFilter}
-              onChange={(v) => {
-                setTypeFilter(v);
-                setPage(1);
-              }}
-              options={[{ value: "", label: "All types" }, ...(typesData ?? []).map((t: any) => ({ value: String(t.id), label: t.name }))]}
-              buttonClassName="h-9 w-[160px] border border-[#AEB5BB] bg-white px-2 text-sm text-[#1F2933] focus:outline-none focus:ring-1 focus:ring-white/70"
-              ariaLabel="Document type filter"
-            />
+                  <CustomListbox
+                    value={supplierFilter}
+                    onChange={(v) => {
+                      setSupplierFilter(v);
+                      setPage(1);
+                    }}
+                    options={[{ value: "", label: "All suppliers" }, ...supplierOptions.map((s) => ({ value: s, label: s }))]}
+                    buttonClassName="h-9 w-[160px] border border-[#AEB5BB] bg-white px-2 text-sm text-[#1F2933]"
+                    ariaLabel="Supplier filter"
+                  />
+                </div>
 
-            <CustomListbox
-              value={supplierFilter}
-              onChange={(v) => {
-                setSupplierFilter(v);
-                setPage(1);
-              }}
-              options={[{ value: "", label: "All suppliers" }, ...supplierOptions.map((s) => ({ value: s, label: s }))]}
-              buttonClassName="h-9 w-[170px] border border-[#AEB5BB] bg-white px-2 text-sm text-[#1F2933] focus:outline-none focus:ring-1 focus:ring-white/70"
-              ariaLabel="Supplier filter"
-            />
-
-            {(search || statusFilter || typeFilter || supplierFilter) && (
-              <button
-                type="button"
-                onClick={() => {
-                  clearUrlStatusFilter();
-                  setSearch("");
-                  setStatusFilter("");
-                  setTypeFilter("");
-                  setSupplierFilter("");
-                  setPage(1);
-                }}
-                className="h-9 px-3 text-sm text-white/80 hover:text-white"
-              >
-                Clear
-              </button>
-            )}
+                {(search || statusFilter || typeFilter || supplierFilter) && (
+                  <button
+                    type="button"
+                    onClick={() => {
+                      clearUrlStatusFilter();
+                      setSearch("");
+                      setStatusFilter("");
+                      setTypeFilter("");
+                      setSupplierFilter("");
+                      setPage(1);
+                    }}
+                    className="h-9 inline-flex items-center gap-2 px-3 text-sm text-[#3D454D] bg-white border border-[#B7BEC5] hover:bg-[#EEF3F7]"
+                  >
+                    Clear
+                  </button>
+                )}
+              </div>
 
           </WorkspaceCommandBar>
 

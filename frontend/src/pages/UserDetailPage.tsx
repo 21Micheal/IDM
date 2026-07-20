@@ -361,7 +361,7 @@ export default function UserDetailPage() {
               </label>
               <CustomListbox
                 value={form.department ?? ""}
-                onChange={(v) => setForm((s) => ({ ...s, department: v || null }))}
+                onChange={(v) => setForm((s) => ({ ...s, department: v || "" }))}
                 options={[
                   { value: "", label: "No department" },
                   ...departments.map((d) => ({ value: d.id, label: d.name })),

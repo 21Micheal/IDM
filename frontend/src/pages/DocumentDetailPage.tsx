@@ -14,6 +14,7 @@ import { ApprovalStagesTable } from "@/components/workflow/ApprovalStagesTable";
 import WorkflowActionPanel from "@/components/workflow/WorkflowActionPanel";
 import SignatureRequestPanel from "@/components/signatures/SignatureRequestPanel";
 import JournalPostingCard from "@/components/templates/JournalPostingCard";
+import JournalPayloadModal from "@/components/templates/JournalPayloadModal";
 import { format } from "date-fns";
 import {
   ArrowLeft, Send, MessageSquare, ShieldCheck,
@@ -729,6 +730,7 @@ export default function DocumentDetailPage() {
   const isLockedByOther = Boolean(doc.is_edit_locked && doc.edit_locked_by !== user?.id);
   const lockedByMe = Boolean(doc.is_edit_locked && doc.edit_locked_by === user?.id);
 
+  const isOwnerOrSubmitter = doc.uploaded_by?.id === user?.id || doc.owned_by?.id === user?.id;
   const canSubmit = !isPersonal && ["draft", "returned"].includes(doc.status) && (canApprove || isOwnerOrSubmitter);
 
   const submitActionLabel = doc.status === "returned" ? "Resubmit" : "Start workflow";

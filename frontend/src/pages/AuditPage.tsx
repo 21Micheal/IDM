@@ -102,7 +102,6 @@ export default function AuditPage() {
     ...QUERY_SHORT_STALE,
   });
 
-  // Indigo Vault semantic event coloring
   const eventColor = (event: string) => {
     if (event.includes("deleted") || event.includes("rejected") || event.includes("failed"))
       return "bg-destructive/10 text-destructive ring-1 ring-destructive/20";
@@ -182,7 +181,6 @@ export default function AuditPage() {
     dateTo !== format(new Date(), "yyyy-MM-dd") ? dateTo : "",
   ].filter(Boolean).length;
 
-  // Group user feed entries by day
   const groupedFeed = useMemo(() => {
     const groups: Record<string, any[]> = {};
     (data?.results ?? []).forEach((log: any) => {
@@ -199,7 +197,6 @@ export default function AuditPage() {
 
   return (
     <div className="flex h-full flex-col bg-[#EDEDED] text-[#1F2933]">
-      {/* Header */}
       <WorkspaceCommandBar
         actions={
           user?.has_admin_access ? (
@@ -242,50 +239,46 @@ export default function AuditPage() {
         </div>
       </WorkspaceCommandBar>
 
-      {/* Filters: full controls for admins, simplified note for regular users */}
       <div className="scrollbar-minimal min-h-0 flex-1 overflow-y-auto p-5 pr-0">
-      {user?.has_admin_access ? (
-        <div className="mb-5 border border-[#C8CDD2] bg-white p-4">
-          <div className="flex items-center justify-between mb-5">
-            <div className="flex items-center gap-2 text-sm">
-              <Filter className="w-4 h-4 text-muted-foreground" />
-              <span className="font-medium text-foreground">Filters</span>
+        {user?.has_admin_access ? (
+          <div className="mb-5 border border-[#C8CDD2] bg-white p-4">
+            <div className="flex items-center justify-between mb-5">
+              <div className="flex items-center gap-2 text-sm">
+                <Filter className="w-4 h-4 text-muted-foreground" />
+                <span className="font-medium text-foreground">Filters</span>
+                {activeFilterCount > 0 && (
+                  <span className="ml-1 bg-[#DCEAF2] px-2 py-0.5 text-xs font-medium text-[#287EAD]">
+                    {activeFilterCount} active
+                  </span>
+                )}
+              </div>
               {activeFilterCount > 0 && (
-                <span className="ml-1 bg-[#DCEAF2] px-2 py-0.5 text-xs font-medium text-[#287EAD]">
-                  {activeFilterCount} active
-                </span>
+                <button onClick={resetFilters} className="text-xs text-muted-foreground hover:text-foreground inline-flex items-center gap-1">
+                  <X className="w-3 h-3" />
+                  Clear all
+                </button>
               )}
             </div>
-            {activeFilterCount > 0 && (
-              <button
-                onClick={resetFilters}
-                className="text-xs text-muted-foreground hover:text-foreground inline-flex items-center gap-1"
-              >
-                <X className="w-3 h-3" />
-                Clear all
-              </button>
-            )}
-          </div>
 
-          <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-5">
-            <div className="lg:col-span-2">
-              <label className="label flex items-center gap-2">
-                <Search className="w-4 h-4" /> Search
-              </label>
-              <input
-                type="text"
-                value={searchTerm}
-                onChange={(e) => {
-                  setSearchTerm(e.target.value);
-                  setPage(1);
-                }}
-                placeholder="Actor email, object name, or event..."
-                className="input"
-              />
-            </div>
+            <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-5">
+              <div>
+                <label className="label flex items-center gap-2">
+                  <Search className="w-4 h-4" /> Search
+                </label>
+                <input
+                  type="text"
+                  value={searchTerm}
+                  onChange={(e) => {
+                    setSearchTerm(e.target.value);
+                    setPage(1);
+                  }}
+                  placeholder="Actor email, object name, or event..."
+                  className="input"
+                />
+              </div>
 
-            <div>
-              <label className="label">Event Type</label>
+              <div>
+                <label className="label">Event Type</label>
                 <CustomListbox
                   value={eventFilter}
                   onChange={(v) => {
@@ -299,7 +292,8 @@ export default function AuditPage() {
                   buttonClassName="input"
                   ariaLabel="Event type filter"
                 />
-            <div className="grid grid-cols-2 gap-3">
+              </div>
+
               <div>
                 <label className="label">From</label>
                 <input
@@ -312,6 +306,7 @@ export default function AuditPage() {
                   className="input"
                 />
               </div>
+
               <div>
                 <label className="label">To</label>
                 <input
@@ -326,57 +321,42 @@ export default function AuditPage() {
               </div>
             </div>
           </div>
-        </div>
-      ) : (
-        <div className="mb-5 flex items-center gap-2 border border-[#C8CDD2] bg-white p-4 text-sm text-[#5E6870]">
-          <Calendar className="w-4 h-4 text-muted-foreground" />
-          Showing recent activity on your documents (last 30 days). Use the Dashboard for a quick overview.
-        </div>
-      )}
+        ) : (
+          <div className="mb-5 flex items-center gap-2 border border-[#C8CDD2] bg-white p-4 text-sm text-[#5E6870]">
+            <Calendar className="w-4 h-4 text-muted-foreground" />
+            Showing recent activity on your documents (last 30 days). Use the Dashboard for a quick overview.
+          </div>
+        )}
 
-      {/* Audit Table / Simple Feed for non-admin users */}
-      {user?.has_admin_access ? (
-        <div className="overflow-hidden border border-[#C8CDD2] bg-white">
-          <div className="overflow-x-auto">
-            <table className="w-full text-sm">
-              <thead>
-                <tr className="border-b border-border bg-muted/40">
-                  <th className="text-left px-6 py-3.5 font-semibold text-[11px] uppercase tracking-wider text-muted-foreground">Event</th>
-                  <th className="text-left px-6 py-3.5 font-semibold text-[11px] uppercase tracking-wider text-muted-foreground">Actor</th>
-                  <th className="text-left px-6 py-3.5 font-semibold text-[11px] uppercase tracking-wider text-muted-foreground">Object</th>
-                  <th className="text-left px-6 py-3.5 font-semibold text-[11px] uppercase tracking-wider text-muted-foreground">IP Address</th>
-                  <th className="text-left px-6 py-3.5 font-semibold text-[11px] uppercase tracking-wider text-muted-foreground">Timestamp</th>
-                </tr>
-              </thead>
-              <tbody className="divide-y divide-border">
-                {isLoading &&
-                  Array.from({ length: 8 }).map((_, i) => (
-                    <tr key={i}>
-                      {Array.from({ length: 5 }).map((_, j) => (
-                        <td key={j} className="px-6 py-4">
-                          <div className="h-4 bg-muted rounded animate-pulse" />
-                        </td>
-                      ))}
-                    </tr>
-                  ))}
+        {user?.has_admin_access ? (
+          <div className="overflow-hidden border border-[#C8CDD2] bg-white">
+            <div className="overflow-x-auto">
+              <table className="w-full text-sm">
+                <thead>
+                  <tr className="border-b border-border bg-muted/40">
+                    <th className="text-left px-6 py-3.5 font-semibold text-[11px] uppercase tracking-wider text-muted-foreground">Event</th>
+                    <th className="text-left px-6 py-3.5 font-semibold text-[11px] uppercase tracking-wider text-muted-foreground">Actor</th>
+                    <th className="text-left px-6 py-3.5 font-semibold text-[11px] uppercase tracking-wider text-muted-foreground">Object</th>
+                    <th className="text-left px-6 py-3.5 font-semibold text-[11px] uppercase tracking-wider text-muted-foreground">IP Address</th>
+                    <th className="text-left px-6 py-3.5 font-semibold text-[11px] uppercase tracking-wider text-muted-foreground">Timestamp</th>
+                  </tr>
+                </thead>
+                <tbody className="divide-y divide-border">
+                  {isLoading &&
+                    Array.from({ length: 8 }).map((_, i) => (
+                      <tr key={i}>
+                        {Array.from({ length: 5 }).map((_, j) => (
+                          <td key={j} className="px-6 py-4">
+                            <div className="h-4 bg-muted rounded animate-pulse" />
+                          </td>
+                        ))}
+                      </tr>
+                    ))}
 
-                {data?.results?.map(
-                  (log: {
-                    id: string;
-                    event: string;
-                    summary?: string;
-                    actor_name?: string;
-                    actor_email?: string;
-                    object_type?: string;
-                    object_repr?: string;
-                    ip_address?: string;
-                    timestamp: string;
-                  }) => (
+                  {data?.results?.map((log: any) => (
                     <tr key={log.id} className="hover:bg-muted/30 transition-colors">
                       <td className="px-6 py-4 align-top">
-                        <span
-                          className={`inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full text-xs font-medium ${eventColor(log.event)}`}
-                        >
+                        <span className={`inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full text-xs font-medium ${eventColor(log.event)}`}>
                           <span className={`w-1.5 h-1.5 rounded-full ${eventDot(log.event)}`} />
                           {humanizeEvent(log.event)}
                         </span>
@@ -391,197 +371,139 @@ export default function AuditPage() {
                               {log.actor_name || log.actor_email || "System"}
                             </div>
                             {log.actor_name && log.actor_email && (
-                              <div className="text-xs text-muted-foreground truncate">
-                                {log.actor_email}
-                              </div>
+                              <div className="text-xs text-muted-foreground truncate">{log.actor_email}</div>
                             )}
                           </div>
                         </div>
                       </td>
                       <td className="px-6 py-4 align-top text-muted-foreground max-w-md">
-                        {log.summary && (
-                          <div className="mb-1 text-foreground leading-snug">{log.summary}</div>
-                        )}
+                        {log.summary && <div className="mb-1 text-foreground leading-snug">{log.summary}</div>}
                         <div className="flex items-center gap-2 flex-wrap">
-                          {log.object_type && (
-                            <span className="font-mono text-[11px] bg-muted px-1.5 py-0.5 rounded text-foreground">
-                              {log.object_type}
-                            </span>
-                          )}
-                          {log.object_repr && (
-                            <span className="text-xs text-muted-foreground truncate">
-                              {log.object_repr}
-                            </span>
-                          )}
+                          {log.object_type && <span className="font-mono text-[11px] bg-muted px-1.5 py-0.5 rounded text-foreground">{log.object_type}</span>}
+                          {log.object_repr && <span className="text-xs text-muted-foreground truncate">{log.object_repr}</span>}
                         </div>
                       </td>
-                      <td className="px-6 py-4 align-top font-mono text-xs text-muted-foreground">
-                        {log.ip_address || "—"}
-                      </td>
+                      <td className="px-6 py-4 align-top font-mono text-xs text-muted-foreground">{log.ip_address || "—"}</td>
                       <td className="px-6 py-4 align-top text-muted-foreground text-xs whitespace-nowrap">
                         <div className="flex items-center gap-2">
                           <Clock className="w-3.5 h-3.5" />
                           <div>
-                            <div className="text-foreground">
-                              {format(new Date(log.timestamp), "dd MMM yyyy")}
-                            </div>
-                            <div className="text-[11px] text-muted-foreground">
-                              {format(new Date(log.timestamp), "HH:mm:ss")}
-                            </div>
+                            <div className="text-foreground">{format(new Date(log.timestamp), "dd MMM yyyy")}</div>
+                            <div className="text-[11px] text-muted-foreground">{format(new Date(log.timestamp), "HH:mm:ss")}</div>
                           </div>
                         </div>
                       </td>
                     </tr>
-                  ),
-                )}
+                  ))}
 
-                {!isLoading && !data?.results?.length && (
-                  <tr>
-                    <td colSpan={5} className="py-20 text-center">
-                      <div className="w-14 h-14 rounded-2xl bg-muted/60 mx-auto mb-4 flex items-center justify-center">
-                        <ShieldCheck className="w-6 h-6 text-muted-foreground" />
-                      </div>
-                      <p className="text-foreground font-medium mb-1">No audit events found</p>
-                      <p className="text-sm text-muted-foreground">
-                        Try adjusting your filters or expanding the date range.
-                      </p>
-                    </td>
-                  </tr>
-                )}
-              </tbody>
-            </table>
-          </div>
-
-          {/* Pagination */}
-          {totalPages > 1 && (
-            <div className="flex items-center justify-between px-6 py-4 border-t border-border bg-muted/30">
-              <p className="text-sm text-muted-foreground">
-                Page <span className="font-medium text-foreground">{page}</span> of{" "}
-                <span className="font-medium text-foreground">{totalPages}</span>
-                <span className="mx-2">·</span>
-                <span className="font-medium text-foreground">{data?.count ?? 0}</span> total events
-              </p>
-              <div className="flex gap-2">
-                <button
-                  onClick={() => setPage((p) => Math.max(1, p - 1))}
-                  disabled={page === 1}
-                  className="btn-secondary px-4 py-2 disabled:opacity-50 flex items-center gap-1"
-                >
-                  <ChevronLeft className="w-4 h-4" /> Previous
-                </button>
-                <button
-                  onClick={() => setPage((p) => Math.min(totalPages, p + 1))}
-                  disabled={page === totalPages}
-                  className="btn-secondary px-4 py-2 disabled:opacity-50 flex items-center gap-1"
-                >
-                  Next <ChevronRight className="w-4 h-4" />
-                </button>
-              </div>
+                  {!isLoading && !data?.results?.length && (
+                    <tr>
+                      <td colSpan={5} className="py-20 text-center">
+                        <div className="w-14 h-14 rounded-2xl bg-muted/60 mx-auto mb-4 flex items-center justify-center">
+                          <ShieldCheck className="w-6 h-6 text-muted-foreground" />
+                        </div>
+                        <p className="text-foreground font-medium mb-1">No audit events found</p>
+                        <p className="text-sm text-muted-foreground">Try adjusting your filters or expanding the date range.</p>
+                      </td>
+                    </tr>
+                  )}
+                </tbody>
+              </table>
             </div>
-          )}
-        </div>
-      ) : (
-        <div className="space-y-6">
-          {isLoading && (
-            <div className="card p-4 space-y-3">
-              {Array.from({ length: 6 }).map((_, i) => (
-                <div key={i} className="flex items-center gap-3">
-                  <div className="w-9 h-9 rounded-full bg-muted animate-pulse shrink-0" />
-                  <div className="flex-1 space-y-2">
-                    <div className="h-4 bg-muted rounded animate-pulse w-3/4" />
-                    <div className="h-3 bg-muted rounded animate-pulse w-1/3" />
+
+            {totalPages > 1 && (
+              <div className="flex items-center justify-between px-6 py-4 border-t border-border bg-muted/30">
+                <p className="text-sm text-muted-foreground">
+                  Page <span className="font-medium text-foreground">{page}</span> of <span className="font-medium text-foreground">{totalPages}</span>
+                  <span className="mx-2">·</span>
+                  <span className="font-medium text-foreground">{data?.count ?? 0}</span> total events
+                </p>
+                <div className="flex gap-2">
+                  <button onClick={() => setPage((p) => Math.max(1, p - 1))} disabled={page === 1} className="btn-secondary px-4 py-2 disabled:opacity-50 flex items-center gap-1">
+                    <ChevronLeft className="w-4 h-4" /> Previous
+                  </button>
+                  <button onClick={() => setPage((p) => Math.min(totalPages, p + 1))} disabled={page === totalPages} className="btn-secondary px-4 py-2 disabled:opacity-50 flex items-center gap-1">
+                    Next <ChevronRight className="w-4 h-4" />
+                  </button>
+                </div>
+              </div>
+            )}
+          </div>
+        ) : (
+          <div className="space-y-6">
+            {isLoading && (
+              <div className="card p-4 space-y-3">
+                {Array.from({ length: 6 }).map((_, i) => (
+                  <div key={i} className="flex items-center gap-3">
+                    <div className="w-9 h-9 rounded-full bg-muted animate-pulse shrink-0" />
+                    <div className="flex-1 space-y-2">
+                      <div className="h-4 bg-muted rounded animate-pulse w-3/4" />
+                      <div className="h-3 bg-muted rounded animate-pulse w-1/3" />
+                    </div>
+                  </div>
+                ))}
+              </div>
+            )}
+
+            {!isLoading &&
+              Object.entries(groupedFeed).map(([day, items]) => (
+                <div key={day}>
+                  <div className="flex items-center gap-3 mb-3 px-1">
+                    <h3 className="text-xs font-semibold uppercase tracking-wider text-muted-foreground">{day}</h3>
+                    <div className="flex-1 h-px bg-border" />
+                    <span className="text-[11px] text-muted-foreground">{items.length} {items.length === 1 ? "activity" : "activities"}</span>
+                  </div>
+                  <div className="card overflow-hidden">
+                    <ul className="divide-y divide-border">
+                      {items.map((log: any) => (
+                        <li key={log.id} className="p-4 hover:bg-muted/30 transition-colors flex items-start gap-3">
+                          <div className={`w-9 h-9 rounded-full flex items-center justify-center shrink-0 ${eventColor(log.event || "")}`}>
+                            <FileText className="w-4 h-4" />
+                          </div>
+                          <div className="flex-1 min-w-0">
+                            <div className="text-sm text-foreground leading-snug">{log.summary || humanizeEvent(log.event || "Activity")}</div>
+                            <div className="text-xs text-muted-foreground mt-0.5 flex items-center gap-1.5">
+                              <Clock className="w-3 h-3" />
+                              {formatDistanceToNow(new Date(log.timestamp), { addSuffix: true })}
+                            </div>
+                          </div>
+                          <div className="text-xs text-muted-foreground font-mono whitespace-nowrap">{format(new Date(log.timestamp), "HH:mm")}</div>
+                        </li>
+                      ))}
+                    </ul>
                   </div>
                 </div>
               ))}
-            </div>
-          )}
 
-          {!isLoading &&
-            Object.entries(groupedFeed).map(([day, items]) => (
-              <div key={day}>
-                <div className="flex items-center gap-3 mb-3 px-1">
-                  <h3 className="text-xs font-semibold uppercase tracking-wider text-muted-foreground">
-                    {day}
-                  </h3>
-                  <div className="flex-1 h-px bg-border" />
-                  <span className="text-[11px] text-muted-foreground">
-                    {items.length} {items.length === 1 ? "activity" : "activities"}
-                  </span>
+            {!isLoading && !data?.results?.length && (
+              <div className="card py-20 text-center">
+                <div className="w-14 h-14 rounded-2xl bg-muted/60 mx-auto mb-4 flex items-center justify-center">
+                  <ShieldCheck className="w-6 h-6 text-muted-foreground" />
                 </div>
-                <div className="card overflow-hidden">
-                  <ul className="divide-y divide-border">
-                    {items.map((log: any) => (
-                      <li
-                        key={log.id}
-                        className="p-4 hover:bg-muted/30 transition-colors flex items-start gap-3"
-                      >
-                        <div
-                          className={`w-9 h-9 rounded-full flex items-center justify-center shrink-0 ${eventColor(
-                            log.event || "",
-                          )}`}
-                        >
-                          <FileText className="w-4 h-4" />
-                        </div>
-                        <div className="flex-1 min-w-0">
-                          <div className="text-sm text-foreground leading-snug">
-                            {log.summary || humanizeEvent(log.event || "Activity")}
-                          </div>
-                          <div className="text-xs text-muted-foreground mt-0.5 flex items-center gap-1.5">
-                            <Clock className="w-3 h-3" />
-                            {formatDistanceToNow(new Date(log.timestamp), { addSuffix: true })}
-                          </div>
-                        </div>
-                        <div className="text-xs text-muted-foreground font-mono whitespace-nowrap">
-                          {format(new Date(log.timestamp), "HH:mm")}
-                        </div>
-                      </li>
-                    ))}
-                  </ul>
+                <p className="text-foreground font-medium mb-1">No recent activity</p>
+                <p className="text-sm text-muted-foreground">Actions on your documents will appear here.</p>
+              </div>
+            )}
+
+            {totalPages > 1 && (
+              <div className="card flex items-center justify-between px-6 py-4">
+                <p className="text-sm text-muted-foreground">
+                  Page <span className="font-medium text-foreground">{page}</span> of <span className="font-medium text-foreground">{totalPages}</span>
+                  <span className="mx-2">·</span>
+                  <span className="font-medium text-foreground">{data?.count ?? 0}</span> total
+                </p>
+                <div className="flex gap-2">
+                  <button onClick={() => setPage((p) => Math.max(1, p - 1))} disabled={page === 1} className="btn-secondary px-4 py-2 disabled:opacity-50 flex items-center gap-1">
+                    <ChevronLeft className="w-4 h-4" /> Previous
+                  </button>
+                  <button onClick={() => setPage((p) => Math.min(totalPages, p + 1))} disabled={page === totalPages} className="btn-secondary px-4 py-2 disabled:opacity-50 flex items-center gap-1">
+                    Next <ChevronRight className="w-4 h-4" />
+                  </button>
                 </div>
               </div>
-            ))}
-
-          {!isLoading && !data?.results?.length && (
-            <div className="card py-20 text-center">
-              <div className="w-14 h-14 rounded-2xl bg-muted/60 mx-auto mb-4 flex items-center justify-center">
-                <ShieldCheck className="w-6 h-6 text-muted-foreground" />
-              </div>
-              <p className="text-foreground font-medium mb-1">No recent activity</p>
-              <p className="text-sm text-muted-foreground">
-                Actions on your documents will appear here.
-              </p>
-            </div>
-          )}
-
-          {/* Pagination */}
-          {totalPages > 1 && (
-            <div className="card flex items-center justify-between px-6 py-4">
-              <p className="text-sm text-muted-foreground">
-                Page <span className="font-medium text-foreground">{page}</span> of{" "}
-                <span className="font-medium text-foreground">{totalPages}</span>
-                <span className="mx-2">·</span>
-                <span className="font-medium text-foreground">{data?.count ?? 0}</span> total
-              </p>
-              <div className="flex gap-2">
-                <button
-                  onClick={() => setPage((p) => Math.max(1, p - 1))}
-                  disabled={page === 1}
-                  className="btn-secondary px-4 py-2 disabled:opacity-50 flex items-center gap-1"
-                >
-                  <ChevronLeft className="w-4 h-4" /> Previous
-                </button>
-                <button
-                  onClick={() => setPage((p) => Math.min(totalPages, p + 1))}
-                  disabled={page === totalPages}
-                  className="btn-secondary px-4 py-2 disabled:opacity-50 flex items-center gap-1"
-                >
-                  Next <ChevronRight className="w-4 h-4" />
-                </button>
-              </div>
-            </div>
-          )}
-        </div>
-      )}
+            )}
+          </div>
+        )}
       </div>
     </div>
   );

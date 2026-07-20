@@ -123,7 +123,7 @@ function getFormValues(doc: any): Record<string, unknown> {
 // not an authoritative lookup. If your imprest template's purpose/reason
 // field uses a different key, add it here (or better: tell me the actual
 // key and I'll wire it in directly).
-const DESCRIPTION_KEYS = ["description", "purpose", "purpose_of_travel", "reason", "details", "activity", "short_text_j1lo", "short_text_ca8g"];
+const DESCRIPTION_KEYS = ["description", "purpose", "purpose_of_travel", "reason", "details", "activity"];
 function getFormDescription(doc: any): string {
   const values = getFormValues(doc);
   for (const key of DESCRIPTION_KEYS) {
@@ -167,13 +167,12 @@ function getFormAmount(doc: any): number | null {
   // Last resort — guessed field-key names, for a form whose template has no
   // retirement mapping configured (so there's nothing authoritative above).
   const values = getFormValues(doc);
-  const alt = Number((values as any)?.amount ?? (values as any)?.total ?? (values as any)?.total_amount ?? (values as any)?.requested_amount ?? (values as any)?.advance_amount);
+  const alt = Number((values as any)?.amount ?? (values as any)?.total ?? (values as any)?.total_amount ?? (values as any)?.requested_amount);
   return Number.isFinite(alt) && alt > 0 ? alt : null;
 }
 
 function getFormVariance(doc: any): { amount: number; kind: "over" | "under" } | null {
-  // Check both metadata.form.retirement_variance and form_summary.retirement_variance
-  const v = doc?.metadata?.form?.retirement_variance ?? doc?.form_summary?.retirement_variance;
+  const v = doc?.metadata?.form?.retirement_variance;
   if (!v || typeof v !== "object") return null;
   const amount = Number(v.amount);
   if (!Number.isFinite(amount) || amount === 0) return null;
@@ -453,8 +452,8 @@ export default function FormsPage() {
           ))}
         </div>
 
-        <div className="flex flex-wrap items-center gap-3 border-t border-[#EEF0F2] pt-3">
-          <div className="relative min-w-[220px] max-w-[320px] flex-1">
+        <div className="flex flex-wrap items-center gap-2 border-t border-[#EEF0F2] pt-3">
+          <div className="relative min-w-[220px] max-w-[320px]">
             <SearchIcon className="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-[#5E6870]" />
             <input
               value={search}
@@ -463,69 +462,78 @@ export default function FormsPage() {
               className="h-9 w-full border border-[#AEB5BB] bg-white pl-9 pr-3 text-sm text-[#1F2933] placeholder:text-[#8C969E] focus:outline-none focus:ring-1 focus:ring-[#287EAD]"
             />
           </div>
+
           <CustomListbox
             value={stageFilter}
             onChange={setStageFilter}
             options={STAGE_OPTIONS}
-            buttonClassName="h-9 w-[150px] border border-[#AEB5BB] bg-white px-2 text-sm text-[#1F2933]"
+            buttonClassName="h-9 w-[140px] border border-[#AEB5BB] bg-white px-2 text-sm text-[#1F2933]"
             ariaLabel="Stage filter"
           />
+
           <CustomListbox
             value={templateFilter}
             onChange={setTemplateFilter}
             options={[{ value: "", label: "All form types" }, ...imprestTemplates.map((t: any) => ({ value: String(t.id), label: t.name }))]}
-            buttonClassName="h-9 w-[190px] border border-[#AEB5BB] bg-white px-2 text-sm text-[#1F2933]"
+            buttonClassName="h-9 w-[170px] border border-[#AEB5BB] bg-white px-2 text-sm text-[#1F2933]"
             ariaLabel="Form type filter"
           />
+
           <CustomListbox
             value={varianceFilter}
             onChange={setVarianceFilter}
             options={VARIANCE_OPTIONS}
-            buttonClassName="h-9 w-[170px] border border-[#AEB5BB] bg-white px-2 text-sm text-[#1F2933]"
+            buttonClassName="h-9 w-[140px] border border-[#AEB5BB] bg-white px-2 text-sm text-[#1F2933]"
             ariaLabel="Variance filter"
           />
+
           <CustomListbox
             value={departmentFilter}
             onChange={setDepartmentFilter}
             options={[{ value: "", label: "All departments" }, ...departmentOptions.map((d) => ({ value: d, label: d }))]}
-            buttonClassName="h-9 w-[170px] border border-[#AEB5BB] bg-white px-2 text-sm text-[#1F2933]"
+            buttonClassName="h-9 w-[150px] border border-[#AEB5BB] bg-white px-2 text-sm text-[#1F2933]"
             ariaLabel="Department filter"
           />
+
           <CustomListbox
             value={requesterFilter}
             onChange={setRequesterFilter}
             options={[{ value: "", label: "All requesters" }, ...requesterOptions.map(([id, name]) => ({ value: id, label: name }))]}
-            buttonClassName="h-9 w-[180px] border border-[#AEB5BB] bg-white px-2 text-sm text-[#1F2933]"
+            buttonClassName="h-9 w-[150px] border border-[#AEB5BB] bg-white px-2 text-sm text-[#1F2933]"
             ariaLabel="Requester filter"
           />
-        </div>
-        <div className="flex flex-wrap items-center gap-3">
+
           <label className="flex items-center gap-1.5 text-xs text-[#5E6870]">
             From
             <input type="date" value={dateFrom} onChange={(e) => setDateFrom(e.target.value)}
               className="h-8 border border-[#AEB5BB] bg-white px-2 text-xs text-[#1F2933]" />
           </label>
+
           <label className="flex items-center gap-1.5 text-xs text-[#5E6870]">
             To
             <input type="date" value={dateTo} onChange={(e) => setDateTo(e.target.value)}
               className="h-8 border border-[#AEB5BB] bg-white px-2 text-xs text-[#1F2933]" />
           </label>
+
           <label className="flex items-center gap-1.5 text-xs text-[#5E6870]">
             Amount min
             <input type="number" value={amountMin} onChange={(e) => setAmountMin(e.target.value)}
               className="h-8 w-24 border border-[#AEB5BB] bg-white px-2 text-xs text-[#1F2933]" />
           </label>
+
           <label className="flex items-center gap-1.5 text-xs text-[#5E6870]">
             Amount max
             <input type="number" value={amountMax} onChange={(e) => setAmountMax(e.target.value)}
               className="h-8 w-24 border border-[#AEB5BB] bg-white px-2 text-xs text-[#1F2933]" />
           </label>
+
           {activeFilterCount > 0 && (
             <button type="button" onClick={clearFilters}
               className="inline-flex items-center gap-1 text-xs font-semibold text-[#287EAD] hover:text-[#1E6F99]">
               <X className="h-3.5 w-3.5" /> Clear filters ({activeFilterCount})
             </button>
           )}
+
           <span className="ml-auto text-xs text-[#5E6870]">
             {isLoading ? "Loading…" : `${filteredRows.length} matching form${filteredRows.length === 1 ? "" : "s"}`}
           </span>
