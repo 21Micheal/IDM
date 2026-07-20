@@ -22,6 +22,7 @@ import {
   CircleSlash,
   CalendarClock,
 } from "lucide-react";
+import CustomListbox from "@/components/ui/CustomListbox";
 import { toast } from "@/components/ui/vault-toast";
 import { TemporaryPasswordModal } from "@/components/users/TemporaryPasswordModal";
 import {
@@ -358,38 +359,33 @@ export default function UserDetailPage() {
               <label className="block text-xs font-medium text-muted-foreground mb-1.5">
                 Department
               </label>
-              <select
-                className="w-full h-10 rounded-lg border border-input bg-background px-3 text-sm focus:outline-none focus:ring-2 focus:ring-ring focus:border-ring transition-colors"
-                value={form.department}
-                onChange={(e) =>
-                  setForm((s) => ({ ...s, department: e.target.value }))
-                }
-              >
-                <option value="">No department</option>
-                {departments.map((d) => (
-                  <option key={d.id} value={d.id}>
-                    {d.name}
-                  </option>
-                ))}
-              </select>
-            </div>
-
-            <label className="flex items-center justify-between rounded-lg border border-border bg-muted/30 px-4 py-3">
-              <div>
-                <p className="text-sm font-medium text-foreground">Account active</p>
-                <p className="text-xs text-muted-foreground">
-                  When disabled, the user cannot sign in.
-                </p>
-              </div>
-              <input
-                type="checkbox"
-                className="h-4 w-4 accent-primary"
-                checked={form.is_active}
-                onChange={(e) =>
-                  setForm((s) => ({ ...s, is_active: e.target.checked }))
-                }
+              <CustomListbox
+                value={form.department ?? ""}
+                onChange={(v) => setForm((s) => ({ ...s, department: v || null }))}
+                options={[
+                  { value: "", label: "No department" },
+                  ...departments.map((d) => ({ value: d.id, label: d.name })),
+                ]}
+                buttonClassName="w-full h-10 rounded-lg border border-input bg-background px-3 text-sm text-left focus:outline-none focus:ring-2 focus:ring-ring focus:border-ring transition-colors"
+                ariaLabel="Department"
               />
-            </label>
+              <div className="flex items-center gap-3 mt-3">
+                <input
+                  type="checkbox"
+                  className="h-4 w-4 accent-primary"
+                  checked={form.is_active}
+                  onChange={(e) =>
+                    setForm((s) => ({ ...s, is_active: e.target.checked }))
+                  }
+                />
+                <div>
+                  <p className="text-sm font-medium text-foreground">Account active</p>
+                  <p className="text-xs text-muted-foreground">
+                    When disabled, the user cannot sign in.
+                  </p>
+                </div>
+              </div>
+            </div>
 
             <div className="flex flex-wrap gap-2 pt-2">
               <button
@@ -448,18 +444,16 @@ export default function UserDetailPage() {
             </p>
           </header>
           <div className="p-6 space-y-3 flex-1 flex flex-col">
-            <select
-              className="w-full h-10 rounded-lg border border-input bg-background px-3 text-sm focus:outline-none focus:ring-2 focus:ring-ring focus:border-ring transition-colors"
+            <CustomListbox
               value={reassignTo}
-              onChange={(e) => setReassignTo(e.target.value)}
-            >
-              <option value="">Select target user</option>
-              {reassignCandidates.map((c) => (
-                <option key={c.id} value={c.id}>
-                  {c.full_name} ({c.email})
-                </option>
-              ))}
-            </select>
+              onChange={setReassignTo}
+              options={[
+                { value: "", label: "Select target user" },
+                ...reassignCandidates.map((c) => ({ value: c.id, label: `${c.full_name} (${c.email})` })),
+              ]}
+              buttonClassName="w-full h-10 rounded-lg border border-input bg-background px-3 text-sm text-left focus:outline-none focus:ring-2 focus:ring-ring focus:border-ring transition-colors"
+              ariaLabel="Reassign user"
+            />
             <button
               onClick={() => reassignMutation.mutate()}
               disabled={!reassignTo || reassignMutation.isPending}

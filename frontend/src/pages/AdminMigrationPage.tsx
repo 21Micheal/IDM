@@ -17,6 +17,7 @@ import {
   type MigrationConnection,
   type MigrationJob,
 } from "@/services/api";
+import CustomListbox from "@/components/ui/CustomListbox";
 import { extractApiError } from "@/lib/apiError";
 import { toast } from "@/components/ui/vault-toast";
 
@@ -255,18 +256,16 @@ export default function AdminMigrationPage() {
           </div>
           <div>
             <label className={labelCls}>Target document type</label>
-            <select
-              className={inputCls}
+            <CustomListbox
               value={targetType}
-              onChange={(e) => setTargetType(e.target.value)}
-            >
-              <option value="">Select a type…</option>
-              {types.map((t) => (
-                <option key={t.id} value={t.id}>
-                  {t.name} ({t.code})
-                </option>
-              ))}
-            </select>
+              onChange={setTargetType}
+              options={[
+                { value: "", label: "Select a type…" },
+                ...types.map((t) => ({ value: t.id, label: `${t.name} (${t.code})` })),
+              ]}
+              buttonClassName={inputCls}
+              ariaLabel="Target document type"
+            />
           </div>
           <div className="md:col-span-2">
             <label className={labelCls}>IDM source query (optional)</label>

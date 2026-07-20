@@ -471,12 +471,16 @@ function DynamicField({
         control={control}
         rules={rules}
         render={({ field: f }) => (
-          <select {...f} value={String(f.value ?? "")} className="input">
-            <option value="">Select…</option>
-            {(field.select_options ?? []).map((opt) => (
-              <option key={opt} value={opt}>{opt}</option>
-            ))}
-          </select>
+          <CustomListbox
+            value={String(f.value ?? "")}
+            onChange={(value) => f.onChange(value)}
+            options={[
+              { value: "", label: "Select…" },
+              ...(field.select_options ?? []).map((opt) => ({ value: opt, label: opt })),
+            ]}
+            buttonClassName="input text-left"
+            ariaLabel={field.label}
+          />
         )}
       />,
     );

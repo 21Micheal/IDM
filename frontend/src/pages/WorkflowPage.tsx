@@ -22,6 +22,7 @@ import {
   type WorkflowTaskFilters,
 } from "@/lib/workflowTaskFilters";
 import { WorkspaceCommandBar } from "@/components/shared/WorkspaceCommandBar";
+import CustomListbox from "@/components/ui/CustomListbox";
 
 export default function WorkflowPage() {
   const [filters, setFilters] = useState<WorkflowTaskFilters>(DEFAULT_WORKFLOW_TASK_FILTERS);
@@ -148,52 +149,48 @@ export default function WorkflowPage() {
                 className="h-10 w-full border border-[#C8CDD2] bg-white pl-9 pr-3 text-sm outline-none focus:border-[#287EAD]"
               />
             </div>
-            <select
+            <CustomListbox
               value={filters.documentType}
-              onChange={(e) => updateFilter("documentType", e.target.value)}
-              className="h-10 border border-[#C8CDD2] bg-white px-3 text-sm outline-none focus:border-[#287EAD]"
-            >
-              <option value="">All document types</option>
-              {filterOptions.documentTypes.map((option) => (
-                <option key={option.value} value={option.value}>
-                  {option.label} ({option.count})
-                </option>
-              ))}
-            </select>
-            <select
+              onChange={(v) => updateFilter("documentType", v)}
+              options={[
+                { value: "", label: "All document types" },
+                ...filterOptions.documentTypes.map((option) => ({ value: option.value, label: `${option.label} (${option.count})` })),
+              ]}
+              buttonClassName="h-10 border border-[#C8CDD2] bg-white px-3 text-sm text-left outline-none focus:border-[#287EAD]"
+              ariaLabel="Document type filter"
+            />
+            <CustomListbox
               value={filters.department}
-              onChange={(e) => updateFilter("department", e.target.value)}
-              className="h-10 border border-[#C8CDD2] bg-white px-3 text-sm outline-none focus:border-[#287EAD]"
-            >
-              <option value="">All departments</option>
-              {filterOptions.departments.map((option) => (
-                <option key={option.value} value={option.value}>
-                  {option.label} ({option.count})
-                </option>
-              ))}
-            </select>
-            <select
+              onChange={(v) => updateFilter("department", v)}
+              options={[
+                { value: "", label: "All departments" },
+                ...filterOptions.departments.map((option) => ({ value: option.value, label: `${option.label} (${option.count})` })),
+              ]}
+              buttonClassName="h-10 border border-[#C8CDD2] bg-white px-3 text-sm text-left outline-none focus:border-[#287EAD]"
+              ariaLabel="Department filter"
+            />
+            <CustomListbox
               value={filters.fileFormat}
-              onChange={(e) => updateFilter("fileFormat", e.target.value)}
-              className="h-10 border border-[#C8CDD2] bg-white px-3 text-sm outline-none focus:border-[#287EAD]"
-            >
-              <option value="">All formats</option>
-              {filterOptions.fileFormats.map((option) => (
-                <option key={option.value} value={option.value}>
-                  {option.label} ({option.count})
-                </option>
-              ))}
-            </select>
-            <select
-              value={filters.urgency}
-              onChange={(e) => updateFilter("urgency", e.target.value as WorkflowTaskFilters["urgency"])}
-              className="h-10 border border-[#C8CDD2] bg-white px-3 text-sm outline-none focus:border-[#287EAD]"
-            >
-              <option value="">Any urgency</option>
-              <option value="overdue">Overdue</option>
-              <option value="due_soon">Due in 24h</option>
-              <option value="held">On hold</option>
-            </select>
+              onChange={(v) => updateFilter("fileFormat", v)}
+              options={[
+                { value: "", label: "All formats" },
+                ...filterOptions.fileFormats.map((option) => ({ value: option.value, label: `${option.label} (${option.count})` })),
+              ]}
+              buttonClassName="h-10 border border-[#C8CDD2] bg-white px-3 text-sm text-left outline-none focus:border-[#287EAD]"
+              ariaLabel="File format filter"
+            />
+            <CustomListbox
+              value={filters.urgency ?? ""}
+              onChange={(v) => updateFilter("urgency", v as WorkflowTaskFilters["urgency"])}
+              options={[
+                { value: "", label: "Any urgency" },
+                { value: "overdue", label: "Overdue" },
+                { value: "due_soon", label: "Due in 24h" },
+                { value: "held", label: "On hold" },
+              ]}
+              buttonClassName="h-10 border border-[#C8CDD2] bg-white px-3 text-sm text-left outline-none focus:border-[#287EAD]"
+              ariaLabel="Urgency filter"
+            />
           </div>
 
           <div className="mt-3 inline-flex items-center gap-1.5 text-xs text-[#5E6870]">

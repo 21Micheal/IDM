@@ -9,6 +9,7 @@ import { usersAPI, departmentsAPI } from "@/services/api";
 import {
   Plus, Search, Loader2, X, Users as UsersIcon,
 } from "lucide-react";
+import CustomListbox from "@/components/ui/CustomListbox";
 import { toast } from "@/components/ui/vault-toast";
 import { TemporaryPasswordModal } from "@/components/users/TemporaryPasswordModal";
 import { format } from "date-fns";
@@ -65,7 +66,7 @@ function CreateUserModal({
   onClose: () => void;
 }) {
   const qc = useQueryClient();
-  const { register, handleSubmit, formState: { errors }, reset } = useForm<CreateForm>({
+  const { register, handleSubmit, formState: { errors }, reset, watch, setValue } = useForm<CreateForm>({
     resolver: zodResolver(createSchema),
   });
 
@@ -136,14 +137,17 @@ function CreateUserModal({
 
               <div>
                 <label className="block text-sm font-medium text-[#1F2933] mb-1.5">Department</label>
-                <select {...register("department")} className="input">
-                  <option value="">— None —</option>
-                  {departments.map((d) => (
-                    <option key={d.id} value={d.id}>{d.name}</option>
-                  ))}
-                </select>
+                  <CustomListbox
+                    value={watch("department") ?? ""}
+                    onChange={(v) => setValue("department", v || "")}
+                    options={[
+                      { value: "", label: "— None —" },
+                      ...departments.map((d) => ({ value: d.id, label: d.name })),
+                    ]}
+                    buttonClassName="input"
+                    ariaLabel="Department"
+                  />
               </div>
-
               <button type="submit" disabled={mutation.isPending} className="inline-flex w-full items-center justify-center gap-2 bg-[#287EAD] px-5 py-2.5 font-medium text-white transition-colors hover:bg-[#206D99] disabled:opacity-60">
                 {mutation.isPending && <Loader2 className="w-4 h-4 animate-spin" />}
                 Create User
@@ -169,7 +173,7 @@ function EditUserModal({
   onClose: () => void;
 }) {
   const qc = useQueryClient();
-  const { register, handleSubmit, formState: { errors: _errors } } = useForm<EditForm>({
+  const { register, handleSubmit, formState: { errors: _errors }, watch, setValue } = useForm<EditForm>({
     resolver: zodResolver(editSchema),
     defaultValues: {
       first_name: user.first_name,
@@ -224,12 +228,17 @@ function EditUserModal({
 
           <div>
             <label className="block text-sm font-medium text-[#1F2933] mb-1.5">Department</label>
-            <select {...register("department")} className="input">
-              <option value="">— None —</option>
-              {departments.map(d => <option key={d.id} value={d.id}>{d.name}</option>)}
-            </select>
-          </div>
-
+              <CustomListbox
+                value={watch("department") ?? ""}
+                onChange={(v) => setValue("department", v || "")}
+                options={[
+                  { value: "", label: "— None —" },
+                  ...departments.map((d) => ({ value: d.id, label: d.name })),
+                ]}
+                buttonClassName="input"
+                ariaLabel="Department"
+              />
+            </div>
           <div className="flex items-center gap-3">
             <input {...register("is_active")} type="checkbox" className="w-4 h-4 accent-[#287EAD]" />
             <label className="text-sm font-medium text-[#1F2933]">Account is active</label>
@@ -328,16 +337,16 @@ export default function UsersPage() {
             className="input pl-11 w-full"
           />
         </div>
-        <select
+        <CustomListbox
           value={deptFilter}
-          onChange={(e) => setDeptFilter(e.target.value)}
-          className="input w-64"
-        >
-          <option value="">All Departments</option>
-          {departments.map((d) => (
-            <option key={d.id} value={d.id}>{d.name}</option>
-          ))}
-        </select>
+          onChange={setDeptFilter}
+          options={[
+            { value: "", label: "All Departments" },
+            ...departments.map((d) => ({ value: d.id, label: d.name })),
+          ]}
+          buttonClassName="input w-64 text-left"
+          ariaLabel="Department filter"
+        />
       </div>
 
       {/* Table */}

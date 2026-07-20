@@ -23,6 +23,7 @@ import {
 } from "@/services/api";
 import { extractApiError } from "@/lib/apiError";
 import { toast } from "@/components/ui/vault-toast";
+import CustomListbox from "@/components/ui/CustomListbox";
 
 type DocumentTypeLite = { id: string; name: string; code: string };
 
@@ -358,14 +359,16 @@ export default function AdminMailboxPage() {
         <div className="grid grid-cols-1 gap-4 p-4 md:grid-cols-2">
           <div>
             <label className={labelCls}>Protocol</label>
-            <select
-              className={inputCls}
+            <CustomListbox
               value={protocol}
-              onChange={(e) => changeProtocol(e.target.value as MailboxProtocol)}
-            >
-              <option value="imap">IMAP</option>
-              <option value="graph">Microsoft Graph (Microsoft 365 / Outlook)</option>
-            </select>
+              onChange={(v) => changeProtocol(v as MailboxProtocol)}
+              options={[
+                { value: "imap", label: "IMAP" },
+                { value: "graph", label: "Microsoft Graph (Microsoft 365 / Outlook)" },
+              ]}
+              buttonClassName={inputCls}
+              ariaLabel="Mailbox protocol"
+            />
           </div>
           <div className="hidden md:block" />
 
@@ -537,18 +540,16 @@ export default function AdminMailboxPage() {
           </div>
           <div>
             <label className={labelCls}>Default document type</label>
-            <select
-              className={inputCls}
+            <CustomListbox
               value={defaultType}
-              onChange={(e) => setDefaultType(e.target.value)}
-            >
-              <option value="">Unclassified — reviewer classifies</option>
-              {types.map((t) => (
-                <option key={t.id} value={t.id}>
-                  {t.name} ({t.code})
-                </option>
-              ))}
-            </select>
+              onChange={setDefaultType}
+              options={[
+                { value: "", label: "Unclassified — reviewer classifies" },
+                ...types.map((t) => ({ value: t.id, label: `${t.name} (${t.code})` })),
+              ]}
+              buttonClassName={inputCls}
+              ariaLabel="Default document type"
+            />
           </div>
           <div className="md:col-span-2">
             <label className={labelCls}>Sender → supplier map (one per line: email or domain = Supplier)</label>
@@ -670,15 +671,17 @@ export default function AdminMailboxPage() {
             <BarChart3 className="h-4 w-4 text-[#287EAD]" />
             <h2 className="text-sm font-semibold text-[#1F2933]">Ingestion statistics</h2>
           </span>
-          <select
-            className="h-8 border border-[#AEB5BB] bg-white px-2 text-xs text-[#1F2933] outline-none"
-            value={statsDays}
-            onChange={(e) => setStatsDays(Number(e.target.value))}
-          >
-            <option value={7}>Last 7 days</option>
-            <option value={30}>Last 30 days</option>
-            <option value={90}>Last 90 days</option>
-          </select>
+          <CustomListbox
+            value={String(statsDays)}
+            onChange={(v) => setStatsDays(Number(v))}
+            options={[
+              { value: "7", label: "Last 7 days" },
+              { value: "30", label: "Last 30 days" },
+              { value: "90", label: "Last 90 days" },
+            ]}
+            buttonClassName="h-8 border border-[#AEB5BB] bg-white px-2 text-xs text-[#1F2933] text-left"
+            ariaLabel="Ingestion statistics time range"
+          />
         </div>
         <div className="space-y-4 p-4">
           {statsQuery.data && (

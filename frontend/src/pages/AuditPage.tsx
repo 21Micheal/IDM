@@ -16,6 +16,7 @@ import {
   X,
   FileText,
 } from "lucide-react";
+import CustomListbox from "@/components/ui/CustomListbox";
 import { format, subDays, isToday, isYesterday, formatDistanceToNow } from "date-fns";
 import { useAuthStore } from "@/store/authStore";
 import { toast } from "@/components/ui/vault-toast";
@@ -285,23 +286,19 @@ export default function AuditPage() {
 
             <div>
               <label className="label">Event Type</label>
-              <select
-                value={eventFilter}
-                onChange={(e) => {
-                  setEventFilter(e.target.value);
-                  setPage(1);
-                }}
-                className="input"
-              >
-                <option value="">All Events</option>
-                {eventOptions.map(([value, label]) => (
-                  <option key={value} value={value}>
-                    {label}
-                  </option>
-                ))}
-              </select>
-            </div>
-
+                <CustomListbox
+                  value={eventFilter}
+                  onChange={(v) => {
+                    setEventFilter(v);
+                    setPage(1);
+                  }}
+                  options={[
+                    { value: "", label: "All Events" },
+                    ...eventOptions.map(([value, label]) => ({ value, label })),
+                  ]}
+                  buttonClassName="input"
+                  ariaLabel="Event type filter"
+                />
             <div className="grid grid-cols-2 gap-3">
               <div>
                 <label className="label">From</label>
