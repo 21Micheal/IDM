@@ -462,9 +462,9 @@ export default function FormsPage() {
       </div>
 
       {/* ── Filters ── */}
-      <div className="space-y-3 border border-[#C8CDD2] bg-white p-4">
+      <div className="border border-[#C8CDD2] bg-white p-4">
         {/* Status quick filters */}
-        <div className="flex flex-wrap items-center gap-1.5">
+        <div className="flex flex-wrap items-center gap-1.5 mb-3">
           {STATUS_CHIPS.map((chip) => (
             <button
               key={chip.value || "all"}

@@ -166,7 +166,7 @@ export default function CustomListbox({
   }, [activeIndex]);
 
   return (
-    <div ref={rootRef} className={`relative inline-block w-full max-w-full ${className}`}>
+    <div ref={rootRef} className={`relative inline-block max-w-full ${className}`}>
       <button
         ref={buttonRef}
         type="button"
