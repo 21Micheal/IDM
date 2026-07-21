@@ -1272,6 +1272,7 @@ export default function DocumentDetailPage() {
                 documentId={doc.id}
                 expectPosting={journalEnabled && ["request_approved", "fully_approved"].includes(doc.status)}
                 watchKey={`${doc.status}:${doc.updated_at}`}
+                availableStages={availableStages}
               />
             </div>
           )}

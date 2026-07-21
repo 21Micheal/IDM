@@ -57,6 +57,10 @@ function isApprovalLockedStatus(status?: string): boolean {
   return ["pending_approval", "request_pending", "retirement_pending", "on_hold"].includes(status || "");
 }
 
+function isWorkflowActiveOrCompleted(status?: string): boolean {
+  return isApprovalLockedStatus(status) || ["approved", "request_approved", "fully_approved"].includes(status || "");
+}
+
 function isFinalFormProcessStep(step?: string): boolean {
   return ["fully_approved", "retirement_rejected"].includes(step || "");
 }
@@ -130,7 +134,9 @@ export default function FormDetailPage() {
       && !isFinalFormProcessStep(formProcessStep)
       && (doc.status !== "approved" || (isRequestApproved && hasConditionalEditability && (hasAdminAccess || isOwnerOrSubmitter)));
 
-    if (!formEditing && canEditForm && hasConditionalEditability) {
+    // Auto-enter edit mode when form has conditional editability and user is at a stage
+    // where conditional editing should be allowed (request_approved for retirement, etc.)
+    if (!formEditing && hasConditionalEditability && (isRequestApproved || canEditForm)) {
       setFormValues({ ...(formData?.values ?? {}) });
       formDirtyRef.current = false;
       setFormEditing(true);
@@ -228,7 +234,7 @@ export default function FormDetailPage() {
 
   if (isLoading) {
     return (
-      <div className="flex h-screen items-center justify-center bg-[#EDEDED]">
+      <div className="flex h-full items-center justify-center bg-[#EDEDED]">
         <Loader2 className="h-8 w-8 animate-spin text-[#287EAD]" />
       </div>
     );
@@ -304,7 +310,9 @@ export default function FormDetailPage() {
   const isRetirementPhase = doc.builder_workflow_phase === "retirement";
   const isRetirementFinalized = isRetirementPhase && isFinalFormProcessStep(step);
   const canSubmitRequest = ["draft", "returned"].includes(doc.status) && (!isRetirementPhase || doc.status === "returned") && (canApprove || isOwnerOrSubmitter);
-  const canSubmitRetirement = Boolean(doc.can_submit_retirement) && !isRetirementFinalized && (canApprove || isOwnerOrSubmitter);
+  // Only allow retirement submission if template has multiple stages configured (Stage 2 exists)
+  const hasRetirementStage = availableStages.includes(2);
+  const canSubmitRetirement = Boolean(doc.can_submit_retirement) && !isRetirementFinalized && hasRetirementStage && (canApprove || isOwnerOrSubmitter);
   const canSubmit = canSubmitRequest || canSubmitRetirement;
   const submitLabel = canSubmitRetirement ? "Submit retirement" : doc.status === "returned" ? "Resubmit" : "Start workflow";
 
@@ -334,7 +342,7 @@ export default function FormDetailPage() {
   ];
 
   return (
-    <div className="flex h-screen flex-col overflow-hidden bg-[#EDEDED] text-[#1F2933]">
+    <div className="flex flex-1 flex-col bg-[#EDEDED] text-[#1F2933]">
       {/* Header */}
       <div className="flex h-14 shrink-0 items-center gap-3 border-b border-[#1E6F99] bg-[#287EAD] px-5 text-white">
         <button onClick={() => navigate("/forms")} className="flex h-9 items-center gap-1 border border-white/20 bg-white/10 px-3 text-xs text-white/85 hover:text-white">
@@ -486,15 +494,16 @@ export default function FormDetailPage() {
             />
           )}
 
-          {(workflowStepsCount > 0 || journalEnabled) && (
-            <div className={cn("grid gap-3", workflowStepsCount > 0 && journalEnabled ? "lg:grid-cols-2" : "")}>
-              {workflowStepsCount > 0 && (
+          {(isWorkflowActiveOrCompleted(step) || journalEnabled) && (
+            <div className={cn("grid gap-3", isWorkflowActiveOrCompleted(step) && journalEnabled ? "lg:grid-cols-2" : "")}>
+              {isWorkflowActiveOrCompleted(step) && (
                 <ApprovalStagesTable steps={workflowData?.steps ?? []} isLoading={workflowDataLoading} phase={doc.builder_workflow_phase} />
               )}
               <JournalPostingCard
                 documentId={doc.id}
                 expectPosting={journalEnabled && ["request_approved", "fully_approved"].includes(step)}
                 watchKey={`${step}:${doc.updated_at}`}
+                availableStages={availableStages}
               />
             </div>
           )}

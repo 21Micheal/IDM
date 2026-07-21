@@ -72,8 +72,8 @@ function StageRow({
   const hasError      = posting.status === "failed" && errorMessages.length > 0;
   const rawXml        = posting.response_xml || "";
   const hasSummary    = Boolean(posting.error || posting.message);
-  // Prioritize custom stage labels for stages 1 and 2
-  const stageLabel    = (isPO ? "LPO" : posting.stage === 1 ? "Stage 1-Initial" : posting.stage === 2 ? "Stage 2-Retirement" : posting.stage_label || `Stage ${posting.stage}`);
+  // For LPOs, always use "LPO" regardless of stage. For journals, use stage labels.
+  const stageLabel    = isPO ? "LPO" : posting.stage === 1 ? "Stage 1-Initial" : posting.stage === 2 ? "Stage 2-Retirement" : posting.stage_label || `Stage ${posting.stage}`;
 
   const onRetry = useCallback(async () => {
     setRetrying(true);
@@ -247,10 +247,12 @@ export default function JournalPostingCard({
   documentId,
   expectPosting = false,
   watchKey,
+  availableStages,
 }: {
   documentId: string;
   expectPosting?: boolean;
   watchKey?: string | number | null;
+  availableStages?: number[];
 }) {
   const qc = useQueryClient();
   // Local overrides keyed by stage — updated immediately from retry responses.
@@ -271,13 +273,15 @@ export default function JournalPostingCard({
   });
 
   // Merge server data with local overrides (local wins while fresher).
-  const postings: JournalPosting[] = (serverPostings ?? []).map((server) => {
-    const local = localPostings[server.stage];
-    if (!local) return server;
-    // Discard local once server has caught up.
-    if ((server.attempts ?? 0) > (local.attempts ?? 0) || server.status !== local.status) return server;
-    return local;
-  });
+  const postings: JournalPosting[] = (serverPostings ?? [])
+    .filter((p) => !availableStages || availableStages.includes(p.stage))
+    .map((server) => {
+      const local = localPostings[server.stage];
+      if (!local) return server;
+      // Discard local once server has caught up.
+      if ((server.attempts ?? 0) > (local.attempts ?? 0) || server.status !== local.status) return server;
+      return local;
+    });
 
   const handleRetryDone = useCallback((updated: JournalPosting) => {
     setLocalPostings((prev) => ({ ...prev, [updated.stage]: updated }));
@@ -323,7 +327,7 @@ export default function JournalPostingCard({
       </div>
 
       {/* stages — side-by-side when multi, single column otherwise */}
-      <div className={multiStage ? "grid grid-cols-1 sm:grid-cols-2 divide-x divide-[#E8EAEC]" : "p-4"}>
+      <div className={multiStage ? "grid grid-cols-1 sm:grid-cols-2 divide-x divide-[#E8EAEC]" : "max-w-md p-4"}>
         {postings.map((posting, idx) => {
           const prevPosted = idx === 0 || postings[idx - 1]?.status === "posted";
           return (
