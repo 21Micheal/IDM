@@ -31,7 +31,6 @@ import { ApprovalStagesTable } from "@/components/workflow/ApprovalStagesTable";
 import WorkflowActionPanel from "@/components/workflow/WorkflowActionPanel";
 import { WorkflowVisualizer } from "@/components/notifications/workflow-visualizer";
 import { loadWorkflowData } from "@/components/notifications/workflow-data";
-import StatusBadge from "@/components/documents/StatusBadge";
 import { format } from "date-fns";
 import {
   ArrowLeft, Send, Loader2, Edit2, Info, FileCode, Eye, EyeOff, Check, X, Save,
@@ -77,6 +76,29 @@ function formatMoney(amount: number, currency?: string) {
   } catch {
     return `${currency ?? ""} ${amount.toLocaleString()}`.trim();
   }
+}
+
+function getCommandStatusLabel(status: string) {
+  return status
+    ? status.replace(/_/g, " ").replace(/\b\w/g, (char) => char.toUpperCase())
+    : "Unknown";
+}
+
+function getCommandStatusClass(status: string) {
+  const key = status?.toLowerCase?.().replace(/\s+/g, "_") ?? "";
+  if (["approved", "active", "enabled", "completed", "request_approved", "fully_approved"].includes(key)) {
+    return "border-emerald-200 bg-emerald-50 text-emerald-800";
+  }
+  if (["pending_review", "pending_approval", "on_hold", "returned", "request_pending", "retirement_pending"].includes(key)) {
+    return "border-amber-200 bg-amber-50 text-amber-900";
+  }
+  if (["rejected", "void", "retirement_rejected"].includes(key)) {
+    return "border-red-200 bg-red-50 text-red-800";
+  }
+  if (key === "archived") {
+    return "border-sky-200 bg-sky-50 text-sky-800";
+  }
+  return "border-slate-200 bg-white text-slate-800";
 }
 
 /** Mirrors what apps.sunsystems.variance.compute_retirement_variance persists
@@ -351,7 +373,28 @@ export default function FormDetailPage() {
         <div className="min-w-0 flex-1">
           <div className="flex items-center gap-2">
             <h1 className="truncate text-base font-semibold">{doc.title}</h1>
-            <StatusBadge status={doc.status} />
+            <span className={cn(
+              "inline-flex items-center border px-2.5 py-0.5 text-xs font-bold shadow-sm",
+              getCommandStatusClass(doc.status),
+            )}>
+              {getCommandStatusLabel(doc.status)}
+            </span>
+            {isRetirementPhase && (() => {
+              const variance = (doc.metadata as any)?.form?.retirement_variance as RetirementVariance | undefined;
+              if (!variance) return null;
+              const amount = Number(variance.amount ?? 0);
+              if (!variance.kind || !Number.isFinite(amount) || amount === 0) return null;
+              const isOver = variance.kind === "over";
+              return (
+                <span className={cn(
+                  "inline-flex items-center gap-1.5 border px-2.5 py-0.5 text-xs font-semibold shadow-sm",
+                  isOver ? "border-red-200 bg-red-50 text-red-800" : "border-amber-200 bg-amber-50 text-amber-900",
+                )}>
+                  {isOver ? <TrendingUp className="h-3 w-3" /> : <TrendingDown className="h-3 w-3" />}
+                  {isOver ? "Overspent" : "Underspent"} {formatMoney(amount, doc.currency)}
+                </span>
+              );
+            })()}
           </div>
           <p className="mt-0.5 truncate text-[11px] text-white/75">
             {doc.reference_number} · {doc.document_type?.name || "Form"}
@@ -449,40 +492,6 @@ export default function FormDetailPage() {
               />
             </div>
           </div>
-
-          {/* Retirement variance — populated server-side by
-              apps.sunsystems.variance.compute_retirement_variance whenever a
-              retirement mapping is configured on this form's template. Absent
-              (renders nothing) for a request-only form, or before any form
-              values exist to classify. */}
-          {isRetirementPhase && (() => {
-            const variance = (doc.metadata as any)?.form?.retirement_variance as RetirementVariance | undefined;
-            if (!variance) return null;
-            const amount = Number(variance.amount ?? 0);
-            if (!variance.kind || !Number.isFinite(amount) || amount === 0) {
-              return (
-                <div className="flex items-center gap-2 border border-emerald-200 bg-emerald-50 px-4 py-2.5 text-sm text-emerald-800">
-                  <CheckCircle2 className="h-4 w-4 flex-shrink-0" />
-                  <span>Retirement matches the issued amount exactly — nothing over or under.</span>
-                </div>
-              );
-            }
-            const isOver = variance.kind === "over";
-            return (
-              <div className={cn(
-                "flex items-center gap-3 border px-4 py-2.5 text-sm",
-                isOver ? "border-red-200 bg-red-50 text-red-800" : "border-amber-200 bg-amber-50 text-amber-800",
-              )}>
-                {isOver ? <TrendingUp className="h-4 w-4 flex-shrink-0" /> : <TrendingDown className="h-4 w-4 flex-shrink-0" />}
-                <div>
-                  <p className="font-semibold">{isOver ? "Overspent" : "Underspent"} by {formatMoney(amount, doc.currency)}</p>
-                  <p className="text-xs opacity-80">
-                    Issued {formatMoney(Number(variance.issued ?? 0), doc.currency)} · Spent {formatMoney(Number(variance.spent ?? 0), doc.currency)}
-                  </p>
-                </div>
-              </div>
-            );
-          })()}
 
           {showJournalXml && (
             <JournalPayloadModal
