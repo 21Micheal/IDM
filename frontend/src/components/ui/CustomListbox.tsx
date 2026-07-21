@@ -15,6 +15,7 @@ interface Props {
   listClassName?: string;
   optionClassName?: string;
   ariaLabel?: string;
+  disabled?: boolean;
 }
 
 export default function CustomListbox({
@@ -26,6 +27,7 @@ export default function CustomListbox({
   listClassName = "",
   optionClassName = "",
   ariaLabel,
+  disabled = false,
 }: Props) {
   const [open, setOpen] = useState(false);
   const [activeIndex, setActiveIndex] = useState<number | null>(null);
@@ -122,6 +124,7 @@ export default function CustomListbox({
   const optionRefs = useRef<Array<HTMLLIElement | null>>([]);
 
   function onKeyDown(e: React.KeyboardEvent) {
+    if (disabled) return;
     if (e.key === "ArrowDown") {
       e.preventDefault();
       setOpen(true);
@@ -170,9 +173,10 @@ export default function CustomListbox({
         aria-haspopup="listbox"
         aria-expanded={open}
         aria-label={ariaLabel}
-        onClick={() => setOpen((v) => !v)}
+        disabled={disabled}
+        onClick={() => !disabled && setOpen((v) => !v)}
         onKeyDown={onKeyDown}
-        className={`text-left flex max-w-full min-w-0 items-center justify-between gap-2 ${buttonClassName}`}
+        className={`text-left flex max-w-full min-w-0 items-center justify-between gap-2 ${buttonClassName} ${disabled ? "cursor-not-allowed opacity-60" : ""}`}
       >
         <span className="min-w-0 truncate">
           {options.find((o) => o.value === value)?.label ?? options[0]?.label}

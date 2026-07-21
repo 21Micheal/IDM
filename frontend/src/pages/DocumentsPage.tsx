@@ -463,6 +463,7 @@ export default function DocumentsPage({ personalOnly = false }: DocumentsPagePro
     status: isArchiveView ? "archived" : personalOnly ? undefined : statusFilter || undefined,
     document_type: isArchiveView || personalOnly ? undefined : typeFilter || undefined,
     supplier: isArchiveView || personalOnly ? undefined : supplierFilter || undefined,
+    is_form: false,
     ordering: `${sortDir === "desc" ? "-" : ""}${sort}`,
     page,
     page_size: PAGE_SIZE,
@@ -527,6 +528,7 @@ export default function DocumentsPage({ personalOnly = false }: DocumentsPagePro
       status: isArchiveView ? "archived" : personalOnly ? undefined : statusFilter || undefined,
       document_type: isArchiveView || personalOnly ? undefined : typeFilter || undefined,
       supplier: isArchiveView || personalOnly ? undefined : supplierFilter || undefined,
+      is_form: false,
       ordering: `${sortDir === "desc" ? "-" : ""}${sort}`,
       page_size: PAGE_SIZE,
     };
@@ -848,60 +850,60 @@ export default function DocumentsPage({ personalOnly = false }: DocumentsPagePro
                 className="h-9 w-full border border-[#AEB5BB] bg-white pl-9 pr-3 text-sm text-[#1F2933] placeholder:text-[#6E767D] focus:outline-none focus:ring-1 focus:ring-white/70"
               />
             </div>
+              <div className="w-full flex items-center gap-2">
+                <div className="flex items-center gap-2">
+                  <CustomListbox
+                    value={statusFilter}
+                    onChange={(v) => {
+                      clearUrlStatusFilter();
+                      setStatusFilter(v);
+                      setPage(1);
+                    }}
+                    options={[{ value: "", label: "All statuses" }, ...STATUS_OPTIONS.map((s) => ({ value: s, label: s.replace(/_/g, " ") }))]}
+                    buttonClassName="h-9 w-[140px] border border-[#AEB5BB] bg-white px-2 text-sm text-[#1F2933]"
+                    ariaLabel="Status filter"
+                  />
 
-            <CustomListbox
-              value={statusFilter}
-              onChange={(v) => {
-                clearUrlStatusFilter();
-                setStatusFilter(v);
-                setPage(1);
-              }}
-              options={[
-                { value: "", label: "All statuses" },
-                ...STATUS_OPTIONS.map((s) => ({ value: s, label: s.replace(/_/g, " ") })),
-              ]}
-              buttonClassName="h-9 w-[150px] border border-[#AEB5BB] bg-white px-2 text-sm text-[#1F2933] focus:outline-none focus:ring-1 focus:ring-white/70"
-              ariaLabel="Status filter"
-            />
+                  <CustomListbox
+                    value={typeFilter}
+                    onChange={(v) => {
+                      setTypeFilter(v);
+                      setPage(1);
+                    }}
+                    options={[{ value: "", label: "All types" }, ...(typesData ?? []).map((t: any) => ({ value: String(t.id), label: t.name }))]}
+                    buttonClassName="h-9 w-[150px] border border-[#AEB5BB] bg-white px-2 text-sm text-[#1F2933]"
+                    ariaLabel="Document type filter"
+                  />
 
-            <CustomListbox
-              value={typeFilter}
-              onChange={(v) => {
-                setTypeFilter(v);
-                setPage(1);
-              }}
-              options={[{ value: "", label: "All types" }, ...(typesData ?? []).map((t: any) => ({ value: String(t.id), label: t.name }))]}
-              buttonClassName="h-9 w-[160px] border border-[#AEB5BB] bg-white px-2 text-sm text-[#1F2933] focus:outline-none focus:ring-1 focus:ring-white/70"
-              ariaLabel="Document type filter"
-            />
+                  <CustomListbox
+                    value={supplierFilter}
+                    onChange={(v) => {
+                      setSupplierFilter(v);
+                      setPage(1);
+                    }}
+                    options={[{ value: "", label: "All suppliers" }, ...supplierOptions.map((s) => ({ value: s, label: s }))]}
+                    buttonClassName="h-9 w-[160px] border border-[#AEB5BB] bg-white px-2 text-sm text-[#1F2933]"
+                    ariaLabel="Supplier filter"
+                  />
+                </div>
 
-            <CustomListbox
-              value={supplierFilter}
-              onChange={(v) => {
-                setSupplierFilter(v);
-                setPage(1);
-              }}
-              options={[{ value: "", label: "All suppliers" }, ...supplierOptions.map((s) => ({ value: s, label: s }))]}
-              buttonClassName="h-9 w-[170px] border border-[#AEB5BB] bg-white px-2 text-sm text-[#1F2933] focus:outline-none focus:ring-1 focus:ring-white/70"
-              ariaLabel="Supplier filter"
-            />
-
-            {(search || statusFilter || typeFilter || supplierFilter) && (
-              <button
-                type="button"
-                onClick={() => {
-                  clearUrlStatusFilter();
-                  setSearch("");
-                  setStatusFilter("");
-                  setTypeFilter("");
-                  setSupplierFilter("");
-                  setPage(1);
-                }}
-                className="h-9 px-3 text-sm text-white/80 hover:text-white"
-              >
-                Clear
-              </button>
-            )}
+                {(search || statusFilter || typeFilter || supplierFilter) && (
+                  <button
+                    type="button"
+                    onClick={() => {
+                      clearUrlStatusFilter();
+                      setSearch("");
+                      setStatusFilter("");
+                      setTypeFilter("");
+                      setSupplierFilter("");
+                      setPage(1);
+                    }}
+                    className="h-9 inline-flex items-center gap-2 px-3 text-sm text-[#3D454D] bg-white border border-[#B7BEC5] hover:bg-[#EEF3F7]"
+                  >
+                    Clear
+                  </button>
+                )}
+              </div>
 
           </WorkspaceCommandBar>
 
@@ -933,21 +935,23 @@ export default function DocumentsPage({ personalOnly = false }: DocumentsPagePro
                 <div className="ml-auto flex items-center gap-5 text-xs text-[#5E6870]">
                   <label className="inline-flex items-center gap-2">
                     <span>Sort Results</span>
-                    <select
+                    <CustomListbox
                       value={sort}
-                      onChange={(event) => {
-                        setSort(event.target.value as typeof sort);
+                      onChange={(v) => {
+                        setSort(v as typeof sort);
                         setPage(1);
                       }}
-                      className="border-0 bg-transparent py-1 pr-6 text-xs text-[#5E6870] focus:outline-none"
-                    >
-                      <option value="created_at">Created Date</option>
-                      <option value="updated_at">Modified Date</option>
-                      <option value="title">Title</option>
-                      <option value="reference_number">Reference</option>
-                      <option value="document_date">Document Date</option>
-                      <option value="amount">Amount</option>
-                    </select>
+                      options={[
+                        { value: "created_at", label: "Created Date" },
+                        { value: "updated_at", label: "Modified Date" },
+                        { value: "title", label: "Title" },
+                        { value: "reference_number", label: "Reference" },
+                        { value: "document_date", label: "Document Date" },
+                        { value: "amount", label: "Amount" },
+                      ]}
+                      buttonClassName="border-0 bg-transparent py-1 pr-6 text-xs text-[#5E6870] text-left"
+                      ariaLabel="Sort results"
+                    />
                   </label>
                 </div>
               </div>
@@ -1985,44 +1989,44 @@ export default function DocumentsPage({ personalOnly = false }: DocumentsPagePro
             >
               <div className="space-y-1">
                 <label className="text-[10px] font-semibold uppercase tracking-widest text-muted-foreground">Status</label>
-                <select
+                <CustomListbox
                   value={statusFilter}
-                  onChange={(e) => { clearUrlStatusFilter(); setStatusFilter(e.target.value); setPage(1); }}
-                  className="block text-sm bg-card border border-border px-3 py-2 focus:outline-none focus:ring-2 focus:ring-accent/40 focus:border-accent transition-colors min-w-[140px]"
-                >
-                  <option value="">All statuses</option>
-                  {STATUS_OPTIONS.map((s) => (
-                    <option key={s} value={s}>{s.replace(/_/g, " ")}</option>
-                  ))}
-                </select>
+                  onChange={(v) => { clearUrlStatusFilter(); setStatusFilter(v); setPage(1); }}
+                  options={[
+                    { value: "", label: "All statuses" },
+                    ...STATUS_OPTIONS.map((s) => ({ value: s, label: s.replace(/_/g, " ") })),
+                  ]}
+                  buttonClassName="block text-sm bg-card border border-border px-3 py-2 focus:outline-none focus:ring-2 focus:ring-accent/40 focus:border-accent transition-colors min-w-[140px] text-left"
+                  ariaLabel="Status filter"
+                />
               </div>
 
               <div className="space-y-1">
                 <label className="text-[10px] font-semibold uppercase tracking-widest text-muted-foreground">Type</label>
-                <select
+                <CustomListbox
                   value={typeFilter}
-                  onChange={(e) => { setTypeFilter(e.target.value); setPage(1); }}
-                  className="block text-sm bg-card border border-border px-3 py-2 focus:outline-none focus:ring-2 focus:ring-accent/40 focus:border-accent transition-colors min-w-[140px]"
-                >
-                  <option value="">All types</option>
-                  {(typesData ?? []).map((t: any) => (
-                    <option key={t.id} value={t.id}>{t.name}</option>
-                  ))}
-                </select>
+                  onChange={(v) => { setTypeFilter(v); setPage(1); }}
+                  options={[
+                    { value: "", label: "All types" },
+                    ...((typesData ?? []) as any[]).map((t) => ({ value: String(t.id), label: t.name })),
+                  ]}
+                  buttonClassName="block text-sm bg-card border border-border px-3 py-2 focus:outline-none focus:ring-2 focus:ring-accent/40 focus:border-accent transition-colors min-w-[140px] text-left"
+                  ariaLabel="Type filter"
+                />
               </div>
 
               <div className="space-y-1">
                 <label className="text-[10px] font-semibold uppercase tracking-widest text-muted-foreground">Supplier</label>
-                <select
+                <CustomListbox
                   value={supplierFilter}
-                  onChange={(e) => { setSupplierFilter(e.target.value); setPage(1); }}
-                  className="block text-sm bg-card border border-border px-3 py-2 focus:outline-none focus:ring-2 focus:ring-accent/40 focus:border-accent transition-colors min-w-[160px]"
-                >
-                  <option value="">All suppliers</option>
-                  {supplierOptions.map((s) => (
-                    <option key={s} value={s}>{s}</option>
-                  ))}
-                </select>
+                  onChange={(v) => { setSupplierFilter(v); setPage(1); }}
+                  options={[
+                    { value: "", label: "All suppliers" },
+                    ...supplierOptions.map((s) => ({ value: s, label: s })),
+                  ]}
+                  buttonClassName="block text-sm bg-card border border-border px-3 py-2 focus:outline-none focus:ring-2 focus:ring-accent/40 focus:border-accent transition-colors min-w-[160px] text-left"
+                  ariaLabel="Supplier filter"
+                />
               </div>
 
               {activeFilterCount > 0 && (

@@ -14,7 +14,7 @@ import { useState, useCallback } from "react";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import {
   AlertTriangle, CheckCircle2, Clock, Loader2,
-  RefreshCw, Receipt, ChevronDown, ChevronUp, FileCode, Lock, MessageSquare,
+  RefreshCw, Receipt, ChevronDown, FileCode, Lock, MessageSquare,
 } from "lucide-react";
 import { sunsystemsAPI, type JournalPosting } from "@/services/api";
 import { toast } from "@/components/ui/vault-toast";
@@ -62,8 +62,8 @@ function StageRow({
   documentId: string;
 }) {
   const [retrying, setRetrying] = useState(false);
-  const [showRaw,  setShowRaw]  = useState(false);
-  const [showSummary, setShowSummary] = useState(false);
+  // Popup modal: "summary" | "response" | null
+  const [popup, setPopup] = useState<"summary" | "response" | null>(null);
 
   const isPO          = posting.component === "PurchaseOrder";
   const meta          = STATUS_META[posting.status] ?? STATUS_META.pending;
@@ -72,11 +72,12 @@ function StageRow({
   const hasError      = posting.status === "failed" && errorMessages.length > 0;
   const rawXml        = posting.response_xml || "";
   const hasSummary    = Boolean(posting.error || posting.message);
-  const stageLabel    = posting.stage_label || (isPO ? "LPO" : `Stage ${posting.stage}`);
+  // For LPOs, always use "LPO" regardless of stage. For journals, use stage labels.
+  const stageLabel    = isPO ? "LPO" : posting.stage === 1 ? "Stage 1-Initial" : posting.stage === 2 ? "Stage 2-Retirement" : posting.stage_label || `Stage ${posting.stage}`;
 
   const onRetry = useCallback(async () => {
     setRetrying(true);
-    setShowRaw(false);
+    setPopup(null);
     try {
       const { data: result } = await sunsystemsAPI.retryPosting(documentId, posting.stage);
       onRetryDone(result);
@@ -94,125 +95,150 @@ function StageRow({
   }, [documentId, posting.stage, stageLabel, onRetryDone]);
 
   return (
-    <div className={`space-y-3 ${locked ? "opacity-50 pointer-events-none select-none" : ""}`}>
-      {/* stage label row */}
-      <div className="flex items-center gap-2">
-        {locked
-          ? <Lock className="h-3.5 w-3.5 text-[#5E6870]" />
-          : <span className="h-3.5 w-3.5 flex items-center justify-center rounded-full bg-[#287EAD] text-white text-[9px] font-bold flex-shrink-0">{posting.stage}</span>
-        }
-        <span className="text-xs font-semibold text-[#1F2933]">{stageLabel}</span>
-        {locked && <span className="text-[10px] text-[#5E6870] ml-auto">Awaiting previous stage</span>}
-      </div>
+    <>
+      <div className={`space-y-3 ${locked ? "opacity-50 pointer-events-none select-none" : ""}`}>
+        {/* stage label row */}
+        <div className="flex items-center gap-2">
+          {locked
+            ? <Lock className="h-3.5 w-3.5 text-[#5E6870]" />
+            : <span className="h-3.5 w-3.5 flex items-center justify-center rounded-full bg-[#287EAD] text-white text-[9px] font-bold flex-shrink-0">{posting.stage}</span>
+          }
+          <span className="text-xs font-semibold text-[#1F2933]">{stageLabel}</span>
+          {locked && <span className="text-[10px] text-[#5E6870] ml-auto">Awaiting previous stage</span>}
+        </div>
 
-      {/* status badge */}
-      <div className={`flex items-center gap-2 rounded border px-3 py-2 ${meta.cls}`}>
-        <Icon className={`h-4 w-4 flex-shrink-0 ${posting.status === "posting" || retrying ? "animate-spin" : ""}`} />
-        <span className="text-sm font-semibold">
-          {retrying ? "Retrying…" : meta.label}
-        </span>
-      </div>
+        {/* status badge */}
+        <div className={`flex items-center gap-2 rounded border px-3 py-2 ${meta.cls}`}>
+          <Icon className={`h-4 w-4 flex-shrink-0 ${posting.status === "posting" || retrying ? "animate-spin" : ""}`} />
+          <span className="text-sm font-semibold">
+            {retrying ? "Retrying…" : meta.label}
+          </span>
+        </div>
 
-      {/* metadata grid */}
-      {!retrying && (
-        <dl className="grid grid-cols-2 gap-x-4 gap-y-2 text-sm">
-          {posting.journal_number && (
-            <>
-              <dt className="text-sm font-medium text-[#475569]">{isPO ? "SunSystems ref" : "Journal number"}</dt>
-              <dd className="font-mono font-semibold text-[#0F172A]">{posting.journal_number}</dd>
-            </>
-          )}
-          {posting.business_unit && (
-            <>
-              <dt className="text-sm font-medium text-[#475569]">Business unit</dt>
-              <dd className="font-semibold text-[#0F172A]">{posting.business_unit}</dd>
-            </>
-          )}
-          {posting.posted_at && (
-            <>
-              <dt className="text-sm font-medium text-[#475569]">Posted</dt>
-              <dd className="font-semibold text-[#0F172A]">{new Date(posting.posted_at).toLocaleString()}</dd>
-            </>
-          )}
-          {(posting.attempts ?? 0) > 0 && (
-            <>
-              <dt className="text-sm font-medium text-[#475569]">Attempts</dt>
-              <dd className="font-semibold text-[#0F172A]">{posting.attempts}</dd>
-            </>
-          )}
-        </dl>
-      )}
+        {/* metadata grid */}
+        {!retrying && (
+          <dl className="grid grid-cols-2 gap-x-4 gap-y-2 text-sm">
+            {posting.journal_number && (
+              <>
+                <dt className="text-sm font-medium text-[#475569]">{isPO ? "SunSystems ref" : "Journal number"}</dt>
+                <dd className="font-mono font-semibold text-[#0F172A]">{posting.journal_number}</dd>
+              </>
+            )}
+            {posting.business_unit && (
+              <>
+                <dt className="text-sm font-medium text-[#475569]">Business unit</dt>
+                <dd className="font-semibold text-[#0F172A]">{posting.business_unit}</dd>
+              </>
+            )}
+            {posting.posted_at && (
+              <>
+                <dt className="text-sm font-medium text-[#475569]">Posted</dt>
+                <dd className="font-semibold text-[#0F172A]">{new Date(posting.posted_at).toLocaleString()}</dd>
+              </>
+            )}
+            {(posting.attempts ?? 0) > 0 && (
+              <>
+                <dt className="text-sm font-medium text-[#475569]">Attempts</dt>
+                <dd className="font-semibold text-[#0F172A]">{posting.attempts}</dd>
+              </>
+            )}
+          </dl>
+        )}
 
-      {/* structured errors */}
-      {!retrying && hasError && (
-        <div className="space-y-1.5">
-          {errorMessages.map((e, i) => (
-            <div key={i} className="rounded border border-red-200 bg-red-50 px-3 py-2 text-xs text-red-800 space-y-0.5">
-              <div className="flex items-center gap-1.5 font-semibold">
-                {e.code && <span className="bg-red-200 text-red-900 font-mono px-1 rounded text-[10px]">#{e.code}</span>}
-                <span>{e.text}</span>
-              </div>
-              {(e.field || e.value) && (
-                <div className="flex gap-3 text-[11px] text-red-600 font-mono mt-0.5">
-                  {e.field && <span>field: {e.field}</span>}
-                  {e.value && <span>value: {e.value}</span>}
+        {/* structured errors */}
+        {!retrying && hasError && (
+          <div className="space-y-1.5">
+            {errorMessages.map((e, i) => (
+              <div key={i} className="rounded border border-red-200 bg-red-50 px-3 py-2 text-xs text-red-800 space-y-0.5">
+                <div className="flex items-center gap-1.5 font-semibold">
+                  {e.code && <span className="bg-red-200 text-red-900 font-mono px-1 rounded text-[10px]">#{e.code}</span>}
+                  <span>{e.text}</span>
                 </div>
+                {(e.field || e.value) && (
+                  <div className="flex gap-3 text-[11px] text-red-600 font-mono mt-0.5">
+                    {e.field && <span>field: {e.field}</span>}
+                    {e.value && <span>value: {e.value}</span>}
+                  </div>
+                )}
+              </div>
+            ))}
+          </div>
+        )}
+
+        {/* action buttons — summary/response open as popups */}
+        {!retrying && (
+          <div className="flex items-center gap-2 flex-wrap">
+            {posting.status === "failed" && (
+              <button
+                type="button"
+                onClick={onRetry}
+                className="inline-flex items-center gap-1.5 border border-[#287EAD] px-3 py-1.5 text-xs font-semibold text-[#287EAD] hover:bg-[#EEF6FB]"
+              >
+                <RefreshCw className="h-3.5 w-3.5" />
+                Retry
+              </button>
+            )}
+            {hasSummary && (
+              <button
+                type="button"
+                onClick={() => setPopup("summary")}
+                className="inline-flex items-center gap-1.5 border border-[#C8CDD2] px-3 py-1.5 text-xs font-semibold text-[#5E6870] hover:bg-[#F3F5F6]"
+              >
+                <MessageSquare className="h-3.5 w-3.5" />
+                Show summary
+              </button>
+            )}
+            {rawXml && (
+              <button
+                type="button"
+                onClick={() => setPopup("response")}
+                className="inline-flex items-center gap-1.5 border border-[#C8CDD2] px-3 py-1.5 text-xs font-semibold text-[#5E6870] hover:bg-[#F3F5F6]"
+              >
+                <FileCode className="h-3.5 w-3.5" />
+                Show response
+              </button>
+            )}
+          </div>
+        )}
+      </div>
+
+      {/* ── Popup modal for summary / XML response ────────────────────────── */}
+      {popup && (
+        <div
+          className="fixed inset-0 z-[70] flex items-center justify-center bg-black/50 p-4"
+          onClick={(e) => { if (e.target === e.currentTarget) setPopup(null); }}
+        >
+          <div className="w-full max-w-lg border border-[#C8CDD2] bg-white shadow-xl">
+            {/* modal header */}
+            <div className="flex items-center justify-between gap-3 border-b border-[#C8CDD2] bg-[#50545A] px-4 py-2.5">
+              <p className="text-sm font-bold text-white">
+                {popup === "summary" ? `${stageLabel} — posting summary` : `${stageLabel} — raw XML response`}
+              </p>
+              <button
+                type="button"
+                onClick={() => setPopup(null)}
+                className="flex items-center gap-1 border border-white/30 bg-white/10 px-2 py-1 text-xs font-semibold text-white hover:bg-white/20"
+              >
+                <ChevronDown className="h-3.5 w-3.5 rotate-90" /> Close
+              </button>
+            </div>
+            {/* modal body */}
+            <div className="p-4 max-h-[60vh] overflow-y-auto">
+              {popup === "summary" && (
+                <p className="whitespace-pre-wrap text-sm leading-relaxed text-[#0F172A]">
+                  {posting.error || posting.message}
+                </p>
+              )}
+              {popup === "response" && (
+                <pre className="whitespace-pre-wrap break-all text-[11px] leading-relaxed text-[#3D4B55]">
+                  {rawXml}
+                </pre>
               )}
             </div>
-          ))}
+          </div>
         </div>
       )}
-
-      {/* action buttons */}
-      {!retrying && (
-        <div className="flex items-center gap-2 flex-wrap">
-          {posting.status === "failed" && (
-            <button
-              type="button"
-              onClick={onRetry}
-              className="inline-flex items-center gap-1.5 border border-[#287EAD] px-3 py-1.5 text-xs font-semibold text-[#287EAD] hover:bg-[#EEF6FB]"
-            >
-              <RefreshCw className="h-3.5 w-3.5" />
-              Retry
-            </button>
-          )}
-          {hasSummary && (
-            <button
-              type="button"
-              onClick={() => setShowSummary((v) => !v)}
-              className="inline-flex items-center gap-1.5 border border-[#C8CDD2] px-3 py-1.5 text-xs font-semibold text-[#5E6870] hover:bg-[#F3F5F6]"
-            >
-              <MessageSquare className="h-3.5 w-3.5" />
-              {showSummary ? "Hide summary" : "Show summary"}
-            </button>
-          )}
-          {rawXml && (
-            <button
-              type="button"
-              onClick={() => setShowRaw((v) => !v)}
-              className="inline-flex items-center gap-1.5 border border-[#C8CDD2] px-3 py-1.5 text-xs font-semibold text-[#5E6870] hover:bg-[#F3F5F6]"
-            >
-              <FileCode className="h-3.5 w-3.5" />
-              {showRaw ? "Hide" : "Show"} response
-              {showRaw ? <ChevronUp className="h-3 w-3" /> : <ChevronDown className="h-3 w-3" />}
-            </button>
-          )}
-        </div>
-      )}
-
-      {showSummary && !retrying && hasSummary && (
-        <div className="rounded border border-[#C8CDD2] bg-[#F8FAFB] p-3 text-sm text-[#0F172A]">
-          <p>{posting.error || posting.message}</p>
-        </div>
-      )}
-
-      {/* collapsible raw XML */}
-      {showRaw && rawXml && (
-        <pre className="max-h-64 overflow-auto rounded border border-[#C8CDD2] bg-[#F8FAFB] p-3 text-[10px] leading-relaxed text-[#3D4B55] whitespace-pre-wrap break-all">
-          {rawXml}
-        </pre>
-      )}
-    </div>
+    </>
   );
 }
 
@@ -221,10 +247,12 @@ export default function JournalPostingCard({
   documentId,
   expectPosting = false,
   watchKey,
+  availableStages,
 }: {
   documentId: string;
   expectPosting?: boolean;
   watchKey?: string | number | null;
+  availableStages?: number[];
 }) {
   const qc = useQueryClient();
   // Local overrides keyed by stage — updated immediately from retry responses.
@@ -245,13 +273,15 @@ export default function JournalPostingCard({
   });
 
   // Merge server data with local overrides (local wins while fresher).
-  const postings: JournalPosting[] = (serverPostings ?? []).map((server) => {
-    const local = localPostings[server.stage];
-    if (!local) return server;
-    // Discard local once server has caught up.
-    if ((server.attempts ?? 0) > (local.attempts ?? 0) || server.status !== local.status) return server;
-    return local;
-  });
+  const postings: JournalPosting[] = (serverPostings ?? [])
+    .filter((p) => !availableStages || availableStages.includes(p.stage))
+    .map((server) => {
+      const local = localPostings[server.stage];
+      if (!local) return server;
+      // Discard local once server has caught up.
+      if ((server.attempts ?? 0) > (local.attempts ?? 0) || server.status !== local.status) return server;
+      return local;
+    });
 
   const handleRetryDone = useCallback((updated: JournalPosting) => {
     setLocalPostings((prev) => ({ ...prev, [updated.stage]: updated }));
@@ -278,7 +308,9 @@ export default function JournalPostingCard({
 
   const isPO = postings[0]?.component === "PurchaseOrder";
 
-  /* ── render ───────────────────────────────────────────────────────────── */
+  /* ── render ───────────────────────────────────────────────── */
+  const multiStage = postings.length > 1;
+
   return (
     <div className="border border-[#C8CDD2] bg-white shadow-sm">
       {/* header */}
@@ -287,19 +319,19 @@ export default function JournalPostingCard({
         <p className="text-sm font-bold text-[#1F2933]">
           {isPO ? "SunSystems LPO" : "SunSystems Journal"}
         </p>
-        {postings.length > 1 && (
+        {multiStage && (
           <span className="ml-auto text-[10px] text-[#5E6870] font-medium">
             {postings.filter((p) => p.status === "posted").length}/{postings.length} stages posted
           </span>
         )}
       </div>
 
-      <div className="p-4 divide-y divide-[#E8EAEC]">
+      {/* stages — side-by-side when multi, single column otherwise */}
+      <div className={multiStage ? "grid grid-cols-1 sm:grid-cols-2 divide-x divide-[#E8EAEC]" : "max-w-md p-4"}>
         {postings.map((posting, idx) => {
-          // A stage is locked if the previous stage hasn't been posted yet.
           const prevPosted = idx === 0 || postings[idx - 1]?.status === "posted";
           return (
-            <div key={posting.id} className={idx > 0 ? "pt-4 mt-4" : ""}>
+            <div key={posting.id} className={multiStage ? "p-4" : ""}>
               <StageRow
                 posting={localPostings[posting.stage] ?? posting}
                 locked={!prevPosted}

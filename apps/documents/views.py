@@ -655,13 +655,18 @@ class DocumentViewSet(AuditMixin, viewsets.ModelViewSet):
         return bool(user.has_admin_access or doc.uploaded_by_id == user.id)
 
     def _prepare_builder_workflow_phase(self, doc) -> str | None:
-        from apps.documents.builder_workflow import sync_builder_workflow_phase
+        from apps.documents.builder_workflow import sync_builder_workflow_phase, sync_retirement_variance
 
         try:
-            return sync_builder_workflow_phase(doc)
+            phase = sync_builder_workflow_phase(doc)
         except Exception:
             logger.exception("Could not infer workflow phase for builder document %s", doc.id)
-            return None
+            phase = None
+        try:
+            sync_retirement_variance(doc)
+        except Exception:
+            logger.exception("Could not sync retirement variance for builder document %s", doc.id)
+        return phase
 
     def destroy(self, request, *args, **kwargs):
         """Move a document to Trash (soft delete) rather than removing it."""
@@ -945,17 +950,10 @@ class DocumentViewSet(AuditMixin, viewsets.ModelViewSet):
                 {"detail": "This document cannot be edited in its current status."},
                 status=status.HTTP_400_BAD_REQUEST,
             )
-        # Same checkout gate as metadata edits: once locked (or when anyone other
-        # than the uploader edits), the caller must hold the lock.
-        holder = doc.edit_lock_holder
-        lock_required = doc.is_edit_locked or doc.uploaded_by_id != request.user.id
-        if lock_required and (holder is None or holder.id != request.user.id):
-            detail = (
-                f"This document is locked by {holder.get_full_name()}."
-                if holder
-                else "Lock (check out) the document first."
-            )
-            return Response({"detail": detail}, status=status.HTTP_423_LOCKED)
+        # Form documents are edited in-app (not via an external editor) and
+        # manage concurrency through document_allows_form_edit() and per-field
+        # editability conditions.  The file-level checkout lock is for external
+        # editors (Office, WebDAV) and must NOT be required here.
 
         import json
         from apps.documents.form_attachments import (
@@ -1083,6 +1081,11 @@ class DocumentViewSet(AuditMixin, viewsets.ModelViewSet):
         from apps.search.indexing import schedule_document_search_pipeline
 
         schedule_document_search_pipeline(str(doc.id), reextract_content=True, index_immediately=True)
+        from apps.documents.builder_workflow import sync_retirement_variance
+        try:
+            sync_retirement_variance(doc)
+        except Exception:
+            logger.exception("Could not sync retirement variance after form update for %s", doc.id)
         return Response(DocumentDetailSerializer(doc, context={"request": request}).data)
 
     @action(detail=True, methods=["get"], url_path=r"form_attachment/(?P<field_key>[^/.]+)")

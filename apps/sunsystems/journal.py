@@ -147,6 +147,12 @@ def post_journal_for_document(
             message=message_text,
         )
         _write_back_to_document(document, posting)
+        try:
+            from apps.documents.builder_workflow import sync_retirement_variance
+
+            sync_retirement_variance(document)
+        except Exception:  # pragma: no cover - display-only, never blocks posting
+            logger.exception("Failed to sync retirement variance for document %s", document.pk)
     else:
         error_text = result.message or "SunSystems did not return a journal number."
         if warning_prefix:

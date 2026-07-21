@@ -1012,8 +1012,8 @@ export default function DashboardPage() {
 
             {hasOpenTasks && (
               <div className="border-b border-[#C8CDD2] bg-[#F5F7F8] p-3">
-                <div className="grid grid-cols-1 gap-2 md:grid-cols-2 xl:grid-cols-6">
-                  <div className="relative xl:col-span-2">
+                <div className="flex flex-wrap items-center gap-2">
+                  <div className="relative min-w-[220px] max-w-[320px] flex-1">
                     <Search className="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-[#5E6870]" />
                     <input
                       type="search"

@@ -83,6 +83,45 @@ class CalcParser {
     return left;
   }
 
+  // Like comparison() but preserves string values instead of converting to numbers.
+  // Used for IF() true/false branches to allow string results like "OK" or error messages.
+  private ternaryExpr(): CalcValue {
+    const left = this.valueExpr();
+    const t = this.peek();
+    if (t?.t === "op" && [">", "<", ">=", "<=", "==", "!="].includes(t.v)) {
+      const op = this.next() as { t: "op"; v: string };
+      const right = this.valueExpr();
+      if (op.v === "==" || op.v === "!=") {
+        const equal = (typeof left === "string" || typeof right === "string")
+          ? String(left) === String(right)
+          : toNumber(left) === toNumber(right);
+        return (op.v === "==" ? equal : !equal) ? 1 : 0;
+      }
+      const ln = toNumber(left), rn = toNumber(right);
+      if (op.v === ">") return ln > rn ? 1 : 0;
+      if (op.v === "<") return ln < rn ? 1 : 0;
+      if (op.v === ">=") return ln >= rn ? 1 : 0;
+      return ln <= rn ? 1 : 0;
+    }
+    return left;
+  }
+
+  // Value expression that returns atoms (strings, numbers, identifiers) without
+  // forcing arithmetic operations. Used for IF() branches to preserve string values.
+  private valueExpr(): CalcValue {
+    const t = this.peek();
+    // Handle parentheses
+    if (t?.t === "op" && t.v === "(") {
+      this.next();
+      const result = this.ternaryExpr();
+      const close = this.next();
+      if (!close || close.t !== "op" || close.v !== ")") throw new Error("Expected ')'");
+      return result;
+    }
+    // Fall back to atom for simple values (strings, numbers, identifiers)
+    return this.atom();
+  }
+
   private arith(): CalcValue {
     let v: CalcValue = this.term();
     while (this.peek()?.t === "op" && ((this.peek() as any).v === "+" || (this.peek() as any).v === "-")) {
@@ -127,32 +166,37 @@ class CalcParser {
       const nxt = this.peek();
       if (nxt?.t === "op" && nxt.v === "(") {
         this.next();
-        if (name.toUpperCase() === "IF") {
-          const cond = this.comparison();
-          let sep = this.next();
-          if (!sep || sep.t !== "op" || sep.v !== ",") throw new Error("IF expects 3 arguments: IF(condition, if_true, if_false)");
-          const trueVal = this.comparison();
-          sep = this.next();
-          if (!sep || sep.t !== "op" || sep.v !== ",") throw new Error("IF expects 3 arguments: IF(condition, if_true, if_false)");
-          const falseVal = this.comparison();
-          const close = this.next();
-          if (!close || close.t !== "op" || close.v !== ")") throw new Error("Expected ')'");
-          return isTruthy(cond) ? trueVal : falseVal;
-        }
-        const args: CalcValue[] = [];
-        if (!(this.peek()?.t === "op" && (this.peek() as any).v === ")")) {
-          args.push(this.comparison());
-          while (this.peek()?.t === "op" && (this.peek() as any).v === ",") { this.next(); args.push(this.comparison()); }
-        }
-        const close = this.next();
-        if (!close || close.t !== "op" || close.v !== ")") throw new Error("Expected ')'");
-        const fn = CALC_FUNCS[name.toUpperCase()];
-        if (!fn) throw new Error(`Unknown function ${name}`);
-        return fn(...args);
+        return this.parseFunctionCall(name);
       }
       return this.scope[name] ?? 0;
     }
     throw new Error("Unexpected token");
+  }
+
+  // Handle function calls separately from atom to avoid circular dependency
+  private parseFunctionCall(name: string): CalcValue {
+    if (name.toUpperCase() === "IF") {
+      const cond = this.comparison();
+      let sep = this.next();
+      if (!sep || sep.t !== "op" || sep.v !== ",") throw new Error("IF expects 3 arguments: IF(condition, if_true, if_false)");
+      const trueVal = this.valueExpr();
+      sep = this.next();
+      if (!sep || sep.t !== "op" || sep.v !== ",") throw new Error("IF expects 3 arguments: IF(condition, if_true, if_false)");
+      const falseVal = this.valueExpr();
+      const close = this.next();
+      if (!close || close.t !== "op" || close.v !== ")") throw new Error("Expected ')'");
+      return isTruthy(cond) ? trueVal : falseVal;
+    }
+    const args: CalcValue[] = [];
+    if (!(this.peek()?.t === "op" && (this.peek() as any).v === ")")) {
+      args.push(this.comparison());
+      while (this.peek()?.t === "op" && (this.peek() as any).v === ",") { this.next(); args.push(this.comparison()); }
+    }
+    const close = this.next();
+    if (!close || close.t !== "op" || close.v !== ")") throw new Error("Expected ')'");
+    const fn = CALC_FUNCS[name.toUpperCase()];
+    if (!fn) throw new Error(`Unknown function ${name}`);
+    return fn(...args);
   }
 }
 
@@ -195,6 +239,7 @@ export function evaluateCalcExpression(expression: string | undefined, scope: Re
 export interface TableColumn {
   key?: string;
   type?: string;
+  calc?: { expression?: string; decimals?: number };
 }
 
 export interface TemplateField {
@@ -237,16 +282,28 @@ export function buildRowCalcScope(
 
 const AGG_CALL_RE = /\b(SUM|AVG|COUNT|COLMIN|COLMAX)\(\s*([A-Za-z_][A-Za-z0-9_]*)(?:\.([A-Za-z_][A-Za-z0-9_]*))?\s*\)/gi;
 
+type RowAggregateRegistryEntry = {
+  rows: Record<string, unknown>[];
+  colTypeByKey: Record<string, string | undefined>;
+};
+
 export function resolveRowAggregates(
   expression: string,
-  rows: Record<string, string>[],
+  rows: Record<string, unknown>[],
   colTypeByKey: Record<string, string | undefined>,
+  allTables?: Record<string, RowAggregateRegistryEntry>,
 ): string {
   if (!expression || !expression.includes("(")) return expression;
   return expression.replace(AGG_CALL_RE, (_match, func: string, firstIdent: string, secondIdent: string | undefined) => {
-    const targetColType = colTypeByKey[firstIdent];
-    const colKey = firstIdent;
-    const colValues = rows.map((r) => coerceNumeric(targetColType, r[colKey]));
+    const targetRows = secondIdent
+      ? (allTables?.[firstIdent]?.rows ?? [])
+      : rows;
+    const targetColTypes = secondIdent
+      ? (allTables?.[firstIdent]?.colTypeByKey ?? {})
+      : colTypeByKey;
+    const colKey = secondIdent ?? firstIdent;
+    const targetColType = targetColTypes[colKey];
+    const colValues = targetRows.map((r) => coerceNumeric(targetColType, r[colKey]));
     let result = 0;
     switch (func.toUpperCase()) {
       case "SUM": result = colValues.reduce((a, b) => a + b, 0); break;
@@ -257,4 +314,64 @@ export function resolveRowAggregates(
     }
     return String(result);
   });
+}
+
+export function evaluateTableColumnFormulas(
+  columns: TableColumn[],
+  rows: Record<string, unknown>[],
+  allFields: TemplateField[],
+  values: Record<string, unknown>,
+  allTables?: Record<string, RowAggregateRegistryEntry>,
+): Record<string, unknown>[] {
+  const colTypesByKey: Record<string, string | undefined> = {};
+  columns.forEach((column) => {
+    if (column.key) colTypesByKey[column.key] = column.type;
+  });
+
+  const calcColumns = columns.filter((column) => Boolean(column.key) && Boolean(column.calc?.expression));
+  if (calcColumns.length === 0) return rows.map((r) => ({ ...r }));
+
+  let computedRows: Record<string, unknown>[] = rows.map((row) => ({ ...row }));
+
+  // Multiple full passes let a calc column reference ANOTHER calc column
+  // regardless of which one is declared first in the table — e.g.
+  // "Expenditure Check" referencing "DSA Amount" even though DSA Amount is
+  // a later column. A single row-major pass only ever sees calc columns
+  // that happen to come earlier in the array; each further pass lets a
+  // later-declared column's just-resolved value propagate back to an
+  // earlier one. Bounded by calcColumns.length — enough passes to settle
+  // any acyclic dependency chain however it's ordered — so a genuinely
+  // circular formula (A references B references A) just stops changing
+  // rather than looping forever.
+  for (let pass = 0; pass < calcColumns.length; pass++) {
+    let changed = false;
+    computedRows = computedRows.map((row) => {
+      const computedRow: Record<string, unknown> = { ...row };
+      for (const column of calcColumns) {
+        const colKey = column.key!;
+        try {
+          const scope = buildRowCalcScope(allFields, values, columns, computedRow as Record<string, string>);
+          const resolvedExpr = resolveRowAggregates(
+            column.calc!.expression!,
+            computedRows as Record<string, string>[],
+            colTypesByKey,
+            allTables,
+          );
+          let result = evaluateCalcExpression(resolvedExpr, scope);
+          if (typeof result === "number" && typeof column.calc?.decimals === "number") {
+            result = Number(result.toFixed(column.calc.decimals));
+          }
+          const str = String(result);
+          if (computedRow[colKey] !== str) changed = true;
+          computedRow[colKey] = str;
+        } catch {
+          // Preserve existing value on calculation failure instead of clearing it.
+        }
+      }
+      return computedRow;
+    });
+    if (!changed) break;
+  }
+
+  return computedRows;
 }

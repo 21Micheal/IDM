@@ -7,6 +7,26 @@
  * 2. The sidebar's nav scroll area is split so the FolderTree sits in a
  *    dedicated collapsible section that doesn't push admin links off-screen.
  * 3. All existing nav logic, group collapsing, and admin section are unchanged.
+ *
+ * Forms-area changes (this pass)
+ * ────────────────────────────────
+ * 4. New "Forms" top-level nav item pointing at /forms (the dedicated Forms
+ *    landing page — see FormsPage.tsx / FormDetailPage.tsx). Placed right
+ *    under the Documents group since forms are still document records under
+ *    the hood, just presented through their own workspace. There's no
+ *    "/forms/new" route — creating a form is a modal (NewFormModal) launched
+ *    from FormsPage itself, not a separate page.
+ * 5. `isFullWidthByDefaultRoute` now also recognises /forms/:id (a single
+ *    form's workspace), mirroring exactly how /documents/:id is already
+ *    handled — it opens with the sidebar collapsed by default, same as a
+ *    single document's workspace does. /forms itself (the list/report page)
+ *    is a normal page and does NOT get this treatment.
+ * 6. `usesWorkspaceCommandBar` no longer includes /forms — FormsPage builds
+ *    its own regular in-page header instead of the app-wide blue command bar,
+ *    so Layout renders its standard header (search/notifications/profile) for
+ *    that route, same as any other ordinary page. /forms/:id is still listed,
+ *    since FormDetailPage supplies its own full-bleed header (same pattern as
+ *    DocumentDetailPage on /documents/:id).
  */
 
 import { Suspense, lazy, useEffect, useRef, useState } from "react";
@@ -17,7 +37,7 @@ import {
   Bell, Users, Building2, UserRoundCog, Shield,
   ChevronDown, ChevronRight, ChevronLeft, Archive, ScanLine, Loader2, UserCheck, Monitor, Lock, History, Trash2,
   BellRing, CircleUserRound, ClipboardCheck, Inbox, ArrowRight, FileSignature, LayoutTemplate, Database,
-  Plug,
+  Plug, ClipboardList,
 } from "lucide-react";
 import { useAuthStore } from "../../store/authStore";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
@@ -70,14 +90,24 @@ function navTarget(to: string) {
 // by default. The user can still toggle the sidebar back open on these pages.
 function isFullWidthByDefaultRoute(pathname: string): boolean {
   if (pathname === "/admin/templates" || pathname === "/workflow/builder") return true;
+
   // Single-document workspace: /documents/:id (not the upload/scan/review/etc.)
-  const seg = pathname.split("/")[2] ?? "";
-  return (
+  const docSeg = pathname.split("/")[2] ?? "";
+  const isDocumentWorkspace =
     pathname.startsWith("/documents/") &&
-    Boolean(seg) &&
-    !["upload", "scan", "review", "trash", "folders"].includes(seg) &&
-    !pathname.slice("/documents/".length).includes("/")
-  );
+    Boolean(docSeg) &&
+    !["upload", "scan", "review", "trash", "folders"].includes(docSeg) &&
+    !pathname.slice("/documents/".length).includes("/");
+
+  // Single-form workspace: /forms/:id — same pattern as above. (There's no
+  // /forms/new route to exclude; creating a form is a modal on /forms itself.)
+  const formSeg = pathname.split("/")[2] ?? "";
+  const isFormWorkspace =
+    pathname.startsWith("/forms/") &&
+    Boolean(formSeg) &&
+    !pathname.slice("/forms/".length).includes("/");
+
+  return isDocumentWorkspace || isFormWorkspace;
 }
 
 // ── Navigation structure (unchanged) ─────────────────────────────────────────
@@ -99,6 +129,7 @@ const mainNav: NavEntry[] = [
       { to: "/search",                    icon: Search,   label: "Search" },
     ],
   } as NavGroup,
+  { to: "/forms", icon: ClipboardList, label: "Forms" } as NavLeaf,
   { to: "/personal-documents", icon: Lock, label: "Personal documents" } as NavLeaf,
   { to: "/request-signature", icon: FileSignature, label: "Request signature" } as NavLeaf,
   {
@@ -720,6 +751,7 @@ export default function Layout() {
   const pendingTasksCount = summary?.pending_tasks ?? 0;
   const signatureCount = summary?.incoming_signatures ?? 0;
   const documentsRouteSegment = location.pathname.split("/")[2] ?? "";
+  const formsRouteSegment = location.pathname.split("/")[2] ?? "";
   const usesWorkspaceCommandBar =
     location.pathname === "/" ||
     location.pathname === "/notifications" ||
@@ -736,6 +768,14 @@ export default function Layout() {
       Boolean(documentsRouteSegment) &&
       !["upload", "scan", "review", "trash", "folders"].includes(documentsRouteSegment) &&
       !location.pathname.slice("/documents/".length).includes("/")
+    ) ||
+    // /forms (the list page) is intentionally NOT here — it uses Layout's
+    // normal header. Only a single form's workspace (/forms/:id) supplies
+    // its own header, same as /documents/:id does.
+    (
+      location.pathname.startsWith("/forms/") &&
+      Boolean(formsRouteSegment) &&
+      !location.pathname.slice("/forms/".length).includes("/")
     );
   // Bell badge: every unread notification (notices + task alerts) plus pending
   // tasks — mirrors what the tray used to sum from the now-unpolled lists.
@@ -759,7 +799,10 @@ export default function Layout() {
   }, [idleReady]);
 
   return (
-    <div className="relative flex h-screen bg-background text-foreground">
+    <div
+      className="relative flex h-screen bg-background text-foreground"
+      style={{ "--app-sidebar-width": sidebarCollapsed ? "0px" : "270px" } as React.CSSProperties}
+    >
 
       {/* ── Sidebar ────────────────────────────────────────────────────── */}
       <aside

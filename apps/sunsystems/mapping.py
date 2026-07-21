@@ -33,7 +33,15 @@ Mapping shape (all value slots accept a *ValueSpec*; see :func:`resolve_value`):
           "analysis": { "6": {"field": "tax_code"} } },
         { "retirement": {
             "issued_amount": {"field": "advance_amount"},
-            "spent_amount": {"table": "expenses", "column": "amount"},
+            "spent_amount": {
+              "table": "expenses", "column": "amount",
+              # Optional — which column holds each row's narrative text.
+              # Defaults to a column literally keyed "description" if omitted.
+              # A "spent"-sourced line with no explicit `description` of its
+              # own (see below) uses these, joined, instead of generic filler
+              # text like "Retirement — under (spent)".
+              "description_column": "description"
+            },
             "scenarios": {
               "exact": {"lines": [
                 {"account": {"const": "1000"}, "dc": "C", "amount_source": "issued"},
@@ -371,22 +379,25 @@ def build_purchase_order_ssc(
     )
 
 
-def _expand_retirement_lines(retirement: dict, values: dict, warnings: list[str]) -> list[dict]:
+def classify_retirement(retirement: dict, values: dict, warnings: list[str] | None = None) -> dict:
     """Classify an imprest/retirement table against its issued/requested
-    amount and expand into the matching scenario's fixed set of ordinary
-    (non-repeating) line specs, each carrying a resolved ``const`` amount.
+    amount. Pure classification — no line expansion, no XML — so it can be
+    called anywhere the issued/spent/scenario numbers are needed (line
+    expansion below, and the retirement-variance persisted for display on
+    the Forms report / detail page).
 
     Scenario selection:
       - "exact" — spent == issued (within a half-cent rounding tolerance)
       - "under" — spent <  issued (the user returns the unspent balance)
       - "over"  — spent >  issued (the user is owed the overspend)
 
-    The account codes, debit/credit direction, and which of
-    issued/spent/variance feeds each line are entirely admin-configured data
-    (see the ``scenarios`` shape in this module's docstring) — this function
-    only does the classification + amount arithmetic, never hard-codes a
-    business rule about which account plays which role.
+    Returns ``{"scenario": ..., "issued": Decimal, "spent": Decimal, "variance": Decimal}``.
+    ``warnings`` is optional — pass a list to collect the same stale-field /
+    unconfigured / empty-table warnings :func:`_expand_retirement_lines` has
+    always raised; omit it (default) to classify silently.
     """
+    _warnings = warnings if warnings is not None else []
+
     issued_spec = retirement.get("issued_amount") or {}
     issued = resolve_amount(issued_spec, values)
     issued_field_key = issued_spec.get("field") if isinstance(issued_spec, dict) else None
@@ -398,7 +409,7 @@ def _expand_retirement_lines(retirement: dict, values: dict, warnings: list[str]
         # Silently treating this as issued=0 would classify every submission
         # as a full "overspend" and post a journal that still balances, so
         # the mistake would otherwise go unnoticed. Surface it loudly instead.
-        warnings.append(
+        _warnings.append(
             f"Retirement's issued/requested amount field '{issued_field_key}' was not "
             f"found in the submitted form values — treated as 0. Check that the "
             f"Retirement panel's 'Issued / requested amount field' still points at "
@@ -410,7 +421,7 @@ def _expand_retirement_lines(retirement: dict, values: dict, warnings: list[str]
         # above (every submission reads as a full overspend), just from a
         # template that was never finished being configured rather than a
         # rename.
-        warnings.append(
+        _warnings.append(
             "Retirement's 'Issued / requested amount field' is not configured — "
             "issued amount treated as 0. Every submission will be classified as an "
             "overspend until a field is selected in the Retirement panel."
@@ -419,14 +430,23 @@ def _expand_retirement_lines(retirement: dict, values: dict, warnings: list[str]
     spent_spec = retirement.get("spent_amount") or {}
     table_key = spent_spec.get("table")
     column_key = spent_spec.get("column")
+    # Which column holds each row's narrative text — explicit
+    # spent_amount.description_column wins; default to a column literally
+    # keyed "description" so this works out of the box for tables built that
+    # way, without requiring extra Retirement-panel configuration.
+    description_column_key = spent_spec.get("description_column") or "description"
     rows = values.get(table_key) if table_key else None
     spent = Decimal("0")
+    row_descriptions: list[str] = []
     if isinstance(rows, list):
         for row in rows:
             if isinstance(row, dict):
                 spent += resolve_amount({"const": row.get(column_key)}, values)
+                text = row.get(description_column_key)
+                if isinstance(text, str) and text.strip():
+                    row_descriptions.append(text.strip())
     else:
-        warnings.append(f"Retirement table '{table_key}' has no rows; spent amount treated as 0.")
+        _warnings.append(f"Retirement table '{table_key}' has no rows; spent amount treated as 0.")
 
     diff = spent - issued
     if abs(diff) <= _RETIREMENT_EPSILON:
@@ -436,8 +456,40 @@ def _expand_retirement_lines(retirement: dict, values: dict, warnings: list[str]
     else:
         scenario_name = "over"
 
-    variance = abs(diff)
-    amounts = {"issued": issued, "spent": spent, "variance": variance}
+    return {
+        "scenario": scenario_name,
+        "issued": issued,
+        "spent": spent,
+        "variance": abs(diff),
+        # De-duplicated, in encounter order — one line per distinct expense
+        # narrative rather than repeating "Fuel; Fuel; Fuel" for three fuel
+        # rows. Empty string when the table has no rows, no configured
+        # description column, or every row's cell there is blank.
+        "description": "; ".join(dict.fromkeys(row_descriptions)),
+    }
+
+
+def _expand_retirement_lines(retirement: dict, values: dict, warnings: list[str]) -> list[dict]:
+    """Expand a retirement table into the matching scenario's fixed set of
+    ordinary (non-repeating) line specs, each carrying a resolved ``const``
+    amount. See :func:`classify_retirement` for the issued/spent/scenario
+    classification this builds on.
+
+    The account codes, debit/credit direction, and which of
+    issued/spent/variance feeds each line are entirely admin-configured data
+    (see the ``scenarios`` shape in this module's docstring) — this function
+    only does the classification + amount arithmetic, never hard-codes a
+    business rule about which account plays which role. The one exception:
+    a "spent" line with no explicit ``description`` configured uses the
+    spent table's own description column (see classify_retirement above)
+    instead of the generic "Retirement — <scenario> (spent)" filler text, so
+    the journal payload reflects what was actually spent on, not just that a
+    retirement happened.
+    """
+    classified = classify_retirement(retirement, values, warnings)
+    scenario_name = classified["scenario"]
+    amounts = {"issued": classified["issued"], "spent": classified["spent"], "variance": classified["variance"]}
+    spent_description = classified.get("description") or ""
 
     scenario = (retirement.get("scenarios") or {}).get(scenario_name) or {}
     scenario_lines = scenario.get("lines") or []
@@ -451,11 +503,17 @@ def _expand_retirement_lines(retirement: dict, values: dict, warnings: list[str]
             continue
         source = line.get("amount_source", "spent")
         amount_value = amounts.get(source, Decimal("0"))
+        if line.get("description"):
+            description_spec = line["description"]
+        elif source == "spent" and spent_description:
+            description_spec = {"const": spent_description}
+        else:
+            description_spec = {"const": f"Retirement — {scenario_name} ({source})"}
         expanded.append({
             "account": line.get("account"),
             "dc": line.get("dc", "D"),
             "amount": {"const": _amount_str(amount_value)},
-            "description": line.get("description") or {"const": f"Retirement — {scenario_name} ({source})"},
+            "description": description_spec,
             "analysis": line.get("analysis"),
         })
     return expanded
@@ -494,15 +552,6 @@ def _append_line(
 ) -> None:
     line_el = ET.SubElement(ledger_el, "Line")
     ET.SubElement(line_el, "AccountCode").text = resolve_value(line_spec.get("account"), values, row)
-
-    analysis = dict(mapping.get("analysis_defaults") or {})
-    analysis.update(line_spec.get("analysis") or {})
-    for n in _ANALYSIS_CODES:
-        spec = analysis.get(str(n), analysis.get(n))
-        if spec is None:
-            continue
-        ET.SubElement(line_el, f"AnalysisCode{n}").text = resolve_value(spec, values, row)
-
     ET.SubElement(line_el, "TransactionAmount").text = _amount_str(amount)
     ET.SubElement(line_el, "CurrencyCode").text = resolve_value(
         line_spec.get("currency") or mapping.get("currency"), values, row
@@ -515,6 +564,20 @@ def _append_line(
     ET.SubElement(line_el, "TransactionDate").text = resolve_value(
         line_spec.get("date") or mapping.get("date"), values, row
     )
+
+    # Analysis dimensions (AnalysisCode1..10). SunSystems ledger accounts are
+    # often configured with required analysis dimensions (PRODUCT, DEPARTMENT,
+    # PROJECT, EMPLOYEE, TAX, ...) mapped onto these ten generic slots. Any slot
+    # we don't have a real value for must still be sent — as "#" (SunSystems'
+    # wildcard/"any" analysis value) — or the posting is rejected with
+    # "Missing <X> Analysis Code (Dimension Id N)" for that account's required
+    # dimensions. `resolve_value`'s `default` kicks in both when a slot has no
+    # spec at all and when a spec resolves to an empty value.
+    analysis = dict(mapping.get("analysis_defaults") or {})
+    analysis.update(line_spec.get("analysis") or {})
+    for n in _ANALYSIS_CODES:
+        spec = analysis.get(str(n), analysis.get(n))
+        ET.SubElement(line_el, f"AnalysisCode{n}").text = resolve_value(spec, values, row, default="#")
 
     detail = line_spec.get("detail") or mapping.get("detail")
     if detail and isinstance(detail, dict):

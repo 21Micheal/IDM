@@ -29,7 +29,7 @@ import { resolveFormula, evaluateFormula, formulaLabel } from "@/components/temp
 import { currencySymbolFor } from "@/lib/currencies";
 import { useAuthStore } from "@/store/authStore";
 import { Sparkles } from "lucide-react";
-import { buildCalcScope, buildRowCalcScope, evaluateCalcExpression, resolveRowAggregates, type CalcValue } from "@/lib/calculations";
+import { buildCalcScope, evaluateCalcExpression, evaluateTableColumnFormulas, type CalcValue } from "@/lib/calculations";
 
 // ── Types ─────────────────────────────────────────────────────────────────────
 
@@ -482,12 +482,31 @@ function TableColInput({ col, value, onChange, readOnly, documentId, attachmentK
   const type = (col.type ?? "text") as ColType;
   const dis = readOnly || col.readonly;
 
-  // Calculated column - display result value like regular columns
+  // Calculated column — display computed result (read-only).
+  // Show currency symbol when applicable; format numbers nicely.
   if (col.calc?.expression) {
     const sval = typeof value === "string" ? value : value == null ? "" : String(value);
+    const num = parseFloat(sval);
+    const isNumericType = type === "number" || type === "currency";
+    const hasValue = isNumericType ? (sval !== "" && !Number.isNaN(num)) : sval !== "";
+
+    let display: React.ReactNode;
+    if (type === "currency") {
+      const linkedVal = col.currencyFromColumn ? row?.[col.currencyFromColumn] : undefined;
+      const symbol = currencySymbolFor(typeof linkedVal === "string" ? linkedVal : undefined)
+        ?? col.currencySymbol ?? "KSh";
+      display = hasValue
+        ? <span className="flex items-center gap-0.5"><span className="text-[10px] text-muted-foreground">{symbol}</span>{num.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}</span>
+        : <span className="italic text-muted-foreground">—</span>;
+    } else if ((type === "number") && hasValue) {
+      display = num.toLocaleString();
+    } else {
+      display = hasValue ? sval : <span className="italic text-muted-foreground">—</span>;
+    }
     return (
-      <div className={base}>
-        {sval || <span className="italic text-muted-foreground">—</span>}
+      <div className="flex items-center justify-between gap-1 w-full py-0.5 text-sm text-foreground font-medium">
+        {display}
+        <span className="text-[9px] font-semibold text-emerald-600 bg-emerald-50 px-1 rounded flex-shrink-0" title="Formula column">ƒx</span>
       </div>
     );
   }
@@ -565,10 +584,14 @@ function TableField({ field, value, onChange, readOnly, tableKey, documentId, al
   processStep?: string;
   allFields: Field[];
 }) {
-  // Filter columns by hidden and visibleWhen conditions
-  const cols = (field.columns ?? []).filter((c) => {
+  // ALL columns — used by the calc engine. Hidden helper columns must still
+  // participate in formula evaluation even though they are not rendered.
+  const allCols = field.columns ?? [];
+
+  // Columns actually rendered/editable; hidden or conditionally-hidden columns
+  // are dropped here for display only.
+  const cols = allCols.filter((c) => {
     if (c.hidden) return false;
-    // Evaluate visibleWhen condition for the column
     if (c.visibleWhen) {
       return evalVisible({ hidden: false, visibleWhen: c.visibleWhen }, allValues, allFields, processStep ?? "draft");
     }
@@ -577,50 +600,114 @@ function TableField({ field, value, onChange, readOnly, tableKey, documentId, al
 
   const emptyRow = (): Record<string, unknown> => {
     const r: Record<string, unknown> = {};
-    cols.forEach((c) => { if (c.defaultValue && c.key) r[c.key] = c.defaultValue; });
+    allCols.forEach((c) => { if (c.defaultValue && c.key) r[c.key] = c.defaultValue; });
     return r;
   };
+
   const [rows, setRows] = useState<Record<string, unknown>[]>(() =>
     Array.isArray(value) && value.length > 0
       ? value
       : Array.from({ length: field.minRows ?? 1 }, emptyRow)
   );
 
-  // Compute calculated column values for each row
-  const computedRows = useMemo(() => {
-    const colTypeByKey: Record<string, string | undefined> = {};
-    cols.forEach((c) => { if (c.key) colTypeByKey[c.key] = c.type; });
-    
-    return rows.map((row) => {
-      const computedRow = { ...row };
-      
-      // Calculate values for columns with calc expressions
-      cols.forEach((col) => {
-        if (col.calc?.expression && col.key) {
-          try {
-            // Build scope: top-level fields + row values
-            const scope = buildRowCalcScope(allFields, allValues, cols, row as Record<string, string>);
-            // Resolve aggregates (SUM, AVG, etc.)
-            const resolvedExpr = resolveRowAggregates(col.calc.expression, rows as Record<string, string>[], colTypeByKey);
-            // Evaluate the expression
-            const result = evaluateCalcExpression(resolvedExpr, scope);
-            computedRow[col.key] = String(result);
-          } catch {
-            computedRow[col.key] = "";
-          }
-        }
-      });
-      
-      return computedRow;
-    });
-  }, [rows, cols, allFields, allValues]);
+  // ── Sync rows from parent prop ─────────────────────────────────────────────
+  // The parent passes the saved/live table rows via `value`. Because useState
+  // initialises only once, we need an effect to pick up prop changes that happen
+  // AFTER mount: e.g. the document query settling with saved data, or the page
+  // toggling from edit mode (formValues) back to read-only mode (formData.values).
+  // We compare serialised JSON to avoid re-setting on every parent re-render.
+  const lastValueRef = useRef<string>("");
+  const hydratedRef = useRef(Array.isArray(value) && value.length > 0);
+  const lastDocRef = useRef(documentId);
+  useEffect(() => {
+    if (documentId !== lastDocRef.current) {
+      // Different document instance (e.g. navigated between documents without
+      // a full remount) — always resync to the new one's data.
+      lastDocRef.current = documentId;
+      hydratedRef.current = Array.isArray(value) && value.length > 0;
+      setRows(Array.isArray(value) && value.length > 0 ? value : Array.from({ length: field.minRows ?? 1 }, emptyRow));
+      return;
+    }
+    if (!hydratedRef.current && Array.isArray(value) && value.length > 0) {
+      hydratedRef.current = true;
+      setRows(value);
+      return;
+    }
+    // Normal sync for edit mode toggling
+    if (!Array.isArray(value) || value.length === 0) return;
+    const serialised = JSON.stringify(value);
+    if (serialised === lastValueRef.current) return; // nothing actually changed
+    lastValueRef.current = serialised;
+    setRows(value);
+  }, [value, documentId]);
 
+  // ── Compute calculated column values for each row ──────────────────────────
+  const colTypeByKey = useMemo(() => {
+    const map: Record<string, string | undefined> = {};
+    cols.forEach((c) => { if (c.key) map[c.key] = c.type; });
+    return map;
+  }, [cols]);
+
+  // Resolve sibling table fields (by key) so cross-table aggregate formulas
+  // like SUM(expense_items.amount) can look up another table's live rows,
+  // not just this table's own columns.
+  const crossTableTables = useMemo(() => {
+    const map: Record<string, { rows: Record<string, unknown>[]; colTypeByKey: Record<string, string | undefined> }> = {};
+    for (const f of allFields) {
+      if (f.type !== "table" || !f.key) continue;
+      const otherRows = Array.isArray(allValues[f.key]) ? (allValues[f.key] as Record<string, unknown>[]) : [];
+      const typeByKey: Record<string, string | undefined> = {};
+      (f.columns ?? []).forEach((c) => { if (c.key) typeByKey[c.key] = c.type; });
+      map[f.key] = { rows: otherRows, colTypeByKey: typeByKey };
+    }
+    return map;
+  }, [allFields, allValues]);
+
+  const computedRows = useMemo(() => {
+    return evaluateTableColumnFormulas(allCols, rows, allFields, allValues, crossTableTables);
+  }, [rows, allCols, allFields, allValues, crossTableTables]);
+
+  // ── Persist computed column values to parent ───────────────────────────────
+  // When any calc column updates, push the merged (raw + computed) rows to the
+  // parent so the values are included in the submission payload. Guard against
+  // loops: only fire when computedRows actually differs from what we last sent.
+  // Skip persistence in read-only mode (viewing saved document) since the server
+  // already computed and saved these values.
+  const lastComputedRef = useRef<string>("");
+  useEffect(() => {
+    const hasCalcCols = allCols.some((c) => c.calc?.expression && c.key);
+    if (!hasCalcCols) return;
+    if (readOnly) return; // Don't persist computed values when viewing a saved document
+    const serialised = JSON.stringify(computedRows);
+    if (serialised === lastComputedRef.current) return;
+    lastComputedRef.current = serialised;
+    // Update the last-seen value ref too so the VALUE sync effect above won't
+    // re-set rows when the parent echoes our own payload back as a new prop.
+    lastValueRef.current = serialised;
+    onChange(computedRows as Record<string, unknown>[]);
+  }, [computedRows, allCols, onChange, readOnly]);
+
+  // ── Row mutation helpers ───────────────────────────────────────────────────
   const update = (ri: number, key: string, val: unknown) => {
     const next = rows.map((r, i) => i === ri ? { ...r, [key]: val } : r);
-    setRows(next); onChange(next);
+    setRows(next);
+    // computedRows effect will fire and call onChange with the merged result.
+    // For non-calc tables (no calc columns), call onChange directly now.
+    const hasCalcCols = allCols.some((c) => c.calc?.expression && c.key);
+    if (!hasCalcCols) onChange(next);
   };
-  const addRow = () => { const next = [...rows, emptyRow()]; setRows(next); onChange(next); };
-  const removeRow = (i: number) => { const next = rows.filter((_, idx) => idx !== i); setRows(next); onChange(next); };
+  const addRow = () => {
+    const next = [...rows, emptyRow()];
+    setRows(next);
+    const hasCalcCols = allCols.some((c) => c.calc?.expression && c.key);
+    if (!hasCalcCols) onChange(next);
+  };
+  const removeRow = (i: number) => {
+    const next = rows.filter((_, idx) => idx !== i);
+    setRows(next);
+    const hasCalcCols = allCols.some((c) => c.calc?.expression && c.key);
+    if (!hasCalcCols) onChange(next);
+  };
 
   return (
     <div className="col-span-12 space-y-2">
@@ -639,7 +726,12 @@ function TableField({ field, value, onChange, readOnly, tableKey, documentId, al
                 {cols.map((col, i) => (
                   <th key={col.id ?? i} title={col.tooltip}
                       className="w-[230px] flex-shrink-0 px-3 py-2 text-left text-[11px] font-semibold text-muted-foreground border-r border-border/50 last:border-0 whitespace-nowrap">
-                    {col.label}{col.required && <span className="text-red-400 ml-0.5">*</span>}
+                    <span className="flex items-center gap-1">
+                      {col.label}{col.required && <span className="text-red-400 ml-0.5">*</span>}
+                      {col.calc?.expression && (
+                        <span className="text-[9px] font-semibold text-emerald-600 bg-emerald-50 px-1 rounded" title="Formula column">ƒx</span>
+                      )}
+                    </span>
                     {col.additionalText && <div className="text-[10px] font-normal opacity-70">{col.additionalText}</div>}
                   </th>
                 ))}
@@ -1209,7 +1301,7 @@ function FormField({ field, control, errors, onChangeCb, readOnly, allValues, ed
 
 // ── Main export ───────────────────────────────────────────────────────────────
 
-export default function TemplateForm({ sections, values, onChange, readOnly = false, documentId, documentStatus, canEditConditionalSections }: {
+function TemplateForm({ sections, values, onChange, readOnly = false, documentId, documentStatus, canEditConditionalSections }: {
   sections: unknown[];
   values: TemplateFormValues;
   onChange: (key: string, value: unknown) => void;
@@ -1305,13 +1397,17 @@ export default function TemplateForm({ sections, values, onChange, readOnly = fa
   return (
     <div className="space-y-6">
       {list.map((section, si) => {
-        // Hidden / conditionally-hidden / role-restricted sections drop out entirely.
+        // Hidden / conditionally-hidden / role-restricted sections drop out
+        // entirely. Whether the viewer is ALLOWED TO EDIT a conditionally-
+        // editable section/field is a different axis — handled below via
+        // `sectionEditable` / `evalEditableForViewer`, which locks the
+        // controls to read-only. It must never also hide the section, or an
+        // approver reviewing the document loses visibility into content
+        // they're specifically there to review.
         if (!evalVisible(section, liveValues as TemplateFormValues, allFields, processStep)) return null;
         if (!sectionVisibleToViewer(section, viewer)) return null;
-        if (conditionalEditBlockedForViewer(section, viewer)) return null;
         const visibleFields = (section.fields ?? []).filter((f) =>
           evalVisible(f, liveValues as TemplateFormValues, allFields, processStep)
-          && !conditionalEditBlockedForViewer(f, viewer)
         );
         // Editability cascades: a read-only/locked section locks all its fields.
         const sectionEditable = evalEditableForViewer(section, liveValues as TemplateFormValues, allFields, processStep, viewer);
@@ -1359,6 +1455,8 @@ export default function TemplateForm({ sections, values, onChange, readOnly = fa
   );
 }
 
+export { TemplateForm as default };
+
 // ── Validation helper (unchanged signature) ───────────────────────────────────
 
 /** Returns labels of required fields that are missing or fail basic validation. */
@@ -1391,7 +1489,35 @@ export function requiredFieldLabels(
       // Don't require a field the user can't edit at this step (read-only / locked).
       if (!sectionEditable || !evalEditableForViewer(f, values, allFields, processStep, viewer)) continue;
       const key = f.key ?? "";
-      const v   = values[key];
+
+      // Table fields: validate REQUIRED COLUMNS the same way a top-level field
+      // is validated. A column can be individually hidden/conditionally shown
+      // (`hidden`/`visibleWhen`) and read-only/conditionally editable
+      // (`readonly`/`editableWhen`) — only a column the person can actually see
+      // and edit is enforced, mirroring the field-level rule just above. A
+      // required column with zero rows (nothing entered yet) counts as missing,
+      // same as an empty scalar field.
+      if (type === "table") {
+        const rows = Array.isArray(values[key]) ? (values[key] as Record<string, unknown>[]) : [];
+        for (const col of f.columns ?? []) {
+          if (!col.required || !col.key) continue;
+          if (col.hidden || !evalVisible(col, values, allFields, processStep)) continue;
+          if (!evalEditable(col, values, allFields, processStep)) continue;
+          const colKey = col.key;
+          const missingInAnyRow =
+            rows.length === 0 ||
+            rows.some((row) => {
+              const v = row?.[colKey];
+              return v === undefined || v === null || (typeof v === "string" && v.trim() === "");
+            });
+          if (missingInAnyRow) {
+            missing.push(`${f.label ?? key} — ${col.label ?? colKey}`);
+          }
+        }
+        continue; // tables have no scalar `required`/regex of their own
+      }
+
+      const v = values[key];
       if (f.required) {
         const empty =
           v === undefined || v === null ||

@@ -19,6 +19,7 @@ import {
   Timer,
   Trash2,
 } from "lucide-react";
+import CustomListbox from "@/components/ui/CustomListbox";
 import clsx from "clsx";
 
 type SectionId = "preview" | "lifecycle" | "governance" | "security";
@@ -309,15 +310,17 @@ function SettingsWorkspace() {
                   </label>
                   <label>
                     <span className="mb-1.5 block text-xs font-semibold uppercase tracking-wider text-[#5E6870]">Position</span>
-                    <select
-                      className={`${inputCls} w-full`}
+                    <CustomListbox
                       value={settings.watermark_position}
-                      onChange={(event) => update("watermark_position", event.target.value as DmsSettings["watermark_position"])}
-                    >
-                      <option value="diagonal">Diagonal pattern</option>
-                      <option value="center">Centered</option>
-                      <option value="footer">Footer strip</option>
-                    </select>
+                      onChange={(v) => update("watermark_position", v as DmsSettings["watermark_position"])}
+                      options={[
+                        { value: "diagonal", label: "Diagonal pattern" },
+                        { value: "center", label: "Centered" },
+                        { value: "footer", label: "Footer strip" },
+                      ]}
+                      buttonClassName={`${inputCls} w-full`}
+                      ariaLabel="Watermark position"
+                    />
                   </label>
                 </div>
                 <label className="block">

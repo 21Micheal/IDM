@@ -66,6 +66,66 @@ def sync_builder_workflow_phase(document: Document) -> str | None:
     return phase
 
 
+def sync_retirement_variance(document: Document) -> dict | None:
+    """Persist two display-only numbers onto ``metadata.form``, each time
+    this document is viewed/submitted/updated:
+
+      - ``requested_amount`` — resolved unconditionally (whenever a
+        retirement mapping names the field), from the REQUEST phase onward.
+        This is what the Forms report's "Amount" column and description
+        summary read; it doesn't depend on the retirement "spent" table
+        having any rows.
+      - ``retirement_variance`` — the issued-vs-spent classification, only
+        computed once the document has actually reached the retirement
+        phase. Computing this during the request phase would misclassify
+        every such form as "underspent" (spent=0 < issued), because the
+        retirement "spent" table is normally only fillable once the form
+        reaches the retirement step — there's nothing to classify yet.
+
+    Safe to call at any point in a form's lifecycle — a no-op (returns None,
+    touches nothing) when the document isn't a form. Deliberately tolerant of
+    a broken/misconfigured mapping (a template mid-edit, a stale field
+    reference): any exception is swallowed so a display-only computation can
+    never block a view/submit/update_form request. See
+    apps.sunsystems.variance for the mapping warnings a bad config still
+    produces (logged there, not raised here).
+    """
+    if not is_built_form_document(document):
+        return None
+
+    from apps.sunsystems.variance import compute_retirement_variance, get_requested_amount
+
+    try:
+        requested_amount = get_requested_amount(document)
+    except Exception:
+        requested_amount = None
+
+    form_meta = (document.metadata or {}).get("form") or {}
+    phase = (form_meta.get("workflow_phase") or infer_builder_workflow_phase(document) or "request").strip().lower()
+
+    variance = None
+    if phase == "retirement":
+        try:
+            variance = compute_retirement_variance(document)
+        except Exception:
+            variance = None
+
+    meta = dict(document.metadata or {})
+    form = dict(meta.get("form") or {})
+    changed = False
+    if form.get("requested_amount") != requested_amount:
+        form["requested_amount"] = requested_amount
+        changed = True
+    if form.get("retirement_variance") != variance:
+        form["retirement_variance"] = variance
+        changed = True
+    if changed:
+        meta["form"] = form
+        document.metadata = meta
+        document.save(update_fields=["metadata", "updated_at"])
+    return variance
+
+
 def retirement_journal_posted(document: Document) -> bool:
     """True when a configured stage-2 SunSystems journal has been posted."""
     try:

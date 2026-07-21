@@ -1,5 +1,5 @@
 import { Suspense, lazy, useEffect, useState } from "react";
-import { Routes, Route, Navigate, useLocation } from "react-router-dom";
+import { Routes, Route, Navigate, useLocation, useNavigate } from "react-router-dom";
 import { useQuery } from "@tanstack/react-query";
 import { useAuthStore, applyServerSessionPolicy } from "@/store/authStore";
 import { useSessionUiStore } from "@/store/sessionUiStore";
@@ -38,6 +38,9 @@ const NotificationsPage = lazy(() => import("@/pages/NotificationsPage"));
 const NotificationWorkflowPage = lazy(() => import("@/pages/NotificationWorkflowPage"));
 const FolderPage = lazy(() => import("@/pages/FolderPage"));
 const TemplatesPage = lazy(() => import("@/pages/TemplatesPage"));
+const FormsPage = lazy(() => import("@/pages/FormsPage"));
+const FormUploadPage = lazy(() => import("@/components/templates/FormUploadPage"));
+const FormDetailPage = lazy(() => import("@/pages/FormDetailPage"));
 
 // ── Guards ────────────────────────────────────────────────────────────────────
 
@@ -302,6 +305,21 @@ const ROUTE_FALLBACK_CONTENT = [
     description: "Loading account preferences, security options, and personal details.",
   },
   {
+    match: (pathname: string) => pathname === "/forms",
+    title: "Preparing forms list",
+    description: "Loading forms, filters, and request summaries.",
+  },
+  {
+    match: (pathname: string) => pathname.startsWith("/forms/new"),
+    title: "Preparing new form",
+    description: "Loading form templates and create-workflow tools.",
+  },
+  {
+    match: (pathname: string) => pathname.startsWith("/forms/"),
+    title: "Preparing form detail",
+    description: "Loading the selected form and approval workflow.",
+  },
+  {
     match: (pathname: string) => pathname.startsWith("/admin"),
     title: "Preparing administration",
     description: "Loading configuration, user controls, and system management tools.",
@@ -331,6 +349,8 @@ function RouteFallback() {
 // ── App ───────────────────────────────────────────────────────────────────────
 
 export default function App() {
+  const navigate = useNavigate();
+
   return (
     <AuthBootstrap>
       <>
@@ -378,6 +398,9 @@ export default function App() {
               <Route path="documents/review/:batchId" element={<ReviewQueuePage />} />
               <Route path="documents/:id"    element={<DocumentDetailPage />} />
               <Route path="documents/folders/:folderId" element={<FolderPage />} />
+              <Route path="forms" element={<FormsPage />} />
+              <Route path="forms/new" element={<FormUploadPage onClose={() => navigate("/forms")} />} />
+              <Route path="forms/:id" element={<FormDetailPage />} />
               <Route path="request-signature" element={<RequestSignaturePage />} />
 
               <Route path="templates" element={<Navigate to="/admin/templates" replace />} />

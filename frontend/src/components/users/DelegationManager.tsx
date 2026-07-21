@@ -5,6 +5,7 @@ import { documentTypesAPI, profileAPI } from "@/services/api";
 import { format } from "date-fns";
 import { ArrowLeftRight, CalendarClock, CircleSlash, Loader2, UserCheck } from "lucide-react";
 import { toast } from "@/components/ui/vault-toast";
+import CustomListbox from "@/components/ui/CustomListbox";
 
 export type DelegationRecord = {
   id: string;
@@ -113,38 +114,34 @@ export function DelegationScheduleForm({
           <label className="block text-xs font-medium text-muted-foreground mb-1.5">
             Delegate to
           </label>
-          <select
-            className="w-full h-10 rounded-lg border border-input bg-background px-3 text-sm"
+          <CustomListbox
+            className="w-full"
             value={form.delegate_id}
-            onChange={(e) => setForm((s) => ({ ...s, delegate_id: e.target.value }))}
-          >
-            <option value="">Select user</option>
-            {candidates.map((candidate) => (
-              <option key={candidate.id} value={candidate.id}>
-                {candidate.full_name || candidate.email}
-              </option>
-            ))}
-          </select>
+            onChange={(value) => setForm((s) => ({ ...s, delegate_id: value }))}
+            options={[
+              { value: "", label: "Select user" },
+              ...candidates.map((candidate) => ({ value: candidate.id, label: candidate.full_name || candidate.email })),
+            ]}
+            buttonClassName="w-full h-10 rounded-lg border border-input bg-background px-3 text-sm text-left"
+            ariaLabel="Delegate to"
+          />
         </div>
 
         <div>
           <label className="block text-xs font-medium text-muted-foreground mb-1.5">
             Document type filter
           </label>
-          <select
-            className="w-full h-10 rounded-lg border border-input bg-background px-3 text-sm"
+          <CustomListbox
+            className="w-full"
             value={form.document_type_id || ""}
-            onChange={(e) =>
-              setForm((s) => ({ ...s, document_type_id: e.target.value || null }))
-            }
-          >
-            <option value="">All tasks</option>
-            {documentTypes.map((dt) => (
-              <option key={dt.id} value={dt.id}>
-                {dt.name} ({dt.code})
-              </option>
-            ))}
-          </select>
+            onChange={(value) => setForm((s) => ({ ...s, document_type_id: value || null }))}
+            options={[
+              { value: "", label: "All tasks" },
+              ...documentTypes.map((dt) => ({ value: dt.id, label: `${dt.name} (${dt.code})` })),
+            ]}
+            buttonClassName="w-full h-10 rounded-lg border border-input bg-background px-3 text-sm text-left"
+            ariaLabel="Document type filter"
+          />
           <p className="text-xs text-muted-foreground mt-1">
             Leave empty to delegate all tasks, or filter to one document type.
           </p>

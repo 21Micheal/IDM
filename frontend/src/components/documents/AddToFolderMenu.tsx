@@ -9,7 +9,7 @@
  *   <AddToFolderMenu documentId={doc.id} />
  */
 
-import { useState } from "react";
+import { useState, useEffect } from "react";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { FolderPlus, Check, Folder, Star, Plus, Loader2, X } from "lucide-react";
 import clsx from "clsx";
@@ -29,6 +29,19 @@ export function AddToFolderMenu({ documentId, showLabel = false, className, trig
   const [creating, setCreating] = useState(false);
   const [folderName, setFolderName] = useState("");
   const qc              = useQueryClient();
+
+  // Escape: cancel folder creation first; second press closes the whole menu.
+  useEffect(() => {
+    if (!open) return;
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key !== "Escape") return;
+      e.stopPropagation();
+      if (creating) { setCreating(false); setFolderName(""); }
+      else { setOpen(false); }
+    };
+    document.addEventListener("keydown", onKey, true);
+    return () => document.removeEventListener("keydown", onKey, true);
+  }, [open, creating]);
 
   // Flat folder list with document_count
   const { data: folders = [] } = useQuery<DocumentFolder[]>({
@@ -148,7 +161,7 @@ export function AddToFolderMenu({ documentId, showLabel = false, className, trig
         <>
           <div className="fixed inset-0 z-40" onClick={() => setOpen(false)} />
           <div className="absolute right-0 top-9 z-50 w-72 border border-[#C8CDD2] bg-white shadow-xl overflow-hidden">
-            <div className="px-3 py-2.5 border-b border-[#C8CDD2] bg-[#287EAD]">
+            <div className="px-3 py-2.5 border-b border-[#C8CDD2] bg-[#50545A]">
               <p className="text-xs font-semibold text-white">Add to folder</p>
               <p className="mt-0.5 text-[11px] text-white/75">
                 Choose an existing folder or create one here.

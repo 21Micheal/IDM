@@ -468,6 +468,10 @@ class DocumentListSerializer(serializers.ModelSerializer):
     shared_with_me = serializers.SerializerMethodField()
     share_access_level = serializers.SerializerMethodField()
     deleted_by_name = serializers.SerializerMethodField()
+    is_form = serializers.SerializerMethodField()
+    builder_workflow_phase = serializers.SerializerMethodField()
+    can_submit_retirement = serializers.SerializerMethodField()
+    form_summary = serializers.SerializerMethodField()
 
     class Meta:
         model  = Document
@@ -485,6 +489,8 @@ class DocumentListSerializer(serializers.ModelSerializer):
             "current_version", "created_at", "updated_at",
             "deleted_at", "deleted_by_name",
             "available_bulk_actions", "shared_with_me", "share_access_level",
+            "metadata",
+            "is_form", "builder_workflow_phase", "can_submit_retirement", "form_summary",
         ]
 
     def get_deleted_by_name(self, obj):
@@ -610,6 +616,47 @@ class DocumentListSerializer(serializers.ModelSerializer):
             return True
         from apps.documents.access import effective_permissions_for_user
         return GroupAction.DELETE.value in effective_permissions_for_user(user, obj)
+
+    def get_is_form(self, obj):
+        form = (obj.metadata or {}).get("form")
+        return bool(isinstance(form, dict) and form.get("sections"))
+
+    def get_builder_workflow_phase(self, obj):
+        if not self.get_is_form(obj):
+            return None
+        form = obj.metadata["form"]
+        phase = form.get("workflow_phase")
+        if phase:
+            return str(phase).strip().lower()
+        from apps.documents.builder_workflow import infer_builder_workflow_phase
+        return infer_builder_workflow_phase(obj)
+
+    def get_can_submit_retirement(self, obj):
+        if not self.get_is_form(obj):
+            return False
+        from apps.documents.builder_workflow import can_submit_retirement_workflow
+        request = self.context.get("request")
+        return can_submit_retirement_workflow(obj, user=getattr(request, "user", None))
+
+    def get_form_summary(self, obj):
+        if not self.get_is_form(obj):
+            return None
+        form = obj.metadata["form"]
+        values = form.get("values") if isinstance(form.get("values"), dict) else {}
+        variance = form.get("retirement_variance")
+        # If variance is not set but document is at retirement phase, try to compute it
+        if not variance:
+            phase = form.get("workflow_phase")
+            if not phase:
+                from apps.documents.builder_workflow import infer_builder_workflow_phase
+                phase = infer_builder_workflow_phase(obj)
+            if phase == "retirement":
+                try:
+                    from apps.sunsystems.variance import compute_retirement_variance
+                    variance = compute_retirement_variance(obj)
+                except Exception:
+                    variance = None
+        return {"values": values, "retirement_variance": variance}
 
 
 class DocumentDetailSerializer(serializers.ModelSerializer):

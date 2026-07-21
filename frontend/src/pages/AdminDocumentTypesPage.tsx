@@ -1,7 +1,8 @@
 import { useEffect, useMemo, useState } from "react";
 import { extractApiError } from "@/lib/apiError";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
-import { useForm, useFieldArray } from "react-hook-form";
+import { useForm, useFieldArray, Controller } from "react-hook-form";
+import CustomListbox from "@/components/ui/CustomListbox";
 import {
   AlertCircle, Copy, FileText, GripVertical, Link2, Loader2, Plus,
   Save, Search, Shield, Trash2, X,
@@ -544,12 +545,22 @@ export default function AdminDocumentTypesPage() {
                     {/* Document title ─ which source names documents of this type */}
                     <label className="pt-2 text-[#5E6870]">Document title</label>
                     <div>
-                      <select {...form.register("title_field")} className={inputCls}>
-                        <option value="filename">File name (default)</option>
-                        {fieldOptions({ ...(selectedType ?? {} as DocumentType), metadata_fields: form.watch("metadata_fields") as any }).map((field) => (
-                          <option key={field.key} value={field.key}>{field.label}</option>
-                        ))}
-                      </select>
+                      <Controller
+                        name="title_field"
+                        control={form.control}
+                        render={({ field: f }) => (
+                          <CustomListbox
+                            value={String(f.value ?? "filename")}
+                            onChange={f.onChange}
+                            options={[
+                              { value: "filename", label: "File name (default)" },
+                              ...fieldOptions({ ...(selectedType ?? {} as DocumentType), metadata_fields: form.watch("metadata_fields") as any }).map((field) => ({ value: field.key, label: field.label })),
+                            ]}
+                            buttonClassName={inputCls}
+                            ariaLabel="Document title"
+                          />
+                        )}
+                      />
                       <p className="mt-1.5 text-xs text-[#8C969E]">How documents of this type are named — by default the uploaded file name; or pick a field like Document Name, Supplier, or Reference Number</p>
                     </div>
 
@@ -569,10 +580,23 @@ export default function AdminDocumentTypesPage() {
                       </label>
                       <div className="max-w-xs">
                         <label className="mb-1 block text-xs text-[#5E6870]">Metadata mode</label>
-                        <select {...form.register("metadata_mode")} disabled={isPersonalType} className={inputCls}>
-                          <option value="admin_defined">Admin-defined attributes</option>
-                          <option value="user_defined">User-defined attributes</option>
-                        </select>
+                        <Controller
+                          name="metadata_mode"
+                          control={form.control}
+                          render={({ field: f }) => (
+                            <CustomListbox
+                              value={String(f.value ?? "admin_defined")}
+                              onChange={f.onChange}
+                              options={[
+                                { value: "admin_defined", label: "Admin-defined attributes" },
+                                { value: "user_defined", label: "User-defined attributes" },
+                              ]}
+                              buttonClassName={inputCls}
+                              ariaLabel="Metadata mode"
+                              disabled={isPersonalType}
+                            />
+                          )}
+                        />
                       </div>
                     </div>
                   </div>
@@ -614,9 +638,19 @@ export default function AdminDocumentTypesPage() {
                               placeholder="Detail label"
                             />
                             <input {...form.register(`metadata_fields.${index}.field_key`, { required: true })} className={cn(inputCls, "font-mono text-xs")} readOnly />
-                            <select {...form.register(`metadata_fields.${index}.field_type`)} className={inputCls}>
-                              {FIELD_TYPES.map((type) => <option key={type.value} value={type.value}>{type.label}</option>)}
-                            </select>
+                            <Controller
+                              name={`metadata_fields.${index}.field_type`}
+                              control={form.control}
+                              render={({ field: f }) => (
+                                <CustomListbox
+                                  value={String(f.value ?? "text")}
+                                  onChange={f.onChange}
+                                  options={FIELD_TYPES.map((type) => ({ value: type.value, label: type.label }))}
+                                  buttonClassName={inputCls}
+                                  ariaLabel="Metadata field type"
+                                />
+                              )}
+                            />
                             <label className="flex items-center gap-2 text-sm text-[#1F2933]">
                               <input type="checkbox" {...form.register(`metadata_fields.${index}.is_required`)} />
                               Required
@@ -673,28 +707,74 @@ export default function AdminDocumentTypesPage() {
                               </button>
                             </div>
                             <div className="mt-3 grid grid-cols-2 gap-3">
-                              <select {...form.register(`relationship_rules.${index}.target_document_type`)} className={inputCls}>
-                                <option value="">Target document type</option>
-                                {types.filter((type) => type.id !== editingId).map((type) => (
-                                  <option key={type.id} value={type.id}>{type.name}</option>
-                                ))}
-                              </select>
-                              <select {...form.register(`relationship_rules.${index}.relation_type`)} className={inputCls}>
-                                {RELATIONSHIP_TYPES.map((type) => <option key={type.value} value={type.value}>{type.label}</option>)}
-                              </select>
-                              <select {...form.register(`relationship_rules.${index}.source_field_key`)} className={inputCls}>
-                                {fieldOptions({ ...(selectedType ?? {} as DocumentType), metadata_fields: form.watch("metadata_fields") as any }).map((field) => (
-                                  <option key={field.key} value={field.key}>{field.label}</option>
-                                ))}
-                              </select>
-                              <select {...form.register(`relationship_rules.${index}.target_field_key`)} className={inputCls}>
-                                {fieldOptions(target).map((field) => (
-                                  <option key={field.key} value={field.key}>{field.label}</option>
-                                ))}
-                              </select>
-                              <select {...form.register(`relationship_rules.${index}.match_operator`)} className={inputCls}>
-                                <option value="equals">= Equal</option>
-                              </select>
+                              <Controller
+                                name={`relationship_rules.${index}.target_document_type`}
+                                control={form.control}
+                                render={({ field: f }) => (
+                                  <CustomListbox
+                                    value={String(f.value ?? "")}
+                                    onChange={f.onChange}
+                                    options={[
+                                      { value: "", label: "Target document type" },
+                                      ...types.filter((type) => type.id !== editingId).map((type) => ({ value: type.id, label: type.name })),
+                                    ]}
+                                    buttonClassName={inputCls}
+                                    ariaLabel="Relationship target document type"
+                                  />
+                                )}
+                              />
+                              <Controller
+                                name={`relationship_rules.${index}.relation_type`}
+                                control={form.control}
+                                render={({ field: f }) => (
+                                  <CustomListbox
+                                    value={String(f.value ?? RELATIONSHIP_TYPES[0].value)}
+                                    onChange={f.onChange}
+                                    options={RELATIONSHIP_TYPES.map((type) => ({ value: type.value, label: type.label }))}
+                                    buttonClassName={inputCls}
+                                    ariaLabel="Relationship type"
+                                  />
+                                )}
+                              />
+                              <Controller
+                                name={`relationship_rules.${index}.source_field_key`}
+                                control={form.control}
+                                render={({ field: f }) => (
+                                  <CustomListbox
+                                    value={String(f.value ?? "")}
+                                    onChange={f.onChange}
+                                    options={fieldOptions({ ...(selectedType ?? {} as DocumentType), metadata_fields: form.watch("metadata_fields") as any }).map((field) => ({ value: field.key, label: field.label }))}
+                                    buttonClassName={inputCls}
+                                    ariaLabel="Relationship source field"
+                                  />
+                                )}
+                              />
+                              <Controller
+                                name={`relationship_rules.${index}.target_field_key`}
+                                control={form.control}
+                                render={({ field: f }) => (
+                                  <CustomListbox
+                                    value={String(f.value ?? "")}
+                                    onChange={f.onChange}
+                                    options={fieldOptions(target).map((field) => ({ value: field.key, label: field.label }))}
+                                    buttonClassName={inputCls}
+                                    ariaLabel="Relationship target field"
+                                  />
+                                )}
+                              />
+                              <Controller
+                                name={`relationship_rules.${index}.match_operator`}
+                                control={form.control}
+                                render={({ field: f }) => (
+                                  <CustomListbox
+                                    value={String(f.value ?? "equals")}
+                                    onChange={f.onChange}
+                                    options={[{ value: "equals", label: "= Equal" }]}
+                                    buttonClassName={inputCls}
+                                    ariaLabel="Match operator"
+                                  />
+                                )}
+                              />
                               <label className="flex items-center gap-2 text-sm text-[#1F2933]">
                                 <input type="checkbox" {...form.register(`relationship_rules.${index}.is_active`)} />
                                 Active

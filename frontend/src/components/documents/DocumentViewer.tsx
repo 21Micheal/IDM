@@ -1176,9 +1176,15 @@ interface Props {
    * Cancel prompt). Resolve `false` to abort the release.
    */
   onBeforeRelease?: () => Promise<boolean>;
+  /**
+   * When true, all lock-acquire / release UI is hidden. Use for form documents
+   * that manage their own optimistic concurrency via update_form/ — they must
+   * never trigger the file-level lock endpoint.
+   */
+  disableLocking?: boolean;
 }
 
-export default function DocumentViewer({ document: doc, submitSlot, hideUploadActionBar, onPreviewLinksChange, onBeforeRelease }: Props) {
+export default function DocumentViewer({ document: doc, submitSlot, hideUploadActionBar, onPreviewLinksChange, onBeforeRelease, disableLocking = false }: Props) {
   const qc   = useQueryClient();
   const user = useAuthStore((s) => s.user);
   const [selectedVersionId, setSelectedVersionId] = useState<string | null>(null);
@@ -1440,8 +1446,8 @@ export default function DocumentViewer({ document: doc, submitSlot, hideUploadAc
 
   return (
     <div className="space-y-0 bg-white">
-      {/* Lock banner */}
-      {doc.is_edit_locked && (
+      {/* Lock banner — hidden for form documents */}
+      {doc.is_edit_locked && !disableLocking && (
         <div className="p-3 pb-0">
           <EditLockBanner
             doc={doc}
@@ -1469,9 +1475,9 @@ export default function DocumentViewer({ document: doc, submitSlot, hideUploadAc
           )}
         </div>
 
-        {/* Lock / Release for NON-office docs (PDF, images, …). Office docs get
+        {/* Lock / Release for NON-office, NON-form docs (PDF, images, …). Office docs get
             these inside OfficeEditPanel. Locking enables the "Edit details" tab. */}
-        {!isOffice && (
+        {!isOffice && !disableLocking && (
           <div className="flex items-center gap-2 flex-wrap">
             {canEdit && !doc.is_edit_locked && (
               <button

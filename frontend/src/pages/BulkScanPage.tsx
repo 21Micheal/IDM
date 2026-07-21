@@ -22,6 +22,7 @@ import {
 } from "@/services/api";
 import type { DocumentType } from "@/types";
 import { QUERY_FIVE_MIN_STALE } from "@/lib/reactQueryDefaults";
+import CustomListbox from "@/components/ui/CustomListbox";
 import { deriveDocumentTypeConfig } from "@/lib/documentTypeConfig";
 import BulkUploadDropzone from "@/components/documents/bulk/BulkUploadDropzone";
 import BulkProcessingPanel from "@/components/documents/bulk/BulkProcessingPanel";
@@ -422,21 +423,18 @@ export default function BulkScanPage({ scanMode = true, onSingleMode, initialBat
                   Use this for PO, invoice, GRN, and support files in one packet. Each document type is confirmed during review.
                 </p>
               )}
-              <select
+              <CustomListbox
                 value={selectedTypeId}
-                onChange={(e) => setSelectedTypeId(e.target.value)}
-                disabled={isRelatedSet}
-                className="input w-full disabled:bg-[#EEF3F7] disabled:text-[#7A858E]"
-              >
-                <option value="">
-                  {isRelatedSet
-                    ? scanMode ? "Auto classify during review" : "Choose type during review"
-                    : "— Choose document type —"}
-                </option>
-                {visibleDocTypes.map((t) => (
-                  <option key={t.id} value={t.id}>{t.name}</option>
-                ))}
-              </select>
+                onChange={setSelectedTypeId}
+                options={[
+                  { value: "", label: isRelatedSet
+                      ? scanMode ? "Auto classify during review" : "Choose type during review"
+                      : "— Choose document type —" },
+                  ...visibleDocTypes.map((t) => ({ value: t.id, label: t.name })),
+                ]}
+                buttonClassName="input w-full disabled:bg-[#EEF3F7] disabled:text-[#7A858E]"
+                ariaLabel="Document type selector"
+              />
               {isRelatedSet ? (
                 <p className="mt-3 border-t border-[#D3D7DA] pt-3 text-xs text-[#5E6870]">
                   {scanMode

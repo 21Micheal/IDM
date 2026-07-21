@@ -21,6 +21,7 @@ import {
   ChevronRight, Settings,
   Bell, Monitor, FileSignature,
 } from "lucide-react";
+import CustomListbox from "@/components/ui/CustomListbox";
 import { toast } from "@/components/ui/vault-toast";
 import clsx from "clsx";
 
@@ -554,16 +555,17 @@ export default function ProfilePage() {
                         <p className="font-medium text-foreground">Date format</p>
                         <p className="text-sm text-muted-foreground">Choose how dates are displayed</p>
                       </div>
-                      <select
-                        className="input w-auto"
+                      <CustomListbox
                         value={preferences?.date_format || "DD/MM/YYYY"}
-                        onChange={(e) => updatePreferencesMutation.mutate({ date_format: e.target.value })}
-                        disabled={preferencesLoading || updatePreferencesMutation.isPending}
-                      >
-                        <option value="DD/MM/YYYY">DD/MM/YYYY</option>
-                        <option value="MM/DD/YYYY">MM/DD/YYYY</option>
-                        <option value="YYYY-MM-DD">YYYY-MM-DD</option>
-                      </select>
+                        onChange={(v) => updatePreferencesMutation.mutate({ date_format: v })}
+                        options={[
+                          { value: "DD/MM/YYYY", label: "DD/MM/YYYY" },
+                          { value: "MM/DD/YYYY", label: "MM/DD/YYYY" },
+                          { value: "YYYY-MM-DD", label: "YYYY-MM-DD" },
+                        ]}
+                        buttonClassName="input w-auto"
+                        ariaLabel="Date format"
+                      />
                     </div>
 
                     <div className="flex items-center justify-between py-3 border-b border-border">
@@ -571,15 +573,16 @@ export default function ProfilePage() {
                         <p className="font-medium text-foreground">Time format</p>
                         <p className="text-sm text-muted-foreground">12-hour or 24-hour clock</p>
                       </div>
-                      <select
-                        className="input w-auto"
+                      <CustomListbox
                         value={preferences?.time_format || "12-hour"}
-                        onChange={(e) => updatePreferencesMutation.mutate({ time_format: e.target.value })}
-                        disabled={preferencesLoading || updatePreferencesMutation.isPending}
-                      >
-                        <option value="12-hour">12-hour</option>
-                        <option value="24-hour">24-hour</option>
-                      </select>
+                        onChange={(v) => updatePreferencesMutation.mutate({ time_format: v })}
+                        options={[
+                          { value: "12-hour", label: "12-hour" },
+                          { value: "24-hour", label: "24-hour" },
+                        ]}
+                        buttonClassName="input w-auto"
+                        ariaLabel="Time format"
+                      />
                     </div>
 
                     <div className="flex items-center justify-between py-3">
@@ -587,16 +590,17 @@ export default function ProfilePage() {
                         <p className="font-medium text-foreground">On launch, go to</p>
                         <p className="text-sm text-muted-foreground">Default page when you log in</p>
                       </div>
-                      <select
-                        className="input w-auto"
+                      <CustomListbox
                         value={preferences?.default_page || "dashboard"}
-                        onChange={(e) => updatePreferencesMutation.mutate({ default_page: e.target.value })}
-                        disabled={preferencesLoading || updatePreferencesMutation.isPending}
-                      >
-                        <option value="dashboard">Dashboard</option>
-                        <option value="my_tasks">My Tasks</option>
-                        <option value="all_documents">All Documents</option>
-                      </select>
+                        onChange={(v) => updatePreferencesMutation.mutate({ default_page: v })}
+                        options={[
+                          { value: "dashboard", label: "Dashboard" },
+                          { value: "my_tasks", label: "My Tasks" },
+                          { value: "all_documents", label: "All Documents" },
+                        ]}
+                        buttonClassName="input w-auto"
+                        ariaLabel="Default page"
+                      />
                     </div>
                   </div>
                 </div>

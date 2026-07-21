@@ -122,6 +122,11 @@ export async function loadWorkflowData(documentId: string, workflowPhase?: "requ
     instances.find((row) => row.status === "in_progress") ??
     instances[0];
 
+  // Use the instance's own phase field as the authoritative source. This prevents
+  // a stale or missing caller-supplied phase from causing the retirement instance's
+  // completed steps to show "Approved" instead of "Fully approved" (or vice-versa).
+  const effectivePhase = (instance?.phase as "request" | "retirement" | undefined) ?? workflowPhase ?? null;
+
   const template = instance?.template
     ? await workflowAPI
         .getTemplate(instance.template)
@@ -164,7 +169,7 @@ export async function loadWorkflowData(documentId: string, workflowPhase?: "requ
   }));
 
   const meta = getWorkflowMeta(orderedTasks, instance);
-  const steps = buildApproverWorkflow(tasksWithHistory, template?.steps ?? [], workflowPhase);
+  const steps = buildApproverWorkflow(tasksWithHistory, template?.steps ?? [], effectivePhase);
 
   // The workflow is still "live" (worth polling) while at least one stage is
   // running or yet to be reached, and it hasn't ended in a rejection.

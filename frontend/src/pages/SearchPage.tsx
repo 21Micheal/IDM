@@ -354,7 +354,7 @@ export default function SearchPage() {
           </div>
         }
       >
-          <div className="relative w-full max-w-[620px]">
+          <div className="relative w-full max-w-[420px]">
             <Search className="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-[#5E6870]" />
             <input
               value={searchTerm}
@@ -377,48 +377,40 @@ export default function SearchPage() {
               </button>
             )}
           </div>
+          <div className="flex items-center gap-1">
+            <CustomListbox
+              value={statusFilter}
+              onChange={(v) => {
+                setStatusFilter(v);
+                setPage(1);
+              }}
+              options={[{ value: "", label: "All statuses" }, ...STATUS_OPTIONS.map((status) => ({ value: status, label: statusLabel(status) }))]}
+              buttonClassName="h-9 w-[140px] border border-[#AEB5BB] bg-white px-2 text-sm text-[#1F2933]"
+              ariaLabel="Status filter"
+            />
 
-          <CustomListbox
-            value={statusFilter}
-            onChange={(v) => {
-              setStatusFilter(v);
-              setPage(1);
-            }}
-            options={[
-              { value: "", label: "All statuses" },
-              ...STATUS_OPTIONS.map((status) => ({ value: status, label: statusLabel(status) })),
-            ]}
-            buttonClassName="h-9 w-[155px] border border-[#AEB5BB] bg-white px-2 text-sm text-[#1F2933] focus:outline-none focus:border-[#2B86C5] focus:ring-1 focus:ring-[#2B86C5]/30"
-            ariaLabel="Status filter"
-          />
+            <CustomListbox
+              value={typeFilter}
+              onChange={(v) => {
+                setTypeFilter(v);
+                setPage(1);
+              }}
+              options={[{ value: "", label: "All types" }, ...documentTypes.map((type) => ({ value: String(type.name), label: type.name }))]}
+              buttonClassName="h-9 w-[140px] border border-[#AEB5BB] bg-white px-2 text-sm text-[#1F2933]"
+              ariaLabel="Document type filter"
+            />
 
-          <CustomListbox
-            value={typeFilter}
-            onChange={(v) => {
-              setTypeFilter(v);
-              setPage(1);
-            }}
-            options={[
-              { value: "", label: "All types" },
-              ...documentTypes.map((type) => ({ value: String(type.name), label: type.name })),
-            ]}
-            buttonClassName="h-9 w-[170px] border border-[#AEB5BB] bg-white px-2 text-sm text-[#1F2933] focus:outline-none focus:border-[#2B86C5] focus:ring-1 focus:ring-[#2B86C5]/30"
-            ariaLabel="Document type filter"
-          />
-
-          <CustomListbox
-            value={formatFilter}
-            onChange={(v) => {
-              setFormatFilter(v);
-              setPage(1);
-            }}
-            options={[
-              { value: "", label: "All formats" },
-              ...FORMAT_OPTIONS.map((opt) => ({ value: opt.value, label: opt.label })),
-            ]}
-            buttonClassName="h-9 w-[145px] border border-[#AEB5BB] bg-white px-2 text-sm text-[#1F2933] focus:outline-none focus:border-[#2B86C5] focus:ring-1 focus:ring-[#2B86C5]/30"
-            ariaLabel="Format filter"
-          />
+            <CustomListbox
+              value={formatFilter}
+              onChange={(v) => {
+                setFormatFilter(v);
+                setPage(1);
+              }}
+              options={[{ value: "", label: "All formats" }, ...FORMAT_OPTIONS.map((opt) => ({ value: opt.value, label: opt.label }))]}
+              buttonClassName="h-9 w-[120px] border border-[#AEB5BB] bg-white px-2 text-sm text-[#1F2933]"
+              ariaLabel="Format filter"
+            />
+          </div>
       </WorkspaceCommandBar>
 
       <div className="scrollbar-minimal min-h-0 flex-1 overflow-y-auto px-5 pb-8 pr-0">

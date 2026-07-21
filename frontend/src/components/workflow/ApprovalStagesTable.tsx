@@ -81,11 +81,7 @@ export function ApprovalStagesTable({ steps = [], isLoading, phase }: ApprovalSt
   }
 
   if (!steps.length) {
-    return (
-      <div className="flex items-center justify-center border border-dashed border-[#C8CDD2] bg-[#F5F7F8] p-6 text-sm text-[#5E6870]">
-        No approval stages to display.
-      </div>
-    );
+    return null;
   }
 
   // Filter out structural nodes (start, end, gateway) - only show task nodes
@@ -93,12 +89,12 @@ export function ApprovalStagesTable({ steps = [], isLoading, phase }: ApprovalSt
 
   return (
     <div className="border border-[#C8CDD2] bg-white shadow-sm">
-      <div className="flex items-center justify-between border-b border-[#C8CDD2] bg-[#F5F7F8] px-4 py-2.5">
+      <div className="flex items-center justify-between border-b border-[#C8CDD2] bg-[#F5F7F8] px-3 py-1.5">
         <div className="flex items-center gap-2">
-          <p className="text-sm font-bold text-[#1F2933]">
+          <p className="text-xs font-bold text-[#1F2933]">
             {phase === "retirement" ? "Retirement Approval Stages" : "Request Approval Stages"}
           </p>
-          <span className="text-xs text-[#5E6870]">
+          <span className="text-[10px] text-[#5E6870]">
             {taskSteps.length} stage{taskSteps.length !== 1 ? "s" : ""}
           </span>
         </div>
@@ -107,30 +103,28 @@ export function ApprovalStagesTable({ steps = [], isLoading, phase }: ApprovalSt
         <table className="w-full text-sm">
           <thead>
             <tr className="border-b border-[#C8CDD2] bg-[#F5F7F8]">
-              <th className="px-4 py-2 text-left font-semibold text-[#1F2933]">Stage</th>
-              <th className="px-4 py-2 text-left font-semibold text-[#1F2933]">Approver</th>
-              <th className="px-4 py-2 text-left font-semibold text-[#1F2933]">Status</th>
-              <th className="px-4 py-2 text-left font-semibold text-[#1F2933]">Completed</th>
-              <th className="px-4 py-2 text-left font-semibold text-[#1F2933]">Comment</th>
+              <th className="px-3 py-1.5 text-left font-semibold text-[#5E6870] uppercase tracking-wide text-[10px]">Stage</th>
+              <th className="px-3 py-1.5 text-left font-semibold text-[#5E6870] uppercase tracking-wide text-[10px]">Approver</th>
+              <th className="px-3 py-1.5 text-left font-semibold text-[#5E6870] uppercase tracking-wide text-[10px]">Status</th>
+              <th className="px-3 py-1.5 text-left font-semibold text-[#5E6870] uppercase tracking-wide text-[10px]">Completed</th>
+              <th className="px-3 py-1.5 text-left font-semibold text-[#5E6870] uppercase tracking-wide text-[10px]">Comment</th>
             </tr>
           </thead>
           <tbody>
             {taskSteps.map((step, index) => {
               const tone = STATUS_TONE[step.status];
               return (
-                <tr key={step.id} className="border-b border-[#C8CDD2] hover:bg-[#F5F7F8]">
-                  <td className="px-4 py-3 text-[#1F2933]">
-                    <div className="flex items-center gap-2">
+                <tr key={step.id} className="border-b border-[#C8CDD2] last:border-b-0 hover:bg-[#F5F7F8]">
+                  <td className="px-3 py-2 text-[#1F2933]">
+                    <div className="flex items-center gap-1.5">
                       <span className="font-medium">{step.name}</span>
                       <span className="text-xs text-[#5E6870]">#{index + 1}</span>
                     </div>
                   </td>
-                  <td className="px-4 py-3 text-[#5E6870]">
-                    {step.approver || "Unassigned"}
-                  </td>
-                  <td className="px-4 py-3">
+                  <td className="px-3 py-2 text-[#5E6870]">{step.approver || "Unassigned"}</td>
+                  <td className="px-3 py-2">
                     <span
-                      className="inline-flex items-center gap-1.5 rounded-full px-2.5 py-1 text-xs font-semibold"
+                      className="inline-flex items-center gap-1 px-2 py-0.5 text-xs font-semibold"
                       style={{
                         backgroundColor: tone.bg,
                         color: tone.text,
@@ -141,12 +135,8 @@ export function ApprovalStagesTable({ steps = [], isLoading, phase }: ApprovalSt
                       {step.statusDisplay || step.status}
                     </span>
                   </td>
-                  <td className="px-4 py-3 text-[#5E6870]">
-                    {step.completedAt ? formatTime(step.completedAt) : "-"}
-                  </td>
-                  <td className="px-4 py-3 text-[#5E6870] max-w-xs truncate" title={step.comment}>
-                    {step.comment || "-"}
-                  </td>
+                  <td className="px-3 py-2 text-[#5E6870]">{step.completedAt ? formatTime(step.completedAt) : "-"}</td>
+                  <td className="px-3 py-2 text-[#5E6870] max-w-xs truncate" title={step.comment}>{step.comment || "-"}</td>
                 </tr>
               );
             })}
