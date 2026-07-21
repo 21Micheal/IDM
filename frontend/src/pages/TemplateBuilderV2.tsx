@@ -961,11 +961,8 @@ function compileSunSystems(template: Template): SunSystemsConfig | undefined {
       if (!amountCol) continue;
       const retirement = amountCol.sunsystems?.retirement;
       if (retirement?.enabled) {
-        // Imprest/retirement reconciliation: post a fixed set of lines based
-        // on comparing SUM(this column) against an issued/requested amount,
-        // instead of one line per expense row. See RetirementConfig's
-        // docstring and apps/sunsystems/mapping.py's _expand_retirement_lines,
-        // which interprets this exact shape at posting time.
+        const descCol = cols.find((c) => c.sunsystems?.role === "description"); // ← add this
+
         const toScenario = (s: RetirementScenario) => ({
           lines: s.lines.map((l) => ({
             account: { const: l.account ?? "" },
@@ -977,7 +974,11 @@ function compileSunSystems(template: Template): SunSystemsConfig | undefined {
           _fieldKey: f.key,
           retirement: {
             issued_amount: retirement.issuedAmountField ? { field: retirement.issuedAmountField } : { const: "0" },
-            spent_amount: { table: f.key, column: amountCol.key },
+            spent_amount: {
+              table: f.key,
+              column: amountCol.key,
+              ...(descCol ? { description_column: descCol.key } : {}), // ← add this
+            },
             scenarios: {
               exact: toScenario(retirement.exact),
               under: toScenario(retirement.under),
