@@ -18,7 +18,7 @@ import {
 } from "lucide-react";
 import clsx from "clsx";
 
-type Tab = "request" | "incoming" | "sent";
+type Tab = "request" | "incoming" | "sent" | "signed";
 
 interface UserLite { id: string; full_name: string; email: string }
 interface SignatureRequestRow {
@@ -197,7 +197,7 @@ function RequestForm({ onCreated }: { onCreated: (documentId: string) => void })
 }
 
 // ── Request list ────────────────────────────────────────────────────────────────
-function RequestList({ box }: { box: "incoming" | "sent" }) {
+function RequestList({ box }: { box: "incoming" | "sent" | "signed" }) {
   const navigate = useNavigate();
   const { data: rows = [], isLoading } = useQuery<SignatureRequestRow[]>({
     queryKey: ["signature-requests", box],
@@ -224,7 +224,7 @@ function RequestList({ box }: { box: "incoming" | "sent" }) {
           <div className="flex-1 min-w-0">
             <p className="text-sm font-semibold text-foreground truncate">{req.document_title}</p>
             <p className="text-xs text-muted-foreground">
-              {box === "incoming" ? `From ${req.requested_by.full_name}` : `${req.ordered ? "Sequential" : "Any order"}`}
+              {box === "sent" ? `${req.ordered ? "Sequential" : "Any order"}` : `From ${req.requested_by.full_name}`}
               {" · "}{req.document_reference}
             </p>
           </div>
@@ -250,6 +250,7 @@ export default function RequestSignaturePage() {
     { id: "request", label: "Request signature" },
     { id: "incoming", label: "Awaiting my signature" },
     { id: "sent", label: "Sent by me" },
+    { id: "signed", label: "Signed by me" },
   ];
 
   return (
@@ -282,6 +283,7 @@ export default function RequestSignaturePage() {
       </div>
       {tab === "incoming" && <RequestList box="incoming" />}
       {tab === "sent" && <RequestList box="sent" />}
+      {tab === "signed" && <RequestList box="signed" />}
       </div>
     </div>
   );

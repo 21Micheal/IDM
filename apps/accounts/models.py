@@ -219,6 +219,22 @@ class User(AbstractBaseUser, PermissionsMixin):
             Q(expires_at__isnull=True) | Q(expires_at__gt=now)
         ).exists()
 
+    @cached_property
+    def hod_department_ids(self) -> set[str]:
+        """
+        Department ids this user is Head of Department for (Department.head == self).
+        Backs the HOD group's document visibility scope — "their respective
+        department" — derived directly from Department.head rather than from
+        `self.department` (the department the user is an ordinary member of),
+        since a head's own department membership isn't guaranteed to match the
+        department(s) they head. This is intentionally independent of HOD group
+        membership itself (UserGroup.sync_hod_memberships derives the group FROM
+        this FK, not the other way around), so it stays correct even if the
+        synced membership is momentarily stale. No admin-facing toggle needed —
+        being a department's head is what grants this, not a checkbox.
+        """
+        return set(str(pk) for pk in self.headed_departments.values_list("id", flat=True))
+
     # Convenience helpers
     @property
     def is_admin(self):   return self.has_admin_access

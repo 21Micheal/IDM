@@ -112,8 +112,13 @@ class HasDocumentPermission(permissions.BasePermission):
         # involved with (own / assigned a workflow task / shared with). Group
         # permissions then decide *what* they can do — they do NOT grant blanket
         # access to every document of a type.
-        from apps.documents.file_streaming import user_is_involved_with_document
+        from apps.documents.file_streaming import user_is_involved_with_document, user_has_signed_document
         if not user_is_involved_with_document(request.user, obj):
+            # Not "involved" by the normal definition — but a completed signer keeps
+            # permanent VIEW-only access to what they signed. No other action is
+            # ever granted through this path.
+            if required_action == GroupAction.VIEW.value and user_has_signed_document(request.user, obj):
+                return True
             return False
 
         is_owner = (
