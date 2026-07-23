@@ -246,9 +246,14 @@ export default function RequestSignaturePage() {
   const navigate = useNavigate();
   const qc = useQueryClient();
 
-  const tabs: { id: Tab; label: string }[] = [
+  const { data: incomingCount } = useQuery({
+    queryKey: ["signature-requests", "incoming-count"],
+    queryFn: () => signatureRequestsAPI.incomingCount().then((r) => r.data.count ?? 0),
+  });
+
+  const tabs: { id: Tab; label: string; showCount?: boolean }[] = [
     { id: "request", label: "Request signature" },
-    { id: "incoming", label: "Awaiting my signature" },
+    { id: "incoming", label: `Awaiting my signature${incomingCount ? ` (${incomingCount})` : ""}`, showCount: incomingCount > 0 },
     { id: "sent", label: "Sent by me" },
     { id: "signed", label: "Signed by me" },
   ];
@@ -265,9 +270,18 @@ export default function RequestSignaturePage() {
         <nav className="-mb-px flex gap-6">
           {tabs.map((t) => (
             <button key={t.id} onClick={() => setTab(t.id)}
-              className={clsx("px-1 py-3 text-sm font-medium border-b-2 transition-colors",
+              className={clsx("px-1 py-3 text-sm font-medium border-b-2 transition-colors flex items-center gap-2",
                 tab === t.id ? "border-accent text-accent" : "border-transparent text-muted-foreground hover:text-foreground")}>
-              {t.label}
+              {t.showCount && incomingCount ? (
+                <>
+                  {t.label.split('(')[0].trim()}
+                  <span className="bg-red-700 text-white text-[10px] font-bold px-1.5 py-0.5 rounded-full min-w-[1.25rem] text-center">
+                    {incomingCount}
+                  </span>
+                </>
+              ) : (
+                t.label
+              )}
             </button>
           ))}
         </nav>

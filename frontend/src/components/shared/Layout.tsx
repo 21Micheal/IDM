@@ -236,7 +236,7 @@ function SidebarGroup({
                   <span
                     className={clsx(
                       "ml-auto inline-flex min-w-[1.25rem] items-center justify-center px-1.5 py-0.5 text-[10px] font-bold text-white",
-                      to === "/workflow" ? "bg-red-700" : "bg-[#287EAD]"
+                      to === "/workflow" || to === "/notifications" ? "bg-red-700" : "bg-[#287EAD]"
                     )}
                   >
                     {badgeValue}
@@ -866,7 +866,7 @@ export default function Layout() {
                             <span
                               className={clsx(
                                 "inline-flex min-w-[1.25rem] items-center justify-center px-1.5 py-0.5 text-[10px] font-bold text-white",
-                                to === "/workflow" ? "bg-red-700" : "bg-[#287EAD]"
+                                to === "/workflow" || to === "/notifications" || to === "/request-signature" ? "bg-red-700" : "bg-[#287EAD]"
                               )}
                             >
                               {badgeValue}

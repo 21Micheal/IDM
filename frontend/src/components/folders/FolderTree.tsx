@@ -267,7 +267,7 @@ function FolderNode({ folder, depth, activeFolderId, onSelect }: FolderNodeProps
 
         {/* Count badge */}
         {folder.document_count > 0 && !renaming && (
-          <span className="min-w-[1.25rem] bg-[#DCEAF2] px-1.5 py-0.5 text-center text-[10px] font-bold tabular-nums text-[#287EAD]">
+          <span className="min-w-[1.25rem] bg-[#287EAD] px-1.5 py-0.5 text-center text-[10px] font-bold tabular-nums text-white">
             {folder.document_count}
           </span>
         )}
