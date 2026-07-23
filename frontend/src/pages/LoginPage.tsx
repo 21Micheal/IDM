@@ -22,7 +22,6 @@ import { useAuthStore, applyServerSessionPolicy } from "@/store/authStore";
 import { toast } from "@/components/ui/vault-toast";
 import type { AuthUser, ServerSessionPolicy } from "@/store/authStore";
 
-// Drop this file at src/assets/dms-logo.png — Vite will resolve it to a URL.
 import dmsLogo from "@/assets/images/FSEDMSlogo.png";
 
 const credSchema = z.object({
@@ -167,38 +166,27 @@ export default function LoginPage() {
 
   return (
     <div className="min-h-screen bg-gradient-to-br from-sky-50 via-sky-100 to-blue-200 flex items-center justify-center p-4">
-      <div className="w-full max-w-6xl grid grid-cols-1 lg:grid-cols-2 gap-10 lg:gap-16 items-center">
-        {/* Brand panel — logo only, no marketing copy */}
-        <div className="hidden lg:flex items-center justify-center px-8">
-          <img
-            src={dmsLogo}
-            alt="Flaxem Document Management System"
-            className="w-80 h-auto drop-shadow-sm"
-          />
-        </div>
-
-        {/* Form column — square, minimal Flaxem box (no rounded corners) */}
-        <div className="w-full max-w-[440px] mx-auto">
-          <div className="lg:hidden text-center mb-8">
-            <img src={dmsLogo} alt="Flaxem" className="mx-auto w-40 h-auto" />
+      <div className="w-full max-w-[440px]">
+        <div className="shadow-[0_2px_6px_rgba(0,0,0,0.15)]">
+          {/* Light-blue header strip so the logo is visible but still reads as part of the blue card */}
+          <div className="flex justify-center px-10 pt-8 pb-6" style={{ backgroundColor: "#dff0fb" }}>
+            <img
+              src={dmsLogo}
+              alt="Flaxem Document Management System"
+              className="h-24 w-auto"
+            />
           </div>
 
           <div
-            className="shadow-[0_2px_6px_rgba(0,0,0,0.15)]"
             style={{
               background:
                 "var(--gradient-sidebar, linear-gradient(180deg, hsl(203 64% 42%) 0%, hsl(203 78% 34%) 100%))",
             }}
           >
-            <div className="px-10 pt-10 pb-8">
-              {/* Brand — same wordmark treatment as the original box */}
-              <h1 className="text-[26px] font-normal tracking-wide text-white">
-                FLAXEM
-              </h1>
-
-              {step === "credentials" ? (
-                <>
-                  <h2 className="mt-10 text-[15px] font-semibold text-white">
+          <div className="px-10 pt-8 pb-10">
+            {step === "credentials" ? (
+              <>
+                <h2 className="text-[15px] font-semibold text-white">
                     Sign in
                   </h2>
 
@@ -233,7 +221,7 @@ export default function LoginPage() {
                       </p>
                     )}
 
-                    <div className="pt-3">
+                    <div className="pt-3 flex items-center justify-between">
                       <button
                         type="submit"
                         disabled={loading}
@@ -245,21 +233,19 @@ export default function LoginPage() {
                           "Sign in"
                         )}
                       </button>
-                    </div>
 
-                    {/* <div className="pt-2">
                       <button
                         type="button"
-                        className="text-[13px] text-white/80 hover:underline"
+                        className="text-[13px] text-white/80 hover:text-white hover:underline"
                       >
                         Forgot password?
                       </button>
-                    </div> */}
+                    </div>
                   </form>
                 </>
               ) : (
                 <>
-                  <h2 className="mt-10 text-[15px] font-semibold text-white">
+                  <h2 className="text-[15px] font-semibold text-white">
                     Verification
                   </h2>
 
@@ -334,8 +320,8 @@ export default function LoginPage() {
               © {new Date().getFullYear()} Flaxem
             </div>
           </div>
+          </div>
         </div>
       </div>
-    </div>
   );
 }
