@@ -22,6 +22,9 @@ import { useAuthStore, applyServerSessionPolicy } from "@/store/authStore";
 import { toast } from "@/components/ui/vault-toast";
 import type { AuthUser, ServerSessionPolicy } from "@/store/authStore";
 
+// Drop this file at src/assets/dms-logo.png — Vite will resolve it to a URL.
+import dmsLogo from "@/assets/images/FSEDMSlogo.png";
+
 const credSchema = z.object({
   email: z.string().email("Please enter a valid email address."),
   password: z.string().min(1, "Password is required."),
@@ -163,184 +166,173 @@ export default function LoginPage() {
   };
 
   return (
-    <div
-      className="relative min-h-screen overflow-hidden"
-      style={{
-        background:
-          "linear-gradient(135deg, #1175c6 0%, #2389d4 45%, #3aa3e6 100%)",
-      }}
-    >
-      {/* Background geometry — thin diagonal lines + soft circles */}
-      <div className="pointer-events-none absolute inset-0 overflow-hidden">
-        <svg
-          className="absolute inset-0 h-full w-full"
-          viewBox="0 0 1920 1080"
-          preserveAspectRatio="none"
-        >
-          <g stroke="#ffffff" strokeOpacity="0.28" strokeWidth="1" fill="none">
-            <path d="M-50 720 L1400 -50" />
-            <path d="M-50 820 L1500 60" />
-            <path d="M-50 980 L1700 120" />
-            <path d="M200 1100 L1920 280" />
-            <path d="M600 1100 L1920 520" />
-          </g>
-          <g stroke="#bfe3ff" strokeOpacity="0.35" strokeWidth="1" fill="none">
-            <path d="M-50 760 L1450 -20" />
-            <path d="M-50 900 L1600 80" />
-          </g>
-        </svg>
+    <div className="min-h-screen bg-gradient-to-br from-sky-50 via-sky-100 to-blue-200 flex items-center justify-center p-4">
+      <div className="w-full max-w-6xl grid grid-cols-1 lg:grid-cols-2 gap-10 lg:gap-16 items-center">
+        {/* Brand panel — logo only, no marketing copy */}
+        <div className="hidden lg:flex items-center justify-center px-8">
+          <img
+            src={dmsLogo}
+            alt="Flaxem Document Management System"
+            className="w-80 h-auto drop-shadow-sm"
+          />
+        </div>
 
-        {/* Bottom-left concentric circles */}
-        <svg
-          className="absolute -bottom-32 -left-32 h-[520px] w-[520px] opacity-40"
-          viewBox="0 0 400 400"
-          fill="none"
-        >
-          <circle cx="200" cy="200" r="180" stroke="#bfe3ff" strokeWidth="1" />
-          <circle cx="200" cy="200" r="140" stroke="#bfe3ff" strokeWidth="1" />
-          <circle cx="200" cy="200" r="100" stroke="#bfe3ff" strokeWidth="1" />
-          <circle cx="200" cy="200" r="60" stroke="#bfe3ff" strokeWidth="1" />
-        </svg>
-        <svg
-          className="absolute bottom-10 left-64 h-[260px] w-[260px] opacity-30"
-          viewBox="0 0 400 400"
-          fill="none"
-        >
-          <circle cx="200" cy="200" r="180" stroke="#ffffff" strokeWidth="1" />
-          <circle cx="200" cy="200" r="120" stroke="#ffffff" strokeWidth="1" />
-          <circle cx="200" cy="200" r="60" stroke="#ffffff" strokeWidth="1" />
-        </svg>
-      </div>
-
-      <div className="relative z-10 flex min-h-screen items-center justify-center p-6">
-        <div className="w-full max-w-[440px] bg-white shadow-[0_2px_6px_rgba(0,0,0,0.2)]">
-          <div className="px-10 pt-10 pb-8">
-            {/* Brand */}
-            <h1 className="text-[26px] font-normal tracking-wide text-[#1a1a1a]">
-              FLAXEM
-            </h1>
-
-            {step === "credentials" ? (
-              <>
-                <h2 className="mt-10 text-[15px] font-semibold text-[#1a1a1a]">
-                  Sign in
-                </h2>
-
-                <form
-                  onSubmit={credForm.handleSubmit(onCredentials)}
-                  className="mt-5 space-y-3"
-                >
-                  <input
-                    {...credForm.register("email")}
-                    type="email"
-                    autoComplete="email"
-                    autoFocus
-                    placeholder="someone@example.com"
-                    className="block h-9 w-full border border-[#1175c6] bg-white px-2 text-[14px] text-[#1a1a1a] placeholder:text-[#666] focus:border-[#0a5ea3] focus:outline-none"
-                  />
-
-                  <input
-                    {...credForm.register("password")}
-                    type="password"
-                    autoComplete="current-password"
-                    placeholder="Password"
-                    className="block h-9 w-full border border-[#bcbcbc] bg-white px-2 text-[14px] text-[#1a1a1a] placeholder:text-[#666] focus:border-[#1175c6] focus:outline-none"
-                  />
-
-                  <div className="pt-3">
-                    <button
-                      type="submit"
-                      disabled={loading}
-                      className="inline-flex h-9 min-w-[110px] items-center justify-center bg-[#1175c6] px-6 text-[14px] font-normal text-white transition-colors hover:bg-[#0a5ea3] disabled:opacity-70"
-                    >
-                      {loading ? (
-                        <Loader2 className="h-4 w-4 animate-spin" />
-                      ) : (
-                        "Sign in"
-                      )}
-                    </button>
-                  </div>
-
-                  {/* <div className="pt-2">
-                    <button
-                      type="button"
-                      className="text-[13px] text-[#1175c6] hover:underline"
-                    >
-                      Forgot password?
-                    </button>
-                  </div> */}
-                </form>
-              </>
-            ) : (
-              <>
-                <h2 className="mt-10 text-[15px] font-semibold text-[#1a1a1a]">
-                  Verification
-                </h2>
-
-                <p className="mt-3 text-[13px] leading-relaxed text-[#444]">
-                  Enter the verification code sent to{" "}
-                  <span className="font-semibold text-[#1a1a1a]">{userEmail}</span>
-                </p>
-
-                <form
-                  onSubmit={otpForm.handleSubmit(onOTP)}
-                  className="mt-5 space-y-3"
-                >
-                  <input
-                    {...otpForm.register("otp")}
-                    maxLength={6}
-                    autoFocus
-                    placeholder="------"
-                    onChange={(e) => {
-                      const val = e.target.value.replace(/\D/g, "").slice(0, 6);
-                      otpForm.setValue("otp", val);
-                      if (val.length === 6) {
-                        otpForm.handleSubmit(onOTP)();
-                      }
-                    }}
-                    className="block h-11 w-full border border-[#1175c6] bg-white text-center font-mono text-[22px] tracking-[0.5em] text-[#1a1a1a] placeholder:text-[#999] focus:border-[#0a5ea3] focus:outline-none"
-                  />
-
-                  <div className="pt-3">
-                    <button
-                      type="submit"
-                      disabled={loading}
-                      className="inline-flex h-9 min-w-[110px] items-center justify-center bg-[#1175c6] px-6 text-[14px] font-normal text-white transition-colors hover:bg-[#0a5ea3] disabled:opacity-70"
-                    >
-                      {loading ? (
-                        <Loader2 className="h-4 w-4 animate-spin" />
-                      ) : (
-                        "Verify"
-                      )}
-                    </button>
-                  </div>
-                </form>
-
-                <div className="mt-6 flex items-center justify-between border-t border-[#e5e5e5] pt-4">
-                  <button
-                    onClick={() => setStep("credentials")}
-                    className="text-[13px] text-[#1175c6] hover:underline"
-                  >
-                    Back
-                  </button>
-
-                  <button
-                    onClick={resendOTP}
-                    disabled={resending || resendCooldown > 0}
-                    className="flex items-center gap-2 text-[13px] text-[#1175c6] hover:underline disabled:text-[#999] disabled:no-underline"
-                  >
-                    <RefreshCw
-                      className={`h-3.5 w-3.5 ${resending ? "animate-spin" : ""}`}
-                    />
-                    {resendCooldown > 0 ? `${resendCooldown}s` : "Resend code"}
-                  </button>
-                </div>
-              </>
-            )}
+        {/* Form column — square, minimal Flaxem box (no rounded corners) */}
+        <div className="w-full max-w-[440px] mx-auto">
+          <div className="lg:hidden text-center mb-8">
+            <img src={dmsLogo} alt="Flaxem" className="mx-auto w-40 h-auto" />
           </div>
 
-          <div className="px-10 pb-6 text-right text-[11px] text-[#666]">
-            © {new Date().getFullYear()} Flaxem
+          <div
+            className="shadow-[0_2px_6px_rgba(0,0,0,0.15)]"
+            style={{
+              background:
+                "var(--gradient-sidebar, linear-gradient(180deg, hsl(203 64% 42%) 0%, hsl(203 78% 34%) 100%))",
+            }}
+          >
+            <div className="px-10 pt-10 pb-8">
+              {/* Brand — same wordmark treatment as the original box */}
+              <h1 className="text-[26px] font-normal tracking-wide text-white">
+                FLAXEM
+              </h1>
+
+              {step === "credentials" ? (
+                <>
+                  <h2 className="mt-10 text-[15px] font-semibold text-white">
+                    Sign in
+                  </h2>
+
+                  <form
+                    onSubmit={credForm.handleSubmit(onCredentials)}
+                    className="mt-5 space-y-3"
+                  >
+                    <input
+                      {...credForm.register("email")}
+                      type="email"
+                      autoComplete="email"
+                      autoFocus
+                      placeholder="someone@example.com"
+                      className="block h-9 w-full border border-white/40 bg-white/10 px-2 text-[14px] text-white placeholder:text-white/60 focus:border-white focus:outline-none"
+                    />
+                    {credForm.formState.errors.email && (
+                      <p className="text-[12px] text-red-200">
+                        {credForm.formState.errors.email.message}
+                      </p>
+                    )}
+
+                    <input
+                      {...credForm.register("password")}
+                      type="password"
+                      autoComplete="current-password"
+                      placeholder="Password"
+                      className="block h-9 w-full border border-white/40 bg-white/10 px-2 text-[14px] text-white placeholder:text-white/60 focus:border-white focus:outline-none"
+                    />
+                    {credForm.formState.errors.password && (
+                      <p className="text-[12px] text-red-200">
+                        {credForm.formState.errors.password.message}
+                      </p>
+                    )}
+
+                    <div className="pt-3">
+                      <button
+                        type="submit"
+                        disabled={loading}
+                        className="inline-flex h-9 min-w-[110px] items-center justify-center bg-white px-6 text-[14px] font-normal text-[#155a86] transition-colors hover:bg-white/90 disabled:opacity-70"
+                      >
+                        {loading ? (
+                          <Loader2 className="h-4 w-4 animate-spin" />
+                        ) : (
+                          "Sign in"
+                        )}
+                      </button>
+                    </div>
+
+                    {/* <div className="pt-2">
+                      <button
+                        type="button"
+                        className="text-[13px] text-white/80 hover:underline"
+                      >
+                        Forgot password?
+                      </button>
+                    </div> */}
+                  </form>
+                </>
+              ) : (
+                <>
+                  <h2 className="mt-10 text-[15px] font-semibold text-white">
+                    Verification
+                  </h2>
+
+                  <p className="mt-3 text-[13px] leading-relaxed text-white/80">
+                    Enter the verification code sent to{" "}
+                    <span className="font-semibold text-white">{userEmail}</span>
+                  </p>
+
+                  <form
+                    onSubmit={otpForm.handleSubmit(onOTP)}
+                    className="mt-5 space-y-3"
+                  >
+                    <input
+                      {...otpForm.register("otp")}
+                      maxLength={6}
+                      autoFocus
+                      placeholder="------"
+                      onChange={(e) => {
+                        const val = e.target.value.replace(/\D/g, "").slice(0, 6);
+                        otpForm.setValue("otp", val);
+                        if (val.length === 6) {
+                          otpForm.handleSubmit(onOTP)();
+                        }
+                      }}
+                      className="block h-11 w-full border border-white/40 bg-white/10 text-center font-mono text-[22px] tracking-[0.5em] text-white placeholder:text-white/50 focus:border-white focus:outline-none"
+                    />
+                    {otpForm.formState.errors.otp && (
+                      <p className="text-[12px] text-red-200">
+                        {otpForm.formState.errors.otp.message}
+                      </p>
+                    )}
+
+                    <div className="pt-3">
+                      <button
+                        type="submit"
+                        disabled={loading}
+                        className="inline-flex h-9 min-w-[110px] items-center justify-center bg-white px-6 text-[14px] font-normal text-[#155a86] transition-colors hover:bg-white/90 disabled:opacity-70"
+                      >
+                        {loading ? (
+                          <Loader2 className="h-4 w-4 animate-spin" />
+                        ) : (
+                          "Verify"
+                        )}
+                      </button>
+                    </div>
+                  </form>
+
+                  <div className="mt-6 flex items-center justify-between border-t border-white/20 pt-4">
+                    <button
+                      onClick={() => setStep("credentials")}
+                      className="text-[13px] text-white/80 hover:underline"
+                    >
+                      Back
+                    </button>
+
+                    <button
+                      onClick={resendOTP}
+                      disabled={resending || resendCooldown > 0}
+                      className="flex items-center gap-2 text-[13px] text-white/80 hover:underline disabled:text-white/40 disabled:no-underline"
+                    >
+                      <RefreshCw
+                        className={`h-3.5 w-3.5 ${resending ? "animate-spin" : ""}`}
+                      />
+                      {resendCooldown > 0 ? `${resendCooldown}s` : "Resend code"}
+                    </button>
+                  </div>
+                </>
+              )}
+            </div>
+
+            <div className="px-10 pb-6 text-right text-[11px] text-white/60">
+              © {new Date().getFullYear()} Flaxem
+            </div>
           </div>
         </div>
       </div>
