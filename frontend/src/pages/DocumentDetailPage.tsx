@@ -1277,19 +1277,6 @@ export default function DocumentDetailPage() {
             </div>
           )}
 
-          {activeTask && (
-            <div className="fixed bottom-0 left-[var(--app-sidebar-width)] right-0 z-40 border-t border-[#C8CDD2] bg-[#EDEDED]/95 backdrop-blur-sm">
-              <Suspense fallback={<div className="px-4 py-3 text-xs text-[#5E6870]">Loading actions...</div>}>
-                <WorkflowActionPanel
-                  task={activeTask}
-                  documentId={id!}
-                  variant="bar"
-                  onCompleted={() => setWorkflowActionCompleted(true)}
-                />
-              </Suspense>
-            </div>
-          )}
-
           {/* Non-form document primary viewer + optional comparison viewer */}
           <div className={cn("grid gap-3", compareDoc && "xl:grid-cols-2")}>
               <div className="border border-[#C8CDD2] bg-white shadow-sm">
