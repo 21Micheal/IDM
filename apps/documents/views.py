@@ -445,12 +445,22 @@ class DocumentViewSet(AuditMixin, viewsets.ModelViewSet):
                 models.Q(expires_at__isnull=True) | models.Q(expires_at__gt=timezone.now())
             ).values("document_id")
 
-            # INVOLVEMENT: own docs, an ACTIVE workflow task, a PENDING signature
-            # assignment, or an active share. Both the task and the signature
-            # assignment must be status-filtered — a WorkflowTask row and a
-            # SignatureRequestSigner row both persist after being actioned, they just
-            # change status, so an unfiltered join keeps granting visibility forever
-            # after the action is complete.
+            # INVOLVEMENT: own docs, an ACTIVE workflow task (including delegated),
+            # a PENDING signature assignment, or an active share. Both the task and
+            # the signature assignment must be status-filtered — a WorkflowTask row
+            # and a SignatureRequestSigner row both persist after being actioned,
+            # they just change status, so an unfiltered join keeps granting visibility
+            # forever after the action is complete.
+            from apps.accounts.delegation import active_delegations_qs
+            delegated_task_filter = models.Q()
+            for delegation in active_delegations_qs(delegate=user):
+                clause = models.Q(
+                    workflow_instance__tasks__assigned_to_id=delegation.delegator_id,
+                    workflow_instance__tasks__status__in=["in_progress", "held"],
+                )
+                if delegation.document_type_id:
+                    clause &= models.Q(document_type_id=delegation.document_type_id)
+                delegated_task_filter |= clause
             access_filter = (
                 models.Q(uploaded_by=user) |
                 models.Q(owned_by=user) |
@@ -458,6 +468,7 @@ class DocumentViewSet(AuditMixin, viewsets.ModelViewSet):
                     workflow_instance__tasks__assigned_to=user,
                     workflow_instance__tasks__status__in=["in_progress", "held"],
                 ) |
+                delegated_task_filter |
                 models.Q(
                     signature_request__signers__signer=user,
                     signature_request__signers__status="pending",

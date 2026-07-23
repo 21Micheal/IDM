@@ -53,11 +53,10 @@ def user_is_involved_with_document(user: User, doc: Document) -> bool:
     # being actioned, so this must be status-filtered. Without it, an approver
     # stays "involved" with — and able to reopen — a document forever after
     # acting on it, which is exactly the stale-visibility bug seen on Forms.
-    if WorkflowTask.objects.filter(
-        assigned_to=user,
-        workflow_instance__document_id=doc.id,
-        status__in=["in_progress", "held"],
-    ).exists():
+    # This also covers delegated tasks: if the user can action a task via delegation,
+    # they should be considered involved with the document.
+    from apps.accounts.delegation import tasks_visible_to_user
+    if tasks_visible_to_user(user).filter(workflow_instance__document_id=doc.id).exists():
         return True
     if DocumentShare.objects.filter(
         document=doc,
