@@ -258,6 +258,12 @@ export const authAPI = {
     api.get("/auth/me/", token
       ? { headers: { Authorization: `Bearer ${token}` } }
       : undefined),
+
+  requestPasswordReset: (data: { email: string }) =>
+    api.post("/auth/password-reset/request/", data),
+
+  confirmPasswordReset: (data: { token: string; new_password: string }) =>
+    api.post("/auth/password-reset/confirm/", data),
 };
 
 export const documentsAPI = {

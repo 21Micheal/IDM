@@ -111,6 +111,9 @@ class User(AbstractBaseUser, PermissionsMixin):
     must_change_password = models.BooleanField(default=True)
     # Email OTP enabled (replaces TOTP)
     mfa_enabled          = models.BooleanField(default=True)
+    # Password reset token fields for self-service password reset
+    password_reset_token = models.CharField(max_length=255, null=True, blank=True)
+    password_reset_token_expires_at = models.DateTimeField(null=True, blank=True)
 
     last_login_ip = models.GenericIPAddressField(null=True, blank=True)
     created_at    = models.DateTimeField(auto_now_add=True)

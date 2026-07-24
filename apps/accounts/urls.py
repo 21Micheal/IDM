@@ -3,6 +3,7 @@ from rest_framework.routers import DefaultRouter
 from .views import (
     LoginView, VerifyOTPView, ResendOTPView,
     MeView, ChangePasswordView, EnableMFAView, UserPreferencesView, UserSignatureView, UserSignatureImageView,
+    PasswordResetRequestView, PasswordResetConfirmView,
     UserViewSet, DepartmentViewSet, UserGroupViewSet, UserDelegationViewSet,
 )
 
@@ -23,6 +24,9 @@ urlpatterns = [
     path("auth/preferences/",     UserPreferencesView.as_view(), name="preferences"),
     path("auth/signature/",       UserSignatureView.as_view(), name="signature"),
     path("auth/signature/image/<uuid:signature_id>/", UserSignatureImageView.as_view(), name="signature-image"),
+    # Password reset
+    path("auth/password-reset/request/",  PasswordResetRequestView.as_view(),  name="password-reset-request"),
+    path("auth/password-reset/confirm/", PasswordResetConfirmView.as_view(), name="password-reset-confirm"),
     # User, department & group management
     path("", include(router.urls)),
 ]

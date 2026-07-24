@@ -383,6 +383,108 @@ class UserSignatureView(APIView):
         return Response(status=204)
 
 
+class PasswordResetRequestView(APIView):
+    """Request a password reset email with a token."""
+    permission_classes = []
+
+    def post(self, request):
+        email = request.data.get("email", "").strip().lower()
+        if not email:
+            return Response({"detail": "Email is required."}, status=400)
+
+        try:
+            user = User.objects.get(email=email, is_active=True)
+        except User.DoesNotExist:
+            # Always return success to prevent email enumeration
+            return Response({"detail": "If an account with that email exists, a password reset link has been sent."})
+
+        # Generate a reset token
+        from django.utils.crypto import get_random_string
+        from django.utils import timezone
+        from datetime import timedelta
+        from django.core.mail import send_mail
+        from django.conf import settings
+
+        token = get_random_string(length=32)
+        user.password_reset_token = token
+        user.password_reset_token_expires_at = timezone.now() + timedelta(hours=1)
+        user.save(update_fields=["password_reset_token", "password_reset_token_expires_at"])
+
+        # Send email with reset link
+        frontend_url = getattr(settings, "FRONTEND_URL", "http://localhost:3000")
+        reset_link = f"{frontend_url}/reset-password?token={token}"
+        try:
+            send_mail(
+                subject="FseDMS — Password Reset Request",
+                message=f"""Hello {user.first_name},
+
+You requested a password reset for your FseDMS account.
+
+Click the link below to reset your password:
+{reset_link}
+
+This link will expire in 1 hour.
+
+If you did not request this reset, please ignore this email.
+
+— FseDMS Administration
+""",
+                from_email=settings.DEFAULT_FROM_EMAIL,
+                recipient_list=[user.email],
+                fail_silently=False,
+            )
+        except Exception:
+            logger.exception("Failed to send password reset email to %s", user.email)
+
+        return Response({"detail": "If an account with that email exists, a password reset link has been sent."})
+
+
+class PasswordResetConfirmView(APIView):
+    """Confirm password reset using the token from the email."""
+    permission_classes = []
+
+    def post(self, request):
+        token = request.data.get("token", "")
+        new_password = request.data.get("new_password", "")
+
+        if not token or not new_password:
+            return Response({"detail": "Token and new password are required."}, status=400)
+
+        try:
+            user = User.objects.get(password_reset_token=token, is_active=True)
+        except User.DoesNotExist:
+            return Response({"detail": "Invalid or expired reset token."}, status=400)
+
+        from django.utils import timezone
+        if not user.password_reset_token_expires_at or user.password_reset_token_expires_at < timezone.now():
+            return Response({"detail": "Invalid or expired reset token."}, status=400)
+
+        # Validate password strength
+        try:
+            validate_password(new_password, user=user)
+        except DjangoValidationError as e:
+            return Response({"detail": list(e.messages)}, status=400)
+
+        # Set new password and clear token
+        user.set_password(new_password)
+        user.password_reset_token = None
+        user.password_reset_token_expires_at = None
+        user.must_change_password = False
+        user.save(update_fields=["password", "password_reset_token", "password_reset_token_expires_at", "must_change_password"])
+
+        AuditLog.objects.create(
+            event=AuditEvent.USER_PASSWORD_RESET,
+            actor=user,
+            object_type="User",
+            object_id=str(user.id),
+            object_repr=user.email,
+            changes={"action": "password_reset_self"},
+            ip_address=request.META.get("REMOTE_ADDR"),
+        )
+
+        return Response({"detail": "Password has been reset successfully. You can now log in with your new password."})
+
+
 class UserSignatureImageView(APIView):
     permission_classes = [permissions.IsAuthenticated]
 

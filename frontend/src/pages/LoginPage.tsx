@@ -1,14 +1,14 @@
 // src/pages/LoginPage.tsx
 "use client";
 
-import { useState } from "react";
+import { useState, useRef, useEffect } from "react";
 import { extractApiError } from "@/lib/apiError";
 import { useNavigate, useLocation } from "react-router-dom";
 import { useQueryClient } from "@tanstack/react-query";
 import { useForm } from "react-hook-form";
 import { zodResolver } from "@hookform/resolvers/zod";
 import { z } from "zod";
-import { Loader2, RefreshCw } from "lucide-react";
+import { Loader2, RefreshCw, ArrowLeft, CheckCircle2 } from "lucide-react";
 
 import {
   api,
@@ -36,13 +36,134 @@ const otpSchema = z.object({
 type CredForm = z.infer<typeof credSchema>;
 type OTPForm = z.infer<typeof otpSchema>;
 
+// ── Forgot-password modal ─────────────────────────────────────────────────────
+
+function ForgotPasswordPanel({ onBack }: { onBack: () => void }) {
+  const [email, setEmail] = useState("");
+  const [loading, setLoading] = useState(false);
+  const [done, setDone] = useState(false);
+  const [error, setError] = useState("");
+  const inputRef = useRef<HTMLInputElement>(null);
+
+  useEffect(() => {
+    inputRef.current?.focus();
+  }, []);
+
+  const handleSubmit = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!email.trim()) {
+      setError("Please enter your email address.");
+      return;
+    }
+    setLoading(true);
+    setError("");
+    try {
+      await authAPI.requestPasswordReset({ email: email.trim() });
+      setDone(true);
+    } catch (err: any) {
+      setError(
+        err.response?.data?.detail ||
+          "Failed to send reset email. Please try again."
+      );
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  if (done) {
+    return (
+      <>
+        <div className="flex items-center gap-3 mb-6">
+          <div className="flex h-9 w-9 flex-shrink-0 items-center justify-center rounded-full bg-white/20">
+            <CheckCircle2 className="h-4 w-4 text-white" />
+          </div>
+          <div>
+            <h2 className="text-[15px] font-semibold text-white">Check your email</h2>
+            <p className="text-[12px] text-white/70 mt-0.5">Reset link sent</p>
+          </div>
+        </div>
+
+        <p className="text-[13px] leading-relaxed text-white/80 mb-6">
+          If an account with{" "}
+          <span className="font-semibold text-white">{email}</span> exists, a
+          password reset link has been sent. The link will expire in{" "}
+          <span className="font-semibold text-white">1 hour</span>.
+        </p>
+
+        <div className="pt-1 flex items-center justify-between border-t border-white/20 pt-4">
+          <button
+            type="button"
+            onClick={onBack}
+            className="flex items-center gap-1.5 text-[13px] text-white/80 hover:text-white hover:underline transition-colors"
+          >
+            <ArrowLeft className="h-3.5 w-3.5" />
+            Back to sign in
+          </button>
+        </div>
+      </>
+    );
+  }
+
+  return (
+    <>
+      <h2 className="text-[15px] font-semibold text-white">Reset password</h2>
+      <p className="mt-1.5 text-[13px] leading-relaxed text-white/80">
+        Enter your email and we'll send you a link to set a new password.
+      </p>
+
+      <form onSubmit={handleSubmit} className="mt-5 space-y-3">
+        <input
+          ref={inputRef}
+          type="email"
+          autoComplete="email"
+          value={email}
+          onChange={(e) => setEmail(e.target.value)}
+          placeholder="someone@example.com"
+          disabled={loading}
+          className="block h-9 w-full border border-white/40 bg-white/10 px-2 text-[14px] text-white placeholder:text-white/60 focus:border-white focus:outline-none disabled:opacity-60"
+        />
+
+        {error && (
+          <p className="text-[12px] text-red-200">{error}</p>
+        )}
+
+        <div className="pt-3 flex items-center justify-between">
+          <button
+            type="submit"
+            disabled={loading}
+            className="inline-flex h-9 min-w-[130px] items-center justify-center bg-white px-6 text-[14px] font-normal text-[#155a86] transition-colors hover:bg-white/90 disabled:opacity-70"
+          >
+            {loading ? (
+              <Loader2 className="h-4 w-4 animate-spin" />
+            ) : (
+              "Send reset link"
+            )}
+          </button>
+
+          <button
+            type="button"
+            onClick={onBack}
+            className="text-[13px] text-white/80 hover:text-white hover:underline"
+          >
+            Back
+          </button>
+        </div>
+      </form>
+    </>
+  );
+}
+
+// ── Main LoginPage ────────────────────────────────────────────────────────────
+
 export default function LoginPage() {
   const navigate = useNavigate();
   const location = useLocation();
   const qc = useQueryClient();
   const { setTokens, setUser } = useAuthStore();
 
-  const [step, setStep] = useState<"credentials" | "otp">("credentials");
+  const [step, setStep] = useState<"credentials" | "otp" | "forgot">(
+    "credentials"
+  );
 
   const [pendingUserId, setPendingUserId] = useState("");
   const [userEmail, setUserEmail] = useState("");
@@ -238,6 +359,7 @@ export default function LoginPage() {
 
                       <button
                         type="button"
+                        onClick={() => setStep("forgot")}
                         className="text-[13px] text-white/80 hover:text-white hover:underline"
                       >
                         Forgot password?
@@ -245,7 +367,7 @@ export default function LoginPage() {
                     </div>
                   </form>
                 </>
-              ) : (
+              ) : step === "otp" ? (
                 <>
                   <h2 className="text-[15px] font-semibold text-white">
                     Verification
@@ -315,6 +437,9 @@ export default function LoginPage() {
                     </button>
                   </div>
                 </>
+              ) : (
+                /* ── Forgot password panel — same chrome, no navigation ── */
+                <ForgotPasswordPanel onBack={() => setStep("credentials")} />
               )}
             </div>
 
