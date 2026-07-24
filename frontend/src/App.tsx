@@ -46,7 +46,8 @@ const FormDetailPage = lazy(() => import("@/pages/FormDetailPage"));
 
 function RequireAuth({ children }: { children: React.ReactNode }) {
   const isAuthenticated = useAuthStore((s) => s.isAuthenticated);
-  return isAuthenticated ? <>{children}</> : <Navigate to="/login" replace />;
+  const location = useLocation();
+  return isAuthenticated ? <>{children}</> : <Navigate to="/login" state={{ from: location.pathname + location.search }} replace />;
 }
 
 function AuthBootstrap({ children }: { children: React.ReactNode }) {

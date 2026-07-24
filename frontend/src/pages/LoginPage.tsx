@@ -3,7 +3,7 @@
 
 import { useState } from "react";
 import { extractApiError } from "@/lib/apiError";
-import { useNavigate } from "react-router-dom";
+import { useNavigate, useLocation } from "react-router-dom";
 import { useQueryClient } from "@tanstack/react-query";
 import { useForm } from "react-hook-form";
 import { zodResolver } from "@hookform/resolvers/zod";
@@ -38,6 +38,7 @@ type OTPForm = z.infer<typeof otpSchema>;
 
 export default function LoginPage() {
   const navigate = useNavigate();
+  const location = useLocation();
   const qc = useQueryClient();
   const { setTokens, setUser } = useAuthStore();
 
@@ -106,7 +107,8 @@ export default function LoginPage() {
     if (tokenData.must_change_password) {
       navigate("/change-password", { replace: true });
     } else {
-      navigate("/", { replace: true });
+      const redirectTo = (location.state as any)?.from || "/";
+      navigate(redirectTo, { replace: true });
     }
   };
 
