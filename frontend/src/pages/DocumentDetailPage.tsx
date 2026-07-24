@@ -651,7 +651,7 @@ export default function DocumentDetailPage() {
           <div>
             <h2 className="text-xl font-semibold">Document not found</h2>
             <p className="mt-2 text-sm text-slate-600">
-              The requested document is no longer available from this page. You can go back to where you came from, or continue to the document list.
+              You don't have permission to view this document. You can only access documents you've uploaded, own, or have been assigned to. If you believe this is an error, please contact your administrator.
             </p>
           </div>
         </div>
