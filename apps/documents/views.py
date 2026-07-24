@@ -494,6 +494,15 @@ class DocumentViewSet(AuditMixin, viewsets.ModelViewSet):
             ).values("request__document_id")
             access_filter |= models.Q(id__in=signed_document_ids)
 
+            # Permanent view carve-out: someone who completed a workflow task
+            # on this document keeps the ability to open it even after they otherwise
+            # drop out of "involvement" — mirrors "you can always see what you approved".
+            from apps.workflows.models import WorkflowTaskAction
+            completed_task_document_ids = WorkflowTaskAction.objects.filter(
+                task__assigned_to=user,
+            ).values("task__workflow_instance__document_id")
+            access_filter |= models.Q(id__in=completed_task_document_ids)
+
             qs = qs.filter(access_filter).distinct()
 
         # Trash visibility: the list shows either live docs or Trash (?trash=true).

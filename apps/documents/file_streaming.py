@@ -112,6 +112,24 @@ def user_has_signed_document(user: User, doc: Document) -> bool:
     ).exists()
 
 
+def user_has_completed_workflow_task_on_document(user: User, doc: Document) -> bool:
+    """True if `user` has completed a workflow task (approved/rejected/returned)
+    on this document.
+
+    This is a PERMANENT view-only grant that survives the user otherwise
+    losing involvement once their task is completed (see user_is_involved_with_document's
+    ACTIVE-only task check). It grants nothing beyond viewing; download/edit/comment
+    must still be gated normally and are NOT extended by this helper."""
+    if not user or not getattr(user, "is_authenticated", False):
+        return False
+    from apps.workflows.models import WorkflowTask, WorkflowTaskAction
+    # Check if the user has any completed task actions on this document
+    return WorkflowTaskAction.objects.filter(
+        task__workflow_instance__document_id=doc.id,
+        task__assigned_to=user,
+    ).exists()
+
+
 def user_can_view_document(user: User, doc: Document) -> bool:
     if not user or not user.is_authenticated:
         return False
@@ -126,7 +144,12 @@ def user_can_view_document(user: User, doc: Document) -> bool:
     # Permanent view-only carve-out: someone who completed signing this
     # document keeps the ability to open it even after they otherwise drop
     # out of "involvement" — mirrors "you can always see what you signed".
-    return user_has_signed_document(user, doc)
+    if user_has_signed_document(user, doc):
+        return True
+    # Permanent view-only carve-out: someone who completed a workflow task
+    # on this document keeps the ability to open it even after they otherwise
+    # drop out of "involvement" — mirrors "you can always see what you approved".
+    return user_has_completed_workflow_task_on_document(user, doc)
 
 
 def user_can_download_document(user: User, doc: Document) -> bool:
