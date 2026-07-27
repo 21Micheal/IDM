@@ -44,7 +44,7 @@ interface Overview {
 }
 interface TurnaroundItem { step: string; avg_hours: number; sla_hours: number; completed: number }
 interface SlaItem { month: string; total: number; breached: number; breach_rate: number }
-interface VolumeItem { month: string; [docType: string]: number | string }
+interface VolumeItem { month: string;[docType: string]: number | string }
 interface UploaderItem { name: string; department: string; count: number; approved: number; pending: number; rejected: number }
 interface StatusItem { status: string; label: string; count: number }
 interface DeptItem { department: string; uploads: number; approved: number; pending: number; rejected: number }
@@ -291,14 +291,66 @@ function ChartCard<T>({
 }
 
 /* ── KPI row — tinted colored tiles ────────────────────────────────────────── */
-type KpiTone = "primary" | "success" | "warning" | "teal" | "accent" | "danger";
-const KPI_TONE: Record<KpiTone, { border: string; iconBg: string; iconText: string; label: string; value: string }> = {
-  primary: { border: "border-primary/20", iconBg: "bg-primary", iconText: "text-primary-foreground", label: "text-primary/80", value: "text-foreground" },
-  success: { border: "border-[hsl(150,55%,42%)]/25", iconBg: "bg-[hsl(150,55%,38%)]", iconText: "text-white", label: "text-[hsl(150,45%,28%)]", value: "text-foreground" },
-  warning: { border: "border-[hsl(38,90%,50%)]/30", iconBg: "bg-[hsl(38,90%,48%)]", iconText: "text-white", label: "text-[hsl(28,80%,32%)]", value: "text-foreground" },
-  teal: { border: "border-teal/25", iconBg: "bg-teal", iconText: "text-teal-foreground", label: "text-teal/90", value: "text-foreground" },
-  accent: { border: "border-accent/25", iconBg: "bg-accent", iconText: "text-accent-foreground", label: "text-accent/90", value: "text-foreground" },
-  danger: { border: "border-destructive/25", iconBg: "bg-destructive", iconText: "text-destructive-foreground", label: "text-destructive/90", value: "text-foreground" },
+type KpiTone = "primary" | "success" | "warning" | "teal" | "accent" | "indigo";
+const KPI_TONE: Record<KpiTone, {
+  bg: string; border: string;
+  iconBg: string; iconText: string;
+  label: string; value: string;
+}> = {
+  // Documents — primary blue
+  primary: {
+    bg: "bg-[hsl(203,80%,42%)]/[0.06]",
+    border: "border-[hsl(203,80%,42%)]/25",
+    iconBg: "bg-[hsl(203,80%,42%)]",
+    iconText: "text-white",
+    label: "text-[hsl(203,65%,32%)]",
+    value: "text-[hsl(203,80%,30%)]",
+  },
+  // Approved — light green
+  success: {
+    bg: "bg-[hsl(150,55%,42%)]/[0.07]",
+    border: "border-[hsl(150,55%,42%)]/25",
+    iconBg: "bg-[hsl(150,55%,38%)]",
+    iconText: "text-white",
+    label: "text-[hsl(150,45%,28%)]",
+    value: "text-[hsl(150,55%,26%)]",
+  },
+  // Pending — amber
+  warning: {
+    bg: "bg-[hsl(38,90%,50%)]/[0.08]",
+    border: "border-[hsl(38,90%,50%)]/30",
+    iconBg: "bg-[hsl(38,90%,46%)]",
+    iconText: "text-white",
+    label: "text-[hsl(28,80%,32%)]",
+    value: "text-[hsl(28,80%,26%)]",
+  },
+  // Turnaround — teal
+  teal: {
+    bg: "bg-[hsl(195,75%,45%)]/[0.07]",
+    border: "border-[hsl(195,75%,45%)]/25",
+    iconBg: "bg-[hsl(195,75%,40%)]",
+    iconText: "text-white",
+    label: "text-[hsl(195,60%,28%)]",
+    value: "text-[hsl(195,75%,26%)]",
+  },
+  // SLA — indigo/accent
+  accent: {
+    bg: "bg-[hsl(240,40%,50%)]/[0.07]",
+    border: "border-[hsl(240,40%,50%)]/25",
+    iconBg: "bg-[hsl(240,40%,48%)]",
+    iconText: "text-white",
+    label: "text-[hsl(240,35%,35%)]",
+    value: "text-[hsl(240,40%,32%)]",
+  },
+  // Uploaders — indigo-blue (distinct from primary)
+  indigo: {
+    bg: "bg-[hsl(220,60%,50%)]/[0.07]",
+    border: "border-[hsl(220,60%,50%)]/25",
+    iconBg: "bg-[hsl(220,60%,46%)]",
+    iconText: "text-white",
+    label: "text-[hsl(220,50%,32%)]",
+    value: "text-[hsl(220,60%,28%)]",
+  },
 };
 
 function KpiTile({
@@ -310,27 +362,36 @@ function KpiTile({
   const t = KPI_TONE[tone];
   const TrendIcon = trend?.direction === "flat" ? Minus : trend?.direction === "up" ? TrendingUp : TrendingDown;
   return (
-    <div className={cn("border bg-white p-4 transition hover:bg-[#FAFBFC]", t.border)}>
+    <div className={cn("border p-4 transition", t.bg, t.border)}>
       <div className="flex items-start justify-between gap-3">
-        <div className="min-w-0">
-          <p className={cn("text-[10px] font-semibold uppercase tracking-wider", t.label)}>{title}</p>
-          <p className={cn("mt-2 text-2xl font-semibold tracking-tight tabular-nums", t.value)}>{value}</p>
+        <div className="min-w-0 flex-1">
+          <p className={cn("text-[10px] font-bold uppercase tracking-widest", t.label)}>{title}</p>
+          <p className={cn("mt-2 text-[1.65rem] font-bold tracking-tight tabular-nums leading-none", t.value)}>{value}</p>
         </div>
-        <div className={cn("flex h-9 w-9 shrink-0 items-center justify-center", t.iconBg, t.iconText)}>
-          <Icon className="h-4 w-4" />
+        {/* Icon chip — square, slightly larger */}
+        <div className={cn(
+          "flex h-11 w-11 shrink-0 items-center justify-center shadow-sm",
+          t.iconBg, t.iconText,
+        )}>
+          <Icon className="h-5 w-5" />
         </div>
       </div>
-      {trend && (
+      {trend ? (
         <div className="mt-3 flex items-center gap-1.5">
           <span className={cn(
-            "inline-flex items-center gap-1 px-1.5 py-0.5 text-[10px] font-semibold",
-            trend.isPositive ? "bg-[hsl(150,55%,42%)]/15 text-[hsl(150,55%,28%)]" : "bg-destructive/10 text-destructive",
+            "inline-flex items-center gap-1 px-1.5 py-0.5 text-[10px] font-bold",
+            trend.isPositive
+              ? "bg-[hsl(150,55%,42%)]/20 text-[hsl(150,45%,28%)]"
+              : "bg-[hsl(0,84%,46%)]/15 text-[hsl(0,72%,38%)]",
           )}>
             <TrendIcon className="h-3 w-3" />
             {trend.value.toFixed(1)}%
           </span>
           <span className="text-[10px] text-muted-foreground">vs prev period</span>
         </div>
+      ) : (
+        /* spacer so all tiles are the same height */
+        <div className="mt-3 h-[22px]" />
       )}
     </div>
   );
@@ -365,7 +426,7 @@ function KpiRow({ query }: { query: UseQueryResult<Overview> }) {
       <KpiTile title="Pending backlog" value={data.pending_now} icon={Hourglass} tone="warning" />
       <KpiTile title="Avg turnaround" value={fmt(data.avg_turnaround_hours.current, "h")} icon={Clock} tone="teal" trend={kpiTrend(data.avg_turnaround_hours, false)} />
       <KpiTile title="SLA compliance" value={fmt(data.sla_compliance.current, "%")} icon={ShieldCheck} tone="accent" trend={kpiTrend(data.sla_compliance, true)} />
-      <KpiTile title="Active uploaders" value={data.active_uploaders.current ?? 0} icon={Users} tone="primary" trend={kpiTrend(data.active_uploaders, true)} />
+      <KpiTile title="Active uploaders" value={data.active_uploaders.current ?? 0} icon={Users} tone="indigo" trend={kpiTrend(data.active_uploaders, true)} />
     </div>
   );
 }
