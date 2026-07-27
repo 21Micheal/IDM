@@ -109,7 +109,7 @@ const TONE: Record<WorkflowStatus, {
     badgeBg: "#f1f3f8",
     badgeText: "#475569",
     badgeBorder: "#d1d8e3",
-    label: "In Progress",
+    label: "Pending review",
   },
   "on-hold": {
     stroke: "#9a8f70",
