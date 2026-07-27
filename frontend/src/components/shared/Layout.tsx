@@ -756,6 +756,7 @@ export default function Layout() {
     location.pathname === "/" ||
     location.pathname === "/notifications" ||
     location.pathname === "/search" ||
+    location.pathname === "/analytics" ||
     location.pathname === "/workflow" ||
     location.pathname === "/audit" ||
     location.pathname === "/admin/templates" ||
