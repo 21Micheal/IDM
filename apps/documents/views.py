@@ -43,6 +43,7 @@ from .models import (
     DMSSettings,
     DocumentStatus,
     PreviewStatus,
+    SignatureRequestSigner,
 )
 from .serializers import (
     DocumentListSerializer, DocumentDetailSerializer,
@@ -444,18 +445,56 @@ class DocumentViewSet(AuditMixin, viewsets.ModelViewSet):
                 models.Q(expires_at__isnull=True) | models.Q(expires_at__gt=timezone.now())
             ).values("document_id")
 
-            # Access is scoped to INVOLVEMENT: a user sees a document only if they
-            # uploaded/own it, have ever been assigned a workflow task on it, or it
-            # was shared with them. Group permissions gate what they can DO with
-            # those documents (object level); they don't grant blanket visibility
-            # of every document of a type.
-            qs = qs.filter(
+            # INVOLVEMENT: own docs, an ACTIVE workflow task (including delegated),
+            # a PENDING signature assignment, or an active share. Both the task and
+            # the signature assignment must be status-filtered — a WorkflowTask row
+            # and a SignatureRequestSigner row both persist after being actioned,
+            # they just change status, so an unfiltered join keeps granting visibility
+            # forever after the action is complete.
+            from apps.accounts.delegation import active_delegations_qs
+            delegated_task_filter = models.Q()
+            for delegation in active_delegations_qs(delegate=user):
+                clause = models.Q(
+                    workflow_instance__tasks__assigned_to_id=delegation.delegator_id,
+                    workflow_instance__tasks__status__in=["in_progress", "held"],
+                )
+                if delegation.document_type_id:
+                    clause &= models.Q(document_type_id=delegation.document_type_id)
+                delegated_task_filter |= clause
+            access_filter = (
                 models.Q(uploaded_by=user) |
                 models.Q(owned_by=user) |
-                models.Q(workflow_instance__tasks__assigned_to=user) |
-                models.Q(signature_request__signers__signer=user) |
+                models.Q(
+                    workflow_instance__tasks__assigned_to=user,
+                    workflow_instance__tasks__status__in=["in_progress", "held"],
+                ) |
+                delegated_task_filter |
+                models.Q(
+                    signature_request__signers__signer=user,
+                    signature_request__signers__status="pending",
+                ) |
                 models.Q(id__in=active_shared_docs)
-            ).distinct()
+            )
+
+            # DEPARTMENT SCOPE: a department head (HOD) is involved with every
+            # document in the department(s) they head.
+            hod_department_ids = getattr(user, "hod_department_ids", set())
+            if hod_department_ids:
+                access_filter |= (
+                    models.Q(department_id__in=hod_department_ids) |
+                    models.Q(uploaded_by__department_id__in=hod_department_ids)
+                )
+
+            # Permanent view carve-out: someone who completed signing this
+            # document keeps the ability to open it even after they otherwise drop
+            # out of "involvement" — mirrors "you can always see what you signed".
+            signed_document_ids = SignatureRequestSigner.objects.filter(
+                signer=user,
+                status=SignatureRequestSigner.Status.SIGNED,
+            ).values("request__document_id")
+            access_filter |= models.Q(id__in=signed_document_ids)
+
+            qs = qs.filter(access_filter).distinct()
 
         # Trash visibility: the list shows either live docs or Trash (?trash=true).
         # Detail/restore/purge actions can reach trashed docs so they remain operable.

@@ -63,6 +63,7 @@ export default function SignatureRequestPanel({ documentId }: { documentId: stri
     qc.invalidateQueries({ queryKey: ["notifications"] });
     // Refresh the "Awaiting my signature" list + nav badge (count) after signing.
     qc.invalidateQueries({ queryKey: ["signature-requests"] });
+    qc.invalidateQueries({ queryKey: ["signature-requests", "incoming-count"] });
   };
 
   const signMutation = useMutation({

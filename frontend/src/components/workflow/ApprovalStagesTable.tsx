@@ -1,4 +1,4 @@
-import { Check, Clock, Loader2, XCircle, Minus } from "lucide-react";
+import { Check, Clock, XCircle, Minus, Loader2 } from "lucide-react";
 import type { WorkflowStep, WorkflowStatus } from "../notifications/workflow-visualizer";
 
 const STATUS_TONE: Record<WorkflowStatus, {

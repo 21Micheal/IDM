@@ -650,7 +650,7 @@ export default function DashboardPage() {
     activeDashboardResultIndex >= 0 && activeDashboardResultIndex < dashboardResults.length;
   const allTasks = myTasks as WorkflowTask[];
   const hasOpenTasks = allTasks.length > 0;
-  const showAdminRecentColumns = Boolean(user?.has_admin_access);
+  const showAdminRecentColumns = Boolean(user?.has_admin_access || (user?.group_names ?? []).includes("HOD"));
   const totalDocumentsTrend = buildTrend(
     documentsCreatedThisPeriod,
     documentsCreatedPreviousPeriod,

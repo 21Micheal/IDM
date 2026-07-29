@@ -3,9 +3,18 @@
  *
  * Forms-area counterpart to components/templates/BuiltTemplateFormModal.
  * Nearly identical (same fill/attachment/validation flow) — the only
- * behavioural difference is that on success it lands the person on
- * `/forms/:id` (the new dedicated Forms detail page) instead of
- * `/documents/:id`, so a form created here stays inside the Forms area.
+ * behavioural difference is that on success it stays in the Forms area
+ * rather than navigating to /forms/:id.
+ *
+ * Two footer actions replace the old "Create Form" button:
+ *
+ *  • "Save as draft"  — creates the document in draft state, no validation
+ *    gate (matches FormDetailPage's own "Save draft" behaviour so partial
+ *    forms can be saved and completed later).
+ *
+ *  • "Start workflow" — validates required fields, creates the document,
+ *    then immediately submits it for approval. If the submit call fails the
+ *    document exists in draft state and the user can retry from the list.
  *
  * This is intentionally a separate component rather than an edit to
  * BuiltTemplateFormModal so this pass doesn't touch existing files — once the
@@ -15,16 +24,15 @@
 
 import { useState } from "react";
 import { extractApiError } from "@/lib/apiError";
-import { useNavigate } from "react-router-dom";
 import { useMutation, useQueryClient } from "@tanstack/react-query";
-import { templatesAPI } from "@/services/api";
+import { documentsAPI, templatesAPI } from "@/services/api";
 import { requiredFieldLabels } from "@/components/templates/TemplateForm";
 import { useAuthStore } from "@/store/authStore";
 import TemplateForm from "@/components/templates/TemplateForm";
 import BudgetBanner from "@/components/templates/BudgetBanner";
 import { collectFormAttachments } from "@/components/templates/formAttachments";
 import { toast } from "@/components/ui/vault-toast";
-import { X, Loader2, CheckCircle, FileText, LayoutTemplate, Paperclip } from "lucide-react";
+import { X, Loader2, Send, Save, FileText, LayoutTemplate, Paperclip } from "lucide-react";
 
 type DocumentTemplateOption = {
   id: string;
@@ -53,78 +61,131 @@ export default function FormFillModal({
   initialValues = {},
   onClose,
 }: Props) {
-  const navigate = useNavigate();
   const queryClient = useQueryClient();
   const currentUser = useAuthStore((s) => s.user);
 
   const [title, setTitle] = useState((initialTitle ?? "").trim() || template.name);
   const [values, setValues] = useState<Record<string, unknown>>(() => initialValues);
   const [uploadingFiles, setUploadingFiles] = useState(false);
+  const [submitting, setSubmitting] = useState(false);
 
   const sections = (template.sections ?? []) as Array<{ title?: string; fields?: unknown[] }>;
-  const isPending = uploadingFiles;
 
+  // ── Core create mutation ───────────────────────────────────────────────────
+  // Returns the new document id. onSuccess is deliberately left empty here —
+  // callers (handleSaveAsDraft / handleStartWorkflow) take responsibility for
+  // toasting and closing so they can chain the submit call when needed.
   const createMutation = useMutation({
     mutationFn: async () => {
       const { jsonValues, attachments } = collectFormAttachments(values);
 
       setUploadingFiles(attachments.length > 0);
-      const request = attachments.length > 0
-        ? templatesAPI.fillTemplateWithAttachments({
-            template_id: template.id,
-            values: jsonValues,
-            output_format: "pdf",
-            title: title.trim() || template.name,
-            document_type_id: documentTypeId,
-            draft_from_template: false,
-            attachments,
-          })
-        : templatesAPI.fillTemplate({
-            template_id: template.id,
-            values: jsonValues,
-            output_format: "pdf",
-            title: title.trim() || template.name,
-            document_type_id: documentTypeId,
-            draft_from_template: false,
-          });
+      const request =
+        attachments.length > 0
+          ? templatesAPI.fillTemplateWithAttachments({
+              template_id: template.id,
+              values: jsonValues,
+              output_format: "pdf",
+              title: title.trim() || template.name,
+              document_type_id: documentTypeId,
+              draft_from_template: false,
+              attachments,
+            })
+          : templatesAPI.fillTemplate({
+              template_id: template.id,
+              values: jsonValues,
+              output_format: "pdf",
+              title: title.trim() || template.name,
+              document_type_id: documentTypeId,
+              draft_from_template: false,
+            });
 
       const { data } = await request;
       setUploadingFiles(false);
       return data.document_id as string;
     },
-    onSuccess: (docId) => {
-      queryClient.invalidateQueries({ queryKey: ["forms"] });
-      queryClient.invalidateQueries({ queryKey: ["documents"] });
-      toast.success("Form created.");
-      navigate(`/forms/${docId}`);
-    },
     onError: (err: any) => {
       setUploadingFiles(false);
+      setSubmitting(false);
       toast.error(extractApiError(err, "Could not create the form."));
     },
   });
 
-  const handleCreate = () => {
+  // ── Save as draft ──────────────────────────────────────────────────────────
+  // No validation gate — partial forms are allowed (mirrors FormDetailPage's
+  // own "Save draft" which also skips required-field checks).
+  const handleSaveAsDraft = async () => {
+    if (!title.trim()) {
+      toast.error("Please enter a form title.");
+      return;
+    }
+    try {
+      await createMutation.mutateAsync();
+      queryClient.invalidateQueries({ queryKey: ["forms"] });
+      queryClient.invalidateQueries({ queryKey: ["documents"] });
+      toast.success("Form saved as draft.");
+      onClose();
+    } catch {
+      // error already toasted by createMutation.onError
+    }
+  };
+
+  // ── Start workflow ─────────────────────────────────────────────────────────
+  // Validates required fields, creates the document, then immediately submits
+  // it for approval. If submit fails the form lands in draft — the user can
+  // retry from the forms list.
+  const handleStartWorkflow = async () => {
     if (!title.trim()) {
       toast.error("Please enter a form title.");
       return;
     }
     const { jsonValues } = collectFormAttachments(values);
-    const missing = requiredFieldLabels(template.sections ?? [], jsonValues, {
-      groupNames: currentUser?.group_names ?? [],
-      isAdmin: Boolean(currentUser?.has_admin_access || currentUser?.is_staff),
-    });
+    const missing = requiredFieldLabels(
+      template.sections ?? [],
+      jsonValues,
+      {
+        groupNames: currentUser?.group_names ?? [],
+        isAdmin: Boolean(currentUser?.has_admin_access || currentUser?.is_staff),
+      },
+    );
     if (missing.length) {
       toast.error(`Please fill in: ${missing.join(", ")}`);
       return;
     }
-    createMutation.mutate();
+
+    setSubmitting(true);
+    try {
+      const docId = await createMutation.mutateAsync();
+      try {
+        await documentsAPI.submit(docId);
+        queryClient.invalidateQueries({ queryKey: ["forms"] });
+        queryClient.invalidateQueries({ queryKey: ["documents"] });
+        toast.success("Workflow started — form submitted for approval.");
+        onClose();
+      } catch (submitErr: any) {
+        // Document was created but submission failed — leave it as draft
+        // so the user can retry from the forms list.
+        queryClient.invalidateQueries({ queryKey: ["forms"] });
+        queryClient.invalidateQueries({ queryKey: ["documents"] });
+        toast.warn(
+          "Form saved, but workflow could not be started. Open it from the list to retry.",
+        );
+        onClose();
+      }
+    } catch {
+      // create itself failed — already toasted
+    } finally {
+      setSubmitting(false);
+    }
   };
 
   const fileCount = collectFormAttachments(values).attachments.length;
+  const isCreating = createMutation.isPending || uploadingFiles;
+  const isPending = isCreating || submitting;
 
   return (
     <div className="fixed inset-0 z-50 flex flex-col bg-[#EDEDED]">
+      {/* ── Header ── */}
       <div className="flex h-[60px] flex-shrink-0 items-center gap-4 border-b border-[#C8CDD2] bg-[#287EAD] px-5 pr-6 text-white">
         <div className="flex items-center gap-3 flex-shrink-0">
           <div className="flex h-8 w-8 flex-shrink-0 items-center justify-center rounded bg-white/20">
@@ -138,6 +199,7 @@ export default function FormFillModal({
           </div>
         </div>
 
+        {/* Inline title input */}
         <div className="flex flex-1 items-center gap-2 rounded border border-white/30 bg-white/10 px-3 py-1.5 min-w-0">
           <FileText className="h-3.5 w-3.5 flex-shrink-0 text-white/70" />
           <input
@@ -145,7 +207,7 @@ export default function FormFillModal({
             onChange={(e) => setTitle(e.target.value)}
             className="min-w-0 flex-1 bg-transparent text-sm text-white placeholder:text-white/50 outline-none"
             placeholder="Form title…"
-            onKeyDown={(e) => e.key === "Enter" && handleCreate()}
+            onKeyDown={(e) => e.key === "Enter" && handleStartWorkflow()}
           />
         </div>
 
@@ -156,11 +218,17 @@ export default function FormFillModal({
           </div>
         )}
 
-        <button onClick={onClose} className="flex-shrink-0 rounded p-1.5 text-white/70 hover:bg-white/15 hover:text-white transition-colors" title="Cancel">
+        <button
+          onClick={onClose}
+          disabled={isPending}
+          className="flex-shrink-0 rounded p-1.5 text-white/70 hover:bg-white/15 hover:text-white transition-colors disabled:opacity-40"
+          title="Cancel"
+        >
           <X className="h-5 w-5" />
         </button>
       </div>
 
+      {/* ── Sub-header hint ── */}
       <div className="flex-shrink-0 border-b border-[#C8CDD2] bg-white px-6 py-2.5">
         <p className="text-xs text-[#5E6870]">
           Complete all required fields — marked <span className="text-red-500 font-semibold">*</span>.
@@ -172,6 +240,7 @@ export default function FormFillModal({
         </p>
       </div>
 
+      {/* ── Form body ── */}
       <div className="flex-1 overflow-y-auto px-6 py-6">
         {sections.length === 0 ? (
           <div className="flex flex-col items-center justify-center py-24 text-center">
@@ -201,24 +270,50 @@ export default function FormFillModal({
         )}
       </div>
 
+      {/* ── Footer actions ── */}
       <div className="flex-shrink-0 flex items-center justify-between border-t border-[#C8CDD2] bg-white px-6 py-4">
-        <button onClick={onClose} className="px-5 py-2 text-sm font-semibold text-[#5E6870] hover:text-[#1F2933] border border-[#C8CDD2] bg-white hover:bg-[#F7F8F9] transition-colors rounded">
+        <button
+          onClick={onClose}
+          disabled={isPending}
+          className="px-5 py-2 text-sm font-semibold text-[#5E6870] hover:text-[#1F2933] border border-[#C8CDD2] bg-white hover:bg-[#F7F8F9] transition-colors disabled:opacity-50"
+        >
           Cancel
         </button>
-        <button onClick={handleCreate} disabled={isPending}
-          className="flex items-center gap-2 rounded bg-[#287EAD] px-7 py-2 text-sm font-semibold text-white hover:bg-[#1E6F99] transition-colors disabled:opacity-60">
-          {isPending ? (
-            <>
+
+        <div className="flex items-center gap-2">
+          {/* Save as draft — no required-field gate */}
+          <button
+            onClick={handleSaveAsDraft}
+            disabled={isPending}
+            className="flex items-center gap-2 border border-[#AEB5BB] bg-white px-5 py-2 text-sm font-semibold text-[#1F2933] hover:bg-[#F3F5F6] transition-colors disabled:opacity-50"
+          >
+            {isCreating && !submitting ? (
               <Loader2 className="h-4 w-4 animate-spin" />
-              {uploadingFiles ? "Uploading attachments…" : "Creating…"}
-            </>
-          ) : (
-            <>
-              <CheckCircle className="h-4 w-4" />
-              Create Form
-            </>
-          )}
-        </button>
+            ) : (
+              <Save className="h-4 w-4" />
+            )}
+            Save as draft
+          </button>
+
+          {/* Start workflow — validates then create + submit */}
+          <button
+            onClick={handleStartWorkflow}
+            disabled={isPending}
+            className="flex items-center gap-2 bg-[#287EAD] px-7 py-2 text-sm font-semibold text-white hover:bg-[#1E6F99] transition-colors disabled:opacity-60"
+          >
+            {submitting || (isCreating && submitting) ? (
+              <>
+                <Loader2 className="h-4 w-4 animate-spin" />
+                {uploadingFiles ? "Uploading…" : "Starting…"}
+              </>
+            ) : (
+              <>
+                <Send className="h-4 w-4" />
+                Start workflow
+              </>
+            )}
+          </button>
+        </div>
       </div>
     </div>
   );

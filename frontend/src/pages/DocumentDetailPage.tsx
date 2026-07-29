@@ -651,7 +651,7 @@ export default function DocumentDetailPage() {
           <div>
             <h2 className="text-xl font-semibold">Document not found</h2>
             <p className="mt-2 text-sm text-slate-600">
-              The requested document is no longer available from this page. You can go back to where you came from, or continue to the document list.
+              You don't have permission to view this document. You can only access documents you've uploaded, own, or have been assigned to. If you believe this is an error, please contact your administrator.
             </p>
           </div>
         </div>
@@ -1274,19 +1274,6 @@ export default function DocumentDetailPage() {
                 watchKey={`${doc.status}:${doc.updated_at}`}
                 availableStages={availableStages}
               />
-            </div>
-          )}
-
-          {activeTask && (
-            <div className="fixed bottom-0 left-[var(--app-sidebar-width)] right-0 z-40 border-t border-[#C8CDD2] bg-[#EDEDED]/95 backdrop-blur-sm">
-              <Suspense fallback={<div className="px-4 py-3 text-xs text-[#5E6870]">Loading actions...</div>}>
-                <WorkflowActionPanel
-                  task={activeTask}
-                  documentId={id!}
-                  variant="bar"
-                  onCompleted={() => setWorkflowActionCompleted(true)}
-                />
-              </Suspense>
             </div>
           )}
 

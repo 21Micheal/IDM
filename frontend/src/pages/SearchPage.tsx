@@ -317,7 +317,8 @@ export default function SearchPage() {
   const filteredData: DocumentSearchResponse | null = useMemo(() => {
     if (!rawData) return null;
     const results = (rawData.results || []).filter((hit) => hitMatchesFilters(hit));
-    return { ...rawData, results, total: results.length } as DocumentSearchResponse;
+    // Keep the backend's total count for pagination, only filter the displayed results
+    return { ...rawData, results } as DocumentSearchResponse;
   }, [
     rawData,
     statusFilter,
@@ -331,7 +332,7 @@ export default function SearchPage() {
     amountMax,
   ]);
 
-  const totalPages = filteredData ? Math.max(1, Math.ceil(filteredData.total / PAGE_SIZE)) : 1;
+  const totalPages = filteredData ? Math.max(1, Math.ceil((filteredData.total ?? 0) / PAGE_SIZE)) : 1;
   const activeFilterCount = [
     statusFilter,
     typeFilter,

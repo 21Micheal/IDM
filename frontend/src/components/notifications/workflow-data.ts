@@ -286,6 +286,7 @@ function buildApproverWorkflow(
       statusDisplay: describeStatus({
         status: step.status,
         isNotification: step.isNotification,
+        stepName: step.name,
         previousName: previous?.name,
         previousIsNotification: previous?.isNotification,
         workflowPhase,
@@ -375,12 +376,14 @@ function buildApproverWorkflow(
 function describeStatus({
   status,
   isNotification,
+  stepName,
   previousName,
   previousIsNotification,
   workflowPhase,
 }: {
   status: WorkflowStep["status"];
   isNotification: boolean;
+  stepName?: string;
   previousName?: string;
   previousIsNotification?: boolean;
   workflowPhase?: "request" | "retirement" | null;
@@ -392,7 +395,7 @@ function describeStatus({
       }
       return isNotification ? "Notification sent" : "Approved";
     case "in-progress":
-      return isNotification ? "Sending notification" : "In progress";
+      return isNotification ? "Sending notification" : (stepName ? `Pending \u2014 ${stripApproval(stepName)}` : "Pending review");
     case "on-hold":
       return "On hold";
     case "rejected":
@@ -415,8 +418,15 @@ function describeStatus({
       }
       return previousIsNotification
         ? `Awaiting ${previousName}`
-        : `Awaiting ${previousName} approval`;
+        : `Awaiting ${stripApproval(previousName)} approval`;
   }
+}
+
+/** Strip a redundant trailing "approval" word so we don't produce
+ *  "Awaiting Manager Approval approval" when the step is already named
+ *  something like "Manager Approval" or "Finance approval". */
+function stripApproval(name: string): string {
+  return name.replace(/\s+approval\s*$/i, "").trim();
 }
 
 function resolveStepStatus(statuses: WorkflowStep["status"][]): WorkflowStep["status"] {

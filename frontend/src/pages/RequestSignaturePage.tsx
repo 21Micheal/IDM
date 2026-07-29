@@ -18,7 +18,7 @@ import {
 } from "lucide-react";
 import clsx from "clsx";
 
-type Tab = "request" | "incoming" | "sent";
+type Tab = "request" | "incoming" | "sent" | "signed";
 
 interface UserLite { id: string; full_name: string; email: string }
 interface SignatureRequestRow {
@@ -197,7 +197,7 @@ function RequestForm({ onCreated }: { onCreated: (documentId: string) => void })
 }
 
 // ── Request list ────────────────────────────────────────────────────────────────
-function RequestList({ box }: { box: "incoming" | "sent" }) {
+function RequestList({ box }: { box: "incoming" | "sent" | "signed" }) {
   const navigate = useNavigate();
   const { data: rows = [], isLoading } = useQuery<SignatureRequestRow[]>({
     queryKey: ["signature-requests", box],
@@ -224,7 +224,7 @@ function RequestList({ box }: { box: "incoming" | "sent" }) {
           <div className="flex-1 min-w-0">
             <p className="text-sm font-semibold text-foreground truncate">{req.document_title}</p>
             <p className="text-xs text-muted-foreground">
-              {box === "incoming" ? `From ${req.requested_by.full_name}` : `${req.ordered ? "Sequential" : "Any order"}`}
+              {box === "sent" ? `${req.ordered ? "Sequential" : "Any order"}` : `From ${req.requested_by.full_name}`}
               {" · "}{req.document_reference}
             </p>
           </div>
@@ -246,10 +246,16 @@ export default function RequestSignaturePage() {
   const navigate = useNavigate();
   const qc = useQueryClient();
 
-  const tabs: { id: Tab; label: string }[] = [
+  const { data: incomingCount } = useQuery({
+    queryKey: ["signature-requests", "incoming-count"],
+    queryFn: () => signatureRequestsAPI.incomingCount().then((r) => r.data.count ?? 0),
+  });
+
+  const tabs: { id: Tab; label: string; showCount?: boolean }[] = [
     { id: "request", label: "Request signature" },
-    { id: "incoming", label: "Awaiting my signature" },
+    { id: "incoming", label: `Awaiting my signature${incomingCount ? ` (${incomingCount})` : ""}`, showCount: incomingCount > 0 },
     { id: "sent", label: "Sent by me" },
+    { id: "signed", label: "Signed by me" },
   ];
 
   return (
@@ -264,9 +270,18 @@ export default function RequestSignaturePage() {
         <nav className="-mb-px flex gap-6">
           {tabs.map((t) => (
             <button key={t.id} onClick={() => setTab(t.id)}
-              className={clsx("px-1 py-3 text-sm font-medium border-b-2 transition-colors",
+              className={clsx("px-1 py-3 text-sm font-medium border-b-2 transition-colors flex items-center gap-2",
                 tab === t.id ? "border-accent text-accent" : "border-transparent text-muted-foreground hover:text-foreground")}>
-              {t.label}
+              {t.showCount && incomingCount ? (
+                <>
+                  {t.label.split('(')[0].trim()}
+                  <span className="bg-red-700 text-white text-[10px] font-bold px-1.5 py-0.5 rounded-full min-w-[1.25rem] text-center">
+                    {incomingCount}
+                  </span>
+                </>
+              ) : (
+                t.label
+              )}
             </button>
           ))}
         </nav>
@@ -282,6 +297,7 @@ export default function RequestSignaturePage() {
       </div>
       {tab === "incoming" && <RequestList box="incoming" />}
       {tab === "sent" && <RequestList box="sent" />}
+      {tab === "signed" && <RequestList box="signed" />}
       </div>
     </div>
   );

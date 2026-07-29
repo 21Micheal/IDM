@@ -15,8 +15,8 @@ import { useQuery, type UseQueryResult } from "@tanstack/react-query";
 import { api, departmentsAPI, documentTypesAPI, normalizeListResponse } from "@/services/api";
 import { QUERY_FIVE_MIN_STALE } from "@/lib/reactQueryDefaults";
 import { exportCsv } from "@/lib/exportCsv";
-import { StatCard } from "@/components/dashboard/StatCard";
 import CustomListbox from "@/components/ui/CustomListbox";
+import { WorkspaceCommandBar } from "@/components/shared/WorkspaceCommandBar";
 import type { DocumentType } from "@/types";
 import {
   BarChart, Bar, AreaChart, Area, PieChart, Pie,
@@ -26,8 +26,9 @@ import {
 import {
   AlertTriangle, Clock, FileBarChart, FileText, CheckCircle2, Hourglass,
   Users, Building2, PieChart as PieIcon, Download, Loader2, RefreshCw, Inbox, ShieldCheck,
-  Image as ImageIcon, Code,
+  Image as ImageIcon, Code, TrendingUp, TrendingDown, Minus, ArrowLeft,
 } from "lucide-react";
+import { cn } from "@/lib/utils";
 
 /* ── Types ─────────────────────────────────────────────────────────────────── */
 type Metric = { current: number | null; previous: number | null; delta_pct: number | null };
@@ -43,7 +44,7 @@ interface Overview {
 }
 interface TurnaroundItem { step: string; avg_hours: number; sla_hours: number; completed: number }
 interface SlaItem { month: string; total: number; breached: number; breach_rate: number }
-interface VolumeItem { month: string; [docType: string]: number | string }
+interface VolumeItem { month: string;[docType: string]: number | string }
 interface UploaderItem { name: string; department: string; count: number; approved: number; pending: number; rejected: number }
 interface StatusItem { status: string; label: string; count: number }
 interface DeptItem { department: string; uploads: number; approved: number; pending: number; rejected: number }
@@ -51,11 +52,12 @@ interface DeptItem { department: string; uploads: number; approved: number; pend
 type Period = 3 | 6 | 12;
 interface Filters { months: Period; department: string; document_type: string }
 
-/* ── Palette ───────────────────────────────────────────────────────────────── */
+/* ── Palette (chart-only) — page chrome uses semantic tokens ─────────────── */
 const BRAND = {
   primary: "hsl(203,80%,42%)",
   accent: "hsl(240,40%,50%)",
   teal: "hsl(195,75%,45%)",
+  success: "hsl(150,55%,42%)",
   danger: "hsl(0,84%,46%)",
   warning: "hsl(38,90%,50%)",
   neutral: "hsl(210,20%,82%)",
@@ -172,7 +174,7 @@ function ExportMenu({ name, captureRef, getRows, disabled }: {
   };
 
   const itemCls =
-    "flex w-full items-center gap-2 px-3 py-2 text-left text-xs text-[#1F2933] transition hover:bg-[#F0F5F8] disabled:cursor-not-allowed disabled:opacity-40";
+    "flex w-full items-center gap-2 px-3 py-2 text-left text-xs text-foreground transition hover:bg-muted disabled:cursor-not-allowed disabled:opacity-40";
 
   return (
     <div ref={wrapRef} className="relative">
@@ -181,12 +183,12 @@ function ExportMenu({ name, captureRef, getRows, disabled }: {
         onClick={() => setOpen((v) => !v)}
         disabled={disabled || busy}
         title="Export chart"
-        className="border border-white/30 p-1.5 text-white/75 transition hover:bg-white/10 disabled:opacity-40"
+        className="border border-[#C8CDD2] bg-white p-1.5 text-[#5E6870] transition hover:bg-[#F5F7F8] hover:text-[#1F2933] disabled:opacity-40"
       >
         {busy ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Download className="h-3.5 w-3.5" />}
       </button>
       {open && (
-        <div className="absolute right-0 z-20 mt-1 w-44 border border-[#C8CDD2] bg-white py-1 shadow-lg">
+        <div className="absolute right-0 z-20 mt-1 w-44 overflow-hidden border border-[#C8CDD2] bg-white py-1 shadow-lg">
           {getRows && (
             <button
               type="button"
@@ -194,14 +196,14 @@ function ExportMenu({ name, captureRef, getRows, disabled }: {
               className={itemCls}
               onClick={() => { exportCsv(name, rows); setOpen(false); }}
             >
-              <FileText className="h-3.5 w-3.5 text-[#287EAD]" /> CSV (data)
+              <FileText className="h-3.5 w-3.5 text-primary" /> CSV (data)
             </button>
           )}
           <button type="button" className={itemCls} onClick={() => exportImage("png")}>
-            <ImageIcon className="h-3.5 w-3.5 text-[#287EAD]" /> PNG image
+            <ImageIcon className="h-3.5 w-3.5 text-primary" /> PNG image
           </button>
           <button type="button" className={itemCls} onClick={() => exportImage("svg")}>
-            <Code className="h-3.5 w-3.5 text-[#287EAD]" /> SVG (vector)
+            <Code className="h-3.5 w-3.5 text-primary" /> SVG (vector)
           </button>
         </div>
       )}
@@ -209,12 +211,24 @@ function ExportMenu({ name, captureRef, getRows, disabled }: {
   );
 }
 
+/* Chart card — white surface, subtle tinted icon, refined header */
+type CardTone = "primary" | "teal" | "accent" | "success" | "warning" | "danger";
+const CARD_TONE: Record<CardTone, { icon: string }> = {
+  primary: { icon: "bg-primary/10 text-primary" },
+  teal: { icon: "bg-teal/10 text-teal" },
+  accent: { icon: "bg-accent/10 text-accent" },
+  success: { icon: "bg-[hsl(150,55%,42%)]/10 text-[hsl(150,55%,32%)]" },
+  warning: { icon: "bg-[hsl(38,90%,50%)]/15 text-[hsl(28,80%,38%)]" },
+  danger: { icon: "bg-destructive/10 text-destructive" },
+};
+
 function ChartCard<T>({
-  icon: Icon, title, subtitle, query, exportRows, exportName, headerExtra, children,
+  icon: Icon, title, subtitle, tone = "primary", query, exportRows, exportName, headerExtra, children,
 }: {
   icon: React.ElementType;
   title: string;
   subtitle: string;
+  tone?: CardTone;
   query: UseQueryResult<T>;
   exportRows?: (data: T) => Array<Record<string, unknown>>;
   exportName?: string;
@@ -224,21 +238,23 @@ function ChartCard<T>({
   const { data, isLoading, isError, refetch, isFetching } = query;
   const isEmpty = !isLoading && !isError && Array.isArray(data) && (data as any[]).length === 0;
   const bodyRef = useRef<HTMLDivElement>(null);
+  const t = CARD_TONE[tone];
 
   return (
     <div className="flex flex-col overflow-hidden border border-[#C8CDD2] bg-white">
-      {/* BI-style blue header strip */}
-      <div className="flex flex-wrap items-center justify-between gap-2 bg-[#287EAD] px-4 py-2.5">
-        <div className="flex items-center gap-2.5">
-          <Icon className="h-4 w-4 text-white/80 shrink-0" />
+      <div className="flex flex-wrap items-center justify-between gap-2 border-b border-[#C8CDD2] bg-[#F5F7F8] px-4 py-3">
+        <div className="flex items-center gap-3">
+          <div className={cn("flex h-9 w-9 items-center justify-center border border-white", t.icon)}>
+            <Icon className="h-4 w-4" />
+          </div>
           <div>
-            <h3 className="text-sm font-semibold text-white leading-tight">{title}</h3>
-            <p className="text-[11px] text-white/65 leading-tight">{subtitle}</p>
+            <h3 className="text-sm font-semibold text-foreground leading-tight">{title}</h3>
+            <p className="text-[11px] text-muted-foreground leading-tight mt-0.5">{subtitle}</p>
           </div>
         </div>
         <div className="flex items-center gap-2">
           {headerExtra}
-          {isFetching && !isLoading && <Loader2 className="h-3.5 w-3.5 animate-spin text-white/70" />}
+          {isFetching && !isLoading && <Loader2 className="h-3.5 w-3.5 animate-spin text-muted-foreground" />}
           {exportName && (
             <ExportMenu
               name={exportName}
@@ -250,19 +266,19 @@ function ChartCard<T>({
         </div>
       </div>
 
-      <div ref={bodyRef} className="flex-1 p-4">
+      <div ref={bodyRef} className="flex-1 p-5">
         {isLoading ? (
-          <div className="h-[260px] animate-pulse bg-[#F5F7F8]" />
+          <div className="h-[260px] animate-pulse bg-[#EEF1F3]" />
         ) : isError ? (
-          <div className="flex h-[260px] flex-col items-center justify-center gap-3 text-sm text-[#5E6870]">
-            <AlertTriangle className="h-6 w-6 text-red-500" />
+          <div className="flex h-[260px] flex-col items-center justify-center gap-3 text-sm text-muted-foreground">
+            <AlertTriangle className="h-6 w-6 text-destructive" />
             Could not load this chart.
-            <button onClick={() => refetch()} className="inline-flex items-center gap-1.5 border border-[#C8CDD2] px-3 py-1.5 text-xs font-semibold text-[#1F2933] hover:bg-[#F5F7F8]">
+            <button onClick={() => refetch()} className="inline-flex items-center gap-1.5 border border-[#C8CDD2] bg-white px-3 py-1.5 text-xs font-semibold text-[#1F2933] hover:bg-[#F5F7F8]">
               <RefreshCw className="h-3.5 w-3.5" /> Retry
             </button>
           </div>
         ) : isEmpty ? (
-          <div className="flex h-[260px] flex-col items-center justify-center gap-2 text-sm text-[#5E6870]">
+          <div className="flex h-[260px] flex-col items-center justify-center gap-2 text-sm text-muted-foreground">
             <Inbox className="h-7 w-7 opacity-40" />
             No data for the selected filters.
           </div>
@@ -274,7 +290,113 @@ function ChartCard<T>({
   );
 }
 
-/* ── KPI row ───────────────────────────────────────────────────────────────── */
+/* ── KPI row — tinted colored tiles ────────────────────────────────────────── */
+type KpiTone = "primary" | "success" | "warning" | "teal" | "accent" | "indigo";
+const KPI_TONE: Record<KpiTone, {
+  bg: string; border: string;
+  iconBg: string; iconText: string;
+  label: string; value: string;
+}> = {
+  // Documents — primary blue
+  primary: {
+    bg: "bg-[hsl(203,80%,42%)]/[0.06]",
+    border: "border-[hsl(203,80%,42%)]/25",
+    iconBg: "bg-[hsl(203,80%,42%)]",
+    iconText: "text-white",
+    label: "text-[hsl(203,65%,32%)]",
+    value: "text-[hsl(203,80%,30%)]",
+  },
+  // Approved — light green
+  success: {
+    bg: "bg-[hsl(150,55%,42%)]/[0.07]",
+    border: "border-[hsl(150,55%,42%)]/25",
+    iconBg: "bg-[hsl(150,55%,38%)]",
+    iconText: "text-white",
+    label: "text-[hsl(150,45%,28%)]",
+    value: "text-[hsl(150,55%,26%)]",
+  },
+  // Pending — amber
+  warning: {
+    bg: "bg-[hsl(38,90%,50%)]/[0.08]",
+    border: "border-[hsl(38,90%,50%)]/30",
+    iconBg: "bg-[hsl(38,90%,46%)]",
+    iconText: "text-white",
+    label: "text-[hsl(28,80%,32%)]",
+    value: "text-[hsl(28,80%,26%)]",
+  },
+  // Turnaround — teal
+  teal: {
+    bg: "bg-[hsl(195,75%,45%)]/[0.07]",
+    border: "border-[hsl(195,75%,45%)]/25",
+    iconBg: "bg-[hsl(195,75%,40%)]",
+    iconText: "text-white",
+    label: "text-[hsl(195,60%,28%)]",
+    value: "text-[hsl(195,75%,26%)]",
+  },
+  // SLA — indigo/accent
+  accent: {
+    bg: "bg-[hsl(240,40%,50%)]/[0.07]",
+    border: "border-[hsl(240,40%,50%)]/25",
+    iconBg: "bg-[hsl(240,40%,48%)]",
+    iconText: "text-white",
+    label: "text-[hsl(240,35%,35%)]",
+    value: "text-[hsl(240,40%,32%)]",
+  },
+  // Uploaders — indigo-blue (distinct from primary)
+  indigo: {
+    bg: "bg-[hsl(220,60%,50%)]/[0.07]",
+    border: "border-[hsl(220,60%,50%)]/25",
+    iconBg: "bg-[hsl(220,60%,46%)]",
+    iconText: "text-white",
+    label: "text-[hsl(220,50%,32%)]",
+    value: "text-[hsl(220,60%,28%)]",
+  },
+};
+
+function KpiTile({
+  title, value, icon: Icon, tone, trend,
+}: {
+  title: string; value: string | number; icon: React.ElementType; tone: KpiTone;
+  trend?: { value: number; isPositive: boolean; direction: "up" | "down" | "flat" };
+}) {
+  const t = KPI_TONE[tone];
+  const TrendIcon = trend?.direction === "flat" ? Minus : trend?.direction === "up" ? TrendingUp : TrendingDown;
+  return (
+    <div className={cn("border p-4 transition", t.bg, t.border)}>
+      <div className="flex items-start justify-between gap-3">
+        <div className="min-w-0 flex-1">
+          <p className={cn("text-[10px] font-bold uppercase tracking-widest", t.label)}>{title}</p>
+          <p className={cn("mt-2 text-[1.65rem] font-bold tracking-tight tabular-nums leading-none", t.value)}>{value}</p>
+        </div>
+        {/* Icon chip — square, slightly larger */}
+        <div className={cn(
+          "flex h-11 w-11 shrink-0 items-center justify-center shadow-sm",
+          t.iconBg, t.iconText,
+        )}>
+          <Icon className="h-5 w-5" />
+        </div>
+      </div>
+      {trend ? (
+        <div className="mt-3 flex items-center gap-1.5">
+          <span className={cn(
+            "inline-flex items-center gap-1 px-1.5 py-0.5 text-[10px] font-bold",
+            trend.isPositive
+              ? "bg-[hsl(150,55%,42%)]/20 text-[hsl(150,45%,28%)]"
+              : "bg-[hsl(0,84%,46%)]/15 text-[hsl(0,72%,38%)]",
+          )}>
+            <TrendIcon className="h-3 w-3" />
+            {trend.value.toFixed(1)}%
+          </span>
+          <span className="text-[10px] text-muted-foreground">vs prev period</span>
+        </div>
+      ) : (
+        /* spacer so all tiles are the same height */
+        <div className="mt-3 h-[22px]" />
+      )}
+    </div>
+  );
+}
+
 function kpiTrend(m: Metric | undefined, higherIsBetter: boolean) {
   if (!m || m.delta_pct === null || m.delta_pct === undefined) return undefined;
   const up = m.delta_pct >= 0;
@@ -282,8 +404,6 @@ function kpiTrend(m: Metric | undefined, higherIsBetter: boolean) {
     value: Math.abs(m.delta_pct),
     isPositive: higherIsBetter ? up : !up,
     direction: (m.delta_pct === 0 ? "flat" : up ? "up" : "down") as "up" | "down" | "flat",
-    suffix: "%",
-    label: "vs prev period",
   };
 }
 const fmt = (v: number | null | undefined, suffix = "") =>
@@ -294,19 +414,81 @@ function KpiRow({ query }: { query: UseQueryResult<Overview> }) {
   if (isLoading) {
     return (
       <div className="grid grid-cols-2 gap-3 lg:grid-cols-3 xl:grid-cols-6">
-        {Array.from({ length: 6 }).map((_, i) => <div key={i} className="h-24 animate-pulse bg-[#2A3040]" />)}
+        {Array.from({ length: 6 }).map((_, i) => <div key={i} className="h-[104px] animate-pulse border border-[#C8CDD2] bg-white" />)}
       </div>
     );
   }
   if (!data) return null;
   return (
     <div className="grid grid-cols-2 gap-3 lg:grid-cols-3 xl:grid-cols-6">
-      <StatCard title="Documents" value={data.documents.current ?? 0} icon={FileText} color="primary" trend={kpiTrend(data.documents, true)} />
-      <StatCard title="Approved" value={data.approved.current ?? 0} icon={CheckCircle2} color="teal" trend={kpiTrend(data.approved, true)} />
-      <StatCard title="Pending backlog" value={data.pending_now} icon={Hourglass} color="accent" />
-      <StatCard title="Avg turnaround" value={fmt(data.avg_turnaround_hours.current, "h")} icon={Clock} color="primary" trend={kpiTrend(data.avg_turnaround_hours, false)} />
-      <StatCard title="SLA compliance" value={fmt(data.sla_compliance.current, "%")} icon={ShieldCheck} color="teal" trend={kpiTrend(data.sla_compliance, true)} />
-      <StatCard title="Active uploaders" value={data.active_uploaders.current ?? 0} icon={Users} color="accent" trend={kpiTrend(data.active_uploaders, true)} />
+      <KpiTile title="Documents" value={data.documents.current ?? 0} icon={FileText} tone="primary" trend={kpiTrend(data.documents, true)} />
+      <KpiTile title="Approved" value={data.approved.current ?? 0} icon={CheckCircle2} tone="success" trend={kpiTrend(data.approved, true)} />
+      <KpiTile title="Pending backlog" value={data.pending_now} icon={Hourglass} tone="warning" />
+      <KpiTile title="Avg turnaround" value={fmt(data.avg_turnaround_hours.current, "h")} icon={Clock} tone="teal" trend={kpiTrend(data.avg_turnaround_hours, false)} />
+      <KpiTile title="SLA compliance" value={fmt(data.sla_compliance.current, "%")} icon={ShieldCheck} tone="accent" trend={kpiTrend(data.sla_compliance, true)} />
+      <KpiTile title="Active uploaders" value={data.active_uploaders.current ?? 0} icon={Users} tone="indigo" trend={kpiTrend(data.active_uploaders, true)} />
+    </div>
+  );
+}
+
+function ExecutiveBrief({
+  overview,
+  sla,
+  turnaround,
+}: {
+  overview: UseQueryResult<Overview>;
+  sla: UseQueryResult<SlaItem[]>;
+  turnaround: UseQueryResult<TurnaroundItem[]>;
+}) {
+  const data = overview.data;
+  const slaRows = sla.data ?? [];
+  const turnRows = turnaround.data ?? [];
+  const avgBreach = slaRows.length
+    ? slaRows.reduce((sum, row) => sum + row.breach_rate, 0) / slaRows.length
+    : 0;
+  const breachingSteps = turnRows.filter((row) => row.avg_hours > row.sla_hours);
+  const backlog = data?.pending_now ?? 0;
+
+  const items = [
+    {
+      label: "Manager focus",
+      value: backlog > 0 ? `${backlog} pending document${backlog === 1 ? "" : "s"}` : "No pending backlog",
+      detail: backlog > 0 ? "Prioritize ageing approvals and held tasks." : "Approval queue is currently clear.",
+      tone: backlog > 0 ? "text-[hsl(28,80%,34%)]" : "text-[hsl(150,45%,30%)]",
+    },
+    {
+      label: "SLA risk",
+      value: `${Math.round(avgBreach * 10) / 10}% breach average`,
+      detail: avgBreach > 10 ? "Above target; check bottleneck steps." : "Within the 10% breach target.",
+      tone: avgBreach > 10 ? "text-destructive" : "text-[hsl(150,45%,30%)]",
+    },
+    {
+      label: "Workflow bottlenecks",
+      value: breachingSteps.length ? `${breachingSteps.length} step${breachingSteps.length === 1 ? "" : "s"} breaching` : "No breaching steps",
+      detail: breachingSteps[0]?.step ? `Worst: ${breachingSteps[0].step}` : "Average step times are within target.",
+      tone: breachingSteps.length ? "text-destructive" : "text-[hsl(150,45%,30%)]",
+    },
+  ];
+
+  if (overview.isLoading || sla.isLoading || turnaround.isLoading) {
+    return (
+      <div className="grid grid-cols-1 gap-3 lg:grid-cols-3">
+        {Array.from({ length: 3 }).map((_, index) => (
+          <div key={index} className="h-[76px] animate-pulse border border-[#C8CDD2] bg-white" />
+        ))}
+      </div>
+    );
+  }
+
+  return (
+    <div className="grid grid-cols-1 gap-3 lg:grid-cols-3">
+      {items.map((item) => (
+        <div key={item.label} className="border border-[#C8CDD2] bg-white px-4 py-3">
+          <p className="text-[10px] font-bold uppercase tracking-wider text-[#5E6870]">{item.label}</p>
+          <p className={`mt-1 text-sm font-bold ${item.tone}`}>{item.value}</p>
+          <p className="mt-1 text-xs text-[#5E6870]">{item.detail}</p>
+        </div>
+      ))}
     </div>
   );
 }
@@ -396,7 +578,7 @@ function DepartmentChart({ data }: { data: DeptItem[] }) {
         <YAxis type="category" dataKey="department" width={120} tickLine={false} axisLine={false} tick={{ fontSize: 11, fill: "hsl(210,12%,45%)", fontWeight: 500 }} />
         <Tooltip content={<ChartTooltip />} />
         <Legend iconType="circle" iconSize={8} wrapperStyle={{ fontSize: 11, paddingTop: 8 }} />
-        <Bar dataKey="approved" name="Approved" stackId="a" fill="hsl(150,55%,42%)" maxBarSize={22} />
+        <Bar dataKey="approved" name="Approved" stackId="a" fill={BRAND.success} maxBarSize={22} />
         <Bar dataKey="pending" name="Pending" stackId="a" fill={BRAND.primary} maxBarSize={22} />
         <Bar dataKey="rejected" name="Rejected" stackId="a" fill={BRAND.danger} maxBarSize={22} />
       </BarChart>
@@ -452,7 +634,7 @@ function VolumeChart({ data }: { data: VolumeItem[] }) {
             <span className="text-muted-foreground">({grand ? Math.round((totals[t] / grand) * 100) : 0}%)</span>
             <button type="button" onClick={() => setEditingType(editingType === t ? null : t)} className="ml-1 text-muted-foreground hover:text-foreground">edit</button>
             {editingType === t && (
-              <input type="color" value={colorFor(t, i)} onChange={(e) => updateColor(t, e.target.value)} onBlur={() => setEditingType(null)} className="h-5 w-8 rounded" />
+              <input type="color" value={colorFor(t, i)} onChange={(e) => updateColor(t, e.target.value)} onBlur={() => setEditingType(null)} className="h-5 w-8" />
             )}
           </div>
         ))}
@@ -480,9 +662,9 @@ function UploadersList({ data }: { data: UploaderItem[] }) {
         const approvedPct = p.count ? Math.round((p.approved / p.count) * 100) : 0;
         const barWidth = Math.round((p.count / max) * 100);
         return (
-          <div key={p.name + i} className="flex items-center gap-4 px-5 py-3">
+          <div key={p.name + i} className="flex items-center gap-4 px-5 py-3 transition hover:bg-muted/40">
             <span className="w-5 shrink-0 text-center text-[13px] font-black tabular-nums" style={{ color: i === 0 ? BRAND.warning : i < 3 ? BRAND.primary : "hsl(210,12%,60%)" }}>{i + 1}</span>
-            <div className="flex h-8 w-8 shrink-0 items-center justify-center rounded-full text-[11px] font-black text-white" style={{ background: BRAND.accent }}>
+            <div className="flex h-8 w-8 shrink-0 items-center justify-center rounded-full text-[11px] font-black text-primary-foreground" style={{ background: BRAND.primary }}>
               {p.name.split(" ").map((n) => n[0]).join("").slice(0, 2).toUpperCase()}
             </div>
             <div className="min-w-0 flex-1">
@@ -493,11 +675,11 @@ function UploadersList({ data }: { data: UploaderItem[] }) {
               <div className="mt-0.5 flex items-center gap-2 text-[11px]">
                 <span className="text-muted-foreground">{p.department}</span>
                 <span className="text-muted-foreground">·</span>
-                <span className="font-medium" style={{ color: approvedPct >= 80 ? BRAND.teal : BRAND.warning }}>{approvedPct}% approved</span>
+                <span className="font-medium" style={{ color: approvedPct >= 80 ? BRAND.success : BRAND.warning }}>{approvedPct}% approved</span>
                 {p.rejected > 0 && <><span className="text-muted-foreground">·</span><span className="font-medium" style={{ color: BRAND.danger }}>{p.rejected} rejected</span></>}
               </div>
               <div className="mt-1.5 h-1 w-full overflow-hidden bg-[#E3E7EA]">
-                <div className="h-full transition-all duration-500" style={{ width: `${barWidth}%`, background: BRAND.accent, opacity: 0.85 }} />
+                <div className="h-full transition-all duration-500" style={{ width: `${barWidth}%`, background: BRAND.primary, opacity: 0.85 }} />
               </div>
             </div>
           </div>
@@ -515,14 +697,17 @@ function FilterBar({ filters, onChange, departments, docTypes }: {
   docTypes: DocumentType[];
 }) {
   const periods: Period[] = [3, 6, 12];
-  const selectCls = "h-8 border border-[#AEB5BB] bg-white px-2.5 text-sm text-[#1F2933] outline-none focus:border-[#287EAD]";
+  const selectCls = "h-9 border border-[#AEB5BB] bg-white px-2.5 text-sm text-[#1F2933] outline-none focus:border-[#287EAD] focus:ring-1 focus:ring-[#287EAD]";
   return (
     <div className="flex flex-wrap items-center gap-2">
       {/* Period toggle */}
       <div className="inline-flex border border-[#AEB5BB] bg-white">
         {periods.map((p) => (
           <button key={p} type="button" onClick={() => onChange({ ...filters, months: p })}
-            className={`px-3 py-1 text-[11px] font-semibold uppercase tracking-wide transition-colors ${filters.months === p ? "bg-[#287EAD] text-white" : "text-[#5E6870] hover:text-[#1F2933]"}`}>
+            className={cn(
+              "px-3 py-1.5 text-[11px] font-semibold uppercase tracking-wide transition-colors",
+              filters.months === p ? "bg-[#287EAD] text-white" : "text-[#5E6870] hover:bg-[#F5F7F8] hover:text-[#1F2933]",
+            )}>
             {p}m
           </button>
         ))}
@@ -570,64 +755,57 @@ export default function AnalyticsDashboardPage() {
   const uploaders = useAnalytics<UploaderItem[]>("uploaders", "top-uploaders", filters);
 
   return (
-    <div className="-m-6 min-h-[calc(100vh-3.5rem)] bg-[#1A1F26] text-[#1F2933]">
-      {/* Page header */}
-      <div className="flex min-h-[69px] flex-col gap-3 bg-[#287EAD] px-5 py-3 text-white lg:flex-row lg:items-center lg:justify-between">
-        <div>
-          <p className="text-[11px] font-semibold uppercase tracking-[0.2em] text-white/65">Manager workspace</p>
-          <h1 className="mt-0.5 text-xl font-semibold tracking-tight">Analytics</h1>
-        </div>
+    <div className="min-h-screen bg-[#EDEDED] text-[#1F2933]">
+      <WorkspaceCommandBar
+        actions={<FilterBar filters={filters} onChange={setFilters} departments={departments} docTypes={docTypes} />}
+      >
         <div className="flex items-center gap-3">
-          <FilterBar filters={filters} onChange={setFilters} departments={departments} docTypes={docTypes} />
-          <Link to="/" className="inline-flex h-8 items-center justify-center border border-white/20 bg-white/10 px-4 text-sm font-semibold text-white hover:bg-white/20">
-            ← Dashboard
+          <Link
+            to="/"
+            className="inline-flex h-9 w-9 items-center justify-center border border-white/20 bg-[#206D99] text-white transition hover:bg-white/10"
+            title="Back to Dashboard"
+          >
+            <ArrowLeft className="h-4 w-4" />
           </Link>
+          <div>
+            <p className="text-[10px] font-semibold uppercase tracking-[0.22em] text-white/70">Manager workspace</p>
+            <h1 className="mt-0.5 text-xl font-semibold tracking-tight">Analytics</h1>
+          </div>
         </div>
-      </div>
+      </WorkspaceCommandBar>
 
-      {/* Sub-header: KPI strip on dark canvas */}
-      <div className="border-b border-[#2D3440] bg-[#20262D] px-5 py-3">
+      {/* KPI strip */}
+      <div className="space-y-4 border-b border-[#C8CDD2] bg-[#F5F7F8] px-5 py-4 pr-8">
         <KpiRow query={overview} />
+        <ExecutiveBrief overview={overview} sla={sla} turnaround={turnaround} />
       </div>
 
       {/* Chart grid */}
-      <div className="grid grid-cols-1 gap-px bg-[#2D3440] p-px xl:grid-cols-2">
-        <div className="bg-white">
-          <ChartCard icon={AlertTriangle} title="SLA Breach Rate" subtitle="% of completed approvals that exceeded SLA per month"
-            query={sla} exportName="sla-breach-rate" exportRows={(d) => d as any}>
-            {(d) => <SlaBreachChart data={d} />}
-          </ChartCard>
-        </div>
-        <div className="bg-white">
-          <ChartCard icon={PieIcon} title="Status Distribution" subtitle="Documents by status in the selected period"
-            query={status} exportName="status-distribution" exportRows={(d) => d as any}>
-            {(d) => <StatusDonut data={d} />}
-          </ChartCard>
-        </div>
-        <div className="bg-white">
-          <ChartCard icon={Clock} title="Approval Turnaround" subtitle="Average hours per workflow step vs SLA target"
-            query={turnaround} exportName="approval-turnaround" exportRows={(d) => d as any}>
-            {(d) => <TurnaroundChart data={d} />}
-          </ChartCard>
-        </div>
-        <div className="bg-white">
-          <ChartCard icon={Building2} title="Department Activity" subtitle="Approvals, pending and rejections by department"
-            query={dept} exportName="department-activity" exportRows={(d) => d as any}>
-            {(d) => <DepartmentChart data={d} />}
-          </ChartCard>
-        </div>
-        <div className="bg-white">
-          <ChartCard icon={FileBarChart} title="Document Volume by Type" subtitle="Monthly upload breakdown across categories"
-            query={volume} exportName="document-volume" exportRows={(d) => d as any}>
-            {(d) => <VolumeChart data={d} />}
-          </ChartCard>
-        </div>
-        <div className="bg-white">
-          <ChartCard icon={Users} title="Top Uploaders" subtitle="Staff ranked by submissions this period"
-            query={uploaders} exportName="top-uploaders" exportRows={(d) => d as any}>
-            {(d) => <UploadersList data={d} />}
-          </ChartCard>
-        </div>
+      <div className="grid grid-cols-1 gap-4 p-4 pr-8 xl:grid-cols-2">
+        <ChartCard icon={AlertTriangle} title="SLA Breach Rate" subtitle="% of completed approvals that exceeded SLA per month"
+          tone="danger" query={sla} exportName="sla-breach-rate" exportRows={(d) => d as any}>
+          {(d) => <SlaBreachChart data={d} />}
+        </ChartCard>
+        <ChartCard icon={PieIcon} title="Status Distribution" subtitle="Documents by status in the selected period"
+          tone="primary" query={status} exportName="status-distribution" exportRows={(d) => d as any}>
+          {(d) => <StatusDonut data={d} />}
+        </ChartCard>
+        <ChartCard icon={Clock} title="Approval Turnaround" subtitle="Average hours per workflow step vs SLA target"
+          tone="teal" query={turnaround} exportName="approval-turnaround" exportRows={(d) => d as any}>
+          {(d) => <TurnaroundChart data={d} />}
+        </ChartCard>
+        <ChartCard icon={Building2} title="Department Activity" subtitle="Approvals, pending and rejections by department"
+          tone="accent" query={dept} exportName="department-activity" exportRows={(d) => d as any}>
+          {(d) => <DepartmentChart data={d} />}
+        </ChartCard>
+        <ChartCard icon={FileBarChart} title="Document Volume by Type" subtitle="Monthly upload breakdown across categories"
+          tone="primary" query={volume} exportName="document-volume" exportRows={(d) => d as any}>
+          {(d) => <VolumeChart data={d} />}
+        </ChartCard>
+        <ChartCard icon={Users} title="Top Uploaders" subtitle="Staff ranked by submissions this period"
+          tone="success" query={uploaders} exportName="top-uploaders" exportRows={(d) => d as any}>
+          {(d) => <UploadersList data={d} />}
+        </ChartCard>
       </div>
     </div>
   );

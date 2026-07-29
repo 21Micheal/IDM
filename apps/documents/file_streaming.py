@@ -36,10 +36,12 @@ def signed_file_urls_enabled() -> bool:
 
 def user_is_involved_with_document(user: User, doc: Document) -> bool:
     """Access is scoped to **involvement**: a non-admin may only reach a workflow
-    document if they uploaded/own it, have ever been assigned a workflow task on
-    it, or hold an active (non-revoked, unexpired) share. Group permissions then
-    decide *what* they can do with documents they're involved in — they do NOT
-    grant blanket access to every document of a type."""
+    document if they uploaded/own it, currently hold an ACTIVE workflow task on
+    it, hold an active (non-revoked, unexpired) share, are a signer on an ad-hoc
+    signature request for it, or head the department it (or its uploader)
+    belongs to. Group permissions then decide *what* they can do with documents
+    they're involved in — they do NOT grant blanket access to every document of
+    a type."""
     if not user or not getattr(user, "is_authenticated", False):
         return False
     # Members of a "sees all documents" group are involved with everything.
@@ -47,10 +49,14 @@ def user_is_involved_with_document(user: User, doc: Document) -> bool:
         return True
     if doc.uploaded_by_id == user.id or getattr(doc, "owned_by_id", None) == user.id:
         return True
-    if WorkflowTask.objects.filter(
-        assigned_to=user,
-        workflow_instance__document_id=doc.id,
-    ).exists():
+    # ACTIVE task only — a WorkflowTask row persists (under a new status) after
+    # being actioned, so this must be status-filtered. Without it, an approver
+    # stays "involved" with — and able to reopen — a document forever after
+    # acting on it, which is exactly the stale-visibility bug seen on Forms.
+    # This also covers delegated tasks: if the user can action a task via delegation,
+    # they should be considered involved with the document.
+    from apps.accounts.delegation import tasks_visible_to_user
+    if tasks_visible_to_user(user).filter(workflow_instance__document_id=doc.id).exists():
         return True
     if DocumentShare.objects.filter(
         document=doc,
@@ -61,14 +67,49 @@ def user_is_involved_with_document(user: User, doc: Document) -> bool:
     ).exists():
         return True
     # A selected signer on an ad-hoc signature request for this document is
-    # involved (so they can open and sign it).
+    # involved only while their turn to sign is still PENDING — once they've
+    # signed or declined, that assignment is complete and must not keep
+    # granting access, mirroring the WorkflowTask status filter above.
     from apps.documents.models import SignatureRequestSigner
     if SignatureRequestSigner.objects.filter(
         request__document_id=doc.id,
         signer=user,
+        status=SignatureRequestSigner.Status.PENDING,
     ).exists():
         return True
+    # DEPARTMENT SCOPE: a department head (HOD) is involved with every document
+    # in the department(s) they head — mirrors DocumentViewSet.get_queryset's
+    # department-scope filter (both derive from Department.head via
+    # User.hod_department_ids), so list-level and object-level access agree.
+    # Checks the document's own department and its uploader's department, since
+    # not every document type sets `department` explicitly.
+    hod_department_ids = getattr(user, "hod_department_ids", None)
+    if hod_department_ids:
+        doc_department_id = str(getattr(doc, "department_id", None) or "")
+        uploader_department_id = str(getattr(doc.uploaded_by, "department_id", None) or "")
+        if doc_department_id in hod_department_ids or uploader_department_id in hod_department_ids:
+            return True
     return False
+
+
+def user_has_signed_document(user: User, doc: Document) -> bool:
+    """True if `user` has a completed (SIGNED) SignatureRequestSigner row on an
+    ad-hoc signature request for this document.
+
+    This is intentionally separate from — and broader than —
+    user_is_involved_with_document: it's a PERMANENT view-only grant that
+    survives the signer otherwise losing involvement once their signature is
+    resolved (see that function's PENDING-only signer check). It grants
+    nothing beyond viewing; download/edit/comment must still be gated
+    normally and are NOT extended by this helper."""
+    if not user or not getattr(user, "is_authenticated", False):
+        return False
+    from apps.documents.models import SignatureRequestSigner
+    return SignatureRequestSigner.objects.filter(
+        request__document_id=doc.id,
+        signer=user,
+        status=SignatureRequestSigner.Status.SIGNED,
+    ).exists()
 
 
 def user_can_view_document(user: User, doc: Document) -> bool:
@@ -80,8 +121,12 @@ def user_can_view_document(user: User, doc: Document) -> bool:
         return doc.uploaded_by_id == user.id or getattr(doc, "owned_by_id", None) == user.id
     if not str(getattr(doc, "document_type_id", None) or ""):
         return False
-    # Involvement is the sole gate for viewing a workflow document.
-    return user_is_involved_with_document(user, doc)
+    if user_is_involved_with_document(user, doc):
+        return True
+    # Permanent view-only carve-out: someone who completed signing this
+    # document keeps the ability to open it even after they otherwise drop
+    # out of "involvement" — mirrors "you can always see what you signed".
+    return user_has_signed_document(user, doc)
 
 
 def user_can_download_document(user: User, doc: Document) -> bool:

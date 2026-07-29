@@ -61,7 +61,12 @@ export default function WorkflowPage() {
 
   const TASK_NOTIFICATION_TYPES = new Set(["task_assigned", "task_sla_warning", "task_overdue"]);
   const taskAlertNotifications = (notifications ?? []).filter((n) => TASK_NOTIFICATION_TYPES.has(n.type));
-  const visibleTaskAlerts = taskAlertNotifications.filter((n) => !n.is_read).slice(0, 5);
+  // Filter task alerts to only show for tasks that are still in the user's active task list
+  // This prevents stale warnings for tasks that have already been actioned
+  const activeTaskIds = new Set((tasks ?? []).map((t) => t.id));
+  const visibleTaskAlerts = taskAlertNotifications
+    .filter((n) => !n.is_read && n.link && activeTaskIds.has(n.link.split("/").pop() || ""))
+    .slice(0, 5);
 
   const allTasks = tasks ?? [];
   const filterOptions = useMemo(() => buildWorkflowTaskFilterOptions(allTasks), [allTasks]);
@@ -138,8 +143,8 @@ export default function WorkflowPage() {
             )}
           </div>
 
-          <div className="grid grid-cols-1 gap-3 md:grid-cols-2 xl:grid-cols-6">
-            <div className="relative xl:col-span-2">
+          <div className="flex flex-wrap gap-2">
+            <div className="relative w-64">
               <Search className="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-[#5E6870]" />
               <input
                 type="search"
@@ -276,7 +281,7 @@ export default function WorkflowPage() {
                     <span>Uploader: <span className="font-semibold text-[#1F2933]">{uploaderName}</span></span>
                   )}
                   {task.is_delegated && task.delegated_from && (
-                    <span className="rounded bg-violet-100 px-1.5 py-0.5 font-semibold text-violet-800">
+                    <span className="rounded bg-[#DCEAF2] px-1.5 py-0.5 font-semibold text-[#287EAD]">
                       Delegated from {task.delegated_from.full_name || task.delegated_from.email}
                     </span>
                   )}

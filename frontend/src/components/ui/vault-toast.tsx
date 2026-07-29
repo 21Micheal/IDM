@@ -24,7 +24,6 @@ type Tone = "success" | "error" | "warning" | "info" | "default";
 const TONE_CONFIG: Record<
   Tone,
   {
-    rail: string;
     progress: string;
     iconBg: string;
     iconColor: string;
@@ -35,51 +34,46 @@ const TONE_CONFIG: Record<
   }
 > = {
   success: {
-    rail: "bg-[#16836B]",
     progress: "bg-[#16836B]",
     iconBg: "bg-[#E8F5F1]",
     iconColor: "text-[#16836B]",
-    border: "border-[#BFDCD3]",
+    border: "border-[#D4EAE7]",
     header: "text-[#16836B]",
     label: "Success",
     Icon: CheckCircle2,
   },
   error: {
-    rail: "bg-[#B42318]",
     progress: "bg-[#B42318]",
     iconBg: "bg-[#FCEEEE]",
     iconColor: "text-[#B42318]",
-    border: "border-[#E6B8B4]",
+    border: "border-[#F0D5D1]",
     header: "text-[#B42318]",
     label: "Action failed",
     Icon: XCircle,
   },
   warning: {
-    rail: "bg-[#A15C00]",
     progress: "bg-[#A15C00]",
     iconBg: "bg-[#FFF3DA]",
     iconColor: "text-[#A15C00]",
-    border: "border-[#E7C68E]",
+    border: "border-[#FDE8C4]",
     header: "text-[#A15C00]",
     label: "Attention",
     Icon: AlertTriangle,
   },
   info: {
-    rail: "bg-[#287EAD]",
     progress: "bg-[#287EAD]",
     iconBg: "bg-[#EEF6FB]",
     iconColor: "text-[#287EAD]",
-    border: "border-[#A7CDE3]",
+    border: "border-[#D4E9F4]",
     header: "text-[#287EAD]",
     label: "Notice",
     Icon: Info,
   },
   default: {
-    rail: "bg-[#5E6870]",
     progress: "bg-[#5E6870]",
     iconBg: "bg-[#F1F3F4]",
     iconColor: "text-[#3F474F]",
-    border: "border-[#C8CDD2]",
+    border: "border-[#E1E5E8]",
     header: "text-[#3F474F]",
     label: "Notification",
     Icon: ShieldCheck,
@@ -164,17 +158,13 @@ function VaultToastCard({
         "animate-in slide-in-from-right-4 fade-in-0 duration-300",
       )}
     >
-      {/* Tone rail */}
-      <div className={cn("w-1 shrink-0", cfg.rail)} />
-
       <div className="relative flex flex-1 flex-col">
         {/* Body */}
-        <div className="flex items-start gap-3 px-4 py-3.5 pb-4">
+        <div className="flex items-start gap-3 px-4 py-3 pb-3">
           <div
             className={cn(
-              "flex h-9 w-9 shrink-0 items-center justify-center border",
+              "flex h-9 w-9 shrink-0 items-center justify-center",
               cfg.iconBg,
-              cfg.border,
             )}
           >
             {loading ? (
@@ -185,18 +175,11 @@ function VaultToastCard({
           </div>
 
           <div className="min-w-0 flex-1">
-            <div className="mb-1 flex items-center gap-2">
-              <span className={cn("text-[11px] font-semibold uppercase tracking-wider", cfg.header)}>
-                {loading ? "Processing" : cfg.label}
-              </span>
-              <span className="h-1 w-1 rounded-full bg-[#C8CDD2]" />
-              <span className="text-[11px] font-medium text-[#7A858E]">DMS</span>
-            </div>
             <p className="text-sm font-semibold leading-snug text-[#1F2933]">
               {title}
             </p>
             {description && (
-              <p className="mt-1 text-[13px] leading-snug text-[#5E6870]">
+              <p className="mt-1 text-xs leading-snug text-[#5E6870]">
                 {description}
               </p>
             )}
@@ -207,7 +190,7 @@ function VaultToastCard({
                   action.onClick();
                   onDismiss();
                 }}
-                className="mt-3 inline-flex items-center border border-[#287EAD] bg-white px-2.5 py-1.5 text-xs font-semibold text-[#287EAD] transition-colors hover:bg-[#EEF6FB]"
+                className="mt-2 inline-flex items-center border border-[#287EAD] bg-white px-2.5 py-1 text-xs font-semibold text-[#287EAD] transition-colors hover:bg-[#EEF6FB]"
               >
                 {action.label}
               </button>
@@ -218,7 +201,7 @@ function VaultToastCard({
             type="button"
             onClick={onDismiss}
             aria-label="Dismiss notification"
-            className="-mr-1 -mt-1 flex h-7 w-7 shrink-0 items-center justify-center text-[#7A858E] opacity-0 transition-all hover:bg-[#F3F5F6] hover:text-[#1F2933] group-hover:opacity-100"
+            className="flex h-6 w-6 shrink-0 items-center justify-center text-[#94A3B8] opacity-70 transition-all hover:opacity-100 hover:text-[#1F2933]"
           >
             <X className="h-4 w-4" />
           </button>

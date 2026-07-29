@@ -121,6 +121,11 @@ class SignatureRequestViewSet(viewsets.ModelViewSet):
                 signers__status=SignatureRequestSigner.Status.PENDING,
                 status=SignatureRequest.Status.PENDING,
             ).distinct()
+        if box == "signed":
+            return qs.filter(
+                signers__signer=user,
+                signers__status=SignatureRequestSigner.Status.SIGNED,
+            ).distinct()
         return qs.filter(Q(requested_by=user) | Q(signers__signer=user)).distinct()
 
     @action(detail=False, methods=["get"])

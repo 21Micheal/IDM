@@ -168,7 +168,7 @@ export default function FormDetailPage() {
 
   const { data: myTasks } = useQuery({
     queryKey: ["workflow", "my-tasks"],
-    queryFn: () => workflowAPI.myTasks().then((r) => r.data),
+    queryFn: () => workflowAPI.myTasks().then((r) => r.data.results ?? r.data),
     enabled: !!id,
     ...QUERY_SHORT_STALE,
   });

@@ -6,11 +6,11 @@ import { useSessionUiStore } from "@/store/sessionUiStore";
 import { authAPI } from "@/services/api";
 import { VaultToaster } from "@/components/ui/vault-toast";
 import { Loader2 } from "lucide-react";
-
-const SessionDialogs = lazy(() => import("@/components/shared/SessionDialogs"));
+import SessionDialogs from "@/components/shared/SessionDialogs";
 
 const Layout = lazy(() => import("@/components/shared/Layout"));
 const LoginPage = lazy(() => import("@/pages/LoginPage"));
+const PasswordResetConfirmPage = lazy(() => import("@/pages/PasswordResetConfirmPage"));
 const ForceChangePasswordPage = lazy(() => import("@/pages/ForceChangePasswordPage"));
 const DashboardPage = lazy(() => import("@/pages/DashboardPage"));
 const AnalyticsDashboardPage = lazy(() => import("@/pages/AnalyticsDashboard"));
@@ -46,7 +46,8 @@ const FormDetailPage = lazy(() => import("@/pages/FormDetailPage"));
 
 function RequireAuth({ children }: { children: React.ReactNode }) {
   const isAuthenticated = useAuthStore((s) => s.isAuthenticated);
-  return isAuthenticated ? <>{children}</> : <Navigate to="/login" replace />;
+  const location = useLocation();
+  return isAuthenticated ? <>{children}</> : <Navigate to="/login" state={{ from: location.pathname + location.search }} replace />;
 }
 
 function AuthBootstrap({ children }: { children: React.ReactNode }) {
@@ -360,6 +361,7 @@ export default function App() {
           <Routes>
             {/* Public */}
             <Route path="/login" element={<LoginPage />} />
+            <Route path="/reset-password" element={<PasswordResetConfirmPage />} />
 
             {/* First-login password wall — requires auth but bypasses the layout */}
             <Route
@@ -438,9 +440,7 @@ export default function App() {
             <Route path="*" element={<Navigate to="/" replace />} />
           </Routes>
         </Suspense>
-        <Suspense fallback={null}>
-          <SessionDialogs />
-        </Suspense>
+        <SessionDialogs />
         <VaultToaster />
       </>
     </AuthBootstrap>
