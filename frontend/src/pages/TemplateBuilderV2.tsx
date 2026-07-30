@@ -39,7 +39,7 @@ import {
   defaultDropAnimationSideEffects,
   type DragEndEvent, type DragStartEvent,
 } from "@dnd-kit/core";
-import { useForm, Controller, type UseFormRegister, type FieldErrors } from "react-hook-form";
+import { useForm, type UseFormRegister, type FieldErrors } from "react-hook-form";
 import { toast } from "sonner";
 import {
   ArrowLeft, Save, Undo2, Redo2, Eye, LayoutGrid, Settings,
@@ -54,7 +54,6 @@ import {
 import { cn } from "@/lib/utils";
 import { documentTypesAPI, groupsAPI, workflowAPI } from "@/services/api";
 import { FORMULA_OPTIONS } from "@/components/templates/formulas";
-import CustomListbox from "@/components/ui/CustomListbox";
 import { CURRENCY_CODES, currencySymbolFor } from "@/lib/currencies";
 import JournalPayloadModal from "@/components/templates/JournalPayloadModal";
 
@@ -369,11 +368,6 @@ export interface SunSystemsUi {
   currencyConst?: string;
   dateFormat?: string;
   validateBalance?: boolean;
-  /** Default Analysis Code 1–10 sent on every ledger line unless a column/line
-   * binding overrides that slot. Unset slots default to "#" (SunSystems
-   * wildcard) so accounts with required analysis dimensions never reject
-   * for a missing code. Keyed "1".."10". */
-  analysisDefaults?: Record<string, string>;
   supplierCode?: string;
   purchaseTransactionType?: string;
   invoiceAddressCode?: string;
@@ -642,13 +636,9 @@ function CreateDocTypeQuickModal({
           </div>
           <div className="space-y-1.5">
             <label className="text-xs font-semibold uppercase tracking-wider text-[#5E6870]">Document title</label>
-            <CustomListbox
-              value={titleField}
-              onChange={(value) => setTitleField(value)}
-              options={QUICK_TITLE_FIELD_OPTIONS.map((o) => ({ value: o.key, label: o.label }))}
-              buttonClassName={iCls}
-              ariaLabel="Document title"
-            />
+            <select value={titleField} onChange={(e) => setTitleField(e.target.value)} className={iCls}>
+              {QUICK_TITLE_FIELD_OPTIONS.map((o) => <option key={o.key} value={o.key}>{o.label}</option>)}
+            </select>
             <p className="text-[10px] text-[#8C969E]">Which field's value names documents of this type</p>
           </div>
           <div className="space-y-1.5">
@@ -961,8 +951,11 @@ function compileSunSystems(template: Template): SunSystemsConfig | undefined {
       if (!amountCol) continue;
       const retirement = amountCol.sunsystems?.retirement;
       if (retirement?.enabled) {
-        const descCol = cols.find((c) => c.sunsystems?.role === "description"); // ← add this
-
+        // Imprest/retirement reconciliation: post a fixed set of lines based
+        // on comparing SUM(this column) against an issued/requested amount,
+        // instead of one line per expense row. See RetirementConfig's
+        // docstring and apps/sunsystems/mapping.py's _expand_retirement_lines,
+        // which interprets this exact shape at posting time.
         const toScenario = (s: RetirementScenario) => ({
           lines: s.lines.map((l) => ({
             account: { const: l.account ?? "" },
@@ -974,11 +967,7 @@ function compileSunSystems(template: Template): SunSystemsConfig | undefined {
           _fieldKey: f.key,
           retirement: {
             issued_amount: retirement.issuedAmountField ? { field: retirement.issuedAmountField } : { const: "0" },
-            spent_amount: {
-              table: f.key,
-              column: amountCol.key,
-              ...(descCol ? { description_column: descCol.key } : {}), // ← add this
-            },
+            spent_amount: { table: f.key, column: amountCol.key },
             scenarios: {
               exact: toScenario(retirement.exact),
               under: toScenario(retirement.under),
@@ -1016,13 +1005,6 @@ function compileSunSystems(template: Template): SunSystemsConfig | undefined {
   if (ui.postingType) parameters.PostingType = ui.postingType;
   for (const p of ui.parameters ?? []) if (p.name) parameters[p.name] = p.value;
 
-  const analysisDefaultsUi = ui.analysisDefaults ?? {};
-  const analysisDefaults: Record<string, unknown> = {};
-  for (let n = 1; n <= 10; n++) {
-    const v = analysisDefaultsUi[String(n)];
-    analysisDefaults[String(n)] = { const: v && v.trim() ? v.trim() : "#" };
-  }
-
   const journalStageBase = {
     component: "Journal",
     method: "Import",
@@ -1035,7 +1017,6 @@ function compileSunSystems(template: Template): SunSystemsConfig | undefined {
     ...(referenceSpec ? { reference: referenceSpec } : {}),
     ...(dateSpec ? { date: dateSpec } : {}),
     validate_balance: ui.validateBalance !== false,
-    analysis_defaults: analysisDefaults,
     lines,
   };
   const configuredStages = (ui.journalStages ?? [])
@@ -1932,16 +1913,12 @@ function RetirementConfigEditor({ column, formFields, onChange }: {
           <div className="space-y-3">
             <div>
               <span className="text-[11px] font-semibold uppercase tracking-wider text-[#5E6870]">Issued / requested amount field</span>
-              <CustomListbox
-                value={retirement.issuedAmountField ?? ""}
-                onChange={(value) => onChange({ ...retirement, issuedAmountField: value || undefined })}
-                options={[
-                  { value: "", label: "— choose a field —" },
-                  ...amountFieldOptions.map((f) => ({ value: f.key ?? "", label: `${f.label} (${f.key})` })),
-                ]}
-                buttonClassName={cn(iCls, "mt-1", !retirement.issuedAmountField && amountFieldOptions.length > 0 && "border-amber-400")}
-                ariaLabel="Issued / requested amount field"
-              />
+              <select className={cn(iCls, "mt-1", !retirement.issuedAmountField && amountFieldOptions.length > 0 && "border-amber-400")}
+                      value={retirement.issuedAmountField ?? ""}
+                      onChange={(e) => onChange({ ...retirement, issuedAmountField: e.target.value || undefined })}>
+                <option value="">— choose a field —</option>
+                {amountFieldOptions.map((f) => <option key={f.id} value={f.key}>{f.label} ({f.key})</option>)}
+              </select>
               {amountFieldOptions.length === 0 ? (
                 <p className="mt-1 text-[10px] text-amber-600">Add a Number or Currency field elsewhere on the form to hold the issued/requested amount.</p>
               ) : !retirement.issuedAmountField && (
@@ -2002,23 +1979,14 @@ function RetirementScenarioEditor({ label, hint, scenario, onChange }: {
             <input className={cn(iCls, "font-mono")} value={line.account}
                    onChange={(e) => updateLine(idx, { account: e.target.value })}
                    placeholder="Account code" />
-            <CustomListbox
-              value={line.dc}
-              onChange={(value) => updateLine(idx, { dc: value as "D" | "C" })}
-              options={[
-                { value: "D", label: "Debit" },
-                { value: "C", label: "Credit" },
-              ]}
-              buttonClassName={iCls}
-              ariaLabel="Debit / Credit"
-            />
-            <CustomListbox
-              value={line.amountSource}
-              onChange={(value) => updateLine(idx, { amountSource: value as RetirementAmountSource })}
-              options={AMOUNT_SOURCE_OPTIONS.map((o) => ({ value: o.value, label: o.label }))}
-              buttonClassName={iCls}
-              ariaLabel="Amount source"
-            />
+            <select className={iCls} value={line.dc} onChange={(e) => updateLine(idx, { dc: e.target.value as "D" | "C" })}>
+              <option value="D">Debit</option>
+              <option value="C">Credit</option>
+            </select>
+            <select className={iCls} value={line.amountSource}
+                    onChange={(e) => updateLine(idx, { amountSource: e.target.value as RetirementAmountSource })}>
+              {AMOUNT_SOURCE_OPTIONS.map((o) => <option key={o.value} value={o.value}>{o.label}</option>)}
+            </select>
             <button type="button" onClick={() => removeLine(idx)} title="Remove line"
                     className="p-1 text-[#5E6870] hover:bg-red-50 hover:text-red-600">
               <Trash2 className="h-3.5 w-3.5" />
@@ -2112,13 +2080,11 @@ function ColumnConfigModal({
                 )}
               </Row>
               <Row label="Type">
-                <CustomListbox
-                  value={draft.type ?? "text"}
-                  onChange={(value) => set({ type: value as TableColumnType })}
-                  options={COL_TYPES.map((t) => ({ value: t.value, label: t.label }))}
-                  buttonClassName={iCls}
-                  ariaLabel="Column type"
-                />
+                <select value={draft.type ?? "text"}
+                        onChange={(e) => set({ type: e.target.value as TableColumnType })}
+                        className={iCls}>
+                  {COL_TYPES.map((t) => <option key={t.value} value={t.value}>{t.label}</option>)}
+                </select>
               </Row>
               <Row label="Mandatory">
                 <ToggleYesNo value={!!draft.required} onChange={(v) => set({ required: v })} />
@@ -2131,16 +2097,10 @@ function ColumnConfigModal({
               </Row>
               <Row label="Default value">
                 {isDropdown ? (
-                  <CustomListbox
-                    value={draft.defaultValue ?? ""}
-                    onChange={(value) => set({ defaultValue: value })}
-                    options={[
-                      { value: "", label: "—" },
-                      ...(draft.options ?? []).map((o) => ({ value: o, label: o })),
-                    ]}
-                    buttonClassName={iCls}
-                    ariaLabel="Default value"
-                  />
+                  <select className={iCls} value={draft.defaultValue ?? ""} onChange={(e) => set({ defaultValue: e.target.value })}>
+                    <option value="">—</option>
+                    {(draft.options ?? []).map((o) => <option key={o} value={o}>{o}</option>)}
+                  </select>
                 ) : (
                   <input className={iCls} value={draft.defaultValue ?? ""} onChange={(e) => set({ defaultValue: e.target.value })} />
                 )}
@@ -2158,13 +2118,13 @@ function ColumnConfigModal({
                 </Row>
               )}
               <Row label="SunSystems role">
-                <CustomListbox
+                <select
+                  className={iCls}
                   value={draft.sunsystems?.role ?? ""}
-                  onChange={(value) => set({ sunsystems: { ...(draft.sunsystems ?? {}), role: value || undefined } })}
-                  options={FINANCE_COLUMN_ROLES.map((o) => ({ value: o.value, label: o.label }))}
-                  buttonClassName={iCls}
-                  ariaLabel="SunSystems role"
-                />
+                  onChange={(e) => set({ sunsystems: { ...(draft.sunsystems ?? {}), role: e.target.value || undefined } })}
+                >
+                  {FINANCE_COLUMN_ROLES.map((o) => <option key={o.value} value={o.value}>{o.label}</option>)}
+                </select>
               </Row>
               {draft.sunsystems?.role === "analysis" && (
                 <Row label="Analysis code number (1–10)">
@@ -2180,16 +2140,11 @@ function ColumnConfigModal({
                 <>
                   <div className="grid grid-cols-2 gap-3">
                     <Row label="Debit / Credit">
-                      <CustomListbox
-                        value={draft.sunsystems?.dc ?? "D"}
-                        onChange={(value) => set({ sunsystems: { ...(draft.sunsystems ?? {}), dc: value as "D" | "C" } })}
-                        options={[
-                          { value: "D", label: "Debit" },
-                          { value: "C", label: "Credit" },
-                        ]}
-                        buttonClassName={iCls}
-                        ariaLabel="Debit / Credit"
-                      />
+                      <select className={iCls} value={draft.sunsystems?.dc ?? "D"}
+                              onChange={(e) => set({ sunsystems: { ...(draft.sunsystems ?? {}), dc: e.target.value as "D" | "C" } })}>
+                        <option value="D">Debit</option>
+                        <option value="C">Credit</option>
+                      </select>
                     </Row>
                     <Row label="Default account" hint="Used unless a separate 'Account code' column is set on this table.">
                       <input className={cn(iCls, "font-mono")} value={draft.sunsystems?.account ?? ""}
@@ -2245,16 +2200,13 @@ function ColumnConfigModal({
               {draft.type === "currency" && (
                 <>
                   <Row label="Currency symbol source">
-                    <CustomListbox
-                      value={draft.currencyFromColumn ?? ""}
-                      onChange={(value) => set({ currencyFromColumn: value || undefined })}
-                      options={[
-                        { value: "", label: "Fixed symbol" },
-                        ...currencySourceColumns.map((c) => ({ value: c.key, label: `From column: ${c.label} (${c.key})` })),
-                      ]}
-                      buttonClassName={iCls}
-                      ariaLabel="Currency symbol source"
-                    />
+                    <select className={iCls} value={draft.currencyFromColumn ?? ""}
+                            onChange={(e) => set({ currencyFromColumn: e.target.value || undefined })}>
+                      <option value="">Fixed symbol</option>
+                      {currencySourceColumns.map((c) => (
+                        <option key={c.id} value={c.key}>From column: {c.label} ({c.key})</option>
+                      ))}
+                    </select>
                   </Row>
                   <Row label={draft.currencyFromColumn ? "Fallback symbol" : "Currency symbol"}>
                     <input className={iCls} value={draft.currencySymbol ?? "KSh"} onChange={(e) => set({ currencySymbol: e.target.value })} />
@@ -2272,13 +2224,9 @@ function ColumnConfigModal({
               )}
               {(draft.type === "reference" || draft.type === "user") && (
                 <Row label="Reference source">
-                  <CustomListbox
-                    value={draft.referenceSource ?? (draft.type === "user" ? "users" : "documents")}
-                    onChange={(value) => set({ referenceSource: value })}
-                    options={REFERENCE_SOURCE_OPTIONS.map((o) => ({ value: o.value, label: o.label }))}
-                    buttonClassName={iCls}
-                    ariaLabel="Reference source"
-                  />
+                  <select className={iCls} value={draft.referenceSource ?? (draft.type === "user" ? "users" : "documents")} onChange={(e) => set({ referenceSource: e.target.value })}>
+                    {REFERENCE_SOURCE_OPTIONS.map((o) => <option key={o.value} value={o.value}>{o.label}</option>)}
+                  </select>
                 </Row>
               )}
               <VisibilityEditor
@@ -2454,28 +2402,18 @@ function FinanceBindingFields({ field, onUpdate }: {
           ? "A table becomes a journal line source when one of its columns is marked Line amount."
           : "How this field posts to the SunSystems ledger on approval."}
       >
-        <CustomListbox
-          value={role}
-          onChange={(value) => setB({ role: value || undefined })}
-          options={journalOptions.map((o) => ({ value: o.value, label: o.label }))}
-          buttonClassName={inputCls}
-          ariaLabel="Journal role"
-        />
+        <select className={inputCls} value={role} onChange={(e) => setB({ role: e.target.value || undefined })}>
+          {journalOptions.map((o) => <option key={o.value} value={o.value}>{o.label}</option>)}
+        </select>
       </InspectorRow>
       {showAcct && (
         <>
           <div className="grid grid-cols-2 gap-3">
             <InspectorRow label="Debit / Credit">
-              <CustomListbox
-                value={binding.dc ?? "D"}
-                onChange={(value) => setB({ dc: value as "D" | "C" })}
-                options={[
-                  { value: "D", label: "Debit" },
-                  { value: "C", label: "Credit" },
-                ]}
-                buttonClassName={inputCls}
-                ariaLabel="Debit / Credit"
-              />
+              <select className={inputCls} value={binding.dc ?? "D"} onChange={(e) => setB({ dc: e.target.value as "D" | "C" })}>
+                <option value="D">Debit</option>
+                <option value="C">Credit</option>
+              </select>
             </InspectorRow>
             <InspectorRow label={isTable ? "Default account" : "Account code"} hint={isTable ? "Used unless a column is 'Account code'." : undefined}>
               <input className={cn(inputCls, "font-mono")} value={binding.account ?? ""} onChange={(e) => setB({ account: e.target.value })} placeholder="e.g. 71001" />
@@ -2497,16 +2435,12 @@ function FinanceBindingFields({ field, onUpdate }: {
                     placeholder="e.g. 10101 (leave blank to skip)" />
                 </InspectorRow>
                 <InspectorRow label="Counter D/C">
-                  <CustomListbox
+                  <select className={inputCls}
                     value={binding.counterDc ?? (binding.dc === "C" ? "D" : "C")}
-                    onChange={(value) => setB({ counterDc: value as "D" | "C" })}
-                    options={[
-                      { value: "D", label: "Debit" },
-                      { value: "C", label: "Credit" },
-                    ]}
-                    buttonClassName={inputCls}
-                    ariaLabel="Counter D/C"
-                  />
+                    onChange={(e) => setB({ counterDc: e.target.value as "D" | "C" })}>
+                    <option value="D">Debit</option>
+                    <option value="C">Credit</option>
+                  </select>
                 </InspectorRow>
               </div>
             </div>
@@ -2515,13 +2449,9 @@ function FinanceBindingFields({ field, onUpdate }: {
       )}
       {!isTable && (
         <InspectorRow label="Budget role" hint="Independent of the journal role — the same field can do both.">
-          <CustomListbox
-            value={binding.budgetRole ?? ""}
-            onChange={(value) => setB({ budgetRole: value || undefined })}
-            options={FINANCE_BUDGET_ROLES}
-            buttonClassName={inputCls}
-            ariaLabel="Budget role"
-          />
+          <select className={inputCls} value={binding.budgetRole ?? ""} onChange={(e) => setB({ budgetRole: e.target.value || undefined })}>
+            {FINANCE_BUDGET_ROLES.map((o) => <option key={o.value} value={o.value}>{o.label}</option>)}
+          </select>
         </InspectorRow>
       )}
     </div>
@@ -2589,21 +2519,16 @@ function RuleGroupEditor({ group, sources, processSteps, onChange }: {
       {group.conditions.map((c, i) => (
         <div key={i} className="space-y-1.5 border border-[#E5E8EB] bg-[#FAFBFC] p-2">
           <div className="flex items-center gap-1.5">
-            <CustomListbox
-              value={c.source}
-              onChange={(value) => {
-                const source = value as ConditionSource;
-                updateCond(i, source === "process_step"
-                  ? { source, fieldKey: undefined, operator: "equals", value: processSteps[0]?.value ?? "" }
-                  : { source, fieldKey: sources[0]?.key ?? "", value: "" });
-              }}
-              options={[
-                { value: "field", label: "Form field" },
-                { value: "process_step", label: "Process step" },
-              ]}
-              buttonClassName={cn(inputCls, "h-8 flex-1")}
-              ariaLabel="Condition source"
-            />
+            <select className={cn(inputCls, "h-8 flex-1")} value={c.source}
+                    onChange={(e) => {
+                      const source = e.target.value as ConditionSource;
+                      updateCond(i, source === "process_step"
+                        ? { source, fieldKey: undefined, operator: "equals", value: processSteps[0]?.value ?? "" }
+                        : { source, fieldKey: sources[0]?.key ?? "", value: "" });
+                    }}>
+              <option value="field">Form field</option>
+              <option value="process_step">Process step</option>
+            </select>
             <button type="button" onClick={() => removeCond(i)} title="Remove condition"
                     className="p-1 text-[#8C969E] hover:bg-red-50 hover:text-red-500">
               <X className="h-3.5 w-3.5" />
@@ -2611,47 +2536,28 @@ function RuleGroupEditor({ group, sources, processSteps, onChange }: {
           </div>
 
           {c.source === "field" && (
-            <CustomListbox
-              value={c.fieldKey ?? ""}
-              onChange={(value) => updateCond(i, { fieldKey: value })}
-              options={[
-                { value: "", label: "— choose a field —" },
-                ...sources.map((s) => ({ value: s.key, label: `${s.label} (${s.key})` })),
-              ]}
-              buttonClassName={cn(inputCls, "h-8")}
-              ariaLabel="Form field"
-            />
+            <select className={cn(inputCls, "h-8")} value={c.fieldKey ?? ""}
+                    onChange={(e) => updateCond(i, { fieldKey: e.target.value })}>
+              <option value="">— choose a field —</option>
+              {sources.map((s) => <option key={s.key} value={s.key}>{s.label} ({s.key})</option>)}
+            </select>
           )}
 
           <div className="grid grid-cols-2 gap-1.5">
-            <CustomListbox
-              value={c.operator}
-              onChange={(value) => updateCond(i, { operator: value as ConditionOperator })}
-              options={[
-                { value: "equals", label: "equals" },
-                { value: "not_equals", label: "not equals" },
-                ...(c.source === "field"
-                  ? [
-                      { value: "is_empty", label: "is empty" },
-                      { value: "is_not_empty", label: "is not empty" },
-                    ]
-                  : []),
-              ]}
-              buttonClassName={cn(inputCls, "h-8")}
-              ariaLabel="Condition operator"
-            />
+            <select className={cn(inputCls, "h-8")} value={c.operator}
+                    onChange={(e) => updateCond(i, { operator: e.target.value as ConditionOperator })}>
+              <option value="equals">equals</option>
+              <option value="not_equals">not equals</option>
+              {c.source === "field" && <option value="is_empty">is empty</option>}
+              {c.source === "field" && <option value="is_not_empty">is not empty</option>}
+            </select>
             {needsValue(c.operator) && (
               c.source === "process_step" ? (
-                <CustomListbox
-                  value={c.value ?? ""}
-                  onChange={(value) => updateCond(i, { value })}
-                  options={[
-                    { value: "", label: "— choose a step —" },
-                    ...processSteps.map((s) => ({ value: s.value, label: s.label })),
-                  ]}
-                  buttonClassName={cn(inputCls, "h-8")}
-                  ariaLabel="Process step"
-                />
+                <select className={cn(inputCls, "h-8")} value={c.value ?? ""}
+                        onChange={(e) => updateCond(i, { value: e.target.value })}>
+                  <option value="">— choose a step —</option>
+                  {processSteps.map((s) => <option key={s.value} value={s.value}>{s.label}</option>)}
+                </select>
               ) : (
                 <input className={cn(inputCls, "h-8")} value={c.value ?? ""}
                        onChange={(e) => updateCond(i, { value: e.target.value })} placeholder="Value" />
@@ -2726,18 +2632,12 @@ function VisibilityEditor({ value, sources, onChange, subject, groupOptions, pro
       }
     >
       <div className="space-y-2 border border-[#C8CDD2] bg-white p-2.5">
-        <CustomListbox
-          value={mode}
-          onChange={(value) => setMode(value as VisibilityMode)}
-          options={[
-            { value: "visible", label: "Always visible" },
-            { value: "hidden", label: "Always hidden" },
-            { value: "conditional", label: "Show only when…" },
-            ...(allowsGroups ? [{ value: "groups", label: "Visible only to groups…" }] : []),
-          ]}
-          buttonClassName={inputCls}
-          ariaLabel="Visibility mode"
-        />
+        <select className={inputCls} value={mode} onChange={(e) => setMode(e.target.value as VisibilityMode)}>
+          <option value="visible">Always visible</option>
+          <option value="hidden">Always hidden</option>
+          <option value="conditional">Show only when…</option>
+          {allowsGroups && <option value="groups">Visible only to groups…</option>}
+        </select>
         {mode === "groups" && allowsGroups && (
           <div className="space-y-1">
             {groupOptions!.length === 0 && (
@@ -2808,17 +2708,11 @@ function EditabilityEditor({ value, sources, onChange, subject, processSteps = [
       }
     >
       <div className="space-y-2 border border-[#C8CDD2] bg-white p-2.5">
-        <CustomListbox
-          value={mode}
-          onChange={(value) => setMode(value as EditabilityMode)}
-          options={[
-            { value: "editable", label: "Always editable" },
-            { value: "readonly", label: "Always read-only" },
-            { value: "conditional", label: "Editable only when…" },
-          ]}
-          buttonClassName={inputCls}
-          ariaLabel="Editability mode"
-        />
+        <select className={inputCls} value={mode} onChange={(e) => setMode(e.target.value as EditabilityMode)}>
+          <option value="editable">Always editable</option>
+          <option value="readonly">Always read-only</option>
+          <option value="conditional">Editable only when…</option>
+        </select>
         {mode === "conditional" && rule && (
           <RuleGroupEditor group={rule} sources={sources} processSteps={processSteps}
             onChange={(g) => onChange({ editableWhen: g })} />
@@ -2840,7 +2734,8 @@ function CalcFormulaEditor({ field, siblings, onUpdate }: {
 }) {
   const calc = field.calc ?? { expression: "" };
   const exprRef = useRef<HTMLTextAreaElement>(null);
-  const keyedSiblings = siblings.filter((s) => s.key);
+  const keyedSiblings = siblings.filter((s) => s.key && s.type !== "table");
+  const tableSiblings = siblings.filter((s) => s.key && s.type === "table");
 
   const insertToken = (key: string) => {
     const el = exprRef.current;
@@ -2861,14 +2756,14 @@ function CalcFormulaEditor({ field, siblings, onUpdate }: {
   return (
     <InspectorRow
       label="Formula"
-      hint="Arithmetic (+ - * / ( )), comparisons (> < >= <= == !=), and IF(condition, if_true, if_false) — e.g. IF(status==&quot;Approved&quot;,&quot;Ready&quot;,&quot;Pending&quot;). ROUND()/ABS()/MIN()/MAX() work on numbers. This exact formula re-runs authoritatively on the server at submit time, so the stored value can't be spoofed from the browser."
+      hint="Arithmetic (+ - * / ( )), comparisons (> < >= <= == !=), and IF(condition, if_true, if_false) — e.g. IF(status==&quot;Approved&quot;,&quot;Ready&quot;,&quot;Pending&quot;). ROUND()/ABS()/MIN()/MAX() work on numbers. SUM()/AVG()/COUNT()/COLMIN()/COLMAX() total a table elsewhere on the form, e.g. SUM(expenses.amount). A bare table.column reference (or just the column ID on its own, e.g. amount) pulls that column's value straight from its first row, the same way a table column can already pull in a top-level field's value. This exact formula re-runs authoritatively on the server at submit time, so the stored value can't be spoofed from the browser."
     >
       <div className="space-y-2 border border-[#C8CDD2] bg-white p-2.5">
         <textarea
           ref={exprRef}
           value={calc.expression}
           onChange={(e) => onUpdate({ calc: { ...calc, expression: e.target.value } })}
-          placeholder="e.g. total_days * daily_rate"
+          placeholder="e.g. total_days * daily_rate, or SUM(expenses.amount)"
           rows={2}
           className={cn(inputCls, "h-auto min-h-[52px] py-2 font-mono resize-none")}
         />
@@ -2876,16 +2771,57 @@ function CalcFormulaEditor({ field, siblings, onUpdate }: {
                 className="inline-flex items-center gap-1 border border-[#287EAD]/40 bg-[#EEF6FB] px-2 py-1 font-mono text-[10px] font-semibold text-[#287EAD] hover:bg-[#287EAD] hover:text-white">
           + Insert IF(condition, …)
         </button>
-        {keyedSiblings.length > 0 ? (
-          <div className="flex flex-wrap gap-1">
-            {keyedSiblings.map((s) => (
-              <button key={s.id} type="button" onClick={() => insertToken(s.key)} title={`Insert ${s.key}`}
-                      className="border border-[#C8CDD2] bg-[#F6F7F8] px-1.5 py-0.5 font-mono text-[10px] text-[#287EAD] hover:border-[#287EAD] hover:bg-[#EEF6FB]">
-                {s.key}
-              </button>
-            ))}
+        {keyedSiblings.length > 0 && (
+          <div className="space-y-1">
+            <span className="text-[10px] font-semibold uppercase tracking-wider text-[#5E6870]">Other fields</span>
+            <div className="flex flex-wrap gap-1">
+              {keyedSiblings.map((s) => (
+                <button key={s.id} type="button" onClick={() => insertToken(s.key)} title={`Insert ${s.key}`}
+                        className="border border-[#C8CDD2] bg-[#F6F7F8] px-1.5 py-0.5 font-mono text-[10px] text-[#287EAD] hover:border-[#287EAD] hover:bg-[#EEF6FB]">
+                  {s.key}
+                </button>
+              ))}
+            </div>
           </div>
-        ) : (
+        )}
+        {tableSiblings.map((t) => {
+          const numericCols = (t.columns ?? []).filter((c) => c.key && (c.type === "number" || c.type === "currency"));
+          const allCols = (t.columns ?? []).filter((c) => c.key);
+          if (allCols.length === 0) return null;
+          return (
+            <div key={t.id} className="space-y-1.5">
+              {numericCols.length > 0 && (
+                <div className="space-y-1">
+                  <span className="text-[10px] font-semibold uppercase tracking-wider text-[#5E6870]">"{t.label}" table totals</span>
+                  <div className="flex flex-wrap gap-1">
+                    {numericCols.map((c) => (
+                      <span key={c.id} className="inline-flex overflow-hidden border border-[#C8CDD2]">
+                        {(["SUM", "AVG", "COUNT"] as const).map((fn) => (
+                          <button key={fn} type="button" onClick={() => insertToken(`${fn}(${t.key}.${c.key})`)} title={`Insert ${fn}(${t.key}.${c.key}) — computed across every row of "${t.label}"`}
+                                  className="border-r border-[#C8CDD2] bg-[#F6F7F8] px-1.5 py-0.5 font-mono text-[10px] text-[#5E6870] last:border-r-0 hover:bg-[#EEF6FB] hover:text-[#287EAD]">
+                            {fn}({t.key}.{c.key})
+                          </button>
+                        ))}
+                      </span>
+                    ))}
+                  </div>
+                </div>
+              )}
+              <div className="space-y-1">
+                <span className="text-[10px] font-semibold uppercase tracking-wider text-[#5E6870]">"{t.label}" first row</span>
+                <div className="flex flex-wrap gap-1">
+                  {allCols.map((c) => (
+                    <button key={c.id} type="button" onClick={() => insertToken(`${t.key}.${c.key}`)} title={`Insert ${t.key}.${c.key} — that column's own value from row 1 of "${t.label}"`}
+                            className="border border-teal-200 bg-teal-50 px-1.5 py-0.5 font-mono text-[10px] text-teal-700 hover:border-teal-400">
+                      {t.key}.{c.key}
+                    </button>
+                  ))}
+                </div>
+              </div>
+            </div>
+          );
+        })}
+        {keyedSiblings.length === 0 && tableSiblings.length === 0 && (
           <p className="text-[10px] text-amber-600">Add other fields to this form first — a formula needs something to reference.</p>
         )}
         {showDecimals && (
@@ -3024,24 +2960,16 @@ function FieldEditor({ field, onUpdate, allFields, processSteps }: {
           )}
           {(field.type === "reference" || field.type === "user") && (
             <InspectorRow label="Reference source">
-              <CustomListbox
-                value={field.referenceSource ?? (field.type === "user" ? "users" : "documents")}
-                onChange={(value) => onUpdate({ referenceSource: value })}
-                options={REFERENCE_SOURCE_OPTIONS.map((o) => ({ value: o.value, label: o.label }))}
-                buttonClassName={inputCls}
-                ariaLabel="Reference source"
-              />
+              <select className={inputCls} value={field.referenceSource ?? (field.type === "user" ? "users" : "documents")} onChange={(e) => onUpdate({ referenceSource: e.target.value })}>
+                {REFERENCE_SOURCE_OPTIONS.map((o) => <option key={o.value} value={o.value}>{o.label}</option>)}
+              </select>
             </InspectorRow>
           )}
           {FORMULA_FIELD_TYPES.has(field.type) && (
             <InspectorRow label="Auto-fill" hint="Fill this field automatically — the user won't type it.">
-              <CustomListbox
-                value={field.formula ?? ""}
-                onChange={(value) => onUpdate({ formula: value || undefined })}
-                options={FORMULA_OPTIONS.map((o) => ({ value: o.value, label: o.label }))}
-                buttonClassName={inputCls}
-                ariaLabel="Auto-fill formula"
-              />
+              <select className={inputCls} value={field.formula ?? ""} onChange={(e) => onUpdate({ formula: e.target.value || undefined })}>
+                {FORMULA_OPTIONS.map((o) => <option key={o.value} value={o.value}>{o.label}</option>)}
+              </select>
             </InspectorRow>
           )}
           {isCalculated && (
@@ -3075,16 +3003,14 @@ function FieldEditor({ field, onUpdate, allFields, processSteps }: {
                 : "Fixed symbol shown before the amount."}
             >
               <div className="space-y-2">
-                <CustomListbox
-                  value={field.currencyFromField ?? ""}
-                  onChange={(value) => onUpdate({ currencyFromField: value || undefined })}
-                  options={[
-                    { value: "", label: "Fixed symbol" },
-                    ...currencySourceSiblings.map((s) => ({ value: s.key, label: `From field: ${s.label} (${s.key})` })),
-                  ]}
-                  buttonClassName={inputCls}
-                  ariaLabel="Currency symbol source"
-                />
+                <select className={inputCls}
+                        value={field.currencyFromField ?? ""}
+                        onChange={(e) => onUpdate({ currencyFromField: e.target.value || undefined })}>
+                  <option value="">Fixed symbol</option>
+                  {currencySourceSiblings.map((s) => (
+                    <option key={s.id} value={s.key}>From field: {s.label} ({s.key})</option>
+                  ))}
+                </select>
                 <input className={inputCls} value={field.currencySymbol ?? "KSh"}
                        onChange={(e) => onUpdate({ currencySymbol: e.target.value })}
                        placeholder={field.currencyFromField ? "Fallback symbol" : "Symbol, e.g. KSh"} />
@@ -3265,17 +3191,10 @@ function PreviewColumnInput({ col, value, onChange, row, disabled }: { col: Tabl
   switch (col.type) {
     case "select":
       return (
-        <CustomListbox
-          value={value}
-          onChange={onChange}
-          options={[
-            { value: "", label: "—" },
-            ...(col.options ?? []).map((o) => ({ value: o, label: o })),
-          ]}
-          buttonClassName={cn(base, "h-10")}
-          ariaLabel={col.label ?? "Select"}
-          disabled={ro}
-        />
+        <select value={value} onChange={(e) => onChange(e.target.value)} className={base} disabled={ro}>
+          <option value="">—</option>
+          {(col.options ?? []).map((o) => <option key={o} value={o}>{o}</option>)}
+        </select>
       );
     case "boolean":
       return <input type="checkbox" checked={value === "true"} disabled={ro} onChange={(e) => onChange(e.target.checked ? "true" : "false")} className="h-4 w-4 accent-[#287EAD]" />;
@@ -3394,18 +3313,6 @@ function PreviewTableField({ field, readOnly = false, rows, onUpdateCell, onAddR
  * the process step is treated as "draft" (the implicit start state). Field
  * values here are keyed by field id (react-hook-form register key). */
 function evalCondition(c: VisibilityCondition, values: Record<string, unknown>, allFields: TemplateField[], processStep: string): boolean {
-  const stepMatches = (actual: string, expected: string) => {
-    const a = (actual || "").trim().toLowerCase();
-    const e = (expected || "").trim().toLowerCase();
-    if (a === e) return true;
-    const aliases: Record<string, string[]> = {
-      approved: ["approved", "request_approved", "fully_approved"],
-      pending_approval: ["pending_approval", "request_pending", "retirement_pending"],
-      returned: ["returned", "retirement_returned"],
-      rejected: ["rejected", "retirement_rejected"],
-    };
-    return aliases[e]?.includes(a) ?? false;
-  };
   let sv: string;
   if (c.source === "process_step") {
     sv = processStep;
@@ -3416,8 +3323,8 @@ function evalCondition(c: VisibilityCondition, values: Record<string, unknown>, 
     sv = v == null ? "" : String(v);
   }
   switch (c.operator) {
-    case "equals":       return c.source === "process_step" ? stepMatches(sv, c.value ?? "") : sv === (c.value ?? "");
-    case "not_equals":   return c.source === "process_step" ? !stepMatches(sv, c.value ?? "") : sv !== (c.value ?? "");
+    case "equals":       return sv === (c.value ?? "");
+    case "not_equals":   return sv !== (c.value ?? "");
     case "is_empty":     return sv.trim() === "";
     case "is_not_empty": return sv.trim() !== "";
     default:             return true;
@@ -3465,7 +3372,7 @@ type CalcToken =
   | { t: "op"; v: string };
 
 function calcTokenize(expr: string): CalcToken[] {
-  const re = /\s*(?:(\d+\.\d+|\d+)|("(?:[^"\\]|\\.)*")|([A-Za-z_][A-Za-z0-9_]*)|(>=|<=|==|!=)|([+\-*/(),><]))/y;
+  const re = /\s*(?:(\d+\.\d+|\d+)|("(?:[^"\\]|\\.)*")|([A-Za-z_][A-Za-z0-9_]*(?:\.[A-Za-z_][A-Za-z0-9_]*)?)|(>=|<=|==|!=)|([+\-*/(),><]))/y;
   const tokens: CalcToken[] = [];
   let pos = 0;
   while (pos < expr.length) {
@@ -3673,9 +3580,22 @@ function evaluateCalcExpression(expression: string | undefined, scope: Record<st
 /** Build a { fieldKey: value } scope from the form's current (id-keyed)
  * values, for evaluating sibling calc expressions. Type-aware per field
  * (see coerceScopeValue) — this is what makes date-difference formulas AND
- * string comparisons/IF() work. */
-function buildCalcScope(allFields: TemplateField[], values: Record<string, unknown>): Record<string, CalcValue> {
-  const scope: Record<string, CalcValue> = {};
+ * string comparisons/IF() work.
+ *
+ * When `registry` is supplied, a PLAIN (non-aggregate) reference to a table
+ * column — bare `amount` or qualified `table_key.amount` — resolves to that
+ * column's value straight off the first row, mirroring how a table column
+ * can already reference a top-level field's single value directly by its
+ * key (the "DSA Amount" pattern) — this is the same idea running the other
+ * way. Table-derived fallbacks are lowest priority: a real field of that
+ * key always wins, and bare (unqualified) column references follow the
+ * same "first table wins" rule as unqualified aggregates. */
+function buildCalcScope(
+  allFields: TemplateField[],
+  values: Record<string, unknown>,
+  registry?: Record<string, TableCalcRegistryEntry>,
+): Record<string, CalcValue> {
+  const scope: Record<string, CalcValue> = registry ? firstRowScopeEntries(registry) : {};
   for (const f of allFields) {
     if (!f.key) continue;
     scope[f.key] = coerceScopeValue(f.type, values[f.id]);
@@ -3683,19 +3603,22 @@ function buildCalcScope(allFields: TemplateField[], values: Record<string, unkno
   return scope;
 }
 
-/** Scope for a table column formula on one row: every top-level field, plus
- * that row's own columns overlaid on top (row-local keys win on a name
- * collision — the row is "closer"than the sheet, same as a spreadsheet).
- * This is what lets a column formula reference either a sibling cell in its
- * own row (`qty * unit_price`) or a form-level field copied into every row
- * (`daily_subsistence_allowance`). */
+/** Scope for a table column formula on one row: every top-level field (plus
+ * table-derived fallbacks via `registry`, see buildCalcScope), overlaid with
+ * that row's own columns (row-local keys win on a name collision — the row
+ * is "closer"than the sheet, same as a spreadsheet). This is what lets a
+ * column formula reference a sibling cell in its own row (`qty *
+ * unit_price`), a form-level field copied into every row
+ * (`daily_subsistence_allowance`), or another table's first row
+ * (`other_table.amount`). */
 function buildRowCalcScope(
   allFields: TemplateField[],
   values: Record<string, unknown>,
   columns: TableColumn[],
   row: Record<string, string>,
+  registry?: Record<string, TableCalcRegistryEntry>,
 ): Record<string, CalcValue> {
-  const scope = buildCalcScope(allFields, values);
+  const scope = buildCalcScope(allFields, values, registry);
   const colTypeByKey: Record<string, TableColumnType | undefined> = {};
   columns.forEach((c) => { colTypeByKey[c.key] = c.type; });
   for (const [k, v] of Object.entries(row)) {
@@ -3723,27 +3646,82 @@ export interface TableCalcRegistryEntry {
   colTypeByKey: Record<string, TableColumnType | undefined>;
 }
 
+/** Build the shared cross-table aggregate registry from every table field's
+ * current row data — used by both the top-level calc effect (a top-level
+ * field aggregating a table, e.g. SUM(expenses.amount)) and the table calc
+ * effect (one table column aggregating another table), so both share one
+ * consistent snapshot of "what every table currently looks like". */
+/** Build the { bareColKey / "table.col": value } fallback entries derived
+ * from each table's FIRST row — see buildCalcScope's docstring. Bare keys
+ * follow "first table wins" when more than one table has a same-named
+ * column; dotted keys are always unambiguous. */
+function firstRowScopeEntries(registry: Record<string, TableCalcRegistryEntry>): Record<string, CalcValue> {
+  const scope: Record<string, CalcValue> = {};
+  for (const [tableKey, entry] of Object.entries(registry)) {
+    const firstRow = entry.rows[0] ?? {};
+    for (const [colKey, colType] of Object.entries(entry.colTypeByKey)) {
+      const value = coerceScopeValue(colType, firstRow[colKey]);
+      if (!(colKey in scope)) scope[colKey] = value; // first table wins
+      scope[`${tableKey}.${colKey}`] = value;
+    }
+  }
+  return scope;
+}
+
+function buildTableCalcRegistry(
+  tableFields: TemplateField[],
+  tableRowsState: Record<string, Record<string, string>[]>,
+): Record<string, TableCalcRegistryEntry> {
+  const registry: Record<string, TableCalcRegistryEntry> = {};
+  for (const f of tableFields) {
+    const colTypeByKey: Record<string, TableColumnType | undefined> = {};
+    (f.columns ?? []).forEach((c) => { colTypeByKey[c.key] = c.type; });
+    registry[f.key] = { rows: tableRowsState[f.key] ?? [], colTypeByKey };
+  }
+  return registry;
+}
+
 function resolveRowAggregates(
   expression: string,
-  rows: Record<string, string>[],
-  colTypeByKey: Record<string, TableColumnType | undefined>,
+  rows: Record<string, string>[] | null,
+  colTypeByKey: Record<string, TableColumnType | undefined> | null,
   allTables?: Record<string, TableCalcRegistryEntry>,
 ): string {
   if (!expression || !expression.includes("(")) return expression;
   return expression.replace(AGG_CALL_RE, (_match, func: string, firstIdent: string, secondIdent: string | undefined) => {
-    let targetRows = rows;
+    let targetRows: Record<string, string>[] = [];
     let targetColType: TableColumnType | undefined;
     let colKey: string;
     if (secondIdent) {
-      // Qualified: firstIdent names another table field; secondIdent is the
-      // column key within THAT table.
+      // Qualified: firstIdent names a table field; secondIdent is the column
+      // key within THAT table. Works the same whether called from a table
+      // column's own formula or a top-level field's formula.
       const entry = allTables?.[firstIdent];
       targetRows = entry?.rows ?? [];
       targetColType = entry?.colTypeByKey[secondIdent];
       colKey = secondIdent;
-    } else {
+    } else if (rows && colTypeByKey && firstIdent in colTypeByKey) {
+      // Unqualified, called from a table column's own formula, and the name
+      // matches one of THIS table's own columns — aggregate this table
+      // (original, single-table behavior).
+      targetRows = rows;
       targetColType = colTypeByKey[firstIdent];
       colKey = firstIdent;
+    } else {
+      // Unqualified with no current-table match — either a top-level
+      // field's formula (no current table at all) or a table-column
+      // formula naming a column that isn't its own. Search every
+      // registered table for a column with this key and use the first
+      // match; ambiguous across multiple same-named columns, so the
+      // qualified form is the reliable choice there.
+      colKey = firstIdent;
+      for (const entry of Object.values(allTables ?? {})) {
+        if (firstIdent in entry.colTypeByKey) {
+          targetRows = entry.rows;
+          targetColType = entry.colTypeByKey[firstIdent];
+          break;
+        }
+      }
     }
     const colValues = targetRows.map((r) => coerceNumeric(targetColType, r[colKey]));
     let result = 0;
@@ -3821,51 +3799,17 @@ function PreviewField({ field, register, errors, values, allFields, editable = t
       break;
     case "select":
       control = (
-        <CustomListbox
-          value={String(values[field.id] ?? field.defaultValue ?? "")}
-          onChange={(value) => {
-            const fakeEvent = { target: { name: field.id, value } } as any;
-            reg.onChange(fakeEvent);
-          }}
-          options={[
-            { value: "", label: field.placeholder ?? "Select an option" },
-            ...(field.options ?? []).map((o) => ({ value: o, label: o })),
-          ]}
-          buttonClassName={previewInputCls}
-          ariaLabel={field.label ?? "Select"}
-          disabled={dis}
-        />
+        <select {...reg} className={previewInputCls} defaultValue={field.defaultValue ?? ""} disabled={dis}>
+          <option value=""disabled>{field.placeholder ?? "Select an option"}</option>
+          {(field.options ?? []).map((o) => <option key={o} value={o}>{o}</option>)}
+        </select>
       );
       break;
     case "multi_select":
       control = (
-        <div className="space-y-2">
-          <div className="grid gap-2">
-            {(field.options ?? []).map((o) => {
-              const selectedValues = Array.isArray(values[field.id]) ? (values[field.id] as string[]) : [];
-              const checked = selectedValues.includes(o);
-              return (
-                <label key={o} className="flex items-center gap-2 text-sm text-slate-700">
-                  <input
-                    type="checkbox"
-                    checked={checked}
-                    disabled={dis}
-                    onChange={(e) => {
-                      const next = e.target.checked ? [...selectedValues, o] : selectedValues.filter((value) => value !== o);
-                      const fakeEvent = { target: { name: field.id, value: next } } as any;
-                      reg.onChange(fakeEvent);
-                    }}
-                    className="h-4 w-4 accent-[#287EAD]"
-                  />
-                  <span>{o}</span>
-                </label>
-              );
-            })}
-          </div>
-          {(!Array.isArray(values[field.id]) || (values[field.id] as string[]).length === 0) && (
-            <p className="text-xs text-slate-500">No options selected</p>
-          )}
-        </div>
+        <select {...reg} multiple className={cn(previewInputCls, "h-auto min-h-[80px] py-2")} disabled={dis}>
+          {(field.options ?? []).map((o) => <option key={o} value={o}>{o}</option>)}
+        </select>
       );
       break;
     case "radio":
@@ -4016,7 +3960,7 @@ function Preview({ sections, templateName, processSteps }: {
   sections: TemplateSection[]; templateName: string;
   processSteps: { value: string; label: string }[];
 }) {
-  const { control, register, handleSubmit, reset, watch, setValue, formState: { errors } } = useForm<Record<string, unknown>>();
+  const { register, handleSubmit, reset, watch, setValue, formState: { errors } } = useForm<Record<string, unknown>>();
   const [submitted, setSubmitted] = useState<Record<string, unknown> | null>(null);
   // Simulate the document being at a given workflow step, so process-step
   // visibility/editability rules can be exercised without a live document.
@@ -4067,20 +4011,31 @@ function Preview({ sections, templateName, processSteps }: {
   // Recompute every `calc`-bearing field whenever any value changes, mirroring
   // the server's authoritative recompute at submit time. Fields resolve in
   // template order so a later formula can reference an earlier calculated
-  // field's result. Guarded by a value comparison so this settles to a fixed
-  // point instead of looping — a circular formula (A depends on B depends on
-  // A) will simply stop updating rather than hang.
+  // field's result. A formula can ALSO aggregate a table elsewhere on the
+  // form via SUM(table_key.col) (or the unqualified SUM(col), which searches
+  // every table for a matching column — see resolveRowAggregates), so this
+  // effect also depends on tableRows/tableFields, not just top-level values.
+  // Guarded by a value comparison so this settles to a fixed point instead
+  // of looping — a circular formula (A depends on B depends on A) will
+  // simply stop updating rather than hang.
   useEffect(() => {
-    const scope = buildCalcScope(allFields, values);
+    const registry = buildTableCalcRegistry(tableFields, tableRows);
+    const scope = buildCalcScope(allFields, values, registry);
     for (const f of allFields) {
       if (!f.calc?.expression) continue;
-      let result = evaluateCalcExpression(f.calc.expression, scope);
+      const resolvedExpr = resolveRowAggregates(f.calc.expression, null, null, registry);
+      let result = evaluateCalcExpression(resolvedExpr, scope);
       if (typeof result === "number" && typeof f.calc.decimals === "number") result = Number(result.toFixed(f.calc.decimals));
       scope[f.key] = result; // let later formulas see this one's result
       if (values[f.id] !== result) setValue(f.id, result);
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [JSON.stringify(values), JSON.stringify(allFields.map((f) => f.calc))]);
+  }, [
+    JSON.stringify(values),
+    JSON.stringify(allFields.map((f) => f.calc)),
+    JSON.stringify(tableRows),
+    JSON.stringify(tableFields.map((f) => ({ key: f.key, columns: f.columns }))),
+  ]);
 
   // Recompute every calc-bearing TABLE COLUMN across every table at once —
   // mirrors the server's authoritative compute_calculated_values. Column
@@ -4114,7 +4069,7 @@ function Preview({ sections, templateName, processSteps }: {
         for (const col of calcCols) {
           const resolvedExpr = resolveRowAggregates(col.calc!.expression, rows, colTypesByTable[f.key], registry);
           for (const row of rows) {
-            const scope = buildRowCalcScope(allFields, values, f.columns ?? [], row);
+            const scope = buildRowCalcScope(allFields, values, f.columns ?? [], row, registry);
             let result = evaluateCalcExpression(resolvedExpr, scope);
             if (typeof result === "number" && typeof col.calc!.decimals === "number") result = Number(result.toFixed(col.calc!.decimals));
             const str = String(result);
@@ -4183,14 +4138,10 @@ function Preview({ sections, templateName, processSteps }: {
           </div>
           <label className="flex flex-shrink-0 flex-col gap-1 text-right">
             <span className="text-[10px] font-semibold uppercase tracking-wider text-slate-500">Preview as step</span>
-            <CustomListbox
-              value={previewStep}
-              onChange={(value) => setPreviewStep(value)}
-              options={stepOptions}
-              buttonClassName="h-9 border border-[#AEB5BB] bg-white px-2 text-sm text-[#1F2933] outline-none focus:border-[#287EAD]"
-              className="min-w-[180px]"
-              ariaLabel="Preview as step"
-            />
+            <select value={previewStep} onChange={(e) => setPreviewStep(e.target.value)}
+                    className="h-9 min-w-[180px] border border-[#AEB5BB] bg-white px-2 text-sm text-[#1F2933] outline-none focus:border-[#287EAD]">
+              {stepOptions.map((o) => <option key={o.value} value={o.value}>{o.label}</option>)}
+            </select>
           </label>
         </header>
         {sections.map((s) => {
@@ -4288,17 +4239,11 @@ function SettingsTab({ template, onCommit, documentTypes, processSteps }: {
           <div className="space-y-1.5">
             <label className="text-xs font-semibold uppercase tracking-wider text-[#5E6870]">Document type <span className="text-red-400 normal-case font-normal">*</span></label>
             <div className="flex gap-2">
-              <CustomListbox
-                value={template.document_type_id ?? ""}
-                onChange={(value) => onCommit({ document_type_id: value })}
-                options={[
-                  { value: "", label: "Select document type" },
-                  ...documentTypes.map((type) => ({ value: type.id, label: type.name })),
-                ]}
-                className="flex-1"
-                buttonClassName={iCls}
-                ariaLabel="Document type"
-              />
+              <select value={template.document_type_id ?? ""} onChange={(e) => onCommit({ document_type_id: e.target.value })}
+                      className={cn(iCls, "flex-1")}>
+                <option value="">Select document type</option>
+                {documentTypes.map((type) => <option key={type.id} value={type.id}>{type.name}</option>)}
+              </select>
               <button type="button" onClick={() => setShowCreate(true)} title="Create new document type"
                       className="h-9 px-3 border border-[#AEB5BB] bg-white text-[#5E6870] hover:text-[#287EAD] hover:border-[#287EAD]/60 hover:bg-[#EEF6FB] transition-all flex items-center gap-1.5 text-xs font-semibold whitespace-nowrap">
                 <Plus className="h-3.5 w-3.5" /> New type
@@ -4386,11 +4331,9 @@ function FinanceSettingsCard({ template, onCommit, iCls, processSteps }: {
   const journalTableLines = fields.filter((f) => f.type === "table" && isJournalLineSource(f)).length;
   const postingKind = ui.postingKind ?? "journal";
   const purchaseAmountLabel = roleLabel("journal_amount");
-  const journalTriggerOptions = [
-    { value: "approved", label: "Request approved" },
-    { value: "retirement_approved", label: "Retirement approved" },
-    { value: "rejected", label: "Rejected" },
-  ];
+  const stageOptions = processSteps.some((s) => s.value === "approved")
+    ? processSteps
+    : [...processSteps, { value: "approved", label: "Approved" }];
   const journalBoundFields = fields.filter(isJournalLineSource);
   const journalStages = (ui.journalStages?.length ? ui.journalStages : [{ stage: 1, label: "Stage 1", postOn: "approved", fieldKeys: [] as string[] }])
     .map((s, idx) => ({
@@ -4451,16 +4394,10 @@ function FinanceSettingsCard({ template, onCommit, iCls, processSteps }: {
             </div>
             <div className="space-y-1.5">
               <span className={label}>When over budget at submit</span>
-              <CustomListbox
-                value={ui.budgetMode ?? "warn"}
-                onChange={(value) => setUi({ budgetMode: value as "warn" | "block" })}
-                options={[
-                  { value: "warn", label: "Warn only" },
-                  { value: "block", label: "Block submission" },
-                ]}
-                buttonClassName={iCls}
-                ariaLabel="Budget mode"
-              />
+              <select className={iCls} value={ui.budgetMode ?? "warn"} onChange={(e) => setUi({ budgetMode: e.target.value as "warn" | "block" })}>
+                <option value="warn">Warn only</option>
+                <option value="block">Block submission</option>
+              </select>
             </div>
           </div>
         )}
@@ -4477,16 +4414,10 @@ function FinanceSettingsCard({ template, onCommit, iCls, processSteps }: {
           <div className="space-y-3 border-l-2 border-[#287EAD]/30 pl-4">
             <div className="space-y-1.5">
               <span className={label}>Posting type</span>
-              <CustomListbox
-                value={postingKind}
-                onChange={(value) => setUi({ postingKind: value as "journal" | "purchase_order" })}
-                options={[
-                  { value: "journal", label: "Ledger journal" },
-                  { value: "purchase_order", label: "Purchase order / LPO" },
-                ]}
-                buttonClassName={iCls}
-                ariaLabel="Posting type"
-              />
+              <select className={iCls} value={postingKind} onChange={(e) => setUi({ postingKind: e.target.value as "journal" | "purchase_order" })}>
+                <option value="journal">Ledger journal</option>
+                <option value="purchase_order">Purchase order / LPO</option>
+              </select>
             </div>
             <div className="grid grid-cols-2 gap-3">
               <div className="space-y-1.5"><span className={label}>Business unit</span>
@@ -4527,31 +4458,6 @@ function FinanceSettingsCard({ template, onCommit, iCls, processSteps }: {
                 </>
               )}
             </div>
-            {postingKind === "journal" && (
-              <div className="space-y-2 border-t border-[#EEF0F2] pt-3">
-                <span className={label}>Default analysis codes (1–10)</span>
-                <p className="text-[11px] text-[#8C969E]">
-                  Sent on every ledger line. Leave as "#" unless this business unit's account
-                  structure requires a specific code for that slot — table "Analysis code" columns
-                  still override a specific slot per row.
-                </p>
-                <div className="grid grid-cols-5 gap-2">
-                  {Array.from({ length: 10 }, (_, i) => i + 1).map((n) => (
-                    <div key={n} className="space-y-1">
-                      <span className="text-[10px] font-semibold uppercase text-[#5E6870]">Code {n}</span>
-                      <input
-                        className={cn(iCls, "font-mono text-center")}
-                        value={ui.analysisDefaults?.[String(n)] ?? "#"}
-                        onChange={(e) =>
-                          setUi({ analysisDefaults: { ...(ui.analysisDefaults ?? {}), [String(n)]: e.target.value } })
-                        }
-                        maxLength={20}
-                      />
-                    </div>
-                  ))}
-                </div>
-              </div>
-            )}
             <div className="grid grid-cols-2 gap-3 text-xs">
               <div><span className={label}>Reference</span><div className="mt-1 text-[#1F2933]">{roleLabel("reference")}</div></div>
               <div><span className={label}>Transaction date</span><div className="mt-1 text-[#1F2933]">{roleLabel("transaction_date")}</div></div>
@@ -4594,13 +4500,13 @@ function FinanceSettingsCard({ template, onCommit, iCls, processSteps }: {
                           </div>
                           <div className="space-y-1">
                             <span className="text-[10px] font-semibold uppercase text-[#5E6870]">Post when workflow status becomes</span>
-                            <CustomListbox
+                            <select
+                              className={iCls}
                               value={stage.postOn ?? "approved"}
-                              onChange={(value) => updateStage(index, { postOn: value })}
-                              options={journalTriggerOptions}
-                              buttonClassName={iCls}
-                              ariaLabel="Journal stage trigger"
-                            />
+                              onChange={(e) => updateStage(index, { postOn: e.target.value })}
+                            >
+                              {stageOptions.map((s) => <option key={s.value} value={s.value}>{s.label}</option>)}
+                            </select>
                           </div>
                           <button
                             type="button"

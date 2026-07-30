@@ -27,19 +27,6 @@ def rule_conditions(vw):
 
 
 def eval_condition(cond: dict, values: dict, process_step: str) -> bool:
-    def step_matches(actual: str, expected: str) -> bool:
-        actual = (actual or "").strip().lower()
-        expected = (expected or "").strip().lower()
-        if actual == expected:
-            return True
-        aliases = {
-            "approved": {"approved", "request_approved", "fully_approved"},
-            "pending_approval": {"pending_approval", "request_pending", "retirement_pending"},
-            "returned": {"returned", "retirement_returned"},
-            "rejected": {"rejected", "retirement_rejected"},
-        }
-        return actual in aliases.get(expected, set())
-
     if cond.get("source") == "process_step":
         sv = process_step
     else:
@@ -48,12 +35,8 @@ def eval_condition(cond: dict, values: dict, process_step: str) -> bool:
     operator = cond.get("operator")
     expected = cond.get("value") or ""
     if operator == "equals":
-        if cond.get("source") == "process_step":
-            return step_matches(sv, expected)
         return sv == expected
     if operator == "not_equals":
-        if cond.get("source") == "process_step":
-            return not step_matches(sv, expected)
         return sv != expected
     if operator == "is_empty":
         return sv.strip() == ""
@@ -116,7 +99,7 @@ import re as _re
 _CALC_TOKEN_RE = _re.compile(
     r'\s*(?:(?P<num>\d+\.\d+|\d+)'
     r'|(?P<str>"(?:[^"\\]|\\.)*")'
-    r"|(?P<ident>[A-Za-z_][A-Za-z0-9_]*)"
+    r"|(?P<ident>[A-Za-z_][A-Za-z0-9_]*(?:\.[A-Za-z_][A-Za-z0-9_]*)?)"
     r"|(?P<cmp>>=|<=|==|!=)"
     r"|(?P<op>[+\-*/(),><]))"
 )
@@ -422,28 +405,36 @@ _AGG_CALL_RE = _re.compile(
 
 def _resolve_row_aggregates(expression: str, rows, col_types: dict, all_tables: dict = None) -> str:
     """Replace ``SUM(col)``, ``AVG(col)``, ``COUNT(col)``, ``COLMIN(col)``,
-    ``COLMAX(col)`` calls in a table-column formula with their computed
-    numeric literal, aggregated across EVERY row of a table — not just the
-    row currently being evaluated. This is what lets a column do a
-    running-total/footer-style calculation (e.g. a "% of total" column, or a
-    balance column referencing the sum of another column across all expense
-    lines) rather than only ever seeing its own row.
+    ``COLMAX(col)`` calls — anywhere in a calc formula, whether it's a table
+    COLUMN's own formula or a TOP-LEVEL field's formula — with their computed
+    numeric literal, aggregated across EVERY row of a table. This is what
+    lets a column (or a top-level summary field) do a running-total /
+    footer-style calculation (e.g. a "% of total" column, or a top-level
+    "Grand Total" field referencing a table elsewhere on the form) rather
+    than only ever seeing a single row's value.
 
-    Unqualified — ``SUM(amount)`` — aggregates the CURRENT table's own
-    ``rows``/``col_types``. Qualified with a dot — ``SUM(other_table.amount)``
-    — aggregates a *different* table field elsewhere in the same template,
-    looked up by that field's key in ``all_tables`` (a ``{table_field_key:
-    {"rows": [...], "col_types": {...}}}`` map built once for the whole
-    template in ``compute_calculated_values``). This lets one table
-    reference totals from another — e.g. an "Approved Budget" table's
-    balance column referencing ``SUM(expenses.amount)`` from a separate
-    "Expenses" table.
+    Two calling shapes:
+      - From a table COLUMN's formula: ``rows``/``col_types`` describe that
+        column's OWN table, so an unqualified ``SUM(amount)`` aggregates
+        that table. A qualified ``SUM(other_table.amount)`` still reaches
+        into a different table via ``all_tables``.
+      - From a TOP-LEVEL field's formula (``compute_calculated_values``'s
+        top-level loop): there IS no "current" table, so ``rows`` is passed
+        as ``None``. An unqualified ``SUM(amount)`` in this position
+        searches every table in ``all_tables`` for a column keyed "amount"
+        and uses the first one found — ambiguous if more than one table
+        has a same-named column, so the qualified ``SUM(table_key.amount)``
+        form is the reliable choice whenever that's a possibility.
+
+    ``all_tables`` is a ``{table_field_key: {"rows": [...], "col_types":
+    {...}}}`` map built once for the whole template in
+    ``compute_calculated_values``, letting any formula reach any table.
 
     Deliberately a textual substitution pass *before* the normal expression
     parser runs, rather than a grammar feature: the parser's function calls
-    evaluate their arguments as expressions against a single row's scope,
-    but an aggregate needs the raw column key and a full row list, which
-    that grammar has no way to express. Named distinctly from the pointwise
+    evaluate their arguments as expressions against a single scope, but an
+    aggregate needs the raw column key and a full row list, which that
+    grammar has no way to express. Named distinctly from the pointwise
     ``MIN``/``MAX`` (which take already-evaluated numbers, e.g.
     ``MIN(a, b)``) to avoid confusing the two."""
     if not expression or "(" not in expression:
@@ -455,15 +446,35 @@ def _resolve_row_aggregates(expression: str, rows, col_types: dict, all_tables: 
         second_ident = match.group(3)
 
         if second_ident:
-            # Qualified: first_ident names another table field; second_ident
-            # is the column key within THAT table.
+            # Qualified: first_ident names a table field; second_ident is
+            # the column key within THAT table. Works identically whether
+            # called from a table column's own formula or a top-level
+            # field's formula.
             table_info = (all_tables or {}).get(first_ident) or {}
             target_rows = table_info.get("rows") or []
             target_col_types = table_info.get("col_types") or {}
             col_key = second_ident
-        else:
+        elif rows is not None and first_ident in (col_types or {}):
+            # Unqualified, called from a table column's own formula, and the
+            # name matches one of THIS table's own columns — aggregate this
+            # table (original, single-table behavior).
             target_rows = rows
             target_col_types = col_types
+            col_key = first_ident
+        else:
+            # Unqualified with no current-table match (either a top-level
+            # field's formula, where there's no current table at all, or a
+            # table-column formula naming a column that isn't its own) —
+            # search every registered table for a column with this key and
+            # use the first match. Falls through to an empty result (0) if
+            # nothing matches anywhere.
+            target_rows, target_col_types = [], {}
+            for table_info in (all_tables or {}).values():
+                candidate_types = table_info.get("col_types") or {}
+                if first_ident in candidate_types:
+                    target_rows = table_info.get("rows") or []
+                    target_col_types = candidate_types
+                    break
             col_key = first_ident
 
         col_type = target_col_types.get(col_key)
@@ -498,7 +509,11 @@ def compute_calculated_values(sections, values: dict) -> dict:
        formula can reference an earlier calculated field's result (e.g. a
        "total" that sums two other calculated fields). Uses each field's
        declared ``type`` for scope coercion, so date/time/boolean fields
-       arithmetic correctly (see ``_coerce_scope_value``).
+       arithmetic correctly (see ``_coerce_scope_value``). Can ALSO
+       aggregate a table elsewhere on the form via ``SUM(table_key.col)``
+       (or the unqualified ``SUM(col)``, which searches every table for a
+       matching column — see ``_resolve_row_aggregates``) — e.g. a
+       top-level "Grand Total" field computed as ``SUM(expenses.amount)``.
 
     2. Table columns (``column.calc``, on a field of type "table") —
        resolved COLUMN-MAJOR: each calculated column is fully resolved
@@ -526,20 +541,13 @@ def compute_calculated_values(sections, values: dict) -> dict:
     """
     out = dict(values or {})
 
-    # Build the type map once so table-row scopes can reuse it, and track a
-    # running numeric top-level scope that top-level calc fields update as
-    # they resolve (letting later formulas see earlier results).
+    # Build the type map once so table-row scopes can reuse it.
     top_field_types = {}
     for section in sections or []:
         for field in section.get("fields", []):
             key = field.get("key")
             if key:
                 top_field_types[key] = field.get("type")
-
-    top_scope = {
-        key: _coerce_scope_value(ftype, out.get(key))
-        for key, ftype in top_field_types.items()
-    }
 
     # Shared, LIVE registry of every table field in the template — keyed by
     # the table field's own key — so a column formula in one table can
@@ -566,6 +574,34 @@ def compute_calculated_values(sections, values: dict) -> dict:
                 "calc_columns": [c for c in columns if c.get("calc") and c.get("key")],
             }
 
+    # A PLAIN (non-aggregate) reference to a table column — bare `amount` or
+    # qualified `table_key.amount` — means "that column's value, straight
+    # off the first row", mirroring exactly how a table column can already
+    # reference a top-level field's single value directly by its key (the
+    # "DSA Amount" pattern) — this is the same idea running the other way.
+    # A real aggregate (SUM/AVG/…) is still required for anything spanning
+    # more than one row; this only ever looks at row 0. Bare (unqualified)
+    # entries follow the same "first table wins" ambiguity rule as unqualified
+    # aggregates, and are lower priority than an actual field of that key —
+    # see how top_scope is assembled below.
+    first_row_scope: dict = {}
+    for table_key, info in all_tables.items():
+        first_row = info["rows"][0] if info["rows"] and isinstance(info["rows"][0], dict) else {}
+        for col_key, col_type in info["col_types"].items():
+            value = _coerce_scope_value(col_type, first_row.get(col_key))
+            first_row_scope.setdefault(col_key, value)  # first table wins
+            first_row_scope[f"{table_key}.{col_key}"] = value
+
+    # Top-level scope: table-derived fallbacks first (lowest priority), then
+    # every real top-level field's own value overlaid on top — a field
+    # always wins over a same-keyed table-column fallback.
+    top_scope = dict(first_row_scope)
+    top_scope.update({
+        key: _coerce_scope_value(ftype, out.get(key))
+        for key, ftype in top_field_types.items()
+    })
+
+
     for section in sections or []:
         for field in section.get("fields", []):
             key = field.get("key")
@@ -578,40 +614,40 @@ def compute_calculated_values(sections, values: dict) -> dict:
                     continue
                 rows = table_info["rows"]
                 col_types = table_info["col_types"]
-                calc_columns = table_info["calc_columns"]
 
-                # Same rationale as the client (calculations.ts evaluateTableColumnFormulas):
-                # resolve in multiple full passes so a calc column can reference another
-                # calc column regardless of declaration order in the table. Bounded by
-                # len(calc_columns) so a circular formula just stops changing.
-                for _pass in range(len(calc_columns)):
-                    changed = False
-                    for col in calc_columns:
-                        col_key = col["key"]
-                        calc = col["calc"]
-                        decimals = calc.get("decimals")
-                        resolved_expr = _resolve_row_aggregates(
-                            calc.get("expression", ""), rows, col_types, all_tables
-                        )
-                        for row in rows:
-                            if not isinstance(row, dict):
-                                continue
-                            row_scope = dict(top_scope)
-                            for ck, ctype in col_types.items():
-                                row_scope[ck] = _coerce_scope_value(ctype, row.get(ck))
-                            result = _eval_typed(resolved_expr, row_scope)
-                            if isinstance(decimals, int) and isinstance(result, (int, float)):
-                                result = round(result, decimals)
-                            if row.get(col_key) != result:
-                                changed = True
-                            row[col_key] = result
-                    if not changed:
-                        break
+                for col in table_info["calc_columns"]:
+                    col_key = col["key"]
+                    calc = col["calc"]
+                    decimals = calc.get("decimals")
+                    # Aggregates are the same value for every row, so resolve
+                    # them once per column (against the column's current
+                    # state — including any earlier calculated columns
+                    # already written into `rows` this pass, and any other
+                    # table's current state via `all_tables`).
+                    resolved_expr = _resolve_row_aggregates(
+                        calc.get("expression", ""), rows, col_types, all_tables
+                    )
+                    for row in rows:
+                        if not isinstance(row, dict):
+                            continue
+                        row_scope = dict(top_scope)
+                        for ck, ctype in col_types.items():
+                            row_scope[ck] = _coerce_scope_value(ctype, row.get(ck))
+                        result = _eval_typed(resolved_expr, row_scope)
+                        if isinstance(decimals, int) and isinstance(result, (int, float)):
+                            result = round(result, decimals)
+                        row[col_key] = result
                 continue
+
             calc = field.get("calc")
             if not calc:
                 continue
-            result = _eval_typed(calc.get("expression", ""), top_scope)
+            # Top-level fields have no "current" table, so aggregates only
+            # ever resolve via the qualified form or by searching every
+            # table (see _resolve_row_aggregates) — pass rows=None to signal
+            # "no current table context".
+            resolved_expr = _resolve_row_aggregates(calc.get("expression", ""), None, {}, all_tables)
+            result = _eval_typed(resolved_expr, top_scope)
             decimals = calc.get("decimals")
             if isinstance(decimals, int) and isinstance(result, (int, float)):
                 result = round(result, decimals)
