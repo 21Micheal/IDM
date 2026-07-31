@@ -26,22 +26,56 @@ def rule_conditions(vw):
     return None
 
 
+def _condition_values(field_key, values: dict):
+    """Every candidate value a condition's ``fieldKey`` can resolve to.
+
+    A plain key is a top-level form field and yields exactly one value. A
+    dotted ``table_key.column_key`` reference targets a table column, which has
+    one value *per row* — so it yields one entry per row. Rule evaluation then
+    uses "any row matches" semantics (and "every row" for the negative
+    operators), which is what people mean by "show this when a table row has
+    an amount over the limit".
+    """
+    if not field_key:
+        return [""]
+
+    if "." in field_key:
+        table_key, _, column_key = field_key.partition(".")
+        rows = values.get(table_key)
+        if isinstance(rows, dict):
+            rows = [rows]
+        if not isinstance(rows, list):
+            return [""]
+        out = []
+        for row in rows:
+            if not isinstance(row, dict):
+                continue
+            raw = row.get(column_key)
+            out.append("" if raw is None else str(raw))
+        return out or [""]
+
+    raw = values.get(field_key)
+    return ["" if raw is None else str(raw)]
+
+
 def eval_condition(cond: dict, values: dict, process_step: str) -> bool:
-    if cond.get("source") == "process_step":
-        sv = process_step
-    else:
-        raw = values.get(cond.get("fieldKey"))
-        sv = "" if raw is None else str(raw)
     operator = cond.get("operator")
     expected = cond.get("value") or ""
+
+    if cond.get("source") == "process_step":
+        candidates = [process_step]
+    else:
+        candidates = _condition_values(cond.get("fieldKey"), values)
+
     if operator == "equals":
-        return sv == expected
+        return any(sv == expected for sv in candidates)
     if operator == "not_equals":
-        return sv != expected
+        # Negative operators hold only when NO row contradicts them.
+        return all(sv != expected for sv in candidates)
     if operator == "is_empty":
-        return sv.strip() == ""
+        return all(sv.strip() == "" for sv in candidates)
     if operator == "is_not_empty":
-        return sv.strip() != ""
+        return any(sv.strip() != "" for sv in candidates)
     return True
 
 
@@ -70,6 +104,42 @@ def is_editable(item: dict, values: dict, process_step: str = "draft") -> bool:
     if item.get("readonly"):
         return False
     return eval_group(item.get("editableWhen"), values, process_step)
+
+
+def row_scoped_values(values: dict, row: dict) -> dict:
+    """Merge one table row's own cell values over the form-level values, so a
+    table COLUMN rule can reference a sibling column in the SAME row. Row keys
+    win over form keys."""
+    merged = dict(values or {})
+    merged.update(row or {})
+    return merged
+
+
+def is_column_visible(column: dict, values: dict, rows=None, process_step: str = "draft") -> bool:
+    """Column headers are shared by every row, so a column stays visible when
+    ANY row satisfies its ``visibleWhen`` (evaluated with that row's own cell
+    values merged in). With no rows, the form-level values decide."""
+    if column.get("hidden"):
+        return False
+    if not rows:
+        return eval_group(column.get("visibleWhen"), values, process_step)
+    return any(
+        eval_group(column.get("visibleWhen"), row_scoped_values(values, row), process_step)
+        for row in rows
+    )
+
+
+def is_cell_editable(column: dict, values: dict, row: dict, process_step: str = "draft") -> bool:
+    """Per-row editability for one table cell: the column must be editable AND
+    visible for THIS row's values."""
+    if column.get("hidden") or column.get("readonly"):
+        return False
+    scoped = row_scoped_values(values, row)
+    return (
+        eval_group(column.get("visibleWhen"), scoped, process_step)
+        and eval_group(column.get("editableWhen"), scoped, process_step)
+    )
+
 
 
 # ─── Calculated fields ──────────────────────────────────────────────────────

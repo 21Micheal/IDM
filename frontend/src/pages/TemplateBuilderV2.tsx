@@ -50,6 +50,7 @@ import {
   ChevronDown, AlertCircle, Tag, Layers, ArrowRight,
   ChevronRight, X, Loader2, Sliders, Link2, User as UserIcon,
   Wrench, FileCode, Calculator, Star, Percent, Link as UrlIcon, ListOrdered,
+  Info, Files, ToggleLeft, MoveLeft, MoveRight, CopyPlus, Sigma,
 } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { documentTypesAPI, groupsAPI, workflowAPI } from "@/services/api";
@@ -67,14 +68,16 @@ export type FieldType =
   | "file" | "image" | "table" | "divider" | "heading" | "signature"
   | "reference" | "user" | "multi_select"
   | "url" | "percentage" | "rating" | "auto_number"
-  | "calc_number" | "calc_currency" | "calc_text" | "calc_date";
+  | "multi_file"
+  | "calc_number" | "calc_currency" | "calc_text" | "calc_date" | "calc_boolean"
+  | "info" | "spacer";
 
 /* Field types that are auto-derived rather than typed by the person filling
  * the form: calculated values (formula over sibling field keys) and the
  * auto-number shortcut (sugar for a read-only reference-number formula
  * field). Kept in one place so palette/newField/validation agree on which
  * types never need to be "required". */
-const CALCULATED_TYPES = new Set<FieldType>(["calc_number", "calc_currency", "calc_text", "calc_date"]);
+const CALCULATED_TYPES = new Set<FieldType>(["calc_number", "calc_currency", "calc_text", "calc_date", "calc_boolean"]);
 
 /* A field's calculation config. `expression` is a small arithmetic formula
  * referencing sibling fields by KEY (matches the server-side evaluator in
@@ -89,7 +92,8 @@ export interface CalcConfig {
 
 export type TableColumnType =
   | "text" | "textarea" | "number" | "currency" | "date" | "datetime" | "time"
-  | "select" | "boolean" | "email" | "phone" | "reference" | "user" | "file";
+  | "select" | "boolean" | "email" | "phone" | "reference" | "user" | "file"
+  | "percentage" | "url" | "multi_select" | "image";
 
 export interface TableColumn {
   id: string;
@@ -109,6 +113,9 @@ export interface TableColumn {
   minLength?: number;
   maxLength?: number;
   currencySymbol?: string;
+  /* Number formatting (also applies when the column is shown as currency). */
+  decimals?: number;
+  thousandsSeparator?: boolean;
   // For a currency column: the KEY of a sibling column (a currency dropdown) in
   // the same table whose selected code drives this cell's symbol per row. When
   // set, `currencySymbol` is only the fallback for unknown codes.
@@ -161,14 +168,14 @@ export interface FieldFinanceBinding {
 export interface ColumnFinanceBinding {
   role?: string;            // see FINANCE_COLUMN_ROLES
   account?: string;         // for role "account_code": a constant fallback account.
-                            // for role "line_amount": THIS line's own default/
-                            // fallback account (used when the table has no
-                            // separate "account_code"-role column).
+  // for role "line_amount": THIS line's own default/
+  // fallback account (used when the table has no
+  // separate "account_code"-role column).
   dc?: "D" | "C";           // for role "line_amount": this line's debit/credit
-                            // direction — settable right on the amount column
-                            // instead of only at the table level, so multiple
-                            // "line_amount" columns in one table can each pick
-                            // their own account + direction.
+  // direction — settable right on the amount column
+  // instead of only at the table level, so multiple
+  // "line_amount" columns in one table can each pick
+  // their own account + direction.
   analysisNumber?: number;  // for role "analysis" → AnalysisCode{n}
   /* Imprest/retirement reconciliation — only meaningful for role
    * "line_amount". When set, this column's total (summed across every row)
@@ -224,7 +231,20 @@ function emptyRetirementConfig(): RetirementConfig {
   };
 }
 
-export type ConditionOperator = "equals" | "not_equals" | "is_empty" | "is_not_empty";
+export type ConditionOperator =
+  | "equals" | "not_equals" | "is_empty" | "is_not_empty"
+  | "greater_than" | "greater_or_equal" | "less_than" | "less_or_equal"
+  | "between" | "not_between"
+  | "contains" | "not_contains" | "starts_with" | "ends_with"
+  | "in_list" | "not_in_list"
+  | "is_true" | "is_false";
+
+/* Operators that need no right-hand value at all. */
+const VALUELESS_OPERATORS = new Set<ConditionOperator>(["is_empty", "is_not_empty", "is_true", "is_false"]);
+/* Operators whose value is a two-part range ("100,500"). */
+const RANGE_OPERATORS = new Set<ConditionOperator>(["between", "not_between"]);
+/* Operators whose value is a comma-separated list. */
+const LIST_OPERATORS = new Set<ConditionOperator>(["in_list", "not_in_list"]);
 
 /* Legacy single-rule shape (pre rule-groups). Still read from older saved
  * templates and migrated into a one-condition RuleGroup on load (toRuleGroup). */
@@ -250,6 +270,11 @@ export interface VisibilityCondition {
 export interface RuleGroup {
   combinator: "and" | "or";
   conditions: VisibilityCondition[];
+  /* Optional NESTED groups, evaluated with this group's own combinator
+   * alongside its plain conditions. Lets you express real-world rules like
+   * "step = approved AND (amount > 5000 OR category = capital)"without a
+   * separate rules language. Older templates simply have no `groups` key. */
+  groups?: RuleGroup[];
 }
 
 /* Normalize any stored `visibleWhen` (legacy single rule, a group, or null) into
@@ -258,6 +283,9 @@ function toRuleGroup(v: unknown): RuleGroup | null {
   if (!v || typeof v !== "object") return null;
   const obj = v as Record<string, unknown>;
   if (Array.isArray(obj.conditions)) {
+    const nested = Array.isArray(obj.groups)
+      ? (obj.groups as unknown[]).map(toRuleGroup).filter((g): g is RuleGroup => !!g)
+      : [];
     return {
       combinator: obj.combinator === "or" ? "or" : "and",
       conditions: (obj.conditions as VisibilityCondition[]).map((c) => ({
@@ -266,6 +294,7 @@ function toRuleGroup(v: unknown): RuleGroup | null {
         operator: c.operator,
         value: c.value,
       })),
+      ...(nested.length ? { groups: nested } : {}),
     };
   }
   if (typeof obj.fieldKey === "string") {
@@ -279,22 +308,47 @@ function toRuleGroup(v: unknown): RuleGroup | null {
 
 const OPERATOR_LABEL: Record<ConditionOperator, string> = {
   equals: "=", not_equals: "≠", is_empty: "is empty", is_not_empty: "is not empty",
+  greater_than: ">", greater_or_equal: "≥", less_than: "<", less_or_equal: "≤",
+  between: "between", not_between: "not between",
+  contains: "contains", not_contains: "does not contain",
+  starts_with: "starts with", ends_with: "ends with",
+  in_list: "is one of", not_in_list: "is not one of",
+  is_true: "is ticked", is_false: "is not ticked",
 };
+
+/* Grouped operator menu, so the dropdown stays readable as the list grows. */
+const OPERATOR_GROUPS: Array<{ label: string; ops: ConditionOperator[] }> = [
+  { label: "Basic", ops: ["equals", "not_equals", "is_empty", "is_not_empty"] },
+  { label: "Numbers & dates", ops: ["greater_than", "greater_or_equal", "less_than", "less_or_equal", "between", "not_between"] },
+  { label: "Text", ops: ["contains", "not_contains", "starts_with", "ends_with"] },
+  { label: "Lists", ops: ["in_list", "not_in_list"] },
+  { label: "Yes / No", ops: ["is_true", "is_false"] },
+];
 
 function summarizeCondition(c: VisibilityCondition): string {
   const left = c.source === "process_step" ? "step" : (c.fieldKey || "field");
   const op = OPERATOR_LABEL[c.operator] ?? c.operator;
-  if (c.operator === "is_empty" || c.operator === "is_not_empty") return `${left} ${op}`;
+  if (VALUELESS_OPERATORS.has(c.operator)) return `${left} ${op}`;
+  if (RANGE_OPERATORS.has(c.operator)) {
+    const [lo = "?", hi = "?"] = (c.value ?? "").split(",");
+    return `${left} ${op} ${lo.trim()}–${hi.trim()}`;
+  }
   return `${left} ${op} ${c.value ?? ""}`.trim();
 }
 
 function summarizeRuleGroup(g?: RuleGroup | null): string {
-  if (!g || g.conditions.length === 0) return "";
-  return g.conditions.map(summarizeCondition).join(g.combinator === "or" ? "OR " : "AND ");
+  if (!g) return "";
+  const parts = [
+    ...g.conditions.map(summarizeCondition),
+    ...(g.groups ?? []).filter((n) => ruleGroupHasConditions(n)).map((n) => `(${summarizeRuleGroup(n)})`),
+  ];
+  if (!parts.length) return "";
+  return parts.join(g.combinator === "or" ? " OR " : " AND ");
 }
 
 function ruleGroupHasConditions(g?: RuleGroup | null): boolean {
-  return !!g && g.conditions.length > 0;
+  if (!g) return false;
+  return g.conditions.length > 0 || (g.groups ?? []).some(ruleGroupHasConditions);
 }
 
 export interface TemplateField {
@@ -321,6 +375,10 @@ export interface TemplateField {
   minLength?: number;
   maxLength?: number;
   currencySymbol?: string;     // fixed / fallback symbol for a currency field
+  /* Number formatting — shared by number and currency fields. `decimals`
+   * fixes the displayed precision; `thousandsSeparator` groups by 3. */
+  decimals?: number;
+  thousandsSeparator?: boolean;
   // For a currency field: the KEY of a sibling field (a currency dropdown) whose
   // selected code drives the symbol dynamically. When set, `currencySymbol` is
   // only the fallback used if the selected value isn't a known currency code.
@@ -441,36 +499,43 @@ export type EditableTemplate = Omit<Template, "type"> & { type?: Template["type"
 type FieldGroup = "input" | "choice" | "reference" | "advanced" | "calculated" | "layout";
 
 const FIELD_META: Record<FieldType, { label: string; group: FieldGroup; defaults: Partial<TemplateField>; hint?: string }> = {
-  text:        { label: "Short text",    group: "input",     defaults: { colSpan: 6, placeholder: "Enter text…" } },
-  textarea:    { label: "Long text",     group: "input",     defaults: { colSpan: 12, placeholder: "Write something…" } },
-  number:      { label: "Number",        group: "input",     defaults: { colSpan: 4, placeholder: "0" } },
-  currency:    { label: "Currency",      group: "input",     defaults: { colSpan: 4, placeholder: "0.00", currencySymbol: "KSh" } },
-  date:        { label: "Date",          group: "input",     defaults: { colSpan: 4, dateFormat: "YYYY-MM-DD" } },
-  datetime:    { label: "Date & Time",   group: "input",     defaults: { colSpan: 6 } },
-  time:        { label: "Time",          group: "input",     defaults: { colSpan: 4 } },
-  email:       { label: "Email",         group: "input",     defaults: { colSpan: 6, placeholder: "name@company.com" } },
-  phone:       { label: "Phone",         group: "input",     defaults: { colSpan: 4, placeholder: "+254 700 000000" } },
-  select:      { label: "Dropdown",      group: "choice",    defaults: { colSpan: 6, options: ["Option 1", "Option 2"] } },
-  multi_select:{ label: "Multi-select",  group: "choice",    defaults: { colSpan: 6, options: ["Option 1", "Option 2"] } },
-  radio:       { label: "Radio group",   group: "choice",    defaults: { colSpan: 6, options: ["Yes", "No"] } },
-  boolean:     { label: "Checkbox",      group: "choice",    defaults: { colSpan: 6 } },
-  checkbox:    { label: "Checkbox",      group: "choice",    defaults: { colSpan: 6 } },
-  reference:   { label: "Reference",     group: "reference", defaults: { colSpan: 6, referenceSource: "documents" }, hint: "Links to another document/record" },
-  user:        { label: "User picker",   group: "reference", defaults: { colSpan: 6, referenceSource: "users" } },
-  signature:   { label: "Signature",     group: "advanced",  defaults: { colSpan: 12 } },
-  file:        { label: "File upload",   group: "advanced",  defaults: { colSpan: 6 } },
-  image:       { label: "Image",         group: "advanced",  defaults: { colSpan: 6 } },
-  table:       { label: "Data table",    group: "advanced",  defaults: { colSpan: 12, minRows: 2 } },
-  url:         { label: "URL / Link",    group: "input",     defaults: { colSpan: 6, placeholder: "https://…" } },
-  percentage:  { label: "Percentage",    group: "input",     defaults: { colSpan: 4, placeholder: "0", min: 0, max: 100 } },
-  rating:      { label: "Rating",        group: "choice",    defaults: { colSpan: 4, max: 5 }, hint: "Star rating, 1–5 by default" },
-  auto_number: { label: "Auto Number",   group: "calculated", defaults: { colSpan: 4 }, hint: "Auto-populated with the document's reference number" },
-  calc_number:   { label: "Calculated Number",   group: "calculated", defaults: { colSpan: 4 }, hint: "Computed from a formula over other fields" },
+  text: { label: "Short text", group: "input", defaults: { colSpan: 6, placeholder: "Enter text…" } },
+  textarea: { label: "Long text", group: "input", defaults: { colSpan: 12, placeholder: "Write something…" } },
+  number: { label: "Number / Currency", group: "input", defaults: { colSpan: 4, placeholder: "0", decimals: 0, thousandsSeparator: true }, hint: "Turn on “Show as currency” in the inspector for money values" },
+  // Currency stays a valid stored type for existing templates, but it is not
+  // offered separately in the palette — it is a Number with currency format.
+  currency: { label: "Currency", group: "input", defaults: { colSpan: 4, placeholder: "0.00", currencySymbol: "KSh", decimals: 2, thousandsSeparator: true } },
+  date: { label: "Date", group: "input", defaults: { colSpan: 4, dateFormat: "YYYY-MM-DD" } },
+  datetime: { label: "Date & Time", group: "input", defaults: { colSpan: 6 } },
+  time: { label: "Time", group: "input", defaults: { colSpan: 4 } },
+  email: { label: "Email", group: "input", defaults: { colSpan: 6, placeholder: "name@company.com" } },
+  phone: { label: "Phone", group: "input", defaults: { colSpan: 4, placeholder: "+254 700 000000" } },
+  select: { label: "Dropdown", group: "choice", defaults: { colSpan: 6, options: ["Option 1", "Option 2"] } },
+  multi_select: { label: "Multi-select", group: "choice", defaults: { colSpan: 6, options: ["Option 1", "Option 2"] } },
+  radio: { label: "Radio group", group: "choice", defaults: { colSpan: 6, options: ["Yes", "No"] } },
+  boolean: { label: "Checkbox", group: "choice", defaults: { colSpan: 6 } },
+  // Legacy alias of `boolean`; kept for stored templates, hidden from the palette.
+  checkbox: { label: "Checkbox", group: "choice", defaults: { colSpan: 6 } },
+  reference: { label: "Reference", group: "reference", defaults: { colSpan: 6, referenceSource: "documents" }, hint: "Links to another document/record" },
+  user: { label: "User picker", group: "reference", defaults: { colSpan: 6, referenceSource: "users" } },
+  signature: { label: "Signature", group: "advanced", defaults: { colSpan: 12 } },
+  file: { label: "File upload", group: "advanced", defaults: { colSpan: 6 } },
+  image: { label: "Image", group: "advanced", defaults: { colSpan: 6 } },
+  table: { label: "Data table", group: "advanced", defaults: { colSpan: 12, minRows: 2 } },
+  url: { label: "URL / Link", group: "input", defaults: { colSpan: 6, placeholder: "https://…" } },
+  percentage: { label: "Percentage", group: "input", defaults: { colSpan: 4, placeholder: "0", min: 0, max: 100 } },
+  rating: { label: "Rating", group: "choice", defaults: { colSpan: 4, max: 5 }, hint: "Star rating, 1–5 by default" },
+  auto_number: { label: "Auto Number", group: "calculated", defaults: { colSpan: 4 }, hint: "Auto-populated with the document's reference number" },
+  calc_number: { label: "Calculated Number", group: "calculated", defaults: { colSpan: 4 }, hint: "Computed from a formula over other fields" },
   calc_currency: { label: "Calculated Currency", group: "calculated", defaults: { colSpan: 4, currencySymbol: "KSh" }, hint: "Computed from a formula over other fields" },
-  calc_text:     { label: "Calculated Text",     group: "calculated", defaults: { colSpan: 6 }, hint: "Computed from a formula over other fields" },
-  calc_date:     { label: "Calculated Date",     group: "calculated", defaults: { colSpan: 4, dateFormat: "YYYY-MM-DD" }, hint: "Computed from a formula over other fields" },
-  heading:     { label: "Heading",       group: "layout",    defaults: { colSpan: 12, defaultValue: "Section heading" } },
-  divider:     { label: "Divider",       group: "layout",    defaults: { colSpan: 12 } },
+  calc_text: { label: "Calculated Text", group: "calculated", defaults: { colSpan: 6 }, hint: "Computed from a formula over other fields" },
+  calc_date: { label: "Calculated Date", group: "calculated", defaults: { colSpan: 4, dateFormat: "YYYY-MM-DD" }, hint: "Computed from a formula over other fields" },
+  calc_boolean: { label: "Calculated Yes/No", group: "calculated", defaults: { colSpan: 4 }, hint: "A rule that resolves to Yes or No, e.g. amount > limit" },
+  multi_file: { label: "Multiple files", group: "advanced", defaults: { colSpan: 12 }, hint: "Several supporting attachments on one field" },
+  heading: { label: "Heading", group: "layout", defaults: { colSpan: 12, defaultValue: "Section heading" } },
+  divider: { label: "Divider", group: "layout", defaults: { colSpan: 12 } },
+  info: { label: "Info note", group: "layout", defaults: { colSpan: 12, defaultValue: "Guidance for the person filling this form." }, hint: "Read-only guidance — never submitted" },
+  spacer: { label: "Spacer", group: "layout", defaults: { colSpan: 6 }, hint: "Empty gap for aligning fields on a row" },
 };
 
 const ICONS: Record<FieldType, React.ElementType> = {
@@ -482,7 +547,13 @@ const ICONS: Record<FieldType, React.ElementType> = {
   reference: Link2, user: UserIcon,
   url: UrlIcon, percentage: Percent, rating: Star, auto_number: ListOrdered,
   calc_number: Calculator, calc_currency: Calculator, calc_text: Calculator, calc_date: Calculator,
+  calc_boolean: Sigma, multi_file: Files, info: Info, spacer: Minus,
 };
+
+/* Presentational-only field types. They never hold a value, so they're
+ * skipped by the payload preview, can't be marked required, and never
+ * appear as a formula/condition source. */
+const PRESENTATION_TYPES = new Set<FieldType>(["heading", "divider", "info", "spacer"]);
 
 const uid = () => Math.random().toString(36).slice(2, 10);
 
@@ -534,10 +605,10 @@ function deriveKeyFromLabel(label: string, existingKey: string): string {
 // Reference/user picker sources — must match the keys in
 // frontend/src/components/templates/referenceSources.ts.
 const REFERENCE_SOURCE_OPTIONS = [
-  { value: "users",          label: "Users" },
-  { value: "groups",         label: "Groups" },
-  { value: "departments",    label: "Departments" },
-  { value: "documents",      label: "Documents" },
+  { value: "users", label: "Users" },
+  { value: "groups", label: "Groups" },
+  { value: "departments", label: "Departments" },
+  { value: "documents", label: "Documents" },
   { value: "document_types", label: "Document types" },
 ];
 
@@ -550,12 +621,12 @@ const FORMULA_FIELD_TYPES = new Set<string>([
  * Quick "create document type"modal — unchanged from v2
  * ============================================================ */
 const QUICK_TITLE_FIELD_OPTIONS = [
-  { key: "filename",         label: "File name (default)" },
-  { key: "title",            label: "Document Name" },
+  { key: "filename", label: "File name (default)" },
+  { key: "title", label: "Document Name" },
   { key: "reference_number", label: "Reference Number" },
-  { key: "supplier",         label: "Supplier / Vendor" },
-  { key: "amount",           label: "Amount" },
-  { key: "document_date",    label: "Document Date" },
+  { key: "supplier", label: "Supplier / Vendor" },
+  { key: "amount", label: "Amount" },
+  { key: "document_date", label: "Document Date" },
 ];
 
 function CreateDocTypeQuickModal({
@@ -565,12 +636,12 @@ function CreateDocTypeQuickModal({
   onCreated: (type: { id: string; name: string; code: string }) => void;
 }) {
   const qc = useQueryClient();
-  const [dname, setDname]           = useState("");
-  const [code, setCode]             = useState("");
-  const [refPrefix, setRefPrefix]   = useState("");
+  const [dname, setDname] = useState("");
+  const [code, setCode] = useState("");
+  const [refPrefix, setRefPrefix] = useState("");
   const [refPadding, setRefPadding] = useState(5);
   const [titleField, setTitleField] = useState("filename");
-  const [desc, setDesc]             = useState("");
+  const [desc, setDesc] = useState("");
 
   const iCls =
     "h-9 w-full border border-[#AEB5BB] bg-white px-3 text-sm text-[#1F2933] " +
@@ -598,8 +669,8 @@ function CreateDocTypeQuickModal({
       const d = err?.response?.data;
       const msg = d
         ? Object.entries(d as Record<string, unknown>)
-            .map(([f, m]) => `${f}: ${Array.isArray(m) ? m.join(", ") : String(m)}`)
-            .join(" | ")
+          .map(([f, m]) => `${f}: ${Array.isArray(m) ? m.join(", ") : String(m)}`)
+          .join(" | ")
         : "Failed to create document type";
       toast.error(msg);
     },
@@ -620,7 +691,7 @@ function CreateDocTypeQuickModal({
         <div className="p-5 space-y-4">
           <div className="space-y-1.5">
             <label className="text-xs font-semibold uppercase tracking-wider text-[#5E6870]">Display name <span className="text-red-400 normal-case font-normal">*</span></label>
-            <input value={dname} onChange={(e) => { setDname(e.target.value); setCode(toDocTypeCode(e.target.value)); }} placeholder="e.g. Supplier Invoice"autoFocus className={iCls} />
+            <input value={dname} onChange={(e) => { setDname(e.target.value); setCode(toDocTypeCode(e.target.value)); }} placeholder="e.g. Supplier Invoice" autoFocus className={iCls} />
           </div>
           <div className="space-y-1.5">
             <label className="text-xs font-semibold uppercase tracking-wider text-[#5E6870]">Code <span className="text-red-400 normal-case font-normal">*</span></label>
@@ -649,7 +720,7 @@ function CreateDocTypeQuickModal({
         <div className="flex justify-end gap-2 border-t border-[#C8CDD2] px-5 py-3">
           <button onClick={onClose} className="border border-[#AEB5BB] bg-white px-4 py-2 text-sm font-semibold text-[#1F2933] hover:bg-[#F3F5F6]">Cancel</button>
           <button onClick={() => createMutation.mutate()} disabled={!dname.trim() || !code.trim() || !refPrefix.trim() || createMutation.isPending}
-                  className="inline-flex items-center gap-2 bg-[#287EAD] px-4 py-2 text-sm font-semibold text-white hover:bg-[#1E6F99] disabled:opacity-50">
+            className="inline-flex items-center gap-2 bg-[#287EAD] px-4 py-2 text-sm font-semibold text-white hover:bg-[#1E6F99] disabled:opacity-50">
             {createMutation.isPending ? <><Loader2 className="h-4 w-4 animate-spin" /> Creating…</> : <><Plus className="h-4 w-4" /> Create type</>}
           </button>
         </div>
@@ -667,20 +738,24 @@ function cellPlaceholder(c: TableColumn): string {
   if (c.calc?.expression) return `ƒx = ${c.calc.expression}`;
   if (c.defaultValue) return c.defaultValue;
   switch (t) {
-    case "number":   return "0";
+    case "number": return "0";
     case "currency": return `${c.currencySymbol ?? "KSh"} 0.00`;
-    case "date":     return c.dateFormat ?? "YYYY-MM-DD";
+    case "date": return c.dateFormat ?? "YYYY-MM-DD";
     case "datetime": return "YYYY-MM-DD HH:mm";
-    case "time":     return "HH:mm";
-    case "select":   return c.options?.[0] ? `${c.options[0]} ▾` : "Select… ▾";
-    case "boolean":  return "☐";
-    case "email":    return "name@example.com";
-    case "phone":    return "+254 …";
-    case "reference":return `↗ ${c.referenceSource ?? "record"}`;
-    case "user":     return "👤 user";
-    case "file":     return "📎 file";
+    case "time": return "HH:mm";
+    case "select": return c.options?.[0] ? `${c.options[0]} ▾` : "Select… ▾";
+    case "boolean": return "☐";
+    case "email": return "name@example.com";
+    case "phone": return "+254 …";
+    case "reference": return `↗ ${c.referenceSource ?? "record"}`;
+    case "user": return "👤 user";
+    case "file": return "📎 file";
     case "textarea": return "Long text…";
-    default:         return "—";
+    case "percentage": return "0 %";
+    case "url": return "https://…";
+    case "multi_select": return c.options?.[0] ? `${c.options[0]} +` : "Select many…";
+    case "image": return "🖼 image";
+    default: return "—";
   }
 }
 
@@ -691,7 +766,7 @@ function newColumn(type: TableColumnType = "text", label = "New Column"): TableC
     label,
     type,
     width: 2,
-    options: type === "select" ? ["Option 1", "Option 2"] : undefined,
+    options: type === "select" || type === "multi_select" ? ["Option 1", "Option 2"] : undefined,
     currencySymbol: type === "currency" ? "KSh" : undefined,
     referenceSource: type === "reference" ? "documents" : type === "user" ? "users" : undefined,
   };
@@ -720,8 +795,8 @@ function newField(type: FieldType): TemplateField {
     // per-row attachments). Avoid imposing a domain-specific stub.
     base.minRows = 1;
     base.columns = [
-      newColumn("text",     "Item"),
-      newColumn("text",     "Description"),
+      newColumn("text", "Item"),
+      newColumn("text", "Description"),
       newColumn("currency", "Amount"),
     ];
   }
@@ -750,27 +825,9 @@ const initialTemplate: Template = {
   type: "built",
   category: "other",
   tags: [],
-  sections: [
-    {
-      id: uid(),
-      title: "Header",
-      description: "Basic identifying information for this document.",
-      fields: [
-        { ...newField("text"),   label: "Staff Name",        key: "staff_name",     colSpan: 4, required: true },
-        { ...newField("text"),   label: "Purpose of Travel", key: "purpose",        colSpan: 4 },
-        { ...newField("date"),   label: "Travel Start Date", key: "travel_start",   colSpan: 2, required: true },
-        { ...newField("date"),   label: "Travel End Date",   key: "travel_end",     colSpan: 2, required: true },
-      ],
-    },
-    {
-      id: uid(),
-      title: "Expenditure",
-      description: "Itemized breakdown.",
-      fields: [
-        { ...newField("table"), label: "Expense Items", key: "items" },
-      ],
-    },
-  ],
+  /* A brand-new template opens on ONE empty section — no domain-specific
+   * sample fields to delete first. */
+  sections: [newSection("Section 1")],
 };
 
 /* Migrate the legacy single-`role` budget tags onto the independent
@@ -819,25 +876,25 @@ function normalizeTemplate(template: EditableTemplate): Template {
  * (apps/sunsystems/mapping.py) consumes. */
 // Journal / header roles (posting side). Budget roles live on a separate axis.
 export const FINANCE_FIELD_ROLES = [
-  { value: "",                 label: "— none —" },
-  { value: "journal_amount",   label: "Journal line amount" },
-  { value: "currency",         label: "Currency" },
-  { value: "reference",        label: "Transaction reference" },
+  { value: "", label: "— none —" },
+  { value: "journal_amount", label: "Journal line amount" },
+  { value: "currency", label: "Currency" },
+  { value: "reference", label: "Transaction reference" },
   { value: "transaction_date", label: "Transaction date" },
-  { value: "description",      label: "Description" },
+  { value: "description", label: "Description" },
 ];
 // Budget roles (live-check side) — independent of the journal role.
 export const FINANCE_BUDGET_ROLES = [
-  { value: "",        label: "— none —" },
-  { value: "amount",  label: "Budget amount (checked)" },
+  { value: "", label: "— none —" },
+  { value: "amount", label: "Budget amount (checked)" },
   { value: "account", label: "Budget account / code" },
 ];
 export const FINANCE_COLUMN_ROLES = [
-  { value: "",             label: "— none —" },
-  { value: "line_amount",  label: "Line amount" },
+  { value: "", label: "— none —" },
+  { value: "line_amount", label: "Line amount" },
   { value: "account_code", label: "Account code" },
-  { value: "description",  label: "Description" },
-  { value: "analysis",     label: "Analysis code" },
+  { value: "description", label: "Description" },
+  { value: "analysis", label: "Analysis code" },
 ];
 
 /* A field's budget role, tolerating the legacy combined `role` values
@@ -885,7 +942,7 @@ function sampleScalar(f: { type: FieldType; label: string; options?: string[]; d
 
 function buildSampleValues(template: Template): Record<string, unknown> {
   const out: Record<string, unknown> = {};
-  const skip = new Set(["divider", "heading", "file", "image", "signature"]);
+  const skip = new Set(["divider", "heading", "info", "spacer", "file", "image", "multi_file", "signature"]);
   for (const s of template.sections) {
     for (const f of s.fields ?? []) {
       if (!f.key) continue;
@@ -1034,9 +1091,9 @@ function compileSunSystems(template: Template): SunSystemsConfig | undefined {
       : (isMultiStage ? new Set<string>() : null);
     const stageLines = stageFieldKeys
       ? lines.filter((l) => {
-          const key = (l as any)._fieldKey as string | undefined;
-          return key ? stageFieldKeys.has(key) : true;
-        })
+        const key = (l as any)._fieldKey as string | undefined;
+        return key ? stageFieldKeys.has(key) : true;
+      })
       : lines;
     return {
       ...journalStageBase,
@@ -1056,39 +1113,39 @@ function compileSunSystems(template: Template): SunSystemsConfig | undefined {
   const journal = ui.journalEnabled
     ? postingKind === "purchase_order"
       ? {
-          enabled: true,
-          post_on: "approved",
-          component: "PurchaseOrder",
-          method: "CreateOrAmend",
-          context: {
-            ...(ui.businessUnit ? { business_unit: { const: ui.businessUnit } } : {}),
-            ...(ui.budgetCode ? { budget_code: { const: ui.budgetCode } } : {}),
-          },
+        enabled: true,
+        post_on: "approved",
+        component: "PurchaseOrder",
+        method: "CreateOrAmend",
+        context: {
+          ...(ui.businessUnit ? { business_unit: { const: ui.businessUnit } } : {}),
+          ...(ui.budgetCode ? { budget_code: { const: ui.budgetCode } } : {}),
+        },
+        ...(currencySpec ? { currency: currencySpec } : {}),
+        ...(referenceSpec ? { reference: referenceSpec } : {}),
+        ...(dateSpec ? { date: dateSpec } : {}),
+        purchase_order: {
+          supplier_code: { const: ui.supplierCode || "81105" },
+          transaction_type: { const: ui.purchaseTransactionType || "ASSETS" },
+          invoice_address_code: { const: ui.invoiceAddressCode || "0000000000" },
+          item_code: { const: ui.itemCode || "ITM29" },
+          account_code: { const: ui.accountCode || "" },
+          analysis10_category: { const: ui.analysis10Category ?? "11" },
+          analysis10_code: { const: ui.analysis10Code ?? "E" },
+          // quantity / unit_price: only emit when the operator has set them;
+          // the backend defaults quantity to "1"and unit_price to the total amount.
+          ...(ui.quantity ? { quantity: { const: ui.quantity } } : {}),
+          ...(ui.unitPrice ? { unit_price: { const: ui.unitPrice } } : {}),
+          // VLAB numbers: only emit when explicitly set; backend defaults to 1 and 2.
+          ...(ui.vlabBase ? { vlab_base_num: { const: ui.vlabBase } } : {}),
+          ...(ui.vlabTrans ? { vlab_trans_num: { const: ui.vlabTrans } } : {}),
+          ...(purchaseAmountField ? { amount: { field: purchaseAmountField.key } } : {}),
           ...(currencySpec ? { currency: currencySpec } : {}),
           ...(referenceSpec ? { reference: referenceSpec } : {}),
           ...(dateSpec ? { date: dateSpec } : {}),
-          purchase_order: {
-            supplier_code: { const: ui.supplierCode || "81105" },
-            transaction_type: { const: ui.purchaseTransactionType || "ASSETS" },
-            invoice_address_code: { const: ui.invoiceAddressCode || "0000000000" },
-            item_code: { const: ui.itemCode || "ITM29" },
-            account_code: { const: ui.accountCode || "" },
-            analysis10_category: { const: ui.analysis10Category ?? "11" },
-            analysis10_code: { const: ui.analysis10Code ?? "E" },
-            // quantity / unit_price: only emit when the operator has set them;
-            // the backend defaults quantity to "1"and unit_price to the total amount.
-            ...(ui.quantity ? { quantity: { const: ui.quantity } } : {}),
-            ...(ui.unitPrice ? { unit_price: { const: ui.unitPrice } } : {}),
-            // VLAB numbers: only emit when explicitly set; backend defaults to 1 and 2.
-            ...(ui.vlabBase  ? { vlab_base_num:  { const: ui.vlabBase  } } : {}),
-            ...(ui.vlabTrans ? { vlab_trans_num: { const: ui.vlabTrans } } : {}),
-            ...(purchaseAmountField ? { amount: { field: purchaseAmountField.key } } : {}),
-            ...(currencySpec ? { currency: currencySpec } : {}),
-            ...(referenceSpec ? { reference: referenceSpec } : {}),
-            ...(dateSpec ? { date: dateSpec } : {}),
-            ...(descSpec ? { description: descSpec } : {}),
-          },
-        }
+          ...(descSpec ? { description: descSpec } : {}),
+        },
+      }
       : {
         enabled: true,
         stages: journalStages,
@@ -1098,12 +1155,12 @@ function compileSunSystems(template: Template): SunSystemsConfig | undefined {
   const byBudgetRole = (r: string) => fields.find((f) => budgetRoleOf(f) === r);
   const budget = ui.budgetEnabled
     ? {
-        enabled: true,
-        mode: ui.budgetMode ?? "warn",
-        ...(valueSpec(byBudgetRole("account")) ? { account: valueSpec(byBudgetRole("account")) } : {}),
-        ...(valueSpec(byBudgetRole("amount")) ? { amount: valueSpec(byBudgetRole("amount")) } : {}),
-        ...(currencySpec ? { currency: currencySpec } : {}),
-      }
+      enabled: true,
+      mode: ui.budgetMode ?? "warn",
+      ...(valueSpec(byBudgetRole("account")) ? { account: valueSpec(byBudgetRole("account")) } : {}),
+      ...(valueSpec(byBudgetRole("amount")) ? { amount: valueSpec(byBudgetRole("amount")) } : {}),
+      ...(currencySpec ? { currency: currencySpec } : {}),
+    }
     : { enabled: false };
 
   return { ...ss, ui, journal, budget };
@@ -1168,12 +1225,12 @@ function PaletteItem({ type }: { type: FieldType }) {
 }
 
 const PALETTE_GROUPS: Array<{ key: FieldGroup; label: string }> = [
-  { key: "input",      label: "Input" },
-  { key: "choice",     label: "Choice / Dropdown" },
-  { key: "reference",  label: "Reference" },
+  { key: "input", label: "Input" },
+  { key: "choice", label: "Choice / Dropdown" },
+  { key: "reference", label: "Reference" },
   { key: "calculated", label: "Calculated" },
-  { key: "advanced",   label: "Advanced" },
-  { key: "layout",     label: "Layout" },
+  { key: "advanced", label: "Advanced" },
+  { key: "layout", label: "Layout" },
 ];
 
 function Palette() {
@@ -1181,7 +1238,11 @@ function Palette() {
   const [openGroups, setOpenGroups] = useState<Record<FieldGroup, boolean>>({
     input: true, choice: true, reference: false, calculated: false, advanced: false, layout: false,
   });
-  const all = Object.keys(FIELD_META) as FieldType[];
+  // Types that exist only for backwards compatibility with saved templates:
+  // `checkbox` duplicates `boolean`, and `currency` is now a Number with a
+  // currency number-format. Showing them would double up the library.
+  const HIDDEN_TYPES = new Set<FieldType>(["checkbox", "currency"]);
+  const all = (Object.keys(FIELD_META) as FieldType[]).filter((t) => !HIDDEN_TYPES.has(t));
   const filtered = all.filter((t) =>
     FIELD_META[t].label.toLowerCase().includes(query.toLowerCase())
   );
@@ -1281,9 +1342,9 @@ function FieldPreview({ field, onConfigureColumn, onAddColumn, onRemoveColumn, o
     case "multi_select":
       return <div className={cn(inputPreview, "justify-between")}><span>{field.options?.[0] ?? "Select…"}</span><ChevronDown className="h-3 w-3" /></div>;
     case "reference":
-      return <div className={cn(inputPreview, "justify-between")}><span className="flex items-center gap-1.5"><Link2 className="h-3 w-3"/> Choose {field.referenceSource ?? "record"}…</span></div>;
+      return <div className={cn(inputPreview, "justify-between")}><span className="flex items-center gap-1.5"><Link2 className="h-3 w-3" /> Choose {field.referenceSource ?? "record"}…</span></div>;
     case "user":
-      return <div className={cn(inputPreview, "justify-between")}><span className="flex items-center gap-1.5"><UserIcon className="h-3 w-3"/> Select user…</span></div>;
+      return <div className={cn(inputPreview, "justify-between")}><span className="flex items-center gap-1.5"><UserIcon className="h-3 w-3" /> Select user…</span></div>;
     case "table": {
       const cols = field.columns ?? [];
       return (
@@ -1314,7 +1375,8 @@ function FieldPreview({ field, onConfigureColumn, onAddColumn, onRemoveColumn, o
                     text: Type, textarea: AlignLeft, number: Hash, currency: Hash,
                     date: Calendar, datetime: Calendar, time: Clock, select: List,
                     boolean: CheckSquare, email: Mail, phone: Phone, reference: Link2,
-                    user: UserIcon, file: Paperclip,
+                    user: UserIcon, file: Paperclip, image: ImageIcon, multi_select: List,
+                    url: UrlIcon, percentage: Percent,
                   } as Record<TableColumnType, React.ElementType>)[(c.type ?? "text") as TableColumnType] ?? Type;
                   return (
                     <div
@@ -1349,19 +1411,19 @@ function FieldPreview({ field, onConfigureColumn, onAddColumn, onRemoveColumn, o
                       {/* Column actions on hover */}
                       <div className="flex items-center gap-0.5 px-3.5 pb-2 opacity-0 transition group-hover/col:opacity-100">
                         <button onClick={(e) => { e.stopPropagation(); onConfigureColumn?.(c.id); }} title="Configure"
-                                className="p-0.5 text-[#5E6870] hover:bg-[#287EAD]/10 hover:text-[#287EAD]">
+                          className="p-0.5 text-[#5E6870] hover:bg-[#287EAD]/10 hover:text-[#287EAD]">
                           <Wrench className="h-3 w-3" />
                         </button>
                         <button onClick={(e) => { e.stopPropagation(); onMoveColumn?.(c.id, "left"); }} disabled={idx === 0}
-                                title="Move left" className="p-0.5 text-[#5E6870] hover:bg-[#287EAD]/10 disabled:opacity-20">
+                          title="Move left" className="p-0.5 text-[#5E6870] hover:bg-[#287EAD]/10 disabled:opacity-20">
                           <ChevronUp className="h-3 w-3 -rotate-90" />
                         </button>
                         <button onClick={(e) => { e.stopPropagation(); onMoveColumn?.(c.id, "right"); }} disabled={idx === (cols.length) - 1}
-                                title="Move right" className="p-0.5 text-[#5E6870] hover:bg-[#287EAD]/10 disabled:opacity-20">
+                          title="Move right" className="p-0.5 text-[#5E6870] hover:bg-[#287EAD]/10 disabled:opacity-20">
                           <ChevronDown className="h-3 w-3 -rotate-90" />
                         </button>
                         <button onClick={(e) => { e.stopPropagation(); onRemoveColumn?.(c.id); }} title="Remove"
-                                className="p-0.5 text-[#5E6870] hover:bg-red-50 hover:text-red-500">
+                          className="p-0.5 text-[#5E6870] hover:bg-red-50 hover:text-red-500">
                           <Trash2 className="h-3 w-3" />
                         </button>
                       </div>
@@ -1413,10 +1475,26 @@ function FieldPreview({ field, onConfigureColumn, onAddColumn, onRemoveColumn, o
       );
     case "auto_number":
       return <div className={cn(inputPreview, "gap-1.5 italic")}><ListOrdered className="h-3 w-3 text-zinc-400" />Assigned on submit</div>;
+    case "info":
+      return (
+        <div className="flex items-start gap-2 border border-sky-200 bg-sky-50 px-3 py-2 text-xs text-sky-800">
+          <Info className="mt-0.5 h-3.5 w-3.5 flex-shrink-0" />
+          <span>{field.defaultValue || field.helpText || "Informational note"}</span>
+        </div>
+      );
+    case "spacer":
+      return <div className="h-8 border border-dashed border-zinc-200 bg-[repeating-linear-gradient(45deg,#F6F7F8,#F6F7F8_6px,#FFF_6px,#FFF_12px)]" />;
+    case "multi_file":
+      return (
+        <div className="flex h-10 items-center justify-center border border-dashed border-zinc-200 bg-zinc-50 text-xs text-zinc-400">
+          <Files className="h-3 w-3 mr-1.5" />Attach one or more files
+        </div>
+      );
     case "calc_number":
     case "calc_currency":
     case "calc_date":
     case "calc_text":
+    case "calc_boolean":
       return (
         <div className={cn(inputPreview, "gap-1.5 bg-[#F0FBF6] border-emerald-200 text-emerald-700")}>
           <Calculator className="h-3 w-3 flex-shrink-0" />
@@ -1435,6 +1513,7 @@ function FieldPreview({ field, onConfigureColumn, onAddColumn, onRemoveColumn, o
 function FieldCard({
   field, sectionId, isSelected, onSelect, onRemove, onDuplicate, onResize, rowWidth,
   onConfigureColumn, onAddColumn, onRemoveColumn, onMoveColumn, onUpdateColumn,
+  onMoveField, isFirstField, isLastField,
 }: {
   field: TemplateField; sectionId: string; isSelected: boolean;
   onSelect: () => void; onRemove: () => void; onDuplicate: () => void;
@@ -1443,10 +1522,16 @@ function FieldCard({
   onAddColumn: () => void;
   onRemoveColumn: (colId: string) => void;
   onMoveColumn: (colId: string, dir: "left" | "right") => void;
+  /* Keyboard/click reordering within the section — drag-and-drop is fast for
+   * a mouse user but unusable on a trackpad-less laptop or with a screen
+   * reader, and impossible in a long section that scrolls. */
+  onMoveField: (dir: "back" | "forward") => void;
+  isFirstField: boolean;
+  isLastField: boolean;
   onUpdateColumn: (colId: string, patch: Partial<TableColumn>) => void;
 }) {
   const dropBefore = useDroppable({ id: `drop-before-${sectionId}-${field.id}`, data: { source: "canvas", kind: "before", sectionId, fieldId: field.id } });
-  const dropAfter  = useDroppable({ id: `drop-after-${sectionId}-${field.id}`,  data: { source: "canvas", kind: "after",  sectionId, fieldId: field.id } });
+  const dropAfter = useDroppable({ id: `drop-after-${sectionId}-${field.id}`, data: { source: "canvas", kind: "after", sectionId, fieldId: field.id } });
   const { attributes, listeners, setNodeRef: setDragRef, isDragging } = useDraggable({
     id: `canvas-${sectionId}-${field.id}`,
     data: { source: "canvas-field", sectionId, fieldId: field.id },
@@ -1469,17 +1554,17 @@ function FieldCard({
 
   return (
     <div className={cn("relative flex items-stretch min-w-0", isDragging && "opacity-40")}
-         style={{ gridColumn: `span ${field.type === "table" ? 12 : (field.colSpan ?? 1)} / span ${field.type === "table" ? 12 : (field.colSpan ?? 1)}` }}>
+      style={{ gridColumn: `span ${field.type === "table" ? 12 : (field.colSpan ?? 1)} / span ${field.type === "table" ? 12 : (field.colSpan ?? 1)}` }}>
       <div ref={dropBefore.setNodeRef}
-           className={cn("w-1 shrink-0 transition-all", dropBefore.isOver ? "bg-[#287EAD]" : "bg-transparent")} />
+        className={cn("w-1 shrink-0 transition-all", dropBefore.isOver ? "bg-[#287EAD]" : "bg-transparent")} />
       <div onClick={(e) => { e.stopPropagation(); onSelect(); }}
-           className={cn(
-             "group relative flex-1 min-w-0 border bg-white p-3 transition-all cursor-pointer",
-             isSelected ? "border-[#287EAD] ring-2 ring-[#287EAD]/20 shadow-sm" : "border-slate-300 hover:border-[#287EAD]/60 hover:shadow-sm",
-           )}>
+        className={cn(
+          "group relative flex-1 min-w-0 border bg-white p-3 transition-all cursor-pointer",
+          isSelected ? "border-[#287EAD] ring-2 ring-[#287EAD]/20 shadow-sm" : "border-slate-300 hover:border-[#287EAD]/60 hover:shadow-sm",
+        )}>
         <div className="mb-2 flex items-center justify-between gap-2">
           <div ref={setDragRef} {...listeners} {...attributes}
-               className="flex items-center gap-1.5 text-xs font-semibold text-slate-700 cursor-grab active:cursor-grabbing flex-1 min-w-0 overflow-hidden">
+            className="flex items-center gap-1.5 text-xs font-semibold text-slate-700 cursor-grab active:cursor-grabbing flex-1 min-w-0 overflow-hidden">
             <GripVertical className="h-3.5 w-3.5 text-slate-300 flex-shrink-0" />
             {(() => { const TypeIcon = ICONS[field.type]; return <TypeIcon className="h-3.5 w-3.5 text-[#287EAD] flex-shrink-0" />; })()}
             <span className="truncate min-w-0 flex-1" title={`${field.label || "Unlabelled"} — ${FIELD_META[field.type]?.label ?? field.type}`}>
@@ -1501,12 +1586,22 @@ function FieldCard({
             )}
           </div>
           <div className="flex items-center gap-0.5 opacity-0 transition group-hover:opacity-100 flex-shrink-0">
+            <button onClick={(e) => { e.stopPropagation(); onMoveField("back"); }} title="Move backward (earlier in this section)"
+              disabled={isFirstField}
+              className="p-1 text-slate-400 hover:bg-slate-100 hover:text-slate-700 disabled:opacity-25 disabled:hover:bg-transparent">
+              <MoveLeft className="h-3 w-3" />
+            </button>
+            <button onClick={(e) => { e.stopPropagation(); onMoveField("forward"); }} title="Move forward (later in this section)"
+              disabled={isLastField}
+              className="p-1 text-slate-400 hover:bg-slate-100 hover:text-slate-700 disabled:opacity-25 disabled:hover:bg-transparent">
+              <MoveRight className="h-3 w-3" />
+            </button>
             <button onClick={(e) => { e.stopPropagation(); onDuplicate(); }} title="Duplicate"
-                    className="p-1 text-slate-400 hover:bg-slate-100 hover:text-slate-700">
+              className="p-1 text-slate-400 hover:bg-slate-100 hover:text-slate-700">
               <Copy className="h-3 w-3" />
             </button>
             <button onClick={(e) => { e.stopPropagation(); onRemove(); }} title="Remove"
-                    className="p-1 text-slate-400 hover:bg-red-50 hover:text-red-500">
+              className="p-1 text-slate-400 hover:bg-red-50 hover:text-red-500">
               <Trash2 className="h-3 w-3" />
             </button>
           </div>
@@ -1525,12 +1620,12 @@ function FieldCard({
         </div>
         {field.type !== "table" && (
           <div onMouseDown={startResize}
-               className="absolute right-0 top-0 h-full w-1.5 cursor-col-resize opacity-0 transition group-hover:bg-[#287EAD]/40 group-hover:opacity-100"
-               title="Drag to resize" />
+            className="absolute right-0 top-0 h-full w-1.5 cursor-col-resize opacity-0 transition group-hover:bg-[#287EAD]/40 group-hover:opacity-100"
+            title="Drag to resize" />
         )}
       </div>
       <div ref={dropAfter.setNodeRef}
-           className={cn("w-1 shrink-0 transition-all", dropAfter.isOver ? "bg-[#287EAD]" : "bg-transparent")} />
+        className={cn("w-1 shrink-0 transition-all", dropAfter.isOver ? "bg-[#287EAD]" : "bg-transparent")} />
     </div>
   );
 }
@@ -1542,10 +1637,10 @@ function SectionDropZone({ sectionId }: { sectionId: string }) {
   });
   return (
     <div ref={setNodeRef}
-         className={cn(
-           "col-span-12 flex h-11 items-center justify-center border-2 border-dashed text-xs font-medium transition",
-           isOver ? "border-[#287EAD] bg-[#EEF6FB] text-[#287EAD]" : "border-slate-300 text-slate-400 hover:border-[#287EAD]/60",
-         )}>
+      className={cn(
+        "col-span-12 flex h-11 items-center justify-center border-2 border-dashed text-xs font-medium transition",
+        isOver ? "border-[#287EAD] bg-[#EEF6FB] text-[#287EAD]" : "border-slate-300 text-slate-400 hover:border-[#287EAD]/60",
+      )}>
       <Plus className="h-3.5 w-3.5 mr-1.5" /> Drop a field here
     </div>
   );
@@ -1561,6 +1656,7 @@ function SectionBlock(props: {
   onDuplicateField: (sectionId: string, fieldId: string) => void;
   onResizeField: (sectionId: string, fieldId: string, colSpan: number) => void;
   onMoveSection: (id: string, dir: "up" | "down") => void;
+  onMoveField: (sectionId: string, fieldId: string, dir: "back" | "forward") => void;
   onConfigureColumn: (sectionId: string, fieldId: string, colId: string) => void;
   onAddColumn: (sectionId: string, fieldId: string) => void;
   onRemoveColumn: (sectionId: string, fieldId: string, colId: string) => void;
@@ -1584,27 +1680,27 @@ function SectionBlock(props: {
 
   return (
     <section onClick={() => props.onSelect(section.id)}
-             className={cn(
-               "border-2 bg-white shadow-sm transition-all overflow-hidden",
-               isSelected ? "border-[#287EAD] ring-2 ring-[#287EAD]/20" : "border-[#C8CDD2] hover:border-[#287EAD]/50",
-             )}>
+      className={cn(
+        "border-2 bg-white shadow-sm transition-all overflow-hidden",
+        isSelected ? "border-[#287EAD] ring-2 ring-[#287EAD]/20" : "border-[#C8CDD2] hover:border-[#287EAD]/50",
+      )}>
       <header className="flex items-start gap-3 border-b border-[#D0D5DA] bg-[#F3F5F6] px-5 py-3.5">
         <div className="flex flex-col gap-0.5 mt-1 flex-shrink-0">
           <button onClick={(e) => { e.stopPropagation(); props.onMoveSection(section.id, "up"); }} disabled={props.isFirst}
-                  className="p-0.5 text-slate-500 hover:bg-white hover:text-slate-800 disabled:opacity-20 transition-colors">
+            className="p-0.5 text-slate-500 hover:bg-white hover:text-slate-800 disabled:opacity-20 transition-colors">
             <ChevronUp className="h-3.5 w-3.5" />
           </button>
           <button onClick={(e) => { e.stopPropagation(); props.onMoveSection(section.id, "down"); }} disabled={props.isLast}
-                  className="p-0.5 text-slate-500 hover:bg-white hover:text-slate-800 disabled:opacity-20 transition-colors">
+            className="p-0.5 text-slate-500 hover:bg-white hover:text-slate-800 disabled:opacity-20 transition-colors">
             <ChevronDown className="h-3.5 w-3.5" />
           </button>
         </div>
         <div className="flex-1 min-w-0">
           <div className="flex items-center gap-1.5">
             <input value={section.title}
-                   onChange={(e) => props.onUpdateSection(section.id, { title: e.target.value })}
-                   onClick={(e) => e.stopPropagation()}
-                   className="min-w-0 flex-1 bg-transparent text-sm font-bold text-[#1F2933] outline-none border-b border-transparent focus:border-[#287EAD] pb-0.5 transition-colors" />
+              onChange={(e) => props.onUpdateSection(section.id, { title: e.target.value })}
+              onClick={(e) => e.stopPropagation()}
+              className="min-w-0 flex-1 bg-transparent text-sm font-bold text-[#1F2933] outline-none border-b border-transparent focus:border-[#287EAD] pb-0.5 transition-colors" />
             {section.hidden ? (
               <span className="bg-slate-100 px-1.5 py-0.5 text-[9px] font-semibold text-slate-500 border border-slate-300 flex-shrink-0" title="Section always hidden from people filling the form">hidden</span>
             ) : section.visibleToGroups && section.visibleToGroups.length > 0 ? (
@@ -1621,35 +1717,38 @@ function SectionBlock(props: {
             )}
           </div>
           <input value={section.description ?? ""}
-                 placeholder="Add a description…"
-                 onChange={(e) => props.onUpdateSection(section.id, { description: e.target.value })}
-                 onClick={(e) => e.stopPropagation()}
-                 className="mt-1 w-full bg-transparent text-xs text-[#5E6870] outline-none placeholder:text-[#AEB5BB] border-b border-transparent focus:border-[#AEB5BB] pb-0.5 transition-colors" />
+            placeholder="Add a description…"
+            onChange={(e) => props.onUpdateSection(section.id, { description: e.target.value })}
+            onClick={(e) => e.stopPropagation()}
+            className="mt-1 w-full bg-transparent text-xs text-[#5E6870] outline-none placeholder:text-[#AEB5BB] border-b border-transparent focus:border-[#AEB5BB] pb-0.5 transition-colors" />
         </div>
         <button onClick={(e) => { e.stopPropagation(); props.onSelect(section.id); }}
-                title="Section settings"
-                className={cn(
-                  "p-1.5 transition-colors flex-shrink-0",
-                  isSelected ? "bg-[#287EAD] text-white" : "text-slate-500 hover:bg-white hover:text-[#287EAD]",
-                )}>
+          title="Section settings"
+          className={cn(
+            "p-1.5 transition-colors flex-shrink-0",
+            isSelected ? "bg-[#287EAD] text-white" : "text-slate-500 hover:bg-white hover:text-[#287EAD]",
+          )}>
           <Settings className="h-4 w-4" />
         </button>
         <button onClick={(e) => { e.stopPropagation(); setCollapsed((c) => !c); }}
-                title={collapsed ? "Expand" : "Collapse"}
-                className="p-1.5 text-slate-500 hover:bg-white hover:text-slate-800 transition-colors flex-shrink-0">
+          title={collapsed ? "Expand" : "Collapse"}
+          className="p-1.5 text-slate-500 hover:bg-white hover:text-slate-800 transition-colors flex-shrink-0">
           {collapsed ? <ChevronDown className="h-4 w-4" /> : <ChevronUp className="h-4 w-4" />}
         </button>
         <button onClick={(e) => { e.stopPropagation(); props.onRemoveSection(section.id); }}
-                className="p-1.5 text-slate-500 hover:bg-red-50 hover:text-red-600 transition-colors flex-shrink-0"
-                title="Remove section">
+          className="p-1.5 text-slate-500 hover:bg-red-50 hover:text-red-600 transition-colors flex-shrink-0"
+          title="Remove section">
           <Trash2 className="h-4 w-4" />
         </button>
       </header>
       {!collapsed && (
         <div className="p-5">
           <div ref={gridRef} className="grid grid-cols-12 gap-3">
-            {section.fields.map((f) => (
+            {section.fields.map((f, fi) => (
               <FieldCard key={f.id} field={f} sectionId={section.id}
+                onMoveField={(dir) => props.onMoveField(section.id, f.id, dir)}
+                isFirstField={fi === 0}
+                isLastField={fi === section.fields.length - 1}
                 isSelected={selectedId === f.id}
                 onSelect={() => props.onSelect(f.id)}
                 onRemove={() => props.onRemoveField(section.id, f.id)}
@@ -1688,6 +1787,7 @@ function Canvas(props: {
   onDuplicateField: (sectionId: string, fieldId: string) => void;
   onResizeField: (sectionId: string, fieldId: string, colSpan: number) => void;
   onMoveSection: (id: string, dir: "up" | "down") => void;
+  onMoveField: (sectionId: string, fieldId: string, dir: "back" | "forward") => void;
   onConfigureColumn: (sectionId: string, fieldId: string, colId: string) => void;
   onAddColumn: (sectionId: string, fieldId: string) => void;
   onRemoveColumn: (sectionId: string, fieldId: string, colId: string) => void;
@@ -1706,6 +1806,7 @@ function Canvas(props: {
           onDuplicateField={props.onDuplicateField}
           onResizeField={props.onResizeField}
           onMoveSection={props.onMoveSection}
+          onMoveField={props.onMoveField}
           onConfigureColumn={props.onConfigureColumn}
           onAddColumn={props.onAddColumn}
           onRemoveColumn={props.onRemoveColumn}
@@ -1714,7 +1815,7 @@ function Canvas(props: {
         />
       ))}
       <button onClick={(e) => { e.stopPropagation(); props.onAddSection(); }}
-              className="flex items-center justify-center gap-2 border-2 border-dashed border-slate-300 bg-white py-5 text-sm font-semibold text-slate-400 transition hover:border-[#287EAD] hover:bg-[#EEF6FB] hover:text-[#287EAD]">
+        className="flex items-center justify-center gap-2 border-2 border-dashed border-slate-300 bg-white py-5 text-sm font-semibold text-slate-400 transition hover:border-[#287EAD] hover:bg-[#EEF6FB] hover:text-[#287EAD]">
         <Plus className="h-4 w-4" /> Add Section
       </button>
     </div>
@@ -1726,21 +1827,158 @@ function Canvas(props: {
  * ============================================================ */
 
 const COL_TYPES: Array<{ value: TableColumnType; label: string }> = [
-  { value: "text",      label: "Text" },
-  { value: "textarea",  label: "Long text" },
-  { value: "number",    label: "Number" },
-  { value: "currency",  label: "Currency" },
-  { value: "date",      label: "Date" },
-  { value: "datetime",  label: "Date & Time" },
-  { value: "time",      label: "Time" },
-  { value: "select",    label: "Dropdown" },
-  { value: "boolean",   label: "Checkbox" },
-  { value: "email",     label: "Email" },
-  { value: "phone",     label: "Phone" },
+  { value: "text", label: "Text" },
+  { value: "textarea", label: "Long text" },
+  // "Currency" is not listed: it is a Number with a currency number-format.
+  { value: "number", label: "Number / Currency" },
+  { value: "date", label: "Date" },
+  { value: "datetime", label: "Date & Time" },
+  { value: "time", label: "Time" },
+  { value: "select", label: "Dropdown" },
+  { value: "boolean", label: "Checkbox" },
+  { value: "email", label: "Email" },
+  { value: "phone", label: "Phone" },
   { value: "reference", label: "Reference" },
-  { value: "user",      label: "User picker" },
-  { value: "file",      label: "File / Attachment" },
+  { value: "user", label: "User picker" },
+  { value: "file", label: "File / Attachment" },
+  { value: "image", label: "Image" },
+  { value: "percentage", label: "Percentage" },
+  { value: "url", label: "URL / Link" },
+  { value: "multi_select", label: "Multi-select" },
 ];
+
+/* ── Formula reference ────────────────────────────────────────────────────
+ * The single source of truth for what a form author can type into a formula.
+ * Kept beside the editors (rather than in a wiki) so it can never drift from
+ * the engine: every entry below is implemented in CALC_FUNCS / the aggregate
+ * pre-pass here AND mirrored in apps/templates_engine/conditions.py. */
+const FUNCTION_REFERENCE: Array<{ group: string; items: Array<[string, string]> }> = [
+  {
+    group: "Operators", items: [
+      ["+ - * /", "Arithmetic"],
+      ["^", "Power: base ^ exponent"],
+      ["%", "Remainder after division"],
+      ["&", 'Join text: first_name & " " & last_name'],
+      ["> < >= <= == != <>", "Comparisons — result is true/false"],
+    ]
+  },
+  {
+    group: "Numbers", items: [
+      ["ROUND(n, places)", "Round to N decimal places"],
+      ["CEIL(n) / FLOOR(n)", "Round up / down to a whole number"],
+      ["TRUNC(n, places)", "Cut off decimals without rounding"],
+      ["ABS(n) / SIGN(n)", "Magnitude / -1, 0 or 1"],
+      ["SQRT(n) / POWER(a, b)", "Square root / a to the power b"],
+      ["MIN(…) / MAX(…)", "Smallest / largest of the arguments"],
+      ["AVERAGE(…) / SUMALL(…)", "Mean / total of the arguments"],
+      ["CLAMP(n, low, high)", "Force a value inside a range"],
+      ["PCT(n, percent)", "percent% of n — PCT(amount, 7.5)"],
+      ["GROSS(net, rate) / NET(gross, rate)", "Add / strip a VAT-style rate"],
+    ]
+  },
+  {
+    group: "Logic", items: [
+      ["IF(test, then, else)", "Two-way branch"],
+      ["IFS(test1, val1, test2, val2, …, fallback)", "Many branches, first match wins"],
+      ["SWITCH(value, match1, val1, …, fallback)", "Compare one value against options"],
+      ["AND(…) / OR(…) / NOT(x) / XOR(…)", "Combine true/false tests"],
+      ["ISBLANK(x) / ISNUMBER(x)", "Emptiness / numeric checks"],
+      ["COALESCE(…)", "First argument that isn't blank"],
+    ]
+  },
+  {
+    group: "Text", items: [
+      ["UPPER / LOWER / PROPER(text)", "Change case"],
+      ["TRIM(text) / LEN(text)", "Strip spaces / character count"],
+      ["LEFT(text, n) / RIGHT(text, n) / MID(text, start, n)", "Take part of the text"],
+      ["CONCAT(…)", "Join any number of values"],
+      ["FIND(needle, haystack)", "Position of text, 0 when absent"],
+      ["SUBSTITUTE(text, find, replace)", "Replace every occurrence"],
+      ["PADLEFT(text, width, char)", "Pad a reference number to a fixed width"],
+      ["SPLIT(text, separator, index)", "Nth part of a delimited value"],
+      ["TEXT(value) / VALUE(text)", "Convert between text and number"],
+    ]
+  },
+  {
+    group: "Dates", items: [
+      ["TODAY() / NOW()", "Current date / date-time"],
+      ["DATE(year, month, day)", "Build a date"],
+      ["YEAR(d) / MONTH(d) / DAY(d) / WEEKDAY(d)", "Pull a date apart"],
+      ["DATEADD(d, n, \"days|months|years\")", "Shift a date"],
+      ["DATEDIF(start, end, \"days|months|years\")", "Distance between two dates"],
+      ["NETWORKDAYS(start, end)", "Working days, weekends excluded"],
+      ["FORMATDATE(d, \"YYYY-MM-DD\")", "Render a date as text"],
+    ]
+  },
+  {
+    group: "Table columns (all rows)", items: [
+      ["SUM(col) / AVG(col) / COUNT(col)", "Totals down a column"],
+      ["COUNTA(col) / COUNTBLANK(col)", "Filled / empty cells"],
+      ["COLMIN(col) / COLMAX(col) / MEDIAN(col) / PRODUCT(col)", "Column statistics"],
+      ["FIRST(col) / LAST(col)", "Value in the first / last row"],
+      ['SUMIF(value_col, test_col, ">1000")', "Conditional total"],
+      ['COUNTIF(test_col, "Travel")', "Conditional count"],
+      ['AVGIF(value_col, test_col, "<>Cancelled")', "Conditional average"],
+      ['COLJOIN(col, ", ")', "Join every cell into one text value"],
+      ["ROWCOUNT(table_key)", "How many rows the table has"],
+    ]
+  },
+];
+
+/* Collapsible cheat-sheet shared by both formula editors. */
+function FormulaReference() {
+  const [open, setOpen] = useState(false);
+  return (
+    <div className="border border-[#E5E8EB] bg-[#FAFBFC]">
+      <button type="button" onClick={() => setOpen((o) => !o)}
+        className="flex w-full items-center justify-between px-2 py-1.5 text-[10px] font-semibold uppercase tracking-wider text-[#5E6870] hover:bg-[#F3F5F6]">
+        <span className="flex items-center gap-1"><FileCode className="h-3 w-3" /> Function reference</span>
+        {open ? <ChevronUp className="h-3 w-3" /> : <ChevronDown className="h-3 w-3" />}
+      </button>
+      {open && (
+        <div className="max-h-64 space-y-2 overflow-y-auto border-t border-[#E5E8EB] p-2">
+          {FUNCTION_REFERENCE.map((g) => (
+            <div key={g.group}>
+              <p className="text-[10px] font-semibold uppercase tracking-wider text-[#287EAD]">{g.group}</p>
+              <ul className="mt-0.5 space-y-0.5">
+                {g.items.map(([sig, desc]) => (
+                  <li key={sig} className="text-[10px] leading-snug text-[#5E6870]">
+                    <code className="font-mono text-[#1F2933]">{sig}</code> — {desc}
+                  </li>
+                ))}
+              </ul>
+            </div>
+          ))}
+          <p className="text-[10px] text-[#8C969E]">
+            Reference other fields and table columns by their ID. Every formula re-runs
+            authoritatively on the server at submit time.
+          </p>
+        </div>
+      )}
+    </div>
+  );
+}
+
+/* Shared "is this formula valid?" banner. */
+function FormulaStatus({ error, expression, previewValue }: {
+  error: string | null; expression: string; previewValue: CalcValue;
+}) {
+  if (!expression.trim()) return null;
+  if (error) {
+    return (
+      <p className="flex items-start gap-1.5 border border-red-200 bg-red-50 px-2 py-1.5 text-[11px] text-red-700">
+        <AlertCircle className="mt-0.5 h-3 w-3 flex-shrink-0" /> <span>{error}</span>
+      </p>
+    );
+  }
+  return (
+    <p className="flex items-start gap-1.5 border border-emerald-200 bg-emerald-50 px-2 py-1.5 text-[11px] text-emerald-800">
+      <CheckCircle2 className="mt-0.5 h-3 w-3 flex-shrink-0" />
+      <span>Valid. Sanity check with every referenced value = 100 and empty tables:{" "}
+        <span className="font-mono font-semibold">{String(previewValue)}</span></span>
+    </p>
+  );
+}
 
 /* Formula editor for a calculated TABLE COLUMN. Same grammar/engine as the
  * top-level CalcFormulaEditor, but the chip picker offers two scopes: this
@@ -1779,11 +2017,15 @@ function ColumnCalcFormulaEditor({ column, siblingColumns, formFields, onChange 
   const sampleScope: Record<string, number> = {};
   keyedColumns.forEach((c) => { sampleScope[c.key] = 100; });
   keyedFormFields.forEach((f) => { sampleScope[f.key] = 100; });
-  const previewValue = evaluateCalcExpression(calc.expression, sampleScope);
+  const knownKeys = [...keyedColumns.map((c) => c.key), ...keyedFormFields.map((f) => f.key)];
+  const formulaError = validateCalcExpression(calc.expression, knownKeys);
+  const previewValue = formulaError ? "" : previewCalcValue(calc.expression, sampleScope, calc.decimals);
   const showDecimals = column.type === "number" || column.type === "currency";
   const iCls =
     "h-9 w-full border border-[#AEB5BB] bg-white px-3 text-sm text-[#1F2933] " +
     "placeholder:text-[#8C969E] outline-none focus:border-[#287EAD] focus:ring-1 focus:ring-[#287EAD]";
+
+  const sampleFormula = sampleFormulaFor(keyedColumns[0]?.key ?? keyedFormFields[0]?.key, numericColumns[0]?.key);
 
   return (
     <div className="space-y-2 border border-[#C8CDD2] bg-white p-2.5">
@@ -1791,57 +2033,56 @@ function ColumnCalcFormulaEditor({ column, siblingColumns, formFields, onChange 
         ref={exprRef}
         value={calc.expression}
         onChange={(e) => onChange({ ...calc, expression: e.target.value })}
-        placeholder="e.g. daily_subsistence_allowance or qty * unit_price"
+        placeholder={`e.g. ${sampleFormula}`}
         rows={2}
         className={cn(iCls, "h-auto min-h-[52px] py-2 font-mono resize-none")}
       />
-      <button type="button" onClick={() => insertToken('IF(condition, "value if true", "value if false")')}
-              className="inline-flex items-center gap-1 border border-[#287EAD]/40 bg-[#EEF6FB] px-2 py-1 font-mono text-[10px] font-semibold text-[#287EAD] hover:bg-[#287EAD] hover:text-white">
-        + Insert IF(condition, …)
-      </button>
-      {keyedColumns.length > 0 && (
-        <div className="space-y-1">
-          <span className="text-[10px] font-semibold uppercase tracking-wider text-[#5E6870]">This row's columns</span>
-          <div className="flex flex-wrap gap-1">
-            {keyedColumns.map((c) => (
-              <button key={c.id} type="button" onClick={() => insertToken(c.key)} title={`Insert ${c.key}`}
-                      className="border border-[#C8CDD2] bg-[#F6F7F8] px-1.5 py-0.5 font-mono text-[10px] text-[#287EAD] hover:border-[#287EAD] hover:bg-[#EEF6FB]">
-                {c.key}
-              </button>
-            ))}
+      <div className="flex flex-wrap items-center gap-2">
+        <button type="button" onClick={() => insertToken('IF(condition, "value if true", "value if false")')}
+          className="inline-flex items-center gap-1 border border-[#287EAD]/40 bg-[#EEF6FB] px-2 py-1 font-mono text-[10px] font-semibold text-[#287EAD] hover:bg-[#287EAD] hover:text-white">
+          + Insert IF(condition, …)
+        </button>
+        <button type="button" onClick={() => insertToken(sampleFormula)}
+          className="inline-flex items-center gap-1 border border-[#C8CDD2] bg-[#F6F7F8] px-2 py-1 font-mono text-[10px] font-semibold text-[#5E6870] hover:border-[#287EAD] hover:text-[#287EAD]">
+          + Insert sample
+        </button>
+      </div>
+
+      {/* IDs live behind a disclosure: a wide table has far too many of them
+          to list permanently inside the column modal. */}
+      <RefPicker count={keyedColumns.length + keyedFormFields.length}>
+        {keyedColumns.length > 0 && (
+          <div className="space-y-1">
+            <span className="text-[10px] font-semibold uppercase tracking-wider text-[#5E6870]">This row's columns</span>
+            <div className="flex flex-wrap gap-1">
+              {keyedColumns.map((c) => (
+                <button key={c.id} type="button" onClick={() => insertToken(c.key)} title={`Insert ${c.key}`}
+                  className="border border-[#C8CDD2] bg-[#F6F7F8] px-1.5 py-0.5 font-mono text-[10px] text-[#287EAD] hover:border-[#287EAD] hover:bg-[#EEF6FB]">
+                  {c.key}
+                </button>
+              ))}
+            </div>
           </div>
-        </div>
-      )}
-      {numericColumns.length > 0 && (
-        <div className="space-y-1">
-          <span className="text-[10px] font-semibold uppercase tracking-wider text-[#5E6870]">Whole-column totals (all rows)</span>
-          <div className="flex flex-wrap gap-1">
-            {numericColumns.map((c) => (
-              <span key={c.id} className="inline-flex overflow-hidden border border-[#C8CDD2]">
-                {(["SUM", "AVG", "COUNT"] as const).map((fn) => (
-                  <button key={fn} type="button" onClick={() => insertToken(`${fn}(${c.key})`)} title={`Insert ${fn}(${c.key}) — computed across every row`}
-                          className="border-r border-[#C8CDD2] bg-[#F6F7F8] px-1.5 py-0.5 font-mono text-[10px] text-[#5E6870] last:border-r-0 hover:bg-[#EEF6FB] hover:text-[#287EAD]">
-                    {fn}({c.key})
-                  </button>
-                ))}
-              </span>
-            ))}
+        )}
+        {keyedFormFields.length > 0 && (
+          <div className="space-y-1">
+            <span className="text-[10px] font-semibold uppercase tracking-wider text-[#5E6870]">Form fields (same value in every row)</span>
+            <div className="flex flex-wrap gap-1">
+              {keyedFormFields.map((f) => (
+                <button key={f.id} type="button" onClick={() => insertToken(f.key)} title={`Insert ${f.key}`}
+                  className="border border-emerald-200 bg-emerald-50 px-1.5 py-0.5 font-mono text-[10px] text-emerald-700 hover:border-emerald-400">
+                  {f.key}
+                </button>
+              ))}
+            </div>
           </div>
-        </div>
-      )}
-      {keyedFormFields.length > 0 && (
-        <div className="space-y-1">
-          <span className="text-[10px] font-semibold uppercase tracking-wider text-[#5E6870]">Form fields (same value in every row)</span>
-          <div className="flex flex-wrap gap-1">
-            {keyedFormFields.map((f) => (
-              <button key={f.id} type="button" onClick={() => insertToken(f.key)} title={`Insert ${f.key}`}
-                      className="border border-emerald-200 bg-emerald-50 px-1.5 py-0.5 font-mono text-[10px] text-emerald-700 hover:border-emerald-400">
-                {f.key}
-              </button>
-            ))}
-          </div>
-        </div>
-      )}
+        )}
+        <p className="text-[10px] text-[#8C969E]">
+          A bare ID is this row's value. Wrap a column ID to total every row — e.g.{" "}
+          <code className="font-mono">SUM(column_id)</code>, <code className="font-mono">AVG(column_id)</code>,{" "}
+          <code className="font-mono">COUNT(column_id)</code>.
+        </p>
+      </RefPicker>
       {keyedColumns.length === 0 && keyedFormFields.length === 0 && (
         <p className="text-[10px] text-amber-600">Add other columns or form fields first — a formula needs something to reference.</p>
       )}
@@ -1849,18 +2090,12 @@ function ColumnCalcFormulaEditor({ column, siblingColumns, formFields, onChange 
         <div className="flex items-center gap-2 pt-1">
           <span className="text-[11px] font-semibold uppercase tracking-wider text-[#5E6870]">Decimal places</span>
           <input type="number" min={0} max={6} value={calc.decimals ?? 2}
-                 onChange={(e) => onChange({ ...calc, decimals: Math.max(0, Math.min(6, Number(e.target.value))) })}
-                 className={cn(iCls, "h-8 w-20")} />
+            onChange={(e) => onChange({ ...calc, decimals: Math.max(0, Math.min(6, Number(e.target.value))) })}
+            className={cn(iCls, "h-8 w-20")} />
         </div>
       )}
-      {calc.expression.trim() && (
-        <p className="text-[11px] text-[#5E6870]">
-          Sanity check (every field above = 100): <span className="font-mono font-semibold text-[#287EAD]">{String(previewValue)}</span>
-        </p>
-      )}
-      <p className="text-[10px] text-[#8C969E]">
-        Arithmetic (+ - * / ( )), comparisons (&gt; &lt; &gt;= &lt;= == !=), and IF(condition, if_true, if_false) — e.g. IF(amount&gt;dsa_amount,"Exceeds advance","OK"). ROUND()/ABS()/MIN()/MAX() work on numbers; SUM()/AVG()/COUNT()/COLMIN()/COLMAX() total a column across every row. Re-runs authoritatively on the server at submit time.
-      </p>
+      <FormulaStatus error={formulaError} expression={calc.expression} previewValue={previewValue} />
+      <FormulaReference />
     </div>
   );
 }
@@ -1868,12 +2103,12 @@ function ColumnCalcFormulaEditor({ column, siblingColumns, formFields, onChange 
 const RETIREMENT_SCENARIOS: Array<{ key: "exact" | "under" | "over"; label: string; hint: string }> = [
   { key: "exact", label: "Exact spend", hint: "Spent equals the issued/requested amount." },
   { key: "under", label: "Underspend", hint: "Spent is less than issued — a balance is returned." },
-  { key: "over",  label: "Overspend",  hint: "Spent exceeds issued — the user is owed the difference." },
+  { key: "over", label: "Overspend", hint: "Spent exceeds issued — the user is owed the difference." },
 ];
 
 const AMOUNT_SOURCE_OPTIONS: Array<{ value: RetirementAmountSource; label: string }> = [
-  { value: "issued",   label: "Issued amount" },
-  { value: "spent",    label: "Spent (this column, summed)" },
+  { value: "issued", label: "Issued amount" },
+  { value: "spent", label: "Spent (this column, summed)" },
   { value: "variance", label: "Variance (|issued − spent|)" },
 ];
 
@@ -1914,8 +2149,8 @@ function RetirementConfigEditor({ column, formFields, onChange }: {
             <div>
               <span className="text-[11px] font-semibold uppercase tracking-wider text-[#5E6870]">Issued / requested amount field</span>
               <select className={cn(iCls, "mt-1", !retirement.issuedAmountField && amountFieldOptions.length > 0 && "border-amber-400")}
-                      value={retirement.issuedAmountField ?? ""}
-                      onChange={(e) => onChange({ ...retirement, issuedAmountField: e.target.value || undefined })}>
+                value={retirement.issuedAmountField ?? ""}
+                onChange={(e) => onChange({ ...retirement, issuedAmountField: e.target.value || undefined })}>
                 <option value="">— choose a field —</option>
                 {amountFieldOptions.map((f) => <option key={f.id} value={f.key}>{f.label} ({f.key})</option>)}
               </select>
@@ -1969,7 +2204,7 @@ function RetirementScenarioEditor({ label, hint, scenario, onChange }: {
           <p className="text-[10px] text-[#8C969E]">{hint}</p>
         </div>
         <button type="button" onClick={addLine}
-                className="inline-flex items-center gap-1 border border-[#287EAD] px-2 py-1 text-[10px] font-semibold text-[#287EAD] hover:bg-[#EEF6FB]">
+          className="inline-flex items-center gap-1 border border-[#287EAD] px-2 py-1 text-[10px] font-semibold text-[#287EAD] hover:bg-[#EEF6FB]">
           <Plus className="h-3 w-3" /> Add line
         </button>
       </div>
@@ -1977,18 +2212,18 @@ function RetirementScenarioEditor({ label, hint, scenario, onChange }: {
         {scenario.lines.map((line, idx) => (
           <div key={idx} className="grid grid-cols-[1fr_90px_1fr_auto] gap-1.5 items-center">
             <input className={cn(iCls, "font-mono")} value={line.account}
-                   onChange={(e) => updateLine(idx, { account: e.target.value })}
-                   placeholder="Account code" />
+              onChange={(e) => updateLine(idx, { account: e.target.value })}
+              placeholder="Account code" />
             <select className={iCls} value={line.dc} onChange={(e) => updateLine(idx, { dc: e.target.value as "D" | "C" })}>
               <option value="D">Debit</option>
               <option value="C">Credit</option>
             </select>
             <select className={iCls} value={line.amountSource}
-                    onChange={(e) => updateLine(idx, { amountSource: e.target.value as RetirementAmountSource })}>
+              onChange={(e) => updateLine(idx, { amountSource: e.target.value as RetirementAmountSource })}>
               {AMOUNT_SOURCE_OPTIONS.map((o) => <option key={o.value} value={o.value}>{o.label}</option>)}
             </select>
             <button type="button" onClick={() => removeLine(idx)} title="Remove line"
-                    className="p-1 text-[#5E6870] hover:bg-red-50 hover:text-red-600">
+              className="p-1 text-[#5E6870] hover:bg-red-50 hover:text-red-600">
               <Trash2 className="h-3.5 w-3.5" />
             </button>
           </div>
@@ -2012,7 +2247,7 @@ function ColumnConfigModal({
   onSave: (col: TableColumn) => void;
   onDelete: () => void;
 }) {
-  const [tab, setTab]   = useState<"field" | "advanced">("field");
+  const [tab, setTab] = useState<"field" | "advanced">("field");
   const [draft, setDraft] = useState<TableColumn>({ ...column });
   // Whether the column's ID still follows its Label — see FieldEditor's
   // identical pattern (deriveKeyFromLabel / looksAutoGenerated above). Each
@@ -2026,9 +2261,9 @@ function ColumnConfigModal({
   const currencySourceColumns = siblingColumns.filter(
     (c) => c.id !== draft.id && c.key && ["select", "text"].includes(c.type ?? "text"),
   );
-  const isNumeric  = draft.type === "number" || draft.type === "currency";
-  const isText     = draft.type === "text" || draft.type === "textarea" || draft.type === "email" || draft.type === "phone";
-  const isCalcCol  = !!draft.calc;
+  const isNumeric = draft.type === "number" || draft.type === "currency";
+  const isText = draft.type === "text" || draft.type === "textarea" || draft.type === "email" || draft.type === "phone";
+  const isCalcCol = !!draft.calc;
   const keyDuplicate = siblingColumns.some((c) => c.id !== draft.id && c.key === draft.key);
 
   const iCls =
@@ -2045,13 +2280,13 @@ function ColumnConfigModal({
             <span className="text-sm font-semibold text-[#1F2933]">Column: {draft.label || "Untitled"}</span>
           </div>
           <button onClick={() => setTab("field")}
-                  className={cn("px-6 py-3 text-sm font-semibold transition-colors",
-                    tab === "field" ? "bg-[#287EAD] text-white" : "bg-white text-[#5E6870] hover:bg-[#F3F5F6]")}>
+            className={cn("px-6 py-3 text-sm font-semibold transition-colors",
+              tab === "field" ? "bg-[#287EAD] text-white" : "bg-white text-[#5E6870] hover:bg-[#F3F5F6]")}>
             Field Properties
           </button>
           <button onClick={() => setTab("advanced")}
-                  className={cn("px-6 py-3 text-sm font-semibold transition-colors",
-                    tab === "advanced" ? "bg-[#287EAD] text-white" : "bg-white text-[#5E6870] hover:bg-[#F3F5F6]")}>
+            className={cn("px-6 py-3 text-sm font-semibold transition-colors",
+              tab === "advanced" ? "bg-[#287EAD] text-white" : "bg-white text-[#5E6870] hover:bg-[#F3F5F6]")}>
             Advanced Properties
           </button>
           <button onClick={onClose} className="px-4 text-[#5E6870] hover:bg-[#F3F5F6]">
@@ -2065,14 +2300,14 @@ function ColumnConfigModal({
             <div className="space-y-4">
               <Row label="Label" required>
                 <input className={iCls} value={draft.label}
-                       onChange={(e) => {
-                         const label = e.target.value;
-                         set(autoKey ? { label, key: deriveKeyFromLabel(label, draft.key) } : { label });
-                       }} />
+                  onChange={(e) => {
+                    const label = e.target.value;
+                    set(autoKey ? { label, key: deriveKeyFromLabel(label, draft.key) } : { label });
+                  }} />
               </Row>
               <Row label="ID" hint={autoKey ? "Following the label automatically — edit directly to take over." : undefined}>
                 <input className={cn(iCls, "font-mono", keyDuplicate && "border-red-500 focus:border-red-500 focus:ring-red-500/20")} value={draft.key}
-                       onChange={(e) => { setAutoKey(false); set({ key: slugifyLive(e.target.value) || draft.key }); }} />
+                  onChange={(e) => { setAutoKey(false); set({ key: slugifyLive(e.target.value) || draft.key }); }} />
                 {keyDuplicate && (
                   <div className="flex items-center gap-1.5 text-xs text-red-500 mt-1">
                     <AlertCircle className="h-3 w-3" /> Duplicate ID — must be unique within this table
@@ -2080,12 +2315,39 @@ function ColumnConfigModal({
                 )}
               </Row>
               <Row label="Type">
-                <select value={draft.type ?? "text"}
-                        onChange={(e) => set({ type: e.target.value as TableColumnType })}
-                        className={iCls}>
+                {/* Currency is no longer a separate type — a Number column
+                    becomes a currency purely through its number format. */}
+                <select value={draft.type === "currency" ? "number" : (draft.type ?? "text")}
+                  onChange={(e) => set({ type: e.target.value as TableColumnType })}
+                  className={iCls}>
                   {COL_TYPES.map((t) => <option key={t.value} value={t.value}>{t.label}</option>)}
                 </select>
               </Row>
+              {isNumeric && (
+                <Row label="Number format" hint="Controls how the cell is displayed and rounded. Turn on “Show as currency” to prefix a symbol.">
+                  <NumberFormatEditor
+                    value={{
+                      asCurrency: draft.type === "currency",
+                      decimals: draft.decimals,
+                      thousandsSeparator: draft.thousandsSeparator,
+                      currencySymbol: draft.currencySymbol,
+                      currencyFrom: draft.currencyFromColumn,
+                    }}
+                    symbolSources={currencySourceColumns.map((c) => ({ key: c.key, label: c.label }))}
+                    symbolSourceNoun="column"
+                    inputCls={iCls}
+                    onChange={(patch) =>
+                      set({
+                        ...(patch.asCurrency === undefined ? {} : { type: patch.asCurrency ? "currency" : "number" }),
+                        ...("decimals" in patch ? { decimals: patch.decimals } : {}),
+                        ...("thousandsSeparator" in patch ? { thousandsSeparator: patch.thousandsSeparator } : {}),
+                        ...("currencySymbol" in patch ? { currencySymbol: patch.currencySymbol } : {}),
+                        ...("currencyFrom" in patch ? { currencyFromColumn: patch.currencyFrom } : {}),
+                      })
+                    }
+                  />
+                </Row>
+              )}
               <Row label="Mandatory">
                 <ToggleYesNo value={!!draft.required} onChange={(v) => set({ required: v })} />
               </Row>
@@ -2141,15 +2403,15 @@ function ColumnConfigModal({
                   <div className="grid grid-cols-2 gap-3">
                     <Row label="Debit / Credit">
                       <select className={iCls} value={draft.sunsystems?.dc ?? "D"}
-                              onChange={(e) => set({ sunsystems: { ...(draft.sunsystems ?? {}), dc: e.target.value as "D" | "C" } })}>
+                        onChange={(e) => set({ sunsystems: { ...(draft.sunsystems ?? {}), dc: e.target.value as "D" | "C" } })}>
                         <option value="D">Debit</option>
                         <option value="C">Credit</option>
                       </select>
                     </Row>
                     <Row label="Default account" hint="Used unless a separate 'Account code' column is set on this table.">
                       <input className={cn(iCls, "font-mono")} value={draft.sunsystems?.account ?? ""}
-                             onChange={(e) => set({ sunsystems: { ...(draft.sunsystems ?? {}), account: e.target.value } })}
-                             placeholder="e.g. 37400" />
+                        onChange={(e) => set({ sunsystems: { ...(draft.sunsystems ?? {}), account: e.target.value } })}
+                        placeholder="e.g. 37400" />
                     </Row>
                   </div>
                   <RetirementConfigEditor
@@ -2197,22 +2459,9 @@ function ColumnConfigModal({
                   <Row label="Maximum value"><input type="number" value={draft.max ?? ""} onChange={(e) => set({ max: e.target.value === "" ? undefined : Number(e.target.value) })} className={iCls} /></Row>
                 </>
               )}
-              {draft.type === "currency" && (
-                <>
-                  <Row label="Currency symbol source">
-                    <select className={iCls} value={draft.currencyFromColumn ?? ""}
-                            onChange={(e) => set({ currencyFromColumn: e.target.value || undefined })}>
-                      <option value="">Fixed symbol</option>
-                      {currencySourceColumns.map((c) => (
-                        <option key={c.id} value={c.key}>From column: {c.label} ({c.key})</option>
-                      ))}
-                    </select>
-                  </Row>
-                  <Row label={draft.currencyFromColumn ? "Fallback symbol" : "Currency symbol"}>
-                    <input className={iCls} value={draft.currencySymbol ?? "KSh"} onChange={(e) => set({ currencySymbol: e.target.value })} />
-                  </Row>
-                </>
-              )}
+              {/* Currency symbol / decimals / thousands separator moved to the
+                  Field Properties tab ("Number format") — Number and Currency
+                  are one type there, distinguished only by that config. */}
               {isText && (
                 <>
                   <Row label="Minimum length"><input type="number" min={0} value={draft.minLength ?? ""} onChange={(e) => set({ minLength: e.target.value === "" ? undefined : Number(e.target.value) })} className={iCls} /></Row>
@@ -2231,18 +2480,23 @@ function ColumnConfigModal({
               )}
               <VisibilityEditor
                 value={draft}
-                sources={formFields.map((f) => ({ key: f.key, label: f.label }))}
+                sources={columnRuleSources(draft, siblingColumns, formFields)}
                 onChange={(patch) => set(patch)}
                 subject="column"
                 processSteps={processSteps}
               />
               <EditabilityEditor
                 value={draft}
-                sources={formFields.map((f) => ({ key: f.key, label: f.label }))}
+                sources={columnRuleSources(draft, siblingColumns, formFields)}
                 onChange={(patch) => set(patch)}
                 subject="column"
                 processSteps={processSteps}
               />
+              <p className="text-[11px] text-[#5E6870]">
+                Rules that reference another column in this table are evaluated per row —
+                the cell is locked (or the column hidden) based on that row's own values.
+              </p>
+
             </div>
           )}
         </div>
@@ -2263,6 +2517,72 @@ function ColumnConfigModal({
     </div>
   );
 }
+
+/* Rule sources available to a table column: its sibling columns in the same
+ * table (evaluated per row) plus the top-level form fields. */
+function columnRuleSources(
+  draft: TableColumn,
+  siblingColumns: TableColumn[],
+  formFields: TemplateField[],
+): Array<{ key: string; label: string }> {
+  const own = siblingColumns
+    .filter((c) => c.key && c.id !== draft.id)
+    .map((c) => ({ key: c.key, label: `This row › ${c.label || c.key}` }));
+  return [...own, ...conditionSourcesFrom(formFields)];
+}
+
+/* Merge a table row's own cell values into the form-level value map so a
+ * column rule can be resolved per row. Row keys win over form keys. */
+function rowScopedValues(values: Record<string, unknown>, row?: Record<string, string>): Record<string, unknown> {
+  return row ? { ...values, ...row } : values;
+}
+
+/* Reusable destructive-action confirmation. Deleting a field, section or
+ * column is irreversible from the canvas, so it always goes through here. */
+function ConfirmDeleteDialog({ open, title, message, confirmLabel = "Delete", onCancel, onConfirm }: {
+  open: boolean;
+  title: string;
+  message: React.ReactNode;
+  confirmLabel?: string;
+  onCancel: () => void;
+  onConfirm: () => void;
+}) {
+  useEffect(() => {
+    if (!open) return;
+    const onKey = (e: KeyboardEvent) => { if (e.key === "Escape") onCancel(); };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [open, onCancel]);
+  if (!open) return null;
+  return (
+    <div className="fixed inset-0 z-[60] flex items-center justify-center bg-black/40 p-4" onClick={onCancel}>
+      <div role="alertdialog" aria-modal="true" onClick={(e) => e.stopPropagation()}
+        className="w-full max-w-md border border-[#C8CDD2] bg-white shadow-2xl">
+        <div className="flex items-start gap-3 px-5 py-4">
+          <div className="mt-0.5 flex h-8 w-8 flex-shrink-0 items-center justify-center bg-red-50 text-red-600">
+            <Trash2 className="h-4 w-4" />
+          </div>
+          <div className="min-w-0">
+            <h3 className="text-sm font-bold text-[#1F2933]">{title}</h3>
+            <div className="mt-1 text-sm text-[#5E6870]">{message}</div>
+          </div>
+        </div>
+        <div className="flex justify-end gap-2 border-t border-[#E4E7E9] px-5 py-3">
+          <button autoFocus onClick={onCancel}
+            className="border border-[#AEB5BB] bg-white px-4 py-2 text-sm font-semibold text-[#1F2933] hover:bg-[#F3F5F6]">
+            Cancel
+          </button>
+          <button onClick={onConfirm}
+            className="inline-flex items-center gap-1.5 bg-red-600 px-4 py-2 text-sm font-semibold text-white hover:bg-red-700">
+            <Trash2 className="h-4 w-4" /> {confirmLabel}
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+
 
 function Row({ label, required, hint, children }: { label: string; required?: boolean; hint?: string; children: React.ReactNode }) {
   return (
@@ -2297,6 +2617,167 @@ function ToggleYesNo({ value, onChange }: { value: boolean; onChange: (v: boolea
     </button>
   );
 }
+
+/* A read-only version of the same switch, used to render calculated
+ * Yes/No values in the preview — the switch position IS the answer. */
+function ReadonlyToggle({ value }: { value: boolean }) {
+  return (
+    <span
+      aria-hidden
+      className={cn(
+        "inline-flex h-6 w-11 shrink-0 items-center rounded-full px-0.5 transition-colors",
+        value ? "bg-[#287EAD]" : "bg-[#C8CDD2]"
+      )}
+    >
+      <span className={cn("h-5 w-5 rounded-full bg-white shadow-sm transition-transform", value ? "translate-x-5" : "translate-x-0")} />
+    </span>
+  );
+}
+
+/* Condition sources include table columns as `table.column`, so visibility
+ * and editability rules can be driven by table data and not just form fields. */
+function conditionSourcesFrom(fields: TemplateField[]): Array<{ key: string; label: string }> {
+  const out: Array<{ key: string; label: string }> = [];
+  for (const f of fields) {
+    if (!f.key) continue;
+    if (f.type === "table") {
+      for (const c of f.columns ?? []) {
+        if (!c.key) continue;
+        out.push({ key: `${f.key}.${c.key}`, label: `${f.label} › ${c.label}` });
+      }
+      continue;
+    }
+    if (f.type === "divider" || f.type === "heading") continue;
+    out.push({ key: f.key, label: f.label });
+  }
+  return out;
+}
+
+/* One short, contextual example instead of a wall of SUM()/AVG()/COUNT()
+ * sample chips that grows with the form. */
+function sampleFormulaFor(fieldKey?: string, tableRef?: string): string {
+  if (fieldKey && tableRef) return `SUM(${tableRef}) * ${fieldKey}`;
+  if (tableRef) return `SUM(${tableRef})`;
+  if (fieldKey) return `${fieldKey} * 1.16`;
+  return "quantity * unit_price";
+}
+
+/* Collapsible list of insertable IDs — collapsed by default so a big form
+ * doesn't bury the formula box under dozens of chips. */
+function RefPicker({ count, children }: { count: number; children: React.ReactNode }) {
+  const [open, setOpen] = useState(false);
+  if (count === 0) return null;
+  return (
+    <div className="border border-[#E4E7E9] bg-[#FAFBFB]">
+      <button
+        type="button"
+        onClick={() => setOpen((o) => !o)}
+        className="flex w-full items-center justify-between px-2 py-1.5 text-left text-[11px] font-semibold text-[#5E6870] hover:text-[#287EAD]"
+      >
+        <span>Insert a field ID{count ? ` (${count})` : ""}</span>
+        <span className="font-mono text-[10px]">{open ? "▲" : "▼"}</span>
+      </button>
+      {open && <div className="space-y-2 border-t border-[#E4E7E9] p-2">{children}</div>}
+    </div>
+  );
+}
+
+/* Numeric display helpers driven by the number-format settings. */
+function stepForDecimals(decimals: number): string {
+  return decimals <= 0 ? "1" : `0.${"0".repeat(decimals - 1)}1`;
+}
+function formatNumeric(n: number, decimals: number, thousandsSeparator: boolean): string {
+  return n.toLocaleString("en-US", {
+    minimumFractionDigits: decimals,
+    maximumFractionDigits: decimals,
+    useGrouping: thousandsSeparator,
+  });
+}
+function placeholderForNumber(
+  cfg: { placeholder?: string; decimals?: number; thousandsSeparator?: boolean },
+  fallback: string,
+): string {
+  if (cfg.placeholder) return cfg.placeholder;
+  if (cfg.decimals === undefined) return fallback;
+  return formatNumeric(0, cfg.decimals, cfg.thousandsSeparator ?? true);
+}
+
+
+/* Number formatting shared by top-level fields and table columns. This is the
+ * single place where a number "becomes" a currency. */
+function NumberFormatEditor({
+  value, onChange, symbolSources, inputCls, symbolSourceNoun = "field",
+}: {
+  value: { asCurrency: boolean; decimals?: number; thousandsSeparator?: boolean; currencySymbol?: string; currencyFrom?: string };
+  onChange: (patch: Partial<{ asCurrency: boolean; decimals?: number; thousandsSeparator?: boolean; currencySymbol?: string; currencyFrom?: string }>) => void;
+  symbolSources: Array<{ key: string; label: string }>;
+  inputCls: string;
+  symbolSourceNoun?: string;
+}) {
+  const decimals = value.decimals ?? (value.asCurrency ? 2 : 0);
+  const sep = value.thousandsSeparator ?? true;
+  const sample = (12345.6789).toLocaleString(sep ? "en-US" : undefined, {
+    minimumFractionDigits: decimals, maximumFractionDigits: decimals, useGrouping: sep,
+  });
+
+  return (
+    <div className="space-y-2.5 border border-[#C8CDD2] bg-white p-2.5">
+      <div className="flex items-center justify-between gap-3">
+        <div>
+          <div className="text-[12px] font-semibold text-[#2C3338]">Show as currency</div>
+          <div className="text-[10px] text-[#8C969E]">Prefixes a symbol; otherwise it stays a plain number.</div>
+        </div>
+        <ToggleYesNo value={value.asCurrency} onChange={(v) => onChange({ asCurrency: v })} />
+      </div>
+
+      <div className="grid grid-cols-2 gap-2">
+        <label className="space-y-1">
+          <span className="text-[10px] font-semibold uppercase tracking-wider text-[#5E6870]">Decimal places</span>
+          <input type="number" min={0} max={6} value={decimals}
+            onChange={(e) => onChange({ decimals: Math.max(0, Math.min(6, Number(e.target.value) || 0)) })}
+            className={cn(inputCls, "h-8")} />
+        </label>
+        <div className="space-y-1">
+          <span className="text-[10px] font-semibold uppercase tracking-wider text-[#5E6870]">Thousands separator</span>
+          <div className="flex h-8 items-center">
+            <ToggleYesNo value={sep} onChange={(v) => onChange({ thousandsSeparator: v })} />
+          </div>
+        </div>
+      </div>
+
+      {value.asCurrency && (
+        <div className="grid grid-cols-2 gap-2">
+          <label className="space-y-1">
+            <span className="text-[10px] font-semibold uppercase tracking-wider text-[#5E6870]">Symbol source</span>
+            <select className={cn(inputCls, "h-8")} value={value.currencyFrom ?? ""}
+              onChange={(e) => onChange({ currencyFrom: e.target.value || undefined })}>
+              <option value="">Fixed symbol</option>
+              {symbolSources.map((s) => (
+                <option key={s.key} value={s.key}>From {symbolSourceNoun}: {s.label}</option>
+              ))}
+            </select>
+          </label>
+          <label className="space-y-1">
+            <span className="text-[10px] font-semibold uppercase tracking-wider text-[#5E6870]">
+              {value.currencyFrom ? "Fallback symbol" : "Symbol"}
+            </span>
+            <input className={cn(inputCls, "h-8")} value={value.currencySymbol ?? "KSh"}
+              onChange={(e) => onChange({ currencySymbol: e.target.value })} />
+          </label>
+        </div>
+      )}
+
+      <div className="border-t border-dashed border-[#E4E7E9] pt-2 text-[11px] text-[#5E6870]">
+        Preview:{" "}
+        <span className="font-mono font-semibold text-[#2C3338]">
+          {value.asCurrency ? `${value.currencySymbol ?? "KSh"} ` : ""}{sample}
+        </span>
+      </div>
+    </div>
+  );
+}
+
+
 
 function DropdownValuesEditor({ options, onChange }: { options: string[]; onChange: (opts: string[]) => void }) {
   const [draft, setDraft] = useState("");
@@ -2485,11 +2966,14 @@ function defaultCondition(sources: { key: string }[]): VisibilityCondition {
 
 /* Editor for an AND/OR group of visibility conditions. Each condition tests
  * either a form field's value or the document's current process step. */
-function RuleGroupEditor({ group, sources, processSteps, onChange }: {
+function RuleGroupEditor({ group, sources, processSteps, onChange, depth = 0 }: {
   group: RuleGroup;
   sources: { key: string; label: string }[];
   processSteps: { value: string; label: string }[];
   onChange: (g: RuleGroup) => void;
+  /* Nesting level. One extra level is allowed (depth 1) — deeper rule trees
+   * are unreadable in a side panel and are better modelled as two rules. */
+  depth?: number;
 }) {
   const updateCond = (i: number, patch: Partial<VisibilityCondition>) =>
     onChange({ ...group, conditions: group.conditions.map((c, idx) => (idx === i ? { ...c, ...patch } : c)) });
@@ -2497,7 +2981,13 @@ function RuleGroupEditor({ group, sources, processSteps, onChange }: {
     onChange({ ...group, conditions: group.conditions.filter((_, idx) => idx !== i) });
   const addCond = () =>
     onChange({ ...group, conditions: [...group.conditions, defaultCondition(sources)] });
-  const needsValue = (op: ConditionOperator) => op === "equals" || op === "not_equals";
+  const nested = group.groups ?? [];
+  const addGroup = () =>
+    onChange({ ...group, groups: [...nested, { combinator: group.combinator === "and" ? "or" : "and", conditions: [defaultCondition(sources)] }] });
+  const updateGroup = (i: number, g: RuleGroup) =>
+    onChange({ ...group, groups: nested.map((n, idx) => (idx === i ? g : n)) });
+  const removeGroup = (i: number) =>
+    onChange({ ...group, groups: nested.filter((_, idx) => idx !== i) });
 
   return (
     <div className="space-y-2">
@@ -2520,24 +3010,24 @@ function RuleGroupEditor({ group, sources, processSteps, onChange }: {
         <div key={i} className="space-y-1.5 border border-[#E5E8EB] bg-[#FAFBFC] p-2">
           <div className="flex items-center gap-1.5">
             <select className={cn(inputCls, "h-8 flex-1")} value={c.source}
-                    onChange={(e) => {
-                      const source = e.target.value as ConditionSource;
-                      updateCond(i, source === "process_step"
-                        ? { source, fieldKey: undefined, operator: "equals", value: processSteps[0]?.value ?? "" }
-                        : { source, fieldKey: sources[0]?.key ?? "", value: "" });
-                    }}>
+              onChange={(e) => {
+                const source = e.target.value as ConditionSource;
+                updateCond(i, source === "process_step"
+                  ? { source, fieldKey: undefined, operator: "equals", value: processSteps[0]?.value ?? "" }
+                  : { source, fieldKey: sources[0]?.key ?? "", value: "" });
+              }}>
               <option value="field">Form field</option>
               <option value="process_step">Process step</option>
             </select>
             <button type="button" onClick={() => removeCond(i)} title="Remove condition"
-                    className="p-1 text-[#8C969E] hover:bg-red-50 hover:text-red-500">
+              className="p-1 text-[#8C969E] hover:bg-red-50 hover:text-red-500">
               <X className="h-3.5 w-3.5" />
             </button>
           </div>
 
           {c.source === "field" && (
             <select className={cn(inputCls, "h-8")} value={c.fieldKey ?? ""}
-                    onChange={(e) => updateCond(i, { fieldKey: e.target.value })}>
+              onChange={(e) => updateCond(i, { fieldKey: e.target.value })}>
               <option value="">— choose a field —</option>
               {sources.map((s) => <option key={s.key} value={s.key}>{s.label} ({s.key})</option>)}
             </select>
@@ -2545,34 +3035,78 @@ function RuleGroupEditor({ group, sources, processSteps, onChange }: {
 
           <div className="grid grid-cols-2 gap-1.5">
             <select className={cn(inputCls, "h-8")} value={c.operator}
-                    onChange={(e) => updateCond(i, { operator: e.target.value as ConditionOperator })}>
-              <option value="equals">equals</option>
-              <option value="not_equals">not equals</option>
-              {c.source === "field" && <option value="is_empty">is empty</option>}
-              {c.source === "field" && <option value="is_not_empty">is not empty</option>}
+              onChange={(e) => updateCond(i, { operator: e.target.value as ConditionOperator })}>
+              {OPERATOR_GROUPS.map((g) => {
+                /* A process step is a plain label: only text-ish operators apply. */
+                const ops = c.source === "process_step"
+                  ? g.ops.filter((o) => ["equals", "not_equals", "contains", "not_contains", "starts_with", "ends_with", "in_list", "not_in_list"].includes(o))
+                  : g.ops;
+                if (!ops.length) return null;
+                return (
+                  <optgroup key={g.label} label={g.label}>
+                    {ops.map((o) => <option key={o} value={o}>{OPERATOR_LABEL[o]}</option>)}
+                  </optgroup>
+                );
+              })}
             </select>
-            {needsValue(c.operator) && (
-              c.source === "process_step" ? (
+            {!VALUELESS_OPERATORS.has(c.operator) && (
+              c.source === "process_step" && !LIST_OPERATORS.has(c.operator) ? (
                 <select className={cn(inputCls, "h-8")} value={c.value ?? ""}
-                        onChange={(e) => updateCond(i, { value: e.target.value })}>
+                  onChange={(e) => updateCond(i, { value: e.target.value })}>
                   <option value="">— choose a step —</option>
                   {processSteps.map((s) => <option key={s.value} value={s.value}>{s.label}</option>)}
                 </select>
+              ) : RANGE_OPERATORS.has(c.operator) ? (
+                <div className="flex items-center gap-1">
+                  <input className={cn(inputCls, "h-8 min-w-0")} value={(c.value ?? "").split(",")[0] ?? ""} placeholder="From"
+                    onChange={(e) => updateCond(i, { value: `${e.target.value},${(c.value ?? "").split(",")[1] ?? ""}` })} />
+                  <span className="text-[10px] text-[#8C969E]">–</span>
+                  <input className={cn(inputCls, "h-8 min-w-0")} value={(c.value ?? "").split(",")[1] ?? ""} placeholder="To"
+                    onChange={(e) => updateCond(i, { value: `${(c.value ?? "").split(",")[0] ?? ""},${e.target.value}` })} />
+                </div>
               ) : (
                 <input className={cn(inputCls, "h-8")} value={c.value ?? ""}
-                       onChange={(e) => updateCond(i, { value: e.target.value })} placeholder="Value" />
+                  onChange={(e) => updateCond(i, { value: e.target.value })}
+                  placeholder={LIST_OPERATORS.has(c.operator) ? "A, B, C" : "Value"} />
               )
             )}
           </div>
+          {LIST_OPERATORS.has(c.operator) && (
+            <p className="text-[10px] text-[#8C969E]">Separate each accepted value with a comma.</p>
+          )}
+          <p className="text-[10px] text-[#8C969E]">{summarizeCondition(c)}</p>
         </div>
       ))}
 
-      <button type="button" onClick={addCond}
-              className="flex items-center gap-1 text-[11px] font-semibold text-[#287EAD] hover:text-[#1E6F99]">
-        <Plus className="h-3 w-3" /> Add condition
-      </button>
+      {/* Nested groups — one level deep, to express "A AND (B OR C)". */}
+      {nested.map((n, i) => (
+        <div key={`g${i}`} className="border-l-2 border-[#287EAD]/40 pl-2">
+          <div className="mb-1 flex items-center justify-between">
+            <span className="text-[10px] font-semibold uppercase tracking-wider text-[#287EAD]">Nested group</span>
+            <button type="button" onClick={() => removeGroup(i)} title="Remove group"
+              className="p-1 text-[#8C969E] hover:bg-red-50 hover:text-red-500">
+              <X className="h-3.5 w-3.5" />
+            </button>
+          </div>
+          <RuleGroupEditor group={n} sources={sources} processSteps={processSteps}
+            depth={depth + 1} onChange={(g) => updateGroup(i, g)} />
+        </div>
+      ))}
 
-      {group.conditions.length === 0 && (
+      <div className="flex flex-wrap items-center gap-3">
+        <button type="button" onClick={addCond}
+          className="flex items-center gap-1 text-[11px] font-semibold text-[#287EAD] hover:text-[#1E6F99]">
+          <Plus className="h-3 w-3" /> Add condition
+        </button>
+        {depth < 1 && (
+          <button type="button" onClick={addGroup}
+            className="flex items-center gap-1 text-[11px] font-semibold text-[#5E6870] hover:text-[#287EAD]">
+            <Layers className="h-3 w-3" /> Add nested group
+          </button>
+        )}
+      </div>
+
+      {group.conditions.length === 0 && nested.length === 0 && (
         <p className="text-[10px] text-amber-600">Add at least one condition, or this stays visible to everyone.</p>
       )}
       {processSteps.length === 0 && group.conditions.some((c) => c.source === "process_step") && (
@@ -2627,8 +3161,8 @@ function VisibilityEditor({ value, sources, onChange, subject, groupOptions, pro
         mode === "hidden"
           ? `This ${subject} is always hidden from people filling the form.`
           : mode === "groups"
-          ? "Only members of the selected groups (and admins) see this section."
-          : `Control when this ${subject} appears for people filling the form.`
+            ? "Only members of the selected groups (and admins) see this section."
+            : `Control when this ${subject} appears for people filling the form.`
       }
     >
       <div className="space-y-2 border border-[#C8CDD2] bg-white p-2.5">
@@ -2647,7 +3181,7 @@ function VisibilityEditor({ value, sources, onChange, subject, groupOptions, pro
               {groupOptions!.map((g) => (
                 <label key={g.id} className="flex cursor-pointer items-center gap-2 px-2 py-1.5 text-xs text-[#1F2933] hover:bg-[#F6F7F8]">
                   <input type="checkbox" checked={isGroupSelected(g.id)} onChange={() => toggleGroup(g)}
-                         className="h-3.5 w-3.5 accent-[#287EAD]" />
+                    className="h-3.5 w-3.5 accent-[#287EAD]" />
                   <span className="truncate">{g.name}</span>
                 </label>
               ))}
@@ -2703,8 +3237,8 @@ function EditabilityEditor({ value, sources, onChange, subject, processSteps = [
         mode === "readonly"
           ? `This ${subject} is always read-only.`
           : mode === "conditional"
-          ? `Editable only while the rules below match — read-only at every other step.`
-          : `Control when people can edit this ${subject}.`
+            ? `Editable only while the rules below match — read-only at every other step.`
+            : `Control when people can edit this ${subject}.`
       }
     >
       <div className="space-y-2 border border-[#C8CDD2] bg-white p-2.5">
@@ -2750,77 +3284,88 @@ function CalcFormulaEditor({ field, siblings, onUpdate }: {
   // Quick sanity preview: every referenced sibling = 100.
   const sampleScope: Record<string, number> = {};
   keyedSiblings.forEach((s) => { sampleScope[s.key] = 100; });
-  const previewValue = evaluateCalcExpression(calc.expression, sampleScope);
-  const showDecimals = field.type !== "calc_text" && field.type !== "calc_date";
+  /* Table columns are addressable both bare (`amount`) and qualified
+   * (`expenses.amount`), so both spellings count as "known"for validation. */
+  const knownKeys = [
+    ...keyedSiblings.map((s) => s.key),
+    ...tableSiblings.flatMap((t) => (t.columns ?? []).filter((c) => c.key).flatMap((c) => [c.key, `${t.key}.${c.key}`])),
+  ];
+  const formulaError = validateCalcExpression(calc.expression, knownKeys);
+  const previewValue = formulaError
+    ? ""
+    : formatCalcResult(field.type, previewCalcValue(calc.expression, sampleScope, calc.decimals));
+  const showDecimals = field.type !== "calc_text" && field.type !== "calc_date" && field.type !== "calc_boolean";
+
+  const sampleFormula = sampleFormulaFor(
+    keyedSiblings[0]?.key,
+    tableSiblings[0] ? `${tableSiblings[0].key}.${(tableSiblings[0].columns ?? []).find((c) => c.key)?.key ?? "amount"}` : undefined,
+  );
 
   return (
     <InspectorRow
       label="Formula"
-      hint="Arithmetic (+ - * / ( )), comparisons (> < >= <= == !=), and IF(condition, if_true, if_false) — e.g. IF(status==&quot;Approved&quot;,&quot;Ready&quot;,&quot;Pending&quot;). ROUND()/ABS()/MIN()/MAX() work on numbers. SUM()/AVG()/COUNT()/COLMIN()/COLMAX() total a table elsewhere on the form, e.g. SUM(expenses.amount). A bare table.column reference (or just the column ID on its own, e.g. amount) pulls that column's value straight from its first row, the same way a table column can already pull in a top-level field's value. This exact formula re-runs authoritatively on the server at submit time, so the stored value can't be spoofed from the browser."
+      hint="Arithmetic, comparisons and IF(…) over other field IDs. Open Function reference below for the full list. This formula re-runs authoritatively on the server at submit time."
     >
       <div className="space-y-2 border border-[#C8CDD2] bg-white p-2.5">
         <textarea
           ref={exprRef}
           value={calc.expression}
           onChange={(e) => onUpdate({ calc: { ...calc, expression: e.target.value } })}
-          placeholder="e.g. total_days * daily_rate, or SUM(expenses.amount)"
+          placeholder={`e.g. ${sampleFormula}`}
           rows={2}
           className={cn(inputCls, "h-auto min-h-[52px] py-2 font-mono resize-none")}
         />
-        <button type="button" onClick={() => insertToken('IF(condition, "value if true", "value if false")')}
-                className="inline-flex items-center gap-1 border border-[#287EAD]/40 bg-[#EEF6FB] px-2 py-1 font-mono text-[10px] font-semibold text-[#287EAD] hover:bg-[#287EAD] hover:text-white">
-          + Insert IF(condition, …)
-        </button>
-        {keyedSiblings.length > 0 && (
-          <div className="space-y-1">
-            <span className="text-[10px] font-semibold uppercase tracking-wider text-[#5E6870]">Other fields</span>
-            <div className="flex flex-wrap gap-1">
-              {keyedSiblings.map((s) => (
-                <button key={s.id} type="button" onClick={() => insertToken(s.key)} title={`Insert ${s.key}`}
-                        className="border border-[#C8CDD2] bg-[#F6F7F8] px-1.5 py-0.5 font-mono text-[10px] text-[#287EAD] hover:border-[#287EAD] hover:bg-[#EEF6FB]">
-                  {s.key}
-                </button>
-              ))}
+        <div className="flex flex-wrap items-center gap-2">
+          <button type="button" onClick={() => insertToken('IF(condition, "value if true", "value if false")')}
+            className="inline-flex items-center gap-1 border border-[#287EAD]/40 bg-[#EEF6FB] px-2 py-1 font-mono text-[10px] font-semibold text-[#287EAD] hover:bg-[#287EAD] hover:text-white">
+            + Insert IF(condition, …)
+          </button>
+          <button type="button" onClick={() => insertToken(sampleFormula)}
+            className="inline-flex items-center gap-1 border border-[#C8CDD2] bg-[#F6F7F8] px-2 py-1 font-mono text-[10px] font-semibold text-[#5E6870] hover:border-[#287EAD] hover:text-[#287EAD]">
+            + Insert sample
+          </button>
+        </div>
+
+        {/* Field / column IDs are hidden behind a disclosure — a long form can
+            have dozens of them and they used to flood the inspector. */}
+        <RefPicker
+          count={keyedSiblings.length + tableSiblings.reduce((n, t) => n + (t.columns ?? []).filter((c) => c.key).length, 0)}
+        >
+          {keyedSiblings.length > 0 && (
+            <div className="space-y-1">
+              <span className="text-[10px] font-semibold uppercase tracking-wider text-[#5E6870]">Other fields</span>
+              <div className="flex flex-wrap gap-1">
+                {keyedSiblings.map((s) => (
+                  <button key={s.id} type="button" onClick={() => insertToken(s.key)} title={`Insert ${s.key}`}
+                    className="border border-[#C8CDD2] bg-[#F6F7F8] px-1.5 py-0.5 font-mono text-[10px] text-[#287EAD] hover:border-[#287EAD] hover:bg-[#EEF6FB]">
+                    {s.key}
+                  </button>
+                ))}
+              </div>
             </div>
-          </div>
-        )}
-        {tableSiblings.map((t) => {
-          const numericCols = (t.columns ?? []).filter((c) => c.key && (c.type === "number" || c.type === "currency"));
-          const allCols = (t.columns ?? []).filter((c) => c.key);
-          if (allCols.length === 0) return null;
-          return (
-            <div key={t.id} className="space-y-1.5">
-              {numericCols.length > 0 && (
-                <div className="space-y-1">
-                  <span className="text-[10px] font-semibold uppercase tracking-wider text-[#5E6870]">"{t.label}" table totals</span>
-                  <div className="flex flex-wrap gap-1">
-                    {numericCols.map((c) => (
-                      <span key={c.id} className="inline-flex overflow-hidden border border-[#C8CDD2]">
-                        {(["SUM", "AVG", "COUNT"] as const).map((fn) => (
-                          <button key={fn} type="button" onClick={() => insertToken(`${fn}(${t.key}.${c.key})`)} title={`Insert ${fn}(${t.key}.${c.key}) — computed across every row of "${t.label}"`}
-                                  className="border-r border-[#C8CDD2] bg-[#F6F7F8] px-1.5 py-0.5 font-mono text-[10px] text-[#5E6870] last:border-r-0 hover:bg-[#EEF6FB] hover:text-[#287EAD]">
-                            {fn}({t.key}.{c.key})
-                          </button>
-                        ))}
-                      </span>
-                    ))}
-                  </div>
-                </div>
-              )}
-              <div className="space-y-1">
-                <span className="text-[10px] font-semibold uppercase tracking-wider text-[#5E6870]">"{t.label}" first row</span>
+          )}
+          {tableSiblings.map((t) => {
+            const allCols = (t.columns ?? []).filter((c) => c.key);
+            if (allCols.length === 0) return null;
+            return (
+              <div key={t.id} className="space-y-1">
+                <span className="text-[10px] font-semibold uppercase tracking-wider text-[#5E6870]">"{t.label}" columns</span>
                 <div className="flex flex-wrap gap-1">
                   {allCols.map((c) => (
-                    <button key={c.id} type="button" onClick={() => insertToken(`${t.key}.${c.key}`)} title={`Insert ${t.key}.${c.key} — that column's own value from row 1 of "${t.label}"`}
-                            className="border border-teal-200 bg-teal-50 px-1.5 py-0.5 font-mono text-[10px] text-teal-700 hover:border-teal-400">
+                    <button key={c.id} type="button" onClick={() => insertToken(`${t.key}.${c.key}`)} title={`Insert ${t.key}.${c.key} — wrap in SUM()/AVG()/COUNT() to total every row`}
+                      className="border border-teal-200 bg-teal-50 px-1.5 py-0.5 font-mono text-[10px] text-teal-700 hover:border-teal-400">
                       {t.key}.{c.key}
                     </button>
                   ))}
                 </div>
               </div>
-            </div>
-          );
-        })}
+            );
+          })}
+          <p className="text-[10px] text-[#8C969E]">
+            A bare reference is the field's own value (row 1 for a table column). Wrap a table
+            column to total every row — e.g. <code className="font-mono">SUM(table_id.column_id)</code>.
+          </p>
+        </RefPicker>
         {keyedSiblings.length === 0 && tableSiblings.length === 0 && (
           <p className="text-[10px] text-amber-600">Add other fields to this form first — a formula needs something to reference.</p>
         )}
@@ -2828,15 +3373,12 @@ function CalcFormulaEditor({ field, siblings, onUpdate }: {
           <div className="flex items-center gap-2 pt-1">
             <span className="text-[11px] font-semibold uppercase tracking-wider text-[#5E6870]">Decimal places</span>
             <input type="number" min={0} max={6} value={calc.decimals ?? 2}
-                   onChange={(e) => onUpdate({ calc: { ...calc, decimals: Math.max(0, Math.min(6, Number(e.target.value))) } })}
-                   className={cn(inputCls, "h-8 w-20")} />
+              onChange={(e) => onUpdate({ calc: { ...calc, decimals: Math.max(0, Math.min(6, Number(e.target.value))) } })}
+              className={cn(inputCls, "h-8 w-20")} />
           </div>
         )}
-        {calc.expression.trim() && (
-          <p className="text-[11px] text-[#5E6870]">
-            Sanity check (every field above = 100): <span className="font-mono font-semibold text-[#287EAD]">{String(previewValue)}</span>
-          </p>
-        )}
+        <FormulaStatus error={formulaError} expression={calc.expression} previewValue={previewValue} />
+        <FormulaReference />
       </div>
     </InspectorRow>
   );
@@ -2849,10 +3391,10 @@ function FieldEditor({ field, onUpdate, allFields, processSteps }: {
   processSteps: { value: string; label: string }[];
 }) {
   const [tab, setTab] = useState<"field" | "advanced">("field");
-  const isTable    = field.type === "table";
-  const isLayout   = field.type === "divider" || field.type === "heading";
-  const isNumeric  = field.type === "number" || field.type === "currency";
-  const isText     = field.type === "text" || field.type === "textarea" || field.type === "email" || field.type === "phone";
+  const isTable = field.type === "table";
+  const isLayout = field.type === "divider" || field.type === "heading";
+  const isNumeric = field.type === "number" || field.type === "currency";
+  const isText = field.type === "text" || field.type === "textarea" || field.type === "email" || field.type === "phone";
   const isCalculated = CALCULATED_TYPES.has(field.type);
   const hasOptions = field.type === "select" || field.type === "radio" || field.type === "multi_select";
 
@@ -2874,13 +3416,13 @@ function FieldEditor({ field, onUpdate, allFields, processSteps }: {
       {/* Tabs */}
       <div className="flex border border-[#C8CDD2] bg-white">
         <button onClick={() => setTab("field")}
-                className={cn("flex-1 py-2 text-xs font-semibold transition-colors",
-                  tab === "field" ? "bg-[#287EAD] text-white" : "text-[#5E6870] hover:bg-[#F3F5F6]")}>
+          className={cn("flex-1 py-2 text-xs font-semibold transition-colors",
+            tab === "field" ? "bg-[#287EAD] text-white" : "text-[#5E6870] hover:bg-[#F3F5F6]")}>
           Field Properties
         </button>
         <button onClick={() => setTab("advanced")}
-                className={cn("flex-1 py-2 text-xs font-semibold transition-colors",
-                  tab === "advanced" ? "bg-[#287EAD] text-white" : "text-[#5E6870] hover:bg-[#F3F5F6]")}>
+          className={cn("flex-1 py-2 text-xs font-semibold transition-colors",
+            tab === "advanced" ? "bg-[#287EAD] text-white" : "text-[#5E6870] hover:bg-[#F3F5F6]")}>
           Advanced Properties
         </button>
       </div>
@@ -2890,10 +3432,10 @@ function FieldEditor({ field, onUpdate, allFields, processSteps }: {
           {!isLayout && (
             <InspectorRow label="Label">
               <input className={inputCls} value={field.label}
-                     onChange={(e) => {
-                       const label = e.target.value;
-                       onUpdate(autoKey ? { label, key: deriveKeyFromLabel(label, field.key) } : { label });
-                     }} />
+                onChange={(e) => {
+                  const label = e.target.value;
+                  onUpdate(autoKey ? { label, key: deriveKeyFromLabel(label, field.key) } : { label });
+                }} />
             </InspectorRow>
           )}
           <InspectorRow label="Field Key" hint={autoKey ? "Following the label automatically — edit directly to take over." : "Used as the variable name in generated documents"}>
@@ -2909,11 +3451,12 @@ function FieldEditor({ field, onUpdate, allFields, processSteps }: {
             )}
           </InspectorRow>
           {!["heading", "divider", "checkbox", "boolean", "table", "file", "image", "signature",
-             "rating", "auto_number", "calc_number", "calc_currency", "calc_text", "calc_date"].includes(field.type) && (
-            <InspectorRow label="Placeholder">
-              <input className={inputCls} value={field.placeholder ?? ""} onChange={(e) => onUpdate({ placeholder: e.target.value })} />
-            </InspectorRow>
-          )}
+            "rating", "auto_number", "calc_number", "calc_currency", "calc_text", "calc_date",
+            "calc_boolean", "multi_file", "info", "spacer"].includes(field.type) && (
+              <InspectorRow label="Placeholder">
+                <input className={inputCls} value={field.placeholder ?? ""} onChange={(e) => onUpdate({ placeholder: e.target.value })} />
+              </InspectorRow>
+            )}
           <InspectorRow label="Help text">
             <input className={inputCls} value={field.helpText ?? ""} onChange={(e) => onUpdate({ helpText: e.target.value })} />
           </InspectorRow>
@@ -2923,8 +3466,8 @@ function FieldEditor({ field, onUpdate, allFields, processSteps }: {
           {!isTable && (
             <InspectorRow label={`Column width — ${field.colSpan} / 12`}>
               <input type="range" min={1} max={12} value={field.colSpan ?? 6}
-                     onChange={(e) => onUpdate({ colSpan: Number(e.target.value) })}
-                     className="w-full accent-[#287EAD]" />
+                onChange={(e) => onUpdate({ colSpan: Number(e.target.value) })}
+                className="w-full accent-[#287EAD]" />
               <div className="flex justify-between text-[10px] text-[#5E6870]"><span>1</span><span>6</span><span>12</span></div>
             </InspectorRow>
           )}
@@ -2932,7 +3475,7 @@ function FieldEditor({ field, onUpdate, allFields, processSteps }: {
             <div className="flex items-center gap-6">
               <label className="flex cursor-pointer items-center gap-2.5 text-sm text-[#1F2933]">
                 <input type="checkbox" checked={!!field.required} onChange={(e) => onUpdate({ required: e.target.checked })}
-                       className="h-4 w-4 border-[#AEB5BB] accent-[#287EAD]" />
+                  className="h-4 w-4 border-[#AEB5BB] accent-[#287EAD]" />
                 Required
               </label>
               {/* Read-only moved to the Editability control (Advanced tab). */}
@@ -2941,7 +3484,7 @@ function FieldEditor({ field, onUpdate, allFields, processSteps }: {
           {isTable && (
             <InspectorRow label="Minimum rows shown">
               <input type="number" min={1} max={20} value={field.minRows ?? 2}
-                     onChange={(e) => onUpdate({ minRows: Number(e.target.value) })} className={inputCls} />
+                onChange={(e) => onUpdate({ minRows: Number(e.target.value) })} className={inputCls} />
             </InspectorRow>
           )}
           {hasOptions && (
@@ -2955,8 +3498,30 @@ function FieldEditor({ field, onUpdate, allFields, processSteps }: {
           {field.type === "rating" && (
             <InspectorRow label="Number of stars">
               <input type="number" min={2} max={10} value={field.max ?? 5}
-                     onChange={(e) => onUpdate({ max: Math.max(2, Math.min(10, Number(e.target.value))) })} className={inputCls} />
+                onChange={(e) => onUpdate({ max: Math.max(2, Math.min(10, Number(e.target.value))) })} className={inputCls} />
             </InspectorRow>
+          )}
+          {isNumeric && (
+            <NumberFormatEditor
+              value={{
+                asCurrency: field.type === "currency",
+                decimals: field.decimals,
+                thousandsSeparator: field.thousandsSeparator,
+                currencySymbol: field.currencySymbol,
+                currencyFrom: field.currencyFromField,
+              }}
+              symbolSources={currencySourceSiblings.map((s) => ({ key: s.key, label: s.label }))}
+              inputCls={inputCls}
+              onChange={(patch) =>
+                onUpdate({
+                  ...(patch.asCurrency === undefined ? {} : { type: patch.asCurrency ? "currency" : "number" }),
+                  ...("decimals" in patch ? { decimals: patch.decimals } : {}),
+                  ...("thousandsSeparator" in patch ? { thousandsSeparator: patch.thousandsSeparator } : {}),
+                  ...("currencySymbol" in patch ? { currencySymbol: patch.currencySymbol } : {}),
+                  ...("currencyFrom" in patch ? { currencyFromField: patch.currencyFrom } : {}),
+                })
+              }
+            />
           )}
           {(field.type === "reference" || field.type === "user") && (
             <InspectorRow label="Reference source">
@@ -2995,32 +3560,12 @@ function FieldEditor({ field, onUpdate, allFields, processSteps }: {
               <InspectorRow label="Max"><input type="number" className={inputCls} value={field.max ?? ""} onChange={(e) => onUpdate({ max: e.target.value === "" ? undefined : Number(e.target.value) })} /></InspectorRow>
             </div>
           )}
-          {field.type === "currency" && (
-            <InspectorRow
-              label="Currency symbol"
-              hint={field.currencyFromField
-                ? "Symbol follows the linked field's selected currency code; the symbol below is the fallback."
-                : "Fixed symbol shown before the amount."}
-            >
-              <div className="space-y-2">
-                <select className={inputCls}
-                        value={field.currencyFromField ?? ""}
-                        onChange={(e) => onUpdate({ currencyFromField: e.target.value || undefined })}>
-                  <option value="">Fixed symbol</option>
-                  {currencySourceSiblings.map((s) => (
-                    <option key={s.id} value={s.key}>From field: {s.label} ({s.key})</option>
-                  ))}
-                </select>
-                <input className={inputCls} value={field.currencySymbol ?? "KSh"}
-                       onChange={(e) => onUpdate({ currencySymbol: e.target.value })}
-                       placeholder={field.currencyFromField ? "Fallback symbol" : "Symbol, e.g. KSh"} />
-              </div>
-            </InspectorRow>
-          )}
+          {/* Currency/number formatting now lives in Field Properties — see
+              the "Number format" block there (merged Number + Currency). */}
           {field.type === "calc_currency" && (
             <InspectorRow label="Currency symbol" hint="Fixed symbol shown before the computed amount.">
               <input className={inputCls} value={field.currencySymbol ?? "KSh"}
-                     onChange={(e) => onUpdate({ currencySymbol: e.target.value })} placeholder="Symbol, e.g. KSh" />
+                onChange={(e) => onUpdate({ currencySymbol: e.target.value })} placeholder="Symbol, e.g. KSh" />
             </InspectorRow>
           )}
           {isText && (
@@ -3036,14 +3581,14 @@ function FieldEditor({ field, onUpdate, allFields, processSteps }: {
           )}
           <VisibilityEditor
             value={field}
-            sources={siblings.map((s) => ({ key: s.key, label: s.label }))}
+            sources={conditionSourcesFrom(siblings)}
             onChange={onUpdate}
             subject="field"
             processSteps={processSteps}
           />
           <EditabilityEditor
             value={field}
-            sources={siblings.map((s) => ({ key: s.key, label: s.label }))}
+            sources={conditionSourcesFrom(siblings)}
             onChange={onUpdate}
             subject="field"
             processSteps={processSteps}
@@ -3064,7 +3609,7 @@ function SectionEditor({ section, onUpdate, allFields, processSteps }: {
   // siblings of their own), excluding fields that live in this same section —
   // those would be hidden alongside it.
   const ownFieldIds = new Set(section.fields.map((f) => f.id));
-  const sources = allFields.filter((f) => f.key && !ownFieldIds.has(f.id));
+  const sources = conditionSourcesFrom(allFields.filter((f) => f.key && !ownFieldIds.has(f.id)));
 
   // RBAC groups for the "visible only to groups"mode.
   const { data: groups = [] } = useQuery({
@@ -3083,12 +3628,12 @@ function SectionEditor({ section, onUpdate, allFields, processSteps }: {
       </InspectorRow>
       <InspectorRow label="Description">
         <textarea value={section.description ?? ""} rows={3}
-                  onChange={(e) => onUpdate({ description: e.target.value })}
-                  className={inputCls.replace("h-9", "min-h-[76px] py-2 resize-none")} />
+          onChange={(e) => onUpdate({ description: e.target.value })}
+          className={inputCls.replace("h-9", "min-h-[76px] py-2 resize-none")} />
       </InspectorRow>
       <VisibilityEditor
         value={section}
-        sources={sources.map((f) => ({ key: f.key, label: f.label }))}
+        sources={sources}
         onChange={onUpdate}
         subject="section"
         groupOptions={groups}
@@ -3096,7 +3641,7 @@ function SectionEditor({ section, onUpdate, allFields, processSteps }: {
       />
       <EditabilityEditor
         value={section}
-        sources={sources.map((f) => ({ key: f.key, label: f.label }))}
+        sources={sources}
         onChange={onUpdate}
         subject="section"
         processSteps={processSteps}
@@ -3136,14 +3681,14 @@ function Inspector({ sections, selectedId, onUpdateField, onUpdateSection, onCol
             {target?.kind === "field"
               ? FIELD_META[target.field.type]?.label ?? target.field.type
               : target?.kind === "section" ? target.section.title
-              : "Nothing selected"}
+                : "Nothing selected"}
           </p>
           {target?.kind === "field" && (
             <p className="mt-0.5 truncate font-mono text-xs text-[#5E6870]">{target.field.key}</p>
           )}
         </div>
         <button onClick={onCollapse} title="Collapse inspector"
-                className="mt-0.5 shrink-0 p-1.5 text-[#5E6870] hover:bg-white hover:text-[#287EAD] transition-colors">
+          className="mt-0.5 shrink-0 p-1.5 text-[#5E6870] hover:bg-white hover:text-[#287EAD] transition-colors">
           <ChevronRight className="h-4 w-4" />
         </button>
       </div>
@@ -3206,12 +3751,12 @@ function PreviewColumnInput({ col, value, onChange, row, disabled }: { col: Tabl
       return (
         <div className="flex items-center gap-1">
           <span className="text-[10px] text-slate-400">{symbol}</span>
-          <input type="number" step="0.01" min={col.min} max={col.max} disabled={ro} value={value} onChange={(e) => onChange(e.target.value)} className={base} placeholder="0.00" />
+          <input type="number" step={stepForDecimals(col.decimals ?? 2)} min={col.min} max={col.max} disabled={ro} value={value} onChange={(e) => onChange(e.target.value)} className={base} placeholder={placeholderForNumber(col, "0.00")} />
         </div>
       );
     }
     case "number":
-      return <input type="number" min={col.min} max={col.max} value={value} disabled={ro} onChange={(e) => onChange(e.target.value)} className={base} />;
+      return <input type="number" step={stepForDecimals(col.decimals ?? 0)} min={col.min} max={col.max} value={value} disabled={ro} onChange={(e) => onChange(e.target.value)} className={base} placeholder={placeholderForNumber(col, "0")} />;
     case "date":
       return <input type="date" value={value} disabled={ro} onChange={(e) => onChange(e.target.value)} className={base} />;
     case "datetime":
@@ -3232,6 +3777,26 @@ function PreviewColumnInput({ col, value, onChange, row, disabled }: { col: Tabl
       );
     case "file":
       return <input type="file" disabled={ro} className="text-xs" />;
+    case "image":
+      return <input type="file" accept="image/*" disabled={ro} className="text-xs" />;
+    case "percentage":
+      return (
+        <div className="flex items-center gap-1">
+          <input type="number" step="0.01" min={col.min ?? 0} max={col.max ?? 100} disabled={ro} value={value}
+            onChange={(e) => onChange(e.target.value)} className={base} placeholder="0" />
+          <span className="text-[10px] text-slate-400">%</span>
+        </div>
+      );
+    case "url":
+      return <input type="url" value={value} disabled={ro} onChange={(e) => onChange(e.target.value)} className={base} placeholder="https://…" />;
+    case "multi_select":
+      return (
+        <select multiple value={value ? value.split("|") : []} disabled={ro} size={2}
+          onChange={(e) => onChange(Array.from(e.target.selectedOptions).map((o) => o.value).join("|"))}
+          className={cn(base, "min-h-[42px]")}>
+          {(col.options ?? []).map((o) => <option key={o} value={o}>{o}</option>)}
+        </select>
+      );
     default:
       return <input type="text" value={value} disabled={ro} maxLength={col.maxLength} onChange={(e) => onChange(e.target.value)} className={base} />;
   }
@@ -3248,14 +3813,18 @@ function PreviewTableField({ field, readOnly = false, rows, onUpdateCell, onAddR
   allFields: TemplateField[];
   previewStep: string;
 }) {
-  // A column is a single definition shared by every row, so its visibility
-  // is table-wide (like a section), evaluated once against the top-level
-  // form values + current workflow step — not per-row. `evalVisible` /
-  // `evalEditable` are the exact same generic functions already used for
-  // fields and sections; a TableColumn now carries the same
-  // hidden/visibleWhen/readonly/editableWhen shape, so no separate logic
-  // is needed here.
-  const cols = (field.columns ?? []).filter((c) => evalVisible(c, values, allFields, previewStep));
+  // Column rules use the same hidden/visibleWhen/readonly/editableWhen shape
+  // as fields and sections, but they are resolved with the row's own cell
+  // values merged over the top-level form values, so a rule can reference a
+  // sibling column. A column stays visible when ANY row satisfies its rule
+  // (a column header is shared by every row); editability is evaluated per
+  // row, so a cell can be locked on one row and editable on the next.
+  const cols = (field.columns ?? []).filter((c) =>
+    rows.length === 0
+      ? evalVisible(c, values, allFields, previewStep)
+      : rows.some((r) => evalVisible(c, rowScopedValues(values, r), allFields, previewStep)),
+  );
+
 
   return (
     <div className="col-span-12 space-y-2">
@@ -3281,7 +3850,11 @@ function PreviewTableField({ field, readOnly = false, rows, onUpdateCell, onAddR
             {rows.map((row, rowIdx) => (
               <tr key={rowIdx} className="border-b border-slate-300 last:border-0 hover:bg-slate-50 transition-colors">
                 {cols.map((col) => {
-                  const colDisabled = readOnly || !evalEditable(col, values, allFields, previewStep);
+                  const rowValues = rowScopedValues(values, row);
+                  const colDisabled = readOnly
+                    || !evalVisible(col, rowValues, allFields, previewStep)
+                    || !evalEditable(col, rowValues, allFields, previewStep);
+
                   return (
                     <td key={col.id} className="px-3 py-2.5 border-r border-slate-300 last:border-0">
                       <PreviewColumnInput col={col} value={row[col.key] ?? ""} row={row} disabled={colDisabled} onChange={(v) => onUpdateCell(rowIdx, col.key, v)} />
@@ -3322,33 +3895,80 @@ function evalCondition(c: VisibilityCondition, values: Record<string, unknown>, 
     const v = values[sib.id];
     sv = v == null ? "" : String(v);
   }
+  const target = (c.value ?? "").trim();
+  const lower = sv.trim().toLowerCase();
+  const targetLower = target.toLowerCase();
+  const num = parseFloat(sv);
+  /* Dates compare correctly as ISO strings, so fall back to a string compare
+   * whenever either side isn't numeric. */
+  const compare = (rhs: string): number => {
+    const b = parseFloat(rhs);
+    if (Number.isFinite(num) && Number.isFinite(b) && `${num}` === sv.trim()) return num - b;
+    if (Number.isFinite(num) && Number.isFinite(b) && !/[^0-9.\-+eE]/.test(sv.trim())) return num - b;
+    return sv.trim().localeCompare(rhs);
+  };
+  const listValues = () => target.split(",").map((v) => v.trim().toLowerCase()).filter(Boolean);
+  const rangeBounds = () => {
+    const [lo, hi] = target.split(",");
+    return [(lo ?? "").trim(), (hi ?? "").trim()];
+  };
+  const truthyText = new Set(["true", "yes", "1", "on", "checked"]);
+
   switch (c.operator) {
-    case "equals":       return sv === (c.value ?? "");
-    case "not_equals":   return sv !== (c.value ?? "");
-    case "is_empty":     return sv.trim() === "";
+    case "equals": return lower === targetLower;
+    case "not_equals": return lower !== targetLower;
+    case "is_empty": return sv.trim() === "";
     case "is_not_empty": return sv.trim() !== "";
-    default:             return true;
+    case "greater_than": return sv.trim() !== "" && compare(target) > 0;
+    case "greater_or_equal": return sv.trim() !== "" && compare(target) >= 0;
+    case "less_than": return sv.trim() !== "" && compare(target) < 0;
+    case "less_or_equal": return sv.trim() !== "" && compare(target) <= 0;
+    case "between": {
+      const [lo, hi] = rangeBounds();
+      return sv.trim() !== "" && compare(lo) >= 0 && compare(hi) <= 0;
+    }
+    case "not_between": {
+      const [lo, hi] = rangeBounds();
+      return sv.trim() === "" || compare(lo) < 0 || compare(hi) > 0;
+    }
+    case "contains": return targetLower !== "" && lower.includes(targetLower);
+    case "not_contains": return targetLower === "" || !lower.includes(targetLower);
+    case "starts_with": return lower.startsWith(targetLower);
+    case "ends_with": return lower.endsWith(targetLower);
+    case "in_list": return listValues().includes(lower);
+    case "not_in_list": return !listValues().includes(lower);
+    case "is_true": return truthyText.has(lower);
+    case "is_false": return !truthyText.has(lower);
+    default: return true;
   }
+}
+
+/* Evaluate a (possibly nested) rule group. Plain conditions and nested
+ * groups are combined with the SAME combinator, so a group reads exactly
+ * like its summary string. An empty group is "no restriction"= true. */
+function evalRuleGroup(group: RuleGroup | null | undefined, values: Record<string, unknown>, allFields: TemplateField[], processStep: string): boolean {
+  if (!group) return true;
+  const nested = (group.groups ?? []).filter(ruleGroupHasConditions);
+  if (group.conditions.length === 0 && nested.length === 0) return true;
+  const results = [
+    ...group.conditions.map((c) => evalCondition(c, values, allFields, processStep)),
+    ...nested.map((g) => evalRuleGroup(g, values, allFields, processStep)),
+  ];
+  return group.combinator === "or" ? results.some(Boolean) : results.every(Boolean);
 }
 
 /* Visibility for a field OR a section (both carry `hidden` + `visibleWhen`).
  * An empty/absent rule group means no restriction (visible). */
 function evalVisible(item: VisibilityState, values: Record<string, unknown>, allFields: TemplateField[], processStep = "draft"): boolean {
   if (item.hidden) return false;
-  const group = item.visibleWhen;
-  if (!group || group.conditions.length === 0) return true;
-  const results = group.conditions.map((c) => evalCondition(c, values, allFields, processStep));
-  return group.combinator === "or" ? results.some(Boolean) : results.every(Boolean);
+  return evalRuleGroup(item.visibleWhen, values, allFields, processStep);
 }
 
 /* Editability mirror (both carry `readonly` + `editableWhen`). Absent group =
  * editable. The builder Preview evaluates at the "draft"process step. */
 function evalEditable(item: EditabilityState, values: Record<string, unknown>, allFields: TemplateField[], processStep = "draft"): boolean {
   if (item.readonly) return false;
-  const group = item.editableWhen;
-  if (!group || group.conditions.length === 0) return true;
-  const results = group.conditions.map((c) => evalCondition(c, values, allFields, processStep));
-  return group.combinator === "or" ? results.some(Boolean) : results.every(Boolean);
+  return evalRuleGroup(item.editableWhen, values, allFields, processStep);
 }
 
 /* ── Calculated fields ────────────────────────────────────────────────────
@@ -3372,7 +3992,7 @@ type CalcToken =
   | { t: "op"; v: string };
 
 function calcTokenize(expr: string): CalcToken[] {
-  const re = /\s*(?:(\d+\.\d+|\d+)|("(?:[^"\\]|\\.)*")|([A-Za-z_][A-Za-z0-9_]*(?:\.[A-Za-z_][A-Za-z0-9_]*)?)|(>=|<=|==|!=)|([+\-*/(),><]))/y;
+  const re = /\s*(?:(\d+\.\d+|\d+)|("(?:[^"\\]|\\.)*")|('(?:[^'\\]|\\.)*')|([A-Za-z_][A-Za-z0-9_]*(?:\.[A-Za-z_][A-Za-z0-9_]*)?)|(>=|<=|==|!=|<>)|([+\-*/%^&(),><]))/y;
   const tokens: CalcToken[] = [];
   let pos = 0;
   while (pos < expr.length) {
@@ -3385,9 +4005,11 @@ function calcTokenize(expr: string): CalcToken[] {
     pos = re.lastIndex;
     if (m[1] !== undefined) tokens.push({ t: "num", v: parseFloat(m[1]) });
     else if (m[2] !== undefined) tokens.push({ t: "str", v: m[2].slice(1, -1).replace(/\\"/g, "\"").replace(/\\\\/g, "\\") });
-    else if (m[3] !== undefined) tokens.push({ t: "ident", v: m[3] });
-    else if (m[4] !== undefined) tokens.push({ t: "op", v: m[4] });
-    else if (m[5] !== undefined) tokens.push({ t: "op", v: m[5] });
+    else if (m[3] !== undefined) tokens.push({ t: "str", v: m[3].slice(1, -1).replace(/\\'/g, "'").replace(/\\\\/g, "\\") });
+    else if (m[4] !== undefined) tokens.push({ t: "ident", v: m[4] });
+    // "<>"is accepted as a friendlier spelling of "!="(spreadsheet muscle memory).
+    else if (m[5] !== undefined) tokens.push({ t: "op", v: m[5] === "<>" ? "!=" : m[5] });
+    else if (m[6] !== undefined) tokens.push({ t: "op", v: m[6] });
   }
   return tokens;
 }
@@ -3405,18 +4027,294 @@ function isTruthy(value: CalcValue | undefined): boolean {
   return toNumber(value) !== 0;
 }
 
-const CALC_FUNCS: Record<string, (...args: CalcValue[]) => number> = {
+/* ── Value helpers shared by the whole function library ───────────────────
+ * A calc VALUE is a number or a string. Dates/date-times travel through the
+ * engine as a DAY SERIAL (days since 1970-01-01 UTC — see coerceNumeric), and
+ * times as MINUTES SINCE MIDNIGHT, so date/time arithmetic is plain
+ * arithmetic and the date functions below are thin wrappers over it. */
+const MS_PER_DAY = 86400000;
+
+/** Render a calc VALUE as text — used by every text function and by the `&`
+ *  concatenation operator. Trims float noise off computed numbers. */
+function calcText(v: CalcValue | undefined): string {
+  if (v === undefined || v === null) return "";
+  if (typeof v === "number") {
+    if (!Number.isFinite(v)) return "";
+    return Number.isInteger(v) ? String(v) : String(parseFloat(v.toFixed(10)));
+  }
+  return String(v);
+}
+
+const pad2 = (n: number) => String(Math.abs(Math.trunc(n))).padStart(2, "0");
+
+function serialToDate(serial: CalcValue | undefined): Date {
+  return new Date(Math.round(toNumber(serial) * MS_PER_DAY));
+}
+function dateToSerial(d: Date): number { return Math.floor(d.getTime() / MS_PER_DAY); }
+
+/** Format a day serial with the YYYY / MM / DD / HH / mm / ss tokens. */
+function formatSerial(serial: CalcValue | undefined, fmt: CalcValue = "YYYY-MM-DD"): string {
+  const d = serialToDate(serial);
+  if (Number.isNaN(d.getTime())) return "";
+  return calcText(fmt || "YYYY-MM-DD")
+    .replace(/YYYY/g, String(d.getUTCFullYear()))
+    .replace(/MM/g, pad2(d.getUTCMonth() + 1))
+    .replace(/DD/g, pad2(d.getUTCDate()))
+    .replace(/HH/g, pad2(d.getUTCHours()))
+    .replace(/mm/g, pad2(d.getUTCMinutes()))
+    .replace(/ss/g, pad2(d.getUTCSeconds()));
+}
+
+function addMonthsSerial(serial: CalcValue, months: CalcValue): number {
+  const d = serialToDate(serial);
+  if (Number.isNaN(d.getTime())) return 0;
+  const day = d.getUTCDate();
+  const target = new Date(Date.UTC(d.getUTCFullYear(), d.getUTCMonth() + Math.trunc(toNumber(months)), 1));
+  const lastDay = new Date(Date.UTC(target.getUTCFullYear(), target.getUTCMonth() + 1, 0)).getUTCDate();
+  target.setUTCDate(Math.min(day, lastDay));
+  return dateToSerial(target);
+}
+
+/** Whole weekdays (Mon–Fri) between two day serials, inclusive of the start
+ *  and exclusive of the end — the usual "working days"count. Bounded so a
+ *  nonsense pair of dates can never spin. */
+function networkDays(a: CalcValue, b: CalcValue): number {
+  let start = Math.round(toNumber(a));
+  let end = Math.round(toNumber(b));
+  const sign = end < start ? -1 : 1;
+  if (sign < 0) { const t = start; start = end; end = t; }
+  const span = Math.min(end - start, 20000);
+  let count = 0;
+  for (let i = 0; i < span; i += 1) {
+    const dow = new Date((start + i) * MS_PER_DAY).getUTCDay();
+    if (dow !== 0 && dow !== 6) count += 1;
+  }
+  return count * sign;
+}
+
+/* The pure function library. Every entry is side-effect free and total —
+ * a bad argument yields 0 or "" rather than throwing, matching the engine's
+ * "never break the form"contract. Mirrored 1:1 by _CALC_FUNCS in
+ * apps/templates_engine/conditions.py. */
+const CALC_FUNCS: Record<string, (...args: CalcValue[]) => CalcValue> = {
+  /* ── Maths ───────────────────────────────────────────────────────────── */
   ROUND: (a, n = 0) => { const f = Math.pow(10, Math.trunc(toNumber(n))); return Math.round(toNumber(a) * f) / f; },
+  ROUNDUP: (a, n = 0) => { const f = Math.pow(10, Math.trunc(toNumber(n))); return Math.ceil(toNumber(a) * f) / f; },
+  ROUNDDOWN: (a, n = 0) => { const f = Math.pow(10, Math.trunc(toNumber(n))); return Math.floor(toNumber(a) * f) / f; },
+  CEIL: (a) => Math.ceil(toNumber(a)),
+  CEILING: (a) => Math.ceil(toNumber(a)),
+  FLOOR: (a) => Math.floor(toNumber(a)),
+  INT: (a) => Math.trunc(toNumber(a)),
+  TRUNC: (a) => Math.trunc(toNumber(a)),
   ABS: (a) => Math.abs(toNumber(a)),
-  MIN: (...a) => Math.min(...a.map(toNumber)),
-  MAX: (...a) => Math.max(...a.map(toNumber)),
+  SIGN: (a) => Math.sign(toNumber(a)),
+  SQRT: (a) => { const n = toNumber(a); return n < 0 ? 0 : Math.sqrt(n); },
+  POWER: (a, b) => { const r = Math.pow(toNumber(a), toNumber(b)); return Number.isFinite(r) ? r : 0; },
+  MOD: (a, b) => { const d = toNumber(b); return d === 0 ? 0 : toNumber(a) % d; },
+  MIN: (...a) => (a.length ? Math.min(...a.map(toNumber)) : 0),
+  MAX: (...a) => (a.length ? Math.max(...a.map(toNumber)) : 0),
+  AVERAGE: (...a) => (a.length ? a.reduce<number>((s, x) => s + toNumber(x), 0) / a.length : 0),
+  SUMARGS: (...a) => a.reduce<number>((s, x) => s + toNumber(x), 0),
+  CLAMP: (v, lo, hi) => Math.min(Math.max(toNumber(v), toNumber(lo)), toNumber(hi)),
+  /** PERCENT(part, whole) → part as a percentage of whole (0 when whole is 0). */
+  PERCENT: (part, whole) => { const w = toNumber(whole); return w === 0 ? 0 : (toNumber(part) / w) * 100; },
+  /** VAT-style helpers: APPLYRATE(1000, 16) = 160, GROSS(1000, 16) = 1160. */
+  APPLYRATE: (amount, ratePct) => (toNumber(amount) * toNumber(ratePct)) / 100,
+  GROSS: (amount, ratePct) => toNumber(amount) * (1 + toNumber(ratePct) / 100),
+  NET: (gross, ratePct) => toNumber(gross) / (1 + toNumber(ratePct) / 100),
+
+  /* ── Logic ───────────────────────────────────────────────────────────── */
+  AND: (...a) => (a.length > 0 && a.every(isTruthy) ? 1 : 0),
+  OR: (...a) => (a.some(isTruthy) ? 1 : 0),
+  NOT: (a) => (isTruthy(a) ? 0 : 1),
+  XOR: (...a) => (a.filter(isTruthy).length % 2 === 1 ? 1 : 0),
+  TRUE: () => 1,
+  FALSE: () => 0,
+  ISBLANK: (a) => (calcText(a).trim() === "" || toNumber(a) === 0 && calcText(a) === "" ? 1 : 0),
+  ISNUMBER: (a) => (typeof a === "number" || (calcText(a).trim() !== "" && Number.isFinite(parseFloat(calcText(a)))) ? 1 : 0),
+  /** First argument that isn't blank. */
+  COALESCE: (...a) => a.find((v) => calcText(v).trim() !== "") ?? "",
+  /** IFS(cond1, val1, cond2, val2, …, fallback?) — first matching branch. */
+  IFS: (...a) => {
+    for (let i = 0; i + 1 < a.length; i += 2) if (isTruthy(a[i])) return a[i + 1];
+    return a.length % 2 === 1 ? a[a.length - 1] : "";
+  },
+  /** SWITCH(value, match1, result1, …, fallback?) — string-compared. */
+  SWITCH: (...a) => {
+    const subject = calcText(a[0]);
+    for (let i = 1; i + 1 < a.length; i += 2) if (calcText(a[i]) === subject) return a[i + 1];
+    return (a.length - 1) % 2 === 1 ? a[a.length - 1] : "";
+  },
+
+  /* ── Text ────────────────────────────────────────────────────────────── */
+  CONCAT: (...a) => a.map(calcText).join(""),
+  CONCATENATE: (...a) => a.map(calcText).join(""),
+  JOIN: (sep, ...a) => a.map(calcText).filter((s) => s !== "").join(calcText(sep)),
+  TEXT: (v, decimals) => (decimals === undefined ? calcText(v) : toNumber(v).toFixed(Math.max(0, Math.trunc(toNumber(decimals))))),
+  VALUE: (v) => toNumber(v),
+  UPPER: (v) => calcText(v).toUpperCase(),
+  LOWER: (v) => calcText(v).toLowerCase(),
+  PROPER: (v) => calcText(v).replace(/\w\S*/g, (w) => w[0].toUpperCase() + w.slice(1).toLowerCase()),
+  TRIM: (v) => calcText(v).trim(),
+  LEN: (v) => calcText(v).length,
+  LEFT: (v, n) => calcText(v).slice(0, Math.max(0, Math.trunc(toNumber(n)))),
+  RIGHT: (v, n) => { const k = Math.max(0, Math.trunc(toNumber(n))); return k === 0 ? "" : calcText(v).slice(-k); },
+  MID: (v, start, len) => calcText(v).slice(Math.max(0, Math.trunc(toNumber(start)) - 1), Math.max(0, Math.trunc(toNumber(start)) - 1 + Math.max(0, Math.trunc(toNumber(len))))),
+  FIND: (needle, hay) => calcText(hay).indexOf(calcText(needle)) + 1,
+  CONTAINS: (hay, needle) => (calcText(hay).toLowerCase().includes(calcText(needle).toLowerCase()) ? 1 : 0),
+  STARTSWITH: (hay, needle) => (calcText(hay).toLowerCase().startsWith(calcText(needle).toLowerCase()) ? 1 : 0),
+  ENDSWITH: (hay, needle) => (calcText(hay).toLowerCase().endsWith(calcText(needle).toLowerCase()) ? 1 : 0),
+  SUBSTITUTE: (v, find, repl) => calcText(v).split(calcText(find)).join(calcText(repl)),
+  REPLACE: (v, find, repl) => calcText(v).split(calcText(find)).join(calcText(repl)),
+  PADLEFT: (v, width, ch = "0") => calcText(v).padStart(Math.max(0, Math.trunc(toNumber(width))), calcText(ch) || "0"),
+  PADRIGHT: (v, width, ch = " ") => calcText(v).padEnd(Math.max(0, Math.trunc(toNumber(width))), calcText(ch) || " "),
+  /** SPLIT(text, separator, index) — 1-based index, "" when out of range. */
+  SPLIT: (v, sep, idx) => calcText(v).split(calcText(sep))[Math.max(1, Math.trunc(toNumber(idx))) - 1] ?? "",
+
+  /* ── Dates & times ───────────────────────────────────────────────────── */
+  TODAY: () => dateToSerial(new Date()),
+  NOW: () => Date.now() / MS_PER_DAY,
+  DATE: (y, m, d) => dateToSerial(new Date(Date.UTC(Math.trunc(toNumber(y)), Math.trunc(toNumber(m)) - 1, Math.trunc(toNumber(d))))),
+  YEAR: (s) => serialToDate(s).getUTCFullYear(),
+  MONTH: (s) => serialToDate(s).getUTCMonth() + 1,
+  DAY: (s) => serialToDate(s).getUTCDate(),
+  /** 1 = Sunday … 7 = Saturday, matching the spreadsheet convention. */
+  WEEKDAY: (s) => serialToDate(s).getUTCDay() + 1,
+  ISWEEKEND: (s) => { const d = serialToDate(s).getUTCDay(); return d === 0 || d === 6 ? 1 : 0; },
+  /** DAYS(end, start) — calendar days between two dates. */
+  DAYS: (end, start) => Math.round(toNumber(end) - toNumber(start)),
+  NETWORKDAYS: (start, end) => networkDays(start, end),
+  ADDDAYS: (s, n) => Math.round(toNumber(s)) + Math.trunc(toNumber(n)),
+  ADDMONTHS: (s, n) => addMonthsSerial(s, n),
+  ADDYEARS: (s, n) => addMonthsSerial(s, toNumber(n) * 12),
+  /** Last day of the month `n` months from the given date. */
+  EOMONTH: (s, n = 0) => {
+    const d = serialToDate(addMonthsSerial(s, n));
+    return dateToSerial(new Date(Date.UTC(d.getUTCFullYear(), d.getUTCMonth() + 1, 0)));
+  },
+  /** DATEDIF(start, end, "d"|"m"|"y") — whole units between two dates. */
+  DATEDIF: (start, end, unit = "d") => {
+    const a = serialToDate(start), b = serialToDate(end);
+    const u = calcText(unit).toLowerCase();
+    if (u === "y") {
+      let years = b.getUTCFullYear() - a.getUTCFullYear();
+      if (b.getUTCMonth() < a.getUTCMonth() || (b.getUTCMonth() === a.getUTCMonth() && b.getUTCDate() < a.getUTCDate())) years -= 1;
+      return years;
+    }
+    if (u === "m") {
+      let months = (b.getUTCFullYear() - a.getUTCFullYear()) * 12 + (b.getUTCMonth() - a.getUTCMonth());
+      if (b.getUTCDate() < a.getUTCDate()) months -= 1;
+      return months;
+    }
+    return Math.round(toNumber(end) - toNumber(start));
+  },
+  FORMATDATE: (s, fmt = "YYYY-MM-DD") => formatSerial(s, fmt),
+  /** Time values are minutes since midnight (see coerceNumeric). */
+  HOUR: (t) => Math.floor(toNumber(t) / 60),
+  MINUTE: (t) => Math.round(toNumber(t) % 60),
+  FORMATTIME: (t) => `${pad2(Math.floor(toNumber(t) / 60))}:${pad2(Math.round(toNumber(t) % 60))}`,
+  /** Decimal hours between two time values, e.g. HOURSBETWEEN(start, end). */
+  HOURSBETWEEN: (a, b) => (toNumber(b) - toNumber(a)) / 60,
 };
+
+/** Function names, grouped, for the builder's formula reference panel. */
+export const CALC_FUNCTION_GROUPS: Array<{ label: string; items: Array<{ name: string; signature: string; help: string }> }> = [
+  {
+    label: "Logic",
+    items: [
+      { name: "IF", signature: 'IF(condition, if_true, if_false)', help: "Pick one of two values." },
+      { name: "IFS", signature: 'IFS(cond1, val1, cond2, val2, fallback)', help: "First matching branch wins." },
+      { name: "SWITCH", signature: 'SWITCH(value, "A", 1, "B", 2, 0)', help: "Match a value against a list." },
+      { name: "AND", signature: "AND(a, b, …)", help: "True when every argument is true." },
+      { name: "OR", signature: "OR(a, b, …)", help: "True when any argument is true." },
+      { name: "NOT", signature: "NOT(a)", help: "Inverts a condition." },
+      { name: "COALESCE", signature: "COALESCE(a, b, …)", help: "First value that isn't blank." },
+      { name: "ISBLANK", signature: "ISBLANK(a)", help: "1 when empty, else 0." },
+    ],
+  },
+  {
+    label: "Numbers",
+    items: [
+      { name: "ROUND", signature: "ROUND(value, decimals)", help: "Round to N decimals." },
+      { name: "ROUNDUP", signature: "ROUNDUP(value, decimals)", help: "Always round away from zero." },
+      { name: "ROUNDDOWN", signature: "ROUNDDOWN(value, decimals)", help: "Always round toward zero." },
+      { name: "ABS", signature: "ABS(value)", help: "Absolute value." },
+      { name: "MIN", signature: "MIN(a, b, …)", help: "Smallest argument." },
+      { name: "MAX", signature: "MAX(a, b, …)", help: "Largest argument." },
+      { name: "MOD", signature: "MOD(a, b)", help: "Remainder of a / b." },
+      { name: "POWER", signature: "POWER(a, b)", help: "a to the power of b (or a ^ b)." },
+      { name: "CLAMP", signature: "CLAMP(value, low, high)", help: "Keep a value inside a range." },
+      { name: "PERCENT", signature: "PERCENT(part, whole)", help: "part as a % of whole." },
+      { name: "APPLYRATE", signature: "APPLYRATE(amount, rate_pct)", help: "e.g. VAT on a net amount." },
+      { name: "GROSS", signature: "GROSS(amount, rate_pct)", help: "Amount plus the rate." },
+      { name: "NET", signature: "NET(gross, rate_pct)", help: "Strip the rate back out." },
+    ],
+  },
+  {
+    label: "Text",
+    items: [
+      { name: "CONCAT", signature: 'CONCAT(a, " - ", b)', help: "Join values (or use a & b)." },
+      { name: "TEXT", signature: "TEXT(value, decimals)", help: "Number to text." },
+      { name: "UPPER", signature: "UPPER(text)", help: "Uppercase." },
+      { name: "LOWER", signature: "LOWER(text)", help: "Lowercase." },
+      { name: "TRIM", signature: "TRIM(text)", help: "Strip outer spaces." },
+      { name: "LEN", signature: "LEN(text)", help: "Character count." },
+      { name: "LEFT", signature: "LEFT(text, n)", help: "First n characters." },
+      { name: "RIGHT", signature: "RIGHT(text, n)", help: "Last n characters." },
+      { name: "MID", signature: "MID(text, start, length)", help: "Substring, 1-based." },
+      { name: "CONTAINS", signature: 'CONTAINS(text, "abc")', help: "1 when found." },
+      { name: "SUBSTITUTE", signature: 'SUBSTITUTE(text, "a", "b")', help: "Replace every occurrence." },
+      { name: "PADLEFT", signature: 'PADLEFT(value, 5, "0")', help: "Zero-pad a reference number." },
+      { name: "SPLIT", signature: 'SPLIT(text, ",", 2)', help: "Nth piece of a delimited value." },
+    ],
+  },
+  {
+    label: "Dates & times",
+    items: [
+      { name: "TODAY", signature: "TODAY()", help: "Today's date." },
+      { name: "DAYS", signature: "DAYS(end_date, start_date)", help: "Calendar days between." },
+      { name: "NETWORKDAYS", signature: "NETWORKDAYS(start, end)", help: "Working days (Mon–Fri)." },
+      { name: "ADDDAYS", signature: "ADDDAYS(date, n)", help: "Shift a date by n days." },
+      { name: "ADDMONTHS", signature: "ADDMONTHS(date, n)", help: "Shift a date by n months." },
+      { name: "EOMONTH", signature: "EOMONTH(date, n)", help: "End of month, n months out." },
+      { name: "DATEDIF", signature: 'DATEDIF(start, end, "y")', help: 'Whole "d", "m"or "y"between.' },
+      { name: "YEAR", signature: "YEAR(date)", help: "Calendar year." },
+      { name: "MONTH", signature: "MONTH(date)", help: "Month number." },
+      { name: "DAY", signature: "DAY(date)", help: "Day of month." },
+      { name: "WEEKDAY", signature: "WEEKDAY(date)", help: "1 = Sunday … 7 = Saturday." },
+      { name: "FORMATDATE", signature: 'FORMATDATE(date, "DD/MM/YYYY")', help: "Date as text." },
+      { name: "HOURSBETWEEN", signature: "HOURSBETWEEN(start_time, end_time)", help: "Decimal hours." },
+    ],
+  },
+  {
+    label: "Table aggregates",
+    items: [
+      { name: "SUM", signature: "SUM(table.column)", help: "Total a column across every row." },
+      { name: "AVG", signature: "AVG(table.column)", help: "Mean of a column." },
+      { name: "COUNT", signature: "COUNT(table.column)", help: "Number of rows." },
+      { name: "COUNTA", signature: "COUNTA(table.column)", help: "Rows where the cell isn't blank." },
+      { name: "COUNTBLANK", signature: "COUNTBLANK(table.column)", help: "Rows where the cell is blank." },
+      { name: "COLMIN", signature: "COLMIN(table.column)", help: "Smallest value in a column." },
+      { name: "COLMAX", signature: "COLMAX(table.column)", help: "Largest value in a column." },
+      { name: "MEDIAN", signature: "MEDIAN(table.column)", help: "Middle value of a column." },
+      { name: "PRODUCT", signature: "PRODUCT(table.column)", help: "All values multiplied." },
+      { name: "FIRST", signature: "FIRST(table.column)", help: "Value in the first row." },
+      { name: "LAST", signature: "LAST(table.column)", help: "Value in the last row." },
+      { name: "SUMIF", signature: 'SUMIF(amount, category, "Travel")', help: "Total the rows that match." },
+      { name: "COUNTIF", signature: 'COUNTIF(category, "Travel")', help: "Count the rows that match." },
+      { name: "AVGIF", signature: 'AVGIF(amount, category, "Travel")', help: "Mean of the matching rows." },
+      { name: "COLJOIN", signature: 'COLJOIN(table.column, ", ")', help: "Every value as one text list." },
+      { name: "ROWCOUNT", signature: "ROWCOUNT(table)", help: "How many rows a table has." },
+    ],
+  },
+];
 
 class CalcParser {
   private i = 0;
-  constructor(private tokens: CalcToken[], private scope: Record<string, CalcValue>) {}
+  constructor(private tokens: CalcToken[], private scope: Record<string, CalcValue>) { }
   private peek() { return this.tokens[this.i]; }
   private next() { return this.tokens[this.i++]; }
+  private isOp(v: string) { const t = this.peek(); return t?.t === "op" && t.v === v; }
 
   parse(): CalcValue {
     const v = this.comparison();
@@ -3425,16 +4323,25 @@ class CalcParser {
   }
 
   private comparison(): CalcValue {
-    const left = this.arith();
+    const left = this.concat();
     const t = this.peek();
     if (t?.t === "op" && [">", "<", ">=", "<=", "==", "!="].includes(t.v)) {
       const op = this.next() as { t: "op"; v: string };
-      const right = this.arith();
+      const right = this.concat();
       if (op.v === "==" || op.v === "!=") {
         const equal = (typeof left === "string" || typeof right === "string")
           ? String(left) === String(right)
           : toNumber(left) === toNumber(right);
         return (op.v === "==" ? equal : !equal) ? 1 : 0;
+      }
+      // > < >= <= compare numerically for numbers, lexically when BOTH sides
+      // are text (so "Approved">"Draft"is meaningful for sorted status codes).
+      if (typeof left === "string" && typeof right === "string") {
+        const c = left.localeCompare(right);
+        if (op.v === ">") return c > 0 ? 1 : 0;
+        if (op.v === "<") return c < 0 ? 1 : 0;
+        if (op.v === ">=") return c >= 0 ? 1 : 0;
+        return c <= 0 ? 1 : 0;
       }
       const ln = toNumber(left), rn = toNumber(right);
       if (op.v === ">") return ln > rn ? 1 : 0;
@@ -3443,6 +4350,16 @@ class CalcParser {
       return ln <= rn ? 1 : 0;
     }
     return left;
+  }
+
+  /** `a & b` — string concatenation, binding looser than arithmetic. */
+  private concat(): CalcValue {
+    let v: CalcValue = this.arith();
+    while (this.isOp("&")) {
+      this.next();
+      v = calcText(v) + calcText(this.arith());
+    }
+    return v;
   }
 
   private arith(): CalcValue {
@@ -3457,11 +4374,12 @@ class CalcParser {
 
   private term(): CalcValue {
     let v: CalcValue = this.factor();
-    while (this.peek()?.t === "op" && ((this.peek() as any).v === "*" || (this.peek() as any).v === "/")) {
+    while (this.peek()?.t === "op" && ["*", "/", "%"].includes((this.peek() as any).v)) {
       const op = (this.next() as any).v;
       const rhs = this.factor();
       const rn = toNumber(rhs);
-      v = op === "*" ? toNumber(v) * rn : (rn ? toNumber(v) / rn : 0);
+      if (op === "*") v = toNumber(v) * rn;
+      else v = rn ? (op === "/" ? toNumber(v) / rn : toNumber(v) % rn) : 0;
     }
     return v;
   }
@@ -3470,7 +4388,19 @@ class CalcParser {
     const t = this.peek();
     if (t?.t === "op" && t.v === "-") { this.next(); return -toNumber(this.factor()); }
     if (t?.t === "op" && t.v === "+") { this.next(); return toNumber(this.factor()); }
-    return this.atom();
+    return this.power();
+  }
+
+  /** `a ^ b` — exponentiation, right-associative, tighter than * and /. */
+  private power(): CalcValue {
+    const base = this.atom();
+    if (this.isOp("^")) {
+      this.next();
+      const exp = this.factor();
+      const r = Math.pow(toNumber(base), toNumber(exp));
+      return Number.isFinite(r) ? r : 0;
+    }
+    return base;
   }
 
   private atom(): CalcValue {
@@ -3509,9 +4439,10 @@ class CalcParser {
         const close = this.next();
         if (!close || close.t !== "op" || close.v !== ")") throw new Error("Expected ')'");
         const fn = CALC_FUNCS[name.toUpperCase()];
-        if (!fn) throw new Error(`Unknown function ${name}`);
+        if (!fn) throw new Error(`Unknown function ${name}()`);
         return fn(...args);
       }
+      if (!(name in this.scope)) throw new Error(`Unknown field or column "${name}"`);
       return this.scope[name] ?? 0;
     }
     throw new Error("Unexpected token");
@@ -3628,33 +4559,40 @@ function buildRowCalcScope(
 }
 
 /* Client-side mirror of the server's ``_resolve_row_aggregates`` (see
- * apps/templates_engine/conditions.py). Replaces SUM(col)/AVG(col)/
- * COUNT(col)/COLMIN(col)/COLMAX(col) — or the cross-table qualified form
- * SUM(other_table_key.col) — in a table-column formula with the literal
- * value computed across every row of a table, before the normal per-row
- * expression evaluator ever sees the formula. Powers the live builder
- * Preview only; the server recomputes the authoritative figure the same
- * way at submit time. Aggregates always coerce to numbers via
- * `coerceNumeric` regardless of column nature (summing text is meaningless
- * but must not crash). */
-const AGG_CALL_RE = /\b(SUM|AVG|COUNT|COLMIN|COLMAX)\(\s*([A-Za-z_][A-Za-z0-9_]*)(?:\.([A-Za-z_][A-Za-z0-9_]*))?\s*\)/gi;
+ * apps/templates_engine/conditions.py). Whole-column aggregate calls are
+ * replaced with their computed literal BEFORE the expression parser ever
+ * sees the formula, because an aggregate needs a raw column key plus a full
+ * row list — things the value-oriented grammar can't express.
+ *
+ * Supported (all also work cross-table via the qualified `table_key.column`
+ * form, and from a top-level field's formula as well as from a table
+ * column's own formula):
+ *   SUM AVG COUNT COUNTA COUNTBLANK COLMIN COLMAX MEDIAN PRODUCT FIRST LAST
+ *   SUMIF(value_col, test_col, "criteria")   COUNTIF(test_col, "criteria")
+ *   AVGIF(value_col, test_col, "criteria")   COLJOIN(col, ", ")
+ *   ROWCOUNT(table_key)
+ * A criteria literal may be a plain value ("Travel", case-insensitive) or a
+ * comparison (">1000", "<=0", "<>Cancelled"). Arguments are LITERALS, not
+ * expressions — that's what keeps this a pre-pass rather than a grammar
+ * feature. Powers the live builder Preview only; the server recomputes the
+ * authoritative figure exactly the same way at submit time. */
+const AGG_FUNCS = new Set([
+  "SUM", "AVG", "COUNT", "COUNTA", "COUNTBLANK", "COLMIN", "COLMAX",
+  "MEDIAN", "PRODUCT", "FIRST", "LAST", "SUMIF", "COUNTIF", "AVGIF",
+  "COLJOIN", "ROWCOUNT",
+]);
 
 /** Registry entry for one table field, used to resolve cross-table
- * aggregates: SUM(other_table_key.col) looks this up by table field key. */
+ *  aggregates: SUM(other_table_key.col) looks this up by table field key. */
 export interface TableCalcRegistryEntry {
   rows: Record<string, string>[];
   colTypeByKey: Record<string, TableColumnType | undefined>;
 }
 
-/** Build the shared cross-table aggregate registry from every table field's
- * current row data — used by both the top-level calc effect (a top-level
- * field aggregating a table, e.g. SUM(expenses.amount)) and the table calc
- * effect (one table column aggregating another table), so both share one
- * consistent snapshot of "what every table currently looks like". */
 /** Build the { bareColKey / "table.col": value } fallback entries derived
- * from each table's FIRST row — see buildCalcScope's docstring. Bare keys
- * follow "first table wins" when more than one table has a same-named
- * column; dotted keys are always unambiguous. */
+ *  from each table's FIRST row — see buildCalcScope's docstring. Bare keys
+ *  follow "first table wins"when more than one table has a same-named
+ *  column; dotted keys are always unambiguous. */
 function firstRowScopeEntries(registry: Record<string, TableCalcRegistryEntry>): Record<string, CalcValue> {
   const scope: Record<string, CalcValue> = {};
   for (const [tableKey, entry] of Object.entries(registry)) {
@@ -3668,6 +4606,9 @@ function firstRowScopeEntries(registry: Record<string, TableCalcRegistryEntry>):
   return scope;
 }
 
+/** Build the shared cross-table aggregate registry from every table field's
+ *  current row data — used by both the top-level calc effect and the table
+ *  calc effect, so both share one consistent snapshot of every table. */
 function buildTableCalcRegistry(
   tableFields: TemplateField[],
   tableRowsState: Record<string, Record<string, string>[]>,
@@ -3681,6 +4622,91 @@ function buildTableCalcRegistry(
   return registry;
 }
 
+/** Split an argument list on top-level commas, ignoring commas inside
+ *  nested parentheses or quoted strings. */
+function splitTopLevelArgs(inner: string): string[] {
+  const args: string[] = [];
+  let depth = 0, quote: string | null = null, current = "";
+  for (let i = 0; i < inner.length; i += 1) {
+    const ch = inner[i];
+    if (quote) {
+      current += ch;
+      if (ch === "\\" && i + 1 < inner.length) { current += inner[i + 1]; i += 1; }
+      else if (ch === quote) quote = null;
+      continue;
+    }
+    if (ch === '"' || ch === "'") { quote = ch; current += ch; continue; }
+    if (ch === "(") depth += 1;
+    if (ch === ")") depth -= 1;
+    if (ch === "," && depth === 0) { args.push(current.trim()); current = ""; continue; }
+    current += ch;
+  }
+  if (current.trim() !== "" || args.length > 0) args.push(current.trim());
+  return args;
+}
+
+/** Strip the surrounding quotes off a literal argument (leaves bare words
+ *  and numbers untouched). */
+function literalArg(arg: string | undefined): string {
+  if (!arg) return "";
+  const t = arg.trim();
+  if ((t.startsWith('"') && t.endsWith('"')) || (t.startsWith("'") && t.endsWith("'"))) {
+    return t.slice(1, -1).replace(/\\(["'\\])/g, "$1");
+  }
+  return t;
+}
+
+/** Does one cell satisfy a criteria literal? Plain values compare
+ *  case-insensitively; ">", ">=", "<", "<=", "=", "<>" prefixes compare
+ *  numerically when both sides look numeric, textually otherwise. */
+function matchesCriteria(raw: string | undefined, criteria: string): boolean {
+  const cell = (raw ?? "").trim();
+  const c = criteria.trim();
+  const m = /^(>=|<=|<>|!=|=|>|<)\s*(.*)$/.exec(c);
+  if (!m) return cell.toLowerCase() === c.toLowerCase();
+  const [, op, rhsRaw] = m;
+  const rhs = rhsRaw.trim();
+  const bothNumeric = cell !== "" && rhs !== "" && Number.isFinite(parseFloat(cell)) && Number.isFinite(parseFloat(rhs));
+  if (op === "=") return cell.toLowerCase() === rhs.toLowerCase();
+  if (op === "<>" || op === "!=") return cell.toLowerCase() !== rhs.toLowerCase();
+  if (bothNumeric) {
+    const a = parseFloat(cell), b = parseFloat(rhs);
+    if (op === ">") return a > b;
+    if (op === ">=") return a >= b;
+    if (op === "<") return a < b;
+    return a <= b;
+  }
+  const cmp = cell.localeCompare(rhs);
+  if (op === ">") return cmp > 0;
+  if (op === ">=") return cmp >= 0;
+  if (op === "<") return cmp < 0;
+  return cmp <= 0;
+}
+
+/** Resolve a column reference ("amount"or "expenses.amount") against the
+ *  current table (when called from a column formula) or the whole registry.
+ *  Precedence matches the server: qualified wins, then this table's own
+ *  columns, then the first registered table carrying that column key. */
+function resolveColumnRef(
+  ref: string,
+  rows: Record<string, string>[] | null,
+  colTypeByKey: Record<string, TableColumnType | undefined> | null,
+  allTables?: Record<string, TableCalcRegistryEntry>,
+): { rows: Record<string, string>[]; colType: TableColumnType | undefined; colKey: string } {
+  const [first, second] = ref.split(".");
+  if (second) {
+    const entry = allTables?.[first];
+    return { rows: entry?.rows ?? [], colType: entry?.colTypeByKey[second], colKey: second };
+  }
+  if (rows && colTypeByKey && first in colTypeByKey) {
+    return { rows, colType: colTypeByKey[first], colKey: first };
+  }
+  for (const entry of Object.values(allTables ?? {})) {
+    if (first in entry.colTypeByKey) return { rows: entry.rows, colType: entry.colTypeByKey[first], colKey: first };
+  }
+  return { rows: [], colType: undefined, colKey: first };
+}
+
 function resolveRowAggregates(
   expression: string,
   rows: Record<string, string>[] | null,
@@ -3688,52 +4714,132 @@ function resolveRowAggregates(
   allTables?: Record<string, TableCalcRegistryEntry>,
 ): string {
   if (!expression || !expression.includes("(")) return expression;
-  return expression.replace(AGG_CALL_RE, (_match, func: string, firstIdent: string, secondIdent: string | undefined) => {
-    let targetRows: Record<string, string>[] = [];
-    let targetColType: TableColumnType | undefined;
-    let colKey: string;
-    if (secondIdent) {
-      // Qualified: firstIdent names a table field; secondIdent is the column
-      // key within THAT table. Works the same whether called from a table
-      // column's own formula or a top-level field's formula.
-      const entry = allTables?.[firstIdent];
-      targetRows = entry?.rows ?? [];
-      targetColType = entry?.colTypeByKey[secondIdent];
-      colKey = secondIdent;
-    } else if (rows && colTypeByKey && firstIdent in colTypeByKey) {
-      // Unqualified, called from a table column's own formula, and the name
-      // matches one of THIS table's own columns — aggregate this table
-      // (original, single-table behavior).
-      targetRows = rows;
-      targetColType = colTypeByKey[firstIdent];
-      colKey = firstIdent;
+  const nameRe = /\b([A-Za-z_][A-Za-z0-9_]*)\s*\(/g;
+  let out = expression;
+  let guard = 0;
+  // Re-scan from the start after each substitution so nested/repeated calls
+  // all resolve, with a hard guard against a pathological formula.
+  while (guard < 200) {
+    guard += 1;
+    nameRe.lastIndex = 0;
+    let match: RegExpExecArray | null = null;
+    let found: { start: number; inner: string; end: number; fn: string } | null = null;
+    while ((match = nameRe.exec(out))) {
+      const fn = match[1].toUpperCase();
+      if (!AGG_FUNCS.has(fn)) continue;
+      // Walk to the matching close paren.
+      let depth = 1, quote: string | null = null, i = match.index + match[0].length;
+      for (; i < out.length && depth > 0; i += 1) {
+        const ch = out[i];
+        if (quote) { if (ch === "\\") i += 1; else if (ch === quote) quote = null; continue; }
+        if (ch === '"' || ch === "'") quote = ch;
+        else if (ch === "(") depth += 1;
+        else if (ch === ")") depth -= 1;
+      }
+      if (depth !== 0) continue;
+      found = { start: match.index, inner: out.slice(match.index + match[0].length, i - 1), end: i, fn };
+      break;
+    }
+    if (!found) break;
+
+    const args = splitTopLevelArgs(found.inner);
+    const fn = found.fn;
+    let literal = "(0)";
+
+    if (fn === "ROWCOUNT") {
+      const key = literalArg(args[0]);
+      const entry = allTables?.[key];
+      literal = `(${entry ? entry.rows.length : (rows?.length ?? 0)})`;
     } else {
-      // Unqualified with no current-table match — either a top-level
-      // field's formula (no current table at all) or a table-column
-      // formula naming a column that isn't its own. Search every
-      // registered table for a column with this key and use the first
-      // match; ambiguous across multiple same-named columns, so the
-      // qualified form is the reliable choice there.
-      colKey = firstIdent;
-      for (const entry of Object.values(allTables ?? {})) {
-        if (firstIdent in entry.colTypeByKey) {
-          targetRows = entry.rows;
-          targetColType = entry.colTypeByKey[firstIdent];
-          break;
+      const target = resolveColumnRef(literalArg(args[0]), rows, colTypeByKey, allTables);
+      const cells = target.rows.filter((r) => r && typeof r === "object").map((r) => r[target.colKey]);
+      const nums = cells.map((v) => coerceNumeric(target.colType, v));
+      const sum = (xs: number[]) => xs.reduce((a, b) => a + b, 0);
+
+      if (fn === "SUMIF" || fn === "AVGIF" || fn === "COUNTIF") {
+        // COUNTIF(test_col, criteria) · SUMIF/AVGIF(value_col, test_col, criteria)
+        const testRef = fn === "COUNTIF" ? literalArg(args[0]) : literalArg(args[1]);
+        const criteria = fn === "COUNTIF" ? literalArg(args[1]) : literalArg(args[2]);
+        const test = resolveColumnRef(testRef, rows, colTypeByKey, allTables);
+        const keep: number[] = [];
+        let matched = 0;
+        target.rows.forEach((row, idx) => {
+          const testCell = (test.rows[idx] ?? row)?.[test.colKey];
+          if (!matchesCriteria(testCell, criteria)) return;
+          matched += 1;
+          keep.push(coerceNumeric(target.colType, row?.[target.colKey]));
+        });
+        if (fn === "COUNTIF") literal = `(${matched})`;
+        else if (fn === "SUMIF") literal = `(${sum(keep)})`;
+        else literal = `(${keep.length ? sum(keep) / keep.length : 0})`;
+      } else if (fn === "COLJOIN") {
+        const sep = args.length > 1 ? literalArg(args[1]) : ", ";
+        const text = cells.map((v) => (v ?? "").trim()).filter((v) => v !== "").join(sep);
+        literal = JSON.stringify(text);
+      } else {
+        let result = 0;
+        switch (fn) {
+          case "SUM": result = sum(nums); break;
+          case "AVG": result = nums.length ? sum(nums) / nums.length : 0; break;
+          case "COUNT": result = nums.length; break;
+          case "COUNTA": result = cells.filter((v) => (v ?? "").trim() !== "").length; break;
+          case "COUNTBLANK": result = cells.filter((v) => (v ?? "").trim() === "").length; break;
+          case "COLMIN": result = nums.length ? Math.min(...nums) : 0; break;
+          case "COLMAX": result = nums.length ? Math.max(...nums) : 0; break;
+          case "PRODUCT": result = nums.length ? nums.reduce((a, b) => a * b, 1) : 0; break;
+          case "MEDIAN": {
+            if (nums.length) {
+              const sorted = [...nums].sort((a, b) => a - b);
+              const mid = Math.floor(sorted.length / 2);
+              result = sorted.length % 2 ? sorted[mid] : (sorted[mid - 1] + sorted[mid]) / 2;
+            }
+            break;
+          }
+          case "FIRST": result = nums.length ? nums[0] : 0; break;
+          case "LAST": result = nums.length ? nums[nums.length - 1] : 0; break;
         }
+        literal = `(${Number.isFinite(result) ? result : 0})`;
       }
     }
-    const colValues = targetRows.map((r) => coerceNumeric(targetColType, r[colKey]));
-    let result = 0;
-    switch (func.toUpperCase()) {
-      case "SUM": result = colValues.reduce((a, b) => a + b, 0); break;
-      case "AVG": result = colValues.length ? colValues.reduce((a, b) => a + b, 0) / colValues.length : 0; break;
-      case "COUNT": result = colValues.length; break;
-      case "COLMIN": result = colValues.length ? Math.min(...colValues) : 0; break;
-      case "COLMAX": result = colValues.length ? Math.max(...colValues) : 0; break;
-    }
-    return String(result);
-  });
+    out = out.slice(0, found.start) + literal + out.slice(found.end);
+  }
+  return out;
+}
+
+/** Compile-time check for the builder: returns a human-readable problem with
+ *  a formula, or null when it parses cleanly. `knownKeys` are the field /
+ *  column IDs the formula is allowed to reference — an unknown one is the
+ *  single most common authoring mistake (a renamed field, a typo) and used
+ *  to silently evaluate to 0 forever. */
+function validateCalcExpression(expression: string | undefined, knownKeys: string[]): string | null {
+  if (!expression || !expression.trim()) return null;
+  const scope: Record<string, CalcValue> = {};
+  knownKeys.forEach((k) => { if (k) scope[k] = 1; });
+  try {
+    // Aggregates are a pre-pass; with an empty registry they collapse to 0,
+    // which is exactly what we want for a syntax/reference check.
+    new CalcParser(calcTokenize(resolveRowAggregates(expression, null, null, {})), scope).parse();
+    return null;
+  } catch (e) {
+    return e instanceof Error ? e.message : "Invalid formula";
+  }
+}
+
+/** Evaluate a formula the way the builder previews do: aggregates first,
+ *  then the expression, then the field's decimal rounding. */
+function previewCalcValue(expression: string | undefined, scope: Record<string, CalcValue>, decimals?: number): CalcValue {
+  const resolved = resolveRowAggregates(expression ?? "", null, null, {});
+  let result = evaluateCalcExpression(resolved, scope);
+  if (typeof result === "number" && typeof decimals === "number") result = Number(result.toFixed(decimals));
+  return result;
+}
+
+/** A calc_date field's formula produces a day serial; store/display it as an
+ *  ISO date instead of a bare number. calc_boolean renders as Yes/No. */
+function formatCalcResult(fieldType: string | undefined, result: CalcValue): CalcValue {
+  if (fieldType === "calc_date") return typeof result === "number" ? formatSerial(result) : result;
+  if (fieldType === "calc_boolean") return isTruthy(result) ? "Yes" : "No";
+  return result;
 }
 
 function PreviewField({ field, register, errors, values, allFields, editable = true, tableRows, onUpdateTableCell, onAddTableRow, onRemoveTableRow, previewStep = "draft" }: {
@@ -3782,6 +4888,15 @@ function PreviewField({ field, register, errors, values, allFields, editable = t
 
   if (field.type === "heading") return <h3 className="text-base font-bold text-slate-800 border-b border-slate-300 pb-2">{field.label}</h3>;
   if (field.type === "divider") return <hr className="border-slate-300" />;
+  if (field.type === "spacer") return <div aria-hidden className="h-2" />;
+  if (field.type === "info") {
+    return (
+      <div className="flex items-start gap-2 border border-sky-200 bg-sky-50 px-3 py-2.5 text-sm text-sky-900">
+        <Info className="mt-0.5 h-4 w-4 flex-shrink-0" />
+        <span>{field.defaultValue || field.helpText || field.label}</span>
+      </div>
+    );
+  }
 
   const label = field.type !== "boolean" && field.type !== "checkbox" ? (
     <label className="text-sm font-semibold text-slate-700">
@@ -3794,13 +4909,13 @@ function PreviewField({ field, register, errors, values, allFields, editable = t
   switch (field.type) {
     case "textarea":
       control = <textarea {...reg} placeholder={field.placeholder} rows={4} disabled={dis}
-                          defaultValue={field.defaultValue ?? ""}
-                          className={previewInputCls.replace("h-10", "min-h-[100px] py-2.5 resize-none")} />;
+        defaultValue={field.defaultValue ?? ""}
+        className={previewInputCls.replace("h-10", "min-h-[100px] py-2.5 resize-none")} />;
       break;
     case "select":
       control = (
         <select {...reg} className={previewInputCls} defaultValue={field.defaultValue ?? ""} disabled={dis}>
-          <option value=""disabled>{field.placeholder ?? "Select an option"}</option>
+          <option value="" disabled>{field.placeholder ?? "Select an option"}</option>
           {(field.options ?? []).map((o) => <option key={o} value={o}>{o}</option>)}
         </select>
       );
@@ -3842,14 +4957,14 @@ function PreviewField({ field, register, errors, values, allFields, editable = t
       control = (
         <div className="relative">
           <span className="absolute left-3 top-1/2 -translate-y-1/2 text-sm text-slate-400 font-medium">{symbol}</span>
-          <input type="number" step="0.01" {...reg} placeholder="0.00" disabled={dis}
-                 defaultValue={field.defaultValue ?? ""} className={cn(previewInputCls, "pl-14")} />
+          <input type="number" step={stepForDecimals(field.decimals ?? 2)} {...reg} placeholder={placeholderForNumber(field, "0.00")} disabled={dis}
+            defaultValue={field.defaultValue ?? ""} className={cn(previewInputCls, "pl-14")} />
         </div>
       );
       break;
     }
     case "number":
-      control = <input type="number" {...reg} placeholder={field.placeholder} disabled={dis} defaultValue={field.defaultValue ?? ""} className={previewInputCls} />;
+      control = <input type="number" step={stepForDecimals(field.decimals ?? 0)} {...reg} placeholder={placeholderForNumber(field, field.placeholder ?? "0")} disabled={dis} defaultValue={field.defaultValue ?? ""} className={previewInputCls} />;
       break;
     case "email":
       control = <input type="email" {...reg} placeholder={field.placeholder} disabled={dis} defaultValue={field.defaultValue ?? ""} className={previewInputCls} />;
@@ -3879,7 +4994,7 @@ function PreviewField({ field, register, errors, values, allFields, editable = t
     case "image":
       control = (
         <input type="file" {...reg} accept={field.type === "image" ? "image/*" : undefined} disabled={dis}
-               className="block w-full text-sm text-slate-500 file:mr-3 file:rounded-none file:border-0 file:bg-[#287EAD] file:px-4 file:py-2 file:text-sm file:font-semibold file:text-white hover:file:bg-[#1E6F99]" />
+          className="block w-full text-sm text-slate-500 file:mr-3 file:rounded-none file:border-0 file:bg-[#287EAD] file:px-4 file:py-2 file:text-sm file:font-semibold file:text-white hover:file:bg-[#1E6F99]" />
       );
       break;
     case "signature":
@@ -3892,8 +5007,8 @@ function PreviewField({ field, register, errors, values, allFields, editable = t
       control = (
         <div className="relative">
           <input type="number" step="0.01" min={field.min ?? 0} max={field.max ?? 100} {...reg}
-                 placeholder={field.placeholder || "0"} disabled={dis} defaultValue={field.defaultValue ?? ""}
-                 className={cn(previewInputCls, "pr-9")} />
+            placeholder={field.placeholder || "0"} disabled={dis} defaultValue={field.defaultValue ?? ""}
+            className={cn(previewInputCls, "pr-9")} />
           <span className="absolute right-3 top-1/2 -translate-y-1/2 text-sm text-slate-400 font-medium">%</span>
         </div>
       );
@@ -3907,8 +5022,8 @@ function PreviewField({ field, register, errors, values, allFields, editable = t
           <div className="flex items-center gap-1">
             {Array.from({ length: max }, (_, i) => i + 1).map((n) => (
               <button key={n} type="button" disabled={dis}
-                      onClick={() => !dis && reg.onChange({ target: { name: field.id, value: n } })}
-                      className={cn("transition-colors", n <= current ? "text-amber-400" : "text-slate-200", !dis && "hover:text-amber-300")}>
+                onClick={() => !dis && reg.onChange({ target: { name: field.id, value: n } })}
+                className={cn("transition-colors", n <= current ? "text-amber-400" : "text-slate-200", !dis && "hover:text-amber-300")}>
                 <Star className="h-5 w-5" fill="currentColor" />
               </button>
             ))}
@@ -3937,7 +5052,29 @@ function PreviewField({ field, register, errors, values, allFields, editable = t
       break;
     }
     case "calc_date":
-      control = <input type="date" {...reg} disabled className={cn(previewInputCls, "bg-slate-50 font-semibold text-slate-700")} />;
+      control = <input type="text" {...reg} disabled className={cn(previewInputCls, "bg-slate-50 font-semibold text-slate-700")} />;
+      break;
+    case "calc_boolean": {
+      /* Calculated boolean is rendered as a real (read-only) toggle rather
+       * than the words Yes/No — the switch position IS the answer. */
+      const raw = values[field.id];
+      const on = typeof raw === "string"
+        ? ["yes", "true", "1"].includes(raw.trim().toLowerCase())
+        : isTruthy(raw as CalcValue);
+      control = (
+        <div className={cn(previewInputCls, "flex items-center gap-3 bg-slate-50")}>
+          <ReadonlyToggle value={on} />
+          <span className="text-sm font-semibold text-slate-700">{on ? "Yes" : "No"}</span>
+          <input type="hidden" {...reg} />
+        </div>
+      );
+      break;
+    }
+    case "multi_file":
+      control = (
+        <input type="file" multiple {...reg} disabled={dis}
+          className="block w-full text-sm text-slate-500 file:mr-3 file:rounded-none file:border-0 file:bg-[#287EAD] file:px-4 file:py-2 file:text-sm file:font-semibold file:text-white hover:file:bg-[#1E6F99]" />
+      );
       break;
     case "calc_text":
       control = <input type="text" {...reg} disabled className={cn(previewInputCls, "bg-slate-50 font-semibold text-slate-700")} />;
@@ -4120,7 +5257,7 @@ function Preview({ sections, templateName, processSteps }: {
             {JSON.stringify(submitted, null, 2)}
           </pre>
           <button type="button" onClick={() => { setSubmitted(null); reset(); }}
-                  className="mt-5 inline-flex items-center gap-1.5 border border-slate-300 bg-white px-4 py-2 text-sm font-semibold text-slate-700 hover:bg-slate-50">
+            className="mt-5 inline-flex items-center gap-1.5 border border-slate-300 bg-white px-4 py-2 text-sm font-semibold text-slate-700 hover:bg-slate-50">
             <RotateCcw className="h-4 w-4" /> Test again
           </button>
         </div>
@@ -4139,7 +5276,7 @@ function Preview({ sections, templateName, processSteps }: {
           <label className="flex flex-shrink-0 flex-col gap-1 text-right">
             <span className="text-[10px] font-semibold uppercase tracking-wider text-slate-500">Preview as step</span>
             <select value={previewStep} onChange={(e) => setPreviewStep(e.target.value)}
-                    className="h-9 min-w-[180px] border border-[#AEB5BB] bg-white px-2 text-sm text-[#1F2933] outline-none focus:border-[#287EAD]">
+              className="h-9 min-w-[180px] border border-[#AEB5BB] bg-white px-2 text-sm text-[#1F2933] outline-none focus:border-[#287EAD]">
               {stepOptions.map((o) => <option key={o.value} value={o.value}>{o.label}</option>)}
             </select>
           </label>
@@ -4148,40 +5285,40 @@ function Preview({ sections, templateName, processSteps }: {
           if (!evalVisible(s, values, allFields, previewStep)) return null;
           const sectionEditable = evalEditable(s, values, allFields, previewStep);
           return (
-          <section key={s.id} className="border border-slate-300 bg-white p-6 shadow-sm">
-            <div className="mb-5 pb-4 border-b border-slate-200">
-              <h2 className="flex items-center gap-2 text-base font-bold text-slate-800">
-                {s.title}
-                {!sectionEditable && (
-                  <span className="inline-flex items-center gap-1 bg-slate-100 px-1.5 py-0.5 text-[10px] font-semibold text-slate-500">read-only</span>
-                )}
-              </h2>
-              {s.description && <p className="mt-0.5 text-sm text-slate-500">{s.description}</p>}
-            </div>
-            <div className="grid grid-cols-12 gap-4">
-              {s.fields.map((f) => {
-                if (!evalVisible(f, values, allFields, previewStep)) return null;
-                return (
-                  <div key={f.id} className="min-w-0" style={{ gridColumn: `span ${f.colSpan ?? 12} / span ${f.colSpan ?? 12}` }}>
-                    <PreviewField field={f} register={register} errors={errors} values={values} allFields={allFields}
-                                  editable={sectionEditable && evalEditable(f, values, allFields, previewStep)}
-                                  tableRows={tableRows} onUpdateTableCell={updateTableCell}
-                                  onAddTableRow={addTableRow} onRemoveTableRow={removeTableRow}
-                                  previewStep={previewStep} />
-                  </div>
-                );
-              })}
-            </div>
-          </section>
+            <section key={s.id} className="border border-slate-300 bg-white p-6 shadow-sm">
+              <div className="mb-5 pb-4 border-b border-slate-200">
+                <h2 className="flex items-center gap-2 text-base font-bold text-slate-800">
+                  {s.title}
+                  {!sectionEditable && (
+                    <span className="inline-flex items-center gap-1 bg-slate-100 px-1.5 py-0.5 text-[10px] font-semibold text-slate-500">read-only</span>
+                  )}
+                </h2>
+                {s.description && <p className="mt-0.5 text-sm text-slate-500">{s.description}</p>}
+              </div>
+              <div className="grid grid-cols-12 gap-4">
+                {s.fields.map((f) => {
+                  if (!evalVisible(f, values, allFields, previewStep)) return null;
+                  return (
+                    <div key={f.id} className="min-w-0" style={{ gridColumn: `span ${f.colSpan ?? 12} / span ${f.colSpan ?? 12}` }}>
+                      <PreviewField field={f} register={register} errors={errors} values={values} allFields={allFields}
+                        editable={sectionEditable && evalEditable(f, values, allFields, previewStep)}
+                        tableRows={tableRows} onUpdateTableCell={updateTableCell}
+                        onAddTableRow={addTableRow} onRemoveTableRow={removeTableRow}
+                        previewStep={previewStep} />
+                    </div>
+                  );
+                })}
+              </div>
+            </section>
           );
         })}
         <div className="flex items-center justify-end gap-3 pt-2">
           <button type="button" onClick={() => reset()}
-                  className="inline-flex items-center gap-1.5 border border-slate-300 bg-white px-4 py-2 text-sm font-semibold text-slate-700 hover:bg-slate-50">
+            className="inline-flex items-center gap-1.5 border border-slate-300 bg-white px-4 py-2 text-sm font-semibold text-slate-700 hover:bg-slate-50">
             <RotateCcw className="h-4 w-4" /> Reset
           </button>
           <button type="submit"
-                  className="inline-flex items-center gap-1.5 bg-[#287EAD] px-5 py-2 text-sm font-semibold text-white hover:bg-[#1E6F99] shadow-sm">
+            className="inline-flex items-center gap-1.5 bg-[#287EAD] px-5 py-2 text-sm font-semibold text-white hover:bg-[#1E6F99] shadow-sm">
             <ArrowRight className="h-4 w-4" /> Submit test
           </button>
         </div>
@@ -4200,7 +5337,7 @@ function SettingsTab({ template, onCommit, documentTypes, processSteps }: {
   documentTypes: Array<{ id: string; name: string; code: string }>;
   processSteps: { value: string; label: string }[];
 }) {
-  const [tagInput, setTagInput]     = useState("");
+  const [tagInput, setTagInput] = useState("");
   const [showCreate, setShowCreate] = useState(false);
 
   const addTag = () => {
@@ -4233,19 +5370,19 @@ function SettingsTab({ template, onCommit, documentTypes, processSteps }: {
           <div className="space-y-1.5">
             <label className="text-xs font-semibold uppercase tracking-wider text-[#5E6870]">Description</label>
             <textarea value={template.description ?? ""} rows={3}
-                      onChange={(e) => onCommit({ description: e.target.value })}
-                      className={iCls.replace("h-9", "min-h-[76px] py-2 resize-none")} />
+              onChange={(e) => onCommit({ description: e.target.value })}
+              className={iCls.replace("h-9", "min-h-[76px] py-2 resize-none")} />
           </div>
           <div className="space-y-1.5">
             <label className="text-xs font-semibold uppercase tracking-wider text-[#5E6870]">Document type <span className="text-red-400 normal-case font-normal">*</span></label>
             <div className="flex gap-2">
               <select value={template.document_type_id ?? ""} onChange={(e) => onCommit({ document_type_id: e.target.value })}
-                      className={cn(iCls, "flex-1")}>
+                className={cn(iCls, "flex-1")}>
                 <option value="">Select document type</option>
                 {documentTypes.map((type) => <option key={type.id} value={type.id}>{type.name}</option>)}
               </select>
               <button type="button" onClick={() => setShowCreate(true)} title="Create new document type"
-                      className="h-9 px-3 border border-[#AEB5BB] bg-white text-[#5E6870] hover:text-[#287EAD] hover:border-[#287EAD]/60 hover:bg-[#EEF6FB] transition-all flex items-center gap-1.5 text-xs font-semibold whitespace-nowrap">
+                className="h-9 px-3 border border-[#AEB5BB] bg-white text-[#5E6870] hover:text-[#287EAD] hover:border-[#287EAD]/60 hover:bg-[#EEF6FB] transition-all flex items-center gap-1.5 text-xs font-semibold whitespace-nowrap">
                 <Plus className="h-3.5 w-3.5" /> New type
               </button>
             </div>
@@ -4260,9 +5397,9 @@ function SettingsTab({ template, onCommit, documentTypes, processSteps }: {
             <label className="text-xs font-semibold uppercase tracking-wider text-[#5E6870]">Tags</label>
             <div className="flex gap-2">
               <input value={tagInput} onChange={(e) => setTagInput(e.target.value)}
-                     onKeyDown={(e) => e.key === "Enter" && (e.preventDefault(), addTag())}
-                     placeholder="Add tag and press Enter"
-                     className={cn(iCls, "flex-1")} />
+                onKeyDown={(e) => e.key === "Enter" && (e.preventDefault(), addTag())}
+                placeholder="Add tag and press Enter"
+                className={cn(iCls, "flex-1")} />
               <button onClick={addTag} className="h-9 px-3 bg-[#287EAD] text-white text-sm font-semibold hover:bg-[#1E6F99]">
                 <Plus className="h-4 w-4" />
               </button>
@@ -4287,7 +5424,7 @@ function SettingsTab({ template, onCommit, documentTypes, processSteps }: {
         <div className="grid grid-cols-3 divide-x divide-[#C8CDD2]">
           {[
             { label: "Sections", value: template.sections.length },
-            { label: "Fields",   value: fieldCount },
+            { label: "Fields", value: fieldCount },
             { label: "Document type", value: documentTypes.find((type) => type.id === template.document_type_id)?.code ?? "—" },
           ].map((s) => (
             <div key={s.label} className="px-5 py-4 text-center">
@@ -4554,7 +5691,7 @@ function FinanceSettingsCard({ template, onCommit, iCls, processSteps }: {
                 </div>
                 <label className="flex cursor-pointer items-center gap-2.5 text-sm text-[#1F2933]">
                   <input type="checkbox" checked={ui.validateBalance !== false} onChange={(e) => setUi({ validateBalance: e.target.checked })}
-                         className="h-4 w-4 accent-[#287EAD]" />
+                    className="h-4 w-4 accent-[#287EAD]" />
                   Require debits to balance credits before posting
                 </label>
               </>
@@ -4689,12 +5826,14 @@ export default function TemplateBuilderV2({ initial, onSave, onCancel, isSaving,
   const { stack: history, cursor } = hist;
   const template = history[cursor];
   const [selectedId, setSelectedId] = useState<string | null>(null);
-  const [tab, setTab]               = useState<Tab>("form");
-  const [dragType, setDragType]     = useState<FieldType | null>(null);
+  const [tab, setTab] = useState<Tab>("form");
+  const [dragType, setDragType] = useState<FieldType | null>(null);
   const [inspectorOpen, setInspectorOpen] = useState(true);
-  const [visible, setVisible]       = useState(false);
-  const [closing, setClosing]       = useState(false);
+  const [visible, setVisible] = useState(false);
+  const [closing, setClosing] = useState(false);
   const [configuringColumn, setConfiguringColumn] = useState<{ sectionId: string; fieldId: string; colId: string } | null>(null);
+  const [pendingDelete, setPendingDelete] = useState<{ title: string; message: React.ReactNode; onConfirm: () => void } | null>(null);
+
   const [autoSave, setAutoSave] = useState<boolean>(() => {
     if (typeof window === "undefined") return false;
     return window.localStorage.getItem("tb:autoSave") === "1";
@@ -4777,25 +5916,25 @@ export default function TemplateBuilderV2({ initial, onSave, onCancel, isSaving,
     }
   };
 
-/* Propagate a field/column KEY rename to every place in the template that
- * references it by that key string — visibility/editability rule
- * conditions, calc formulas (including the table-qualifier in
- * SUM(table_key.column_key)), currency-symbol-source links, and a
- * SunSystems Retirement panel's "issued amount" field selection.
- *
- * Without this, renaming an already-in-use field — which the auto-key-sync
- * label→ID behavior makes easy to do by accident, since a fresh field's key
- * keeps following its label until manually edited — silently breaks every
- * reference pointing at the old key. Concretely: a Retirement panel's
- * "issued amount" field selection is stored as a bare key string, not a
- * live reference; rename that field afterward and the stored key no longer
- * matches anything in the submitted form values, so it silently resolves
- * to 0 forever after — every submission then reads as a full "overspend",
- * with the variance line posting the entire spent total instead of the
- * true difference. No error, no warning — just a wrong-but-still-balanced
- * journal. This is called from the exact same commit that changes a key,
- * so the rename and its propagation can never land as two separate,
- * separately-undoable steps. */
+  /* Propagate a field/column KEY rename to every place in the template that
+   * references it by that key string — visibility/editability rule
+   * conditions, calc formulas (including the table-qualifier in
+   * SUM(table_key.column_key)), currency-symbol-source links, and a
+   * SunSystems Retirement panel's "issued amount" field selection.
+   *
+   * Without this, renaming an already-in-use field — which the auto-key-sync
+   * label→ID behavior makes easy to do by accident, since a fresh field's key
+   * keeps following its label until manually edited — silently breaks every
+   * reference pointing at the old key. Concretely: a Retirement panel's
+   * "issued amount" field selection is stored as a bare key string, not a
+   * live reference; rename that field afterward and the stored key no longer
+   * matches anything in the submitted form values, so it silently resolves
+   * to 0 forever after — every submission then reads as a full "overspend",
+   * with the variance line posting the entire spent total instead of the
+   * true difference. No error, no warning — just a wrong-but-still-balanced
+   * journal. This is called from the exact same commit that changes a key,
+   * so the rename and its propagation can never land as two separate,
+   * separately-undoable steps. */
 
   const updateField = (sectionId: string, fieldId: string, patch: Partial<TemplateField>) => {
     const current = template.sections.flatMap((s) => s.fields).find((f) => f.id === fieldId);
@@ -4836,8 +5975,43 @@ export default function TemplateBuilderV2({ initial, onSave, onCancel, isSaving,
       }),
     });
   };
-  const removeSection = (sectionId: string) =>
+  const removeSection = (sectionId: string) => {
     commit({ ...template, sections: template.sections.filter((s) => s.id !== sectionId) });
+    if (selectedId === sectionId) setSelectedId(null);
+  };
+  /* Deleting is destructive and easy to hit by accident (the trash icon sits
+   * next to move/duplicate), so both field and section deletes are confirmed. */
+  const requestRemoveField = (sectionId: string, fieldId: string) => {
+    const field = template.sections.find((s) => s.id === sectionId)?.fields.find((f) => f.id === fieldId);
+    setPendingDelete({
+      title: "Delete this field?",
+      message: (
+        <>
+          <strong>{field?.label || field?.key || "This field"}</strong> and its settings
+          {field?.type === "table" && (field.columns?.length ?? 0) > 0
+            ? `, including ${field.columns!.length} column${field.columns!.length === 1 ? "" : "s"},`
+            : ""} will be removed from the form. You can undo this afterwards.
+        </>
+      ),
+      onConfirm: () => removeField(sectionId, fieldId),
+    });
+  };
+  const requestRemoveSection = (sectionId: string) => {
+    const section = template.sections.find((s) => s.id === sectionId);
+    const count = section?.fields.length ?? 0;
+    setPendingDelete({
+      title: "Delete this section?",
+      message: (
+        <>
+          <strong>{section?.title || "This section"}</strong>
+          {count > 0 ? ` and its ${count} field${count === 1 ? "" : "s"}` : ""} will be removed from the form.
+          You can undo this afterwards.
+        </>
+      ),
+      onConfirm: () => removeSection(sectionId),
+    });
+  };
+
   const addSection = () => {
     const s = newSection();
     commit({ ...template, sections: [...template.sections, s] });
@@ -4852,6 +6026,27 @@ export default function TemplateBuilderV2({ initial, onSave, onCancel, isSaving,
     [sections[idx], sections[target]] = [sections[target], sections[idx]];
     commit({ ...template, sections });
   };
+
+  /* Reorder a field within its section without dragging. "back"/"forward"
+   * (rather than up/down) because the 12-column grid flows inline: the
+   * neighbour may sit beside the field, not above it. */
+  const moveField = (sectionId: string, fieldId: string, dir: "back" | "forward") => {
+    commit({
+      ...template,
+      sections: template.sections.map((s) => {
+        if (s.id !== sectionId) return s;
+        const idx = s.fields.findIndex((f) => f.id === fieldId);
+        const target = dir === "back" ? idx - 1 : idx + 1;
+        if (idx < 0 || target < 0 || target >= s.fields.length) return s;
+        const fields = [...s.fields];
+        [fields[idx], fields[target]] = [fields[target], fields[idx]];
+        return { ...s, fields };
+      }),
+    });
+    setSelectedId(fieldId);
+  };
+
+
 
   /* Column ops */
   const mutateColumns = (sectionId: string, fieldId: string, fn: (cols: TableColumn[]) => TableColumn[]) => {
@@ -4983,8 +6178,8 @@ export default function TemplateBuilderV2({ initial, onSave, onCancel, isSaving,
           </button>
           <div className="h-5 w-px bg-white/25" />
           <input value={template.name}
-                 onChange={(e) => commit({ ...template, name: e.target.value })}
-                 className="h-9 w-64 border border-transparent bg-transparent px-2 text-sm font-semibold text-white outline-none hover:border-white/25 focus:border-white/70 focus:bg-white/10" />
+            onChange={(e) => commit({ ...template, name: e.target.value })}
+            className="h-9 w-64 border border-transparent bg-transparent px-2 text-sm font-semibold text-white outline-none hover:border-white/25 focus:border-white/70 focus:bg-white/10" />
           <span className="border border-white/25 bg-white/10 px-2.5 py-0.5 text-[10px] font-semibold text-white/80">
             {template.sections.length} sections · {fieldCount} fields
           </span>
@@ -5018,17 +6213,17 @@ export default function TemplateBuilderV2({ initial, onSave, onCancel, isSaving,
 
         <div className="flex h-9 items-center gap-0.5 border border-white/25 bg-white/10 p-0.5">
           {([
-            { id: "form",     label: "Build",    icon: LayoutGrid },
-            { id: "preview",  label: "Preview",  icon: Eye },
+            { id: "form", label: "Build", icon: LayoutGrid },
+            { id: "preview", label: "Preview", icon: Eye },
             { id: "settings", label: "Settings", icon: Settings },
           ] as const).map((t) => {
             const Icon = t.icon;
             return (
               <button key={t.id} onClick={() => setTab(t.id)}
-                      className={cn(
-                        "flex items-center gap-1.5 px-3 py-1.5 text-xs font-semibold transition-all",
-                        tab === t.id ? "bg-white text-[#287EAD]" : "text-white/70 hover:bg-white/10 hover:text-white",
-                      )}>
+                className={cn(
+                  "flex items-center gap-1.5 px-3 py-1.5 text-xs font-semibold transition-all",
+                  tab === t.id ? "bg-white text-[#287EAD]" : "text-white/70 hover:bg-white/10 hover:text-white",
+                )}>
                 <Icon className="h-3.5 w-3.5" />{t.label}
               </button>
             );
@@ -5038,17 +6233,17 @@ export default function TemplateBuilderV2({ initial, onSave, onCancel, isSaving,
         <div className="flex items-center gap-2">
           <div className="flex items-center gap-1">
             <button disabled={!canUndo} onClick={() => setHist((s) => ({ ...s, cursor: Math.max(0, s.cursor - 1) }))} title="Undo"
-                    className="p-1.5 text-white/70 hover:bg-white/10 hover:text-white disabled:opacity-25">
+              className="p-1.5 text-white/70 hover:bg-white/10 hover:text-white disabled:opacity-25">
               <Undo2 className="h-4 w-4" />
             </button>
             <button disabled={!canRedo} onClick={() => setHist((s) => ({ ...s, cursor: Math.min(s.stack.length - 1, s.cursor + 1) }))} title="Redo"
-                    className="p-1.5 text-white/70 hover:bg-white/10 hover:text-white disabled:opacity-25">
+              className="p-1.5 text-white/70 hover:bg-white/10 hover:text-white disabled:opacity-25">
               <Redo2 className="h-4 w-4" />
             </button>
           </div>
           <div className="h-5 w-px bg-white/25" />
           <button onClick={handleSave} disabled={isSaving}
-                  className="inline-flex items-center gap-2 border border-white/30 bg-white px-4 py-2 text-sm font-semibold text-[#287EAD] hover:bg-[#EEF6FB] disabled:opacity-50">
+            className="inline-flex items-center gap-2 border border-white/30 bg-white px-4 py-2 text-sm font-semibold text-[#287EAD] hover:bg-[#EEF6FB] disabled:opacity-50">
             <Save className="h-4 w-4" />
             {isSaving ? "Saving…" : "Save template"}
           </button>
@@ -5068,14 +6263,30 @@ export default function TemplateBuilderV2({ initial, onSave, onCancel, isSaving,
                   onSelect={(id) => { setSelectedId(id); if (id) setInspectorOpen(true); }}
                   onAddSection={addSection}
                   onUpdateSection={updateSection}
-                  onRemoveSection={removeSection}
-                  onRemoveField={removeField}
+                  onRemoveSection={requestRemoveSection}
+                  onRemoveField={requestRemoveField}
+
                   onDuplicateField={duplicateField}
                   onResizeField={(sid, fid, c) => updateField(sid, fid, { colSpan: c })}
                   onMoveSection={moveSection}
+                  onMoveField={moveField}
                   onConfigureColumn={(sectionId, fieldId, colId) => setConfiguringColumn({ sectionId, fieldId, colId })}
                   onAddColumn={addColumn}
-                  onRemoveColumn={removeColumn}
+                  onRemoveColumn={(sectionId, fieldId, colId) => {
+                    const col = template.sections.find((s) => s.id === sectionId)?.fields
+                      .find((f) => f.id === fieldId)?.columns?.find((c) => c.id === colId);
+                    setPendingDelete({
+                      title: "Delete this column?",
+                      message: (
+                        <>
+                          <strong>{col?.label || col?.key || "This column"}</strong> and any data captured in it
+                          will be removed from the table. You can undo this afterwards.
+                        </>
+                      ),
+                      onConfirm: () => removeColumn(sectionId, fieldId, colId),
+                    });
+                  }}
+
                   onMoveColumn={moveColumn}
                   onUpdateColumn={updateColumn}
                 />
@@ -5106,8 +6317,8 @@ export default function TemplateBuilderV2({ initial, onSave, onCancel, isSaving,
           {tab === "settings" && (
             <main key="settings" className="flex-1 overflow-y-auto bg-slate-100 animate-in fade-in duration-150">
               <SettingsTab template={template} documentTypes={documentTypes}
-                           processSteps={processSteps}
-                           onCommit={(patch) => commit({ ...template, ...patch })} />
+                processSteps={processSteps}
+                onCommit={(patch) => commit({ ...template, ...patch })} />
             </main>
           )}
         </div>
@@ -5137,11 +6348,31 @@ export default function TemplateBuilderV2({ initial, onSave, onCancel, isSaving,
             setConfiguringColumn(null);
           }}
           onDelete={() => {
-            removeColumn(configCol.sectionId, configCol.fieldId, configCol.colId);
-            setConfiguringColumn(null);
+            setPendingDelete({
+              title: "Delete this column?",
+              message: (
+                <>
+                  <strong>{configCol.column.label || configCol.column.key || "This column"}</strong> and any data
+                  captured in it will be removed from the table. You can undo this afterwards.
+                </>
+              ),
+              onConfirm: () => {
+                removeColumn(configCol.sectionId, configCol.fieldId, configCol.colId);
+                setConfiguringColumn(null);
+              },
+            });
           }}
         />
       )}
+
+      <ConfirmDeleteDialog
+        open={pendingDelete !== null}
+        title={pendingDelete?.title ?? ""}
+        message={pendingDelete?.message}
+        onCancel={() => setPendingDelete(null)}
+        onConfirm={() => { pendingDelete?.onConfirm(); setPendingDelete(null); }}
+      />
+
     </div>
   );
 }
