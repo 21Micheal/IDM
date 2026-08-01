@@ -103,11 +103,11 @@ export function ApprovalStagesTable({ steps = [], isLoading, phase }: ApprovalSt
         <table className="w-full text-sm">
           <thead>
             <tr className="border-b border-[#C8CDD2] bg-[#F5F7F8]">
-              <th className="px-3 py-1.5 text-left font-semibold text-[#5E6870] uppercase tracking-wide text-[10px]">Stage</th>
-              <th className="px-3 py-1.5 text-left font-semibold text-[#5E6870] uppercase tracking-wide text-[10px]">Approver</th>
-              <th className="px-3 py-1.5 text-left font-semibold text-[#5E6870] uppercase tracking-wide text-[10px]">Status</th>
-              <th className="px-3 py-1.5 text-left font-semibold text-[#5E6870] uppercase tracking-wide text-[10px]">Completed</th>
-              <th className="px-3 py-1.5 text-left font-semibold text-[#5E6870] uppercase tracking-wide text-[10px]">Comment</th>
+              <th className="px-3 py-2 text-left font-semibold text-[#1F2933] uppercase tracking-wide text-xs">Stage</th>
+              <th className="px-3 py-2 text-left font-semibold text-[#1F2933] uppercase tracking-wide text-xs">Approver</th>
+              <th className="px-3 py-2 text-left font-semibold text-[#1F2933] uppercase tracking-wide text-xs">Status</th>
+              <th className="px-3 py-2 text-left font-semibold text-[#1F2933] uppercase tracking-wide text-xs">Completed</th>
+              <th className="px-3 py-2 text-left font-semibold text-[#1F2933] uppercase tracking-wide text-xs">Comment</th>
             </tr>
           </thead>
           <tbody>

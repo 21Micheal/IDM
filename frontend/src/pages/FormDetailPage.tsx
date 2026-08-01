@@ -170,6 +170,12 @@ export default function FormDetailPage() {
       && !isFinalFormProcessStep(formProcessStep)
       && (doc.status !== "approved" || (isRequestApproved && hasConditionalEditability && (hasAdminAccess || isOwnerOrSubmitter)));
 
+    // Always sync form values from the server to get attachment descriptors
+    // This ensures images show correctly after submission (storage_path instead of filename)
+    if (!formEditing) {
+      setFormValues({ ...(formData?.values ?? {}) });
+    }
+
     // Auto-enter edit mode when form has conditional editability and user is at a stage
     // where conditional editing should be allowed (request_approved for retirement, etc.)
     if (!formEditing && hasConditionalEditability && (isRequestApproved || canEditForm)) {
