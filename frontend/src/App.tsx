@@ -401,7 +401,7 @@ export default function App() {
               <Route path="documents/:id"    element={<DocumentDetailPage />} />
               <Route path="documents/folders/:folderId" element={<FolderPage />} />
               <Route path="forms" element={<FormsPage />} />
-              <Route path="forms/new" element={<FormUploadPage onClose={() => navigate("/forms")} />} />
+              <Route path="forms/new" element={<FormUploadPage />} />
               <Route path="forms/:id" element={<FormDetailPage />} />
               <Route path="request-signature" element={<RequestSignaturePage />} />
 

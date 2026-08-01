@@ -89,7 +89,7 @@ function navTarget(to: string) {
 // Content-heavy routes that open with the sidebar collapsed (full-width canvas)
 // by default. The user can still toggle the sidebar back open on these pages.
 function isFullWidthByDefaultRoute(pathname: string): boolean {
-  if (pathname === "/admin/templates" || pathname === "/workflow/builder") return true;
+  if (pathname === "/admin/templates" || pathname === "/workflow/builder" || pathname === "/forms/new") return true;
 
   // Single-document workspace: /documents/:id (not the upload/scan/review/etc.)
   const docSeg = pathname.split("/")[2] ?? "";
@@ -770,6 +770,10 @@ export default function Layout() {
       !["upload", "scan", "review", "trash", "folders"].includes(documentsRouteSegment) &&
       !location.pathname.slice("/documents/".length).includes("/")
     ) ||
+    // /forms/new — the template picker and fill experience both get the
+    // full-bleed treatment (same as /forms/:id — they both supply their own
+    // blue header).
+    location.pathname === "/forms/new" ||
     // /forms (the list page) is intentionally NOT here — it uses Layout's
     // normal header. Only a single form's workspace (/forms/:id) supplies
     // its own header, same as /documents/:id does.

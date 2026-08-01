@@ -63,7 +63,7 @@
  */
 
 import { useEffect, useMemo, useState } from "react";
-import { Link } from "react-router-dom";
+import { Link, useNavigate } from "react-router-dom";
 import { useQuery } from "@tanstack/react-query";
 import { extractApiError } from "@/lib/apiError";
 import { documentsAPI, documentTypesAPI, templatesAPI, normalizeListResponse } from "@/services/api";
@@ -76,7 +76,6 @@ import {
 import CustomListbox from "@/components/ui/CustomListbox";
 import StatusBadge from "@/components/documents/StatusBadge";
 import { StatCard } from "@/components/dashboard/StatCard";
-import NewFormModal from "@/components/templates/FormUploadPage";
 
 // ── Local helpers ─────────────────────────────────────────────────────────────
 
@@ -253,6 +252,7 @@ function formatMoney(amount: number | null, currency?: string) {
 // ── Main page ─────────────────────────────────────────────────────────────────
 
 export default function FormsPage() {
+  const navigate = useNavigate();
   const [search, setSearch] = useState("");
   const [statusFilter, setStatusFilter] = useState("");
   const [stageFilter, setStageFilter] = useState("");
@@ -265,7 +265,6 @@ export default function FormsPage() {
   const [amountMin, setAmountMin] = useState("");
   const [amountMax, setAmountMax] = useState("");
   const [page, setPage] = useState(1);
-  const [showNewFormModal, setShowNewFormModal] = useState(false);
 
   // ── Imprest templates (LPO, Journal, etc.) — for the type filter. Imprest
   // is one document type with several form templates under it; this is
@@ -429,7 +428,7 @@ export default function FormsPage() {
         </div>
         <button
           type="button"
-          onClick={() => setShowNewFormModal(true)}
+          onClick={() => navigate('/forms/new')}
           className="inline-flex items-center gap-2 bg-[#287EAD] px-4 py-2.5 text-sm font-semibold text-white transition-colors hover:bg-[#1E6F99]"
         >
           <Plus className="h-4 w-4" /> New Form
@@ -687,7 +686,6 @@ export default function FormsPage() {
         )}
       </div>
 
-      {showNewFormModal && <NewFormModal onClose={() => setShowNewFormModal(false)} />}
     </div>
   );
 }

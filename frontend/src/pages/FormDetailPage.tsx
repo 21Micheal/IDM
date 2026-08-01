@@ -130,6 +130,20 @@ export default function FormDetailPage() {
   const [comment, setComment] = useState("");
   const [auditPage, setAuditPage] = useState(1);
   const [workflowActionCompleted, setWorkflowActionCompleted] = useState(false);
+  // Required fields that failed the last save/submit attempt. Kept in state
+  // (not just a toast) so a long list stays on screen while it's being fixed.
+  const [missingFields, setMissingFields] = useState<string[]>([]);
+
+  // Warn before leaving/reloading with unsaved form edits.
+  useEffect(() => {
+    const onBeforeUnload = (e: BeforeUnloadEvent) => {
+      if (!formEditing || !formDirtyRef.current) return;
+      e.preventDefault();
+      e.returnValue = "";
+    };
+    window.addEventListener("beforeunload", onBeforeUnload);
+    return () => window.removeEventListener("beforeunload", onBeforeUnload);
+  }, [formEditing]);
 
   const { data: doc, isLoading } = useQuery<any>({
     queryKey: ["form", id],
@@ -201,9 +215,11 @@ export default function FormDetailPage() {
             canEditConditionalSections: canEditConditionalSections(),
           }, formProcessStep());
           if (missing.length) {
-            toast.error(`Please fill in: ${missing.join(", ")}`);
+            setMissingFields(missing);
+            toast.error(`${missing.length} required field${missing.length === 1 ? "" : "s"} still need${missing.length === 1 ? "s" : ""} attention.`);
             throw new Error("Form validation failed");
           }
+          setMissingFields([]);
           await updateFormMutation.mutateAsync();
         }
       }
@@ -256,7 +272,7 @@ export default function FormDetailPage() {
 
   if (isLoading) {
     return (
-      <div className="flex h-full items-center justify-center bg-[#EDEDED]">
+      <div className="flex h-full items-center justify-center bg-white">
         <Loader2 className="h-8 w-8 animate-spin text-[#287EAD]" />
       </div>
     );
@@ -349,8 +365,21 @@ export default function FormDetailPage() {
       isAdmin: Boolean(user?.has_admin_access || user?.is_staff),
       canEditConditionalSections: canEditConditionalSections(),
     }, step);
-    if (missing.length) { toast.error(`Please fill in: ${missing.join(", ")}`); return; }
+    if (missing.length) {
+      setMissingFields(missing);
+      toast.error(`${missing.length} required field${missing.length === 1 ? "" : "s"} still need${missing.length === 1 ? "s" : ""} attention.`);
+      return;
+    }
+    setMissingFields([]);
     updateFormMutation.mutate();
+  };
+
+  // Leaving edit mode throws away unsaved work — always confirm first.
+  const cancelFormEdit = () => {
+    if (formDirtyRef.current && !window.confirm("Discard your unsaved changes to this form?")) return;
+    setFormEditing(false);
+    formDirtyRef.current = false;
+    setMissingFields([]);
   };
 
   const auditCount = auditLogs?.count ?? 0;
@@ -364,7 +393,7 @@ export default function FormDetailPage() {
   ];
 
   return (
-    <div className="flex flex-1 flex-col bg-[#EDEDED] text-[#1F2933]">
+    <div className="flex flex-1 flex-col bg-[#F5F7F8] text-[#1F2933]">
       {/* Header */}
       <div className="flex h-14 shrink-0 items-center gap-3 border-b border-[#1E6F99] bg-[#287EAD] px-5 text-white">
         <button onClick={() => navigate("/forms")} className="flex h-9 items-center gap-1 border border-white/20 bg-white/10 px-3 text-xs text-white/85 hover:text-white">
@@ -437,7 +466,7 @@ export default function FormDetailPage() {
               <div className="flex items-center gap-2 min-w-0">
                 <p className="text-sm font-bold text-[#1F2933]">Form</p>
                 <span className="text-xs text-[#5E6870]">
-                  {formEditing ? "Editing — fill and save" : canSubmitRetirement ? "Retirement stage — fill expenditure, then submit" : canEditForm ? "Click Edit form to modify" : "Filled in-app"}
+                  {formEditing ? (formDirtyRef.current ? "Editing — unsaved changes" : "Editing — fill and save") : canSubmitRetirement ? "Retirement stage — fill expenditure, then submit" : canEditForm ? "Click Edit form to modify" : "Filled in-app"}
                 </span>
               </div>
               <div className="flex items-center gap-2 flex-wrap justify-end">
@@ -458,7 +487,7 @@ export default function FormDetailPage() {
                 )}
                 {formEditing && (
                   <>
-                    <button type="button" onClick={() => { setFormEditing(false); formDirtyRef.current = false; }}
+                    <button type="button" onClick={cancelFormEdit}
                       disabled={updateFormMutation.isPending || saveFormAsDraftMutation.isPending}
                       className="inline-flex items-center gap-1.5 border border-[#AEB5BB] bg-white px-2.5 py-1.5 text-xs font-semibold text-[#1F2933] hover:bg-[#F3F5F6] disabled:opacity-50">
                       <X className="h-3.5 w-3.5" /> Cancel
@@ -478,6 +507,17 @@ export default function FormDetailPage() {
               </div>
             </div>
             <div className="space-y-4 p-5">
+              {missingFields.length > 0 && formEditing && (
+                <div className="border border-red-200 bg-red-50 px-4 py-3">
+                  <p className="flex items-center gap-2 text-xs font-bold text-red-800">
+                    <AlertTriangle className="h-3.5 w-3.5" />
+                    {missingFields.length} required field{missingFields.length === 1 ? "" : "s"} to complete
+                  </p>
+                  <ul className="mt-1.5 flex flex-wrap gap-x-4 gap-y-1 text-xs text-red-800">
+                    {missingFields.map((m) => <li key={m} className="list-inside list-disc">{m}</li>)}
+                  </ul>
+                </div>
+              )}
               {budgetEnabled && formEditing && (
                 <BudgetBanner values={formValues} documentId={doc.id} sections={formData.sections ?? []} enabled />
               )}
@@ -635,7 +675,7 @@ export default function FormDetailPage() {
       </div>
 
       {activeTask && (
-        <div className="fixed bottom-0 left-0 right-0 z-40 border-t border-[#C8CDD2] bg-[#EDEDED]/95 backdrop-blur-sm">
+        <div className="fixed bottom-0 left-0 right-0 z-40 border-t border-[#C8CDD2] bg-white/95 backdrop-blur-sm">
           <Suspense fallback={<div className="px-4 py-3 text-xs text-[#5E6870]">Loading actions...</div>}>
             <WorkflowActionPanel
               task={activeTask}
