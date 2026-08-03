@@ -89,6 +89,7 @@ const STATUS_CHIPS: { value: string; label: string }[] = [
   { value: "", label: "All" },
   { value: "draft", label: "Draft" },
   { value: "pending_approval", label: "Pending approval" },
+  { value: "ready_for_retirement", label: "Ready for Retirement" },
   { value: "returned", label: "Returned" },
   { value: "approved", label: "Approved" },
   { value: "rejected", label: "Rejected" },
@@ -328,7 +329,18 @@ export default function FormsPage() {
         const ref = String(doc.reference_number || "").toLowerCase();
         if (!title.includes(q) && !ref.includes(q)) return false;
       }
-      if (statusFilter && doc.status !== statusFilter) return false;
+      // Handle status filtering: for "pending_approval", use the same logic as
+      // isPendingRequestApproval to match custom workflow status labels
+      // For "ready_for_retirement", use isReadyForRetirement
+      if (statusFilter) {
+        if (statusFilter === "pending_approval") {
+          if (!isPendingRequestApproval(doc)) return false;
+        } else if (statusFilter === "ready_for_retirement") {
+          if (!isReadyForRetirement(doc)) return false;
+        } else if (doc.status !== statusFilter) {
+          return false;
+        }
+      }
       if (stageFilter && getFormStage(doc) !== stageFilter) return false;
       if (templateFilter && String(doc?.metadata?.form?.template_id ?? "") !== templateFilter) return false;
       if (varianceFilter) {
@@ -391,7 +403,15 @@ export default function FormsPage() {
     });
     const counts: Record<string, number> = {};
     for (const chip of STATUS_CHIPS) {
-      counts[chip.value] = chip.value ? withoutStatus.filter((d) => d.status === chip.value).length : withoutStatus.length;
+      if (chip.value === "pending_approval") {
+        counts[chip.value] = withoutStatus.filter(isPendingRequestApproval).length;
+      } else if (chip.value === "ready_for_retirement") {
+        counts[chip.value] = withoutStatus.filter(isReadyForRetirement).length;
+      } else if (chip.value) {
+        counts[chip.value] = withoutStatus.filter((d) => d.status === chip.value).length;
+      } else {
+        counts[chip.value] = withoutStatus.length;
+      }
     }
     return counts;
   }, [
@@ -456,7 +476,9 @@ export default function FormsPage() {
           value={readyForRetirementCount}
           icon={Wallet}
           color="teal"
-          href="#"
+          onClick={() => {
+            setStatusFilter("ready_for_retirement");
+          }}
         />
       </div>
 

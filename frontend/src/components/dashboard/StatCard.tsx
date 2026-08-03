@@ -17,6 +17,7 @@ interface StatCardProps {
   /** Indigo Vault semantic variants */
   color?: 'primary' | 'accent' | 'teal' | 'secondary';
   href?: string;
+  onClick?: (e: React.MouseEvent) => void;
 }
 
 const iconWrapVariants: Record<NonNullable<StatCardProps['color']>, string> = {
@@ -39,6 +40,7 @@ export const StatCard: React.FC<StatCardProps> = ({
   trend,
   color = 'primary',
   href,
+  onClick,
 }) => {
   const trendDirection = trend?.direction ?? (trend?.isPositive ? 'up' : 'down');
   const TrendIcon =
@@ -96,6 +98,14 @@ export const StatCard: React.FC<StatCardProps> = ({
 
   if (href) {
     return <Link to={href} className="block">{cardContent}</Link>;
+  }
+
+  if (onClick) {
+    return (
+      <button type="button" onClick={onClick} className="block w-full text-left">
+        {cardContent}
+      </button>
+    );
   }
 
   return cardContent;

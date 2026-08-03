@@ -238,16 +238,43 @@ def can_submit_retirement_workflow(document: Document, *, user=None) -> bool:
     if not is_built_form_document(document):
         return False
 
+    # Explicitly check that this document type has a retirement workflow rule configured
+    try:
+        from apps.workflows.models import WorkflowRule
+        has_retirement_rule = WorkflowRule.objects.filter(
+            document_type=document.document_type,
+            phase="retirement",
+            is_active=True,
+        ).exists()
+        if not has_retirement_rule:
+            return False
+    except Exception:
+        return False
+
     form = (document.metadata or {}).get("form") or {}
     phase = (form.get("workflow_phase") or infer_builder_workflow_phase(document) or "request").strip().lower()
     if phase != "retirement":
         return False
     if (document.status or "").strip() != DocumentStatus.APPROVED:
         return False
-    if builder_workflow_in_progress(document):
-        return False
-    if retirement_workflow_completed(document):
-        return False
+
+    # Check if retirement workflow is already in progress or completed
+    try:
+        from apps.workflows.models import WorkflowInstance
+        retirement_workflow = WorkflowInstance.objects.filter(
+            document=document,
+            rule__phase="retirement",
+        ).first()
+        if retirement_workflow:
+            # If retirement workflow exists and is in progress, not ready
+            if retirement_workflow.status == "in_progress":
+                return False
+            # If retirement workflow is approved, it's completed
+            if retirement_workflow.status == "approved":
+                return False
+    except Exception:
+        pass
+
     if retirement_journal_posted(document):
         return False
     if user is not None and not user_may_submit_document(user, document):
