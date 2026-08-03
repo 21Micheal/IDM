@@ -10,6 +10,7 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { PenLine, Type as TypeIcon, Upload, Undo2, Eraser } from "lucide-react";
 import clsx from "clsx";
+import UploadCurator from "./UploadCurator";
 
 export type SignatureMode = "draw" | "type" | "upload";
 
@@ -93,7 +94,7 @@ export default function SignaturePad({ onChange, defaultName = "", className }: 
   const fontCss = SCRIPT_FONTS.find((f) => f.id === fontId)!.css;
 
   // upload state
-  const [uploadPreview, setUploadPreview] = useState<string | null>(null);
+  const [curatedSignature, setCuratedSignature] = useState<string | null>(null);
 
   /* ---- canvas sizing (Hi-DPI) ---- */
   useEffect(() => {
@@ -230,24 +231,19 @@ export default function SignaturePad({ onChange, defaultName = "", className }: 
   const emit = () => {
     if (mode === "draw") onChange(renderDraw());
     else if (mode === "type") onChange(renderTyped());
-    else onChange(uploadPreview);
+    else onChange(curatedSignature);
   };
 
   // re-emit when typed/font/color/mode/upload changes
   useEffect(() => {
     if (mode === "type") onChange(renderTyped());
-    if (mode === "upload") onChange(uploadPreview);
+    if (mode === "upload") onChange(curatedSignature);
     if (mode === "draw") onChange(renderDraw());
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [mode, typed, fontId, color, uploadPreview]);
+  }, [mode, typed, fontId, color, curatedSignature]);
 
-  const handleFile = (file: File | null) => {
-    if (!file) return;
-    if (!/^image\/(png|jpeg)$/.test(file.type)) return;
-    if (file.size > 2 * 1024 * 1024) return;
-    const reader = new FileReader();
-    reader.onload = () => setUploadPreview(reader.result as string);
-    reader.readAsDataURL(file);
+  const handleCuratedChange = (dataUrl: string | null) => {
+    setCuratedSignature(dataUrl);
   };
 
   const tabs = useMemo(
@@ -380,23 +376,7 @@ export default function SignaturePad({ onChange, defaultName = "", className }: 
         )}
 
         {mode === "upload" && (
-          <label className="flex h-40 w-full cursor-pointer flex-col items-center justify-center gap-2 rounded-md border border-dashed border-[#C8CDD2] bg-[#FAFBFC] text-sm text-[#5E6870] hover:bg-[#F1F5F8]">
-            {uploadPreview ? (
-              <img src={uploadPreview} alt="Signature preview" className="max-h-32 max-w-[80%] object-contain" />
-            ) : (
-              <>
-                <Upload className="h-6 w-6 text-[#9AA4AD]" />
-                <span>Click to upload a PNG or JPG (max 2 MB)</span>
-                <span className="text-[11px] text-[#9AA4AD]">Transparent PNG recommended</span>
-              </>
-            )}
-            <input
-              type="file"
-              accept="image/png,image/jpeg"
-              className="hidden"
-              onChange={(e) => handleFile(e.target.files?.[0] ?? null)}
-            />
-          </label>
+          <UploadCurator onChange={handleCuratedChange} />
         )}
       </div>
     </div>

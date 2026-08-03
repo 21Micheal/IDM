@@ -11,6 +11,7 @@ import clsx from "clsx";
 import { profileAPI } from "@/services/api";
 import { useAuthStore } from "@/store/authStore";
 import { toast } from "@/components/ui/vault-toast";
+import UploadCurator from "./UploadCurator";
 
 /* ---------- types ---------- */
 type SignatureMode = "draw" | "type" | "upload";
@@ -80,6 +81,7 @@ export default function SignaturePanel() {
   // Upload state
   const [uploadedFile, setUploadedFile] = useState<File | null>(null);
   const [uploadedPreview, setUploadedPreview] = useState<string | null>(null);
+  const [curatedSignature, setCuratedSignature] = useState<string | null>(null);
   const [dragActive, setDragActive] = useState(false);
 
   const [consent, setConsent] = useState(false);
@@ -277,6 +279,10 @@ export default function SignaturePanel() {
     reader.readAsDataURL(file);
   };
 
+  const handleCuratedChange = (dataUrl: string | null) => {
+    setCuratedSignature(dataUrl);
+  };
+
   /* ----- save / delete ----- */
   const saveMutation = useMutation({
     mutationFn: async () => {
@@ -292,15 +298,15 @@ export default function SignaturePanel() {
         form.append("font", fontId);
         form.append("image", await dataUrlToFile(renderTypedToCanvas().toDataURL("image/png"), "typed-signature.png"));
       } else {
-        if (!uploadedFile) throw new Error("Choose a signature image first");
-        form.append("image", uploadedFile);
+        if (!curatedSignature) throw new Error("Choose a signature image first");
+        form.append("image", await dataUrlToFile(curatedSignature, "signature.png"));
       }
       return profileAPI.saveSignature(form);
     },
     onSuccess: () => {
       toast.success("Signature saved securely");
       qc.invalidateQueries({ queryKey: ["profile-signature"] });
-      setUploadedFile(null); setUploadedPreview(null); commitStrokes([]);
+      setUploadedFile(null); setUploadedPreview(null); setCuratedSignature(null); commitStrokes([]);
     },
     onError: (err: any) =>
       toast.error(extractApiError(err, err?.message || "Failed to save signature")),
@@ -319,9 +325,9 @@ export default function SignaturePanel() {
     if (!consent) return false;
     if (mode === "draw")   return strokes.length > 0;
     if (mode === "type")   return typedSignature.trim().length > 0;
-    if (mode === "upload") return !!uploadedFile;
+    if (mode === "upload") return !!curatedSignature;
     return false;
-  }, [mode, strokes, typedSignature, uploadedFile, consent]);
+  }, [mode, strokes, typedSignature, curatedSignature, consent]);
 
   const _hasContent =
     (mode === "draw" && strokes.length > 0) ||
@@ -629,57 +635,7 @@ export default function SignaturePanel() {
           {/* ── UPLOAD mode ── */}
           {mode === "upload" && (
             <div className="space-y-4">
-              <label
-                onDragOver={(e) => { e.preventDefault(); setDragActive(true); }}
-                onDragLeave={() => setDragActive(false)}
-                onDrop={(e) => {
-                  e.preventDefault(); setDragActive(false);
-                  handleFiles(e.dataTransfer.files?.[0] ?? null);
-                }}
-                className={clsx(
-                  "flex cursor-pointer flex-col items-center justify-center gap-3 border border-dashed px-6 py-12 transition-colors",
-                  dragActive
-                    ? "border-[#287EAD] bg-[#EEF6FB]"
-                    : "border-[#C8CDD2] bg-[#F7F8F9] hover:border-[#287EAD] hover:bg-white"
-                )}
-              >
-                <div className={clsx(
-                  "flex h-14 w-14 items-center justify-center transition-colors",
-                  dragActive ? "bg-[#DCEAF2]" : "border border-[#C8CDD2] bg-white"
-                )}>
-                  {dragActive
-                    ? <Upload className="h-7 w-7 text-[#287EAD]" />
-                    : <ImageIcon className="h-7 w-7 text-[#5E6870]" />
-                  }
-                </div>
-                <div className="text-center">
-                  <p className="text-sm font-semibold text-foreground">
-                    {uploadedFile ? uploadedFile.name : "Drop your signature image here"}
-                  </p>
-                  <p className="text-xs text-muted-foreground mt-1">
-                    or <span className="font-medium text-[#287EAD]">click to browse</span> · PNG or JPG · max 2 MB
-                  </p>
-                  <p className="text-xs text-muted-foreground mt-0.5">Transparent background recommended</p>
-                </div>
-                <input
-                  type="file"
-                  accept="image/png,image/jpeg"
-                  className="hidden"
-                  onChange={(e) => handleFiles(e.target.files?.[0] ?? null)}
-                />
-              </label>
-
-              {uploadedPreview && (
-                <div className="flex flex-col items-center gap-3 border border-[#C8CDD2] bg-[#F7F8F9] p-6">
-                  <img src={uploadedPreview} alt="Preview" className="max-h-36 max-w-full object-contain" />
-                  <button
-                    onClick={() => { setUploadedFile(null); setUploadedPreview(null); }}
-                    className="text-xs text-muted-foreground hover:text-destructive flex items-center gap-1.5 transition-colors"
-                  >
-                    <Trash2 className="w-3.5 h-3.5" /> Remove image
-                  </button>
-                </div>
-              )}
+              <UploadCurator onChange={handleCuratedChange} />
             </div>
           )}
 
