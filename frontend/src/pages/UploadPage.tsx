@@ -1698,20 +1698,6 @@ export default function UploadPage({ scanOnly = false }: UploadPageProps) {
       <WorkspaceCommandBar
         actions={
           <div className="hidden items-center gap-3 text-xs text-white/80 md:flex">
-            <label className="inline-flex cursor-pointer items-center gap-2 border border-white/30 px-2.5 py-1.5 font-semibold">
-              <input
-                type="checkbox"
-                checked={bulkMode}
-                onChange={(event) => {
-                  setBulkMode(event.target.checked);
-                  if (event.target.checked) {
-                    navigate(`${scanOnly ? "/documents/scan" : "/documents/upload"}?mode=bulk`, { replace: true });
-                  }
-                }}
-                className="h-3.5 w-3.5"
-              />
-              Bulk mode
-            </label>
             <span className="border border-white/30 px-2 py-1">{selectedType?.name || "No type selected"}</span>
             <span className="border border-white/30 px-2 py-1">
               {useTemplate ? (selectedTemplate ? "Template selected" : "Awaiting template") : droppedFile ? "File attached" : "Awaiting file"}
@@ -1884,6 +1870,7 @@ export default function UploadPage({ scanOnly = false }: UploadPageProps) {
 
       {/* ── Main upload layout ─────────────────────────────────────────── */}
       {(scanStage === "idle" || scanStage === "uploading") && (
+        <>
         <div className="grid grid-cols-1 gap-5 p-5 pr-0 xl:grid-cols-12">
           {/* Left column — controls */}
           <div className={clsx(
@@ -1900,19 +1887,6 @@ export default function UploadPage({ scanOnly = false }: UploadPageProps) {
                 <StepBadge n={1} active={!selectedTypeId} done={Boolean(selectedTypeId)} />
                 Document Type
               </h2>
-              <label className="mb-3 flex cursor-pointer items-center gap-2 border border-[#D3D7DA] bg-[#F7F8F9] px-3 py-2 text-sm text-[#1F2933] md:hidden">
-                <input
-                  type="checkbox"
-                  checked={bulkMode}
-                  onChange={(event) => {
-                    setBulkMode(event.target.checked);
-                    if (event.target.checked) {
-                      navigate(`${scanOnly ? "/documents/scan" : "/documents/upload"}?mode=bulk`, { replace: true });
-                    }
-                  }}
-                />
-                Use bulk mode
-              </label>
               <CustomListbox
                 value={selectedTypeId}
                 onChange={(v) => setSelectedTypeId(v)}
@@ -1972,11 +1946,12 @@ export default function UploadPage({ scanOnly = false }: UploadPageProps) {
 
             {/* Step 2 — Attach File */}
             {!useTemplate && (
-            <div className="border border-[#C8CDD2] bg-white p-4">
-              <h2 className="mb-3 flex items-center gap-2 text-sm font-semibold text-[#1F2933]">
-                <StepBadge n={2} active={Boolean(selectedTypeId) && !droppedFile} done={Boolean(droppedFile)} />
-                Attach File
-              </h2>
+            <>
+              <div className="border border-[#C8CDD2] bg-white p-4">
+                <h2 className="mb-3 flex items-center gap-2 text-sm font-semibold text-[#1F2933]">
+                  <StepBadge n={2} active={Boolean(selectedTypeId) && !droppedFile} done={Boolean(droppedFile)} />
+                  Attach File
+                </h2>
               <div
                 {...getRootProps()}
                 className={clsx(
@@ -2014,6 +1989,7 @@ export default function UploadPage({ scanOnly = false }: UploadPageProps) {
                 )}
               </div>
             </div>
+            </>
             )}
 
             {scanOnly && (
@@ -2030,6 +2006,22 @@ export default function UploadPage({ scanOnly = false }: UploadPageProps) {
                 </div>
               </div>
             )}
+
+            {/* Bulk mode toggle — positioned below the left panels */}
+            <label className="inline-flex cursor-pointer items-center gap-2 text-sm text-[#1F2933]">
+              <input
+                type="checkbox"
+                checked={bulkMode}
+                onChange={(event) => {
+                  setBulkMode(event.target.checked);
+                  if (event.target.checked) {
+                    navigate(`${scanOnly ? "/documents/scan" : "/documents/upload"}?mode=bulk`, { replace: true });
+                  }
+                }}
+                className="h-4 w-4 accent-[#287EAD]"
+              />
+              Use bulk mode
+            </label>
           </div>
 
           {/* Centre column — document preview (visible when file selected and displayable) */}
@@ -2483,8 +2475,11 @@ export default function UploadPage({ scanOnly = false }: UploadPageProps) {
                 </div>
               </div>
             )}
+
           </div>
         </div>
+
+        </>
       )}
 
       {/* Uploading spinner (OCR flow) */}

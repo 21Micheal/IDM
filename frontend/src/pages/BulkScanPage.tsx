@@ -300,19 +300,6 @@ export default function BulkScanPage({ scanMode = true, onSingleMode, initialBat
       <WorkspaceCommandBar
         actions={
           <div className="hidden items-center gap-3 text-xs text-white/80 md:flex">
-            {onSingleMode && (
-              <label className="inline-flex cursor-pointer items-center gap-2 border border-white/30 px-2.5 py-1.5 font-semibold">
-                <input
-                  type="checkbox"
-                  checked
-                  onChange={(event) => {
-                    if (!event.target.checked) onSingleMode();
-                  }}
-                  className="h-3.5 w-3.5"
-                />
-                Bulk mode
-              </label>
-            )}
             <span className="border border-white/30 px-2 py-1">
               {isRelatedSet ? "Related set" : selectedType?.name || "No type selected"}
             </span>
@@ -396,7 +383,7 @@ export default function BulkScanPage({ scanMode = true, onSingleMode, initialBat
             <div className="border border-[#C8CDD2] bg-white p-5">
               <h2 className="mb-4 font-semibold text-[#1F2933]">1. Batch mode</h2>
               {onSingleMode && (
-                <label className="mb-3 flex cursor-pointer items-center gap-2 border border-[#D3D7DA] bg-[#F7F8F9] px-3 py-2 text-sm text-[#1F2933] md:hidden">
+                <label className="mb-3 hidden cursor-pointer items-center gap-2 border border-[#D3D7DA] bg-[#F7F8F9] px-3 py-2 text-sm text-[#1F2933] md:hidden">
                   <input
                     type="checkbox"
                     checked
@@ -458,6 +445,19 @@ export default function BulkScanPage({ scanMode = true, onSingleMode, initialBat
                     : "Each file is reviewed with its preview. Fill the details before the batch is submitted to workflow."}
               </span>
             </div>
+
+            {/* Bulk mode toggle — always visible so users know they're in bulk mode */}
+            <label className="inline-flex cursor-pointer items-center gap-2 text-sm text-[#1F2933]">
+              <input
+                type="checkbox"
+                checked
+                onChange={(event) => {
+                  if (!event.target.checked && onSingleMode) onSingleMode();
+                }}
+                className="h-4 w-4 accent-[#287EAD]"
+              />
+              Use bulk mode
+            </label>
           </div>
 
           <div className="space-y-5 lg:col-span-8">
