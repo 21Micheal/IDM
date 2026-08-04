@@ -253,7 +253,7 @@ export default function RequestSignaturePage() {
 
   const tabs: { id: Tab; label: string; showCount?: boolean }[] = [
     { id: "request", label: "Request signature" },
-    { id: "incoming", label: `Awaiting my signature${incomingCount ? ` (${incomingCount})` : ""}`, showCount: incomingCount > 0 },
+    { id: "incoming", label: `Awaiting my signature${incomingCount ? ` (${incomingCount})` : ""}`, showCount: (incomingCount ?? 0) > 0 },
     { id: "sent", label: "Sent by me" },
     { id: "signed", label: "Signed by me" },
   ];

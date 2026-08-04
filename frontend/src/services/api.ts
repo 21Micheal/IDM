@@ -1045,7 +1045,7 @@ export const documentApi = {
 
 // ── Ad-hoc signature requests ─────────────────────────────────────────────────
 export const signatureRequestsAPI = {
-  list: (params?: { box?: "incoming" | "sent"; document?: string }) =>
+  list: (params?: { box?: "incoming" | "sent" | "signed"; document?: string }) =>
     api.get("/documents/signature-requests/", { params }),
   /** Count of requests still awaiting the current user's signature (nav badge). */
   incomingCount: () =>
