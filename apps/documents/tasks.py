@@ -1391,16 +1391,29 @@ def poll_mailbox(self, mailbox_id: str):
 
 @shared_task(queue="default")
 def poll_active_mailboxes():
-    """Fan out a poll task for every active mailbox.
+    """Fan out a poll task for every mailbox due for automatic polling.
 
-    Scheduled by Celery beat. Each mailbox is polled in its own task so one slow
-    or unreachable server does not hold up the others.
+    Scheduled by Celery beat as a short tick. Only mailboxes with
+    ``is_active`` and ``auto_poll`` are considered; each one's
+    ``poll_interval_seconds`` (relative to ``last_polled_at``) decides whether
+    it is due. Manual "Poll now" bypasses this filter via :func:`poll_mailbox`.
     """
-    from .models import Mailbox
+    from django.utils import timezone
 
-    mailbox_ids = list(
-        Mailbox.objects.filter(is_active=True).values_list("id", flat=True)
-    )
-    for mailbox_id in mailbox_ids:
-        poll_mailbox.delay(str(mailbox_id))
-    return len(mailbox_ids)
+    from .models import Mailbox, MailboxPollStatus
+
+    now = timezone.now()
+    due_ids: list[str] = []
+    for mb in Mailbox.objects.filter(is_active=True, auto_poll=True).only(
+        "id", "poll_status", "last_polled_at", "poll_interval_seconds"
+    ):
+        if mb.poll_status == MailboxPollStatus.POLLING:
+            continue
+        interval = mb.poll_interval_seconds or 300
+        if mb.last_polled_at and (now - mb.last_polled_at).total_seconds() < interval:
+            continue
+        due_ids.append(str(mb.id))
+
+    for mailbox_id in due_ids:
+        poll_mailbox.delay(mailbox_id)
+    return len(due_ids)

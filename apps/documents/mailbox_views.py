@@ -28,6 +28,9 @@ from rest_framework import permissions, serializers, status, viewsets
 from rest_framework.decorators import action
 from rest_framework.response import Response
 
+from apps.accounts.models import User
+from apps.accounts.serializers import UserSummarySerializer
+
 from .imap_client import (
     IMAPClient,
     IMAPConfig,
@@ -101,6 +104,12 @@ class MailboxSerializer(serializers.ModelSerializer):
     created_by_name = serializers.CharField(
         source="created_by.get_full_name", read_only=True, default=None
     )
+    reviewers = serializers.PrimaryKeyRelatedField(
+        queryset=User.objects.filter(is_active=True),
+        many=True,
+        required=False,
+    )
+    reviewer_details = UserSummarySerializer(source="reviewers", many=True, read_only=True)
     has_password = serializers.SerializerMethodField()
     recent_emails = serializers.SerializerMethodField()
     email_counts = serializers.SerializerMethodField()
@@ -113,7 +122,8 @@ class MailboxSerializer(serializers.ModelSerializer):
             "auto_classify", "sender_supplier_map", "sender_allowlist",
             "allowed_attachment_extensions",
             "related_set_attachments", "ingest_history", "ingest_since",
-            "max_messages_per_poll", "is_active",
+            "max_messages_per_poll", "auto_poll", "poll_interval_seconds",
+            "is_active", "reviewers", "reviewer_details",
             "poll_status", "last_polled_at", "last_error", "consecutive_failures",
             "last_seen_uid", "last_seen_cursor",
             "last_imported_count", "last_skipped_count", "last_failed_count",
@@ -178,16 +188,30 @@ class MailboxSerializer(serializers.ModelSerializer):
                 incoming[key] = stored[key]
         return incoming
 
+    def validate_poll_interval_seconds(self, value):
+        # Floor at 60s so a misconfigured mailbox can't thrash the IMAP server.
+        if value is not None and value < 60:
+            raise serializers.ValidationError("Poll interval must be at least 60 seconds.")
+        return value
+
     def create(self, validated_data):
+        reviewers = validated_data.pop("reviewers", [])
         validated_data["created_by"] = self.context["request"].user
-        return super().create(validated_data)
+        mailbox = super().create(validated_data)
+        if reviewers:
+            mailbox.reviewers.set(reviewers)
+        return mailbox
 
     def update(self, instance, validated_data):
+        reviewers = validated_data.pop("reviewers", None)
         if "connection" in validated_data:
             validated_data["connection"] = self._merge_secret_preserving(
                 instance, validated_data["connection"]
             )
-        return super().update(instance, validated_data)
+        mailbox = super().update(instance, validated_data)
+        if reviewers is not None:
+            mailbox.reviewers.set(reviewers)
+        return mailbox
 
 
 class MailboxListSerializer(serializers.ModelSerializer):
@@ -200,7 +224,8 @@ class MailboxListSerializer(serializers.ModelSerializer):
     class Meta:
         model = Mailbox
         fields = [
-            "id", "name", "protocol", "is_active", "auto_classify", "related_set_attachments",
+            "id", "name", "protocol", "is_active", "auto_poll", "poll_interval_seconds",
+            "auto_classify", "related_set_attachments",
             "default_document_type", "default_document_type_name",
             "poll_status", "last_polled_at", "last_error",
             "last_imported_count", "last_skipped_count", "last_failed_count",
@@ -214,7 +239,7 @@ class MailboxViewSet(viewsets.ModelViewSet):
     permission_classes = [IsAdminAccess]
     queryset = Mailbox.objects.select_related(
         "default_document_type", "created_by"
-    ).all()
+    ).prefetch_related("reviewers").all()
 
     def get_serializer_class(self):
         if self.action == "list":
@@ -268,6 +293,11 @@ class MailboxViewSet(viewsets.ModelViewSet):
     def poll(self, request, pk=None):
         """Queue an immediate poll of this mailbox."""
         mailbox = self.get_object()
+        if not mailbox.is_active:
+            return Response(
+                {"detail": "Mailbox is inactive. Enable it before polling."},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
         if mailbox.poll_status == MailboxPollStatus.POLLING:
             return Response(
                 {"detail": "Mailbox is already polling."},

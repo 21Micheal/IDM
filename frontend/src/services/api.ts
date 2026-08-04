@@ -832,7 +832,17 @@ export type Mailbox = {
   ingest_history: boolean;
   ingest_since: string | null;
   max_messages_per_poll: number;
+  auto_poll: boolean;
+  poll_interval_seconds: number;
   is_active: boolean;
+  reviewers?: string[];
+  reviewer_details?: Array<{
+    id: string;
+    email: string;
+    first_name: string;
+    last_name: string;
+    full_name: string;
+  }>;
   poll_status: MailboxPollStatus;
   last_polled_at?: string | null;
   last_error?: string;
@@ -869,7 +879,10 @@ export type MailboxInput = {
   ingest_history?: boolean;
   ingest_since?: string | null;
   max_messages_per_poll?: number;
+  auto_poll?: boolean;
+  poll_interval_seconds?: number;
   is_active?: boolean;
+  reviewers?: string[];
 };
 
 export const mailboxAPI = {
@@ -1007,6 +1020,7 @@ export interface NotificationSummary {
   unread_notifications: number;
   unread_task_alerts: number;
   pending_tasks: number;
+  pending_reviews: number;
   incoming_signatures: number;
 }
 

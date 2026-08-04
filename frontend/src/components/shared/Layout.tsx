@@ -170,11 +170,13 @@ function SidebarGroup({
   group,
   userAccess,
   taskCount,
+  reviewCount,
   onWarmRoute,
 }: {
   group: NavGroup;
   userAccess?: string;
   taskCount?: number;
+  reviewCount?: number;
   onWarmRoute?: (to: string) => void;
 }) {
   const location = useLocation();
@@ -208,7 +210,10 @@ function SidebarGroup({
       {open && (
         <div className="ml-5 border-l border-[#CDD3D8] py-1">
           {visibleChildren.map(({ to, icon: Icon, label, exact }) => {
-            const badgeValue = to === "/workflow" ? taskCount : undefined;
+            const badgeValue =
+              to === "/workflow" ? taskCount
+              : to === "/documents/review" ? reviewCount
+              : undefined;
             const target = navTarget(to);
             const isChildActive =
               location.pathname === target.pathname &&
@@ -236,10 +241,12 @@ function SidebarGroup({
                   <span
                     className={clsx(
                       "ml-auto inline-flex min-w-[1.25rem] items-center justify-center px-1.5 py-0.5 text-[10px] font-bold text-white",
-                      to === "/workflow" || to === "/notifications" ? "bg-red-700" : "bg-[#287EAD]"
+                      to === "/workflow" || to === "/notifications" || to === "/documents/review"
+                        ? "bg-red-700"
+                        : "bg-[#287EAD]"
                     )}
                   >
-                    {badgeValue}
+                    {badgeValue > 9 ? "9+" : badgeValue}
                   </span>
                 ) : null}
               </NavLink>
@@ -749,6 +756,7 @@ export default function Layout() {
 
   const unread = summary?.unread_notifications ?? 0;
   const pendingTasksCount = summary?.pending_tasks ?? 0;
+  const pendingReviewsCount = summary?.pending_reviews ?? 0;
   const signatureCount = summary?.incoming_signatures ?? 0;
   const documentsRouteSegment = location.pathname.split("/")[2] ?? "";
   const formsRouteSegment = location.pathname.split("/")[2] ?? "";
@@ -837,6 +845,7 @@ export default function Layout() {
                     group={entry}
                     userAccess={hasAdminAccess ? "admin" : undefined}
                     taskCount={pendingTasksCount}
+                    reviewCount={pendingReviewsCount}
                     onWarmRoute={warmRoute}
                   />
                 );
