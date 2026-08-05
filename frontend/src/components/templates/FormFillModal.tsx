@@ -33,6 +33,7 @@ import BudgetBanner from "@/components/templates/BudgetBanner";
 import { collectFormAttachments } from "@/components/templates/formAttachments";
 import { toast } from "@/components/ui/vault-toast";
 import { X, Loader2, Send, Save, FileText, LayoutTemplate, Paperclip } from "lucide-react";
+import { WorkspaceCommandBar } from "@/components/shared/WorkspaceCommandBar";
 
 type DocumentTemplateOption = {
   id: string;
@@ -202,22 +203,31 @@ export default function FormFillModal({
 
   return (
     <div className="flex h-full flex-col bg-white">
-      {/* ── Header ── */}
-      <div className="flex h-[60px] flex-shrink-0 items-center gap-4 border-b border-[#C8CDD2] bg-[#287EAD] px-5 pr-6 text-white">
+      {/* ── Portal into Layout's blue bar ── */}
+      <WorkspaceCommandBar
+        actions={
+          <button
+            onClick={requestClose}
+            disabled={isPending}
+            className="flex-shrink-0 p-1.5 text-white/70 hover:bg-white/15 hover:text-white transition-colors disabled:opacity-40"
+            title="Cancel"
+          >
+            <X className="h-5 w-5" />
+          </button>
+        }
+      >
         <div className="flex items-center gap-3 flex-shrink-0">
-          <div className="flex h-8 w-8 flex-shrink-0 items-center justify-center rounded bg-white/20">
+          <div className="flex h-8 w-8 flex-shrink-0 items-center justify-center bg-white/20">
             <LayoutTemplate className="h-4 w-4" />
           </div>
           <div className="hidden sm:block">
-            <p className="text-[10px] font-semibold text-white/60 uppercase tracking-widest leading-none mb-0.5">
-              New Form
-            </p>
+            <p className="text-[10px] font-semibold text-white/60 uppercase tracking-widest leading-none mb-0.5">New Form</p>
             <h1 className="truncate text-sm font-bold leading-tight max-w-[180px]">{template.name}</h1>
           </div>
         </div>
 
         {/* Inline title input */}
-        <div className="flex flex-1 items-center gap-2 rounded border border-white/30 bg-white/10 px-3 py-1.5 min-w-0">
+        <div className="flex flex-1 items-center gap-2 border border-white/30 bg-white/10 px-3 py-1.5 min-w-0 max-w-xs">
           <FileText className="h-3.5 w-3.5 flex-shrink-0 text-white/70" />
           <input
             value={title}
@@ -229,21 +239,12 @@ export default function FormFillModal({
         </div>
 
         {fileCount > 0 && (
-          <div className="flex-shrink-0 flex items-center gap-1.5 rounded border border-white/30 bg-white/10 px-2.5 py-1 text-xs font-semibold text-white">
+          <div className="flex-shrink-0 flex items-center gap-1.5 border border-white/30 bg-white/10 px-2.5 py-1 text-xs font-semibold text-white">
             <Paperclip className="h-3.5 w-3.5" />
             {fileCount} file{fileCount !== 1 ? "s" : ""}
           </div>
         )}
-
-        <button
-          onClick={requestClose}
-          disabled={isPending}
-          className="flex-shrink-0 rounded p-1.5 text-white/70 hover:bg-white/15 hover:text-white transition-colors disabled:opacity-40"
-          title="Cancel"
-        >
-          <X className="h-5 w-5" />
-        </button>
-      </div>
+      </WorkspaceCommandBar>
 
       {/* ── Sub-header hint ── */}
       <div className="flex-shrink-0 border-b border-[#C8CDD2] bg-[#F5F7F8] px-6 py-2.5">

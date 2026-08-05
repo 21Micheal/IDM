@@ -14,6 +14,7 @@ import { documentTypesAPI, templatesAPI, normalizeListResponse } from "@/service
 import { Loader2, LayoutTemplate, ArrowRight, AlertTriangle, ArrowLeft } from "lucide-react";
 import { cn } from "@/lib/utils";
 import FormFillModal from "@/components/templates/FormFillModal";
+import { WorkspaceCommandBar } from "@/components/shared/WorkspaceCommandBar";
 
 type DocumentTemplateOption = {
   id: string;
@@ -95,12 +96,11 @@ export default function NewFormModal({ onClose }: { onClose?: () => void }) {
 
   return (
     <div className="flex h-full flex-col bg-[#F5F7F8]">
-      {/* Page header — same blue bar style as FormDetailPage */}
-      <div className="flex h-14 shrink-0 items-center gap-3 border-b border-[#1E6F99] bg-[#287EAD] px-5 text-white">
+      <WorkspaceCommandBar>
         <button
           type="button"
           onClick={goBack}
-          className="flex h-9 items-center gap-1 border border-white/20 bg-white/10 px-3 text-xs text-white/85 hover:text-white"
+          className="flex h-8 items-center gap-1 border border-white/20 bg-white/10 px-3 text-xs text-white/85 hover:text-white"
         >
           <ArrowLeft className="h-3.5 w-3.5" /> Forms
         </button>
@@ -108,7 +108,7 @@ export default function NewFormModal({ onClose }: { onClose?: () => void }) {
           <h1 className="text-base font-semibold">New Form</h1>
           <p className="mt-0.5 text-[11px] text-white/75">Select the form type to fill in.</p>
         </div>
-      </div>
+      </WorkspaceCommandBar>
 
       {/* Centred card */}
       <div className="flex flex-1 items-start justify-center px-4 pt-10">

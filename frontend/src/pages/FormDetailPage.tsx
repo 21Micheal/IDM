@@ -41,6 +41,7 @@ import { toast } from "@/components/ui/vault-toast";
 import { useAuthStore } from "@/store/authStore";
 import { cn } from "@/lib/utils";
 import { QUERY_SHORT_STALE } from "@/lib/reactQueryDefaults";
+import { WorkspaceCommandBar } from "@/components/shared/WorkspaceCommandBar";
 
 const AUDIT_PAGE_SIZE = 5;
 
@@ -400,9 +401,24 @@ export default function FormDetailPage() {
 
   return (
     <div className="flex flex-1 flex-col bg-[#F5F7F8] text-[#1F2933]">
-      {/* Header */}
-      <div className="flex h-14 shrink-0 items-center gap-3 border-b border-[#1E6F99] bg-[#287EAD] px-5 text-white">
-        <button onClick={() => navigate("/forms")} className="flex h-9 items-center gap-1 border border-white/20 bg-white/10 px-3 text-xs text-white/85 hover:text-white">
+      <WorkspaceCommandBar
+        actions={
+          canSubmit ? (
+            <button
+              onClick={() => submitMutation.mutate()}
+              disabled={submitMutation.isPending}
+              className="flex h-9 items-center gap-1.5 border border-white/20 bg-white/10 px-3 text-xs font-semibold text-white hover:bg-white/20 disabled:opacity-50"
+            >
+              {submitMutation.isPending ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Send className="h-3.5 w-3.5" />}
+              {submitLabel}
+            </button>
+          ) : undefined
+        }
+      >
+        <button
+          onClick={() => navigate("/forms")}
+          className="flex h-8 items-center gap-1 border border-white/20 bg-white/10 px-3 text-xs text-white/85 hover:text-white"
+        >
           <ArrowLeft className="h-3.5 w-3.5" /> Forms
         </button>
         <div className="min-w-0 flex-1">
@@ -435,14 +451,7 @@ export default function FormDetailPage() {
             {doc.reference_number} · {doc.document_type?.name || "Form"}
           </p>
         </div>
-        {canSubmit && (
-          <button onClick={() => submitMutation.mutate()} disabled={submitMutation.isPending}
-            className="flex h-9 items-center gap-1.5 border border-white/20 bg-white/10 px-3 text-xs font-semibold text-white hover:bg-white/20 disabled:opacity-50">
-            {submitMutation.isPending ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Send className="h-3.5 w-3.5" />}
-            {submitLabel}
-          </button>
-        )}
-      </div>
+      </WorkspaceCommandBar>
 
       <div className={cn(
         "scrollbar-minimal relative grid min-h-0 flex-1 grid-cols-1 items-start gap-4 overflow-y-auto p-4 lg:grid-cols-12",
