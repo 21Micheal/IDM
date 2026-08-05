@@ -772,6 +772,10 @@ export default function Layout() {
     location.pathname === "/documents/upload" ||
     location.pathname === "/documents/scan" ||
     location.pathname === "/documents/trash" ||
+    // Review queue: the list page AND opening a specific batch both render
+    // BulkScanPage which supplies its own blue WorkspaceCommandBar.
+    location.pathname === "/documents/review" ||
+    location.pathname.startsWith("/documents/review/") ||
     (
       location.pathname.startsWith("/documents/") &&
       Boolean(documentsRouteSegment) &&
