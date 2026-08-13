@@ -86,6 +86,15 @@ function navTarget(to: string) {
   };
 }
 
+const sidebarItemBase =
+  "group flex items-center gap-3 rounded-md px-3 py-2 text-sm font-semibold transition-colors";
+const sidebarItemActive =
+  "bg-[#287EAD] text-white shadow-sm";
+const sidebarItemInactive =
+  "text-[#3D454D] hover:bg-white/75 hover:text-[#1F2933] hover:shadow-sm";
+const sidebarIconActive = "text-white";
+const sidebarIconInactive = "text-[#6E767D] group-hover:text-[#287EAD]";
+
 // Content-heavy routes that open with the sidebar collapsed (full-width canvas)
 // by default. The user can still toggle the sidebar back open on these pages.
 function isFullWidthByDefaultRoute(pathname: string): boolean {
@@ -197,13 +206,14 @@ function SidebarGroup({
       <button
         onClick={() => setOpen(!open)}
         className={clsx(
-          "group flex w-full items-center gap-3 border-l-2 px-3 py-2 text-sm font-semibold transition-colors",
+          sidebarItemBase,
+          "w-full",
           isGroupActive
-            ? "border-[#287EAD] bg-[#E9F3F8] text-[#1F2933]"
-            : "border-transparent text-[#3D454D] hover:border-[#9ABFD4] hover:bg-[#EEF3F7] hover:text-[#1F2933]"
+            ? sidebarItemActive
+            : sidebarItemInactive
         )}
       >
-        <group.icon className={clsx("h-4 w-4 flex-shrink-0", isGroupActive ? "text-[#287EAD]" : "text-[#6E767D] group-hover:text-[#287EAD]")} />
+        <group.icon className={clsx("h-4 w-4 flex-shrink-0", isGroupActive ? sidebarIconActive : sidebarIconInactive)} />
         <span className="flex-1 text-left">{group.label}</span>
         {open
           ? <ChevronDown className="h-3.5 w-3.5 flex-shrink-0 text-[#6E767D]" />
@@ -231,14 +241,14 @@ function SidebarGroup({
                 onFocus={() => onWarmRoute?.(to)}
                 className={() =>
                   clsx(
-                    "group flex items-center gap-2.5 border-l-2 px-3 py-1.5 text-sm transition-colors",
+                    "group flex items-center gap-2.5 rounded-md px-3 py-1.5 text-sm transition-colors",
                     isChildActive
-                      ? "border-[#287EAD] bg-white text-[#1F2933]"
-                      : "border-transparent text-[#4B5560] hover:border-[#A7CDE3] hover:bg-[#F5F7F8] hover:text-[#1F2933]"
+                      ? "bg-[#287EAD] text-white shadow-sm"
+                      : "text-[#4B5560] hover:bg-white/75 hover:text-[#1F2933] hover:shadow-sm"
                   )
                 }
               >
-                <Icon className={clsx("h-3.5 w-3.5 flex-shrink-0", isChildActive ? "text-[#287EAD]" : "text-[#7C8790] group-hover:text-[#287EAD]")} />
+                <Icon className={clsx("h-3.5 w-3.5 flex-shrink-0", isChildActive ? sidebarIconActive : "text-[#7C8790] group-hover:text-[#287EAD]")} />
                 <span className="flex-1">{label}</span>
                 {badgeValue ? (
                   <span
@@ -269,11 +279,6 @@ function ProfileMenu({ variant = "light" }: { variant?: "light" | "blue" }) {
   void _navigate;
   const [open, setOpen] = useState(false);
 
-  const initials = [
-    user?.first_name?.[0] ?? "",
-    user?.last_name?.[0] ?? "",
-  ].join("").toUpperCase() || "?";
-
   const buttonClassName = variant === "blue"
     ? "flex items-center justify-center transition-all active:scale-95"
     : "flex h-9 w-9 items-center justify-center border border-[#C8CDD2] bg-white text-[#5E6870] transition-colors hover:bg-[#EEF6FB] hover:text-[#287EAD]";
@@ -298,8 +303,8 @@ function ProfileMenu({ variant = "light" }: { variant?: "light" | "blue" }) {
         aria-label="Open profile menu"
       >
         {variant === "blue" ? (
-          <span className="flex h-8 w-8 items-center justify-center rounded-full bg-white/15 text-[11px] font-bold tracking-wide text-white ring-1 ring-white/25 transition-all hover:bg-white/25 hover:ring-white/40">
-            {initials}
+          <span className="flex h-9 w-9 items-center justify-center rounded-full bg-white/15 text-white ring-1 ring-white/25 transition-colors hover:bg-white/25 hover:ring-white/40">
+            <CircleUserRound className="h-5 w-5" />
           </span>
         ) : (
           <CircleUserRound className="h-5 w-5" />
@@ -692,9 +697,6 @@ export default function Layout() {
   const mainRef = useRef<HTMLElement | null>(null);
   const hasAdminAccess = Boolean(user?.has_admin_access);
   const [idleReady, setIdleReady] = useState(false);
-  // ── NEW: folder panel toggle ──────────────────────────────────────────────
-  const [_foldersExpanded, _setFoldersExpanded] = useState(true);
-  void _foldersExpanded; void _setFoldersExpanded;
 
   // ── Sidebar collapse. `collapsePref` is the user's remembered choice for
   // regular pages (persisted). The effective collapsed state is DERIVED during
@@ -938,16 +940,16 @@ export default function Layout() {
                     onFocus={() => warmRoute(to)}
                     className={({ isActive }) =>
                       clsx(
-                        "group flex items-center gap-3 border-l-2 px-3 py-2 text-sm font-semibold transition-colors",
+                        sidebarItemBase,
                         isActive
-                          ? "border-[#287EAD] bg-white text-[#1F2933]"
-                          : "border-transparent text-[#3D454D] hover:border-[#9ABFD4] hover:bg-[#EEF3F7] hover:text-[#1F2933]"
+                          ? sidebarItemActive
+                          : sidebarItemInactive
                       )
                     }
                   >
                     {({ isActive }) => (
                       <>
-                        <Icon className={clsx("h-4 w-4 flex-shrink-0", isActive ? "text-[#287EAD]" : "text-[#6E767D] group-hover:text-[#287EAD]")} />
+                        <Icon className={clsx("h-4 w-4 flex-shrink-0", isActive ? sidebarIconActive : sidebarIconInactive)} />
                         <span className="flex-1">{label}</span>
                             {badgeValue ? (
                               <span
@@ -967,7 +969,7 @@ export default function Layout() {
             </div>
 
             {/* ── Folder tree ────────────────────────────────────────── */}
-            <div className="border-t border-[#C8CDD2] pb-2">
+            <div className="pb-2">
               {idleReady && (
                 <FolderTree
                   activeFolderId={
@@ -981,7 +983,7 @@ export default function Layout() {
 
             {/* ── Administration ─────────────────────────────────────── */}
             {visibleAdmin.length > 0 && (
-              <div className="space-y-0.5 border-t border-[#C8CDD2] px-2 py-3">
+              <div className="space-y-0.5 px-2 py-3">
                 <div className="px-3 pb-1 pt-0">
                   <p className="text-[10px] font-bold uppercase tracking-widest text-[#6E767D]">
                     Administration
@@ -995,16 +997,16 @@ export default function Layout() {
                     onFocus={() => warmRoute(to)}
                     className={({ isActive }) =>
                       clsx(
-                        "group flex items-center gap-3 border-l-2 px-3 py-2 text-sm font-semibold transition-colors",
+                        sidebarItemBase,
                         isActive
-                          ? "border-[#287EAD] bg-white text-[#1F2933]"
-                          : "border-transparent text-[#3D454D] hover:border-[#9ABFD4] hover:bg-[#EEF3F7] hover:text-[#1F2933]"
+                          ? sidebarItemActive
+                          : sidebarItemInactive
                       )
                     }
                   >
                     {({ isActive }) => (
                       <>
-                        <Icon className={clsx("h-4 w-4 flex-shrink-0", isActive ? "text-[#287EAD]" : "text-[#6E767D] group-hover:text-[#287EAD]")} />
+                        <Icon className={clsx("h-4 w-4 flex-shrink-0", isActive ? sidebarIconActive : sidebarIconInactive)} />
                         <span>{label}</span>
                       </>
                     )}
@@ -1034,4 +1036,3 @@ export default function Layout() {
     </div>
   );
 }
-
