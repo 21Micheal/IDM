@@ -37,7 +37,7 @@ import {
   Bell, Users, Building2, UserRoundCog, Shield,
   ChevronDown, ChevronRight, ChevronLeft, Archive, ScanLine, Loader2, UserCheck, Monitor, Lock, History, Trash2,
   BellRing, CircleUserRound, ClipboardCheck, Inbox, ArrowRight, FileSignature, LayoutTemplate, Database,
-  Plug, ClipboardList,
+  Plug, ClipboardList, BarChart3,
 } from "lucide-react";
 import { useAuthStore } from "../../store/authStore";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
@@ -138,6 +138,9 @@ const mainNav: NavEntry[] = [
     label: "My tasks",
   } as NavLeaf,
   { to: "/audit", icon: History, label: "Audit trail" } as NavLeaf,
+  // Analytics moved out of the dashboard (it duplicated the stat cards) and
+  // now lives in the sidebar, manager/admin only.
+  { to: "/analytics", icon: BarChart3, label: "Analytics", allowedRoles: ["admin"] } as NavLeaf,
   {
     icon: UserRoundCog,
     label: "Profile",
@@ -265,8 +268,14 @@ function ProfileMenu({ variant = "light" }: { variant?: "light" | "blue" }) {
   const _navigate = useNavigate();
   void _navigate;
   const [open, setOpen] = useState(false);
+
+  const initials = [
+    user?.first_name?.[0] ?? "",
+    user?.last_name?.[0] ?? "",
+  ].join("").toUpperCase() || "?";
+
   const buttonClassName = variant === "blue"
-    ? "flex h-9 w-9 items-center justify-center text-white/85 transition-colors hover:bg-white/10 hover:text-white"
+    ? "flex items-center justify-center transition-all active:scale-95"
     : "flex h-9 w-9 items-center justify-center border border-[#C8CDD2] bg-white text-[#5E6870] transition-colors hover:bg-[#EEF6FB] hover:text-[#287EAD]";
 
   useEffect(() => {
@@ -288,7 +297,13 @@ function ProfileMenu({ variant = "light" }: { variant?: "light" | "blue" }) {
         title="Profile"
         aria-label="Open profile menu"
       >
-        <CircleUserRound className="h-5 w-5" />
+        {variant === "blue" ? (
+          <span className="flex h-8 w-8 items-center justify-center rounded-full bg-white/15 text-[11px] font-bold tracking-wide text-white ring-1 ring-white/25 transition-all hover:bg-white/25 hover:ring-white/40">
+            {initials}
+          </span>
+        ) : (
+          <CircleUserRound className="h-5 w-5" />
+        )}
       </button>
 
       {open && (
@@ -424,7 +439,7 @@ function NotificationsTray({
     _navigate("/workflow");
   };
   const buttonClassName = variant === "blue"
-    ? "relative flex h-9 w-9 items-center justify-center text-white/85 transition-colors hover:bg-white/10 hover:text-white"
+    ? "relative flex h-9 w-9 items-center justify-center text-white/80 transition-all hover:text-white active:scale-95"
     : "relative flex h-9 w-9 items-center justify-center border border-[#C8CDD2] bg-white text-[#5E6870] transition-colors hover:bg-[#EEF6FB] hover:text-[#287EAD]";
 
   return (
@@ -859,19 +874,20 @@ export default function Layout() {
         <div id="wcb-slot" className="flex min-w-0 flex-1 items-center" />
 
         {/* Global actions */}
-        <div className="flex shrink-0 items-center gap-2 border-l border-white/20 px-4">
+        <div className="flex shrink-0 items-center gap-1 border-l border-white/20 pl-4 pr-3">
           {idleReady ? (
             <Suspense fallback={null}>
-              <ChatLauncher />
+              <ChatLauncher variant="blue" />
             </Suspense>
           ) : null}
           <NotificationsTray
             notifications={notifications as any}
             tasks={myTasks as unknown[]}
             attentionCount={trayAttentionCount}
+            variant="blue"
           />
-          <div className="mx-1 h-5 w-px bg-white/25" />
-          <ProfileMenu />
+          <div className="mx-0.5 h-5 w-px bg-white/20" />
+          <ProfileMenu variant="blue" />
         </div>
       </div>
 
@@ -1018,5 +1034,4 @@ export default function Layout() {
     </div>
   );
 }
-
 

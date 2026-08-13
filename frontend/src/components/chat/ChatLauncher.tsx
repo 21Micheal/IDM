@@ -144,7 +144,7 @@ export function ChatLauncher({ variant = "light" }: { variant?: "light" | "blue"
 
   const isBlue = variant === "blue";
   const launcherClassName = isBlue
-    ? "group relative flex h-9 w-9 items-center justify-center text-white/85 transition-colors hover:bg-white/10 hover:text-white active:scale-95"
+    ? "group relative flex h-9 w-9 items-center justify-center text-white/80 transition-all hover:text-white active:scale-95"
     : "group relative flex h-9 w-9 items-center justify-center border border-[#C8CDD2] bg-white text-[#5E6870] transition-colors hover:bg-[#EEF6FB] hover:text-[#287EAD] active:scale-95";
 
   const handleClose = () => {
