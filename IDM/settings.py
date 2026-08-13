@@ -271,7 +271,10 @@ CELERY_BEAT_SCHEDULE = {
     },
     "mailbox-email-ingestion-poll": {
         "task": "apps.documents.tasks.poll_active_mailboxes",
-        "schedule": env.int("IMAP_POLL_INTERVAL_SECONDS", default=5 * 60),
+        # Short tick: each mailbox decides due-ness via its own
+        # poll_interval_seconds. IMAP_POLL_INTERVAL_SECONDS remains the
+        # default interval applied to new mailboxes.
+        "schedule": 60,
     },
 }
 
@@ -325,8 +328,9 @@ ION_VERIFY_TLS    = env.bool("ION_VERIFY_TLS", default=True)
 # Default IMAP connection settings used to ingest documents from a mailbox.
 # Each Mailbox may override these in its own `connection` JSON; anything left
 # blank on a mailbox falls back to the environment defaults exposed here.
-# poll_active_mailboxes (Celery beat) polls every active mailbox on the
-# IMAP_POLL_INTERVAL_SECONDS schedule defined in CELERY_BEAT_SCHEDULE above.
+# Celery beat ticks every 60s and fans out poll_active_mailboxes for mailboxes
+# with auto_poll enabled whose poll_interval_seconds has elapsed.
+# IMAP_POLL_INTERVAL_SECONDS is the default per-mailbox interval.
 IMAP_HOST       = env("IMAP_HOST", default="")
 IMAP_PORT       = env.int("IMAP_PORT", default=993)
 IMAP_USE_SSL    = env.bool("IMAP_USE_SSL", default=True)
@@ -334,6 +338,7 @@ IMAP_USERNAME   = env("IMAP_USERNAME", default="")
 IMAP_PASSWORD   = env("IMAP_PASSWORD", default="")
 IMAP_FOLDER     = env("IMAP_FOLDER", default="INBOX")
 IMAP_VERIFY_TLS = env.bool("IMAP_VERIFY_TLS", default=True)
+IMAP_POLL_INTERVAL_SECONDS = env.int("IMAP_POLL_INTERVAL_SECONDS", default=5 * 60)
 
 # ── Infor SunSystems (SunSystems Connect / SSC web services) ─────────────────
 # Default connection used to reach a SunSystems Connect SOAP gateway for budget

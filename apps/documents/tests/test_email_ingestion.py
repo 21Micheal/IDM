@@ -196,6 +196,25 @@ class ImportEmailTests(IngestionTestBase):
         self.assertEqual(record.documents_created, 1)
         self.assertTrue(record.raw_email.name)
 
+    def test_documents_attributed_to_email_bot_on_poll(self):
+        """Poll attributes drafts to Email bot, not the mailbox-configuring admin."""
+        from apps.documents.email_bot import EMAIL_BOT_EMAIL, get_email_bot_user
+
+        self.mailbox.ingest_history = True
+        self.mailbox.save(update_fields=["ingest_history"])
+        messages = [_fetched(_build_email(), uid=5)]
+        with mock.patch.object(email_ingestion, "IMAPClient", _FakeIMAPClient(messages)):
+            email_ingestion.run_mailbox_poll(str(self.mailbox.id))
+
+        bot = get_email_bot_user()
+        doc = Document.objects.get()
+        self.assertEqual(doc.uploaded_by_id, bot.id)
+        self.assertEqual(doc.uploaded_by.email, EMAIL_BOT_EMAIL)
+        self.assertEqual(doc.uploaded_by.get_full_name(), "Email bot")
+        self.assertEqual(doc.bulk_upload.uploaded_by_id, bot.id)
+        # The admin who configured the mailbox is not the document owner.
+        self.assertNotEqual(doc.uploaded_by_id, self.user.id)
+
     def test_duplicate_message_skipped(self):
         msg = _build_email()
         email_ingestion.import_email(self.mailbox, _fetched(msg), user=self.user)

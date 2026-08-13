@@ -17,6 +17,7 @@ import {
   documentTypesAPI,
   mailboxAPI,
   normalizeListResponse,
+  usersAPI,
   type Mailbox,
   type MailboxConnection,
   type MailboxProtocol,
@@ -26,6 +27,15 @@ import { toast } from "@/components/ui/vault-toast";
 import CustomListbox from "@/components/ui/CustomListbox";
 
 type DocumentTypeLite = { id: string; name: string; code: string };
+type UserLite = { id: string; email: string; first_name: string; last_name: string; full_name?: string };
+
+const POLL_INTERVAL_OPTIONS = [
+  { value: "60", label: "Every 1 minute" },
+  { value: "300", label: "Every 5 minutes" },
+  { value: "900", label: "Every 15 minutes" },
+  { value: "1800", label: "Every 30 minutes" },
+  { value: "3600", label: "Every hour" },
+];
 
 const inputCls =
   "h-9 w-full border border-[#AEB5BB] bg-white px-3 text-sm text-[#1F2933] outline-none focus:border-[#287EAD] focus:ring-1 focus:ring-[#287EAD]";
@@ -113,6 +123,9 @@ export default function AdminMailboxPage() {
   const [maxMessages, setMaxMessages] = useState(50);
   const [ingestHistory, setIngestHistory] = useState(false);
   const [ingestSince, setIngestSince] = useState("");
+  const [autoPoll, setAutoPoll] = useState(false);
+  const [pollInterval, setPollInterval] = useState(300);
+  const [reviewerIds, setReviewerIds] = useState<string[]>([]);
   const [supplierMapText, setSupplierMapText] = useState("");
   const [allowlistText, setAllowlistText] = useState("");
   const [attachmentTypesText, setAttachmentTypesText] = useState("");
@@ -155,6 +168,12 @@ export default function AdminMailboxPage() {
     queryKey: ["document-types-lite"],
     queryFn: () =>
       documentTypesAPI.list().then((r) => normalizeListResponse<DocumentTypeLite>(r.data)),
+  });
+
+  const usersQuery = useQuery({
+    queryKey: ["users-lite-mailbox-reviewers"],
+    queryFn: () =>
+      usersAPI.list({ page_size: 200 }).then((r) => normalizeListResponse<UserLite>(r.data)),
   });
 
   const [statsDays, setStatsDays] = useState(30);
@@ -209,6 +228,9 @@ export default function AdminMailboxPage() {
           ingest_history: ingestHistory,
           ingest_since: ingestSince || null,
           max_messages_per_poll: Number(maxMessages) || 0,
+          auto_poll: autoPoll,
+          poll_interval_seconds: Number(pollInterval) || 300,
+          reviewers: reviewerIds,
           sender_supplier_map: textToMap(supplierMapText),
           sender_allowlist: textToList(allowlistText),
           allowed_attachment_extensions: textToList(attachmentTypesText),
@@ -232,6 +254,9 @@ export default function AdminMailboxPage() {
     setMaxMessages(50);
     setIngestHistory(false);
     setIngestSince("");
+    setAutoPoll(false);
+    setPollInterval(300);
+    setReviewerIds([]);
     setSupplierMapText("");
     setAllowlistText("");
     setAttachmentTypesText("");
@@ -260,6 +285,9 @@ export default function AdminMailboxPage() {
       setMaxMessages(data.max_messages_per_poll);
       setIngestHistory(data.ingest_history);
       setIngestSince(data.ingest_since ?? "");
+      setAutoPoll(data.auto_poll ?? false);
+      setPollInterval(data.poll_interval_seconds ?? 300);
+      setReviewerIds(data.reviewers ?? data.reviewer_details?.map((u) => u.id) ?? []);
       setSupplierMapText(mapToText(data.sender_supplier_map ?? {}));
       setAllowlistText(listToText(data.sender_allowlist ?? []));
       setAttachmentTypesText(listToText(data.allowed_attachment_extensions ?? []));
@@ -282,6 +310,9 @@ export default function AdminMailboxPage() {
           ingest_history: ingestHistory,
           ingest_since: ingestSince || null,
           max_messages_per_poll: Number(maxMessages) || 0,
+          auto_poll: autoPoll,
+          poll_interval_seconds: Number(pollInterval) || 300,
+          reviewers: reviewerIds,
           sender_supplier_map: textToMap(supplierMapText),
           sender_allowlist: textToList(allowlistText),
           allowed_attachment_extensions: textToList(attachmentTypesText),
@@ -624,6 +655,74 @@ export default function AdminMailboxPage() {
               so an existing inbox doesn't pull its whole history.
             </p>
           </div>
+          <div className="md:col-span-2 space-y-3 border border-[#E5E7EB] bg-[#F9FAFB] p-3">
+            <label className="flex items-center gap-2 text-sm text-[#1F2933]">
+              <input
+                type="checkbox"
+                checked={autoPoll}
+                onChange={(e) => setAutoPoll(e.target.checked)}
+              />
+              Automatic polling
+            </label>
+            <p className="text-xs text-[#6E767D]">
+              When enabled, the system polls this mailbox on a schedule and lands matching
+              attachments in Pending review — no manual Poll now required. Manual poll still works.
+            </p>
+            {autoPoll && (
+              <div className="max-w-xs">
+                <label className={labelCls}>Poll interval</label>
+                <CustomListbox
+                  value={String(pollInterval)}
+                  onChange={(v) => setPollInterval(Number(v))}
+                  options={POLL_INTERVAL_OPTIONS}
+                  buttonClassName={inputCls}
+                  ariaLabel="Automatic poll interval"
+                />
+              </div>
+            )}
+          </div>
+          <div className="md:col-span-2">
+            <label className={labelCls}>Reviewers (optional)</label>
+            <div className="max-h-40 overflow-auto border border-[#AEB5BB] bg-white p-2">
+              {(usersQuery.data ?? []).length === 0 ? (
+                <p className="px-1 py-2 text-xs text-[#6E767D]">
+                  {usersQuery.isLoading ? "Loading users…" : "No users available."}
+                </p>
+              ) : (
+                (usersQuery.data ?? []).map((u) => {
+                  const checked = reviewerIds.includes(u.id);
+                  const label = u.full_name || `${u.first_name} ${u.last_name}`.trim() || u.email;
+                  return (
+                    <label
+                      key={u.id}
+                      className="flex cursor-pointer items-center gap-2 px-1 py-1 text-sm text-[#1F2933] hover:bg-[#F5F7F8]"
+                    >
+                      <input
+                        type="checkbox"
+                        checked={checked}
+                        onChange={() =>
+                          setReviewerIds((prev) =>
+                            checked ? prev.filter((id) => id !== u.id) : [...prev, u.id],
+                          )
+                        }
+                      />
+                      <span className="truncate">{label}</span>
+                      <span className="truncate text-xs text-[#6E767D]">{u.email}</span>
+                    </label>
+                  );
+                })
+              )}
+            </div>
+            <div className="mt-1 flex items-center justify-between gap-3 text-xs text-[#6E767D]">
+              <p>
+                Members who see this mailbox's ingested documents in Pending review.
+                Leave empty so the mailbox owner and admins handle review.
+              </p>
+              <span className="whitespace-nowrap font-medium text-[#4B5560]">
+                {reviewerIds.length} selected
+              </span>
+            </div>
+          </div>
           <div className="flex flex-col justify-end gap-2">
             <label className="flex items-center gap-2 text-sm text-[#1F2933]">
               <input
@@ -749,6 +848,7 @@ export default function AdminMailboxPage() {
                 <th className="px-4 py-2">Name</th>
                 <th className="px-4 py-2">Default type</th>
                 <th className="px-4 py-2">Active</th>
+                <th className="px-4 py-2">Auto poll</th>
                 <th className="px-4 py-2">Last poll</th>
                 <th className="px-4 py-2 text-right">Actions</th>
               </tr>
@@ -778,6 +878,11 @@ export default function AdminMailboxPage() {
                         }
                       />
                     </label>
+                  </td>
+                  <td className="px-4 py-2 text-[#6E767D]">
+                    {box.auto_poll
+                      ? `Every ${Math.max(1, Math.round((box.poll_interval_seconds || 300) / 60))}m`
+                      : "Manual"}
                   </td>
                   <td className="px-4 py-2">
                     <span

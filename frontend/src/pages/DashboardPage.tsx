@@ -5,8 +5,9 @@ import { useAuthStore } from "@/store/authStore";
 import {
   GitBranch, ArrowRight, ChevronLeft, ChevronRight,
   Layers, Timer, ShieldCheck, ClipboardCheck,
-  Calendar, FileText, Inbox, ListChecks, Loader2, Search, Sparkles,
-  Filter, X, Hourglass, BarChart3, UploadCloud,
+  Calendar, FileText, Loader2, Search, Sparkles,
+  FileType2, FileSpreadsheet, FileImage, FileArchive,
+  TrendingDown, TrendingUp, Minus, Plus,
 } from "lucide-react";
 import { Link, useNavigate } from "react-router-dom";
 import { formatDistanceToNow } from "date-fns";
@@ -14,7 +15,6 @@ import clsx from "clsx";
 import StatusBadge from "@/components/documents/StatusBadge";
 import { useEffect, useRef, useState, useMemo } from "react";
 import type { Document, DocumentSearchResponse, SearchHit, WorkflowTask } from "@/types";
-import { StatCard } from "@/components/dashboard/StatCard";
 import { useDebounce } from "@/hooks/useDebounce";
 import { highlightSearchText, getPreferredHighlights } from "@/lib/search";
 import { QUERY_FIVE_MIN_STALE, QUERY_SHORT_STALE, QUERY_FOCUS_OFF } from "@/lib/reactQueryDefaults";
@@ -22,20 +22,11 @@ import { formatDocumentFileType } from "@/lib/documentFormat";
 import { preloadDocumentWorkspace } from "@/lib/routePreload";
 import statusUtils from "@/lib/status";
 import {
-  DEFAULT_WORKFLOW_TASK_FILTERS,
-  buildWorkflowTaskFilterOptions,
-  filterWorkflowTasks,
-  getTaskDepartment,
   getTaskDocumentFormat,
   getTaskDocumentId,
   getTaskDocumentTitle,
-  getTaskDocumentType,
-  getTaskUploaderName,
-  hasWorkflowTaskFilters,
-  type WorkflowTaskFilters,
 } from "@/lib/workflowTaskFilters";
 import { WorkspaceCommandBar } from "@/components/shared/WorkspaceCommandBar";
-import CustomListbox from "@/components/ui/CustomListbox";
 
 const RECENT_DOCS_PAGE_SIZE = 5;
 const RECENT_AUDIT_PAGE_SIZE = 5;
@@ -166,6 +157,12 @@ function buildTrend(
   };
 }
 
+function getYesterdayTrendLabel(trend: StatTrend) {
+  if (trend.direction === "up") return "above yesterday";
+  if (trend.direction === "down") return "below yesterday";
+  return "same as yesterday";
+}
+
 function countDueSoonTasks(tasks: WorkflowTask[]) {
   const now = Date.now();
   const tomorrow = now + 24 * 60 * 60 * 1000;
@@ -196,14 +193,31 @@ function getDashboardStatusLabel(status: string): string {
   return status ? status.replace(/_/g, " ").replace(/\b\w/g, (char) => char.toUpperCase()) : "Unknown";
 }
 
-function getDashboardStatusClass(status: string): string {
+function getDashboardStatusTextClass(status: string): string {
   const key = status?.toLowerCase?.().replace(/\s+/g, "_") ?? "";
   if (["approved", "completed"].includes(key)) return "text-emerald-700";
-  if (["pending_review", "pending_approval"].includes(key)) return "text-amber-700";
+  if (["pending_review", "pending_approval", "on_hold", "returned"].includes(key)) return "text-amber-700";
   if (["rejected", "void"].includes(key)) return "text-red-700";
   if (key === "archived") return "text-sky-700";
   return "text-[#3F474F]";
 }
+
+function isDashboardNeedsAttention(status: string) {
+  const key = status?.toLowerCase?.().replace(/\s+/g, "_") ?? "";
+  return ["pending_review", "pending_approval", "rejected", "void"].includes(key);
+}
+
+// File-type icon mapping (matches the workspace document table)
+function getDocumentFileIcon(fileName?: string | null, mimeType?: string | null) {
+  const source = `${fileName ?? ""} ${mimeType ?? ""}`.toLowerCase();
+  if (/(xls|xlsx|csv|sheet|excel)/.test(source)) return FileSpreadsheet;
+  if (/(png|jpe?g|gif|webp|svg|tif{1,2}|bmp|image)/.test(source)) return FileImage;
+  if (/(zip|rar|7z|tar|gz|archive)/.test(source)) return FileArchive;
+  if (/(pdf|docx?|pptx?|word|powerpoint|rtf|odt)/.test(source)) return FileType2;
+  return FileText;
+}
+
+
 
 function formatStorageAmount(bytes: number) {
   if (bytes >= 1024 ** 3) {
@@ -385,31 +399,84 @@ function formatAuditSummary(event: DashboardAuditEvent): AuditSummaryParts {
   return { actor, verb, target: objectTitle };
 }
 
+function getTaskUrgency(dueAt: string | null): "overdue" | "urgent" | "track" {
+  if (!dueAt) return "track";
+
+  const hoursDiff = (new Date(dueAt).getTime() - Date.now()) / (1000 * 60 * 60);
+  if (hoursDiff < 0) return "overdue";
+  if (hoursDiff < 24) return "urgent";
+  return "track";
+}
+
 function TaskMetaInfo({ dueAt }: { dueAt: string | null }) {
   if (!dueAt) return null;
 
   const dueDate = new Date(dueAt);
-  const now = new Date();
-  const hoursDiff = (dueDate.getTime() - now.getTime()) / (1000 * 60 * 60);
-
-  let statusClass = "text-muted-foreground";
-  let statusText = "On track";
-
-  if (hoursDiff < 0) {
-    statusClass = "text-destructive";
-    statusText = "Overdue";
-  } else if (hoursDiff < 24) {
-    statusClass = "text-accent";
-    statusText = "Due soon";
-  }
+  const urgency = getTaskUrgency(dueAt);
+  const statusClass =
+    urgency === "overdue"
+      ? "text-[#B42318]"
+      : urgency === "urgent"
+        ? "text-[#A16207]"
+        : "text-[#6E767D]";
+  const statusText = urgency === "overdue" ? "Overdue" : urgency === "urgent" ? "Due soon" : "On track";
 
   return (
-    <div className="flex items-center gap-1 text-xs">
-      <Calendar className="w-3 h-3" />
+    <span className={`inline-flex items-center gap-1 text-[11px] font-medium ${statusClass}`}>
+      <Calendar className="h-3 w-3" />
       <span className={statusClass}>
         {statusText} · {formatDistanceToNow(dueDate, { addSuffix: true })}
       </span>
-    </div>
+    </span>
+  );
+}
+
+type DashboardMetricCardProps = {
+  title: string;
+  value: number;
+  icon: typeof Layers;
+  trend?: StatTrend;
+  href: string;
+  tone: "neutral" | "attention" | "positive" | "teal";
+};
+
+function DashboardMetricCard({ title, value, icon: Icon, trend, href, tone }: DashboardMetricCardProps) {
+  const iconClass =
+    tone === "attention"
+      ? "text-[#A16207]"
+      : tone === "positive"
+        ? "text-[#0F766E]"
+        : "text-[#287EAD]";
+  const TrendIcon = trend?.direction === "up" ? TrendingUp : trend?.direction === "down" ? TrendingDown : Minus;
+  const trendClass = trend
+    ? trend.isPositive
+      ? "text-[#287EAD]"
+      : "text-[#B42318]"
+    : "text-[#6E767D]";
+  const trendValue = trend
+    ? `${trend.value.toLocaleString(undefined, { maximumFractionDigits: 1 })}${trend.suffix ?? "%"}`
+    : "";
+
+  return (
+    <Link
+      to={href}
+      className="group flex min-h-[142px] min-w-0 flex-col border border-[#C8CDD2] bg-white p-5 transition-colors hover:border-[#287EAD]/60"
+    >
+      <div className="flex items-start justify-between gap-3">
+        <p className="truncate text-xs font-semibold uppercase tracking-[0.16em] text-[#68737B]">{title}</p>
+        <Icon className={`h-5 w-5 shrink-0 ${iconClass}`} />
+      </div>
+      <p className="mt-4 text-3xl font-semibold tracking-tight text-[#1F2933]">{value.toLocaleString()}</p>
+      {trend ? (
+        <div className={`mt-2 flex min-w-0 items-center gap-1.5 text-xs font-semibold ${trendClass}`} title={trend.label}>
+          <TrendIcon className="h-3.5 w-3.5 shrink-0" />
+          <span className="shrink-0">{trendValue}</span>
+          <span className="truncate">{trend.label}</span>
+        </div>
+      ) : (
+        <span className="mt-2 text-xs text-[#6E767D]">No recent change</span>
+      )}
+    </Link>
   );
 }
 
@@ -422,7 +489,7 @@ export default function DashboardPage() {
   const [dashboardSearch, setDashboardSearch] = useState("");
   const [isDashboardSearchFocused, setIsDashboardSearchFocused] = useState(false);
   const [activeDashboardResultIndex, setActiveDashboardResultIndex] = useState(-1);
-  const [taskFilters, setTaskFilters] = useState<WorkflowTaskFilters>(DEFAULT_WORKFLOW_TASK_FILTERS);
+  const [recentDocsFilter, setRecentDocsFilter] = useState<"all" | "attention">("all");
   const [metricsEnabled, setMetricsEnabled] = useState(false);
 
   const dashboardSearchRef = useRef<HTMLDivElement | null>(null);
@@ -437,7 +504,7 @@ export default function DashboardPage() {
   // ── Queries ───────────────────────────────────────────────────────────────
 
   const { data: recentDocs, isLoading: docsLoading } = useQuery({
-          queryKey: ["documents", "recent", recentDocsPage],
+    queryKey: ["documents", "recent", recentDocsPage],
     queryFn: () =>
       documentsAPI.list({
         page: recentDocsPage,
@@ -605,19 +672,27 @@ export default function DashboardPage() {
   const recentDocsDisplay = useMemo(() => {
     if (!recentDocs) return recentDocs;
     if (!urlStatus && !urlDocType) return recentDocs;
-        const filtered = recentDocs.results.filter((doc: Document) => {
-          if (urlStatus && !statusUtils.statusMatchesFilter(doc.status, urlStatus)) return false;
-          if (urlDocType) {
-            const docTypeName =
-              typeof (doc as any).document_type === "string"
-                ? (doc as any).document_type
-                : (doc as any).document_type?.name ?? String((doc as any).document_type ?? "");
-            if (docTypeName !== urlDocType) return false;
-          }
-          return true;
-        });
+    const filtered = recentDocs.results.filter((doc: Document) => {
+      if (urlStatus && !statusUtils.statusMatchesFilter(doc.status, urlStatus)) return false;
+      if (urlDocType) {
+        const docTypeName =
+          typeof (doc as any).document_type === "string"
+            ? (doc as any).document_type
+            : (doc as any).document_type?.name ?? String((doc as any).document_type ?? "");
+        if (docTypeName !== urlDocType) return false;
+      }
+      return true;
+    });
     return { ...recentDocs, results: filtered, count: filtered.length } as PaginatedResponse<Document>;
   }, [recentDocs, urlStatus, urlDocType]);
+
+  const filteredRecentDocsDisplay = useMemo(() => {
+    if (!recentDocsDisplay || recentDocsFilter === "all") return recentDocsDisplay;
+    return {
+      ...recentDocsDisplay,
+      results: recentDocsDisplay.results.filter((doc: Document) => isDashboardNeedsAttention(doc.status)),
+    };
+  }, [recentDocsDisplay, recentDocsFilter]);
 
   const recentDocsCount = recentDocsDisplay?.count ?? 0;
   const recentAuditCount = recentAudit?.count ?? 0;
@@ -649,52 +724,38 @@ export default function DashboardPage() {
   const hasActiveDashboardSelection =
     activeDashboardResultIndex >= 0 && activeDashboardResultIndex < dashboardResults.length;
   const allTasks = myTasks as WorkflowTask[];
-  const hasOpenTasks = allTasks.length > 0;
   const showAdminRecentColumns = Boolean(user?.has_admin_access || (user?.group_names ?? []).includes("HOD"));
   const totalDocumentsTrend = buildTrend(
     documentsCreatedThisPeriod,
     documentsCreatedPreviousPeriod,
     true,
-    `Documents created in the last ${TREND_WINDOW_DAYS} days vs previous ${TREND_WINDOW_DAYS} days`,
+    "vs last month",
   );
   const pendingApprovalTrend = buildTrend(
     pendingCreatedThisPeriod,
     pendingCreatedPreviousPeriod,
     false,
-    `Pending approvals created in the last ${TREND_WINDOW_DAYS} days vs previous ${TREND_WINDOW_DAYS} days`,
+    "vs last month",
   );
-  const approvedTrend = buildTrend(
-    approvedTodayCount,
-    approvedYesterdayCount,
-    true,
-    "Documents approved today vs yesterday",
-  );
+  const approvedTrendBase = buildTrend(approvedTodayCount, approvedYesterdayCount, true, "vs yesterday");
+  const approvedTrend = {
+    ...approvedTrendBase,
+    label: getYesterdayTrendLabel(approvedTrendBase),
+  };
   const dueSoonTaskCount = countDueSoonTasks(allTasks);
   const tasksTrend: StatTrend | undefined =
     dueSoonTaskCount > 0
       ? {
-          value: dueSoonTaskCount,
-          isPositive: false,
-          direction: "flat",
-          suffix: " due",
-          label: "Tasks due within 24 hours or overdue",
-        }
+        value: dueSoonTaskCount,
+        isPositive: false,
+        direction: "flat",
+        suffix: " need attention",
+        label: "today",
+      }
       : undefined;
-  const taskFilterOptions = useMemo(() => buildWorkflowTaskFilterOptions(allTasks), [allTasks]);
-  const filteredTasks = useMemo(
-    () => filterWorkflowTasks(allTasks, taskFilters),
-    [allTasks, taskFilters],
-  );
-  const hasTaskFilters = hasWorkflowTaskFilters(taskFilters);
-  const visibleTasks = filteredTasks.slice(0, hasTaskFilters ? 8 : 4);
-  const taskGridClass =
-    visibleTasks.length === 1
-      ? "mt-4 grid grid-cols-1 gap-3 md:max-w-xl"
-      : visibleTasks.length === 2
-        ? "mt-4 grid grid-cols-1 gap-3 md:grid-cols-2"
-        : "mt-4 grid grid-cols-1 gap-3 md:grid-cols-2 xl:grid-cols-4";
+  const visibleTasks = allTasks.slice(0, 4);
   const activityCardStyle = {
-    minHeight: "440px",
+    minHeight: "490px",
   };
 
   // ── Handlers ──────────────────────────────────────────────────────────────
@@ -710,15 +771,6 @@ export default function DashboardPage() {
     setActiveDashboardResultIndex(-1);
     navigate(`/documents/${hit.id}`);
   };
-
-  const updateTaskFilter = <K extends keyof WorkflowTaskFilters>(
-    key: K,
-    value: WorkflowTaskFilters[K],
-  ) => {
-    setTaskFilters((current) => ({ ...current, [key]: value }));
-  };
-
-  const clearTaskFilters = () => setTaskFilters(DEFAULT_WORKFLOW_TASK_FILTERS);
 
   useEffect(() => {
     const handleClickOutside = (event: MouseEvent) => {
@@ -750,647 +802,568 @@ export default function DashboardPage() {
           </button>
         }
       >
-        <div className="min-w-0 shrink-0">
-          <p className="text-[11px] font-semibold uppercase tracking-[0.2em] text-white/70">Operations workspace</p>
-          <h1 className="mt-1 text-xl font-semibold tracking-tight">
-            {user?.first_name ? `Welcome, ${user.first_name}` : "Document Operations"}
-          </h1>
-        </div>
+        <div ref={dashboardSearchRef} className="relative ml-auto w-full min-w-0 max-w-xl">
+          <div className="relative">
+            <span className="pointer-events-none absolute left-3 top-1/2 -translate-y-1/2 text-[#5E6870]">
+              <Search className="w-4 h-4" />
+            </span>
+            <input
+              type="search"
+              placeholder="Search documents, metadata, content..."
+              className="h-9 w-full border border-[#AEB5BB] bg-white pl-9 pr-3 text-sm text-[#1F2933] placeholder:text-[#6E767D] focus:outline-none focus:ring-1 focus:ring-white/70"
+              value={dashboardSearch}
+              onChange={(e) => setDashboardSearch(e.target.value)}
+              onFocus={() => setIsDashboardSearchFocused(true)}
+              onKeyDown={(e) => {
+                if (e.key === "ArrowDown" && dashboardResults.length > 0) {
+                  e.preventDefault();
+                  setIsDashboardSearchFocused(true);
+                  setActiveDashboardResultIndex((current) =>
+                    current < dashboardResults.length - 1 ? current + 1 : 0,
+                  );
+                }
+                if (e.key === "ArrowUp" && dashboardResults.length > 0) {
+                  e.preventDefault();
+                  setIsDashboardSearchFocused(true);
+                  setActiveDashboardResultIndex((current) =>
+                    current <= 0 ? dashboardResults.length - 1 : current - 1,
+                  );
+                }
+                if (e.key === "Enter") {
+                  e.preventDefault();
+                  if (activeDashboardResultIndex >= 0 && dashboardResults[activeDashboardResultIndex]) {
+                    handleDashboardResultOpen(dashboardResults[activeDashboardResultIndex]);
+                    return;
+                  }
+                  handleDashboardSearch();
+                }
+                if (e.key === "Escape") {
+                  setIsDashboardSearchFocused(false);
+                  setActiveDashboardResultIndex(-1);
+                }
+              }}
+            />
+          </div>
 
-        <div ref={dashboardSearchRef} className="relative ml-auto w-full min-w-0 max-w-2xl">
-            <div className="relative">
-              <span className="pointer-events-none absolute left-3 top-1/2 -translate-y-1/2 text-[#5E6870]">
-                <Search className="w-4 h-4" />
-              </span>
-              <input
-                type="search"
-                placeholder="Search documents, metadata, content..."
-                className="h-9 w-full border border-[#AEB5BB] bg-white pl-9 pr-3 text-sm text-[#1F2933] placeholder:text-[#6E767D] focus:outline-none focus:ring-1 focus:ring-white/70"
-                value={dashboardSearch}
-                onChange={(e) => setDashboardSearch(e.target.value)}
-                onFocus={() => setIsDashboardSearchFocused(true)}
-                onKeyDown={(e) => {
-                  if (e.key === "ArrowDown" && dashboardResults.length > 0) {
-                    e.preventDefault();
-                    setIsDashboardSearchFocused(true);
-                    setActiveDashboardResultIndex((current) =>
-                      current < dashboardResults.length - 1 ? current + 1 : 0,
-                    );
-                  }
-                  if (e.key === "ArrowUp" && dashboardResults.length > 0) {
-                    e.preventDefault();
-                    setIsDashboardSearchFocused(true);
-                    setActiveDashboardResultIndex((current) =>
-                      current <= 0 ? dashboardResults.length - 1 : current - 1,
-                    );
-                  }
-                  if (e.key === "Enter") {
-                    e.preventDefault();
-                    if (activeDashboardResultIndex >= 0 && dashboardResults[activeDashboardResultIndex]) {
-                      handleDashboardResultOpen(dashboardResults[activeDashboardResultIndex]);
-                      return;
-                    }
-                    handleDashboardSearch();
-                  }
-                  if (e.key === "Escape") {
-                    setIsDashboardSearchFocused(false);
-                    setActiveDashboardResultIndex(-1);
-                  }
-                }}
-              />
-            </div>
-
-            {showDashboardSearchPanel && (
-              <div
-                className="absolute left-0 right-0 top-[calc(100%+0.5rem)] z-30 overflow-hidden border border-[#C8CDD2] bg-white text-[#1F2933] shadow-2xl"
-              >
-                <div className="border-b border-[#C8CDD2] bg-[#F5F7F8] px-4 py-3">
-                  <div className="flex items-center justify-between gap-3">
-                    <div>
-                      <p className="text-sm font-semibold text-[#1F2933]">Quick search</p>
-                      <p className="text-xs text-[#5E6870]">
-                        {dashboardSearch.trim().length < 2
-                          ? "Type at least 2 characters to search across document text and metadata."
-                          : "Open a document directly, or continue to advanced search for filters."}
-                      </p>
-                    </div>
-                    <Sparkles className="h-4 w-4 text-[#287EAD]" />
+          {showDashboardSearchPanel && (
+            <div
+              className="absolute left-0 right-0 top-[calc(100%+0.5rem)] z-30 overflow-hidden border border-[#C8CDD2] bg-white text-[#1F2933] shadow-2xl"
+            >
+              <div className="border-b border-[#C8CDD2] bg-[#F5F7F8] px-4 py-3">
+                <div className="flex items-center justify-between gap-3">
+                  <div>
+                    <p className="text-sm font-semibold text-[#1F2933]">Quick search</p>
+                    <p className="text-xs text-[#5E6870]">
+                      {dashboardSearch.trim().length < 2
+                        ? "Type at least 2 characters to search across document text and metadata."
+                        : "Open a document directly, or continue to advanced search for filters."}
+                    </p>
                   </div>
+                  <Sparkles className="h-4 w-4 text-[#287EAD]" />
                 </div>
+              </div>
 
-                {dashboardSearch.trim().length < 2 ? (
-                  <div className="px-4 py-5 text-sm text-[#5E6870]">
-                    Keep typing to see live matches from Elasticsearch.
-                  </div>
-                ) : isDashboardSearchLoading ? (
-                  <div className="flex items-center justify-center px-4 py-6">
-                    <Loader2 className="h-5 w-5 animate-spin text-muted-foreground" />
-                  </div>
-                ) : dashboardResults.length > 0 ? (
-                  <>
-                    <div className="divide-y divide-border">
-                      {dashboardResults.map((hit: SearchHit, index) => {
-                        const preferredHighlights = getPreferredHighlights(hit, dashboardSearchTerm).slice(0, 2);
+              {dashboardSearch.trim().length < 2 ? (
+                <div className="px-4 py-5 text-sm text-[#5E6870]">
+                  Keep typing to see live matches from Elasticsearch.
+                </div>
+              ) : isDashboardSearchLoading ? (
+                <div className="flex items-center justify-center px-4 py-6">
+                  <Loader2 className="h-5 w-5 animate-spin text-muted-foreground" />
+                </div>
+              ) : dashboardResults.length > 0 ? (
+                <>
+                  <div className="divide-y divide-border">
+                    {dashboardResults.map((hit: SearchHit, index) => {
+                      const preferredHighlights = getPreferredHighlights(hit, dashboardSearchTerm).slice(0, 2);
 
-                        return (
-                          <button
-                            key={hit.id}
-                            type="button"
-                            className={`block w-full px-4 py-3 text-left transition-colors hover:bg-[#F5F7F8] ${
-                              activeDashboardResultIndex === index ? "bg-[#EEF6FB]" : ""
+                      return (
+                        <button
+                          key={hit.id}
+                          type="button"
+                          className={`block w-full px-4 py-3 text-left transition-colors hover:bg-[#F5F7F8] ${activeDashboardResultIndex === index ? "bg-[#EEF6FB]" : ""
                             }`}
-                            onMouseEnter={() => setActiveDashboardResultIndex(index)}
-                            onClick={() => handleDashboardResultOpen(hit)}
-                          >
-                            <div className="flex items-start justify-between gap-3">
-                              <div className="min-w-0 flex-1">
-                                <div className="mb-1 flex flex-wrap items-center gap-2 text-xs text-[#5E6870]">
-                                  <span
-                                    className="font-mono text-[#287EAD]"
-                                    dangerouslySetInnerHTML={{
-                                      __html: highlightSearchText(hit.reference_number, dashboardSearchTerm),
-                                    }}
-                                  />
-                                  <span>•</span>
-                                  <span>{hit.document_type}</span>
-                                  <span>•</span>
-                                  <span>{formatDocumentFileType(hit.file_name, hit.file_mime_type)}</span>
-                                </div>
-                                <p
-                                  className="truncate text-sm font-semibold text-[#1F2933]"
+                          onMouseEnter={() => setActiveDashboardResultIndex(index)}
+                          onClick={() => handleDashboardResultOpen(hit)}
+                        >
+                          <div className="flex items-start justify-between gap-3">
+                            <div className="min-w-0 flex-1">
+                              <div className="mb-1 flex flex-wrap items-center gap-2 text-xs text-[#5E6870]">
+                                <span
+                                  className="font-mono text-[#287EAD]"
                                   dangerouslySetInnerHTML={{
-                                    __html: highlightSearchText(String(hit.title || ""), dashboardSearchTerm),
+                                    __html: highlightSearchText(hit.reference_number, dashboardSearchTerm),
                                   }}
                                 />
-                                {hit.supplier && (
-                                  <p
-                                    className="mt-1 truncate text-xs text-[#5E6870]"
-                                    dangerouslySetInnerHTML={{
-                                      __html: highlightSearchText(hit.supplier, dashboardSearchTerm),
-                                    }}
-                                  />
-                                )}
-                                {preferredHighlights.length > 0 ? (
-                                  <div className="mt-2 bg-[#F5F7F8] px-2.5 py-2">
-                                    <div className="line-clamp-3 space-y-2 text-xs leading-5 text-[#1F2933]">
-                                      {preferredHighlights.map(([field, snippet]) => (
-                                        <div key={field} className="italic">
-                                          <span
-                                            dangerouslySetInnerHTML={{
-                                              __html: highlightSearchText(snippet, dashboardSearchTerm),
-                                            }}
-                                          />
-                                        </div>
-                                      ))}
-                                    </div>
-                                  </div>
-                                ) : (
-                                  <div className="mt-2 bg-[#F5F7F8] px-2.5 py-2">
-                                    <div className="line-clamp-3 text-xs italic leading-5 text-[#1F2933]">
-                                      <span
-                                        dangerouslySetInnerHTML={{
-                                          __html: highlightSearchText(
-                                            hit.supplier || hit.title || hit.reference_number,
-                                            dashboardSearchTerm
-                                          ),
-                                        }}
-                                      />
-                                    </div>
-                                  </div>
-                                )}
+                                <span>•</span>
+                                <span>{hit.document_type}</span>
+                                <span>•</span>
+                                <span>{formatDocumentFileType(hit.file_name, hit.file_mime_type)}</span>
                               </div>
-                              <StatusBadge status={hit.status} />
+                              <p
+                                className="truncate text-sm font-semibold text-[#1F2933]"
+                                dangerouslySetInnerHTML={{
+                                  __html: highlightSearchText(String(hit.title || ""), dashboardSearchTerm),
+                                }}
+                              />
+                              {hit.supplier && (
+                                <p
+                                  className="mt-1 truncate text-xs text-[#5E6870]"
+                                  dangerouslySetInnerHTML={{
+                                    __html: highlightSearchText(hit.supplier, dashboardSearchTerm),
+                                  }}
+                                />
+                              )}
+                              {preferredHighlights.length > 0 ? (
+                                <div className="mt-2 bg-[#F5F7F8] px-2.5 py-2">
+                                  <div className="line-clamp-3 space-y-2 text-xs leading-5 text-[#1F2933]">
+                                    {preferredHighlights.map(([field, snippet]) => (
+                                      <div key={field} className="italic">
+                                        <span
+                                          dangerouslySetInnerHTML={{
+                                            __html: highlightSearchText(snippet, dashboardSearchTerm),
+                                          }}
+                                        />
+                                      </div>
+                                    ))}
+                                  </div>
+                                </div>
+                              ) : (
+                                <div className="mt-2 bg-[#F5F7F8] px-2.5 py-2">
+                                  <div className="line-clamp-3 text-xs italic leading-5 text-[#1F2933]">
+                                    <span
+                                      dangerouslySetInnerHTML={{
+                                        __html: highlightSearchText(
+                                          hit.supplier || hit.title || hit.reference_number,
+                                          dashboardSearchTerm
+                                        ),
+                                      }}
+                                    />
+                                  </div>
+                                </div>
+                              )}
                             </div>
-                          </button>
-                        );
-                      })}
-                    </div>
+                            <StatusBadge status={hit.status} />
+                          </div>
+                        </button>
+                      );
+                    })}
+                  </div>
 
-                    <div className="flex items-center justify-between gap-3 border-t border-[#C8CDD2] bg-[#F5F7F8] px-4 py-3">
-                      <div className="space-y-1">
-                        <p className="text-xs text-[#5E6870]">
-                          {dashboardResultsTotal} result{dashboardResultsTotal !== 1 ? "s" : ""} for "{dashboardSearchTerm}"
-                        </p>
-                        <p className="text-[11px] text-[#5E6870]">
-                          {hasActiveDashboardSelection ? "Enter to open selected result" : "Arrow keys to browse"} • Esc to close
-                        </p>
-                      </div>
-                      <button
-                        type="button"
-                        onClick={handleDashboardSearch}
-                        className="inline-flex items-center gap-2 text-sm font-semibold text-[#287EAD] transition-colors hover:text-[#206D99]"
-                      >
-                        Advanced search <ArrowRight className="h-4 w-4" />
-                      </button>
+                  <div className="flex items-center justify-between gap-3 border-t border-[#C8CDD2] bg-[#F5F7F8] px-4 py-3">
+                    <div className="space-y-1">
+                      <p className="text-xs text-[#5E6870]">
+                        {dashboardResultsTotal} result{dashboardResultsTotal !== 1 ? "s" : ""} for "{dashboardSearchTerm}"
+                      </p>
+                      <p className="text-[11px] text-[#5E6870]">
+                        {hasActiveDashboardSelection ? "Enter to open selected result" : "Arrow keys to browse"} • Esc to close
+                      </p>
                     </div>
-                  </>
-                ) : (
-                  <div className="px-4 py-5">
-                    <p className="text-sm font-medium text-[#1F2933]">No direct matches yet</p>
-                    <p className="mt-1 text-xs text-[#5E6870]">
-                      Try a different keyword, or open advanced search to apply filters.
-                    </p>
                     <button
                       type="button"
                       onClick={handleDashboardSearch}
-                      className="mt-3 inline-flex items-center gap-2 text-sm font-semibold text-[#287EAD] transition-colors hover:text-[#206D99]"
+                      className="inline-flex items-center gap-2 text-sm font-semibold text-[#287EAD] transition-colors hover:text-[#206D99]"
                     >
-                      Search everything <ArrowRight className="h-4 w-4" />
+                      Advanced search <ArrowRight className="h-4 w-4" />
                     </button>
                   </div>
-                )}
-              </div>
-            )}
-          </div>
+                </>
+              ) : (
+                <div className="px-4 py-5">
+                  <p className="text-sm font-medium text-[#1F2933]">No direct matches yet</p>
+                  <p className="mt-1 text-xs text-[#5E6870]">
+                    Try a different keyword, or open advanced search to apply filters.
+                  </p>
+                  <button
+                    type="button"
+                    onClick={handleDashboardSearch}
+                    className="mt-3 inline-flex items-center gap-2 text-sm font-semibold text-[#287EAD] transition-colors hover:text-[#206D99]"
+                  >
+                    Search everything <ArrowRight className="h-4 w-4" />
+                  </button>
+                </div>
+              )}
+            </div>
+          )}
+        </div>
 
       </WorkspaceCommandBar>
 
-      <div className="scrollbar-minimal min-h-0 flex-1 space-y-4 overflow-y-auto p-5 pr-0">
-        <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 xl:grid-cols-4">
-          <StatCard
-            title="Total Documents"
-            value={totalDocuments}
-            icon={Layers}
-            color="primary"
-            trend={totalDocumentsTrend}
-            href="/documents"
-          />
-          <StatCard
-            title="Pending Approval"
-            value={pendingCount}
-            icon={Timer}
-            color="accent"
-            trend={pendingApprovalTrend}
-            href="/documents?status=pending_approval"
-          />
-          <StatCard
-            title="Approved Today"
-            value={approvedTodayCount}
-            icon={ShieldCheck}
-            color="primary"
-            trend={approvedTrend}
-            href="/documents?status=approved"
-          />
-          <StatCard
-            title="My Tasks"
-            value={myTasks.length}
-            icon={ClipboardCheck}
-            color="teal"
-            trend={tasksTrend}
-            href="/workflow"
-          />
-        </div>
-
-        <div className="grid grid-cols-1 gap-3 xl:grid-cols-[1fr_360px]">
-          <section className="border border-[#C8CDD2] bg-white">
-            <div className="flex flex-wrap items-center justify-between gap-3 border-b border-[#C8CDD2] px-4 py-3">
-              <div>
-                <h2 className="text-sm font-bold text-[#1F2933]">Work queue</h2>
-                <p className="text-sm text-[#5E6870]">
-                  {tasksLoading
-                    ? "Checking tasks waiting for your attention."
-                    : hasOpenTasks
-                      ? hasTaskFilters
-                        ? `${filteredTasks.length} of ${allTasks.length} tasks match your filters.`
-                        : "Tasks waiting for your attention."
-                      : "All clear. No tasks need your attention right now."}
-                </p>
-              </div>
-              <div className="flex items-center gap-2">
-                <span className="inline-flex items-center gap-1.5 border border-[#287EAD]/25 bg-[#EEF6FB] px-2.5 py-1 text-xs font-bold text-[#287EAD]">
-                  <Inbox className="h-3.5 w-3.5" />
-                  {allTasks.length} open
-                </span>
-                <Link
-                  to="/workflow"
-                  className="inline-flex items-center gap-1 border border-[#C8CDD2] bg-white px-3 py-1.5 text-xs font-bold text-[#1F2933] hover:bg-[#F5F7F8]"
-                >
-                  View queue <ArrowRight className="h-3.5 w-3.5" />
-                </Link>
-              </div>
+      <div className="scrollbar-minimal min-h-0 flex-1 overflow-y-auto">
+        <div className="w-full space-y-5 px-6 pb-12 pt-6 lg:px-8 lg:pb-14 lg:pt-8">
+          <div className="flex flex-col gap-4 sm:flex-row sm:items-end sm:justify-between">
+            <div className="min-w-0">
+              <p className="text-[11px] font-semibold uppercase tracking-[0.2em] text-[#5E6870]">Operations workspace</p>
+              <h1 className="mt-1 truncate text-2xl font-semibold tracking-tight text-[#1F2933]">
+                {user?.first_name ? `Welcome, ${user.first_name}` : "Document Operations"}
+              </h1>
             </div>
-
-            {hasOpenTasks && (
-              <div className="border-b border-[#C8CDD2] bg-[#F5F7F8] p-3">
-                <div className="flex flex-wrap items-center gap-2">
-                  <div className="relative min-w-[220px] max-w-[320px] flex-1">
-                    <Search className="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-[#5E6870]" />
-                    <input
-                      type="search"
-                      value={taskFilters.search}
-                      onChange={(e) => updateTaskFilter("search", e.target.value)}
-                      placeholder="Find title, reference, uploader..."
-                      className="h-9 w-full border border-[#AEB5BB] bg-white pl-9 pr-3 text-sm text-[#1F2933] focus:outline-none focus:ring-1 focus:ring-[#287EAD]"
-                    />
-                  </div>
-                  <CustomListbox
-                    value={taskFilters.documentType}
-                    onChange={(v) => updateTaskFilter("documentType", v)}
-                    options={[{ value: "", label: "All document types" }, ...taskFilterOptions.documentTypes.map((o) => ({ value: o.value, label: `${o.label} (${o.count})` }))]}
-                    buttonClassName="h-9 border border-[#AEB5BB] bg-white px-2 text-sm text-[#1F2933]"
-                    ariaLabel="Task document type"
-                  />
-                  <CustomListbox
-                    value={taskFilters.department}
-                    onChange={(v) => updateTaskFilter("department", v)}
-                    options={[{ value: "", label: "All departments" }, ...taskFilterOptions.departments.map((o) => ({ value: o.value, label: `${o.label} (${o.count})` }))]}
-                    buttonClassName="h-9 border border-[#AEB5BB] bg-white px-2 text-sm text-[#1F2933]"
-                    ariaLabel="Task department"
-                  />
-                  <CustomListbox
-                    value={taskFilters.fileFormat}
-                    onChange={(v) => updateTaskFilter("fileFormat", v)}
-                    options={[{ value: "", label: "All formats" }, ...taskFilterOptions.fileFormats.map((o) => ({ value: o.value, label: `${o.label} (${o.count})` }))]}
-                    buttonClassName="h-9 border border-[#AEB5BB] bg-white px-2 text-sm text-[#1F2933]"
-                    ariaLabel="Task file format"
-                  />
-                  <CustomListbox
-                    value={taskFilters.urgency}
-                    onChange={(v) => updateTaskFilter("urgency", v as any)}
-                    options={[{ value: "", label: "Any urgency" }, { value: "overdue", label: "Overdue" }, { value: "due_soon", label: "Due in 24h" }, { value: "held", label: "On hold" }]}
-                    buttonClassName="h-9 border border-[#AEB5BB] bg-white px-2 text-sm text-[#1F2933]"
-                    ariaLabel="Task urgency"
-                  />
-                </div>
-                <div className="mt-2 flex flex-wrap items-center justify-between gap-2 text-xs text-[#5E6870]">
-                  <div className="inline-flex items-center gap-1.5">
-                    <Filter className="h-3.5 w-3.5" />
-                    <span>{filteredTasks.length} matching task{filteredTasks.length !== 1 ? "s" : ""}</span>
-                  </div>
-                  {hasTaskFilters && (
-                    <button type="button" onClick={clearTaskFilters} className="inline-flex items-center gap-1 font-bold text-[#287EAD] hover:text-[#206D99]">
-                      <X className="h-3.5 w-3.5" />
-                      Clear filters
-                    </button>
-                  )}
-                </div>
-              </div>
-            )}
-
-            <div className="p-4">
-              {tasksLoading ? (
-                <div className="flex items-center gap-2 border border-[#C8CDD2] bg-[#F5F7F8] p-4 text-sm text-[#5E6870]">
-                  <Loader2 className="h-4 w-4 animate-spin text-[#287EAD]" />
-                  Loading tasks...
-                </div>
-              ) : visibleTasks.length ? (
-                <div className={taskGridClass}>
-                  {visibleTasks.map((task: WorkflowTask) => {
-                    const documentId = getTaskDocumentId(task);
-                    const documentType = getTaskDocumentType(task);
-                    const documentFormat = getTaskDocumentFormat(task);
-                    const department = getTaskDepartment(task);
-                    const uploaderName = getTaskUploaderName(task);
-                    return (
-                      <Link
-                        key={task.id}
-                        to={documentId ? `/documents/${documentId}` : "/workflow"}
-                        className="block border border-[#C8CDD2] bg-white p-3 transition-colors hover:bg-[#F5F7F8]"
-                      >
-                        <div className="flex items-start gap-3">
-                          <div className="mt-0.5 border border-[#287EAD]/25 bg-[#EEF6FB] p-2 text-[#287EAD]">
-                            <Hourglass className="w-4 h-4" />
-                          </div>
-                          <div className="min-w-0 flex-1">
-                            <p className="truncate text-sm font-bold text-[#1F2933]">{getTaskDocumentTitle(task)}</p>
-                            <div className="mt-1 flex flex-wrap items-center gap-2 text-xs text-[#5E6870]">
-                              <span>{documentType}</span><span>•</span><span>{documentFormat}</span><span>•</span><span>{task.step?.name}</span>
-                            </div>
-                            <div className="mt-1 flex flex-wrap items-center gap-2 text-xs text-[#5E6870]">
-                              <span>{department}</span>
-                              {uploaderName && <><span>•</span><span>{uploaderName}</span></>}
-                            </div>
-                            <div className="mt-1"><TaskMetaInfo dueAt={task.due_at} /></div>
-                          </div>
-                        </div>
-                      </Link>
-                    );
-                  })}
-                </div>
-              ) : hasOpenTasks ? (
-                <div className="border border-dashed border-[#C8CDD2] bg-[#F5F7F8] px-4 py-5 text-sm text-[#5E6870]">No tasks match the selected filters.</div>
-              ) : (
-                <div className="flex items-center gap-3 border border-[#C8CDD2] bg-[#F5F7F8] p-4 text-sm text-[#5E6870]">
-                  <ListChecks className="h-5 w-5 text-[#287EAD]" />
-                  No active workflow tasks assigned to you.
-                </div>
-              )}
-            </div>
-          </section>
-
-          <section className="border border-[#C8CDD2] bg-white">
-            <div className="border-b border-[#C8CDD2] px-4 py-3">
-              <h2 className="text-sm font-bold text-[#1F2933]">Manager analytics</h2>
-              <p className="text-sm text-[#5E6870]">Dashboard stays operational; analytics available for managers.</p>
-            </div>
-            {user?.has_admin_access ? (
-              <div className="space-y-4 p-4">
-                <div className="grid grid-cols-2 gap-3">
-                  <div className="border border-[#C8CDD2] bg-[#F5F7F8] p-3">
-                    <BarChart3 className="h-5 w-5 text-[#287EAD]" />
-                    <p className="mt-3 text-xs font-semibold uppercase tracking-wider text-[#5E6870]">Approval health</p>
-                    <p className="mt-1 text-lg font-bold text-[#1F2933]">{pendingCount}</p>
-                  </div>
-                  <div className="border border-[#C8CDD2] bg-[#F5F7F8] p-3">
-                    <UploadCloud className="h-5 w-5 text-[#287EAD]" />
-                    <p className="mt-3 text-xs font-semibold uppercase tracking-wider text-[#5E6870]">Documents</p>
-                    <p className="mt-1 text-lg font-bold text-[#1F2933]">{totalDocuments}</p>
-                  </div>
-                </div>
-                <Link to="/analytics" className="inline-flex w-full items-center justify-center gap-2 bg-[#287EAD] px-4 py-2 text-sm font-bold text-white hover:bg-[#206D99]">
-                  Open analytics <ArrowRight className="h-4 w-4" />
-                </Link>
-              </div>
-            ) : (
-              <div className="p-4 text-sm text-[#5E6870]">
-                Analytics is available to managers and administrators.
-              </div>
-            )}
-          </section>
-        </div>
-
-      {/* Recent Documents (wide) + Audit Trail w/ Storage (narrow) */}
-      <div className="grid min-w-0 grid-cols-1 items-stretch gap-3 xl:grid-cols-3">
-        {/* Recent Documents — clean compact rows */}
-        <section
-          className="flex min-w-0 flex-col overflow-hidden border border-[#C8CDD2] bg-white xl:col-span-2"
-          style={activityCardStyle}
-        >
-          <div className="flex items-center justify-between border-b border-[#C8CDD2] px-4 py-3">
-            <div>
-              <h2 className="text-sm font-bold text-[#1F2933]">Recent documents</h2>
-              <p className="text-sm text-[#5E6870]">Latest activity across all repositories</p>
-            </div>
-            <Link to="/documents" className="inline-flex items-center gap-1 text-xs font-bold text-[#287EAD] transition-colors hover:text-[#206D99]">
-              View all <ArrowRight className="w-3 h-3" />
+            <Link
+              to="/documents/upload"
+              className="inline-flex h-10 shrink-0 items-center justify-center gap-2 bg-[#287EAD] px-4 text-sm font-bold text-white transition-colors hover:bg-[#206D99]"
+            >
+              <Plus className="h-4 w-4" />
+              Add document
             </Link>
           </div>
+          <div className="grid grid-cols-1 gap-5 sm:grid-cols-2 xl:grid-cols-4">
+            <DashboardMetricCard
+              title="Total Documents"
+              value={totalDocuments}
+              icon={Layers}
+              trend={totalDocumentsTrend}
+              href="/documents"
+              tone="neutral"
+            />
+            <DashboardMetricCard
+              title="Pending Approval"
+              value={pendingCount}
+              icon={Timer}
+              trend={pendingApprovalTrend}
+              href="/documents?status=pending_approval"
+              tone="attention"
+            />
+            <DashboardMetricCard
+              title="Approved Today"
+              value={approvedTodayCount}
+              icon={ShieldCheck}
+              trend={approvedTrend}
+              href="/documents?status=approved"
+              tone="positive"
+            />
+            <DashboardMetricCard
+              title="My Tasks"
+              value={myTasks.length}
+              icon={ClipboardCheck}
+              trend={tasksTrend}
+              href="/workflow"
+              tone="teal"
+            />
+          </div>
 
-          <div className="flex-1">
-            {docsLoading ? (
-              <div className="flex h-full items-center justify-center p-10">
-                <Loader2 className="w-6 h-6 text-muted-foreground animate-spin" />
-              </div>
-            ) : recentDocs?.results?.length ? (
-              <table className={`w-full table-fixed text-sm ${showAdminRecentColumns ? "min-w-[920px]" : "min-w-[640px]"}`}>
-                <thead>
-                  <tr className="border-b border-[#AEB5BB] bg-[#50545A] text-left text-[11px] uppercase tracking-wider text-white">
-                    <th className={`${showAdminRecentColumns ? "w-[32%]" : "w-[48%]"} px-5 py-3 font-medium`}>Name</th>
-                    {showAdminRecentColumns && (
-                      <>
-                        <th className="hidden w-[16%] px-5 py-3 font-medium lg:table-cell">Owner</th>
-                        <th className="hidden w-[16%] px-5 py-3 font-medium xl:table-cell">Department</th>
-                      </>
-                    )}
-                    <th className={`${showAdminRecentColumns ? "w-[12%]" : "w-[18%]"} hidden px-5 py-3 font-medium md:table-cell`}>Type</th>
-                    <th className={`${showAdminRecentColumns ? "w-[14%]" : "w-[22%]"} px-5 py-3 font-medium`}>Status</th>
-                    <th className={`${showAdminRecentColumns ? "w-[10%]" : "w-[12%]"} hidden px-5 py-3 font-medium md:table-cell`}>Updated</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {recentDocsDisplay?.results.map((doc: Document) => (
-                    <tr
-                      key={doc.id}
-                      className="cursor-pointer border-t border-[#D3D7DA] transition hover:bg-[#F5F7F8]"
-                      onClick={() => { preloadDocumentWorkspace(); navigate(`/documents/${doc.id}`); }}
-                      onMouseEnter={preloadDocumentWorkspace}
-                    >
-                      <td className="max-w-0 px-5 py-3">
-                        <div className="flex items-center gap-3 min-w-0">
-                          <div className="flex h-9 w-9 shrink-0 items-center justify-center border border-[#287EAD]/25 bg-[#EEF6FB] text-[#287EAD]">
-                            <FileText className="h-4 w-4" />
-                          </div>
-                          <div className="min-w-0 flex-1">
-                            <p className="truncate font-semibold text-[#1F2933]">{doc.title}</p>
-                            <p className="truncate text-[11px] text-[#5E6870]">
-                              {doc.reference_number} · {doc.document_type_name || doc.document_type?.name || "Unclassified"}
-                            </p>
-                          </div>
-                        </div>
-                      </td>
-                      {showAdminRecentColumns && (
-                        <>
-                          <td className="hidden max-w-0 px-5 py-3 text-xs text-[#1F2933] lg:table-cell">
-                            <span className="block truncate">{getDocumentOwnerName(doc)}</span>
-                          </td>
-                          <td className="hidden max-w-0 px-5 py-3 text-xs text-[#5E6870] xl:table-cell">
-                            <span className="block truncate">{getDocumentDepartmentName(doc)}</span>
-                          </td>
-                        </>
+          {/* Recent Documents (wide) + Audit Trail w/ Storage (narrow) */}
+          <div className="grid min-w-0 grid-cols-1 items-stretch gap-5 xl:grid-cols-3">
+            {/* Recent Documents — clean compact rows */}
+            <section
+              className="flex min-w-0 flex-col overflow-hidden border border-[#C8CDD2] bg-white xl:col-span-2"
+              style={activityCardStyle}
+            >
+              <div className="flex items-center justify-between gap-4 border-b border-[#C8CDD2] px-5 py-4">
+                <div>
+                  <div className="flex items-center gap-2">
+                    <h2 className="text-sm font-bold text-[#1F2933]">Recent documents</h2>
+                    <span className="bg-[#EEF6FB] px-2 py-0.5 text-[10px] font-bold uppercase tracking-wider text-[#287EAD]">Live</span>
+                  </div>
+                  <p className="mt-0.5 text-xs text-[#5E6870]">Latest activity across all repositories</p>
+                </div>
+                <div className="flex items-center gap-3">
+                  <div className="flex border border-[#C8CDD2] text-[11px]" role="group" aria-label="Recent document filter">
+                    <button
+                      type="button"
+                      onClick={() => setRecentDocsFilter("all")}
+                      className={clsx(
+                        "px-2.5 py-1.5 font-semibold transition-colors",
+                        recentDocsFilter === "all" ? "bg-[#50545A] text-white" : "bg-white text-[#5E6870] hover:bg-[#F5F7F8]",
                       )}
-                      <td className="hidden px-5 py-3 text-[#5E6870] md:table-cell">
-                        <span className="block truncate">
-                          {formatDocumentFileType(doc.file_name, doc.file_mime_type)}
-                        </span>
-                      </td>
-                      <td className="px-5 py-3 align-middle">
-                        <span className={clsx("font-semibold", getDashboardStatusClass(doc.status))}>
-                          {getDashboardStatusLabel(doc.status)}
-                        </span>
-                      </td>
-                      <td className="hidden whitespace-nowrap px-5 py-3 text-[#5E6870] md:table-cell">
-                        {formatDistanceToNow(new Date(doc.updated_at), { addSuffix: true })}
-                      </td>
-                    </tr>
-                  ))}
-                </tbody>
-              </table>
-            ) : (
-              <div className="flex h-full flex-col items-center justify-center px-6 py-10 text-center">
-                <FileText className="mx-auto h-12 w-12 text-muted-foreground/50" />
-                <p className="mt-4 text-sm text-muted-foreground">No recent documents yet.</p>
-                <Link to="/documents/upload" className="mt-3 inline-flex text-sm font-semibold text-foreground hover:text-accent transition-colors">
-                  Upload your first document →
+                    >
+                      All
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => setRecentDocsFilter("attention")}
+                      className={clsx(
+                        "border-l border-[#C8CDD2] px-2.5 py-1.5 font-semibold transition-colors",
+                        recentDocsFilter === "attention" ? "bg-[#FFF7E6] text-[#A16207]" : "bg-white text-[#5E6870] hover:bg-[#F5F7F8]",
+                      )}
+                    >
+                      Needs attention
+                    </button>
+                  </div>
+                  <Link to="/documents" className="inline-flex items-center gap-1 text-xs font-bold text-[#287EAD] transition-colors hover:text-[#206D99]">
+                    View all <ArrowRight className="w-3 h-3" />
+                  </Link>
+                </div>
+              </div>
+
+              <div className="flex-1">
+                {docsLoading ? (
+                  <div className="flex h-full items-center justify-center p-10">
+                    <Loader2 className="w-6 h-6 text-muted-foreground animate-spin" />
+                  </div>
+                ) : filteredRecentDocsDisplay?.results?.length ? (
+                  <table className={`w-full table-fixed text-sm ${showAdminRecentColumns ? "min-w-[920px]" : "min-w-[640px]"}`}>
+                    <thead>
+                      <tr className="border-b border-[#AEB5BB] bg-[#50545A] text-left text-[11px] uppercase tracking-wider text-white">
+                        <th className={`${showAdminRecentColumns ? "w-[32%]" : "w-[48%]"} px-5 py-3.5 font-medium`}>Name</th>
+                        {showAdminRecentColumns && (
+                          <>
+                            <th className="hidden w-[16%] px-5 py-3.5 font-medium lg:table-cell">Owner</th>
+                            <th className="hidden w-[16%] px-5 py-3.5 font-medium xl:table-cell">Department</th>
+                          </>
+                        )}
+                        <th className={`${showAdminRecentColumns ? "w-[12%]" : "w-[18%]"} hidden px-5 py-3.5 font-medium md:table-cell`}>Type</th>
+                        <th className={`${showAdminRecentColumns ? "w-[14%]" : "w-[22%]"} px-5 py-3.5 font-medium`}>Status</th>
+                        <th className={`${showAdminRecentColumns ? "w-[10%]" : "w-[12%]"} hidden px-5 py-3.5 font-medium md:table-cell`}>Updated</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {filteredRecentDocsDisplay?.results.map((doc: Document) => {
+                        const DocIcon = getDocumentFileIcon(doc.file_name, doc.file_mime_type);
+                        return (
+                          <tr
+                            key={doc.id}
+                            className="cursor-pointer border-t border-[#D3D7DA] transition hover:bg-[#F5F7F8]"
+                            onClick={() => { preloadDocumentWorkspace(); navigate(`/documents/${doc.id}`); }}
+                            onMouseEnter={preloadDocumentWorkspace}
+                          >
+                            <td className="max-w-0 px-5 py-4">
+                              <div className="flex items-center gap-3 min-w-0">
+                                <div className="flex h-9 w-9 shrink-0 items-center justify-center rounded-md border border-[#287EAD]/25 bg-[#EEF6FB] text-[#287EAD]">
+                                  <DocIcon className="h-4 w-4" />
+                                </div>
+                                <div className="min-w-0 flex-1">
+                                  <p className="truncate font-semibold text-[#1F2933]">{doc.title}</p>
+                                  <p className="truncate text-[11px] text-[#5E6870]">
+                                    {doc.reference_number} · {doc.document_type_name || doc.document_type?.name || "Unclassified"}
+                                  </p>
+                                </div>
+                              </div>
+                            </td>
+                            {showAdminRecentColumns && (
+                              <>
+                                <td className="hidden max-w-0 px-5 py-4 text-xs text-[#1F2933] lg:table-cell">
+                                  <span className="block truncate">{getDocumentOwnerName(doc)}</span>
+                                </td>
+                                <td className="hidden max-w-0 px-5 py-4 text-xs text-[#5E6870] xl:table-cell">
+                                  <span className="block truncate">{getDocumentDepartmentName(doc)}</span>
+                                </td>
+                              </>
+                            )}
+                            <td className="hidden px-5 py-4 text-[#5E6870] md:table-cell">
+                              <span className="block truncate">
+                                {formatDocumentFileType(doc.file_name, doc.file_mime_type)}
+                              </span>
+                            </td>
+                            <td className="px-5 py-4 align-middle">
+                              <span className={clsx("font-semibold", getDashboardStatusTextClass(doc.status))}>
+                                {getDashboardStatusLabel(doc.status)}
+                              </span>
+                            </td>
+                            <td className="hidden whitespace-nowrap px-5 py-4 text-[#5E6870] md:table-cell">
+                              {formatDistanceToNow(new Date(doc.updated_at), { addSuffix: true })}
+                            </td>
+                          </tr>
+                        );
+                      })}
+                    </tbody>
+                  </table>
+                ) : (
+                  <div className="flex h-full flex-col items-center justify-center px-6 py-10 text-center">
+                    <FileText className="mx-auto h-12 w-12 text-muted-foreground/50" />
+                    <p className="mt-4 text-sm text-muted-foreground">
+                      {recentDocsFilter === "attention" ? "No documents need attention on this page." : "No recent documents yet."}
+                    </p>
+                    <Link to="/documents/upload" className="mt-3 inline-flex text-sm font-semibold text-foreground hover:text-accent transition-colors">
+                      Upload your first document →
+                    </Link>
+                  </div>
+                )}
+              </div>
+
+              {recentDocsCount > RECENT_DOCS_PAGE_SIZE && (
+                <div className="flex shrink-0 items-center justify-between border-t border-[#C8CDD2] bg-[#F5F7F8] px-5 py-3">
+                  <span className="text-xs text-[#5E6870]">
+                    Page {recentDocsPage} of {recentDocsPages}
+                  </span>
+                  <div className="flex items-center gap-2">
+                    <button
+                      type="button"
+                      onClick={() => setRecentDocsPage((p) => Math.max(1, p - 1))}
+                      disabled={recentDocsPage === 1}
+                      className="inline-flex items-center gap-1 border border-[#C8CDD2] bg-white px-3 py-1.5 text-xs font-semibold text-[#1F2933] hover:bg-[#EEF6FB] disabled:cursor-not-allowed disabled:opacity-40"
+                    >
+                      <ChevronLeft className="w-3.5 h-3.5" /> Prev
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => setRecentDocsPage((p) => p + 1)}
+                      disabled={recentDocsPage * RECENT_DOCS_PAGE_SIZE >= recentDocsCount}
+                      className="inline-flex items-center gap-1 border border-[#C8CDD2] bg-white px-3 py-1.5 text-xs font-semibold text-[#1F2933] hover:bg-[#EEF6FB] disabled:cursor-not-allowed disabled:opacity-40"
+                    >
+                      Next <ChevronRight className="w-3.5 h-3.5" />
+                    </button>
+                  </div>
+                </div>
+              )}
+            </section>
+
+            {/* Audit Trail with Storage merged at bottom */}
+            <section className="flex min-w-0 flex-col overflow-hidden border border-[#C8CDD2] bg-white p-5" style={activityCardStyle}>
+              <div className="flex items-start justify-between">
+                <div>
+                  <h2 className="text-sm font-bold text-[#1F2933]">
+                    {user?.has_admin_access ? "Audit Trail" : "Document Activity"}
+                  </h2>
+                  <p className="mt-0.5 text-xs text-[#5E6870]">A plain-language feed of what just happened.</p>
+                </div>
+                <Link to="/audit" className="text-xs font-bold text-[#287EAD] transition-colors hover:text-[#206D99]">
+                  View all
                 </Link>
               </div>
-            )}
-          </div>
 
-          {recentDocsCount > RECENT_DOCS_PAGE_SIZE && (
-            <div className="flex shrink-0 items-center justify-between border-t border-[#C8CDD2] bg-[#F5F7F8] px-5 py-3">
-              <span className="text-xs text-[#5E6870]">
-                Page {recentDocsPage} of {recentDocsPages}
-              </span>
-              <div className="flex items-center gap-2">
-                <button
-                  type="button"
-                  onClick={() => setRecentDocsPage((p) => Math.max(1, p - 1))}
-                  disabled={recentDocsPage === 1}
-                  className="inline-flex items-center gap-1 border border-[#C8CDD2] bg-white px-3 py-1.5 text-xs font-semibold text-[#1F2933] hover:bg-[#EEF6FB] disabled:cursor-not-allowed disabled:opacity-40"
-                >
-                  <ChevronLeft className="w-3.5 h-3.5" /> Prev
-                </button>
-                <button
-                  type="button"
-                  onClick={() => setRecentDocsPage((p) => p + 1)}
-                  disabled={recentDocsPage * RECENT_DOCS_PAGE_SIZE >= recentDocsCount}
-                  className="inline-flex items-center gap-1 border border-[#C8CDD2] bg-white px-3 py-1.5 text-xs font-semibold text-[#1F2933] hover:bg-[#EEF6FB] disabled:cursor-not-allowed disabled:opacity-40"
-                >
-                  Next <ChevronRight className="w-3.5 h-3.5" />
-                </button>
-              </div>
-            </div>
-          )}
-        </section>
+              <ul className="mt-5 flex-1 space-y-4">
+                {auditLoading ? (
+                  <li className="flex h-full items-center justify-center rounded-lg bg-muted/40 p-4 text-center text-xs text-muted-foreground">Loading activity…</li>
+                ) : recentAudit?.results?.length ? (
+                  recentAudit.results.map((event: DashboardAuditEvent, index: number) => {
+                    const meta = getAuditPresentation(event);
+                    const Icon = meta.icon;
+                    const isLast = index === (recentAudit.results.length - 1);
+                    const initialsSource = event.actor_name || event.actor_email || "System";
+                    const initials = initialsSource
+                      .split(/[ @._-]/)
+                      .filter(Boolean)
+                      .slice(0, 2)
+                      .map((s) => s[0]?.toUpperCase())
+                      .join("") || "S";
+                    const { actor, verb, target } = formatAuditSummary(event);
+                    return (
+                      <li key={event.id} className="flex gap-3">
+                        <div className="relative">
+                          <div className="flex h-8 w-8 items-center justify-center rounded-full bg-[#287EAD] text-[11px] font-semibold text-white">
+                            {initials}
+                          </div>
+                          {!isLast && <div className="absolute left-1/2 top-8 h-7 w-px -translate-x-1/2 bg-[#D5DADF]" />}
+                        </div>
+                        <div className="min-w-0 flex-1 pb-1">
+                          <p className="text-sm leading-snug text-[#1F2933]">
+                            <span className="font-semibold">{actor}</span>
+                            {verb && <span className="text-[#66717A]"> {verb}</span>}
+                            {target && <span className="font-semibold"> {target}</span>}
+                            {!verb && !target && (
+                              <span className="text-[#66717A]"> performed an action</span>
+                            )}
+                          </p>
+                          <div className="mt-1 flex items-center gap-1.5 text-[11px] text-[#6E767D]">
+                            <span className={`inline-flex h-4 w-4 items-center justify-center rounded-full border ${meta.tone}`}>
+                              <Icon className="h-2.5 w-2.5" />
+                            </span>
+                            <span>{formatDistanceToNow(new Date(event.timestamp), { addSuffix: true })}</span>
+                          </div>
+                        </div>
+                      </li>
+                    );
+                  })
+                ) : (
+                  <li className="flex h-full items-center justify-center rounded-lg bg-muted/40 p-4 text-center text-xs text-muted-foreground">No recent audit events.</li>
+                )}
+              </ul>
 
-        {/* Audit Trail with Storage merged at bottom */}
-        <section className="flex min-w-0 flex-col overflow-hidden border border-[#C8CDD2] bg-white p-4" style={activityCardStyle}>
-          <div className="flex items-start justify-between">
-            <div>
-              <h2 className="text-sm font-bold text-[#1F2933]">
-                {user?.has_admin_access ? "Audit Trail" : "Document Activity"}
-              </h2>
-              <p className="text-sm text-[#5E6870]">A plain-language feed of what just happened.</p>
-            </div>
-            <Link to="/audit" className="text-xs font-bold text-[#287EAD] transition-colors hover:text-[#206D99]">
-              View all
-            </Link>
-          </div>
-
-          <ul className="mt-5 flex-1 space-y-4">
-            {auditLoading ? (
-              <li className="flex h-full items-center justify-center rounded-lg bg-muted/40 p-4 text-center text-xs text-muted-foreground">Loading activity…</li>
-            ) : recentAudit?.results?.length ? (
-              recentAudit.results.map((event: DashboardAuditEvent, index: number) => {
-                const meta = getAuditPresentation(event);
-                const Icon = meta.icon;
-                const isLast = index === (recentAudit.results.length - 1);
-                const initialsSource = event.actor_name || event.actor_email || "System";
-                const initials = initialsSource
-                  .split(/[ @._-]/)
-                  .filter(Boolean)
-                  .slice(0, 2)
-                  .map((s) => s[0]?.toUpperCase())
-                  .join("") || "S";
-                const { actor, verb, target } = formatAuditSummary(event);
-                return (
-                  <li key={event.id} className="flex gap-3">
-                    <div className="relative">
-                      <div className="flex h-8 w-8 items-center justify-center rounded-full bg-primary text-[11px] font-semibold text-primary-foreground">
-                        {initials}
-                      </div>
-                      {!isLast && <div className="absolute left-1/2 top-8 h-full w-px -translate-x-1/2 bg-border" />}
-                    </div>
-                    <div className="flex-1 pb-1 min-w-0">
-                      <p className="text-sm text-foreground leading-snug">
-                        <span className="font-medium text-foreground">{actor}</span>
-                        {verb && <span className="text-muted-foreground"> {verb}</span>}
-                        {target && <span className="font-medium text-foreground"> {target}</span>}
-                        {!verb && !target && (
-                          <span className="text-muted-foreground"> performed an action</span>
-                        )}
-                      </p>
-                      <div className="mt-1 flex items-center gap-1.5 text-[11px] text-muted-foreground">
-                        <span className={`inline-flex h-4 w-4 items-center justify-center rounded-full border ${meta.tone}`}>
-                          <Icon className="w-2.5 h-2.5" />
-                        </span>
-                        <span>{formatDistanceToNow(new Date(event.timestamp), { addSuffix: true })}</span>
-                      </div>
-                    </div>
-                  </li>
-                );
-              })
-            ) : (
-              <li className="flex h-full items-center justify-center rounded-lg bg-muted/40 p-4 text-center text-xs text-muted-foreground">No recent audit events.</li>
-            )}
-          </ul>
-
-          {recentAuditCount > RECENT_AUDIT_PAGE_SIZE && (
-            <div className="mt-4 flex shrink-0 items-center justify-between border-t border-border pt-3">
-              <span className="text-[11px] text-muted-foreground">
-                {recentAuditPage} / {recentAuditPages}
-              </span>
-              <div className="flex items-center gap-1.5">
-                <button
-                  type="button"
-                  onClick={() => setRecentAuditPage((p) => Math.max(1, p - 1))}
-                  disabled={recentAuditPage === 1}
-                  className="inline-flex items-center rounded-md border border-border bg-card p-1 text-foreground hover:bg-muted disabled:opacity-40"
-                >
-                  <ChevronLeft className="w-3.5 h-3.5" />
-                </button>
-                <button
-                  type="button"
-                  onClick={() => setRecentAuditPage((p) => p + 1)}
-                  disabled={recentAuditPage * RECENT_AUDIT_PAGE_SIZE >= recentAuditCount}
-                  className="inline-flex items-center rounded-md border border-border bg-card p-1 text-foreground hover:bg-muted disabled:opacity-40"
-                >
-                  <ChevronRight className="w-3.5 h-3.5" />
-                </button>
-              </div>
-            </div>
-          )}
-
-          {/* Storage merged at bottom */}
-          <div className="mt-4 shrink-0 rounded-lg border border-dashed border-border p-3">
-            <div className="flex items-center justify-between">
-              <p className="text-xs font-medium text-foreground">Storage Used</p>
-              <p className="text-[11px] text-muted-foreground">{storage.percentage}%</p>
-            </div>
-            <div className="mt-2 h-2 overflow-hidden rounded-full bg-muted">
-              <div
-                className="h-full rounded-full transition-all duration-500"
-                style={{
-                  width: `${storage.percentage}%`,
-                  background: storage.percentage > 85 ? "hsl(var(--destructive))" : "var(--gradient-accent)",
-                }}
-              />
-            </div>
-            <p className="mt-2 text-[11px] text-muted-foreground">
-              {storageDisplay.value} {storageDisplay.unit} of {storage.total_gb} GB
-              {storage.document_count > 0 && (
-                <> · {storage.document_count.toLocaleString()} document{storage.document_count === 1 ? "" : "s"}</>
+              {recentAuditCount > RECENT_AUDIT_PAGE_SIZE && (
+                <div className="mt-4 flex shrink-0 items-center justify-between border-t border-border pt-3">
+                  <span className="text-[11px] text-muted-foreground">
+                    {recentAuditPage} / {recentAuditPages}
+                  </span>
+                  <div className="flex items-center gap-1.5">
+                    <button
+                      type="button"
+                      onClick={() => setRecentAuditPage((p) => Math.max(1, p - 1))}
+                      disabled={recentAuditPage === 1}
+                      className="inline-flex items-center rounded-md border border-border bg-card p-1 text-foreground hover:bg-muted disabled:opacity-40"
+                    >
+                      <ChevronLeft className="w-3.5 h-3.5" />
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => setRecentAuditPage((p) => p + 1)}
+                      disabled={recentAuditPage * RECENT_AUDIT_PAGE_SIZE >= recentAuditCount}
+                      className="inline-flex items-center rounded-md border border-border bg-card p-1 text-foreground hover:bg-muted disabled:opacity-40"
+                    >
+                      <ChevronRight className="w-3.5 h-3.5" />
+                    </button>
+                  </div>
+                </div>
               )}
-            </p>
-            {storage.percentage > 80 && (
-              <p className="mt-2 text-[11px] text-destructive font-medium">
-                Approaching storage limit — consider archiving old documents.
-              </p>
-            )}
-          </div>
-        </section>
-      </div>
 
+              {/* Storage merged at bottom */}
+              <div className="mt-5 shrink-0 rounded-lg border border-dashed border-border bg-[#F5F7F8] p-4">
+                <div className="flex items-center justify-between">
+                  <p className="text-xs font-medium text-foreground">Storage Used</p>
+                  <p className="text-[11px] text-muted-foreground">{storage.percentage}%</p>
+                </div>
+                <div className="mt-2 h-2 overflow-hidden rounded-full bg-muted">
+                  <div
+                    className="h-full rounded-full transition-all duration-500"
+                    style={{
+                      width: `${storage.percentage}%`,
+                      background: storage.percentage > 85 ? "hsl(var(--destructive))" : "var(--gradient-accent)",
+                    }}
+                  />
+                </div>
+                <p className="mt-2 text-[11px] text-muted-foreground">
+                  {storageDisplay.value} {storageDisplay.unit} of {storage.total_gb} GB
+                  {storage.document_count > 0 && (
+                    <> · {storage.document_count.toLocaleString()} document{storage.document_count === 1 ? "" : "s"}</>
+                  )}
+                </p>
+                {storage.percentage > 80 && (
+                  <p className="mt-2 text-[11px] text-destructive font-medium">
+                    Approaching storage limit — consider archiving old documents.
+                  </p>
+                )}
+              </div>
+            </section>
+          </div>
+
+          {!tasksLoading && visibleTasks.length > 0 && (
+            <section className="flex flex-col gap-4 border border-[#C8CDD2] bg-white p-5" aria-labelledby="recent-tasks-heading">
+              <div className="flex items-center justify-between gap-3">
+                <h2 id="recent-tasks-heading" className="text-xs font-bold uppercase tracking-[0.16em] text-[#5E6870]">
+                  Recent tasks
+                </h2>
+                <Link to="/workflow" className="inline-flex items-center gap-1 text-xs font-bold text-[#287EAD] hover:text-[#206D99]">
+                  View all tasks <ArrowRight className="h-3.5 w-3.5" />
+                </Link>
+              </div>
+              <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 xl:grid-cols-4">
+                {visibleTasks.map((task: WorkflowTask) => {
+                  const documentId = getTaskDocumentId(task);
+                  const documentFormat = getTaskDocumentFormat(task);
+                  const taskUrgency = getTaskUrgency(task.due_at);
+                  const taskIconClass =
+                    taskUrgency === "overdue"
+                      ? "border-[#E7A9A3] bg-[#FDEDEC] text-[#B42318]"
+                      : taskUrgency === "urgent"
+                        ? "border-[#F1C58A] bg-[#FFF7E6] text-[#A16207]"
+                        : "border-[#B7D9E9] bg-[#EEF6FB] text-[#287EAD]";
+                  return (
+                    <Link
+                      key={task.id}
+                      to={documentId ? `/documents/${documentId}` : "/workflow"}
+                      className={clsx(
+                        "flex min-w-0 items-start gap-3 border bg-[#F9FAFB] p-3 transition-colors hover:border-[#287EAD]/50 hover:bg-[#EEF6FB]",
+                        taskUrgency === "overdue" || taskUrgency === "urgent" ? "border-[#E7D0A8]" : "border-[#E2E5E8]",
+                      )}
+                    >
+                      <span className={`flex h-12 w-10 shrink-0 flex-col items-center justify-center border ${taskIconClass}`}>
+                        <FileText className="h-4 w-4" />
+                        <span className="mt-0.5 text-[9px] font-bold uppercase">{documentFormat}</span>
+                      </span>
+                      <span className="min-w-0 pt-0.5">
+                        <span className="block truncate text-xs font-bold text-[#1F2933]">{getTaskDocumentTitle(task)}</span>
+                        <span className="mt-1 block truncate text-[11px] text-[#287EAD]">
+                          {task.step?.name || "Workflow task"}
+                        </span>
+                        <TaskMetaInfo dueAt={task.due_at} />
+                      </span>
+                    </Link>
+                  );
+                })}
+              </div>
+            </section>
+          )}
+
+        </div>
       </div>
     </div>
   );

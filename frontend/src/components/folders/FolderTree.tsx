@@ -185,7 +185,7 @@ function ContextMenu({
 // ─── FolderNode ───────────────────────────────────────────────────────────────
 
 function FolderNode({ folder, depth, activeFolderId, onSelect }: FolderNodeProps) {
-  const [open, setOpen]         = useState(depth === 0);
+  const [open, setOpen]         = useState(false);
   const [renaming, setRenaming] = useState(false);
   const [addingChild, setAddingChild] = useState(false);
   const [ctx, setCtx]           = useState<{ x: number; y: number } | null>(null);
@@ -216,10 +216,10 @@ function FolderNode({ folder, depth, activeFolderId, onSelect }: FolderNodeProps
       {/* Row */}
       <div
         className={clsx(
-          "group flex cursor-pointer select-none items-center gap-1.5 border-l-2 px-2 py-1.5 transition-colors",
+          "group flex cursor-pointer select-none items-center gap-1.5 rounded-md px-2 py-1.5 transition-colors",
           isActive
-            ? "border-[#287EAD] bg-white text-[#1F2933]"
-            : "border-transparent text-[#3D454D] hover:border-[#A7CDE3] hover:bg-[#EEF3F7] hover:text-[#1F2933]",
+            ? "bg-[#287EAD] text-white shadow-sm"
+            : "text-[#3D454D] hover:bg-white/75 hover:text-[#1F2933] hover:shadow-sm",
         )}
         style={{ paddingLeft: `${8 + indent}px` }}
         onClick={() => { onSelect(folder.id); if (hasChildren) setOpen((o) => !o); }}
@@ -243,9 +243,9 @@ function FolderNode({ folder, depth, activeFolderId, onSelect }: FolderNodeProps
         <Icon
           className={clsx(
             "h-4 w-4 shrink-0",
-            folder.is_favourites ? "text-[#A15C00]" : "text-[#6E767D]",
+            isActive ? "text-white" : folder.is_favourites ? "text-[#A15C00]" : "text-[#6E767D]",
           )}
-          style={{ color: folder.is_favourites ? undefined : folder.color }}
+          style={{ color: isActive || folder.is_favourites ? undefined : folder.color }}
         />
 
         {/* Name / inline edit */}

@@ -1372,10 +1372,33 @@ class Mailbox(models.Model):
         help_text="Ceiling on messages processed in one poll. 0 = no limit.",
     )
 
+    auto_poll = models.BooleanField(
+        default=False,
+        db_index=True,
+        help_text=(
+            "When on (and the mailbox is active), Celery beat polls this mailbox "
+            "on ``poll_interval_seconds``. Off = manual poll only."
+        ),
+    )
+    poll_interval_seconds = models.PositiveIntegerField(
+        default=300,
+        help_text="How often to auto-poll this mailbox, in seconds. Ignored when auto_poll is off.",
+    )
+
     is_active = models.BooleanField(
         default=True,
         db_index=True,
-        help_text="Only active mailboxes are polled by the scheduled job.",
+        help_text="Inactive mailboxes are never polled (manual or scheduled).",
+    )
+
+    reviewers = models.ManyToManyField(
+        settings.AUTH_USER_MODEL,
+        blank=True,
+        related_name="review_mailboxes",
+        help_text=(
+            "Users who see this mailbox's ingested batches in the pending-review "
+            "queue. Empty = mailbox owner and admins."
+        ),
     )
 
     poll_status   = models.CharField(
@@ -1405,7 +1428,7 @@ class Mailbox(models.Model):
         null=True,
         on_delete=models.SET_NULL,
         related_name="mailboxes",
-        help_text="Owner that imported documents are attributed to.",
+        help_text="Admin who configured the mailbox (fallback reviewer when none are set).",
     )
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
@@ -1415,6 +1438,7 @@ class Mailbox(models.Model):
         verbose_name_plural = "mailboxes"
         indexes = [
             models.Index(fields=["is_active", "poll_status"]),
+            models.Index(fields=["is_active", "auto_poll"]),
         ]
 
     def __str__(self):

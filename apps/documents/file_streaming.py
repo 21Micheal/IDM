@@ -89,8 +89,49 @@ def user_is_involved_with_document(user: User, doc: Document) -> bool:
         uploader_department_id = str(getattr(doc.uploaded_by, "department_id", None) or "")
         if doc_department_id in hod_department_ids or uploader_department_id in hod_department_ids:
             return True
+    # BATCH-REVIEWER carve-out: email-ingested documents are owned by the bot
+    # user, not by the reviewer.  A reviewer configured on the source mailbox
+    # (or the mailbox owner when none are set) is still "involved" for the
+    # purpose of previewing and reviewing the batch.
+    if _is_batch_reviewer(user, doc):
+        return True
     return False
 
+
+def _is_batch_reviewer(user, doc) -> bool:
+    """True when *user* is a designated reviewer for the bulk-upload batch that
+    *doc* belongs to.  Mirrors ``review_queue.reviewable_bulk_uploads_for``.
+
+    Used to grant view access to email-ingested UNCLASS placeholder documents
+    that are attributed to the Email bot (not to the reviewing user)."""
+    bulk_upload_id = getattr(doc, "bulk_upload_id", None)
+    if not bulk_upload_id:
+        return False
+    try:
+        from django.db.models import Count
+        from apps.documents.models import Mailbox
+        # Explicit reviewer on the mailbox.
+        if Mailbox.objects.filter(
+            ingested_emails__bulk_upload_id=bulk_upload_id,
+            reviewers=user,
+        ).exists():
+            return True
+        # Mailboxes with no reviewers assigned: the mailbox creator is the
+        # implicit reviewer.
+        unassigned_mailbox_ids = list(
+            Mailbox.objects.annotate(_rc=Count("reviewers"))
+            .filter(_rc=0)
+            .values_list("id", flat=True)
+        )
+        if unassigned_mailbox_ids and Mailbox.objects.filter(
+            id__in=unassigned_mailbox_ids,
+            ingested_emails__bulk_upload_id=bulk_upload_id,
+            created_by=user,
+        ).exists():
+            return True
+    except Exception:
+        pass
+    return False
 
 def user_has_signed_document(user: User, doc: Document) -> bool:
     """True if `user` has a completed (SIGNED) SignatureRequestSigner row on an
@@ -119,10 +160,13 @@ def user_can_view_document(user: User, doc: Document) -> bool:
         return True
     if getattr(doc, "is_self_upload", False):
         return doc.uploaded_by_id == user.id or getattr(doc, "owned_by_id", None) == user.id
-    if not str(getattr(doc, "document_type_id", None) or ""):
-        return False
+    # Check involvement BEFORE the document_type gate so that batch reviewers
+    # can preview email-ingested UNCLASS placeholder documents (which have no
+    # document_type yet) during the review step.
     if user_is_involved_with_document(user, doc):
         return True
+    if not str(getattr(doc, "document_type_id", None) or ""):
+        return False
     # Permanent view-only carve-out: someone who completed signing this
     # document keeps the ability to open it even after they otherwise drop
     # out of "involvement" — mirrors "you can always see what you signed".

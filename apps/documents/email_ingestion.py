@@ -43,6 +43,7 @@ from .bulk_upload import (
     get_unclassified_bulk_document_type,
     sync_bulk_upload_status,
 )
+from .email_bot import get_email_bot_user
 from .models import (
     BulkUpload,
     BulkUploadStatus,
@@ -477,12 +478,9 @@ def run_mailbox_poll(mailbox_id: str) -> Mailbox:
     mailbox.last_error = ""
     mailbox.save(update_fields=["poll_status", "last_error", "updated_at"])
 
-    user = mailbox.created_by
-    if user is None:
-        return _finish_poll(
-            mailbox, MailboxPollStatus.ERROR,
-            "Mailbox has no owner to attribute imported documents to.",
-        )
+    # Documents are attributed to the Email bot, not the admin who configured
+    # the mailbox — so Documents/Dashboard show a clear non-human provenance.
+    user = get_email_bot_user()
 
     # Track progress on the instance so every exit path (success or error)
     # persists the same partial counters and cursor via _finish_poll.
@@ -593,35 +591,61 @@ def _finish_poll(mailbox: Mailbox, status: str, error: str) -> Mailbox:
     return mailbox
 
 
+def _review_notify_recipients(mailbox: Mailbox) -> list:
+    """Who should be told about poll outcomes for this mailbox.
+
+    Prefer configured reviewers; fall back to the mailbox owner (the admin who
+    set it up) when the reviewer list is empty.
+    """
+    reviewers = list(mailbox.reviewers.all())
+    if reviewers:
+        return reviewers
+    if mailbox.created_by_id:
+        return [mailbox.created_by]
+    return []
+
+
 def _notify_poll_failure(mailbox: Mailbox, error: str) -> None:
-    """Alert the mailbox owner that polling has started failing."""
-    if not mailbox.created_by_id:
+    """Alert reviewers (or the mailbox owner) that polling has started failing."""
+    recipients = _review_notify_recipients(mailbox)
+    if not recipients:
         return
     try:
         from apps.notifications.models import Notification
 
-        Notification.objects.create(
-            recipient_id=mailbox.created_by_id,
-            type="mailbox_poll_failed",
-            message=f"Mailbox '{mailbox.name}' failed to poll: {error}"[:2000],
-            link="/admin/mailboxes",
-        )
+        message = f"Mailbox '{mailbox.name}' failed to poll: {error}"[:2000]
+        Notification.objects.bulk_create([
+            Notification(
+                recipient=r,
+                type="mailbox_poll_failed",
+                message=message,
+                link="/admin/mailboxes",
+            )
+            for r in recipients
+        ])
     except Exception:  # noqa: BLE001 - a notification failure must not break polling
         logger.exception("Failed to create poll-failure notification for mailbox %s", mailbox.id)
 
 
 def _notify_ingested(mailbox: Mailbox, count: int) -> None:
-    """Tell the mailbox owner a poll brought in documents to review."""
-    if not mailbox.created_by_id:
+    """Tell reviewers a poll brought in documents to review."""
+    recipients = _review_notify_recipients(mailbox)
+    if not recipients:
         return
     try:
         from apps.notifications.models import Notification
 
-        Notification.objects.create(
-            recipient_id=mailbox.created_by_id,
-            type="mailbox_ingested",
-            message=f"{count} new document email(s) from '{mailbox.name}' are ready for review.",
-            link="/documents/review",
+        message = (
+            f"{count} new document email(s) from '{mailbox.name}' are ready for review."
         )
+        Notification.objects.bulk_create([
+            Notification(
+                recipient=r,
+                type="mailbox_ingested",
+                message=message,
+                link="/documents/review",
+            )
+            for r in recipients
+        ])
     except Exception:  # noqa: BLE001 - a notification failure must not break polling
         logger.exception("Failed to create ingestion notification for mailbox %s", mailbox.id)

@@ -15,7 +15,7 @@ import { useState, useEffect, useRef, useMemo } from "react";
 import { createPortal } from "react-dom";
 import { useForm, Controller } from "react-hook-form";
 import { useQuery } from "@tanstack/react-query";
-import { AlertCircle, ChevronDown, Download, ExternalLink, Loader2, Lock, Pencil, Paperclip, Plus, Search, Trash2, X } from "lucide-react";
+import { AlertCircle, ChevronDown, Download, ExternalLink, Info, Loader2, Lock, Pencil, Paperclip, Plus, Search, Star, Trash2, X, Image as ImageIcon, FileText, FileImage, FileCode2, FileSpreadsheet, FileArchive, FileVideo, FileAudio, Upload } from "lucide-react";
 import type { ReactNode } from "react";
 import { documentsAPI } from "@/services/api";
 import { toast } from "@/components/ui/vault-toast";
@@ -35,12 +35,16 @@ import { buildCalcScope, evaluateCalcExpression, evaluateTableColumnFormulas, ty
 
 type ColType =
   | "text" | "textarea" | "number" | "currency" | "date" | "datetime" | "time"
-  | "select" | "boolean" | "email" | "phone" | "reference" | "user" | "file";
+  | "select" | "boolean" | "email" | "phone" | "reference" | "user" | "file"
+  | "url" | "percentage" | "multi_select" | "image";
 
 type Column = {
   id?: string; key?: string; label?: string; required?: boolean;
   type?: ColType | string; options?: string[]; currencySymbol?: string;
   currencyFromColumn?: string;
+  /* Number/currency display config (builder: "Number / Currency" column). */
+  decimals?: number; thousandsSeparator?: boolean;
+  min?: number; max?: number;
   tooltip?: string; additionalText?: string; readonly?: boolean; hidden?: boolean;
   defaultValue?: string; referenceSource?: string;
   visibleWhen?: VisibleWhen | null;
@@ -70,6 +74,9 @@ type Field = {
   options?: string[]; columns?: Column[]; minRows?: number;
   currencySymbol?: string; currencyFromField?: string; referenceSource?: string; tooltip?: string; regex?: string;
   min?: number; max?: number; minLength?: number; maxLength?: number;
+  /* Number/currency display config — a "number" field with `currency` type (or
+   * a linked currency dropdown) is money; both share decimals/grouping. */
+  decimals?: number; thousandsSeparator?: boolean;
   defaultValue?: string; readonly?: boolean; hidden?: boolean;
   formula?: string;
   // Calculated value (see calc_number/calc_currency/calc_text/calc_date types)
@@ -83,7 +90,77 @@ type Field = {
 
 // Field types whose value is derived from `field.calc.expression` rather than
 // typed by the person filling the form. Mirrors the builder's CALCULATED_TYPES.
-const CALCULATED_FIELD_TYPES = new Set(["calc_number", "calc_currency", "calc_text", "calc_date"]);
+const CALCULATED_FIELD_TYPES = new Set(["calc_number", "calc_currency", "calc_text", "calc_date", "calc_boolean"]);
+
+/* Presentation-only field types — they never hold a value, are never required
+ * and never appear in the submitted payload. Mirrors the builder's
+ * PRESENTATION_TYPES. */
+const PRESENTATION_TYPES = new Set(["heading", "divider", "info", "spacer"]);
+
+/* Filled by the server on create (reference number), never typed. */
+const SERVER_FILLED_TYPES = new Set(["auto_number"]);
+
+/* ── Numeric display ────────────────────────────────────────────────────────
+ * A Number field and a Currency field are the same input; the only difference
+ * is the symbol and the default precision. `decimals` fixes precision,
+ * `thousandsSeparator` groups by 3 (matches the builder inspector). */
+function numberConfig(cfg: { type?: string; decimals?: number; thousandsSeparator?: boolean }) {
+  const asCurrency = cfg.type === "currency";
+  return {
+    asCurrency,
+    decimals: typeof cfg.decimals === "number" ? cfg.decimals : (asCurrency ? 2 : 0),
+    grouping: cfg.thousandsSeparator !== false,
+  };
+}
+
+function stepForDecimals(decimals: number): string {
+  return decimals > 0 ? `0.${"0".repeat(decimals - 1)}1` : "1";
+}
+
+function formatNumeric(raw: unknown, decimals: number, grouping: boolean): string {
+  const n = typeof raw === "number" ? raw : parseFloat(String(raw ?? ""));
+  if (!Number.isFinite(n)) return "";
+  return n.toLocaleString(undefined, {
+    minimumFractionDigits: decimals,
+    maximumFractionDigits: decimals,
+    useGrouping: grouping,
+  });
+}
+
+function numberPlaceholder(placeholder: string | undefined, decimals: number): string {
+  if (placeholder) return placeholder;
+  return decimals > 0 ? `0.${"0".repeat(decimals)}` : "0";
+}
+
+/** Make a pasted/typed link openable ("example.com" -> "https://example.com"). */
+function normalizeUrl(v: string): string {
+  const t = v.trim();
+  if (!t) return "";
+  return /^[a-z][a-z0-9+.-]*:\/\//i.test(t) ? t : `https://${t}`;
+}
+
+/** Read-only Yes/No switch, used for calculated boolean results. */
+function ReadonlyToggle({ on }: { on: boolean }) {
+  return (
+    <span className="inline-flex items-center gap-2">
+      <span
+        aria-hidden
+        className={`relative inline-flex h-5 w-9 flex-shrink-0 items-center rounded-full transition-colors ${on ? "bg-emerald-500" : "bg-muted-foreground/30"}`}
+      >
+        <span className={`inline-block h-4 w-4 transform rounded-full bg-white shadow transition-transform ${on ? "translate-x-4" : "translate-x-0.5"}`} />
+      </span>
+      <span className="text-sm font-semibold text-foreground">{on ? "Yes" : "No"}</span>
+    </span>
+  );
+}
+
+/** Coerce a stored calculated boolean ("false"/"0"/"" are all No). */
+function truthyValue(v: unknown): boolean {
+  if (typeof v === "boolean") return v;
+  if (typeof v === "number") return v !== 0;
+  const s = String(v ?? "").trim().toLowerCase();
+  return s !== "" && s !== "false" && s !== "0" && s !== "no";
+}
 
 type SectionGroupRef = { id?: string; name?: string };
 
@@ -304,7 +381,7 @@ function ruleConditions(vw?: VisibleWhen | null): { combinator: "and" | "or"; co
   return null;
 }
 
-function evalCondition(c: VisibilityCondition, values: TemplateFormValues, allFields: Field[], processStep: string): boolean {
+function evalCondition(c: VisibilityCondition, values: TemplateFormValues, allFields: Field[], processStep: string, rowScope?: Record<string, unknown> | null): boolean {
   const stepMatches = (actual: string, expected: string) => {
     const a = (actual || "").trim().toLowerCase();
     const e = (expected || "").trim().toLowerCase();
@@ -317,22 +394,68 @@ function evalCondition(c: VisibilityCondition, values: TemplateFormValues, allFi
     };
     return aliases[e]?.includes(a) ?? false;
   };
-  let sv: string;
   if (c.source === "process_step") {
-    sv = processStep;
-  } else {
-    const sib = allFields.find((f) => f.key === c.fieldKey);
-    if (!sib) return true;
-    const v = values[sib.key ?? ""];
-    sv = v == null ? "" : String(v);
+    const sv = processStep;
+    switch (c.operator) {
+      case "equals":       return stepMatches(sv, c.value ?? "");
+      case "not_equals":   return !stepMatches(sv, c.value ?? "");
+      case "is_empty":     return sv.trim() === "";
+      case "is_not_empty": return sv.trim() !== "";
+      default:             return true;
+    }
   }
-  switch (c.operator) {
-    case "equals":       return c.source === "process_step" ? stepMatches(sv, c.value ?? "") : sv === (c.value ?? "");
-    case "not_equals":   return c.source === "process_step" ? !stepMatches(sv, c.value ?? "") : sv !== (c.value ?? "");
-    case "is_empty":     return sv.trim() === "";
-    case "is_not_empty": return sv.trim() !== "";
-    default:             return true;
+
+  // Candidate source values. A plain key resolves to one value; a dotted key
+  // ("expense_items.amount") resolves to one value PER ROW of that table, and
+  // a row-scoped evaluation (a rule on a table column, evaluated for one row)
+  // resolves sibling column keys against that row first. Mirrors the
+  // server-side evaluator in apps/templates_engine/conditions.py.
+  const svs = conditionSourceValues(c.fieldKey ?? "", values, allFields, rowScope);
+  if (svs === null) return true; // unknown source — never hide/lock on it
+
+  const match = (sv: string): boolean => {
+    switch (c.operator) {
+      case "equals":       return sv === (c.value ?? "");
+      case "not_equals":   return sv !== (c.value ?? "");
+      case "is_empty":     return sv.trim() === "";
+      case "is_not_empty": return sv.trim() !== "";
+      default:             return true;
+    }
+  };
+
+  if (svs.length === 0) {
+    // No rows at all — treat as a single empty value.
+    return match("");
   }
+  // Positive operators: satisfied when ANY row matches. Negative operators
+  // ("not equals" / "is empty"): every row must satisfy them.
+  const negative = c.operator === "not_equals" || c.operator === "is_empty";
+  return negative ? svs.every(match) : svs.some(match);
+}
+
+/** Resolve the value(s) a condition points at. `null` = unknown source. */
+function conditionSourceValues(
+  fieldKey: string,
+  values: TemplateFormValues,
+  allFields: Field[],
+  rowScope?: Record<string, unknown> | null,
+): string[] | null {
+  const str = (v: unknown) => (v == null ? "" : String(v));
+  if (!fieldKey) return null;
+  // Sibling column inside the same row wins for row-scoped rules.
+  if (rowScope && Object.prototype.hasOwnProperty.call(rowScope, fieldKey)) {
+    return [str(rowScope[fieldKey])];
+  }
+  if (fieldKey.includes(".")) {
+    const [tableKey, colKey] = fieldKey.split(".");
+    const table = allFields.find((f) => f.key === tableKey && f.type === "table");
+    if (!table) return null;
+    const rows = Array.isArray(values[tableKey]) ? (values[tableKey] as Record<string, unknown>[]) : [];
+    return rows.map((r) => str(r?.[colKey]));
+  }
+  const sib = allFields.find((f) => f.key === fieldKey);
+  if (!sib) return null;
+  return [str(values[sib.key ?? ""])];
 }
 
 // Works for a field OR a section — both carry `hidden` + `visibleWhen`. An
@@ -343,11 +466,12 @@ function evalVisible(
   values: TemplateFormValues,
   allFields: Field[],
   processStep = "draft",
+  rowScope?: Record<string, unknown> | null,
 ): boolean {
   if (item.hidden) return false;
   const g = ruleConditions(item.visibleWhen);
   if (!g || g.conditions.length === 0) return true;
-  const results = g.conditions.map((c) => evalCondition(c, values, allFields, processStep));
+  const results = g.conditions.map((c) => evalCondition(c, values, allFields, processStep, rowScope));
   return g.combinator === "or" ? results.some(Boolean) : results.every(Boolean);
 }
 
@@ -359,11 +483,12 @@ export function evalEditable(
   values: TemplateFormValues,
   allFields: Field[],
   processStep = "draft",
+  rowScope?: Record<string, unknown> | null,
 ): boolean {
   if (item.readonly) return false;
   const g = ruleConditions(item.editableWhen);
   if (!g || g.conditions.length === 0) return true;
-  const results = g.conditions.map((c) => evalCondition(c, values, allFields, processStep));
+  const results = g.conditions.map((c) => evalCondition(c, values, allFields, processStep, rowScope));
   return g.combinator === "or" ? results.some(Boolean) : results.every(Boolean);
 }
 
@@ -491,15 +616,16 @@ function TableColInput({ col, value, onChange, readOnly, documentId, attachmentK
     const hasValue = isNumericType ? (sval !== "" && !Number.isNaN(num)) : sval !== "";
 
     let display: React.ReactNode;
+    const numCfg = numberConfig(col);
     if (type === "currency") {
       const linkedVal = col.currencyFromColumn ? row?.[col.currencyFromColumn] : undefined;
       const symbol = currencySymbolFor(typeof linkedVal === "string" ? linkedVal : undefined)
         ?? col.currencySymbol ?? "KSh";
       display = hasValue
-        ? <span className="flex items-center gap-0.5"><span className="text-[10px] text-muted-foreground">{symbol}</span>{num.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}</span>
+        ? <span className="flex items-center gap-0.5"><span className="text-[10px] text-muted-foreground">{symbol}</span>{formatNumeric(num, numCfg.decimals, numCfg.grouping)}</span>
         : <span className="italic text-muted-foreground">—</span>;
-    } else if ((type === "number") && hasValue) {
-      display = num.toLocaleString();
+    } else if ((type === "number" || type === "percentage") && hasValue) {
+      display = `${formatNumeric(num, numCfg.decimals, numCfg.grouping)}${type === "percentage" ? " %" : ""}`;
     } else {
       display = hasValue ? sval : <span className="italic text-muted-foreground">—</span>;
     }
@@ -511,7 +637,7 @@ function TableColInput({ col, value, onChange, readOnly, documentId, attachmentK
     );
   }
 
-  if (type === "file") {
+  if (type === "file" || type === "image") {
     return (
       <TableFileCell value={value} onChange={onChange} disabled={dis}
         documentId={documentId} attachmentKey={attachmentKey} />
@@ -532,19 +658,60 @@ function TableColInput({ col, value, onChange, readOnly, documentId, attachmentK
       return <input type="checkbox" checked={sval === "true"} disabled={dis} onChange={(e) => onChange(e.target.checked ? "true" : "false")} className="h-4 w-4 accent-primary" />;
     case "textarea":
       return <textarea rows={1} value={sval} disabled={dis} onChange={(e) => onChange(e.target.value)} className={`${base} resize-none`} />;
-    case "currency": {
+    case "currency":
+    case "number":
+    case "percentage": {
+      const cfg = numberConfig(col);
       const linkedVal = col.currencyFromColumn ? row?.[col.currencyFromColumn] : undefined;
-      const symbol = currencySymbolFor(typeof linkedVal === "string" ? linkedVal : undefined)
-        ?? col.currencySymbol ?? "KSh";
+      const symbol = type === "currency"
+        ? (currencySymbolFor(typeof linkedVal === "string" ? linkedVal : undefined) ?? col.currencySymbol ?? "KSh")
+        : null;
+      // Locked cells show the formatted value rather than a dead number input.
+      if (dis) {
+        const shown = formatNumeric(sval, cfg.decimals, cfg.grouping);
+        return (
+          <span className="flex items-center gap-1 py-0.5 text-sm text-foreground">
+            {symbol && shown && <span className="text-[10px] text-muted-foreground">{symbol}</span>}
+            {shown || <span className="italic text-muted-foreground">—</span>}
+            {type === "percentage" && shown ? "%" : ""}
+          </span>
+        );
+      }
       return (
         <div className="flex items-center gap-1">
-          <span className="text-[10px] text-muted-foreground flex-shrink-0">{symbol}</span>
-          <input type="number" step="0.01" value={sval} disabled={dis} onChange={(e) => onChange(e.target.value)} className={base} placeholder="0.00" />
+          {symbol && <span className="text-[10px] text-muted-foreground flex-shrink-0">{symbol}</span>}
+          <input type="number" step={stepForDecimals(cfg.decimals)} value={sval}
+            min={col.min ?? (type === "percentage" ? 0 : undefined)}
+            max={col.max ?? (type === "percentage" ? 100 : undefined)}
+            onChange={(e) => onChange(e.target.value)} className={base}
+            placeholder={numberPlaceholder(undefined, cfg.decimals)} />
+          {type === "percentage" && <span className="text-[10px] text-muted-foreground flex-shrink-0">%</span>}
         </div>
       );
     }
-    case "number":
-      return <input type="number" value={sval} disabled={dis} onChange={(e) => onChange(e.target.value)} className={base} />;
+    case "url":
+      return (
+        <div className="flex items-center gap-1">
+          <input type="url" value={sval} disabled={dis} onChange={(e) => onChange(e.target.value)}
+            className={base} placeholder="https://…" />
+          {sval.trim() && (
+            <a href={normalizeUrl(sval)} target="_blank" rel="noreferrer"
+              className="flex-shrink-0 text-muted-foreground hover:text-primary" title="Open link">
+              <ExternalLink className="h-3 w-3" />
+            </a>
+          )}
+        </div>
+      );
+    case "multi_select": {
+      const selected = Array.isArray(value) ? (value as string[]) : sval ? sval.split(",").map((x) => x.trim()).filter(Boolean) : [];
+      if (dis) return <span className="py-0.5 text-sm text-foreground">{selected.join(", ") || <span className="italic text-muted-foreground">—</span>}</span>;
+      return (
+        <select multiple value={selected} className={`${base} h-auto min-h-[52px]`}
+          onChange={(e) => onChange(Array.from(e.target.selectedOptions).map((o) => o.value))}>
+          {(col.options ?? []).map((o) => <option key={o} value={o}>{o}</option>)}
+        </select>
+      );
+    }
     case "date":
       return <input type="date" value={sval} disabled={dis} onChange={(e) => onChange(e.target.value)} className={base} />;
     case "datetime":
@@ -588,15 +755,17 @@ function TableField({ field, value, onChange, readOnly, tableKey, documentId, al
   // participate in formula evaluation even though they are not rendered.
   const allCols = field.columns ?? [];
 
-  // Columns actually rendered/editable; hidden or conditionally-hidden columns
-  // are dropped here for display only.
-  const cols = allCols.filter((c) => {
-    if (c.hidden) return false;
-    if (c.visibleWhen) {
-      return evalVisible({ hidden: false, visibleWhen: c.visibleWhen }, allValues, allFields, processStep ?? "draft");
-    }
-    return true;
-  });
+  const step = processStep ?? "draft";
+
+  // A column rule can reference a SIBLING COLUMN, so it is evaluated per row:
+  // the row's own cells are merged over the form-level values first. A column
+  // is dropped from the header only when it resolves hidden for every row
+  // (nothing to show anywhere); otherwise it stays and individual cells that
+  // fail the rule render as "—".
+  const colVisibleInRow = (c: Column, row?: Record<string, unknown> | null) =>
+    evalVisible({ hidden: c.hidden, visibleWhen: c.visibleWhen }, allValues, allFields, step, row ?? null);
+  const colEditableInRow = (c: Column, row?: Record<string, unknown> | null) =>
+    evalEditable({ readonly: c.readonly, editableWhen: c.editableWhen }, allValues, allFields, step, row ?? null);
 
   const emptyRow = (): Record<string, unknown> => {
     const r: Record<string, unknown> = {};
@@ -644,9 +813,9 @@ function TableField({ field, value, onChange, readOnly, tableKey, documentId, al
   // ── Compute calculated column values for each row ──────────────────────────
   const colTypeByKey = useMemo(() => {
     const map: Record<string, string | undefined> = {};
-    cols.forEach((c) => { if (c.key) map[c.key] = c.type; });
+    allCols.forEach((c) => { if (c.key) map[c.key] = c.type; });
     return map;
-  }, [cols]);
+  }, [allCols]);
 
   // Resolve sibling table fields (by key) so cross-table aggregate formulas
   // like SUM(expense_items.amount) can look up another table's live rows,
@@ -666,6 +835,16 @@ function TableField({ field, value, onChange, readOnly, tableKey, documentId, al
   const computedRows = useMemo(() => {
     return evaluateTableColumnFormulas(allCols, rows, allFields, allValues, crossTableTables);
   }, [rows, allCols, allFields, allValues, crossTableTables]);
+
+  // Rendered columns: visible in at least one row (or, with no rows yet,
+  // visible against the form-level values alone).
+  const cols = useMemo(() => allCols.filter((c) => {
+    if (c.hidden) return false;
+    if (!c.visibleWhen) return true;
+    if (computedRows.length === 0) return colVisibleInRow(c, null);
+    return computedRows.some((row) => colVisibleInRow(c, row));
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }), [allCols, computedRows, allValues, allFields, step]);
 
   // ── Persist computed column values to parent ───────────────────────────────
   // When any calc column updates, push the merged (raw + computed) rows to the
@@ -710,7 +889,7 @@ function TableField({ field, value, onChange, readOnly, tableKey, documentId, al
   };
 
   return (
-    <div className="col-span-12 space-y-2">
+    <div className="col-span-12 space-y-3">
       <div className="text-xs font-semibold text-foreground">
         {field.label}
         {field.required && <span className="ml-1 text-red-500">*</span>}
@@ -718,57 +897,82 @@ function TableField({ field, value, onChange, readOnly, tableKey, documentId, al
           <span className="ml-2 font-normal text-muted-foreground">{field.helpText ?? field.help_text}</span>
         )}
       </div>
-      <div className="overflow-x-auto rounded-lg border border-border">
-        <div className="min-w-max">
-          <table className="w-max text-sm">
+      <div className="overflow-x-auto border border-border bg-white shadow-sm">
+        <div className="min-w-full">
+          <table className="w-full text-sm border-separate border-spacing-0">
             <thead>
-              <tr className="border-b border-border bg-muted/40">
-                {cols.map((col, i) => (
-                  <th key={col.id ?? i} title={col.tooltip}
-                      className="w-[230px] flex-shrink-0 px-3 py-2 text-left text-[11px] font-semibold text-muted-foreground border-r border-border/50 last:border-0 whitespace-nowrap">
-                    <span className="flex items-center gap-1">
-                      {col.label}{col.required && <span className="text-red-400 ml-0.5">*</span>}
-                      {col.calc?.expression && (
-                        <span className="text-[9px] font-semibold text-emerald-600 bg-emerald-50 px-1 rounded" title="Formula column">ƒx</span>
-                      )}
-                    </span>
-                    {col.additionalText && <div className="text-[10px] font-normal opacity-70">{col.additionalText}</div>}
-                  </th>
-                ))}
-                {!readOnly && <th className="w-8 flex-shrink-0" />}
+              <tr className="text-[11px] uppercase tracking-wide text-muted-foreground">
+                {cols.map((col, i) => {
+                  // Alternating column tint: even → faint blue-grey, odd → white.
+                  const colBg = i % 2 === 0 ? "bg-[#F4F7FA]" : "bg-white";
+                  return (
+                    <th key={col.id ?? i} title={col.tooltip}
+                        className={`w-[230px] flex-shrink-0 px-5 py-4 text-left font-semibold border-b border-r border-border/60 last:border-r-0 whitespace-nowrap ${colBg}`}>
+                      <div className="flex items-center gap-1">
+                        {col.label}{col.required && <span className="text-red-400 ml-0.5">*</span>}
+                        {col.calc?.expression && (
+                          <span className="text-[9px] font-semibold text-emerald-600 bg-emerald-50 px-1 rounded" title="Formula column">ƒx</span>
+                        )}
+                        {(col.readonly || col.editableWhen) && !col.calc?.expression && (
+                          <Lock className="h-3 w-3 text-muted-foreground/70" aria-label="Locked in some rows" />
+                        )}
+                      </div>
+                      {col.additionalText && <div className="mt-1 text-[10px] font-normal text-muted-foreground/80">{col.additionalText}</div>}
+                    </th>
+                  );
+                })}
+                {!readOnly && <th className="w-8 flex-shrink-0 px-4 py-4 border-b border-border/60 bg-white" />}
               </tr>
             </thead>
             <tbody>
-              {computedRows.map((row, ri) => (
-                <tr key={ri} className="border-b border-border/40 last:border-0 hover:bg-muted/20 transition-colors">
-                  {cols.map((col, ci) => {
-                    const key = col.key ?? `col_${ci}`;
-                    return (
-                      <td key={col.id ?? ci} className="w-[230px] flex-shrink-0 px-2 py-1.5 border-r border-border/30 last:border-0">
-                        <TableColInput
-                          col={col}
-                          value={row[key] ?? ""}
-                          row={row}
-                          onChange={(v) => update(ri, key, v)}
-                          readOnly={readOnly}
-                          documentId={documentId}
-                          attachmentKey={`${tableKey}~${ri}~${key}`}
-                        />
+              {computedRows.map((row, ri) => {
+                const isEvenRow = ri % 2 === 0;
+                return (
+                  <tr key={ri} className="border-b border-border/40 last:border-0 group/row">
+                    {cols.map((col, ci) => {
+                      const key = col.key ?? `col_${ci}`;
+                      const shown = colVisibleInRow(col, row);
+                      const cellLocked = readOnly || !colEditableInRow(col, row);
+                      // 4-shade checkerboard: row parity × col parity
+                      const isEvenCol = ci % 2 === 0;
+                      const cellBg =
+                        isEvenRow && isEvenCol  ? "bg-[#EBF1F7]" :   // darker blue-grey
+                        isEvenRow && !isEvenCol ? "bg-[#F3F5F7]" :   // faint warm-grey
+                        !isEvenRow && isEvenCol ? "bg-[#F4F7FA]" :   // base blue-grey
+                                                  "bg-white";         // plain white
+                      return (
+                        <td key={col.id ?? ci}
+                            className={`w-[230px] flex-shrink-0 px-5 py-4 align-top border-r border-border/25 last:border-r-0 ${cellBg} group-hover/row:brightness-[0.985] transition-[filter]`}>
+                          {shown ? (
+                            <TableColInput
+                              col={col}
+                              value={row[key] ?? ""}
+                              row={row}
+                              onChange={(v) => update(ri, key, v)}
+                              readOnly={cellLocked}
+                              documentId={documentId}
+                              attachmentKey={`${tableKey}~${ri}~${key}`}
+                            />
+                          ) : (
+                            <span className="block text-sm italic text-muted-foreground/70" title="Not applicable for this row">—</span>
+                          )}
+                        </td>
+                      );
+                    })}
+                    {!readOnly && (
+                      <td className={`w-8 flex-shrink-0 px-3 py-4 text-center align-top ${isEvenRow ? "bg-[#F3F5F7]" : "bg-white"} group-hover/row:brightness-[0.985] transition-[filter]`}>
+                        {rows.length > 1 && (
+                          <button type="button" onClick={() => removeRow(ri)} className="inline-flex items-center justify-center rounded text-muted-foreground hover:text-red-500 transition-colors">
+                            <Trash2 className="h-4 w-4" />
+                          </button>
+                        )}
                       </td>
-                    );
-                  })}
-                  {!readOnly && (
-                    <td className="w-8 flex-shrink-0 px-1 text-center">
-                      {rows.length > 1 && (
-                        <button type="button" onClick={() => removeRow(ri)} className="p-0.5 text-muted-foreground hover:text-red-500 transition-colors rounded">
-                          <Trash2 className="h-3.5 w-3.5" />
-                        </button>
-                      )}
-                    </td>
-                  )}
-                </tr>
-              ))}
+                    )}
+                  </tr>
+                );
+              })}
             </tbody>
+
           </table>
         </div>
       </div>
@@ -783,6 +987,75 @@ function TableField({ field, value, onChange, readOnly, tableKey, documentId, al
 
 // ── File / Image attach field ──────────────────────────────────────────────────
 
+/** Returns a coloured Lucide icon matching a file extension or MIME type. */
+function FileTypeIcon({ name, contentType, className = "h-5 w-5" }: { name?: string; contentType?: string; className?: string }) {
+  const ext = (name?.split(".").pop() ?? "").toLowerCase();
+  const mime = (contentType ?? "").toLowerCase();
+
+  if (mime.startsWith("image/") || ["jpg", "jpeg", "png", "gif", "svg", "webp", "bmp"].includes(ext))
+    return <FileImage className={className} style={{ color: "#0ea5e9" }} />;
+  if (["pdf"].includes(ext) || mime === "application/pdf")
+    return <FileText className={className} style={{ color: "#ef4444" }} />;
+  if (["doc", "docx", "odt", "rtf"].includes(ext) || mime.includes("word") || mime.includes("opendocument.text"))
+    return <FileText className={className} style={{ color: "#2563eb" }} />;
+  if (["xls", "xlsx", "csv", "ods"].includes(ext) || mime.includes("spreadsheet") || mime.includes("excel"))
+    return <FileSpreadsheet className={className} style={{ color: "#16a34a" }} />;
+  if (["ppt", "pptx", "odp"].includes(ext) || mime.includes("presentation"))
+    return <FileText className={className} style={{ color: "#ea580c" }} />;
+  if (["zip", "rar", "7z", "tar", "gz"].includes(ext))
+    return <FileArchive className={className} style={{ color: "#a16207" }} />;
+  if (["mp4", "mov", "avi", "mkv", "webm"].includes(ext) || mime.startsWith("video/"))
+    return <FileVideo className={className} style={{ color: "#7c3aed" }} />;
+  if (["mp3", "wav", "ogg", "flac", "m4a"].includes(ext) || mime.startsWith("audio/"))
+    return <FileAudio className={className} style={{ color: "#db2777" }} />;
+  if (["js", "ts", "jsx", "tsx", "py", "java", "cpp", "c", "cs", "go", "rs", "php", "rb", "json", "xml", "html", "css"].includes(ext))
+    return <FileCode2 className={className} style={{ color: "#0891b2" }} />;
+  return <FileText className={className} style={{ color: "#64748b" }} />;
+}
+
+/** Compact thumbnail chip for a single attached file. */
+function FileChip({ name, contentType, size, onRemove, onDownload, downloading, disabled }: {
+  name: string; contentType?: string; size?: number;
+  onRemove?: () => void; onDownload?: () => void;
+  downloading?: boolean; disabled?: boolean;
+}) {
+  return (
+    <div className="group relative inline-flex flex-col items-center gap-1" style={{ width: 72 }}>
+      {/* Remove button */}
+      {!disabled && onRemove && (
+        <button
+          type="button"
+          onClick={onRemove}
+          className="absolute -right-1.5 -top-1.5 z-10 flex h-4 w-4 items-center justify-center rounded-full border border-white bg-red-500 text-white opacity-0 shadow group-hover:opacity-100 transition-opacity"
+          title="Remove"
+        >
+          <X className="h-2.5 w-2.5" />
+        </button>
+      )}
+      {/* Icon box */}
+      <button
+        type="button"
+        onClick={onDownload}
+        disabled={!onDownload || downloading}
+        className="flex h-[52px] w-[52px] flex-shrink-0 items-center justify-center border border-[#E3E7EA] bg-white shadow-sm hover:border-[#287EAD]/40 hover:bg-[#F0F7FC] transition-colors disabled:cursor-default disabled:hover:bg-white disabled:hover:border-[#E3E7EA]"
+        title={onDownload ? "Download" : name}
+      >
+        {downloading
+          ? <Loader2 className="h-5 w-5 animate-spin text-muted-foreground" />
+          : <FileTypeIcon name={name} contentType={contentType} className="h-6 w-6" />}
+      </button>
+      {/* Filename */}
+      <span className="max-w-[72px] truncate text-center text-[10px] leading-tight text-[#3D454D]" title={name}>
+        {name}
+      </span>
+      {/* Size */}
+      {size != null && (
+        <span className="text-[9px] text-muted-foreground">{formatFileSize(size)}</span>
+      )}
+    </div>
+  );
+}
+
 function FileAttachField({ label, fieldKey, imageOnly, disabled, value, documentId, onChangeCb }: {
   label: string;
   fieldKey: string;
@@ -792,13 +1065,29 @@ function FileAttachField({ label, fieldKey, imageOnly, disabled, value, document
   documentId?: string;
   onChangeCb: (key: string, val: unknown) => void;
 }) {
-  const [file, setFile] = useState<File | null>(null);
-  const [downloading, setDownloading] = useState(false);
-  const inputRef = useRef<HTMLInputElement>(null);
+  // Derive staged file directly from the value prop so it survives tab
+  // navigation / remounts. The parent stores the File object in its values
+  // state after the user picks it; we read it back here instead of keeping a
+  // redundant local copy that resets on every unmount.
+  const stagedFile = value instanceof File ? value : null;
   const descriptor = isAttachmentValue(value) ? value : null;
 
+  // Generate a preview data-URL whenever the staged image changes.
+  const [filePreview, setFilePreview] = useState<string | null>(null);
+  useEffect(() => {
+    if (!stagedFile || !imageOnly) { setFilePreview(null); return; }
+    let cancelled = false;
+    const reader = new FileReader();
+    reader.onload = (e) => { if (!cancelled) setFilePreview(e.target?.result as string); };
+    reader.readAsDataURL(stagedFile);
+    return () => { cancelled = true; };
+  }, [stagedFile, imageOnly]);
+
+  const [downloading, setDownloading] = useState(false);
+  const inputRef = useRef<HTMLInputElement>(null);
+
+  // Only update the parent — filePreview updates automatically via effect.
   const pick = (f: File | null) => {
-    setFile(f);
     onChangeCb(fieldKey, f ?? undefined);
   };
 
@@ -823,71 +1112,93 @@ function FileAttachField({ label, fieldKey, imageOnly, disabled, value, document
     }
   };
 
-  return (
-    <div>
-      {!file && descriptor ? (
-        // An attachment is already saved on the form. Show it (with download),
-        // and — when editing — allow replacing it without losing the existing
-        // file if the user leaves it untouched.
-        <div className="flex items-center gap-2 rounded-lg border border-border bg-muted/20 px-3 py-2.5">
-          <Paperclip className="h-4 w-4 flex-shrink-0 text-primary" />
-          <span className="min-w-0 flex-1 truncate text-xs text-foreground">{descriptor.name || label}</span>
-          {descriptor.size ? (
-            <span className="flex-shrink-0 text-[10px] text-muted-foreground">{formatFileSize(descriptor.size)}</span>
-          ) : null}
-          {documentId && (
-            <button
-              type="button"
-              onClick={downloadAttachment}
-              disabled={downloading}
-              className="flex-shrink-0 rounded border border-border bg-white px-2 py-1 text-[11px] font-semibold text-primary hover:bg-muted disabled:opacity-50"
-            >
-              {downloading ? <Loader2 className="h-3 w-3 animate-spin" /> : <Download className="h-3 w-3" />}
-            </button>
-          )}
-          {!disabled && (
-            <label className="flex-shrink-0 cursor-pointer rounded border border-border bg-white px-2 py-1 text-[11px] font-semibold text-primary hover:bg-muted">
-              Replace
-              <input
-                type="file"
-                accept={imageOnly ? "image/*" : undefined}
-                className="sr-only"
-                onChange={(e) => pick(e.target.files?.[0] ?? null)}
-              />
-            </label>
-          )}
+  // ── Saved image attachment ────────────────────────────────────────────────
+  if (!stagedFile && descriptor && descriptor.content_type?.startsWith("image/")) {
+    return (
+      <div className="space-y-2">
+        <div className="overflow-hidden border border-border bg-slate-50">
+          <img
+            src={`/api/attachments/${descriptor.storage_path}`}
+            alt={descriptor.name || label}
+            className="h-40 w-full object-contain"
+          />
         </div>
-      ) : file ? (
-        <div className="flex items-center gap-2 rounded-lg border border-border bg-muted/20 px-3 py-2.5">
-          <Paperclip className="h-4 w-4 flex-shrink-0 text-primary" />
-          <span className="min-w-0 flex-1 truncate text-xs text-foreground">{file.name}</span>
-          <span className="flex-shrink-0 text-[10px] text-muted-foreground">
-            {(file.size / 1024).toFixed(0)} KB
-          </span>
+        {documentId && (
+          <div className="flex items-center gap-2">
+            <button type="button" onClick={downloadAttachment} disabled={downloading}
+              className="inline-flex items-center gap-1.5 border border-[#C8CDD2] bg-white px-2.5 py-1 text-[11px] font-semibold text-[#1F2933] hover:bg-[#F5F7F8] disabled:opacity-50">
+              {downloading ? <Loader2 className="h-3 w-3 animate-spin" /> : <Download className="h-3 w-3" />}
+              Download
+            </button>
+          </div>
+        )}
+      </div>
+    );
+  }
+
+  // ── Newly staged image (with preview) ────────────────────────────────────
+  if (stagedFile && filePreview) {
+    return (
+      <div className="space-y-2">
+        <div className="overflow-hidden border border-border bg-slate-50">
+          <img src={filePreview} alt={stagedFile.name} className="h-40 w-full object-contain" />
+        </div>
+        <div className="flex items-center gap-2">
+          <span className="text-xs text-[#5E6870] truncate min-w-0">{stagedFile.name}</span>
           {!disabled && (
             <button type="button" onClick={() => pick(null)}
-              className="flex-shrink-0 rounded p-0.5 text-muted-foreground hover:text-red-500">
-              <X className="h-3.5 w-3.5" />
+              className="flex-shrink-0 text-xs font-semibold text-red-500 hover:text-red-700">
+              Remove
             </button>
           )}
         </div>
+      </div>
+    );
+  }
+
+  // ── Saved non-image OR staged non-image — compact chip ────────────────────
+  const hasChip = stagedFile || descriptor;
+  if (hasChip) {
+    const chipName = stagedFile ? stagedFile.name : (descriptor?.name || label);
+    const chipMime = stagedFile ? stagedFile.type : descriptor?.content_type;
+    const chipSize = stagedFile ? stagedFile.size : descriptor?.size;
+    return (
+      <div className="flex flex-wrap items-start gap-3">
+        <FileChip
+          name={chipName}
+          contentType={chipMime}
+          size={chipSize}
+          onDownload={descriptor && documentId ? downloadAttachment : undefined}
+          downloading={downloading}
+          disabled={disabled}
+          onRemove={!disabled ? () => pick(null) : undefined}
+        />
+      </div>
+    );
+  }
+
+  // ── Empty state — compact upload button ───────────────────────────────────
+  return (
+    <label
+      className={`inline-flex cursor-pointer items-center gap-2 border border-dashed border-[#AEB5BB] bg-[#F9FAFB] px-3 py-2 text-xs font-semibold text-[#5E6870] transition-colors hover:border-[#287EAD] hover:bg-[#EEF6FB] hover:text-[#287EAD] ${
+        disabled ? "pointer-events-none opacity-50" : ""
+      }`}
+    >
+      {imageOnly ? (
+        <ImageIcon className="h-4 w-4 flex-shrink-0" />
       ) : (
-        <label className={`flex cursor-pointer flex-col items-center gap-2 rounded-lg border-2 border-dashed
-          border-border bg-muted/20 py-5 text-xs text-muted-foreground transition-colors
-          hover:border-primary/50 hover:text-foreground ${disabled ? "pointer-events-none opacity-50" : ""}`}>
-          <Paperclip className="h-5 w-5" />
-          <span>Click to {imageOnly ? "upload image" : "attach file"}</span>
-          <input
-            ref={inputRef}
-            type="file"
-            accept={imageOnly ? "image/*" : undefined}
-            disabled={disabled}
-            className="sr-only"
-            onChange={(e) => pick(e.target.files?.[0] ?? null)}
-          />
-        </label>
+        <Upload className="h-4 w-4 flex-shrink-0" />
       )}
-    </div>
+      {imageOnly ? "Upload image" : "Attach file"}
+      <input
+        ref={inputRef}
+        type="file"
+        accept={imageOnly ? "image/*" : undefined}
+        disabled={disabled}
+        className="sr-only"
+        onChange={(e) => pick(e.target.files?.[0] ?? null)}
+      />
+    </label>
   );
 }
 
@@ -1002,10 +1313,80 @@ function SignatureField({ fieldKey, disabled, value, onChangeCb }: {
   );
 }
 
+// ── Multiple attachments field ────────────────────────────────────────────────
+
+/**
+ * `multi_file` — several supporting attachments on one field. Each slot is an
+ * independent attachment stored under `<key>~<index>` (the same "~" convention
+ * the table cells use), so the existing per-key upload/download plumbing keeps
+ * working unchanged.
+ */
+function MultiFileField({ fieldKey, label, disabled, allValues, documentId, onChangeCb }: {
+  fieldKey: string;
+  label: string;
+  disabled?: boolean;
+  allValues: TemplateFormValues;
+  documentId?: string;
+  onChangeCb: (key: string, val: unknown) => void;
+}) {
+  const existing = Object.keys(allValues)
+    .filter((k) => k.startsWith(`${fieldKey}~`) && allValues[k] != null)
+    .map((k) => Number(k.slice(fieldKey.length + 1)))
+    .filter((n) => Number.isInteger(n) && n >= 0);
+  const highest = existing.length ? Math.max(...existing) : -1;
+  const [slots, setSlots] = useState<number[]>(() =>
+    Array.from({ length: Math.max(highest + 2, 1) }, (_, i) => i)
+  );
+
+  return (
+    <div className="space-y-2">
+      {/* Inline chip row — all slots rendered horizontally */}
+      <div className="flex flex-wrap items-start gap-3">
+        {slots.map((i) => (
+          <FileAttachField
+            key={i}
+            label={`${label} ${i + 1}`}
+            fieldKey={`${fieldKey}~${i}`}
+            disabled={disabled}
+            value={allValues[`${fieldKey}~${i}`]}
+            documentId={documentId}
+            onChangeCb={(k, v) => {
+              onChangeCb(k, v);
+              // If a slot is cleared remove it (keep at least 1)
+              if (v == null && slots.length > 1) {
+                setSlots((prev) => prev.filter((n) => n !== i));
+              }
+            }}
+          />
+        ))}
+        {/* Add-another button — shown inline after existing chips */}
+        {!disabled && (
+          <button
+            type="button"
+            onClick={() => setSlots((prev) => [...prev, (prev[prev.length - 1] ?? -1) + 1])}
+            className="inline-flex items-center gap-1.5 self-center border border-dashed border-[#AEB5BB] bg-[#F9FAFB] px-3 py-2 text-xs font-semibold text-[#5E6870] hover:border-[#287EAD] hover:bg-[#EEF6FB] hover:text-[#287EAD] transition-colors"
+          >
+            <Plus className="h-3.5 w-3.5" /> Add file
+          </button>
+        )}
+      </div>
+    </div>
+  );
+}
+
 // ── Single form field ─────────────────────────────────────────────────────────
 
 const inp = "input";
 const errCls = "mt-1 flex items-center gap-1 text-xs text-red-500";
+
+function labelForAuto(label: string, field: Field) {
+  return (
+    <label style={{ marginBottom: "6px", display: "block", fontSize: "12px", fontWeight: "600", color: "#1F2933" }}>
+      {label}
+      {field.tooltip && <span style={{ marginLeft: "4px", cursor: "help", color: "#8C969E" }} title={field.tooltip}>(?)</span>}
+    </label>
+  );
+}
 
 function FormField({ field, control, errors, onChangeCb, readOnly, allValues, editable = true, processStep, allFields }: {
   field: Field;
@@ -1038,6 +1419,19 @@ function FormField({ field, control, errors, onChangeCb, readOnly, allValues, ed
     </div>
   );
   if (type === "divider") return <div className="min-w-0" style={{ gridColumn: "span 12 / span 12" }}><hr style={{ borderColor: "#E5E8EB" }} /></div>;
+
+  // Read-only guidance note — never submitted.
+  if (type === "info") return (
+    <div className="min-w-0" style={{ gridColumn: "span 12 / span 12" }}>
+      <div className="flex items-start gap-2 rounded-md border border-sky-200 bg-sky-50 px-3 py-2 text-xs text-sky-900">
+        <Info className="mt-0.5 h-3.5 w-3.5 flex-shrink-0" />
+        <span>{field.defaultValue || help || label}</span>
+      </div>
+    </div>
+  );
+
+  // Empty gap used to align fields on a row.
+  if (type === "spacer") return <div aria-hidden className="min-w-0" style={style} />;
 
   // Table handled separately (needs full width + local state)
   if (type === "table") return (
@@ -1080,6 +1474,21 @@ function FormField({ field, control, errors, onChangeCb, readOnly, allValues, ed
     const raw = allValues[key];
     const hasValue = raw !== undefined && raw !== null && raw !== "";
     const symbol = type === "calc_currency" ? (field.currencySymbol ?? "KSh") : null;
+    if (type === "calc_boolean") {
+      return (
+        <div className="min-w-0" style={style}>
+          <label style={{ marginBottom: "6px", display: "block", fontSize: "12px", fontWeight: "600", color: "#1F2933" }}>
+            {label}
+            {field.tooltip && <span style={{ marginLeft: "4px", cursor: "help", color: "#8C969E" }} title={field.tooltip}>(?)</span>}
+          </label>
+          <div className={`${inp} flex items-center`} style={{ backgroundColor: "#F6F7F8" }}>
+            {hasValue || field.calc?.expression
+              ? <ReadonlyToggle on={truthyValue(raw)} />
+              : <span className="text-sm italic text-muted-foreground">No rule configured</span>}
+          </div>
+        </div>
+      );
+    }
     return (
       <div className="min-w-0" style={style}>
         <label style={{ marginBottom: "6px", display: "block", fontSize: "12px", fontWeight: "600", color: "#1F2933" }}>
@@ -1096,6 +1505,19 @@ function FormField({ field, control, errors, onChangeCb, readOnly, allValues, ed
           ) : (
             <span className="italic" style={{ color: "#8C969E", fontWeight: 400 }}>No formula configured</span>
           )}
+        </div>
+      </div>
+    );
+  }
+
+  // Reference number assigned by the server on create — read-only everywhere.
+  if (type === "auto_number") {
+    const shown = allValues[key];
+    return (
+      <div className="min-w-0" style={style}>
+        {labelForAuto(label, field)}
+        <div className={`${inp} flex items-center`} style={{ backgroundColor: "#F6F7F8", color: "#8C969E" }}>
+          {shown ? String(shown) : <span className="italic">Assigned automatically on submit</span>}
         </div>
       </div>
     );
@@ -1133,12 +1555,20 @@ function FormField({ field, control, errors, onChangeCb, readOnly, allValues, ed
     );
   }
 
-  // Shared label element
+  // Shared label element. A field that is visible but not editable at this
+  // step gets an explicit lock chip — a greyed-out control alone doesn't tell
+  // the person WHY they can't type in it.
+  const lockedAtStep = !readOnly && !editable && !field.readonly;
   const labelEl = (
     <label style={{ marginBottom: "6px", display: "block", fontSize: "12px", fontWeight: "600", color: "#1F2933" }}>
       {label}
       {field.required && <span style={{ marginLeft: "4px", color: "#D32F2F" }}>*</span>}
       {field.tooltip && <span style={{ marginLeft: "4px", cursor: "help", color: "#8C969E" }} title={field.tooltip}>(?)</span>}
+      {lockedAtStep && (
+        <span className="ml-2 inline-flex items-center gap-1 rounded bg-muted px-1.5 py-0.5 text-[10px] font-semibold text-muted-foreground align-middle">
+          <Lock className="h-2.5 w-2.5" /> Locked at this step
+        </span>
+      )}
       {help && <span style={{ marginLeft: "8px", fontWeight: "400", color: "#8C969E" }}>{help}</span>}
     </label>
   );
@@ -1152,6 +1582,21 @@ function FormField({ field, control, errors, onChangeCb, readOnly, allValues, ed
           fieldKey={key}
           disabled={dis}
           value={allValues[key]}
+          onChangeCb={onChangeCb}
+        />
+      </div>
+    );
+  }
+  if (type === "multi_file") {
+    return (
+      <div className="min-w-0" style={style}>
+        {labelEl}
+        <MultiFileField
+          fieldKey={key}
+          label={label}
+          disabled={dis}
+          allValues={allValues}
+          documentId={(allValues.__document_id as string | undefined)}
           onChangeCb={onChangeCb}
         />
       </div>
@@ -1230,25 +1675,108 @@ function FormField({ field, control, errors, onChangeCb, readOnly, allValues, ed
       );
       break;
 
-    case "currency": {
-      // Symbol follows a linked currency dropdown's selected code when set,
-      // otherwise the field's fixed/fallback symbol.
+    // Number and Currency are one control: `decimals` + `thousandsSeparator`
+    // drive the display, and a currency type (or a linked currency dropdown)
+    // adds the symbol. Percentage is the same input with a "%" suffix.
+    case "number":
+    case "currency":
+    case "percentage": {
+      const cfg = numberConfig(field);
       const linkedVal = field.currencyFromField ? allValues[field.currencyFromField] : undefined;
-      const currencySymbol =
-        currencySymbolFor(typeof linkedVal === "string" ? linkedVal : undefined) ??
-        field.currencySymbol ?? "KSh";
+      const currencySymbol = cfg.asCurrency
+        ? (currencySymbolFor(typeof linkedVal === "string" ? linkedVal : undefined) ?? field.currencySymbol ?? "KSh")
+        : null;
+      const isPct = type === "percentage";
       control_el = (
-        <Controller control={control} name={key} rules={rules} render={({ field: f }) => (
-          <div className="relative">
-            <span className="pointer-events-none absolute left-3 top-1/2 -translate-y-1/2 text-sm font-medium text-muted-foreground">
-              {currencySymbol}
-            </span>
-            <input type="number" step="0.01" value={String(f.value ?? "")} disabled={dis}
-              placeholder="0.00" min={field.min} max={field.max}
-              className={`${inp} pl-14`}
-              onChange={(e) => { f.onChange(e.target.value); onChangeCb(key, e.target.value); }} />
-          </div>
-        )} />
+        <Controller control={control} name={key} rules={rules} render={({ field: f }) => {
+          const raw = String(f.value ?? "");
+          // Locked/read-only: show the formatted figure, not a dead spinner.
+          if (dis) {
+            const shown = formatNumeric(raw, cfg.decimals, cfg.grouping);
+            return (
+              <div className={`${inp} flex items-center gap-1.5`} style={{ backgroundColor: "#F6F7F8", color: "#1F2933" }}>
+                {currencySymbol && shown && <span className="text-muted-foreground">{currencySymbol}</span>}
+                {shown ? `${shown}${isPct ? " %" : ""}` : <span className="italic text-muted-foreground">—</span>}
+              </div>
+            );
+          }
+          return (
+            <div className="relative">
+              {currencySymbol && (
+                <span className="pointer-events-none absolute left-3 top-1/2 -translate-y-1/2 text-sm font-medium text-muted-foreground">
+                  {currencySymbol}
+                </span>
+              )}
+              <input type="number" step={stepForDecimals(cfg.decimals)} value={raw}
+                placeholder={numberPlaceholder(field.placeholder, cfg.decimals)}
+                min={field.min ?? (isPct ? 0 : undefined)}
+                max={field.max ?? (isPct ? 100 : undefined)}
+                className={`${inp} ${currencySymbol ? "pl-14" : ""} ${isPct ? "pr-8" : ""}`}
+                onChange={(e) => { f.onChange(e.target.value); onChangeCb(key, e.target.value); }} />
+              {isPct && (
+                <span className="pointer-events-none absolute right-3 top-1/2 -translate-y-1/2 text-sm text-muted-foreground">%</span>
+              )}
+            </div>
+          );
+        }} />
+      );
+      break;
+    }
+
+    case "url":
+      control_el = (
+        <Controller control={control} name={key} rules={rules} render={({ field: f }) => {
+          const raw = String(f.value ?? "");
+          return (
+            <div className="relative">
+              <input type="url" value={raw} disabled={dis}
+                placeholder={field.placeholder ?? "https://…"} className={`${inp} pr-9`}
+                onChange={(e) => { f.onChange(e.target.value); onChangeCb(key, e.target.value); }} />
+              {raw.trim() && (
+                <a href={normalizeUrl(raw)} target="_blank" rel="noreferrer" title="Open link"
+                  className="absolute right-2.5 top-1/2 -translate-y-1/2 text-muted-foreground hover:text-primary">
+                  <ExternalLink className="h-4 w-4" />
+                </a>
+              )}
+            </div>
+          );
+        }} />
+      );
+      break;
+
+    // Star rating — buttons, not a number box.
+    case "rating": {
+      const maxStars = Math.max(1, Math.min(10, field.max ?? 5));
+      control_el = (
+        <Controller control={control} name={key} rules={rules} render={({ field: f }) => {
+          const current = Number(f.value ?? 0) || 0;
+          const set = (v: number) => { f.onChange(v); onChangeCb(key, v); };
+          return (
+            <div className="flex items-center gap-1 pt-1">
+              {Array.from({ length: maxStars }).map((_, i) => {
+                const filled = i < current;
+                return (
+                  <button key={i} type="button" disabled={dis}
+                    aria-label={`${i + 1} of ${maxStars}`}
+                    aria-pressed={filled}
+                    onClick={() => set(i + 1 === current ? 0 : i + 1)}
+                    className={`rounded p-0.5 transition-transform ${dis ? "cursor-default" : "hover:scale-110"}`}>
+                    <Star className={`h-5 w-5 ${filled ? "fill-amber-400 text-amber-400" : "text-muted-foreground/40"}`} />
+                  </button>
+                );
+              })}
+              <span className="ml-2 text-xs text-muted-foreground">
+                {current ? `${current} / ${maxStars}` : "Not rated"}
+              </span>
+              {current > 0 && !dis && (
+                <button type="button" onClick={() => set(0)}
+                  className="ml-1 text-xs font-semibold text-muted-foreground hover:text-red-500">
+                  Clear
+                </button>
+              )}
+            </div>
+          );
+        }} />
       );
       break;
     }
@@ -1268,10 +1796,10 @@ function FormField({ field, control, errors, onChangeCb, readOnly, allValues, ed
       break;
 
     default: {
-      // text, number, email, phone, date, datetime, time
+      // text, email, phone, date, datetime, time (and any unknown type, which
+      // degrades to a plain text box rather than disappearing from the form).
       const htmlType =
-        type === "number" ? "number"
-        : type === "email" ? "email"
+        type === "email" ? "email"
         : type === "phone" ? "tel"
         : type === "date" ? "date"
         : type === "datetime" ? "datetime-local"
@@ -1360,7 +1888,16 @@ function TemplateForm({ sections, values, onChange, readOnly = false, documentId
   // here would just be superseded noise against a document's saved values.
   useEffect(() => {
     if (readOnly || documentId) return;
-    const scope = buildCalcScope(allFields, values);
+    // Build table registry so top-level formulas can reference table columns
+    const tableRegistry: Record<string, { rows: Record<string, unknown>[]; colTypeByKey: Record<string, string | undefined> }> = {};
+    for (const f of allFields) {
+      if (f.type !== "table" || !f.key) continue;
+      const tableRows = Array.isArray(values[f.key]) ? (values[f.key] as Record<string, unknown>[]) : [];
+      const typeByKey: Record<string, string | undefined> = {};
+      (f.columns ?? []).forEach((c) => { if (c.key) typeByKey[c.key] = c.type; });
+      tableRegistry[f.key] = { rows: tableRows, colTypeByKey: typeByKey };
+    }
+    const scope = buildCalcScope(allFields, values, tableRegistry);
     for (const f of allFields) {
       const k = f.key ?? f.id ?? "";
       if (!k || !f.calc?.expression) continue;
@@ -1480,7 +2017,10 @@ export function requiredFieldLabels(
     const sectionEditable = evalEditableForViewer(s, values, allFields, processStep, viewer);
     for (const f of s.fields ?? []) {
       const type = f.type ?? "text";
-      if (type === "divider" || type === "heading") continue;
+      // Layout-only elements and server/calculated values are never "missing".
+      if (PRESENTATION_TYPES.has(type)) continue;
+      if (SERVER_FILLED_TYPES.has(type)) continue;
+      if (CALCULATED_FIELD_TYPES.has(type)) continue;
       // Formula fields auto-fill (and the server finalizes them); never block on them.
       if (resolveFormula(f.formula)) continue;
       // Don't require a field the user can't see (hidden / conditionally hidden).
@@ -1500,16 +2040,21 @@ export function requiredFieldLabels(
       if (type === "table") {
         const rows = Array.isArray(values[key]) ? (values[key] as Record<string, unknown>[]) : [];
         for (const col of f.columns ?? []) {
-          if (!col.required || !col.key) continue;
-          if (col.hidden || !evalVisible(col, values, allFields, processStep)) continue;
-          if (!evalEditable(col, values, allFields, processStep)) continue;
+          if (!col.required || !col.key || col.calc?.expression) continue;
+          if (col.hidden) continue;
           const colKey = col.key;
+          // Column rules are row-scoped (they may reference sibling columns),
+          // so a value is only enforced in the rows where the column is
+          // actually shown and editable.
           const missingInAnyRow =
-            rows.length === 0 ||
-            rows.some((row) => {
-              const v = row?.[colKey];
-              return v === undefined || v === null || (typeof v === "string" && v.trim() === "");
-            });
+            rows.length === 0
+              ? evalVisible(col, values, allFields, processStep, null) && evalEditable(col, values, allFields, processStep, null)
+              : rows.some((row) => {
+                  if (!evalVisible(col, values, allFields, processStep, row)) return false;
+                  if (!evalEditable(col, values, allFields, processStep, row)) return false;
+                  const v = row?.[colKey];
+                  return v === undefined || v === null || (typeof v === "string" && v.trim() === "");
+                });
           if (missingInAnyRow) {
             missing.push(`${f.label ?? key} — ${col.label ?? colKey}`);
           }

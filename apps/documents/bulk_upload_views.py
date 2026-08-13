@@ -21,6 +21,7 @@ from .bulk_upload import (
     sync_bulk_upload_status,
 )
 from .models import BulkUpload, BulkUploadStatus, DocumentType, DocumentStatus
+from .review_queue import reviewable_bulk_uploads_for
 
 logger = logging.getLogger(__name__)
 from .serializers import (
@@ -42,10 +43,8 @@ class BulkUploadViewSet(viewsets.GenericViewSet):
     lookup_field = "pk"
 
     def get_queryset(self):
-        return (
-            BulkUpload.objects.filter(uploaded_by=self.request.user)
-            .select_related("document_type")
-            .prefetch_related("documents", "common_tags")
+        return reviewable_bulk_uploads_for(self.request.user).prefetch_related(
+            "documents", "common_tags"
         )
 
     def get_serializer_class(self):
@@ -58,17 +57,14 @@ class BulkUploadViewSet(viewsets.GenericViewSet):
         return BulkUploadSerializer
 
     def list(self, request, *args, **kwargs):
-        """List the current user's batches for the pending-review queue.
+        """List batches for the pending-review queue.
 
         Defaults to the batches that still need attention (processing/review);
         pass ``?status=...`` (comma-separated) to widen or narrow that.
+        Includes the caller's own bulk scans plus email-ingested batches they
+        are allowed to review (mailbox reviewers / owner / admins).
         """
-        qs = (
-            BulkUpload.objects.filter(uploaded_by=request.user)
-            .select_related("document_type")
-            .prefetch_related("ingested_emails")
-            .order_by("-created_at")
-        )
+        qs = self.get_queryset().order_by("-created_at")
         status_param = request.query_params.get("status")
         statuses = (
             [s.strip() for s in status_param.split(",") if s.strip()]

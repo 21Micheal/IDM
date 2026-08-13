@@ -1,27 +1,23 @@
 /**
- * WorkspaceCommandBar — the single source of truth for the blue command bar
- * that sits at the top of every workspace page (Dashboard, Documents, Trash,
- * Audit, Upload, Scan, Workflow, Notifications, …).
+ * WorkspaceCommandBar — Rev-2 (portal edition)
+ * ─────────────────────────────────────────────
+ * Renders its content into the blue command-bar slot (#wcb-slot) that Layout
+ * owns.  This means:
  *
- * Why this exists
- * ───────────────
- * Each page used to hand-roll its own `<div className="bg-[#287EAD] …">` header.
- * Small differences (vertical padding, min-h vs fixed height, where the actions
- * sat) meant the bars drifted out of alignment with each other and with the
- * sidebar's blue logo block — most visibly a few px of height variance at the
- * seam where the sidebar meets the page. Centralising the shell here guarantees:
+ *   • The bar's DOM position is always in Layout's Row 2 (the blue strip),
+ *     so it is guaranteed to be the same height and position on every page,
+ *     perfectly flush with the sidebar.
+ *   • Pages keep the exact same JSX API — <WorkspaceCommandBar actions={…}>
+ *     …children… </WorkspaceCommandBar> — nothing changes in the callers.
+ *   • WorkspaceHeaderActions (bell / profile) now lives in Layout's Row 1
+ *     (white bar) and is NOT rendered here anymore.
  *
- *   • a FIXED 69px height (matches the sidebar logo block exactly, and can't
- *     grow when content would otherwise wrap on a narrow window), and
- *   • identical horizontal padding (px-5 / pr-6), and
- *   • the chat/bell/profile actions always pinned to the right.
- *
- * Pages pass their own left/centre content as `children`, plus any page-specific
- * right-side controls (export button, filter pills, counts) via `actions`.
+ * The `sticky` + z-index tricks from Rev-1 are gone: the bar is Layout-owned
+ * and always at the correct stacking level.
  */
-import type { ReactNode } from "react";
+import { useEffect, useState, type ReactNode } from "react";
+import { createPortal } from "react-dom";
 import clsx from "clsx";
-import { WorkspaceHeaderActions } from "./Layout";
 
 export function WorkspaceCommandBar({
   children,
@@ -30,26 +26,26 @@ export function WorkspaceCommandBar({
 }: {
   /** Left / centre content: title block, search, filters. */
   children?: ReactNode;
-  /** Optional page-specific controls rendered just left of the standard actions. */
+  /** Optional page-specific controls rendered just left of the slot edge. */
   actions?: ReactNode;
   className?: string;
 }) {
-  return (
-    <div
-      className={clsx(
-        // sticky keeps the bar pinned to the top of whatever scrolls beneath it
-        // (page-level scroll on pages that still use min-h-screen). Pages that
-        // give the body its own scroll container render the bar above it, where
-        // sticky is simply a no-op.
-        "sticky top-0 z-20 flex h-[69px] shrink-0 items-center gap-3 bg-[#287EAD] px-5 pr-6 text-white",
-        className,
-      )}
-    >
+  // Wait until the DOM has mounted so getElementById is reliable.
+  const [slot, setSlot] = useState<Element | null>(null);
+
+  useEffect(() => {
+    setSlot(document.getElementById("wcb-slot"));
+  }, []);
+
+  if (!slot) return null;
+
+  return createPortal(
+    <div className={clsx("flex h-full min-w-0 flex-1 items-center gap-3 px-4", className)}>
       <div className="flex min-w-0 flex-1 items-center gap-3">{children}</div>
-      <div className="flex shrink-0 items-center gap-3">
-        {actions}
-        <WorkspaceHeaderActions variant="blue" />
-      </div>
-    </div>
+      {actions != null && (
+        <div className="flex shrink-0 items-center gap-3">{actions}</div>
+      )}
+    </div>,
+    slot,
   );
 }

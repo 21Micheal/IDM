@@ -205,6 +205,15 @@ const TEXT_CALC_TYPES = new Set([
   "reference", "user", "url", "calc_text", "auto_number",
 ]);
 
+const BOOLEAN_CALC_TYPES = new Set([
+  "boolean", "checkbox", "calc_boolean",
+]);
+
+const NUMERIC_CALC_TYPES = new Set([
+  "number", "currency", "percentage", "rating",
+  "calc_number", "calc_currency",
+]);
+
 function coerceNumeric(fieldType: string | undefined, raw: unknown): number {
   if (raw === null || raw === undefined || raw === "") return 0;
   if (fieldType === "date" || fieldType === "datetime" || fieldType === "calc_date") {
@@ -217,13 +226,29 @@ function coerceNumeric(fieldType: string | undefined, raw: unknown): number {
     const h = parseInt(hStr, 10), m = parseInt(mStr, 10);
     return (Number.isFinite(h) ? h : 0) * 60 + (Number.isFinite(m) ? m : 0);
   }
-  if (fieldType === "boolean" || fieldType === "checkbox") return raw ? 1 : 0;
+  if (fieldType === "boolean" || fieldType === "checkbox" || fieldType === "calc_boolean") {
+    // Handle calc_boolean like the builder: "yes", "true", "1" are truthy
+    if (typeof raw === "string") {
+      return ["yes", "true", "1"].includes(raw.trim().toLowerCase()) ? 1 : 0;
+    }
+    return raw ? 1 : 0;
+  }
+  // For currency and other numeric types, strip currency symbols and commas before parsing
+  if (fieldType === "currency" || fieldType === "calc_currency" || NUMERIC_CALC_TYPES.has(fieldType || "")) {
+    if (typeof raw === "string") {
+      // Remove currency symbols, commas, and whitespace
+      const cleaned = raw.replace(/[^0-9.\-]/g, "");
+      const n = parseFloat(cleaned);
+      return Number.isFinite(n) ? n : 0;
+    }
+  }
   const n = typeof raw === "number" ? raw : parseFloat(String(raw));
   return Number.isFinite(n) ? n : 0;
 }
 
 function coerceScopeValue(fieldType: string | undefined, raw: unknown): CalcValue {
   if (fieldType && TEXT_CALC_TYPES.has(fieldType)) return raw === null || raw === undefined ? "" : String(raw);
+  if (fieldType && BOOLEAN_CALC_TYPES.has(fieldType)) return coerceNumeric(fieldType, raw);
   return coerceNumeric(fieldType, raw);
 }
 
@@ -248,8 +273,12 @@ export interface TemplateField {
   type?: string;
 }
 
-export function buildCalcScope(allFields: TemplateField[], values: Record<string, unknown>): Record<string, CalcValue> {
-  const scope: Record<string, CalcValue> = {};
+export function buildCalcScope(
+  allFields: TemplateField[],
+  values: Record<string, unknown>,
+  registry?: Record<string, RowAggregateRegistryEntry>,
+): Record<string, CalcValue> {
+  const scope: Record<string, CalcValue> = registry ? firstRowScopeEntries(registry) : {};
   for (const f of allFields) {
     if (!f.key) continue;
     // Values here are keyed by the field's KEY (see TemplateForm.tsx — every
@@ -258,7 +287,7 @@ export function buildCalcScope(allFields: TemplateField[], values: Record<string
     // `f.id`, which is never how values are stored outside the builder's own
     // Preview (which id-keys via react-hook-form register(field.id, ...) and
     // keeps its own separate calc engine for that reason) — that mismatch
-    // silently zeroed out every top-level sibling reference in real forms,
+   // silently zeroed out every top-level sibling reference in real forms,
     // e.g. a table column formula like `= daily_subsistence_allowance`.
     scope[f.key] = coerceScopeValue(f.type, values[f.key]);
   }
@@ -286,6 +315,23 @@ type RowAggregateRegistryEntry = {
   rows: Record<string, unknown>[];
   colTypeByKey: Record<string, string | undefined>;
 };
+
+/** Build the { bareColKey / "table.col": value } fallback entries derived
+ *  from each table's FIRST row — see buildCalcScope's docstring. Bare keys
+ *  follow "first table wins" when more than one table has a same-named
+ *  column; dotted keys are always unambiguous. */
+function firstRowScopeEntries(registry: Record<string, RowAggregateRegistryEntry>): Record<string, CalcValue> {
+  const scope: Record<string, CalcValue> = {};
+  for (const [tableKey, entry] of Object.entries(registry)) {
+    const firstRow = entry.rows[0] ?? {};
+    for (const [colKey, colType] of Object.entries(entry.colTypeByKey)) {
+      const value = coerceScopeValue(colType, firstRow[colKey]);
+      if (!(colKey in scope)) scope[colKey] = value; // first table wins
+      scope[`${tableKey}.${colKey}`] = value;
+    }
+  }
+  return scope;
+}
 
 export function resolveRowAggregates(
   expression: string,

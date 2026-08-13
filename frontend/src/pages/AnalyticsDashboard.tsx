@@ -424,7 +424,7 @@ function KpiRow({ query }: { query: UseQueryResult<Overview> }) {
       <KpiTile title="Documents" value={data.documents.current ?? 0} icon={FileText} tone="primary" trend={kpiTrend(data.documents, true)} />
       <KpiTile title="Approved" value={data.approved.current ?? 0} icon={CheckCircle2} tone="success" trend={kpiTrend(data.approved, true)} />
       <KpiTile title="Pending backlog" value={data.pending_now} icon={Hourglass} tone="warning" />
-      <KpiTile title="Avg turnaround" value={fmt(data.avg_turnaround_hours.current, "h")} icon={Clock} tone="teal" trend={kpiTrend(data.avg_turnaround_hours, false)} />
+      <KpiTile title="Avg approval turnaround" value={fmt(data.avg_turnaround_hours.current, "h")} icon={Clock} tone="teal" trend={kpiTrend(data.avg_turnaround_hours, false)} />
       <KpiTile title="SLA compliance" value={fmt(data.sla_compliance.current, "%")} icon={ShieldCheck} tone="accent" trend={kpiTrend(data.sla_compliance, true)} />
       <KpiTile title="Active uploaders" value={data.active_uploaders.current ?? 0} icon={Users} tone="indigo" trend={kpiTrend(data.active_uploaders, true)} />
     </div>

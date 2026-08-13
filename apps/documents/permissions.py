@@ -100,6 +100,15 @@ class HasDocumentPermission(permissions.BasePermission):
         # ── Standard group-permission flow (unchanged) ─────────────────────
         document_type_id = str(getattr(obj, "document_type_id", None) or "")
         if not document_type_id:
+            # UNCLASS / un-typed documents are draft batch placeholders.  Let
+            # the reviewer open the preview_url / retrieve action so they can
+            # see the file before assigning the final type.  Any other action on
+            # an un-typed document is still denied.
+            action = getattr(view, "action", None)
+            if action in ("preview_url", "retrieve", "file"):
+                from apps.documents.file_streaming import _is_batch_reviewer
+                if request.user.has_admin_access or _is_batch_reviewer(request.user, obj):
+                    return True
             return False
 
         action = getattr(view, "action", None)

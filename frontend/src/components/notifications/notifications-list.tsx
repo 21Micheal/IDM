@@ -7,9 +7,11 @@ import {
   ChevronRight,
   ClipboardCheck,
   Clock,
+  FileSignature,
   Info,
   Loader2,
   PauseCircle,
+  PenLine,
   PlayCircle,
   RotateCcw,
   Share2,
@@ -140,6 +142,34 @@ export function getNotificationConfig(type: string, message = "") {
         color: "text-muted-foreground bg-muted border-border",
         label: "Workflow Update",
         category: "Workflow",
+      };
+    case "signature_requested":
+      return {
+        icon: FileSignature,
+        color: "text-violet-700 bg-violet-50 border-violet-200",
+        label: "Signature Required",
+        category: "Sign Document",
+      };
+    case "signature_signed":
+      return {
+        icon: PenLine,
+        color: "text-emerald-700 bg-emerald-50 border-emerald-200",
+        label: "Document Signed",
+        category: "Signature",
+      };
+    case "signature_declined":
+      return {
+        icon: XCircle,
+        color: "text-red-700 bg-red-50 border-red-200",
+        label: "Signature Declined",
+        category: "Signature",
+      };
+    case "signature_completed":
+      return {
+        icon: CheckCircle,
+        color: "text-emerald-700 bg-emerald-50 border-emerald-200",
+        label: "Fully Signed",
+        category: "Signatures Complete",
       };
     default:
       if (normalized.includes("overdue") || normalized.includes("urgent")) {

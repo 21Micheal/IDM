@@ -63,7 +63,7 @@
  */
 
 import { useEffect, useMemo, useState } from "react";
-import { Link } from "react-router-dom";
+import { Link, useNavigate } from "react-router-dom";
 import { useQuery } from "@tanstack/react-query";
 import { extractApiError } from "@/lib/apiError";
 import { documentsAPI, documentTypesAPI, templatesAPI, normalizeListResponse } from "@/services/api";
@@ -76,7 +76,6 @@ import {
 import CustomListbox from "@/components/ui/CustomListbox";
 import StatusBadge from "@/components/documents/StatusBadge";
 import { StatCard } from "@/components/dashboard/StatCard";
-import NewFormModal from "@/components/templates/FormUploadPage";
 
 // ── Local helpers ─────────────────────────────────────────────────────────────
 
@@ -90,6 +89,7 @@ const STATUS_CHIPS: { value: string; label: string }[] = [
   { value: "", label: "All" },
   { value: "draft", label: "Draft" },
   { value: "pending_approval", label: "Pending approval" },
+  { value: "ready_for_retirement", label: "Ready for Retirement" },
   { value: "returned", label: "Returned" },
   { value: "approved", label: "Approved" },
   { value: "rejected", label: "Rejected" },
@@ -253,6 +253,7 @@ function formatMoney(amount: number | null, currency?: string) {
 // ── Main page ─────────────────────────────────────────────────────────────────
 
 export default function FormsPage() {
+  const navigate = useNavigate();
   const [search, setSearch] = useState("");
   const [statusFilter, setStatusFilter] = useState("");
   const [stageFilter, setStageFilter] = useState("");
@@ -265,7 +266,6 @@ export default function FormsPage() {
   const [amountMin, setAmountMin] = useState("");
   const [amountMax, setAmountMax] = useState("");
   const [page, setPage] = useState(1);
-  const [showNewFormModal, setShowNewFormModal] = useState(false);
 
   // ── Imprest templates (LPO, Journal, etc.) — for the type filter. Imprest
   // is one document type with several form templates under it; this is
@@ -329,7 +329,18 @@ export default function FormsPage() {
         const ref = String(doc.reference_number || "").toLowerCase();
         if (!title.includes(q) && !ref.includes(q)) return false;
       }
-      if (statusFilter && doc.status !== statusFilter) return false;
+      // Handle status filtering: for "pending_approval", use the same logic as
+      // isPendingRequestApproval to match custom workflow status labels
+      // For "ready_for_retirement", use isReadyForRetirement
+      if (statusFilter) {
+        if (statusFilter === "pending_approval") {
+          if (!isPendingRequestApproval(doc)) return false;
+        } else if (statusFilter === "ready_for_retirement") {
+          if (!isReadyForRetirement(doc)) return false;
+        } else if (doc.status !== statusFilter) {
+          return false;
+        }
+      }
       if (stageFilter && getFormStage(doc) !== stageFilter) return false;
       if (templateFilter && String(doc?.metadata?.form?.template_id ?? "") !== templateFilter) return false;
       if (varianceFilter) {
@@ -392,7 +403,15 @@ export default function FormsPage() {
     });
     const counts: Record<string, number> = {};
     for (const chip of STATUS_CHIPS) {
-      counts[chip.value] = chip.value ? withoutStatus.filter((d) => d.status === chip.value).length : withoutStatus.length;
+      if (chip.value === "pending_approval") {
+        counts[chip.value] = withoutStatus.filter(isPendingRequestApproval).length;
+      } else if (chip.value === "ready_for_retirement") {
+        counts[chip.value] = withoutStatus.filter(isReadyForRetirement).length;
+      } else if (chip.value) {
+        counts[chip.value] = withoutStatus.filter((d) => d.status === chip.value).length;
+      } else {
+        counts[chip.value] = withoutStatus.length;
+      }
     }
     return counts;
   }, [
@@ -429,7 +448,7 @@ export default function FormsPage() {
         </div>
         <button
           type="button"
-          onClick={() => setShowNewFormModal(true)}
+          onClick={() => navigate('/forms/new')}
           className="inline-flex items-center gap-2 bg-[#287EAD] px-4 py-2.5 text-sm font-semibold text-white transition-colors hover:bg-[#1E6F99]"
         >
           <Plus className="h-4 w-4" /> New Form
@@ -457,7 +476,9 @@ export default function FormsPage() {
           value={readyForRetirementCount}
           icon={Wallet}
           color="teal"
-          href="#"
+          onClick={() => {
+            setStatusFilter("ready_for_retirement");
+          }}
         />
       </div>
 
@@ -687,7 +708,6 @@ export default function FormsPage() {
         )}
       </div>
 
-      {showNewFormModal && <NewFormModal onClose={() => setShowNewFormModal(false)} />}
     </div>
   );
 }

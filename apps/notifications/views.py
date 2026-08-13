@@ -73,6 +73,7 @@ class NotificationViewSet(
         """
         # Local imports keep this cross-app action free of import-time cycles.
         from apps.documents.models import SignatureRequest, SignatureRequestSigner
+        from apps.documents.review_queue import pending_review_count_for
         from apps.accounts.delegation import tasks_visible_to_user
 
         user = request.user
@@ -83,6 +84,7 @@ class NotificationViewSet(
         unread_notifications = base.count() - unread_task_alerts
 
         pending_tasks = tasks_visible_to_user(user).count()
+        pending_reviews = pending_review_count_for(user)
 
         incoming_signatures = (
             SignatureRequest.objects.filter(
@@ -99,6 +101,7 @@ class NotificationViewSet(
                 "unread_notifications": unread_notifications,
                 "unread_task_alerts": unread_task_alerts,
                 "pending_tasks": pending_tasks,
+                "pending_reviews": pending_reviews,
                 "incoming_signatures": incoming_signatures,
             }
         )

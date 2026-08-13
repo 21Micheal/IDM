@@ -38,6 +38,7 @@ from .models import (
     DocumentVersion,
     DocumentShare,
     DocumentRelationship,
+    Mailbox,
     Tag,
     DocTypeColor,
     DMSSettings,
@@ -493,6 +494,32 @@ class DocumentViewSet(AuditMixin, viewsets.ModelViewSet):
                 status=SignatureRequestSigner.Status.SIGNED,
             ).values("request__document_id")
             access_filter |= models.Q(id__in=signed_document_ids)
+
+            # BATCH-REVIEWER CARVE-OUT: email-ingested documents are attributed to
+            # the Email bot, not to the reviewing user, so a dedicated clause is
+            # needed. Mirrors review_queue.reviewable_bulk_uploads_for() exactly:
+            # explicit reviewer on the mailbox, fallback owner when no reviewers
+            # are assigned, and admins see all email-ingested batches.
+            from django.db.models import Count as _Count
+            _unassigned_mailbox_ids = list(
+                Mailbox.objects.annotate(_rc=_Count("reviewers"))
+                .filter(_rc=0)
+                .values_list("id", flat=True)
+            )
+            _batch_reviewer_filter = (
+                models.Q(bulk_upload__ingested_emails__mailbox__reviewers=user)
+                | (
+                    models.Q(bulk_upload__ingested_emails__mailbox_id__in=_unassigned_mailbox_ids)
+                    & models.Q(bulk_upload__ingested_emails__mailbox__created_by=user)
+                )
+            )
+            if user.has_admin_access:
+                # Admins already bypass this block entirely (outer if-branch),
+                # but keep the guard symmetric for clarity.
+                _batch_reviewer_filter |= models.Q(
+                    bulk_upload__ingested_emails__isnull=False
+                )
+            access_filter |= _batch_reviewer_filter
 
             qs = qs.filter(access_filter).distinct()
 

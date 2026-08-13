@@ -3,7 +3,7 @@ import { extractApiError } from "@/lib/apiError";
 import { useNavigate } from "react-router-dom";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import {
-  ScanLine, Loader2, ArrowRight, Info, CheckCircle, AlertCircle,
+  ScanLine, Loader2, ArrowRight, Info, CheckCircle, AlertCircle, ArrowLeft,
 } from "lucide-react";
 import { documentsAPI } from "@/services/api";
 import { toast } from "@/components/ui/vault-toast";
@@ -48,6 +48,12 @@ type BulkScanPageProps = {
    * panel renders exactly as for a freshly uploaded batch.
    */
   initialBatchId?: string;
+  /**
+   * When set, renders a back-navigation link inside the WorkspaceCommandBar
+   * instead of a separate header bar (avoids double-bar when opened from
+   * the pending-review queue).
+   */
+  backTo?: { label: string; path: string };
 };
 
 async function calculateFileSha256(file: File): Promise<string> {
@@ -58,7 +64,7 @@ async function calculateFileSha256(file: File): Promise<string> {
     .join("");
 }
 
-export default function BulkScanPage({ scanMode = true, onSingleMode, initialBatchId }: BulkScanPageProps) {
+export default function BulkScanPage({ scanMode = true, onSingleMode, initialBatchId, backTo }: BulkScanPageProps) {
   const navigate = useNavigate();
   const queryClient = useQueryClient();
 
@@ -300,19 +306,6 @@ export default function BulkScanPage({ scanMode = true, onSingleMode, initialBat
       <WorkspaceCommandBar
         actions={
           <div className="hidden items-center gap-3 text-xs text-white/80 md:flex">
-            {onSingleMode && (
-              <label className="inline-flex cursor-pointer items-center gap-2 border border-white/30 px-2.5 py-1.5 font-semibold">
-                <input
-                  type="checkbox"
-                  checked
-                  onChange={(event) => {
-                    if (!event.target.checked) onSingleMode();
-                  }}
-                  className="h-3.5 w-3.5"
-                />
-                Bulk mode
-              </label>
-            )}
             <span className="border border-white/30 px-2 py-1">
               {isRelatedSet ? "Related set" : selectedType?.name || "No type selected"}
             </span>
@@ -320,17 +313,38 @@ export default function BulkScanPage({ scanMode = true, onSingleMode, initialBat
           </div>
         }
       >
-        <div className="min-w-0">
-          <h1 className="flex items-center gap-2 text-lg font-semibold tracking-tight">
-            <ScanLine className="h-5 w-5" />
-            {scanMode ? "Bulk Scan" : "Bulk Upload"}
-          </h1>
-          <p className="mt-0.5 text-xs text-white/75">
-            {scanMode
-              ? "Upload same-type batches or related procurement sets. OCR runs per file before review."
-              : "Upload several files, preview each one, then choose its type and details during review."}
-          </p>
-        </div>
+        {backTo ? (
+          /* Opened from the review queue: show back link + page title in one bar */
+          <div className="flex min-w-0 items-center gap-3">
+            <button
+              type="button"
+              onClick={() => navigate(backTo.path)}
+              className="flex shrink-0 items-center gap-1.5 rounded px-2 py-1 text-sm font-medium text-white/80 transition hover:bg-white/10 hover:text-white"
+            >
+              <ArrowLeft className="h-4 w-4" />
+              {backTo.label}
+            </button>
+            <span className="text-white/30">|</span>
+            <div className="min-w-0">
+              <h1 className="flex items-center gap-2 text-base font-semibold tracking-tight">
+                <ScanLine className="h-4 w-4 shrink-0" />
+                <span className="truncate">Batch review</span>
+              </h1>
+            </div>
+          </div>
+        ) : (
+          <div className="min-w-0">
+            <h1 className="flex items-center gap-2 text-lg font-semibold tracking-tight">
+              <ScanLine className="h-5 w-5" />
+              {scanMode ? "Bulk Scan" : "Bulk Upload"}
+            </h1>
+            <p className="mt-0.5 text-xs text-white/75">
+              {scanMode
+                ? "Upload same-type batches or related procurement sets. OCR runs per file before review."
+                : "Upload several files, preview each one, then choose its type and details during review."}
+            </p>
+          </div>
+        )}
       </WorkspaceCommandBar>
 
       <div className="scrollbar-minimal min-h-0 flex-1 overflow-y-auto">
@@ -396,7 +410,7 @@ export default function BulkScanPage({ scanMode = true, onSingleMode, initialBat
             <div className="border border-[#C8CDD2] bg-white p-5">
               <h2 className="mb-4 font-semibold text-[#1F2933]">1. Batch mode</h2>
               {onSingleMode && (
-                <label className="mb-3 flex cursor-pointer items-center gap-2 border border-[#D3D7DA] bg-[#F7F8F9] px-3 py-2 text-sm text-[#1F2933] md:hidden">
+                <label className="mb-3 hidden cursor-pointer items-center gap-2 border border-[#D3D7DA] bg-[#F7F8F9] px-3 py-2 text-sm text-[#1F2933] md:hidden">
                   <input
                     type="checkbox"
                     checked
@@ -458,6 +472,19 @@ export default function BulkScanPage({ scanMode = true, onSingleMode, initialBat
                     : "Each file is reviewed with its preview. Fill the details before the batch is submitted to workflow."}
               </span>
             </div>
+
+            {/* Bulk mode toggle — always visible so users know they're in bulk mode */}
+            <label className="inline-flex cursor-pointer items-center gap-2 text-sm text-[#1F2933]">
+              <input
+                type="checkbox"
+                checked
+                onChange={(event) => {
+                  if (!event.target.checked && onSingleMode) onSingleMode();
+                }}
+                className="h-4 w-4 accent-[#287EAD]"
+              />
+              Use bulk mode
+            </label>
           </div>
 
           <div className="space-y-5 lg:col-span-8">
