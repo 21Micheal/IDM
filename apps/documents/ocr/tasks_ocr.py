@@ -141,8 +141,30 @@ def run_ocr(doc) -> OcrRunResult:
     provider = _normalise_setting(getattr(django_settings, "IDP_PROVIDER", "anthropic"))
     policy = IdpPolicy.load()
 
-    # Explicit dev / air-gapped regex mode — unchanged behaviour.
+    # Tenant entitlement first — never run local OCR when Claude is off and
+    # policy says ask/manual (even if env OCR_IDP_ENGINE=regex).
+    if provider in {"", "anthropic"}:
+        unavailable = claude_unavailable_reason(
+            policy=policy,
+            has_api_key=_has_anthropic_config(django_settings),
+        )
+        if unavailable:
+            logger.info(
+                "run_ocr: Claude unavailable for doc=%s (%s)",
+                doc.id,
+                unavailable,
+            )
+            return _handle_claude_failure(doc, policy=policy, reason=unavailable)
+
+    # Explicit dev / air-gapped regex mode — only when Claude is still enabled
+    # at tenant level; otherwise honour the fallback policy above.
     if provider == "regex" or idp_engine == "regex":
+        if not policy.claude_enabled:
+            return _handle_claude_failure(
+                doc,
+                policy=policy,
+                reason="subscription_inactive",
+            )
         text, metadata_updates = _run_local_pipeline(doc)
         return OcrRunResult(text, metadata_updates, OCRStatus.DONE)
 
@@ -157,18 +179,6 @@ def run_ocr(doc) -> OcrRunResult:
             policy=policy,
             reason=f"unsupported_provider:{provider}",
         )
-
-    unavailable = claude_unavailable_reason(
-        policy=policy,
-        has_api_key=_has_anthropic_config(django_settings),
-    )
-    if unavailable:
-        logger.info(
-            "run_ocr: Claude unavailable for doc=%s (%s)",
-            doc.id,
-            unavailable,
-        )
-        return _handle_claude_failure(doc, policy=policy, reason=unavailable)
 
     pages = estimate_claude_pages(doc)
     if not policy.has_page_budget(pages):

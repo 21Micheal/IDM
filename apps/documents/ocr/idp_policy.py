@@ -133,3 +133,38 @@ def build_needs_manual_metadata(*, reason: str, awaiting_user_choice: bool) -> d
             },
         },
     }
+
+
+def apply_idp_unavailable_state(document) -> bool:
+    """
+    Mark a document needs_manual when Claude cannot run and policy forbids
+    automatic regex. Skips queuing the heavy local OCR pipeline.
+
+    Returns True when the document was updated (caller should not queue OCR).
+    """
+    from django.conf import settings as django_settings
+
+    from apps.documents.models import OCRStatus
+
+    policy = IdpPolicy.load()
+    reason = claude_unavailable_reason(
+        policy=policy,
+        has_api_key=bool(getattr(django_settings, "ANTHROPIC_API_KEY", "").strip()),
+    )
+    if not reason or policy.should_use_regex_on_failure(reason):
+        return False
+
+    metadata_updates = build_needs_manual_metadata(
+        reason=reason,
+        awaiting_user_choice=policy.awaiting_user_choice(),
+    )
+    current_metadata = document.metadata or {}
+    merged_metadata = {**current_metadata, **metadata_updates}
+
+    type(document).objects.filter(id=document.id).update(
+        ocr_status=OCRStatus.NEEDS_MANUAL,
+        metadata=merged_metadata,
+    )
+    document.ocr_status = OCRStatus.NEEDS_MANUAL
+    document.metadata = merged_metadata
+    return True

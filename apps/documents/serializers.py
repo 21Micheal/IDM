@@ -1263,24 +1263,44 @@ class DocumentUploadSerializer(serializers.ModelSerializer):
         if is_scanned:
             # Confirmed scan: go straight to OCR, skip extract_text hop
             try:
+                from apps.documents.ocr.idp_policy import apply_idp_unavailable_state
                 from apps.documents.tasks import ocr_document
-                # Mark pending before queuing so the UI shows the badge instantly.
-                # Use update() directly (not _mark_pending()) to avoid the
-                # filter-on-status guard that _mark_pending() applies.
-                Document.objects.filter(id=doc.id).update(
-                    ocr_status=OCRStatus.PENDING
-                )
-                ocr_document.delay(str(doc.id))
-                from apps.audit.models import AuditEvent
-                from apps.audit.utils import record_audit_event
 
-                record_audit_event(
-                    AuditEvent.DOCUMENT_OCR_QUEUED,
-                    actor=request.user,
-                    obj=doc,
-                    request=request,
-                    changes={"source": "upload", "is_scanned": True},
-                )
+                if apply_idp_unavailable_state(doc):
+                    from apps.audit.models import AuditEvent
+                    from apps.audit.utils import record_audit_event
+
+                    record_audit_event(
+                        AuditEvent.DOCUMENT_OCR_COMPLETED,
+                        actor=request.user,
+                        obj=doc,
+                        request=request,
+                        changes={
+                            "source": "upload",
+                            "is_scanned": True,
+                            "skipped_pipeline": True,
+                            "ocr_status": OCRStatus.NEEDS_MANUAL,
+                        },
+                    )
+                else:
+                    # Mark pending before queuing so the UI shows the badge instantly.
+                    # Use update() directly (not _mark_pending()) to avoid the
+                    # filter-on-status guard that _mark_pending() applies.
+                    Document.objects.filter(id=doc.id).update(
+                        ocr_status=OCRStatus.PENDING
+                    )
+                    doc.ocr_status = OCRStatus.PENDING
+                    ocr_document.delay(str(doc.id))
+                    from apps.audit.models import AuditEvent
+                    from apps.audit.utils import record_audit_event
+
+                    record_audit_event(
+                        AuditEvent.DOCUMENT_OCR_QUEUED,
+                        actor=request.user,
+                        obj=doc,
+                        request=request,
+                        changes={"source": "upload", "is_scanned": True},
+                    )
             except Exception as exc:
                 import logging
                 logging.getLogger(__name__).error(

@@ -1519,7 +1519,16 @@ export default function UploadPage({ scanOnly = false }: UploadPageProps) {
       setUploadProgress(0);
       if (isOcrFlow) {
         setUploadedDocId(data.id);
-        setScanStage(data.ocr_status === "processing" ? "ocr_processing" : "ocr_pending");
+        if (data.ocr_status === "needs_manual") {
+          void documentsAPI.ocrSuggestions(data.id).then(({ data: ocrData }) => {
+            handleOcrComplete(ocrData);
+          }).catch(() => {
+            setScanStage("ocr_failed");
+            toast.warning("Automatic extraction unavailable. Fill in the details manually.");
+          });
+        } else {
+          setScanStage(data.ocr_status === "processing" ? "ocr_processing" : "ocr_pending");
+        }
       } else {
         const msg = isSelfUpload ? "Personal document saved" : "Document uploaded";
         toast.success(`${msg}: ${data.reference_number}`);
