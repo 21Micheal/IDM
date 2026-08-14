@@ -9,6 +9,8 @@ from __future__ import annotations
 import logging
 from dataclasses import dataclass
 
+from apps.documents.ocr.status import clear_ocr_tracking_metadata
+
 logger = logging.getLogger(__name__)
 
 
@@ -160,6 +162,7 @@ def apply_idp_unavailable_state(document) -> bool:
     )
     current_metadata = document.metadata or {}
     merged_metadata = {**current_metadata, **metadata_updates}
+    merged_metadata = clear_ocr_tracking_metadata(merged_metadata)
 
     type(document).objects.filter(id=document.id).update(
         ocr_status=OCRStatus.NEEDS_MANUAL,

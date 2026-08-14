@@ -263,6 +263,8 @@ export default function DocumentDetailPage() {
   const printFrameRef = useRef<HTMLIFrameElement | null>(null);
 
   const pollRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  const ocrPollCountRef = useRef(0);
+  const OCR_DETAIL_POLL_MAX = 60; // ~5 minutes at 5s intervals
 
   const { data: doc, isLoading } = useQuery<Document>({
     queryKey: ["document", id],
@@ -379,14 +381,23 @@ export default function DocumentDetailPage() {
   useEffect(() => {
     if ((!ocrActive && !previewActive) || !id) {
       if (pollRef.current) clearInterval(pollRef.current);
+      ocrPollCountRef.current = 0;
       return;
     }
+    ocrPollCountRef.current = 0;
     pollRef.current = setInterval(() => {
       if (typeof document !== "undefined" && document.hidden) return;
+      ocrPollCountRef.current += 1;
+      if (ocrActive && ocrPollCountRef.current > OCR_DETAIL_POLL_MAX) {
+        if (pollRef.current) clearInterval(pollRef.current);
+        toast.warning("OCR is taking longer than expected. Use Re-run OCR or fill details manually.");
+        return;
+      }
       qc.invalidateQueries({ queryKey: ["document", id] });
     }, previewActive ? 2_000 : 5_000);
     return () => {
       if (pollRef.current) clearInterval(pollRef.current);
+      ocrPollCountRef.current = 0;
     };
   }, [ocrActive, previewActive, id, qc]);
 
@@ -542,8 +553,13 @@ export default function DocumentDetailPage() {
 
   const reOcrMutation = useMutation({
     mutationFn: () => (documentsAPI as any).reOcr(id!),
-    onSuccess: () => {
-      toast.info("OCR queued. Text will be updated shortly.");
+    onSuccess: (response: { data?: { ocr_status?: string; detail?: string } }) => {
+      const status = response?.data?.ocr_status;
+      if (status === "needs_manual") {
+        toast.info(response?.data?.detail ?? "Claude extraction unavailable — fill in details manually.");
+      } else {
+        toast.info("OCR queued. Text will be updated shortly.");
+      }
       qc.invalidateQueries({ queryKey: ["document", id] });
     },
     onError: (err) => toast.error(extractApiError(err, "Could not queue OCR. Please try again.")),
@@ -1249,6 +1265,28 @@ export default function DocumentDetailPage() {
                   >
                     {reOcrMutation.isPending ? <Loader2 className="h-3 w-3 animate-spin" /> : <RefreshCw className="h-3 w-3" />}
                     Re-run OCR
+                  </button>
+                )}
+              </div>
+            </div>
+          )}
+
+          {ocrStatus === "needs_manual" && (
+            <div className="flex items-start gap-3 border border-amber-200 bg-amber-50 px-4 py-3 text-xs text-amber-800 shadow-sm">
+              <AlertTriangle className="mt-0.5 h-4 w-4 flex-shrink-0" />
+              <div className="flex-1">
+                <p className="font-semibold">Manual metadata required</p>
+                <p className="mt-0.5 text-[10px] text-amber-700/90">
+                  Automatic extraction did not run or returned no fields. Fill in the document details below.
+                </p>
+                {canReOcr && (
+                  <button
+                    onClick={() => reOcrMutation.mutate()}
+                    disabled={reOcrMutation.isPending}
+                    className="mt-2 inline-flex items-center gap-1 text-[10px] font-semibold text-amber-800 hover:underline"
+                  >
+                    {reOcrMutation.isPending ? <Loader2 className="h-3 w-3 animate-spin" /> : <RefreshCw className="h-3 w-3" />}
+                    Retry extraction
                   </button>
                 )}
               </div>

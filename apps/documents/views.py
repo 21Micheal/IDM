@@ -539,6 +539,10 @@ class DocumentViewSet(AuditMixin, viewsets.ModelViewSet):
 
     def retrieve(self, request, *args, **kwargs):
         instance = self.get_object()
+        from apps.documents.ocr.status import heal_stale_ocr_status
+
+        if heal_stale_ocr_status(instance):
+            instance.refresh_from_db()
         self._prepare_builder_workflow_phase(instance)
         instance.refresh_from_db(fields=["metadata", "updated_at"])
         self.record_audit(AuditEvent.DOCUMENT_VIEWED, instance, {})
@@ -1926,7 +1930,13 @@ echo "✓ DocVault LibreOffice integration installed."
     def re_ocr(self, request, pk=None):
         from .models import OCRStatus
         from .tasks import ocr_document
+        from apps.documents.ocr.idp_policy import apply_idp_unavailable_state
+        from apps.documents.ocr.status import heal_stale_ocr_status, merge_ocr_queued_metadata
+
         doc = self.get_object()
+        heal_stale_ocr_status(doc)
+        doc.refresh_from_db(fields=["ocr_status", "metadata", "updated_at"])
+
         is_ocr_candidate = (
             doc.is_scanned or (doc.file_mime_type and doc.file_mime_type.startswith("image/"))
             or doc.file_mime_type == "application/pdf"
@@ -1937,7 +1947,19 @@ echo "✓ DocVault LibreOffice integration installed."
         if doc.ocr_status in (OCRStatus.PENDING, OCRStatus.PROCESSING):
             return Response({"detail": "OCR is already in progress."}, status=400)
 
-        Document.objects.filter(id=doc.id).update(ocr_status=OCRStatus.PENDING, is_scanned=True)
+        if apply_idp_unavailable_state(doc):
+            self.record_audit(AuditEvent.DOCUMENT_OCR_COMPLETED, doc)
+            return Response({
+                "detail": "Claude extraction unavailable — fill in details manually.",
+                "ocr_status": OCRStatus.NEEDS_MANUAL,
+            })
+
+        queued_metadata = merge_ocr_queued_metadata(doc.metadata)
+        Document.objects.filter(id=doc.id).update(
+            ocr_status=OCRStatus.PENDING,
+            is_scanned=True,
+            metadata=queued_metadata,
+        )
         ocr_document.delay(str(doc.id))
         self.record_audit(AuditEvent.DOCUMENT_OCR_QUEUED, doc)
         return Response({"detail": "OCR queued.", "ocr_status": OCRStatus.PENDING})
@@ -1963,16 +1985,10 @@ echo "✓ DocVault LibreOffice integration installed."
         from .models import OCRStatus
         doc = self.get_object()
 
-        # Auto-heal stale OCR states so frontend pollers don't spin forever.
-        if doc.ocr_status in (OCRStatus.PENDING, OCRStatus.PROCESSING):
-            stale_after = int(getattr(settings, "OCR_PROCESSING_STALE_SECONDS", 300))
-            age_seconds = max(0, int((timezone.now() - doc.updated_at).total_seconds()))
-            if age_seconds >= stale_after:
-                Document.objects.filter(
-                    id=doc.id,
-                    ocr_status__in=[OCRStatus.PENDING, OCRStatus.PROCESSING],
-                ).update(ocr_status=OCRStatus.FAILED, updated_at=timezone.now())
-                doc.refresh_from_db(fields=["ocr_status", "updated_at"])
+        from apps.documents.ocr.status import heal_stale_ocr_status
+
+        if heal_stale_ocr_status(doc):
+            doc.refresh_from_db(fields=["ocr_status", "metadata", "updated_at"])
 
         meta = doc.metadata or {}
         suggestions = None

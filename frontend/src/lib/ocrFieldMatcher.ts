@@ -301,8 +301,6 @@ function jaccard(a: Set<string>, b: Set<string>): number {
   return intersection.size / union.size;
 }
 
-// ── Pass 4: semantic group table ───────────────────────────────────────────
-
 const SEMANTIC_GROUPS: Record<string, Array<keyof OcrFields>> = {
   currency:  ["amount", "subtotal", "tax_amount", "contract_value"],
   number:    ["amount", "subtotal", "tax_amount"],
@@ -314,6 +312,15 @@ const SEMANTIC_GROUPS: Record<string, Array<keyof OcrFields>> = {
   select:    ["currency", "payment_method", "payment_terms"],
   textarea:  ["registered_address"],
 };
+
+const ADMIN_LABEL_FALLBACKS: Array<{ pattern: RegExp; ocrKey: OcrFieldKey }> = [
+  { pattern: /goods receipt|grn|gr note|receipt note|delivery note number/, ocrKey: "reference_number" },
+  { pattern: /invoice number|invoice no|tax invoice/, ocrKey: "reference_number" },
+  { pattern: /\bpo number\b|purchase order|\blpo\b|po ref/, ocrKey: "po_reference" },
+  { pattern: /transaction ref|payment ref|mpesa|cheque number/, ocrKey: "transaction_ref" },
+  { pattern: /due date|payment due/, ocrKey: "due_date" },
+  { pattern: /document date|invoice date|issue date|grn date/, ocrKey: "document_date" },
+];
 
 // ── Main scorer ────────────────────────────────────────────────────────────
 
@@ -355,7 +362,21 @@ export function matchOcrToField(
     }
   }
 
-  if (bestScore === 0 || bestKey === null) return null;
+  if (bestScore === 0 || bestKey === null) {
+    const labelText = `${fieldLabel} ${fieldKey.replace(/_/g, " ")}`.toLowerCase();
+    for (const route of ADMIN_LABEL_FALLBACKS) {
+      if (!route.pattern.test(labelText)) continue;
+      const value = cleanedOcrFields[route.ocrKey];
+      if (typeof value === "string" && value.trim()) {
+        return {
+          ocrKey: route.ocrKey,
+          score: 3,
+          value: value.trim(),
+        };
+      }
+    }
+    return null;
+  }
 
   return {
     ocrKey: bestKey,

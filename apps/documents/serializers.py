@@ -1283,13 +1283,18 @@ class DocumentUploadSerializer(serializers.ModelSerializer):
                         },
                     )
                 else:
+                    from apps.documents.ocr.status import merge_ocr_queued_metadata
+
                     # Mark pending before queuing so the UI shows the badge instantly.
                     # Use update() directly (not _mark_pending()) to avoid the
                     # filter-on-status guard that _mark_pending() applies.
+                    queued_metadata = merge_ocr_queued_metadata(doc.metadata)
                     Document.objects.filter(id=doc.id).update(
-                        ocr_status=OCRStatus.PENDING
+                        ocr_status=OCRStatus.PENDING,
+                        metadata=queued_metadata,
                     )
                     doc.ocr_status = OCRStatus.PENDING
+                    doc.metadata = queued_metadata
                     ocr_document.delay(str(doc.id))
                     from apps.audit.models import AuditEvent
                     from apps.audit.utils import record_audit_event

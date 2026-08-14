@@ -251,6 +251,7 @@ def ocr_document(self, document_id: str):
     UPDATE so that duplicate Celery deliveries are safely no-ops.
     """
     from .models import Document, OCRStatus
+    from apps.documents.ocr.status import clear_ocr_tracking_metadata
 
     # Atomic claim — only one worker proceeds
     claimed = Document.objects.filter(
@@ -270,6 +271,14 @@ def ocr_document(self, document_id: str):
         except Document.DoesNotExist:
             logger.warning("ocr_document: document %s not found", document_id)
         return
+
+    from apps.documents.ocr.status import merge_ocr_processing_metadata
+
+    doc_for_tracking = Document.objects.filter(id=document_id).first()
+    if doc_for_tracking:
+        Document.objects.filter(id=document_id).update(
+            metadata=merge_ocr_processing_metadata(doc_for_tracking.metadata),
+        )
 
     try:
         doc = (
@@ -295,6 +304,7 @@ def ocr_document(self, document_id: str):
         # Use the existing metadata as the base; never clobber unrelated keys.
         current_metadata = doc.metadata or {}
         updated_metadata = {**current_metadata, **metadata_updates}
+        updated_metadata = clear_ocr_tracking_metadata(updated_metadata)
 
         # If OCR suggested structured fields, persist a few high-value
         # suggestions into top-level Document columns *only when those
@@ -410,7 +420,14 @@ def ocr_document(self, document_id: str):
         # Permanent code/config/runtime import errors should not be retried;
         # mark failed immediately so frontend polling can terminate.
         if isinstance(exc, (SyntaxError, ImportError, ModuleNotFoundError)):
-            Document.objects.filter(id=document_id).update(ocr_status=OCRStatus.FAILED)
+            Document.objects.filter(id=document_id).update(
+                ocr_status=OCRStatus.FAILED,
+                metadata=clear_ocr_tracking_metadata(
+                    Document.objects.filter(id=document_id)
+                    .values_list("metadata", flat=True)
+                    .first()
+                ),
+            )
             try:
                 from apps.audit.models import AuditEvent
                 from apps.audit.utils import record_audit_event
@@ -433,7 +450,12 @@ def ocr_document(self, document_id: str):
             raise self.retry(exc=exc, countdown=120)
         except self.MaxRetriesExceededError:
             Document.objects.filter(id=document_id).update(
-                ocr_status=OCRStatus.FAILED
+                ocr_status=OCRStatus.FAILED,
+                metadata=clear_ocr_tracking_metadata(
+                    Document.objects.filter(id=document_id)
+                    .values_list("metadata", flat=True)
+                    .first()
+                ),
             )
             try:
                 from apps.audit.models import AuditEvent
@@ -1360,7 +1382,13 @@ def _mark_pending(document_id: str, auto_flag_scanned: bool = False) -> None:
     scanned PDFs. Does not overwrite PROCESSING or DONE.
     """
     from .models import Document, OCRStatus
-    fields: dict = {"ocr_status": OCRStatus.PENDING}
+    from apps.documents.ocr.status import merge_ocr_queued_metadata
+
+    doc = Document.objects.filter(id=document_id).only("metadata").first()
+    fields: dict = {
+        "ocr_status": OCRStatus.PENDING,
+        "metadata": merge_ocr_queued_metadata(doc.metadata if doc else {}),
+    }
     if auto_flag_scanned:
         fields["is_scanned"] = True
     Document.objects.filter(

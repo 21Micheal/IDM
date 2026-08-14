@@ -616,6 +616,9 @@ function PersonalMetadataRow({
 
 // ── OCR polling hook ──────────────────────────────────────────────────────────
 
+const OCR_POLL_MS = 3000;
+const OCR_POLL_MAX_ATTEMPTS = 100; // ~5 minutes at 3s intervals
+
 function parseOcrSuggestionsPayload(
   raw: OcrSuggestionsResponse["suggestions"],
 ): OcrSuggestions {
@@ -631,11 +634,20 @@ function useOcrPoller(
   onFailed:      () => void,
 ) {
   const intervalRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  const attemptsRef = useRef(0);
 
   useEffect(() => {
     if (!enabled || !documentId) return;
 
+    attemptsRef.current = 0;
+
     const poll = async () => {
+      attemptsRef.current += 1;
+      if (attemptsRef.current > OCR_POLL_MAX_ATTEMPTS) {
+        if (intervalRef.current) clearInterval(intervalRef.current);
+        onFailed();
+        return;
+      }
       try {
         const { data } = await documentsAPI.ocrSuggestions(documentId);
         if (data.ocr_status === "done" || data.ocr_status === "needs_manual") {
@@ -649,7 +661,7 @@ function useOcrPoller(
     };
 
     poll();
-    intervalRef.current = setInterval(poll, 3000);
+    intervalRef.current = setInterval(poll, OCR_POLL_MS);
     return () => { if (intervalRef.current) clearInterval(intervalRef.current); };
      
   }, [documentId, enabled, onComplete, onFailed]);
