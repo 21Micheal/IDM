@@ -17,7 +17,7 @@ import {
   type Path,
   type UseFormRegister,
 } from "react-hook-form";
-import { documentsAPI, documentTypesAPI, normalizeListResponse, templatesAPI, profileAPI } from "@/services/api";
+import { documentsAPI, documentTypesAPI, normalizeListResponse, templatesAPI, profileAPI, type OcrSuggestionsResponse } from "@/services/api";
 import {
   Upload, File, X, Loader2, ArrowRight, CheckCircle, Plus, Lock,
   Info, ScanLine, Sparkles, AlertCircle, ChevronRight, ShieldAlert,
@@ -31,6 +31,7 @@ import { extractApiError } from "@/lib/apiError";
 import { deriveDocumentTypeConfig } from "@/lib/documentTypeConfig";
 import { applyOcrToFields, sanitizeOcrFields, type OcrFields } from "@/lib/ocrFieldMatcher";
 import BulkScanPage from "@/pages/BulkScanPage";
+import IdpFailureModal, { type IdpFailureReason } from "@/components/documents/IdpFailureModal";
 import TemplatePreview from "@/components/templates/TemplatePreview";
 import { resolveSource, type ReferenceValue } from "@/components/templates/referenceSources";
 import { WorkspaceCommandBar } from "@/components/shared/WorkspaceCommandBar";
@@ -85,7 +86,10 @@ type OcrQuality = {
   low_quality_warning?:   boolean;
   total_pages?:           number;
   low_quality_pages?:     number;
-  engine?:                "paddle" | "tesseract" | "textract" | string;
+  engine?:                string;
+  fallback_reason?:       string;
+  requires_review?:       boolean;
+  awaiting_user_choice?:  boolean;
 };
 
 type OcrSuggestions = {
@@ -100,6 +104,7 @@ type ScanStage =
   | "ocr_processing"
   | "ocr_done"
   | "ocr_failed"
+  | "ocr_needs_choice"
   | "submitting";
 
 const PREVIEW_HEIGHT = "h-[clamp(34rem,calc(100vh-15rem),46rem)]";
@@ -290,16 +295,39 @@ function SuggestionPill({ score }: { score?: number }) {
 
 function EngineBadge({ engine }: { engine?: string }) {
   if (!engine) return null;
+  const normalized = engine.toLowerCase();
   const label =
-    engine === "paddle"    ? "PaddleOCR"
-    : engine === "tesseract" ? "Tesseract"
-    : engine === "textract"  ? "AWS Textract"
+    normalized.startsWith("claude") ? "Claude"
+    : normalized === "regex" ? "Pattern matching"
+    : normalized === "paddle" ? "PaddleOCR"
+    : normalized === "tesseract" ? "Tesseract"
+    : normalized === "textract" ? "AWS Textract"
     : engine;
+  const tone =
+    normalized.startsWith("claude")
+      ? "bg-teal/15 text-teal border-teal/25"
+      : normalized === "regex"
+        ? "bg-amber-50 text-amber-800 border-amber-200"
+        : "bg-muted border-border text-muted-foreground";
   return (
-    <span className="inline-flex items-center gap-1 text-[10px] font-semibold px-1.5 py-0.5 rounded-full bg-muted border border-border text-muted-foreground">
+    <span className={`inline-flex items-center gap-1 text-[10px] font-semibold px-1.5 py-0.5 rounded-full border ${tone}`}>
       <Cpu className="w-2.5 h-2.5" />
       {label}
     </span>
+  );
+}
+
+function PatternMatchingBanner() {
+  return (
+    <div className="flex items-start gap-3 rounded-xl border border-amber-200 bg-amber-50 px-4 py-3 mb-6">
+      <ShieldAlert className="w-5 h-5 text-amber-500 flex-shrink-0 mt-0.5" />
+      <div>
+        <p className="text-sm font-semibold text-amber-800">Pattern matching — verify every field</p>
+        <p className="text-xs text-amber-700 mt-0.5">
+          These values were guessed from document layout, not extracted by Claude. Confirm amounts, dates, and supplier before saving.
+        </p>
+      </div>
+    </div>
   );
 }
 
@@ -588,10 +616,18 @@ function PersonalMetadataRow({
 
 // ── OCR polling hook ──────────────────────────────────────────────────────────
 
+function parseOcrSuggestionsPayload(
+  raw: OcrSuggestionsResponse["suggestions"],
+): OcrSuggestions {
+  if (!raw || typeof raw !== "object") return {};
+  if ("fields" in raw || "quality" in raw) return raw as OcrSuggestions;
+  return { fields: raw as OcrFields };
+}
+
 function useOcrPoller(
   documentId:    string | null,
   enabled:       boolean,
-  onDone:        (suggestions: OcrSuggestions) => void,
+  onComplete:    (response: OcrSuggestionsResponse) => void,
   onFailed:      () => void,
 ) {
   const intervalRef = useRef<ReturnType<typeof setInterval> | null>(null);
@@ -602,16 +638,9 @@ function useOcrPoller(
     const poll = async () => {
       try {
         const { data } = await documentsAPI.ocrSuggestions(documentId);
-        if (data.ocr_status === "done") {
+        if (data.ocr_status === "done" || data.ocr_status === "needs_manual") {
           if (intervalRef.current) clearInterval(intervalRef.current);
-          const raw = data.suggestions as Record<string, unknown> | null;
-          let parsed: OcrSuggestions = {};
-          if (raw && typeof raw === "object") {
-            parsed = ("fields" in raw || "quality" in raw)
-              ? (raw as OcrSuggestions)
-              : { fields: raw as OcrFields };
-          }
-          onDone(parsed);
+          onComplete(data);
         } else if (data.ocr_status === "failed") {
           if (intervalRef.current) clearInterval(intervalRef.current);
           onFailed();
@@ -623,7 +652,7 @@ function useOcrPoller(
     intervalRef.current = setInterval(poll, 3000);
     return () => { if (intervalRef.current) clearInterval(intervalRef.current); };
      
-  }, [documentId, enabled]);
+  }, [documentId, enabled, onComplete, onFailed]);
 }
 
 // ── OCR wait screen ───────────────────────────────────────────────────────────
@@ -1028,6 +1057,10 @@ export default function UploadPage({ scanOnly = false }: UploadPageProps) {
   // Map from form path → OCR confidence score
   const [suggestedFields,  setSuggestedFields]  = useState<Map<string, number>>(new Map());
   const [showPersonalExtras, setShowPersonalExtras] = useState(false);
+  const [idpModalOpen, setIdpModalOpen] = useState(false);
+  const [idpFailureReason, setIdpFailureReason] = useState<IdpFailureReason>("extraction_error");
+  const [idpAllowRegex, setIdpAllowRegex] = useState(false);
+  const [idpFallbackPending, setIdpFallbackPending] = useState(false);
 
   const {
     register, handleSubmit, control, reset, setValue, clearErrors, getValues,
@@ -1200,110 +1233,145 @@ export default function UploadPage({ scanOnly = false }: UploadPageProps) {
 
   // ── OCR poller ──────────────────────────────────────────────────────────────
 
+  const applyExtractedSuggestions = useCallback((suggestions: OcrSuggestions) => {
+    const fields = sanitizeOcrFields(suggestions.fields ?? {});
+    const sanitizedSuggestions = { ...suggestions, fields };
+    setOcrSuggestions(sanitizedSuggestions);
+    setScanStage("ocr_done");
+
+    const scoreMap = new Map<string, number>();
+
+    if (Array.isArray(fields.line_items) && fields.line_items.length > 0) {
+      setOcrLineItems(fields.line_items as unknown as OcrLineItem[]);
+    }
+
+    const fillDirect = (key: Path<UploadFormValues>, value: unknown, score = 4) => {
+      const scalar = ocrScalar(value);
+      if (scalar) {
+        const normalized = String(key).endsWith("_date")
+          ? normalizeDateInput(scalar)
+          : scalar;
+        setValue(key, normalized);
+        scoreMap.set(key, score);
+      }
+    };
+
+    fillDirect("supplier", fields.supplier);
+    fillDirect("amount", fields.amount);
+    fillDirect("currency", fields.currency);
+    fillDirect("document_date", fields.document_date);
+    fillDirect("due_date", fields.due_date);
+    fillDirect("quantity", ocrString(fields.quantity));
+    fillDirect("description", ocrString(fields.description));
+    fillDirect("uom", ocrString(fields.uom));
+
+    if (selectedType?.metadata_fields?.length) {
+      for (const field of selectedType.metadata_fields) {
+        const metadataKey = getMetadataFieldKey(field);
+        if (!metadataKey || isDirectColumnKey(metadataKey)) continue;
+        const value = getExactOcrValueForField(field, fields);
+        if (!value) continue;
+        const formPath = `metadata.${metadataKey}` as Path<UploadFormValues>;
+        const normalized = field.field_type === "date" ? normalizeDateInput(value) : value;
+        setValue(formPath, normalized);
+        scoreMap.set(formPath, 4);
+      }
+
+      const matches = applyOcrToFields(selectedType.metadata_fields, fields);
+      for (const { field, match } of matches) {
+        const metadataKey = getMetadataFieldKey(field);
+        if (!metadataKey) continue;
+
+        const formPath: Path<UploadFormValues> = isDocumentFieldKey(metadataKey)
+          ? (metadataKey as Path<UploadFormValues>)
+          : (`metadata.${metadataKey}` as Path<UploadFormValues>);
+
+        const existingScore = scoreMap.get(formPath) ?? 0;
+        if (match.score > existingScore) {
+          setValue(formPath, match.value);
+          const trackKey = isDocumentFieldKey(metadataKey)
+            ? metadataKey
+            : `metadata.${metadataKey}`;
+          scoreMap.set(trackKey, match.score);
+        }
+      }
+    }
+
+    setSuggestedFields(scoreMap);
+
+    const engine = suggestions.quality?.engine?.toLowerCase() ?? "";
+    const warn = suggestions.quality?.low_quality_warning;
+    const isRegex = engine === "regex";
+
+    if (isRegex) {
+      toast.warning("Pattern matching complete — verify every field before saving.");
+    } else if (warn) {
+      toast.warning("OCR complete — low scan quality detected. Please verify all fields carefully.");
+    } else if (engine.startsWith("claude")) {
+      toast.success("Claude extraction complete. Review the details below.");
+    } else {
+      toast.success("OCR complete. Review the extracted details below.");
+    }
+  }, [selectedType, setValue]);
+
+  const handleOcrComplete = useCallback((response: OcrSuggestionsResponse) => {
+    const suggestions = parseOcrSuggestionsPayload(response.suggestions);
+    const quality = suggestions.quality;
+    const reason = (quality?.fallback_reason ?? "extraction_error") as IdpFailureReason;
+
+    if (response.ocr_status === "needs_manual") {
+      setOcrSuggestions(suggestions);
+      if (quality?.awaiting_user_choice) {
+        setIdpFailureReason(reason);
+        setIdpAllowRegex(Boolean(response.idp_policy?.allow_regex_fallback));
+        setIdpModalOpen(true);
+        setScanStage("ocr_needs_choice");
+        return;
+      }
+      setScanStage("ocr_failed");
+      toast.warning(
+        reason === "subscription_inactive"
+          ? "Claude extraction is unavailable. Fill in the details manually."
+          : reason === "quota_exhausted"
+            ? "Claude page allowance is used up. Fill in the details manually."
+            : "Automatic extraction unavailable. Fill in the details manually.",
+      );
+      return;
+    }
+
+    applyExtractedSuggestions(suggestions);
+  }, [applyExtractedSuggestions]);
+
   useOcrPoller(
     uploadedDocId,
     isOcrFlow && (scanStage === "ocr_pending" || scanStage === "ocr_processing"),
-
-    // onDone — run 4-pass matcher against every admin-configured metadata field
-    (suggestions) => {
-      const fields = sanitizeOcrFields(suggestions.fields ?? {});
-      const sanitizedSuggestions = { ...suggestions, fields };
-      setOcrSuggestions(sanitizedSuggestions);
-      setScanStage("ocr_done");
-
-      const scoreMap  = new Map<string, number>();
-
-      // Store detected line items for display
-      if (Array.isArray(fields.line_items) && fields.line_items.length > 0) {
-        setOcrLineItems(fields.line_items as unknown as OcrLineItem[]);
-      }
-
-      // Helper — fill a named form field and record its confidence score
-      const fillDirect = (key: Path<UploadFormValues>, value: unknown, score = 4) => {
-        const scalar = ocrScalar(value);
-        if (scalar) {
-          const normalized = String(key).endsWith("_date")
-            ? normalizeDateInput(scalar)
-            : scalar;
-          setValue(key, normalized);
-          scoreMap.set(key, score);
-        }
-      };
-
-      // 1. Fill the six first-class Document columns (direct DB fields)
-      fillDirect("supplier",      fields.supplier);
-      fillDirect("amount",        fields.amount);
-      fillDirect("currency",      fields.currency);
-      fillDirect("document_date", fields.document_date);
-      fillDirect("due_date",      fields.due_date);
-
-      // 2. Fill the three new line-item fields
-      fillDirect("quantity",    ocrString(fields.quantity));
-      fillDirect("description", ocrString(fields.description));
-      fillDirect("uom",         ocrString(fields.uom));
-
-      // 3. Fill admin metadata fields using the 4-pass matcher
-      if (selectedType?.metadata_fields?.length) {
-        for (const field of selectedType.metadata_fields) {
-          const metadataKey = getMetadataFieldKey(field);
-          if (!metadataKey || isDirectColumnKey(metadataKey)) continue;
-          const value = getExactOcrValueForField(field, fields);
-          if (!value) continue;
-          const formPath = `metadata.${metadataKey}` as Path<UploadFormValues>;
-          const normalized = field.field_type === "date" ? normalizeDateInput(value) : value;
-          setValue(formPath, normalized);
-          scoreMap.set(formPath, 4);
-        }
-
-        const matches = applyOcrToFields(selectedType.metadata_fields, fields);
-
-        for (const { field, match } of matches) {
-          const metadataKey = getMetadataFieldKey(field);
-          if (!metadataKey) continue;
-
-          const formPath: Path<UploadFormValues> = isDocumentFieldKey(metadataKey)
-            ? (metadataKey as Path<UploadFormValues>)
-            : (`metadata.${metadataKey}` as Path<UploadFormValues>);
-
-          // Don't overwrite a higher-confidence direct fill
-          const existingScore = scoreMap.get(formPath) ?? 0;
-          if (match.score > existingScore) {
-            setValue(formPath, match.value);
-            const trackKey = isDocumentFieldKey(metadataKey)
-              ? metadataKey
-              : `metadata.${metadataKey}`;
-            scoreMap.set(trackKey, match.score);
-          }
-        }
-      }
-
-      setSuggestedFields(scoreMap);
-
-      const engine    = suggestions.quality?.engine;
-      const warn      = suggestions.quality?.low_quality_warning;
-      const engineLabel =
-        engine === "paddle"    ? "PaddleOCR"
-        : engine === "tesseract" ? "Tesseract"
-        : engine === "textract"  ? "AWS Textract"
-        : "";
-
-      if (warn) {
-        toast.warning("OCR complete — low scan quality detected. Please verify all fields carefully.");
-      } else {
-        toast.success(
-          engineLabel
-            ? `OCR complete (${engineLabel})! Review the extracted details below.`
-            : "OCR complete! Review the extracted details below.",
-        );
-      }
-    },
-
-    // onFailed
+    handleOcrComplete,
     () => {
       setScanStage("ocr_failed");
       toast.warning("OCR could not extract text. Please fill in the details manually.");
     },
   );
+
+  const handleIdpManualChoice = useCallback(() => {
+    setIdpModalOpen(false);
+    setScanStage("ocr_failed");
+    toast.info("Fill in the details manually and confirm.");
+  }, []);
+
+  const handleIdpRegexChoice = useCallback(async () => {
+    if (!uploadedDocId) return;
+    setIdpFallbackPending(true);
+    try {
+      const { data } = await documentsAPI.ocrFallback(uploadedDocId);
+      setIdpModalOpen(false);
+      applyExtractedSuggestions(parseOcrSuggestionsPayload(data.suggestions));
+    } catch (err) {
+      toast.error(extractApiError(err, "Pattern matching failed. Fill in the details manually."));
+      setScanStage("ocr_failed");
+    } finally {
+      setIdpFallbackPending(false);
+    }
+  }, [applyExtractedSuggestions, uploadedDocId]);
 
   // ── Dropzone ────────────────────────────────────────────────────────────────
 
@@ -1694,6 +1762,14 @@ export default function UploadPage({ scanOnly = false }: UploadPageProps) {
 
   return (
     <>
+    <IdpFailureModal
+      open={idpModalOpen}
+      reason={idpFailureReason}
+      allowRegex={idpAllowRegex}
+      pending={idpFallbackPending}
+      onManual={handleIdpManualChoice}
+      onRegex={idpAllowRegex ? handleIdpRegexChoice : undefined}
+    />
     <div className="flex h-full flex-col bg-[#EDEDED] text-[#1F2933]">
       <WorkspaceCommandBar
         actions={
@@ -1778,6 +1854,7 @@ export default function UploadPage({ scanOnly = false }: UploadPageProps) {
               </div>
 
               {isLowQuality && ocrQuality && <LowQualityBanner quality={ocrQuality} />}
+              {ocrQuality?.engine?.toLowerCase() === "regex" && <PatternMatchingBanner />}
 
               {/* Raw text preview */}
               {ocrFields.raw_lines && ocrFields.raw_lines.length > 0 && (

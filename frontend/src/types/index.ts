@@ -28,7 +28,7 @@ export interface DocumentType {
   metadata_fields: MetadataField[];
   relationship_rules?: DocumentRelationshipRule[];
   is_scanned?: boolean;
-  ocr_status?: "pending" | "processing" | "done" | "failed" | "";
+  ocr_status?: "pending" | "processing" | "done" | "needs_manual" | "failed" | "";
   preview_pdf?: string | null;
   preview_status?: "pending" | "processing" | "done" | "failed" | "";
   // Edit lock
@@ -91,7 +91,7 @@ export interface Document {
   permissions?: string[];
   is_self_upload?: boolean;
   is_scanned?: boolean;
-  ocr_status?: "pending" | "processing" | "done" | "failed" | "";
+  ocr_status?: "pending" | "processing" | "done" | "needs_manual" | "failed" | "";
   preview_pdf?: string | null;
   preview_status?: "pending" | "processing" | "done" | "failed" | "";
   edit_locked_by?: string | null;

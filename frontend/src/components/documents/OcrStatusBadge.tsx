@@ -21,7 +21,7 @@
 
 import { Clock, Loader2, ScanLine, AlertCircle, ShieldAlert } from "lucide-react";
 
-type OcrStatus = "pending" | "processing" | "done" | "failed" | null | undefined;
+type OcrStatus = "pending" | "processing" | "done" | "needs_manual" | "failed" | null | undefined;
 
 interface Props {
   status: OcrStatus;
@@ -31,7 +31,7 @@ interface Props {
 }
 
 const CONFIG: Record<
-  "pending" | "processing" | "done" | "done_low_quality" | "failed",
+  "pending" | "processing" | "done" | "done_low_quality" | "needs_manual" | "failed",
   {
     label: string;
     containerClass: string;
@@ -71,6 +71,12 @@ const CONFIG: Record<
     iconClass: "text-red-400",
     Icon: AlertCircle,
   },
+  needs_manual: {
+    label: "Manual entry required",
+    containerClass: "bg-amber-50 text-amber-700 border-amber-200",
+    iconClass: "text-amber-500",
+    Icon: ShieldAlert,
+  },
 };
 
 export default function OcrStatusBadge({
@@ -94,7 +100,7 @@ export default function OcrStatusBadge({
     } else {
       configKey = "done";
     }
-  } else if (status === "pending" || status === "processing" || status === "failed") {
+  } else if (status === "pending" || status === "processing" || status === "failed" || status === "needs_manual") {
     configKey = status;
   } else {
     return null;

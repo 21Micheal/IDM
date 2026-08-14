@@ -1949,14 +1949,14 @@ echo "✓ DocVault LibreOffice integration installed."
 
         Response shape:
           {
-            "ocr_status": "done" | "pending" | "processing" | "failed" | "",
+            "ocr_status": "done" | "needs_manual" | "pending" | "processing" | "failed" | "",
             "suggestions": {
               "fields": { ... } | null,
               "quality": { ... } | null
             } | null
           }
 
-        Suggestions are null until ocr_status == "done".
+        Suggestions are returned when ocr_status is "done" or "needs_manual".
         The frontend polls this endpoint after upload until done, then
         pre-fills the details form for user review.
         """
@@ -1976,7 +1976,7 @@ echo "✓ DocVault LibreOffice integration installed."
 
         meta = doc.metadata or {}
         suggestions = None
-        if doc.ocr_status == OCRStatus.DONE:
+        if doc.ocr_status in (OCRStatus.DONE, OCRStatus.NEEDS_MANUAL):
             ocr_block = meta.get("ocr_suggestions")
             if isinstance(ocr_block, dict) and (
                 "fields" in ocr_block or "quality" in ocr_block
@@ -1991,10 +1991,45 @@ echo "✓ DocVault LibreOffice integration installed."
                     "fields": fields or None,
                     "quality": quality or None,
                 }
+        from apps.documents.models import DMSSettings
+        dms = DMSSettings.load()
         return Response({
             "ocr_status": doc.ocr_status,
             "suggestions": suggestions,
+            "idp_policy": {
+                "fallback_policy": dms.idp_fallback_policy,
+                "allow_regex_fallback": dms.idp_allow_regex_fallback,
+                "claude_enabled": dms.idp_claude_enabled,
+            },
         })
+
+    @action(detail=True, methods=["post"])
+    def ocr_fallback(self, request, pk=None):
+        """
+        Re-run extraction using the local pattern-matching pipeline.
+
+        Used when Claude is unavailable and the tenant policy or uploader opts
+        into regex-assisted field guessing.
+        """
+        from apps.documents.models import DMSSettings, OCRStatus
+        from apps.documents.ocr.fallback import apply_document_regex_fallback
+
+        doc = self.get_object()
+        dms = DMSSettings.load()
+        if not dms.idp_allow_regex_fallback:
+            return Response(
+                {"detail": "Pattern matching fallback is not enabled for this organization."},
+                status=403,
+            )
+        if doc.ocr_status not in (OCRStatus.NEEDS_MANUAL, OCRStatus.FAILED):
+            return Response(
+                {"detail": "Document is not awaiting a manual extraction choice."},
+                status=400,
+            )
+
+        doc = apply_document_regex_fallback(doc, reason="user_opt_in")
+        self.record_audit(AuditEvent.DOCUMENT_OCR_COMPLETED, doc)
+        return self.ocr_suggestions(request, pk=pk)
 
     @action(detail=True, methods=["get", "post"])
     def comments(self, request, pk=None):

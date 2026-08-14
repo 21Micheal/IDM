@@ -42,6 +42,8 @@ from __future__ import annotations
 import logging
 import re
 import threading
+import time
+from dataclasses import dataclass
 from typing import Optional
 
 import numpy as np
@@ -107,79 +109,128 @@ def _get_spacy_model(model_name: str):
 # ─────────────────────────────────────────────────────────────────────────────
 
 
-def run_ocr(doc) -> tuple[str, dict]:
+@dataclass
+class OcrRunResult:
+    text: str
+    metadata_updates: dict
+    ocr_status: str
+    claude_pages: int = 0
+
+
+def run_ocr(doc) -> OcrRunResult:
     """
-    Run IDP/OCR on a Document and return (extracted_text, metadata_updates).
+    Run IDP/OCR on a Document.
 
-    Routing priority:
-      1. IDP via Anthropic when credentials are set
-         and OCR_IDP_ENGINE != "regex".
-
-         IDP_PROVIDER:
-           "anthropic" → Claude via Anthropic API
-
-         Falls back to PDF text extraction automatically on any API failure.
-
-      2. Local pipeline (always available, no API key needed):
-         a. Pre-packaged OCR zip bundle
-         b. Native PDF text layer (pdfplumber + table augmentation)
-         c. Raster OCR: PaddleOCR → Tesseract fallback (or Textract)
-         d. Field extraction: regex extractor + spaCy NER → FieldResolver merge
-
-    metadata_updates shape (same for both paths):
-        {
-            "ocr_suggestions": {
-                "fields":  { ...all extracted fields... },
-                "quality": {
-                    "engine":              str,   # "claude_text"|"claude_vision"|...
-                    "provider":            str,   # "anthropic"|"local"
-                    "confidence":          str,   # "high"|"medium"|"low" (IDP) or None (local)
-                    "low_quality_warning": bool,
-                    ...
-                }
-            }
-        }
-
-    The Celery task (ocr_document in tasks.py) reads:
-        metadata_updates["ocr_suggestions"]["fields"]   for field suggestions
-        metadata_updates["ocr_suggestions"]["quality"]  for quality metrics
-    Backward-compatible: tasks.py also checks "ocr_quality" at the top level
-    (kept via _metadata_from_extracted_text below).
+    Returns OcrRunResult with terminal ocr_status:
+      done          — suggestions available (Claude or explicit local/regex mode)
+      needs_manual  — Claude unavailable; empty fields; user must fill or opt in
+      failed        — reserved for hard pipeline failures (handled by task)
     """
     from django.conf import settings as django_settings
 
+    from apps.documents.models import OCRStatus
+    from apps.documents.ocr.idp_policy import (
+        IdpPolicy,
+        build_needs_manual_metadata,
+        classify_anthropic_error,
+        claude_unavailable_reason,
+        estimate_claude_pages,
+    )
+
     idp_engine = _normalise_setting(getattr(django_settings, "OCR_IDP_ENGINE", "auto"))
     provider = _normalise_setting(getattr(django_settings, "IDP_PROVIDER", "anthropic"))
+    policy = IdpPolicy.load()
 
+    # Explicit dev / air-gapped regex mode — unchanged behaviour.
     if provider == "regex" or idp_engine == "regex":
-        return _run_local_pipeline(doc)
+        text, metadata_updates = _run_local_pipeline(doc)
+        return OcrRunResult(text, metadata_updates, OCRStatus.DONE)
 
     if provider != "anthropic":
         logger.warning(
-            "run_ocr: unsupported IDP_PROVIDER=%s for doc=%s — falling back to PDF text",
+            "run_ocr: unsupported IDP_PROVIDER=%s for doc=%s",
             provider,
             doc.id,
         )
-        return _run_pdf_text_fallback(doc, reason=f"unsupported_provider:{provider}")
-
-    if not _has_anthropic_config(django_settings):
-        logger.info(
-            "run_ocr: ANTHROPIC_API_KEY missing for doc=%s — falling back to PDF text",
-            doc.id,
+        return _handle_claude_failure(
+            doc,
+            policy=policy,
+            reason=f"unsupported_provider:{provider}",
         )
-        return _run_pdf_text_fallback(doc, reason="anthropic_key_missing")
 
-    # ── IDP path ─────────────────────────────────────────────────────────────
+    unavailable = claude_unavailable_reason(
+        policy=policy,
+        has_api_key=_has_anthropic_config(django_settings),
+    )
+    if unavailable:
+        logger.info(
+            "run_ocr: Claude unavailable for doc=%s (%s)",
+            doc.id,
+            unavailable,
+        )
+        return _handle_claude_failure(doc, policy=policy, reason=unavailable)
+
+    pages = estimate_claude_pages(doc)
+    if not policy.has_page_budget(pages):
+        logger.info(
+            "run_ocr: Claude page allowance exhausted for doc=%s (%d pages needed)",
+            doc.id,
+            pages,
+        )
+        return _handle_claude_failure(doc, policy=policy, reason="quota_exhausted")
+
     try:
         from apps.documents.ocr.idp import run_idp
-        return run_idp(doc)
+
+        text, metadata_updates = run_idp(doc)
+        return OcrRunResult(text, metadata_updates, OCRStatus.DONE, claude_pages=pages)
     except Exception as exc:
+        reason = classify_anthropic_error(exc)
         logger.error(
-            "run_ocr: Anthropic IDP failed for doc=%s (%s) — falling back to PDF text",
+            "run_ocr: Anthropic IDP failed for doc=%s (%s: %s)",
             doc.id,
+            reason,
             exc,
         )
-        return _run_pdf_text_fallback(doc, reason="anthropic_error")
+        if reason == "rate_limited":
+            time.sleep(2)
+            try:
+                from apps.documents.ocr.idp import run_idp
+
+                text, metadata_updates = run_idp(doc)
+                return OcrRunResult(text, metadata_updates, OCRStatus.DONE, claude_pages=pages)
+            except Exception as retry_exc:
+                reason = classify_anthropic_error(retry_exc)
+                logger.error(
+                    "run_ocr: Anthropic retry failed for doc=%s (%s)",
+                    doc.id,
+                    reason,
+                )
+        return _handle_claude_failure(doc, policy=policy, reason=reason)
+
+
+def run_regex_fallback(doc, *, reason: str = "user_opt_in") -> OcrRunResult:
+    """Re-run local pattern-matching extraction (user or policy initiated)."""
+    from apps.documents.models import OCRStatus
+
+    text, metadata_updates = _run_local_pipeline(doc, policy_fallback_reason=reason)
+    quality = (metadata_updates.get("ocr_suggestions") or {}).get("quality") or {}
+    quality["user_confirmed"] = str(reason).startswith("user_opt_in")
+    return OcrRunResult(text, metadata_updates, OCRStatus.DONE)
+
+
+def _handle_claude_failure(doc, *, policy, reason: str) -> OcrRunResult:
+    from apps.documents.models import OCRStatus
+
+    if policy.should_use_regex_on_failure(reason):
+        text, metadata_updates = _run_local_pipeline(doc, policy_fallback_reason=reason)
+        return OcrRunResult(text, metadata_updates, OCRStatus.DONE)
+
+    metadata_updates = build_needs_manual_metadata(
+        reason=reason,
+        awaiting_user_choice=policy.awaiting_user_choice(),
+    )
+    return OcrRunResult("", metadata_updates, OCRStatus.NEEDS_MANUAL)
 
 
 def _normalise_setting(value: object) -> str:
@@ -190,45 +241,7 @@ def _has_anthropic_config(settings) -> bool:
     return bool(getattr(settings, "ANTHROPIC_API_KEY", "").strip())
 
 
-def _run_pdf_text_fallback(doc, *, reason: str = "anthropic_unavailable") -> tuple[str, dict]:
-    """
-    Lightweight fallback for the Anthropic path: PDF text layer + regex fields.
-
-    Unlike the full local OCR pipeline, this does not rasterise pages or load
-    Paddle/Tesseract. It is intentionally cheap and dependency-light.
-    """
-    mime = (doc.file_mime_type or "").lower()
-    file_path = doc.file.path
-
-    text = ""
-    quality_meta = {
-        "extraction_source": "pdf_text_fallback",
-        "mean_confidence": 0.0,
-        "overall_quality_ratio": 0.0,
-        "total_pages": 0,
-        "low_quality_pages": 0,
-        "low_quality_warning": True,
-        "fallback_reason": reason,
-    }
-
-    if mime == "application/pdf":
-        native_text, cpp = _pdf_native_text_and_density(file_path)
-        table_text = _extract_pdf_tables_as_text(file_path)
-        text = native_text + (("\n\n" + table_text) if table_text else "")
-        page_count = _pdf_page_count(file_path)
-        quality_meta.update({
-            "chars_per_page": round(cpp, 1),
-            "mean_confidence": 100.0 if text.strip() else 0.0,
-            "overall_quality_ratio": 1.0 if text.strip() else 0.0,
-            "total_pages": page_count,
-            "low_quality_pages": 0 if text.strip() else page_count,
-            "low_quality_warning": not bool(text.strip()),
-        })
-
-    return _metadata_from_extracted_text(text, quality_meta)
-
-
-def _run_local_pipeline(doc) -> tuple[str, dict]:
+def _run_local_pipeline(doc, *, policy_fallback_reason: str | None = None) -> tuple[str, dict]:
     """
     Local OCR pipeline: zip bundle → PDF text layer → raster OCR → field extraction.
     Produces the same metadata_updates shape as run_idp() for consistency.
@@ -295,7 +308,20 @@ def _run_local_pipeline(doc) -> tuple[str, dict]:
                 text, quality_meta = _ocr_tesseract_v2(doc)
                 quality_meta["extraction_source"] = "tesseract_fallback"
 
-    return _metadata_from_extracted_text(text, quality_meta)
+    text, metadata_updates = _metadata_from_extracted_text(text, quality_meta)
+    if policy_fallback_reason:
+        ocr_block = metadata_updates.setdefault("ocr_suggestions", {})
+        quality = ocr_block.setdefault("quality", {})
+        quality.update({
+            "engine": "regex",
+            "provider": "local",
+            "model": None,
+            "confidence": None,
+            "requires_review": True,
+            "fallback_reason": policy_fallback_reason,
+            "low_quality_warning": True,
+        })
+    return text, metadata_updates
 
 
 def _metadata_from_extracted_text(text: str, quality_meta: dict) -> tuple[str, dict]:

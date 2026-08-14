@@ -40,14 +40,27 @@ export type OcrQualityMetrics = {
   low_quality_warning?: boolean;
   total_pages?: number;
   low_quality_pages?: number;
+  engine?: string;
+  provider?: string;
+  model?: string;
+  confidence?: string;
+  fallback_reason?: string;
+  requires_review?: boolean;
+  awaiting_user_choice?: boolean;
+  user_confirmed?: boolean;
 };
 
 export type OcrSuggestionsResponse = {
-  ocr_status: "pending" | "processing" | "done" | "failed" | "";
+  ocr_status: "pending" | "processing" | "done" | "needs_manual" | "failed" | "";
   suggestions: {
     fields?: OcrFieldSuggestions | null;
     quality?: OcrQualityMetrics | null;
   } | null;
+  idp_policy?: {
+    fallback_policy: "claude_only" | "claude_ask" | "claude_then_regex";
+    allow_regex_fallback: boolean;
+    claude_enabled: boolean;
+  };
 };
 
 export type DmsSettings = {
@@ -70,6 +83,11 @@ export type DmsSettings = {
   session_lifetime_minutes: number;
   session_idle_timeout_minutes: number;
   session_warning_minutes: number;
+  idp_claude_enabled: boolean;
+  idp_fallback_policy: "claude_only" | "claude_ask" | "claude_then_regex";
+  idp_allow_regex_fallback: boolean;
+  idp_page_allowance: number;
+  idp_pages_used: number;
   updated_at?: string;
 };
 
@@ -484,6 +502,9 @@ export const documentsAPI = {
   ocrSuggestions: (id: string) =>
     api.get<OcrSuggestionsResponse>(`/documents/${id}/ocr_suggestions/`),
 
+  ocrFallback: (id: string) =>
+    api.post<OcrSuggestionsResponse>(`/documents/${id}/ocr_fallback/`),
+
   /**
    * Explicitly (re-)trigger Office→PDF preview conversion.
    * Use for retries after failure or when preview was never queued.
@@ -549,6 +570,9 @@ export const bulkUploadAPI = {
     api.post(`/documents/bulk-uploads/${id}/review/`, { documents }),
 
   cancel: (id: string) => api.post(`/documents/bulk-uploads/${id}/cancel/`),
+
+  ocrFallback: (id: string) =>
+    api.post(`/documents/bulk-uploads/${id}/ocr_fallback/`),
 
   // Pending-review queue: the user's batches (email ingestion + bulk scans).
   // Defaults server-side to processing/review; pass status to widen/narrow.

@@ -333,6 +333,35 @@ class DMSSettings(models.Model):
         default=False,
         help_text="When enabled, reviewed bulk scan documents are immediately submitted to approval workflows.",
     )
+
+    class IdpFallbackPolicy(models.TextChoices):
+        CLAUDE_ONLY = "claude_only", "Claude only — leave fields empty when unavailable"
+        CLAUDE_ASK = "claude_ask", "Claude — prompt uploader when unavailable"
+        CLAUDE_THEN_REGEX = "claude_then_regex", "Claude — allow pattern matching when unavailable"
+
+    idp_claude_enabled = models.BooleanField(
+        default=True,
+        help_text="When off (e.g. subscription ended), Claude is not called and extraction follows the fallback policy.",
+    )
+    idp_fallback_policy = models.CharField(
+        max_length=32,
+        choices=IdpFallbackPolicy.choices,
+        default=IdpFallbackPolicy.CLAUDE_ONLY,
+        help_text="What to do when Claude cannot extract fields for this tenant.",
+    )
+    idp_allow_regex_fallback = models.BooleanField(
+        default=False,
+        help_text="Allow the local pattern-matching pipeline as a last resort. Requires claude_then_regex or user opt-in.",
+    )
+    idp_page_allowance = models.PositiveIntegerField(
+        default=0,
+        help_text="Maximum Claude pages per billing period for this tenant. 0 = unlimited.",
+    )
+    idp_pages_used = models.PositiveIntegerField(
+        default=0,
+        help_text="Claude pages consumed in the current billing period.",
+    )
+
     access_stages = models.JSONField(
         default=list,
         blank=True,
@@ -411,10 +440,11 @@ class DocumentStatus(models.TextChoices):
 
 
 class OCRStatus(models.TextChoices):
-    PENDING    = "pending",    "Pending"
-    PROCESSING = "processing", "Processing"
-    DONE       = "done",       "Done"
-    FAILED     = "failed",     "Failed"
+    PENDING       = "pending",       "Pending"
+    PROCESSING    = "processing",    "Processing"
+    DONE          = "done",          "Done"
+    NEEDS_MANUAL  = "needs_manual",  "Needs manual entry"
+    FAILED        = "failed",      "Failed"
 
 
 class PreviewStatus(models.TextChoices):

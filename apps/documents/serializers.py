@@ -252,6 +252,11 @@ class DMSSettingsSerializer(serializers.ModelSerializer):
             "session_lifetime_minutes",
             "session_idle_timeout_minutes",
             "session_warning_minutes",
+            "idp_claude_enabled",
+            "idp_fallback_policy",
+            "idp_allow_regex_fallback",
+            "idp_page_allowance",
+            "idp_pages_used",
             "bulk_scan_submit_for_approval",
             "access_stages",
             "updated_at",
@@ -288,6 +293,16 @@ class DMSSettingsSerializer(serializers.ModelSerializer):
             raise serializers.ValidationError("Warning lead time cannot be negative.")
         return value
 
+    def validate_idp_page_allowance(self, value):
+        if value < 0:
+            raise serializers.ValidationError("Page allowance cannot be negative.")
+        return value
+
+    def validate_idp_pages_used(self, value):
+        if value < 0:
+            raise serializers.ValidationError("Pages used cannot be negative.")
+        return value
+
     def validate(self, attrs):
         lifetime = attrs.get(
             "session_lifetime_minutes",
@@ -311,6 +326,22 @@ class DMSSettingsSerializer(serializers.ModelSerializer):
                 raise serializers.ValidationError(
                     {"session_warning_minutes": "Warning lead time cannot exceed the session lifetime."}
                 )
+        policy = attrs.get(
+            "idp_fallback_policy",
+            getattr(self.instance, "idp_fallback_policy", None),
+        )
+        allow_regex = attrs.get(
+            "idp_allow_regex_fallback",
+            getattr(self.instance, "idp_allow_regex_fallback", None),
+        )
+        if (
+            policy == "claude_then_regex"
+            and allow_regex is False
+            and "idp_fallback_policy" in attrs
+        ):
+            raise serializers.ValidationError(
+                {"idp_allow_regex_fallback": "Enable pattern matching when using the regex fallback policy."}
+            )
         return attrs
 
 class MetadataFieldSerializer(serializers.ModelSerializer):
@@ -853,7 +884,7 @@ class DocumentDetailSerializer(serializers.ModelSerializer):
         return can_submit_retirement_workflow(obj, user=user)
 
     def get_ocr_suggestions(self, obj):
-        if obj.ocr_status != OCRStatus.DONE:
+        if obj.ocr_status not in (OCRStatus.DONE, OCRStatus.NEEDS_MANUAL):
             return None
         meta = obj.metadata or {}
         result = {}
@@ -1758,9 +1789,10 @@ class BulkUploadDocumentReadSerializer(serializers.Serializer):
 class BulkUploadDetailSerializer(BulkUploadSerializer):
     documents = serializers.SerializerMethodField()
     ocr_progress = serializers.SerializerMethodField()
+    idp_policy = serializers.SerializerMethodField()
 
     class Meta(BulkUploadSerializer.Meta):
-        fields = BulkUploadSerializer.Meta.fields + ["documents", "ocr_progress"]
+        fields = BulkUploadSerializer.Meta.fields + ["documents", "ocr_progress", "idp_policy"]
 
     def get_documents(self, obj):
         from .bulk_upload import serialize_bulk_document
@@ -1774,15 +1806,29 @@ class BulkUploadDetailSerializer(BulkUploadSerializer):
         docs = obj.documents.all()
         total = docs.count()
         if total == 0:
-            return {"total": 0, "done": 0, "failed": 0, "pending": 0}
+            return {"total": 0, "done": 0, "failed": 0, "needs_manual": 0, "pending": 0}
         done = docs.filter(ocr_status=OCRStatus.DONE).count()
         failed = docs.filter(ocr_status=OCRStatus.FAILED).count()
+        needs_manual = docs.filter(ocr_status=OCRStatus.NEEDS_MANUAL).count()
         pending = docs.filter(ocr_status__in=[OCRStatus.PENDING, OCRStatus.PROCESSING, ""]).count()
         return {
             "total": total,
             "done": done,
             "failed": failed,
+            "needs_manual": needs_manual,
             "pending": pending,
+        }
+
+    def get_idp_policy(self, obj):
+        from .models import DMSSettings
+
+        row = DMSSettings.load()
+        return {
+            "fallback_policy": row.idp_fallback_policy,
+            "allow_regex_fallback": row.idp_allow_regex_fallback,
+            "claude_enabled": row.idp_claude_enabled,
+            "page_allowance": row.idp_page_allowance,
+            "pages_used": row.idp_pages_used,
         }
 
 

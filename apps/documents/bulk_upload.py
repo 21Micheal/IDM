@@ -56,9 +56,11 @@ def _serialize_metadata_fields(document_type: DocumentType) -> list[dict]:
 def serialize_bulk_document(doc: Document) -> dict:
     meta = dict(doc.metadata or {})
     suggestions = None
-    if doc.ocr_status == OCRStatus.DONE:
+    if doc.ocr_status in (OCRStatus.DONE, OCRStatus.NEEDS_MANUAL):
         ocr_suggestions = meta.get("ocr_suggestions")
         quality = meta.get("ocr_quality")
+        if isinstance(ocr_suggestions, dict) and ocr_suggestions.get("quality"):
+            quality = ocr_suggestions.get("quality")
         if ocr_suggestions or quality:
             # Extract the nested fields if present, otherwise use the whole object
             fields = None

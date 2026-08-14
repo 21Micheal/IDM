@@ -29,9 +29,12 @@ import BulkProcessingPanel from "@/components/documents/bulk/BulkProcessingPanel
 import BulkReviewPanel from "@/components/documents/bulk/BulkReviewPanel";
 import type { BulkDocReviewState, BulkLocalPreview, BulkUploadBatch } from "@/components/documents/bulk/bulkUploadTypes";
 import {
-  buildReviewStateFromBatchItem,
+  countNeedsManualDocs,
+  primaryIdpFailureReason,
+  rebuildReviewStatesFromBatch,
   reviewStateToSubmitItem,
 } from "@/components/documents/bulk/bulkUploadUtils";
+import IdpFailureModal, { type IdpFailureReason } from "@/components/documents/IdpFailureModal";
 import { WorkspaceCommandBar } from "@/components/shared/WorkspaceCommandBar";
 
 type Stage = "select" | "processing" | "review" | "complete";
@@ -83,6 +86,12 @@ export default function BulkScanPage({ scanMode = true, onSingleMode, initialBat
   const [duplicateFiles, setDuplicateFiles] = useState<File[]>([]);
   const [pendingUploadFiles, setPendingUploadFiles] = useState<File[] | null>(null);
   const [isCheckingDuplicates, setIsCheckingDuplicates] = useState(false);
+  const [idpModalOpen, setIdpModalOpen] = useState(false);
+  const [idpFailureReason, setIdpFailureReason] = useState<IdpFailureReason>("extraction_error");
+  const [idpNeedsManualCount, setIdpNeedsManualCount] = useState(0);
+  const [idpAllowRegex, setIdpAllowRegex] = useState(false);
+  const [idpFallbackPending, setIdpFallbackPending] = useState(false);
+  const [pendingReviewBatch, setPendingReviewBatch] = useState<BulkUploadBatch | null>(null);
 
   const { data: docTypes = [] } = useQuery<unknown, Error, DocumentType[]>({
     queryKey: ["document-types"],
@@ -136,26 +145,69 @@ export default function BulkScanPage({ scanMode = true, onSingleMode, initialBat
     },
   });
 
+  const enterReview = useCallback((batch: BulkUploadBatch) => {
+    const needsManual = countNeedsManualDocs(batch.documents);
+    const askOnFailure = batch.idp_policy?.fallback_policy === "claude_ask";
+
+    if (needsManual > 0 && askOnFailure) {
+      setIdpFailureReason(primaryIdpFailureReason(batch.documents) as IdpFailureReason);
+      setIdpNeedsManualCount(needsManual);
+      setIdpAllowRegex(Boolean(batch.idp_policy?.allow_regex_fallback));
+      setPendingReviewBatch(batch);
+      setIdpModalOpen(true);
+      return;
+    }
+
+    const states = rebuildReviewStatesFromBatch(batch, visibleDocTypes);
+    setReviewStates(states);
+    setStage("review");
+    if (needsManual > 0) {
+      toast.warning(
+        `${needsManual} document${needsManual === 1 ? "" : "s"} need manual metadata — Claude extraction was unavailable.`,
+      );
+    } else {
+      toast.success(scanMode ? "OCR complete — review each document's details." : "Batch ready — review each document's details.");
+    }
+  }, [scanMode, visibleDocTypes]);
+
   useEffect(() => {
     if (!polledBatch) return;
     if (polledBatch.status === "review") {
-      const states = polledBatch.documents.map((doc) =>
-        buildReviewStateFromBatchItem(
-          doc,
-          doc.document_type ?? polledBatch.document_type,
-          visibleDocTypes,
-          polledBatch.mode === "related_set",
-        ),
-      );
-      setReviewStates(states);
-      setStage("review");
-      toast.success(scanMode ? "OCR complete — review each document's details." : "Batch ready — review each document's details.");
+      enterReview(polledBatch);
     } else if (polledBatch.status === "failed") {
       setStage("select");
       setBatchId(null);
       toast.error("Bulk upload failed. Check your files and try again.");
     }
-  }, [polledBatch, scanMode, visibleDocTypes]);
+  }, [polledBatch, enterReview]);
+
+  const handleBatchIdpManual = useCallback(() => {
+    if (!pendingReviewBatch) return;
+    setIdpModalOpen(false);
+    const states = rebuildReviewStatesFromBatch(pendingReviewBatch, visibleDocTypes);
+    setReviewStates(states);
+    setStage("review");
+    setPendingReviewBatch(null);
+    toast.info(`Fill metadata manually for ${idpNeedsManualCount} document${idpNeedsManualCount === 1 ? "" : "s"}.`);
+  }, [pendingReviewBatch, visibleDocTypes, idpNeedsManualCount]);
+
+  const handleBatchIdpRegex = useCallback(async () => {
+    if (!pendingReviewBatch?.id) return;
+    setIdpFallbackPending(true);
+    try {
+      const { data } = await bulkUploadAPI.ocrFallback(pendingReviewBatch.id);
+      setIdpModalOpen(false);
+      setPendingReviewBatch(null);
+      const states = rebuildReviewStatesFromBatch(data as BulkUploadBatch, visibleDocTypes);
+      setReviewStates(states);
+      setStage("review");
+      toast.warning("Pattern matching applied — verify every field before submitting.");
+    } catch (err) {
+      toast.error(extractApiError(err, "Pattern matching failed for this batch."));
+    } finally {
+      setIdpFallbackPending(false);
+    }
+  }, [pendingReviewBatch, visibleDocTypes]);
 
   const createMutation = useMutation({
     mutationFn: async (uploadFiles?: File[]) => {
@@ -179,17 +231,7 @@ export default function BulkScanPage({ scanMode = true, onSingleMode, initialBat
       setUploadProgress(0);
       setBatchId(data.id);
       if (data.status === "review") {
-        const states = data.documents.map((doc) =>
-          buildReviewStateFromBatchItem(
-            doc,
-            doc.document_type ?? data.document_type,
-            visibleDocTypes,
-            data.mode === "related_set",
-          ),
-        );
-        setReviewStates(states);
-        setStage("review");
-        toast.success("Batch ready for review.");
+        enterReview(data);
       } else if (data.status === "failed") {
         toast.error("No files could be uploaded.");
         setStage("select");
@@ -302,6 +344,16 @@ export default function BulkScanPage({ scanMode = true, onSingleMode, initialBat
   const activeBatch = polledBatch ?? (createMutation.data as BulkUploadBatch | undefined);
 
   return (
+    <>
+    <IdpFailureModal
+      open={idpModalOpen}
+      reason={idpFailureReason}
+      allowRegex={idpAllowRegex}
+      pending={idpFallbackPending}
+      documentCount={idpNeedsManualCount}
+      onManual={handleBatchIdpManual}
+      onRegex={idpAllowRegex ? handleBatchIdpRegex : undefined}
+    />
     <div className="flex h-full flex-col bg-[#EDEDED] text-[#1F2933]">
       <WorkspaceCommandBar
         actions={
@@ -615,5 +667,6 @@ export default function BulkScanPage({ scanMode = true, onSingleMode, initialBat
       )}
       </div>
     </div>
+    </>
   );
 }

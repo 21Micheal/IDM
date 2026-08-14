@@ -245,6 +245,52 @@ class BulkUploadViewSet(viewsets.GenericViewSet):
         return Response(out.data)
 
     @action(detail=True, methods=["post"], parser_classes=[JSONParser])
+    def ocr_fallback(self, request, pk=None):
+        """Run pattern matching on every needs_manual document in the batch."""
+        from apps.documents.models import DMSSettings, OCRStatus
+        from apps.documents.ocr.fallback import apply_document_regex_fallback
+
+        bulk_upload = sync_bulk_upload_status(self.get_object())
+        if bulk_upload.status != BulkUploadStatus.REVIEW:
+            return Response(
+                {
+                    "detail": (
+                        "This batch is not ready for review. "
+                        f"Current status: {bulk_upload.status}."
+                    )
+                },
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        dms = DMSSettings.load()
+        if not dms.idp_allow_regex_fallback:
+            return Response(
+                {"detail": "Pattern matching fallback is not enabled for this organization."},
+                status=status.HTTP_403_FORBIDDEN,
+            )
+
+        docs = list(bulk_upload.documents.filter(ocr_status=OCRStatus.NEEDS_MANUAL))
+        if not docs:
+            return Response(
+                {"detail": "No documents in this batch require pattern matching."},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        for doc in docs:
+            apply_document_regex_fallback(doc, reason="user_opt_in_batch")
+            record_audit_event(
+                AuditEvent.DOCUMENT_OCR_COMPLETED,
+                actor=request.user,
+                obj=doc,
+                request=request,
+                changes={"bulk_upload_id": str(bulk_upload.id), "fallback": "regex_batch"},
+            )
+
+        bulk_upload.refresh_from_db()
+        out = BulkUploadDetailSerializer(bulk_upload, context={"request": request})
+        return Response(out.data)
+
+    @action(detail=True, methods=["post"], parser_classes=[JSONParser])
     def cancel(self, request, pk=None):
         bulk_upload = get_object_or_404(self.get_queryset(), pk=pk)
         if bulk_upload.status not in (

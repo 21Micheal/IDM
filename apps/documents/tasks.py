@@ -280,8 +280,16 @@ def ocr_document(self, document_id: str):
         )
 
         # ── Run OCR via the new modular pipeline ──────────────────────────
+        from apps.documents.ocr.idp_policy import increment_idp_pages_used, should_promote_suggestions
         from apps.documents.ocr.tasks_ocr import run_ocr
-        text, metadata_updates = run_ocr(doc)
+
+        result = run_ocr(doc)
+        text = result.text
+        metadata_updates = result.metadata_updates
+        terminal_status = result.ocr_status
+
+        if result.claude_pages:
+            increment_idp_pages_used(result.claude_pages)
 
         # ── Merge quality metrics + suggestions into metadata ─────────────
         # Use the existing metadata as the base; never clobber unrelated keys.
@@ -294,44 +302,51 @@ def ocr_document(self, document_id: str):
         # supplier/amount/date without requiring additional frontend mapping.
         ocr_block = (metadata_updates.get("ocr_suggestions") or {})
         suggested = ocr_block.get("fields", {}) if isinstance(ocr_block, dict) else {}
+        quality = (
+            ocr_block.get("quality")
+            if isinstance(ocr_block, dict)
+            else None
+        ) or metadata_updates.get("ocr_quality") or {}
 
         update_kwargs = {
             "extracted_text": text[:1_000_000],
-            "ocr_status": OCRStatus.DONE,
+            "ocr_status": terminal_status,
             "metadata": updated_metadata,
         }
 
+        promote = should_promote_suggestions(quality)
         try:
-            # title
-            if not doc.title and suggested.get("title"):
-                update_kwargs["title"] = str(suggested.get("title"))[:255]
+            if promote:
+                # title
+                if not doc.title and suggested.get("title"):
+                    update_kwargs["title"] = str(suggested.get("title"))[:255]
 
-            # supplier
-            if (not doc.supplier or str(doc.supplier).strip() == "") and suggested.get("supplier"):
-                update_kwargs["supplier"] = str(suggested.get("supplier"))[:255]
+                # supplier
+                if (not doc.supplier or str(doc.supplier).strip() == "") and suggested.get("supplier"):
+                    update_kwargs["supplier"] = str(suggested.get("supplier"))[:255]
 
-            # amount & currency
-            if (doc.amount is None or doc.amount == "") and suggested.get("amount") is not None:
-                try:
-                    update_kwargs["amount"] = Decimal(str(suggested.get("amount")))
-                except (InvalidOperation, TypeError, ValueError):
-                    pass
-            if (not doc.currency or str(doc.currency).strip() == "") and suggested.get("currency"):
-                update_kwargs["currency"] = str(suggested.get("currency"))[:3]
+                # amount & currency
+                if (doc.amount is None or doc.amount == "") and suggested.get("amount") is not None:
+                    try:
+                        update_kwargs["amount"] = Decimal(str(suggested.get("amount")))
+                    except (InvalidOperation, TypeError, ValueError):
+                        pass
+                if (not doc.currency or str(doc.currency).strip() == "") and suggested.get("currency"):
+                    update_kwargs["currency"] = str(suggested.get("currency"))[:3]
 
-            # dates
-            if (not doc.document_date) and suggested.get("document_date"):
-                parsed = parse_date(str(suggested.get("document_date")))
-                if parsed:
-                    update_kwargs["document_date"] = parsed
-            if (not doc.due_date) and suggested.get("due_date"):
-                parsed = parse_date(str(suggested.get("due_date")))
-                if parsed:
-                    update_kwargs["due_date"] = parsed
+                # dates
+                if (not doc.document_date) and suggested.get("document_date"):
+                    parsed = parse_date(str(suggested.get("document_date")))
+                    if parsed:
+                        update_kwargs["document_date"] = parsed
+                if (not doc.due_date) and suggested.get("due_date"):
+                    parsed = parse_date(str(suggested.get("due_date")))
+                    if parsed:
+                        update_kwargs["due_date"] = parsed
 
-            # reference number
-            if (not doc.reference_number or str(doc.reference_number).strip() == "") and suggested.get("reference_number"):
-                update_kwargs["reference_number"] = str(suggested.get("reference_number"))[:60]
+                # reference number
+                if (not doc.reference_number or str(doc.reference_number).strip() == "") and suggested.get("reference_number"):
+                    update_kwargs["reference_number"] = str(suggested.get("reference_number"))[:60]
         except Exception:
             logger.exception("ocr_document: failed to promote suggested fields to top-level for %s", document_id)
 

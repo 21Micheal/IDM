@@ -55,6 +55,33 @@ function parseOcrFields(item: BulkUploadDocumentItem): OcrFields {
   return sanitizeOcrFields(raw as unknown as OcrFields);
 }
 
+export function countNeedsManualDocs(items: BulkUploadDocumentItem[]): number {
+  return items.filter((item) => item.ocr_status === "needs_manual").length;
+}
+
+export function primaryIdpFailureReason(items: BulkUploadDocumentItem[]): string {
+  for (const item of items) {
+    if (item.ocr_status !== "needs_manual") continue;
+    const reason = item.ocr_suggestions?.quality?.fallback_reason;
+    if (typeof reason === "string" && reason.trim()) return reason;
+  }
+  return "extraction_error";
+}
+
+export function rebuildReviewStatesFromBatch(
+  batch: { documents: BulkUploadDocumentItem[]; document_type: DocumentType; mode?: string },
+  documentTypes: DocumentType[],
+): BulkDocReviewState[] {
+  return batch.documents.map((doc) =>
+    buildReviewStateFromBatchItem(
+      doc,
+      doc.document_type ?? batch.document_type,
+      documentTypes,
+      batch.mode === "related_set",
+    ),
+  );
+}
+
 export function buildReviewStateFromBatchItem(
   item: BulkUploadDocumentItem,
   documentType: DocumentType,

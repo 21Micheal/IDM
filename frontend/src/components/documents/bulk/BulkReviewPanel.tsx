@@ -38,6 +38,10 @@ export default function BulkReviewPanel({
   previews = {},
 }: Props) {
   const counts = useMemo(() => countReviewDecisions(reviewStates), [reviewStates]);
+  const needsManualCount = useMemo(
+    () => reviewStates.filter((state) => state.ocrStatus === "needs_manual").length,
+    [reviewStates],
+  );
   const missingTypeCount = useMemo(
     () => reviewStates.filter((state) => state.approved && isRelatedSet && !state.documentTypeId).length,
     [isRelatedSet, reviewStates],
@@ -69,6 +73,12 @@ export default function BulkReviewPanel({
 
   return (
     <div className="space-y-4">
+      {needsManualCount > 0 && (
+        <div className="border border-amber-200 bg-amber-50 px-4 py-3 text-sm text-amber-800">
+          {needsManualCount} document{needsManualCount === 1 ? "" : "s"} could not be extracted by Claude.
+          Fill metadata manually before approving.
+        </div>
+      )}
       <div className="flex flex-col gap-4 border border-[#C8CDD2] bg-white p-4 sm:flex-row sm:items-center">
         <div className="flex items-center gap-3">
           <div className="flex h-10 w-10 items-center justify-center bg-[#EEF6FB]">
