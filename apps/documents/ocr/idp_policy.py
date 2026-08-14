@@ -1,8 +1,11 @@
 """
 Tenant IDP policy — entitlement, failure reasons, and fallback routing.
 
-Separates commercial entitlement (Claude enabled, page allowance) from runtime
-availability (API errors) and tenant admin policy (claude_only / ask / regex).
+Separates commercial entitlement (Claude enabled) from runtime availability
+(API/spend errors) and tenant admin policy (claude_only / ask / regex).
+
+Page counts (idp_pages_used / idp_page_allowance) are reporting-only.
+Hard spend limits are enforced by Anthropic workspace caps on each API key.
 """
 from __future__ import annotations
 
@@ -12,6 +15,28 @@ from dataclasses import dataclass
 from apps.documents.ocr.status import clear_ocr_tracking_metadata
 
 logger = logging.getLogger(__name__)
+
+
+def resolve_anthropic_api_key() -> str:
+    """
+    Return the Anthropic API key for the current tenant/deployment.
+
+    Prefers the operator-managed key on DMSSettings, then falls back to the
+    global ANTHROPIC_API_KEY environment variable.
+    """
+    from django.conf import settings as django_settings
+
+    from apps.documents.models import DMSSettings
+
+    row = DMSSettings.load()
+    db_key = (row.idp_anthropic_api_key or "").strip()
+    if db_key:
+        return db_key
+    return str(getattr(django_settings, "ANTHROPIC_API_KEY", "") or "").strip()
+
+
+def has_anthropic_api_key() -> bool:
+    return bool(resolve_anthropic_api_key())
 
 
 @dataclass(frozen=True)
@@ -36,9 +61,8 @@ class IdpPolicy:
         )
 
     def has_page_budget(self, pages: int = 1) -> bool:
-        if self.page_allowance <= 0:
-            return True
-        return self.pages_used + pages <= self.page_allowance
+        """Reporting-only — page allowance is never enforced in the application."""
+        return True
 
     def should_use_regex_on_failure(self, reason: str) -> bool:
         from apps.documents.models import DMSSettings
@@ -64,6 +88,22 @@ def classify_anthropic_error(exc: BaseException) -> str:
     name = type(exc).__name__.lower()
     if "rate" in msg or "429" in msg or "rate" in name:
         return "rate_limited"
+    if any(
+        token in msg
+        for token in (
+            "402",
+            "credit",
+            "billing",
+            "spend",
+            "quota",
+            "insufficient",
+            "balance",
+            "limit exceeded",
+            "usage limit",
+            "budget",
+        )
+    ):
+        return "quota_exhausted"
     if any(token in msg for token in ("401", "403", "authentication", "api_key", "unauthorized")):
         return "auth_error"
     if any(token in msg for token in ("timeout", "timed out", "connection", "unreachable", "503", "502")):
@@ -71,13 +111,13 @@ def classify_anthropic_error(exc: BaseException) -> str:
     return "extraction_error"
 
 
-def claude_unavailable_reason(*, policy: IdpPolicy, has_api_key: bool) -> str | None:
+def claude_unavailable_reason(*, policy: IdpPolicy, has_api_key: bool | None = None) -> str | None:
     if not policy.claude_enabled:
         return "subscription_inactive"
+    if has_api_key is None:
+        has_api_key = has_anthropic_api_key()
     if not has_api_key:
         return "anthropic_key_missing"
-    if not policy.has_page_budget():
-        return "quota_exhausted"
     return None
 
 
@@ -144,15 +184,10 @@ def apply_idp_unavailable_state(document) -> bool:
 
     Returns True when the document was updated (caller should not queue OCR).
     """
-    from django.conf import settings as django_settings
-
     from apps.documents.models import OCRStatus
 
     policy = IdpPolicy.load()
-    reason = claude_unavailable_reason(
-        policy=policy,
-        has_api_key=bool(getattr(django_settings, "ANTHROPIC_API_KEY", "").strip()),
-    )
+    reason = claude_unavailable_reason(policy=policy)
     if not reason or policy.should_use_regex_on_failure(reason):
         return False
 

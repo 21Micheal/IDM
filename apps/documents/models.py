@@ -355,11 +355,23 @@ class DMSSettings(models.Model):
     )
     idp_page_allowance = models.PositiveIntegerField(
         default=0,
-        help_text="Maximum Claude pages per billing period for this tenant. 0 = unlimited.",
+        help_text=(
+            "Optional reference page target for reporting only — not enforced. "
+            "Hard spend limits are configured in the Anthropic workspace console."
+        ),
     )
     idp_pages_used = models.PositiveIntegerField(
         default=0,
-        help_text="Claude pages consumed in the current billing period.",
+        help_text="Claude pages consumed since last manual reset (reporting metric).",
+    )
+    idp_anthropic_api_key = models.CharField(
+        max_length=255,
+        blank=True,
+        default="",
+        help_text=(
+            "Per-tenant Anthropic workspace API key (operator-managed). "
+            "When empty, falls back to ANTHROPIC_API_KEY in the environment."
+        ),
     )
 
     access_stages = models.JSONField(

@@ -144,10 +144,7 @@ def run_ocr(doc) -> OcrRunResult:
     # Tenant entitlement first — never run local OCR when Claude is off and
     # policy says ask/manual (even if env OCR_IDP_ENGINE=regex).
     if provider in {"", "anthropic"}:
-        unavailable = claude_unavailable_reason(
-            policy=policy,
-            has_api_key=_has_anthropic_config(django_settings),
-        )
+        unavailable = claude_unavailable_reason(policy=policy)
         if unavailable:
             logger.info(
                 "run_ocr: Claude unavailable for doc=%s (%s)",
@@ -181,13 +178,6 @@ def run_ocr(doc) -> OcrRunResult:
         )
 
     pages = estimate_claude_pages(doc)
-    if not policy.has_page_budget(pages):
-        logger.info(
-            "run_ocr: Claude page allowance exhausted for doc=%s (%d pages needed)",
-            doc.id,
-            pages,
-        )
-        return _handle_claude_failure(doc, policy=policy, reason="quota_exhausted")
 
     try:
         from apps.documents.ocr.idp import run_idp
@@ -248,7 +238,9 @@ def _normalise_setting(value: object) -> str:
 
 
 def _has_anthropic_config(settings) -> bool:
-    return bool(getattr(settings, "ANTHROPIC_API_KEY", "").strip())
+    from apps.documents.ocr.idp_policy import has_anthropic_api_key
+
+    return has_anthropic_api_key()
 
 
 def _run_local_pipeline(doc, *, policy_fallback_reason: str | None = None) -> tuple[str, dict]:

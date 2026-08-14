@@ -22,8 +22,8 @@ function reasonCopy(reason: IdpFailureReason): { title: string; body: string } {
   switch (reason) {
     case "quota_exhausted":
       return {
-        title: "Claude page allowance used up",
-        body: "This organization's Claude extraction quota for the current period is exhausted. You can fill metadata manually or use pattern matching if your admin enabled it.",
+        title: "Claude usage limit reached",
+        body: "This organization's Anthropic workspace spend cap has been reached. Fill metadata manually, use pattern matching if enabled, or contact your administrator to upgrade.",
       };
     case "subscription_inactive":
       return {

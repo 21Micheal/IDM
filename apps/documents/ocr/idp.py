@@ -304,9 +304,11 @@ def run_idp(doc) -> tuple[str, dict]:
 def _call_anthropic_vision(settings, model: str, pages_b64: list[tuple[str, str]], prompt: str) -> str:
     import anthropic
 
-    api_key = getattr(settings, "ANTHROPIC_API_KEY", "").strip()
+    from apps.documents.ocr.idp_policy import resolve_anthropic_api_key
+
+    api_key = resolve_anthropic_api_key()
     if not api_key:
-        raise RuntimeError("ANTHROPIC_API_KEY is not set")
+        raise RuntimeError("Anthropic API key is not configured")
 
     content = []
     for i, (img_b64, img_mime) in enumerate(pages_b64):
@@ -354,7 +356,9 @@ def classify_document_type(content: bytes, mime: str, filename: str, candidates,
 
     if getattr(settings, "IDP_PROVIDER", "") != "anthropic":
         return None
-    if not getattr(settings, "ANTHROPIC_API_KEY", "").strip():
+    from apps.documents.ocr.idp_policy import resolve_anthropic_api_key
+
+    if not resolve_anthropic_api_key():
         return None
     if not candidates:
         return None
@@ -420,9 +424,11 @@ def classify_document_type(content: bytes, mime: str, filename: str, candidates,
 def _call_anthropic_text(settings, model: str, document_context: str, prompt: str) -> str:
     import anthropic
 
-    api_key = getattr(settings, "ANTHROPIC_API_KEY", "").strip()
+    from apps.documents.ocr.idp_policy import resolve_anthropic_api_key
+
+    api_key = resolve_anthropic_api_key()
     if not api_key:
-        raise RuntimeError("ANTHROPIC_API_KEY is not set")
+        raise RuntimeError("Anthropic API key is not configured")
 
     client = anthropic.Anthropic(
         api_key=api_key,

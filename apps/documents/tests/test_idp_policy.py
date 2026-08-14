@@ -9,6 +9,8 @@ from apps.documents.ocr.idp_policy import (
     apply_idp_unavailable_state,
     build_needs_manual_metadata,
     classify_anthropic_error,
+    has_anthropic_api_key,
+    resolve_anthropic_api_key,
     should_promote_suggestions,
 )
 from apps.documents.ocr.tasks_ocr import run_ocr
@@ -17,6 +19,12 @@ from apps.documents.ocr.tasks_ocr import run_ocr
 class ClassifyAnthropicErrorTests(SimpleTestCase):
     def test_rate_limit(self):
         self.assertEqual(classify_anthropic_error(Exception("429 rate limit")), "rate_limited")
+
+    def test_spend_cap(self):
+        self.assertEqual(
+            classify_anthropic_error(Exception("402 credit balance too low")),
+            "quota_exhausted",
+        )
 
     def test_unreachable(self):
         self.assertEqual(classify_anthropic_error(TimeoutError("connection timed out")), "unreachable")
@@ -56,15 +64,15 @@ class IdpPolicyTests(SimpleTestCase):
         )
         self.assertTrue(policy.should_use_regex_on_failure("subscription_inactive"))
 
-    def test_page_budget(self):
+    def test_page_budget_is_reporting_only(self):
         policy = IdpPolicy(
             claude_enabled=True,
             fallback_policy=DMSSettings.IdpFallbackPolicy.CLAUDE_ONLY,
             allow_regex_fallback=False,
             page_allowance=10,
-            pages_used=10,
+            pages_used=100,
         )
-        self.assertFalse(policy.has_page_budget(1))
+        self.assertTrue(policy.has_page_budget(1))
 
 
 class PromotionTests(SimpleTestCase):
@@ -167,3 +175,20 @@ class RunOcrPolicyRoutingTests(SimpleTestCase):
         self.assertTrue(
             result.metadata_updates["ocr_suggestions"]["quality"]["awaiting_user_choice"]
         )
+
+
+class ResolveAnthropicApiKeyTests(SimpleTestCase):
+    @patch("django.conf.settings")
+    @patch("apps.documents.models.DMSSettings.load")
+    def test_prefers_database_key(self, load_mock, settings_mock):
+        load_mock.return_value = MagicMock(idp_anthropic_api_key="sk-ant-db-key")
+        settings_mock.ANTHROPIC_API_KEY = "sk-ant-env-key"
+        self.assertEqual(resolve_anthropic_api_key(), "sk-ant-db-key")
+
+    @patch("django.conf.settings")
+    @patch("apps.documents.models.DMSSettings.load")
+    def test_falls_back_to_env(self, load_mock, settings_mock):
+        load_mock.return_value = MagicMock(idp_anthropic_api_key="")
+        settings_mock.ANTHROPIC_API_KEY = "sk-ant-env-key"
+        self.assertEqual(resolve_anthropic_api_key(), "sk-ant-env-key")
+        self.assertTrue(has_anthropic_api_key())

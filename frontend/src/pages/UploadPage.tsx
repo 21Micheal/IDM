@@ -1345,7 +1345,7 @@ export default function UploadPage({ scanOnly = false }: UploadPageProps) {
         reason === "subscription_inactive"
           ? "Claude extraction is unavailable. Fill in the details manually."
           : reason === "quota_exhausted"
-            ? "Claude page allowance is used up. Fill in the details manually."
+            ? "Claude usage limit reached (Anthropic workspace cap). Fill in the details manually or contact your administrator."
             : "Automatic extraction unavailable. Fill in the details manually.",
       );
       return;

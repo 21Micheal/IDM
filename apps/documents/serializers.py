@@ -295,7 +295,7 @@ class DMSSettingsSerializer(serializers.ModelSerializer):
 
     def validate_idp_page_allowance(self, value):
         if value < 0:
-            raise serializers.ValidationError("Page allowance cannot be negative.")
+            raise serializers.ValidationError("Reference page target cannot be negative.")
         return value
 
     def validate_idp_pages_used(self, value):

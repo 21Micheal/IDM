@@ -201,9 +201,6 @@ function SettingsWorkspace() {
 
   const summary = useMemo(() => {
     if (!settings) return [];
-    const pagePct = settings.idp_page_allowance > 0
-      ? Math.round((settings.idp_pages_used / settings.idp_page_allowance) * 100)
-      : null;
     return [
       { label: "Watermark", value: settings.watermark_enabled ? "Enabled" : "Off" },
       { label: "Duplicates", value: settings.allow_duplicate_uploads ? "Allowed" : "Blocked" },
@@ -223,9 +220,7 @@ function SettingsWorkspace() {
             ? "Ask on failure"
             : "Regex allowed",
       },
-      ...(pagePct != null
-        ? [{ label: "Claude usage", value: `${pagePct}% of allowance` }]
-        : []),
+      { label: "Claude pages", value: String(settings.idp_pages_used) },
     ];
   }, [settings]);
 
@@ -543,19 +538,6 @@ function SettingsWorkspace() {
 
           {activeSection === "idp" && (
             <>
-              {settings.idp_page_allowance > 0 && (
-                (() => {
-                  const pct = Math.round((settings.idp_pages_used / settings.idp_page_allowance) * 100);
-                  if (pct < 80) return null;
-                  return (
-                    <InfoNote>
-                      {pct >= 100
-                        ? "Claude page allowance is exhausted. New uploads will follow your fallback policy until the allowance is increased or reset."
-                        : `Claude page allowance is ${pct}% used. Consider increasing the cap or resetting usage before bulk uploads.`}
-                    </InfoNote>
-                  );
-                })()
-              )}
               <SettingBlock
                 icon={Sparkles}
                 title="Claude extraction"
@@ -607,27 +589,15 @@ function SettingsWorkspace() {
 
               <SettingBlock
                 icon={Sparkles}
-                title="Claude page allowance"
-                description="Organization-wide budget for Claude extraction across all uploads. Each document consumes one page per image, or up to three pages per PDF (whichever is sent to Claude)."
+                title="Claude usage (reporting)"
+                description="Page counts are for visibility only. Hard spend limits are enforced by your Anthropic workspace cap on this tenant's API key."
               >
+                <InfoNote>
+                  Billing is controlled in the Anthropic console (workspace spend limit per client key).
+                  When that cap is reached, extraction follows your fallback policy above.
+                  Page counts here do not block Claude.
+                </InfoNote>
                 <div className="grid gap-4 sm:grid-cols-2">
-                  <label>
-                    <span className="mb-1.5 block text-xs font-semibold uppercase tracking-wider text-[#5E6870]">
-                      Page allowance
-                    </span>
-                    <input
-                      type="number"
-                      min={0}
-                      className={`${inputCls} w-full`}
-                      value={settings.idp_page_allowance}
-                      onChange={(event) =>
-                        update("idp_page_allowance", Math.max(0, Number(event.target.value) || 0))
-                      }
-                    />
-                    <span className="mt-1 block text-xs text-[#5E6870]">
-                      Total Claude pages allowed since last reset. 0 = unlimited.
-                    </span>
-                  </label>
                   <label>
                     <span className="mb-1.5 block text-xs font-semibold uppercase tracking-wider text-[#5E6870]">
                       Pages used (since last reset)
@@ -642,18 +612,40 @@ function SettingsWorkspace() {
                       }
                     />
                     <span className="mt-1 block text-xs text-[#5E6870]">
-                      Increments after each successful Claude extraction. Reset manually to start a new period.
+                      Increments after each successful Claude extraction. Reset manually to start a new reporting period.
+                    </span>
+                  </label>
+                  <label>
+                    <span className="mb-1.5 block text-xs font-semibold uppercase tracking-wider text-[#5E6870]">
+                      Reference page target (optional)
+                    </span>
+                    <input
+                      type="number"
+                      min={0}
+                      className={`${inputCls} w-full`}
+                      value={settings.idp_page_allowance}
+                      onChange={(event) =>
+                        update("idp_page_allowance", Math.max(0, Number(event.target.value) || 0))
+                      }
+                    />
+                    <span className="mt-1 block text-xs text-[#5E6870]">
+                      Not enforced — optional benchmark to compare against pages used (0 = hide comparison).
                     </span>
                   </label>
                 </div>
                 {settings.idp_page_allowance > 0 && (
                   <InfoNote>
-                    {settings.idp_pages_used} of {settings.idp_page_allowance} pages used (
-                    {Math.min(
-                      100,
-                      Math.round((settings.idp_pages_used / settings.idp_page_allowance) * 100),
-                    )}
-                    %). Updates every few seconds while this page is open.
+                    {settings.idp_pages_used} pages used
+                    {" "}
+                    (reference target: {settings.idp_page_allowance}
+                    {settings.idp_pages_used > settings.idp_page_allowance ? " — above reference" : ""}
+                    ). Updates every few seconds while this page is open.
+                  </InfoNote>
+                )}
+                {settings.idp_page_allowance <= 0 && (
+                  <InfoNote>
+                    {settings.idp_pages_used} Claude pages used since last reset.
+                    Updates every few seconds while this page is open.
                   </InfoNote>
                 )}
               </SettingBlock>
