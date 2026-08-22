@@ -113,6 +113,7 @@ class BulkUploadViewSet(viewsets.GenericViewSet):
 
         data = {
             "related_set": request.data.get("related_set", "false"),
+            "auto_classify": request.data.get("auto_classify", "false"),
             "shared_metadata": shared_metadata,
             "is_scanned": request.data.get("is_scanned", "true"),
             "files": files,
@@ -162,12 +163,13 @@ class BulkUploadViewSet(viewsets.GenericViewSet):
         serializer.is_valid(raise_exception=True)
         files = serializer.validated_data["files"]
         is_related_set = serializer.validated_data.get("related_set", False)
+        auto_classify = serializer.validated_data.get("auto_classify", False)
         document_type = (
             get_unclassified_bulk_document_type()
-            if is_related_set
+            if is_related_set or auto_classify
             else serializer.validated_data["document_type"]
         )
-        if not is_related_set and not self._user_can_upload_type(document_type):
+        if not is_related_set and not auto_classify and not self._user_can_upload_type(document_type):
             return Response(
                 {"detail": "You do not have upload permission for this document type."},
                 status=status.HTTP_403_FORBIDDEN,
@@ -180,7 +182,7 @@ class BulkUploadViewSet(viewsets.GenericViewSet):
             uploaded_by=request.user,
             mode=(
                 BulkUpload.Mode.RELATED_SET
-                if is_related_set
+                if is_related_set or auto_classify
                 else BulkUpload.Mode.SAME_TYPE
             ),
             shared_metadata=shared_metadata,
@@ -197,6 +199,12 @@ class BulkUploadViewSet(viewsets.GenericViewSet):
             request=request,
             is_scanned=is_scanned,
             shared_metadata=shared_metadata,
+            auto_classify=auto_classify,
+            allowed_document_type_ids=None if request.user.has_admin_access else {
+                str(doc_type.id)
+                for doc_type in DocumentType.objects.filter(is_active=True)
+                if self._user_can_upload_type(doc_type)
+            },
         )
 
         out = BulkUploadDetailSerializer(bulk_upload, context={"request": request})

@@ -76,6 +76,7 @@ export default function BulkScanPage({ scanMode = true, onSingleMode, initialBat
   const [stage, setStage] = useState<Stage>(initialBatchId ? "processing" : "select");
   const [selectedTypeId, setSelectedTypeId] = useState("");
   const [isRelatedSet, setIsRelatedSet] = useState(false);
+  const [autoClassifyBulk, setAutoClassifyBulk] = useState(false);
   const [files, setFiles] = useState<File[]>([]);
   const [batchId, setBatchId] = useState<string | null>(initialBatchId ?? null);
   const [uploadProgress, setUploadProgress] = useState(0);
@@ -109,6 +110,7 @@ export default function BulkScanPage({ scanMode = true, onSingleMode, initialBat
     [docTypes],
   );
   const selectedType = visibleDocTypes.find((t) => t.id === selectedTypeId);
+  const isUntypedBatch = isRelatedSet || autoClassifyBulk;
 
   useEffect(() => {
     const next: Record<string, BulkLocalPreview> = {};
@@ -147,7 +149,7 @@ export default function BulkScanPage({ scanMode = true, onSingleMode, initialBat
 
   const enterReview = useCallback((batch: BulkUploadBatch) => {
     const needsManual = countNeedsManualDocs(batch.documents);
-    const askOnFailure = batch.idp_policy?.fallback_policy === "claude_ask";
+    const askOnFailure = false;
 
     if (needsManual > 0 && askOnFailure) {
       setIdpFailureReason(primaryIdpFailureReason(batch.documents) as IdpFailureReason);
@@ -212,12 +214,13 @@ export default function BulkScanPage({ scanMode = true, onSingleMode, initialBat
   const createMutation = useMutation({
     mutationFn: async (uploadFiles?: File[]) => {
       const effectiveFiles = uploadFiles ?? files;
-      if ((!selectedTypeId && !isRelatedSet) || effectiveFiles.length === 0) {
+      if ((!selectedTypeId && !isUntypedBatch) || effectiveFiles.length === 0) {
         throw new Error("Missing type or files");
       }
       const fd = new FormData();
-      if (!isRelatedSet) fd.append("document_type_id", selectedTypeId);
-      fd.append("related_set", isRelatedSet ? "true" : "false");
+      if (!isUntypedBatch) fd.append("document_type_id", selectedTypeId);
+      fd.append("related_set", isUntypedBatch ? "true" : "false");
+      fd.append("auto_classify", autoClassifyBulk ? "true" : "false");
       fd.append("is_scanned", scanMode ? "true" : "false");
       effectiveFiles.forEach((file) => fd.append("files", file));
       const { data } = await bulkUploadAPI.create(fd, {
@@ -290,8 +293,8 @@ export default function BulkScanPage({ scanMode = true, onSingleMode, initialBat
   }, [createMutation]);
 
   const onStartUpload = useCallback(async () => {
-    if (!selectedTypeId && !isRelatedSet) {
-      toast.error("Please select a document type");
+    if (!selectedTypeId && !isUntypedBatch) {
+      toast.error("Please select a document type or enable auto-classification");
       return;
     }
     if (files.length === 0) {
@@ -322,7 +325,7 @@ export default function BulkScanPage({ scanMode = true, onSingleMode, initialBat
     }
 
     uploadFiles(files);
-  }, [selectedTypeId, isRelatedSet, files, uploadFiles]);
+  }, [selectedTypeId, isUntypedBatch, files, uploadFiles]);
 
   const confirmSkipDuplicates = useCallback(() => {
     if (!pendingUploadFiles || pendingUploadFiles.length === 0) {
@@ -359,7 +362,7 @@ export default function BulkScanPage({ scanMode = true, onSingleMode, initialBat
         actions={
           <div className="hidden items-center gap-3 text-xs text-white/80 md:flex">
             <span className="border border-white/30 px-2 py-1">
-              {isRelatedSet ? "Related set" : selectedType?.name || "No type selected"}
+              {autoClassifyBulk ? "Auto classify" : isRelatedSet ? "Related set" : selectedType?.name || "No type selected"}
             </span>
             <span className="border border-white/30 px-2 py-1">{files.length} file{files.length === 1 ? "" : "s"}</span>
           </div>
@@ -392,7 +395,7 @@ export default function BulkScanPage({ scanMode = true, onSingleMode, initialBat
             </h1>
             <p className="mt-0.5 text-xs text-white/75">
               {scanMode
-                ? "Upload same-type batches or related procurement sets. OCR runs per file before review."
+                ? "Upload same-type batches, mixed auto-classified files, or related procurement sets. OCR runs per file before review."
                 : "Upload several files, preview each one, then choose its type and details during review."}
             </p>
           </div>
@@ -479,29 +482,66 @@ export default function BulkScanPage({ scanMode = true, onSingleMode, initialBat
                   checked={isRelatedSet}
                   onChange={(event) => {
                     setIsRelatedSet(event.target.checked);
-                    if (event.target.checked) setSelectedTypeId("");
+                    if (event.target.checked) {
+                      setSelectedTypeId("");
+                      setAutoClassifyBulk(false);
+                    }
                   }}
                 />
                 Related document set
               </label>
+              {scanMode && (
+                <label className="mb-4 flex cursor-pointer items-center gap-2 text-sm text-[#1F2933]">
+                  <input
+                    type="checkbox"
+                    checked={autoClassifyBulk}
+                    onChange={(event) => {
+                      setAutoClassifyBulk(event.target.checked);
+                      if (event.target.checked) {
+                        setSelectedTypeId("");
+                        setIsRelatedSet(false);
+                      }
+                    }}
+                  />
+                  Auto classify document types
+                </label>
+              )}
               {isRelatedSet && (
                 <p className="mb-3 border border-[#A7CDE3] bg-[#EEF6FB] px-3 py-2 text-xs text-[#287EAD]">
                   Use this for PO, invoice, GRN, and support files in one packet. Each document type is confirmed during review.
                 </p>
               )}
+              {autoClassifyBulk && (
+                <p className="mb-3 border border-[#A7CDE3] bg-[#EEF6FB] px-3 py-2 text-xs text-[#287EAD]">
+                  Upload mixed invoices, POs, GRNs, and other business documents. IDP will classify each file before extracting that type&apos;s metadata.
+                </p>
+              )}
               <CustomListbox
                 value={selectedTypeId}
-                onChange={setSelectedTypeId}
+                onChange={(value) => {
+                  setSelectedTypeId(value);
+                  if (value) {
+                    setAutoClassifyBulk(false);
+                    setIsRelatedSet(false);
+                  }
+                }}
                 options={[
-                  { value: "", label: isRelatedSet
+                  { value: "", label: autoClassifyBulk
+                      ? "Auto classify each document"
+                      : isRelatedSet
                       ? scanMode ? "Auto classify during review" : "Choose type during review"
                       : "— Choose document type —" },
                   ...visibleDocTypes.map((t) => ({ value: t.id, label: t.name })),
                 ]}
+                disabled={isUntypedBatch}
                 buttonClassName="input w-full disabled:bg-[#EEF3F7] disabled:text-[#7A858E]"
                 ariaLabel="Document type selector"
               />
-              {isRelatedSet ? (
+              {autoClassifyBulk ? (
+                <p className="mt-3 border-t border-[#D3D7DA] pt-3 text-xs text-[#5E6870]">
+                  Claude classifies each file first, then extracts using the matched document type&apos;s configured metadata fields. Uncertain files stay available for manual type selection in review.
+                </p>
+              ) : isRelatedSet ? (
                 <p className="mt-3 border-t border-[#D3D7DA] pt-3 text-xs text-[#5E6870]">
                   {scanMode
                     ? "OCR will classify each file and extract supplier, PO reference, amount, and dates during review."
@@ -515,7 +555,9 @@ export default function BulkScanPage({ scanMode = true, onSingleMode, initialBat
             <div className="flex items-start gap-2 border border-[#A7CDE3] bg-[#EEF6FB] p-4 text-xs text-[#287EAD]">
               <Info className="w-4 h-4 flex-shrink-0 mt-0.5" />
               <span>
-                {isRelatedSet
+                {autoClassifyBulk
+                  ? "Mixed batches are classified per file before review. Confirm every suggested type and metadata field before submitting."
+                  : isRelatedSet
                   ? scanMode
                     ? "Related sets are classified one document at a time. Confirm the suggested type and fields before the system links matching PO references."
                     : "Related uploads are reviewed one document at a time. The system links matching PO references after you confirm the details."
@@ -546,6 +588,7 @@ export default function BulkScanPage({ scanMode = true, onSingleMode, initialBat
                 files={files}
                 onChange={setFiles}
                 disabled={createMutation.isPending}
+                onLimitExceeded={(maxFiles) => toast.warning(`You can upload up to ${maxFiles} files in one batch. Extra files were not added.`)}
               />
             </div>
 
@@ -553,7 +596,7 @@ export default function BulkScanPage({ scanMode = true, onSingleMode, initialBat
               <button
                 type="button"
                 onClick={onStartUpload}
-                disabled={createMutation.isPending || isCheckingDuplicates || (!selectedTypeId && !isRelatedSet) || files.length === 0}
+                disabled={createMutation.isPending || isCheckingDuplicates || (!selectedTypeId && !isUntypedBatch) || files.length === 0}
                 className="inline-flex items-center justify-center gap-2 bg-[#287EAD] px-4 py-2 text-sm font-semibold text-white hover:bg-[#206D99] disabled:opacity-50"
               >
                 {createMutation.isPending || isCheckingDuplicates ? (
@@ -564,7 +607,9 @@ export default function BulkScanPage({ scanMode = true, onSingleMode, initialBat
                 ) : (
                   <>
                     <ScanLine className="w-4 h-4" />
-                    {isRelatedSet
+                    {autoClassifyBulk
+                      ? "Upload & classify batch"
+                      : isRelatedSet
                       ? scanMode ? "Upload & classify set" : "Upload related set"
                       : scanMode ? "Upload & scan batch" : "Upload batch"}
                     <ArrowRight className="w-4 h-4" />
@@ -594,12 +639,12 @@ export default function BulkScanPage({ scanMode = true, onSingleMode, initialBat
         </div>
       )}
 
-      {stage === "review" && (selectedType || isRelatedSet || polledBatch?.document_type) && reviewStates.length > 0 && (
+      {stage === "review" && (selectedType || isUntypedBatch || polledBatch?.document_type) && reviewStates.length > 0 && (
         <div className="p-5 pr-0">
           <BulkReviewPanel
             documentType={polledBatch?.document_type ?? selectedType ?? visibleDocTypes[0]}
             documentTypes={visibleDocTypes}
-            isRelatedSet={isRelatedSet || polledBatch?.mode === "related_set"}
+            isRelatedSet={isUntypedBatch || polledBatch?.mode === "related_set"}
             scanMode={scanMode}
             reviewStates={reviewStates}
             onChange={setReviewStates}

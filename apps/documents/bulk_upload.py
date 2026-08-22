@@ -4,6 +4,7 @@ Helpers for bulk scan upload batches.
 from __future__ import annotations
 
 import logging
+import mimetypes
 import os
 
 from apps.search.utils import SEARCH_INDEX_EXCEPTIONS
@@ -40,6 +41,62 @@ def document_title_from_filename(filename: str) -> str:
         stem = base.rsplit(".", 1)[0]
         return stem or base
     return base
+
+
+def _is_scannable_upload(upload) -> bool:
+    mime = (getattr(upload, "content_type", "") or "").lower()
+    name = (getattr(upload, "name", "") or "").lower()
+    return mime == "application/pdf" or mime.startswith("image/") or name.endswith(
+        (".pdf", ".png", ".jpg", ".jpeg", ".tiff", ".tif", ".bmp", ".webp")
+    )
+
+
+def _classification_candidates(allowed_document_type_ids: set[str] | None = None):
+    from .models import SIGNATURE_REQUEST_DOCUMENT_TYPE_CODE
+    from .serializers import PERSONAL_DOCUMENT_TYPE_CODE
+
+    qs = DocumentType.objects.filter(is_active=True).exclude(
+        code__in=[
+            UNCLASSIFIED_BULK_DOCUMENT_TYPE_CODE,
+            PERSONAL_DOCUMENT_TYPE_CODE,
+            SIGNATURE_REQUEST_DOCUMENT_TYPE_CODE,
+        ]
+    )
+    if allowed_document_type_ids is not None:
+        qs = qs.filter(id__in=allowed_document_type_ids)
+    return list(qs)
+
+
+def _classify_upload_document_type(upload, candidates: list[DocumentType]) -> DocumentType | None:
+    if not candidates or not _is_scannable_upload(upload):
+        return None
+
+    try:
+        position = upload.tell() if hasattr(upload, "tell") else None
+    except Exception:
+        position = None
+
+    try:
+        if hasattr(upload, "seek"):
+            upload.seek(0)
+        content = upload.read()
+        if hasattr(upload, "seek"):
+            upload.seek(0)
+        if not content:
+            return None
+        from .ocr.idp import classify_document_type
+
+        mime = getattr(upload, "content_type", "") or mimetypes.guess_type(getattr(upload, "name", ""))[0] or "application/octet-stream"
+        return classify_document_type(content, mime, getattr(upload, "name", ""), candidates)
+    except Exception:
+        logger.exception("Bulk auto-classification failed for file=%s", getattr(upload, "name", None))
+        return None
+    finally:
+        if position is not None and hasattr(upload, "seek"):
+            try:
+                upload.seek(position)
+            except Exception:
+                pass
 
 
 def _serialize_metadata_fields(document_type: DocumentType) -> list[dict]:
@@ -142,6 +199,8 @@ def create_bulk_upload_documents(
     request,
     is_scanned: bool = True,
     shared_metadata: dict | None = None,
+    auto_classify: bool = False,
+    allowed_document_type_ids: set[str] | None = None,
 ) -> BulkUpload:
     """
     Upload each file as a draft document linked to the batch.
@@ -149,15 +208,25 @@ def create_bulk_upload_documents(
     bulk_upload.status = BulkUploadStatus.UPLOADING
     bulk_upload.total_files = len(files)
     bulk_upload.save(update_fields=["status", "total_files", "updated_at"])
+    classification_candidates = (
+        _classification_candidates(allowed_document_type_ids)
+        if auto_classify and bulk_upload.document_type.code == UNCLASSIFIED_BULK_DOCUMENT_TYPE_CODE
+        else []
+    )
 
     for upload in files:
         title = document_title_from_filename(upload.name)
         metadata = dict(shared_metadata or {})
+        document_type = (
+            _classify_upload_document_type(upload, classification_candidates)
+            or bulk_upload.document_type
+        )
+        should_scan = bool(is_scanned)
         payload = {
             "title": title,
-            "document_type_id": str(bulk_upload.document_type_id),
+            "document_type_id": str(document_type.id),
             "file": upload,
-            "is_scanned": is_scanned,
+            "is_scanned": should_scan,
             "is_self_upload": False,
         }
         if metadata:

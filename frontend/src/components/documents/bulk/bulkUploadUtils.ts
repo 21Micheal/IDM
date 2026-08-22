@@ -107,8 +107,9 @@ export function buildReviewStateFromBatchItem(
   const suggestedScores: Record<string, number> = {};
   const ocrFields = parseOcrFields(item);
   const detectedDocumentType = ocrFields.document_type ? String(ocrFields.document_type).trim() : "";
+  const itemDocumentType = item.document_type?.code !== "UNCLASS" ? item.document_type : undefined;
   const resolvedDocumentType = isRelatedSet
-    ? resolveDocumentType(detectedDocumentType || item.file_name, documentTypes)
+    ? itemDocumentType ?? resolveDocumentType(detectedDocumentType || item.file_name, documentTypes)
     : documentType;
 
   // The document type embedded in the batch item can carry an empty

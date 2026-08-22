@@ -16,6 +16,7 @@ type Props = {
   onChange: (files: File[]) => void;
   maxFiles?: number;
   disabled?: boolean;
+  onLimitExceeded?: (maxFiles: number) => void;
 };
 
 export default function BulkUploadDropzone({
@@ -23,10 +24,15 @@ export default function BulkUploadDropzone({
   onChange,
   maxFiles = 50,
   disabled = false,
+  onLimitExceeded,
 }: Props) {
   const { getRootProps, getInputProps, isDragActive } = useDropzone({
-    onDrop: (accepted) => {
-      const merged = [...files, ...accepted].slice(0, maxFiles);
+    onDrop: (accepted, rejected) => {
+      const availableSlots = Math.max(maxFiles - files.length, 0);
+      if (rejected.some((item) => item.errors.some((error) => error.code === "too-many-files")) || accepted.length > availableSlots) {
+        onLimitExceeded?.(maxFiles);
+      }
+      const merged = [...files, ...accepted.slice(0, availableSlots)];
       onChange(merged);
     },
     maxFiles,

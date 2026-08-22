@@ -1761,6 +1761,7 @@ class BulkUploadCreateSerializer(serializers.Serializer):
         required=False,
     )
     related_set = serializers.BooleanField(default=False)
+    auto_classify = serializers.BooleanField(default=False)
     shared_metadata = serializers.DictField(required=False)
     files = serializers.ListField(
         child=serializers.FileField(),
@@ -1779,13 +1780,18 @@ class BulkUploadCreateSerializer(serializers.Serializer):
             return value.lower() in ("true", "1", "yes", "on")
         return bool(value)
 
+    def validate_auto_classify(self, value):
+        if isinstance(value, str):
+            return value.lower() in ("true", "1", "yes", "on")
+        return bool(value)
+
     def validate(self, attrs):
-        if attrs.get("related_set") and not attrs.get("document_type"):
+        if (attrs.get("related_set") or attrs.get("auto_classify")) and not attrs.get("document_type"):
             return attrs
         document_type = attrs.get("document_type")
         if not document_type:
             raise serializers.ValidationError(
-                {"document_type_id": "Document type is required unless this is a related document set."}
+                {"document_type_id": "Document type is required unless this is a related or auto-classified batch."}
             )
         if document_type.is_personal_type:
             raise serializers.ValidationError(
