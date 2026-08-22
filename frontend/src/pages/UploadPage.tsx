@@ -32,7 +32,7 @@ import { deriveDocumentTypeConfig } from "@/lib/documentTypeConfig";
 import { applyOcrToFields, sanitizeOcrFields, type OcrFields } from "@/lib/ocrFieldMatcher";
 import BulkScanPage from "@/pages/BulkScanPage";
 import IdpFailureModal, { type IdpFailureReason } from "@/components/documents/IdpFailureModal";
-import TemplatePreview from "@/components/templates/TemplatePreview";
+
 import { resolveSource, type ReferenceValue } from "@/components/templates/referenceSources";
 import { WorkspaceCommandBar } from "@/components/shared/WorkspaceCommandBar";
 import CustomListbox from "@/components/ui/CustomListbox";
@@ -739,16 +739,44 @@ function StepBadge({ n, active, done }: { n: number; active?: boolean; done?: bo
   );
 }
 
-function DetailsTab() {
+function DetailsTabs({
+  showFileTab = false,
+  activeTab,
+  onTabChange,
+}: {
+  showFileTab?: boolean;
+  activeTab: "details" | "file";
+  onTabChange: (tab: "details" | "file") => void;
+}) {
   return (
-    <div className="border-b border-border">
-      <div className="flex flex-wrap">
+    <div className="border-b border-[#C8CDD2] bg-white">
+      <div className="flex">
         <button
           type="button"
-          className="-mb-px h-11 border border-t-2 border-border border-t-primary bg-background px-5 text-sm text-primary transition-colors"
+          onClick={() => onTabChange("details")}
+          className={clsx(
+            "h-11 px-5 text-sm font-medium transition-colors border-b-2 -mb-px",
+            activeTab === "details"
+              ? "border-b-[#287EAD] text-[#287EAD]"
+              : "border-b-transparent text-[#5E6870] hover:text-[#1F2933]",
+          )}
         >
           Details
         </button>
+        {showFileTab && (
+          <button
+            type="button"
+            onClick={() => onTabChange("file")}
+            className={clsx(
+              "h-11 px-5 text-sm font-medium transition-colors border-b-2 -mb-px",
+              activeTab === "file"
+                ? "border-b-[#287EAD] text-[#287EAD]"
+                : "border-b-transparent text-[#5E6870] hover:text-[#1F2933]",
+            )}
+          >
+            File
+          </button>
+        )}
       </div>
     </div>
   );
@@ -1073,6 +1101,12 @@ export default function UploadPage({ scanOnly = false }: UploadPageProps) {
   const [idpFailureReason, setIdpFailureReason] = useState<IdpFailureReason>("extraction_error");
   const [idpAllowRegex, setIdpAllowRegex] = useState(false);
   const [idpFallbackPending, setIdpFallbackPending] = useState(false);
+  // Tab state for the right-side panel (used when a previewable file is selected)
+  const [activeTab, setActiveTab] = useState<"details" | "file">("details");
+  // Switch to "File" tab when a new file lands, so user sees type selector immediately
+  // activeTab defaults to "details" and only ever changes on user click.
+  // We no longer auto-switch to "file" on drop — the Details tab persists.
+
 
   const {
     register, handleSubmit, control, reset, setValue, clearErrors, getValues,
@@ -1971,12 +2005,11 @@ export default function UploadPage({ scanOnly = false }: UploadPageProps) {
         <>
         <div className="grid grid-cols-1 gap-5 p-5 pr-0 xl:grid-cols-12">
           {/* Left column — controls */}
+
           <div className={clsx(
             droppedFile && (getCapturePreviewKind(droppedFile) === "pdf" || getCapturePreviewKind(droppedFile) === "image")
-              ? "order-2 xl:col-span-3"
-              : selectedTemplate && !droppedFile && selectedTemplate.kind !== "document"
-                ? "xl:col-span-4"
-                : "xl:col-start-2 xl:col-span-4",
+              ? "hidden"
+              : "xl:col-start-2 xl:col-span-4",
             "space-y-4"
           )}>
             {/* Step 1 — Document Type */}
@@ -2005,41 +2038,7 @@ export default function UploadPage({ scanOnly = false }: UploadPageProps) {
                   </span>
                 </div>
               )}
-              {canUseTemplate && (
-                <div className="mt-4 border border-[#C8CDD2] bg-[#F7F8F9] p-3">
-                  <label className="flex cursor-pointer items-center gap-2 text-sm font-semibold text-[#1F2933]">
-                    <input
-                      type="checkbox"
-                      checked={useTemplate}
-                      onChange={(event) => {
-                        setUseTemplate(event.target.checked);
-                        if (!event.target.checked) setSelectedTemplateId("");
-                      }}
-                    />
-                    <LayoutTemplate className="h-4 w-4 text-[#287EAD]" />
-                    Use template
-                  </label>
-                  {useTemplate && (
-                    <div className="mt-3 space-y-2">
-                      <CustomListbox
-                        value={selectedTemplateId}
-                        onChange={(v) => setSelectedTemplateId(v)}
-                        options={[{ value: "", label: "Select template" }, ...typeTemplates.map((template) => ({ value: template.id, label: `${template.name} (${template.type === "uploaded" ? "Office" : "Builder"})` }))]}
-                        buttonClassName="input w-full"
-                        ariaLabel="Template select"
-                      />
-                      {typeTemplates.length === 0 && (
-                        <p className="text-xs text-[#5E6870]">No active templates are configured for this document type.</p>
-                      )}
-                      {selectedTemplate && (
-                        <p className="text-xs text-[#5E6870]">
-                          {selectedTemplate.description || "A draft document will be created from this template for editing."}
-                        </p>
-                      )}
-                    </div>
-                  )}
-                </div>
-              )}
+
             </div>
 
             {/* Step 2 — Attach File */}
@@ -2105,26 +2104,65 @@ export default function UploadPage({ scanOnly = false }: UploadPageProps) {
               </div>
             )}
 
-            {/* Bulk mode toggle — positioned below the left panels */}
-            <label className="inline-flex cursor-pointer items-center gap-2 text-sm text-[#1F2933]">
-              <input
-                type="checkbox"
-                checked={bulkMode}
-                onChange={(event) => {
-                  setBulkMode(event.target.checked);
-                  if (event.target.checked) {
-                    navigate(`${scanOnly ? "/documents/scan" : "/documents/upload"}?mode=bulk`, { replace: true });
-                  }
-                }}
-                className="h-4 w-4 accent-[#287EAD]"
-              />
-              Use bulk mode
-            </label>
+            {/* Checkboxes flow here when no file is selected */}
+            <div className="flex flex-wrap items-center gap-4">
+              <label className="inline-flex cursor-pointer items-center gap-2 text-sm text-[#1F2933]">
+                <input
+                  type="checkbox"
+                  checked={bulkMode}
+                  onChange={(event) => {
+                    setBulkMode(event.target.checked);
+                    if (event.target.checked) {
+                      navigate(`${scanOnly ? "/documents/scan" : "/documents/upload"}?mode=bulk`, { replace: true });
+                    }
+                  }}
+                  className="h-4 w-4 accent-[#287EAD]"
+                />
+                Use bulk mode
+              </label>
+              {canUseTemplate && (
+                <label className="inline-flex cursor-pointer items-center gap-2 text-sm text-[#1F2933]">
+                  <input
+                    type="checkbox"
+                    checked={useTemplate}
+                    onChange={(event) => {
+                      setUseTemplate(event.target.checked);
+                      if (!event.target.checked) setSelectedTemplateId("");
+                    }}
+                    className="h-4 w-4 accent-[#287EAD]"
+                  />
+                  <LayoutTemplate className="h-4 w-4 text-[#287EAD]" />
+                  Use template
+                </label>
+              )}
+            </div>
+
+            {/* Template selector — shown below checkbox when use template is active */}
+            {canUseTemplate && useTemplate && (
+              <div className="border border-[#C8CDD2] bg-[#F7F8F9] p-3 space-y-2">
+                <CustomListbox
+                  value={selectedTemplateId}
+                  onChange={(v) => setSelectedTemplateId(v)}
+                  options={[{ value: "", label: "Select template" }, ...typeTemplates.map((t) => ({ value: t.id, label: `${t.name} (${t.type === "uploaded" ? "Office" : "Builder"})` }))]}
+                  buttonClassName="input w-full"
+                  ariaLabel="Template select"
+                />
+                {typeTemplates.length === 0 && (
+                  <p className="text-xs text-[#5E6870]">No active templates are configured for this document type.</p>
+                )}
+                {selectedTemplate && (
+                  <p className="text-xs text-[#5E6870]">
+                    {selectedTemplate.description || "A draft document will be created from this template for editing."}
+                  </p>
+                )}
+              </div>
+            )}
+
           </div>
 
           {/* Centre column — document preview (visible when file selected and displayable) */}
           {droppedFile && (getCapturePreviewKind(droppedFile) === "pdf" || getCapturePreviewKind(droppedFile) === "image") && (
-            <div className="order-1 xl:col-span-6">
+            <div className="xl:col-span-7">
               <CapturePreviewPane
                 file={droppedFile}
                 previewUrl={pdfPreviewUrl}
@@ -2139,78 +2177,16 @@ export default function UploadPage({ scanOnly = false }: UploadPageProps) {
               />
             </div>
           )}
-          {/* Centre column — template preview (template selected, but not document templates) */}
-          {selectedTemplate && !droppedFile && selectedTemplate.kind !== "document" && (
-            <div className="order-1 xl:col-span-5">
-              <div className={clsx("flex flex-col border border-[#C8CDD2] bg-white", PREVIEW_MIN_HEIGHT)}>
-                {/* Header */}
-                <div className="flex items-center justify-between border-b border-[#C8CDD2] bg-[#F3F5F6] px-4 py-3">
-                  <div className="min-w-0">
-                    <p className="text-xs font-semibold uppercase tracking-wider text-[#5E6870]">Template source</p>
-                    <p className="mt-0.5 text-sm font-bold text-[#1F2933] truncate">
-                      {selectedTemplate?.name || "Select a template"}
-                    </p>
-                  </div>
-                  {selectedTemplate && (
-                    <span className={clsx(
-                      "flex-shrink-0 rounded px-2 py-0.5 text-[10px] font-semibold uppercase tracking-wider border",
-                      isBuiltTemplate || isDesignerDoc
-                        ? "bg-[#EEF6FB] text-[#287EAD] border-[#287EAD]/30"
-                        : "bg-amber-50 text-amber-700 border-amber-200",
-                    )}>
-                      {isBuiltTemplate ? "Builder" : isDesignerDoc ? "Document" : "Office"}
-                    </span>
-                  )}
-                </div>
 
-                {selectedTemplate ? (
-                  <div className="flex-1 overflow-y-auto p-5">
-                    <TemplatePreview
-                      template={{
-                        name: selectedTemplate.name,
-                        type: selectedTemplate.type,
-                        description: selectedTemplate.description,
-                        file_name: selectedTemplate.file_name,
-                        file_url: selectedTemplate.file_url,
-                        placeholders: selectedTemplate.placeholders,
-                        sections: selectedTemplate.sections,
-                      }}
-                      values={{}}
-                      processStep="draft"
-                    />
-
-                    {/* Footer note */}
-                    <p className="mt-5 border-t border-[#E3E7EA] pt-3 text-xs text-[#5E6870]">
-                      {isBuiltTemplate
-                        ? "Click \"Create Document\" below to open the full form and complete all fields."
-                        : isDesignerDoc
-                          ? "This document is generated from the template — merge fields (author, date, reference) and the details you enter are filled in automatically, then it opens for editing."
-                          : "A draft Office document will be created from this template for editing."}
-                    </p>
-                  </div>
-                ) : (
-                  <div className="flex h-full min-h-[30rem] flex-col items-center justify-center px-8 text-center">
-                    <div className="mb-4 flex h-16 w-16 items-center justify-center border border-[#A7CDE3] bg-[#EEF6FB] text-[#287EAD]">
-                      <LayoutTemplate className="h-8 w-8" />
-                    </div>
-                    <p className="text-base font-semibold text-[#1F2933]">Choose a template for this document type</p>
-                    <p className="mt-2 max-w-md text-sm text-[#5E6870]">
-                      Templates are maintained by admins and scoped to the selected document type.
-                    </p>
-                  </div>
-                )}
-              </div>
-            </div>
-          )}
 
           {/* Right column — form / OCR idle */}
-          <div className={clsx(
-            droppedFile && (getCapturePreviewKind(droppedFile) === "pdf" || getCapturePreviewKind(droppedFile) === "image")
-              ? "order-3 xl:col-span-3"
-              : selectedTemplate && !droppedFile && selectedTemplate.kind !== "document"
-                ? "order-3 xl:col-span-3"
-                : "xl:col-start-7 xl:col-span-5"
-          )}>
+          {(() => {
+            const hasPreviewFile = droppedFile && (getCapturePreviewKind(droppedFile) === "pdf" || getCapturePreviewKind(droppedFile) === "image");
+            const colClass = hasPreviewFile
+              ? "xl:col-span-5"
+              : "xl:col-start-7 xl:col-span-5";
+            return (
+          <div className={colClass}>
             {showManualForm && (
               <div
                 className={clsx(
@@ -2218,14 +2194,132 @@ export default function UploadPage({ scanOnly = false }: UploadPageProps) {
                   isSelfUpload ? "border-[#A7CDE3]" : "border-[#C8CDD2]",
                 )}
               >
-                <DetailsTab />
+                <DetailsTabs
+                  showFileTab={Boolean(droppedFile)}
+                  activeTab={activeTab}
+                  onTabChange={setActiveTab}
+                />
+                {/* ── File tab: doc-type selector + attached file info ── */}
+                {activeTab === "file" && droppedFile && (
+                  <div className="p-5 space-y-5">
+                    {/* Doc type */}
+                    <div>
+                      <h2 className="mb-3 flex items-center gap-2 text-sm font-semibold text-[#1F2933]">
+                        <StepBadge n={1} active={!selectedTypeId} done={Boolean(selectedTypeId)} />
+                        Document Type
+                      </h2>
+                      <CustomListbox
+                        value={selectedTypeId}
+                        onChange={(v) => setSelectedTypeId(v)}
+                        options={[{ value: "", label: "— Choose document type —" }, ...visibleDocTypes.map((t) => ({ value: t.id, label: t.name }))]}
+                        buttonClassName="input w-full"
+                        ariaLabel="Document type"
+                      />
+                      {selectedType?.description && (
+                        <p className="mt-2 text-xs text-muted-foreground">{selectedType.description}</p>
+                      )}
+                      {selectedType && (
+                        <div className="mt-3 flex items-start gap-2 border border-[#A7CDE3] bg-[#EEF6FB] px-3 py-2 text-xs text-[#287EAD]">
+                          <Info className="w-4 h-4 flex-shrink-0 mt-0.5" />
+                          <span>
+                            {isSelfUpload
+                              ? "This type uploads as personal (visible to you and admins, no approval workflow)."
+                              : "This type follows the workflow approval process."}
+                          </span>
+                        </div>
+                      )}
+                    </div>
+                    {/* Template selector in File tab */}
+                    {canUseTemplate && (
+                      <div>
+                        <label className="inline-flex cursor-pointer items-center gap-2 text-sm text-[#1F2933] mb-2">
+                          <input
+                            type="checkbox"
+                            checked={useTemplate}
+                            onChange={(event) => {
+                              setUseTemplate(event.target.checked);
+                              if (!event.target.checked) setSelectedTemplateId("");
+                            }}
+                            className="h-4 w-4 accent-[#287EAD]"
+                          />
+                          <LayoutTemplate className="h-4 w-4 text-[#287EAD]" />
+                          Use template
+                        </label>
+                        {useTemplate && (
+                          <div className="border border-[#C8CDD2] bg-[#F7F8F9] p-3 space-y-2">
+                            <CustomListbox
+                              value={selectedTemplateId}
+                              onChange={(v) => setSelectedTemplateId(v)}
+                              options={[{ value: "", label: "Select template" }, ...typeTemplates.map((t) => ({ value: t.id, label: `${t.name} (${t.type === "uploaded" ? "Office" : "Builder"})` }))]}
+                              buttonClassName="input w-full"
+                              ariaLabel="Template select"
+                            />
+                            {typeTemplates.length === 0 && (
+                              <p className="text-xs text-[#5E6870]">No active templates are configured for this document type.</p>
+                            )}
+                            {selectedTemplate && (
+                              <p className="text-xs text-[#5E6870]">
+                                {selectedTemplate.description || "A draft document will be created from this template for editing."}
+                              </p>
+                            )}
+                          </div>
+                        )}
+                      </div>
+                    )}
+                    {/* Attached file info */}
+                    <div>
+                      <h2 className="mb-3 flex items-center gap-2 text-sm font-semibold text-[#1F2933]">
+                        <StepBadge n={2} active done />
+                        Attached File
+                      </h2>
+                      <div className="border border-[#C8CDD2] bg-[#F7F8F9] p-4">
+                        <p className="text-sm font-semibold text-[#1F2933] truncate">{droppedFile.name}</p>
+                        <p className="text-xs text-[#5E6870] mt-1">{formatBytes(droppedFile.size)}</p>
+                        <div className="mt-3 flex items-center gap-2">
+                          {isOfficeEditable(droppedFile) && (
+                            <button
+                              type="button"
+                              onClick={(e) => { e.stopPropagation(); handleEditClick(); }}
+                              className="inline-flex items-center gap-1.5 border border-[#287EAD] bg-white px-2.5 py-1 text-[11px] font-semibold text-[#287EAD] hover:bg-[#EEF6FB]"
+                            >
+                              <Pencil className="h-3.5 w-3.5" />
+                              Edit Document
+                            </button>
+                          )}
+                          <button
+                            type="button"
+                            onClick={() => { setDroppedFile(null); setPdfPreviewUrl(null); }}
+                            className="inline-flex items-center gap-1 text-xs font-medium text-destructive hover:text-destructive/80"
+                          >
+                            <X className="w-3.5 h-3.5" /> Remove
+                          </button>
+                        </div>
+                      </div>
+                      {/* Replacement dropzone */}
+                      <div
+                        {...getRootProps()}
+                        className={clsx(
+                          "mt-3 cursor-pointer border border-dashed p-3 text-center text-xs text-[#5E6870] transition-all",
+                          isDragActive ? "border-[#287EAD] bg-[#EEF6FB]" : "border-[#C8CDD2] hover:border-[#287EAD]",
+                        )}
+                      >
+                        <input {...getInputProps()} />
+                        <Upload className="mx-auto mb-1 w-4 h-4" />
+                        {isDragActive ? "Drop to replace" : "Drop a file here to replace"}
+                      </div>
+                    </div>
+                  </div>
+                )}
+                {/* ── Details tab ── */}
+                {(activeTab === "details" || !droppedFile) && (
                 <div className="p-5 sm:p-6">
+
                   <div className="mb-5 flex items-center gap-2.5">
                     <StepBadge n={4} active />
                     <h2 className="text-base font-semibold text-foreground">
                       {isSelfUpload ? "Personal Details" : "Document Details"}
                     </h2>
-                    {isSelfUpload && (
+                    {isSelfUpload && !droppedFile && (
                       <span className="ml-auto inline-flex items-center gap-1 text-xs font-semibold text-primary">
                         <Lock className="w-3.5 h-3.5" /> Personal
                       </span>
@@ -2501,6 +2595,7 @@ export default function UploadPage({ scanOnly = false }: UploadPageProps) {
                   </button>
                   </div>
                 </div>
+                )}
               </div>
             )}
 
@@ -2575,8 +2670,44 @@ export default function UploadPage({ scanOnly = false }: UploadPageProps) {
             )}
 
           </div>
+          );
+          })()}
         </div>
 
+        {/* Checkboxes below preview+panel when a file is loaded */}
+        {droppedFile && (getCapturePreviewKind(droppedFile) === "pdf" || getCapturePreviewKind(droppedFile) === "image") && (
+          <div className="flex flex-wrap items-center gap-6 px-5 py-4">
+            <label className="inline-flex cursor-pointer items-center gap-2 text-sm text-[#1F2933]">
+              <input
+                type="checkbox"
+                checked={bulkMode}
+                onChange={(event) => {
+                  setBulkMode(event.target.checked);
+                  if (event.target.checked) {
+                    navigate(`${scanOnly ? "/documents/scan" : "/documents/upload"}?mode=bulk`, { replace: true });
+                  }
+                }}
+                className="h-4 w-4 accent-[#287EAD]"
+              />
+              Use bulk mode
+            </label>
+            {canUseTemplate && (
+              <label className="inline-flex cursor-pointer items-center gap-2 text-sm text-[#1F2933]">
+                <input
+                  type="checkbox"
+                  checked={useTemplate}
+                  onChange={(event) => {
+                    setUseTemplate(event.target.checked);
+                    if (!event.target.checked) setSelectedTemplateId("");
+                  }}
+                  className="h-4 w-4 accent-[#287EAD]"
+                />
+                <LayoutTemplate className="h-4 w-4 text-[#287EAD]" />
+                Use template
+              </label>
+            )}
+          </div>
+        )}
         </>
       )}
 

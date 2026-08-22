@@ -460,6 +460,7 @@ export default function BulkScanPage({ scanMode = true, onSingleMode, initialBat
       </Dialog>
 
       {stage === "select" && (
+        <>
         <div className="grid grid-cols-1 gap-5 p-5 pr-0 lg:grid-cols-12">
           <div className="space-y-5 lg:col-span-4">
             <div className="border border-[#C8CDD2] bg-white p-5">
@@ -567,7 +568,7 @@ export default function BulkScanPage({ scanMode = true, onSingleMode, initialBat
               </span>
             </div>
 
-            {/* Bulk mode toggle — always visible so users know they're in bulk mode */}
+            {/* Checkbox flows with panel content */}
             <label className="inline-flex cursor-pointer items-center gap-2 text-sm text-[#1F2933]">
               <input
                 type="checkbox"
@@ -579,6 +580,7 @@ export default function BulkScanPage({ scanMode = true, onSingleMode, initialBat
               />
               Use bulk mode
             </label>
+
           </div>
 
           <div className="space-y-5 lg:col-span-8">
@@ -626,6 +628,7 @@ export default function BulkScanPage({ scanMode = true, onSingleMode, initialBat
             </div>
           </div>
         </div>
+        </>
       )}
 
       {stage === "processing" && activeBatch && (
