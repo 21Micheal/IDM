@@ -1544,7 +1544,7 @@ export default function UploadPage({ scanOnly = false }: UploadPageProps) {
     }
   }, [maxSizeBytes]);
 
-  const { getRootProps, getInputProps, isDragActive } = useDropzone({
+  const { getRootProps, getInputProps, isDragActive, open: openFileDialog } = useDropzone({
     onDrop,
     onDropRejected,
     maxFiles: 1,
@@ -2295,18 +2295,15 @@ export default function UploadPage({ scanOnly = false }: UploadPageProps) {
                           </button>
                         </div>
                       </div>
-                      {/* Replacement dropzone */}
-                      <div
-                        {...getRootProps()}
-                        className={clsx(
-                          "mt-3 cursor-pointer border border-dashed p-3 text-center text-xs text-[#5E6870] transition-all",
-                          isDragActive ? "border-[#287EAD] bg-[#EEF6FB]" : "border-[#C8CDD2] hover:border-[#287EAD]",
-                        )}
+                      {/* Replace button — reuses the main dropzone's open() to avoid a second getRootProps consumer in the DOM */}
+                      <button
+                        type="button"
+                        onClick={() => openFileDialog()}
+                        className="mt-3 flex w-full cursor-pointer items-center justify-center gap-2 border border-dashed border-[#C8CDD2] p-3 text-xs text-[#5E6870] transition-all hover:border-[#287EAD] hover:text-[#287EAD]"
                       >
-                        <input {...getInputProps()} />
-                        <Upload className="mx-auto mb-1 w-4 h-4" />
-                        {isDragActive ? "Drop to replace" : "Drop a file here to replace"}
-                      </div>
+                        <Upload className="h-4 w-4" />
+                        Replace file
+                      </button>
                     </div>
                   </div>
                 )}
