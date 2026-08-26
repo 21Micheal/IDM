@@ -44,7 +44,6 @@ type PermissionStage = string;
 const ALL_ACTIONS = [
   { value: "view",     label: "View",     description: "Open and read documents" },
   { value: "upload",   label: "Upload",   description: "Add new documents" },
-  { value: "submit",   label: "Submit",   description: "Submit draft documents for approval" },
   { value: "edit",     label: "Edit",     description: "Update document metadata" },
   { value: "download", label: "Download", description: "Download file copies" },
   { value: "comment",  label: "Comment",  description: "Add comments" },

@@ -30,6 +30,7 @@ from rest_framework.response import Response
 from rest_framework_simplejwt.tokens import AccessToken
 
 from apps.accounts.views import IsGroupAdmin
+from apps.accounts.models import AccessStage
 from apps.documents.analytics import IsAnalyticsViewer
 
 from .models import (
@@ -522,6 +523,60 @@ class DocumentViewSet(AuditMixin, viewsets.ModelViewSet):
             access_filter |= _batch_reviewer_filter
 
             qs = qs.filter(access_filter).distinct()
+
+            # VIEW PERMISSION FILTER: For documents a user is involved with through
+            # mechanisms OTHER than direct ownership or work queue assignment, they need
+            # VIEW permission on the document type. This ensures that documents appearing
+            # through HOD scope, shared documents, signed documents, etc. are only visible
+            # if the user has VIEW permission on that document type.
+            from apps.accounts.models import GroupAction, GroupPermission
+            from apps.documents.access import permission_stage_is_global
+            
+            # Check if user has wildcard VIEW permission (all document types)
+            now = timezone.now()
+            has_wildcard_view = GroupPermission.objects.filter(
+                group__memberships__user=user,
+                group__is_active=True,
+                action=GroupAction.VIEW.value,
+                document_type__isnull=True,
+            ).filter(
+                models.Q(group__memberships__expires_at__isnull=True) |
+                models.Q(group__memberships__expires_at__gt=now)
+            ).exists()
+            
+            if not has_wildcard_view:
+                # User doesn't have wildcard VIEW - get specific document type permissions
+                stage = AccessStage.ANY.value if permission_stage_is_global() else None
+                
+                view_permissions = GroupPermission.objects.filter(
+                    group__memberships__user=user,
+                    group__is_active=True,
+                    action=GroupAction.VIEW.value,
+                    document_type__isnull=False,
+                ).filter(
+                    models.Q(group__memberships__expires_at__isnull=True) |
+                    models.Q(group__memberships__expires_at__gt=now)
+                )
+                
+                if stage == AccessStage.ANY.value:
+                    view_permissions = view_permissions.filter(stage=AccessStage.ANY.value)
+                else:
+                    # In multi-stage mode, collect all doc types the user can view at any stage
+                    view_permissions = view_permissions.filter(
+                        models.Q(stage=AccessStage.ANY.value) | 
+                        models.Q(stage__in=[AccessStage.CREATION.value, AccessStage.APPROVAL.value, AccessStage.AFTER_APPROVAL.value])
+                    )
+                
+                user_view_doc_types = set(view_permissions.values_list('document_type_id', flat=True))
+                
+                # Apply VIEW permission filter to documents that are NOT directly owned or in work queue
+                # This targets documents visible through HOD scope, shares, signatures, etc.
+                qs = qs.filter(
+                    models.Q(document_type_id__in=user_view_doc_types) |  # Has VIEW permission on type
+                    models.Q(uploaded_by=user) |                         # Own uploads (always visible)
+                    models.Q(owned_by=user) |                             # Owned documents (always visible)  
+                    models.Q(workflow_instance__tasks__assigned_to=user, workflow_instance__tasks__status__in=["in_progress", "held"])  # Work queue (always visible)
+                ).distinct()
 
         # Trash visibility: the list shows either live docs or Trash (?trash=true).
         # Detail/restore/purge actions can reach trashed docs so they remain operable.
