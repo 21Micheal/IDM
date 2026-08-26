@@ -134,7 +134,7 @@ def serialize_bulk_document(doc: Document) -> dict:
     public_metadata = {
         key: value
         for key, value in meta.items()
-        if key not in ("ocr_suggestions", "ocr_quality", "relationship_suggestions")
+        if key not in ("ocr_suggestions", "ocr_quality")
     }
 
     return {
@@ -154,6 +154,7 @@ def serialize_bulk_document(doc: Document) -> dict:
         "ocr_status": doc.ocr_status or "",
         "ocr_suggestions": suggestions,
         "metadata": public_metadata,
+        "relationship_suggestions": meta.get("relationship_suggestions"),
         "supplier": doc.supplier or "",
         "amount": str(doc.amount) if doc.amount is not None else "",
         "currency": doc.currency or "",

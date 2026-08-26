@@ -256,11 +256,36 @@ export default function BulkScanPage({ scanMode = true, onSingleMode, initialBat
       const { data } = await bulkUploadAPI.review(batchId, payload);
       return data as BulkUploadBatch;
     },
-    onSuccess: (data) => {
+    onSuccess: async (data) => {
       setCompletedBatch(data);
       setStage("complete");
       queryClient.invalidateQueries({ queryKey: ["documents"] });
       toast.success("Batch submitted successfully.");
+      
+      // Check for relationship suggestions in the batch
+      try {
+        const relationshipCount = data.documents?.reduce((count: number, doc: any) => {
+          const suggestions = doc.relationship_suggestions || doc.metadata?.relationship_suggestions;
+          if (suggestions && Array.isArray(suggestions) && suggestions.length > 0) {
+            return count + suggestions.length;
+          }
+          return count;
+        }, 0) || 0;
+        
+        if (relationshipCount > 0) {
+          setTimeout(() => {
+            toast.info(
+              `${relationshipCount} document relationship${relationshipCount === 1 ? '' : 's'} found across the batch. View individual documents to review and confirm.`,
+              {
+                duration: 10000,
+              }
+            );
+          }, 1500);
+        }
+      } catch (err) {
+        // Don't fail the submission if relationship check fails
+        console.error("Failed to check relationship suggestions:", err);
+      }
     },
     onError: (err) => {
       toast.error(extractApiError(err, "Could not submit the batch. Please try again."));

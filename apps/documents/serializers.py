@@ -1810,6 +1810,7 @@ class BulkUploadDocumentReadSerializer(serializers.Serializer):
     ocr_status = serializers.CharField()
     ocr_suggestions = serializers.DictField(required=False, allow_null=True)
     metadata = serializers.DictField(required=False)
+    relationship_suggestions = serializers.ListField(required=False, allow_null=True)
     supplier = serializers.CharField(allow_blank=True)
     amount = serializers.CharField(allow_blank=True, required=False)
     currency = serializers.CharField(allow_blank=True)
