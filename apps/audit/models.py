@@ -52,6 +52,11 @@ class AuditEvent(models.TextChoices):
     GROUP_PERMISSION_GRANTED = "group.permission_granted", "Group Permission Granted"
     GROUP_PERMISSION_REVOKED = "group.permission_revoked", "Group Permission Revoked"
     GROUP_PERMISSION_UPDATED = "group.permission_updated", "Group Permissions Updated"
+    SIGNATURE_REQUEST_CREATED = "signature.request_created", "Signature Request Created"
+    SIGNATURE_REQUEST_SIGNED = "signature.request_signed", "Signature Request Signed"
+    SIGNATURE_REQUEST_COMPLETED = "signature.request_completed", "Signature Request Completed"
+    SIGNATURE_REQUEST_DECLINED = "signature.request_declined", "Signature Request Declined"
+    SIGNATURE_REQUEST_CANCELLED = "signature.request_cancelled", "Signature Request Cancelled"
     AUDIT_EXPORTED = "audit.exported", "Audit Log Exported"
 
 

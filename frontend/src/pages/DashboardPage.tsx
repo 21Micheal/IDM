@@ -261,6 +261,9 @@ function getAuditPresentation(event: any) {
   if (name.includes("group.permission")) {
     return { icon: ShieldCheck, tone: "bg-accent/15 text-accent border-accent/30" };
   }
+  if (name.includes("signature.request")) {
+    return { icon: FileSignature, tone: "bg-primary/10 text-primary border-primary/20" };
+  }
   if (name.includes("delete") || name.includes("fail") || name.includes("error")) {
     return { icon: ShieldCheck, tone: "bg-destructive/10 text-destructive border-destructive/30" };
   }
@@ -341,6 +344,11 @@ const EVENT_VERB_MAP: Record<string, string> = {
   "workflow.reassigned": "reassigned tasks to",
   "audit.exported": "exported",
   "group.permission_updated": "updated permissions for",
+  "signature.request_created": "requested signature for",
+  "signature.request_signed": "signed",
+  "signature.request_completed": "completed signature request for",
+  "signature.request_declined": "declined signature request for",
+  "signature.request_cancelled": "cancelled signature request for",
 };
 
 const VERB_RE = /(submitted|uploaded|edited|updated|created|deleted|approved|rejected|downloaded|viewed|previewed|printed|shared|failed|queued|completed|logged in|logged out|signed in|signed out|enabled|disabled|returned|held|released|archived|added|delegated|reassigned|exported)\b/i;
@@ -380,6 +388,21 @@ function formatAuditSummary(event: DashboardAuditEvent): AuditSummaryParts {
   if (code === "permission.changed") {
     const { verb, target } = describePermissionChange(event);
     return { actor, verb, target };
+  }
+
+  if (code === "signature.request_created" || code === "signature.request_signed" || 
+      code === "signature.request_completed" || code === "signature.request_declined" || 
+      code === "signature.request_cancelled") {
+    const changes = (event.changes ?? {}) as Record<string, unknown>;
+    const documentTitle = typeof changes.document_title === "string" ? changes.document_title : "";
+    const target = cleanAuditTitle(documentTitle);
+    
+    const mappedVerb = EVENT_VERB_MAP[code];
+    if (mappedVerb) {
+      return { actor, verb: mappedVerb, target };
+    }
+    
+    return { actor, verb: code.replace("signature.request_", ""), target };
   }
 
   if (code === "group.permission_updated") {

@@ -65,6 +65,11 @@ export default function AuditPage() {
     ["user.mfa_enabled", "MFA Enabled"],
     ["permission.changed", "Permission Changed"],
     ["group.permission_updated", "Group Permissions Updated"],
+    ["signature.request_created", "Signature Request Created"],
+    ["signature.request_signed", "Signature Request Signed"],
+    ["signature.request_completed", "Signature Request Completed"],
+    ["signature.request_declined", "Signature Request Declined"],
+    ["signature.request_cancelled", "Signature Request Cancelled"],
     ["audit.exported", "Audit Exported"],
   ] as const;
 
