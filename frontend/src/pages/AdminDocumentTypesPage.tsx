@@ -605,6 +605,10 @@ export default function AdminDocumentTypesPage() {
 
               {activeTab === "attributes" && (
                 <section className="grid grid-cols-[minmax(360px,560px)_1fr] gap-6">
+                  <div className="border border-[#A7CDE3] bg-[#EEF6FB] p-4 text-sm text-[#287EAD] lg:col-span-2">
+                    Claude extraction reads these admin-defined details from the database and tries to fill each field during scan.
+                    Use clear labels (e.g. &quot;Goods Receipt note number&quot;) so the model can map visible document values to the right key.
+                  </div>
                   <div className="border border-[#C8CDD2] bg-white">
                     <div className="flex items-center justify-between border-b border-[#C8CDD2] px-4 py-3">
                       <p className="text-sm font-semibold text-[#1F2933]">Details</p>

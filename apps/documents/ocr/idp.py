@@ -78,7 +78,7 @@ logger = logging.getLogger(__name__)
 # ── Field extraction prompt ────────────────────────────────────────────────────
 # Versioned so we can A/B test prompt changes without code deploys.
 
-_PROMPT_VERSION = "5"
+_PROMPT_VERSION = "6"
 
 _SYSTEM_PROMPT = """You are a precise document field extraction engine for an enterprise document management system. Your job is to extract structured data from business documents with high accuracy.
 
@@ -176,17 +176,18 @@ STRICT RULES:
 3. Do not guess hidden values, but do return a visible candidate value when the nearby label identifies the field. Use low_quality_warning/confidence to flag uncertainty instead of dropping visible fields.
 4. account_code requires an explicit nearby account/customer/GL/cost-centre label. If the document lacks that label, account_code must be null.
 5. Do not reuse reference_number, po_reference, vendor_code, vat_number, kra_pin, bank_details, phone numbers, addresses, or line-item codes as account_code.
-6. Also fill custom_fields using the exact admin field keys shown above.
-7. If a custom field overlaps a standard field, return the same value in both places, but only when the value is clearly present.
-8. supplier = the ISSUING party, not the bill-to/customer/recipient.
-9. amount = the FINAL total after tax. Do not use subtotal unless no total is present.
-10. Numbers and currency amounts must be plain decimals only: no symbols, commas, or spaces.
-11. Dates must be YYYY-MM-DD. Never return ambiguous formats like 10/25/2024.
-12. For select fields, use one of the configured options when the document clearly supports it; otherwise null.
-13. For blurry, skewed, cropped, or otherwise poor-quality scans, set low_quality_warning to true.
-14. confidence must be "high", "medium", or "low".
-15. For invoices and GRNs, keep the document's own number in reference_number and the PO Number/PO Ref in po_reference. Do not swap them.
-16. transaction_ref is only for payment/transaction identifiers. A PO Number is not a transaction_ref.
+6. Populate every admin-defined custom_fields key when the document shows a labelled value that matches that field's label or purpose. Example: label "Goods Receipt note number" → custom_fields.goods_receipt_note_number with the GRN number from the document.
+7. Admin-defined metadata fields take priority over generic standard fields when both could apply. You may duplicate the same visible value in custom_fields and a standard field when both are configured.
+8. If a custom field overlaps a standard field, return the same value in both places, but only when the value is clearly present.
+9. supplier = the ISSUING party, not the bill-to/customer/recipient.
+10. amount = the FINAL total after tax. Do not use subtotal unless no total is present.
+11. Numbers and currency amounts must be plain decimals only: no symbols, commas, or spaces.
+12. Dates must be YYYY-MM-DD. Never return ambiguous formats like 10/25/2024.
+13. For select fields, use one of the configured options when the document clearly supports it; otherwise null.
+14. For blurry, skewed, cropped, or otherwise poor-quality scans, set low_quality_warning to true.
+15. confidence must be "high", "medium", or "low".
+16. For invoices and GRNs, keep the document's own number in reference_number AND in any admin field whose label describes that same number (e.g. GRN number, goods receipt note number). Put PO Number/PO Ref in po_reference. Do not swap them.
+17. transaction_ref is only for payment/transaction identifiers. A PO Number is not a transaction_ref.
 
 Return ONLY the JSON object. Nothing else."""
 
@@ -270,6 +271,7 @@ def run_idp(doc) -> tuple[str, dict]:
     model = _claude_model(django_settings)
 
     fields = _clean_extracted_fields(fields)
+    fields = _fill_admin_metadata_fields(doc, fields)
 
     quality = {
         "engine":              engine,
@@ -302,9 +304,11 @@ def run_idp(doc) -> tuple[str, dict]:
 def _call_anthropic_vision(settings, model: str, pages_b64: list[tuple[str, str]], prompt: str) -> str:
     import anthropic
 
-    api_key = getattr(settings, "ANTHROPIC_API_KEY", "").strip()
+    from apps.documents.ocr.idp_policy import resolve_anthropic_api_key
+
+    api_key = resolve_anthropic_api_key()
     if not api_key:
-        raise RuntimeError("ANTHROPIC_API_KEY is not set")
+        raise RuntimeError("Anthropic API key is not configured")
 
     content = []
     for i, (img_b64, img_mime) in enumerate(pages_b64):
@@ -352,7 +356,9 @@ def classify_document_type(content: bytes, mime: str, filename: str, candidates,
 
     if getattr(settings, "IDP_PROVIDER", "") != "anthropic":
         return None
-    if not getattr(settings, "ANTHROPIC_API_KEY", "").strip():
+    from apps.documents.ocr.idp_policy import resolve_anthropic_api_key
+
+    if not resolve_anthropic_api_key():
         return None
     if not candidates:
         return None
@@ -418,9 +424,11 @@ def classify_document_type(content: bytes, mime: str, filename: str, candidates,
 def _call_anthropic_text(settings, model: str, document_context: str, prompt: str) -> str:
     import anthropic
 
-    api_key = getattr(settings, "ANTHROPIC_API_KEY", "").strip()
+    from apps.documents.ocr.idp_policy import resolve_anthropic_api_key
+
+    api_key = resolve_anthropic_api_key()
     if not api_key:
-        raise RuntimeError("ANTHROPIC_API_KEY is not set")
+        raise RuntimeError("Anthropic API key is not configured")
 
     client = anthropic.Anthropic(
         api_key=api_key,
@@ -626,6 +634,36 @@ def _normalise_claude_fields(parsed: dict) -> dict:
         }
 
     return parsed
+
+
+def _fill_admin_metadata_fields(doc, fields: dict) -> dict:
+    """
+    Back-fill admin-defined metadata keys when Claude populated the matching
+    standard field but omitted the custom_fields entry.
+    """
+    filled = dict(fields or {})
+    context = _document_type_context(doc)
+    label_routes = (
+        (("goods receipt", "grn", "gr note", "receipt note", "delivery note number"), "reference_number"),
+        (("invoice number", "invoice no", "tax invoice"), "reference_number"),
+        (("po number", "purchase order", "lpo", "po ref"), "po_reference"),
+        (("transaction ref", "payment ref", "mpesa", "cheque"), "transaction_ref"),
+        (("due date", "payment due"), "due_date"),
+        (("document date", "invoice date", "issue date", "grn date"), "document_date"),
+    )
+
+    for meta_field in context["metadata_fields"]:
+        key = meta_field.get("key")
+        if not key or filled.get(key):
+            continue
+        label = (meta_field.get("label") or "").lower()
+        for patterns, standard_key in label_routes:
+            if any(pattern in label for pattern in patterns):
+                value = filled.get(standard_key)
+                if value not in (None, "", "null"):
+                    filled[key] = value
+                break
+    return filled
 
 
 def _clean_extracted_fields(fields: dict) -> dict:

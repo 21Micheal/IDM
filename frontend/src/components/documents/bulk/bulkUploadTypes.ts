@@ -47,7 +47,15 @@ export type BulkUploadBatch = {
     total: number;
     done: number;
     failed: number;
+    needs_manual?: number;
     pending: number;
+  };
+  idp_policy?: {
+    fallback_policy: "claude_only" | "claude_ask" | "claude_then_regex";
+    allow_regex_fallback: boolean;
+    claude_enabled: boolean;
+    page_allowance?: number;
+    pages_used?: number;
   };
 };
 

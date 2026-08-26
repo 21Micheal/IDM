@@ -104,6 +104,11 @@ export default function BulkProcessingPanel({ batch, uploadProgress, previews = 
               {ocr?.pending ?? 0} still processing
             </p>
           )}
+          {(ocr?.needs_manual ?? 0) > 0 && (
+            <p className="mt-2 text-xs font-semibold text-amber-700">
+              {ocr?.needs_manual} awaiting manual entry
+            </p>
+          )}
         </div>
       )}
 

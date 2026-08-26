@@ -113,6 +113,7 @@ class BulkUploadViewSet(viewsets.GenericViewSet):
 
         data = {
             "related_set": request.data.get("related_set", "false"),
+            "auto_classify": request.data.get("auto_classify", "false"),
             "shared_metadata": shared_metadata,
             "is_scanned": request.data.get("is_scanned", "true"),
             "files": files,
@@ -162,12 +163,13 @@ class BulkUploadViewSet(viewsets.GenericViewSet):
         serializer.is_valid(raise_exception=True)
         files = serializer.validated_data["files"]
         is_related_set = serializer.validated_data.get("related_set", False)
+        auto_classify = serializer.validated_data.get("auto_classify", False)
         document_type = (
             get_unclassified_bulk_document_type()
-            if is_related_set
+            if is_related_set or auto_classify
             else serializer.validated_data["document_type"]
         )
-        if not is_related_set and not self._user_can_upload_type(document_type):
+        if not is_related_set and not auto_classify and not self._user_can_upload_type(document_type):
             return Response(
                 {"detail": "You do not have upload permission for this document type."},
                 status=status.HTTP_403_FORBIDDEN,
@@ -180,7 +182,7 @@ class BulkUploadViewSet(viewsets.GenericViewSet):
             uploaded_by=request.user,
             mode=(
                 BulkUpload.Mode.RELATED_SET
-                if is_related_set
+                if is_related_set or auto_classify
                 else BulkUpload.Mode.SAME_TYPE
             ),
             shared_metadata=shared_metadata,
@@ -197,6 +199,12 @@ class BulkUploadViewSet(viewsets.GenericViewSet):
             request=request,
             is_scanned=is_scanned,
             shared_metadata=shared_metadata,
+            auto_classify=auto_classify,
+            allowed_document_type_ids=None if request.user.has_admin_access else {
+                str(doc_type.id)
+                for doc_type in DocumentType.objects.filter(is_active=True)
+                if self._user_can_upload_type(doc_type)
+            },
         )
 
         out = BulkUploadDetailSerializer(bulk_upload, context={"request": request})
@@ -241,6 +249,52 @@ class BulkUploadViewSet(viewsets.GenericViewSet):
                 request=request,
                 changes={"bulk_upload_id": str(bulk_upload.id)},
             )
+        out = BulkUploadDetailSerializer(bulk_upload, context={"request": request})
+        return Response(out.data)
+
+    @action(detail=True, methods=["post"], parser_classes=[JSONParser])
+    def ocr_fallback(self, request, pk=None):
+        """Run pattern matching on every needs_manual document in the batch."""
+        from apps.documents.models import DMSSettings, OCRStatus
+        from apps.documents.ocr.fallback import apply_document_regex_fallback
+
+        bulk_upload = sync_bulk_upload_status(self.get_object())
+        if bulk_upload.status != BulkUploadStatus.REVIEW:
+            return Response(
+                {
+                    "detail": (
+                        "This batch is not ready for review. "
+                        f"Current status: {bulk_upload.status}."
+                    )
+                },
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        dms = DMSSettings.load()
+        if not dms.idp_allow_regex_fallback:
+            return Response(
+                {"detail": "Pattern matching fallback is not enabled for this organization."},
+                status=status.HTTP_403_FORBIDDEN,
+            )
+
+        docs = list(bulk_upload.documents.filter(ocr_status=OCRStatus.NEEDS_MANUAL))
+        if not docs:
+            return Response(
+                {"detail": "No documents in this batch require pattern matching."},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        for doc in docs:
+            apply_document_regex_fallback(doc, reason="user_opt_in_batch")
+            record_audit_event(
+                AuditEvent.DOCUMENT_OCR_COMPLETED,
+                actor=request.user,
+                obj=doc,
+                request=request,
+                changes={"bulk_upload_id": str(bulk_upload.id), "fallback": "regex_batch"},
+            )
+
+        bulk_upload.refresh_from_db()
         out = BulkUploadDetailSerializer(bulk_upload, context={"request": request})
         return Response(out.data)
 

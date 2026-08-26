@@ -1,4 +1,4 @@
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { extractApiError } from "@/lib/apiError";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { dmsSettingsAPI, type DmsSettings } from "@/services/api";
@@ -16,13 +16,14 @@ import {
   RotateCcw,
   Save,
   ShieldCheck,
+  Sparkles,
   Timer,
   Trash2,
 } from "lucide-react";
 import CustomListbox from "@/components/ui/CustomListbox";
 import clsx from "clsx";
 
-type SectionId = "preview" | "lifecycle" | "governance" | "security";
+type SectionId = "preview" | "lifecycle" | "governance" | "idp" | "security";
 
 const inputCls =
   "h-9 border border-[#AEB5BB] bg-white px-3 text-sm text-[#1F2933] outline-none focus:border-[#287EAD] focus:ring-1 focus:ring-[#287EAD]";
@@ -54,6 +55,12 @@ const sections: Array<{
     title: "Governance",
     description: "Duplicates, metadata, and stage access",
     icon: ShieldCheck,
+  },
+  {
+    id: "idp",
+    title: "Document extraction",
+    description: "Claude IDP and fallback behaviour",
+    icon: Sparkles,
   },
   {
     id: "security",
@@ -156,7 +163,18 @@ function SettingsWorkspace() {
   const { data, isLoading } = useQuery({
     queryKey: ["dms-settings"],
     queryFn: () => dmsSettingsAPI.get().then((r) => r.data),
+    refetchInterval: activeSection === "idp" ? 5000 : false,
   });
+
+  // Keep pages-used counter in sync while viewing IDP settings (OCR jobs increment it server-side).
+  useEffect(() => {
+    if (!data) return;
+    setDraft((prev) => {
+      if (!prev) return null;
+      if (prev.idp_pages_used === data.idp_pages_used) return prev;
+      return { ...prev, idp_pages_used: data.idp_pages_used };
+    });
+  }, [data]);
 
   const settings = draft ?? data ?? null;
   const hasChanges = Boolean(draft && data && JSON.stringify(draft) !== JSON.stringify(data));
@@ -194,6 +212,15 @@ function SettingsWorkspace() {
           ? formatMinutes(settings.session_idle_timeout_minutes)
           : "Off",
       },
+      {
+        label: "IDP fallback",
+        value: settings.idp_fallback_policy === "claude_only"
+          ? "Claude only"
+          : settings.idp_fallback_policy === "claude_ask"
+            ? "Ask on failure"
+            : "Regex allowed",
+      },
+      { label: "Claude pages", value: String(settings.idp_pages_used) },
     ];
   }, [settings]);
 
@@ -505,6 +532,122 @@ function SettingsWorkspace() {
                 <InfoNote>
                   Required metadata is checked against each document type&apos;s admin-defined required fields.
                 </InfoNote>
+              </SettingBlock>
+            </>
+          )}
+
+          {activeSection === "idp" && (
+            <>
+              <SettingBlock
+                icon={Sparkles}
+                title="Claude extraction"
+                description="Control whether paid Claude IDP runs and how failures are handled."
+              >
+                <SettingToggle
+                  checked={settings.idp_claude_enabled}
+                  onChange={(checked) => update("idp_claude_enabled", checked)}
+                  label="Enable Claude extraction"
+                  description="Turn off when the subscription ends. Documents will not call Claude until re-enabled."
+                />
+                <label className="block">
+                  <span className="mb-1.5 block text-xs font-semibold uppercase tracking-wider text-[#5E6870]">
+                    When Claude cannot run
+                  </span>
+                  <CustomListbox
+                    value={settings.idp_fallback_policy}
+                    onChange={(v) => {
+                      if (!settings) return;
+                      const policy = v as DmsSettings["idp_fallback_policy"];
+                      setDraft({
+                        ...settings,
+                        idp_fallback_policy: policy,
+                        idp_allow_regex_fallback: policy === "claude_then_regex"
+                          ? true
+                          : settings.idp_allow_regex_fallback,
+                      });
+                    }}
+                    options={[
+                      { value: "claude_only", label: "Leave fields empty (recommended)" },
+                      { value: "claude_ask", label: "Ask the uploader on single upload" },
+                      { value: "claude_then_regex", label: "Allow pattern matching as last resort" },
+                    ]}
+                    buttonClassName={`${inputCls} w-full`}
+                    ariaLabel="IDP fallback policy"
+                  />
+                </label>
+                <SettingToggle
+                  checked={settings.idp_allow_regex_fallback}
+                  onChange={(checked) => update("idp_allow_regex_fallback", checked)}
+                  label="Allow pattern matching fallback"
+                  description="Permits the local regex pipeline when policy allows it or the uploader opts in. Values are labelled as guessed."
+                />
+                <InfoNote>
+                  Bulk upload and mailbox ingestion follow this policy without prompting.
+                  Subscription end should disable Claude above — do not rely on regex as a silent substitute.
+                </InfoNote>
+              </SettingBlock>
+
+              <SettingBlock
+                icon={Sparkles}
+                title="Claude usage (reporting)"
+                description="Page counts are for visibility only. Hard spend limits are enforced by your Anthropic workspace cap on this tenant's API key."
+              >
+                <InfoNote>
+                  Billing is controlled in the Anthropic console (workspace spend limit per client key).
+                  When that cap is reached, extraction follows your fallback policy above.
+                  Page counts here do not block Claude.
+                </InfoNote>
+                <div className="grid gap-4 sm:grid-cols-2">
+                  <label>
+                    <span className="mb-1.5 block text-xs font-semibold uppercase tracking-wider text-[#5E6870]">
+                      Pages used (since last reset)
+                    </span>
+                    <input
+                      type="number"
+                      min={0}
+                      className={`${inputCls} w-full`}
+                      value={settings.idp_pages_used}
+                      onChange={(event) =>
+                        update("idp_pages_used", Math.max(0, Number(event.target.value) || 0))
+                      }
+                    />
+                    <span className="mt-1 block text-xs text-[#5E6870]">
+                      Increments after each successful Claude extraction. Reset manually to start a new reporting period.
+                    </span>
+                  </label>
+                  <label>
+                    <span className="mb-1.5 block text-xs font-semibold uppercase tracking-wider text-[#5E6870]">
+                      Reference page target (optional)
+                    </span>
+                    <input
+                      type="number"
+                      min={0}
+                      className={`${inputCls} w-full`}
+                      value={settings.idp_page_allowance}
+                      onChange={(event) =>
+                        update("idp_page_allowance", Math.max(0, Number(event.target.value) || 0))
+                      }
+                    />
+                    <span className="mt-1 block text-xs text-[#5E6870]">
+                      Not enforced — optional benchmark to compare against pages used (0 = hide comparison).
+                    </span>
+                  </label>
+                </div>
+                {settings.idp_page_allowance > 0 && (
+                  <InfoNote>
+                    {settings.idp_pages_used} pages used
+                    {" "}
+                    (reference target: {settings.idp_page_allowance}
+                    {settings.idp_pages_used > settings.idp_page_allowance ? " — above reference" : ""}
+                    ). Updates every few seconds while this page is open.
+                  </InfoNote>
+                )}
+                {settings.idp_page_allowance <= 0 && (
+                  <InfoNote>
+                    {settings.idp_pages_used} Claude pages used since last reset.
+                    Updates every few seconds while this page is open.
+                  </InfoNote>
+                )}
               </SettingBlock>
             </>
           )}

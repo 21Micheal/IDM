@@ -252,6 +252,11 @@ class DMSSettingsSerializer(serializers.ModelSerializer):
             "session_lifetime_minutes",
             "session_idle_timeout_minutes",
             "session_warning_minutes",
+            "idp_claude_enabled",
+            "idp_fallback_policy",
+            "idp_allow_regex_fallback",
+            "idp_page_allowance",
+            "idp_pages_used",
             "bulk_scan_submit_for_approval",
             "access_stages",
             "updated_at",
@@ -288,6 +293,16 @@ class DMSSettingsSerializer(serializers.ModelSerializer):
             raise serializers.ValidationError("Warning lead time cannot be negative.")
         return value
 
+    def validate_idp_page_allowance(self, value):
+        if value < 0:
+            raise serializers.ValidationError("Reference page target cannot be negative.")
+        return value
+
+    def validate_idp_pages_used(self, value):
+        if value < 0:
+            raise serializers.ValidationError("Pages used cannot be negative.")
+        return value
+
     def validate(self, attrs):
         lifetime = attrs.get(
             "session_lifetime_minutes",
@@ -311,6 +326,22 @@ class DMSSettingsSerializer(serializers.ModelSerializer):
                 raise serializers.ValidationError(
                     {"session_warning_minutes": "Warning lead time cannot exceed the session lifetime."}
                 )
+        policy = attrs.get(
+            "idp_fallback_policy",
+            getattr(self.instance, "idp_fallback_policy", None),
+        )
+        allow_regex = attrs.get(
+            "idp_allow_regex_fallback",
+            getattr(self.instance, "idp_allow_regex_fallback", None),
+        )
+        if (
+            policy == "claude_then_regex"
+            and allow_regex is False
+            and "idp_fallback_policy" in attrs
+        ):
+            raise serializers.ValidationError(
+                {"idp_allow_regex_fallback": "Enable pattern matching when using the regex fallback policy."}
+            )
         return attrs
 
 class MetadataFieldSerializer(serializers.ModelSerializer):
@@ -853,7 +884,7 @@ class DocumentDetailSerializer(serializers.ModelSerializer):
         return can_submit_retirement_workflow(obj, user=user)
 
     def get_ocr_suggestions(self, obj):
-        if obj.ocr_status != OCRStatus.DONE:
+        if obj.ocr_status not in (OCRStatus.DONE, OCRStatus.NEEDS_MANUAL):
             return None
         meta = obj.metadata or {}
         result = {}
@@ -1232,24 +1263,49 @@ class DocumentUploadSerializer(serializers.ModelSerializer):
         if is_scanned:
             # Confirmed scan: go straight to OCR, skip extract_text hop
             try:
+                from apps.documents.ocr.idp_policy import apply_idp_unavailable_state
                 from apps.documents.tasks import ocr_document
-                # Mark pending before queuing so the UI shows the badge instantly.
-                # Use update() directly (not _mark_pending()) to avoid the
-                # filter-on-status guard that _mark_pending() applies.
-                Document.objects.filter(id=doc.id).update(
-                    ocr_status=OCRStatus.PENDING
-                )
-                ocr_document.delay(str(doc.id))
-                from apps.audit.models import AuditEvent
-                from apps.audit.utils import record_audit_event
 
-                record_audit_event(
-                    AuditEvent.DOCUMENT_OCR_QUEUED,
-                    actor=request.user,
-                    obj=doc,
-                    request=request,
-                    changes={"source": "upload", "is_scanned": True},
-                )
+                if apply_idp_unavailable_state(doc):
+                    from apps.audit.models import AuditEvent
+                    from apps.audit.utils import record_audit_event
+
+                    record_audit_event(
+                        AuditEvent.DOCUMENT_OCR_COMPLETED,
+                        actor=request.user,
+                        obj=doc,
+                        request=request,
+                        changes={
+                            "source": "upload",
+                            "is_scanned": True,
+                            "skipped_pipeline": True,
+                            "ocr_status": OCRStatus.NEEDS_MANUAL,
+                        },
+                    )
+                else:
+                    from apps.documents.ocr.status import merge_ocr_queued_metadata
+
+                    # Mark pending before queuing so the UI shows the badge instantly.
+                    # Use update() directly (not _mark_pending()) to avoid the
+                    # filter-on-status guard that _mark_pending() applies.
+                    queued_metadata = merge_ocr_queued_metadata(doc.metadata)
+                    Document.objects.filter(id=doc.id).update(
+                        ocr_status=OCRStatus.PENDING,
+                        metadata=queued_metadata,
+                    )
+                    doc.ocr_status = OCRStatus.PENDING
+                    doc.metadata = queued_metadata
+                    ocr_document.delay(str(doc.id))
+                    from apps.audit.models import AuditEvent
+                    from apps.audit.utils import record_audit_event
+
+                    record_audit_event(
+                        AuditEvent.DOCUMENT_OCR_QUEUED,
+                        actor=request.user,
+                        obj=doc,
+                        request=request,
+                        changes={"source": "upload", "is_scanned": True},
+                    )
             except Exception as exc:
                 import logging
                 logging.getLogger(__name__).error(
@@ -1705,6 +1761,7 @@ class BulkUploadCreateSerializer(serializers.Serializer):
         required=False,
     )
     related_set = serializers.BooleanField(default=False)
+    auto_classify = serializers.BooleanField(default=False)
     shared_metadata = serializers.DictField(required=False)
     files = serializers.ListField(
         child=serializers.FileField(),
@@ -1723,13 +1780,18 @@ class BulkUploadCreateSerializer(serializers.Serializer):
             return value.lower() in ("true", "1", "yes", "on")
         return bool(value)
 
+    def validate_auto_classify(self, value):
+        if isinstance(value, str):
+            return value.lower() in ("true", "1", "yes", "on")
+        return bool(value)
+
     def validate(self, attrs):
-        if attrs.get("related_set") and not attrs.get("document_type"):
+        if (attrs.get("related_set") or attrs.get("auto_classify")) and not attrs.get("document_type"):
             return attrs
         document_type = attrs.get("document_type")
         if not document_type:
             raise serializers.ValidationError(
-                {"document_type_id": "Document type is required unless this is a related document set."}
+                {"document_type_id": "Document type is required unless this is a related or auto-classified batch."}
             )
         if document_type.is_personal_type:
             raise serializers.ValidationError(
@@ -1758,9 +1820,10 @@ class BulkUploadDocumentReadSerializer(serializers.Serializer):
 class BulkUploadDetailSerializer(BulkUploadSerializer):
     documents = serializers.SerializerMethodField()
     ocr_progress = serializers.SerializerMethodField()
+    idp_policy = serializers.SerializerMethodField()
 
     class Meta(BulkUploadSerializer.Meta):
-        fields = BulkUploadSerializer.Meta.fields + ["documents", "ocr_progress"]
+        fields = BulkUploadSerializer.Meta.fields + ["documents", "ocr_progress", "idp_policy"]
 
     def get_documents(self, obj):
         from .bulk_upload import serialize_bulk_document
@@ -1774,15 +1837,29 @@ class BulkUploadDetailSerializer(BulkUploadSerializer):
         docs = obj.documents.all()
         total = docs.count()
         if total == 0:
-            return {"total": 0, "done": 0, "failed": 0, "pending": 0}
+            return {"total": 0, "done": 0, "failed": 0, "needs_manual": 0, "pending": 0}
         done = docs.filter(ocr_status=OCRStatus.DONE).count()
         failed = docs.filter(ocr_status=OCRStatus.FAILED).count()
+        needs_manual = docs.filter(ocr_status=OCRStatus.NEEDS_MANUAL).count()
         pending = docs.filter(ocr_status__in=[OCRStatus.PENDING, OCRStatus.PROCESSING, ""]).count()
         return {
             "total": total,
             "done": done,
             "failed": failed,
+            "needs_manual": needs_manual,
             "pending": pending,
+        }
+
+    def get_idp_policy(self, obj):
+        from .models import DMSSettings
+
+        row = DMSSettings.load()
+        return {
+            "fallback_policy": row.idp_fallback_policy,
+            "allow_regex_fallback": row.idp_allow_regex_fallback,
+            "claude_enabled": row.idp_claude_enabled,
+            "page_allowance": row.idp_page_allowance,
+            "pages_used": row.idp_pages_used,
         }
 
 
