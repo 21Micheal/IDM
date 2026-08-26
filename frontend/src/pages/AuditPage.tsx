@@ -64,6 +64,7 @@ export default function AuditPage() {
     ["user.login_failed", "Login Failed"],
     ["user.mfa_enabled", "MFA Enabled"],
     ["permission.changed", "Permission Changed"],
+    ["group.permission_updated", "Group Permissions Updated"],
     ["audit.exported", "Audit Exported"],
   ] as const;
 
@@ -122,6 +123,8 @@ export default function AuditPage() {
       return "bg-accent/15 text-accent ring-1 ring-accent/20";
     if (event.includes("workflow") || event.includes("submitted") || event.includes("queued"))
       return "bg-primary/10 text-primary ring-1 ring-primary/20";
+    if (event.includes("group.permission"))
+      return "bg-accent/15 text-accent ring-1 ring-accent/20";
     return "bg-muted text-muted-foreground ring-1 ring-border";
   };
 
@@ -134,7 +137,73 @@ export default function AuditPage() {
       return "bg-accent";
     if (event.includes("workflow") || event.includes("submitted") || event.includes("queued"))
       return "bg-primary";
+    if (event.includes("group.permission"))
+      return "bg-accent";
     return "bg-muted-foreground/40";
+  };
+
+  const formatGroupPermissionSummary = (changes: any) => {
+    if (!changes) return null;
+    
+    const grantedCount = typeof changes.granted_count === "number" ? changes.granted_count : 0;
+    const revokedCount = typeof changes.revoked_count === "number" ? changes.revoked_count : 0;
+    const totalPermissions = typeof changes.total_permissions === "number" ? changes.total_permissions : 0;
+    
+    if (grantedCount > 0 && revokedCount > 0) {
+      return `${grantedCount} granted, ${revokedCount} revoked (${totalPermissions} total)`;
+    } else if (grantedCount > 0) {
+      return `${grantedCount} permission${grantedCount === 1 ? "" : "s"} granted (${totalPermissions} total)`;
+    } else if (revokedCount > 0) {
+      return `${revokedCount} permission${revokedCount === 1 ? "" : "s"} revoked (${totalPermissions} total)`;
+    }
+    return `${totalPermissions} total permissions`;
+  };
+
+  const formatGroupPermissionDetailedChanges = (changes: any) => {
+    if (!changes) return null;
+    
+    const grantedDetails = Array.isArray(changes.granted_details) ? changes.granted_details : [];
+    const revokedDetails = Array.isArray(changes.revoked_details) ? changes.revoked_details : [];
+    
+    if (grantedDetails.length === 0 && revokedDetails.length === 0) return null;
+    
+    const parts: string[] = [];
+    
+    for (const detail of grantedDetails) {
+      const action = detail.action || "";
+      const documentTypeName = detail.document_type_name;
+      const documentTypeId = detail.document_type_id;
+      const stage = detail.stage;
+      
+      const actionDisplay = String(action || "").replace(/_/g, " ").replace(/\b\w/g, (char: string) => char.toUpperCase());
+      const docTypePart = documentTypeName 
+        ? ` for ${documentTypeName}` 
+        : documentTypeId 
+          ? ` for document type ${documentTypeId}` 
+          : "";
+      const stagePart = stage && stage !== "any" ? ` in ${stage} stage` : "";
+      
+      parts.push(`Granted ${actionDisplay}${docTypePart}${stagePart}`);
+    }
+    
+    for (const detail of revokedDetails) {
+      const action = detail.action || "";
+      const documentTypeName = detail.document_type_name;
+      const documentTypeId = detail.document_type_id;
+      const stage = detail.stage;
+      
+      const actionDisplay = String(action || "").replace(/_/g, " ").replace(/\b\w/g, (char: string) => char.toUpperCase());
+      const docTypePart = documentTypeName 
+        ? ` for ${documentTypeName}` 
+        : documentTypeId 
+          ? ` for document type ${documentTypeId}` 
+          : "";
+      const stagePart = stage && stage !== "any" ? ` in ${stage} stage` : "";
+      
+      parts.push(`Revoked ${actionDisplay}${docTypePart}${stagePart}`);
+    }
+    
+    return parts.join(", ");
   };
 
   const exportAudit = async () => {
@@ -378,6 +447,11 @@ export default function AuditPage() {
                       </td>
                       <td className="px-6 py-4 align-top text-muted-foreground max-w-md">
                         {log.summary && <div className="mb-1 text-foreground leading-snug">{log.summary}</div>}
+                        {log.event === "group.permission_updated" && log.changes && (
+                          <div className="mb-1 text-xs">
+                            {formatGroupPermissionDetailedChanges(log.changes) || formatGroupPermissionSummary(log.changes)}
+                          </div>
+                        )}
                         <div className="flex items-center gap-2 flex-wrap">
                           {log.object_type && <span className="font-mono text-[11px] bg-muted px-1.5 py-0.5 rounded text-foreground">{log.object_type}</span>}
                           {log.object_repr && <span className="text-xs text-muted-foreground truncate">{log.object_repr}</span>}
@@ -461,7 +535,14 @@ export default function AuditPage() {
                             <FileText className="w-4 h-4" />
                           </div>
                           <div className="flex-1 min-w-0">
-                            <div className="text-sm text-foreground leading-snug">{log.summary || humanizeEvent(log.event || "Activity")}</div>
+                            <div className="text-sm text-foreground leading-snug">
+                              {log.summary || humanizeEvent(log.event || "Activity")}
+                            </div>
+                            {log.event === "group.permission_updated" && log.changes && (
+                              <div className="text-xs text-muted-foreground mt-1">
+                                {formatGroupPermissionDetailedChanges(log.changes) || formatGroupPermissionSummary(log.changes)}
+                              </div>
+                            )}
                             <div className="text-xs text-muted-foreground mt-0.5 flex items-center gap-1.5">
                               <Clock className="w-3 h-3" />
                               {formatDistanceToNow(new Date(log.timestamp), { addSuffix: true })}

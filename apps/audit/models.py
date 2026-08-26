@@ -49,6 +49,9 @@ class AuditEvent(models.TextChoices):
     USER_ACTIVATED = "user.activated", "User Activated"
     USER_DEACTIVATED = "user.deactivated", "User Deactivated"
     PERMISSION_CHANGED = "permission.changed", "Permission Changed"
+    GROUP_PERMISSION_GRANTED = "group.permission_granted", "Group Permission Granted"
+    GROUP_PERMISSION_REVOKED = "group.permission_revoked", "Group Permission Revoked"
+    GROUP_PERMISSION_UPDATED = "group.permission_updated", "Group Permissions Updated"
     AUDIT_EXPORTED = "audit.exported", "Audit Log Exported"
 
 

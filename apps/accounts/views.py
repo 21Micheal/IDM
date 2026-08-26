@@ -869,6 +869,8 @@ class UserGroupViewSet(viewsets.ModelViewSet):
         from apps.accounts.models import AccessStage
         from apps.documents.access import ACCESS_STAGE_KEYS
         from apps.documents.models import DocumentType
+        from apps.audit.utils import record_audit_event
+        from apps.audit.models import AuditEvent
 
         group = self.get_object()
         perms = request.data.get("permissions", [])
@@ -897,6 +899,15 @@ class UserGroupViewSet(viewsets.ModelViewSet):
         if errors:
             return Response({"detail": errors}, status=400)
 
+        # Capture old permissions for audit trail
+        old_permissions = list(GroupPermission.objects.filter(group=group).values(
+            'document_type_id', 'stage', 'action'
+        ))
+        old_perms_set = {
+            (str(p['document_type_id']) if p['document_type_id'] else None, p['stage'], p['action']) 
+            for p in old_permissions
+        }
+
         from django.db import transaction
         with transaction.atomic():
             GroupPermission.objects.filter(group=group).delete()
@@ -911,6 +922,68 @@ class UserGroupViewSet(viewsets.ModelViewSet):
                     action=p["action"],
                 )
                 created.append(obj)
+
+        # Create new permissions set for comparison
+        new_perms_set = {
+            (str(p.get('document_type_id')) if p.get('document_type_id') else None, p.get('stage'), p.get('action')) 
+            for p in perms
+        }
+
+        # Determine granted and revoked permissions
+        granted = new_perms_set - old_perms_set
+        revoked = old_perms_set - new_perms_set
+
+        # Build a mapping of document type IDs to names for audit trail
+        from apps.documents.models import DocumentType
+        doc_type_ids = set()
+        for dt_id, stage, action in granted:
+            if dt_id:
+                doc_type_ids.add(str(dt_id))
+        for dt_id, stage, action in revoked:
+            if dt_id:
+                doc_type_ids.add(str(dt_id))
+        
+        doc_type_names = {}
+        if doc_type_ids:
+            doc_type_names = {
+                str(dt.id): dt.name 
+                for dt in DocumentType.objects.filter(id__in=doc_type_ids)
+            }
+
+        # Record a summary event if there were any changes
+        if granted or revoked:
+            # Build detailed change info for the summary
+            granted_details = []
+            for dt_id, stage, action in granted:
+                granted_details.append({
+                    'document_type_id': str(dt_id) if dt_id else None,
+                    'document_type_name': doc_type_names.get(str(dt_id)) if dt_id else None,
+                    'stage': stage,
+                    'action': action
+                })
+            
+            revoked_details = []
+            for dt_id, stage, action in revoked:
+                revoked_details.append({
+                    'document_type_id': str(dt_id) if dt_id else None,
+                    'document_type_name': doc_type_names.get(str(dt_id)) if dt_id else None,
+                    'stage': stage,
+                    'action': action
+                })
+            
+            record_audit_event(
+                AuditEvent.GROUP_PERMISSION_UPDATED,
+                actor=request.user,
+                obj=group,
+                changes={
+                    'granted_count': len(granted),
+                    'revoked_count': len(revoked),
+                    'total_permissions': len(perms),
+                    'granted_details': granted_details,
+                    'revoked_details': revoked_details
+                },
+                request=request
+            )
 
         return Response(GroupPermissionSerializer(created, many=True).data)
 
