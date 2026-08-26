@@ -1,7 +1,7 @@
 import { useMemo, useState } from "react";
 import { useNavigate } from "react-router-dom";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { Bell, CheckCheck, Loader2 } from "lucide-react";
+import { Bell, CheckCheck, Loader2, Trash2 } from "lucide-react";
 import { notificationsAPI, normalizeListResponse } from "@/services/api";
 import type { Notification } from "@/types";
 import { NotificationList, inferNotificationPriority } from "@/components/notifications/notifications-list";
@@ -39,11 +39,20 @@ export default function NotificationsPage() {
     },
   });
 
+  const clearReadMutation = useMutation({
+    mutationFn: () => notificationsAPI.clearRead(),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ["notifications"] });
+      qc.invalidateQueries({ queryKey: ["notifications", "unread-count"] });
+    },
+  });
+
   const notifications = useMemo(
     () => allNotifications.filter((notification) => !TASK_NOTIFICATION_TYPES.has(notification.type)),
     [allNotifications],
   );
   const unreadCount = notifications.filter((notification) => !notification.is_read).length;
+  const readCount = notifications.filter((notification) => notification.is_read).length;
   const urgentCount = notifications.filter((notification) => inferNotificationPriority(notification) === "high").length;
 
   const visibleNotifications = useMemo(() => {
@@ -105,6 +114,28 @@ export default function NotificationsPage() {
                 <CheckCheck className="h-4 w-4" />
               )}
               Mark all read
+            </button>
+
+            <button
+              type="button"
+              onClick={() => clearReadMutation.mutate()}
+              disabled={clearReadMutation.isPending || readCount === 0}
+              className={clsx(
+                "inline-flex items-center gap-2 border border-white/25 px-3 py-2 text-sm font-semibold transition-colors",
+                clearReadMutation.isPending || readCount === 0
+                  ? "cursor-not-allowed text-white/45"
+                  : "text-white hover:bg-white/15 hover:border-red-300/50",
+              )}
+            >
+              {clearReadMutation.isPending ? (
+                <Loader2 className="h-4 w-4 animate-spin" />
+              ) : (
+                <Trash2 className="h-4 w-4" />
+              )}
+              Clear read
+              {readCount > 0 && (
+                <span className="text-xs text-white/75">{readCount}</span>
+              )}
             </button>
           </>
         }

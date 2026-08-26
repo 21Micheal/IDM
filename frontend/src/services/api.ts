@@ -1059,6 +1059,7 @@ export const notificationsAPI = {
   markUnread: (id: string) =>
     api.patch(`/notifications/${id}/`, { is_read: false }),
   markAllRead: () => api.post("/notifications/mark_all_read/"),
+  clearRead: () => api.post("/notifications/clear_read/"),
 };
 
 // Combined helper for compatibility with existing components
