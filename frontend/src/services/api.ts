@@ -1049,7 +1049,7 @@ export interface NotificationSummary {
 }
 
 export const notificationsAPI = {
-  list: (params?: { is_read?: boolean }) => api.get("/notifications/", { params }),
+  list: (params?: { is_read?: boolean; page_size?: number }) => api.get("/notifications/", { params }),
   unreadCount: () => api.get("/notifications/unread_count/"),
   // Consolidated badge counts for the app shell — one cheap request instead of
   // separately polling notifications, workflow tasks and signature requests.

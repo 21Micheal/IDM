@@ -18,7 +18,8 @@ export default function NotificationsPage() {
 
   const { data: allNotifications = [], isLoading } = useQuery<Notification[]>({
     queryKey: ["notifications"],
-    queryFn: () => notificationsAPI.list().then((r) => normalizeListResponse<Notification>(r.data)),
+    queryFn: () =>
+      notificationsAPI.list({ page_size: 100 }).then((r) => normalizeListResponse<Notification>(r.data)),
     staleTime: 30_000,
   });
 
@@ -119,19 +120,21 @@ export default function NotificationsPage() {
         </div>
       </WorkspaceCommandBar>
 
-      <div className="scrollbar-minimal min-h-0 flex-1 overflow-y-auto p-5 pr-0">
-        <NotificationList
-          notifications={visibleNotifications}
-          isLoading={isLoading}
-          onMarkRead={(id) => markReadMutation.mutate(id)}
-          onOpenLink={(link) => navigate(link)}
-          onOpenWorkflow={(detail) => {
-            if (!detail.documentId) return;
-            navigate(`/notifications/workflow/${detail.documentId}`, {
-              state: { notification: detail },
-            });
-          }}
-        />
+      <div className="scrollbar-minimal min-h-0 flex-1 overflow-y-auto p-5">
+        <div className="mx-auto w-full max-w-4xl">
+          <NotificationList
+            notifications={visibleNotifications}
+            isLoading={isLoading}
+            onMarkRead={(id) => markReadMutation.mutate(id)}
+            onOpenLink={(link) => navigate(link)}
+            onOpenWorkflow={(detail) => {
+              if (!detail.documentId) return;
+              navigate(`/notifications/workflow/${detail.documentId}`, {
+                state: { notification: detail },
+              });
+            }}
+          />
+        </div>
       </div>
     </div>
   );
