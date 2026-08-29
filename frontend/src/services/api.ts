@@ -785,11 +785,45 @@ export type SunSystemsConnectionResponse = {
   updated_at: string | null;
 };
 
+export type PaymentRunFilters = {
+  account_codes?: string;
+  allocation_markers?: string;
+  journal_number_gt?: number | string;
+  business_unit?: string;
+  budget_code?: string;
+};
+
+export type PaymentRunLine = {
+  account_code: string;
+  accounting_period: string;
+  transaction_date: string;
+  journal_number: string;
+  journal_line_number: string;
+  transaction_reference: string;
+  description: string;
+  base_amount: string;
+  conversion_rate: string;
+  currency_code: string;
+  transaction_amount: string;
+  debit_credit: string;
+  allocation_marker: string;
+  account_description: string;
+};
+
+export type PaymentRunResult = {
+  ok: boolean;
+  lines: PaymentRunLine[];
+  count: number;
+  error?: string;
+};
+
 export const sunsystemsAPI = {
   budgetCheck: (input: BudgetCheckInput) =>
     api.post<BudgetResult>("/sunsystems/budget-check/", input),
   journalPreview: (input: BudgetCheckInput) =>
     api.post<JournalPreviewResult>("/sunsystems/journal-preview/", input),
+  paymentRun: (filters: PaymentRunFilters) =>
+    api.post<PaymentRunResult>("/sunsystems/payment-run/", filters),
   getConnection: () =>
     api.get<SunSystemsConnectionResponse>("/sunsystems/connection/"),
   updateConnection: (conn: SunSystemsConnection) =>

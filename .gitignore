@@ -54,3 +54,5 @@ dump.rdb
 
 # Local Vite overrides (never commit — bakes a dev API URL into prod builds)
 frontend/.env.local
+test_sunsystems_auth.py
+test_sunsystems_payment_run.py

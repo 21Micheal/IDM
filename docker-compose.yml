@@ -60,6 +60,16 @@ services:
       - NGROK_URL=${NGROK_URL}
       - ALLOWED_HOSTS=${ALLOWED_HOSTS:-localhost,127.0.0.1,backend,frontend,nginx},.ngrok-free.dev
       - TZ=Africa/Nairobi
+      # ── SunSystems Connect ──────────────────────────────────────────────────
+      # Env-var defaults for the SunSystems gateway. These are used as fallbacks
+      # when no connection has been saved via the Admin → SunSystems page, and
+      # survive a database wipe (e.g. docker system prune --volumes).
+      - SUNSYSTEMS_BASE_URL=${SUNSYSTEMS_BASE_URL:-}
+      - SUNSYSTEMS_USERNAME=${SUNSYSTEMS_USERNAME:-}
+      - SUNSYSTEMS_PASSWORD=${SUNSYSTEMS_PASSWORD:-}
+      - SUNSYSTEMS_BUSINESS_UNIT=${SUNSYSTEMS_BUSINESS_UNIT:-}
+      - SUNSYSTEMS_BUDGET_CODE=${SUNSYSTEMS_BUDGET_CODE:-A}
+      - SUNSYSTEMS_VERIFY_TLS=${SUNSYSTEMS_VERIFY_TLS:-true}
     volumes:
       - .:/app
       - media_files:/app/media

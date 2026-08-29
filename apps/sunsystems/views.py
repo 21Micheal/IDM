@@ -7,6 +7,7 @@ API surface for the SunSystems integration:
   POST /api/v1/sunsystems/journal-preview/      the exact <SSC> XML to be posted
   GET  /api/v1/sunsystems/postings/<doc_id>/    journal posting status
   POST /api/v1/sunsystems/postings/<doc_id>/retry/   re-attempt a failed posting
+  POST /api/v1/sunsystems/payment-run/          query ledger lines (Journal/Query)
 """
 from __future__ import annotations
 
@@ -312,3 +313,154 @@ class JournalPostingRetryView(APIView):
             {**JournalPostingSerializer(posting).data, "mapping_refreshed": refreshed},
             status=code,
         )
+
+
+class PaymentRunView(APIView):
+    """Query SunSystems ledger lines for a payment run.
+
+    POST /api/v1/sunsystems/payment-run/
+
+    Request body (all fields optional — defaults mirror the test script):
+        account_codes      list[str] | str  comma-separated or list   e.g. ["64001","71001"]
+        allocation_markers list[str] | str  e.g. ["W"]  (unallocated)
+        journal_number_gt  int | str        e.g. 10
+        business_unit      str              e.g. "PK1"
+        budget_code        str              e.g. "A"
+
+    Response:
+        { lines: [ { account_code, accounting_period, transaction_date,
+                     journal_number, journal_line_number, transaction_reference,
+                     description, base_amount, conversion_rate, currency_code,
+                     transaction_amount, debit_credit, allocation_marker,
+                     account_description } ], count: int }
+    """
+
+    permission_classes = [IsAuthenticated]
+
+    def post(self, request):
+        import xml.etree.ElementTree as ET
+
+        data = request.data or {}
+
+        # ── Resolve connection ────────────────────────────────────────────────
+        conn = effective_connection()
+        config = SunSystemsConfig.from_mapping(conn)
+
+        # ── Filter params ─────────────────────────────────────────────────────
+        raw_accounts = data.get("account_codes", "")
+        if isinstance(raw_accounts, list):
+            account_codes = ",".join(str(a) for a in raw_accounts if a)
+        else:
+            account_codes = str(raw_accounts).strip()
+
+        raw_markers = data.get("allocation_markers", "W")
+        if isinstance(raw_markers, list):
+            allocation_markers = ",".join(str(m) for m in raw_markers if m)
+        else:
+            allocation_markers = str(raw_markers).strip() or "W"
+
+        journal_number_gt = str(data.get("journal_number_gt", "0")).strip() or "0"
+
+        business_unit = str(data.get("business_unit") or config.business_unit or "PK1")
+        budget_code = str(data.get("budget_code") or config.budget_code or "A")
+
+        # ── Build filter expressions ──────────────────────────────────────────
+        filter_items = []
+        if account_codes:
+            filter_items.append(
+                f'<Item name="/Ledger/Line/AccountCode" operator="IN" value="{account_codes}"/>'
+            )
+        filter_items.append(
+            f'<Item name="/Ledger/Line/JournalNumber" operator="GT" value="{journal_number_gt}"/>'
+        )
+        if allocation_markers:
+            filter_items.append(
+                f'<Item name="/Ledger/Line/AllocationMarker" operator="IN" value="{allocation_markers}"/>'
+            )
+
+        filter_xml = (
+            '<Filter><Expr operator="AND">' + "".join(filter_items) + "</Expr></Filter>"
+            if filter_items else ""
+        )
+
+        # ── Build full SSC payload ────────────────────────────────────────────
+        ssc_payload = f"""<SSC>
+  <ErrorContext/>
+  <User/>
+  <SunSystemsContext>
+    <BusinessUnit>{business_unit}</BusinessUnit>
+    <BudgetCode>{budget_code}</BudgetCode>
+  </SunSystemsContext>
+  <Payload>
+    {filter_xml}
+    <Select>
+      <Ledger>
+        <Line>
+          <AccountCode>.</AccountCode>
+          <AccountingPeriod>.</AccountingPeriod>
+          <TransactionDate>.</TransactionDate>
+          <JournalNumber>.</JournalNumber>
+          <JournalLineNumber>.</JournalLineNumber>
+          <TransactionReference>.</TransactionReference>
+          <Description>.</Description>
+          <BaseAmount>.</BaseAmount>
+          <ConversionRate>.</ConversionRate>
+          <CurrencyCode>.</CurrencyCode>
+          <TransactionAmount>.</TransactionAmount>
+          <DebitCredit>.</DebitCredit>
+          <AllocationMarker>.</AllocationMarker>
+          <Accounts>
+            <Description>.</Description>
+          </Accounts>
+        </Line>
+      </Ledger>
+    </Select>
+  </Payload>
+</SSC>"""
+
+        # ── Execute ───────────────────────────────────────────────────────────
+        try:
+            client = SunSystemsClient(config)
+            response_xml = client.execute("Journal", "Query", ssc_payload)
+        except SunSystemsError as exc:
+            return Response(
+                {"ok": False, "error": str(exc)},
+                status=status.HTTP_502_BAD_GATEWAY,
+            )
+
+        # ── Parse response XML ────────────────────────────────────────────────
+        lines = []
+
+        def _text(el_root, tag: str) -> str:
+            el = el_root.find(tag)
+            return (el.text or "").strip() if el is not None else ""
+
+        try:
+            root = ET.fromstring(response_xml or "<SSC/>")
+            for line_el in root.findall(".//Ledger/Line"):
+                account_desc_el = line_el.find("Accounts/Description")
+                account_desc = (account_desc_el.text or "").strip() if account_desc_el is not None else ""
+
+                lines.append({
+                    "account_code":          _text(line_el, "AccountCode"),
+                    "accounting_period":     _text(line_el, "AccountingPeriod"),
+                    "transaction_date":      _text(line_el, "TransactionDate"),
+                    "journal_number":        _text(line_el, "JournalNumber"),
+                    "journal_line_number":   _text(line_el, "JournalLineNumber"),
+                    "transaction_reference": _text(line_el, "TransactionReference"),
+                    "description":           _text(line_el, "Description"),
+                    "base_amount":           _text(line_el, "BaseAmount"),
+                    "conversion_rate":       _text(line_el, "ConversionRate"),
+                    "currency_code":         _text(line_el, "CurrencyCode"),
+                    "transaction_amount":    _text(line_el, "TransactionAmount"),
+                    "debit_credit":          _text(line_el, "DebitCredit"),
+                    "allocation_marker":     _text(line_el, "AllocationMarker"),
+                    "account_description":   account_desc,
+                })
+        except ET.ParseError as exc:
+            return Response(
+                {"ok": False, "error": f"Could not parse SunSystems response: {exc}"},
+                status=status.HTTP_502_BAD_GATEWAY,
+            )
+
+        return Response({"ok": True, "lines": lines, "count": len(lines)})
