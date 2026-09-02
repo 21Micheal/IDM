@@ -712,13 +712,13 @@ function ProgressRing({ pct, size = 48 }: { pct: number; size?: number }) {
   const dash = (pct / 100) * circ;
   return (
     <svg width={size} height={size} className="shrink-0 -rotate-90">
-      <circle cx={size / 2} cy={size / 2} r={r} fill="none" stroke="rgba(255,255,255,0.25)" strokeWidth={5} />
+      <circle cx={size / 2} cy={size / 2} r={r} fill="none" stroke="#E5E7EB" strokeWidth={5} />
       <circle
         cx={size / 2}
         cy={size / 2}
         r={r}
         fill="none"
-        stroke="#ffffff"
+        stroke="#287EAD"
         strokeWidth={5}
         strokeLinecap="round"
         strokeDasharray={`${dash} ${circ}`}
@@ -732,7 +732,7 @@ function ProgressRing({ pct, size = 48 }: { pct: number; size?: number }) {
         style={{
           fontSize: 11,
           fontWeight: 700,
-          fill: "#ffffff",
+          fill: "#1F2933",
           transform: "rotate(90deg)",
           transformOrigin: "50% 50%",
           fontFamily: "inherit",
@@ -835,22 +835,22 @@ export function WorkflowVisualizer({
       )}
     >
       {/* ── Header ──────────────────────────────────────────────── */}
-      <div className="flex flex-wrap items-center gap-4 border-b border-[#206D99] bg-[#287EAD] px-5 py-4 text-white">
+      <div className="flex flex-wrap items-center gap-4 border-b border-[#C8CDD2] bg-white px-5 py-4">
         {/* Icon */}
-        <div className="flex h-10 w-10 shrink-0 items-center justify-center border border-white/25 bg-white/10 text-white">
+        <div className="flex h-10 w-10 shrink-0 items-center justify-center border border-[#A7CDE3] bg-[#EEF6FB] text-[#287EAD]">
           <GitBranch className="h-5 w-5" />
         </div>
 
         {/* Title block */}
         <div className="min-w-0 flex-1">
-          <h3 className="truncate text-[15px] font-bold tracking-tight text-white">
+          <h3 className="truncate text-[15px] font-bold tracking-tight text-[#1F2933]">
             {documentTitle ?? "Workflow Progress"}
           </h3>
-          <p className="mt-0.5 text-xs text-white/75">
+          <p className="mt-0.5 text-xs text-[#5E6870]">
             {submittedBy && (
               <>
                 Submitted by{" "}
-                <span className="font-semibold text-white">{submittedBy}</span>
+                <span className="font-semibold text-[#1F2933]">{submittedBy}</span>
               </>
             )}
             {submittedDate && (
@@ -862,8 +862,8 @@ export function WorkflowVisualizer({
         {/* Progress ring */}
         <div className="flex items-center gap-3">
           <div className="hidden text-right sm:block">
-            <p className="text-[10px] font-bold uppercase tracking-widest text-white/65">Progress</p>
-            <p className="text-base font-black text-white">
+            <p className="text-[10px] font-bold uppercase tracking-widest text-[#5E6870]">Progress</p>
+            <p className="text-base font-black text-[#287EAD]">
               {counts.completed}/{taskTotal} steps
             </p>
           </div>
@@ -878,7 +878,7 @@ export function WorkflowVisualizer({
           <button
             type="button"
             onClick={() => setDiagramOpen((v) => !v)}
-            className="inline-flex items-center gap-1.5 text-[11px] font-bold uppercase tracking-widest text-[#5E6870] transition hover:text-[#1F2933]"
+            className="inline-flex items-center gap-1.5 text-[11px] font-bold uppercase tracking-widest text-[#287EAD] transition hover:text-[#206D99]"
           >
             {diagramOpen ? (
               <ChevronDown className="h-3.5 w-3.5" />

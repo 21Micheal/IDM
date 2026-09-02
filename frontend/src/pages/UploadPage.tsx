@@ -1890,8 +1890,8 @@ export default function UploadPage({ scanOnly = false }: UploadPageProps) {
 
       {/* ── OCR wait / review / submitting ──────────────────────────────── */}
       {isOcrFlow && scanStage !== "idle" && scanStage !== "uploading" && (
-        <div className="grid gap-4 p-5 pr-0 lg:grid-cols-12">
-          <div className="lg:col-span-7 2xl:col-span-8">
+        <div className="grid gap-4 p-5 pr-0 xl:grid-cols-12">
+          <div className="xl:col-span-6">
             <CapturePreviewPane
               file={droppedFile}
               previewUrl={pdfPreviewUrl}
@@ -1900,7 +1900,7 @@ export default function UploadPage({ scanOnly = false }: UploadPageProps) {
             />
           </div>
 
-          <div className="lg:col-span-5 2xl:col-span-4">
+          <div className="xl:col-span-6">
             <div className="max-h-[calc(100vh-9rem)] overflow-y-auto border border-[#C8CDD2] bg-white">
             {showOcrWait && (
               <OcrWaitScreen
@@ -2204,7 +2204,7 @@ export default function UploadPage({ scanOnly = false }: UploadPageProps) {
 
           {/* Centre column — document preview (visible when file selected and displayable) */}
           {droppedFile && (getCapturePreviewKind(droppedFile) === "pdf" || getCapturePreviewKind(droppedFile) === "image") && (
-            <div className="xl:col-span-7">
+            <div className="xl:col-span-6">
               <CapturePreviewPane
                 file={droppedFile}
                 previewUrl={pdfPreviewUrl}
@@ -2225,8 +2225,8 @@ export default function UploadPage({ scanOnly = false }: UploadPageProps) {
           {(() => {
             const hasPreviewFile = droppedFile && (getCapturePreviewKind(droppedFile) === "pdf" || getCapturePreviewKind(droppedFile) === "image");
             const colClass = hasPreviewFile
-              ? "xl:col-span-5"
-              : "xl:col-start-7 xl:col-span-5";
+              ? "xl:col-span-6"
+              : "xl:col-start-7 xl:col-span-6";
             return (
           <div className={colClass}>
             {showManualForm && (

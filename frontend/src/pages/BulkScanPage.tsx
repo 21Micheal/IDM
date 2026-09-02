@@ -25,6 +25,7 @@ import { QUERY_FIVE_MIN_STALE } from "@/lib/reactQueryDefaults";
 import CustomListbox from "@/components/ui/CustomListbox";
 import { deriveDocumentTypeConfig } from "@/lib/documentTypeConfig";
 import BulkUploadDropzone from "@/components/documents/bulk/BulkUploadDropzone";
+import BulkFileThumbnails from "@/components/documents/bulk/BulkFileThumbnails";
 import BulkProcessingPanel from "@/components/documents/bulk/BulkProcessingPanel";
 import BulkReviewPanel from "@/components/documents/bulk/BulkReviewPanel";
 import type { BulkDocReviewState, BulkLocalPreview, BulkUploadBatch } from "@/components/documents/bulk/bulkUploadTypes";
@@ -490,8 +491,8 @@ export default function BulkScanPage({ scanMode = true, onSingleMode, initialBat
 
       {stage === "select" && (
         <>
-        <div className="grid grid-cols-1 gap-5 p-5 pr-0 lg:grid-cols-12">
-          <div className="space-y-5 lg:col-span-4">
+        <div className="grid grid-cols-1 gap-5 p-5 pr-0 xl:grid-cols-12">
+          <div className="space-y-5 xl:col-start-2 xl:col-span-4">
             <div className="border border-[#C8CDD2] bg-white p-5">
               <h2 className="mb-4 font-semibold text-[#1F2933]">1. Batch mode</h2>
               {onSingleMode && (
@@ -612,7 +613,7 @@ export default function BulkScanPage({ scanMode = true, onSingleMode, initialBat
 
           </div>
 
-          <div className="space-y-5 lg:col-span-8">
+          <div className="space-y-5 xl:col-span-6">
             <div className="border border-[#C8CDD2] bg-white p-5">
               <h2 className="mb-4 font-semibold text-[#1F2933]">2. Files</h2>
               <BulkUploadDropzone
@@ -657,6 +658,16 @@ export default function BulkScanPage({ scanMode = true, onSingleMode, initialBat
             </div>
           </div>
         </div>
+
+        {/* File thumbnails displayed outside the panel */}
+        {files.length > 0 && (
+          <BulkFileThumbnails
+            files={files}
+            onRemove={(index) => setFiles(files.filter((_, i) => i !== index))}
+            onClearAll={() => setFiles([])}
+            disabled={createMutation.isPending}
+          />
+        )}
         </>
       )}
 
