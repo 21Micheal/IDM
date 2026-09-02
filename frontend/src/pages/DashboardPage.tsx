@@ -258,6 +258,12 @@ function getAuditPresentation(event: any) {
   if (name.includes("upload") || name.includes("create") || name.includes("edit") || name.includes("update") || name.includes("version")) {
     return { icon: FileText, tone: "bg-primary/10 text-primary border-primary/20" };
   }
+  if (name.includes("group.permission")) {
+    return { icon: ShieldCheck, tone: "bg-accent/15 text-accent border-accent/30" };
+  }
+  if (name.includes("signature.request")) {
+    return { icon: FileSignature, tone: "bg-primary/10 text-primary border-primary/20" };
+  }
   if (name.includes("delete") || name.includes("fail") || name.includes("error")) {
     return { icon: ShieldCheck, tone: "bg-destructive/10 text-destructive border-destructive/30" };
   }
@@ -337,6 +343,12 @@ const EVENT_VERB_MAP: Record<string, string> = {
   "workflow.delegated": "delegated tasks to",
   "workflow.reassigned": "reassigned tasks to",
   "audit.exported": "exported",
+  "group.permission_updated": "updated permissions for",
+  "signature.request_created": "requested signature for",
+  "signature.request_signed": "signed",
+  "signature.request_completed": "completed signature request for",
+  "signature.request_declined": "declined signature request for",
+  "signature.request_cancelled": "cancelled signature request for",
 };
 
 const VERB_RE = /(submitted|uploaded|edited|updated|created|deleted|approved|rejected|downloaded|viewed|previewed|printed|shared|failed|queued|completed|logged in|logged out|signed in|signed out|enabled|disabled|returned|held|released|archived|added|delegated|reassigned|exported)\b/i;
@@ -376,6 +388,86 @@ function formatAuditSummary(event: DashboardAuditEvent): AuditSummaryParts {
   if (code === "permission.changed") {
     const { verb, target } = describePermissionChange(event);
     return { actor, verb, target };
+  }
+
+  if (code === "signature.request_created" || code === "signature.request_signed" || 
+      code === "signature.request_completed" || code === "signature.request_declined" || 
+      code === "signature.request_cancelled") {
+    const changes = (event.changes ?? {}) as Record<string, unknown>;
+    const documentTitle = typeof changes.document_title === "string" ? changes.document_title : "";
+    const target = cleanAuditTitle(documentTitle);
+    
+    const mappedVerb = EVENT_VERB_MAP[code];
+    if (mappedVerb) {
+      return { actor, verb: mappedVerb, target };
+    }
+    
+    return { actor, verb: code.replace("signature.request_", ""), target };
+  }
+
+  if (code === "group.permission_updated") {
+    const changes = (event.changes ?? {}) as Record<string, unknown>;
+    const grantedCount = typeof changes.granted_count === "number" ? changes.granted_count : 0;
+    const revokedCount = typeof changes.revoked_count === "number" ? changes.revoked_count : 0;
+    const totalPermissions = typeof changes.total_permissions === "number" ? changes.total_permissions : 0;
+    
+    // Build detailed description from granted/revoked details
+    const grantedDetails = Array.isArray(changes.granted_details) ? changes.granted_details : [];
+    const revokedDetails = Array.isArray(changes.revoked_details) ? changes.revoked_details : [];
+    
+    let verb = "updated permissions for";
+    if (grantedDetails.length > 0 || revokedDetails.length > 0) {
+      const parts: string[] = [];
+      
+      for (const detail of grantedDetails) {
+        const action = detail.action || "";
+        const documentTypeName = detail.document_type_name;
+        const documentTypeId = detail.document_type_id;
+        const stage = detail.stage;
+        
+        const actionDisplay = String(action || "").replace(/_/g, " ").replace(/\b\w/g, (char) => char.toUpperCase());
+        const docTypePart = documentTypeName 
+          ? ` for ${documentTypeName}` 
+          : documentTypeId 
+            ? ` for document type ${documentTypeId}` 
+            : "";
+        const stagePart = stage && stage !== "any" ? ` in ${stage} stage` : "";
+        
+        parts.push(`granted ${actionDisplay}${docTypePart}${stagePart}`);
+      }
+      
+      for (const detail of revokedDetails) {
+        const action = detail.action || "";
+        const documentTypeName = detail.document_type_name;
+        const documentTypeId = detail.document_type_id;
+        const stage = detail.stage;
+        
+        const actionDisplay = String(action || "").replace(/_/g, " ").replace(/\b\w/g, (char) => char.toUpperCase());
+        const docTypePart = documentTypeName 
+          ? ` for ${documentTypeName}` 
+          : documentTypeId 
+            ? ` for document type ${documentTypeId}` 
+            : "";
+        const stagePart = stage && stage !== "any" ? ` in ${stage} stage` : "";
+        
+        parts.push(`revoked ${actionDisplay}${docTypePart}${stagePart}`);
+      }
+      
+      if (parts.length > 0) {
+        verb = parts.join(", ");
+      }
+    } else {
+      // Fallback to count-based description for backward compatibility
+      if (grantedCount > 0 && revokedCount > 0) {
+        verb = `updated permissions for (${grantedCount} granted, ${revokedCount} revoked)`;
+      } else if (grantedCount > 0) {
+        verb = `granted ${grantedCount} permission${grantedCount === 1 ? "" : "s"} to`;
+      } else if (revokedCount > 0) {
+        verb = `revoked ${revokedCount} permission${revokedCount === 1 ? "" : "s"} from`;
+      }
+    }
+    
+    return { actor, verb, target: objectTitle };
   }
 
   const mappedVerb = EVENT_VERB_MAP[code];

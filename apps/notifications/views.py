@@ -59,6 +59,17 @@ class NotificationViewSet(
             "updated": updated,
         })
 
+    @action(detail=False, methods=["post"])
+    def clear_read(self, request):
+        """Permanently delete all read notifications for the current user."""
+        deleted, _ = Notification.objects.filter(
+            recipient=request.user, is_read=True
+        ).delete()
+        return Response({
+            "detail": "Read notifications cleared.",
+            "deleted": deleted,
+        })
+
     @action(detail=False, methods=["get"])
     def unread_count(self, request):
         return Response({"unread_count": self.get_queryset().filter(is_read=False).count()})

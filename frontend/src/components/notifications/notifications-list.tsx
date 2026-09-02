@@ -1,20 +1,27 @@
 import { useMemo } from "react";
 import {
   AlertTriangle,
+  BadgeCheck,
   Bell,
-  CheckCheck,
   CheckCircle,
   ChevronRight,
   ClipboardCheck,
-  Clock,
+  ClipboardList,
   FileSignature,
+  GitMerge,
+  Hourglass,
   Info,
   Loader2,
   PauseCircle,
   PenLine,
   PlayCircle,
+  Receipt,
   RotateCcw,
   Share2,
+  ShieldCheck,
+  Stamp,
+  TimerOff,
+  TimerReset,
   XCircle,
 } from "lucide-react";
 import clsx from "clsx";
@@ -40,7 +47,8 @@ export function getNotificationConfig(type: string, message = "") {
 
   if (invoiceApproved) {
     return {
-      icon: CheckCircle,
+      // Stamp = finalised / rubber-stamped approval — unique to invoice-approved
+      icon: Stamp,
       color: "text-emerald-700 bg-emerald-50 border-emerald-200",
       label: "Invoice Approved",
       category: "Approved Invoice",
@@ -49,7 +57,8 @@ export function getNotificationConfig(type: string, message = "") {
 
   if (invoiceApproval) {
     return {
-      icon: ClipboardCheck,
+      // Receipt = invoice-specific approval request
+      icon: Receipt,
       color: "text-sky-700 bg-sky-50 border-sky-200",
       label: "Invoice Approval Needed",
       category: "Invoice Approval",
@@ -58,7 +67,8 @@ export function getNotificationConfig(type: string, message = "") {
 
   if (documentApproval) {
     return {
-      icon: ClipboardCheck,
+      // ClipboardList = generic document approval request (not invoice)
+      icon: ClipboardList,
       color: "text-primary bg-primary/10 border-primary/20",
       label: "Approval Request",
       category: "Document Approval",
@@ -75,6 +85,7 @@ export function getNotificationConfig(type: string, message = "") {
       };
     case "task_assigned":
       return {
+        // ClipboardCheck = task assigned / requires action — same family as approvals
         icon: ClipboardCheck,
         color: "text-primary bg-primary/10 border-primary/20",
         label: "Approval Request",
@@ -82,14 +93,16 @@ export function getNotificationConfig(type: string, message = "") {
       };
     case "task_sla_warning":
       return {
-        icon: Clock,
+        // Hourglass = time pressure / SLA countdown
+        icon: Hourglass,
         color: "text-amber-700 bg-amber-50 border-amber-200",
         label: "SLA Approaching",
         category: "Task Alert",
       };
     case "workflow_complete":
       return {
-        icon: CheckCircle,
+        // BadgeCheck = workflow fully completed / certified — distinct from CheckCircle
+        icon: BadgeCheck,
         color: "text-emerald-700 bg-emerald-50 border-emerald-200",
         label: "Workflow Complete",
         category: "Approved",
@@ -117,14 +130,16 @@ export function getNotificationConfig(type: string, message = "") {
       };
     case "hold_ending":
       return {
-        icon: Clock,
+        // TimerReset = hold nearing expiry but still running
+        icon: TimerReset,
         color: "text-amber-700 bg-amber-50 border-amber-200",
         label: "Hold Ending Soon",
         category: "Hold Alert",
       };
     case "hold_expired":
       return {
-        icon: Clock,
+        // TimerOff = hold has lapsed
+        icon: TimerOff,
         color: "text-purple-700 bg-purple-50 border-purple-200",
         label: "Hold Expired",
         category: "Hold Expired",
@@ -138,13 +153,15 @@ export function getNotificationConfig(type: string, message = "") {
       };
     case "workflow_action":
       return {
-        icon: CheckCheck,
+        // GitMerge = mid-workflow step / action taken along the pipeline
+        icon: GitMerge,
         color: "text-muted-foreground bg-muted border-border",
         label: "Workflow Update",
         category: "Workflow",
       };
     case "signature_requested":
       return {
+        // FileSignature = needs your signature
         icon: FileSignature,
         color: "text-violet-700 bg-violet-50 border-violet-200",
         label: "Signature Required",
@@ -152,8 +169,9 @@ export function getNotificationConfig(type: string, message = "") {
       };
     case "signature_signed":
       return {
+        // PenLine = a signer has just signed
         icon: PenLine,
-        color: "text-emerald-700 bg-emerald-50 border-emerald-200",
+        color: "text-teal-700 bg-teal-50 border-teal-200",
         label: "Document Signed",
         category: "Signature",
       };
@@ -166,7 +184,8 @@ export function getNotificationConfig(type: string, message = "") {
       };
     case "signature_completed":
       return {
-        icon: CheckCircle,
+        // ShieldCheck = all parties signed — fully certified / secured
+        icon: ShieldCheck,
         color: "text-emerald-700 bg-emerald-50 border-emerald-200",
         label: "Fully Signed",
         category: "Signatures Complete",
@@ -182,7 +201,7 @@ export function getNotificationConfig(type: string, message = "") {
       }
       if (normalized.includes("returned") || normalized.includes("rejected") || normalized.includes("hold")) {
         return {
-          icon: XCircle,
+          icon: RotateCcw,
           color: "text-amber-700 bg-amber-50 border-amber-200",
           label: "Attention",
           category: "Attention",

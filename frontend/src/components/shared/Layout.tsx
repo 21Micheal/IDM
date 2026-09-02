@@ -37,7 +37,7 @@ import {
   Bell, Users, Building2, UserRoundCog, Shield,
   ChevronDown, ChevronRight, ChevronLeft, Archive, ScanLine, Loader2, UserCheck, Monitor, Lock, History, Trash2,
   BellRing, CircleUserRound, ClipboardCheck, Inbox, ArrowRight, FileSignature, LayoutTemplate, Database,
-  Plug, ClipboardList, BarChart3,
+  Plug, ClipboardList, BarChart3, CreditCard,
 } from "lucide-react";
 import { useAuthStore } from "../../store/authStore";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
@@ -139,6 +139,7 @@ const mainNav: NavEntry[] = [
     ],
   } as NavGroup,
   { to: "/forms", icon: ClipboardList, label: "Forms" } as NavLeaf,
+  { to: "/payment-run", icon: CreditCard, label: "Payment run" } as NavLeaf,
   { to: "/personal-documents", icon: Lock, label: "Personal documents" } as NavLeaf,
   { to: "/request-signature", icon: FileSignature, label: "Request signature" } as NavLeaf,
   {

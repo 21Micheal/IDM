@@ -41,6 +41,7 @@ const TemplatesPage = lazy(() => import("@/pages/TemplatesPage"));
 const FormsPage = lazy(() => import("@/pages/FormsPage"));
 const FormUploadPage = lazy(() => import("@/components/templates/FormUploadPage"));
 const FormDetailPage = lazy(() => import("@/pages/FormDetailPage"));
+const PaymentRunPage = lazy(() => import("@/pages/PaymentRunPage"));
 
 // ── Guards ────────────────────────────────────────────────────────────────────
 
@@ -406,6 +407,9 @@ export default function App() {
               <Route path="request-signature" element={<RequestSignaturePage />} />
 
               <Route path="templates" element={<Navigate to="/admin/templates" replace />} />
+
+              {/* SunSystems */}
+              <Route path="payment-run" element={<PaymentRunPage />} />
 
               {/* Search */}
               <Route path="search"    element={<SearchPage />} />

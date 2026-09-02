@@ -156,6 +156,16 @@ function describeAuditEvent(event: string) {
     case "document version restored":
     case "version restored":
       return "version was restored";
+    case "signature request created":
+      return "signature was requested";
+    case "signature request signed":
+      return "was signed";
+    case "signature request completed":
+      return "signature request was completed";
+    case "signature request declined":
+      return "signature request was declined";
+    case "signature request cancelled":
+      return "signature request was cancelled";
     case "created":
       return "was created";
     case "updated":

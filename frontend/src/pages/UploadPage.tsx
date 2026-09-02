@@ -1578,6 +1578,24 @@ export default function UploadPage({ scanOnly = false }: UploadPageProps) {
       } else {
         const msg = isSelfUpload ? "Personal document saved" : "Document uploaded";
         toast.success(`${msg}: ${data.reference_number}`);
+        
+        // Check for relationship suggestions
+        const suggestions = data.metadata?.relationship_suggestions;
+        if (suggestions && Array.isArray(suggestions) && suggestions.length > 0) {
+          setTimeout(() => {
+            toast.info(
+              `${suggestions.length} document relationship${suggestions.length === 1 ? '' : 's'} found. View the document to review and confirm.`,
+              {
+                duration: 8000,
+                action: {
+                  label: "View Document",
+                  onClick: () => navigate(`/documents/${data.id}`),
+                },
+              }
+            );
+          }, 1000);
+        }
+        
         queryClient.invalidateQueries({ queryKey: ["documents"] });
         navigate(`/documents/${data.id}`);
       }
@@ -1592,9 +1610,33 @@ export default function UploadPage({ scanOnly = false }: UploadPageProps) {
   const saveMutation = useMutation({
     mutationFn: ({ id, payload }: { id: string; payload: Record<string, unknown> }) =>
       documentsAPI.editMetadata(id, payload),
-    onSuccess: (_, { id }) => {
+    onSuccess: async (_, { id }) => {
       queryClient.invalidateQueries({ queryKey: ["documents"] });
       toast.success("Details confirmed and saved.");
+      
+      // Check for relationship suggestions after save
+      try {
+        const { data: doc } = await documentsAPI.detail(id);
+        const suggestions = doc.metadata?.relationship_suggestions;
+        if (suggestions && Array.isArray(suggestions) && suggestions.length > 0) {
+          setTimeout(() => {
+            toast.info(
+              `${suggestions.length} document relationship${suggestions.length === 1 ? '' : 's'} found. View the document to review and confirm.`,
+              {
+                duration: 8000,
+                action: {
+                  label: "View Document",
+                  onClick: () => navigate(`/documents/${id}`),
+                },
+              }
+            );
+          }, 1000);
+        }
+      } catch (err) {
+        // Don't fail the save if relationship check fails
+        console.error("Failed to check relationship suggestions:", err);
+      }
+      
       navigate(`/documents/${id}`);
     },
     onError: (err) => {

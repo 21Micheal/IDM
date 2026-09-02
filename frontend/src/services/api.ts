@@ -785,11 +785,81 @@ export type SunSystemsConnectionResponse = {
   updated_at: string | null;
 };
 
+export type PaymentRunFilters = {
+  account_codes?: string;
+  allocation_markers?: string;
+  journal_number_gt?: number | string;
+  business_unit?: string;
+  budget_code?: string;
+};
+
+export type PaymentRunLine = {
+  account_code: string;
+  accounting_period: string;
+  transaction_date: string;
+  journal_number: string;
+  journal_line_number: string;
+  transaction_reference: string;
+  description: string;
+  base_amount: string;
+  conversion_rate: string;
+  currency_code: string;
+  transaction_amount: string;
+  debit_credit: string;
+  allocation_marker: string;
+  account_description: string;
+};
+
+export type PaymentRunResult = {
+  ok: boolean;
+  lines: PaymentRunLine[];
+  count: number;
+  error?: string;
+};
+
+export type AmendMarkerLine = {
+  journal_number: string;
+  journal_line_number: string;
+  payment_marker: string;
+};
+
+export type AmendMarkerPayload = {
+  lines: AmendMarkerLine[];
+  business_unit?: string;
+  budget_code?: string;
+};
+
+export type AmendMarkerResult = {
+  ok: boolean;
+  processed?: number;
+  error?: string;
+  response_xml?: string;
+};
+
+export type SunSystemsAccount = {
+  account_code: string;
+  account_type: string;
+  description: string;
+};
+
+export type AccountsResult = {
+  ok: boolean;
+  accounts: SunSystemsAccount[];
+  count: number;
+  error?: string;
+};
+
 export const sunsystemsAPI = {
   budgetCheck: (input: BudgetCheckInput) =>
     api.post<BudgetResult>("/sunsystems/budget-check/", input),
   journalPreview: (input: BudgetCheckInput) =>
     api.post<JournalPreviewResult>("/sunsystems/journal-preview/", input),
+  paymentRun: (filters: PaymentRunFilters) =>
+    api.post<PaymentRunResult>("/sunsystems/payment-run/", filters),
+  amendMarkers: (payload: AmendMarkerPayload) =>
+    api.post<AmendMarkerResult>("/sunsystems/amend-markers/", payload),
+  getAccounts: (params?: { business_unit?: string; account_type?: string }) =>
+    api.get<AccountsResult>("/sunsystems/accounts/", { params }),
   getConnection: () =>
     api.get<SunSystemsConnectionResponse>("/sunsystems/connection/"),
   updateConnection: (conn: SunSystemsConnection) =>
@@ -803,6 +873,7 @@ export const sunsystemsAPI = {
   retryPosting: (documentId: string, stage = 1) =>
     api.post<JournalPosting>(`/sunsystems/postings/${documentId}/retry/`, { stage }),
 };
+
 
 // ── Email ingestion (IMAP mailboxes) ──────────────────────────────────────────
 export type MailboxProtocol = "imap" | "graph";
@@ -1049,7 +1120,7 @@ export interface NotificationSummary {
 }
 
 export const notificationsAPI = {
-  list: (params?: { is_read?: boolean }) => api.get("/notifications/", { params }),
+  list: (params?: { is_read?: boolean; page_size?: number }) => api.get("/notifications/", { params }),
   unreadCount: () => api.get("/notifications/unread_count/"),
   // Consolidated badge counts for the app shell — one cheap request instead of
   // separately polling notifications, workflow tasks and signature requests.
@@ -1059,6 +1130,7 @@ export const notificationsAPI = {
   markUnread: (id: string) =>
     api.patch(`/notifications/${id}/`, { is_read: false }),
   markAllRead: () => api.post("/notifications/mark_all_read/"),
+  clearRead: () => api.post("/notifications/clear_read/"),
 };
 
 // Combined helper for compatibility with existing components

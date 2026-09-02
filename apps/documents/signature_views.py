@@ -19,6 +19,9 @@ from rest_framework.response import Response
 from apps.accounts.models import User
 from apps.accounts.serializers import UserSummarySerializer
 from apps.search.utils import SEARCH_INDEX_EXCEPTIONS
+from apps.audit.models import AuditEvent
+from apps.audit.utils import record_audit_event
+from .models import DocumentVersion
 
 from .models import (
     Document, DocumentStatus, SignatureRequest, SignatureRequestSigner,
@@ -215,7 +218,19 @@ class SignatureRequestViewSet(viewsets.ModelViewSet):
                     owned_by=request.user,
                     document_type=doc_type,
                     status=DocumentStatus.PENDING_SIGNATURE,
-                    current_version=0,
+                    current_version=1,
+                )
+                
+                # Create initial DocumentVersion (V1) for the uploaded file
+                DocumentVersion.objects.create(
+                    document=doc,
+                    version_number=1,
+                    file=doc.file,
+                    file_name=doc.file_name,
+                    file_size=doc.file_size,
+                    checksum=doc.checksum,
+                    change_summary="Initial upload for signature request",
+                    created_by=request.user,
                 )
             except SEARCH_INDEX_EXCEPTIONS:
                 doc = Document.objects.filter(reference_number=reference_number).first()
@@ -239,6 +254,19 @@ class SignatureRequestViewSet(viewsets.ModelViewSet):
                 from apps.documents.tasks import generate_document_preview
                 Document.objects.filter(id=doc.id).update(preview_status="pending")
                 transaction.on_commit(lambda: generate_document_preview.delay(str(doc.id)))
+
+        # Record audit event for signature request creation
+        record_audit_event(
+            AuditEvent.SIGNATURE_REQUEST_CREATED,
+            actor=request.user,
+            obj=doc,
+            changes={
+                'document_title': title,
+                'signer_count': len(ordered_ids),
+                'ordered': ordered,
+            },
+            request=request
+        )
 
         self._notify_current_signers(sig_request)
         ser = self.get_serializer(sig_request)
@@ -300,6 +328,20 @@ class SignatureRequestViewSet(viewsets.ModelViewSet):
         row.placement = {"items": info["items"]}
         row.save(update_fields=["status", "signed_at", "placement"])
 
+        # Record audit event for signature
+        record_audit_event(
+            AuditEvent.SIGNATURE_REQUEST_SIGNED,
+            actor=request.user,
+            obj=sig_request.document,
+            changes={
+                'document_title': sig_request.document.title,
+                'version_number': info['version'].version_number,
+                'signature_count': sig_request.signers.filter(status=SignatureRequestSigner.Status.SIGNED).count(),
+                'total_signers': sig_request.signers.count(),
+            },
+            request=request
+        )
+
         remaining = sig_request.signers.filter(status=SignatureRequestSigner.Status.PENDING).exists()
         if remaining:
             from apps.notifications.tasks import notify_signature_signed
@@ -309,6 +351,21 @@ class SignatureRequestViewSet(viewsets.ModelViewSet):
             sig_request.completed_at = now
             sig_request.save(update_fields=["status", "completed_at"])
             self._set_document_status(sig_request.document, DocumentStatus.SIGNED)
+            
+            # Record audit event for completion
+            record_audit_event(
+                AuditEvent.SIGNATURE_REQUEST_COMPLETED,
+                actor=request.user,
+                obj=sig_request.document,
+                changes={
+                    'document_title': sig_request.document.title,
+                    'version_number': info['version'].version_number,
+                    'signature_count': sig_request.signers.filter(status=SignatureRequestSigner.Status.SIGNED).count(),
+                    'total_signers': sig_request.signers.count(),
+                },
+                request=request
+            )
+            
             from apps.notifications.tasks import notify_signature_completed
             notify_signature_completed.delay(str(sig_request.id))
 
@@ -337,6 +394,18 @@ class SignatureRequestViewSet(viewsets.ModelViewSet):
         sig_request.save(update_fields=["status"])
         self._set_document_status(sig_request.document, DocumentStatus.REJECTED)
 
+        # Record audit event for declined signature
+        record_audit_event(
+            AuditEvent.SIGNATURE_REQUEST_DECLINED,
+            actor=request.user,
+            obj=sig_request.document,
+            changes={
+                'document_title': sig_request.document.title,
+                'decline_reason': reason,
+            },
+            request=request
+        )
+
         from apps.notifications.tasks import notify_signature_declined
         notify_signature_declined.delay(str(sig_request.id), str(request.user.id))
         return Response(self.get_serializer(sig_request).data)
@@ -352,6 +421,17 @@ class SignatureRequestViewSet(viewsets.ModelViewSet):
         sig_request.status = SignatureRequest.Status.CANCELLED
         sig_request.save(update_fields=["status"])
         self._set_document_status(sig_request.document, DocumentStatus.DRAFT)
+
+        # Record audit event for cancelled signature request
+        record_audit_event(
+            AuditEvent.SIGNATURE_REQUEST_CANCELLED,
+            actor=request.user,
+            obj=sig_request.document,
+            changes={
+                'document_title': sig_request.document.title,
+            },
+            request=request
+        )
         return Response(self.get_serializer(sig_request).data)
 
     # ── Helpers ──────────────────────────────────────────────────────────────
