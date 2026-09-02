@@ -503,6 +503,9 @@ class DocumentListSerializer(serializers.ModelSerializer):
     builder_workflow_phase = serializers.SerializerMethodField()
     can_submit_retirement = serializers.SerializerMethodField()
     form_summary = serializers.SerializerMethodField()
+    relationship_count = serializers.SerializerMethodField()
+    relationship_suggestion_count = serializers.SerializerMethodField()
+    has_relationships = serializers.SerializerMethodField()
 
     class Meta:
         model  = Document
@@ -522,6 +525,7 @@ class DocumentListSerializer(serializers.ModelSerializer):
             "available_bulk_actions", "shared_with_me", "share_access_level",
             "metadata",
             "is_form", "builder_workflow_phase", "can_submit_retirement", "form_summary",
+            "relationship_count", "relationship_suggestion_count", "has_relationships",
         ]
 
     def get_deleted_by_name(self, obj):
@@ -688,6 +692,47 @@ class DocumentListSerializer(serializers.ModelSerializer):
                 except Exception:
                     variance = None
         return {"values": values, "retirement_variance": variance}
+
+    def get_relationship_count(self, obj):
+        outgoing = getattr(obj, "visible_outgoing_relationship_count", None)
+        incoming = getattr(obj, "visible_incoming_relationship_count", None)
+        if outgoing is not None or incoming is not None:
+            return int(outgoing or 0) + int(incoming or 0)
+        return obj.outgoing_relationships.count() + obj.incoming_relationships.count()
+
+    def get_relationship_suggestion_count(self, obj):
+        metadata = obj.metadata if isinstance(obj.metadata, dict) else {}
+        suggestions = metadata.get("relationship_suggestions")
+        if not isinstance(suggestions, list):
+            return 0
+
+        request = self.context.get("request")
+        user = getattr(request, "user", None)
+        if not user or not user.is_authenticated or getattr(user, "has_admin_access", False):
+            return len([item for item in suggestions if isinstance(item, dict)])
+
+        target_ids = [
+            item.get("target_document_id")
+            for item in suggestions
+            if isinstance(item, dict) and item.get("target_document_id")
+        ]
+        if not target_ids:
+            return 0
+        visible_target_ids = set(
+            str(item)
+            for item in Document.objects.filter(id__in=target_ids)
+            .filter(Q(uploaded_by=user) | Q(owned_by=user))
+            .values_list("id", flat=True)
+        )
+        return sum(
+            1
+            for item in suggestions
+            if isinstance(item, dict)
+            and str(item.get("target_document_id")) in visible_target_ids
+        )
+
+    def get_has_relationships(self, obj):
+        return self.get_relationship_count(obj) > 0 or self.get_relationship_suggestion_count(obj) > 0
 
 
 class DocumentDetailSerializer(serializers.ModelSerializer):

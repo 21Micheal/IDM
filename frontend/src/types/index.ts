@@ -101,6 +101,9 @@ export interface Document {
   builder_workflow_phase?: "request" | "retirement" | null;
   builder_process_step?: string | null;
   can_submit_retirement?: boolean;
+  relationship_count?: number;
+  relationship_suggestion_count?: number;
+  has_relationships?: boolean;
   current_version: number;
   versions: DocumentVersion[];
   comments?: DocumentComment[];

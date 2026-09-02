@@ -9,7 +9,7 @@ import {
   Archive, Trash2, Loader2, CheckSquare, Square, X, CheckCircle, XCircle,
   Search as SearchIcon, SlidersHorizontal, Eye,
   Rows3, LayoutGrid, Plus, ChevronDown,
-  List, Mail, Send, Share2, Download, ArrowUp, ArrowDown,
+  List, Mail, Send, Share2, Download, ArrowUp, ArrowDown, Link2,
 } from "lucide-react";
 import { format } from "date-fns";
 import { cn } from "../lib/utils";
@@ -262,6 +262,39 @@ function getDocumentStatusTextClass(status: string): string {
   return "text-[#5E6870]";
 }
 
+function getRelationshipCount(doc: Document): number {
+  return Number(doc.relationship_count ?? 0);
+}
+
+function RelationshipBadge({ doc, compact = false }: { doc: Document; compact?: boolean }) {
+  const count = getRelationshipCount(doc);
+  const suggestionCount = Number(doc.relationship_suggestion_count ?? 0);
+  if (count <= 0 && suggestionCount <= 0) return null;
+  const label = count > 0 ? "linked" : "suggested";
+  const displayCount = count > 0 ? count : suggestionCount;
+
+  return (
+    <Link
+      to={`/documents/${doc.id}`}
+      onMouseEnter={preloadDocumentWorkspace}
+      onFocus={preloadDocumentWorkspace}
+      onClick={(event) => event.stopPropagation()}
+      title={
+        count > 0
+          ? `${count} related document${count === 1 ? "" : "s"}`
+          : `${suggestionCount} suggested relationship${suggestionCount === 1 ? "" : "s"}`
+      }
+      className={cn(
+        "inline-flex items-center gap-1 border border-[#A7CDE3] bg-[#EEF6FB] font-semibold text-[#287EAD] hover:border-[#287EAD] hover:bg-white",
+        compact ? "px-1.5 py-0.5 text-[10px]" : "px-2 py-0.5 text-xs",
+      )}
+    >
+      <Link2 className={compact ? "h-3 w-3" : "h-3.5 w-3.5"} />
+      {compact ? displayCount : `${displayCount} ${label}`}
+    </Link>
+  );
+}
+
 function formatInforDateTime(value?: string | null): string {
   if (!value) return "";
   const date = new Date(value);
@@ -369,12 +402,17 @@ export default function DocumentsPage({ personalOnly = false }: DocumentsPagePro
   const [searchParams, setSearchParams] = useSearchParams();
   const statusFromUrl = searchParams.get("status");
   const normalizedStatusFromUrl = STATUS_OPTIONS.includes(statusFromUrl ?? "") ? (statusFromUrl ?? "") : "";
+  const relationshipsFromUrl = ["true", "1", "yes"].includes((searchParams.get("has_relationships") ?? "").toLowerCase());
+  const relationshipSuggestionsFromUrl = ["true", "1", "yes"].includes((searchParams.get("has_relationship_suggestions") ?? "").toLowerCase());
   const isArchiveView = normalizedStatusFromUrl === "archived";
 
   const [search, setSearch] = useState("");
   const [statusFilter, setStatusFilter] = useState(normalizedStatusFromUrl);
   const [typeFilter, setTypeFilter] = useState("");
   const [supplierFilter, setSupplierFilter] = useState("");
+  const [relationshipFilter, setRelationshipFilter] = useState<"" | "linked" | "suggested">(
+    relationshipSuggestionsFromUrl ? "suggested" : relationshipsFromUrl ? "linked" : "",
+  );
   const [personalTagFilter, setPersonalTagFilter] = useState("");
   const [showAllTags, setShowAllTags] = useState(false);
   const [sort, setSort] = useState<"created_at" | "updated_at" | "document_date" | "amount" | "title" | "reference_number">("created_at");
@@ -425,20 +463,24 @@ export default function DocumentsPage({ personalOnly = false }: DocumentsPagePro
 
   useEffect(() => {
     setStatusFilter(normalizedStatusFromUrl);
+    setRelationshipFilter(relationshipSuggestionsFromUrl ? "suggested" : relationshipsFromUrl ? "linked" : "");
     if (normalizedStatusFromUrl === "archived" || personalOnly) {
       setSearch("");
       setTypeFilter("");
       setSupplierFilter("");
+      setRelationshipFilter("");
       setPersonalTagFilter("");
     }
     setPage(1);
     setSelectedIds([]);
-  }, [normalizedStatusFromUrl, personalOnly]);
+  }, [normalizedStatusFromUrl, relationshipsFromUrl, relationshipSuggestionsFromUrl, personalOnly]);
 
-  const clearUrlStatusFilter = () => {
-    if (!searchParams.has("status")) return;
+  const clearUrlListFilters = () => {
+    if (!searchParams.has("status") && !searchParams.has("has_relationships") && !searchParams.has("has_relationship_suggestions")) return;
     const nextParams = new URLSearchParams(searchParams);
     nextParams.delete("status");
+    nextParams.delete("has_relationships");
+    nextParams.delete("has_relationship_suggestions");
     setSearchParams(nextParams, { replace: true });
   };
 
@@ -463,6 +505,8 @@ export default function DocumentsPage({ personalOnly = false }: DocumentsPagePro
     status: isArchiveView ? "archived" : personalOnly ? undefined : statusFilter || undefined,
     document_type: isArchiveView || personalOnly ? undefined : typeFilter || undefined,
     supplier: isArchiveView || personalOnly ? undefined : supplierFilter || undefined,
+    has_relationships: isArchiveView || personalOnly || relationshipFilter !== "linked" ? undefined : true,
+    has_relationship_suggestions: isArchiveView || personalOnly || relationshipFilter !== "suggested" ? undefined : true,
     is_form: false,
     ordering: `${sortDir === "desc" ? "-" : ""}${sort}`,
     page,
@@ -528,6 +572,8 @@ export default function DocumentsPage({ personalOnly = false }: DocumentsPagePro
       status: isArchiveView ? "archived" : personalOnly ? undefined : statusFilter || undefined,
       document_type: isArchiveView || personalOnly ? undefined : typeFilter || undefined,
       supplier: isArchiveView || personalOnly ? undefined : supplierFilter || undefined,
+      has_relationships: isArchiveView || personalOnly || relationshipFilter !== "linked" ? undefined : true,
+      has_relationship_suggestions: isArchiveView || personalOnly || relationshipFilter !== "suggested" ? undefined : true,
       is_form: false,
       ordering: `${sortDir === "desc" ? "-" : ""}${sort}`,
       page_size: PAGE_SIZE,
@@ -549,7 +595,7 @@ export default function DocumentsPage({ personalOnly = false }: DocumentsPagePro
         staleTime: 30_000,
       });
     }
-  }, [data?.count, queryClient, debouncedSearch, statusFilter, typeFilter, supplierFilter, sort, sortDir, page, personalTagFilter, isArchiveView, personalOnly]);
+  }, [data?.count, queryClient, debouncedSearch, statusFilter, typeFilter, supplierFilter, relationshipFilter, sort, sortDir, page, personalTagFilter, isArchiveView, personalOnly]);
 
   const archiveMutation = useMutation({
     mutationFn: (id: string) => documentsAPI.archive(id),
@@ -760,7 +806,7 @@ export default function DocumentsPage({ personalOnly = false }: DocumentsPagePro
   };
 
   const handlePersonalTagClick = (tag: string) => {
-    clearUrlStatusFilter();
+    clearUrlListFilters();
     setSearch("");
     setStatusFilter("");
     setTypeFilter("");
@@ -788,12 +834,12 @@ export default function DocumentsPage({ personalOnly = false }: DocumentsPagePro
     : [];
 
   const totalCols = personalOnly
-    ? 7 // Reference, name, description, tags, uploaded, uploaded by, actions
-    : 5 + (selectionEnabled ? 1 : 0) + (!isArchiveView ? 1 : 0);
+    ? 8 // Reference, name, links, description, tags, uploaded, uploaded by, actions
+    : 6 + (selectionEnabled ? 1 : 0) + (!isArchiveView ? 1 : 0);
 
   const activeFilterCount = personalOnly
     ? 0
-    : [statusFilter, typeFilter, supplierFilter].filter(Boolean).length;
+    : [statusFilter, typeFilter, supplierFilter, relationshipFilter].filter(Boolean).length;
 
   const filteredEmailUsers = (usersData ?? []).filter((user) => {
     const query = emailRecipientSearch.trim().toLowerCase();
@@ -855,7 +901,7 @@ export default function DocumentsPage({ personalOnly = false }: DocumentsPagePro
                   <CustomListbox
                     value={statusFilter}
                     onChange={(v) => {
-                      clearUrlStatusFilter();
+                      clearUrlListFilters();
                       setStatusFilter(v);
                       setPage(1);
                     }}
@@ -885,17 +931,38 @@ export default function DocumentsPage({ personalOnly = false }: DocumentsPagePro
                     buttonClassName="h-9 w-[160px] border border-[#AEB5BB] bg-white px-2 text-sm text-[#1F2933]"
                     ariaLabel="Supplier filter"
                   />
+                  <CustomListbox
+                    value={relationshipFilter}
+                    onChange={(v) => {
+                      clearUrlListFilters();
+                      setRelationshipFilter(v as typeof relationshipFilter);
+                      setPage(1);
+                    }}
+                    options={[
+                      { value: "", label: "All links" },
+                      { value: "linked", label: "Linked only" },
+                      { value: "suggested", label: "Suggested only" },
+                    ]}
+                    buttonClassName={cn(
+                      "h-9 w-[145px] border px-2 text-sm",
+                      relationshipFilter
+                        ? "border-[#287EAD] bg-[#EEF6FB] text-[#287EAD]"
+                        : "border-[#AEB5BB] bg-white text-[#1F2933]",
+                    )}
+                    ariaLabel="Relationship filter"
+                  />
                 </div>
 
-                {(search || statusFilter || typeFilter || supplierFilter) && (
+                {(search || statusFilter || typeFilter || supplierFilter || relationshipFilter) && (
                   <button
                     type="button"
                     onClick={() => {
-                      clearUrlStatusFilter();
+                      clearUrlListFilters();
                       setSearch("");
                       setStatusFilter("");
                       setTypeFilter("");
                       setSupplierFilter("");
+                      setRelationshipFilter("");
                       setPage(1);
                     }}
                     className="h-9 inline-flex items-center gap-2 px-3 text-sm text-[#3D454D] bg-white border border-[#B7BEC5] hover:bg-[#EEF3F7]"
@@ -1089,6 +1156,7 @@ export default function DocumentsPage({ personalOnly = false }: DocumentsPagePro
                         <th className="border-r border-[#858A90] px-3 py-3">Title</th>
                         <th className="border-r border-[#858A90] px-3 py-3">Document Type</th>
                         <th className="border-r border-[#858A90] px-3 py-3">Format</th>
+                        <th className="border-r border-[#858A90] px-3 py-3">Links</th>
                         <th className="border-r border-[#858A90] px-3 py-3">Status</th>
                         <th className="border-r border-[#858A90] px-3 py-3">Created By</th>
                         <th className="border-r border-[#858A90] px-3 py-3">Created Date</th>
@@ -1100,7 +1168,7 @@ export default function DocumentsPage({ personalOnly = false }: DocumentsPagePro
                       {isLoading ? (
                         Array.from({ length: 6 }).map((_, rowIndex) => (
                           <tr key={rowIndex} className="h-[44px] border-b border-[#D3D7DA]">
-                            {Array.from({ length: 10 }).map((_, cellIndex) => (
+                            {Array.from({ length: 11 }).map((_, cellIndex) => (
                               <td key={cellIndex} className="border-r border-[#D3D7DA] px-3">
                                 <div className="h-3 w-2/3 animate-pulse bg-[#E1E5E8]" />
                               </td>
@@ -1109,7 +1177,7 @@ export default function DocumentsPage({ personalOnly = false }: DocumentsPagePro
                         ))
                       ) : docs.length === 0 ? (
                         <tr>
-                          <td colSpan={10} className="py-20 text-center text-[#5E6870]">
+                          <td colSpan={11} className="py-20 text-center text-[#5E6870]">
                             No documents found
                           </td>
                         </tr>
@@ -1149,6 +1217,9 @@ export default function DocumentsPage({ personalOnly = false }: DocumentsPagePro
                               <td className="border-r border-[#D3D7DA] px-3">{typeLabel}</td>
                               <td className="border-r border-[#D3D7DA] px-3">
                                 <span className="font-semibold text-[#3F474F]">{formatLabel}</span>
+                              </td>
+                              <td className="border-r border-[#D3D7DA] px-3">
+                                <RelationshipBadge doc={doc} compact />
                               </td>
                               <td className="border-r border-[#D3D7DA] px-3">
                                 <span className={cn("font-semibold", getDocumentStatusTextClass(doc.status))}>
@@ -1249,6 +1320,7 @@ export default function DocumentsPage({ personalOnly = false }: DocumentsPagePro
                                 <span className="border border-[#D3D7DA] bg-[#F5F7F8] px-1.5 py-0.5 font-semibold uppercase text-[#3F474F]">
                                   {formatLabel}
                                 </span>
+                                <RelationshipBadge doc={doc} compact />
                               </div>
                               <div className="mt-2">
                                 <p className={cn("font-semibold", getDocumentStatusTextClass(doc.status))}>
@@ -1341,6 +1413,7 @@ export default function DocumentsPage({ personalOnly = false }: DocumentsPagePro
                                 {typeLabel || "Unclassified"}
                               </p>
                               <p className="font-semibold text-[#3F474F]">{formatLabel}</p>
+                              <RelationshipBadge doc={doc} compact />
                               <p className={cn("font-semibold", getDocumentStatusTextClass(doc.status))}>
                                 {getDocumentStatusLabel(doc.status)}
                               </p>
@@ -1991,7 +2064,7 @@ export default function DocumentsPage({ personalOnly = false }: DocumentsPagePro
                 <label className="text-[10px] font-semibold uppercase tracking-widest text-muted-foreground">Status</label>
                 <CustomListbox
                   value={statusFilter}
-                  onChange={(v) => { clearUrlStatusFilter(); setStatusFilter(v); setPage(1); }}
+                  onChange={(v) => { clearUrlListFilters(); setStatusFilter(v); setPage(1); }}
                   options={[
                     { value: "", label: "All statuses" },
                     ...STATUS_OPTIONS.map((s) => ({ value: s, label: s.replace(/_/g, " ") })),
@@ -2029,13 +2102,38 @@ export default function DocumentsPage({ personalOnly = false }: DocumentsPagePro
                 />
               </div>
 
+              <div className="space-y-1">
+                <label className="text-[10px] font-semibold uppercase tracking-widest text-muted-foreground">Links</label>
+                <CustomListbox
+                  value={relationshipFilter}
+                  onChange={(v) => {
+                    clearUrlListFilters();
+                    setRelationshipFilter(v as typeof relationshipFilter);
+                    setPage(1);
+                  }}
+                  options={[
+                    { value: "", label: "All links" },
+                    { value: "linked", label: "Linked only" },
+                    { value: "suggested", label: "Suggested only" },
+                  ]}
+                  buttonClassName={cn(
+                    "block min-w-[150px] border px-3 py-2 text-left text-sm transition-colors",
+                    relationshipFilter
+                      ? "border-accent/40 bg-accent/10 text-accent"
+                      : "border-border bg-card text-muted-foreground",
+                  )}
+                  ariaLabel="Relationship filter"
+                />
+              </div>
+
               {activeFilterCount > 0 && (
                 <button
                   onClick={() => {
-                    clearUrlStatusFilter();
+                    clearUrlListFilters();
                     setStatusFilter("");
                     setTypeFilter("");
                     setSupplierFilter("");
+                    setRelationshipFilter("");
                     setPage(1);
                   }}
                   className="self-end inline-flex items-center gap-1.5 px-3 py-2 text-xs font-medium text-destructive hover:bg-destructive/10 transition-colors"
@@ -2083,6 +2181,7 @@ export default function DocumentsPage({ personalOnly = false }: DocumentsPagePro
                 )}
                 <th className="text-left px-4 py-3 font-semibold text-[11px] uppercase tracking-wider text-[#5A6470]">Reference</th>
                 <th className="text-left px-4 py-3 font-semibold text-[11px] uppercase tracking-wider text-[#5A6470]">Document Name</th>
+                <th className="text-left px-4 py-3 font-semibold text-[11px] uppercase tracking-wider text-[#5A6470]">Links</th>
 
                 {personalOnly && (
                   <>
@@ -2190,6 +2289,10 @@ export default function DocumentsPage({ personalOnly = false }: DocumentsPagePro
                             {formatDocumentFileType(doc.file_name, doc.file_mime_type)}
                           </span>
                         </div>
+                      </td>
+
+                      <td className="px-4 py-3.5">
+                        <RelationshipBadge doc={doc} compact />
                       </td>
 
                       {personalOnly && (
@@ -2376,6 +2479,7 @@ export default function DocumentsPage({ personalOnly = false }: DocumentsPagePro
                             {doc.reference_number}
                           </span>
                           <span className="font-semibold uppercase text-[#3F474F]">{formatLabel}</span>
+                          <RelationshipBadge doc={doc} compact />
                           {!personalOnly && !isArchiveView && (
                             <span className={cn("font-semibold", getDocumentStatusTextClass(doc.status))}>
                               {getDocumentStatusLabel(doc.status)}
@@ -2485,7 +2589,10 @@ export default function DocumentsPage({ personalOnly = false }: DocumentsPagePro
                         <FileText className="w-12 h-12" />
                       </Link>
                       <div className="px-3 py-2 text-[11px] text-muted-foreground truncate" title={doc.title}>
-                        {doc.title}
+                        <div className="truncate">{doc.title}</div>
+                        <div className="mt-1">
+                          <RelationshipBadge doc={doc} compact />
+                        </div>
                       </div>
                     </div>
                   );

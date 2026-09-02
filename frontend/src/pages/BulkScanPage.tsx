@@ -278,6 +278,10 @@ export default function BulkScanPage({ scanMode = true, onSingleMode, initialBat
               `${relationshipCount} document relationship${relationshipCount === 1 ? '' : 's'} found across the batch. View individual documents to review and confirm.`,
               {
                 duration: 10000,
+                action: {
+                  label: "Show suggestions",
+                  onClick: () => navigate("/documents?has_relationship_suggestions=true"),
+                },
               }
             );
           }, 1500);

@@ -1588,8 +1588,8 @@ export default function UploadPage({ scanOnly = false }: UploadPageProps) {
               {
                 duration: 8000,
                 action: {
-                  label: "View Document",
-                  onClick: () => navigate(`/documents/${data.id}`),
+                  label: "Show suggestions",
+                  onClick: () => navigate("/documents?has_relationship_suggestions=true"),
                 },
               }
             );
@@ -1616,7 +1616,7 @@ export default function UploadPage({ scanOnly = false }: UploadPageProps) {
       
       // Check for relationship suggestions after save
       try {
-        const { data: doc } = await documentsAPI.detail(id);
+        const { data: doc } = await documentsAPI.get(id);
         const suggestions = doc.metadata?.relationship_suggestions;
         if (suggestions && Array.isArray(suggestions) && suggestions.length > 0) {
           setTimeout(() => {
@@ -1625,8 +1625,8 @@ export default function UploadPage({ scanOnly = false }: UploadPageProps) {
               {
                 duration: 8000,
                 action: {
-                  label: "View Document",
-                  onClick: () => navigate(`/documents/${id}`),
+                  label: "Show suggestions",
+                  onClick: () => navigate("/documents?has_relationship_suggestions=true"),
                 },
               }
             );
