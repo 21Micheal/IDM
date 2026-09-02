@@ -10,7 +10,7 @@ from django.core.mail import EmailMessage
 from django.core.files.base import ContentFile
 from django.core.files.storage import default_storage
 from django.core.exceptions import ValidationError
-from django.http import HttpResponse
+from django.http import Http404, HttpResponse
 from django.utils import timezone
 from django.db import transaction, models
 from django.db.models import Count, Value
@@ -414,9 +414,21 @@ class DocumentViewSet(AuditMixin, viewsets.ModelViewSet):
         # hidden-from-lists draft is reachable by direct id, not who may see it.
         self._include_unclassified = True
         try:
-            return super().get_object()
+            obj = super().get_object()
+            if (
+                self._is_unconfirmed_email_document(obj)
+                and getattr(self, "action", None) not in ("preview_url", "file")
+            ):
+                raise Http404
+            return obj
         finally:
             self._include_unclassified = False
+
+    @staticmethod
+    def _is_unconfirmed_email_document(doc) -> bool:
+        if doc.status != DocumentStatus.PENDING_REVIEW or not doc.bulk_upload_id:
+            return False
+        return Mailbox.objects.filter(ingested_emails__bulk_upload_id=doc.bulk_upload_id).exists()
 
     def get_queryset(self):
         user = self.request.user
@@ -583,6 +595,10 @@ class DocumentViewSet(AuditMixin, viewsets.ModelViewSet):
         if self.action == "list":
             trash = str(self.request.query_params.get("trash", "")).lower() in ("true", "1", "yes")
             qs = qs.filter(deleted_at__isnull=not trash)
+            qs = qs.exclude(
+                status=DocumentStatus.PENDING_REVIEW,
+                bulk_upload__ingested_emails__isnull=False,
+            )
             suggestion_ids = None
             wants_suggestions = str(self.request.query_params.get("has_relationship_suggestions", "")).lower()
             if wants_suggestions in ("true", "1", "yes", "false", "0", "no"):

@@ -2053,6 +2053,11 @@ class BulkUploadReviewSerializer(serializers.Serializer):
                 doc.save(update_fields=update_fields)
                 doc.refresh_from_db()
 
+            if doc.status == DocumentStatus.PENDING_REVIEW:
+                doc.status = DocumentStatus.DRAFT
+                doc.save(update_fields=["status", "updated_at"])
+                doc.refresh_from_db()
+
             try:
                 from .relationship_suggestions import refresh_po_relationship_suggestions
 

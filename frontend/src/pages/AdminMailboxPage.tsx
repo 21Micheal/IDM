@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { BarChart3, Inbox, Loader2, Mail, Pencil, PlugZap, RefreshCw, Trash2, X } from "lucide-react";
+import { BarChart3, Inbox, Loader2, Mail, Pencil, PlugZap, RefreshCw, Trash2, X, Plus } from "lucide-react";
 import clsx from "clsx";
 import {
   Bar,
@@ -25,6 +25,13 @@ import {
 import { extractApiError } from "@/lib/apiError";
 import { toast } from "@/components/ui/vault-toast";
 import CustomListbox from "@/components/ui/CustomListbox";
+import {
+  Dialog,
+  DialogContent,
+  DialogHeader,
+  DialogTitle,
+  DialogFooter,
+} from "@/components/ui/dialog";
 
 type DocumentTypeLite = { id: string; name: string; code: string };
 type UserLite = { id: string; email: string; first_name: string; last_name: string; full_name?: string };
@@ -132,6 +139,7 @@ export default function AdminMailboxPage() {
   const [selectedId, setSelectedId] = useState<string | null>(null);
   // null = creating a new mailbox; an id = editing that mailbox.
   const [editingId, setEditingId] = useState<string | null>(null);
+  const [isNewMailboxModalOpen, setIsNewMailboxModalOpen] = useState(false);
 
   // Prefill the connection form from environment-configured defaults for the
   // selected protocol.
@@ -238,6 +246,7 @@ export default function AdminMailboxPage() {
         .then((r) => r.data),
     onSuccess: (box) => {
       toast.success("Mailbox created.");
+      setIsNewMailboxModalOpen(false);
       resetForm();
       queryClient.invalidateQueries({ queryKey: ["mailboxes"] });
       setSelectedId(box.id);
@@ -247,6 +256,7 @@ export default function AdminMailboxPage() {
 
   const resetForm = () => {
     setEditingId(null);
+    setIsNewMailboxModalOpen(false);
     setName("");
     setDefaultType("");
     setAutoClassify(false);
@@ -269,6 +279,7 @@ export default function AdminMailboxPage() {
     try {
       const { data } = await mailboxAPI.get(id);
       setEditingId(id);
+      setIsNewMailboxModalOpen(true);
       setName(data.name);
       setProtocol(data.protocol);
       // Keep the stored (redacted) connection as-is; blank the secrets so an
@@ -291,7 +302,6 @@ export default function AdminMailboxPage() {
       setSupplierMapText(mapToText(data.sender_supplier_map ?? {}));
       setAllowlistText(listToText(data.sender_allowlist ?? []));
       setAttachmentTypesText(listToText(data.allowed_attachment_extensions ?? []));
-      window.scrollTo({ top: 0, behavior: "smooth" });
     } catch (err) {
       toast.error(extractApiError(err, "Could not load mailbox for editing."));
     }
@@ -321,6 +331,7 @@ export default function AdminMailboxPage() {
     onSuccess: (box) => {
       toast.success("Mailbox updated.");
       const id = box.id;
+      setIsNewMailboxModalOpen(false);
       resetForm();
       queryClient.invalidateQueries({ queryKey: ["mailboxes"] });
       queryClient.invalidateQueries({ queryKey: ["mailbox", id] });
@@ -398,6 +409,7 @@ export default function AdminMailboxPage() {
                 { value: "graph", label: "Microsoft Graph (Microsoft 365 / Outlook)" },
               ]}
               buttonClassName={inputCls}
+              className="w-full"
               ariaLabel="Mailbox protocol"
             />
           </div>
@@ -543,225 +555,219 @@ export default function AdminMailboxPage() {
         </div>
       </section>
 
-      {/* ── New / edit mailbox ──────────────────────────────────────────── */}
-      <section className={panelCls}>
-        <div className={clsx(panelHeaderCls, "justify-between")}>
-          <span className="flex items-center gap-2">
-            <Mail className="h-4 w-4 text-[#287EAD]" />
-            <h2 className="text-sm font-semibold text-[#1F2933]">
-              {editingId ? "Edit mailbox" : "New mailbox"}
-            </h2>
-          </span>
-          {editingId && (
-            <button className={btnGhost} onClick={resetForm}>
-              <X className="h-4 w-4" />
-              Cancel edit
-            </button>
-          )}
-        </div>
-        <div className="grid grid-cols-1 gap-4 p-4 md:grid-cols-2">
-          <div>
-            <label className={labelCls}>Mailbox name</label>
-            <input
-              className={inputCls}
-              value={name}
-              onChange={(e) => setName(e.target.value)}
-              placeholder="e.g. Supplier invoices"
-            />
-          </div>
-          <div>
-            <label className={labelCls}>Default document type</label>
-            <CustomListbox
-              value={defaultType}
-              onChange={setDefaultType}
-              options={[
-                { value: "", label: "Unclassified — reviewer classifies" },
-                ...types.map((t) => ({ value: t.id, label: `${t.name} (${t.code})` })),
-              ]}
-              buttonClassName={inputCls}
-              ariaLabel="Default document type"
-            />
-          </div>
-          <div className="md:col-span-2">
-            <label className={labelCls}>Sender → supplier map (one per line: email or domain = Supplier)</label>
-            <textarea
-              className={clsx(inputCls, "h-24 py-2")}
-              value={supplierMapText}
-              onChange={(e) => setSupplierMapText(e.target.value)}
-              placeholder={"acme.com = ACME Ltd\nbilling@globex.com = Globex Inc"}
-            />
-          </div>
-          <div className="md:col-span-2">
-            <label className={labelCls}>
-              Sender allowlist (one email or domain per line — leave empty to accept all)
-            </label>
-            <textarea
-              className={clsx(inputCls, "h-24 py-2")}
-              value={allowlistText}
-              onChange={(e) => setAllowlistText(e.target.value)}
-              placeholder={"acme.com\nap@globex.com"}
-            />
-            <p className="mt-1 text-xs text-[#6E767D]">
-              When set, only emails from these senders are ingested — everything else is skipped.
-            </p>
-          </div>
-          <div className="md:col-span-2">
-            <label className={labelCls}>
-              Attachment types (file extensions, comma or line separated — leave empty for all)
-            </label>
-            <input
-              className={inputCls}
-              value={attachmentTypesText}
-              onChange={(e) => setAttachmentTypesText(e.target.value)}
-              placeholder="pdf, png, jpg"
-            />
-            <p className="mt-1 text-xs text-[#6E767D]">
-              When set, only attachments with these extensions are imported — others are ignored.
-            </p>
-          </div>
-          <div>
-            <label className={labelCls}>Max messages per poll (0 = no limit)</label>
-            <input
-              className={inputCls}
-              type="number"
-              min={0}
-              value={maxMessages}
-              onChange={(e) => setMaxMessages(Number(e.target.value))}
-            />
-          </div>
-          <div>
-            <label className={labelCls}>Import messages since (optional)</label>
-            <input
-              className={inputCls}
-              type="date"
-              value={ingestSince}
-              onChange={(e) => setIngestSince(e.target.value)}
-            />
-            <p className="mt-1 text-xs text-[#6E767D]">
-              Only ingest mail received on or after this date.
-            </p>
-          </div>
-          <div className="md:col-span-2">
-            <label className="flex items-center gap-2 text-sm text-[#1F2933]">
+      {/* ── New / edit mailbox dialog ──────────────────────────────────────── */}
+      <Dialog open={isNewMailboxModalOpen} onOpenChange={setIsNewMailboxModalOpen}>
+        <DialogContent className="max-w-3xl max-h-[90vh] overflow-y-auto">
+          <DialogHeader>
+            <DialogTitle>{editingId ? "Edit mailbox" : "New mailbox"}</DialogTitle>
+          </DialogHeader>
+          <div className="grid grid-cols-1 gap-4 py-4 md:grid-cols-2">
+            <div>
+              <label className={labelCls}>Mailbox name</label>
               <input
-                type="checkbox"
-                checked={ingestHistory}
-                onChange={(e) => setIngestHistory(e.target.checked)}
+                className={inputCls}
+                value={name}
+                onChange={(e) => setName(e.target.value)}
+                placeholder="e.g. Supplier invoices"
               />
-              Import the mailbox's existing backlog on first poll
-            </label>
-            <p className="mt-1 text-xs text-[#6E767D]">
-              Off by default — a new mailbox ingests only mail that arrives after it's created,
-              so an existing inbox doesn't pull its whole history.
-            </p>
-          </div>
-          <div className="md:col-span-2 space-y-3 border border-[#E5E7EB] bg-[#F9FAFB] p-3">
-            <label className="flex items-center gap-2 text-sm text-[#1F2933]">
+            </div>
+            <div>
+              <label className={labelCls}>Default document type</label>
+              <CustomListbox
+                value={defaultType}
+                onChange={setDefaultType}
+                options={[
+                  { value: "", label: "Unclassified — reviewer classifies" },
+                  ...types.map((t) => ({ value: t.id, label: `${t.name} (${t.code})` })),
+                ]}
+                buttonClassName={inputCls}
+                className="w-full"
+                ariaLabel="Default document type"
+              />
+            </div>
+            <div className="md:col-span-2">
+              <label className={labelCls}>Sender → supplier map (one per line: email or domain = Supplier)</label>
+              <textarea
+                className={clsx(inputCls, "h-24 py-2")}
+                value={supplierMapText}
+                onChange={(e) => setSupplierMapText(e.target.value)}
+                placeholder={"acme.com = ACME Ltd\nbilling@globex.com = Globex Inc"}
+              />
+            </div>
+            <div className="md:col-span-2">
+              <label className={labelCls}>
+                Sender allowlist (one email or domain per line — leave empty to accept all)
+              </label>
+              <textarea
+                className={clsx(inputCls, "h-24 py-2")}
+                value={allowlistText}
+                onChange={(e) => setAllowlistText(e.target.value)}
+                placeholder={"acme.com\nap@globex.com"}
+              />
+              <p className="mt-1 text-xs text-[#6E767D]">
+                When set, only emails from these senders are ingested — everything else is skipped.
+              </p>
+            </div>
+            <div className="md:col-span-2">
+              <label className={labelCls}>
+                Attachment types (file extensions, comma or line separated — leave empty for all)
+              </label>
               <input
-                type="checkbox"
-                checked={autoPoll}
-                onChange={(e) => setAutoPoll(e.target.checked)}
+                className={inputCls}
+                value={attachmentTypesText}
+                onChange={(e) => setAttachmentTypesText(e.target.value)}
+                placeholder="pdf, png, jpg"
               />
-              Automatic polling
-            </label>
-            <p className="text-xs text-[#6E767D]">
-              When enabled, the system polls this mailbox on a schedule and lands matching
-              attachments in Pending review — no manual Poll now required. Manual poll still works.
-            </p>
-            {autoPoll && (
-              <div className="max-w-xs">
-                <label className={labelCls}>Poll interval</label>
-                <CustomListbox
-                  value={String(pollInterval)}
-                  onChange={(v) => setPollInterval(Number(v))}
-                  options={POLL_INTERVAL_OPTIONS}
-                  buttonClassName={inputCls}
-                  ariaLabel="Automatic poll interval"
+              <p className="mt-1 text-xs text-[#6E767D]">
+                When set, only attachments with these extensions are imported — others are ignored.
+              </p>
+            </div>
+            <div>
+              <label className={labelCls}>Max messages per poll (0 = no limit)</label>
+              <input
+                className={inputCls}
+                type="number"
+                min={0}
+                value={maxMessages}
+                onChange={(e) => setMaxMessages(Number(e.target.value))}
+              />
+            </div>
+            <div>
+              <label className={labelCls}>Import messages since (optional)</label>
+              <input
+                className={inputCls}
+                type="date"
+                value={ingestSince}
+                onChange={(e) => setIngestSince(e.target.value)}
+              />
+              <p className="mt-1 text-xs text-[#6E767D]">
+                Only ingest mail received on or after this date.
+              </p>
+            </div>
+            <div className="md:col-span-2">
+              <label className="flex items-center gap-2 text-sm text-[#1F2933]">
+                <input
+                  type="checkbox"
+                  checked={ingestHistory}
+                  onChange={(e) => setIngestHistory(e.target.checked)}
                 />
-              </div>
-            )}
-          </div>
-          <div className="md:col-span-2">
-            <label className={labelCls}>Reviewers (optional)</label>
-            <div className="max-h-40 overflow-auto border border-[#AEB5BB] bg-white p-2">
-              {(usersQuery.data ?? []).length === 0 ? (
-                <p className="px-1 py-2 text-xs text-[#6E767D]">
-                  {usersQuery.isLoading ? "Loading users…" : "No users available."}
-                </p>
-              ) : (
-                (usersQuery.data ?? []).map((u) => {
-                  const checked = reviewerIds.includes(u.id);
-                  const label = u.full_name || `${u.first_name} ${u.last_name}`.trim() || u.email;
-                  return (
-                    <label
-                      key={u.id}
-                      className="flex cursor-pointer items-center gap-2 px-1 py-1 text-sm text-[#1F2933] hover:bg-[#F5F7F8]"
-                    >
-                      <input
-                        type="checkbox"
-                        checked={checked}
-                        onChange={() =>
-                          setReviewerIds((prev) =>
-                            checked ? prev.filter((id) => id !== u.id) : [...prev, u.id],
-                          )
-                        }
-                      />
-                      <span className="truncate">{label}</span>
-                      <span className="truncate text-xs text-[#6E767D]">{u.email}</span>
-                    </label>
-                  );
-                })
+                Import the mailbox's existing backlog on first poll
+              </label>
+              <p className="mt-1 text-xs text-[#6E767D]">
+                Off by default — a new mailbox ingests only mail that arrives after it's created,
+                so an existing inbox doesn't pull its whole history.
+              </p>
+            </div>
+            <div className="md:col-span-2 space-y-3 border border-[#E5E7EB] bg-[#F9FAFB] p-3">
+              <label className="flex items-center gap-2 text-sm text-[#1F2933]">
+                <input
+                  type="checkbox"
+                  checked={autoPoll}
+                  onChange={(e) => setAutoPoll(e.target.checked)}
+                />
+                Automatic polling
+              </label>
+              <p className="text-xs text-[#6E767D]">
+                When enabled, the system polls this mailbox on a schedule and lands matching
+                attachments in Pending review — no manual Poll now required. Manual poll still works.
+              </p>
+              {autoPoll && (
+                <div className="max-w-xs">
+                  <label className={labelCls}>Poll interval</label>
+                  <CustomListbox
+                    value={String(pollInterval)}
+                    onChange={(v) => setPollInterval(Number(v))}
+                    options={POLL_INTERVAL_OPTIONS}
+                    buttonClassName={inputCls}
+                    className="w-full"
+                    ariaLabel="Automatic poll interval"
+                  />
+                </div>
               )}
             </div>
-            <div className="mt-1 flex items-center justify-between gap-3 text-xs text-[#6E767D]">
-              <p>
-                Members who see this mailbox's ingested documents in Pending review.
-                Leave empty so the mailbox owner and admins handle review.
-              </p>
-              <span className="whitespace-nowrap font-medium text-[#4B5560]">
-                {reviewerIds.length} selected
-              </span>
+            <div className="md:col-span-2">
+              <label className={labelCls}>Reviewers (optional)</label>
+              <div className="max-h-40 overflow-auto border border-[#AEB5BB] bg-white p-2">
+                {(usersQuery.data ?? []).length === 0 ? (
+                  <p className="px-1 py-2 text-xs text-[#6E767D]">
+                    {usersQuery.isLoading ? "Loading users…" : "No users available."}
+                  </p>
+                ) : (
+                  (usersQuery.data ?? []).map((u) => {
+                    const checked = reviewerIds.includes(u.id);
+                    const label = u.full_name || `${u.first_name} ${u.last_name}`.trim() || u.email;
+                    return (
+                      <label
+                        key={u.id}
+                        className="flex cursor-pointer items-center gap-2 px-1 py-1 text-sm text-[#1F2933] hover:bg-[#F5F7F8]"
+                      >
+                        <input
+                          type="checkbox"
+                          checked={checked}
+                          onChange={() =>
+                            setReviewerIds((prev) =>
+                              checked ? prev.filter((id) => id !== u.id) : [...prev, u.id],
+                            )
+                          }
+                        />
+                        <span className="truncate">{label}</span>
+                        <span className="truncate text-xs text-[#6E767D]">{u.email}</span>
+                      </label>
+                    );
+                  })
+                )}
+              </div>
+              <div className="mt-1 flex items-center justify-between gap-3 text-xs text-[#6E767D]">
+                <p>
+                  Members who see this mailbox's ingested documents in Pending review.
+                  Leave empty so the mailbox owner and admins handle review.
+                </p>
+                <span className="whitespace-nowrap font-medium text-[#4B5560]">
+                  {reviewerIds.length} selected
+                </span>
+              </div>
+            </div>
+            <div className="flex flex-col justify-end gap-2">
+              <label className="flex items-center gap-2 text-sm text-[#1F2933]">
+                <input
+                  type="checkbox"
+                  checked={relatedSet}
+                  onChange={(e) => setRelatedSet(e.target.checked)}
+                />
+                Treat multi-attachment emails as a related set
+              </label>
+              <label className="flex items-center gap-2 text-sm text-[#1F2933]">
+                <input
+                  type="checkbox"
+                  checked={autoClassify}
+                  onChange={(e) => setAutoClassify(e.target.checked)}
+                />
+                Auto-classify document type from content
+              </label>
             </div>
           </div>
-          <div className="flex flex-col justify-end gap-2">
-            <label className="flex items-center gap-2 text-sm text-[#1F2933]">
-              <input
-                type="checkbox"
-                checked={relatedSet}
-                onChange={(e) => setRelatedSet(e.target.checked)}
-              />
-              Treat multi-attachment emails as a related set
-            </label>
-            <label className="flex items-center gap-2 text-sm text-[#1F2933]">
-              <input
-                type="checkbox"
-                checked={autoClassify}
-                onChange={(e) => setAutoClassify(e.target.checked)}
-              />
-              Auto-classify document type from content
-            </label>
-          </div>
-        </div>
-        <div className="flex justify-end gap-2 border-t border-[#C8CDD2] px-4 py-3">
-          {editingId && (
-            <button className={btnGhost} onClick={resetForm}>
+          <DialogFooter>
+            <button
+              className={btnGhost}
+              onClick={() => setIsNewMailboxModalOpen(false)}
+            >
               Cancel
             </button>
-          )}
-          <button
-            className={btnPrimary}
-            disabled={!canCreate || createMutation.isPending || updateMutation.isPending}
-            onClick={() => (editingId ? updateMutation.mutate() : createMutation.mutate())}
-          >
-            {createMutation.isPending || updateMutation.isPending ? (
-              <Loader2 className="h-4 w-4 animate-spin" />
-            ) : (
-              <Mail className="h-4 w-4" />
-            )}
-            {editingId ? "Save changes" : "Create mailbox"}
-          </button>
-        </div>
-      </section>
+            <button
+              className={btnPrimary}
+              disabled={!canCreate || createMutation.isPending || updateMutation.isPending}
+              onClick={() => (editingId ? updateMutation.mutate() : createMutation.mutate())}
+            >
+              {createMutation.isPending || updateMutation.isPending ? (
+                <Loader2 className="h-4 w-4 animate-spin" />
+              ) : (
+                <Mail className="h-4 w-4" />
+              )}
+              {editingId ? "Save changes" : "Create mailbox"}
+            </button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
 
       {/* ── Ingestion statistics ────────────────────────────────────────── */}
       <section className={panelCls}>
@@ -830,14 +836,26 @@ export default function AdminMailboxPage() {
             <RefreshCw className="h-4 w-4 text-[#287EAD]" />
             <h2 className="text-sm font-semibold text-[#1F2933]">Mailboxes</h2>
           </span>
-          <button
-            className={btnGhost}
-            onClick={() => mailboxesQuery.refetch()}
-            disabled={mailboxesQuery.isFetching}
-          >
-            <RefreshCw className={clsx("h-4 w-4", mailboxesQuery.isFetching && "animate-spin")} />
-            Refresh
-          </button>
+          <div className="flex items-center gap-2">
+            <button
+              className={btnPrimary}
+              onClick={() => {
+                resetForm();
+                setIsNewMailboxModalOpen(true);
+              }}
+            >
+              <Plus className="h-4 w-4" />
+              New mailbox
+            </button>
+            <button
+              className={btnGhost}
+              onClick={() => mailboxesQuery.refetch()}
+              disabled={mailboxesQuery.isFetching}
+            >
+              <RefreshCw className={clsx("h-4 w-4", mailboxesQuery.isFetching && "animate-spin")} />
+              Refresh
+            </button>
+          </div>
         </div>
         {mailboxes.length === 0 ? (
           <p className="p-6 text-center text-sm text-[#6E767D]">No mailboxes yet.</p>
@@ -849,7 +867,7 @@ export default function AdminMailboxPage() {
                 <th className="px-4 py-2">Default type</th>
                 <th className="px-4 py-2">Active</th>
                 <th className="px-4 py-2">Auto poll</th>
-                <th className="px-4 py-2">Last poll</th>
+                <th className="px-4 py-2">Status & timing</th>
                 <th className="px-4 py-2 text-right">Actions</th>
               </tr>
             </thead>
@@ -885,17 +903,26 @@ export default function AdminMailboxPage() {
                       : "Manual"}
                   </td>
                   <td className="px-4 py-2">
-                    <span
-                      className={clsx(
-                        "rounded px-2 py-0.5 text-xs font-medium",
-                        POLL_STATUS_STYLES[box.poll_status],
+                    <div className="flex flex-col gap-1">
+                      <div className="flex items-center gap-2">
+                        <span
+                          className={clsx(
+                            "rounded px-2 py-0.5 text-xs font-medium",
+                            POLL_STATUS_STYLES[box.poll_status],
+                          )}
+                        >
+                          {box.poll_status}
+                        </span>
+                        <span className="text-[#16A34A]">✓{box.last_imported_count}</span>
+                        <span className="text-[#6E767D]">⊘{box.last_skipped_count}</span>
+                        <span className="text-[#DC2626]">✗{box.last_failed_count}</span>
+                      </div>
+                      {box.last_polled_at && (
+                        <span className="text-xs text-[#6E767D]">
+                          Last poll: {new Date(box.last_polled_at).toLocaleString()}
+                        </span>
                       )}
-                    >
-                      {box.poll_status}
-                    </span>{" "}
-                    <span className="text-[#16A34A]">✓{box.last_imported_count}</span>{" "}
-                    <span className="text-[#6E767D]">⊘{box.last_skipped_count}</span>{" "}
-                    <span className="text-[#DC2626]">✗{box.last_failed_count}</span>
+                    </div>
                   </td>
                   <td className="px-4 py-2">
                     <div className="flex justify-end gap-2" onClick={(e) => e.stopPropagation()}>
