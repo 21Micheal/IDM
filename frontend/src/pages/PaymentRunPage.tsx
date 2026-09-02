@@ -6,7 +6,7 @@
  * day-to-day finance operation.
  */
 import { useState } from "react";
-import { useMutation } from "@tanstack/react-query";
+import { useMutation, useQuery } from "@tanstack/react-query";
 import {
   Search,
   AlertCircle,
@@ -22,8 +22,9 @@ import {
   CheckSquare,
   Square,
 } from "lucide-react";
-import { sunsystemsAPI, type PaymentRunLine, type PaymentRunFilters } from "@/services/api";
+import { sunsystemsAPI, type PaymentRunLine, type PaymentRunFilters, type SunSystemsAccount } from "@/services/api";
 import CustomListbox from "@/components/ui/CustomListbox";
+import AccountMultiSelect from "@/components/ui/AccountMultiSelect";
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
 
@@ -345,7 +346,7 @@ const TABLE_COLS: Array<{ label: string; key: keyof PaymentRunLine; className?: 
 
 export default function PaymentRunPage() {
   const [filters, setFilters] = useState<PaymentRunFilters>({
-    account_codes: "64001,71001",
+    account_codes: "",    // driven by selectedAccountCodes below
     allocation_markers: "",   // blank = all markers
     journal_number_gt: "",    // blank = no lower bound
     business_unit: "",
@@ -355,6 +356,16 @@ export default function PaymentRunPage() {
   const [lines, setLines] = useState<PaymentRunLine[]>([]);
   const [sortCol, setSortCol] = useState<keyof PaymentRunLine>("journal_number");
   const [sortDir, setSortDir] = useState<"asc" | "desc">("asc");
+
+  // ── Supplier accounts (fetched once from SunSystems) ──────────────────────
+  const [selectedAccountCodes, setSelectedAccountCodes] = useState<string[]>([]);
+
+  const accountsQuery = useQuery({
+    queryKey: ["sunsystems-accounts"],
+    queryFn: () => sunsystemsAPI.getAccounts().then((r) => r.data),
+    staleTime: 5 * 60 * 1000, // cache for 5 minutes
+  });
+  const accounts: SunSystemsAccount[] = accountsQuery.data?.accounts ?? [];
 
   // ── Selection state ────────────────────────────────────────────────────────
   // selectedKeys: set of row keys that are checked.
@@ -397,7 +408,11 @@ export default function PaymentRunPage() {
   });
 
   const mutation = useMutation({
-    mutationFn: () => sunsystemsAPI.paymentRun(filters).then((r) => r.data),
+    mutationFn: () =>
+      sunsystemsAPI.paymentRun({
+        ...filters,
+        account_codes: selectedAccountCodes.join(","),
+      }).then((r) => r.data),
     onSuccess: (data) => {
       setHasQueried(true);
       setLines(data.lines ?? []);
@@ -554,23 +569,30 @@ export default function PaymentRunPage() {
             </span>
           </div>
           <div className="grid grid-cols-1 gap-4 p-5 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-5">
-            {/* Account codes */}
-            <div className="space-y-1.5">
-              <label
-                htmlFor="filter-account-codes"
-                className="block text-xs font-semibold uppercase tracking-wider text-[#5E6870]"
-              >
-                Account codes
+            {/* Account codes — searchable multi-select from SunSystems */}
+            <div className="space-y-1.5 xl:col-span-2">
+              <label className="block text-xs font-semibold uppercase tracking-wider text-[#5E6870]">
+                Supplier accounts
               </label>
-              <input
-                id="filter-account-codes"
-                type="text"
-                placeholder="e.g. 64001,71001"
-                value={filters.account_codes ?? ""}
-                onChange={(e) => set("account_codes", e.target.value)}
-                className={inputCls}
+              <AccountMultiSelect
+                accounts={accounts}
+                value={selectedAccountCodes}
+                onChange={setSelectedAccountCodes}
+                isLoading={accountsQuery.isLoading}
+                error={
+                  accountsQuery.isError
+                    ? "Could not load accounts from SunSystems."
+                    : null
+                }
+                placeholder="All suppliers (no filter)"
               />
-              <p className="text-[10px] text-[#8C969E]">Comma-separated account codes</p>
+              <p className="text-[10px] text-[#8C969E]">
+                {accounts.length > 0
+                  ? `${accounts.length} suppliers loaded — select one or more, or leave blank for all.`
+                  : accountsQuery.isLoading
+                  ? "Fetching from SunSystems…"
+                  : "Leave blank to query all account codes."}
+              </p>
             </div>
 
             {/* Allocation marker — CustomListbox */}

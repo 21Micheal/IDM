@@ -836,6 +836,19 @@ export type AmendMarkerResult = {
   response_xml?: string;
 };
 
+export type SunSystemsAccount = {
+  account_code: string;
+  account_type: string;
+  description: string;
+};
+
+export type AccountsResult = {
+  ok: boolean;
+  accounts: SunSystemsAccount[];
+  count: number;
+  error?: string;
+};
+
 export const sunsystemsAPI = {
   budgetCheck: (input: BudgetCheckInput) =>
     api.post<BudgetResult>("/sunsystems/budget-check/", input),
@@ -845,6 +858,8 @@ export const sunsystemsAPI = {
     api.post<PaymentRunResult>("/sunsystems/payment-run/", filters),
   amendMarkers: (payload: AmendMarkerPayload) =>
     api.post<AmendMarkerResult>("/sunsystems/amend-markers/", payload),
+  getAccounts: (params?: { business_unit?: string; account_type?: string }) =>
+    api.get<AccountsResult>("/sunsystems/accounts/", { params }),
   getConnection: () =>
     api.get<SunSystemsConnectionResponse>("/sunsystems/connection/"),
   updateConnection: (conn: SunSystemsConnection) =>
@@ -858,6 +873,7 @@ export const sunsystemsAPI = {
   retryPosting: (documentId: string, stage = 1) =>
     api.post<JournalPosting>(`/sunsystems/postings/${documentId}/retry/`, { stage }),
 };
+
 
 // ── Email ingestion (IMAP mailboxes) ──────────────────────────────────────────
 export type MailboxProtocol = "imap" | "graph";

@@ -9,6 +9,7 @@ API surface for the SunSystems integration:
   POST /api/v1/sunsystems/postings/<doc_id>/retry/   re-attempt a failed posting
   POST /api/v1/sunsystems/payment-run/          query ledger lines (Journal/Query)
   POST /api/v1/sunsystems/amend-markers/        update allocation markers (AllocationMarkerUpdate/AmendMarker)
+  GET  /api/v1/sunsystems/accounts/             list supplier accounts (Accounts/Query, AccountType=1)
 """
 from __future__ import annotations
 
@@ -601,3 +602,89 @@ class AmendMarkerView(APIView):
             "processed": len(markers_xml_parts),
             "response_xml": response_xml,
         })
+
+
+class AccountsQueryView(APIView):
+    """Return supplier accounts from SunSystems (Accounts/Query, AccountType=1).
+
+    GET /api/v1/sunsystems/accounts/?business_unit=PK1
+
+    Optional query params:
+        business_unit   override the configured default
+        account_type    default 1 (Creditors/Suppliers); pass 0 for all
+
+    Response:
+        { accounts: [{ account_code, account_type, description }] }
+    """
+
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request):
+        import xml.etree.ElementTree as ET
+
+        conn = effective_connection()
+        config = SunSystemsConfig.from_mapping(conn)
+
+        business_unit = str(
+            request.query_params.get("business_unit") or config.business_unit or "PK1"
+        )
+        account_type = str(request.query_params.get("account_type", "1")).strip()
+
+        # Build filter — omit if account_type is blank (return all)
+        if account_type:
+            filter_xml = (
+                f'<Filter>'
+                f'<Item name="/Accounts/AccountType" operator="EQU" value="{account_type}"/>'
+                f'</Filter>'
+            )
+        else:
+            filter_xml = ""
+
+        ssc_payload = (
+            "<SSC>\n"
+            "  <ErrorContext/>\n"
+            "  <User/>\n"
+            f"  <SunSystemsContext>\n"
+            f"    <BusinessUnit>{business_unit}</BusinessUnit>\n"
+            "  </SunSystemsContext>\n"
+            "  <Payload>\n"
+            f"    {filter_xml}\n"
+            "    <Select>\n"
+            "      <Accounts>\n"
+            "        <AccountCode>.</AccountCode>\n"
+            "        <AccountType>.</AccountType>\n"
+            "        <Description>.</Description>\n"
+            "      </Accounts>\n"
+            "    </Select>\n"
+            "  </Payload>\n"
+            "</SSC>"
+        )
+
+        try:
+            client = SunSystemsClient(config)
+            response_xml = client.execute("Accounts", "Query", ssc_payload)
+        except SunSystemsError as exc:
+            return Response(
+                {"ok": False, "error": str(exc)},
+                status=status.HTTP_502_BAD_GATEWAY,
+            )
+
+        accounts = []
+        try:
+            root = ET.fromstring(response_xml or "<SSC/>")
+            for acct in root.findall(".//Accounts"):
+                code = (acct.findtext("AccountCode") or "").strip()
+                if not code:
+                    continue
+                accounts.append({
+                    "account_code":  code,
+                    "account_type":  (acct.findtext("AccountType") or "").strip(),
+                    "description":   (acct.findtext("Description") or "").strip(),
+                })
+        except ET.ParseError as exc:
+            return Response(
+                {"ok": False, "error": f"Could not parse SunSystems response: {exc}"},
+                status=status.HTTP_502_BAD_GATEWAY,
+            )
+
+        return Response({"ok": True, "accounts": accounts, "count": len(accounts)})

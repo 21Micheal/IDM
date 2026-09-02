@@ -1,6 +1,7 @@
 from django.urls import path
 
 from .views import (
+    AccountsQueryView,
     AmendMarkerView,
     BudgetCheckView,
     JournalPostingDetailView,
@@ -16,6 +17,7 @@ urlpatterns = [
     path("journal-preview/", JournalPreviewView.as_view(), name="sunsystems-journal-preview"),
     path("payment-run/", PaymentRunView.as_view(), name="sunsystems-payment-run"),
     path("amend-markers/", AmendMarkerView.as_view(), name="sunsystems-amend-markers"),
+    path("accounts/", AccountsQueryView.as_view(), name="sunsystems-accounts"),
     path("connection/", SunSystemsConnectionView.as_view(), name="sunsystems-connection"),
     path("connection/test/", SunSystemsTestConnectionView.as_view(), name="sunsystems-connection-test"),
     path("postings/<uuid:document_id>/", JournalPostingDetailView.as_view(), name="sunsystems-posting-detail"),
