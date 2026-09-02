@@ -8,6 +8,7 @@ API surface for the SunSystems integration:
   GET  /api/v1/sunsystems/postings/<doc_id>/    journal posting status
   POST /api/v1/sunsystems/postings/<doc_id>/retry/   re-attempt a failed posting
   POST /api/v1/sunsystems/payment-run/          query ledger lines (Journal/Query)
+  POST /api/v1/sunsystems/amend-markers/        update allocation markers (AllocationMarkerUpdate/AmendMarker)
 """
 from __future__ import annotations
 
@@ -353,13 +354,13 @@ class PaymentRunView(APIView):
         else:
             account_codes = str(raw_accounts).strip()
 
-        raw_markers = data.get("allocation_markers", "W")
+        raw_markers = data.get("allocation_markers", "")
         if isinstance(raw_markers, list):
             allocation_markers = ",".join(str(m) for m in raw_markers if m)
         else:
-            allocation_markers = str(raw_markers).strip() or "W"
+            allocation_markers = str(raw_markers).strip()  # blank = no marker filter
 
-        journal_number_gt = str(data.get("journal_number_gt", "0")).strip() or "0"
+        journal_number_gt = str(data.get("journal_number_gt", "") or "").strip()
 
         business_unit = str(data.get("business_unit") or config.business_unit or "PK1")
         budget_code = str(data.get("budget_code") or config.budget_code or "A")
@@ -370,18 +371,30 @@ class PaymentRunView(APIView):
             filter_items.append(
                 f'<Item name="/Ledger/Line/AccountCode" operator="IN" value="{account_codes}"/>'
             )
-        filter_items.append(
-            f'<Item name="/Ledger/Line/JournalNumber" operator="GT" value="{journal_number_gt}"/>'
-        )
+        if journal_number_gt:
+            filter_items.append(
+                f'<Item name="/Ledger/Line/JournalNumber" operator="GT" value="{journal_number_gt}"/>'
+            )
         if allocation_markers:
             filter_items.append(
                 f'<Item name="/Ledger/Line/AllocationMarker" operator="IN" value="{allocation_markers}"/>'
             )
 
-        filter_xml = (
-            '<Filter><Expr operator="AND">' + "".join(filter_items) + "</Expr></Filter>"
-            if filter_items else ""
-        )
+        if not filter_items:
+            # No filters at all — return everything for the given business unit.
+            filter_xml = ""
+        elif len(filter_items) == 1:
+            # A single <Item> must NOT be wrapped in <Expr operator="AND"> —
+            # SunSystems raises "Index 1 out of bounds for length 1" when AND
+            # has fewer than 2 operands.
+            filter_xml = f"<Filter>{filter_items[0]}</Filter>"
+        else:
+            filter_xml = (
+                '<Filter><Expr operator="AND">'
+                + "".join(filter_items)
+                + "</Expr></Filter>"
+            )
+
 
         # ── Build full SSC payload ────────────────────────────────────────────
         ssc_payload = f"""<SSC>
@@ -464,3 +477,127 @@ class PaymentRunView(APIView):
             )
 
         return Response({"ok": True, "lines": lines, "count": len(lines)})
+
+
+class AmendMarkerView(APIView):
+    """Update allocation markers for a set of ledger lines.
+
+    POST /api/v1/sunsystems/amend-markers/
+
+    Request body:
+        lines: [
+            {
+                journal_number:      str   e.g. "28"
+                journal_line_number: str   e.g. "1"
+                payment_marker:      str   e.g. "F"
+            },
+            ...
+        ]
+        business_unit: str  (optional — falls back to configured value)
+        budget_code:   str  (optional — falls back to configured value)
+
+    Response (success):
+        { ok: true, processed: int, response_xml: str }
+
+    Response (error):
+        { ok: false, error: str, response_xml: str }
+    """
+
+    permission_classes = [IsAuthenticated]
+
+    def post(self, request):
+        import xml.etree.ElementTree as ET
+
+        data = request.data or {}
+
+        lines = data.get("lines", [])
+        if not lines:
+            return Response(
+                {"ok": False, "error": "No lines provided."},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        # ── Resolve connection ────────────────────────────────────────────────
+        conn = effective_connection()
+        config = SunSystemsConfig.from_mapping(conn)
+
+        business_unit = str(data.get("business_unit") or config.business_unit or "PK1")
+        budget_code = str(data.get("budget_code") or config.budget_code or "A")
+
+        # ── Build <AllocationMarkers> blocks ───────────────────────────────────
+        markers_xml_parts = []
+        for line in lines:
+            jnl     = str(line.get("journal_number",      "")).strip()
+            jnl_ln  = str(line.get("journal_line_number", "")).strip()
+            marker  = str(line.get("payment_marker",      "F")).strip()
+            if not jnl or not jnl_ln:
+                continue
+            markers_xml_parts.append(
+                f"    <AllocationMarkers>\n"
+                f"      <JournalLineNumber>{jnl_ln}</JournalLineNumber>\n"
+                f"      <JournalNumber>{jnl}</JournalNumber>\n"
+                f"      <Actions>\n"
+                f"        <AllocationMarker>{marker}</AllocationMarker>\n"
+                f"      </Actions>\n"
+                f"    </AllocationMarkers>"
+            )
+
+        if not markers_xml_parts:
+            return Response(
+                {"ok": False, "error": "No valid lines to process (missing journal number or line number)."},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        ssc_payload = (
+            "<SSC>\n"
+            "  <ErrorContext>\n"
+            "    <ErrorOutput>1</ErrorOutput>\n"
+            "    <ErrorThreshold>0</ErrorThreshold>\n"
+            "  </ErrorContext>\n"
+            f"  <SunSystemsContext>\n"
+            f"    <BusinessUnit>{business_unit}</BusinessUnit>\n"
+            f"    <BudgetCode>{budget_code}</BudgetCode>\n"
+            "  </SunSystemsContext>\n"
+            "  <Payload>\n"
+            + "\n".join(markers_xml_parts) + "\n"
+            "  </Payload>\n"
+            "</SSC>"
+        )
+
+        # ── Execute ───────────────────────────────────────────────────────────
+        try:
+            client = SunSystemsClient(config)
+            response_xml = client.execute("AllocationMarkerUpdate", "AmendMarker", ssc_payload)
+        except SunSystemsError as exc:
+            return Response(
+                {"ok": False, "error": str(exc)},
+                status=status.HTTP_502_BAD_GATEWAY,
+            )
+
+        # ── Parse response for SunSystems-level errors ──────────────────────────
+        try:
+            root = ET.fromstring(response_xml or "<SSC/>")
+            # SunSystems surfaces errors inside <ErrorContext><Errors><Error>...
+            error_els = root.findall(".//Errors/Error")
+            if error_els:
+                msgs = []
+                for err in error_els:
+                    desc = (
+                        err.findtext("Description")
+                        or err.findtext("Message")
+                        or err.findtext("Text")
+                        or "Unknown error"
+                    )
+                    msgs.append(desc.strip())
+                return Response(
+                    {"ok": False, "error": " | ".join(msgs), "response_xml": response_xml},
+                    status=status.HTTP_502_BAD_GATEWAY,
+                )
+        except ET.ParseError:
+            pass  # Can't parse — return the raw XML with ok=True and let the UI warn
+
+        return Response({
+            "ok": True,
+            "processed": len(markers_xml_parts),
+            "response_xml": response_xml,
+        })

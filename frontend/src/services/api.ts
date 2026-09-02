@@ -817,6 +817,25 @@ export type PaymentRunResult = {
   error?: string;
 };
 
+export type AmendMarkerLine = {
+  journal_number: string;
+  journal_line_number: string;
+  payment_marker: string;
+};
+
+export type AmendMarkerPayload = {
+  lines: AmendMarkerLine[];
+  business_unit?: string;
+  budget_code?: string;
+};
+
+export type AmendMarkerResult = {
+  ok: boolean;
+  processed?: number;
+  error?: string;
+  response_xml?: string;
+};
+
 export const sunsystemsAPI = {
   budgetCheck: (input: BudgetCheckInput) =>
     api.post<BudgetResult>("/sunsystems/budget-check/", input),
@@ -824,6 +843,8 @@ export const sunsystemsAPI = {
     api.post<JournalPreviewResult>("/sunsystems/journal-preview/", input),
   paymentRun: (filters: PaymentRunFilters) =>
     api.post<PaymentRunResult>("/sunsystems/payment-run/", filters),
+  amendMarkers: (payload: AmendMarkerPayload) =>
+    api.post<AmendMarkerResult>("/sunsystems/amend-markers/", payload),
   getConnection: () =>
     api.get<SunSystemsConnectionResponse>("/sunsystems/connection/"),
   updateConnection: (conn: SunSystemsConnection) =>
