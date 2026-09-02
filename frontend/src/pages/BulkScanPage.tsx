@@ -559,7 +559,7 @@ export default function BulkScanPage({ scanMode = true, onSingleMode, initialBat
                   { value: "", label: autoClassifyBulk
                       ? "Auto classify each document"
                       : isRelatedSet
-                      ? scanMode ? "Auto classify during review" : "Choose type during review"
+                      ? scanMode ? "Auto classify each document" : "Choose type during review"
                       : "— Choose document type —" },
                   ...visibleDocTypes.map((t) => ({ value: t.id, label: t.name })),
                 ]}
@@ -574,7 +574,7 @@ export default function BulkScanPage({ scanMode = true, onSingleMode, initialBat
               ) : isRelatedSet ? (
                 <p className="mt-3 border-t border-[#D3D7DA] pt-3 text-xs text-[#5E6870]">
                   {scanMode
-                    ? "OCR will classify each file and extract supplier, PO reference, amount, and dates during review."
+                    ? "Claude classifies each file first, then extracts using the matched document type's configured metadata fields."
                     : "After upload, select each file to see its preview, then choose its type and fill the fields."}
                 </p>
               ) : selectedType?.description && (
@@ -589,7 +589,7 @@ export default function BulkScanPage({ scanMode = true, onSingleMode, initialBat
                   ? "Mixed batches are classified per file before review. Confirm every suggested type and metadata field before submitting."
                   : isRelatedSet
                   ? scanMode
-                    ? "Related sets are classified one document at a time. Confirm the suggested type and fields before the system links matching PO references."
+                    ? "Related sets are classified before OCR so admin-defined fields are extracted per document type. Confirm the suggested type and fields before links are suggested."
                     : "Related uploads are reviewed one document at a time. The system links matching PO references after you confirm the details."
                   : scanMode
                     ? "Each file gets its own metadata from OCR. You review and approve documents individually before the batch is submitted to workflow."
