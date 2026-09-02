@@ -351,21 +351,21 @@ export default function AdminDocumentTypesPage() {
   return (
     <>
     <div className="min-h-[calc(100vh-4rem)] bg-[#EEF0F2]">
-      <div className="border-b border-[#1E6F99] bg-[#287EAD] px-6 py-4 text-white">
+      <div className="border-b border-[#C8CDD2] bg-white px-6 py-4">
         <div className="flex items-center justify-between gap-4">
           <div>
-            <h1 className="text-xl font-semibold">Document Type</h1>
-            <p className="text-sm text-white/75">Configure metadata, references, and document linking behavior.</p>
+            <h1 className="text-xl font-semibold text-[#1F2933]">Document Type</h1>
+            <p className="text-sm text-[#5E6870]">Configure metadata, references, and document linking behavior.</p>
           </div>
           <div className="flex items-center gap-2">
-            <button type="button" onClick={openNew} className="inline-flex items-center gap-2 border border-white/25 px-3 py-2 text-sm hover:bg-white/10">
+            <button type="button" onClick={openNew} className="inline-flex items-center gap-2 bg-[#287EAD] px-3 py-2 text-sm text-white hover:bg-[#206D99]">
               <Plus className="h-4 w-4" /> New Document Type
             </button>
             <button
               type="button"
               onClick={form.handleSubmit((values) => saveMutation.mutate(values))}
               disabled={!editingId || saveMutation.isPending}
-              className="inline-flex items-center gap-2 border border-white/25 px-3 py-2 text-sm hover:bg-white/10 disabled:opacity-45"
+              className="inline-flex items-center gap-2 border border-[#C8CDD2] bg-white px-3 py-2 text-sm text-[#1F2933] hover:bg-[#F5F7F8] disabled:opacity-45"
             >
               {saveMutation.isPending ? <Loader2 className="h-4 w-4 animate-spin" /> : <Save className="h-4 w-4" />}
               Save Changes
@@ -402,7 +402,7 @@ export default function AdminDocumentTypesPage() {
                 onClick={() => openEdit(type)}
                 className={cn(
                   "block w-full px-4 py-3 text-left text-sm transition-colors",
-                  editingId === type.id ? "bg-[#348FBE] font-semibold text-white" : "bg-[#F6F7F8] text-[#1F2933] hover:bg-white",
+                  editingId === type.id ? "bg-[#287EAD] font-semibold text-white" : "bg-[#F6F7F8] text-[#1F2933] hover:bg-white",
                 )}
               >
                 <span className="block truncate">{type.name}</span>
@@ -421,8 +421,6 @@ export default function AdminDocumentTypesPage() {
             </div>
           ) : (
             <form onSubmit={form.handleSubmit((values) => saveMutation.mutate(values))} className="space-y-5">
-              <div className="h-10 bg-[#348FBE]" />
-
               <div className="flex items-center justify-between border border-[#C8CDD2] bg-white px-4 py-3">
                 <div>
                   <p className="text-sm font-semibold text-[#1F2933]">
@@ -468,7 +466,7 @@ export default function AdminDocumentTypesPage() {
                         onClick={() => setActiveTab(tab.id)}
                         className={cn(
                           "inline-flex items-center gap-2 border border-b-0 border-[#C8CDD2] px-4 py-2 text-sm",
-                          activeTab === tab.id ? "bg-white text-[#287EAD]" : "bg-[#EEF0F2] text-[#1F2933] hover:bg-white",
+                          activeTab === tab.id ? "bg-white text-[#287EAD] border-b-2 border-b-[#287EAD]" : "bg-[#EEF0F2] text-[#1F2933] hover:bg-white",
                         )}
                       >
                         <Icon className="h-4 w-4" />
