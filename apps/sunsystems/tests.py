@@ -1,8 +1,11 @@
+from unittest.mock import patch
+
 from django.core.files.uploadedfile import SimpleUploadedFile
 from django.test import SimpleTestCase, TestCase
 
 from apps.accounts.models import User
 from apps.documents.models import Document, DocumentStatus, DocumentType
+from apps.sunsystems.client import SunSystemsConfig, _build_zeep_clients, _normalize_base_url
 from apps.sunsystems.config import get_journal_mapping
 from apps.sunsystems.models import JournalPosting, JournalPostingStatus
 from apps.workflows.services import WorkflowService

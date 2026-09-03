@@ -50,6 +50,9 @@ from .mapping import MappingError, build_sunsystems_ssc
 from .models import (
     JournalPosting,
     JournalPostingStatus,
+    PaymentRun,
+    PaymentRunApproval,
+    PaymentRunStatus,
     SunSystemsConnection,
     effective_connection,
     stored_connection,
@@ -59,6 +62,7 @@ from .serializers import (
     ConnectionSerializer,
     JournalPreviewRequestSerializer,
     JournalPostingSerializer,
+    PaymentRunSerializer,
 )
 
 
@@ -317,6 +321,155 @@ class JournalPostingRetryView(APIView):
         )
 
 
+def _sunsystems_error_messages(response_xml: str) -> list[str]:
+    import xml.etree.ElementTree as ET
+
+    try:
+        root = ET.fromstring(response_xml or "<SSC/>")
+    except ET.ParseError:
+        return []
+
+    msgs = []
+    for err in root.findall(".//Errors/Error"):
+        desc = (
+            err.findtext("Description")
+            or err.findtext("Message")
+            or err.findtext("Text")
+            or "Unknown error"
+        )
+        msgs.append(desc.strip())
+    return [m for m in msgs if m]
+
+
+def _payment_run_dates():
+    from django.utils import timezone
+
+    run_date = timezone.localdate()
+    return {
+        "run_date": run_date,
+        "ddmmyyyy": run_date.strftime("%d%m%Y"),
+        "post_period": f"{run_date.month:03d}{run_date.year}",
+        "ddmmyy": run_date.strftime("%d%m%y"),
+    }
+
+
+def _next_payment_reference(prefix: str = "PAY") -> tuple[str, int, object]:
+    from django.db.models import Max
+
+    dates = _payment_run_dates()
+    max_sequence = (
+        PaymentRun.objects
+        .filter(run_date=dates["run_date"], reference_prefix=prefix)
+        .aggregate(Max("daily_sequence"))
+        .get("daily_sequence__max")
+        or 0
+    )
+    sequence = int(max_sequence) + 1
+    return f"{prefix}{dates['ddmmyy']}{sequence:04d}", sequence, dates["run_date"]
+
+
+def _create_payment_run_from_marked_lines(*, request, data, business_unit, budget_code, lines):
+    from decimal import Decimal, InvalidOperation
+    from django.db import IntegrityError, transaction
+
+    reference_prefix = str(data.get("reference_prefix") or "PAY").strip() or "PAY"
+    required_approvals = int(data.get("required_approvals") or 2)
+    bank_details_code = str(data.get("bank_details_code") or "52100").strip()
+    discount_account_credit = str(data.get("discount_account_credit") or "999").strip()
+    profile_code = str(data.get("profile_code") or "BANK").strip()
+    document_format_code = str(data.get("document_format_code") or "AGP1").strip()
+
+    total = Decimal("0")
+    currencies = []
+    for line in lines:
+        try:
+            total += Decimal(str(line.get("transaction_amount") or "0"))
+        except (InvalidOperation, TypeError):
+            pass
+        currency = str(line.get("currency_code") or "").strip()
+        if currency and currency not in currencies:
+            currencies.append(currency)
+
+    for attempt in range(5):
+        try:
+            with transaction.atomic():
+                payment_reference, sequence, run_date = _next_payment_reference(reference_prefix)
+                return PaymentRun.objects.create(
+                    payment_reference=payment_reference,
+                    reference_prefix=reference_prefix,
+                    run_date=run_date,
+                    daily_sequence=sequence,
+                    business_unit=business_unit,
+                    budget_code=budget_code,
+                    required_approvals=required_approvals,
+                    line_count=len(lines),
+                    total_amount=total,
+                    currency_codes=currencies,
+                    lines=lines,
+                    bank_details_code=bank_details_code,
+                    discount_account_credit=discount_account_credit,
+                    profile_code=profile_code,
+                    document_format_code=document_format_code,
+                    submitted_by=request.user,
+                )
+        except IntegrityError:
+            if attempt == 4:
+                raise
+
+
+def _build_payment_process_payload(run: PaymentRun) -> str:
+    from xml.sax.saxutils import escape
+
+    dates = _payment_run_dates()
+
+    def x(value) -> str:
+        return escape(str(value or ""), {'"': "&quot;", "'": "&apos;"})
+
+    payment_ref = x(run.payment_reference)
+    business_unit = x(run.business_unit)
+    return f"""<SSC>
+<SunSystemsContext>
+<BusinessUnit>{business_unit}</BusinessUnit>
+</SunSystemsContext>
+<Payload>
+<PaymentRun>
+<VSsrfmscAcp_AcpPayBaseDate>{dates["ddmmyyyy"]}</VSsrfmscAcp_AcpPayBaseDate>
+<VSsrfmscAcp_AcpPayDate>{dates["ddmmyyyy"]}</VSsrfmscAcp_AcpPayDate>
+<VSsrfmscAcp_AcpDiscBaseDate>{dates["ddmmyyyy"]}</VSsrfmscAcp_AcpDiscBaseDate>
+<PostPeriod>
+<PostPeriod>{dates["post_period"]}</PostPeriod>
+</PostPeriod>
+<BankPayments>
+<ZzGeneric_Datetime>{dates["ddmmyyyy"]}</ZzGeneric_Datetime>
+</BankPayments>
+<VSsrfmscAcp_AcpDiscAcntCr>{x(run.discount_account_credit)}</VSsrfmscAcp_AcpDiscAcntCr>
+<VSsrfmscAcp_AcpBankDetailsCode>{x(run.bank_details_code)}</VSsrfmscAcp_AcpBankDetailsCode>
+<VSsrfmscAcp_AcpBankRef>{payment_ref}</VSsrfmscAcp_AcpBankRef>
+<VSsrfmscAcp_AcpLdgPayRef>{payment_ref}</VSsrfmscAcp_AcpLdgPayRef>
+<VSsrfmscAcp_AcpSelectionFrom3>{payment_ref}</VSsrfmscAcp_AcpSelectionFrom3>
+<VSsrfmscAcp_AcpSelectionTo3>{payment_ref}</VSsrfmscAcp_AcpSelectionTo3>
+<VSsrfmscAcp_AcpProfileCode>{x(run.profile_code)}</VSsrfmscAcp_AcpProfileCode>
+<VSsrfmscAcp_AcpSelectionFrom1>.</VSsrfmscAcp_AcpSelectionFrom1>
+<VSsrfmscAcp_AcpSelectionTo1>.</VSsrfmscAcp_AcpSelectionTo1>
+<VSsrfmscAcp_AcpSelectionFrom2>.</VSsrfmscAcp_AcpSelectionFrom2>
+<VSsrfmscAcp_AcpSelectionTo2>.</VSsrfmscAcp_AcpSelectionTo2>
+<AdditionalParameters>
+<ClearPrevious>Y</ClearPrevious>
+<ClearPreviousBank>Y</ClearPreviousBank>
+</AdditionalParameters>
+<DocumentFormat>
+<DocumentFormatCode>{x(run.document_format_code)}</DocumentFormatCode>
+<LanguageCode>1</LanguageCode>
+<Store>Y</Store>
+</DocumentFormat>
+<PostTransactions>
+<ValidationRoutine_ValidationRoutine>N</ValidationRoutine_ValidationRoutine>
+</PostTransactions>
+</PaymentRun>
+</Payload>
+</SSC>"""
+
+
 class PaymentRunView(APIView):
     """Query SunSystems ledger lines for a payment run.
 
@@ -341,7 +494,6 @@ class PaymentRunView(APIView):
 
     def post(self, request):
         import xml.etree.ElementTree as ET
-
         data = request.data or {}
 
         # ── Resolve connection ────────────────────────────────────────────────
@@ -576,32 +728,146 @@ class AmendMarkerView(APIView):
             )
 
         # ── Parse response for SunSystems-level errors ──────────────────────────
-        try:
-            root = ET.fromstring(response_xml or "<SSC/>")
-            # SunSystems surfaces errors inside <ErrorContext><Errors><Error>...
-            error_els = root.findall(".//Errors/Error")
-            if error_els:
-                msgs = []
-                for err in error_els:
-                    desc = (
-                        err.findtext("Description")
-                        or err.findtext("Message")
-                        or err.findtext("Text")
-                        or "Unknown error"
-                    )
-                    msgs.append(desc.strip())
-                return Response(
-                    {"ok": False, "error": " | ".join(msgs), "response_xml": response_xml},
-                    status=status.HTTP_502_BAD_GATEWAY,
-                )
-        except ET.ParseError:
-            pass  # Can't parse — return the raw XML with ok=True and let the UI warn
+        msgs = _sunsystems_error_messages(response_xml)
+        if msgs:
+            return Response(
+                {"ok": False, "error": " | ".join(msgs), "response_xml": response_xml},
+                status=status.HTTP_502_BAD_GATEWAY,
+            )
+
+        payment_run = _create_payment_run_from_marked_lines(
+            request=request,
+            data=data,
+            business_unit=business_unit,
+            budget_code=budget_code,
+            lines=lines,
+        )
 
         return Response({
             "ok": True,
             "processed": len(markers_xml_parts),
             "response_xml": response_xml,
+            "payment_run": PaymentRunSerializer(payment_run).data,
         })
+
+
+class PaymentRunApproveView(APIView):
+    """Approve a marked payment-run batch.
+
+    A run needs ``required_approvals`` distinct approvers before it can be
+    processed in SunSystems.
+    """
+
+    permission_classes = [IsAuthenticated]
+
+    def post(self, request, payment_run_id):
+        from django.db import IntegrityError, transaction
+
+        run = PaymentRun.objects.filter(pk=payment_run_id).first()
+        if not run:
+            return Response({"detail": "Payment run not found."}, status=status.HTTP_404_NOT_FOUND)
+        if run.status not in (PaymentRunStatus.PENDING_APPROVAL, PaymentRunStatus.APPROVED):
+            return Response(
+                {"detail": f"Payment run cannot be approved while status is {run.status}."},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        if run.status == PaymentRunStatus.APPROVED:
+            return Response(PaymentRunSerializer(run).data)
+
+        try:
+            with transaction.atomic():
+                run = PaymentRun.objects.select_for_update().get(pk=payment_run_id)
+                stage = run.approvals.count() + 1
+                PaymentRunApproval.objects.create(
+                    payment_run=run,
+                    stage=stage,
+                    approved_by=request.user,
+                    note=str((request.data or {}).get("note") or "").strip(),
+                )
+                if run.approvals.count() >= run.required_approvals:
+                    run.status = PaymentRunStatus.APPROVED
+                    run.save(update_fields=["status", "updated_at"])
+        except IntegrityError:
+            return Response(
+                {"detail": "You have already approved this payment run."},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        run.refresh_from_db()
+        return Response(PaymentRunSerializer(run).data)
+
+
+class PaymentRunListView(APIView):
+    """List recent payment-run batches for approval and processing."""
+
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request):
+        status_filter = str(request.query_params.get("status") or "").strip()
+        qs = PaymentRun.objects.prefetch_related("approvals").order_by("-submitted_at")
+        if status_filter:
+            qs = qs.filter(status=status_filter)
+        return Response({
+            "ok": True,
+            "payment_runs": PaymentRunSerializer(qs[:50], many=True).data,
+        })
+
+
+class PaymentRunProcessView(APIView):
+    """Run the final SunSystems PaymentRun/Process call after approval."""
+
+    permission_classes = [IsAuthenticated]
+
+    def post(self, request, payment_run_id):
+        from django.utils import timezone
+
+        run = PaymentRun.objects.filter(pk=payment_run_id).first()
+        if not run:
+            return Response({"detail": "Payment run not found."}, status=status.HTTP_404_NOT_FOUND)
+        if run.status == PaymentRunStatus.PAID:
+            return Response(PaymentRunSerializer(run).data)
+        if run.status not in (PaymentRunStatus.APPROVED, PaymentRunStatus.FAILED):
+            return Response(
+                {"detail": "Payment run must receive all approvals before final payment."},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        ssc_payload = _build_payment_process_payload(run)
+        run.status = PaymentRunStatus.PROCESSING
+        run.request_xml = ssc_payload
+        run.error = ""
+        run.save(update_fields=["status", "request_xml", "error", "updated_at"])
+
+        conn = effective_connection()
+        config = SunSystemsConfig.from_mapping(conn)
+        try:
+            response_xml = SunSystemsClient(config).execute("PaymentRun", "Process", ssc_payload)
+        except SunSystemsError as exc:
+            run.status = PaymentRunStatus.FAILED
+            run.error = str(exc)
+            run.save(update_fields=["status", "error", "updated_at"])
+            return Response(
+                {"ok": False, "error": str(exc), "payment_run": PaymentRunSerializer(run).data},
+                status=status.HTTP_502_BAD_GATEWAY,
+            )
+
+        msgs = _sunsystems_error_messages(response_xml)
+        if msgs:
+            run.status = PaymentRunStatus.FAILED
+            run.response_xml = response_xml
+            run.error = " | ".join(msgs)
+            run.save(update_fields=["status", "response_xml", "error", "updated_at"])
+            return Response(
+                {"ok": False, "error": run.error, "payment_run": PaymentRunSerializer(run).data},
+                status=status.HTTP_502_BAD_GATEWAY,
+            )
+
+        run.status = PaymentRunStatus.PAID
+        run.response_xml = response_xml
+        run.processed_by = request.user
+        run.processed_at = timezone.now()
+        run.save(update_fields=["status", "response_xml", "processed_by", "processed_at", "updated_at"])
+        return Response({"ok": True, "payment_run": PaymentRunSerializer(run).data})
 
 
 class AccountsQueryView(APIView):

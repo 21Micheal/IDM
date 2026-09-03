@@ -22,7 +22,7 @@ import {
   CheckSquare,
   Square,
 } from "lucide-react";
-import { sunsystemsAPI, type PaymentRunLine, type PaymentRunFilters, type SunSystemsAccount } from "@/services/api";
+import { sunsystemsAPI, type PaymentRunLine, type PaymentRunFilters, type SunSystemsAccount, type PaymentRunRecord } from "@/services/api";
 import CustomListbox from "@/components/ui/CustomListbox";
 import AccountMultiSelect from "@/components/ui/AccountMultiSelect";
 
@@ -49,6 +49,19 @@ function formatPeriod(raw: string): string {
   const period = raw.slice(0, 3).replace(/^0+/, "") || "0";
   const year = raw.slice(3);
   return `P${period} / ${year}`;
+}
+
+function formatDateTime(raw?: string | null): string {
+  if (!raw) return "";
+  const d = new Date(raw);
+  if (Number.isNaN(d.getTime())) return raw;
+  return d.toLocaleString(undefined, {
+    year: "numeric",
+    month: "short",
+    day: "2-digit",
+    hour: "2-digit",
+    minute: "2-digit",
+  });
 }
 
 // ── Sub-components ────────────────────────────────────────────────────────────
@@ -140,6 +153,13 @@ function ConfirmPaymentModal({
   isProcessing,
   processError,
   processedCount,
+  paymentRun,
+  onApprove,
+  onProcessPayment,
+  isApproving,
+  isFinalProcessing,
+  approvalError,
+  finalProcessError,
 }: {
   lines: SelectedLine[];
   onMarkerChange: (key: string, marker: string) => void;
@@ -148,10 +168,19 @@ function ConfirmPaymentModal({
   isProcessing: boolean;
   processError: string | null;
   processedCount: number | null;
+  paymentRun: PaymentRunRecord | null;
+  onApprove: () => void;
+  onProcessPayment: () => void;
+  isApproving: boolean;
+  isFinalProcessing: boolean;
+  approvalError: string | null;
+  finalProcessError: string | null;
 }) {
   const total = lines.reduce((s, l) => s + (parseFloat(l.transaction_amount) || 0), 0);
   const currencies = [...new Set(lines.map((l) => l.currency_code))];
   const succeeded = processedCount !== null && !processError;
+  const approvalComplete = paymentRun ? paymentRun.approval_count >= paymentRun.required_approvals : false;
+  const isPaid = paymentRun?.status === "paid";
 
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center p-4">
@@ -171,12 +200,12 @@ function ConfirmPaymentModal({
           )}
           <div className="flex-1">
             <h2 className="text-base font-bold">
-              {succeeded ? "Payment Run Processed" : "Confirm Payment Run"}
+              {succeeded ? "Payment Run Submitted" : "Confirm Payment Run"}
             </h2>
             <p className="text-xs text-white/75">
               {succeeded
-                ? `${processedCount} line${processedCount !== 1 ? "s" : ""} successfully updated in SunSystems.`
-                : `Review the ${lines.length} line${lines.length !== 1 ? "s" : ""} below before processing. You can still adjust the allocation marker for each line.`}
+                ? `${processedCount} line${processedCount !== 1 ? "s" : ""} marked in SunSystems and submitted for approval.`
+                : `Review the ${lines.length} line${lines.length !== 1 ? "s" : ""} below before submission. You can still adjust the allocation marker for each line.`}
             </p>
           </div>
           {!isProcessing && (
@@ -211,6 +240,12 @@ function ConfirmPaymentModal({
             <span><strong>SunSystems error:</strong> {processError}</span>
           </div>
         )}
+        {(approvalError || finalProcessError) && (
+          <div className="flex items-start gap-3 border-b border-red-300 bg-red-50 px-5 py-3 text-sm text-red-800">
+            <AlertCircle className="mt-0.5 h-4 w-4 shrink-0" />
+            <span><strong>Payment run error:</strong> {approvalError || finalProcessError}</span>
+          </div>
+        )}
 
         {/* Success state */}
         {succeeded ? (
@@ -219,12 +254,47 @@ function ConfirmPaymentModal({
               <CheckSquare className="h-8 w-8 text-emerald-600" />
             </div>
             <p className="text-base font-bold text-[#1F2933]">
-              {processedCount} line{processedCount !== 1 ? "s" : ""} updated successfully
+              {paymentRun?.payment_reference ?? "Payment run"} submitted successfully
             </p>
             <p className="max-w-sm text-center text-sm text-[#5E6870]">
-              The allocation markers have been updated in SunSystems.
-              Re-run the query to see the updated ledger state.
+              The allocation markers have been updated in SunSystems. Final payment is available after all approvals are recorded.
             </p>
+            {paymentRun && (
+              <div className="w-full max-w-xl border border-[#C8CDD2] bg-[#F8F9FA] p-4 text-sm">
+                <div className="grid grid-cols-2 gap-4">
+                  <div>
+                    <p className="text-[10px] font-semibold uppercase tracking-wider text-[#5E6870]">Reference</p>
+                    <p className="font-mono font-bold text-[#1F2933]">{paymentRun.payment_reference}</p>
+                  </div>
+                  <div>
+                    <p className="text-[10px] font-semibold uppercase tracking-wider text-[#5E6870]">Approval status</p>
+                    <p className="font-bold text-[#1F2933]">
+                      {paymentRun.approval_count} / {paymentRun.required_approvals} approvals
+                    </p>
+                  </div>
+                  <div>
+                    <p className="text-[10px] font-semibold uppercase tracking-wider text-[#5E6870]">SunSystems call</p>
+                    <p className="font-mono font-bold text-[#1F2933]">{paymentRun.component}/{paymentRun.method}</p>
+                  </div>
+                  <div>
+                    <p className="text-[10px] font-semibold uppercase tracking-wider text-[#5E6870]">Status</p>
+                    <p className="font-bold capitalize text-[#1F2933]">{paymentRun.status.replace("_", " ")}</p>
+                  </div>
+                </div>
+                {paymentRun.approvals.length > 0 && (
+                  <div className="mt-4 border-t border-[#D9DEE2] pt-3">
+                    <p className="text-[10px] font-semibold uppercase tracking-wider text-[#5E6870]">Approvals</p>
+                    <div className="mt-2 space-y-1">
+                      {paymentRun.approvals.map((approval) => (
+                        <p key={approval.id} className="text-xs text-[#1F2933]">
+                          Stage {approval.stage}: {approval.approved_by_name ?? "Unknown approver"}
+                        </p>
+                      ))}
+                    </div>
+                  </div>
+                )}
+              </div>
+            )}
           </div>
         ) : (
           /* Table */
@@ -314,7 +384,29 @@ function ConfirmPaymentModal({
                 ) : (
                   <Zap className="h-4 w-4" />
                 )}
-                {isProcessing ? "Processing…" : "Confirm & Process Payment"}
+                {isProcessing ? "Submitting…" : "Submit for Approval"}
+              </button>
+            )}
+            {succeeded && paymentRun && !approvalComplete && (
+              <button
+                type="button"
+                onClick={onApprove}
+                disabled={isApproving}
+                className="inline-flex items-center gap-2 bg-[#287EAD] px-6 py-2 text-sm font-bold text-white hover:bg-[#1E6F99] disabled:opacity-60 transition-colors active:scale-95"
+              >
+                {isApproving ? <RefreshCw className="h-4 w-4 animate-spin" /> : <CheckSquare className="h-4 w-4" />}
+                {isApproving ? "Approving…" : "Approve Payment Run"}
+              </button>
+            )}
+            {succeeded && paymentRun && approvalComplete && !isPaid && (
+              <button
+                type="button"
+                onClick={onProcessPayment}
+                disabled={isFinalProcessing}
+                className="inline-flex items-center gap-2 bg-emerald-600 px-6 py-2 text-sm font-bold text-white hover:bg-emerald-700 disabled:opacity-60 transition-colors active:scale-95"
+              >
+                {isFinalProcessing ? <RefreshCw className="h-4 w-4 animate-spin" /> : <CreditCard className="h-4 w-4" />}
+                {isFinalProcessing ? "Posting…" : "Make Payment"}
               </button>
             )}
           </div>
@@ -367,6 +459,13 @@ export default function PaymentRunPage() {
   });
   const accounts: SunSystemsAccount[] = accountsQuery.data?.accounts ?? [];
 
+  const paymentRunsQuery = useQuery({
+    queryKey: ["sunsystems-payment-runs"],
+    queryFn: () => sunsystemsAPI.getPaymentRuns().then((r) => r.data),
+    staleTime: 30 * 1000,
+  });
+  const paymentRuns = paymentRunsQuery.data?.payment_runs ?? [];
+
   // ── Selection state ────────────────────────────────────────────────────────
   // selectedKeys: set of row keys that are checked.
   // rowMarkers: per-row payment allocation marker (defaults to F — Force).
@@ -377,26 +476,48 @@ export default function PaymentRunPage() {
   // ── Amend markers mutation ────────────────────────────────────────────────────
   const [processedCount, setProcessedCount] = useState<number | null>(null);
   const [processError, setProcessError] = useState<string | null>(null);
+  const [currentPaymentRun, setCurrentPaymentRun] = useState<PaymentRunRecord | null>(null);
+  const [approvalError, setApprovalError] = useState<string | null>(null);
+  const [finalProcessError, setFinalProcessError] = useState<string | null>(null);
 
   const amendMutation = useMutation({
     mutationFn: () =>
       sunsystemsAPI.amendMarkers({
         lines: selectedLines.map((l) => ({
+          account_code: l.account_code,
+          account_description: l.account_description,
+          accounting_period: l.accounting_period,
+          transaction_date: l.transaction_date,
           journal_number: l.journal_number,
           journal_line_number: l.journal_line_number,
+          transaction_reference: l.transaction_reference,
+          description: l.description,
+          base_amount: l.base_amount,
+          conversion_rate: l.conversion_rate,
+          currency_code: l.currency_code,
+          transaction_amount: l.transaction_amount,
+          debit_credit: l.debit_credit,
+          allocation_marker: l.allocation_marker,
           payment_marker: l.payment_marker,
         })),
+        business_unit: filters.business_unit,
+        budget_code: filters.budget_code,
       }).then((r) => r.data),
     onSuccess: (data) => {
       if (data.ok) {
         setProcessedCount(data.processed ?? selectedLines.length);
+        setCurrentPaymentRun(data.payment_run ?? null);
         setProcessError(null);
+        setApprovalError(null);
+        setFinalProcessError(null);
         // Clear selection so re-query shows fresh state.
         setSelectedKeys(new Set());
         setRowMarkers({});
+        paymentRunsQuery.refetch();
       } else {
         setProcessError(data.error ?? "SunSystems returned an error.");
         setProcessedCount(null);
+        setCurrentPaymentRun(null);
       }
     },
     onError: (err: any) => {
@@ -404,6 +525,44 @@ export default function PaymentRunPage() {
         err?.response?.data?.error ?? "Failed to reach SunSystems. Please try again."
       );
       setProcessedCount(null);
+      setCurrentPaymentRun(null);
+    },
+  });
+
+  const approveMutation = useMutation({
+    mutationFn: (paymentRunId: string) =>
+      sunsystemsAPI.approvePaymentRun(paymentRunId).then((r) => r.data),
+    onSuccess: (data) => {
+      if (!currentPaymentRun || currentPaymentRun.id === data.id) {
+        setCurrentPaymentRun(data);
+      }
+      setApprovalError(null);
+      paymentRunsQuery.refetch();
+    },
+    onError: (err: any) => {
+      setApprovalError(
+        err?.response?.data?.detail ?? err?.message ?? "Approval failed."
+      );
+    },
+  });
+
+  const processPaymentMutation = useMutation({
+    mutationFn: (paymentRunId: string) =>
+      sunsystemsAPI.processPaymentRun(paymentRunId).then((r) => r.data),
+    onSuccess: (data) => {
+      if (data.payment_run) {
+        if (!currentPaymentRun || currentPaymentRun.id === data.payment_run.id) {
+          setCurrentPaymentRun(data.payment_run);
+        }
+      }
+      setFinalProcessError(data.ok === false ? data.error ?? "SunSystems returned an error." : null);
+      paymentRunsQuery.refetch();
+    },
+    onError: (err: any) => {
+      const payload = err?.response?.data;
+      setFinalProcessError(payload?.error ?? payload?.detail ?? "Payment processing failed.");
+      if (payload?.payment_run) setCurrentPaymentRun(payload.payment_run);
+      paymentRunsQuery.refetch();
     },
   });
 
@@ -701,11 +860,95 @@ export default function PaymentRunPage() {
           </div>
         </div>
 
+        {/* ── Approval queue ── */}
+        {paymentRuns.length > 0 && (
+          <div className="border border-[#C8CDD2] bg-white shadow-sm">
+            <div className="flex items-center gap-3 border-b border-[#C8CDD2] bg-[#F3F5F6] px-5 py-3">
+              <CheckSquare className="h-4 w-4 text-[#287EAD]" />
+              <h2 className="text-sm font-bold text-[#1F2933]">Recent Payment Runs</h2>
+              <span className="rounded bg-[#287EAD] px-2.5 py-0.5 text-xs font-bold text-white">
+                {paymentRuns.length}
+              </span>
+              <button
+                type="button"
+                onClick={() => paymentRunsQuery.refetch()}
+                disabled={paymentRunsQuery.isFetching}
+                className="ml-auto inline-flex items-center gap-1.5 text-xs font-semibold text-[#5E6870] hover:text-[#287EAD] disabled:opacity-60"
+              >
+                <RefreshCw className={`h-3.5 w-3.5 ${paymentRunsQuery.isFetching ? "animate-spin" : ""}`} />
+                Refresh
+              </button>
+            </div>
+            <div className="overflow-x-auto">
+              <table className="w-full border-collapse text-sm">
+                <thead>
+                  <tr className="border-b border-[#C8CDD2] bg-[#F7F8F9] text-xs">
+                    {["Reference", "Submitted", "Lines", "Amount", "Approvals", "Status", "Action"].map((h) => (
+                      <th key={h} className="whitespace-nowrap border-r border-[#E5E9EC] px-3 py-2.5 text-left font-bold uppercase tracking-wider text-[#5E6870] last:border-r-0">
+                        {h}
+                      </th>
+                    ))}
+                  </tr>
+                </thead>
+                <tbody>
+                  {paymentRuns.map((run) => {
+                    const canApprove = run.status === "pending_approval";
+                    const canProcess = run.status === "approved" || run.status === "failed";
+                    return (
+                      <tr key={run.id} className="border-b border-[#EDF0F2] last:border-0 hover:bg-[#F3F8FB]">
+                        <td className="border-r border-[#EDF0F2] px-3 py-2.5 font-mono font-bold text-[#287EAD]">{run.payment_reference}</td>
+                        <td className="border-r border-[#EDF0F2] px-3 py-2.5 text-xs text-[#5E6870]">{formatDateTime(run.submitted_at)}</td>
+                        <td className="border-r border-[#EDF0F2] px-3 py-2.5 text-center tabular-nums">{run.line_count}</td>
+                        <td className="border-r border-[#EDF0F2] px-3 py-2.5 text-right tabular-nums font-semibold">{formatAmount(run.total_amount)}</td>
+                        <td className="border-r border-[#EDF0F2] px-3 py-2.5 font-semibold">
+                          {run.approval_count} / {run.required_approvals}
+                        </td>
+                        <td className="border-r border-[#EDF0F2] px-3 py-2.5 capitalize">{run.status.replace("_", " ")}</td>
+                        <td className="px-3 py-2.5">
+                          {canApprove ? (
+                            <button
+                              type="button"
+                              onClick={() => approveMutation.mutate(run.id)}
+                              disabled={approveMutation.isPending}
+                              className="inline-flex items-center gap-1.5 bg-[#287EAD] px-3 py-1.5 text-xs font-bold text-white hover:bg-[#1E6F99] disabled:opacity-60"
+                            >
+                              {approveMutation.isPending ? <RefreshCw className="h-3.5 w-3.5 animate-spin" /> : <CheckSquare className="h-3.5 w-3.5" />}
+                              Approve
+                            </button>
+                          ) : canProcess ? (
+                            <button
+                              type="button"
+                              onClick={() => processPaymentMutation.mutate(run.id)}
+                              disabled={processPaymentMutation.isPending}
+                              className="inline-flex items-center gap-1.5 bg-emerald-600 px-3 py-1.5 text-xs font-bold text-white hover:bg-emerald-700 disabled:opacity-60"
+                            >
+                              {processPaymentMutation.isPending ? <RefreshCw className="h-3.5 w-3.5 animate-spin" /> : <CreditCard className="h-3.5 w-3.5" />}
+                              {run.status === "failed" ? "Retry Payment" : "Make Payment"}
+                            </button>
+                          ) : (
+                            <span className="text-xs font-semibold text-[#8C969E]">No action</span>
+                          )}
+                        </td>
+                      </tr>
+                    );
+                  })}
+                </tbody>
+              </table>
+            </div>
+          </div>
+        )}
+
         {/* ── Error banner ── */}
         {error && (
           <div className="flex items-start gap-3 border border-red-300 bg-red-50 px-4 py-3 text-sm text-red-800">
             <AlertCircle className="mt-0.5 h-4 w-4 shrink-0" />
             <span>{error}</span>
+          </div>
+        )}
+        {(approvalError || finalProcessError) && !showConfirmModal && (
+          <div className="flex items-start gap-3 border border-red-300 bg-red-50 px-4 py-3 text-sm text-red-800">
+            <AlertCircle className="mt-0.5 h-4 w-4 shrink-0" />
+            <span>{approvalError || finalProcessError}</span>
           </div>
         )}
 
@@ -930,7 +1173,7 @@ export default function PaymentRunPage() {
                 Deselect all
               </button>
 
-              {/* Process Payment — opens confirmation modal */}
+              {/* Submit for approval — opens confirmation modal */}
               <button
                 id="process-payment-btn"
                 type="button"
@@ -938,7 +1181,7 @@ export default function PaymentRunPage() {
                 className="inline-flex items-center gap-2 bg-[#287EAD] px-6 py-2.5 text-sm font-bold text-white shadow-sm hover:bg-[#1E6F99] transition-colors active:scale-95"
               >
                 <Zap className="h-4 w-4" />
-                Process Payment ({selectedLines.length})
+                Submit for Approval ({selectedLines.length})
               </button>
             </div>
           </div>
@@ -955,11 +1198,23 @@ export default function PaymentRunPage() {
             setShowConfirmModal(false);
             setProcessedCount(null);
             setProcessError(null);
+            setCurrentPaymentRun(null);
+            setApprovalError(null);
+            setFinalProcessError(null);
             amendMutation.reset();
+            approveMutation.reset();
+            processPaymentMutation.reset();
           }}
           isProcessing={amendMutation.isPending}
           processError={processError}
           processedCount={processedCount}
+          paymentRun={currentPaymentRun}
+          onApprove={() => currentPaymentRun && approveMutation.mutate(currentPaymentRun.id)}
+          onProcessPayment={() => currentPaymentRun && processPaymentMutation.mutate(currentPaymentRun.id)}
+          isApproving={approveMutation.isPending}
+          isFinalProcessing={processPaymentMutation.isPending}
+          approvalError={approvalError}
+          finalProcessError={finalProcessError}
         />
       )}
     </div>

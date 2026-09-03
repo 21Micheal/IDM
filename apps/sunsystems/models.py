@@ -86,6 +86,116 @@ class JournalPosting(models.Model):
         return f"JournalPosting {self.document_id} stage={self.stage} ({self.status})"
 
 
+class PaymentRunStatus(models.TextChoices):
+    """Lifecycle for a SunSystems payment-run batch."""
+
+    PENDING_APPROVAL = "pending_approval", "Pending approval"
+    APPROVED = "approved", "Approved"
+    PROCESSING = "processing", "Processing"
+    PAID = "paid", "Paid"
+    FAILED = "failed", "Failed"
+
+
+class PaymentRun(models.Model):
+    """A marked batch of ledger lines awaiting approval and final payment."""
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    payment_reference = models.CharField(max_length=32, unique=True, db_index=True)
+    reference_prefix = models.CharField(max_length=12, default="PAY")
+    run_date = models.DateField(db_index=True)
+    daily_sequence = models.PositiveIntegerField()
+
+    business_unit = models.CharField(max_length=64, blank=True)
+    budget_code = models.CharField(max_length=64, blank=True)
+    status = models.CharField(
+        max_length=24,
+        choices=PaymentRunStatus.choices,
+        default=PaymentRunStatus.PENDING_APPROVAL,
+        db_index=True,
+    )
+    required_approvals = models.PositiveSmallIntegerField(default=2)
+
+    line_count = models.PositiveIntegerField(default=0)
+    total_amount = models.DecimalField(max_digits=18, decimal_places=3, default=0)
+    currency_codes = models.JSONField(default=list, blank=True)
+    lines = models.JSONField(default=list, blank=True)
+
+    component = models.CharField(max_length=64, blank=True, default="PaymentRun")
+    method = models.CharField(max_length=64, blank=True, default="Process")
+    bank_details_code = models.CharField(max_length=64, blank=True, default="52100")
+    discount_account_credit = models.CharField(max_length=64, blank=True, default="999")
+    profile_code = models.CharField(max_length=64, blank=True, default="BANK")
+    document_format_code = models.CharField(max_length=64, blank=True, default="AGP1")
+
+    request_xml = models.TextField(blank=True)
+    response_xml = models.TextField(blank=True)
+    error = models.TextField(blank=True)
+
+    submitted_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        null=True,
+        blank=True,
+        on_delete=models.SET_NULL,
+        related_name="payment_runs_submitted",
+    )
+    processed_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        null=True,
+        blank=True,
+        on_delete=models.SET_NULL,
+        related_name="payment_runs_processed",
+    )
+    submitted_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+    processed_at = models.DateTimeField(null=True, blank=True)
+
+    class Meta:
+        ordering = ["-submitted_at"]
+        unique_together = [("run_date", "daily_sequence", "reference_prefix")]
+        indexes = [
+            models.Index(fields=["status", "submitted_at"]),
+        ]
+
+    @property
+    def approval_count(self) -> int:
+        return self.approvals.count()
+
+    @property
+    def is_fully_approved(self) -> bool:
+        return self.approval_count >= self.required_approvals
+
+    def __str__(self):
+        return f"PaymentRun {self.payment_reference} ({self.status})"
+
+
+class PaymentRunApproval(models.Model):
+    """One approval action for a payment-run batch."""
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    payment_run = models.ForeignKey(
+        PaymentRun,
+        on_delete=models.CASCADE,
+        related_name="approvals",
+    )
+    stage = models.PositiveSmallIntegerField()
+    approved_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        null=True,
+        blank=True,
+        on_delete=models.SET_NULL,
+        related_name="payment_run_approvals",
+    )
+    approved_at = models.DateTimeField(auto_now_add=True)
+    note = models.TextField(blank=True)
+
+    class Meta:
+        ordering = ["stage", "approved_at"]
+        unique_together = [("payment_run", "approved_by")]
+
+    def __str__(self):
+        return f"{self.payment_run_id} approval {self.stage}"
+
+
 class SunSystemsConnection(models.Model):
     """Singleton holding the admin-configured SunSystems Connect connection.
 

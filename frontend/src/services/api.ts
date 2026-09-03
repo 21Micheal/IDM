@@ -821,12 +821,66 @@ export type AmendMarkerLine = {
   journal_number: string;
   journal_line_number: string;
   payment_marker: string;
+  account_code?: string;
+  account_description?: string;
+  accounting_period?: string;
+  transaction_date?: string;
+  transaction_reference?: string;
+  description?: string;
+  base_amount?: string;
+  conversion_rate?: string;
+  currency_code?: string;
+  transaction_amount?: string;
+  debit_credit?: string;
+  allocation_marker?: string;
 };
 
 export type AmendMarkerPayload = {
   lines: AmendMarkerLine[];
   business_unit?: string;
   budget_code?: string;
+  required_approvals?: number;
+  reference_prefix?: string;
+  bank_details_code?: string;
+  discount_account_credit?: string;
+  profile_code?: string;
+  document_format_code?: string;
+};
+
+export type PaymentRunApproval = {
+  id: string;
+  stage: number;
+  approved_by_name: string | null;
+  approved_at: string;
+  note: string;
+};
+
+export type PaymentRunRecord = {
+  id: string;
+  payment_reference: string;
+  reference_prefix: string;
+  run_date: string;
+  daily_sequence: number;
+  business_unit: string;
+  budget_code: string;
+  status: "pending_approval" | "approved" | "processing" | "paid" | "failed";
+  required_approvals: number;
+  approval_count: number;
+  line_count: number;
+  total_amount: string;
+  currency_codes: string[];
+  lines: AmendMarkerLine[];
+  component: string;
+  method: string;
+  request_xml: string;
+  response_xml: string;
+  error: string;
+  submitted_by_name: string | null;
+  processed_by_name: string | null;
+  submitted_at: string;
+  updated_at: string;
+  processed_at: string | null;
+  approvals: PaymentRunApproval[];
 };
 
 export type AmendMarkerResult = {
@@ -834,6 +888,19 @@ export type AmendMarkerResult = {
   processed?: number;
   error?: string;
   response_xml?: string;
+  payment_run?: PaymentRunRecord;
+};
+
+export type PaymentRunProcessResult = {
+  ok?: boolean;
+  error?: string;
+  payment_run?: PaymentRunRecord;
+} & Partial<PaymentRunRecord>;
+
+export type PaymentRunsResult = {
+  ok: boolean;
+  payment_runs: PaymentRunRecord[];
+  error?: string;
 };
 
 export type SunSystemsAccount = {
@@ -858,6 +925,12 @@ export const sunsystemsAPI = {
     api.post<PaymentRunResult>("/sunsystems/payment-run/", filters),
   amendMarkers: (payload: AmendMarkerPayload) =>
     api.post<AmendMarkerResult>("/sunsystems/amend-markers/", payload),
+  getPaymentRuns: (params?: { status?: string }) =>
+    api.get<PaymentRunsResult>("/sunsystems/payment-runs/", { params }),
+  approvePaymentRun: (paymentRunId: string, note?: string) =>
+    api.post<PaymentRunRecord>(`/sunsystems/payment-runs/${paymentRunId}/approve/`, { note }),
+  processPaymentRun: (paymentRunId: string) =>
+    api.post<PaymentRunProcessResult>(`/sunsystems/payment-runs/${paymentRunId}/process/`),
   getAccounts: (params?: { business_unit?: string; account_type?: string }) =>
     api.get<AccountsResult>("/sunsystems/accounts/", { params }),
   getConnection: () =>
