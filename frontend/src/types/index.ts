@@ -213,6 +213,7 @@ export interface UserSummary {
 
 export interface WorkflowTask {
   id: string;
+  target_type?: "document" | "payment_run";
   step: {
     name: string;
     order: number;
@@ -238,6 +239,28 @@ export interface WorkflowTask {
   document_ref?: string;
   document_type_name?: string;
   document_department_name?: string | null;
+  payment_run_id?: string | null;
+  payment_reference?: string | null;
+  payment_run_status?: string | null;
+  payment_run_total?: string | null;
+  payment_run_currency_codes?: string[];
+  payment_run_lines?: Array<{
+    account_code?: string;
+    account_description?: string;
+    accounting_period?: string;
+    transaction_date?: string;
+    journal_number?: string;
+    journal_line_number?: string;
+    transaction_reference?: string;
+    description?: string;
+    base_amount?: string;
+    conversion_rate?: string;
+    currency_code?: string;
+    transaction_amount?: string;
+    debit_credit?: string;
+    allocation_marker?: string;
+    payment_marker?: string;
+  }>;
   uploaded_by_name?: string | null;
   uploader_department_name?: string | null;
   file_name?: string;

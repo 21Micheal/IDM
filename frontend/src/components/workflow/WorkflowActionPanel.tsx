@@ -30,13 +30,14 @@ import SignaturePlacementModal, { type SignaturePlacementResult } from "@/compon
 interface WorkflowTask {
   id:             string;
   status:         string;
-  status_display: string;
-  step:           { name: string; order: number; instructions: string; allow_approve: boolean; allow_reject: boolean; allow_return: boolean };
+  status_display?: string;
+  step:           { name: string; order: number; instructions?: string; allow_approve?: boolean; allow_reject?: boolean; allow_return?: boolean };
   requires_signature?: boolean;
   assigned_to?:   { id: string; full_name: string };
-  due_at?:        string;
-  held_until?:    string;
-  document_ref:   string;
+  due_at?:        string | null;
+  held_until?:    string | null;
+  target_type?:   string;
+  document_ref?:  string;
   document_title?: string;
 }
 
@@ -54,7 +55,7 @@ interface TaskAction {
 
 interface Props {
   task: WorkflowTask;
-  documentId: string;
+  documentId?: string;
   onCompleted?: () => void;
   variant?: "panel" | "bar";
 }
@@ -200,6 +201,9 @@ function TaskHistoryDrawer({ taskId, task, currentUserId: _currentUserId }: { ta
 export default function WorkflowActionPanel({ task, documentId, onCompleted, variant = "panel" }: Props) {
   const qc = useQueryClient();
   const currentUser = useAuthStore((s) => s.user);
+  const hasDocument = Boolean(documentId);
+  const targetLabel = task.target_type === "payment_run" ? "payment run" : "document";
+  const capitalizedTargetLabel = `${targetLabel[0].toUpperCase()}${targetLabel.slice(1)}`;
 
   const [activeAction, setActiveAction] = useState<
     "approve" | "reject" | "return" | "hold" | null
@@ -227,6 +231,7 @@ export default function WorkflowActionPanel({ task, documentId, onCompleted, var
   };
 
   const patchDocumentStatus = (status: string) => {
+    if (!hasDocument) return;
     qc.setQueryData(["document", documentId], (prev: any) =>
       prev ? { ...prev, status, updated_at: new Date().toISOString() } : prev,
     );
@@ -234,23 +239,30 @@ export default function WorkflowActionPanel({ task, documentId, onCompleted, var
 
   const refetchWorkflowState = () => {
     qc.invalidateQueries({ queryKey: ["workflow", "my-tasks"] });
-    qc.invalidateQueries({ queryKey: ["document", documentId] });
-    qc.invalidateQueries({ queryKey: ["document-workflow", documentId] });
-    qc.invalidateQueries({ queryKey: ["sunsystems-postings", documentId] });
-    qc.invalidateQueries({ queryKey: ["notification-workflow", documentId] });
+    if (hasDocument) {
+      qc.invalidateQueries({ queryKey: ["document", documentId] });
+      qc.invalidateQueries({ queryKey: ["document-workflow", documentId] });
+      qc.invalidateQueries({ queryKey: ["sunsystems-postings", documentId] });
+      qc.invalidateQueries({ queryKey: ["notification-workflow", documentId] });
+    }
+    qc.invalidateQueries({ queryKey: ["sunsystems-payment-runs"] });
     qc.invalidateQueries({ queryKey: ["documents"] });
     qc.invalidateQueries({ queryKey: ["notifications"] });
     qc.invalidateQueries({ queryKey: ["task-history", task.id] });
     qc.invalidateQueries({ queryKey: ["documents", "pending"] });
     qc.invalidateQueries({ queryKey: ["documents", "completed"] });
-    void qc.refetchQueries({ queryKey: ["document", documentId], type: "active" });
-    void qc.refetchQueries({ queryKey: ["document-workflow", documentId], type: "active" });
-    void qc.refetchQueries({ queryKey: ["sunsystems-postings", documentId], type: "active" });
+    if (hasDocument) {
+      void qc.refetchQueries({ queryKey: ["document", documentId], type: "active" });
+      void qc.refetchQueries({ queryKey: ["document-workflow", documentId], type: "active" });
+      void qc.refetchQueries({ queryKey: ["sunsystems-postings", documentId], type: "active" });
+    }
     void qc.refetchQueries({ queryKey: ["workflow", "my-tasks"], type: "active" });
-    void qc.fetchQuery({
-      queryKey: ["document", documentId],
-      queryFn: () => documentsAPI.get(documentId).then((r) => r.data),
-    });
+    if (hasDocument && documentId) {
+      void qc.fetchQuery({
+        queryKey: ["document", documentId],
+        queryFn: () => documentsAPI.get(documentId).then((r) => r.data),
+      });
+    }
   };
 
   const beginOptimisticAction = (action: WorkflowActionKind) => {
@@ -296,7 +308,7 @@ export default function WorkflowActionPanel({ task, documentId, onCompleted, var
   const approveMutation = useMutation({
     mutationFn: (result?: SignaturePlacementResult) => workflowAPI.approveTask(task.id, comment, result ?? undefined),
     onMutate: () => beginOptimisticAction("approve"),
-    onSuccess: () => { toast.success("Document approved"); completeAction(); },
+    onSuccess: () => { toast.success(`${capitalizedTargetLabel} approved`); completeAction(); },
     onError:   (e: { response?: { data?: { detail?: string } } }) =>
       failAction(extractApiError(e, "Approval failed")),
   });
@@ -304,7 +316,7 @@ export default function WorkflowActionPanel({ task, documentId, onCompleted, var
   const rejectMutation = useMutation({
     mutationFn: () => workflowAPI.rejectTask(task.id, comment),
     onMutate: () => beginOptimisticAction("reject"),
-    onSuccess: () => { toast.success("Document rejected"); completeAction(); },
+    onSuccess: () => { toast.success(`${capitalizedTargetLabel} rejected`); completeAction(); },
     onError:   (e: { response?: { data?: { detail?: string } } }) =>
       failAction(extractApiError(e, "Rejection failed")),
   });
@@ -313,7 +325,7 @@ export default function WorkflowActionPanel({ task, documentId, onCompleted, var
     mutationFn: () => workflowAPI.returnForReview(task.id, comment),
     onMutate: () => beginOptimisticAction("return"),
     onSuccess: () => {
-      toast.success("Document returned for review");
+      toast.success(`${capitalizedTargetLabel} sent back`);
       completeAction();
     },
     onError: (e: { response?: { data?: { detail?: string } } }) =>
@@ -324,7 +336,7 @@ export default function WorkflowActionPanel({ task, documentId, onCompleted, var
     mutationFn: () => workflowAPI.holdTask(task.id, comment, holdHours),
     onMutate: () => beginOptimisticAction("hold"),
     onSuccess: () => {
-      toast.success(`Document placed on hold for ${holdHours}h`);
+      toast.success(`${capitalizedTargetLabel} placed on hold for ${holdHours}h`);
       completeAction();
     },
     onError: (e: { response?: { data?: { detail?: string } } }) =>
@@ -376,9 +388,9 @@ export default function WorkflowActionPanel({ task, documentId, onCompleted, var
       <div className="relative px-4 py-3">
         {showSignaturePlacement && (
           <SignaturePlacementModal
-            documentId={documentId}
+            documentId={documentId ?? ""}
             documentTitle={task.document_title}
-            documentRef={task.document_ref}
+            documentRef={task.document_ref ?? ""}
             note={comment ? `Approval note: ${comment}` : undefined}
             confirmLabel="Save signature"
             onCancel={() => setShowSignaturePlacement(false)}
@@ -441,7 +453,7 @@ export default function WorkflowActionPanel({ task, documentId, onCompleted, var
             )}
             {isActive && (
               <>
-                {task.step?.allow_return !== false && (
+                {task.target_type !== "payment_run" && task.step?.allow_return !== false && (
                   <button
                     onClick={() => setActiveAction("return")}
                     className="inline-flex h-8 items-center gap-1.5 bg-white px-3 text-xs font-semibold text-[#5E6870] hover:bg-[#F5F7F8]"
@@ -480,7 +492,7 @@ export default function WorkflowActionPanel({ task, documentId, onCompleted, var
           <div className="absolute bottom-full right-3 z-40 mb-2 w-[min(92vw,28rem)] border border-[#AEB5BB] bg-white p-4 shadow-2xl">
             {activeAction === "approve" && (
               <div className="space-y-3">
-                <p className="text-sm font-bold text-[#1F2933]">Approve document</p>
+                <p className="text-sm font-bold text-[#1F2933]">Approve {targetLabel}</p>
                 <div>
                   <label className="label text-xs">Comment (optional)</label>
                   <textarea
@@ -528,7 +540,7 @@ export default function WorkflowActionPanel({ task, documentId, onCompleted, var
 
             {activeAction === "reject" && (
               <div className="space-y-3">
-                <p className="text-sm font-bold text-[#1F2933]">Reject document</p>
+                <p className="text-sm font-bold text-[#1F2933]">Reject {targetLabel}</p>
                 <div>
                   <label className="label text-xs">Rejection reason <span className="text-red-600">*</span></label>
                   <textarea
@@ -536,7 +548,7 @@ export default function WorkflowActionPanel({ task, documentId, onCompleted, var
                     onChange={(e) => setComment(e.target.value)}
                     rows={3}
                     className="input text-sm"
-                    placeholder="Explain why this document is being rejected..."
+                        placeholder={`Explain why this ${targetLabel} is being rejected...`}
                     autoFocus
                   />
                 </div>
@@ -649,9 +661,9 @@ export default function WorkflowActionPanel({ task, documentId, onCompleted, var
     <div className="border border-[#C8CDD2] bg-[#F5F7F8] p-4 space-y-4">
       {showSignaturePlacement && (
         <SignaturePlacementModal
-          documentId={documentId}
+          documentId={documentId ?? ""}
           documentTitle={task.document_title}
-          documentRef={task.document_ref}
+          documentRef={task.document_ref ?? ""}
           note={comment ? `Approval note: ${comment}` : undefined}
           confirmLabel="Save signature"
           onCancel={() => setShowSignaturePlacement(false)}
@@ -719,7 +731,7 @@ export default function WorkflowActionPanel({ task, documentId, onCompleted, var
       {/* Action buttons — inline compact row, UniPI style */}
       {isActive && !activeAction && (
         <div className="flex items-center gap-2 flex-wrap">
-          {task.step?.allow_return !== false && (
+                {task.target_type !== "payment_run" && task.step?.allow_return !== false && (
             <button
               onClick={() => setActiveAction("return")}
               title="Return for review"
@@ -759,7 +771,7 @@ export default function WorkflowActionPanel({ task, documentId, onCompleted, var
       {/* ── Approve form ─────────────────────────────────────────────────── */}
       {activeAction === "approve" && (
         <div className="space-y-3 border border-[#C8CDD2] p-4 bg-white">
-          <p className="text-sm font-medium text-foreground">Approve document</p>
+          <p className="text-sm font-medium text-foreground">Approve {targetLabel}</p>
           <div>
             <label className="label text-xs">Comment (optional)</label>
             <textarea
@@ -823,7 +835,7 @@ export default function WorkflowActionPanel({ task, documentId, onCompleted, var
       {/* ── Reject form ───────────────────────────────────────────────── */}
       {activeAction === "reject" && (
         <div className="space-y-3 border border-[#C8CDD2] p-4 bg-white">
-          <p className="text-sm font-medium text-foreground">Reject document</p>
+          <p className="text-sm font-medium text-foreground">Reject {targetLabel}</p>
           <div>
             <label className="label text-xs">Rejection reason <span className="text-red-500">*</span></label>
             <textarea
@@ -831,7 +843,7 @@ export default function WorkflowActionPanel({ task, documentId, onCompleted, var
               onChange={(e) => setComment(e.target.value)}
               rows={3}
               className="input text-sm"
-              placeholder="Explain why this document is being rejected…"
+              placeholder={`Explain why this ${targetLabel} is being rejected...`}
               autoFocus
             />
           </div>

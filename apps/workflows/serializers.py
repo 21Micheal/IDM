@@ -289,7 +289,7 @@ class WorkflowTemplateSerializer(serializers.ModelSerializer):
     class Meta:
         model  = WorkflowTemplate
         fields = [
-            "id", "name", "description", "document_type", "document_type_name", "is_active",
+            "id", "name", "description", "target_type", "document_type", "document_type_name", "is_active",
             "notify_uploader_on_approval", "email_templates",
             "steps", "step_count", "created_by", "created_at", "updated_at",
         ]
@@ -307,9 +307,10 @@ class WorkflowTemplateWriteSerializer(serializers.ModelSerializer):
 
     class Meta:
         model  = WorkflowTemplate
-        fields = ["name", "description", "document_type", "is_active", "notify_uploader_on_approval", "email_templates", "steps"]
+        fields = ["name", "description", "target_type", "document_type", "is_active", "notify_uploader_on_approval", "email_templates", "steps"]
         extra_kwargs = {
             "is_active":                    {"required": False},
+            "target_type":                  {"required": False},
             "document_type":                {"required": False, "allow_null": True},
             "notify_uploader_on_approval":  {"required": False},
             "email_templates":              {"required": False},
@@ -327,9 +328,17 @@ class WorkflowTemplateWriteSerializer(serializers.ModelSerializer):
 
     def validate(self, attrs):
         attrs = super().validate(attrs)
+        target_type = attrs.get("target_type", getattr(self.instance, "target_type", "document")) or "document"
         document_type = attrs.get("document_type", getattr(self.instance, "document_type", None))
 
-        if document_type is None and self.instance and self.instance.rules.exists():
+        if target_type == "payment_run":
+            attrs["document_type"] = None
+        elif document_type is None:
+            raise serializers.ValidationError(
+                {"document_type": "Choose the document type this template belongs to."}
+            )
+
+        if target_type == "document" and document_type is None and self.instance and self.instance.rules.exists():
             raise serializers.ValidationError(
                 {"document_type": "Templates with routing rules must remain assigned to a document type."}
             )
@@ -350,6 +359,10 @@ class WorkflowTemplateWriteSerializer(serializers.ModelSerializer):
             if not has_approval:
                 raise serializers.ValidationError(
                     {"steps": "A workflow template must have at least one approval step."}
+                )
+            if target_type == "payment_run" and any(s.get("requires_signature") for s in steps_data):
+                raise serializers.ValidationError(
+                    {"steps": "Payment run workflow steps cannot require document signatures."}
                 )
 
         return attrs
@@ -453,12 +466,12 @@ class WorkflowRuleSerializer(serializers.ModelSerializer):
     class Meta:
         model  = WorkflowRule
         fields = [
-            "id", "document_type", "document_type_name",
+            "id", "target_type", "document_type", "document_type_name",
             "template", "template_name",
             "template_document_type",
             "phase", "amount_min", "amount_max", "currency", "label", "is_active",
         ]
-        read_only_fields = ["id", "document_type", "template_name", "document_type_name", "template_document_type"]
+        read_only_fields = ["id", "target_type", "document_type", "template_name", "document_type_name", "template_document_type"]
         extra_kwargs = {
             "phase":     {"required": False, "allow_blank": True},
             "label":     {"required": False, "allow_blank": True},
@@ -475,8 +488,9 @@ class WorkflowRuleSerializer(serializers.ModelSerializer):
         if template is None:
             raise serializers.ValidationError({"template": "A template is required."})
 
+        target_type = template.target_type
         document_type = template.document_type
-        if document_type is None:
+        if target_type == "document" and document_type is None:
             raise serializers.ValidationError(
                 {"template": "Assign this template to a document type before adding routing rules."}
             )
@@ -487,7 +501,9 @@ class WorkflowRuleSerializer(serializers.ModelSerializer):
         overlaps = (
             WorkflowRule.objects
             .filter(
+                target_type=target_type,
                 document_type=document_type,
+                template__target_type=target_type,
                 template__document_type=document_type,
                 phase=phase,
                 currency=currency,
@@ -506,6 +522,7 @@ class WorkflowRuleSerializer(serializers.ModelSerializer):
                 )
 
         attrs["document_type"] = document_type
+        attrs["target_type"] = target_type
         attrs["currency"] = currency
         attrs["phase"] = phase
         return attrs
@@ -542,23 +559,133 @@ class DocumentSignatureSerializer(serializers.ModelSerializer):
 class WorkflowTaskSerializer(serializers.ModelSerializer):
     step           = WorkflowStepSerializer(read_only=True)
     assigned_to    = UserSummarySerializer(read_only=True)
-    document_id    = serializers.CharField(source="workflow_instance.document.id",               read_only=True)
-    document_ref   = serializers.CharField(source="workflow_instance.document.reference_number", read_only=True)
-    document_title = serializers.CharField(source="workflow_instance.document.title",            read_only=True)
-    document_type_name = serializers.CharField(source="workflow_instance.document.document_type.name", read_only=True)
-    document_department_name = serializers.CharField(source="workflow_instance.document.department.name", read_only=True, default=None)
+    target_type = serializers.CharField(source="workflow_instance.target_type", read_only=True)
+    document_id = serializers.SerializerMethodField()
+    document_ref = serializers.SerializerMethodField()
+    document_title = serializers.SerializerMethodField()
+    document_type_name = serializers.SerializerMethodField()
+    document_department_name = serializers.SerializerMethodField()
+    payment_run_id = serializers.SerializerMethodField()
+    payment_reference = serializers.SerializerMethodField()
+    payment_run_status = serializers.SerializerMethodField()
+    payment_run_total = serializers.SerializerMethodField()
+    payment_run_currency_codes = serializers.SerializerMethodField()
+    payment_run_lines = serializers.SerializerMethodField()
     uploaded_by_name = serializers.SerializerMethodField()
-    uploader_department_name = serializers.CharField(source="workflow_instance.document.uploaded_by.department.name", read_only=True, default=None)
-    file_name = serializers.CharField(source="workflow_instance.document.file_name", read_only=True)
-    file_mime_type = serializers.CharField(source="workflow_instance.document.file_mime_type", read_only=True)
+    uploader_department_name = serializers.SerializerMethodField()
+    file_name = serializers.SerializerMethodField()
+    file_mime_type = serializers.SerializerMethodField()
     status_display = serializers.CharField(source="get_status_display", read_only=True)
-    requires_signature = serializers.BooleanField(source="step.requires_signature", read_only=True)
+    requires_signature = serializers.SerializerMethodField()
     is_delegated = serializers.SerializerMethodField()
     delegated_from = serializers.SerializerMethodField()
 
+    def _document(self, obj):
+        return getattr(obj.workflow_instance, "document", None)
+
+    def _payment_run(self, obj):
+        return getattr(obj.workflow_instance, "payment_run", None)
+
+    def get_document_id(self, obj):
+        doc = self._document(obj)
+        return str(doc.id) if doc else None
+
+    def get_document_ref(self, obj):
+        doc = self._document(obj)
+        if doc:
+            return doc.reference_number
+        run = self._payment_run(obj)
+        return run.payment_reference if run else ""
+
+    def get_document_title(self, obj):
+        doc = self._document(obj)
+        if doc:
+            return doc.title
+        run = self._payment_run(obj)
+        return f"Payment Run {run.payment_reference}" if run else ""
+
+    def get_document_type_name(self, obj):
+        doc = self._document(obj)
+        if doc and doc.document_type_id:
+            return doc.document_type.name
+        return "Payment run" if self._payment_run(obj) else ""
+
+    def get_document_department_name(self, obj):
+        doc = self._document(obj)
+        return doc.department.name if doc and doc.department_id else None
+
+    def get_payment_run_id(self, obj):
+        run = self._payment_run(obj)
+        return str(run.id) if run else None
+
+    def get_payment_reference(self, obj):
+        run = self._payment_run(obj)
+        return run.payment_reference if run else None
+
+    def get_payment_run_status(self, obj):
+        run = self._payment_run(obj)
+        return run.status if run else None
+
+    def get_payment_run_total(self, obj):
+        run = self._payment_run(obj)
+        return str(run.total_amount) if run else None
+
+    def get_payment_run_currency_codes(self, obj):
+        run = self._payment_run(obj)
+        return run.currency_codes if run else []
+
+    def get_payment_run_lines(self, obj):
+        run = self._payment_run(obj)
+        if not run:
+            return []
+        lines = run.lines if isinstance(run.lines, list) else []
+        allowed = {
+            "account_code",
+            "account_description",
+            "accounting_period",
+            "transaction_date",
+            "journal_number",
+            "journal_line_number",
+            "transaction_reference",
+            "description",
+            "base_amount",
+            "conversion_rate",
+            "currency_code",
+            "transaction_amount",
+            "debit_credit",
+            "allocation_marker",
+            "payment_marker",
+        }
+        return [
+            {key: value for key, value in line.items() if key in allowed}
+            for line in lines
+            if isinstance(line, dict)
+        ]
+
     def get_uploaded_by_name(self, obj):
-        uploader = obj.workflow_instance.document.uploaded_by
+        doc = self._document(obj)
+        uploader = doc.uploaded_by if doc else getattr(self._payment_run(obj), "submitted_by", None)
+        if not uploader:
+            return None
         return uploader.get_full_name() or uploader.email
+
+    def get_uploader_department_name(self, obj):
+        doc = self._document(obj)
+        uploader = doc.uploaded_by if doc else getattr(self._payment_run(obj), "submitted_by", None)
+        return uploader.department.name if uploader and uploader.department_id else None
+
+    def get_file_name(self, obj):
+        doc = self._document(obj)
+        return doc.file_name if doc else ""
+
+    def get_file_mime_type(self, obj):
+        doc = self._document(obj)
+        return doc.file_mime_type if doc else ""
+
+    def get_requires_signature(self, obj):
+        if not self._document(obj):
+            return False
+        return bool(obj.step.requires_signature)
 
     def get_is_delegated(self, obj):
         request = self.context.get("request")
@@ -580,7 +707,10 @@ class WorkflowTaskSerializer(serializers.ModelSerializer):
             "requires_signature",
             "comment", "held_until",
             "due_at", "acted_at",
+            "target_type",
             "document_id", "document_ref", "document_title", "document_type_name",
+            "payment_run_id", "payment_reference", "payment_run_status", "payment_run_total",
+            "payment_run_currency_codes", "payment_run_lines",
             "document_department_name", "uploaded_by_name", "uploader_department_name",
             "file_name", "file_mime_type",
             "is_delegated", "delegated_from",
@@ -596,7 +726,7 @@ class WorkflowInstanceSerializer(serializers.ModelSerializer):
     class Meta:
         model  = WorkflowInstance
         fields = [
-            "id", "document", "template", "rule", "rule_label",
+            "id", "target_type", "document", "payment_run", "template", "rule", "rule_label",
             "phase",
             "status", "current_step_order",
             "started_by", "started_at", "completed_at", "tasks",
@@ -605,4 +735,6 @@ class WorkflowInstanceSerializer(serializers.ModelSerializer):
     def get_phase(self, obj):
         if obj.rule_id and obj.rule and obj.rule.phase:
             return obj.rule.phase
+        if obj.target_type == "payment_run":
+            return "payment_run"
         return "request"

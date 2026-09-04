@@ -5,6 +5,7 @@ from .views import (
     AmendMarkerView,
     BudgetCheckView,
     JournalPostingDetailView,
+    JournalPostingListView,
     JournalPostingRetryView,
     PaymentRunApproveView,
     PaymentRunListView,
@@ -26,6 +27,7 @@ urlpatterns = [
     path("accounts/", AccountsQueryView.as_view(), name="sunsystems-accounts"),
     path("connection/", SunSystemsConnectionView.as_view(), name="sunsystems-connection"),
     path("connection/test/", SunSystemsTestConnectionView.as_view(), name="sunsystems-connection-test"),
+    path("postings/", JournalPostingListView.as_view(), name="sunsystems-posting-list"),
     path("postings/<uuid:document_id>/", JournalPostingDetailView.as_view(), name="sunsystems-posting-detail"),
     path("postings/<uuid:document_id>/retry/", JournalPostingRetryView.as_view(), name="sunsystems-posting-retry"),
 ]

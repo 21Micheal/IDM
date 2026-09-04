@@ -100,6 +100,56 @@ def _document_url(document_id) -> str:
     return f"{settings.FRONTEND_URL.rstrip('/')}/documents/{document_id}"
 
 
+def _payment_run_task_context(task):
+    """Return common notification fields for document and payment-run tasks."""
+    doc = task.workflow_instance.document
+    if doc is not None:
+        link = f"/documents/{doc.id}"
+        return {
+            "link": link,
+            "title": doc.title,
+            "reference": doc.reference_number,
+            "target_label": "document",
+            "target_label_title": "Document",
+            "direct_url": f"{settings.FRONTEND_URL.rstrip('/')}{link}",
+            "detail_lines": [
+                f"  Document: {doc.title}",
+                f"  Reference: {doc.reference_number}",
+            ],
+        }
+
+    run = task.workflow_instance.payment_run
+    if run is not None:
+        link = f"/workflow?task={task.id}"
+        currencies = ", ".join(run.currency_codes or []) or "N/A"
+        total = f"{run.total_amount} {currencies}".strip()
+        submitted_by = run.submitted_by.get_full_name() or run.submitted_by.email if run.submitted_by_id else "Unknown"
+        return {
+            "link": link,
+            "title": f"Payment Run {run.payment_reference}",
+            "reference": run.payment_reference,
+            "target_label": "payment run",
+            "target_label_title": "Payment run",
+            "direct_url": f"{settings.FRONTEND_URL.rstrip('/')}{link}",
+            "detail_lines": [
+                f"  Payment run: {run.payment_reference}",
+                f"  Lines: {run.line_count}",
+                f"  Total: {total}",
+                f"  Submitted by: {submitted_by}",
+            ],
+        }
+
+    return {
+        "link": "/workflow",
+        "title": "Workflow task",
+        "reference": str(task.id),
+        "target_label": "workflow item",
+        "target_label_title": "Workflow item",
+        "direct_url": f"{settings.FRONTEND_URL.rstrip('/')}/workflow",
+        "detail_lines": ["  Workflow task"],
+    }
+
+
 def _create_notification(recipient, message: str, link: str = "", notification_type: str = "task_assigned") -> None:
     """Create an in-app Notification row."""
     try:
@@ -149,17 +199,16 @@ def _notify_delegates_of_task(task, *, only_delegation=None) -> None:
     if task.status != "in_progress" or not task.assigned_to_id:
         return
 
-    doc = task.workflow_instance.document
-    link = f"/documents/{doc.id}"
+    target_ctx = _payment_run_task_context(task)
+    link = target_ctx["link"]
     delegator_name = task.assigned_to.get_full_name() or task.assigned_to.email
     message = (
         f"Delegated action required: '{task.step.name}' for "
-        f"{doc.title} ({doc.reference_number}) — on behalf of {delegator_name}"
+        f"{target_ctx['title']} ({target_ctx['reference']}) — on behalf of {delegator_name}"
     )
     body = (
         f"A workflow task has been delegated to you by {delegator_name}.\n\n"
-        f"  Document: {doc.title}\n"
-        f"  Reference: {doc.reference_number}\n"
+        + "\n".join(target_ctx["detail_lines"]) + "\n"
         f"  Step: {task.step.name}\n"
         f"  Instructions: {task.step.instructions or 'None'}\n"
         + (f"  Due by: {task.due_at.strftime('%d %b %Y %H:%M UTC')}\n" if task.due_at else "")
@@ -177,7 +226,7 @@ def _notify_delegates_of_task(task, *, only_delegation=None) -> None:
         _create_once(delegation.delegate, message, link, "delegation")
         _send_email(
             delegation.delegate,
-            subject=f"DMS — Delegated approval: {doc.reference_number}",
+            subject=f"DMS — Delegated approval: {target_ctx['reference']}",
             body=f"Hello {delegation.delegate.first_name},\n\n{body}",
             link=link,
         )
@@ -192,7 +241,10 @@ def notify_task_assigned(
     from apps.workflows.models import WorkflowTask
     try:
         task = WorkflowTask.objects.select_related(
-            "assigned_to", "step", "workflow_instance__document"
+            "assigned_to", "step",
+            "workflow_instance__document",
+            "workflow_instance__payment_run",
+            "workflow_instance__payment_run__submitted_by",
         ).get(id=task_id)
     except WorkflowTask.DoesNotExist:
         return
@@ -200,48 +252,45 @@ def notify_task_assigned(
     if task.status != "in_progress" or not task.assigned_to:
         return
 
-    doc     = task.workflow_instance.document
-    link    = f"/documents/{doc.id}"
+    target_ctx = _payment_run_task_context(task)
+    link = target_ctx["link"]
     message = (
         f"Action required: '{task.step.name}' for "
-        f"{doc.title} ({doc.reference_number})"
+        f"{target_ctx['title']} ({target_ctx['reference']})"
     )
 
     _create_notification(task.assigned_to, message, link, "task_assigned")
 
-    base = settings.FRONTEND_URL.rstrip("/")
-    document_url = f"{base}{link}"
     approver_name = task.assigned_to.get_full_name() or task.assigned_to.email
-    ctx = dict(
+    render_ctx = dict(
         approver_name=approver_name,
-        document_title=doc.title,
-        document_ref=doc.reference_number,
+        document_title=target_ctx["title"],
+        document_ref=target_ctx["reference"],
         step_name=task.step.name,
         instructions=task.step.instructions or "None",
-        document_url=document_url,
+        document_url=target_ctx["direct_url"],
     )
+    details = "\n".join(target_ctx["detail_lines"])
 
     if custom_subject or custom_body:
-        subject = _render_approver_email_template(custom_subject or "", **ctx) or (
-            f"DMS — Approval required: {doc.reference_number}"
+        subject = _render_approver_email_template(custom_subject or "", **render_ctx) or (
+            f"DMS — Approval required: {render_ctx['document_ref']}"
         )
-        body = _render_approver_email_template(custom_body or "", **ctx) or (
+        body = _render_approver_email_template(custom_body or "", **render_ctx) or (
             f"Hello {task.assigned_to.first_name},\n\n"
-            f"A document requires your approval.\n\n"
-            f"  Document: {doc.title}\n"
-            f"  Reference: {doc.reference_number}\n"
+            f"A {target_ctx['target_label']} requires your approval.\n\n"
+            f"{details}\n"
             f"  Step: {task.step.name}\n"
             f"  Instructions: {task.step.instructions or 'None'}\n"
             + (f"  Due by: {task.due_at.strftime('%d %b %Y %H:%M UTC')}\n" if task.due_at else "")
             + f"\nPlease log in to DMS to action this request.\n"
         )
     else:
-        subject = f"DMS — Approval required: {doc.reference_number}"
+        subject = f"DMS — Approval required: {render_ctx['document_ref']}"
         body = (
             f"Hello {task.assigned_to.first_name},\n\n"
-            f"A document requires your approval.\n\n"
-            f"  Document: {doc.title}\n"
-            f"  Reference: {doc.reference_number}\n"
+            f"A {target_ctx['target_label']} requires your approval.\n\n"
+            f"{details}\n"
             f"  Step: {task.step.name}\n"
             f"  Instructions: {task.step.instructions or 'None'}\n"
             + (f"  Due by: {task.due_at.strftime('%d %b %Y %H:%M UTC')}\n" if task.due_at else "")
@@ -274,7 +323,10 @@ def notify_delegation_activated(delegation_id: str) -> None:
         return
 
     tasks = tasks_for_delegation(delegation).select_related(
-        "assigned_to", "step", "workflow_instance__document",
+        "assigned_to", "step",
+        "workflow_instance__document",
+        "workflow_instance__payment_run",
+        "workflow_instance__payment_run__submitted_by",
     )
     task_count = tasks.count()
     if task_count == 0:
@@ -290,12 +342,11 @@ def notify_delegation_activated(delegation_id: str) -> None:
     for task in tasks:
         if not delegation_covers_task(delegation, task):
             continue
-        doc = task.workflow_instance.document
-        task_link = f"/documents/{doc.id}"
+        target_ctx = _payment_run_task_context(task)
         _create_once(
             delegation.delegate,
-            f"Delegated action required: '{task.step.name}' for {doc.title} ({doc.reference_number})",
-            task_link,
+            f"Delegated action required: '{task.step.name}' for {target_ctx['title']} ({target_ctx['reference']})",
+            target_ctx["link"],
             "delegation"
         )
 

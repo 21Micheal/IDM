@@ -808,6 +808,10 @@ export type PaymentRunLine = {
   debit_credit: string;
   allocation_marker: string;
   account_description: string;
+  // Idempotency: set by the backend when the line is already in an active PaymentRun.
+  already_submitted?: boolean;
+  existing_payment_ref?: string | null;
+  existing_run_status?: string | null;
 };
 
 export type PaymentRunResult = {
@@ -887,6 +891,7 @@ export type AmendMarkerResult = {
   ok: boolean;
   processed?: number;
   error?: string;
+  workflow_error?: string | null;
   response_xml?: string;
   payment_run?: PaymentRunRecord;
 };
@@ -945,6 +950,30 @@ export const sunsystemsAPI = {
     api.get<JournalPosting[]>(`/sunsystems/postings/${documentId}/`),
   retryPosting: (documentId: string, stage = 1) =>
     api.post<JournalPosting>(`/sunsystems/postings/${documentId}/retry/`, { stage }),
+  getPostingsList: (params?: { status?: string; limit?: number }) =>
+    api.get<{ ok: boolean; postings: JournalPostingRecord[]; count: number }>(
+      "/sunsystems/postings/", { params }),
+};
+
+export type JournalPostingRecord = {
+  id: string;
+  document_id: string | null;
+  document_reference: string | null;
+  document_title: string;
+  stage: number;
+  stage_label: string;
+  status: "pending" | "posting" | "posted" | "failed" | "skipped";
+  attempts: number;
+  component: string;
+  method: string;
+  business_unit: string;
+  journal_number: string;
+  message: string;
+  error: string;
+  posted_by_name: string | null;
+  posted_at: string | null;
+  created_at: string;
+  updated_at: string;
 };
 
 

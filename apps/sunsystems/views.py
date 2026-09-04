@@ -3,13 +3,17 @@ apps/sunsystems/views.py
 
 API surface for the SunSystems integration:
 
-  POST /api/v1/sunsystems/budget-check/         live budget availability
-  POST /api/v1/sunsystems/journal-preview/      the exact <SSC> XML to be posted
-  GET  /api/v1/sunsystems/postings/<doc_id>/    journal posting status
-  POST /api/v1/sunsystems/postings/<doc_id>/retry/   re-attempt a failed posting
-  POST /api/v1/sunsystems/payment-run/          query ledger lines (Journal/Query)
-  POST /api/v1/sunsystems/amend-markers/        update allocation markers (AllocationMarkerUpdate/AmendMarker)
-  GET  /api/v1/sunsystems/accounts/             list supplier accounts (Accounts/Query, AccountType=1)
+  POST /api/v1/sunsystems/budget-check/
+  POST /api/v1/sunsystems/journal-preview/
+  GET  /api/v1/sunsystems/postings/                           admin list (all docs)
+  GET  /api/v1/sunsystems/postings/<doc_id>/                 per-document postings
+  POST /api/v1/sunsystems/postings/<doc_id>/retry/           retry a failed posting
+  POST /api/v1/sunsystems/payment-run/                       query ledger lines
+  POST /api/v1/sunsystems/amend-markers/                     update allocation markers
+  GET  /api/v1/sunsystems/payment-runs/                      admin list of payment runs
+  GET  /api/v1/sunsystems/accounts/                          supplier accounts
+  GET/PUT /api/v1/sunsystems/connection/                     admin connection config
+  POST /api/v1/sunsystems/connection/test/
 """
 from __future__ import annotations
 
@@ -51,11 +55,16 @@ from .models import (
     JournalPosting,
     JournalPostingStatus,
     PaymentRun,
-    PaymentRunApproval,
     PaymentRunStatus,
     SunSystemsConnection,
     effective_connection,
     stored_connection,
+)
+from .payment_run import (
+    build_payment_process_payload,
+    payment_run_dates,
+    process_payment_run,
+    sunsystems_error_messages,
 )
 from .serializers import (
     BudgetCheckRequestSerializer,
@@ -321,36 +330,54 @@ class JournalPostingRetryView(APIView):
         )
 
 
-def _sunsystems_error_messages(response_xml: str) -> list[str]:
-    import xml.etree.ElementTree as ET
+class JournalPostingListView(APIView):
+    """Admin-wide list of journal postings across all documents.
 
-    try:
-        root = ET.fromstring(response_xml or "<SSC/>")
-    except ET.ParseError:
-        return []
+    GET /api/v1/sunsystems/postings/?status=failed&limit=100
 
-    msgs = []
-    for err in root.findall(".//Errors/Error"):
-        desc = (
-            err.findtext("Description")
-            or err.findtext("Message")
-            or err.findtext("Text")
-            or "Unknown error"
+    Query params:
+        status  (optional) filter by status: pending, posting, posted, failed, skipped
+        limit   (optional, default 100, max 500)
+    """
+
+    permission_classes = [IsAdminAccess]
+
+    def get(self, request):
+        status_filter = str(request.query_params.get("status") or "").strip()
+        limit = min(int(request.query_params.get("limit") or 100), 500)
+
+        qs = (
+            JournalPosting.objects
+            .select_related("document", "posted_by")
+            .order_by("-updated_at")
         )
-        msgs.append(desc.strip())
-    return [m for m in msgs if m]
+        if status_filter:
+            qs = qs.filter(status=status_filter)
+
+        postings = qs[:limit]
+        data = []
+        for p in postings:
+            row = JournalPostingSerializer(p).data
+            # Attach lightweight document context so the UI can link/identify.
+            row["document_reference"] = (
+                getattr(p.document, "reference_number", None) or str(p.document_id)
+                if p.document_id else None
+            )
+            row["document_title"] = (
+                getattr(p.document, "title", None) or ""
+                if p.document_id else ""
+            )
+            data.append(row)
+
+        return Response({"ok": True, "postings": data, "count": len(data)})
+
+
+def _sunsystems_error_messages(response_xml: str) -> list[str]:
+    return sunsystems_error_messages(response_xml)
 
 
 def _payment_run_dates():
-    from django.utils import timezone
-
-    run_date = timezone.localdate()
-    return {
-        "run_date": run_date,
-        "ddmmyyyy": run_date.strftime("%d%m%Y"),
-        "post_period": f"{run_date.month:03d}{run_date.year}",
-        "ddmmyy": run_date.strftime("%d%m%y"),
-    }
+    return payment_run_dates()
 
 
 def _next_payment_reference(prefix: str = "PAY") -> tuple[str, int, object]:
@@ -418,56 +445,7 @@ def _create_payment_run_from_marked_lines(*, request, data, business_unit, budge
 
 
 def _build_payment_process_payload(run: PaymentRun) -> str:
-    from xml.sax.saxutils import escape
-
-    dates = _payment_run_dates()
-
-    def x(value) -> str:
-        return escape(str(value or ""), {'"': "&quot;", "'": "&apos;"})
-
-    payment_ref = x(run.payment_reference)
-    business_unit = x(run.business_unit)
-    return f"""<SSC>
-<SunSystemsContext>
-<BusinessUnit>{business_unit}</BusinessUnit>
-</SunSystemsContext>
-<Payload>
-<PaymentRun>
-<VSsrfmscAcp_AcpPayBaseDate>{dates["ddmmyyyy"]}</VSsrfmscAcp_AcpPayBaseDate>
-<VSsrfmscAcp_AcpPayDate>{dates["ddmmyyyy"]}</VSsrfmscAcp_AcpPayDate>
-<VSsrfmscAcp_AcpDiscBaseDate>{dates["ddmmyyyy"]}</VSsrfmscAcp_AcpDiscBaseDate>
-<PostPeriod>
-<PostPeriod>{dates["post_period"]}</PostPeriod>
-</PostPeriod>
-<BankPayments>
-<ZzGeneric_Datetime>{dates["ddmmyyyy"]}</ZzGeneric_Datetime>
-</BankPayments>
-<VSsrfmscAcp_AcpDiscAcntCr>{x(run.discount_account_credit)}</VSsrfmscAcp_AcpDiscAcntCr>
-<VSsrfmscAcp_AcpBankDetailsCode>{x(run.bank_details_code)}</VSsrfmscAcp_AcpBankDetailsCode>
-<VSsrfmscAcp_AcpBankRef>{payment_ref}</VSsrfmscAcp_AcpBankRef>
-<VSsrfmscAcp_AcpLdgPayRef>{payment_ref}</VSsrfmscAcp_AcpLdgPayRef>
-<VSsrfmscAcp_AcpSelectionFrom3>{payment_ref}</VSsrfmscAcp_AcpSelectionFrom3>
-<VSsrfmscAcp_AcpSelectionTo3>{payment_ref}</VSsrfmscAcp_AcpSelectionTo3>
-<VSsrfmscAcp_AcpProfileCode>{x(run.profile_code)}</VSsrfmscAcp_AcpProfileCode>
-<VSsrfmscAcp_AcpSelectionFrom1>.</VSsrfmscAcp_AcpSelectionFrom1>
-<VSsrfmscAcp_AcpSelectionTo1>.</VSsrfmscAcp_AcpSelectionTo1>
-<VSsrfmscAcp_AcpSelectionFrom2>.</VSsrfmscAcp_AcpSelectionFrom2>
-<VSsrfmscAcp_AcpSelectionTo2>.</VSsrfmscAcp_AcpSelectionTo2>
-<AdditionalParameters>
-<ClearPrevious>Y</ClearPrevious>
-<ClearPreviousBank>Y</ClearPreviousBank>
-</AdditionalParameters>
-<DocumentFormat>
-<DocumentFormatCode>{x(run.document_format_code)}</DocumentFormatCode>
-<LanguageCode>1</LanguageCode>
-<Store>Y</Store>
-</DocumentFormat>
-<PostTransactions>
-<ValidationRoutine_ValidationRoutine>N</ValidationRoutine_ValidationRoutine>
-</PostTransactions>
-</PaymentRun>
-</Payload>
-</SSC>"""
+    return build_payment_process_payload(run)
 
 
 class PaymentRunView(APIView):
@@ -629,6 +607,38 @@ class PaymentRunView(APIView):
                 status=status.HTTP_502_BAD_GATEWAY,
             )
 
+        # ── Idempotency: mark lines already in an active payment run ──────────
+        # Query PaymentRun records for this BU/budget that are NOT rejected
+        # so we can flag lines the user has already submitted.  This prevents
+        # double-submission even if SunSystems still shows the old marker.
+        # Only rejected and never-submitted transactions are selectable.
+        # Pending approval, failed, approved, processing, and paid transactions are blocked.
+        submitted_keys: dict[tuple[str, str], dict] = {}
+        active_runs = (
+            PaymentRun.objects
+            .filter(business_unit=business_unit, budget_code=budget_code)
+            .exclude(status=PaymentRunStatus.REJECTED)
+            .only("payment_reference", "status", "lines")
+        )
+        for run in active_runs:
+            for ln in (run.lines or []):
+                key = (
+                    str(ln.get("journal_number",      "")).strip(),
+                    str(ln.get("journal_line_number", "")).strip(),
+                )
+                if key[0] and key[1] and key not in submitted_keys:
+                    submitted_keys[key] = {
+                        "payment_reference":   run.payment_reference,
+                        "existing_run_status": run.status,
+                    }
+
+        for line in lines:
+            key = (line["journal_number"], line["journal_line_number"])
+            info = submitted_keys.get(key)
+            line["already_submitted"]      = info is not None
+            line["existing_payment_ref"]   = info["payment_reference"]   if info else None
+            line["existing_run_status"]    = info["existing_run_status"] if info else None
+
         return Response({"ok": True, "lines": lines, "count": len(lines)})
 
 
@@ -676,6 +686,55 @@ class AmendMarkerView(APIView):
 
         business_unit = str(data.get("business_unit") or config.business_unit or "PK1")
         budget_code = str(data.get("budget_code") or config.budget_code or "A")
+
+        # ── Idempotency: mark lines already in an active payment run ──────────
+        # Query PaymentRun records for this BU/budget that are NOT rejected
+        # so we can flag lines the user has already submitted.  This prevents
+        # double-submission even if SunSystems still shows the old marker.
+        # Only rejected and never-submitted transactions are selectable.
+        # Pending approval, failed, approved, processing, and paid transactions are blocked.
+        submitted_keys: dict[tuple[str, str], dict] = {}
+        active_runs = (
+            PaymentRun.objects
+            .filter(business_unit=business_unit, budget_code=budget_code)
+            .exclude(status=PaymentRunStatus.REJECTED)
+            .only("payment_reference", "status", "lines")
+        )
+        for run in active_runs:
+            for ln in (run.lines or []):
+                key = (
+                    str(ln.get("journal_number",      "")).strip(),
+                    str(ln.get("journal_line_number", "")).strip(),
+                )
+                if key[0] and key[1] and key not in submitted_keys:
+                    submitted_keys[key] = {
+                        "payment_reference":   run.payment_reference,
+                        "existing_run_status": run.status,
+                    }
+
+        # Check each line in the request against already-submitted lines
+        duplicate_lines = []
+        for line in lines:
+            jnl     = str(line.get("journal_number",      "")).strip()
+            jnl_ln  = str(line.get("journal_line_number", "")).strip()
+            key = (jnl, jnl_ln)
+            if key in submitted_keys:
+                duplicate_lines.append({
+                    "journal_number": jnl,
+                    "journal_line_number": jnl_ln,
+                    "payment_reference": submitted_keys[key]["payment_reference"],
+                    "existing_run_status": submitted_keys[key]["existing_run_status"],
+                })
+
+        if duplicate_lines:
+            return Response(
+                {
+                    "ok": False,
+                    "error": f"{len(duplicate_lines)} line(s) already submitted to payment run {duplicate_lines[0]['payment_reference']}. Duplicate submissions are not allowed.",
+                    "duplicate_lines": duplicate_lines,
+                },
+                status=status.HTTP_409_CONFLICT,
+            )
 
         # ── Build <AllocationMarkers> blocks ───────────────────────────────────
         markers_xml_parts = []
@@ -742,59 +801,39 @@ class AmendMarkerView(APIView):
             budget_code=budget_code,
             lines=lines,
         )
+        workflow_error = None
+        try:
+            from apps.workflows.services import WorkflowError, WorkflowService
+            WorkflowService.start_payment_run(payment_run, request.user)
+            payment_run.refresh_from_db()
+        except WorkflowError as exc:
+            workflow_error = str(exc)
+            payment_run.status = PaymentRunStatus.FAILED
+            payment_run.error = workflow_error
+            payment_run.save(update_fields=["status", "error", "updated_at"])
 
         return Response({
             "ok": True,
             "processed": len(markers_xml_parts),
             "response_xml": response_xml,
+            "workflow_error": workflow_error,
             "payment_run": PaymentRunSerializer(payment_run).data,
         })
 
 
 class PaymentRunApproveView(APIView):
-    """Approve a marked payment-run batch.
-
-    A run needs ``required_approvals`` distinct approvers before it can be
-    processed in SunSystems.
-    """
+    """Legacy endpoint kept for URL compatibility; workflow tasks own approval."""
 
     permission_classes = [IsAuthenticated]
 
     def post(self, request, payment_run_id):
-        from django.db import IntegrityError, transaction
-
         run = PaymentRun.objects.filter(pk=payment_run_id).first()
         if not run:
             return Response({"detail": "Payment run not found."}, status=status.HTTP_404_NOT_FOUND)
-        if run.status not in (PaymentRunStatus.PENDING_APPROVAL, PaymentRunStatus.APPROVED):
-            return Response(
-                {"detail": f"Payment run cannot be approved while status is {run.status}."},
-                status=status.HTTP_400_BAD_REQUEST,
-            )
-        if run.status == PaymentRunStatus.APPROVED:
-            return Response(PaymentRunSerializer(run).data)
-
-        try:
-            with transaction.atomic():
-                run = PaymentRun.objects.select_for_update().get(pk=payment_run_id)
-                stage = run.approvals.count() + 1
-                PaymentRunApproval.objects.create(
-                    payment_run=run,
-                    stage=stage,
-                    approved_by=request.user,
-                    note=str((request.data or {}).get("note") or "").strip(),
-                )
-                if run.approvals.count() >= run.required_approvals:
-                    run.status = PaymentRunStatus.APPROVED
-                    run.save(update_fields=["status", "updated_at"])
-        except IntegrityError:
-            return Response(
-                {"detail": "You have already approved this payment run."},
-                status=status.HTTP_400_BAD_REQUEST,
-            )
-
-        run.refresh_from_db()
-        return Response(PaymentRunSerializer(run).data)
+        return Response(
+            {"detail": "Payment run approvals are handled through Workflow tasks."},
+            status=status.HTTP_410_GONE,
+        )
 
 
 class PaymentRunListView(APIView):
@@ -819,54 +858,16 @@ class PaymentRunProcessView(APIView):
     permission_classes = [IsAuthenticated]
 
     def post(self, request, payment_run_id):
-        from django.utils import timezone
-
         run = PaymentRun.objects.filter(pk=payment_run_id).first()
         if not run:
             return Response({"detail": "Payment run not found."}, status=status.HTTP_404_NOT_FOUND)
-        if run.status == PaymentRunStatus.PAID:
-            return Response(PaymentRunSerializer(run).data)
-        if run.status not in (PaymentRunStatus.APPROVED, PaymentRunStatus.FAILED):
-            return Response(
-                {"detail": "Payment run must receive all approvals before final payment."},
-                status=status.HTTP_400_BAD_REQUEST,
-            )
-
-        ssc_payload = _build_payment_process_payload(run)
-        run.status = PaymentRunStatus.PROCESSING
-        run.request_xml = ssc_payload
-        run.error = ""
-        run.save(update_fields=["status", "request_xml", "error", "updated_at"])
-
-        conn = effective_connection()
-        config = SunSystemsConfig.from_mapping(conn)
         try:
-            response_xml = SunSystemsClient(config).execute("PaymentRun", "Process", ssc_payload)
+            run = process_payment_run(run, actor=request.user)
         except SunSystemsError as exc:
-            run.status = PaymentRunStatus.FAILED
-            run.error = str(exc)
-            run.save(update_fields=["status", "error", "updated_at"])
             return Response(
                 {"ok": False, "error": str(exc), "payment_run": PaymentRunSerializer(run).data},
                 status=status.HTTP_502_BAD_GATEWAY,
             )
-
-        msgs = _sunsystems_error_messages(response_xml)
-        if msgs:
-            run.status = PaymentRunStatus.FAILED
-            run.response_xml = response_xml
-            run.error = " | ".join(msgs)
-            run.save(update_fields=["status", "response_xml", "error", "updated_at"])
-            return Response(
-                {"ok": False, "error": run.error, "payment_run": PaymentRunSerializer(run).data},
-                status=status.HTTP_502_BAD_GATEWAY,
-            )
-
-        run.status = PaymentRunStatus.PAID
-        run.response_xml = response_xml
-        run.processed_by = request.user
-        run.processed_at = timezone.now()
-        run.save(update_fields=["status", "response_xml", "processed_by", "processed_at", "updated_at"])
         return Response({"ok": True, "payment_run": PaymentRunSerializer(run).data})
 
 

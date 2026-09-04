@@ -81,7 +81,9 @@ class WorkflowService:
         phase = WorkflowService._document_workflow_phase(document)
 
         base_rules = WorkflowRule.objects.filter(
+            target_type="document",
             document_type=doc_type,
+            template__target_type="document",
             template__document_type=doc_type,
             is_active=True,
         )
@@ -113,6 +115,7 @@ class WorkflowService:
         if (
             primary
             and primary.is_active
+            and primary.target_type == "document"
             and primary.document_type_id == doc_type.id
         ):
             return None, primary
@@ -122,6 +125,57 @@ class WorkflowService:
             f"up for the '{doc_type.name}' document type (no matching amount rule "
             f"and no fallback template). Ask an administrator to configure it in "
             f"the Workflow Builder."
+        )
+
+    @staticmethod
+    def _resolve_payment_run_routing(payment_run):
+        amount = payment_run.total_amount or 0
+        currencies = payment_run.currency_codes if isinstance(payment_run.currency_codes, list) else []
+        currency = (currencies[0] if len(currencies) == 1 else "").upper()
+        phase = "payment_run"
+
+        base_rules = WorkflowRule.objects.filter(
+            target_type="payment_run",
+            document_type__isnull=True,
+            template__target_type="payment_run",
+            is_active=True,
+        )
+        phase_rules = base_rules.filter(phase=phase)
+        if not phase_rules.exists():
+            phase_rules = base_rules.filter(phase=WorkflowRule.DEFAULT_PHASE)
+
+        amount_q = Q(amount_min__lte=amount) & (
+            Q(amount_max__isnull=True) | Q(amount_max__gte=amount)
+        )
+
+        rule_currencies = {
+            (c or "").upper() for c in phase_rules.values_list("currency", flat=True)
+        }
+        candidates = phase_rules.filter(amount_q)
+        if len(rule_currencies) > 1 and currency:
+            candidates = candidates.filter(currency=currency)
+
+        rule = (
+            candidates
+            .order_by("-amount_min", "amount_max")
+            .select_related("template")
+            .first()
+        )
+        if rule:
+            return rule, rule.template
+
+        template = (
+            WorkflowTemplate.objects
+            .filter(target_type="payment_run", is_active=True)
+            .order_by("name")
+            .first()
+        )
+        if template:
+            return None, template
+
+        raise WorkflowError(
+            "This payment run can't be submitted yet because no payment-run "
+            "approval workflow is configured in the Workflow Builder."
         )
 
     @staticmethod
@@ -168,6 +222,31 @@ class WorkflowService:
 
         instance = WorkflowInstance.objects.create(
             document=document,
+            target_type="document",
+            template=template,
+            rule=rule,
+            started_by=actor,
+            status="in_progress",
+            current_step_order=1,
+        )
+        WorkflowService._activate_step(instance, order=1)
+        return instance
+
+    @staticmethod
+    @transaction.atomic
+    def start_payment_run(payment_run, actor) -> WorkflowInstance:
+        existing = WorkflowInstance.objects.filter(
+            payment_run=payment_run, status="in_progress"
+        ).first()
+        if existing:
+            if not WorkflowService._has_active_step_tasks(existing, existing.current_step_order):
+                WorkflowService._activate_step(existing, order=existing.current_step_order)
+            return existing
+
+        rule, template = WorkflowService._resolve_payment_run_routing(payment_run)
+        instance = WorkflowInstance.objects.create(
+            target_type="payment_run",
+            payment_run=payment_run,
             template=template,
             rule=rule,
             started_by=actor,
@@ -196,6 +275,9 @@ class WorkflowService:
         step       = task.step
         doc        = instance.document
 
+        if step.requires_signature and doc is None:
+            raise WorkflowError("Payment run workflow steps cannot require document signatures.")
+
         if step.requires_signature:
             WorkflowService._embed_signature(
                 doc,
@@ -209,16 +291,18 @@ class WorkflowService:
                 signature_image=signature_image,
             )
 
-        AuditLog.objects.create(
-            event=AuditEvent.WORKFLOW_APPROVED,
-            actor=actor,
-            object_type=doc.__class__.__name__,
-            object_id=str(doc.pk),
-            object_repr=str(doc)[:255],
-            changes={"task_id": str(task.id), "action": action.action, "comment": action.comment},
-        )
+        if doc is not None:
+            AuditLog.objects.create(
+                event=AuditEvent.WORKFLOW_APPROVED,
+                actor=actor,
+                object_type=doc.__class__.__name__,
+                object_id=str(doc.pk),
+                object_repr=str(doc)[:255],
+                changes={"task_id": str(task.id), "action": action.action, "comment": action.comment},
+            )
 
-        WorkflowService._notify_action(action, doc)
+        if doc is not None:
+            WorkflowService._notify_action(action, doc)
 
         if step.assignee_type == "group_all" and WorkflowService._has_active_step_tasks(instance, step.order):
             return
@@ -242,16 +326,18 @@ class WorkflowService:
         instance = task.workflow_instance
         doc      = instance.document
 
-        AuditLog.objects.create(
-            event=AuditEvent.WORKFLOW_REJECTED,
-            actor=actor,
-            object_type=doc.__class__.__name__,
-            object_id=str(doc.pk),
-            object_repr=str(doc)[:255],
-            changes={"task_id": str(task.id), "action": action.action, "comment": action.comment},
-        )
+        if doc is not None:
+            AuditLog.objects.create(
+                event=AuditEvent.WORKFLOW_REJECTED,
+                actor=actor,
+                object_type=doc.__class__.__name__,
+                object_id=str(doc.pk),
+                object_repr=str(doc)[:255],
+                changes={"task_id": str(task.id), "action": action.action, "comment": action.comment},
+            )
 
-        WorkflowService._notify_action(action, doc)
+        if doc is not None:
+            WorkflowService._notify_action(action, doc)
         WorkflowService._complete(instance, "rejected")
 
     # ── Return for review ──────────────────────────────────────────────────
@@ -281,6 +367,10 @@ class WorkflowService:
         instance       = task.workflow_instance
         current_order  = task.step.order
         doc            = instance.document
+
+        if doc is None:
+            WorkflowService._complete(instance, "rejected")
+            return
 
         AuditLog.objects.create(
             event=AuditEvent.WORKFLOW_RETURNED,
@@ -330,19 +420,21 @@ class WorkflowService:
         )
 
         doc        = task.workflow_instance.document
-        doc.status = "On Hold"
-        WorkflowService._save_document(doc, update_fields=["status", "updated_at"])
+        if doc is not None:
+            doc.status = "On Hold"
+            WorkflowService._save_document(doc, update_fields=["status", "updated_at"])
 
-        AuditLog.objects.create(
-            event=AuditEvent.WORKFLOW_HELD,
-            actor=actor,
-            object_type=doc.__class__.__name__,
-            object_id=str(doc.pk),
-            object_repr=str(doc)[:255],
-            changes={"task_id": str(task.id), "action": action.action, "comment": action.comment, "hold_hours": hold_hours},
-        )
+            AuditLog.objects.create(
+                event=AuditEvent.WORKFLOW_HELD,
+                actor=actor,
+                object_type=doc.__class__.__name__,
+                object_id=str(doc.pk),
+                object_repr=str(doc)[:255],
+                changes={"task_id": str(task.id), "action": action.action, "comment": action.comment, "hold_hours": hold_hours},
+            )
 
-        WorkflowService._notify_action(action, doc)
+        if doc is not None:
+            WorkflowService._notify_action(action, doc)
         WorkflowService._schedule_hold_notifications(task)
 
     # ── Release hold ───────────────────────────────────────────────────────
@@ -367,9 +459,9 @@ class WorkflowService:
         AuditLog.objects.create(
             event=AuditEvent.WORKFLOW_RELEASED,
             actor=actor,
-            object_type=task.workflow_instance.document.__class__.__name__,
-            object_id=str(task.workflow_instance.document.pk),
-            object_repr=str(task.workflow_instance.document)[:255],
+            object_type=task.workflow_instance.document.__class__.__name__ if task.workflow_instance.document else "PaymentRun",
+            object_id=str(task.workflow_instance.document.pk) if task.workflow_instance.document else str(task.workflow_instance.payment_run_id),
+            object_repr=str(task.workflow_instance.document)[:255] if task.workflow_instance.document else str(task.workflow_instance.payment_run),
             changes={
                 "task_id": str(task.id),
                 "action": "released",
@@ -379,9 +471,11 @@ class WorkflowService:
 
         step = task.step
         doc  = task.workflow_instance.document
-        WorkflowService._save_document(doc, update_fields=["status", "updated_at"])
+        if doc is not None:
+            WorkflowService._save_document(doc, update_fields=["status", "updated_at"])
 
-        WorkflowService._notify_action(action, doc)
+        if doc is not None:
+            WorkflowService._notify_action(action, doc)
 
     # ── Cancel ─────────────────────────────────────────────────────────────
 
@@ -397,6 +491,14 @@ class WorkflowService:
         instance.save(update_fields=["status", "completed_at"])
 
         doc        = instance.document
+        if doc is None:
+            if instance.payment_run_id:
+                from apps.sunsystems.models import PaymentRunStatus
+                run = instance.payment_run
+                run.status = PaymentRunStatus.FAILED
+                run.error = "Payment run approval workflow was cancelled."
+                run.save(update_fields=["status", "error", "updated_at"])
+            return
         doc.status = DocumentStatus.DRAFT
         WorkflowService._save_document(doc, update_fields=["status", "updated_at"])
         AuditLog.objects.create(
@@ -442,9 +544,10 @@ class WorkflowService:
                 )
             )
 
-        doc        = instance.document
-        doc.status = step.status_label
-        WorkflowService._save_document(doc, update_fields=["status", "updated_at"])
+        doc = instance.document
+        if doc is not None:
+            doc.status = step.status_label
+            WorkflowService._save_document(doc, update_fields=["status", "updated_at"])
 
         instance.current_step_order = order
         instance.save(update_fields=["current_step_order"])
@@ -460,7 +563,8 @@ class WorkflowService:
                         tid, custom_subject=cs, custom_body=cb,
                     )
                 )
-                WorkflowService._schedule_task_sla_notifications(task)
+                if instance.document_id is not None:
+                    WorkflowService._schedule_task_sla_notifications(task)
         except Exception:
             pass
 
@@ -475,9 +579,10 @@ class WorkflowService:
           4. Send the configured email to the recipient.
           5. Auto-advance to the next step.
         """
-        doc        = instance.document
-        doc.status = step.status_label
-        WorkflowService._save_document(doc, update_fields=["status", "updated_at"])
+        doc = instance.document
+        if doc is not None:
+            doc.status = step.status_label
+            WorkflowService._save_document(doc, update_fields=["status", "updated_at"])
 
         instance.current_step_order = order
         instance.save(update_fields=["current_step_order"])
@@ -498,22 +603,24 @@ class WorkflowService:
             comment="Notification step auto-executed by workflow engine.",
         )
 
-        AuditLog.objects.create(
-            event=AuditEvent.WORKFLOW_APPROVED,   # reuse closest event; no dedicated NOTIFIED event yet
-            actor=None,
-            object_type=doc.__class__.__name__,
-            object_id=str(doc.pk),
-            object_repr=str(doc)[:255],
-            changes={
-                "step": step.name,
-                "step_type": "notification",
-                "recipient_user": str(step.notify_user_id) if step.notify_user_id else None,
-                "recipient_email": step.notify_email or None,
-            },
-        )
+        if doc is not None:
+            AuditLog.objects.create(
+                event=AuditEvent.WORKFLOW_APPROVED,   # reuse closest event; no dedicated NOTIFIED event yet
+                actor=None,
+                object_type=doc.__class__.__name__,
+                object_id=str(doc.pk),
+                object_repr=str(doc)[:255],
+                changes={
+                    "step": step.name,
+                    "step_type": "notification",
+                    "recipient_user": str(step.notify_user_id) if step.notify_user_id else None,
+                    "recipient_email": step.notify_email or None,
+                },
+            )
 
         # Fire the notification email asynchronously
-        WorkflowService._send_notification_step_email(step, doc)
+        if doc is not None:
+            WorkflowService._send_notification_step_email(step, doc)
 
         # Immediately advance — notification steps never block
         WorkflowService._advance_step(instance, order)
@@ -736,19 +843,49 @@ class WorkflowService:
         from apps.documents.access import outcome_status_for
 
         doc = instance.document
-        doc.status = outcome_status_for(doc.document_type, outcome)
-        WorkflowService._save_document(doc, update_fields=["status", "updated_at"])
+        if doc is not None:
+            doc.status = outcome_status_for(doc.document_type, outcome)
+            WorkflowService._save_document(doc, update_fields=["status", "updated_at"])
 
-        try:
-            from apps.notifications.tasks import notify_workflow_complete
-            instance_id = str(instance.id)
-            _queue_after_commit(
-                lambda iid=instance_id, oc=outcome: notify_workflow_complete.delay(iid, oc)
-            )
-        except Exception:
-            pass
+            try:
+                from apps.notifications.tasks import notify_workflow_complete
+                instance_id = str(instance.id)
+                _queue_after_commit(
+                    lambda iid=instance_id, oc=outcome: notify_workflow_complete.delay(iid, oc)
+                )
+            except Exception:
+                pass
 
-        WorkflowService._maybe_post_sunsystems_journal(doc, outcome)
+            WorkflowService._maybe_post_sunsystems_journal(doc, outcome)
+            return
+
+        if instance.payment_run_id:
+            WorkflowService._complete_payment_run(instance, outcome)
+
+    @staticmethod
+    def _complete_payment_run(instance: WorkflowInstance, outcome: str) -> None:
+        from apps.sunsystems.models import PaymentRunStatus
+
+        run = instance.payment_run
+        if not run:
+            return
+        if outcome == "approved":
+            run.status = PaymentRunStatus.APPROVED
+            run.error = ""
+            run.save(update_fields=["status", "error", "updated_at"])
+
+            try:
+                from apps.sunsystems.tasks import process_payment_run
+                run_id = str(run.id)
+                actor_id = str(instance.started_by_id) if instance.started_by_id else None
+                _queue_after_commit(lambda rid=run_id, aid=actor_id: process_payment_run.delay(rid, aid))
+            except Exception:
+                logger.exception("Failed to queue payment run processing for %s", run.id)
+        else:
+            # Set to REJECTED for any non-approved outcome
+            run.status = PaymentRunStatus.REJECTED
+            run.error = f"Payment run workflow completed with outcome '{outcome}'."
+            run.save(update_fields=["status", "error", "updated_at"])
 
     @staticmethod
     def _maybe_post_sunsystems_journal(document, outcome: str) -> None:

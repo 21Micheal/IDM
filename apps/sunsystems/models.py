@@ -90,6 +90,7 @@ class PaymentRunStatus(models.TextChoices):
     """Lifecycle for a SunSystems payment-run batch."""
 
     PENDING_APPROVAL = "pending_approval", "Pending approval"
+    REJECTED = "rejected", "Rejected"
     APPROVED = "approved", "Approved"
     PROCESSING = "processing", "Processing"
     PAID = "paid", "Paid"
@@ -153,7 +154,7 @@ class PaymentRun(models.Model):
         ordering = ["-submitted_at"]
         unique_together = [("run_date", "daily_sequence", "reference_prefix")]
         indexes = [
-            models.Index(fields=["status", "submitted_at"]),
+            models.Index(fields=["status", "submitted_at"], name="sunsystems__status_ee32e3_idx"),
         ]
 
     @property
