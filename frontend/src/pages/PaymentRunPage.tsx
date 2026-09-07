@@ -97,7 +97,7 @@ function EmptyState({ hasQueried }: { hasQueried: boolean }) {
 
 const ALLOCATION_OPTIONS = [
   { value: "",  label: "All markers" },
-  { value: "W", label: "W — Unallocated" },
+  { value: "W", label: "Unallocated (blank / W)" },
   { value: "A", label: "A — Allocated" },
   { value: "F", label: "F — Force" },
   { value: "S", label: "S — Split" },
@@ -1090,6 +1090,14 @@ export default function PaymentRunPage() {
                           else if (col.key === "accounting_period") displayValue = formatPeriod(row.accounting_period);
                           else if (col.key === "transaction_amount" || col.key === "base_amount") displayValue = formatAmount(row[col.key] as string);
                           else if (col.key === "debit_credit") displayValue = <DebitCreditBadge value={row.debit_credit} />;
+                          else if (col.key === "allocation_marker") {
+                            const marker = String(row.allocation_marker ?? "").trim();
+                            displayValue = marker ? (
+                              marker
+                            ) : (
+                              <span className="text-[#AEB5BB]" title="Not allocated in SunSystems">—</span>
+                            );
+                          }
                           return (
                             <td
                               key={col.key}
