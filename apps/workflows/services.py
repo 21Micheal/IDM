@@ -291,6 +291,7 @@ class WorkflowService:
                 signature_image=signature_image,
             )
 
+        # Handle audit log and notifications for both documents and payment runs
         if doc is not None:
             AuditLog.objects.create(
                 event=AuditEvent.WORKFLOW_APPROVED,
@@ -300,9 +301,18 @@ class WorkflowService:
                 object_repr=str(doc)[:255],
                 changes={"task_id": str(task.id), "action": action.action, "comment": action.comment},
             )
-
-        if doc is not None:
             WorkflowService._notify_action(action, doc)
+        elif instance.payment_run:
+            AuditLog.objects.create(
+                event=AuditEvent.WORKFLOW_APPROVED,
+                actor=actor,
+                object_type="PaymentRun",
+                object_id=str(instance.payment_run.pk),
+                object_repr=str(instance.payment_run.payment_reference)[:255],
+                changes={"task_id": str(task.id), "action": action.action, "comment": action.comment},
+            )
+            # Payment runs also need action notifications
+            WorkflowService._notify_action(action, None)
 
         if step.assignee_type == "group_all" and WorkflowService._has_active_step_tasks(instance, step.order):
             return
@@ -326,6 +336,7 @@ class WorkflowService:
         instance = task.workflow_instance
         doc      = instance.document
 
+        # Handle audit log and notifications for both documents and payment runs
         if doc is not None:
             AuditLog.objects.create(
                 event=AuditEvent.WORKFLOW_REJECTED,
@@ -335,9 +346,18 @@ class WorkflowService:
                 object_repr=str(doc)[:255],
                 changes={"task_id": str(task.id), "action": action.action, "comment": action.comment},
             )
-
-        if doc is not None:
             WorkflowService._notify_action(action, doc)
+        elif instance.payment_run:
+            AuditLog.objects.create(
+                event=AuditEvent.WORKFLOW_REJECTED,
+                actor=actor,
+                object_type="PaymentRun",
+                object_id=str(instance.payment_run.pk),
+                object_repr=str(instance.payment_run.payment_reference)[:255],
+                changes={"task_id": str(task.id), "action": action.action, "comment": action.comment},
+            )
+            WorkflowService._notify_action(action, None)
+
         WorkflowService._complete(instance, "rejected")
 
     # ── Return for review ──────────────────────────────────────────────────
@@ -368,7 +388,18 @@ class WorkflowService:
         current_order  = task.step.order
         doc            = instance.document
 
+        # Payment runs cannot be returned - treat as rejection
         if doc is None:
+            if instance.payment_run:
+                AuditLog.objects.create(
+                    event=AuditEvent.WORKFLOW_REJECTED,
+                    actor=actor,
+                    object_type="PaymentRun",
+                    object_id=str(instance.payment_run.pk),
+                    object_repr=str(instance.payment_run.payment_reference)[:255],
+                    changes={"task_id": str(task.id), "action": action.action, "comment": action.comment, "return_to": return_to},
+                )
+                WorkflowService._notify_action(action, None)
             WorkflowService._complete(instance, "rejected")
             return
 
@@ -432,9 +463,18 @@ class WorkflowService:
                 object_repr=str(doc)[:255],
                 changes={"task_id": str(task.id), "action": action.action, "comment": action.comment, "hold_hours": hold_hours},
             )
-
-        if doc is not None:
             WorkflowService._notify_action(action, doc)
+        elif task.workflow_instance.payment_run:
+            AuditLog.objects.create(
+                event=AuditEvent.WORKFLOW_HELD,
+                actor=actor,
+                object_type="PaymentRun",
+                object_id=str(task.workflow_instance.payment_run.pk),
+                object_repr=str(task.workflow_instance.payment_run.payment_reference)[:255],
+                changes={"task_id": str(task.id), "action": action.action, "comment": action.comment, "hold_hours": hold_hours},
+            )
+            WorkflowService._notify_action(action, None)
+
         WorkflowService._schedule_hold_notifications(task)
 
     # ── Release hold ───────────────────────────────────────────────────────
@@ -469,13 +509,12 @@ class WorkflowService:
             },
         )
 
-        step = task.step
         doc  = task.workflow_instance.document
         if doc is not None:
             WorkflowService._save_document(doc, update_fields=["status", "updated_at"])
-
-        if doc is not None:
             WorkflowService._notify_action(action, doc)
+        elif task.workflow_instance.payment_run:
+            WorkflowService._notify_action(action, None)
 
     # ── Cancel ─────────────────────────────────────────────────────────────
 
@@ -563,20 +602,20 @@ class WorkflowService:
                         tid, custom_subject=cs, custom_body=cb,
                     )
                 )
-                if instance.document_id is not None:
-                    WorkflowService._schedule_task_sla_notifications(task)
+                # Schedule SLA notifications for both documents and payment runs
+                WorkflowService._schedule_task_sla_notifications(task)
         except Exception:
             pass
 
     @staticmethod
-    @transaction.atomic
     def _execute_notification_step(instance: WorkflowInstance, step: WorkflowStep, order: int) -> None:
         """
-        Handle a notification step:
-          1. Update document status to step.status_label.
+        Handle a notification step (informational blast to people outside the
+        approval chain). Does not replace per-stage action/completion notifies:
+          1. Update document status to step.status_label (if document exists).
           2. Create a WorkflowTask with status="notified" (no human needed).
           3. Log a WorkflowTaskAction(action="notified", actor=None).
-          4. Send the configured email to the recipient.
+          4. Send the configured email body only (no login/document links).
           5. Auto-advance to the next step.
         """
         doc = instance.document
@@ -603,6 +642,7 @@ class WorkflowService:
             comment="Notification step auto-executed by workflow engine.",
         )
 
+        # Handle audit log for both documents and payment runs
         if doc is not None:
             AuditLog.objects.create(
                 event=AuditEvent.WORKFLOW_APPROVED,   # reuse closest event; no dedicated NOTIFIED event yet
@@ -617,38 +657,51 @@ class WorkflowService:
                     "recipient_email": step.notify_email or None,
                 },
             )
+        elif instance.payment_run:
+            AuditLog.objects.create(
+                event=AuditEvent.WORKFLOW_APPROVED,   # reuse closest event; no dedicated NOTIFIED event yet
+                actor=None,
+                object_type="PaymentRun",
+                object_id=str(instance.payment_run.pk),
+                object_repr=str(instance.payment_run.payment_reference)[:255],
+                changes={
+                    "step": step.name,
+                    "step_type": "notification",
+                    "recipient_user": str(step.notify_user_id) if step.notify_user_id else None,
+                    "recipient_email": step.notify_email or None,
+                },
+            )
 
-        # Fire the notification email asynchronously
+        # Fire the notification email asynchronously for both documents and payment runs
         if doc is not None:
-            WorkflowService._send_notification_step_email(step, doc)
+            WorkflowService._send_notification_step_email(step, document=doc)
+        elif instance.payment_run:
+            WorkflowService._send_notification_step_email(step, payment_run=instance.payment_run)
 
         # Immediately advance — notification steps never block
         WorkflowService._advance_step(instance, order)
 
     @staticmethod
-    def _send_notification_step_email(step: WorkflowStep, document) -> None:
+    def _send_notification_step_email(step: WorkflowStep, document=None, payment_run=None) -> None:
         """
-        Dispatch the notification-step email via Celery.
-
-        The notifications app receives:
-          - recipient_user_id (str|None)
-          - recipient_email   (str|None)
-          - subject           (str)
-          - message           (str)
-          - document_id       (str)
-
-        Wire this to your existing email/notification infrastructure.
-        The notification task should resolve the recipient's email from the user
-        if recipient_user_id is set, otherwise use recipient_email directly.
+        Dispatch the notification-step email via Celery for documents or payment runs.
+        Uses the step's configured subject/body; optional template overrides are applied
+        in the notifications task.
         """
+        target = document if document is not None else payment_run
+        if target is None:
+            return
+
         try:
             from apps.notifications.tasks import send_workflow_notification_step_email
             recipient_user_id = str(step.notify_user_id) if step.notify_user_id else None
             recipient_email = step.notify_email or None
             subject = step.notification_subject
             message = step.notification_message
-            document_id = str(document.pk)
             step_name = step.name
+            document_id = str(document.pk) if document is not None else None
+            payment_run_id = str(payment_run.pk) if payment_run is not None else None
+            template_id = str(step.template_id) if step.template_id else None
             _queue_after_commit(
                 lambda: send_workflow_notification_step_email.delay(
                     recipient_user_id=recipient_user_id,
@@ -656,14 +709,17 @@ class WorkflowService:
                     subject=subject,
                     message=message,
                     document_id=document_id,
+                    payment_run_id=payment_run_id,
                     step_name=step_name,
+                    template_id=template_id,
                 )
             )
         except Exception:
             logger.exception(
-                "Failed to dispatch notification-step email for step '%s' on document %s",
+                "Failed to dispatch notification-step email for step '%s' on %s %s",
                 step.name,
-                document.pk,
+                "document" if document is not None else "payment run",
+                getattr(target, "pk", target),
             )
 
     @staticmethod
@@ -860,6 +916,14 @@ class WorkflowService:
             return
 
         if instance.payment_run_id:
+            try:
+                from apps.notifications.tasks import notify_workflow_complete
+                instance_id = str(instance.id)
+                _queue_after_commit(
+                    lambda iid=instance_id, oc=outcome: notify_workflow_complete.delay(iid, oc)
+                )
+            except Exception:
+                pass
             WorkflowService._complete_payment_run(instance, outcome)
 
     @staticmethod
@@ -1095,9 +1159,6 @@ class WorkflowService:
     @staticmethod
     def _notify_action(action: WorkflowTaskAction, document) -> None:
         from apps.workflows.models import WorkflowTaskActionNotification
-        from django.contrib.auth import get_user_model
-
-        User = get_user_model()
 
         template = action.task.workflow_instance.template
         if action.action == "approved" and not template.notify_uploader_on_approval:
@@ -1108,11 +1169,25 @@ class WorkflowService:
                 pass
             return
 
-        uploader = document.uploaded_by if hasattr(document, "uploaded_by") else None
-        notify_users = set()
+        try:
+            from apps.notifications.tasks import _workflow_stakeholder_recipients
+            notify_users = set(
+                _workflow_stakeholder_recipients(
+                    action.task.workflow_instance,
+                    document=document,
+                )
+            )
+        except Exception:
+            notify_users = set()
 
-        if uploader:
-            notify_users.add(uploader)
+        if not notify_users:
+            if action.action in ("approved", "rejected", "returned"):
+                try:
+                    from apps.notifications.tasks import clear_resolved_task_notifications_now
+                    clear_resolved_task_notifications_now(str(action.task_id))
+                except Exception:
+                    pass
+            return
 
         for user in notify_users:
             try:

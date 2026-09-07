@@ -85,7 +85,8 @@ type EmailTemplateKey =
   | "hold_ending"
   | "hold_expired"
   | "sla_warning"
-  | "sla_overdue";
+  | "sla_overdue"
+  | "workflow_notification";
 
 interface EmailTemplateEntry {
   subject: string;
@@ -192,6 +193,18 @@ const EMAIL_TEMPLATE_DEFS: {
     placeholders: ["{approver_name}", "{document_title}", "{document_ref}", "{step_name}", "{document_url}"],
     defaultSubject: "DMS — Hold expired, action required: {document_ref}",
     defaultBody: "Hello {approver_name},\n\nThe hold period you set on a document has expired.\n\n  Document: {document_title}\n  Reference: {document_ref}\n  Step: {step_name}\n\nPlease log in to DMS to action this approval.\n",
+  },
+  {
+    key: "workflow_notification",
+    label: "Workflow notification step",
+    description: "Optional override for notification-step emails to people outside the approval chain. Uses the step subject/body unless set. No login or document links are appended.",
+    group: "Uploader",
+    placeholders: [
+      "{document_title}", "{document_ref}", "{payment_reference}",
+      "{line_count}", "{total_amount}", "{currencies}", "{step_name}",
+    ],
+    defaultSubject: "DMS — Workflow notification: {document_ref}",
+    defaultBody: "Hello,\n\nA workflow notification has been triggered.\n\n  Item: {document_title}\n  Reference: {document_ref}\n  Step: {step_name}\n",
   },
 ];
 
