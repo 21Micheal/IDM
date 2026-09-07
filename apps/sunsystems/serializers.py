@@ -1,6 +1,6 @@
 from rest_framework import serializers
 
-from .models import JournalPosting
+from .models import JournalPosting, PaymentRun, PaymentRunApproval
 
 
 class JournalPostingSerializer(serializers.ModelSerializer):
@@ -21,6 +21,54 @@ class JournalPostingSerializer(serializers.ModelSerializer):
 
     def get_posted_by_name(self, obj):
         user = obj.posted_by
+        if not user:
+            return None
+        return user.get_full_name() or user.email
+
+
+class PaymentRunApprovalSerializer(serializers.ModelSerializer):
+    approved_by_name = serializers.SerializerMethodField()
+
+    class Meta:
+        model = PaymentRunApproval
+        fields = ["id", "stage", "approved_by_name", "approved_at", "note"]
+        read_only_fields = fields
+
+    def get_approved_by_name(self, obj):
+        user = obj.approved_by
+        if not user:
+            return None
+        return user.get_full_name() or user.email
+
+
+class PaymentRunSerializer(serializers.ModelSerializer):
+    submitted_by_name = serializers.SerializerMethodField()
+    processed_by_name = serializers.SerializerMethodField()
+    approval_count = serializers.IntegerField(read_only=True)
+    approvals = PaymentRunApprovalSerializer(many=True, read_only=True)
+
+    class Meta:
+        model = PaymentRun
+        fields = [
+            "id", "payment_reference", "reference_prefix", "run_date",
+            "daily_sequence", "business_unit", "budget_code", "status",
+            "required_approvals", "approval_count", "line_count",
+            "total_amount", "currency_codes", "lines", "component", "method",
+            "bank_details_code", "discount_account_credit", "profile_code",
+            "document_format_code", "request_xml", "response_xml", "error",
+            "submitted_by_name", "processed_by_name", "submitted_at",
+            "updated_at", "processed_at", "approvals",
+        ]
+        read_only_fields = fields
+
+    def get_submitted_by_name(self, obj):
+        user = obj.submitted_by
+        if not user:
+            return None
+        return user.get_full_name() or user.email
+
+    def get_processed_by_name(self, obj):
+        user = obj.processed_by
         if not user:
             return None
         return user.get_full_name() or user.email

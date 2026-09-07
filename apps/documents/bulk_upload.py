@@ -209,19 +209,30 @@ def create_bulk_upload_documents(
     bulk_upload.status = BulkUploadStatus.UPLOADING
     bulk_upload.total_files = len(files)
     bulk_upload.save(update_fields=["status", "total_files", "updated_at"])
+    should_classify_documents = (
+        bulk_upload.document_type.code == UNCLASSIFIED_BULK_DOCUMENT_TYPE_CODE
+        and (auto_classify or bulk_upload.mode == BulkUpload.Mode.RELATED_SET)
+    )
     classification_candidates = (
         _classification_candidates(allowed_document_type_ids)
-        if auto_classify and bulk_upload.document_type.code == UNCLASSIFIED_BULK_DOCUMENT_TYPE_CODE
+        if should_classify_documents
         else []
     )
 
     for upload in files:
         title = document_title_from_filename(upload.name)
         metadata = dict(shared_metadata or {})
-        document_type = (
+        classified_document_type = (
             _classify_upload_document_type(upload, classification_candidates)
-            or bulk_upload.document_type
+            if should_classify_documents
+            else None
         )
+        document_type = classified_document_type or bulk_upload.document_type
+        if should_classify_documents and classified_document_type is None:
+            logger.info(
+                "Bulk upload left file=%s unclassified; reviewer must select type before metadata confirmation.",
+                getattr(upload, "name", None),
+            )
         should_scan = bool(is_scanned)
         payload = {
             "title": title,

@@ -25,6 +25,7 @@ import { QUERY_FIVE_MIN_STALE } from "@/lib/reactQueryDefaults";
 import CustomListbox from "@/components/ui/CustomListbox";
 import { deriveDocumentTypeConfig } from "@/lib/documentTypeConfig";
 import BulkUploadDropzone from "@/components/documents/bulk/BulkUploadDropzone";
+import BulkFileThumbnails from "@/components/documents/bulk/BulkFileThumbnails";
 import BulkProcessingPanel from "@/components/documents/bulk/BulkProcessingPanel";
 import BulkReviewPanel from "@/components/documents/bulk/BulkReviewPanel";
 import type { BulkDocReviewState, BulkLocalPreview, BulkUploadBatch } from "@/components/documents/bulk/bulkUploadTypes";
@@ -278,6 +279,10 @@ export default function BulkScanPage({ scanMode = true, onSingleMode, initialBat
               `${relationshipCount} document relationship${relationshipCount === 1 ? '' : 's'} found across the batch. View individual documents to review and confirm.`,
               {
                 duration: 10000,
+                action: {
+                  label: "Show suggestions",
+                  onClick: () => navigate("/documents?has_relationship_suggestions=true"),
+                },
               }
             );
           }, 1500);
@@ -486,8 +491,8 @@ export default function BulkScanPage({ scanMode = true, onSingleMode, initialBat
 
       {stage === "select" && (
         <>
-        <div className="grid grid-cols-1 gap-5 p-5 pr-0 lg:grid-cols-12">
-          <div className="space-y-5 lg:col-span-4">
+        <div className="grid grid-cols-1 gap-5 p-5 pr-0 xl:grid-cols-12">
+          <div className="space-y-5 xl:col-start-2 xl:col-span-4">
             <div className="border border-[#C8CDD2] bg-white p-5">
               <h2 className="mb-4 font-semibold text-[#1F2933]">1. Batch mode</h2>
               {onSingleMode && (
@@ -555,7 +560,7 @@ export default function BulkScanPage({ scanMode = true, onSingleMode, initialBat
                   { value: "", label: autoClassifyBulk
                       ? "Auto classify each document"
                       : isRelatedSet
-                      ? scanMode ? "Auto classify during review" : "Choose type during review"
+                      ? scanMode ? "Auto classify each document" : "Choose type during review"
                       : "— Choose document type —" },
                   ...visibleDocTypes.map((t) => ({ value: t.id, label: t.name })),
                 ]}
@@ -570,7 +575,7 @@ export default function BulkScanPage({ scanMode = true, onSingleMode, initialBat
               ) : isRelatedSet ? (
                 <p className="mt-3 border-t border-[#D3D7DA] pt-3 text-xs text-[#5E6870]">
                   {scanMode
-                    ? "OCR will classify each file and extract supplier, PO reference, amount, and dates during review."
+                    ? "Claude classifies each file first, then extracts using the matched document type's configured metadata fields."
                     : "After upload, select each file to see its preview, then choose its type and fill the fields."}
                 </p>
               ) : selectedType?.description && (
@@ -585,7 +590,7 @@ export default function BulkScanPage({ scanMode = true, onSingleMode, initialBat
                   ? "Mixed batches are classified per file before review. Confirm every suggested type and metadata field before submitting."
                   : isRelatedSet
                   ? scanMode
-                    ? "Related sets are classified one document at a time. Confirm the suggested type and fields before the system links matching PO references."
+                    ? "Related sets are classified before OCR so admin-defined fields are extracted per document type. Confirm the suggested type and fields before links are suggested."
                     : "Related uploads are reviewed one document at a time. The system links matching PO references after you confirm the details."
                   : scanMode
                     ? "Each file gets its own metadata from OCR. You review and approve documents individually before the batch is submitted to workflow."
@@ -608,7 +613,7 @@ export default function BulkScanPage({ scanMode = true, onSingleMode, initialBat
 
           </div>
 
-          <div className="space-y-5 lg:col-span-8">
+          <div className="space-y-5 xl:col-span-6">
             <div className="border border-[#C8CDD2] bg-white p-5">
               <h2 className="mb-4 font-semibold text-[#1F2933]">2. Files</h2>
               <BulkUploadDropzone
@@ -653,6 +658,16 @@ export default function BulkScanPage({ scanMode = true, onSingleMode, initialBat
             </div>
           </div>
         </div>
+
+        {/* File thumbnails displayed outside the panel */}
+        {files.length > 0 && (
+          <BulkFileThumbnails
+            files={files}
+            onRemove={(index) => setFiles(files.filter((_, i) => i !== index))}
+            onClearAll={() => setFiles([])}
+            disabled={createMutation.isPending}
+          />
+        )}
         </>
       )}
 

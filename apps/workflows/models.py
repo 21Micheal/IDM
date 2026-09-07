@@ -26,9 +26,15 @@ import uuid
 
 
 class WorkflowTemplate(models.Model):
+    TARGET_TYPES = [
+        ("document", "Document"),
+        ("payment_run", "Payment run"),
+    ]
+
     id          = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
     name        = models.CharField(max_length=120, unique=True)
     description = models.TextField(blank=True)
+    target_type = models.CharField(max_length=30, choices=TARGET_TYPES, default="document", db_index=True)
     document_type = models.ForeignKey(
         "documents.DocumentType",
         null=True,
@@ -74,9 +80,13 @@ class WorkflowTemplate(models.Model):
 
     def clean(self):
         super().clean()
-        if self.document_type_id is None and self.pk and self.rules.exists():
+        if self.target_type == "document" and self.document_type_id is None and self.pk and self.rules.exists():
             raise ValidationError(
                 {"document_type": "Templates with routing rules must remain assigned to a document type."}
+            )
+        if self.target_type == "payment_run" and self.document_type_id is not None:
+            raise ValidationError(
+                {"document_type": "Payment run workflows are not assigned to a document type."}
             )
 
     def save(self, *args, **kwargs):
@@ -92,10 +102,12 @@ class WorkflowTemplate(models.Model):
         self.full_clean()
         super().save(*args, **kwargs)
 
-        if self.document_type_id and previous_document_type_id != self.document_type_id:
+        if self.target_type == "document" and self.document_type_id and previous_document_type_id != self.document_type_id:
             self.rules.exclude(document_type_id=self.document_type_id).update(
                 document_type_id=self.document_type_id
             )
+        if self.target_type == "payment_run":
+            self.rules.update(target_type="payment_run", document_type=None)
 
 
 class WorkflowStep(models.Model):
@@ -239,8 +251,9 @@ class WorkflowRule(models.Model):
     DEFAULT_PHASE = "request"
 
     id               = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    target_type      = models.CharField(max_length=30, choices=WorkflowTemplate.TARGET_TYPES, default="document", db_index=True)
     document_type    = models.ForeignKey(
-        "documents.DocumentType", on_delete=models.CASCADE, related_name="workflow_rules",
+        "documents.DocumentType", null=True, blank=True, on_delete=models.CASCADE, related_name="workflow_rules",
     )
     template         = models.ForeignKey(
         WorkflowTemplate, on_delete=models.PROTECT, related_name="rules"
@@ -255,19 +268,39 @@ class WorkflowRule(models.Model):
     updated_at       = models.DateTimeField(auto_now=True)
 
     class Meta:
-        ordering = ["document_type", "phase", "amount_min", "amount_max"]
+        ordering = ["target_type", "document_type", "phase", "amount_min", "amount_max"]
 
     def __str__(self):
         upper = self.amount_max if self.amount_max is not None else "∞"
-        return f"{self.document_type.name} [{self.phase}: {self.amount_min} - {upper}] -> {self.template.name}"
+        scope = self.document_type.name if self.document_type_id else self.get_target_type_display()
+        return f"{scope} [{self.phase}: {self.amount_min} - {upper}] -> {self.template.name}"
 
     def clean(self):
         super().clean()
-        if self.template_id and self.template.document_type_id is None:
+        template_target = self.template.target_type if self.template_id else self.target_type
+        if self.template_id and self.template.target_type != self.target_type:
+            raise ValidationError(
+                {"target_type": "Routing rules must use the same target type as their template."}
+            )
+        if template_target == "document" and self.template_id and self.template.document_type_id is None:
             raise ValidationError(
                 {"template": "Assign this template to a document type before adding routing rules."}
             )
+        if template_target == "payment_run" and self.document_type_id is not None:
+            raise ValidationError(
+                {"document_type": "Payment run routing rules cannot be assigned to a document type."}
+            )
         if (
+            template_target == "document"
+            and self.template_id
+            and not self.document_type_id
+        ):
+            raise ValidationError(
+                {"document_type": "Document routing rules require a document type."}
+            )
+        if (
+            template_target == "document"
+            and
             self.template_id
             and self.template.document_type_id
             and self.document_type_id
@@ -278,8 +311,12 @@ class WorkflowRule(models.Model):
             )
 
     def save(self, *args, **kwargs):
-        if self.template_id and self.template.document_type_id:
+        if self.template_id:
+            self.target_type = self.template.target_type
+        if self.template_id and self.template.target_type == "document" and self.template.document_type_id:
             self.document_type_id = self.template.document_type_id
+        if self.target_type == "payment_run":
+            self.document_type_id = None
         self.phase = (self.phase or self.DEFAULT_PHASE).strip().lower()
         self.full_clean()
         super().save(*args, **kwargs)
@@ -294,8 +331,12 @@ class WorkflowInstance(models.Model):
     ]
 
     id                 = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    target_type        = models.CharField(max_length=30, choices=WorkflowTemplate.TARGET_TYPES, default="document", db_index=True)
     document           = models.OneToOneField(
-        "documents.Document", on_delete=models.CASCADE, related_name="workflow_instance",
+        "documents.Document", null=True, blank=True, on_delete=models.CASCADE, related_name="workflow_instance",
+    )
+    payment_run        = models.OneToOneField(
+        "sunsystems.PaymentRun", null=True, blank=True, on_delete=models.CASCADE, related_name="workflow_instance",
     )
     template           = models.ForeignKey(WorkflowTemplate, on_delete=models.PROTECT)
     rule               = models.ForeignKey(
@@ -311,7 +352,8 @@ class WorkflowInstance(models.Model):
     completed_at = models.DateTimeField(null=True, blank=True)
 
     def __str__(self):
-        return f"Workflow for {self.document.reference_number} [{self.status}]"
+        target = self.document.reference_number if self.document_id else getattr(self.payment_run, "payment_reference", self.id)
+        return f"Workflow for {target} [{self.status}]"
 
 
 class WorkflowTask(models.Model):

@@ -35,6 +35,8 @@ def delegation_covers_task(delegation: UserDelegation, task: WorkflowTask) -> bo
         return False
     if delegation.document_type_id:
         doc = task.workflow_instance.document
+        if doc is None:
+            return False
         return doc.document_type_id == delegation.document_type_id
     return True
 

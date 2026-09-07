@@ -109,18 +109,28 @@ class WorkflowTemplateViewSet(viewsets.ModelViewSet):
         with transaction.atomic():
             clone = WorkflowTemplate.objects.create(
                 name=new_name, description=source.description,
+                target_type=source.target_type,
                 document_type=source.document_type,
                 is_active=True, created_by=request.user,
             )
             for step in source.steps.order_by("order"):
                 WorkflowStep.objects.create(
                     template=clone, order=step.order, name=step.name,
-                    status_label=step.status_label, assignee_type=step.assignee_type,
+                    status_label=step.status_label, step_type=step.step_type,
+                    assignee_type=step.assignee_type,
                     assignee_group=step.assignee_group, assignee_user=step.assignee_user,
+                    assignee_user_auto=step.assignee_user_auto,
                     sla_hours=step.sla_hours, allow_resubmit=step.allow_resubmit,
                     allow_approve=step.allow_approve, allow_reject=step.allow_reject,
                     allow_return=step.allow_return,
+                    requires_signature=step.requires_signature,
                     instructions=step.instructions,
+                    approver_email_subject=step.approver_email_subject,
+                    approver_email_body=step.approver_email_body,
+                    notify_user=step.notify_user,
+                    notify_email=step.notify_email,
+                    notification_subject=step.notification_subject,
+                    notification_message=step.notification_message,
                 )
         return Response(
             WorkflowTemplateSerializer(clone, context={"request": request}).data,
@@ -211,8 +221,14 @@ class WorkflowRuleViewSet(viewsets.ModelViewSet):
         qs = (
             WorkflowRule.objects
             .select_related("template", "template__document_type", "document_type")
-            .filter(template__document_type=models.F("document_type"))
+            .filter(template__target_type=models.F("target_type"))
         )
+        qs = qs.filter(
+            models.Q(target_type="payment_run", document_type__isnull=True)
+            | models.Q(target_type="document", template__document_type=models.F("document_type"))
+        )
+        if target_type := self.request.query_params.get("target_type"):
+            qs = qs.filter(target_type=target_type)
         if dt := self.request.query_params.get("document_type"):
             qs = qs.filter(document_type__id=dt)
         if tmpl := self.request.query_params.get("template"):
@@ -238,16 +254,20 @@ class WorkflowInstanceViewSet(viewsets.ReadOnlyModelViewSet):
         qs = (
             WorkflowInstance.objects
             .select_related("document", "template", "rule", "started_by")
+            .select_related("payment_run")
             .prefetch_related("tasks__step__assignee_user", "tasks__assigned_to")
         )
         if document_id := self.request.query_params.get("document") or self.request.query_params.get("document_id"):
             qs = qs.filter(document_id=document_id)
+        if payment_run_id := self.request.query_params.get("payment_run") or self.request.query_params.get("payment_run_id"):
+            qs = qs.filter(payment_run_id=payment_run_id)
 
         user = self.request.user
         if not user.has_admin_access:
             qs = qs.filter(
                 models.Q(started_by=user) |
                 models.Q(document__uploaded_by=user) |
+                models.Q(payment_run__submitted_by=user) |
                 models.Q(tasks__assigned_to=user)
             ).distinct()
 
@@ -274,6 +294,8 @@ class WorkflowTaskViewSet(viewsets.ReadOnlyModelViewSet):
         user = self.request.user
         qs   = WorkflowTask.objects.select_related(
             "step", "assigned_to", "workflow_instance__document",
+            "workflow_instance__payment_run",
+            "workflow_instance__payment_run__submitted_by",
             "workflow_instance__document__document_type",
             "workflow_instance__document__department",
             "workflow_instance__document__uploaded_by",
@@ -287,6 +309,16 @@ class WorkflowTaskViewSet(viewsets.ReadOnlyModelViewSet):
                 models.Q(assigned_to=user) |
                 models.Q(workflow_instance__started_by=user) |
                 models.Q(workflow_instance__document__uploaded_by=user) |
+                delegated_tasks_q(user),
+            ).distinct()
+        if payment_run_id := self.request.query_params.get("payment_run") or self.request.query_params.get("payment_run_id"):
+            qs = qs.filter(workflow_instance__payment_run_id=payment_run_id)
+            if user.has_admin_access:
+                return qs
+            return qs.filter(
+                models.Q(assigned_to=user) |
+                models.Q(workflow_instance__started_by=user) |
+                models.Q(workflow_instance__payment_run__submitted_by=user) |
                 delegated_tasks_q(user),
             ).distinct()
 
@@ -305,6 +337,8 @@ class WorkflowTaskViewSet(viewsets.ReadOnlyModelViewSet):
                 "step",
                 "assigned_to",
                 "workflow_instance__document",
+                "workflow_instance__payment_run",
+                "workflow_instance__payment_run__submitted_by",
                 "workflow_instance__document__document_type",
                 "workflow_instance__document__department",
                 "workflow_instance__document__uploaded_by",

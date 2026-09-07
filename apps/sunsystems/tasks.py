@@ -49,3 +49,70 @@ def post_journal_for_document(self, document_id: str, stage: int = 1, actor_id: 
         "journal_number": posting.journal_number,
         "document_id": str(document_id),
     }
+
+
+@shared_task(bind=True, max_retries=0, queue="default")
+def process_payment_run(self, payment_run_id: str, actor_id: str | None = None):
+    """Post an approved payment run to SunSystems and verify payment.
+
+    The underlying ``process_payment_run`` function sets status=PAID **only**
+    when a follow-up Journal/Query confirms that every submitted ledger line
+    now carries AllocationMarker=P in SunSystems.  If the PaymentRun/Process
+    call succeeds but the verification step finds lines not yet marked P, the
+    run stays in PROCESSING (not PAID) and this task returns ok=False so that
+    the failure is logged and an operator or a retry mechanism can re-trigger
+    ``PaymentRunProcessView`` once SunSystems has settled the batch.
+    """
+    from apps.sunsystems.models import PaymentRun
+
+    try:
+        run = PaymentRun.objects.get(pk=payment_run_id)
+    except PaymentRun.DoesNotExist:
+        logger.warning("process_payment_run: payment run %s no longer exists", payment_run_id)
+        return {"ok": False, "detail": "payment run not found"}
+
+    actor = None
+    if actor_id:
+        try:
+            from django.contrib.auth import get_user_model
+            actor = get_user_model().objects.filter(pk=actor_id).first()
+        except Exception:  # pragma: no cover - defensive
+            actor = None
+
+    from apps.sunsystems.payment_run import process_payment_run as run_process
+
+    try:
+        processed = run_process(run, actor=actor)
+        return {
+            "ok": processed.status == "paid",
+            "status": processed.status,
+            "payment_reference": processed.payment_reference,
+            "payment_run_id": str(payment_run_id),
+        }
+    except Exception as exc:
+        # Re-read the current status so the log accurately reflects whether
+        # the run is FAILED (SunSystems rejected it) or PROCESSING (process
+        # call succeeded but AllocationMarker=P not yet confirmed).
+        try:
+            run.refresh_from_db(fields=["status", "error"])
+            current_status = run.status
+            current_error  = run.error
+        except Exception:
+            current_status = "unknown"
+            current_error  = str(exc)
+
+        if current_status == "processing":
+            logger.warning(
+                "Payment run %s processed by SunSystems but not yet confirmed as paid: %s",
+                payment_run_id,
+                current_error,
+            )
+        else:
+            logger.exception("Payment run %s failed (status=%s)", payment_run_id, current_status)
+
+        return {
+            "ok": False,
+            "status": current_status,
+            "detail": current_error or str(exc),
+            "payment_run_id": str(payment_run_id),
+        }

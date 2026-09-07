@@ -20,14 +20,22 @@ def _email_footer(link: str = "") -> str:
     return footer
 
 
-def _send_email_to_address(email: str, subject: str, body: str, link: str = "") -> None:
+def _send_email_to_address(
+    email: str,
+    subject: str,
+    body: str,
+    link: str = "",
+    *,
+    include_footer: bool = True,
+) -> None:
     """Send email to a raw address (no User record required)."""
     if not email:
         return
     try:
+        message = body + (_email_footer(link) if include_footer else "")
         send_mail(
             subject=subject,
-            message=body + _email_footer(link),
+            message=message,
             from_email=settings.DEFAULT_FROM_EMAIL,
             recipient_list=[email],
             fail_silently=False,
@@ -36,26 +44,84 @@ def _send_email_to_address(email: str, subject: str, body: str, link: str = "") 
         logger.warning("Email send failed to %s: %s", email, exc)
 
 
-def _send_email(recipient, subject: str, body: str, link: str = "") -> None:
+def _send_email(
+    recipient,
+    subject: str,
+    body: str,
+    link: str = "",
+    *,
+    include_footer: bool = True,
+) -> None:
     """Fire-and-forget email. Logs on failure, never raises.
 
-    Appends a footer pointing at the live system (settings.FRONTEND_URL) so
-    recipients can log in from the email. If ``link`` (a relative path such as
-    ``/documents/<id>``) is given, a direct deep-link is included too.
+    By default appends a footer pointing at the live system (settings.FRONTEND_URL).
+    Pass include_footer=False for informational blasts (e.g. notification steps)
+    that should contain only the configured body.
     """
     if not recipient or not recipient.email:
         return
 
     try:
+        message = body + (_email_footer(link) if include_footer else "")
         send_mail(
             subject=subject,
-            message=body + _email_footer(link),
+            message=message,
             from_email=settings.DEFAULT_FROM_EMAIL,
             recipient_list=[recipient.email],
             fail_silently=False,
         )
     except Exception as exc:
         logger.warning("Email send failed to %s: %s", recipient.email, exc)
+
+
+def _is_notifiable_user(user) -> bool:
+    """Active human user — excludes the email-ingestion bot."""
+    if not user or not getattr(user, "is_active", False):
+        return False
+    try:
+        from apps.documents.email_bot import is_email_bot
+        if is_email_bot(user):
+            return False
+    except Exception:
+        pass
+    return True
+
+
+def _workflow_stakeholder_recipients(instance, document=None):
+    """
+    People who should receive per-stage / completion workflow updates.
+
+    Prefer workflow starter and document owner over uploaded_by so email-ingested
+    documents (uploaded_by = email bot) still notify the real human.
+    """
+    doc = document if document is not None else getattr(instance, "document", None)
+    run = getattr(instance, "payment_run", None)
+    candidates = []
+    if doc is not None:
+        candidates.extend([
+            getattr(instance, "started_by", None),
+            getattr(doc, "owned_by", None),
+            getattr(doc, "uploaded_by", None),
+        ])
+    elif run is not None:
+        candidates.extend([
+            getattr(run, "submitted_by", None),
+            getattr(instance, "started_by", None),
+        ])
+    else:
+        candidates.append(getattr(instance, "started_by", None))
+
+    recipients = []
+    seen = set()
+    for user in candidates:
+        if not _is_notifiable_user(user):
+            continue
+        uid = getattr(user, "id", None)
+        if uid is None or uid in seen:
+            continue
+        seen.add(uid)
+        recipients.append(user)
+    return recipients
 
 
 def _render_email_template(template: str, **ctx) -> str:
@@ -77,7 +143,8 @@ def _template_email_parts(workflow_template, key: str) -> tuple[str | None, str 
     """Return (subject, body) overrides for a template event key, or (None, None)."""
     if not workflow_template:
         return None, None
-    entry = (getattr(workflow_template, "email_templates", None) or {}).get(key) or {}
+    email_templates = getattr(workflow_template, "email_templates", None) or {}
+    entry = email_templates.get(key) or {}
     subject = (entry.get("subject") or "").strip() or None
     body = (entry.get("body") or "").strip() or None
     return subject, body
@@ -98,6 +165,68 @@ def _resolve_email(
 
 def _document_url(document_id) -> str:
     return f"{settings.FRONTEND_URL.rstrip('/')}/documents/{document_id}"
+
+
+def _payment_run_task_context(task):
+    """Return common notification fields for document and payment-run tasks."""
+    doc = task.workflow_instance.document
+    if doc is not None:
+        link = f"/documents/{doc.id}"
+        return {
+            "link": link,
+            "title": doc.title,
+            "reference": doc.reference_number,
+            "target_label": "document",
+            "target_label_title": "Document",
+            "direct_url": f"{settings.FRONTEND_URL.rstrip('/')}{link}",
+            "detail_lines": [
+                f"  Document: {doc.title}",
+                f"  Reference: {doc.reference_number}",
+            ],
+            "scope": "document",
+            "document_id": doc.id,
+            "payment_run_id": None,
+        }
+
+    run = task.workflow_instance.payment_run
+    if run is not None:
+        link = f"/workflow?task={task.id}"
+        currencies = ", ".join(run.currency_codes or []) or "N/A"
+        total = f"{run.total_amount} {currencies}".strip()
+        if run.submitted_by_id and run.submitted_by:
+            submitted_by = run.submitted_by.get_full_name() or run.submitted_by.email
+        else:
+            submitted_by = "Unknown"
+        return {
+            "link": link,
+            "title": f"Payment Run {run.payment_reference}",
+            "reference": run.payment_reference,
+            "target_label": "payment run",
+            "target_label_title": "Payment run",
+            "direct_url": f"{settings.FRONTEND_URL.rstrip('/')}{link}",
+            "detail_lines": [
+                f"  Payment run: {run.payment_reference}",
+                f"  Lines: {run.line_count}",
+                f"  Total: {total}",
+                f"  Submitted by: {submitted_by}",
+            ],
+            "scope": "payment_run",
+            "document_id": None,
+            "payment_run_id": run.id,
+        }
+
+    return {
+        "link": "/workflow",
+        "title": "Workflow task",
+        "reference": str(task.id),
+        "target_label": "workflow item",
+        "target_label_title": "Workflow item",
+        "direct_url": f"{settings.FRONTEND_URL.rstrip('/')}/workflow",
+        "detail_lines": ["  Workflow task"],
+        "scope": "unknown",
+        "document_id": None,
+        "payment_run_id": None,
+    }
 
 
 def _create_notification(recipient, message: str, link: str = "", notification_type: str = "task_assigned") -> None:
@@ -149,17 +278,16 @@ def _notify_delegates_of_task(task, *, only_delegation=None) -> None:
     if task.status != "in_progress" or not task.assigned_to_id:
         return
 
-    doc = task.workflow_instance.document
-    link = f"/documents/{doc.id}"
+    target_ctx = _payment_run_task_context(task)
+    link = target_ctx["link"]
     delegator_name = task.assigned_to.get_full_name() or task.assigned_to.email
     message = (
         f"Delegated action required: '{task.step.name}' for "
-        f"{doc.title} ({doc.reference_number}) — on behalf of {delegator_name}"
+        f"{target_ctx['title']} ({target_ctx['reference']}) — on behalf of {delegator_name}"
     )
     body = (
         f"A workflow task has been delegated to you by {delegator_name}.\n\n"
-        f"  Document: {doc.title}\n"
-        f"  Reference: {doc.reference_number}\n"
+        + "\n".join(target_ctx["detail_lines"]) + "\n"
         f"  Step: {task.step.name}\n"
         f"  Instructions: {task.step.instructions or 'None'}\n"
         + (f"  Due by: {task.due_at.strftime('%d %b %Y %H:%M UTC')}\n" if task.due_at else "")
@@ -177,7 +305,7 @@ def _notify_delegates_of_task(task, *, only_delegation=None) -> None:
         _create_once(delegation.delegate, message, link, "delegation")
         _send_email(
             delegation.delegate,
-            subject=f"DMS — Delegated approval: {doc.reference_number}",
+            subject=f"DMS — Delegated approval: {target_ctx['reference']}",
             body=f"Hello {delegation.delegate.first_name},\n\n{body}",
             link=link,
         )
@@ -192,7 +320,10 @@ def notify_task_assigned(
     from apps.workflows.models import WorkflowTask
     try:
         task = WorkflowTask.objects.select_related(
-            "assigned_to", "step", "workflow_instance__document"
+            "assigned_to", "step",
+            "workflow_instance__document",
+            "workflow_instance__payment_run",
+            "workflow_instance__payment_run__submitted_by",
         ).get(id=task_id)
     except WorkflowTask.DoesNotExist:
         return
@@ -200,48 +331,45 @@ def notify_task_assigned(
     if task.status != "in_progress" or not task.assigned_to:
         return
 
-    doc     = task.workflow_instance.document
-    link    = f"/documents/{doc.id}"
+    target_ctx = _payment_run_task_context(task)
+    link = target_ctx["link"]
     message = (
         f"Action required: '{task.step.name}' for "
-        f"{doc.title} ({doc.reference_number})"
+        f"{target_ctx['title']} ({target_ctx['reference']})"
     )
 
     _create_notification(task.assigned_to, message, link, "task_assigned")
 
-    base = settings.FRONTEND_URL.rstrip("/")
-    document_url = f"{base}{link}"
     approver_name = task.assigned_to.get_full_name() or task.assigned_to.email
-    ctx = dict(
+    render_ctx = dict(
         approver_name=approver_name,
-        document_title=doc.title,
-        document_ref=doc.reference_number,
+        document_title=target_ctx["title"],
+        document_ref=target_ctx["reference"],
         step_name=task.step.name,
         instructions=task.step.instructions or "None",
-        document_url=document_url,
+        document_url=target_ctx["direct_url"],
     )
+    details = "\n".join(target_ctx["detail_lines"])
 
     if custom_subject or custom_body:
-        subject = _render_approver_email_template(custom_subject or "", **ctx) or (
-            f"DMS — Approval required: {doc.reference_number}"
+        subject = _render_approver_email_template(custom_subject or "", **render_ctx) or (
+            f"DMS — Approval required: {render_ctx['document_ref']}"
         )
-        body = _render_approver_email_template(custom_body or "", **ctx) or (
+        body = _render_approver_email_template(custom_body or "", **render_ctx) or (
             f"Hello {task.assigned_to.first_name},\n\n"
-            f"A document requires your approval.\n\n"
-            f"  Document: {doc.title}\n"
-            f"  Reference: {doc.reference_number}\n"
+            f"A {target_ctx['target_label']} requires your approval.\n\n"
+            f"{details}\n"
             f"  Step: {task.step.name}\n"
             f"  Instructions: {task.step.instructions or 'None'}\n"
             + (f"  Due by: {task.due_at.strftime('%d %b %Y %H:%M UTC')}\n" if task.due_at else "")
             + f"\nPlease log in to DMS to action this request.\n"
         )
     else:
-        subject = f"DMS — Approval required: {doc.reference_number}"
+        subject = f"DMS — Approval required: {render_ctx['document_ref']}"
         body = (
             f"Hello {task.assigned_to.first_name},\n\n"
-            f"A document requires your approval.\n\n"
-            f"  Document: {doc.title}\n"
-            f"  Reference: {doc.reference_number}\n"
+            f"A {target_ctx['target_label']} requires your approval.\n\n"
+            f"{details}\n"
             f"  Step: {task.step.name}\n"
             f"  Instructions: {task.step.instructions or 'None'}\n"
             + (f"  Due by: {task.due_at.strftime('%d %b %Y %H:%M UTC')}\n" if task.due_at else "")
@@ -274,7 +402,10 @@ def notify_delegation_activated(delegation_id: str) -> None:
         return
 
     tasks = tasks_for_delegation(delegation).select_related(
-        "assigned_to", "step", "workflow_instance__document",
+        "assigned_to", "step",
+        "workflow_instance__document",
+        "workflow_instance__payment_run",
+        "workflow_instance__payment_run__submitted_by",
     )
     task_count = tasks.count()
     if task_count == 0:
@@ -290,12 +421,11 @@ def notify_delegation_activated(delegation_id: str) -> None:
     for task in tasks:
         if not delegation_covers_task(delegation, task):
             continue
-        doc = task.workflow_instance.document
-        task_link = f"/documents/{doc.id}"
+        target_ctx = _payment_run_task_context(task)
         _create_once(
             delegation.delegate,
-            f"Delegated action required: '{task.step.name}' for {doc.title} ({doc.reference_number})",
-            task_link,
+            f"Delegated action required: '{task.step.name}' for {target_ctx['title']} ({target_ctx['reference']})",
+            target_ctx["link"],
             "delegation"
         )
 
@@ -306,21 +436,66 @@ def send_workflow_notification_step_email(
     recipient_email: str | None,
     subject: str,
     message: str,
-    document_id: str,
+    document_id: str | None = None,
+    payment_run_id: str | None = None,
     step_name: str = "",
+    template_id: str | None = None,
 ) -> None:
     """
     Send the email configured on a workflow notification step.
-    System users also receive an in-app notification; external addresses get email only.
+
+    These steps target people outside the approval chain. Emails contain only the
+    configured subject/body — no login or document deep-links. In-app notices
+    (when the recipient is a system user) also omit a deep-link.
     """
     from django.contrib.auth import get_user_model
+    from apps.workflows.models import WorkflowTemplate
 
-    link = f"/documents/{document_id}"
-    in_app_message = (
-        f"Workflow notification: '{step_name}'"
-        if step_name
-        else "Workflow notification"
+    # Optional template-level override (step subject/body remain the default).
+    if template_id:
+        try:
+            template = WorkflowTemplate.objects.get(id=template_id)
+        except WorkflowTemplate.DoesNotExist:
+            template = None
+        if template:
+            ctx = {"step_name": step_name}
+            if payment_run_id:
+                try:
+                    from apps.sunsystems.models import PaymentRun
+                    run = PaymentRun.objects.get(id=payment_run_id)
+                    ctx.update(
+                        payment_reference=run.payment_reference,
+                        line_count=run.line_count,
+                        total_amount=str(run.total_amount),
+                        currencies=", ".join(run.currency_codes or []),
+                        document_title=f"Payment Run {run.payment_reference}",
+                        document_ref=run.payment_reference,
+                    )
+                except Exception:
+                    pass
+            elif document_id:
+                try:
+                    from apps.documents.models import Document
+                    doc = Document.objects.get(id=document_id)
+                    ctx.update(
+                        document_title=doc.title,
+                        document_ref=doc.reference_number,
+                        payment_reference=doc.reference_number,
+                    )
+                except Exception:
+                    pass
+            custom_subject, custom_body = _template_email_parts(template, "workflow_notification")
+            if custom_subject:
+                subject = _render_email_template(custom_subject, **ctx) or subject
+            if custom_body:
+                message = _render_email_template(custom_body, **ctx) or message
+
+    in_app_message = (message or "").strip() or (
+        f"Workflow notification: '{step_name}'" if step_name else "Workflow notification"
     )
+    # Keep tray rows compact; full text remains in the email body.
+    if len(in_app_message) > 280:
+        in_app_message = in_app_message[:277].rstrip() + "..."
 
     if recipient_user_id:
         User = get_user_model()
@@ -331,17 +506,30 @@ def send_workflow_notification_step_email(
                 "Notification step recipient user %s not found", recipient_user_id
             )
             return
-        _create_notification(recipient, in_app_message, link, "workflow_action")
-        _send_email(recipient, subject=subject, body=message, link=link)
+        _create_notification(recipient, in_app_message, "", "workflow_action")
+        _send_email(
+            recipient,
+            subject=subject,
+            body=message,
+            link="",
+            include_footer=False,
+        )
         return
 
     if recipient_email:
-        _send_email_to_address(recipient_email, subject=subject, body=message, link=link)
+        _send_email_to_address(
+            recipient_email,
+            subject=subject,
+            body=message,
+            link="",
+            include_footer=False,
+        )
         return
 
     logger.warning(
-        "Notification step email skipped for document %s: no recipient configured",
+        "Notification step email skipped: no recipient configured (document=%s payment_run=%s)",
         document_id,
+        payment_run_id,
     )
 
 
@@ -352,39 +540,91 @@ def notify_workflow_complete(instance_id: str, outcome: str) -> None:
     from apps.workflows.models import WorkflowInstance
     try:
         instance = WorkflowInstance.objects.select_related(
-            "document", "started_by", "template"
+            "document",
+            "document__uploaded_by",
+            "document__owned_by",
+            "payment_run",
+            "payment_run__submitted_by",
+            "started_by",
+            "template",
         ).get(id=instance_id)
     except WorkflowInstance.DoesNotExist:
         return
 
-    doc      = instance.document
-    verb     = "approved" if outcome == "approved" else "rejected"
-    link     = f"/documents/{doc.id}"
-    msg      = f"Your document '{doc.title}' ({doc.reference_number}) has been {verb}."
-    recipient = instance.started_by
-    ctx = dict(
-        recipient_name=recipient.first_name,
-        document_title=doc.title,
-        document_ref=doc.reference_number,
-        outcome=verb,
-        outcome_label=verb.capitalize(),
-        document_url=_document_url(doc.id),
-    )
-    default_subject = f"DMS — Document {verb}: {doc.reference_number}"
-    default_body = (
-        f"Hello {recipient.first_name},\n\n"
-        f"Your document has been {verb}.\n\n"
-        f"  Document: {doc.title}\n"
-        f"  Reference: {doc.reference_number}\n"
-        f"  Status: {verb.capitalize()}\n\n"
-        f"Log in to DMS to view the document.\n"
-    )
-    subject, body = _resolve_email(
-        instance.template, "workflow_complete", default_subject, default_body, **ctx
-    )
+    verb = "approved" if outcome == "approved" else "rejected"
+    run = instance.payment_run
+    doc = instance.document
+    recipients = _workflow_stakeholder_recipients(instance, document=doc)
+    if not recipients:
+        logger.warning(
+            "notify_workflow_complete: no stakeholder for instance %s; skipping",
+            instance_id,
+        )
+        return
 
-    _create_notification(recipient, msg, link, "workflow_complete")
-    _send_email(recipient, subject=subject, body=body, link=link)
+    if run is not None:
+        link = f"/workflow?payment_run={run.id}"
+        currencies = ", ".join(run.currency_codes or []) or "N/A"
+        total = f"{run.total_amount} {currencies}".strip()
+        msg = f"Your payment run '{run.payment_reference}' has been {verb}."
+        for recipient in recipients:
+            ctx = dict(
+                recipient_name=recipient.first_name,
+                document_title=f"Payment Run {run.payment_reference}",
+                document_ref=run.payment_reference,
+                outcome=verb,
+                outcome_label=verb.capitalize(),
+                document_url=f"{settings.FRONTEND_URL.rstrip('/')}{link}",
+                payment_reference=run.payment_reference,
+                line_count=run.line_count,
+                total_amount=str(run.total_amount),
+                currencies=currencies,
+            )
+            default_subject = f"DMS — Payment run {verb}: {run.payment_reference}"
+            default_body = (
+                f"Hello {recipient.first_name},\n\n"
+                f"Your payment run has been {verb}.\n\n"
+                f"  Payment run: {run.payment_reference}\n"
+                f"  Lines: {run.line_count}\n"
+                f"  Total: {total}\n"
+                f"  Status: {verb.capitalize()}\n\n"
+                f"Log in to DMS to view the payment run status.\n"
+            )
+            subject, body = _resolve_email(
+                instance.template, "workflow_complete", default_subject, default_body, **ctx
+            )
+            _create_notification(recipient, msg, link, "workflow_complete")
+            _send_email(recipient, subject=subject, body=body, link=link)
+        return
+
+    if doc is None:
+        return
+
+    link = f"/documents/{doc.id}"
+    msg = f"Your document '{doc.title}' ({doc.reference_number}) has been {verb}."
+    for recipient in recipients:
+        ctx = dict(
+            recipient_name=recipient.first_name,
+            document_title=doc.title,
+            document_ref=doc.reference_number,
+            outcome=verb,
+            outcome_label=verb.capitalize(),
+            document_url=_document_url(doc.id),
+        )
+        default_subject = f"DMS — Document {verb}: {doc.reference_number}"
+        default_body = (
+            f"Hello {recipient.first_name},\n\n"
+            f"Your document has been {verb}.\n\n"
+            f"  Document: {doc.title}\n"
+            f"  Reference: {doc.reference_number}\n"
+            f"  Status: {verb.capitalize()}\n\n"
+            f"Log in to DMS to view the document.\n"
+        )
+        subject, body = _resolve_email(
+            instance.template, "workflow_complete", default_subject, default_body, **ctx
+        )
+        _create_notification(recipient, msg, link, "workflow_complete")
+        _send_email(recipient, subject=subject, body=body, link=link)
 
 
 # ── Document returned for review ──────────────────────────────────────────────
@@ -562,6 +802,8 @@ def notify_hold_ending(task_id: str) -> None:
         task = WorkflowTask.objects.select_related(
             "assigned_to", "step",
             "workflow_instance__document",
+            "workflow_instance__payment_run",
+            "workflow_instance__payment_run__submitted_by",
             "workflow_instance__template",
         ).get(id=task_id)
     except WorkflowTask.DoesNotExist:
@@ -570,11 +812,12 @@ def notify_hold_ending(task_id: str) -> None:
     if task.status != "held" or not task.held_until or not task.assigned_to:
         return
 
-    doc  = task.workflow_instance.document
-    link = f"/documents/{doc.id}"
+    target_ctx = _payment_run_task_context(task)
+    link = target_ctx["link"]
     hold_ends = task.held_until.strftime("%d %b %Y %H:%M UTC")
+    step_name = task.step.name if task.step_id else "Approval"
     msg = (
-        f"Hold ending soon: '{doc.title}' ({doc.reference_number}) "
+        f"Hold ending soon: '{target_ctx['title']}' ({target_ctx['reference']}) "
         f"is scheduled to leave hold at {hold_ends}."
     )
     created = _create_once(task.assigned_to, msg, link, "hold_ending")
@@ -582,19 +825,18 @@ def notify_hold_ending(task_id: str) -> None:
         approver = task.assigned_to
         ctx = dict(
             approver_name=approver.first_name,
-            document_title=doc.title,
-            document_ref=doc.reference_number,
-            step_name=task.step.name,
+            document_title=target_ctx["title"],
+            document_ref=target_ctx["reference"],
+            step_name=step_name,
             hold_ends_at=hold_ends,
-            document_url=_document_url(doc.id),
+            document_url=target_ctx["direct_url"],
         )
-        default_subject = f"DMS — Hold ending soon: {doc.reference_number}"
+        default_subject = f"DMS — Hold ending soon: {target_ctx['reference']}"
         default_body = (
             f"Hello {approver.first_name},\n\n"
             f"A hold you scheduled is approaching its end.\n\n"
-            f"  Document: {doc.title}\n"
-            f"  Reference: {doc.reference_number}\n"
-            f"  Step: {task.step.name}\n"
+            + "\n".join(target_ctx["detail_lines"]) + "\n"
+            f"  Step: {step_name}\n"
             f"  Hold ends: {hold_ends}\n\n"
             f"Please log in to DMS if you need to action or extend the task.\n"
         )
@@ -613,6 +855,8 @@ def notify_hold_auto_released(task_id: str) -> None:
         task = WorkflowTask.objects.select_related(
             "assigned_to", "step",
             "workflow_instance__document",
+            "workflow_instance__payment_run",
+            "workflow_instance__payment_run__submitted_by",
             "workflow_instance__template",
         ).get(id=task_id)
     except WorkflowTask.DoesNotExist:
@@ -622,27 +866,27 @@ def notify_hold_auto_released(task_id: str) -> None:
     if not approver:
         return
 
-    doc  = task.workflow_instance.document
-    link = f"/documents/{doc.id}"
+    target_ctx = _payment_run_task_context(task)
+    link = target_ctx["link"]
+    step_name = task.step.name if task.step_id else "Approval"
 
     msg = (
-        f"Your hold on '{doc.title}' ({doc.reference_number}) "
-        f"has expired. The document is awaiting your approval."
+        f"Your hold on '{target_ctx['title']}' ({target_ctx['reference']}) "
+        f"has expired. The {target_ctx['target_label']} is awaiting your approval."
     )
     ctx = dict(
         approver_name=approver.first_name,
-        document_title=doc.title,
-        document_ref=doc.reference_number,
-        step_name=task.step.name,
-        document_url=_document_url(doc.id),
+        document_title=target_ctx["title"],
+        document_ref=target_ctx["reference"],
+        step_name=step_name,
+        document_url=target_ctx["direct_url"],
     )
-    default_subject = f"DMS — Hold expired, action required: {doc.reference_number}"
+    default_subject = f"DMS — Hold expired, action required: {target_ctx['reference']}"
     default_body = (
         f"Hello {approver.first_name},\n\n"
-        f"The hold period you set on a document has expired.\n\n"
-        f"  Document: {doc.title}\n"
-        f"  Reference: {doc.reference_number}\n"
-        f"  Step: {task.step.name}\n\n"
+        f"The hold period you set on a {target_ctx['target_label']} has expired.\n\n"
+        + "\n".join(target_ctx["detail_lines"]) + "\n"
+        f"  Step: {step_name}\n\n"
         f"Please log in to DMS to action this approval.\n"
     )
     subject, body = _resolve_email(
@@ -663,6 +907,8 @@ def notify_task_sla_warning(task_id: str) -> None:
         task = WorkflowTask.objects.select_related(
             "assigned_to", "step",
             "workflow_instance__document",
+            "workflow_instance__payment_run",
+            "workflow_instance__payment_run__submitted_by",
             "workflow_instance__template",
         ).get(id=task_id)
     except WorkflowTask.DoesNotExist:
@@ -671,31 +917,31 @@ def notify_task_sla_warning(task_id: str) -> None:
     if task.status != "in_progress" or not task.assigned_to or not task.due_at:
         return
 
-    doc  = task.workflow_instance.document
-    link = f"/documents/{doc.id}"
+    target_ctx = _payment_run_task_context(task)
+    link = target_ctx["link"]
     due_at = task.due_at.strftime("%d %b %Y %H:%M UTC")
+    step_name = task.step.name if task.step_id else "Approval"
     msg = (
-        f"SLA approaching: Your approval task for '{doc.title}' "
-        f"({doc.reference_number}) is due by {due_at}."
+        f"SLA approaching: Your approval task for '{target_ctx['title']}' "
+        f"({target_ctx['reference']}) is due by {due_at}."
     )
     created = _create_once(task.assigned_to, msg, link, "task_sla_warning")
     if created:
         approver = task.assigned_to
         ctx = dict(
             approver_name=approver.first_name,
-            document_title=doc.title,
-            document_ref=doc.reference_number,
-            step_name=task.step.name,
+            document_title=target_ctx["title"],
+            document_ref=target_ctx["reference"],
+            step_name=step_name,
             due_at=due_at,
-            document_url=_document_url(doc.id),
+            document_url=target_ctx["direct_url"],
         )
-        default_subject = f"DMS — SLA approaching: {doc.reference_number}"
+        default_subject = f"DMS — SLA approaching: {target_ctx['reference']}"
         default_body = (
             f"Hello {approver.first_name},\n\n"
             f"An approval task is approaching its SLA deadline.\n\n"
-            f"  Document: {doc.title}\n"
-            f"  Reference: {doc.reference_number}\n"
-            f"  Step: {task.step.name}\n"
+            + "\n".join(target_ctx["detail_lines"]) + "\n"
+            f"  Step: {step_name}\n"
             f"  Due by: {due_at}\n\n"
             f"Please log in to DMS to action this request.\n"
         )
@@ -714,6 +960,8 @@ def notify_task_overdue(task_id: str) -> None:
         task = WorkflowTask.objects.select_related(
             "assigned_to", "step",
             "workflow_instance__document",
+            "workflow_instance__payment_run",
+            "workflow_instance__payment_run__submitted_by",
             "workflow_instance__template",
         ).get(id=task_id)
     except WorkflowTask.DoesNotExist:
@@ -726,32 +974,32 @@ def notify_task_overdue(task_id: str) -> None:
     if task.status != "in_progress" or not task.assigned_to:
         return
 
-    doc  = task.workflow_instance.document
-    link = f"/documents/{doc.id}"
+    target_ctx = _payment_run_task_context(task)
+    link = target_ctx["link"]
     due_at = task.due_at.strftime("%d %b %Y %H:%M UTC") if task.due_at else "N/A"
+    step_name = task.step.name if task.step_id else "Approval"
 
-    msg  = (
-        f"OVERDUE: Your approval task for '{doc.title}' "
-        f"({doc.reference_number}) has passed its SLA deadline."
+    msg = (
+        f"OVERDUE: Your approval task for '{target_ctx['title']}' "
+        f"({target_ctx['reference']}) has passed its SLA deadline."
     )
     created = _create_once(task.assigned_to, msg, link, "task_overdue")
     if created:
         approver = task.assigned_to
         ctx = dict(
             approver_name=approver.first_name,
-            document_title=doc.title,
-            document_ref=doc.reference_number,
-            step_name=task.step.name,
+            document_title=target_ctx["title"],
+            document_ref=target_ctx["reference"],
+            step_name=step_name,
             due_at=due_at,
-            document_url=_document_url(doc.id),
+            document_url=target_ctx["direct_url"],
         )
-        default_subject = f"DMS — SLA overdue: {doc.reference_number}"
+        default_subject = f"DMS — SLA overdue: {target_ctx['reference']}"
         default_body = (
             f"Hello {approver.first_name},\n\n"
             f"An approval task has passed its SLA deadline and requires urgent action.\n\n"
-            f"  Document: {doc.title}\n"
-            f"  Reference: {doc.reference_number}\n"
-            f"  Step: {task.step.name}\n"
+            + "\n".join(target_ctx["detail_lines"]) + "\n"
+            f"  Step: {step_name}\n"
             f"  Was due: {due_at}\n\n"
             f"Please log in to DMS immediately.\n"
         )
@@ -778,53 +1026,69 @@ ACTIONABLE_TASK_NOTIFICATION_TYPES = [
 
 def clear_resolved_task_notifications_now(task_id: str) -> int:
     """When a task leaves an assignee's queue, delete their now-stale actionable
-    notifications for that document — but only if they have no other open task on
-    it — so the notification tray matches reality. Safe to call synchronously
-    inside the workflow action transaction. Returns the number deleted."""
+    notifications for that document/payment run — but only if they have no other
+    open task on it — so the notification tray matches reality. Safe to call
+    synchronously inside the workflow action transaction. Returns the number deleted."""
     from apps.workflows.models import WorkflowTask
     from apps.notifications.models import Notification
     from apps.accounts.delegation import active_delegations_qs, delegated_tasks_q
 
     try:
-        task = WorkflowTask.objects.select_related("workflow_instance", "assigned_to").get(id=task_id)
+        task = WorkflowTask.objects.select_related(
+            "workflow_instance",
+            "workflow_instance__document",
+            "workflow_instance__payment_run",
+            "workflow_instance__payment_run__submitted_by",
+            "assigned_to",
+        ).get(id=task_id)
     except WorkflowTask.DoesNotExist:
         return 0
 
     assignee_id = task.assigned_to_id
     if not assignee_id:
         return 0
-    document_id = task.workflow_instance.document_id
+
+    instance = task.workflow_instance
+    document_id = instance.document_id
+    payment_run_id = instance.payment_run_id
+
+    if document_id:
+        scope_filter = {"workflow_instance__document_id": document_id}
+        # Documents share one inbox link per document.
+        links = [f"/documents/{document_id}"]
+    elif payment_run_id:
+        scope_filter = {"workflow_instance__payment_run_id": payment_run_id}
+        # Payment-run assignment notices are per-task; also clear the run-level link.
+        links = [f"/workflow?task={task.id}", f"/workflow?payment_run={payment_run_id}"]
+    else:
+        return 0
+
+    def _delete_for(recipient_id: str) -> int:
+        removed, _ = Notification.objects.filter(
+            recipient_id=recipient_id,
+            type__in=ACTIONABLE_TASK_NOTIFICATION_TYPES,
+            link__in=links,
+        ).delete()
+        return removed
 
     # Clear for the original assignee
     still_active = WorkflowTask.objects.filter(
         assigned_to_id=assignee_id,
-        workflow_instance__document_id=document_id,
         status__in=["in_progress", "held"],
+        **scope_filter,
     ).exists()
-    if not still_active:
-        deleted, _ = Notification.objects.filter(
-            recipient_id=assignee_id,
-            type__in=ACTIONABLE_TASK_NOTIFICATION_TYPES,
-            link=f"/documents/{document_id}",
-        ).delete()
-    else:
-        deleted = 0
+    deleted = 0 if still_active else _delete_for(assignee_id)
 
-    # Clear for delegates who have no other delegated tasks on this document
+    # Clear for delegates who have no other delegated tasks on this target
     for delegation in active_delegations_qs(delegator=task.assigned_to):
         delegate_id = delegation.delegate_id
         delegated_still_active = WorkflowTask.objects.filter(
             pk__in=delegated_tasks_q(delegation.delegate),
-            workflow_instance__document_id=document_id,
             status__in=["in_progress", "held"],
+            **scope_filter,
         ).exists()
         if not delegated_still_active:
-            delegate_deleted, _ = Notification.objects.filter(
-                recipient_id=delegate_id,
-                type__in=ACTIONABLE_TASK_NOTIFICATION_TYPES,
-                link=f"/documents/{document_id}",
-            ).delete()
-            deleted += delegate_deleted
+            deleted += _delete_for(delegate_id)
 
     return deleted
 
@@ -841,73 +1105,106 @@ def notify_workflow_action(action_id: str, user_ids: list[str] = None) -> None:
     """
     Notify users of any workflow action: approve, reject, hold, release, return.
     Sends both in-app and email notifications with context-specific messages.
+    Works for both documents and payment runs.
+
+    Recipients are workflow stakeholders (starter / owner / real uploader or
+    payment-run submitter), never the email-ingestion bot. Optional user_ids
+    from the caller are merged in.
     """
-    from apps.workflows.models import WorkflowTaskAction, WorkflowTask
+    from apps.workflows.models import WorkflowTaskAction
     from django.contrib.auth import get_user_model
-    
+
     User = get_user_model()
-    
+
     try:
         action = WorkflowTaskAction.objects.select_related(
             "task__step",
             "task__assigned_to",
             "task__workflow_instance__document__uploaded_by",
+            "task__workflow_instance__document__owned_by",
+            "task__workflow_instance__payment_run__submitted_by",
+            "task__workflow_instance__started_by",
             "task__workflow_instance__template",
             "actor",
         ).get(id=action_id)
     except WorkflowTaskAction.DoesNotExist:
         return
-    
+
     task = action.task
-    doc = task.workflow_instance.document
-    uploader = doc.uploaded_by
-    if not uploader:
+    instance = task.workflow_instance
+    doc = instance.document
+    run = instance.payment_run
+    step_name = task.step.name if task.step_id else "Approval"
+
+    recipients = list(_workflow_stakeholder_recipients(instance, document=doc))
+    if user_ids:
+        for user in User.objects.filter(id__in=user_ids, is_active=True):
+            if _is_notifiable_user(user) and all(user.id != r.id for r in recipients):
+                recipients.append(user)
+
+    if not recipients:
         logger.warning(
-            "notify_workflow_action: document %s has no uploader; skipping",
-            doc.pk,
+            "notify_workflow_action: no stakeholder for action %s; skipping",
+            action_id,
         )
         return
+
     actor = action.actor
-    link = f"/documents/{doc.id}"
-    workflow_template = task.workflow_instance.template
     actor_name = actor.get_full_name() if actor else "System"
     comment_line = f"  Comment: {action.comment}\n" if action.comment else ""
     reason_line = f"  Reason: {action.comment}\n" if action.comment else ""
-    
-    # Determine action-specific messaging
+
+    if doc is not None:
+        link = f"/documents/{doc.id}"
+        title = doc.title
+        reference = doc.reference_number
+        target_type = "document"
+        document_url = _document_url(doc.id)
+    elif run is not None:
+        link = f"/workflow?task={task.id}"
+        title = f"Payment Run {run.payment_reference}"
+        reference = run.payment_reference
+        target_type = "payment run"
+        document_url = f"{settings.FRONTEND_URL.rstrip('/')}{link}"
+    else:
+        return
+
+    workflow_template = instance.template
     action_type = action.action
     template_key = "action_other"
-    
+
     if action_type == "approved":
         template_key = "action_approved"
-        msg_uploader = f"✓ Approved: Your document '{doc.title}' ({doc.reference_number}) has been approved by {actor_name}."
-        default_subject = f"DMS — Document approved: {doc.reference_number}"
-        default_body = (
-            f"Hello {uploader.first_name},\n\n"
-            f"Your document has been approved.\n\n"
-            f"  Document: {doc.title}\n"
-            f"  Reference: {doc.reference_number}\n"
-            f"  Approved by: {actor_name}\n"
-            f"  Step: {task.step.name}\n"
-            + comment_line
-            + f"\nLog in to DMS to view the document status.\n"
+        msg = (
+            f"✓ Approved: Your {target_type} '{title}' ({reference}) "
+            f"has been approved by {actor_name}."
         )
-    
+        default_subject = f"DMS — {target_type.capitalize()} approved: {reference}"
+        body_tail = (
+            f"Your {target_type} has been approved.\n\n"
+            f"  {target_type.capitalize()}: {title}\n"
+            f"  Reference: {reference}\n"
+            f"  Approved by: {actor_name}\n"
+            f"  Step: {step_name}\n"
+            + comment_line
+            + f"\nLog in to DMS to view the {target_type} status.\n"
+        )
     elif action_type == "rejected":
         template_key = "action_rejected"
-        msg_uploader = f"✗ Rejected: Your document '{doc.title}' ({doc.reference_number}) has been rejected by {actor_name}."
-        default_subject = f"DMS — Document rejected: {doc.reference_number}"
-        default_body = (
-            f"Hello {uploader.first_name},\n\n"
-            f"Your document has been rejected and requires revision.\n\n"
-            f"  Document: {doc.title}\n"
-            f"  Reference: {doc.reference_number}\n"
-            f"  Rejected by: {actor_name}\n"
-            f"  Step: {task.step.name}\n"
-            + reason_line
-            + f"\nPlease make the required changes and resubmit.\n"
+        msg = (
+            f"✗ Rejected: Your {target_type} '{title}' ({reference}) "
+            f"has been rejected by {actor_name}."
         )
-    
+        default_subject = f"DMS — {target_type.capitalize()} rejected: {reference}"
+        body_tail = (
+            f"Your {target_type} has been rejected and requires revision.\n\n"
+            f"  {target_type.capitalize()}: {title}\n"
+            f"  Reference: {reference}\n"
+            f"  Rejected by: {actor_name}\n"
+            f"  Step: {step_name}\n"
+            + reason_line
+            + "\nPlease make the required changes and resubmit.\n"
+        )
     elif action_type == "returned":
         template_key = "action_returned"
         return_destination = {
@@ -915,101 +1212,100 @@ def notify_workflow_action(action_id: str, user_ids: list[str] = None) -> None:
             "uploader": "you for further review",
             "same_step": "another approver in this step",
         }.get(action.return_to, "for review")
-        
-        msg_uploader = f"↩ Returned: Your document '{doc.title}' ({doc.reference_number}) has been returned {return_destination}."
-        default_subject = f"DMS — Document returned for review: {doc.reference_number}"
-        default_body = (
-            f"Hello {uploader.first_name},\n\n"
-            f"Your document has been returned and requires your attention.\n\n"
-            f"  Document: {doc.title}\n"
-            f"  Reference: {doc.reference_number}\n"
+        msg = (
+            f"↩ Returned: Your {target_type} '{title}' ({reference}) "
+            f"has been returned {return_destination}."
+        )
+        default_subject = f"DMS — {target_type.capitalize()} returned for review: {reference}"
+        body_tail = (
+            f"Your {target_type} has been returned and requires your attention.\n\n"
+            f"  {target_type.capitalize()}: {title}\n"
+            f"  Reference: {reference}\n"
             f"  Returned by: {actor_name}\n"
             f"  Returned to: {return_destination}\n"
             + reason_line
-            + f"\nPlease make the required changes and resubmit for approval.\n"
+            + "\nPlease make the required changes and resubmit for approval.\n"
         )
-    
     elif action_type == "held":
         template_key = "action_held"
-        hold_duration = f"{action.hold_hours} hour{'s' if action.hold_hours != 1 else ''}" if action.hold_hours else "indefinitely"
-        msg_uploader = f"⏸ On Hold: Your document '{doc.title}' ({doc.reference_number}) has been placed on hold for {hold_duration}."
-        default_subject = f"DMS — Document on hold: {doc.reference_number}"
-        default_body = (
-            f"Hello {uploader.first_name},\n\n"
-            f"Your document has been placed on hold during the approval process.\n\n"
-            f"  Document: {doc.title}\n"
-            f"  Reference: {doc.reference_number}\n"
+        hold_duration = (
+            f"{action.hold_hours} hour{'s' if action.hold_hours != 1 else ''}"
+            if action.hold_hours else "indefinitely"
+        )
+        msg = (
+            f"⏸ On Hold: Your {target_type} '{title}' ({reference}) "
+            f"has been placed on hold for {hold_duration}."
+        )
+        default_subject = f"DMS — {target_type.capitalize()} on hold: {reference}"
+        body_tail = (
+            f"Your {target_type} has been placed on hold during the approval process.\n\n"
+            f"  {target_type.capitalize()}: {title}\n"
+            f"  Reference: {reference}\n"
             f"  Held by: {actor_name}\n"
             f"  Duration: {hold_duration}\n"
             + reason_line
-            + f"\nThe document will resume processing after the hold period, or when manually released.\n"
+            + f"\nThe {target_type} will resume processing after the hold period, or when manually released.\n"
         )
-    
     elif action_type == "released":
         template_key = "action_released"
-        msg_uploader = f"▶ Released: The hold on your document '{doc.title}' ({doc.reference_number}) has been released."
-        default_subject = f"DMS — Hold released: {doc.reference_number}"
-        default_body = (
-            f"Hello {uploader.first_name},\n\n"
-            f"The hold on your document has been released.\n\n"
-            f"  Document: {doc.title}\n"
-            f"  Reference: {doc.reference_number}\n"
-            f"  Released by: {actor_name}\n"
-            f"  Step: {task.step.name}\n\n"
-            f"The document is now back in the approval queue.\n"
+        msg = (
+            f"▶ Released: The hold on your {target_type} '{title}' ({reference}) "
+            f"has been released."
         )
-    
+        default_subject = f"DMS — Hold released: {reference}"
+        body_tail = (
+            f"The hold on your {target_type} has been released.\n\n"
+            f"  {target_type.capitalize()}: {title}\n"
+            f"  Reference: {reference}\n"
+            f"  Released by: {actor_name}\n"
+            f"  Step: {step_name}\n\n"
+            f"The {target_type} is now back in the approval queue.\n"
+        )
     else:
-        msg_uploader = f"Document '{doc.title}' ({doc.reference_number}): {action.get_action_display()} by {actor_name}."
-        default_subject = f"DMS — Document action: {doc.reference_number}"
-        default_body = (
-            f"Hello {uploader.first_name},\n\n"
-            f"An action has been taken on your document.\n\n"
-            f"  Document: {doc.title}\n"
-            f"  Reference: {doc.reference_number}\n"
+        msg = f"{title} ({reference}): {action.get_action_display()} by {actor_name}."
+        default_subject = f"DMS — {target_type.capitalize()} action: {reference}"
+        body_tail = (
+            f"An action has been taken on your {target_type}.\n\n"
+            f"  {target_type.capitalize()}: {title}\n"
+            f"  Reference: {reference}\n"
             f"  Action: {action.get_action_display()}\n"
             f"  By: {actor_name}\n\n"
-            f"Log in to DMS to view the document status.\n"
+            f"Log in to DMS to view the {target_type} status.\n"
         )
 
     return_destination = {
         "previous_step": "the previous approver",
         "uploader": "you for further review",
         "same_step": "another approver in this step",
-    }.get(action.return_to, "for review")
+    }.get(getattr(action, "return_to", None), "for review")
     hold_duration = (
         f"{action.hold_hours} hour{'s' if action.hold_hours != 1 else ''}"
         if action.hold_hours else "indefinitely"
     )
-    ctx = dict(
-        uploader_name=uploader.first_name,
-        document_title=doc.title,
-        document_ref=doc.reference_number,
-        actor_name=actor_name,
-        step_name=task.step.name,
-        comment=action.comment or "",
-        return_destination=return_destination,
-        hold_duration=hold_duration,
-        document_url=_document_url(doc.id),
-    )
-    if template_key != "action_other":
-        subject_uploader, body_uploader = _resolve_email(
-            workflow_template, template_key,
-            default_subject, default_body, **ctx,
+
+    for recipient in recipients:
+        default_body = f"Hello {recipient.first_name},\n\n{body_tail}"
+        ctx = dict(
+            uploader_name=recipient.first_name,
+            document_title=title,
+            document_ref=reference,
+            actor_name=actor_name,
+            step_name=step_name,
+            comment=action.comment or "",
+            return_destination=return_destination,
+            hold_duration=hold_duration,
+            document_url=document_url,
         )
-    else:
-        subject_uploader, body_uploader = default_subject, default_body
-    
-    # Notify the uploader
-    _create_notification(uploader, msg_uploader, link, "workflow_action")
-    _send_email(uploader, subject_uploader, body_uploader, link=link)
-    
-    # Also notify other specified users if provided
-    if user_ids:
-        other_users = User.objects.filter(id__in=user_ids).exclude(id=uploader.id)
-        for user in other_users:
-            _create_notification(user, msg_uploader, link, "workflow_action")
-            _send_email(user, subject_uploader, body_uploader, link=link)
+        if template_key != "action_other":
+            subject, body = _resolve_email(
+                workflow_template, template_key,
+                default_subject, default_body, **ctx,
+            )
+        else:
+            subject, body = default_subject, default_body
+
+        _create_notification(recipient, msg, link, "workflow_action")
+        _send_email(recipient, subject, body, link=link)
 
 
 # ── Ad-hoc signature requests ──────────────────────────────────────────────────

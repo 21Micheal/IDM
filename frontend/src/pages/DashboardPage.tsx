@@ -7,7 +7,7 @@ import {
   Layers, Timer, ShieldCheck, ClipboardCheck,
   Calendar, FileText, Loader2, Search, Sparkles,
   FileType2, FileSpreadsheet, FileImage, FileArchive,
-  TrendingDown, TrendingUp, Minus, Plus,
+  TrendingDown, TrendingUp, Minus, Plus, FileSignature,
 } from "lucide-react";
 import { Link, useNavigate } from "react-router-dom";
 import { formatDistanceToNow } from "date-fns";

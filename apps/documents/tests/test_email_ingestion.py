@@ -13,6 +13,7 @@ from email.mime.text import MIMEText
 from unittest import mock
 
 from django.test import TestCase
+from rest_framework.test import APIClient
 
 from apps.accounts.models import User
 from apps.documents import email_ingestion
@@ -27,6 +28,7 @@ from apps.documents.models import (
     Mailbox,
     MailboxPollStatus,
 )
+from apps.documents.serializers import BulkUploadReviewSerializer
 
 
 def _build_email(
@@ -181,7 +183,7 @@ class ImportEmailTests(IngestionTestBase):
         self.assertEqual(entry["documents_created"], 1)
 
         doc = Document.objects.get()
-        self.assertEqual(doc.status, DocumentStatus.DRAFT)
+        self.assertEqual(doc.status, DocumentStatus.PENDING_REVIEW)
         self.assertEqual(doc.document_type, self.doc_type)
         self.assertEqual(doc.supplier, "ACME Ltd")  # sender→supplier prefill
         self.assertEqual(doc.metadata["_email"]["from"], "billing@acme.com")
@@ -195,6 +197,48 @@ class ImportEmailTests(IngestionTestBase):
         record = IngestedEmail.objects.get()
         self.assertEqual(record.documents_created, 1)
         self.assertTrue(record.raw_email.name)
+
+    def test_review_approval_promotes_email_document_to_draft(self):
+        email_ingestion.import_email(self.mailbox, _fetched(_build_email()), user=self.user)
+        doc = Document.objects.get()
+        self.assertEqual(doc.status, DocumentStatus.PENDING_REVIEW)
+
+        serializer = BulkUploadReviewSerializer(
+            data={
+                "documents": [
+                    {
+                        "document_id": str(doc.id),
+                        "title": doc.title,
+                        "metadata": {},
+                        "approved": True,
+                    }
+                ]
+            },
+            context={"request": mock.Mock(user=self.user), "bulk_upload": doc.bulk_upload},
+        )
+        serializer.is_valid(raise_exception=True)
+        serializer.save()
+
+        doc.refresh_from_db()
+        self.assertEqual(doc.status, DocumentStatus.DRAFT)
+
+    def test_pending_email_document_hidden_from_normal_document_access(self):
+        email_ingestion.import_email(self.mailbox, _fetched(_build_email()), user=self.user)
+        doc = Document.objects.get()
+        client = APIClient()
+        client.force_authenticate(self.user)
+
+        list_response = client.get("/api/v1/documents/")
+        self.assertEqual(list_response.status_code, 200)
+        payload = list_response.data
+        results = payload.get("results", payload) if isinstance(payload, dict) else payload
+        self.assertEqual(len(results), 0)
+
+        detail_response = client.get(f"/api/v1/documents/{doc.id}/")
+        self.assertEqual(detail_response.status_code, 404)
+
+        preview_response = client.get(f"/api/v1/documents/{doc.id}/preview_url/")
+        self.assertEqual(preview_response.status_code, 200)
 
     def test_documents_attributed_to_email_bot_on_poll(self):
         """Poll attributes drafts to Email bot, not the mailbox-configuring admin."""
@@ -273,6 +317,31 @@ class ImportEmailTests(IngestionTestBase):
         self.assertEqual(doc.document_type.code, "PO")
         self.assertTrue(doc.is_scanned)  # classified + scannable → OCR'd
         self.mock_ocr.delay.assert_called_once()
+
+    def test_related_email_without_default_classifies_each_attachment(self):
+        po = DocumentType.objects.create(name="Purchase Order", code="PO", reference_prefix="PO")
+        grn = DocumentType.objects.create(name="Goods Receipt Note", code="GRN", reference_prefix="GRN")
+        self.mailbox.default_document_type = None
+        self.mailbox.auto_classify = False
+        self.mailbox.related_set_attachments = True
+        self.mailbox.save(update_fields=["default_document_type", "auto_classify", "related_set_attachments"])
+        msg = _build_email(attachments=(
+            ("po.pdf", b"%PDF po", "application", "pdf"),
+            ("grn.pdf", b"%PDF grn", "application", "pdf"),
+        ))
+
+        def classify(filename, _content, _mime, _candidates):
+            return grn if filename == "grn.pdf" else po
+
+        with mock.patch.object(email_ingestion, "_classify_attachment_document_type", side_effect=classify):
+            email_ingestion.import_email(self.mailbox, _fetched(msg), user=self.user)
+
+        docs = {doc.file_name: doc for doc in Document.objects.all()}
+        self.assertEqual(docs["po.pdf"].document_type, po)
+        self.assertEqual(docs["grn.pdf"].document_type, grn)
+        self.assertEqual(docs["po.pdf"].status, DocumentStatus.PENDING_REVIEW)
+        self.assertEqual(docs["grn.pdf"].status, DocumentStatus.PENDING_REVIEW)
+        self.assertEqual(self.mock_ocr.delay.call_count, 2)
 
     def test_office_attachment_is_manual_with_preview(self):
         """A classified but non-scannable docx is filled manually; we still

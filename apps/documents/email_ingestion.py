@@ -162,22 +162,32 @@ def _classify_document_type(mailbox: Mailbox, attachments):
     skipped (filled manually). Safe when no model is configured — the IDP helper
     returns ``None`` rather than raising.
     """
-    from .models import DocumentType
-    from .ocr.idp import classify_document_type
+    candidates = _classification_candidates()
+    if not candidates:
+        return None
+    for filename, content, mime in attachments:
+        chosen = _classify_attachment_document_type(filename, content, mime, candidates)
+        if chosen is not None:
+            return chosen
+    return None
 
-    candidates = list(
+
+def _classification_candidates() -> list:
+    from .models import DocumentType
+
+    return list(
         DocumentType.objects.filter(is_active=True).exclude(
             code__in=["UNCLASS", "PERSONAL", SIGNATURE_REQUEST_DOCUMENT_TYPE_CODE]
         )
     )
-    if not candidates:
+
+
+def _classify_attachment_document_type(filename: str, content: bytes, mime: str, candidates):
+    if not candidates or not _is_scannable(mime):
         return None
-    for filename, content, mime in attachments:
-        if mime == "application/pdf" or mime.startswith("image/"):
-            chosen = classify_document_type(content, mime, filename, candidates)
-            if chosen is not None:
-                return chosen
-    return None
+    from .ocr.idp import classify_document_type
+
+    return classify_document_type(content, mime, filename, candidates)
 
 
 # ── single-message import ────────────────────────────────────────────────────
@@ -229,6 +239,7 @@ def _create_document(
     *,
     mailbox: Mailbox,
     bulk_upload: BulkUpload,
+    document_type,
     filename: str,
     content: bytes,
     mime: str,
@@ -254,7 +265,7 @@ def _create_document(
         )
         return None
 
-    doc_type = bulk_upload.document_type
+    doc_type = document_type
     # OCR only earns its keep when the type is known (so there are fields to
     # populate) AND the file is scannable. Unclassified attachments and
     # non-scannable formats (Office, etc.) become manual drafts instead.
@@ -269,7 +280,7 @@ def _create_document(
             title=title[:255],
             reference_number=_generate_unique_reference(doc_type),
             document_type=doc_type,
-            status=DocumentStatus.DRAFT,
+            status=DocumentStatus.PENDING_REVIEW,
             supplier=(supplier or "")[:255],
             file_name=filename[:255],
             file_size=len(content),
@@ -383,11 +394,23 @@ def import_email(mailbox: Mailbox, fetched, *, user) -> dict:
 
     created: list[Document] = []
     failures = 0
+    should_classify_attachments = (
+        mailbox.auto_classify
+        or doc_type.code == UNCLASSIFIED_BULK_DOCUMENT_TYPE_CODE
+        or (mailbox.related_set_attachments and len(attachments) > 1 and not mailbox.default_document_type_id)
+    )
+    classification_candidates = _classification_candidates() if should_classify_attachments else []
     for filename, content, mime in attachments:
         try:
+            attachment_doc_type = (
+                _classify_attachment_document_type(filename, content, mime, classification_candidates)
+                if should_classify_attachments
+                else None
+            ) or doc_type
             doc = _create_document(
                 mailbox=mailbox,
                 bulk_upload=bulk_upload,
+                document_type=attachment_doc_type,
                 filename=filename,
                 content=content,
                 mime=mime,

@@ -23,6 +23,8 @@ import CustomListbox from "@/components/ui/CustomListbox";
 // ── Types ─────────────────────────────────────────────────────────────────────
 type AssigneeType = "group_any" | "group_all" | "group_specific";
 type StepType = "approval" | "notification";
+type WorkflowTargetType = "document" | "payment_run";
+type WorkflowRouteKind = "document" | "form" | "payment_run";
 
 interface WorkflowStep {
   id?: string;
@@ -59,6 +61,7 @@ interface WorkflowTemplate {
   id: string;
   name: string;
   description: string;
+  target_type: WorkflowTargetType;
   document_type: string | null;
   document_type_name?: string | null;
   category?: string;
@@ -82,7 +85,8 @@ type EmailTemplateKey =
   | "hold_ending"
   | "hold_expired"
   | "sla_warning"
-  | "sla_overdue";
+  | "sla_overdue"
+  | "workflow_notification";
 
 interface EmailTemplateEntry {
   subject: string;
@@ -190,6 +194,18 @@ const EMAIL_TEMPLATE_DEFS: {
     defaultSubject: "DMS — Hold expired, action required: {document_ref}",
     defaultBody: "Hello {approver_name},\n\nThe hold period you set on a document has expired.\n\n  Document: {document_title}\n  Reference: {document_ref}\n  Step: {step_name}\n\nPlease log in to DMS to action this approval.\n",
   },
+  {
+    key: "workflow_notification",
+    label: "Workflow notification step",
+    description: "Optional override for notification-step emails to people outside the approval chain. Uses the step subject/body unless set. No login or document links are appended.",
+    group: "Uploader",
+    placeholders: [
+      "{document_title}", "{document_ref}", "{payment_reference}",
+      "{line_count}", "{total_amount}", "{currencies}", "{step_name}",
+    ],
+    defaultSubject: "DMS — Workflow notification: {document_ref}",
+    defaultBody: "Hello,\n\nA workflow notification has been triggered.\n\n  Item: {document_title}\n  Reference: {document_ref}\n  Step: {step_name}\n",
+  },
 ];
 
 interface DocumentType {
@@ -202,12 +218,15 @@ interface DocumentType {
   is_active: boolean;
   is_personal_type?: boolean;
   description?: string;
+  metadata?: Record<string, any>;
+  is_form?: boolean;
 }
 
 interface WorkflowRule {
   id: string;
-  document_type: string;
-  document_type_name: string;
+  target_type?: WorkflowTargetType;
+  document_type: string | null;
+  document_type_name: string | null;
   template: string;
   template_name: string;
   template_document_type?: string | null;
@@ -219,11 +238,12 @@ interface WorkflowRule {
   is_active: boolean;
 }
 
-type WorkflowPhase = "request" | "retirement";
+type WorkflowPhase = "request" | "retirement" | "payment_run";
 
 const WORKFLOW_PHASES: { value: WorkflowPhase; label: string }[] = [
   { value: "request", label: "Request" },
   { value: "retirement", label: "Retirement" },
+  { value: "payment_run", label: "Payment run" },
 ];
 
 function workflowPhaseLabel(value?: string | null) {
@@ -350,6 +370,7 @@ function emailTemplatesToPayload(templates: EmailTemplates): EmailTemplates {
 function normalizeTemplate(template: WorkflowTemplate): WorkflowTemplate {
   return {
     ...template,
+    target_type: template.target_type ?? "document",
     document_type: isUuidLike(template.document_type) ? template.document_type : null,
     notify_uploader_on_approval: template.notify_uploader_on_approval ?? true,
     email_templates: normalizeEmailTemplates(template.email_templates),
@@ -374,12 +395,31 @@ function attachResolvedTemplateDocumentType(
   template: WorkflowTemplate,
   docTypes: DocumentType[],
 ): WorkflowTemplate {
+  if ((template.target_type ?? "document") === "payment_run") {
+    return {
+      ...template,
+      document_type: null,
+      document_type_name: "Payment run",
+    };
+  }
   const resolved = resolveTemplateDocumentType(template, docTypes);
   return {
     ...template,
     document_type: resolved.id,
     document_type_name: resolved.name,
   };
+}
+
+function isFormDocumentType(type: Partial<DocumentType> | null | undefined): boolean {
+  if (!type) return false;
+  const metadata = type.metadata as Record<string, any> | undefined;
+  const haystack = [type.name, type.code, type.description, type.category].filter(Boolean).join(" ");
+  return Boolean(
+    type.is_form ||
+    metadata?.form ||
+    metadata?.form_template ||
+    /\b(form|imprest|retirement|advance)\b/i.test(haystack),
+  );
 }
 
 function formatMoney(value: number, currency: string) {
@@ -506,25 +546,39 @@ type RuleFormValues = {
   label: string;
 };
 
-function RuleFormFields({ values, onChange }: {
+function RuleFormFields({ values, routeKind, onChange }: {
   values: RuleFormValues;
+  routeKind: WorkflowRouteKind;
   onChange: (patch: Partial<RuleFormValues>) => void;
 }) {
+  const phaseOptions = WORKFLOW_PHASES
+    .filter((phase) => {
+      if (routeKind === "payment_run") return phase.value === "payment_run";
+      if (routeKind === "form") return phase.value !== "payment_run";
+      return phase.value === "request";
+    })
+    .map((phase) => ({ value: phase.value, label: phase.label }));
+  const showPhase = routeKind !== "document";
+
   return (
     <div className="grid grid-cols-2 gap-3">
-      <div className="col-span-2">
-        <Label>Workflow phase</Label>
-        <CustomListbox
-          value={values.phase}
-          onChange={(v) => onChange({ phase: v as WorkflowPhase })}
-          options={WORKFLOW_PHASES.map((phase) => ({ value: phase.value, label: phase.label }))}
-          buttonClassName={inp}
-          ariaLabel="Workflow phase"
-        />
-        <p className="text-[11px] text-muted-foreground mt-1">
-          Builder forms use Request for the first approval cycle and Retirement after the first SunSystems posting is complete.
-        </p>
-      </div>
+      {showPhase && (
+        <div className="col-span-2">
+          <Label>Workflow phase</Label>
+          <CustomListbox
+            value={values.phase}
+            onChange={(v) => onChange({ phase: v as WorkflowPhase })}
+            options={phaseOptions}
+            buttonClassName={inp}
+            ariaLabel="Workflow phase"
+          />
+          <p className="text-[11px] text-muted-foreground mt-1">
+            {routeKind === "payment_run"
+              ? "Payment run routing starts after selected lines have been marked in SunSystems."
+              : "Builder forms use Request for the first approval cycle and Retirement after the first SunSystems posting is complete."}
+          </p>
+        </div>
+      )}
       <div>
         <Label required>Minimum amount</Label>
         <input
@@ -1729,11 +1783,14 @@ function TemplateEmailsPanel({
   );
 }
 
-function RoutingRulesPanel({ template }: { template: WorkflowTemplate }) {
+function RoutingRulesPanel({ template, routeKind }: { template: WorkflowTemplate; routeKind: WorkflowRouteKind }) {
   const qc = useQueryClient();
   const [showAdd, setShowAdd] = useState(false);
+  const isPaymentRun = template.target_type === "payment_run";
+  const isFormWorkflow = routeKind === "form";
+  const defaultPhase: WorkflowPhase = isPaymentRun ? "payment_run" : "request";
   const blankRuleForm: RuleFormValues = {
-    phase: "request",
+    phase: defaultPhase,
     amount_min: "0",
     amount_max: "",
     currency: "USD",
@@ -1741,17 +1798,18 @@ function RoutingRulesPanel({ template }: { template: WorkflowTemplate }) {
   };
   const [form, setForm] = useState<RuleFormValues>(blankRuleForm);
   const templateId = template.id;
-  const hasDocumentType = Boolean(template.document_type);
+  const hasRoutingScope = isPaymentRun || Boolean(template.document_type);
 
   const { data: rules, isLoading } = useQuery<WorkflowRule[]>({
     queryKey: ["workflow-rules", templateId],
     queryFn: () => workflowAPI.listRules({ template: templateId }).then(r => r.data.results ?? r.data),
-    enabled: hasDocumentType,
+    enabled: hasRoutingScope,
   });
 
   const createRule = useMutation({
     mutationFn: () => workflowAPI.createRule({
       ...form, template: templateId,
+      phase: routeKind === "document" ? "request" : form.phase,
       amount_min: form.amount_min || "0",
       amount_max: form.amount_max || null,
     }),
@@ -1782,7 +1840,7 @@ function RoutingRulesPanel({ template }: { template: WorkflowTemplate }) {
     setShowAdd(false);
     setEditingId(rule.id);
     setEditForm({
-      phase: ((rule.phase || "request").trim().toLowerCase() || "request") as WorkflowPhase,
+      phase: ((rule.phase || defaultPhase).trim().toLowerCase() || defaultPhase) as WorkflowPhase,
       amount_min: String(rule.amount_min ?? "0"),
       amount_max: rule.amount_max == null ? "" : String(rule.amount_max),
       currency: rule.currency, label: rule.label ?? "",
@@ -1793,7 +1851,7 @@ function RoutingRulesPanel({ template }: { template: WorkflowTemplate }) {
     mutationFn: () => workflowAPI.updateRule(editingId as string, {
       amount_min: editForm.amount_min || "0",
       amount_max: editForm.amount_max || null,
-      phase: editForm.phase,
+      phase: routeKind === "document" ? "request" : editForm.phase,
       currency: editForm.currency, label: editForm.label,
     }),
     onSuccess: () => {
@@ -1827,21 +1885,21 @@ function RoutingRulesPanel({ template }: { template: WorkflowTemplate }) {
         <div className="flex-1">
           <h3 className="font-semibold text-foreground text-base flex items-center gap-2">
             <Settings2 className="w-4 h-4 text-muted-foreground" />
-            Phase and amount routing rules
+            {routeKind === "document" ? "Amount routing rules" : "Phase and amount routing rules"}
           </h3>
           <p className="text-xs text-muted-foreground mt-1">
             Rules for this template are automatically scoped to{" "}
-            <span className="font-medium text-foreground">{template.document_type_name ?? "its document type"}</span>.
+            <span className="font-medium text-foreground">{isPaymentRun ? "payment runs" : template.document_type_name ?? "its document type"}</span>.
           </p>
         </div>
-        {!showAdd && hasDocumentType && (
+        {!showAdd && hasRoutingScope && (
           <button onClick={openAddRule} className="btn-primary text-xs px-3 py-1.5">
             <Plus className="w-3.5 h-3.5" /> Add rule
           </button>
         )}
       </div>
 
-      {!hasDocumentType && (
+      {!hasRoutingScope && (
         <div className="rounded-xl border border-amber-300 bg-amber-50 p-4">
           <p className="text-sm font-medium text-amber-900">Assign a document type to this template first</p>
           <p className="text-xs text-amber-800/80 mt-1">
@@ -1850,13 +1908,13 @@ function RoutingRulesPanel({ template }: { template: WorkflowTemplate }) {
         </div>
       )}
 
-      {showAdd && hasDocumentType && (
+      {showAdd && hasRoutingScope && (
         <div className="rounded-xl border-2 border-accent/40 bg-accent/5 p-4 space-y-3">
           <div className="flex items-center justify-between">
             <h4 className="text-sm font-semibold text-foreground">New routing rule</h4>
             <button onClick={() => setShowAdd(false)} className="p-1 rounded hover:bg-muted"><X className="w-4 h-4 text-muted-foreground" /></button>
           </div>
-          <RuleFormFields values={form} onChange={(p) => setForm(f => ({ ...f, ...p }))} />
+          <RuleFormFields values={form} routeKind={routeKind} onChange={(p) => setForm(f => ({ ...f, ...p }))} />
           <div className="flex gap-2 pt-2">
             <button onClick={() => createRule.mutate()} disabled={createRule.isPending} className="btn-primary text-xs">
               {createRule.isPending && <Loader2 className="w-3 h-3 animate-spin" />} Create rule
@@ -1870,7 +1928,7 @@ function RoutingRulesPanel({ template }: { template: WorkflowTemplate }) {
         <div className="space-y-2">{[1, 2].map(i => <div key={i} className="h-16 bg-muted rounded-lg animate-pulse" />)}</div>
       )}
 
-      {!isLoading && hasDocumentType && sortedRules.length === 0 && !showAdd && (
+      {!isLoading && hasRoutingScope && sortedRules.length === 0 && !showAdd && (
         <div className="text-center py-12 bg-muted/40 rounded-xl border border-dashed border-border">
           <Settings2 className="w-12 h-12 mx-auto mb-3 text-muted-foreground/60" />
           <p className="text-sm font-medium text-foreground">No routing rules yet</p>
@@ -1890,7 +1948,7 @@ function RoutingRulesPanel({ template }: { template: WorkflowTemplate }) {
                     <h4 className="text-sm font-semibold text-foreground">Edit routing rule</h4>
                     <button onClick={() => setEditingId(null)} className="p-1 rounded hover:bg-muted"><X className="w-4 h-4 text-muted-foreground" /></button>
                   </div>
-                  <RuleFormFields values={editForm} onChange={(p) => setEditForm(f => ({ ...f, ...p }))} />
+                  <RuleFormFields values={editForm} routeKind={routeKind} onChange={(p) => setEditForm(f => ({ ...f, ...p }))} />
                   <div className="flex gap-2 pt-2">
                     <button onClick={() => updateRule.mutate()} disabled={updateRule.isPending} className="btn-primary text-xs">
                       {updateRule.isPending && <Loader2 className="w-3 h-3 animate-spin" />} Save changes
@@ -1907,13 +1965,15 @@ function RoutingRulesPanel({ template }: { template: WorkflowTemplate }) {
                   <div className="flex-1 min-w-0">
                     <div className="flex items-center gap-2 flex-wrap">
                       <p className="text-sm font-semibold text-foreground">{formatRuleRange(rule)}</p>
-                      <span className="text-[11px] px-2 py-0.5 rounded-full bg-primary/10 text-primary">
-                        {workflowPhaseLabel(rule.phase)}
-                      </span>
+                      {(isPaymentRun || isFormWorkflow) && (
+                        <span className="text-[11px] px-2 py-0.5 rounded-full bg-primary/10 text-primary">
+                          {workflowPhaseLabel(rule.phase)}
+                        </span>
+                      )}
                       {rule.label && <span className="text-[11px] px-2 py-0.5 rounded-full bg-muted text-muted-foreground">{rule.label}</span>}
                     </div>
                     <p className="text-[11px] text-muted-foreground mt-1">
-                      Matching {rule.document_type_name.toLowerCase()} documents will use this template.
+                      Matching {isPaymentRun ? "payment runs" : `${(rule.document_type_name ?? "this document type").toLowerCase()} documents`} will use this template.
                     </p>
                   </div>
                   <div className="flex items-center gap-1 opacity-0 group-hover:opacity-100 transition-opacity">
@@ -1943,9 +2003,11 @@ function TemplateEditor({
   onDelete,
   allTemplates: _allTemplates,
   docTypes,
+  initialTargetType = "document",
 }: {
   template: WorkflowTemplate | null;
   docType?: DocumentType | null;
+  initialTargetType?: WorkflowTargetType;
   onSaved: (t: WorkflowTemplate, isNew: boolean) => void;
   onDuplicate?: () => void;
   onDelete?: () => void;
@@ -1956,6 +2018,7 @@ function TemplateEditor({
   const [name, setName] = useState("");
   const [description, setDescription] = useState("");
   const [steps, setSteps] = useState<WorkflowStep[]>([]);
+  const [targetType, setTargetType] = useState<WorkflowTargetType>("document");
   const [notifyUploaderOnApproval, setNotifyUploaderOnApproval] = useState(true);
   const [emailTemplates, setEmailTemplates] = useState<EmailTemplates>({});
   const [selectedDocumentTypeId, setSelectedDocumentTypeId] = useState<string | null>(null);
@@ -1964,18 +2027,19 @@ function TemplateEditor({
   const [selectedStepIndex, setSelectedStepIndex] = useState<number | null>(null);
 
   useEffect(() => {
-    setName(template?.name ?? (docType ? `${docType.name} Workflow` : "New Template"));
+    setName(template?.name ?? (docType ? `${docType.name} Workflow` : initialTargetType === "payment_run" ? "Payment Run Workflow" : "New Template"));
     setDescription(template?.description ?? "");
     setSteps(
       template?.steps?.slice().sort((a, b) => a.order - b.order).map((s) => ({ ...s })) ?? []
     );
+    setTargetType(template?.target_type ?? initialTargetType);
     setNotifyUploaderOnApproval(template?.notify_uploader_on_approval ?? true);
     setEmailTemplates(normalizeEmailTemplates(template?.email_templates));
-    setSelectedDocumentTypeId(template?.document_type ?? docType?.id ?? null);
+    setSelectedDocumentTypeId((template?.target_type ?? initialTargetType) === "payment_run" ? null : (template?.document_type ?? docType?.id ?? null));
     setIsDirty(!template);
     setActiveTab("flow");
     setSelectedStepIndex(null);
-  }, [template?.id, docType?.id]);
+  }, [template?.id, docType?.id, initialTargetType]);
 
   const { data: groups } = useQuery<Group[]>({
     queryKey: ["groups-all"],
@@ -1993,11 +2057,21 @@ function TemplateEditor({
       ?? null,
     [availableDocTypes, selectedDocumentTypeId, template?.document_type_name, docType?.name]
   );
+  const selectedDocumentType = useMemo(
+    () => availableDocTypes.find((item) => item.id === selectedDocumentTypeId) ?? docType ?? null,
+    [availableDocTypes, selectedDocumentTypeId, docType]
+  );
+  const routeKind: WorkflowRouteKind = targetType === "payment_run"
+    ? "payment_run"
+    : isFormDocumentType(selectedDocumentType)
+      ? "form"
+      : "document";
   const canEditDocumentType = !template && !docType;
 
   const saveMutation = useMutation({
     mutationFn: (payload: {
       name: string; description: string;
+      target_type: WorkflowTargetType;
       document_type: string | null; is_active: boolean;
       notify_uploader_on_approval: boolean;
       email_templates: EmailTemplates;
@@ -2025,7 +2099,10 @@ function TemplateEditor({
 
   const handleSave = () => {
     if (!name.trim())               { toast.error("Template name is required"); return; }
-    if (!selectedDocumentTypeId)    { toast.error("Choose the document type this template belongs to"); return; }
+    if (targetType === "document" && !selectedDocumentTypeId) {
+      toast.error("Choose the document type this template belongs to");
+      return;
+    }
     if (steps.length === 0)         { toast.error("Add at least one step"); return; }
 
     const hasApproval = steps.some(s => s.step_type !== "notification");
@@ -2075,7 +2152,8 @@ function TemplateEditor({
     saveMutation.mutate({
       name: name.trim(),
       description: description.trim(),
-      document_type: selectedDocumentTypeId,
+      target_type: targetType,
+      document_type: targetType === "payment_run" ? null : selectedDocumentTypeId,
       is_active: template ? template.is_active : true,
       notify_uploader_on_approval: notifyUploaderOnApproval,
       email_templates: emailTemplatesToPayload(emailTemplates),
@@ -2127,9 +2205,13 @@ function TemplateEditor({
         <div className="flex-1 min-w-0">
           <div className="flex items-center gap-2 mb-3 flex-wrap">
             <span className="inline-flex items-center gap-1 text-[11px] font-medium text-muted-foreground bg-muted px-2.5 py-1 rounded-full">
-              <FolderTree className="w-3 h-3" /> Template scope
+              <FolderTree className="w-3 h-3" /> {targetType === "payment_run" ? "Payment run" : "Template scope"}
             </span>
-            {selectedDocumentTypeName && (
+            {targetType === "payment_run" ? (
+              <span className="inline-flex items-center gap-1 text-xs font-medium text-accent bg-accent/20 px-2.5 py-1 rounded-full">
+                Payment run approvals
+              </span>
+            ) : selectedDocumentTypeName && (
               <span className="inline-flex items-center gap-1 text-xs font-medium text-accent bg-accent/20 px-2.5 py-1 rounded-full">
                 {selectedDocumentTypeName}
               </span>
@@ -2147,6 +2229,27 @@ function TemplateEditor({
             className="text-sm text-muted-foreground bg-transparent border-0 outline-none w-full p-0 mt-1 focus:ring-0"
             placeholder="Description (optional)"
           />
+          {canEditDocumentType && (
+            <div className="mt-3 max-w-sm">
+              <Label required>Workflow target</Label>
+              <CustomListbox
+                ariaLabel="Workflow target"
+                value={targetType}
+                onChange={(v) => {
+                  const next = v as WorkflowTargetType;
+                  setTargetType(next);
+                  if (next === "payment_run") setSelectedDocumentTypeId(null);
+                  setIsDirty(true);
+                }}
+                options={[
+                  { value: "document", label: "Document type" },
+                  { value: "payment_run", label: "Payment run" },
+                ]}
+                buttonClassName="h-9 w-full rounded-lg border border-border bg-card px-3 text-sm text-foreground"
+              />
+            </div>
+          )}
+          {targetType === "document" && (
           <div className="mt-3 max-w-sm">
             <Label required>Document type</Label>
             {canEditDocumentType ? (
@@ -2166,6 +2269,7 @@ function TemplateEditor({
               </div>
             )}
           </div>
+          )}
         </div>
         <div className="flex items-center gap-2 flex-shrink-0">
           <div className="flex bg-muted rounded-lg p-1">
@@ -2247,9 +2351,10 @@ function TemplateEditor({
         <div className="flex-1 overflow-y-auto min-h-0">
           <RoutingRulesPanel template={normalizeTemplate({
             ...template,
-            document_type: selectedDocumentTypeId,
-            document_type_name: availableDocTypes.find((item) => item.id === selectedDocumentTypeId)?.name ?? template.document_type_name ?? null,
-          })} />
+            target_type: targetType,
+            document_type: targetType === "payment_run" ? null : selectedDocumentTypeId,
+            document_type_name: targetType === "payment_run" ? "Payment run" : availableDocTypes.find((item) => item.id === selectedDocumentTypeId)?.name ?? template.document_type_name ?? null,
+          })} routeKind={routeKind} />
         </div>
       ) : null}
     </div>
@@ -2267,6 +2372,7 @@ function DuplicateTemplateModal({
 }) {
   const [newName, setNewName] = useState(`${template.name} (copy)`);
   const [selectedDocTypeId, setSelectedDocTypeId] = useState<string | null>(template.document_type ?? null);
+  const isPaymentRun = template.target_type === "payment_run";
   const activeDocTypes = useMemo(() => docTypes.filter((d) => d.is_active), [docTypes]);
 
   const duplicateMutation = useMutation({
@@ -2277,6 +2383,7 @@ function DuplicateTemplateModal({
         try {
           const patchRes = await workflowAPI.updateTemplate(cloned.id, {
             name: cloned.name, description: cloned.description,
+            target_type: "document",
             document_type: selectedDocTypeId, is_active: true,
             steps: (cloned.steps ?? []).map(stepToPayload),
           });
@@ -2322,7 +2429,7 @@ function DuplicateTemplateModal({
           <p className="text-sm font-semibold text-foreground">{template.name}</p>
           <p className="text-xs text-muted-foreground mt-0.5">
             {template.step_count ?? template.steps?.length ?? 0} steps
-            {template.document_type_name ? ` · ${template.document_type_name}` : ""}
+            {isPaymentRun ? " · Payment run" : template.document_type_name ? ` · ${template.document_type_name}` : ""}
           </p>
         </div>
 
@@ -2331,14 +2438,16 @@ function DuplicateTemplateModal({
             <Label required>New template name</Label>
             <input value={newName} onChange={(e) => setNewName(e.target.value)} className="input" autoFocus />
           </div>
-          <div>
-            <Label required>Document type</Label>
-            <select value={selectedDocTypeId ?? ""} onChange={(e) => setSelectedDocTypeId(e.target.value || null)} className="input">
-              <option value="">Select document type</option>
-              {activeDocTypes.map((d) => <option key={d.id} value={d.id}>{d.name}</option>)}
-            </select>
-            <p className="text-[11px] text-muted-foreground mt-1">The duplicate can be assigned to a different document type.</p>
-          </div>
+          {!isPaymentRun && (
+            <div>
+              <Label required>Document type</Label>
+              <select value={selectedDocTypeId ?? ""} onChange={(e) => setSelectedDocTypeId(e.target.value || null)} className="input">
+                <option value="">Select document type</option>
+                {activeDocTypes.map((d) => <option key={d.id} value={d.id}>{d.name}</option>)}
+              </select>
+              <p className="text-[11px] text-muted-foreground mt-1">The duplicate can be assigned to a different document type.</p>
+            </div>
+          )}
           <div className="flex gap-2 pt-1">
             <button type="submit" disabled={duplicateMutation.isPending} className="btn-primary flex-1">
               {duplicateMutation.isPending ? <><Loader2 className="w-4 h-4 animate-spin" /> Duplicating…</> : <><Copy className="w-4 h-4" /> Duplicate</>}
@@ -2580,6 +2689,7 @@ export default function WorkflowBuilderPage() {
   const [search, setSearch] = useState("");
   const [showDetailModal, setShowDetailModal] = useState<DocumentType | null>(null);
   const [creatingForDocType, setCreatingForDocType] = useState<DocumentType | null>(null);
+  const [creatingPaymentRunTemplate, setCreatingPaymentRunTemplate] = useState(false);
   const [duplicatingTemplate, setDuplicatingTemplate] = useState<WorkflowTemplate | null>(null);
   const [deletingTemplate, setDeletingTemplate] = useState<WorkflowTemplate | null>(null);
 
@@ -2612,14 +2722,14 @@ export default function WorkflowBuilderPage() {
   const handleDocTypeClick = (dt: DocumentType) => {
     if (!dt.workflow_template) {
       setShowDetailModal(dt);
-      setSelectedDocType(null); setEditingTemplateId(null); setCreatingForDocType(null);
+      setSelectedDocType(null); setEditingTemplateId(null); setCreatingForDocType(null); setCreatingPaymentRunTemplate(false);
       return;
     }
-    setSelectedDocType(dt); setEditingTemplateId(null); setCreatingForDocType(null);
+    setSelectedDocType(dt); setEditingTemplateId(null); setCreatingForDocType(null); setCreatingPaymentRunTemplate(false);
   };
 
   const handleTemplateClick = (t: WorkflowTemplate) => {
-    setEditingTemplateId(t.id); setSelectedDocType(null); setCreatingForDocType(null);
+    setEditingTemplateId(t.id); setSelectedDocType(null); setCreatingForDocType(null); setCreatingPaymentRunTemplate(false);
   };
 
   const handleAssignTemplate = useCallback(async (docTypeId: string, templateId: string) => {
@@ -2638,7 +2748,13 @@ export default function WorkflowBuilderPage() {
 
   const handleStartCreateForDocType = (docType: DocumentType) => {
     setCreatingForDocType(docType);
-    setSelectedDocType(null); setEditingTemplateId(null); setShowDetailModal(null);
+    setSelectedDocType(null); setEditingTemplateId(null); setShowDetailModal(null); setCreatingPaymentRunTemplate(false);
+  };
+
+  const handleStartCreatePaymentRunTemplate = () => {
+    setCreatingPaymentRunTemplate(true);
+    setCreatingForDocType(null); setSelectedDocType(null); setEditingTemplateId(null); setShowDetailModal(null);
+    setSidebarTab("templates");
   };
 
   const handleSaved = (t: WorkflowTemplate, isNew: boolean) => {
@@ -2650,15 +2766,18 @@ export default function WorkflowBuilderPage() {
           setEditingTemplateId(t.id);
           setSelectedDocType({ ...creatingForDocType, workflow_template: t.id });
           setCreatingForDocType(null);
+          setCreatingPaymentRunTemplate(false);
         })
         .catch(() => {
           toast.warning(`Template created but failed to assign`);
           setEditingTemplateId(t.id);
           setSelectedDocType(creatingForDocType);
           setCreatingForDocType(null);
+          setCreatingPaymentRunTemplate(false);
         });
     } else if (isNew) {
       setEditingTemplateId(t.id);
+      setCreatingPaymentRunTemplate(false);
       toast.success(`Template "${t.name}" created`);
     } else {
       if (selectedDocType) setSelectedDocType(prev => prev ? { ...prev, workflow_template: t.id } : null);
@@ -2708,10 +2827,10 @@ export default function WorkflowBuilderPage() {
   const withTemplate    = workflowDocTypes.filter(d => d.workflow_template).length;
   const withoutTemplate = workflowDocTypes.length - withTemplate;
 
-  const showEditor = selectedDocType || editingTemplateId || creatingForDocType;
-  const currentTemplate = creatingForDocType ? null : (fetchedTemplate ?? null);
+  const showEditor = selectedDocType || editingTemplateId || creatingForDocType || creatingPaymentRunTemplate;
+  const currentTemplate = creatingForDocType || creatingPaymentRunTemplate ? null : (fetchedTemplate ?? null);
   const isLoadingTemplate =
-    !creatingForDocType && !!effectiveTemplateId &&
+    !creatingForDocType && !creatingPaymentRunTemplate && !!effectiveTemplateId &&
     (templateLoading || templateFetching || fetchedTemplate === undefined);
   const editorDocType = selectedDocType || creatingForDocType || null;
 
@@ -2724,6 +2843,13 @@ export default function WorkflowBuilderPage() {
             <h1 className="text-lg font-bold text-foreground">
               {sidebarTab === "doctypes" ? "Document Types" : "Templates"}
             </h1>
+            <button
+              type="button"
+              onClick={handleStartCreatePaymentRunTemplate}
+              className="inline-flex items-center gap-1 rounded-lg bg-accent/15 px-2.5 py-1.5 text-xs font-medium text-accent hover:bg-accent/25"
+            >
+              <Plus className="h-3.5 w-3.5" /> Payment Run
+            </button>
           </div>
 
           <div className="flex bg-muted p-1 rounded-lg mb-4">
@@ -2892,6 +3018,7 @@ export default function WorkflowBuilderPage() {
               onDelete={currentTemplate ? () => setDeletingTemplate(currentTemplate) : undefined}
               allTemplates={resolvedTemplates}
               docTypes={docTypesArray}
+              initialTargetType={creatingPaymentRunTemplate ? "payment_run" : "document"}
             />
           )
         )}

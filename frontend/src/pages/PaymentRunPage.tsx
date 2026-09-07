@@ -8,21 +8,10 @@
 import { useState } from "react";
 import { useMutation, useQuery } from "@tanstack/react-query";
 import {
-  Search,
-  AlertCircle,
-  RefreshCw,
-  CreditCard,
-  TrendingUp,
-  TrendingDown,
-  Filter,
-  X,
-  Info,
-  Download,
-  Zap,
-  CheckSquare,
-  Square,
+  Search, AlertCircle, RefreshCw, CreditCard, TrendingUp, TrendingDown,
+  Filter, X, Info, Download, Zap, CheckSquare, Square, Lock, History,
 } from "lucide-react";
-import { sunsystemsAPI, type PaymentRunLine, type PaymentRunFilters, type SunSystemsAccount } from "@/services/api";
+import { sunsystemsAPI, type PaymentRunLine, type PaymentRunFilters, type SunSystemsAccount, type PaymentRunRecord } from "@/services/api";
 import CustomListbox from "@/components/ui/CustomListbox";
 import AccountMultiSelect from "@/components/ui/AccountMultiSelect";
 
@@ -49,6 +38,19 @@ function formatPeriod(raw: string): string {
   const period = raw.slice(0, 3).replace(/^0+/, "") || "0";
   const year = raw.slice(3);
   return `P${period} / ${year}`;
+}
+
+function formatDateTime(raw?: string | null): string {
+  if (!raw) return "";
+  const d = new Date(raw);
+  if (Number.isNaN(d.getTime())) return raw;
+  return d.toLocaleString(undefined, {
+    year: "numeric",
+    month: "short",
+    day: "2-digit",
+    hour: "2-digit",
+    minute: "2-digit",
+  });
 }
 
 // ── Sub-components ────────────────────────────────────────────────────────────
@@ -123,7 +125,9 @@ const MARKER_LABEL: Record<string, string> = Object.fromEntries(
 
 const DEFAULT_PAYMENT_MARKER = "F";
 
-// Stable row key derived from journal number + line number + sort position.
+const PAGE_TABS = ["Payment Query", "Recent Runs"] as const;
+type PageTab = (typeof PAGE_TABS)[number];
+
 function rowKey(row: { journal_number: string; journal_line_number: string }, i: number) {
   return `${row.journal_number}-${row.journal_line_number}-${i}`;
 }
@@ -140,6 +144,8 @@ function ConfirmPaymentModal({
   isProcessing,
   processError,
   processedCount,
+  paymentRun,
+  approvalError,
 }: {
   lines: SelectedLine[];
   onMarkerChange: (key: string, marker: string) => void;
@@ -148,6 +154,8 @@ function ConfirmPaymentModal({
   isProcessing: boolean;
   processError: string | null;
   processedCount: number | null;
+  paymentRun: PaymentRunRecord | null;
+  approvalError: string | null;
 }) {
   const total = lines.reduce((s, l) => s + (parseFloat(l.transaction_amount) || 0), 0);
   const currencies = [...new Set(lines.map((l) => l.currency_code))];
@@ -171,12 +179,12 @@ function ConfirmPaymentModal({
           )}
           <div className="flex-1">
             <h2 className="text-base font-bold">
-              {succeeded ? "Payment Run Processed" : "Confirm Payment Run"}
+              {succeeded ? "Payment Run Submitted" : "Confirm Payment Run"}
             </h2>
             <p className="text-xs text-white/75">
               {succeeded
-                ? `${processedCount} line${processedCount !== 1 ? "s" : ""} successfully updated in SunSystems.`
-                : `Review the ${lines.length} line${lines.length !== 1 ? "s" : ""} below before processing. You can still adjust the allocation marker for each line.`}
+                ? `${processedCount} line${processedCount !== 1 ? "s" : ""} marked in SunSystems and submitted for approval.`
+                : `Review the ${lines.length} line${lines.length !== 1 ? "s" : ""} below before submission. You can still adjust the allocation marker for each line.`}
             </p>
           </div>
           {!isProcessing && (
@@ -211,6 +219,12 @@ function ConfirmPaymentModal({
             <span><strong>SunSystems error:</strong> {processError}</span>
           </div>
         )}
+        {approvalError && (
+          <div className="flex items-start gap-3 border-b border-red-300 bg-red-50 px-5 py-3 text-sm text-red-800">
+            <AlertCircle className="mt-0.5 h-4 w-4 shrink-0" />
+            <span><strong>Payment run error:</strong> {approvalError}</span>
+          </div>
+        )}
 
         {/* Success state */}
         {succeeded ? (
@@ -219,12 +233,33 @@ function ConfirmPaymentModal({
               <CheckSquare className="h-8 w-8 text-emerald-600" />
             </div>
             <p className="text-base font-bold text-[#1F2933]">
-              {processedCount} line{processedCount !== 1 ? "s" : ""} updated successfully
+              {paymentRun?.payment_reference ?? "Payment run"} submitted successfully
             </p>
             <p className="max-w-sm text-center text-sm text-[#5E6870]">
-              The allocation markers have been updated in SunSystems.
-              Re-run the query to see the updated ledger state.
+              The allocation markers have been updated in SunSystems. The payment will post automatically after the final workflow approver.
             </p>
+            {paymentRun && (
+              <div className="w-full max-w-xl border border-[#C8CDD2] bg-[#F8F9FA] p-4 text-sm">
+                <div className="grid grid-cols-2 gap-4">
+                  <div>
+                    <p className="text-[10px] font-semibold uppercase tracking-wider text-[#5E6870]">Reference</p>
+                    <p className="font-mono font-bold text-[#1F2933]">{paymentRun.payment_reference}</p>
+                  </div>
+                  <div>
+                    <p className="text-[10px] font-semibold uppercase tracking-wider text-[#5E6870]">Workflow</p>
+                    <p className="font-bold text-[#1F2933]">Submitted for approval</p>
+                  </div>
+                  <div>
+                    <p className="text-[10px] font-semibold uppercase tracking-wider text-[#5E6870]">SunSystems call</p>
+                    <p className="font-mono font-bold text-[#1F2933]">{paymentRun.component}/{paymentRun.method}</p>
+                  </div>
+                  <div>
+                    <p className="text-[10px] font-semibold uppercase tracking-wider text-[#5E6870]">Status</p>
+                    <p className="font-bold capitalize text-[#1F2933]">{paymentRun.status.replace("_", " ")}</p>
+                  </div>
+                </div>
+              </div>
+            )}
           </div>
         ) : (
           /* Table */
@@ -314,7 +349,7 @@ function ConfirmPaymentModal({
                 ) : (
                   <Zap className="h-4 w-4" />
                 )}
-                {isProcessing ? "Processing…" : "Confirm & Process Payment"}
+                {isProcessing ? "Submitting…" : "Submit for Approval"}
               </button>
             )}
           </div>
@@ -345,6 +380,7 @@ const TABLE_COLS: Array<{ label: string; key: keyof PaymentRunLine; className?: 
 ];
 
 export default function PaymentRunPage() {
+  const [activeTab, setActiveTab] = useState<PageTab>("Payment Query");
   const [filters, setFilters] = useState<PaymentRunFilters>({
     account_codes: "",    // driven by selectedAccountCodes below
     allocation_markers: "",   // blank = all markers
@@ -367,6 +403,13 @@ export default function PaymentRunPage() {
   });
   const accounts: SunSystemsAccount[] = accountsQuery.data?.accounts ?? [];
 
+  const paymentRunsQuery = useQuery({
+    queryKey: ["sunsystems-payment-runs"],
+    queryFn: () => sunsystemsAPI.getPaymentRuns().then((r) => r.data),
+    staleTime: 30 * 1000,
+  });
+  const paymentRuns = paymentRunsQuery.data?.payment_runs ?? [];
+
   // ── Selection state ────────────────────────────────────────────────────────
   // selectedKeys: set of row keys that are checked.
   // rowMarkers: per-row payment allocation marker (defaults to F — Force).
@@ -377,26 +420,49 @@ export default function PaymentRunPage() {
   // ── Amend markers mutation ────────────────────────────────────────────────────
   const [processedCount, setProcessedCount] = useState<number | null>(null);
   const [processError, setProcessError] = useState<string | null>(null);
+  const [currentPaymentRun, setCurrentPaymentRun] = useState<PaymentRunRecord | null>(null);
+  const [approvalError, setApprovalError] = useState<string | null>(null);
+  const [finalProcessError, setFinalProcessError] = useState<string | null>(null);
+  const [retryError, setRetryError] = useState<string | null>(null);
 
   const amendMutation = useMutation({
     mutationFn: () =>
       sunsystemsAPI.amendMarkers({
         lines: selectedLines.map((l) => ({
+          account_code: l.account_code,
+          account_description: l.account_description,
+          accounting_period: l.accounting_period,
+          transaction_date: l.transaction_date,
           journal_number: l.journal_number,
           journal_line_number: l.journal_line_number,
+          transaction_reference: l.transaction_reference,
+          description: l.description,
+          base_amount: l.base_amount,
+          conversion_rate: l.conversion_rate,
+          currency_code: l.currency_code,
+          transaction_amount: l.transaction_amount,
+          debit_credit: l.debit_credit,
+          allocation_marker: l.allocation_marker,
           payment_marker: l.payment_marker,
         })),
+        business_unit: filters.business_unit,
+        budget_code: filters.budget_code,
       }).then((r) => r.data),
     onSuccess: (data) => {
       if (data.ok) {
         setProcessedCount(data.processed ?? selectedLines.length);
+        setCurrentPaymentRun(data.payment_run ?? null);
         setProcessError(null);
+        setApprovalError(data.workflow_error ?? null);
+        setFinalProcessError(null);
         // Clear selection so re-query shows fresh state.
         setSelectedKeys(new Set());
         setRowMarkers({});
+        paymentRunsQuery.refetch();
       } else {
         setProcessError(data.error ?? "SunSystems returned an error.");
         setProcessedCount(null);
+        setCurrentPaymentRun(null);
       }
     },
     onError: (err: any) => {
@@ -404,6 +470,27 @@ export default function PaymentRunPage() {
         err?.response?.data?.error ?? "Failed to reach SunSystems. Please try again."
       );
       setProcessedCount(null);
+      setCurrentPaymentRun(null);
+    },
+  });
+
+  const processPaymentMutation = useMutation({
+    mutationFn: (paymentRunId: string) =>
+      sunsystemsAPI.processPaymentRun(paymentRunId).then((r) => r.data),
+    onSuccess: (data) => {
+      if (data.payment_run) {
+        if (!currentPaymentRun || currentPaymentRun.id === data.payment_run.id) {
+          setCurrentPaymentRun(data.payment_run);
+        }
+      }
+      setRetryError(data.ok === false ? data.error ?? "SunSystems returned an error." : null);
+      paymentRunsQuery.refetch();
+    },
+    onError: (err: any) => {
+      const payload = err?.response?.data;
+      setRetryError(payload?.error ?? payload?.detail ?? "Payment processing failed.");
+      if (payload?.payment_run) setCurrentPaymentRun(payload.payment_run);
+      paymentRunsQuery.refetch();
     },
   });
 
@@ -446,10 +533,14 @@ export default function PaymentRunPage() {
 
   // ── Selection helpers ──────────────────────────────────────────────────────
   const allKeys = sorted.map((r, i) => rowKey(r, i));
-  const allSelected = allKeys.length > 0 && allKeys.every((k) => selectedKeys.has(k));
-  const someSelected = allKeys.some((k) => selectedKeys.has(k));
+  const selectableKeys = allKeys.filter((k, i) => !sorted[i].already_submitted);
+  const allSelected = selectableKeys.length > 0 && selectableKeys.every((k) => selectedKeys.has(k));
+  const someSelected = selectableKeys.some((k) => selectedKeys.has(k));
 
   const toggleRow = (key: string) => {
+    const row = sorted.find((_, i) => rowKey(sorted[i], i) === key);
+    if (row?.already_submitted) return; // Prevent selecting already-submitted rows
+    
     setSelectedKeys((prev) => {
       const next = new Set(prev);
       if (next.has(key)) { next.delete(key); } else { next.add(key); }
@@ -465,10 +556,11 @@ export default function PaymentRunPage() {
     if (allSelected) {
       setSelectedKeys(new Set());
     } else {
-      setSelectedKeys(new Set(allKeys));
+      const selectableKeys = allKeys.filter((k, i) => !sorted[i].already_submitted);
+      setSelectedKeys(new Set(selectableKeys));
       setRowMarkers((prev) => {
         const next = { ...prev };
-        allKeys.forEach((k) => { if (!next[k]) next[k] = DEFAULT_PAYMENT_MARKER; });
+        selectableKeys.forEach((k) => { if (!next[k]) next[k] = DEFAULT_PAYMENT_MARKER; });
         return next;
       });
     }
@@ -480,7 +572,7 @@ export default function PaymentRunPage() {
   // Lines selected for payment processing, with their chosen marker.
   const selectedLines = sorted
     .map((row, i) => ({ row, key: rowKey(row, i) }))
-    .filter(({ key }) => selectedKeys.has(key))
+    .filter(({ key, row }) => selectedKeys.has(key) && !row.already_submitted)
     .map(({ row, key }) => ({ ...row, payment_marker: rowMarkers[key] ?? DEFAULT_PAYMENT_MARKER, row_key: key }));
 
   const selectedTotal = selectedLines.reduce(
@@ -557,9 +649,146 @@ export default function PaymentRunPage() {
         </div>
       </div>
 
-      <div className="mx-auto w-full max-w-screen-2xl flex-1 space-y-5 px-6 py-6">
-        {/* ── Filter panel ── */}
-        <div className="border border-[#C8CDD2] bg-white shadow-sm">
+      {/* ── Tab bar ── */}
+      <div className="border-b border-[#C8CDD2] bg-white">
+        <div className="mx-auto max-w-screen-2xl px-6">
+          <div className="flex">
+            {PAGE_TABS.map((tab) => (
+              <button key={tab} onClick={() => setActiveTab(tab)}
+                className={`flex items-center gap-2 px-5 py-3 text-sm font-semibold transition-colors -mb-px border-b-2 ${
+                  activeTab === tab ? "border-[#287EAD] text-[#287EAD]" : "border-transparent text-[#5E6870] hover:text-[#1F2933]"
+                }`}>
+                {tab === "Recent Runs" && <History className="h-4 w-4" />}
+                {tab}
+                {tab === "Recent Runs" && paymentRuns.length > 0 && (
+                  <span className="rounded-full bg-[#287EAD] px-1.5 py-0.5 text-[10px] font-bold text-white leading-none">{paymentRuns.length}</span>
+                )}
+              </button>
+            ))}
+          </div>
+        </div>
+      </div>
+
+      {/* ── Recent Runs tab ── */}
+      {activeTab === "Recent Runs" && (
+        <div className="mx-auto w-full max-w-screen-2xl flex-1 px-6 py-6">
+          <div className="border border-[#C8CDD2] bg-white shadow-sm">
+            <div className="flex items-center gap-3 border-b border-[#C8CDD2] bg-[#F3F5F6] px-5 py-3">
+              <History className="h-4 w-4 text-[#287EAD]" />
+              <h2 className="text-sm font-bold text-[#1F2933]">Recent Payment Runs</h2>
+              <span className="rounded bg-[#287EAD] px-2.5 py-0.5 text-xs font-bold text-white">{paymentRuns.length}</span>
+              <button type="button" onClick={() => paymentRunsQuery.refetch()} disabled={paymentRunsQuery.isFetching}
+                className="ml-auto inline-flex items-center gap-1.5 text-xs font-semibold text-[#5E6870] hover:text-[#287EAD] disabled:opacity-60">
+                <RefreshCw className={`h-3.5 w-3.5 ${paymentRunsQuery.isFetching ? "animate-spin" : ""}`} />
+                Refresh
+              </button>
+            </div>
+            
+            {/* Retry error banner */}
+            {retryError && (
+              <div className="flex items-start gap-3 border-b border-red-300 bg-red-50 px-5 py-3 text-sm text-red-800">
+                <AlertCircle className="mt-0.5 h-4 w-4 shrink-0" />
+                <span><strong>Retry error:</strong> {retryError}</span>
+                <button
+                  type="button"
+                  onClick={() => setRetryError(null)}
+                  className="ml-auto text-red-600 hover:text-red-800"
+                >
+                  <X className="h-4 w-4" />
+                </button>
+              </div>
+            )}
+            
+            {paymentRuns.length === 0 ? (
+              <div className="flex flex-col items-center justify-center gap-2 py-16 text-[#5E6870]">
+                <History className="h-8 w-8 text-[#AEB5BB]" />
+                <p className="text-sm font-semibold">No payment runs yet.</p>
+                <p className="text-xs">Submitted payment runs will appear here.</p>
+              </div>
+            ) : (
+              <div className="overflow-x-auto">
+                <table className="w-full border-collapse text-sm">
+                  <thead>
+                    <tr className="border-b border-[#C8CDD2] bg-[#F7F8F9] text-xs">
+                      {["Reference", "Submitted by", "Submitted", "Lines", "Amount", "Status", "Approvals", "Action"].map((h) => (
+                        <th key={h} className="whitespace-nowrap border-r border-[#E5E9EC] px-3 py-2.5 text-left font-bold uppercase tracking-wider text-[#5E6870] last:border-r-0">{h}</th>
+                      ))}
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {paymentRuns.map((run) => {
+                      const statusMeta: Record<string, string> = {
+                        pending_approval: "bg-amber-50 text-amber-700 border-amber-200",
+                        rejected: "bg-orange-50 text-orange-700 border-orange-200",
+                        approved: "bg-blue-50 text-blue-700 border-blue-200",
+                        processing: "bg-amber-50 text-amber-700 border-amber-200",
+                        paid: "bg-emerald-50 text-emerald-700 border-emerald-200",
+                        failed: "bg-red-50 text-red-700 border-red-200",
+                      };
+                      const badge = statusMeta[run.status] ?? "bg-[#F3F5F6] text-[#5E6870] border-[#C8CDD2]";
+                      return (
+                        <tr key={run.id} className={`border-b border-[#EDF0F2] last:border-0 hover:bg-[#F3F8FB] ${
+                          run.status === "failed" ? "bg-red-50/30" : run.status === "processing" ? "bg-amber-50/30" : ""
+                        }`}>
+                          <td className="border-r border-[#EDF0F2] px-3 py-2.5 font-mono font-bold text-[#287EAD]">{run.payment_reference}</td>
+                          <td className="border-r border-[#EDF0F2] px-3 py-2.5 text-xs text-[#5E6870]">{run.submitted_by_name ?? "—"}</td>
+                          <td className="border-r border-[#EDF0F2] px-3 py-2.5 text-xs text-[#5E6870]">{formatDateTime(run.submitted_at)}</td>
+                          <td className="border-r border-[#EDF0F2] px-3 py-2.5 text-center tabular-nums">{run.line_count}</td>
+                          <td className="border-r border-[#EDF0F2] px-3 py-2.5 text-right tabular-nums font-semibold">{formatAmount(run.total_amount)}</td>
+                          <td className="border-r border-[#EDF0F2] px-3 py-2.5">
+                            <span className={`inline-flex items-center rounded border px-2 py-0.5 text-xs font-semibold capitalize ${badge}`}>
+                              {run.status === "approved" ? "Processing payment" : run.status === "rejected" ? "Rejected" : run.status.replace(/_/g, " ")}
+                            </span>
+                          </td>
+                          <td className="border-r border-[#EDF0F2] px-3 py-2.5 text-center text-xs text-[#5E6870]">
+                            {run.approval_count}/{run.required_approvals}
+                          </td>
+                          <td className="px-3 py-2.5">
+                            {run.status === "failed" ? (
+                              <button type="button" onClick={() => processPaymentMutation.mutate(run.id)}
+                                disabled={processPaymentMutation.isPending}
+                                className="inline-flex items-center gap-1.5 bg-[#287EAD] px-3 py-1.5 text-xs font-bold text-white hover:bg-[#1E6F99] disabled:opacity-60">
+                                {processPaymentMutation.isPending ? <RefreshCw className="h-3.5 w-3.5 animate-spin" /> : <CreditCard className="h-3.5 w-3.5" />}
+                                Retry Payment
+                              </button>
+                            ) : run.status === "rejected" ? (
+                              <button type="button" onClick={() => processPaymentMutation.mutate(run.id)}
+                                disabled={processPaymentMutation.isPending}
+                                className="inline-flex items-center gap-1.5 bg-emerald-600 px-3 py-1.5 text-xs font-bold text-white hover:bg-emerald-700 disabled:opacity-60">
+                                {processPaymentMutation.isPending ? <RefreshCw className="h-3.5 w-3.5 animate-spin" /> : <CreditCard className="h-3.5 w-3.5" />}
+                                Retry
+                              </button>
+                            ) : run.status === "processing" ? (
+                              <button type="button" onClick={() => processPaymentMutation.mutate(run.id)}
+                                disabled={processPaymentMutation.isPending}
+                                className="inline-flex items-center gap-1.5 bg-amber-600 px-3 py-1.5 text-xs font-bold text-white hover:bg-amber-700 disabled:opacity-60">
+                                {processPaymentMutation.isPending ? <RefreshCw className="h-3.5 w-3.5 animate-spin" /> : <RefreshCw className="h-3.5 w-3.5" />}
+                                Retry (Stuck)
+                              </button>
+                            ) : run.status === "pending_approval" ? (
+                              <span className="text-xs font-semibold text-[#287EAD]">Awaiting approvers</span>
+                            ) : run.status === "approved" ? (
+                              <span className="text-xs font-semibold text-blue-600">Processing payment</span>
+                            ) : (
+                              <span className="text-xs text-[#8C969E]">—</span>
+                            )}
+                          </td>
+                        </tr>
+                      );
+                    })}
+                  </tbody>
+                </table>
+              </div>
+            )}
+          </div>
+        </div>
+      )}
+
+      {/* ── Payment Query tab ── */}
+      {activeTab === "Payment Query" && (
+        <div className="mx-auto w-full max-w-screen-2xl flex-1 px-6 py-6">
+          {/* ── Filter panel ── */}
+          <div className="border border-[#C8CDD2] bg-white shadow-sm">
           <div className="flex items-center gap-2 border-b border-[#C8CDD2] bg-[#F3F5F6] px-5 py-3">
             <Filter className="h-4 w-4 text-[#287EAD]" />
             <h2 className="text-sm font-bold text-[#1F2933]">Filters</h2>
@@ -708,6 +937,12 @@ export default function PaymentRunPage() {
             <span>{error}</span>
           </div>
         )}
+        {approvalError && !showConfirmModal && (
+          <div className="flex items-start gap-3 border border-red-300 bg-red-50 px-4 py-3 text-sm text-red-800">
+            <AlertCircle className="mt-0.5 h-4 w-4 shrink-0" />
+            <span>{approvalError}</span>
+          </div>
+        )}
 
         {/* ── Summary cards (only when results present) ── */}
         {lines.length > 0 && (
@@ -781,7 +1016,7 @@ export default function PaymentRunPage() {
                       <button
                         type="button"
                         onClick={toggleAll}
-                        title={allSelected ? "Deselect all" : "Select all"}
+                        title={allSelected ? "Deselect all" : "Select all (excludes already-submitted)"}
                         className="flex items-center justify-center text-[#5E6870] hover:text-[#287EAD] transition-colors"
                       >
                         {allSelected ? (
@@ -807,6 +1042,10 @@ export default function PaymentRunPage() {
                         </span>
                       </th>
                     ))}
+                    {/* Status column */}
+                    <th className="whitespace-nowrap border-r border-[#E5E9EC] px-3 py-2.5 text-left font-bold uppercase tracking-wider text-[#5E6870]">
+                      Status
+                    </th>
                     {/* Payment marker column */}
                     <th className="whitespace-nowrap border-l border-[#E5E9EC] px-3 py-2.5 text-left font-bold uppercase tracking-wider text-[#287EAD]">
                       Payment Marker
@@ -818,22 +1057,27 @@ export default function PaymentRunPage() {
                     const key = rowKey(row, i);
                     const isSelected = selectedKeys.has(key);
                     const marker = rowMarkers[key] ?? DEFAULT_PAYMENT_MARKER;
+                    const isAlreadySubmitted = row.already_submitted === true;
                     return (
                       <tr
                         key={key}
-                        onClick={() => toggleRow(key)}
-                        className={`group cursor-pointer border-b border-[#EDF0F2] transition-colors last:border-0 ${
-                          isSelected
-                            ? "bg-amber-50 hover:bg-amber-100"
-                            : "hover:bg-[#F3F8FB]"
+                        onClick={() => !isAlreadySubmitted && toggleRow(key)}
+                        className={`group border-b border-[#EDF0F2] transition-colors last:border-0 ${
+                          isAlreadySubmitted
+                            ? "bg-gray-50 cursor-not-allowed opacity-60"
+                            : isSelected
+                            ? "bg-amber-50 hover:bg-amber-100 cursor-pointer"
+                            : "hover:bg-[#F3F8FB] cursor-pointer"
                         }`}
                       >
                         {/* Row checkbox */}
                         <td
                           className="w-10 border-r border-[#EDF0F2] px-3 py-2.5 text-center"
-                          onClick={(e) => { e.stopPropagation(); toggleRow(key); }}
+                          onClick={(e) => { e.stopPropagation(); if (!isAlreadySubmitted) toggleRow(key); }}
                         >
-                          {isSelected ? (
+                          {isAlreadySubmitted ? (
+                            <Lock className="h-4 w-4 text-gray-400" />
+                          ) : isSelected ? (
                             <CheckSquare className="h-4 w-4 text-[#287EAD]" />
                           ) : (
                             <Square className="h-4 w-4 text-[#AEB5BB] group-hover:text-[#5E6870]" />
@@ -855,23 +1099,43 @@ export default function PaymentRunPage() {
                             </td>
                           );
                         })}
+                        
+                        {/* Status column for already-submitted indicator */}
+                        <td className="border-r border-[#EDF0F2] px-3 py-2.5 text-center">
+                          {isAlreadySubmitted ? (
+                            <div className="flex items-center justify-center gap-1.5 text-xs text-gray-500">
+                              <Lock className="h-3 w-3" />
+                              <span className="font-medium">Submitted</span>
+                            </div>
+                          ) : (
+                            <span className="text-xs text-gray-400">—</span>
+                          )}
+                        </td>
+
 
                         {/* Per-row payment marker selector */}
                         <td
                           className="border-l border-[#EDF0F2] px-2 py-1.5"
                           onClick={(e) => e.stopPropagation()}
                         >
-                          <CustomListbox
-                            value={marker}
-                            onChange={(v) => setMarker(key, v)}
-                            options={PAYMENT_MARKER_OPTIONS}
-                            disabled={!isSelected}
-                            buttonClassName={`h-7 rounded border px-2 text-xs font-semibold transition-colors ${
-                              isSelected
-                                ? "border-[#287EAD] bg-white text-[#1F2933]"
-                                : "border-[#E5E9EC] bg-[#F7F8F9] text-[#AEB5BB]"
-                            }`}
-                          />
+                          {isAlreadySubmitted ? (
+                            <div className="flex items-center gap-1.5 text-xs text-gray-500">
+                              <Lock className="h-3 w-3" />
+                              <span className="font-medium">{row.existing_payment_ref || "Submitted"}</span>
+                            </div>
+                          ) : (
+                            <CustomListbox
+                              value={marker}
+                              onChange={(v) => setMarker(key, v)}
+                              options={PAYMENT_MARKER_OPTIONS}
+                              disabled={!isSelected}
+                              buttonClassName={`h-7 rounded border px-2 text-xs font-semibold transition-colors ${
+                                isSelected
+                                  ? "border-[#287EAD] bg-white text-[#1F2933]"
+                                  : "border-[#E5E9EC] bg-[#F7F8F9] text-[#AEB5BB]"
+                              }`}
+                            />
+                          )}
                         </td>
                       </tr>
                     );
@@ -881,7 +1145,8 @@ export default function PaymentRunPage() {
             </div>
           )}
         </div>
-      </div>
+        </div>
+      )}
 
       {/* ── Sticky action bar — appears when lines are selected ── */}
       {selectedLines.length > 0 && (
@@ -930,7 +1195,7 @@ export default function PaymentRunPage() {
                 Deselect all
               </button>
 
-              {/* Process Payment — opens confirmation modal */}
+              {/* Submit for approval — opens confirmation modal */}
               <button
                 id="process-payment-btn"
                 type="button"
@@ -938,7 +1203,7 @@ export default function PaymentRunPage() {
                 className="inline-flex items-center gap-2 bg-[#287EAD] px-6 py-2.5 text-sm font-bold text-white shadow-sm hover:bg-[#1E6F99] transition-colors active:scale-95"
               >
                 <Zap className="h-4 w-4" />
-                Process Payment ({selectedLines.length})
+                Submit for Approval ({selectedLines.length})
               </button>
             </div>
           </div>
@@ -955,11 +1220,16 @@ export default function PaymentRunPage() {
             setShowConfirmModal(false);
             setProcessedCount(null);
             setProcessError(null);
+            setCurrentPaymentRun(null);
+            setApprovalError(null);
             amendMutation.reset();
+            processPaymentMutation.reset();
           }}
           isProcessing={amendMutation.isPending}
           processError={processError}
           processedCount={processedCount}
+          paymentRun={currentPaymentRun}
+          approvalError={approvalError}
         />
       )}
     </div>
