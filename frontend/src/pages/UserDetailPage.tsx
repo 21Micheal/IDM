@@ -440,7 +440,7 @@ export default function UserDetailPage() {
               Reassign tasks
             </h2>
             <p className="text-xs text-muted-foreground mt-0.5">
-              Move all active tasks owned by this user to another active user.
+              Move all active workflow tasks and pending signature requests owned by this user to another active user.
             </p>
           </header>
           <div className="p-6 space-y-3 flex-1 flex flex-col">
