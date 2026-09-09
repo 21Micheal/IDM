@@ -234,6 +234,20 @@ def _verify_lines_paid(run: PaymentRun, config: "SunSystemsConfig") -> tuple[boo
     return True, f"All {len(lines)} line(s) confirmed as AllocationMarker=P in SunSystems."
 
 
+def _lines_with_paid_markers(lines) -> list:
+    """Return a copy of stored lines with allocation/payment markers set to P."""
+    updated = []
+    for line in lines or []:
+        if not isinstance(line, dict):
+            updated.append(line)
+            continue
+        copy = dict(line)
+        copy["allocation_marker"] = "P"
+        copy["payment_marker"] = "P"
+        updated.append(copy)
+    return updated
+
+
 def process_payment_run(run: PaymentRun, *, actor=None) -> PaymentRun:
     """Execute the SunSystems PaymentRun/Process call, then verify payment.
 
@@ -301,9 +315,12 @@ def process_payment_run(run: PaymentRun, *, actor=None) -> PaymentRun:
         raise SunSystemsError(run.error)
 
     # ── Step 3: Mark as PAID ─────────────────────────────────────────────────
+    # Persist the post-payment marker so snapshots no longer show the
+    # submit-time F (or other) marker after SunSystems has confirmed P.
     run.status = PaymentRunStatus.PAID
+    run.lines = _lines_with_paid_markers(run.lines)
     run.error = ""
     run.processed_by = actor
     run.processed_at = timezone.now()
-    run.save(update_fields=["status", "error", "processed_by", "processed_at", "updated_at"])
+    run.save(update_fields=["status", "lines", "error", "processed_by", "processed_at", "updated_at"])
     return run

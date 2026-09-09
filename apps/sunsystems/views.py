@@ -823,6 +823,13 @@ class AmendMarkerView(APIView):
             from apps.workflows.services import WorkflowError, WorkflowService
             WorkflowService.start_payment_run(payment_run, request.user)
             payment_run.refresh_from_db()
+            # Persist builder approval-step count on the run for legacy consumers.
+            workflow = getattr(payment_run, "workflow_instance", None)
+            if workflow and workflow.template_id:
+                approval_steps = workflow.template.steps.filter(step_type="approval").count()
+                if approval_steps and payment_run.required_approvals != approval_steps:
+                    payment_run.required_approvals = approval_steps
+                    payment_run.save(update_fields=["required_approvals", "updated_at"])
         except WorkflowError as exc:
             workflow_error = str(exc)
             payment_run.status = PaymentRunStatus.FAILED
@@ -860,7 +867,21 @@ class PaymentRunListView(APIView):
 
     def get(self, request):
         status_filter = str(request.query_params.get("status") or "").strip()
-        qs = PaymentRun.objects.prefetch_related("approvals").order_by("-submitted_at")
+        qs = (
+            PaymentRun.objects
+            .select_related(
+                "submitted_by",
+                "processed_by",
+                "workflow_instance",
+                "workflow_instance__template",
+            )
+            .prefetch_related(
+                "approvals",
+                "workflow_instance__template__steps",
+                "workflow_instance__tasks__step",
+            )
+            .order_by("-submitted_at")
+        )
         if status_filter:
             qs = qs.filter(status=status_filter)
         return Response({
