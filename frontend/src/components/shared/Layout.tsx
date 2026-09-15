@@ -692,6 +692,7 @@ export function WorkspaceHeaderActions({ variant = "light" }: { variant?: "light
 
 export default function Layout() {
   const { user } = useAuthStore();
+  const queryClient = useQueryClient();
   const _navigate = useNavigate();
   void _navigate;
   const location = useLocation();
@@ -755,6 +756,18 @@ export default function Layout() {
     enabled: idleReady,
     ...QUERY_ONE_MINUTE_STALE,
   });
+
+  // When the pending-task badge changes (reassignment, delegation, new work),
+  // refresh the cached My Tasks list so it stays in sync without a full reload.
+  const prevPendingTasksRef = useRef<number | null>(null);
+  useEffect(() => {
+    if (summary?.pending_tasks == null) return;
+    const prev = prevPendingTasksRef.current;
+    prevPendingTasksRef.current = summary.pending_tasks;
+    if (prev !== null && prev !== summary.pending_tasks) {
+      void queryClient.invalidateQueries({ queryKey: ["workflow", "my-tasks"] });
+    }
+  }, [summary?.pending_tasks, queryClient]);
 
   // The notification + task *lists* only feed the expanded tray, so they're no
   // longer polled — they load once and the tray refetches them when opened.

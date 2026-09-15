@@ -799,6 +799,14 @@ If you did not expect this reset, contact your administrator immediately.
         for signer_id, request_id in notify_pairs:
             notify_signature_requested.delay(signer_id, request_id)
 
+        # Alert the new assignee the same way a fresh assignment / delegation does,
+        # so their notification tray (and My Tasks via tray refresh) updates promptly.
+        if task_ids:
+            from apps.notifications.tasks import notify_task_assigned
+
+            for task_id in task_ids:
+                notify_task_assigned.delay(str(task_id))
+
         sig_total = sig_moved + sig_cleared
         AuditLog.objects.create(
             event=AuditEvent.WORKFLOW_REASSIGNED,
