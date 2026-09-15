@@ -146,6 +146,15 @@ function paymentRunStatusLabel(run: PaymentRunRecord): string {
   return run.status.replace(/_/g, " ");
 }
 
+/** True when a processing run has gone stale (verification retries exhausted). */
+function isPaymentRunStuck(run: PaymentRunRecord): boolean {
+  if (run.status !== "processing") return false;
+  const updated = new Date(run.updated_at).getTime();
+  if (Number.isNaN(updated)) return true;
+  // Celery re-verifies with ≤30s gaps; treat as stuck only after that window goes quiet.
+  return Date.now() - updated > 90 * 1000;
+}
+
 function LinesSnapshotModal({
   run,
   onClose,
@@ -533,7 +542,15 @@ export default function PaymentRunPage() {
   const paymentRunsQuery = useQuery({
     queryKey: ["sunsystems-payment-runs"],
     queryFn: () => sunsystemsAPI.getPaymentRuns().then((r) => r.data),
-    staleTime: 30 * 1000,
+    staleTime: 5 * 1000,
+    refetchInterval: (query) => {
+      const runs = query.state.data?.payment_runs ?? [];
+      // Poll while payment is in flight so Paid appears without a manual refresh.
+      const inFlight = runs.some(
+        (r) => r.status === "approved" || r.status === "processing",
+      );
+      return inFlight ? 3000 : false;
+    },
   });
   const paymentRuns = paymentRunsQuery.data?.payment_runs ?? [];
 
@@ -905,18 +922,28 @@ export default function PaymentRunPage() {
                                 Retry
                               </button>
                             ) : run.status === "processing" ? (
-                              <button type="button" onClick={() => processPaymentMutation.mutate(run.id)}
-                                disabled={processPaymentMutation.isPending}
-                                className="inline-flex items-center gap-1.5 bg-amber-600 px-3 py-1.5 text-xs font-bold text-white hover:bg-amber-700 disabled:opacity-60">
-                                {processPaymentMutation.isPending ? <RefreshCw className="h-3.5 w-3.5 animate-spin" /> : <RefreshCw className="h-3.5 w-3.5" />}
-                                Retry (Stuck)
-                              </button>
+                              isPaymentRunStuck(run) ? (
+                                <button type="button" onClick={() => processPaymentMutation.mutate(run.id)}
+                                  disabled={processPaymentMutation.isPending}
+                                  className="inline-flex items-center gap-1.5 bg-amber-600 px-3 py-1.5 text-xs font-bold text-white hover:bg-amber-700 disabled:opacity-60">
+                                  {processPaymentMutation.isPending ? <RefreshCw className="h-3.5 w-3.5 animate-spin" /> : <RefreshCw className="h-3.5 w-3.5" />}
+                                  Retry (Stuck)
+                                </button>
+                              ) : (
+                                <span className="inline-flex items-center gap-1.5 text-xs font-semibold text-amber-700">
+                                  <RefreshCw className="h-3.5 w-3.5 animate-spin" />
+                                  Confirming payment…
+                                </span>
+                              )
                             ) : run.status === "pending_approval" ? (
                               <span className="text-xs font-semibold text-[#287EAD]">
                                 {run.current_step_name ? `Awaiting ${run.current_step_name}` : "Awaiting approvers"}
                               </span>
                             ) : run.status === "approved" ? (
-                              <span className="text-xs font-semibold text-blue-600">Processing payment</span>
+                              <span className="inline-flex items-center gap-1.5 text-xs font-semibold text-blue-600">
+                                <RefreshCw className="h-3.5 w-3.5 animate-spin" />
+                                Processing payment…
+                              </span>
                             ) : (
                               <span className="text-xs text-[#8C969E]">—</span>
                             )}
