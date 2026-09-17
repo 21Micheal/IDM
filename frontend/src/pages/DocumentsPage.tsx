@@ -874,8 +874,8 @@ export default function DocumentsPage({ personalOnly = false }: DocumentsPagePro
     const matchingCount = docs.length;
 
     return (
-      <div className="flex h-screen min-h-[42rem] overflow-hidden bg-[#EDEDED] text-[13px] text-[#1F2933]">
-        <div className="flex min-w-0 flex-1 flex-col">
+      <div className="flex h-full min-h-0 flex-col overflow-hidden bg-[#EDEDED] text-[13px] text-[#1F2933]">
+        <div className="flex min-h-0 min-w-0 flex-1 flex-col">
           <WorkspaceCommandBar
             actions={
               <Link to="/documents/upload" className="inline-flex items-center gap-2 text-sm text-white/80 hover:text-white">

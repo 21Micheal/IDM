@@ -328,7 +328,7 @@ def notify_task_assigned(
     except WorkflowTask.DoesNotExist:
         return
 
-    if task.status != "in_progress" or not task.assigned_to:
+    if task.status not in ("in_progress", "held") or not task.assigned_to:
         return
 
     target_ctx = _payment_run_task_context(task)

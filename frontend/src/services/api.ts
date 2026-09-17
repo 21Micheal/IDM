@@ -867,7 +867,11 @@ export type PaymentRunRecord = {
   daily_sequence: number;
   business_unit: string;
   budget_code: string;
-  status: "pending_approval" | "approved" | "processing" | "paid" | "failed";
+  status: "pending_approval" | "approved" | "processing" | "paid" | "failed" | "rejected";
+  status_display?: string | null;
+  current_step_name?: string | null;
+  current_step_status_label?: string | null;
+  workflow_instance_id?: string | null;
   required_approvals: number;
   approval_count: number;
   line_count: number;

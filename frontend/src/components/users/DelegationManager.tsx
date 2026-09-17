@@ -83,6 +83,11 @@ export function DelegationScheduleForm({
       toast.success(delegatorId ? "Delegation scheduled" : "Delegation created");
       setForm(emptyForm);
       qc.invalidateQueries({ queryKey: ["delegations"] });
+      // Same as reassignment: refresh My Tasks for the current user if they are
+      // the delegate (admin scheduling to themselves, or self-service).
+      void qc.invalidateQueries({ queryKey: ["workflow", "my-tasks"] });
+      void qc.invalidateQueries({ queryKey: ["notifications"] });
+      void qc.invalidateQueries({ queryKey: ["notifications", "summary"] });
       if (delegatorId) {
         qc.invalidateQueries({ queryKey: ["users", "delegations", delegatorId] });
       }

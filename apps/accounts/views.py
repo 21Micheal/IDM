@@ -741,38 +741,111 @@ If you did not expect this reset, contact your administrator immediately.
         except User.DoesNotExist:
             return Response({"detail": "Target user not found or inactive."}, status=404)
 
+        from django.db import transaction
         from apps.workflows.models import WorkflowTask, WorkflowTaskAction
+        from apps.documents.models import SignatureRequest, SignatureRequestSigner
+        from apps.notifications.tasks import notify_signature_requested
 
-        tasks = WorkflowTask.objects.filter(
-            assigned_to=user,
-            status__in=["in_progress", "held"],
-        )
-        task_ids = list(tasks.values_list("id", flat=True))
-        updated = tasks.update(assigned_to=to_user)
-
-        if task_ids:
-            WorkflowTaskAction.objects.bulk_create(
-                [
-                    WorkflowTaskAction(
-                        task_id=task_id,
-                        actor=request.user,
-                        action="reassigned",
-                        comment=f"Task reassigned from {user.get_full_name() or user.email} to {to_user.get_full_name() or to_user.email}",
-                    )
-                    for task_id in task_ids
-                ]
+        with transaction.atomic():
+            tasks = WorkflowTask.objects.filter(
+                assigned_to=user,
+                status__in=["in_progress", "held"],
             )
+            task_ids = list(tasks.values_list("id", flat=True))
+            updated = tasks.update(assigned_to=to_user)
 
+            if task_ids:
+                WorkflowTaskAction.objects.bulk_create(
+                    [
+                        WorkflowTaskAction(
+                            task_id=task_id,
+                            actor=request.user,
+                            action="reassigned",
+                            comment=f"Task reassigned from {user.get_full_name() or user.email} to {to_user.get_full_name() or to_user.email}",
+                        )
+                        for task_id in task_ids
+                    ]
+                )
+
+            # Pending ad-hoc signature slots are also "active tasks" for the user.
+            # unique_together (request, signer) means we cannot move onto a request
+            # where the target is already listed — drop the outgoing pending row instead.
+            pending_signers = list(
+                SignatureRequestSigner.objects.filter(
+                    signer=user,
+                    status=SignatureRequestSigner.Status.PENDING,
+                    request__status=SignatureRequest.Status.PENDING,
+                ).select_related("request")
+            )
+            sig_moved = 0
+            sig_cleared = 0
+            notify_pairs: list[tuple[str, str]] = []
+            for row in pending_signers:
+                already = SignatureRequestSigner.objects.filter(
+                    request_id=row.request_id,
+                    signer=to_user,
+                ).exclude(pk=row.pk).exists()
+                if already:
+                    row.delete()
+                    sig_cleared += 1
+                    continue
+                row.signer = to_user
+                row.save(update_fields=["signer"])
+                sig_moved += 1
+                current_ids = {s.pk for s in row.request.current_pending_signers()}
+                if row.pk in current_ids:
+                    notify_pairs.append((str(to_user.id), str(row.request_id)))
+
+        for signer_id, request_id in notify_pairs:
+            notify_signature_requested.delay(signer_id, request_id)
+
+        # Alert the new assignee the same way a fresh assignment / delegation does,
+        # so their notification tray (and My Tasks via tray refresh) updates promptly.
+        if task_ids:
+            from apps.notifications.tasks import notify_task_assigned
+
+            for task_id in task_ids:
+                notify_task_assigned.delay(str(task_id))
+
+        sig_total = sig_moved + sig_cleared
         AuditLog.objects.create(
             event=AuditEvent.WORKFLOW_REASSIGNED,
             actor=request.user,
             object_type="User",
             object_id=str(user.id),
             object_repr=user.get_full_name() or user.email,
-            changes={"action": "reassign_active_tasks", "count": updated, "to_user_id": str(to_user.id), "to_user_name": to_user.get_full_name() or to_user.email},
+            changes={
+                "action": "reassign_active_tasks",
+                "count": updated,
+                "signature_count": sig_total,
+                "signature_moved": sig_moved,
+                "signature_cleared": sig_cleared,
+                "to_user_id": str(to_user.id),
+                "to_user_name": to_user.get_full_name() or to_user.email,
+            },
             ip_address=request.META.get("REMOTE_ADDR"),
         )
-        return Response({"detail": f"Reassigned {updated} active task(s).", "count": updated})
+
+        parts = []
+        if updated:
+            parts.append(f"{updated} active task(s)")
+        if sig_moved:
+            parts.append(f"{sig_moved} signature request(s)")
+        if sig_cleared:
+            parts.append(f"cleared {sig_cleared} signature slot(s) already held by the target")
+        if not parts:
+            detail = "No active tasks or signature requests to reassign"
+        elif len(parts) == 1 and parts[0].startswith("cleared"):
+            detail = parts[0].capitalize()
+        elif len(parts) == 1:
+            detail = f"Reassigned {parts[0]}"
+        else:
+            detail = f"Reassigned {', '.join(parts[:-1])}, and {parts[-1]}"
+        return Response({
+            "detail": f"{detail}.",
+            "count": updated,
+            "signature_count": sig_total,
+        })
 
 
 # ── Department ────────────────────────────────────────────────────────────────

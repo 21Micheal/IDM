@@ -160,6 +160,9 @@ export default function WorkflowPage() {
     queryKey: ["workflow", "my-tasks"],
     queryFn: () => workflowAPI.myTasks().then((r) => r.data.results ?? r.data),
     refetchInterval: 30_000,
+    // Global defaults disable refetchOnMount; always revalidate when opening My Tasks
+    // so reassignments/delegations show without a full page reload.
+    refetchOnMount: "always",
   });
 
   const queryClient = useQueryClient();

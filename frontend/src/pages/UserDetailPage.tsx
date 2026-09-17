@@ -148,6 +148,14 @@ export default function UserDetailPage() {
     onSuccess: (res) => {
       toast.success(res.data.detail || "Tasks reassigned");
       setReassignTo("");
+      // Keep My Tasks in sync for the assignee (same session) without a full reload.
+      // Delegation already feels instant because it creates a notification that
+      // refreshes the tray; reassignment must invalidate the task list directly.
+      void qc.invalidateQueries({ queryKey: ["workflow", "my-tasks"] });
+      void qc.invalidateQueries({ queryKey: ["notifications"] });
+      void qc.invalidateQueries({ queryKey: ["notifications", "summary"] });
+      void qc.invalidateQueries({ queryKey: ["notifications", "unread-count"] });
+      void qc.invalidateQueries({ queryKey: ["signature-requests"] });
     },
     onError: (err) => toast.error(extractApiError(err, "Failed to reassign active tasks")),
   });
@@ -440,7 +448,7 @@ export default function UserDetailPage() {
               Reassign tasks
             </h2>
             <p className="text-xs text-muted-foreground mt-0.5">
-              Move all active tasks owned by this user to another active user.
+              Move all active workflow tasks and pending signature requests owned by this user to another active user.
             </p>
           </header>
           <div className="p-6 space-y-3 flex-1 flex flex-col">

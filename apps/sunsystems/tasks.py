@@ -11,6 +11,7 @@ from __future__ import annotations
 import logging
 
 from celery import shared_task
+from celery.exceptions import MaxRetriesExceededError
 
 logger = logging.getLogger(__name__)
 
@@ -51,7 +52,7 @@ def post_journal_for_document(self, document_id: str, stage: int = 1, actor_id: 
     }
 
 
-@shared_task(bind=True, max_retries=0, queue="default")
+@shared_task(bind=True, max_retries=12, queue="default")
 def process_payment_run(self, payment_run_id: str, actor_id: str | None = None):
     """Post an approved payment run to SunSystems and verify payment.
 
@@ -59,9 +60,8 @@ def process_payment_run(self, payment_run_id: str, actor_id: str | None = None):
     when a follow-up Journal/Query confirms that every submitted ledger line
     now carries AllocationMarker=P in SunSystems.  If the PaymentRun/Process
     call succeeds but the verification step finds lines not yet marked P, the
-    run stays in PROCESSING (not PAID) and this task returns ok=False so that
-    the failure is logged and an operator or a retry mechanism can re-trigger
-    ``PaymentRunProcessView`` once SunSystems has settled the batch.
+    run stays in PROCESSING and this task retries verification with backoff
+    (without re-posting the Process call once a response is stored).
     """
     from apps.sunsystems.models import PaymentRun
 
@@ -96,20 +96,39 @@ def process_payment_run(self, payment_run_id: str, actor_id: str | None = None):
         try:
             run.refresh_from_db(fields=["status", "error"])
             current_status = run.status
-            current_error  = run.error
+            current_error = run.error
         except Exception:
             current_status = "unknown"
-            current_error  = str(exc)
+            current_error = str(exc)
 
         if current_status == "processing":
             logger.warning(
-                "Payment run %s processed by SunSystems but not yet confirmed as paid: %s",
+                "Payment run %s processed by SunSystems but not yet confirmed as paid "
+                "(attempt %s/%s): %s",
                 payment_run_id,
+                self.request.retries + 1,
+                self.max_retries + 1,
                 current_error,
             )
-        else:
-            logger.exception("Payment run %s failed (status=%s)", payment_run_id, current_status)
+            # Back off while SunSystems settles ledger markers (5s, 10s, … capped at 30s).
+            countdown = min(30, 5 + self.request.retries * 5)
+            try:
+                raise self.retry(exc=exc, countdown=countdown)
+            except MaxRetriesExceededError:
+                logger.error(
+                    "Payment run %s still unconfirmed after %s verification attempts: %s",
+                    payment_run_id,
+                    self.max_retries + 1,
+                    current_error,
+                )
+                return {
+                    "ok": False,
+                    "status": current_status,
+                    "detail": current_error or str(exc),
+                    "payment_run_id": str(payment_run_id),
+                }
 
+        logger.exception("Payment run %s failed (status=%s)", payment_run_id, current_status)
         return {
             "ok": False,
             "status": current_status,

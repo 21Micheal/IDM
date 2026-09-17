@@ -234,57 +234,82 @@ def _verify_lines_paid(run: PaymentRun, config: "SunSystemsConfig") -> tuple[boo
     return True, f"All {len(lines)} line(s) confirmed as AllocationMarker=P in SunSystems."
 
 
+def _lines_with_paid_markers(lines) -> list:
+    """Return a copy of stored lines with allocation/payment markers set to P."""
+    updated = []
+    for line in lines or []:
+        if not isinstance(line, dict):
+            updated.append(line)
+            continue
+        copy = dict(line)
+        copy["allocation_marker"] = "P"
+        copy["payment_marker"] = "P"
+        updated.append(copy)
+    return updated
+
+
 def process_payment_run(run: PaymentRun, *, actor=None) -> PaymentRun:
     """Execute the SunSystems PaymentRun/Process call, then verify payment.
 
     The run is marked PAID **only** when a follow-up Journal/Query confirms
     that every submitted line now carries AllocationMarker=P in SunSystems.
     If the process call succeeds but verification fails, the run stays in
-    PROCESSING so it can be retried or investigated without data corruption.
-    
-    Also allows retry for runs stuck in PROCESSING state due to errors.
-    Also allows retry for REJECTED runs (will transition to APPROVED status first).
+    PROCESSING so Celery (or an operator) can re-check without re-posting.
+
+    When a run is already PROCESSING with a stored Process response, only
+    verification is re-run — PaymentRun/Process is not called again.
     """
     if run.status == PaymentRunStatus.PAID:
         return run
-    
+
     # If REJECTED, transition to APPROVED status first (restarting the flow)
     if run.status == PaymentRunStatus.REJECTED:
         run.status = PaymentRunStatus.APPROVED
         run.error = ""
         run.save(update_fields=["status", "error", "updated_at"])
-    
+
     if run.status not in (PaymentRunStatus.APPROVED, PaymentRunStatus.FAILED, PaymentRunStatus.PROCESSING):
         raise SunSystemsError("Payment run must be approved, rejected, failed, or processing before final payment.")
 
-    ssc_payload = build_payment_process_payload(run)
-    run.status = PaymentRunStatus.PROCESSING
-    run.request_xml = ssc_payload
-    run.error = ""
-    run.save(update_fields=["status", "request_xml", "error", "updated_at"])
-
     config = SunSystemsConfig.from_mapping(effective_connection())
 
-    # ── Step 1: Execute PaymentRun/Process ───────────────────────────────────
-    try:
-        response_xml = SunSystemsClient(config).execute("PaymentRun", "Process", ssc_payload)
-    except SunSystemsError as exc:
-        run.status = PaymentRunStatus.FAILED
-        run.error = str(exc)
-        run.save(update_fields=["status", "error", "updated_at"])
-        raise
+    # Process already accepted by SunSystems — only re-verify markers.
+    skip_process = (
+        run.status == PaymentRunStatus.PROCESSING
+        and bool((run.response_xml or "").strip())
+    )
 
-    process_errors = sunsystems_error_messages(response_xml)
-    if process_errors:
-        run.status = PaymentRunStatus.FAILED
+    if not skip_process:
+        ssc_payload = build_payment_process_payload(run)
+        run.status = PaymentRunStatus.PROCESSING
+        run.request_xml = ssc_payload
+        run.error = ""
+        run.save(update_fields=["status", "request_xml", "error", "updated_at"])
+
+        # ── Step 1: Execute PaymentRun/Process ───────────────────────────────
+        try:
+            response_xml = SunSystemsClient(config).execute("PaymentRun", "Process", ssc_payload)
+        except SunSystemsError as exc:
+            run.status = PaymentRunStatus.FAILED
+            run.error = str(exc)
+            run.save(update_fields=["status", "error", "updated_at"])
+            raise
+
+        process_errors = sunsystems_error_messages(response_xml)
+        if process_errors:
+            run.status = PaymentRunStatus.FAILED
+            run.response_xml = response_xml
+            run.error = " | ".join(process_errors)
+            run.save(update_fields=["status", "response_xml", "error", "updated_at"])
+            raise SunSystemsError(run.error)
+
+        # Record the process response before verification so it is never lost.
         run.response_xml = response_xml
-        run.error = " | ".join(process_errors)
-        run.save(update_fields=["status", "response_xml", "error", "updated_at"])
-        raise SunSystemsError(run.error)
-
-    # Record the process response before verification so it is never lost.
-    run.response_xml = response_xml
-    run.save(update_fields=["response_xml", "updated_at"])
+        run.save(update_fields=["response_xml", "updated_at"])
+    else:
+        # Keep PROCESSING while we wait for SunSystems to settle markers.
+        run.status = PaymentRunStatus.PROCESSING
+        run.save(update_fields=["status", "updated_at"])
 
     # ── Step 2: Verify AllocationMarker=P in SunSystems ─────────────────────
     # The PaymentRun/Process call posts the payment batch in SunSystems, but
@@ -294,16 +319,19 @@ def process_payment_run(run: PaymentRun, *, actor=None) -> PaymentRun:
     all_paid, verify_detail = _verify_lines_paid(run, config)
 
     if not all_paid:
-        # Keep PROCESSING so the Celery task can be retried (or an operator
-        # can trigger PaymentRunProcessView manually after investigation).
+        # Keep PROCESSING so Celery can retry verification (or an operator can
+        # trigger PaymentRunProcessView) once SunSystems has settled the batch.
         run.error = f"PaymentRun/Process accepted by SunSystems but payment not yet confirmed: {verify_detail}"
         run.save(update_fields=["error", "updated_at"])
         raise SunSystemsError(run.error)
 
     # ── Step 3: Mark as PAID ─────────────────────────────────────────────────
+    # Persist the post-payment marker so snapshots no longer show the
+    # submit-time F (or other) marker after SunSystems has confirmed P.
     run.status = PaymentRunStatus.PAID
+    run.lines = _lines_with_paid_markers(run.lines)
     run.error = ""
     run.processed_by = actor
     run.processed_at = timezone.now()
-    run.save(update_fields=["status", "error", "processed_by", "processed_at", "updated_at"])
+    run.save(update_fields=["status", "lines", "error", "processed_by", "processed_at", "updated_at"])
     return run

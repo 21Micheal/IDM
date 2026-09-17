@@ -455,7 +455,7 @@ class PaymentRunView(APIView):
 
     Request body (all fields optional — defaults mirror the test script):
         account_codes      list[str] | str  comma-separated or list   e.g. ["64001","71001"]
-        allocation_markers list[str] | str  e.g. ["W"]  (unallocated)
+        allocation_markers list[str] | str  e.g. ["W"]  (unallocated = blank or W)
         journal_number_gt  int | str        e.g. 10
         business_unit      str              e.g. "PK1"
         budget_code        str              e.g. "A"
@@ -487,9 +487,19 @@ class PaymentRunView(APIView):
 
         raw_markers = data.get("allocation_markers", "")
         if isinstance(raw_markers, list):
-            allocation_markers = ",".join(str(m) for m in raw_markers if m)
+            marker_tokens = [str(m).strip() for m in raw_markers if str(m).strip()]
         else:
-            allocation_markers = str(raw_markers).strip()  # blank = no marker filter
+            marker_tokens = [t.strip() for t in str(raw_markers).split(",") if t.strip()]
+
+        # SunSystems Account Allocation shows "Not Allocated" for lines whose
+        # Journal AllocationMarker is blank (or occasionally "W"). Filtering the
+        # SSC query with IN "W" therefore misses the blank-marker lines that
+        # operators actually mean by "unallocated". Detect that intent here and
+        # post-filter after Journal/Query instead.
+        unallocated_tokens = {"W", "UNALLOCATED", "BLANK", "__BLANK__"}
+        marker_upper = {t.upper() for t in marker_tokens}
+        filter_unallocated_only = bool(marker_tokens) and marker_upper <= unallocated_tokens
+        allocation_markers = ",".join(marker_tokens)
 
         journal_number_gt = str(data.get("journal_number_gt", "") or "").strip()
 
@@ -506,7 +516,7 @@ class PaymentRunView(APIView):
             filter_items.append(
                 f'<Item name="/Ledger/Line/JournalNumber" operator="GT" value="{journal_number_gt}"/>'
             )
-        if allocation_markers:
+        if allocation_markers and not filter_unallocated_only:
             filter_items.append(
                 f'<Item name="/Ledger/Line/AllocationMarker" operator="IN" value="{allocation_markers}"/>'
             )
@@ -606,6 +616,13 @@ class PaymentRunView(APIView):
                 {"ok": False, "error": f"Could not parse SunSystems response: {exc}"},
                 status=status.HTTP_502_BAD_GATEWAY,
             )
+
+        if filter_unallocated_only:
+            # Match SunSystems "Not Allocated": blank/whitespace marker, plus literal W.
+            lines = [
+                line for line in lines
+                if (line.get("allocation_marker") or "").strip().upper() in ("", "W")
+            ]
 
         # ── Idempotency: mark lines already in an active payment run ──────────
         # Query PaymentRun records for this BU/budget that are NOT rejected
@@ -806,6 +823,13 @@ class AmendMarkerView(APIView):
             from apps.workflows.services import WorkflowError, WorkflowService
             WorkflowService.start_payment_run(payment_run, request.user)
             payment_run.refresh_from_db()
+            # Persist builder approval-step count on the run for legacy consumers.
+            workflow = getattr(payment_run, "workflow_instance", None)
+            if workflow and workflow.template_id:
+                approval_steps = workflow.template.steps.filter(step_type="approval").count()
+                if approval_steps and payment_run.required_approvals != approval_steps:
+                    payment_run.required_approvals = approval_steps
+                    payment_run.save(update_fields=["required_approvals", "updated_at"])
         except WorkflowError as exc:
             workflow_error = str(exc)
             payment_run.status = PaymentRunStatus.FAILED
@@ -843,7 +867,21 @@ class PaymentRunListView(APIView):
 
     def get(self, request):
         status_filter = str(request.query_params.get("status") or "").strip()
-        qs = PaymentRun.objects.prefetch_related("approvals").order_by("-submitted_at")
+        qs = (
+            PaymentRun.objects
+            .select_related(
+                "submitted_by",
+                "processed_by",
+                "workflow_instance",
+                "workflow_instance__template",
+            )
+            .prefetch_related(
+                "approvals",
+                "workflow_instance__template__steps",
+                "workflow_instance__tasks__step",
+            )
+            .order_by("-submitted_at")
+        )
         if status_filter:
             qs = qs.filter(status=status_filter)
         return Response({

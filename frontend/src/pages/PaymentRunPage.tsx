@@ -9,9 +9,9 @@ import { useState } from "react";
 import { useMutation, useQuery } from "@tanstack/react-query";
 import {
   Search, AlertCircle, RefreshCw, CreditCard, TrendingUp, TrendingDown,
-  Filter, X, Info, Download, Zap, CheckSquare, Square, Lock, History,
+  Filter, X, Info, Download, Zap, CheckSquare, Square, Lock, History, Eye,
 } from "lucide-react";
-import { sunsystemsAPI, type PaymentRunLine, type PaymentRunFilters, type SunSystemsAccount, type PaymentRunRecord } from "@/services/api";
+import { sunsystemsAPI, type PaymentRunLine, type PaymentRunFilters, type SunSystemsAccount, type PaymentRunRecord, type AmendMarkerLine } from "@/services/api";
 import CustomListbox from "@/components/ui/CustomListbox";
 import AccountMultiSelect from "@/components/ui/AccountMultiSelect";
 
@@ -97,7 +97,7 @@ function EmptyState({ hasQueried }: { hasQueried: boolean }) {
 
 const ALLOCATION_OPTIONS = [
   { value: "",  label: "All markers" },
-  { value: "W", label: "W — Unallocated" },
+  { value: "W", label: "Unallocated (blank / W)" },
   { value: "A", label: "A — Allocated" },
   { value: "F", label: "F — Force" },
   { value: "S", label: "S — Split" },
@@ -130,6 +130,140 @@ type PageTab = (typeof PAGE_TABS)[number];
 
 function rowKey(row: { journal_number: string; journal_line_number: string }, i: number) {
   return `${row.journal_number}-${row.journal_line_number}-${i}`;
+}
+
+function paymentRunStatusLabel(run: PaymentRunRecord): string {
+  if (run.status_display?.trim()) return run.status_display.trim();
+  if (run.status === "pending_approval") {
+    return run.current_step_status_label?.trim()
+      || run.current_step_name?.trim()
+      || "Pending approval";
+  }
+  if (run.status === "approved" || run.status === "processing") return "Processing payment";
+  if (run.status === "rejected") return "Rejected";
+  if (run.status === "paid") return "Paid";
+  if (run.status === "failed") return "Failed";
+  return run.status.replace(/_/g, " ");
+}
+
+/** True when a processing run has gone stale (verification retries exhausted). */
+function isPaymentRunStuck(run: PaymentRunRecord): boolean {
+  if (run.status !== "processing") return false;
+  const updated = new Date(run.updated_at).getTime();
+  if (Number.isNaN(updated)) return true;
+  // Celery re-verifies with ≤30s gaps; treat as stuck only after that window goes quiet.
+  return Date.now() - updated > 90 * 1000;
+}
+
+function LinesSnapshotModal({
+  run,
+  onClose,
+}: {
+  run: PaymentRunRecord;
+  onClose: () => void;
+}) {
+  const lines = Array.isArray(run.lines) ? run.lines : [];
+  const currencies = [...new Set(lines.map((l) => l.currency_code).filter(Boolean))];
+
+  return (
+    <div className="fixed inset-0 z-50 flex items-center justify-center p-4">
+      <div className="absolute inset-0 bg-black/40 backdrop-blur-[2px]" onClick={onClose} />
+      <div className="relative z-10 flex max-h-[85vh] w-full max-w-5xl flex-col overflow-hidden border border-[#C8CDD2] bg-white shadow-xl">
+        <div className="flex items-start justify-between gap-3 border-b border-[#C8CDD2] bg-[#F3F5F6] px-5 py-4">
+          <div>
+            <h3 className="text-base font-bold text-[#1F2933]">Payment run lines</h3>
+            <p className="mt-0.5 text-xs text-[#5E6870]">
+              Snapshot of transactions submitted with{" "}
+              <span className="font-mono font-semibold text-[#287EAD]">{run.payment_reference}</span>
+              {currencies.length > 0 ? ` · ${currencies.join(", ")}` : ""}
+            </p>
+          </div>
+          <button
+            type="button"
+            onClick={onClose}
+            className="rounded border border-[#C8CDD2] p-1.5 text-[#5E6870] hover:bg-white"
+            aria-label="Close"
+          >
+            <X className="h-4 w-4" />
+          </button>
+        </div>
+
+        <div className="border-b border-[#EDF0F2] bg-white px-5 py-3 text-xs text-[#5E6870]">
+          <span className="font-semibold text-[#1F2933]">{lines.length}</span> line{lines.length !== 1 ? "s" : ""}
+          {" · "}
+          Total{" "}
+          <span className="font-semibold tabular-nums text-[#1F2933]">{formatAmount(run.total_amount)}</span>
+          {" · "}
+          Status{" "}
+          <span className="font-semibold text-[#1F2933]">{paymentRunStatusLabel(run)}</span>
+          {" · "}
+          Approvals{" "}
+          <span className="font-semibold text-[#1F2933]">{run.approval_count}/{run.required_approvals}</span>
+        </div>
+
+        <div className="min-h-0 flex-1 overflow-auto">
+          {lines.length === 0 ? (
+            <div className="flex flex-col items-center justify-center gap-2 py-16 text-[#5E6870]">
+              <Info className="h-8 w-8 text-[#AEB5BB]" />
+              <p className="text-sm font-semibold">No line snapshot stored for this run.</p>
+            </div>
+          ) : (
+            <table className="w-full border-collapse text-xs">
+              <thead className="sticky top-0 bg-[#F7F8F9]">
+                <tr className="border-b border-[#C8CDD2] text-[10px] uppercase tracking-wider text-[#5E6870]">
+                  {["Account", "Jnl #", "Line", "Date", "Reference", "Description", "Cur", "Txn amount", "Base", "D/C", "Marker"].map((h) => (
+                    <th key={h} className="whitespace-nowrap border-r border-[#E5E9EC] px-3 py-2 text-left font-bold last:border-r-0">{h}</th>
+                  ))}
+                </tr>
+              </thead>
+              <tbody>
+                {lines.map((line: AmendMarkerLine, idx: number) => (
+                  <tr key={`${line.journal_number}-${line.journal_line_number}-${idx}`} className="border-b border-[#EDF0F2] last:border-0 hover:bg-[#F3F8FB]">
+                    <td className="border-r border-[#EDF0F2] px-3 py-2 font-mono text-[#1F2933]">
+                      {line.account_code || "—"}
+                      {line.account_description ? (
+                        <div className="text-[10px] text-[#8C969E]">{line.account_description}</div>
+                      ) : null}
+                    </td>
+                    <td className="border-r border-[#EDF0F2] px-3 py-2 tabular-nums">{line.journal_number}</td>
+                    <td className="border-r border-[#EDF0F2] px-3 py-2 tabular-nums">{line.journal_line_number}</td>
+                    <td className="border-r border-[#EDF0F2] px-3 py-2">{formatDate(line.transaction_date || "")}</td>
+                    <td className="border-r border-[#EDF0F2] px-3 py-2 font-mono">{line.transaction_reference || "—"}</td>
+                    <td className="max-w-[220px] truncate border-r border-[#EDF0F2] px-3 py-2" title={line.description || ""}>
+                      {line.description || "—"}
+                    </td>
+                    <td className="border-r border-[#EDF0F2] px-3 py-2">{line.currency_code || "—"}</td>
+                    <td className="border-r border-[#EDF0F2] px-3 py-2 text-right tabular-nums font-semibold">
+                      {formatAmount(line.transaction_amount || "0")}
+                    </td>
+                    <td className="border-r border-[#EDF0F2] px-3 py-2 text-right tabular-nums">
+                      {formatAmount(line.base_amount || "0")}
+                    </td>
+                    <td className="border-r border-[#EDF0F2] px-3 py-2 text-center">
+                      <DebitCreditBadge value={line.debit_credit || ""} />
+                    </td>
+                    <td className="px-3 py-2 text-center font-mono">
+                      {line.payment_marker || line.allocation_marker || "—"}
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          )}
+        </div>
+
+        <div className="flex justify-end border-t border-[#C8CDD2] bg-[#F7F8F9] px-5 py-3">
+          <button
+            type="button"
+            onClick={onClose}
+            className="border border-[#C8CDD2] bg-white px-4 py-2 text-sm font-semibold text-[#1F2933] hover:bg-[#F3F5F6]"
+          >
+            Close
+          </button>
+        </div>
+      </div>
+    </div>
+  );
 }
 
 // ── Confirmation modal ────────────────────────────────────────────────────────
@@ -255,7 +389,9 @@ function ConfirmPaymentModal({
                   </div>
                   <div>
                     <p className="text-[10px] font-semibold uppercase tracking-wider text-[#5E6870]">Status</p>
-                    <p className="font-bold capitalize text-[#1F2933]">{paymentRun.status.replace("_", " ")}</p>
+                    <p className="font-bold capitalize text-[#1F2933]">
+                      {paymentRunStatusLabel(paymentRun)}
+                    </p>
                   </div>
                 </div>
               </div>
@@ -406,7 +542,15 @@ export default function PaymentRunPage() {
   const paymentRunsQuery = useQuery({
     queryKey: ["sunsystems-payment-runs"],
     queryFn: () => sunsystemsAPI.getPaymentRuns().then((r) => r.data),
-    staleTime: 30 * 1000,
+    staleTime: 5 * 1000,
+    refetchInterval: (query) => {
+      const runs = query.state.data?.payment_runs ?? [];
+      // Poll while payment is in flight so Paid appears without a manual refresh.
+      const inFlight = runs.some(
+        (r) => r.status === "approved" || r.status === "processing",
+      );
+      return inFlight ? 3000 : false;
+    },
   });
   const paymentRuns = paymentRunsQuery.data?.payment_runs ?? [];
 
@@ -424,6 +568,7 @@ export default function PaymentRunPage() {
   const [approvalError, setApprovalError] = useState<string | null>(null);
   const [finalProcessError, setFinalProcessError] = useState<string | null>(null);
   const [retryError, setRetryError] = useState<string | null>(null);
+  const [linesSnapshotRun, setLinesSnapshotRun] = useState<PaymentRunRecord | null>(null);
 
   const amendMutation = useMutation({
     mutationFn: () =>
@@ -726,6 +871,7 @@ export default function PaymentRunPage() {
                         failed: "bg-red-50 text-red-700 border-red-200",
                       };
                       const badge = statusMeta[run.status] ?? "bg-[#F3F5F6] text-[#5E6870] border-[#C8CDD2]";
+                      const statusLabel = paymentRunStatusLabel(run);
                       return (
                         <tr key={run.id} className={`border-b border-[#EDF0F2] last:border-0 hover:bg-[#F3F8FB] ${
                           run.status === "failed" ? "bg-red-50/30" : run.status === "processing" ? "bg-amber-50/30" : ""
@@ -733,15 +879,32 @@ export default function PaymentRunPage() {
                           <td className="border-r border-[#EDF0F2] px-3 py-2.5 font-mono font-bold text-[#287EAD]">{run.payment_reference}</td>
                           <td className="border-r border-[#EDF0F2] px-3 py-2.5 text-xs text-[#5E6870]">{run.submitted_by_name ?? "—"}</td>
                           <td className="border-r border-[#EDF0F2] px-3 py-2.5 text-xs text-[#5E6870]">{formatDateTime(run.submitted_at)}</td>
-                          <td className="border-r border-[#EDF0F2] px-3 py-2.5 text-center tabular-nums">{run.line_count}</td>
+                          <td className="border-r border-[#EDF0F2] px-3 py-2.5 text-center">
+                            <button
+                              type="button"
+                              onClick={() => setLinesSnapshotRun(run)}
+                              className="inline-flex items-center gap-1.5 rounded border border-[#C8CDD2] bg-white px-2 py-1 text-xs font-semibold text-[#287EAD] hover:bg-[#EEF6FB]"
+                              title="View submitted transaction lines"
+                            >
+                              <Eye className="h-3.5 w-3.5" />
+                              <span className="tabular-nums">{run.line_count}</span>
+                            </button>
+                          </td>
                           <td className="border-r border-[#EDF0F2] px-3 py-2.5 text-right tabular-nums font-semibold">{formatAmount(run.total_amount)}</td>
                           <td className="border-r border-[#EDF0F2] px-3 py-2.5">
-                            <span className={`inline-flex items-center rounded border px-2 py-0.5 text-xs font-semibold capitalize ${badge}`}>
-                              {run.status === "approved" ? "Processing payment" : run.status === "rejected" ? "Rejected" : run.status.replace(/_/g, " ")}
+                            <span className={`inline-flex max-w-[220px] items-center rounded border px-2 py-0.5 text-xs font-semibold ${badge}`} title={statusLabel}>
+                              <span className="truncate">{statusLabel}</span>
                             </span>
                           </td>
                           <td className="border-r border-[#EDF0F2] px-3 py-2.5 text-center text-xs text-[#5E6870]">
-                            {run.approval_count}/{run.required_approvals}
+                            <span className="tabular-nums font-semibold text-[#1F2933]">
+                              {run.approval_count}/{run.required_approvals}
+                            </span>
+                            {run.current_step_name && run.status === "pending_approval" ? (
+                              <div className="mt-0.5 text-[10px] text-[#8C969E] truncate max-w-[140px] mx-auto" title={run.current_step_name}>
+                                {run.current_step_name}
+                              </div>
+                            ) : null}
                           </td>
                           <td className="px-3 py-2.5">
                             {run.status === "failed" ? (
@@ -759,16 +922,28 @@ export default function PaymentRunPage() {
                                 Retry
                               </button>
                             ) : run.status === "processing" ? (
-                              <button type="button" onClick={() => processPaymentMutation.mutate(run.id)}
-                                disabled={processPaymentMutation.isPending}
-                                className="inline-flex items-center gap-1.5 bg-amber-600 px-3 py-1.5 text-xs font-bold text-white hover:bg-amber-700 disabled:opacity-60">
-                                {processPaymentMutation.isPending ? <RefreshCw className="h-3.5 w-3.5 animate-spin" /> : <RefreshCw className="h-3.5 w-3.5" />}
-                                Retry (Stuck)
-                              </button>
+                              isPaymentRunStuck(run) ? (
+                                <button type="button" onClick={() => processPaymentMutation.mutate(run.id)}
+                                  disabled={processPaymentMutation.isPending}
+                                  className="inline-flex items-center gap-1.5 bg-amber-600 px-3 py-1.5 text-xs font-bold text-white hover:bg-amber-700 disabled:opacity-60">
+                                  {processPaymentMutation.isPending ? <RefreshCw className="h-3.5 w-3.5 animate-spin" /> : <RefreshCw className="h-3.5 w-3.5" />}
+                                  Retry (Stuck)
+                                </button>
+                              ) : (
+                                <span className="inline-flex items-center gap-1.5 text-xs font-semibold text-amber-700">
+                                  <RefreshCw className="h-3.5 w-3.5 animate-spin" />
+                                  Confirming payment…
+                                </span>
+                              )
                             ) : run.status === "pending_approval" ? (
-                              <span className="text-xs font-semibold text-[#287EAD]">Awaiting approvers</span>
+                              <span className="text-xs font-semibold text-[#287EAD]">
+                                {run.current_step_name ? `Awaiting ${run.current_step_name}` : "Awaiting approvers"}
+                              </span>
                             ) : run.status === "approved" ? (
-                              <span className="text-xs font-semibold text-blue-600">Processing payment</span>
+                              <span className="inline-flex items-center gap-1.5 text-xs font-semibold text-blue-600">
+                                <RefreshCw className="h-3.5 w-3.5 animate-spin" />
+                                Processing payment…
+                              </span>
                             ) : (
                               <span className="text-xs text-[#8C969E]">—</span>
                             )}
@@ -1090,6 +1265,14 @@ export default function PaymentRunPage() {
                           else if (col.key === "accounting_period") displayValue = formatPeriod(row.accounting_period);
                           else if (col.key === "transaction_amount" || col.key === "base_amount") displayValue = formatAmount(row[col.key] as string);
                           else if (col.key === "debit_credit") displayValue = <DebitCreditBadge value={row.debit_credit} />;
+                          else if (col.key === "allocation_marker") {
+                            const marker = String(row.allocation_marker ?? "").trim();
+                            displayValue = marker ? (
+                              marker
+                            ) : (
+                              <span className="text-[#AEB5BB]" title="Not allocated in SunSystems">—</span>
+                            );
+                          }
                           return (
                             <td
                               key={col.key}
@@ -1230,6 +1413,13 @@ export default function PaymentRunPage() {
           processedCount={processedCount}
           paymentRun={currentPaymentRun}
           approvalError={approvalError}
+        />
+      )}
+
+      {linesSnapshotRun && (
+        <LinesSnapshotModal
+          run={linesSnapshotRun}
+          onClose={() => setLinesSnapshotRun(null)}
         />
       )}
     </div>
