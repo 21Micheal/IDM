@@ -257,11 +257,11 @@ def run_idp(doc) -> tuple[str, dict]:
     extraction_prompt = _build_extraction_prompt(doc)
 
     if mode == "vision":
-        fields, raw_text = _extract_via_vision(
+        fields, raw_text, token_usage = _extract_via_vision(
             file_path, mime, django_settings, extraction_prompt
         )
     else:
-        fields, raw_text = _extract_via_text(
+        fields, raw_text, token_usage = _extract_via_text(
             file_path, mime, django_settings, extraction_prompt
         )
 
@@ -281,6 +281,7 @@ def run_idp(doc) -> tuple[str, dict]:
         "low_quality_warning": _as_bool(fields.pop("low_quality_warning", False)),
         "processing_time_s":   elapsed,
         "prompt_version":      _PROMPT_VERSION,
+        "token_usage":         token_usage or {},
     }
 
     metadata_updates = {
@@ -301,10 +302,11 @@ def run_idp(doc) -> tuple[str, dict]:
 # ── Vision extraction path ─────────────────────────────────────────────────────
 
 
-def _call_anthropic_vision(settings, model: str, pages_b64: list[tuple[str, str]], prompt: str) -> str:
+def _call_anthropic_vision(settings, model: str, pages_b64: list[tuple[str, str]], prompt: str) -> tuple[str, dict]:
     import anthropic
 
     from apps.documents.ocr.idp_policy import resolve_anthropic_api_key
+    from apps.documents.ocr.usage import usage_from_anthropic_response
 
     api_key = resolve_anthropic_api_key()
     if not api_key:
@@ -334,7 +336,7 @@ def _call_anthropic_vision(settings, model: str, pages_b64: list[tuple[str, str]
         system=_SYSTEM_PROMPT,
         messages=[{"role": "user", "content": content}],
     )
-    return response.content[0].text.strip()
+    return response.content[0].text.strip(), usage_from_anthropic_response(response)
 
 
 def classify_document_type(content: bytes, mime: str, filename: str, candidates, *, settings=None):
@@ -389,7 +391,7 @@ def classify_document_type(content: bytes, mime: str, filename: str, candidates,
         if mime == "application/pdf":
             text = _extract_raw_text(path, mime)
             if text.strip():
-                raw = _call_anthropic_text(
+                raw, _usage = _call_anthropic_text(
                     settings, model, f"DOCUMENT TEXT:\n{text[:8000]}", prompt
                 )
         if raw is None:
@@ -398,7 +400,7 @@ def classify_document_type(content: bytes, mime: str, filename: str, candidates,
 
             pages = render_doc_to_images(path, mime, dpi=120, max_pages=2)
             if pages:
-                raw = _call_anthropic_vision(settings, model, pages, prompt)
+                raw, _usage = _call_anthropic_vision(settings, model, pages, prompt)
         if not raw:
             return None
 
@@ -421,10 +423,11 @@ def classify_document_type(content: bytes, mime: str, filename: str, candidates,
                 pass
 
 
-def _call_anthropic_text(settings, model: str, document_context: str, prompt: str) -> str:
+def _call_anthropic_text(settings, model: str, document_context: str, prompt: str) -> tuple[str, dict]:
     import anthropic
 
     from apps.documents.ocr.idp_policy import resolve_anthropic_api_key
+    from apps.documents.ocr.usage import usage_from_anthropic_response
 
     api_key = resolve_anthropic_api_key()
     if not api_key:
@@ -443,7 +446,7 @@ def _call_anthropic_text(settings, model: str, document_context: str, prompt: st
             "content": f"{document_context}\n\n{prompt}",
         }],
     )
-    return response.content[0].text.strip()
+    return response.content[0].text.strip(), usage_from_anthropic_response(response)
 
 
 def _extract_via_vision(
@@ -451,10 +454,10 @@ def _extract_via_vision(
     mime: str,
     settings,
     extraction_prompt: str,
-) -> tuple[dict, str]:
+) -> tuple[dict, str, dict]:
     """
     Render document pages to images and send to Claude Vision.
-    Returns (fields_dict, raw_text_for_storage).
+    Returns (fields_dict, raw_text_for_storage, token_usage).
     """
     from apps.documents.ocr.tasks_ocr import render_doc_to_images
 
@@ -466,13 +469,15 @@ def _extract_via_vision(
     if not pages_b64:
         raise RuntimeError("Could not render any pages from document")
 
-    raw_json = _call_anthropic_vision(settings, model, pages_b64, extraction_prompt)
+    raw_json, token_usage = _call_anthropic_vision(
+        settings, model, pages_b64, extraction_prompt
+    )
     fields = _normalise_claude_fields(_parse_claude_json(raw_json))
 
     # Extract raw text for full-text search storage
     raw_text = _extract_raw_text(file_path, mime)
 
-    return fields, raw_text
+    return fields, raw_text, token_usage
 
 
 # ── Text extraction path ───────────────────────────────────────────────────────
@@ -482,10 +487,10 @@ def _extract_via_text(
     mime: str,
     settings,
     extraction_prompt: str,
-) -> tuple[dict, str]:
+) -> tuple[dict, str, dict]:
     """
     Extract text from PDF with spatial augmentation and send to Claude as text.
-    Returns (fields_dict, raw_text_for_storage).
+    Returns (fields_dict, raw_text_for_storage, token_usage).
     """
     from apps.documents.ocr.tasks_ocr import _extract_pdf_tables_as_text
 
@@ -507,10 +512,12 @@ def _extract_via_text(
         f"{'─' * 60}"
     )
 
-    raw_json = _call_anthropic_text(settings, model, document_context, extraction_prompt)
+    raw_json, token_usage = _call_anthropic_text(
+        settings, model, document_context, extraction_prompt
+    )
     fields = _normalise_claude_fields(_parse_claude_json(raw_json))
 
-    return fields, raw_text
+    return fields, raw_text, token_usage
 
 
 # ── Text extraction helpers ────────────────────────────────────────────────────

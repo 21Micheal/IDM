@@ -184,7 +184,7 @@ def apply_idp_unavailable_state(document) -> bool:
 
     Returns True when the document was updated (caller should not queue OCR).
     """
-    from apps.documents.models import OCRStatus
+    from apps.documents.models import Document, OCRStatus
 
     policy = IdpPolicy.load()
     reason = claude_unavailable_reason(policy=policy)
@@ -199,10 +199,19 @@ def apply_idp_unavailable_state(document) -> bool:
     merged_metadata = {**current_metadata, **metadata_updates}
     merged_metadata = clear_ocr_tracking_metadata(merged_metadata)
 
-    type(document).objects.filter(id=document.id).update(
+    Document.objects.filter(id=document.id).update(
         ocr_status=OCRStatus.NEEDS_MANUAL,
         metadata=merged_metadata,
     )
     document.ocr_status = OCRStatus.NEEDS_MANUAL
     document.metadata = merged_metadata
+    try:
+        from apps.documents.ocr.usage import record_idp_usage_event
+
+        record_idp_usage_event(outcome="needs_manual")
+    except Exception:
+        logger.exception(
+            "apply_idp_unavailable_state: failed to record usage for doc=%s",
+            document.id,
+        )
     return True

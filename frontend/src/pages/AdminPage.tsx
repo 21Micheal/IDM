@@ -1,8 +1,9 @@
 import { useEffect, useMemo, useState } from "react";
 import { extractApiError } from "@/lib/apiError";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { dmsSettingsAPI, type DmsSettings } from "@/services/api";
+import { dmsSettingsAPI, type DmsSettings, type IdpUsageReport } from "@/services/api";
 import { toast } from "@/components/ui/vault-toast";
+import { useAuthStore } from "@/store/authStore";
 import {
   Archive,
   BellRing,
@@ -155,14 +156,145 @@ function InfoNote({ children }: { children: React.ReactNode }) {
   );
 }
 
+function IdpUsageClientPanel({
+  usage,
+  pagesUsed,
+}: {
+  usage?: IdpUsageReport;
+  pagesUsed: number;
+}) {
+  const summary = usage?.summary;
+  const daily = usage?.daily ?? [];
+  const maxDocs = Math.max(1, ...daily.map((d) => d.documents));
+
+  return (
+    <div className="space-y-4">
+      <div className="grid gap-3 sm:grid-cols-4">
+        {[
+          { label: "Processed (month)", value: summary?.documents_processed ?? "—" },
+          { label: "Claude extracted", value: summary?.claude_docs ?? "—" },
+          { label: "Needs manual", value: summary?.needs_manual_docs ?? "—" },
+          {
+            label: "Success rate",
+            value: summary?.success_rate_pct != null ? `${summary.success_rate_pct}%` : "—",
+          },
+        ].map((item) => (
+          <div key={item.label} className="border border-[#D3D7DA] bg-[#F7F8F9] px-3 py-2">
+            <p className="text-[10px] font-semibold uppercase tracking-wider text-[#5E6870]">{item.label}</p>
+            <p className="mt-1 text-lg font-semibold text-[#1F2933]">{item.value}</p>
+          </div>
+        ))}
+      </div>
+      <p className="text-xs text-[#5E6870]">
+        Claude pages since reset: <span className="font-semibold text-[#1F2933]">{pagesUsed}</span>
+        {summary?.failed_docs ? ` · Failed: ${summary.failed_docs}` : ""}
+        {summary?.regex_docs ? ` · Pattern matching: ${summary.regex_docs}` : ""}
+      </p>
+      {daily.length > 0 && (
+        <div>
+          <p className="mb-2 text-xs font-semibold uppercase tracking-wider text-[#5E6870]">
+            Last {daily.length} days
+          </p>
+          <div className="flex h-16 items-end gap-0.5">
+            {daily.map((point) => (
+              <div
+                key={point.date}
+                title={`${point.date}: ${point.documents} docs`}
+                className="min-w-0 flex-1 bg-[#287EAD]/80"
+                style={{ height: `${Math.max(4, (point.documents / maxDocs) * 100)}%` }}
+              />
+            ))}
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
+function IdpUsageBillingPanel({
+  usage,
+  monthlyLimit,
+  onMonthlyLimitChange,
+}: {
+  usage?: IdpUsageReport;
+  monthlyLimit: string;
+  onMonthlyLimitChange: (value: string) => void;
+}) {
+  const billing = usage?.billing;
+  if (!billing) {
+    return (
+      <InfoNote>
+        Token and cost data appear after Claude extractions have been recorded. Hard spend caps are
+        configured in the Anthropic console — figures here are estimates for Flaxem only.
+      </InfoNote>
+    );
+  }
+
+  return (
+    <div className="space-y-4">
+      <InfoNote>
+        Hard cap is Anthropic workspace spend. These figures are estimates for Flaxem operators and
+        are not shown to client administrators.
+      </InfoNote>
+      <div className="grid gap-3 sm:grid-cols-3">
+        <div className="border border-[#D3D7DA] bg-[#F7F8F9] px-3 py-2">
+          <p className="text-[10px] font-semibold uppercase tracking-wider text-[#5E6870]">Input tokens</p>
+          <p className="mt-1 text-lg font-semibold text-[#1F2933]">
+            {billing.input_tokens.toLocaleString()}
+          </p>
+        </div>
+        <div className="border border-[#D3D7DA] bg-[#F7F8F9] px-3 py-2">
+          <p className="text-[10px] font-semibold uppercase tracking-wider text-[#5E6870]">Output tokens</p>
+          <p className="mt-1 text-lg font-semibold text-[#1F2933]">
+            {billing.output_tokens.toLocaleString()}
+          </p>
+        </div>
+        <div className="border border-[#D3D7DA] bg-[#F7F8F9] px-3 py-2">
+          <p className="text-[10px] font-semibold uppercase tracking-wider text-[#5E6870]">Est. cost (month)</p>
+          <p className="mt-1 text-lg font-semibold text-[#1F2933]">
+            ${Number(billing.estimated_cost_usd).toFixed(4)}
+            {billing.limit_used_pct != null ? ` (${billing.limit_used_pct}% of ref)` : ""}
+          </p>
+        </div>
+      </div>
+      <label className="block max-w-xs">
+        <span className="mb-1.5 block text-xs font-semibold uppercase tracking-wider text-[#5E6870]">
+          Reference monthly limit (USD)
+        </span>
+        <input
+          type="number"
+          min={0}
+          step="0.01"
+          className={`${inputCls} w-full`}
+          value={monthlyLimit}
+          onChange={(event) => onMonthlyLimitChange(event.target.value)}
+        />
+        <span className="mt-1 block text-xs text-[#5E6870]">
+          Not enforced — optional licence benchmark. Save settings to persist.
+        </span>
+      </label>
+    </div>
+  );
+}
+
 function SettingsWorkspace() {
   const qc = useQueryClient();
+  const user = useAuthStore((s) => s.user);
+  const isPlatformOps = Boolean(user?.is_staff || user?.is_superuser);
   const [activeSection, setActiveSection] = useState<SectionId>("preview");
   const [draft, setDraft] = useState<DmsSettings | null>(null);
+  const [opsMonthlyLimit, setOpsMonthlyLimit] = useState<string>("");
 
   const { data, isLoading } = useQuery({
     queryKey: ["dms-settings"],
     queryFn: () => dmsSettingsAPI.get().then((r) => r.data),
+    refetchInterval: activeSection === "idp" ? 5000 : false,
+  });
+
+  const { data: idpUsage } = useQuery({
+    queryKey: ["idp-usage"],
+    queryFn: () => dmsSettingsAPI.idpUsage(30).then((r) => r.data),
+    enabled: activeSection === "idp",
     refetchInterval: activeSection === "idp" ? 5000 : false,
   });
 
@@ -176,14 +308,31 @@ function SettingsWorkspace() {
     });
   }, [data]);
 
+  useEffect(() => {
+    if (idpUsage?.billing?.monthly_limit_usd != null) {
+      setOpsMonthlyLimit(idpUsage.billing.monthly_limit_usd);
+    }
+  }, [idpUsage?.billing?.monthly_limit_usd]);
+
   const settings = draft ?? data ?? null;
-  const hasChanges = Boolean(draft && data && JSON.stringify(draft) !== JSON.stringify(data));
+  const opsLimitDirty = Boolean(
+    isPlatformOps
+    && idpUsage?.billing
+    && opsMonthlyLimit !== ""
+    && opsMonthlyLimit !== String(idpUsage.billing.monthly_limit_usd),
+  );
+  const hasChanges = Boolean(
+    (draft && data && JSON.stringify(draft) !== JSON.stringify(data))
+    || opsLimitDirty,
+  );
 
   const mutation = useMutation({
-    mutationFn: (payload: Partial<DmsSettings>) => dmsSettingsAPI.update(payload).then((r) => r.data),
+    mutationFn: (payload: Partial<DmsSettings> & { idp_monthly_limit_usd?: number | string }) =>
+      dmsSettingsAPI.update(payload).then((r) => r.data),
     onSuccess: (saved) => {
       setDraft(saved);
       qc.setQueryData(["dms-settings"], saved);
+      qc.invalidateQueries({ queryKey: ["idp-usage"] });
       toast.success("DMS settings saved.");
     },
     onError: (err) => toast.error(extractApiError(err, "Could not save DMS settings.")),
@@ -196,11 +345,17 @@ function SettingsWorkspace() {
 
   const reset = () => setDraft(data ?? null);
   const save = () => {
-    if (settings) mutation.mutate(settings);
+    if (!settings) return;
+    const payload: Partial<DmsSettings> & { idp_monthly_limit_usd?: number } = { ...settings };
+    if (isPlatformOps && opsMonthlyLimit !== "") {
+      payload.idp_monthly_limit_usd = Math.max(0, Number(opsMonthlyLimit) || 0);
+    }
+    mutation.mutate(payload);
   };
 
   const summary = useMemo(() => {
     if (!settings) return [];
+    const docs = idpUsage?.summary.documents_processed;
     return [
       { label: "Watermark", value: settings.watermark_enabled ? "Enabled" : "Off" },
       { label: "Duplicates", value: settings.allow_duplicate_uploads ? "Allowed" : "Blocked" },
@@ -220,9 +375,12 @@ function SettingsWorkspace() {
             ? "Ask on failure"
             : "Regex allowed",
       },
-      { label: "Claude pages", value: String(settings.idp_pages_used) },
+      {
+        label: "Docs this month",
+        value: docs != null ? String(docs) : String(settings.idp_pages_used),
+      },
     ];
-  }, [settings]);
+  }, [settings, idpUsage]);
 
   if (isLoading || !settings) {
     return (
@@ -589,14 +747,10 @@ function SettingsWorkspace() {
 
               <SettingBlock
                 icon={Sparkles}
-                title="Claude usage (reporting)"
-                description="Page counts are for visibility only. Hard spend limits are enforced by your Anthropic workspace cap on this tenant's API key."
+                title="Document extraction activity"
+                description="How many documents were processed this month and how often Claude extraction succeeded."
               >
-                <InfoNote>
-                  Billing is controlled in the Anthropic console (workspace spend limit per client key).
-                  When that cap is reached, extraction follows your fallback policy above.
-                  Page counts here do not block Claude.
-                </InfoNote>
+                <IdpUsageClientPanel usage={idpUsage} pagesUsed={settings.idp_pages_used} />
                 <div className="grid gap-4 sm:grid-cols-2">
                   <label>
                     <span className="mb-1.5 block text-xs font-semibold uppercase tracking-wider text-[#5E6870]">
@@ -612,7 +766,7 @@ function SettingsWorkspace() {
                       }
                     />
                     <span className="mt-1 block text-xs text-[#5E6870]">
-                      Increments after each successful Claude extraction. Reset manually to start a new reporting period.
+                      Volume counter for Claude pages. Does not block extraction — reset manually when starting a new reporting period.
                     </span>
                   </label>
                   <label>
@@ -629,26 +783,25 @@ function SettingsWorkspace() {
                       }
                     />
                     <span className="mt-1 block text-xs text-[#5E6870]">
-                      Not enforced — optional benchmark to compare against pages used (0 = hide comparison).
+                      Optional benchmark only (0 = hide). Hard spend limits are set in Anthropic, not here.
                     </span>
                   </label>
                 </div>
-                {settings.idp_page_allowance > 0 && (
-                  <InfoNote>
-                    {settings.idp_pages_used} pages used
-                    {" "}
-                    (reference target: {settings.idp_page_allowance}
-                    {settings.idp_pages_used > settings.idp_page_allowance ? " — above reference" : ""}
-                    ). Updates every few seconds while this page is open.
-                  </InfoNote>
-                )}
-                {settings.idp_page_allowance <= 0 && (
-                  <InfoNote>
-                    {settings.idp_pages_used} Claude pages used since last reset.
-                    Updates every few seconds while this page is open.
-                  </InfoNote>
-                )}
               </SettingBlock>
+
+              {isPlatformOps && (
+                <SettingBlock
+                  icon={Sparkles}
+                  title="Anthropic spend (Flaxem ops)"
+                  description="Token and cost estimates from Claude responses. Hard caps remain in the Anthropic workspace console."
+                >
+                  <IdpUsageBillingPanel
+                    usage={idpUsage}
+                    monthlyLimit={opsMonthlyLimit}
+                    onMonthlyLimitChange={setOpsMonthlyLimit}
+                  />
+                </SettingBlock>
+              )}
             </>
           )}
 

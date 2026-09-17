@@ -598,6 +598,44 @@ export const dmsSettingsAPI = {
   get: () => api.get<DmsSettings>("/documents/settings/"),
   update: (data: Partial<DmsSettings>) =>
     api.patch<DmsSettings>("/documents/settings/", data),
+  idpUsage: (days = 30) =>
+    api.get<IdpUsageReport>(`/documents/settings/idp-usage/?days=${days}`),
+};
+
+export type IdpUsageDailyPoint = {
+  date: string;
+  claude_docs: number;
+  regex_docs: number;
+  needs_manual_docs: number;
+  failed_docs: number;
+  claude_pages: number;
+  documents: number;
+};
+
+export type IdpUsageReport = {
+  summary: {
+    period_days: number;
+    month_start: string;
+    claude_docs: number;
+    regex_docs: number;
+    needs_manual_docs: number;
+    failed_docs: number;
+    documents_processed: number;
+    claude_pages_month: number;
+    pages_used: number;
+    page_reference_target: number;
+    success_rate_pct: number | null;
+  };
+  daily: IdpUsageDailyPoint[];
+  billing?: {
+    input_tokens: number;
+    output_tokens: number;
+    cache_read_tokens: number;
+    cache_write_tokens: number;
+    estimated_cost_usd: string;
+    monthly_limit_usd: string;
+    limit_used_pct: number | null;
+  };
 };
 
 export const documentTypesAPI = {

@@ -373,6 +373,16 @@ class DMSSettings(models.Model):
             "When empty, falls back to ANTHROPIC_API_KEY in the environment."
         ),
     )
+    idp_monthly_limit_usd = models.DecimalField(
+        max_digits=10,
+        decimal_places=2,
+        default=0,
+        help_text=(
+            "Operator reference monthly Anthropic spend target in USD. "
+            "Not enforced — hard caps live in the Anthropic workspace console. "
+            "Visible only to platform staff."
+        ),
+    )
 
     access_stages = models.JSONField(
         default=list,
@@ -423,6 +433,46 @@ class DMSSettings(models.Model):
 
     def __str__(self):
         return "DMS settings"
+
+
+class IdpUsageDaily(models.Model):
+    """
+    Per-deployment daily OCR/IDP usage snapshot.
+
+    Written by OCR workers from Claude response.usage and outcome counts.
+    Client admins see document/accuracy rollups; token/cost fields are ops-only.
+    """
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    date = models.DateField(unique=True, db_index=True)
+
+    claude_docs = models.PositiveIntegerField(default=0)
+    regex_docs = models.PositiveIntegerField(default=0)
+    needs_manual_docs = models.PositiveIntegerField(default=0)
+    failed_docs = models.PositiveIntegerField(default=0)
+
+    claude_pages = models.PositiveIntegerField(default=0)
+
+    input_tokens = models.BigIntegerField(default=0)
+    output_tokens = models.BigIntegerField(default=0)
+    cache_read_tokens = models.BigIntegerField(default=0)
+    cache_write_tokens = models.BigIntegerField(default=0)
+
+    estimated_cost_usd = models.DecimalField(
+        max_digits=12,
+        decimal_places=6,
+        default=0,
+    )
+
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ["-date"]
+        verbose_name = "IDP usage (daily)"
+        verbose_name_plural = "IDP usage (daily)"
+
+    def __str__(self):
+        return f"IDP usage {self.date}"
 
 
 def document_upload_path(instance, filename):

@@ -30,6 +30,7 @@ export interface AuthUser {
   last_name: string;
   job_description?: string;
   is_staff?: boolean;
+  is_superuser?: boolean;
   has_admin_access?: boolean;
   group_names?: string[];
   mfa_enabled: boolean;
