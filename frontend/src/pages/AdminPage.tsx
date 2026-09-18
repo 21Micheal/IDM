@@ -73,8 +73,8 @@ const baseSections: Array<{
   },
   {
     id: "ops_billing",
-    title: "All clients (ops)",
-    description: "Anthropic usage across registered client keys",
+    title: "Client billing (ops)",
+    description: "Anthropic usage & spend across all registered clients",
     icon: Wallet,
     opsOnly: true,
   },
@@ -167,52 +167,81 @@ function InfoNote({ children }: { children: React.ReactNode }) {
 
 function IdpUsageClientPanel({
   usage,
-  pagesUsed,
 }: {
   usage?: IdpUsageReport;
-  pagesUsed: number;
 }) {
   const summary = usage?.summary;
   const daily = usage?.daily ?? [];
   const maxDocs = Math.max(1, ...daily.map((d) => d.documents));
 
+  const total = summary?.documents_processed ?? 0;
+  const claude = summary?.claude_docs ?? 0;
+  const needsManual = summary?.needs_manual_docs ?? 0;
+  const failed = summary?.failed_docs ?? 0;
+  const regex = summary?.regex_docs ?? 0;
+  const successRate = summary?.success_rate_pct;
+
   return (
     <div className="space-y-4">
-      <div className="grid gap-3 sm:grid-cols-4">
-        {[
-          { label: "Processed (month)", value: summary?.documents_processed ?? "—" },
-          { label: "Claude extracted", value: summary?.claude_docs ?? "—" },
-          { label: "Needs manual", value: summary?.needs_manual_docs ?? "—" },
-          {
-            label: "Success rate",
-            value: summary?.success_rate_pct != null ? `${summary.success_rate_pct}%` : "—",
-          },
-        ].map((item) => (
-          <div key={item.label} className="border border-[#D3D7DA] bg-[#F7F8F9] px-3 py-2">
-            <p className="text-[10px] font-semibold uppercase tracking-wider text-[#5E6870]">{item.label}</p>
-            <p className="mt-1 text-lg font-semibold text-[#1F2933]">{item.value}</p>
+      {/* Headline: count + outcome pills */}
+      <div>
+        <div className="flex flex-wrap items-baseline justify-between gap-x-3 gap-y-0.5">
+          <span className="text-sm font-semibold text-[#1F2933]">
+            {total > 0
+              ? `${total} document${total !== 1 ? "s" : ""} processed this month`
+              : "No documents processed yet"}
+          </span>
+          {successRate != null && (
+            <span className="text-xs text-[#5E6870]">
+              {successRate}% extracted successfully
+            </span>
+          )}
+        </div>
+        {total > 0 && (
+          <div className="mt-1.5 flex flex-wrap gap-x-4 gap-y-1">
+            {claude > 0 && (
+              <span className="text-xs text-[#5E6870]">
+                <span className="font-semibold text-[#287EAD]">{claude}</span> Claude
+              </span>
+            )}
+            {regex > 0 && (
+              <span className="text-xs text-[#5E6870]">
+                <span className="font-semibold text-[#1F2933]">{regex}</span> Pattern match
+              </span>
+            )}
+            {needsManual > 0 && (
+              <span className="text-xs text-[#5E6870]">
+                <span className="font-semibold text-[#C47B1A]">{needsManual}</span> Needs review
+              </span>
+            )}
+            {failed > 0 && (
+              <span className="text-xs text-[#5E6870]">
+                <span className="font-semibold text-[#9B2C2C]">{failed}</span> Failed
+              </span>
+            )}
           </div>
-        ))}
+        )}
       </div>
-      <p className="text-xs text-[#5E6870]">
-        Claude pages since reset: <span className="font-semibold text-[#1F2933]">{pagesUsed}</span>
-        {summary?.failed_docs ? ` · Failed: ${summary.failed_docs}` : ""}
-        {summary?.regex_docs ? ` · Pattern matching: ${summary.regex_docs}` : ""}
-      </p>
+      {/* Sparkline — fixed-width bars so 2 days don't blow up to fill the row */}
       {daily.length > 0 && (
         <div>
-          <p className="mb-2 text-xs font-semibold uppercase tracking-wider text-[#5E6870]">
+          <p className="mb-1.5 text-xs font-semibold uppercase tracking-wider text-[#5E6870]">
             Last {daily.length} days
           </p>
-          <div className="flex h-16 items-end gap-0.5">
-            {daily.map((point) => (
-              <div
-                key={point.date}
-                title={`${point.date}: ${point.documents} docs`}
-                className="min-w-0 flex-1 bg-[#287EAD]/80"
-                style={{ height: `${Math.max(4, (point.documents / maxDocs) * 100)}%` }}
-              />
-            ))}
+          <div className="overflow-x-auto">
+            <div
+              className="flex h-10 items-end gap-px"
+              style={{ minWidth: `${daily.length * 10}px` }}
+            >
+              {daily.map((point) => (
+                <div
+                  key={point.date}
+                  title={`${point.date}: ${point.documents} doc${point.documents !== 1 ? "s" : ""}`}
+                  className="w-2 shrink-0 rounded-sm bg-[#287EAD]/70"
+                  style={{ height: `${Math.max(8, (point.documents / maxDocs) * 100)}%` }}
+                />
+              ))}
+            </div>
           </div>
         </div>
       )}
@@ -286,12 +315,41 @@ function IdpUsageBillingPanel({
   );
 }
 
+// ── Import cap modal ─────────────────────────────────────────────────────────
+type ImportModal = { keyId: string; keyName: string; cap: string } | null;
+
+// ── Spend progress bar (per-client row) ──────────────────────────────────────
+function SpendBar({ cost, limit, pct }: { cost: string; limit: string; pct: number | null }) {
+  if (!pct || Number(limit) <= 0) return null;
+  const color =
+    pct >= 90 ? "bg-[#9B2C2C]" : pct >= 80 ? "bg-[#C47B1A]" : "bg-[#287EAD]";
+  const textColor =
+    pct >= 90 ? "text-[#9B2C2C]" : pct >= 80 ? "text-[#C47B1A]" : "text-[#5E6870]";
+  return (
+    <div className="mt-1.5 space-y-0.5">
+      <div className="h-1.5 w-full overflow-hidden rounded-full bg-[#E4E7EA]">
+        <div
+          className={`h-full rounded-full transition-all ${color}`}
+          style={{ width: `${Math.min(100, pct)}%` }}
+        />
+      </div>
+      <p className={`text-[10px] font-semibold ${textColor}`}>
+        {pct.toFixed(1)}% of ${Number(limit).toFixed(0)} cap
+      </p>
+    </div>
+  );
+}
+
 function OpsBillingPanel() {
   const qc = useQueryClient();
   const [draftName, setDraftName] = useState("");
   const [draftKeyId, setDraftKeyId] = useState("");
   const [draftWs, setDraftWs] = useState("");
-  const [draftLimit, setDraftLimit] = useState("30");
+  const [draftLimit, setDraftLimit] = useState("");
+
+  // Modal state for per-row import — prompts cap before importing a single key.
+  const [importModal, setImportModal] = useState<ImportModal>(null);
+  const [importBulkCap, setImportBulkCap] = useState("");
 
   const { data: report, isLoading } = useQuery({
     queryKey: ["billing-ops-usage"],
@@ -319,16 +377,14 @@ function OpsBillingPanel() {
   });
 
   const importMutation = useMutation({
-    mutationFn: (api_key_ids?: string[]) =>
+    mutationFn: ({ api_key_ids, cap }: { api_key_ids?: string[]; cap: string }) =>
       billingAPI
-        .importKeys({
-          api_key_ids,
-          monthly_limit_usd: draftLimit || "0",
-        })
+        .importKeys({ api_key_ids, monthly_limit_usd: cap || "0" })
         .then((r) => r.data),
     onSuccess: (result) => {
       qc.invalidateQueries({ queryKey: ["billing-ops-usage"] });
       qc.invalidateQueries({ queryKey: ["billing-discovered-keys"] });
+      setImportModal(null);
       if (result.ok) {
         toast.success(
           `Imported ${result.imported} key(s)`
@@ -355,6 +411,7 @@ function OpsBillingPanel() {
       setDraftName("");
       setDraftKeyId("");
       setDraftWs("");
+      setDraftLimit("");
       qc.invalidateQueries({ queryKey: ["billing-ops-usage"] });
       qc.invalidateQueries({ queryKey: ["billing-discovered-keys"] });
       toast.success("Client registered.");
@@ -372,8 +429,8 @@ function OpsBillingPanel() {
     onError: (err) => toast.error(extractApiError(err, "Could not remove client.")),
   });
 
+  // Cap is the only editable field after import — name & api_key_id are locked.
   const [capDrafts, setCapDrafts] = useState<Record<string, string>>({});
-  const [nameDrafts, setNameDrafts] = useState<Record<string, string>>({});
 
   useEffect(() => {
     if (!report?.clients) return;
@@ -384,52 +441,24 @@ function OpsBillingPanel() {
       }
       return next;
     });
-    setNameDrafts((prev) => {
-      const next = { ...prev };
-      for (const c of report.clients) {
-        if (next[c.id] === undefined) next[c.id] = c.client_name;
-      }
-      return next;
-    });
   }, [report?.clients]);
 
   const updateMutation = useMutation({
-    mutationFn: ({
-      id,
-      data,
-    }: {
-      id: string;
-      data: { monthly_limit_usd?: string; client_name?: string };
-    }) => billingAPI.updateClient(id, data).then((r) => r.data),
+    mutationFn: ({ id, cap }: { id: string; cap: string }) =>
+      billingAPI.updateClient(id, { monthly_limit_usd: cap }).then((r) => r.data),
     onSuccess: (saved) => {
       setCapDrafts((prev) => ({ ...prev, [saved.id]: String(saved.monthly_limit_usd ?? "0") }));
-      setNameDrafts((prev) => ({ ...prev, [saved.id]: saved.client_name }));
       qc.invalidateQueries({ queryKey: ["billing-ops-usage"] });
-      qc.invalidateQueries({ queryKey: ["billing-discovered-keys"] });
-      toast.success(`Updated ${saved.client_name}.`);
+      toast.success(`Cap updated for ${saved.client_name}.`);
     },
-    onError: (err) => toast.error(extractApiError(err, "Could not update client.")),
+    onError: (err) => toast.error(extractApiError(err, "Could not update cap.")),
   });
 
-  const saveClientRow = (c: {
-    id: string;
-    client_name: string;
-    monthly_limit_usd: string;
-  }) => {
-    const name = (nameDrafts[c.id] ?? c.client_name).trim();
+  const saveCapForRow = (c: { id: string; monthly_limit_usd: string }) => {
     const cap = (capDrafts[c.id] ?? String(c.monthly_limit_usd)).trim();
     const capNum = Math.max(0, Number(cap) || 0);
-    const unchanged =
-      name === c.client_name
-      && String(capNum) === String(Number(c.monthly_limit_usd) || 0);
-    if (!name || unchanged) return;
-    updateMutation.mutate({
-      id: c.id,
-      data: {
-        client_name: name,
-        monthly_limit_usd: String(capNum),
-      },
-    });
+    if (String(capNum) === String(Number(c.monthly_limit_usd) || 0)) return;
+    updateMutation.mutate({ id: c.id, cap: String(capNum) });
   };
 
   if (isLoading || !report) {
@@ -444,6 +473,66 @@ function OpsBillingPanel() {
 
   return (
     <div className="space-y-5">
+      {/* Import cap modal (per-row) */}
+      {importModal && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40">
+          <div className="w-full max-w-sm border border-[#C8CDD2] bg-white p-5 shadow-xl">
+            <h3 className="mb-1 text-sm font-semibold text-[#1F2933]">Import key</h3>
+            <p className="mb-4 text-xs text-[#5E6870]">
+              <span className="font-medium text-[#1F2933]">{importModal.keyName}</span>
+              <span className="ml-1 font-mono text-[10px]">({importModal.keyId})</span>
+            </p>
+            <label className="block">
+              <span className="mb-1 block text-xs font-semibold uppercase tracking-wider text-[#5E6870]">
+                Monthly reference cap (USD)
+              </span>
+              <input
+                type="number"
+                min={0}
+                step="0.01"
+                autoFocus
+                className={`${inputCls} w-full`}
+                placeholder="0 = no cap"
+                value={importModal.cap}
+                onChange={(e) =>
+                  setImportModal((prev) => prev ? { ...prev, cap: e.target.value } : prev)
+                }
+                onKeyDown={(e) => {
+                  if (e.key === "Enter") {
+                    importMutation.mutate({ api_key_ids: [importModal.keyId], cap: importModal.cap });
+                  } else if (e.key === "Escape") {
+                    setImportModal(null);
+                  }
+                }}
+              />
+              <span className="mt-1 block text-xs text-[#5E6870]">
+                Flaxem alert threshold only — hard stop remains the Anthropic workspace limit.
+              </span>
+            </label>
+            <div className="mt-4 flex justify-end gap-2">
+              <button
+                type="button"
+                className="border border-[#AEB5BB] bg-white px-3 py-1.5 text-xs font-semibold text-[#1F2933] hover:bg-[#EEF3F7]"
+                onClick={() => setImportModal(null)}
+              >
+                Cancel
+              </button>
+              <button
+                type="button"
+                className="bg-[#287EAD] px-3 py-1.5 text-xs font-semibold text-white hover:bg-[#1E6F99] disabled:opacity-50"
+                disabled={importMutation.isPending}
+                onClick={() =>
+                  importMutation.mutate({ api_key_ids: [importModal.keyId], cap: importModal.cap })
+                }
+              >
+                {importMutation.isPending ? <Loader2 className="inline h-3 w-3 animate-spin" /> : null}
+                {" "}Import
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
       <InfoNote>
         Keys in your Anthropic organisation appear below. Import them into Flaxem to track spend;
         daily sync uses ANTHROPIC_ADMIN_KEY. Hard spend stops remain workspace caps in Anthropic.
@@ -468,7 +557,7 @@ function OpsBillingPanel() {
           </p>
         </div>
         <div className="border border-[#D3D7DA] bg-[#F7F8F9] px-3 py-2">
-          <p className="text-[10px] font-semibold uppercase tracking-wider text-[#5E6870]">Tokens (in/out)</p>
+          <p className="text-[10px] font-semibold uppercase tracking-wider text-[#5E6870]">Tokens (in / out)</p>
           <p className="mt-1 text-lg font-semibold text-[#1F2933]">
             {report.summary.input_tokens.toLocaleString()} / {report.summary.output_tokens.toLocaleString()}
           </p>
@@ -479,7 +568,7 @@ function OpsBillingPanel() {
         <div className="border border-[#C45C26] bg-[#FFF7F2] px-3 py-2 text-sm text-[#1F2933]">
           {report.alerts.map((a) => (
             <p key={a.client_name}>
-              {a.client_name} at {a.pct}% of ${a.monthly_limit_usd} reference cap (${a.cost_usd}).
+              ⚠ {a.client_name} — {a.pct.toFixed(0)}% of ${Number(a.monthly_limit_usd).toFixed(0)} cap (${Number(a.cost_usd).toFixed(2)} spent)
             </p>
           ))}
         </div>
@@ -487,17 +576,32 @@ function OpsBillingPanel() {
 
       {report.configured && (
         <div className="space-y-3">
-          <div className="flex flex-wrap items-center justify-between gap-2">
-            <p className="text-sm font-semibold text-[#1F2933]">Keys in Anthropic organisation</p>
-            <button
-              type="button"
-              className="inline-flex items-center gap-2 border border-[#AEB5BB] bg-white px-3 py-1.5 text-xs font-semibold text-[#1F2933] hover:bg-[#EEF3F7] disabled:opacity-50"
-              disabled={importMutation.isPending || unregistered.length === 0}
-              onClick={() => importMutation.mutate(undefined)}
-            >
-              {importMutation.isPending ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : null}
-              Import all unregistered ({unregistered.length})
-            </button>
+          <div className="flex flex-wrap items-end gap-3">
+            <div>
+              <p className="mb-1 text-sm font-semibold text-[#1F2933]">Keys in Anthropic organisation</p>
+              <p className="text-xs text-[#5E6870]">Set a reference cap before importing — you can adjust it later.</p>
+            </div>
+            <div className="ml-auto flex items-center gap-2">
+              <input
+                type="number"
+                min={0}
+                step="0.01"
+                placeholder="Cap USD (0 = none)"
+                className={`${inputCls} w-32 text-xs`}
+                value={importBulkCap}
+                onChange={(e) => setImportBulkCap(e.target.value)}
+                aria-label="Monthly cap for bulk import"
+              />
+              <button
+                type="button"
+                className="inline-flex items-center gap-1.5 border border-[#AEB5BB] bg-white px-3 py-1.5 text-xs font-semibold text-[#1F2933] hover:bg-[#EEF3F7] disabled:opacity-50"
+                disabled={importMutation.isPending || unregistered.length === 0}
+                onClick={() => importMutation.mutate({ api_key_ids: undefined, cap: importBulkCap || "0" })}
+              >
+                {importMutation.isPending ? <Loader2 className="h-3 w-3 animate-spin" /> : null}
+                Import all unregistered ({unregistered.length})
+              </button>
+            </div>
           </div>
           {discovered?.error && (
             <p className="text-sm text-[#9B2C2C]">{discovered.error}</p>
@@ -516,40 +620,32 @@ function OpsBillingPanel() {
               <tbody className="divide-y divide-[#D3D7DA]">
                 {discovering && !discovered ? (
                   <tr>
-                    <td colSpan={5} className="px-3 py-4 text-[#5E6870]">
-                      Loading keys from Anthropic…
-                    </td>
+                    <td colSpan={5} className="px-3 py-4 text-[#5E6870]">Loading keys from Anthropic…</td>
                   </tr>
                 ) : (discovered?.keys?.length ?? 0) === 0 ? (
                   <tr>
-                    <td colSpan={5} className="px-3 py-4 text-[#5E6870]">
-                      No active keys returned by Anthropic.
-                    </td>
+                    <td colSpan={5} className="px-3 py-4 text-[#5E6870]">No active keys returned by Anthropic.</td>
                   </tr>
                 ) : (
                   discovered!.keys.map((k) => (
                     <tr key={k.id}>
                       <td className="px-3 py-2 font-medium text-[#1F2933]">{k.name}</td>
                       <td className="px-3 py-2 font-mono text-xs text-[#5E6870]">{k.id}</td>
-                      <td className="px-3 py-2 font-mono text-xs text-[#5E6870]">
-                        {k.partial_key_hint || "—"}
-                      </td>
-                      <td className="px-3 py-2 text-[#5E6870]">
-                        {k.registered ? "Registered" : "Not in Flaxem"}
-                      </td>
+                      <td className="px-3 py-2 font-mono text-xs text-[#5E6870]">{k.partial_key_hint || "—"}</td>
+                      <td className="px-3 py-2 text-[#5E6870]">{k.registered ? "Registered" : "Not in Flaxem"}</td>
                       <td className="px-3 py-2 text-right">
                         {k.registered ? (
-                          <span className="text-xs text-[#5E6870]">
-                            {k.registered_name}
-                          </span>
+                          <span className="text-xs text-[#5E6870]">{k.registered_name}</span>
                         ) : (
                           <button
                             type="button"
                             className="text-xs font-semibold text-[#287EAD] hover:underline disabled:opacity-50"
                             disabled={importMutation.isPending}
-                            onClick={() => importMutation.mutate([k.id])}
+                            onClick={() =>
+                              setImportModal({ keyId: k.id, keyName: k.name, cap: importBulkCap || "" })
+                            }
                           >
-                            Import
+                            Import…
                           </button>
                         )}
                       </td>
@@ -562,13 +658,14 @@ function OpsBillingPanel() {
         </div>
       )}
 
+      {/* Registered clients table — name & key locked; only cap is editable */}
       <div className="overflow-x-auto border border-[#D3D7DA]">
         <table className="min-w-full text-left text-sm">
           <thead className="bg-[#F5F7F8] text-xs uppercase tracking-wider text-[#5E6870]">
             <tr>
               <th className="px-3 py-2 font-semibold">Client</th>
-              <th className="px-3 py-2 font-semibold">Tokens</th>
-              <th className="px-3 py-2 font-semibold">Cost</th>
+              <th className="px-3 py-2 font-semibold">Usage</th>
+              <th className="px-3 py-2 font-semibold">Cost (month)</th>
               <th className="px-3 py-2 font-semibold">Ref. cap (USD)</th>
               <th className="px-3 py-2 font-semibold" />
             </tr>
@@ -583,33 +680,29 @@ function OpsBillingPanel() {
             ) : (
               report.clients.map((c) => {
                 const draftCap = capDrafts[c.id] ?? String(c.monthly_limit_usd ?? "0");
-                const draftNameVal = nameDrafts[c.id] ?? c.client_name;
-                const dirty =
-                  draftNameVal.trim() !== c.client_name
-                  || String(Math.max(0, Number(draftCap) || 0))
-                    !== String(Number(c.monthly_limit_usd) || 0);
+                const capDirty =
+                  String(Math.max(0, Number(draftCap) || 0)) !== String(Number(c.monthly_limit_usd) || 0);
                 return (
                   <tr key={c.id}>
+                    {/* Client name — read-only after import */}
                     <td className="px-3 py-2">
-                      <input
-                        className={`${inputCls} w-full min-w-[8rem]`}
-                        value={draftNameVal}
-                        onChange={(e) =>
-                          setNameDrafts((prev) => ({ ...prev, [c.id]: e.target.value }))
-                        }
-                        onBlur={() => saveClientRow(c)}
-                        aria-label={`Client name for ${c.client_name}`}
-                      />
+                      <p className="font-medium text-[#1F2933]">{c.client_name}</p>
+                      <p className="mt-0.5 font-mono text-[10px] text-[#5E6870]">{c.api_key_id}</p>
                     </td>
-                    <td className="px-3 py-2 text-[#5E6870]">
-                      {(c.input_tokens + c.output_tokens).toLocaleString()}
-                      {c.limit_used_pct != null ? (
-                        <span className="mt-0.5 block text-xs">
-                          {c.limit_used_pct}% of ref
-                        </span>
-                      ) : null}
+                    {/* Usage column: token totals + spend progress bar */}
+                    <td className="px-3 py-2">
+                      <p className="text-xs text-[#5E6870]">
+                        <span className="font-semibold text-[#1F2933]">{c.input_tokens.toLocaleString()}</span> in
+                        {" / "}
+                        <span className="font-semibold text-[#1F2933]">{c.output_tokens.toLocaleString()}</span> out
+                      </p>
+                      <SpendBar cost={c.cost_usd} limit={c.monthly_limit_usd} pct={c.limit_used_pct} />
                     </td>
-                    <td className="px-3 py-2 text-[#1F2933]">${Number(c.cost_usd).toFixed(2)}</td>
+                    {/* Cost */}
+                    <td className="px-3 py-2 text-[#1F2933]">
+                      ${Number(c.cost_usd).toFixed(2)}
+                    </td>
+                    {/* Editable cap */}
                     <td className="px-3 py-2">
                       <input
                         type="number"
@@ -620,21 +713,22 @@ function OpsBillingPanel() {
                         onChange={(e) =>
                           setCapDrafts((prev) => ({ ...prev, [c.id]: e.target.value }))
                         }
-                        onBlur={() => saveClientRow(c)}
+                        onBlur={() => saveCapForRow(c)}
                         aria-label={`Reference monthly cap for ${c.client_name}`}
                       />
                       <span className="mt-0.5 block text-[10px] text-[#5E6870]">
-                        Flaxem alerts only — not Anthropic
+                        Alert threshold only
                       </span>
                     </td>
+                    {/* Actions */}
                     <td className="px-3 py-2 text-right">
                       <div className="flex flex-col items-end gap-1">
-                        {dirty && (
+                        {capDirty && (
                           <button
                             type="button"
                             className="text-xs font-semibold text-[#287EAD] hover:underline disabled:opacity-50"
                             disabled={updateMutation.isPending}
-                            onClick={() => saveClientRow(c)}
+                            onClick={() => saveCapForRow(c)}
                           >
                             Save
                           </button>
@@ -660,69 +754,43 @@ function OpsBillingPanel() {
         </table>
       </div>
 
-      <div className="grid gap-3 border border-[#D3D7DA] bg-[#F7F8F9] p-3 sm:grid-cols-2 lg:grid-cols-4">
-        <label>
-          <span className="mb-1 block text-xs font-semibold uppercase tracking-wider text-[#5E6870]">
-            Client name
-          </span>
-          <input
-            className={`${inputCls} w-full`}
-            value={draftName}
-            onChange={(e) => setDraftName(e.target.value)}
-            placeholder="Acme Ltd"
-          />
-        </label>
-        <label>
-          <span className="mb-1 block text-xs font-semibold uppercase tracking-wider text-[#5E6870]">
-            API key id
-          </span>
-          <input
-            className={`${inputCls} w-full`}
-            value={draftKeyId}
-            onChange={(e) => setDraftKeyId(e.target.value)}
-            placeholder="apikey_…"
-          />
-        </label>
-        <label>
-          <span className="mb-1 block text-xs font-semibold uppercase tracking-wider text-[#5E6870]">
-            Workspace id (optional)
-          </span>
-          <input
-            className={`${inputCls} w-full`}
-            value={draftWs}
-            onChange={(e) => setDraftWs(e.target.value)}
-            placeholder="wrkspc_…"
-          />
-        </label>
-        <label>
-          <span className="mb-1 block text-xs font-semibold uppercase tracking-wider text-[#5E6870]">
-            Monthly limit USD
-          </span>
-          <input
-            type="number"
-            min={0}
-            step="0.01"
-            className={`${inputCls} w-full`}
-            value={draftLimit}
-            onChange={(e) => setDraftLimit(e.target.value)}
-          />
-        </label>
-      </div>
+      {/* Manual register form */}
+      <details className="border border-[#D3D7DA]">
+        <summary className="cursor-pointer select-none bg-[#F7F8F9] px-4 py-2.5 text-xs font-semibold uppercase tracking-wider text-[#5E6870] hover:bg-[#EEF3F7]">
+          Register client manually
+        </summary>
+        <div className="grid gap-3 p-3 sm:grid-cols-2 lg:grid-cols-4">
+          <label>
+            <span className="mb-1 block text-xs font-semibold uppercase tracking-wider text-[#5E6870]">Client name</span>
+            <input className={`${inputCls} w-full`} value={draftName} onChange={(e) => setDraftName(e.target.value)} placeholder="Acme Ltd" />
+          </label>
+          <label>
+            <span className="mb-1 block text-xs font-semibold uppercase tracking-wider text-[#5E6870]">API key id</span>
+            <input className={`${inputCls} w-full`} value={draftKeyId} onChange={(e) => setDraftKeyId(e.target.value)} placeholder="apikey_…" />
+          </label>
+          <label>
+            <span className="mb-1 block text-xs font-semibold uppercase tracking-wider text-[#5E6870]">Workspace id (optional)</span>
+            <input className={`${inputCls} w-full`} value={draftWs} onChange={(e) => setDraftWs(e.target.value)} placeholder="wrkspc_…" />
+          </label>
+          <label>
+            <span className="mb-1 block text-xs font-semibold uppercase tracking-wider text-[#5E6870]">Monthly limit USD</span>
+            <input type="number" min={0} step="0.01" className={`${inputCls} w-full`} value={draftLimit} onChange={(e) => setDraftLimit(e.target.value)} />
+          </label>
+        </div>
+        <div className="flex gap-2 px-3 pb-3">
+          <button
+            type="button"
+            className="inline-flex items-center gap-2 bg-[#287EAD] px-4 py-2 text-sm font-semibold text-white hover:bg-[#1E6F99] disabled:opacity-50"
+            disabled={createMutation.isPending || !draftName.trim() || !draftKeyId.trim()}
+            onClick={() => createMutation.mutate()}
+          >
+            {createMutation.isPending ? <Loader2 className="h-4 w-4 animate-spin" /> : null}
+            Register
+          </button>
+        </div>
+      </details>
 
-      <div className="flex flex-wrap gap-2">
-        <button
-          type="button"
-          className="inline-flex items-center gap-2 bg-[#287EAD] px-4 py-2 text-sm font-semibold text-white hover:bg-[#1E6F99] disabled:opacity-50"
-          disabled={
-            createMutation.isPending
-            || !draftName.trim()
-            || !draftKeyId.trim()
-          }
-          onClick={() => createMutation.mutate()}
-        >
-          {createMutation.isPending ? <Loader2 className="h-4 w-4 animate-spin" /> : null}
-          Register manually
-        </button>
+      <div className="flex justify-end">
         <button
           type="button"
           className="inline-flex items-center gap-2 border border-[#AEB5BB] bg-white px-4 py-2 text-sm font-semibold text-[#1F2933] hover:bg-[#EEF3F7] disabled:opacity-50"
@@ -1224,45 +1292,9 @@ function SettingsWorkspace() {
               <SettingBlock
                 icon={Sparkles}
                 title="Document extraction activity"
-                description="How many documents were processed this month and how often Claude extraction succeeded."
+                description="Documents processed this month and Claude extraction success rate."
               >
-                <IdpUsageClientPanel usage={idpUsage} pagesUsed={settings.idp_pages_used} />
-                <div className="grid gap-4 sm:grid-cols-2">
-                  <label>
-                    <span className="mb-1.5 block text-xs font-semibold uppercase tracking-wider text-[#5E6870]">
-                      Pages used (since last reset)
-                    </span>
-                    <input
-                      type="number"
-                      min={0}
-                      className={`${inputCls} w-full`}
-                      value={settings.idp_pages_used}
-                      onChange={(event) =>
-                        update("idp_pages_used", Math.max(0, Number(event.target.value) || 0))
-                      }
-                    />
-                    <span className="mt-1 block text-xs text-[#5E6870]">
-                      Volume counter for Claude pages. Does not block extraction — reset manually when starting a new reporting period.
-                    </span>
-                  </label>
-                  <label>
-                    <span className="mb-1.5 block text-xs font-semibold uppercase tracking-wider text-[#5E6870]">
-                      Reference page target (optional)
-                    </span>
-                    <input
-                      type="number"
-                      min={0}
-                      className={`${inputCls} w-full`}
-                      value={settings.idp_page_allowance}
-                      onChange={(event) =>
-                        update("idp_page_allowance", Math.max(0, Number(event.target.value) || 0))
-                      }
-                    />
-                    <span className="mt-1 block text-xs text-[#5E6870]">
-                      Optional benchmark only (0 = hide). Hard spend limits are set in Anthropic, not here.
-                    </span>
-                  </label>
-                </div>
+                <IdpUsageClientPanel usage={idpUsage} />
               </SettingBlock>
 
               {isPlatformOps && (
