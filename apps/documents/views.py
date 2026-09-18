@@ -390,10 +390,49 @@ class DMSSettingsView(APIView):
                 status=status.HTTP_403_FORBIDDEN,
             )
         settings_obj = DMSSettings.load()
-        serializer = DMSSettingsSerializer(settings_obj, data=request.data, partial=True)
+        data = request.data.copy() if hasattr(request.data, "copy") else dict(request.data)
+        # Operator-only reference spend target — never editable by client admins.
+        monthly_limit = data.pop("idp_monthly_limit_usd", None) if isinstance(data, dict) else None
+        serializer = DMSSettingsSerializer(settings_obj, data=data, partial=True)
         serializer.is_valid(raise_exception=True)
         serializer.save(updated_by=request.user)
-        return Response(serializer.data)
+        if monthly_limit is not None and (request.user.is_staff or request.user.is_superuser):
+            try:
+                from decimal import Decimal, InvalidOperation
+
+                settings_obj.idp_monthly_limit_usd = max(
+                    Decimal("0"),
+                    Decimal(str(monthly_limit)),
+                )
+                settings_obj.save(update_fields=["idp_monthly_limit_usd", "updated_at"])
+            except (InvalidOperation, TypeError, ValueError):
+                return Response(
+                    {"idp_monthly_limit_usd": ["Enter a valid USD amount."]},
+                    status=status.HTTP_400_BAD_REQUEST,
+                )
+        return Response(DMSSettingsSerializer(DMSSettings.load()).data)
+
+
+class IdpUsageView(APIView):
+    """Document-extraction usage rollups for Admin → Document extraction."""
+
+    permission_classes = [permissions.IsAuthenticated]
+
+    def get(self, request):
+        if not request.user.has_admin_access:
+            return Response(
+                {"detail": "Administrator access is required."},
+                status=status.HTTP_403_FORBIDDEN,
+            )
+        from apps.documents.ocr.usage import build_idp_usage_report
+
+        try:
+            days = int(request.query_params.get("days") or 30)
+        except (TypeError, ValueError):
+            days = 30
+        include_billing = bool(request.user.is_staff or request.user.is_superuser)
+        return Response(build_idp_usage_report(days=days, include_billing=include_billing))
+
 
 
 # ── Document ViewSet ──────────────────────────────────────────────────────────

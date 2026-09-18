@@ -12,7 +12,7 @@ Changes from previous version
 """
 from django.urls import path
 from rest_framework.routers import DefaultRouter
-from .views import DocumentViewSet, DocumentTypeViewSet, DocTypeColorView, DMSSettingsView
+from .views import DocumentViewSet, DocumentTypeViewSet, DocTypeColorView, DMSSettingsView, IdpUsageView
 from .webdav import DocumentWebDAVView
 from .bulk_upload_views import BulkUploadViewSet
 from .folder_views import (
@@ -81,6 +81,11 @@ urlpatterns = [
         "settings/",
         DMSSettingsView.as_view(),
         name="document-settings",
+    ),
+    path(
+        "settings/idp-usage/",
+        IdpUsageView.as_view(),
+        name="document-idp-usage",
     ),
     # In-app PDF editor server-side jobs (compress / convert). Must precede the
     # router so it isn't captured as a document <pk>.

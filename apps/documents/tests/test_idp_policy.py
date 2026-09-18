@@ -110,7 +110,9 @@ class ApplyIdpUnavailableStateTests(SimpleTestCase):
         doc.metadata = {}
         doc.ocr_status = ""
 
-        with patch("apps.documents.models.Document") as document_model:
+        with patch("apps.documents.models.Document") as document_model, patch(
+            "apps.documents.ocr.usage.record_idp_usage_event",
+        ):
             document_model.objects.filter.return_value.update = MagicMock()
             applied = apply_idp_unavailable_state(doc)
 

@@ -53,4 +53,10 @@ def apply_document_regex_fallback(document, *, reason: str = "user_opt_in"):
 
     type(document).objects.filter(id=document.id).update(**update_kwargs)
     document.refresh_from_db()
+    try:
+        from apps.documents.ocr.usage import record_idp_usage_event
+
+        record_idp_usage_event(outcome="regex")
+    except Exception:
+        pass
     return document

@@ -221,6 +221,7 @@ def run_regex_fallback(doc, *, reason: str = "user_opt_in") -> OcrRunResult:
 
 def _handle_claude_failure(doc, *, policy, reason: str) -> OcrRunResult:
     from apps.documents.models import OCRStatus
+    from apps.documents.ocr.idp_policy import build_needs_manual_metadata
 
     if policy.should_use_regex_on_failure(reason):
         text, metadata_updates = _run_local_pipeline(doc, policy_fallback_reason=reason)

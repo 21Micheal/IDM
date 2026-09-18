@@ -40,6 +40,9 @@ urlpatterns = [
     # Infor SunSystems integration (budget checks + journal posting)
     path("api/v1/sunsystems/", include("apps.sunsystems.urls")),
 
+    # Flaxem ops billing control plane (staff/superuser only)
+    path("api/v1/billing/", include("apps.billing.urls")),
+
     # Storage stats
     path("api/v1/storage/stats/", StorageStatsView.as_view(), name="storage-stats"),
     path("api/v1/analytics/approval-turnaround/", ApprovalTurnaroundView.as_view(), name="analytics-approval-turnaround"),

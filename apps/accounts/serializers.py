@@ -98,6 +98,7 @@ class UserSerializer(serializers.ModelSerializer):
             "id", "email", "first_name", "last_name", "full_name",
             "job_description",
             "is_staff",
+            "is_superuser",
             "has_admin_access", "admin_source",
             "department", "department_name",
             "mfa_enabled", "must_change_password",
@@ -106,6 +107,7 @@ class UserSerializer(serializers.ModelSerializer):
         ]
         read_only_fields = [
             "id", "full_name", "department_name",
+            "is_staff", "is_superuser",
             "has_admin_access", "admin_source",
             "must_change_password", "last_login_ip", "last_login",
             "group_names", "created_at", "updated_at",

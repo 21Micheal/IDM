@@ -361,6 +361,29 @@ def ocr_document(self, document_id: str):
             logger.exception("ocr_document: failed to promote suggested fields to top-level for %s", document_id)
 
         Document.objects.filter(id=document_id).update(**update_kwargs)
+
+        try:
+            from apps.documents.ocr.usage import record_idp_usage_event
+
+            engine = str(quality.get("engine") or "").lower()
+            token_usage = quality.get("token_usage") if isinstance(quality.get("token_usage"), dict) else {}
+            if terminal_status == OCRStatus.NEEDS_MANUAL:
+                record_idp_usage_event(outcome="needs_manual")
+            elif engine.startswith("claude"):
+                record_idp_usage_event(
+                    outcome="claude",
+                    claude_pages=result.claude_pages,
+                    input_tokens=int(token_usage.get("input_tokens") or 0),
+                    output_tokens=int(token_usage.get("output_tokens") or 0),
+                    cache_read_tokens=int(token_usage.get("cache_read_tokens") or 0),
+                    cache_write_tokens=int(token_usage.get("cache_write_tokens") or 0),
+                )
+            elif engine == "regex" or (terminal_status == OCRStatus.DONE and not engine.startswith("claude")):
+                # Local / regex pipeline completion (including policy fallback).
+                record_idp_usage_event(outcome="regex")
+        except Exception:
+            logger.exception("ocr_document: failed to record IDP usage for %s", document_id)
+
         try:
             from .relationship_suggestions import refresh_po_relationship_suggestions
 
@@ -429,6 +452,12 @@ def ocr_document(self, document_id: str):
                 ),
             )
             try:
+                from apps.documents.ocr.usage import record_idp_usage_event
+
+                record_idp_usage_event(outcome="failed")
+            except Exception:
+                logger.exception("ocr_document: failed to record IDP failure usage for %s", document_id)
+            try:
                 from apps.audit.models import AuditEvent
                 from apps.audit.utils import record_audit_event
 
@@ -457,6 +486,12 @@ def ocr_document(self, document_id: str):
                     .first()
                 ),
             )
+            try:
+                from apps.documents.ocr.usage import record_idp_usage_event
+
+                record_idp_usage_event(outcome="failed")
+            except Exception:
+                logger.exception("ocr_document: failed to record IDP failure usage for %s", document_id)
             try:
                 from apps.audit.models import AuditEvent
                 from apps.audit.utils import record_audit_event
