@@ -388,10 +388,13 @@ def classify_document_type(content: bytes, mime: str, filename: str, candidates,
             path = tmp.name
 
         raw = None
+        # Accumulate token usage across whichever Claude call(s) run so we
+        # can record them below instead of silently discarding them.
+        _cls_usage: dict = {}
         if mime == "application/pdf":
             text = _extract_raw_text(path, mime)
             if text.strip():
-                raw, _usage = _call_anthropic_text(
+                raw, _cls_usage = _call_anthropic_text(
                     settings, model, f"DOCUMENT TEXT:\n{text[:8000]}", prompt
                 )
         if raw is None:
@@ -400,11 +403,34 @@ def classify_document_type(content: bytes, mime: str, filename: str, candidates,
 
             pages = render_doc_to_images(path, mime, dpi=120, max_pages=2)
             if pages:
-                raw, _usage = _call_anthropic_vision(settings, model, pages, prompt)
+                raw, _vis_usage = _call_anthropic_vision(settings, model, pages, prompt)
+                # Merge: if text path already ran (and failed), add its tokens too.
+                _cls_usage = {
+                    k: _cls_usage.get(k, 0) + _vis_usage.get(k, 0)
+                    for k in set(_cls_usage) | set(_vis_usage)
+                }
         if not raw:
             return None
 
         code = str(_parse_claude_json(raw).get("code", "")).strip().upper()
+
+        # Record classification token usage regardless of match outcome.
+        # claude_pages=0: classification doesn't consume page-volume quota.
+        if _cls_usage:
+            try:
+                from apps.documents.ocr.usage import record_idp_usage_event
+
+                record_idp_usage_event(
+                    outcome="claude",
+                    claude_pages=0,
+                    input_tokens=int(_cls_usage.get("input_tokens") or 0),
+                    output_tokens=int(_cls_usage.get("output_tokens") or 0),
+                    cache_read_tokens=int(_cls_usage.get("cache_read_tokens") or 0),
+                    cache_write_tokens=int(_cls_usage.get("cache_write_tokens") or 0),
+                )
+            except Exception:
+                logger.exception("classify_document_type: failed to record token usage for %r", filename)
+
         if not code or code == "NONE":
             return None
         for c in candidates:

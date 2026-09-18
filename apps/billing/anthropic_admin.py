@@ -16,7 +16,6 @@ ANTHROPIC_VERSION = "2023-06-01"
 USAGE_URL = "https://api.anthropic.com/v1/organizations/usage_report/messages"
 COST_URL = "https://api.anthropic.com/v1/organizations/cost_report"
 API_KEYS_URL = "https://api.anthropic.com/v1/organizations/api_keys"
-API_KEYS_URL = "https://api.anthropic.com/v1/organizations/api_keys"
 
 
 def admin_api_key() -> str:

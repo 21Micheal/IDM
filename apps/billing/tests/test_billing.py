@@ -158,3 +158,76 @@ class DiscoverImportTests(TestCase):
         self.assertEqual(dep.client_name, "Acme Key")
         self.assertEqual(dep.monthly_limit_usd, Decimal("25.00"))
         self.assertEqual(dep.workspace_id, "wrkspc_1")
+
+
+class SpendAlertTests(TestCase):
+    """check_spend_alerts sends at most one email per client per calendar month."""
+
+    def setUp(self):
+        self.dep = ClientDeployment.objects.create(
+            client_name="AlertCo",
+            api_key_id="apikey_alert",
+            monthly_limit_usd=Decimal("10.00"),
+            alert_email="ops@flaxem.example",
+        )
+        from django.utils import timezone as tz
+        # Record spend that puts client at 95% of cap.
+        APIUsageSnapshot.objects.create(
+            api_key_id="apikey_alert",
+            client_name="AlertCo",
+            date=tz.now().date(),
+            cost_usd=Decimal("9.50"),
+        )
+
+    @patch("apps.billing.sync.send_mail")
+    def test_first_alert_is_sent_and_stamped(self, mock_send):
+        from apps.billing.sync import check_spend_alerts
+        sent = check_spend_alerts()
+        self.assertEqual(sent, 1)
+        mock_send.assert_called_once()
+        self.dep.refresh_from_db()
+        self.assertIsNotNone(self.dep.last_alert_sent_at)
+
+    @patch("apps.billing.sync.send_mail")
+    def test_second_call_this_month_is_suppressed(self, mock_send):
+        from django.utils import timezone as tz
+        from apps.billing.sync import check_spend_alerts
+        # Simulate a previous alert already sent this month.
+        self.dep.last_alert_sent_at = tz.now()
+        self.dep.save(update_fields=["last_alert_sent_at"])
+
+        sent = check_spend_alerts()
+        self.assertEqual(sent, 0)
+        mock_send.assert_not_called()
+
+
+class SyncCostEstimatedTests(TestCase):
+    """sync_usage_for_day marks cost_is_estimated=True when Cost API returns nothing."""
+
+    def setUp(self):
+        ClientDeployment.objects.create(
+            client_name="EstimateCo",
+            api_key_id="apikey_est",
+        )
+
+    @patch("apps.billing.sync.check_spend_alerts", return_value=0)
+    @patch("apps.billing.sync.fetch_cost_by_workspace", return_value={})  # no Cost API data
+    @patch(
+        "apps.billing.sync.fetch_usage_by_api_key",
+        return_value={
+            "apikey_est": {
+                "input_tokens": 500,
+                "output_tokens": 100,
+                "cache_read_tokens": 0,
+                "cache_write_tokens": 0,
+            }
+        },
+    )
+    @patch("apps.billing.sync.admin_api_key", return_value="sk-ant-admin01-test")
+    def test_snapshot_marked_estimated(self, *_mocks):
+        from datetime import date
+        result = sync_usage_for_day(date(2026, 9, 17))
+        self.assertTrue(result["ok"])
+        snap = APIUsageSnapshot.objects.get(api_key_id="apikey_est", date=date(2026, 9, 17))
+        self.assertTrue(snap.cost_is_estimated)
+        self.assertGreater(snap.cost_usd, Decimal("0"))

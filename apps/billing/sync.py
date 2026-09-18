@@ -104,12 +104,20 @@ def sync_usage_for_day(day: date | None = None) -> dict:
 
 
 def check_spend_alerts(*, threshold_pct: Decimal = Decimal("90")) -> int:
-    """Email Flaxem ops when a client is at/above threshold of monthly_limit_usd."""
+    """Email Flaxem ops when a client is at/above threshold of monthly_limit_usd.
+
+    Alerts are deduplicated: at most one email is sent per client per calendar
+    month, tracked via ClientDeployment.last_alert_sent_at.
+    """
     month_start = timezone.now().date().replace(day=1)
     default_to = str(getattr(settings, "FLAXEM_OPS_ALERT_EMAIL", "") or "").strip()
     sent = 0
 
     for dep in ClientDeployment.objects.filter(is_active=True, monthly_limit_usd__gt=0):
+        # Suppress if an alert was already sent this calendar month.
+        if dep.last_alert_sent_at and dep.last_alert_sent_at.date() >= month_start:
+            continue
+
         month_spend = (
             APIUsageSnapshot.objects.filter(
                 api_key_id=dep.api_key_id,
@@ -144,6 +152,9 @@ def check_spend_alerts(*, threshold_pct: Decimal = Decimal("90")) -> int:
                 fail_silently=True,
             )
             sent += 1
+            # Stamp the send time so we don't re-alert this month.
+            dep.last_alert_sent_at = timezone.now()
+            dep.save(update_fields=["last_alert_sent_at"])
         except Exception:
             logger.exception("Failed to send spend alert for %s", dep.client_name)
 

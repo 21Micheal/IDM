@@ -45,6 +45,11 @@ class ClientDeployment(models.Model):
         help_text="Override recipient for 90% spend alerts. Empty → FLAXEM_OPS_ALERT_EMAIL.",
     )
     is_active = models.BooleanField(default=True)
+    last_alert_sent_at = models.DateTimeField(
+        null=True,
+        blank=True,
+        help_text="Timestamp of the last 90%-cap spend alert email. Used to suppress duplicate alerts within the same calendar month.",
+    )
     notes = models.TextField(blank=True, default="")
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)

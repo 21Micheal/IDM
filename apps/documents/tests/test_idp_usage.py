@@ -136,3 +136,71 @@ class IdpUsageViewGatingTests(TestCase):
         self.assertEqual(response.status_code, 200)
         self.assertIn("billing", response.data)
         self.assertEqual(response.data["billing"]["input_tokens"], 100)
+
+
+class ClassificationTokenRecordingTests(TestCase):
+    """Regression: classify_document_type was discarding token usage (_usage)."""
+
+    def test_classification_tokens_are_recorded(self):
+        """
+        When _call_anthropic_text returns usage during classification,
+        record_idp_usage_event should be called with those tokens.
+        """
+        from unittest.mock import MagicMock, patch
+
+        from apps.documents.models import IdpUsageDaily
+        from apps.documents.ocr.idp import classify_document_type
+        from django.utils import timezone
+
+        today = timezone.localdate()
+
+        # Classification returns no match (NONE) — but tokens were still consumed.
+        fake_response_text = '{"code": "NONE"}'
+        fake_usage = {
+            "input_tokens": 250,
+            "output_tokens": 50,
+            "cache_read_tokens": 0,
+            "cache_write_tokens": 0,
+        }
+
+        fake_candidate = MagicMock()
+        fake_candidate.code = "INV"
+
+        with (
+            patch("apps.documents.ocr.idp._call_anthropic_text", return_value=(fake_response_text, fake_usage)),
+            patch("apps.documents.ocr.idp._extract_raw_text", return_value="some text"),
+            patch("apps.documents.ocr.idp._claude_model", return_value="claude-haiku-20240307"),
+            patch("apps.documents.ocr.idp._build_classification_prompt", return_value="prompt"),
+        ):
+            settings_stub = MagicMock()
+            result = classify_document_type(
+                b"%PDF fake",
+                "application/pdf",
+                "invoice.pdf",
+                [fake_candidate],
+                settings=settings_stub,
+            )
+
+        # No code match → None returned, but tokens must be on today's row.
+        self.assertIsNone(result)
+        row = IdpUsageDaily.objects.filter(date=today).first()
+        self.assertIsNotNone(row, "IdpUsageDaily row should have been created for classification tokens")
+        self.assertEqual(row.input_tokens, 250)
+        self.assertEqual(row.output_tokens, 50)
+        # claude_pages must be 0 — classification never contributes to page quota.
+        self.assertEqual(row.claude_pages, 0)
+
+
+class UnknownOutcomeTests(TestCase):
+    """record_idp_usage_event with an unknown outcome must warn and not raise."""
+
+    def test_unknown_outcome_does_not_raise_or_create_row(self):
+        import logging
+
+        from apps.documents.models import IdpUsageDaily
+        from apps.documents.ocr.usage import record_idp_usage_event
+
+        with self.assertLogs("apps.documents.ocr.usage", level=logging.WARNING):
+            record_idp_usage_event(outcome="not_a_real_outcome")
+
+        self.assertFalse(IdpUsageDaily.objects.exists())
