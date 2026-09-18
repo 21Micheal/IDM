@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useState } from "react";
 import { extractApiError } from "@/lib/apiError";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { dmsSettingsAPI, type DmsSettings, type IdpUsageReport } from "@/services/api";
+import { dmsSettingsAPI, billingAPI, type DmsSettings, type IdpUsageReport } from "@/services/api";
 import { toast } from "@/components/ui/vault-toast";
 import { useAuthStore } from "@/store/authStore";
 import {
@@ -20,11 +20,12 @@ import {
   Sparkles,
   Timer,
   Trash2,
+  Wallet,
 } from "lucide-react";
 import CustomListbox from "@/components/ui/CustomListbox";
 import clsx from "clsx";
 
-type SectionId = "preview" | "lifecycle" | "governance" | "idp" | "security";
+type SectionId = "preview" | "lifecycle" | "governance" | "idp" | "security" | "ops_billing";
 
 const inputCls =
   "h-9 border border-[#AEB5BB] bg-white px-3 text-sm text-[#1F2933] outline-none focus:border-[#287EAD] focus:ring-1 focus:ring-[#287EAD]";
@@ -33,11 +34,12 @@ const panelCls = "border border-[#C8CDD2] bg-white";
 const panelHeaderCls = "border-b border-[#C8CDD2] bg-[#F5F7F8] px-4 py-3";
 const sectionBodyCls = "space-y-5 p-4";
 
-const sections: Array<{
+const baseSections: Array<{
   id: SectionId;
   title: string;
   description: string;
   icon: React.ElementType;
+  opsOnly?: boolean;
 }> = [
   {
     id: "preview",
@@ -68,6 +70,13 @@ const sections: Array<{
     title: "Security",
     description: "Session lifetime and inactivity sign-out",
     icon: Clock,
+  },
+  {
+    id: "ops_billing",
+    title: "All clients (ops)",
+    description: "Anthropic usage across registered client keys",
+    icon: Wallet,
+    opsOnly: true,
   },
 ];
 
@@ -277,13 +286,474 @@ function IdpUsageBillingPanel({
   );
 }
 
+function OpsBillingPanel() {
+  const qc = useQueryClient();
+  const [draftName, setDraftName] = useState("");
+  const [draftKeyId, setDraftKeyId] = useState("");
+  const [draftWs, setDraftWs] = useState("");
+  const [draftLimit, setDraftLimit] = useState("30");
+
+  const { data: report, isLoading } = useQuery({
+    queryKey: ["billing-ops-usage"],
+    queryFn: () => billingAPI.usage(30).then((r) => r.data),
+    refetchInterval: 30_000,
+  });
+
+  const { data: discovered, isFetching: discovering } = useQuery({
+    queryKey: ["billing-discovered-keys"],
+    queryFn: () => billingAPI.discoveredKeys().then((r) => r.data),
+    enabled: Boolean(report?.configured),
+  });
+
+  const syncMutation = useMutation({
+    mutationFn: () => billingAPI.sync().then((r) => r.data),
+    onSuccess: (result) => {
+      qc.invalidateQueries({ queryKey: ["billing-ops-usage"] });
+      if (result.ok) {
+        toast.success(`Synced ${result.saved ?? 0} client(s) for ${result.day ?? "yesterday"}.`);
+      } else {
+        toast.error(result.reason || "Sync failed.");
+      }
+    },
+    onError: (err) => toast.error(extractApiError(err, "Sync failed.")),
+  });
+
+  const importMutation = useMutation({
+    mutationFn: (api_key_ids?: string[]) =>
+      billingAPI
+        .importKeys({
+          api_key_ids,
+          monthly_limit_usd: draftLimit || "0",
+        })
+        .then((r) => r.data),
+    onSuccess: (result) => {
+      qc.invalidateQueries({ queryKey: ["billing-ops-usage"] });
+      qc.invalidateQueries({ queryKey: ["billing-discovered-keys"] });
+      if (result.ok) {
+        toast.success(
+          `Imported ${result.imported} key(s)`
+            + (result.skipped ? ` (${result.skipped} already registered)` : "")
+            + ".",
+        );
+      } else {
+        toast.error(result.reason || "Import failed.");
+      }
+    },
+    onError: (err) => toast.error(extractApiError(err, "Import failed.")),
+  });
+
+  const createMutation = useMutation({
+    mutationFn: () =>
+      billingAPI.createClient({
+        client_name: draftName.trim(),
+        api_key_id: draftKeyId.trim(),
+        workspace_id: draftWs.trim(),
+        monthly_limit_usd: draftLimit || "0",
+        is_active: true,
+      }).then((r) => r.data),
+    onSuccess: () => {
+      setDraftName("");
+      setDraftKeyId("");
+      setDraftWs("");
+      qc.invalidateQueries({ queryKey: ["billing-ops-usage"] });
+      qc.invalidateQueries({ queryKey: ["billing-discovered-keys"] });
+      toast.success("Client registered.");
+    },
+    onError: (err) => toast.error(extractApiError(err, "Could not register client.")),
+  });
+
+  const deleteMutation = useMutation({
+    mutationFn: (id: string) => billingAPI.deleteClient(id),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ["billing-ops-usage"] });
+      qc.invalidateQueries({ queryKey: ["billing-discovered-keys"] });
+      toast.success("Client removed.");
+    },
+    onError: (err) => toast.error(extractApiError(err, "Could not remove client.")),
+  });
+
+  const [capDrafts, setCapDrafts] = useState<Record<string, string>>({});
+  const [nameDrafts, setNameDrafts] = useState<Record<string, string>>({});
+
+  useEffect(() => {
+    if (!report?.clients) return;
+    setCapDrafts((prev) => {
+      const next = { ...prev };
+      for (const c of report.clients) {
+        if (next[c.id] === undefined) next[c.id] = String(c.monthly_limit_usd ?? "0");
+      }
+      return next;
+    });
+    setNameDrafts((prev) => {
+      const next = { ...prev };
+      for (const c of report.clients) {
+        if (next[c.id] === undefined) next[c.id] = c.client_name;
+      }
+      return next;
+    });
+  }, [report?.clients]);
+
+  const updateMutation = useMutation({
+    mutationFn: ({
+      id,
+      data,
+    }: {
+      id: string;
+      data: { monthly_limit_usd?: string; client_name?: string };
+    }) => billingAPI.updateClient(id, data).then((r) => r.data),
+    onSuccess: (saved) => {
+      setCapDrafts((prev) => ({ ...prev, [saved.id]: String(saved.monthly_limit_usd ?? "0") }));
+      setNameDrafts((prev) => ({ ...prev, [saved.id]: saved.client_name }));
+      qc.invalidateQueries({ queryKey: ["billing-ops-usage"] });
+      qc.invalidateQueries({ queryKey: ["billing-discovered-keys"] });
+      toast.success(`Updated ${saved.client_name}.`);
+    },
+    onError: (err) => toast.error(extractApiError(err, "Could not update client.")),
+  });
+
+  const saveClientRow = (c: {
+    id: string;
+    client_name: string;
+    monthly_limit_usd: string;
+  }) => {
+    const name = (nameDrafts[c.id] ?? c.client_name).trim();
+    const cap = (capDrafts[c.id] ?? String(c.monthly_limit_usd)).trim();
+    const capNum = Math.max(0, Number(cap) || 0);
+    const unchanged =
+      name === c.client_name
+      && String(capNum) === String(Number(c.monthly_limit_usd) || 0);
+    if (!name || unchanged) return;
+    updateMutation.mutate({
+      id: c.id,
+      data: {
+        client_name: name,
+        monthly_limit_usd: String(capNum),
+      },
+    });
+  };
+
+  if (isLoading || !report) {
+    return (
+      <div className="flex min-h-[8rem] items-center justify-center">
+        <Loader2 className="h-5 w-5 animate-spin text-[#287EAD]" />
+      </div>
+    );
+  }
+
+  const unregistered = (discovered?.keys ?? []).filter((k) => !k.registered);
+
+  return (
+    <div className="space-y-5">
+      <InfoNote>
+        Keys in your Anthropic organisation appear below. Import them into Flaxem to track spend;
+        daily sync uses ANTHROPIC_ADMIN_KEY. Hard spend stops remain workspace caps in Anthropic.
+        {!report.configured && (
+          <>
+            {" "}
+            <strong className="font-semibold text-[#1F2933]">Admin key not configured</strong> — set
+            ANTHROPIC_ADMIN_KEY on this deployment to enable discovery and sync.
+          </>
+        )}
+      </InfoNote>
+
+      <div className="grid gap-3 sm:grid-cols-3">
+        <div className="border border-[#D3D7DA] bg-[#F7F8F9] px-3 py-2">
+          <p className="text-[10px] font-semibold uppercase tracking-wider text-[#5E6870]">Clients</p>
+          <p className="mt-1 text-lg font-semibold text-[#1F2933]">{report.summary.clients}</p>
+        </div>
+        <div className="border border-[#D3D7DA] bg-[#F7F8F9] px-3 py-2">
+          <p className="text-[10px] font-semibold uppercase tracking-wider text-[#5E6870]">Month spend</p>
+          <p className="mt-1 text-lg font-semibold text-[#1F2933]">
+            ${Number(report.summary.cost_usd).toFixed(2)}
+          </p>
+        </div>
+        <div className="border border-[#D3D7DA] bg-[#F7F8F9] px-3 py-2">
+          <p className="text-[10px] font-semibold uppercase tracking-wider text-[#5E6870]">Tokens (in/out)</p>
+          <p className="mt-1 text-lg font-semibold text-[#1F2933]">
+            {report.summary.input_tokens.toLocaleString()} / {report.summary.output_tokens.toLocaleString()}
+          </p>
+        </div>
+      </div>
+
+      {report.alerts.length > 0 && (
+        <div className="border border-[#C45C26] bg-[#FFF7F2] px-3 py-2 text-sm text-[#1F2933]">
+          {report.alerts.map((a) => (
+            <p key={a.client_name}>
+              {a.client_name} at {a.pct}% of ${a.monthly_limit_usd} reference cap (${a.cost_usd}).
+            </p>
+          ))}
+        </div>
+      )}
+
+      {report.configured && (
+        <div className="space-y-3">
+          <div className="flex flex-wrap items-center justify-between gap-2">
+            <p className="text-sm font-semibold text-[#1F2933]">Keys in Anthropic organisation</p>
+            <button
+              type="button"
+              className="inline-flex items-center gap-2 border border-[#AEB5BB] bg-white px-3 py-1.5 text-xs font-semibold text-[#1F2933] hover:bg-[#EEF3F7] disabled:opacity-50"
+              disabled={importMutation.isPending || unregistered.length === 0}
+              onClick={() => importMutation.mutate(undefined)}
+            >
+              {importMutation.isPending ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : null}
+              Import all unregistered ({unregistered.length})
+            </button>
+          </div>
+          {discovered?.error && (
+            <p className="text-sm text-[#9B2C2C]">{discovered.error}</p>
+          )}
+          <div className="overflow-x-auto border border-[#D3D7DA]">
+            <table className="min-w-full text-left text-sm">
+              <thead className="bg-[#F5F7F8] text-xs uppercase tracking-wider text-[#5E6870]">
+                <tr>
+                  <th className="px-3 py-2 font-semibold">Name</th>
+                  <th className="px-3 py-2 font-semibold">Key id</th>
+                  <th className="px-3 py-2 font-semibold">Hint</th>
+                  <th className="px-3 py-2 font-semibold">Status</th>
+                  <th className="px-3 py-2 font-semibold" />
+                </tr>
+              </thead>
+              <tbody className="divide-y divide-[#D3D7DA]">
+                {discovering && !discovered ? (
+                  <tr>
+                    <td colSpan={5} className="px-3 py-4 text-[#5E6870]">
+                      Loading keys from Anthropic…
+                    </td>
+                  </tr>
+                ) : (discovered?.keys?.length ?? 0) === 0 ? (
+                  <tr>
+                    <td colSpan={5} className="px-3 py-4 text-[#5E6870]">
+                      No active keys returned by Anthropic.
+                    </td>
+                  </tr>
+                ) : (
+                  discovered!.keys.map((k) => (
+                    <tr key={k.id}>
+                      <td className="px-3 py-2 font-medium text-[#1F2933]">{k.name}</td>
+                      <td className="px-3 py-2 font-mono text-xs text-[#5E6870]">{k.id}</td>
+                      <td className="px-3 py-2 font-mono text-xs text-[#5E6870]">
+                        {k.partial_key_hint || "—"}
+                      </td>
+                      <td className="px-3 py-2 text-[#5E6870]">
+                        {k.registered ? "Registered" : "Not in Flaxem"}
+                      </td>
+                      <td className="px-3 py-2 text-right">
+                        {k.registered ? (
+                          <span className="text-xs text-[#5E6870]">
+                            {k.registered_name}
+                          </span>
+                        ) : (
+                          <button
+                            type="button"
+                            className="text-xs font-semibold text-[#287EAD] hover:underline disabled:opacity-50"
+                            disabled={importMutation.isPending}
+                            onClick={() => importMutation.mutate([k.id])}
+                          >
+                            Import
+                          </button>
+                        )}
+                      </td>
+                    </tr>
+                  ))
+                )}
+              </tbody>
+            </table>
+          </div>
+        </div>
+      )}
+
+      <div className="overflow-x-auto border border-[#D3D7DA]">
+        <table className="min-w-full text-left text-sm">
+          <thead className="bg-[#F5F7F8] text-xs uppercase tracking-wider text-[#5E6870]">
+            <tr>
+              <th className="px-3 py-2 font-semibold">Client</th>
+              <th className="px-3 py-2 font-semibold">Tokens</th>
+              <th className="px-3 py-2 font-semibold">Cost</th>
+              <th className="px-3 py-2 font-semibold">Ref. cap (USD)</th>
+              <th className="px-3 py-2 font-semibold" />
+            </tr>
+          </thead>
+          <tbody className="divide-y divide-[#D3D7DA]">
+            {report.clients.length === 0 ? (
+              <tr>
+                <td colSpan={5} className="px-3 py-4 text-[#5E6870]">
+                  No clients registered yet — import keys from Anthropic above.
+                </td>
+              </tr>
+            ) : (
+              report.clients.map((c) => {
+                const draftCap = capDrafts[c.id] ?? String(c.monthly_limit_usd ?? "0");
+                const draftNameVal = nameDrafts[c.id] ?? c.client_name;
+                const dirty =
+                  draftNameVal.trim() !== c.client_name
+                  || String(Math.max(0, Number(draftCap) || 0))
+                    !== String(Number(c.monthly_limit_usd) || 0);
+                return (
+                  <tr key={c.id}>
+                    <td className="px-3 py-2">
+                      <input
+                        className={`${inputCls} w-full min-w-[8rem]`}
+                        value={draftNameVal}
+                        onChange={(e) =>
+                          setNameDrafts((prev) => ({ ...prev, [c.id]: e.target.value }))
+                        }
+                        onBlur={() => saveClientRow(c)}
+                        aria-label={`Client name for ${c.client_name}`}
+                      />
+                    </td>
+                    <td className="px-3 py-2 text-[#5E6870]">
+                      {(c.input_tokens + c.output_tokens).toLocaleString()}
+                      {c.limit_used_pct != null ? (
+                        <span className="mt-0.5 block text-xs">
+                          {c.limit_used_pct}% of ref
+                        </span>
+                      ) : null}
+                    </td>
+                    <td className="px-3 py-2 text-[#1F2933]">${Number(c.cost_usd).toFixed(2)}</td>
+                    <td className="px-3 py-2">
+                      <input
+                        type="number"
+                        min={0}
+                        step="0.01"
+                        className={`${inputCls} w-24`}
+                        value={draftCap}
+                        onChange={(e) =>
+                          setCapDrafts((prev) => ({ ...prev, [c.id]: e.target.value }))
+                        }
+                        onBlur={() => saveClientRow(c)}
+                        aria-label={`Reference monthly cap for ${c.client_name}`}
+                      />
+                      <span className="mt-0.5 block text-[10px] text-[#5E6870]">
+                        Flaxem alerts only — not Anthropic
+                      </span>
+                    </td>
+                    <td className="px-3 py-2 text-right">
+                      <div className="flex flex-col items-end gap-1">
+                        {dirty && (
+                          <button
+                            type="button"
+                            className="text-xs font-semibold text-[#287EAD] hover:underline disabled:opacity-50"
+                            disabled={updateMutation.isPending}
+                            onClick={() => saveClientRow(c)}
+                          >
+                            Save
+                          </button>
+                        )}
+                        <button
+                          type="button"
+                          className="text-xs font-semibold text-[#9B2C2C] hover:underline"
+                          onClick={() => {
+                            if (window.confirm(`Remove ${c.client_name}?`)) {
+                              deleteMutation.mutate(c.id);
+                            }
+                          }}
+                        >
+                          Remove
+                        </button>
+                      </div>
+                    </td>
+                  </tr>
+                );
+              })
+            )}
+          </tbody>
+        </table>
+      </div>
+
+      <div className="grid gap-3 border border-[#D3D7DA] bg-[#F7F8F9] p-3 sm:grid-cols-2 lg:grid-cols-4">
+        <label>
+          <span className="mb-1 block text-xs font-semibold uppercase tracking-wider text-[#5E6870]">
+            Client name
+          </span>
+          <input
+            className={`${inputCls} w-full`}
+            value={draftName}
+            onChange={(e) => setDraftName(e.target.value)}
+            placeholder="Acme Ltd"
+          />
+        </label>
+        <label>
+          <span className="mb-1 block text-xs font-semibold uppercase tracking-wider text-[#5E6870]">
+            API key id
+          </span>
+          <input
+            className={`${inputCls} w-full`}
+            value={draftKeyId}
+            onChange={(e) => setDraftKeyId(e.target.value)}
+            placeholder="apikey_…"
+          />
+        </label>
+        <label>
+          <span className="mb-1 block text-xs font-semibold uppercase tracking-wider text-[#5E6870]">
+            Workspace id (optional)
+          </span>
+          <input
+            className={`${inputCls} w-full`}
+            value={draftWs}
+            onChange={(e) => setDraftWs(e.target.value)}
+            placeholder="wrkspc_…"
+          />
+        </label>
+        <label>
+          <span className="mb-1 block text-xs font-semibold uppercase tracking-wider text-[#5E6870]">
+            Monthly limit USD
+          </span>
+          <input
+            type="number"
+            min={0}
+            step="0.01"
+            className={`${inputCls} w-full`}
+            value={draftLimit}
+            onChange={(e) => setDraftLimit(e.target.value)}
+          />
+        </label>
+      </div>
+
+      <div className="flex flex-wrap gap-2">
+        <button
+          type="button"
+          className="inline-flex items-center gap-2 bg-[#287EAD] px-4 py-2 text-sm font-semibold text-white hover:bg-[#1E6F99] disabled:opacity-50"
+          disabled={
+            createMutation.isPending
+            || !draftName.trim()
+            || !draftKeyId.trim()
+          }
+          onClick={() => createMutation.mutate()}
+        >
+          {createMutation.isPending ? <Loader2 className="h-4 w-4 animate-spin" /> : null}
+          Register manually
+        </button>
+        <button
+          type="button"
+          className="inline-flex items-center gap-2 border border-[#AEB5BB] bg-white px-4 py-2 text-sm font-semibold text-[#1F2933] hover:bg-[#EEF3F7] disabled:opacity-50"
+          disabled={syncMutation.isPending || !report.configured || report.summary.clients === 0}
+          onClick={() => syncMutation.mutate()}
+        >
+          {syncMutation.isPending ? <Loader2 className="h-4 w-4 animate-spin" /> : null}
+          Sync usage now
+        </button>
+      </div>
+    </div>
+  );
+}
+
 function SettingsWorkspace() {
   const qc = useQueryClient();
   const user = useAuthStore((s) => s.user);
   const isPlatformOps = Boolean(user?.is_staff || user?.is_superuser);
+  const sections = useMemo(
+    () => baseSections.filter((s) => !s.opsOnly || isPlatformOps),
+    [isPlatformOps],
+  );
   const [activeSection, setActiveSection] = useState<SectionId>("preview");
   const [draft, setDraft] = useState<DmsSettings | null>(null);
   const [opsMonthlyLimit, setOpsMonthlyLimit] = useState<string>("");
+
+  useEffect(() => {
+    if (activeSection === "ops_billing" && !isPlatformOps) {
+      setActiveSection("preview");
+    }
+  }, [activeSection, isPlatformOps]);
 
   const { data, isLoading } = useQuery({
     queryKey: ["dms-settings"],
@@ -447,7 +917,11 @@ function SettingsWorkspace() {
             </p>
           </div>
           <div className="flex items-center gap-2">
-            {hasChanges && <span className="text-xs font-semibold text-[#287EAD]">Unsaved changes</span>}
+            {activeSection !== "ops_billing" && hasChanges && (
+              <span className="text-xs font-semibold text-[#287EAD]">Unsaved changes</span>
+            )}
+            {activeSection !== "ops_billing" && (
+              <>
             <button
               type="button"
               onClick={reset}
@@ -466,6 +940,8 @@ function SettingsWorkspace() {
               {mutation.isPending ? <Loader2 className="h-4 w-4 animate-spin" /> : <Save className="h-4 w-4" />}
               Save
             </button>
+              </>
+            )}
           </div>
         </div>
 
@@ -803,6 +1279,16 @@ function SettingsWorkspace() {
                 </SettingBlock>
               )}
             </>
+          )}
+
+          {activeSection === "ops_billing" && isPlatformOps && (
+            <SettingBlock
+              icon={Wallet}
+              title="All clients — Anthropic usage"
+              description="Official Usage/Cost from the Anthropic Admin API, grouped by registered client keys."
+            >
+              <OpsBillingPanel />
+            </SettingBlock>
           )}
 
           {activeSection === "security" && (

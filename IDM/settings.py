@@ -8,6 +8,7 @@ from decimal import Decimal
 from urllib.parse import urlparse
 import environ
 import dj_database_url
+from celery.schedules import crontab
 
 BASE_DIR = Path(__file__).resolve().parent.parent
 
@@ -89,6 +90,7 @@ INSTALLED_APPS = [
     "apps.chat",
     "apps.templates_engine",
     "apps.sunsystems",
+    "apps.billing",
 ]
 
 MIDDLEWARE = [
@@ -277,6 +279,11 @@ CELERY_BEAT_SCHEDULE = {
         # default interval applied to new mailboxes.
         "schedule": 60,
     },
+    "billing-sync-anthropic-usage": {
+        "task": "apps.billing.tasks.sync_anthropic_usage",
+        # 02:15 UTC daily — pulls yesterday's Admin Usage/Cost into snapshots.
+        "schedule": crontab(hour=2, minute=15),
+    },
 }
 
 # ── Elasticsearch ─────────────────────────────────────────────────────────────
@@ -381,6 +388,11 @@ GRAPH_VERIFY_TLS    = env.bool("GRAPH_VERIFY_TLS", default=True)
 IDP_PROVIDER = env("IDP_PROVIDER", default="anthropic")
 
 ANTHROPIC_API_KEY = env("ANTHROPIC_API_KEY", default="")
+# Org Admin API key (sk-ant-admin01-…) for Flaxem control-plane Usage/Cost sync.
+# Distinct from per-client workspace keys used for OCR.
+ANTHROPIC_ADMIN_KEY = env("ANTHROPIC_ADMIN_KEY", default="")
+# Optional default inbox for 90% monthly-cap spend alerts (ops only).
+FLAXEM_OPS_ALERT_EMAIL = env("FLAXEM_OPS_ALERT_EMAIL", default="")
 
 # HuggingFace provider placeholders remain commented out for later testing.
 # HF_API_KEY = env("HF_API_KEY", default="")
