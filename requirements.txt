@@ -45,6 +45,10 @@ reportlab>=4.0
 
 # DB
 mysqlclient==2.2.4
+# PostgreSQL driver (psycopg3). The [binary] extra bundles its own libpq so
+# no system package changes are needed in the Dockerfile. Django 5.0.4
+# loads psycopg (v3) automatically when ENGINE=django.db.backends.postgresql.
+psycopg[binary]>=3.1,<4
 
 # Utils
 gunicorn==22.0.0

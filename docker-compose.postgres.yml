@@ -1,0 +1,131 @@
+# ──────────────────────────────────────────────────────────────────────────────
+# docker-compose.postgres.yml — PostgreSQL overlay for the IDM dev stack.
+#
+# Use this file ON TOP of the base docker-compose.yml to swap the database
+# backend to PostgreSQL. The base file (MySQL) is left completely unchanged.
+#
+# Usage:
+#   docker compose -f docker-compose.yml -f docker-compose.postgres.yml up -d
+#
+# Environment variables (set in .env or export in shell):
+#   PGPASSWORD          PostgreSQL idm_user password   (default: idm_pg_password)
+#   PGROOT_PASSWORD     PostgreSQL superuser password   (default: root_pg_password)
+#   REDIS_PASSWORD      Redis password                  (inherited from base .env)
+#
+# The backend application connects via discrete DB_* vars (no DATABASE_URL),
+# consistent with the SQL Server deployment style documented in DEPLOY_WINDOWS.md.
+# ──────────────────────────────────────────────────────────────────────────────
+
+services:
+
+  # ── PostgreSQL database service ─────────────────────────────────────────────
+  postgres:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB:       idm_db
+      POSTGRES_USER:     idm_user
+      POSTGRES_PASSWORD: ${PGPASSWORD:-idm_pg_password}
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    ports:
+      - "5432:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U idm_user -d idm_db"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # ── Backend (ASGI / Daphne) — switched to PostgreSQL ────────────────────────
+  backend:
+    environment:
+      - DB_ENGINE=postgres
+      - DB_HOST=postgres
+      - DB_PORT=5432
+      - DB_NAME=idm_db
+      - DB_USER=idm_user
+      - DB_PASSWORD=${PGPASSWORD:-idm_pg_password}
+      # Clear DATABASE_URL so settings.py uses discrete DB_* vars.
+      - DATABASE_URL=
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      elasticsearch:
+        condition: service_started
+
+  # ── Celery default+indexing+notifications worker ─────────────────────────────
+  celery_worker:
+    environment:
+      - DB_ENGINE=postgres
+      - DB_HOST=postgres
+      - DB_PORT=5432
+      - DB_NAME=idm_db
+      - DB_USER=idm_user
+      - DB_PASSWORD=${PGPASSWORD:-idm_pg_password}
+      - DATABASE_URL=
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      elasticsearch:
+        condition: service_started
+
+  # ── Celery beat ──────────────────────────────────────────────────────────────
+  celery_beat:
+    environment:
+      - DB_ENGINE=postgres
+      - DB_HOST=postgres
+      - DB_PORT=5432
+      - DB_NAME=idm_db
+      - DB_USER=idm_user
+      - DB_PASSWORD=${PGPASSWORD:-idm_pg_password}
+      - DATABASE_URL=
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      celery_worker:
+        condition: service_started
+
+  # ── Celery OCR worker ────────────────────────────────────────────────────────
+  celery_ocr:
+    environment:
+      - DB_ENGINE=postgres
+      - DB_HOST=postgres
+      - DB_PORT=5432
+      - DB_NAME=idm_db
+      - DB_USER=idm_user
+      - DB_PASSWORD=${PGPASSWORD:-idm_pg_password}
+      - DATABASE_URL=
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      elasticsearch:
+        condition: service_started
+
+  # ── Celery preview worker ────────────────────────────────────────────────────
+  celery_preview:
+    environment:
+      - DB_ENGINE=postgres
+      - DB_HOST=postgres
+      - DB_PORT=5432
+      - DB_NAME=idm_db
+      - DB_USER=idm_user
+      - DB_PASSWORD=${PGPASSWORD:-idm_pg_password}
+      - DATABASE_URL=
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      elasticsearch:
+        condition: service_started
+
+volumes:
+  postgres_data:

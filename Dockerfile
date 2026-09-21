@@ -22,9 +22,10 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
     PIP_ROOT_USER_ACTION=ignore \
     DEBIAN_FRONTEND=noninteractive
 
-# Compile-time dependencies for the two source-only packages:
+# Compile-time dependencies for the source-only packages:
 #   python-ldap → libldap2-dev, libsasl2-dev, libssl-dev
 #   mysqlclient → default-libmysqlclient-dev, pkg-config
+# psycopg[binary] bundles its own libpq — no extra headers needed here.
 RUN apt-get update && apt-get install -y --no-install-recommends \
     build-essential \
     libldap2-dev \
@@ -74,6 +75,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     # Runtime shared libs the source-built wheels link against:
     #   python-ldap → libldap-2.5-0 (ships liblber too), libsasl2-2
     #   mysqlclient → libmariadb3
+    # psycopg[binary] bundles its own libpq — no extra runtime lib needed.
     libldap-2.5-0 \
     libsasl2-2 \
     libmariadb3 \
@@ -98,10 +100,10 @@ PaddleOCR(lang='en', use_angle_cls=True, use_gpu=False, show_log=False)"
 # Verify the spaCy NER model is importable from the copied venv.
 RUN python -c "import spacy; spacy.load('en_core_web_sm')"
 
-# Fail fast if a runtime shared lib for a source-built wheel is missing — these
-# two import names exercise mysqlclient (libmariadb3) and python-ldap
-# (libldap-2.5-0 / libsasl2-2), the only deps compiled in the builder stage.
-RUN python -c "import MySQLdb, ldap; print('native lib linkage OK')"
+# Fail fast if a runtime shared lib for a source-built wheel is missing.
+# Exercises: mysqlclient (libmariadb3), python-ldap (libldap-2.5-0/libsasl2-2),
+# and psycopg (bundled libpq — confirms the binary wheel extracted correctly).
+RUN python -c "import MySQLdb, ldap, psycopg; print('native lib linkage OK (mysql, ldap, psycopg)')"
 
 # Copy the rest of the application code
 COPY . .

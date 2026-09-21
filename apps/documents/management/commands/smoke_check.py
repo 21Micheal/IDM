@@ -2,11 +2,11 @@
 Read-only runtime smoke check.
 
 Validates that the live stack actually works against the configured backends —
-most useful right after `migrate` on a native-Windows / MS SQL Server install,
-where the schema (MySQL-developed) and a few query patterns meet SQL Server for
-the first time. Touches: DB connection + vendor, representative ORM queries
-(including the cross-DB JSON personal-tag filter and the analytics datetime
-arithmetic), a DISTINCT+ORDER BY query, and the cache (Redis/Memurai).
+most useful right after `migrate` on a new install or when switching the active
+database backend (MySQL, PostgreSQL, or MS SQL Server). Touches: DB connection
++ vendor, representative ORM queries (including the cross-DB JSON personal-tag
+filter and the analytics datetime arithmetic), a DISTINCT+ORDER BY query, and
+the cache (Redis/Memurai).
 
     python manage.py smoke_check
 

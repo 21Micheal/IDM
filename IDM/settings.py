@@ -112,10 +112,18 @@ WSGI_APPLICATION = "IDM.wsgi.application"
 ASGI_APPLICATION = "IDM.asgi.application"
 
 # ── Database ────────────────────────────────────────────────────────────────
-# DB_ENGINE lets the same codebase run on Linux/MySQL (default) and native
-# Windows/MS SQL Server. MySQL keeps the DATABASE_URL form; MS SQL is configured
-# from discrete vars (dj-database-url has no clean mssql scheme) via the
-# mssql-django backend + Microsoft ODBC Driver.
+# DB_ENGINE selects the active database backend for this deployment.
+# One backend is active at a time; choose it via DB_ENGINE in your .env.
+#
+#   mysql (default)           — DATABASE_URL=mysql://user:pass@host:3306/db
+#   mssql / sqlserver         — discrete DB_* vars + Microsoft ODBC Driver
+#   postgres / postgresql / pgsql — DATABASE_URL=postgresql://... OR
+#                                   discrete DB_HOST / DB_PORT / DB_NAME /
+#                                   DB_USER / DB_PASSWORD vars
+#
+# An unrecognised value raises ImproperlyConfigured at startup (fail loud).
+from django.core.exceptions import ImproperlyConfigured
+
 DB_ENGINE = env("DB_ENGINE", default="mysql").lower()
 
 if DB_ENGINE in ("mssql", "sqlserver"):
@@ -136,7 +144,34 @@ if DB_ENGINE in ("mssql", "sqlserver"):
             },
         }
     }
-else:
+
+elif DB_ENGINE in ("postgres", "postgresql", "pgsql"):
+    # PostgreSQL — accepts either DATABASE_URL (postgres:// or postgresql://)
+    # or the same discrete DB_* variables used by the SQL Server branch.
+    # No MySQL-only OPTIONS (charset / init_command) are applied.
+    _pg_url = env("DATABASE_URL", default="")
+    if _pg_url:
+        DATABASES = {
+            "default": dj_database_url.parse(
+                _pg_url,
+                conn_max_age=env.int("DB_CONN_MAX_AGE", default=600),
+                engine="django.db.backends.postgresql",
+            )
+        }
+    else:
+        DATABASES = {
+            "default": {
+                "ENGINE": "django.db.backends.postgresql",
+                "NAME": env("DB_NAME", default="idm_db"),
+                "USER": env("DB_USER", default=""),
+                "PASSWORD": env("DB_PASSWORD", default=""),
+                "HOST": env("DB_HOST", default="localhost"),
+                "PORT": env("DB_PORT", default="5432"),
+                "CONN_MAX_AGE": env.int("DB_CONN_MAX_AGE", default=600),
+            }
+        }
+
+elif DB_ENGINE == "mysql":
     DATABASES = {
         "default": dj_database_url.parse(
             env("DATABASE_URL"),
@@ -149,6 +184,12 @@ else:
         "charset": "utf8mb4",
         "init_command": "SET sql_mode='STRICT_TRANS_TABLES'",
     }
+
+else:
+    raise ImproperlyConfigured(
+        f"Unsupported DB_ENGINE value: {DB_ENGINE!r}. "
+        "Expected one of: mysql, postgres, postgresql, pgsql, mssql, sqlserver."
+    )
 
 # ── Auth & JWT ───────────────────────────────────────────────────────────────
 AUTH_USER_MODEL = "accounts.User"
