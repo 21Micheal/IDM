@@ -143,7 +143,7 @@ function paymentRunStatusLabel(run: PaymentRunRecord): string {
   if (run.status === "rejected") return "Rejected";
   if (run.status === "paid") return "Paid";
   if (run.status === "failed") return "Failed";
-  return run.status.replace(/_/g, " ");
+  return String(run.status).replace(/_/g, " ");
 }
 
 /** True when a processing run has gone stale (verification retries exhausted). */

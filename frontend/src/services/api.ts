@@ -1091,6 +1091,8 @@ export type JournalPostingRecord = {
   journal_number: string;
   message: string;
   error: string;
+  request_xml: string;
+  response_xml: string;
   posted_by_name: string | null;
   posted_at: string | null;
   created_at: string;
