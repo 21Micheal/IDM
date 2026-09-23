@@ -2,6 +2,7 @@ import { Suspense, lazy, useEffect, useState } from "react";
 import { Routes, Route, Navigate, useLocation, useNavigate } from "react-router-dom";
 import { useQuery } from "@tanstack/react-query";
 import { useAuthStore, applyServerSessionPolicy } from "@/store/authStore";
+import { oidcLogout } from "@/lib/oidcClient";
 import { useSessionUiStore } from "@/store/sessionUiStore";
 import { authAPI } from "@/services/api";
 import { VaultToaster } from "@/components/ui/vault-toast";
@@ -10,6 +11,7 @@ import SessionDialogs from "@/components/shared/SessionDialogs";
 
 const Layout = lazy(() => import("@/components/shared/Layout"));
 const LoginPage = lazy(() => import("@/pages/LoginPage"));
+const OIDCCallbackPage = lazy(() => import("@/pages/OIDCCallbackPage"));
 const PasswordResetConfirmPage = lazy(() => import("@/pages/PasswordResetConfirmPage"));
 const ForceChangePasswordPage = lazy(() => import("@/pages/ForceChangePasswordPage"));
 const DashboardPage = lazy(() => import("@/pages/DashboardPage"));
@@ -66,6 +68,7 @@ function AuthBootstrap({ children }: { children: React.ReactNode }) {
       if (accessToken) {
         // We had a session and it has lapsed (e.g. tab reopened after the idle
         // window) — surface the "expired" notice, not a silent bounce to login.
+        oidcLogout().catch(() => {});
         useSessionUiStore.getState().showExpiredNotice();
         logout();
       }
@@ -166,6 +169,8 @@ function SessionGuard() {
 
     const endSession = () => {
       if (!useAuthStore.getState().isAuthenticated) return;
+      // Clear OIDC session to prevent stale session issues
+      oidcLogout().catch(() => {});
       // Raise the expiry notice before clearing auth so the modal shows over the
       // login page the user is about to be redirected to.
       useSessionUiStore.getState().showExpiredNotice();
@@ -362,6 +367,7 @@ export default function App() {
           <Routes>
             {/* Public */}
             <Route path="/login" element={<LoginPage />} />
+            <Route path="/auth/callback" element={<OIDCCallbackPage />} />
             <Route path="/reset-password" element={<PasswordResetConfirmPage />} />
 
             {/* First-login password wall — requires auth but bypasses the layout */}

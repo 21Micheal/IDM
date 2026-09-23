@@ -254,6 +254,35 @@ STORAGE_QUOTA_GB = env.int("STORAGE_QUOTA_GB", default=50)
 # If LDAP/AD is configured via LDAP_SERVER_URI, it will be enabled first.
 AUTHENTICATION_BACKENDS = ["django.contrib.auth.backends.ModelBackend"]
 
+# ── OIDC (Keycloak) ───────────────────────────────────────────────────────────
+# Split-horizon URL configuration — see ~/Projects/idp/README.md §5.
+#
+# OIDC_OP_JWKS_ENDPOINT: machine-to-machine call from the backend container
+#   to Keycloak via Docker service DNS — no host routing, reliable and fast.
+#
+# OIDC_OP_ISSUER: the string that must match the `iss` claim in Keycloak JWTs.
+#   Keycloak stamps tokens with the browser-facing URL (KC_HOSTNAME=localhost:8080),
+#   so this must be the localhost URL even though we fetch keys internally.
+#
+# OIDC_CLIENT_ID: the Keycloak client ID for this application.
+OIDC_OP_JWKS_ENDPOINT = env(
+    "OIDC_OP_JWKS_ENDPOINT",
+    default="http://keycloak:8080/realms/idp-dev/protocol/openid-connect/certs",
+)
+OIDC_OP_ISSUER = env(
+    "OIDC_OP_ISSUER",
+    default="http://localhost:8080/realms/idp-dev",
+)
+OIDC_CLIENT_ID = env("OIDC_CLIENT_ID", default="dms-client")
+# Cache JWKS public keys for this many seconds. On a key-ID miss (Keycloak
+# rotated its signing key) the cache is bypassed automatically.
+OIDC_JWKS_CACHE_TTL = env.int("OIDC_JWKS_CACHE_TTL", default=3600)
+
+# Shared secret for Keycloak's User Storage SPI and protocol mapper when they
+# call the DMS-only internal identity endpoints. Leave blank to disable those
+# endpoints until the IdP service is configured.
+DMS_INTERNAL_IDP_API_KEY = env("DMS_INTERNAL_IDP_API_KEY", default="")
+
 # Switch to S3 by setting USE_S3=True in env
 if env.bool("USE_S3", default=False):
     DEFAULT_FILE_STORAGE = "storages.backends.s3boto3.S3Boto3Storage"

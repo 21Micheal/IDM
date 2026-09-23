@@ -54,6 +54,7 @@ services:
       - DEBUG=True
       - SECRET_KEY=${SECRET_KEY:-insecure-dev-secret-change-me}
       - DATABASE_URL=mysql://idm_user:${DB_PASSWORD:-idm_password}@db:3306/idm_db
+      - DMS_INTERNAL_IDP_API_KEY=${DMS_INTERNAL_IDP_API_KEY:-}
       - REDIS_URL=redis://:${REDIS_PASSWORD:-redis_password}@redis:6379/0
       - ELASTICSEARCH_URL=http://elasticsearch:9200
       - MEDIA_ROOT=/app/media
@@ -84,6 +85,9 @@ services:
         condition: service_healthy
       elasticsearch:
         condition: service_started
+    networks:
+      - default
+      - idp-network   # reaches keycloak:8080 for JWKS key fetching
 
   celery_worker:
     build:
@@ -244,7 +248,6 @@ services:
       - .env
     volumes:
       - ./frontend:/app
-      - /app/node_modules
     ports:
       - "3000:3000"
 
@@ -268,3 +271,12 @@ volumes:
   paddle_models:
   # Warm LibreOffice profile for Office→PDF previews (persists across restarts).
   lo_preview_profile:
+
+networks:
+  default: {}
+  # External network created by ~/Projects/idp/docker-compose.yml.
+  # The backend container joins it so it can resolve `keycloak` by Docker
+  # service DNS for JWKS key fetching. Start the IdP stack first:
+  #   cd ~/Projects/idp && docker compose up -d
+  idp-network:
+    external: true

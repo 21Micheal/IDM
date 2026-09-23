@@ -2,6 +2,7 @@
 apps/accounts/views.py
 """
 import logging
+import jwt as pyjwt
 
 from django.contrib.auth import authenticate
 from django.contrib.auth.password_validation import validate_password
@@ -219,6 +220,90 @@ class VerifyOTPView(APIView):
             "access":               str(refresh.access_token),
             "refresh":              str(refresh),
             "must_change_password": user.must_change_password,
+            "user":                 UserSerializer(user).data,
+            "session_policy":       get_session_policy(),
+        })
+
+
+class OIDCExchangeView(APIView):
+    """
+    POST /api/auth/oidc/exchange/
+
+    Token-exchange endpoint for the OIDC PKCE flow.
+
+    The React frontend completes the PKCE authorization code exchange with
+    Keycloak, then POSTs the resulting ``id_token`` here.  Django validates
+    the token, resolves the existing DMS user, and returns a simplejwt access
+    + refresh pair — identical in shape to the VerifyOTPView response so the
+    frontend can reuse the same post-login handler.
+
+    The endpoint is unauthenticated (AllowAny) because the id_token is
+    cryptographically self-validating via Keycloak's JWKS public keys.
+    """
+    permission_classes = [permissions.AllowAny]
+
+    def post(self, request):
+        from .oidc_auth import validate_id_token, provision_or_link_user
+
+        raw_token = request.data.get("id_token", "").strip()
+        if not raw_token:
+            return Response(
+                {"detail": "id_token is required."},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        try:
+            claims = validate_id_token(raw_token)
+        except pyjwt.ExpiredSignatureError:
+            return Response(
+                {"detail": "The token has expired. Please sign in again."},
+                status=status.HTTP_401_UNAUTHORIZED,
+            )
+        except pyjwt.PyJWTError as exc:
+            logger.warning("OIDC token validation failed: %s", exc)
+            return Response(
+                {"detail": "Invalid identity token."},
+                status=status.HTTP_401_UNAUTHORIZED,
+            )
+        except Exception as exc:
+            logger.error("OIDC exchange unexpected error: %s", exc)
+            return Response(
+                {"detail": "Authentication service error. Please try again."},
+                status=status.HTTP_503_SERVICE_UNAVAILABLE,
+            )
+
+        try:
+            user = provision_or_link_user(claims)
+        except ValueError as exc:
+            return Response({"detail": str(exc)}, status=status.HTTP_400_BAD_REQUEST)
+
+        if not user.is_active:
+            return Response(
+                {"detail": "This account has been deactivated."},
+                status=status.HTTP_403_FORBIDDEN,
+            )
+
+        # Update last-login metadata
+        user.last_login    = timezone.now()
+        user.last_login_ip = request.META.get("REMOTE_ADDR")
+        user.save(update_fields=["last_login", "last_login_ip"])
+
+        refresh = issue_refresh_for_user(user)
+
+        AuditLog.objects.create(
+            event=AuditEvent.USER_LOGIN,
+            actor=user,
+            object_type="User",
+            object_id=str(user.id),
+            object_repr=user.email,
+            ip_address=request.META.get("REMOTE_ADDR"),
+            user_agent=request.META.get("HTTP_USER_AGENT", "")[:500],
+        )
+
+        return Response({
+            "access":               str(refresh.access_token),
+            "refresh":              str(refresh),
+            "must_change_password": False,   # password managed by Keycloak
             "user":                 UserSerializer(user).data,
             "session_policy":       get_session_policy(),
         })

@@ -1,5 +1,6 @@
 import axios, { AxiosError, InternalAxiosRequestConfig } from "axios";
 import { useAuthStore, applyServerSessionPolicy } from "@/store/authStore";
+import { clearLocalOidcState } from "@/lib/oidcClient";
 import type {
   DocumentEditTokenResponse,
   DocumentPreviewResponse,
@@ -172,6 +173,7 @@ async function refreshAccessToken(): Promise<string> {
     refreshPromise = (async () => {
       const authState = useAuthStore.getState();
       if (authState.isSessionExpired()) {
+        clearLocalOidcState().catch(() => {});
         authState.logout();
         throw new Error("Session expired");
       }
@@ -242,6 +244,7 @@ api.interceptors.response.use(
     const isRefreshRequest = original.url?.includes("/token/refresh/");
     const hasAuthHeader = Boolean(original.headers?.Authorization);
     if (error.response?.status === 401 && (original._retry || isRefreshRequest) && hasAuthHeader) {
+      clearLocalOidcState().catch(() => {});
       useAuthStore.getState().logout();
       return Promise.reject(error);
     }
@@ -253,6 +256,7 @@ api.interceptors.response.use(
         original.headers.Authorization = `Bearer ${accessToken}`;
         return api(original);
       } catch {
+        clearLocalOidcState().catch(() => {});
         useAuthStore.getState().logout();
       }
     }

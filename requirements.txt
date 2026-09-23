@@ -12,6 +12,7 @@ django-otp==1.5.1
 qrcode[pil]==7.4.2
 python-ldap==3.4.4
 django-auth-ldap==4.6.0
+PyJWT[cryptography]>=2.8,<3   # RS256 validation of Keycloak id_tokens
 
 # Storage
 boto3==1.34.74               # S3 / compatible object storage

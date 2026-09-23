@@ -40,6 +40,7 @@ import {
   Plug, ClipboardList, BarChart3, CreditCard,
 } from "lucide-react";
 import { useAuthStore } from "../../store/authStore";
+import { oidcLogout } from "@/lib/oidcClient";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { notificationsAPI, workflowAPI } from "../../services/api";
 import { QUERY_ONE_MINUTE_STALE } from "@/lib/reactQueryDefaults";
@@ -330,7 +331,13 @@ function ProfileMenu({ variant = "light" }: { variant?: "light" | "blue" }) {
               My profile
             </button>
             <button
-              onClick={() => { logout(); _navigate("/login"); }}
+              onClick={async () => {
+                setOpen(false);
+                // Clear local auth state first
+                logout();
+                // Then sign out from Keycloak (this will redirect the browser)
+                await oidcLogout().catch(() => {});
+              }}
               className="flex w-full items-center gap-2 px-4 py-2 text-sm text-red-700 transition-colors hover:bg-red-50"
             >
               <LogOut className="w-4 h-4" />

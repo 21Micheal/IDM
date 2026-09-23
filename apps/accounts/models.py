@@ -119,6 +119,18 @@ class User(AbstractBaseUser, PermissionsMixin):
     created_at    = models.DateTimeField(auto_now_add=True)
     updated_at    = models.DateTimeField(auto_now=True)
 
+    # ── OIDC identity link ────────────────────────────────────────────────────
+    # Populated on first Keycloak login. Used as the primary lookup key so that
+    # renaming a user's email in Keycloak does not break the link.
+    oidc_sub = models.CharField(
+        max_length=255,
+        null=True,
+        blank=True,
+        unique=True,
+        db_index=True,
+        help_text="Keycloak subject (sub) UUID — stable OIDC identity link.",
+    )
+
     objects = UserManager()
 
     USERNAME_FIELD  = "email"
@@ -492,7 +504,6 @@ class UserGroup(models.Model):
             UserGroupMembership.objects.get_or_create(
                 user=user,
                 group=group,
-                defaults={"added_by": created_by},
             )
 
         return group
@@ -535,7 +546,7 @@ class UserGroup(models.Model):
             UserGroupMembership.objects.update_or_create(
                 user_id=head_id,
                 group=group,
-                defaults={"added_by": added_by, "expires_at": None},
+                defaults={"expires_at": None},
             )
 
         group.memberships.exclude(user_id__in=head_ids).delete()
