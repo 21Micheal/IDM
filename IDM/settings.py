@@ -278,9 +278,8 @@ OIDC_CLIENT_ID = env("OIDC_CLIENT_ID", default="dms-client")
 # rotated its signing key) the cache is bypassed automatically.
 OIDC_JWKS_CACHE_TTL = env.int("OIDC_JWKS_CACHE_TTL", default=3600)
 
-# Shared secret for Keycloak's User Storage SPI and protocol mapper when they
-# call the DMS-only internal identity endpoints. Leave blank to disable those
-# endpoints until the IdP service is configured.
+# Shared secret for Keycloak's live dms_role mapper and the financial launcher
+# provisioned-check. DMS is not the identity backend.
 DMS_INTERNAL_IDP_API_KEY = env("DMS_INTERNAL_IDP_API_KEY", default="")
 
 # ── Auth Mode ────────────────────────────────────────────────────────────────

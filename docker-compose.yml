@@ -54,7 +54,11 @@ services:
       - DEBUG=True
       - SECRET_KEY=${SECRET_KEY:-insecure-dev-secret-change-me}
       - DATABASE_URL=mysql://idm_user:${DB_PASSWORD:-idm_password}@db:3306/idm_db
+      - AUTH_MODE=${AUTH_MODE:-native}
       - DMS_INTERNAL_IDP_API_KEY=${DMS_INTERNAL_IDP_API_KEY:-}
+      - OIDC_CLIENT_ID=${OIDC_CLIENT_ID:-dms-client}
+      - OIDC_OP_ISSUER=${OIDC_OP_ISSUER:-http://localhost:8080/realms/idp-dev}
+      - OIDC_OP_JWKS_ENDPOINT=${OIDC_OP_JWKS_ENDPOINT:-http://keycloak:8080/realms/idp-dev/protocol/openid-connect/certs}
       - REDIS_URL=redis://:${REDIS_PASSWORD:-redis_password}@redis:6379/0
       - ELASTICSEARCH_URL=http://elasticsearch:9200
       - MEDIA_ROOT=/app/media

@@ -19,7 +19,7 @@ import {
 } from "@/services/api";
 
 import { useAuthStore, applyServerSessionPolicy } from "@/store/authStore";
-import { oidcLogin } from "@/lib/oidcClient";
+import { oidcLogin, trySilentRenew } from "@/lib/oidcClient";
 import { toast } from "@/components/ui/vault-toast";
 import type { AuthUser, ServerSessionPolicy } from "@/store/authStore";
 
@@ -184,14 +184,23 @@ export default function LoginPage() {
   const credForm = useForm<CredForm>({ resolver: zodResolver(credSchema) });
   const otpForm = useForm<OTPForm>({ resolver: zodResolver(otpSchema) });
 
-  // Fetch auth mode config on mount
+  // Fetch auth mode config on mount; if Keycloak session already exists (hub SSO), complete silently.
   useEffect(() => {
     const fetchConfig = async () => {
       try {
         const response = await fetch("/api/v1/config/");
         if (response.ok) {
           const data = await response.json();
-          setAuthMode(data.auth_mode || "native");
+          const mode = data.auth_mode || "native";
+          setAuthMode(mode);
+          if (mode === "keycloak") {
+            const silent = await trySilentRenew();
+            if (silent?.id_token) {
+              const res = await api.post("/auth/oidc/exchange/", { id_token: silent.id_token });
+              await completeLogin(res.data);
+              return;
+            }
+          }
         } else {
           setAuthMode("native");
         }

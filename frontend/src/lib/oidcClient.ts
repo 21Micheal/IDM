@@ -28,13 +28,11 @@ export const oidcManager = new UserManager({
   scope:                  "openid profile email roles",
   // Store OIDC session in sessionStorage (cleared on tab close)
   userStore: new WebStorageStateStore({ store: window.sessionStorage }),
-  // Ask Keycloak to show the login page, never auto-select an account
-  prompt: "select_account",
 });
 
 /** Redirect the browser to the Keycloak login page. */
 export async function oidcLogin(): Promise<void> {
-  await oidcManager.signinRedirect();
+  await oidcManager.signinRedirect({ extraQueryParams: { prompt: "select_account" } });
 }
 
 /**
