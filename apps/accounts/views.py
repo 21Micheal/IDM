@@ -11,6 +11,7 @@ from django.utils.crypto import get_random_string
 from django.utils import timezone
 from django.db.models import Q
 from django.http import FileResponse, Http404
+from django.shortcuts import render
 
 from rest_framework import generics, status, permissions, viewsets, filters, exceptions
 from rest_framework.decorators import action
@@ -34,6 +35,7 @@ from apps.notifications.tasks import (
 from apps.accounts.delegation import tasks_for_delegation
 from .email_otp import send_otp_email
 from apps.audit.models import AuditLog, AuditEvent
+from django.conf import settings
 
 logger = logging.getLogger(__name__)
 
@@ -111,6 +113,32 @@ class SessionTokenRefreshView(TokenRefreshView):
         return response
 
 
+# ── Public Config ─────────────────────────────────────────────────────────────
+
+class ConfigView(APIView):
+    """
+    Public configuration endpoint for the frontend.
+    Returns deployment-time settings that control UI behavior.
+    """
+    permission_classes = [permissions.AllowAny]
+
+    def get(self, request):
+        return Response({
+            "auth_mode": getattr(settings, "AUTH_MODE", "native"),
+        })
+
+
+# ── Break-Glass Login Page ─────────────────────────────────────────────────────
+
+def break_glass_login(request):
+    """
+    Render the break-glass emergency login page.
+    This is a hidden route for platform admins to access native authentication
+    when Keycloak is unavailable. Not linked from the normal login UI.
+    """
+    return render(request, "accounts/admin.html")
+
+
 # ── Permission helpers ────────────────────────────────────────────────────────
 
 class IsGroupAdmin(permissions.BasePermission):
@@ -130,27 +158,60 @@ class LoginView(APIView):
     - Validates credentials.
     - Always requires MFA (email OTP) since it is now default.
     - Returns {mfa_required: True, user_id}
+
+    When AUTH_MODE=keycloak, native login is restricted to platform admins
+    (is_staff or is_superuser) for break-glass emergency access. Set
+    break_glass=true in request data to indicate a break-glass attempt.
     """
     permission_classes = [permissions.AllowAny]
 
     def post(self, request):
         email    = request.data.get("email", "").strip().lower()
         password = request.data.get("password", "").strip()
+        break_glass = request.data.get("break_glass", False)
 
         user = authenticate(request, username=email, password=password)
 
         if not user:
-            AuditLog.objects.create(
-                event=AuditEvent.USER_LOGIN_FAILED,
-                object_type="User",
-                object_repr=email,
-                ip_address=request.META.get("REMOTE_ADDR"),
-                user_agent=request.META.get("HTTP_USER_AGENT", "")[:500],
-            )
+            # Log break-glass failures distinctly
+            if break_glass and getattr(settings, "AUTH_MODE", "native") == "keycloak":
+                AuditLog.objects.create(
+                    event=AuditEvent.USER_BREAK_GLASS_LOGIN_FAILED,
+                    object_type="User",
+                    object_repr=email,
+                    ip_address=request.META.get("REMOTE_ADDR"),
+                    user_agent=request.META.get("HTTP_USER_AGENT", "")[:500],
+                )
+            else:
+                AuditLog.objects.create(
+                    event=AuditEvent.USER_LOGIN_FAILED,
+                    object_type="User",
+                    object_repr=email,
+                    ip_address=request.META.get("REMOTE_ADDR"),
+                    user_agent=request.META.get("HTTP_USER_AGENT", "")[:500],
+                )
             return Response({"detail": "Invalid email or password."}, status=401)
 
         if not user.is_active:
             return Response({"detail": "This account has been deactivated."}, status=403)
+
+        # In keycloak mode, enforce break-glass eligibility
+        auth_mode = getattr(settings, "AUTH_MODE", "native")
+        if auth_mode == "keycloak" and not (user.is_staff or user.is_superuser):
+            # Non-admin users cannot use native login in keycloak mode
+            AuditLog.objects.create(
+                event=AuditEvent.USER_BREAK_GLASS_LOGIN_FAILED,
+                object_type="User",
+                object_id=str(user.id),
+                object_repr=user.email,
+                changes={"reason": "User not eligible for break-glass login (not platform admin)"},
+                ip_address=request.META.get("REMOTE_ADDR"),
+                user_agent=request.META.get("HTTP_USER_AGENT", "")[:500],
+            )
+            return Response(
+                {"detail": "Native login is not available. Please use Keycloak authentication."},
+                status=403,
+            )
 
         # Update login metadata
         user.last_login_ip = request.META.get("REMOTE_ADDR")
@@ -179,6 +240,7 @@ class VerifyOTPView(APIView):
     def post(self, request):
         user_id = request.data.get("user_id", "")
         code    = request.data.get("otp", "").strip()
+        break_glass = request.data.get("break_glass", False)
 
         try:
             user = User.objects.get(id=user_id, is_active=True)
@@ -206,15 +268,29 @@ class VerifyOTPView(APIView):
 
         refresh = issue_refresh_for_user(user)
 
-        AuditLog.objects.create(
-            event=AuditEvent.USER_LOGIN,
-            actor=user,
-            object_type="User",
-            object_id=str(user.id),
-            object_repr=user.email,
-            ip_address=request.META.get("REMOTE_ADDR"),
-            user_agent=request.META.get("HTTP_USER_AGENT", "")[:500],
-        )
+        # Log break-glass logins distinctly when in keycloak mode
+        auth_mode = getattr(settings, "AUTH_MODE", "native")
+        if break_glass and auth_mode == "keycloak":
+            AuditLog.objects.create(
+                event=AuditEvent.USER_BREAK_GLASS_LOGIN,
+                actor=user,
+                object_type="User",
+                object_id=str(user.id),
+                object_repr=user.email,
+                changes={"auth_mode": "keycloak"},
+                ip_address=request.META.get("REMOTE_ADDR"),
+                user_agent=request.META.get("HTTP_USER_AGENT", "")[:500],
+            )
+        else:
+            AuditLog.objects.create(
+                event=AuditEvent.USER_LOGIN,
+                actor=user,
+                object_type="User",
+                object_id=str(user.id),
+                object_repr=user.email,
+                ip_address=request.META.get("REMOTE_ADDR"),
+                user_agent=request.META.get("HTTP_USER_AGENT", "")[:500],
+            )
 
         return Response({
             "access":               str(refresh.access_token),

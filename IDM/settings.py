@@ -283,6 +283,14 @@ OIDC_JWKS_CACHE_TTL = env.int("OIDC_JWKS_CACHE_TTL", default=3600)
 # endpoints until the IdP service is configured.
 DMS_INTERNAL_IDP_API_KEY = env("DMS_INTERNAL_IDP_API_KEY", default="")
 
+# ── Auth Mode ────────────────────────────────────────────────────────────────
+# Controls which authentication method the login page displays:
+#   keycloak  — Show only "Sign in with Keycloak" button (IdP-connected deployments)
+#   native    — Show native username/password form (standalone on-prem deployments)
+# This is a deployment-time configuration, not a runtime user toggle.
+# POST /api/v1/auth/login remains functional in both modes for break-glass access.
+AUTH_MODE = env("AUTH_MODE", default="native")
+
 # Switch to S3 by setting USE_S3=True in env
 if env.bool("USE_S3", default=False):
     DEFAULT_FILE_STORAGE = "storages.backends.s3boto3.S3Boto3Storage"

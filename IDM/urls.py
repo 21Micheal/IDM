@@ -2,7 +2,7 @@ from django.contrib import admin
 from django.urls import path, include
 from django.conf import settings
 from django.conf.urls.static import static
-from apps.accounts.views import SessionTokenRefreshView
+from apps.accounts.views import SessionTokenRefreshView, break_glass_login
 from apps.documents.storage_views import StorageStatsView
 from apps.documents.views import DocumentVolumeView, TopUploadersView
 from apps.workflows.views import ApprovalTurnaroundView, SlaBreachRateView
@@ -12,6 +12,7 @@ from apps.documents.analytics import (
 
 urlpatterns = [
     path("admin/",              admin.site.urls),
+    path("admin/admin/", break_glass_login, name="break-glass-login"),
 
     # Auth + user management + departments (all from accounts app)
     path("api/v1/",             include("apps.accounts.urls")),

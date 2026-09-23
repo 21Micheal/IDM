@@ -4,7 +4,7 @@ from .views import (
     LoginView, VerifyOTPView, ResendOTPView,
     MeView, ChangePasswordView, EnableMFAView, UserPreferencesView, UserSignatureView, UserSignatureImageView,
     PasswordResetRequestView, PasswordResetConfirmView,
-    OIDCExchangeView,
+    OIDCExchangeView, ConfigView,
     UserViewSet, DepartmentViewSet, UserGroupViewSet, UserDelegationViewSet,
 )
 from .internal_idp import (
@@ -24,6 +24,8 @@ router.register(r"groups",      UserGroupViewSet,     basename="group")
 router.register(r"delegations", UserDelegationViewSet, basename="delegation")
 
 urlpatterns = [
+    # Public config
+    path("config/",               ConfigView.as_view(),        name="config"),
     # Auth
     path("auth/login/",           LoginView.as_view(),         name="login"),
     path("auth/verify-otp/",      VerifyOTPView.as_view(),     name="verify-otp"),

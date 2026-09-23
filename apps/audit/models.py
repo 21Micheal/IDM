@@ -42,6 +42,8 @@ class AuditEvent(models.TextChoices):
     DOCUMENT_VERSION_PREVIEW_QUEUED = "document.version_preview_queued", "Document Version Preview Queued"
     USER_LOGIN = "user.login", "User Login"
     USER_LOGIN_FAILED = "user.login_failed", "Login Failed"
+    USER_BREAK_GLASS_LOGIN = "user.break_glass_login", "Break-Glass Login (Emergency Native Auth)"
+    USER_BREAK_GLASS_LOGIN_FAILED = "user.break_glass_login_failed", "Break-Glass Login Failed"
     USER_MFA_ENABLED = "user.mfa_enabled", "MFA Enabled"
     USER_CREATED = "user.created", "User Created"
     USER_DELETED = "user.deleted", "User Deleted"
