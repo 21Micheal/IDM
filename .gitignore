@@ -56,3 +56,4 @@ dump.rdb
 frontend/.env.local
 test_sunsystems_auth.py
 test_sunsystems_payment_run.py
+BREAK_GLASS_README.md

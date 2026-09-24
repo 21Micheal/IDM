@@ -136,7 +136,11 @@ def break_glass_login(request):
     This is a hidden route for platform admins to access native authentication
     when Keycloak is unavailable. Not linked from the normal login UI.
     """
-    return render(request, "accounts/admin.html")
+    from django.conf import settings
+    frontend_url = getattr(settings, 'FRONTEND_URL', 'http://localhost:3000')
+    return render(request, "accounts/admin.html", {
+        'frontend_url': frontend_url
+    })
 
 
 # ── Permission helpers ────────────────────────────────────────────────────────

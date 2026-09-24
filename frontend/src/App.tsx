@@ -57,11 +57,53 @@ function AuthBootstrap({ children }: { children: React.ReactNode }) {
   const accessToken = useAuthStore((s) => s.accessToken);
   const user = useAuthStore((s) => s.user);
   const setUser = useAuthStore((s) => s.setUser);
+  const setTokens = useAuthStore((s) => s.setTokens);
   const logout = useAuthStore((s) => s.logout);
   const isSessionExpired = useAuthStore((s) => s.isSessionExpired);
-  const [ready, setReady] = useState(!accessToken || user?.has_admin_access !== undefined);
+  const [ready, setReady] = useState(false);
+  const [breakGlassProcessed, setBreakGlassProcessed] = useState(false);
+
+  // Handle break-glass login from special admin route
+  useEffect(() => {
+    const params = new URLSearchParams(window.location.search);
+    if (params.has('break_glass') && !breakGlassProcessed) {
+      const access = sessionStorage.getItem('break_glass_access');
+      const refresh = sessionStorage.getItem('break_glass_refresh');
+      const userStr = sessionStorage.getItem('break_glass_user');
+      
+      if (access && refresh && userStr) {
+        try {
+          const userData = JSON.parse(userStr);
+          setTokens(access, refresh);
+          setUser(userData);
+          // Clean up
+          sessionStorage.removeItem('break_glass_access');
+          sessionStorage.removeItem('break_glass_refresh');
+          sessionStorage.removeItem('break_glass_user');
+          // Remove the flag from URL
+          window.history.replaceState({}, '', window.location.pathname);
+          console.log('Break-glass login processed successfully');
+          setBreakGlassProcessed(true);
+          setReady(true);
+        } catch (e) {
+          console.error('Failed to process break-glass login:', e);
+          logout();
+          setBreakGlassProcessed(true);
+          setReady(true);
+        }
+      } else {
+        setBreakGlassProcessed(true);
+        setReady(true);
+      }
+    }
+  }, [setTokens, setUser, logout, breakGlassProcessed, setReady]);
 
   useEffect(() => {
+    // Skip normal auth validation if break-glass was processed
+    if (breakGlassProcessed) {
+      return () => {};
+    }
+
     let cancelled = false;
 
     if (!accessToken || isSessionExpired()) {
@@ -107,7 +149,7 @@ function AuthBootstrap({ children }: { children: React.ReactNode }) {
     return () => {
       cancelled = true;
     };
-  }, [accessToken, isSessionExpired, logout, setUser, user?.has_admin_access]);
+  }, [accessToken, isSessionExpired, logout, setUser, user?.has_admin_access, breakGlassProcessed]);
 
   if (!ready) return <RouteFallback />;
   return <>{children}</>;

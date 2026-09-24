@@ -11,8 +11,8 @@ from apps.documents.analytics import (
 )
 
 urlpatterns = [
-    path("admin/",              admin.site.urls),
     path("admin/admin/", break_glass_login, name="break-glass-login"),
+    path("admin/",              admin.site.urls),
 
     # Auth + user management + departments (all from accounts app)
     path("api/v1/",             include("apps.accounts.urls")),

@@ -4,6 +4,10 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Break-Glass Login - Emergency Access</title>
+    <script>
+        // Set frontend URL from Django context
+        const FRONTEND_URL = "{{ frontend_url }}";
+    </script>
     <style>
         * {
             margin: 0;
@@ -196,12 +200,16 @@
                 <div class="error" id="error"></div>
             `;
             
+            // Update references after DOM replacement
+            const newSubmitBtn = document.getElementById('submitBtn');
+            const newErrorDiv = document.getElementById('error');
+            
             const newForm = document.getElementById('loginForm');
             newForm.addEventListener('submit', async (e) => {
                 e.preventDefault();
-                errorDiv.classList.remove('show');
-                submitBtn.disabled = true;
-                submitBtn.textContent = 'Verifying...';
+                newErrorDiv.classList.remove('show');
+                newSubmitBtn.disabled = true;
+                newSubmitBtn.textContent = 'Verifying...';
                 
                 const otp = document.getElementById('otp').value.trim();
                 
@@ -221,23 +229,25 @@
                     const data = await response.json();
                     
                     if (response.ok) {
-                        // Store tokens and redirect
-                        localStorage.setItem('access', data.access);
-                        localStorage.setItem('refresh', data.refresh);
-                        localStorage.setItem('user', JSON.stringify(data.user));
+                        // Store tokens temporarily and redirect with a special flag
+                        sessionStorage.setItem('break_glass_access', data.access);
+                        sessionStorage.setItem('break_glass_refresh', data.refresh);
+                        sessionStorage.setItem('break_glass_user', JSON.stringify(data.user));
                         sessionStorage.removeItem('break_glass_user_id');
-                        window.location.href = '/';
+                        
+                        // Redirect to frontend with a special flag
+                        window.location.href = FRONTEND_URL + '?break_glass=true';
                     } else {
-                        errorDiv.textContent = data.detail || 'Verification failed';
-                        errorDiv.classList.add('show');
-                        submitBtn.disabled = false;
-                        submitBtn.textContent = 'Verify & Login';
+                        newErrorDiv.textContent = data.detail || 'Verification failed';
+                        newErrorDiv.classList.add('show');
+                        newSubmitBtn.disabled = false;
+                        newSubmitBtn.textContent = 'Verify & Login';
                     }
                 } catch (err) {
-                    errorDiv.textContent = 'Network error. Please try again.';
-                    errorDiv.classList.add('show');
-                    submitBtn.disabled = false;
-                    submitBtn.textContent = 'Verify & Login';
+                    newErrorDiv.textContent = 'Network error. Please try again.';
+                    newErrorDiv.classList.add('show');
+                    newSubmitBtn.disabled = false;
+                    newSubmitBtn.textContent = 'Verify & Login';
                 }
             });
         }
