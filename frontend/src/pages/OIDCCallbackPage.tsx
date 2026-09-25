@@ -25,7 +25,7 @@ import { toast } from "@/components/ui/vault-toast";
 export default function OIDCCallbackPage() {
   const navigate = useNavigate();
   const location = useLocation();
-  const { setTokens, setUser, setSessionPolicy } = useAuthStore();
+  const { setTokens, setUser, setSessionPolicy, setIdToken } = useAuthStore();
   const processed = useRef(false);   // prevent double-execution in React StrictMode
 
   useEffect(() => {
@@ -67,6 +67,8 @@ export default function OIDCCallbackPage() {
 
         // 3. Store in Zustand (same flow as VerifyOTPView response)
         applyServerSessionPolicy(session_policy);
+        // Store id_token for use as id_token_hint on logout (enables proper KC SLO)
+        setIdToken(oidcUser.id_token);
         setTokens(access, refresh);
         setUser(user);
 

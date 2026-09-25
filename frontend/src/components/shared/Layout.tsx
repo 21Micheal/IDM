@@ -276,7 +276,7 @@ function SidebarGroup({
 // ── ProfileMenu (unchanged) ───────────────────────────────────────────────────
 
 function ProfileMenu({ variant = "light" }: { variant?: "light" | "blue" }) {
-  const { user, logout } = useAuthStore();
+  const { user, logout, idToken, refreshToken } = useAuthStore();
   const _navigate = useNavigate();
   void _navigate;
   const [open, setOpen] = useState(false);
@@ -334,9 +334,18 @@ function ProfileMenu({ variant = "light" }: { variant?: "light" | "blue" }) {
               onClick={async () => {
                 setOpen(false);
                 // Clear local auth state first
+                // 1. Blacklist refresh token on the backend
+                if (refreshToken) {
+                  try {
+                    const { api } = await import("@/services/api");
+                    await api.post("/auth/logout/", { refresh: refreshToken });
+                  } catch { /* ignore */ }
+                }
+                // 2. Clear local state
                 logout();
-                // Then sign out from Keycloak (this will redirect the browser)
-                await oidcLogout().catch(() => {});
+                // 3. End Keycloak session — LAST (triggers browser redirect)
+                //    id_token_hint triggers front-channel logout to all clients.
+                await oidcLogout(idToken).catch(() => {});
               }}
               className="flex w-full items-center gap-2 px-4 py-2 text-sm text-red-700 transition-colors hover:bg-red-50"
             >

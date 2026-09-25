@@ -43,6 +43,7 @@ export interface AuthState {
   user: AuthUser | null;
   accessToken: string | null;
   refreshToken: string | null;
+  idToken: string | null;         // stored for id_token_hint on KC logout
   /** Absolute expiry timestamp (ms) — when the session must end no matter what. */
   sessionExpiresAt: number | null;
   /** Last time the user interacted, used for the inactivity timeout. */
@@ -50,6 +51,7 @@ export interface AuthState {
   sessionPolicy: SessionPolicy;
   isAuthenticated: boolean;
   setTokens: (access: string, refresh: string) => void;
+  setIdToken: (token: string | null) => void;
   setUser: (user: AuthUser) => void;
   setSessionPolicy: (policy: Partial<SessionPolicy>) => void;
   recordActivity: () => void;
@@ -63,6 +65,7 @@ export const useAuthStore = create<AuthState>()(
       user: null,
       accessToken: null,
       refreshToken: null,
+      idToken: null,
       sessionExpiresAt: null,
       lastActivityAt: null,
       sessionPolicy: DEFAULT_POLICY,
@@ -86,6 +89,7 @@ export const useAuthStore = create<AuthState>()(
           };
         }),
       setUser: (user) => set({ user }),
+      setIdToken: (token) => set({ idToken: token }),
       setSessionPolicy: (policy) =>
         set((state) => ({
           sessionPolicy: { ...state.sessionPolicy, ...policy },
@@ -96,6 +100,7 @@ export const useAuthStore = create<AuthState>()(
           user: null,
           accessToken: null,
           refreshToken: null,
+          idToken: null,
           sessionExpiresAt: null,
           lastActivityAt: null,
           isAuthenticated: false,

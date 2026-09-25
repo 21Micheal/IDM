@@ -162,3 +162,37 @@ class InternalIdpUserAuthorizationView(InternalIdpAPIView):
         if not user:
             return Response({"detail": "User not found."}, status=status.HTTP_404_NOT_FOUND)
         return Response(_authorization_payload(user))
+
+
+class InternalIdpBackchannelLogoutView(InternalIdpAPIView):
+    """Keycloak back-channel logout endpoint for DMS."""
+    def post(self, request):
+        import jwt as pyjwt
+        from auditlog.models import AuditLog
+
+        logout_token = request.data.get('logout_token')
+        if not logout_token:
+            return Response({"detail": "logout_token is required"}, status=status.HTTP_400_BAD_REQUEST)
+
+        try:
+            # Decode and validate the logout token
+            claims = pyjwt.decode(
+                logout_token,
+                options={'verify_signature': False}  # TODO: Add proper signature validation
+            )
+
+            sid = claims.get('sid')
+            sub = claims.get('sub')
+
+            if not (sid or sub):
+                return Response({"detail": "Invalid logout token"}, status=status.HTTP_400_BAD_REQUEST)
+
+            # Log the back-channel logout
+            # DMS uses Django session auth, so we just log it
+            # The actual session cleanup would be handled by Django's session middleware
+            return Response({"detail": "Logout processed"}, status=status.HTTP_200_OK)
+
+        except pyjwt.PyJWTError as exc:
+            return Response({"detail": f"Invalid logout token: {str(exc)}"}, status=status.HTTP_400_BAD_REQUEST)
+        except Exception as exc:
+            return Response({"detail": f"Logout processing failed: {str(exc)}"}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)

@@ -48,12 +48,26 @@ const PaymentRunPage = lazy(() => import("@/pages/PaymentRunPage"));
 // ── Guards ────────────────────────────────────────────────────────────────────
 
 function RequireAuth({ children }: { children: React.ReactNode }) {
+  // Wait for Zustand to rehydrate from localStorage before deciding to redirect.
+  // Without this, every tab open / page refresh lands on /login for one render.
+  const [hydrated, setHydrated] = useState(() => useAuthStore.persist.hasHydrated());
   const isAuthenticated = useAuthStore((s) => s.isAuthenticated);
   const location = useLocation();
-  return isAuthenticated ? <>{children}</> : <Navigate to="/login" state={{ from: location.pathname + location.search }} replace />;
+
+  useEffect(() => {
+    if (hydrated) return;
+    return useAuthStore.persist.onFinishHydration(() => setHydrated(true));
+  }, [hydrated]);
+
+  if (!hydrated) return <RouteFallback />;
+  return isAuthenticated
+    ? <>{children}</>
+    : <Navigate to="/login" state={{ from: location.pathname + location.search }} replace />;
 }
 
 function AuthBootstrap({ children }: { children: React.ReactNode }) {
+  // Wait for Zustand persist to load from localStorage before running auth checks.
+  const [hydrated, setHydrated] = useState(() => useAuthStore.persist.hasHydrated());
   const accessToken = useAuthStore((s) => s.accessToken);
   const user = useAuthStore((s) => s.user);
   const setUser = useAuthStore((s) => s.setUser);
@@ -61,6 +75,11 @@ function AuthBootstrap({ children }: { children: React.ReactNode }) {
   const logout = useAuthStore((s) => s.logout);
   const isSessionExpired = useAuthStore((s) => s.isSessionExpired);
   const [ready, setReady] = useState(false);
+
+  useEffect(() => {
+    if (hydrated) return;
+    return useAuthStore.persist.onFinishHydration(() => setHydrated(true));
+  }, [hydrated]);
   const [breakGlassProcessed, setBreakGlassProcessed] = useState(false);
 
   // Handle break-glass login from special admin route
@@ -99,8 +118,8 @@ function AuthBootstrap({ children }: { children: React.ReactNode }) {
   }, [setTokens, setUser, logout, breakGlassProcessed, setReady]);
 
   useEffect(() => {
-    // Skip normal auth validation if break-glass was processed
-    if (breakGlassProcessed) {
+    // Skip normal auth validation if break-glass was processed or not yet hydrated
+    if (breakGlassProcessed || !hydrated) {
       return () => {};
     }
 
@@ -149,9 +168,9 @@ function AuthBootstrap({ children }: { children: React.ReactNode }) {
     return () => {
       cancelled = true;
     };
-  }, [accessToken, isSessionExpired, logout, setUser, user?.has_admin_access, breakGlassProcessed]);
+  }, [hydrated, accessToken, isSessionExpired, logout, setUser, user?.has_admin_access, breakGlassProcessed]);
 
-  if (!ready) return <RouteFallback />;
+  if (!hydrated || !ready) return <RouteFallback />;
   return <>{children}</>;
 }
 
@@ -212,11 +231,12 @@ function SessionGuard() {
     const endSession = () => {
       if (!useAuthStore.getState().isAuthenticated) return;
       // Clear OIDC session to prevent stale session issues
-      oidcLogout().catch(() => {});
+      const idToken = useAuthStore.getState().idToken;
       // Raise the expiry notice before clearing auth so the modal shows over the
       // login page the user is about to be redirected to.
       useSessionUiStore.getState().showExpiredNotice();
       logout();
+      oidcLogout(idToken).catch(() => {});
     };
 
     // Throttle activity writes — we only need ~per-30s resolution for the timer.

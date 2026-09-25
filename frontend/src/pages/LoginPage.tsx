@@ -167,7 +167,7 @@ export default function LoginPage() {
   const navigate = useNavigate();
   const location = useLocation();
   const qc = useQueryClient();
-  const { setTokens, setUser } = useAuthStore();
+  const { setTokens, setUser, isAuthenticated } = useAuthStore();
 
   const [authMode, setAuthMode] = useState<"keycloak" | "native" | null>(null);
   const [checking, setChecking] = useState(true);
@@ -184,7 +184,7 @@ export default function LoginPage() {
   const credForm = useForm<CredForm>({ resolver: zodResolver(credSchema) });
   const otpForm = useForm<OTPForm>({ resolver: zodResolver(otpSchema) });
 
-  // Fetch auth mode config on mount; if Keycloak session already exists (hub SSO), complete silently.
+  // Fetch auth mode config on mount; if Keycloak session exists and user not authenticated locally, auto-sign-in
   useEffect(() => {
     const fetchConfig = async () => {
       try {
@@ -193,7 +193,9 @@ export default function LoginPage() {
           const data = await response.json();
           const mode = data.auth_mode || "native";
           setAuthMode(mode);
-          if (mode === "keycloak") {
+          
+          // Only try silent renew if not already authenticated locally and in Keycloak mode
+          if (mode === "keycloak" && !isAuthenticated) {
             const silent = await trySilentRenew();
             if (silent?.id_token) {
               const res = await api.post("/auth/oidc/exchange/", { id_token: silent.id_token });
@@ -213,6 +215,13 @@ export default function LoginPage() {
     };
     fetchConfig();
   }, []);
+
+  // If already authenticated, redirect to home
+  useEffect(() => {
+    if (isAuthenticated && !checking) {
+      navigate("/", { replace: true });
+    }
+  }, [isAuthenticated, checking, navigate]);
 
   const completeLogin = async (tokenData: {
     access: string;

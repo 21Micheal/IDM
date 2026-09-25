@@ -11,6 +11,7 @@ from .internal_idp import (
     InternalIdpUserAuthorizationView,
     InternalIdpUserLookupView,
     InternalIdpUserSearchView,
+    InternalIdpBackchannelLogoutView,
 )
 
 router = DefaultRouter()
@@ -37,6 +38,8 @@ urlpatterns = [
     path("auth/password-reset/confirm/", PasswordResetConfirmView.as_view(), name="password-reset-confirm"),
     # OIDC token exchange — receives Keycloak id_token, returns simplejwt pair
     path("auth/oidc/exchange/", OIDCExchangeView.as_view(), name="oidc-exchange"),
+    # OIDC back-channel logout (Keycloak single sign-out)
+    path("auth/oidc/backchannel-logout/", InternalIdpBackchannelLogoutView.as_view(), name="oidc-backchannel-logout"),
     # Role-only Keycloak mapper / financial launcher API. Protected by DMS_INTERNAL_IDP_API_KEY.
     path("internal/idp/users/lookup/", InternalIdpUserLookupView.as_view(), name="internal-idp-user-lookup"),
     path("internal/idp/users/lookup", InternalIdpUserLookupView.as_view(), name="internal-idp-user-lookup-noslash"),
