@@ -20,7 +20,7 @@ import {
 
 import { useAuthStore, applyServerSessionPolicy } from "@/store/authStore";
 import { toast } from "@/components/ui/vault-toast";
-import type { AuthUser, ServerSessionPolicy } from "@/store/authStore";
+import type { AuthUser, ServerSessionPolicy, DeploymentConfig } from "@/store/authStore";
 
 import dmsLogo from "@/assets/images/FSEDMSlogo.png";
 
@@ -180,11 +180,17 @@ export default function LoginPage() {
     must_change_password?: boolean;
     user?: AuthUser;
     session_policy?: ServerSessionPolicy;
+    deployment?: DeploymentConfig;
   }) => {
     // Apply the configured session policy before starting the session clock so
     // the absolute deadline uses the admin-defined lifetime, not the fallback.
     applyServerSessionPolicy(tokenData.session_policy);
     setTokens(tokenData.access, tokenData.refresh);
+
+    if (tokenData.deployment) {
+      const { setDeployment } = useAuthStore.getState();
+      setDeployment(tokenData.deployment);
+    }
 
     if (tokenData.user) {
       setUser(tokenData.user);

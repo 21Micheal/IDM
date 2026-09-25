@@ -284,6 +284,17 @@ export const authAPI = {
     api.post("/auth/password-reset/confirm/", data),
 };
 
+export const tenantAPI = {
+  getDeployment: () => api.get("/auth/deployment/"),
+  updateDeployment: (data: Partial<{
+    mode: string;
+    enabled_modules: string[];
+    product_name: string;
+    primary_color: string;
+    logo_url: string;
+  }>) => api.patch("/auth/deployment/", data),
+};
+
 export const documentsAPI = {
   list: (params?: Record<string, unknown>) =>
     api.get("/documents/", { params }),

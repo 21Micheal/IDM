@@ -18,7 +18,7 @@ from rest_framework.response import Response
 from rest_framework.views import APIView
 from rest_framework_simplejwt.tokens import RefreshToken
 
-from .models import User, Department, EmailOTP, UserGroup, GroupAction, GroupPermission, UserGroupMembership, UserDelegation, UserPreference, UserSignature
+from .models import User, Department, EmailOTP, UserGroup, GroupAction, GroupPermission, UserGroupMembership, UserDelegation, UserPreference, UserSignature, ClientDeployment
 from .serializers import (
     UserSerializer, UserCreateSerializer, UserUpdateSerializer,
     DepartmentSerializer, UserSummarySerializer,
@@ -215,12 +215,22 @@ class VerifyOTPView(APIView):
             user_agent=request.META.get("HTTP_USER_AGENT", "")[:500],
         )
 
+        deployment = ClientDeployment.get_or_create_singleton()
+        deployment_data = {
+            "mode": deployment.deployment_mode,
+            "enabled_modules": deployment.enabled_modules,
+            "product_name": deployment.product_name,
+            "primary_color": deployment.primary_color,
+            "logo_url": deployment.logo_url,
+        }
+
         return Response({
             "access":               str(refresh.access_token),
             "refresh":              str(refresh),
             "must_change_password": user.must_change_password,
             "user":                 UserSerializer(user).data,
             "session_policy":       get_session_policy(),
+            "deployment":           deployment_data,
         })
 
 
@@ -260,6 +270,21 @@ class MeView(generics.RetrieveUpdateAPIView):
         response = super().retrieve(request, *args, **kwargs)
         response.data["session_policy"] = get_session_policy()
         return response
+
+
+class DeploymentView(generics.RetrieveAPIView):
+    """Return the current deployment configuration."""
+    permission_classes = [permissions.IsAuthenticated]
+
+    def get(self, request, *args, **kwargs):
+        deployment = ClientDeployment.get_or_create_singleton()
+        return Response({
+            "mode": deployment.deployment_mode,
+            "enabled_modules": deployment.enabled_modules,
+            "product_name": deployment.product_name,
+            "primary_color": deployment.primary_color,
+            "logo_url": deployment.logo_url,
+        })
 
 
 class ChangePasswordView(APIView):

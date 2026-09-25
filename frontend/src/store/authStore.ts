@@ -39,6 +39,14 @@ export interface AuthUser {
   department?: { id: string; name: string };
 }
 
+export interface DeploymentConfig {
+  mode: string;
+  enabled_modules: string[];
+  product_name: string;
+  primary_color: string;
+  logo_url: string;
+}
+
 export interface AuthState {
   user: AuthUser | null;
   accessToken: string | null;
@@ -48,9 +56,11 @@ export interface AuthState {
   /** Last time the user interacted, used for the inactivity timeout. */
   lastActivityAt: number | null;
   sessionPolicy: SessionPolicy;
+  deployment: DeploymentConfig | null;
   isAuthenticated: boolean;
   setTokens: (access: string, refresh: string) => void;
   setUser: (user: AuthUser) => void;
+  setDeployment: (deployment: DeploymentConfig) => void;
   setSessionPolicy: (policy: Partial<SessionPolicy>) => void;
   recordActivity: () => void;
   logout: () => void;
@@ -66,6 +76,7 @@ export const useAuthStore = create<AuthState>()(
       sessionExpiresAt: null,
       lastActivityAt: null,
       sessionPolicy: DEFAULT_POLICY,
+      deployment: null,
       isAuthenticated: false,
       setTokens: (access, refresh) =>
         set((state) => {
@@ -86,6 +97,7 @@ export const useAuthStore = create<AuthState>()(
           };
         }),
       setUser: (user) => set({ user }),
+      setDeployment: (deployment) => set({ deployment }),
       setSessionPolicy: (policy) =>
         set((state) => ({
           sessionPolicy: { ...state.sessionPolicy, ...policy },
@@ -98,6 +110,7 @@ export const useAuthStore = create<AuthState>()(
           refreshToken: null,
           sessionExpiresAt: null,
           lastActivityAt: null,
+          deployment: null,
           isAuthenticated: false,
         }),
       isSessionExpired: (): boolean => {
@@ -144,6 +157,31 @@ export function applyServerSessionPolicy(policy?: ServerSessionPolicy | null): v
   if (Object.keys(next).length > 0) {
     useAuthStore.getState().setSessionPolicy(next);
   }
+}
+
+/**
+ * Check if a module is enabled for the current deployment.
+ * Used for navigation scoping and conditional rendering.
+ */
+export function useModuleEnabled(module: string): boolean {
+  const deployment = useAuthStore((state) => state.deployment);
+  
+  if (!deployment) return true; // Default to enabled if no deployment config
+  if (deployment.mode === "full") return true;
+  
+  if (deployment.mode === "procurement") {
+    return ["forms", "workflow", "suppliers", "notifications"].includes(module);
+  }
+  
+  if (deployment.mode === "forms_only") {
+    return ["forms", "workflow", "notifications"].includes(module);
+  }
+  
+  if (deployment.mode === "custom") {
+    return deployment.enabled_modules.includes(module);
+  }
+  
+  return false;
 }
 
 export const isAdmin = (user: AuthUser | null): boolean => {

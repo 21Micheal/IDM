@@ -26,7 +26,7 @@ from rest_framework import permissions
 from django.db.models import Q
 from django.utils import timezone
 
-from apps.accounts.models import GroupPermission, GroupAction
+from apps.accounts.models import GroupPermission, GroupAction, ClientDeployment
 
 
 class HasDocumentPermission(permissions.BasePermission):
@@ -223,3 +223,86 @@ class HasDocumentPermission(permissions.BasePermission):
             "DELETE":  GroupAction.DELETE.value,
         }
         return _method_map.get(method)
+
+
+class DeploymentScopePermission(permissions.BasePermission):
+    """
+    Permission class that enforces deployment scope based on ClientDeployment mode.
+    Auth endpoints and notifications are always allowed.
+    """
+
+    # Module → URL prefix mapping
+    MODULE_URL_PREFIXES = {
+        "documents": "/api/v1/documents/",
+        "forms": "/api/v1/templates/",
+        "workflow": "/api/v1/workflows/",
+        "suppliers": "/api/v1/sunsystems/",
+        "search": "/api/v1/search/",
+        "audit": "/api/v1/audit/",
+        "admin": "/api/v1/document-types/",
+    }
+
+    # Always-allowed URL prefixes
+    ALWAYS_ALLOWED_PREFIXES = {
+        "/api/v1/auth/",
+        "/api/v1/notifications/",
+    }
+
+    def has_permission(self, request, view):
+        if not request.user or not request.user.is_authenticated:
+            return False
+
+        # Admins bypass scope checks
+        if request.user.has_admin_access:
+            return True
+
+        # Check if URL is always allowed
+        request_path = request.path
+        for prefix in self.ALWAYS_ALLOWED_PREFIXES:
+            if request_path.startswith(prefix):
+                return True
+
+        # Get deployment configuration
+        try:
+            deployment = ClientDeployment.get_or_create_singleton()
+        except Exception:
+            # If deployment is unavailable, deny for safety
+            return False
+
+        # Full mode allows everything
+        if deployment.deployment_mode == ClientDeployment.DeploymentMode.FULL:
+            return True
+
+        # Determine which module this request is for
+        module = self._get_module_for_path(request_path)
+        if not module:
+            # Unknown module - deny for safety
+            return False
+
+        # Check if module is enabled based on mode
+        return self._is_module_enabled(module, deployment)
+
+    def _get_module_for_path(self, path: str) -> str | None:
+        """Determine which module a request path belongs to."""
+        for module, prefix in self.MODULE_URL_PREFIXES.items():
+            if path.startswith(prefix):
+                return module
+        return None
+
+    def _is_module_enabled(self, module: str, deployment: ClientDeployment) -> bool:
+        """Check if a module is enabled for the current deployment mode."""
+        mode = deployment.deployment_mode
+
+        if mode == ClientDeployment.DeploymentMode.FULL:
+            return True
+
+        if mode == ClientDeployment.DeploymentMode.PROCUREMENT:
+            return module in {"forms", "workflow", "suppliers", "notifications"}
+
+        if mode == ClientDeployment.DeploymentMode.FORMS_ONLY:
+            return module in {"forms", "workflow", "notifications"}
+
+        if mode == ClientDeployment.DeploymentMode.CUSTOM:
+            return module in deployment.enabled_modules
+
+        return False

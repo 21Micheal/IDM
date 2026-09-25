@@ -653,3 +653,43 @@ class UserPreference(models.Model):
 
     def __str__(self):
         return f"Preferences for {self.user.email}"
+
+
+# ── Client Deployment ───────────────────────────────────────────────────────────
+
+class ClientDeployment(models.Model):
+    """
+    Singleton model representing a client deployment configuration.
+    Each client has their own database, so this is always a single row (pk=1).
+    Controls which product modules are visible to this deployment.
+    """
+    class DeploymentMode(models.TextChoices):
+        FULL = "full", "Full"
+        PROCUREMENT = "procurement", "Procurement"
+        FORMS_ONLY = "forms_only", "Forms Only"
+        CUSTOM = "custom", "Custom"
+
+    deployment_mode = models.CharField(
+        max_length=20,
+        choices=DeploymentMode.choices,
+        default=DeploymentMode.FULL,
+    )
+    enabled_modules = models.JSONField(default=list)
+    product_name = models.CharField(max_length=100, default="FlaxemDMS")
+    primary_color = models.CharField(max_length=7, default="#1e40af")
+    logo_url = models.CharField(max_length=500, blank=True)
+    is_active = models.BooleanField(default=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        verbose_name = "Client Deployment"
+        verbose_name_plural = "Client Deployments"
+
+    def __str__(self):
+        return f"{self.product_name} ({self.deployment_mode})"
+
+    @classmethod
+    def get_or_create_singleton(cls):
+        """Get or create the singleton deployment record (pk=1)."""
+        return cls.objects.get_or_create(pk=1)[0]

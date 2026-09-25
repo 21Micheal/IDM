@@ -3,10 +3,11 @@ import { Routes, Route, Navigate, useLocation, useNavigate } from "react-router-
 import { useQuery } from "@tanstack/react-query";
 import { useAuthStore, applyServerSessionPolicy } from "@/store/authStore";
 import { useSessionUiStore } from "@/store/sessionUiStore";
-import { authAPI } from "@/services/api";
+import { authAPI, api } from "@/services/api";
 import { VaultToaster } from "@/components/ui/vault-toast";
 import { Loader2 } from "lucide-react";
 import SessionDialogs from "@/components/shared/SessionDialogs";
+import type { DeploymentConfig } from "@/store/authStore";
 
 const Layout = lazy(() => import("@/components/shared/Layout"));
 const LoginPage = lazy(() => import("@/pages/LoginPage"));
@@ -55,6 +56,7 @@ function AuthBootstrap({ children }: { children: React.ReactNode }) {
   const accessToken = useAuthStore((s) => s.accessToken);
   const user = useAuthStore((s) => s.user);
   const setUser = useAuthStore((s) => s.setUser);
+  const setDeployment = useAuthStore((s) => s.setDeployment);
   const logout = useAuthStore((s) => s.logout);
   const isSessionExpired = useAuthStore((s) => s.isSessionExpired);
   const [ready, setReady] = useState(!accessToken || user?.has_admin_access !== undefined);
@@ -83,11 +85,15 @@ function AuthBootstrap({ children }: { children: React.ReactNode }) {
     }
 
     setReady(false);
-    authAPI.me(accessToken)
-      .then(({ data }) => {
+    Promise.all([
+      authAPI.me(accessToken),
+      api.get("/auth/deployment/"),
+    ])
+      .then(([{ data: meData }, { data: deploymentData }]) => {
         if (!cancelled) {
-          applyServerSessionPolicy(data.session_policy);
-          setUser(data);
+          applyServerSessionPolicy(meData.session_policy);
+          setUser(meData);
+          setDeployment(deploymentData);
         }
       })
       .catch(() => {
@@ -104,7 +110,7 @@ function AuthBootstrap({ children }: { children: React.ReactNode }) {
     return () => {
       cancelled = true;
     };
-  }, [accessToken, isSessionExpired, logout, setUser, user?.has_admin_access]);
+  }, [accessToken, isSessionExpired, logout, setUser, setDeployment, user?.has_admin_access]);
 
   if (!ready) return <RouteFallback />;
   return <>{children}</>;
@@ -203,6 +209,28 @@ function SessionGuard() {
       window.clearInterval(interval);
     };
   }, [isAuthenticated, recordActivity, logout]);
+
+  return null;
+}
+
+/**
+ * Apply deployment branding to the document and CSS variables.
+ */
+function DeploymentBranding() {
+  const deployment = useAuthStore((s) => s.deployment);
+
+  useEffect(() => {
+    if (!deployment) return;
+
+    // Apply brand color
+    document.documentElement.style.setProperty(
+      '--color-brand',
+      deployment.primary_color
+    );
+
+    // Set document title
+    document.title = deployment.product_name;
+  }, [deployment]);
 
   return null;
 }
@@ -358,6 +386,7 @@ export default function App() {
       <>
         <SessionSync />
         <SessionGuard />
+        <DeploymentBranding />
         <Suspense fallback={<RouteFallback />}>
           <Routes>
             {/* Public */}

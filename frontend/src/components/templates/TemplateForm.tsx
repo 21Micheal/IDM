@@ -15,7 +15,7 @@ import { useState, useEffect, useRef, useMemo } from "react";
 import { createPortal } from "react-dom";
 import { useForm, Controller } from "react-hook-form";
 import { useQuery } from "@tanstack/react-query";
-import { AlertCircle, ChevronDown, Download, ExternalLink, Info, Loader2, Lock, Pencil, Paperclip, Plus, Search, Star, Trash2, X, Image as ImageIcon, FileText, FileImage, FileCode2, FileSpreadsheet, FileArchive, FileVideo, FileAudio, Upload } from "lucide-react";
+import { AlertCircle, ChevronDown, Download, ExternalLink, Info, Loader2, Lock, Pencil, Paperclip, Plus, Search, Star, Trash2, X, Image as ImageIcon, FileText, FileImage, FileCode2, FileSpreadsheet, FileArchive, FileVideo, FileAudio, Upload, Building2 } from "lucide-react";
 import type { ReactNode } from "react";
 import { documentsAPI } from "@/services/api";
 import { toast } from "@/components/ui/vault-toast";
@@ -30,6 +30,7 @@ import { currencySymbolFor } from "@/lib/currencies";
 import { useAuthStore } from "@/store/authStore";
 import { Sparkles } from "lucide-react";
 import { buildCalcScope, evaluateCalcExpression, evaluateTableColumnFormulas, type CalcValue } from "@/lib/calculations";
+import AccountMultiSelect from "@/components/ui/AccountMultiSelect";
 
 // ── Types ─────────────────────────────────────────────────────────────────────
 
@@ -79,6 +80,7 @@ type Field = {
   decimals?: number; thousandsSeparator?: boolean;
   defaultValue?: string; readonly?: boolean; hidden?: boolean;
   formula?: string;
+  multi?: boolean;
   // Calculated value (see calc_number/calc_currency/calc_text/calc_date types)
   // — auto-derived from a formula over sibling field keys, same grammar as a
   // table column's `calc`. Recomputed live below (client preview) and
@@ -1790,6 +1792,18 @@ function FormField({ field, control, errors, onChangeCb, readOnly, allValues, ed
             value={f.value}
             disabled={dis}
             onChange={(v) => { f.onChange(v); onChangeCb(key, v); }}
+          />
+        )} />
+      );
+      break;
+
+    case "sunsystems_account":
+      control_el = (
+        <Controller control={control} name={key} rules={rules} render={({ field: f }) => (
+          <AccountMultiSelect
+            value={f.value}
+            onChange={(v) => { f.onChange(v); onChangeCb(key, v); }}
+            multi={field.multi ?? true}
           />
         )} />
       );

@@ -17,25 +17,29 @@ import React, {
 import { createPortal } from "react-dom";
 import { Search, X, ChevronDown, Loader2, Check } from "lucide-react";
 import type { SunSystemsAccount } from "@/services/api";
+import { sunsystemsAPI } from "@/services/api";
+import { useQuery } from "@tanstack/react-query";
 
 interface Props {
-  accounts: SunSystemsAccount[];
-  value: string[];
-  onChange: (codes: string[]) => void;
+  accounts?: SunSystemsAccount[];
+  value: string[] | string;
+  onChange: (codes: string[] | string) => void;
   isLoading?: boolean;
   error?: string | null;
   placeholder?: string;
   className?: string;
+  multi?: boolean;
 }
 
 export default function AccountMultiSelect({
-  accounts,
+  accounts: propAccounts,
   value,
   onChange,
-  isLoading,
+  isLoading: propIsLoading,
   error,
   placeholder = "All accounts",
   className = "",
+  multi = true,
 }: Props) {
   const [open, setOpen]     = useState(false);
   const [search, setSearch] = useState("");
@@ -44,6 +48,21 @@ export default function AccountMultiSelect({
   const panelRef   = useRef<HTMLDivElement>(null);
   const searchRef  = useRef<HTMLInputElement>(null);
   const [style, setStyle]   = useState<React.CSSProperties>({ top: 0, left: 0, width: 320 });
+
+  // Fetch accounts if not provided
+  const { data: accountsData, isLoading: accountsLoading } = useQuery({
+    queryKey: ["sunsystems", "accounts"],
+    queryFn: () => sunsystemsAPI.getAccounts().then((r) => r.data.accounts),
+    enabled: !propAccounts,
+    staleTime: 5 * 60_000,
+  });
+
+  const accounts = propAccounts ?? accountsData ?? [];
+  const isLoading = propIsLoading ?? accountsLoading;
+
+  // Normalize value to array for internal handling
+  const valueArray = Array.isArray(value) ? value : (value ? [value] : []);
+  const isMulti = multi;
 
   // ── Close on outside click or Escape ─────────────────────────────────────
   useEffect(() => {
@@ -108,11 +127,17 @@ export default function AccountMultiSelect({
       )
     : accounts;
 
-  const isSelected  = (code: string) => value.includes(code);
-  const toggle      = (code: string) =>
-    onChange(isSelected(code) ? value.filter((c) => c !== code) : [...value, code]);
+  const isSelected  = (code: string) => valueArray.includes(code);
+  const toggle      = (code: string) => {
+    if (isMulti) {
+      onChange(isSelected(code) ? valueArray.filter((c) => c !== code) : [...valueArray, code]);
+    } else {
+      onChange(code);
+      setOpen(false);
+    }
+  };
   const selectAll   = () => onChange(filtered.map((a) => a.account_code));
-  const clearAll    = () => onChange([]);
+  const clearAll    = () => onChange(isMulti ? [] : "");
 
   // ── Trigger label ───────────────────────────────────────────────────────
   let triggerLabel: React.ReactNode;
@@ -123,13 +148,13 @@ export default function AccountMultiSelect({
         Loading accounts…
       </span>
     );
-  } else if (value.length === 0) {
+  } else if (valueArray.length === 0) {
     triggerLabel = <span className="text-[#8C969E]">{placeholder}</span>;
-  } else if (value.length === 1) {
-    const acct = accounts.find((a) => a.account_code === value[0]);
+  } else if (valueArray.length === 1) {
+    const acct = accounts.find((a) => a.account_code === valueArray[0]);
     triggerLabel = (
       <span className="truncate">
-        <span className="font-mono font-bold text-[#287EAD]">{value[0]}</span>
+        <span className="font-mono font-bold text-[#287EAD]">{valueArray[0]}</span>
         {acct?.description && (
           <span className="ml-2 text-[#1F2933]">{acct.description}</span>
         )}
@@ -138,7 +163,7 @@ export default function AccountMultiSelect({
   } else {
     triggerLabel = (
       <span className="text-[#1F2933]">
-        <span className="font-bold text-[#287EAD]">{value.length}</span>{" "}
+        <span className="font-bold text-[#287EAD]">{valueArray.length}</span>{" "}
         accounts selected
       </span>
     );
@@ -160,7 +185,7 @@ export default function AccountMultiSelect({
       >
         <span className="min-w-0 flex-1 truncate text-left">{triggerLabel}</span>
         <div className="flex shrink-0 items-center gap-1">
-          {value.length > 0 && !isLoading && (
+          {valueArray.length > 0 && !isLoading && (
             <span
               role="button"
               tabIndex={0}
@@ -225,20 +250,22 @@ export default function AccountMultiSelect({
                 {filtered.length} of {accounts.length} shown
               </span>
               <div className="flex items-center gap-4">
-                <button
-                  type="button"
-                  onClick={selectAll}
-                  className="text-[11px] font-semibold text-[#287EAD] hover:underline"
-                >
-                  Select all shown
-                </button>
-                {value.length > 0 && (
+                {isMulti && (
+                  <button
+                    type="button"
+                    onClick={selectAll}
+                    className="text-[11px] font-semibold text-[#287EAD] hover:underline"
+                  >
+                    Select all shown
+                  </button>
+                )}
+                {valueArray.length > 0 && (
                   <button
                     type="button"
                     onClick={clearAll}
                     className="text-[11px] font-semibold text-[#5E6870] hover:text-red-600 hover:underline"
                   >
-                    Clear ({value.length})
+                    Clear ({valueArray.length})
                   </button>
                 )}
               </div>
@@ -307,14 +334,14 @@ export default function AccountMultiSelect({
             </div>
 
             {/* Footer count */}
-            {value.length > 0 && (
+            {valueArray.length > 0 && (
               <div
                 className="flex items-center justify-between bg-[#F3F8FB] px-4 py-2"
                 style={{ borderTop: "1px solid #D0E6F0" }}
               >
                 <span className="text-[12px] text-[#5E6870]">
-                  <span className="font-bold text-[#287EAD]">{value.length}</span>{" "}
-                  account{value.length !== 1 ? "s" : ""} selected
+                  <span className="font-bold text-[#287EAD]">{valueArray.length}</span>{" "}
+                  account{valueArray.length !== 1 ? "s" : ""} selected
                 </span>
                 <button
                   type="button"

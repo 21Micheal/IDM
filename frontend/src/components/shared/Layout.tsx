@@ -39,7 +39,7 @@ import {
   BellRing, CircleUserRound, ClipboardCheck, Inbox, ArrowRight, FileSignature, LayoutTemplate, Database,
   Plug, ClipboardList, BarChart3, CreditCard,
 } from "lucide-react";
-import { useAuthStore } from "../../store/authStore";
+import { useAuthStore, useModuleEnabled } from "../../store/authStore";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { notificationsAPI, workflowAPI } from "../../services/api";
 import { QUERY_ONE_MINUTE_STALE } from "@/lib/reactQueryDefaults";
@@ -62,6 +62,7 @@ interface NavLeaf {
   label: string;
   exact?: boolean;
   allowedRoles?: string[];
+  module?: string;
 }
 
 interface NavGroup {
@@ -69,6 +70,7 @@ interface NavGroup {
   label: string;
   prefix: string;
   allowedRoles?: string[];
+  module?: string;
   children: NavLeaf[];
 }
 
@@ -128,17 +130,29 @@ const mainNav: NavEntry[] = [
     icon: FileText,
     label: "Documents",
     prefix: "/documents",
+    module: "documents",
     children: [
-      { to: "/documents",                 icon: FileText, label: "All documents" },
-      { to: "/documents?status=archived", icon: Archive,  label: "Archived" },
-      { to: "/documents/upload",          icon: Upload,   label: "Upload" },
-      { to: "/documents/scan",            icon: ScanLine, label: "Scan" },
-      { to: "/documents/review",          icon: ClipboardCheck, label: "Pending review" },
-      { to: "/documents/trash",           icon: Trash2,   label: "Trash" },
-      { to: "/search",                    icon: Search,   label: "Search" },
+      { to: "/documents",                 icon: FileText, label: "All documents", module: "documents" },
+      { to: "/documents?status=archived", icon: Archive,  label: "Archived", module: "documents" },
+      { to: "/documents/upload",          icon: Upload,   label: "Upload", module: "documents" },
+      { to: "/documents/scan",            icon: ScanLine, label: "Scan", module: "documents" },
+      { to: "/documents/review",          icon: ClipboardCheck, label: "Pending review", module: "documents" },
+      { to: "/documents/trash",           icon: Trash2,   label: "Trash", module: "documents" },
+      { to: "/templates",                 icon: LayoutTemplate, label: "Templates", module: "forms" },
+      { to: "/search",                    icon: Search,   label: "Search", module: "search" },
     ],
   } as NavGroup,
-  { to: "/forms", icon: ClipboardList, label: "Forms" } as NavLeaf,
+  { to: "/forms", icon: ClipboardList, label: "Forms", module: "forms" } as NavLeaf,
+  {
+    icon: Building2,
+    label: "Procurement",
+    prefix: "/procurement",
+    module: "suppliers",
+    children: [
+      { to: "/procurement/requisitions", icon: ClipboardList, label: "Requisitions", module: "suppliers" },
+      { to: "/procurement/suppliers",    icon: Building2, label: "Suppliers", module: "suppliers" },
+    ],
+  } as NavGroup,
   { to: "/payment-run", icon: CreditCard, label: "Payment run" } as NavLeaf,
   { to: "/personal-documents", icon: Lock, label: "Personal documents" } as NavLeaf,
   { to: "/request-signature", icon: FileSignature, label: "Request signature" } as NavLeaf,
@@ -146,8 +160,9 @@ const mainNav: NavEntry[] = [
     to: "/workflow",
     icon: Workflow,
     label: "My tasks",
+    module: "workflow",
   } as NavLeaf,
-  { to: "/audit", icon: History, label: "Audit trail" } as NavLeaf,
+  { to: "/audit", icon: History, label: "Audit trail", module: "audit" } as NavLeaf,
   // Analytics moved out of the dashboard (it duplicated the stat cards) and
   // now lives in the sidebar, manager/admin only.
   { to: "/analytics", icon: BarChart3, label: "Analytics", allowedRoles: ["admin"] } as NavLeaf,
@@ -165,16 +180,16 @@ const mainNav: NavEntry[] = [
 ];
 
 const adminNav: NavLeaf[] = [
-  { to: "/admin/document-types", icon: FileText,  label: "Document types", allowedRoles: ["admin"] },
-  { to: "/admin/templates",      icon: LayoutTemplate, label: "Templates", allowedRoles: ["admin"] },
-  { to: "/admin/users",       icon: Users,     label: "Users",       allowedRoles: ["admin"] },
-  { to: "/admin/departments", icon: Building2, label: "Departments", allowedRoles: ["admin"] },
-  { to: "/admin/groups",      icon: Shield,    label: "Groups",      allowedRoles: ["admin"] },
-  { to: "/admin/settings",    icon: Settings,  label: "Settings",    allowedRoles: ["admin"] },
-  { to: "/admin/migration",   icon: Database,  label: "IDM Migration", allowedRoles: ["admin"] },
-  { to: "/admin/mailboxes",   icon: Inbox,     label: "Email Ingestion", allowedRoles: ["admin"] },
-  { to: "/admin/sunsystems",  icon: Plug,      label: "SunSystems", allowedRoles: ["admin"] },
-  { to: "/workflow/builder", icon: Settings, label: "Workflow Builder", allowedRoles: ["admin"] },
+  { to: "/admin/document-types", icon: FileText,  label: "Document types", allowedRoles: ["admin"], module: "admin" },
+  { to: "/admin/templates",      icon: LayoutTemplate, label: "Templates", allowedRoles: ["admin"], module: "admin" },
+  { to: "/admin/users",       icon: Users,     label: "Users",       allowedRoles: ["admin"], module: "admin" },
+  { to: "/admin/departments", icon: Building2, label: "Departments", allowedRoles: ["admin"], module: "admin" },
+  { to: "/admin/groups",      icon: Shield,    label: "Groups",      allowedRoles: ["admin"], module: "admin" },
+  { to: "/admin/settings",    icon: Settings,  label: "Settings",    allowedRoles: ["admin"], module: "admin" },
+  { to: "/admin/migration",   icon: Database,  label: "IDM Migration", allowedRoles: ["admin"], module: "admin" },
+  { to: "/admin/mailboxes",   icon: Inbox,     label: "Email Ingestion", allowedRoles: ["admin"], module: "admin" },
+  { to: "/admin/sunsystems",  icon: Plug,      label: "SunSystems", allowedRoles: ["admin"], module: "admin" },
+  { to: "/workflow/builder", icon: Settings, label: "Workflow Builder", allowedRoles: ["admin"], module: "workflow" },
 ];
 
 // ── SidebarGroup ──────────────────────────────────────────────────────────────
@@ -197,8 +212,21 @@ function SidebarGroup({
   const [open, setOpen] = useState(isGroupActive);
 
   const visibleChildren = group.children.filter(
-    (child) => !child.allowedRoles || (userAccess && child.allowedRoles.includes(userAccess))
+    (child) => {
+      // Role check
+      if (child.allowedRoles && (!userAccess || !child.allowedRoles.includes(userAccess))) {
+        return false;
+      }
+      // Module check
+      if (child.module && !useModuleEnabled(child.module)) {
+        return false;
+      }
+      return true;
+    }
   );
+
+  // Check if the group itself should be visible based on its module
+  if (group.module && !useModuleEnabled(group.module)) return null;
 
   if (visibleChildren.length === 0) return null;
 
@@ -691,7 +719,7 @@ export function WorkspaceHeaderActions({ variant = "light" }: { variant?: "light
 // ── Layout ────────────────────────────────────────────────────────────────────
 
 export default function Layout() {
-  const { user } = useAuthStore();
+  const { user, deployment } = useAuthStore();
   const queryClient = useQueryClient();
   const _navigate = useNavigate();
   void _navigate;
@@ -837,7 +865,11 @@ export default function Layout() {
   }, [location.pathname]);
 
   const visibleAdmin = adminNav.filter(
-    (item) => !item.allowedRoles || hasAdminAccess
+    (item) => {
+      if (item.allowedRoles && !hasAdminAccess) return false;
+      if (item.module && !useModuleEnabled(item.module)) return false;
+      return true;
+    }
   );
   const warmRoute = (to: string) => preloadRouteForPath(navTarget(to).pathname);
 
@@ -868,7 +900,15 @@ export default function Layout() {
         >
           {!sidebarCollapsed && (
             <div className="flex h-full w-full items-center px-4">
-              <FlaxemLogo variant="light" />
+              {deployment?.logo_url ? (
+                <img
+                  src={deployment.logo_url}
+                  alt={deployment.product_name}
+                  className="h-8 w-auto max-h-8 object-contain"
+                />
+              ) : (
+                <FlaxemLogo variant="light" />
+              )}
             </div>
           )}
         </div>
@@ -939,8 +979,9 @@ export default function Layout() {
                     />
                   );
                 }
-                const { to, icon: Icon, label, exact, allowedRoles } = entry;
+                const { to, icon: Icon, label, exact, allowedRoles, module } = entry;
                 if (allowedRoles && !hasAdminAccess) return null;
+                if (module && !useModuleEnabled(module)) return null;
                 const badgeValue = to === "/notifications" ? unread
                   : to === "/workflow" ? pendingTasksCount
                   : to === "/request-signature" ? (signatureCount || undefined)
@@ -1003,29 +1044,32 @@ export default function Layout() {
                     Administration
                   </p>
                 </div>
-                {visibleAdmin.map(({ to, icon: Icon, label }) => (
-                  <NavLink
-                    key={to}
-                    to={to}
-                    onMouseEnter={() => warmRoute(to)}
-                    onFocus={() => warmRoute(to)}
-                    className={({ isActive }) =>
-                      clsx(
-                        sidebarItemBase,
-                        isActive
-                          ? sidebarItemActive
-                          : sidebarItemInactive
-                      )
-                    }
-                  >
-                    {({ isActive }) => (
-                      <>
-                        <Icon className={clsx("h-4 w-4 flex-shrink-0", isActive ? sidebarIconActive : sidebarIconInactive)} />
-                        <span>{label}</span>
-                      </>
-                    )}
-                  </NavLink>
-                ))}
+                {visibleAdmin.map(({ to, icon: Icon, label, module }) => {
+                  if (module && !useModuleEnabled(module)) return null;
+                  return (
+                    <NavLink
+                      key={to}
+                      to={to}
+                      onMouseEnter={() => warmRoute(to)}
+                      onFocus={() => warmRoute(to)}
+                      className={({ isActive }) =>
+                        clsx(
+                          sidebarItemBase,
+                          isActive
+                            ? sidebarItemActive
+                            : sidebarItemInactive
+                        )
+                      }
+                    >
+                      {({ isActive }) => (
+                        <>
+                          <Icon className={clsx("h-4 w-4 flex-shrink-0", isActive ? sidebarIconActive : sidebarIconInactive)} />
+                          <span>{label}</span>
+                        </>
+                      )}
+                    </NavLink>
+                  );
+                })}
               </div>
             )}
           </nav>

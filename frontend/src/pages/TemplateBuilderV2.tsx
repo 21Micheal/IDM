@@ -51,6 +51,7 @@ import {
   ChevronRight, X, Loader2, Sliders, Link2, User as UserIcon,
   Wrench, FileCode, Calculator, Star, Percent, Link as UrlIcon, ListOrdered,
   Info, Files, ToggleLeft, MoveLeft, MoveRight, CopyPlus, Sigma,
+  Building2,
 } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { documentTypesAPI, groupsAPI, workflowAPI } from "@/services/api";
@@ -70,7 +71,8 @@ export type FieldType =
   | "url" | "percentage" | "rating" | "auto_number"
   | "multi_file"
   | "calc_number" | "calc_currency" | "calc_text" | "calc_date" | "calc_boolean"
-  | "info" | "spacer";
+  | "info" | "spacer"
+  | "sunsystems_account";
 
 /* Field types that are auto-derived rather than typed by the person filling
  * the form: calculated values (formula over sibling field keys) and the
@@ -366,6 +368,7 @@ export interface TemplateField {
   columns?: TableColumn[];
   defaultValue?: string;
   minRows?: number;
+  multi?: boolean;
   /* Extended */
   tooltip?: string;
   additionalText?: string;
@@ -510,6 +513,7 @@ const FIELD_META: Record<FieldType, { label: string; group: FieldGroup; defaults
   time: { label: "Time", group: "input", defaults: { colSpan: 4 } },
   email: { label: "Email", group: "input", defaults: { colSpan: 6, placeholder: "name@company.com" } },
   phone: { label: "Phone", group: "input", defaults: { colSpan: 4, placeholder: "+254 700 000000" } },
+  sunsystems_account: { label: "Supplier", group: "input", defaults: { colSpan: 12, multi: true }, hint: "Live supplier lookup from SunSystems" },
   select: { label: "Dropdown", group: "choice", defaults: { colSpan: 6, options: ["Option 1", "Option 2"] } },
   multi_select: { label: "Multi-select", group: "choice", defaults: { colSpan: 6, options: ["Option 1", "Option 2"] } },
   radio: { label: "Radio group", group: "choice", defaults: { colSpan: 6, options: ["Yes", "No"] } },
@@ -548,6 +552,7 @@ const ICONS: Record<FieldType, React.ElementType> = {
   url: UrlIcon, percentage: Percent, rating: Star, auto_number: ListOrdered,
   calc_number: Calculator, calc_currency: Calculator, calc_text: Calculator, calc_date: Calculator,
   calc_boolean: Sigma, multi_file: Files, info: Info, spacer: Minus,
+  sunsystems_account: Building2,
 };
 
 /* Presentational-only field types. They never hold a value, so they're
@@ -811,6 +816,10 @@ function newField(type: FieldType): TemplateField {
     // submit time (see FORMULA_OPTIONS / apply_formulas).
     base.readonly = true;
     base.formula = "reference_number";
+  }
+  if (type === "sunsystems_account") {
+    base.width = 12;
+    base.multi = true;
   }
   return base;
 }
@@ -1499,6 +1508,15 @@ function FieldPreview({ field, onConfigureColumn, onAddColumn, onRemoveColumn, o
         <div className={cn(inputPreview, "gap-1.5 bg-[#F0FBF6] border-emerald-200 text-emerald-700")}>
           <Calculator className="h-3 w-3 flex-shrink-0" />
           <span className="truncate">{field.calc?.expression ? `= ${field.calc.expression}` : "No formula set"}</span>
+        </div>
+      );
+    case "sunsystems_account":
+      return (
+        <div className={cn(inputPreview, "justify-between border border-zinc-200 bg-white")}>
+          <span className="flex items-center gap-1.5 text-zinc-400">
+            <Building2 className="h-3 w-3" />
+            Select supplier from SunSystems…
+          </span>
         </div>
       );
     default:
@@ -3452,7 +3470,7 @@ function FieldEditor({ field, onUpdate, allFields, processSteps }: {
           </InspectorRow>
           {!["heading", "divider", "checkbox", "boolean", "table", "file", "image", "signature",
             "rating", "auto_number", "calc_number", "calc_currency", "calc_text", "calc_date",
-            "calc_boolean", "multi_file", "info", "spacer"].includes(field.type) && (
+            "calc_boolean", "multi_file", "info", "spacer", "sunsystems_account"].includes(field.type) && (
               <InspectorRow label="Placeholder">
                 <input className={inputCls} value={field.placeholder ?? ""} onChange={(e) => onUpdate({ placeholder: e.target.value })} />
               </InspectorRow>
@@ -3478,6 +3496,13 @@ function FieldEditor({ field, onUpdate, allFields, processSteps }: {
                   className="h-4 w-4 border-[#AEB5BB] accent-[#287EAD]" />
                 Required
               </label>
+              {field.type === "sunsystems_account" && (
+                <label className="flex cursor-pointer items-center gap-2.5 text-sm text-[#1F2933]">
+                  <input type="checkbox" checked={field.multi ?? true} onChange={(e) => onUpdate({ multi: e.target.checked })}
+                    className="h-4 w-4 border-[#AEB5BB] accent-[#287EAD]" />
+                  Allow multiple suppliers
+                </label>
+              )}
               {/* Read-only moved to the Editability control (Advanced tab). */}
             </div>
           )}
@@ -5074,6 +5099,14 @@ function PreviewField({ field, register, errors, values, allFields, editable = t
       control = (
         <input type="file" multiple {...reg} disabled={dis}
           className="block w-full text-sm text-slate-500 file:mr-3 file:rounded-none file:border-0 file:bg-[#287EAD] file:px-4 file:py-2 file:text-sm file:font-semibold file:text-white hover:file:bg-[#1E6F99]" />
+      );
+      break;
+    case "sunsystems_account":
+      control = (
+        <div className={cn(previewInputCls, "flex items-center justify-between gap-2 text-[#5E6870]")}>
+          <span className="truncate">Select supplier from SunSystems…</span>
+          <Building2 className="h-3.5 w-3.5 flex-shrink-0" />
+        </div>
       );
       break;
     case "calc_text":
