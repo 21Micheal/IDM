@@ -10,6 +10,7 @@ from .views import (
 from .internal_idp import (
     InternalIdpUserAuthorizationView,
     InternalIdpUserLookupView,
+    InternalIdpUserSearchView,
 )
 
 router = DefaultRouter()
@@ -39,6 +40,7 @@ urlpatterns = [
     # Role-only Keycloak mapper / financial launcher API. Protected by DMS_INTERNAL_IDP_API_KEY.
     path("internal/idp/users/lookup/", InternalIdpUserLookupView.as_view(), name="internal-idp-user-lookup"),
     path("internal/idp/users/lookup", InternalIdpUserLookupView.as_view(), name="internal-idp-user-lookup-noslash"),
+    path("internal/idp/users/search/", InternalIdpUserSearchView.as_view(), name="internal-idp-user-search"),
     path("internal/idp/users/authorization/", InternalIdpUserAuthorizationView.as_view(), name="internal-idp-user-authorization-email"),
     path("internal/idp/users/authorization", InternalIdpUserAuthorizationView.as_view(), name="internal-idp-user-authorization-email-noslash"),
     path("internal/idp/users/<uuid:user_id>/authorization/", InternalIdpUserAuthorizationView.as_view(), name="internal-idp-user-authorization"),

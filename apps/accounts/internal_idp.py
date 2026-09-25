@@ -33,10 +33,10 @@ class InternalIdpAPIView(APIView):
 
 def _dms_role(user: User) -> str:
     if user.is_superuser or user.is_staff:
-        return "platform-admin"
+        return "platform_admin"
     if user.has_admin_access:
-        return "dms-admin"
-    return "dms-user"
+        return "admin"
+    return "financial_user"
 
 
 def _authorization_payload(user: User) -> dict:
@@ -65,6 +65,7 @@ def _authorization_payload(user: User) -> dict:
         "permissions": actions,
         "has_admin_access": bool(user.has_admin_access),
         "updated_at": user.updated_at.isoformat() if user.updated_at else None,
+        "has_usable_password": user.has_usable_password if hasattr(user, 'has_usable_password') else True,
     }
 
 
@@ -77,6 +78,12 @@ def _user_payload(user: User) -> dict:
         "last_name": user.last_name,
         "enabled": user.is_active,
         "email_verified": True,
+        "must_change_password": False,
+        "has_usable_password": user.has_usable_password if hasattr(user, 'has_usable_password') else True,
+        "role": _dms_role(user),
+        "organization_id": None,
+        "is_staff": user.is_staff,
+        "is_superuser": user.is_superuser,
     }
 
 
@@ -103,6 +110,29 @@ class InternalIdpUserLookupView(InternalIdpAPIView):
         if not user:
             return Response({"detail": "User not found."}, status=status.HTTP_404_NOT_FOUND)
         return Response(_user_payload(user))
+
+
+class InternalIdpUserSearchView(InternalIdpAPIView):
+    def get(self, request):
+        query = request.query_params.get("q", "").strip()
+        first = int(request.query_params.get("first", "0"))
+        max_results = int(request.query_params.get("max", "20"))
+
+        queryset = User.objects.all()
+        if query:
+            queryset = queryset.filter(
+                Q(email__icontains=query) |
+                Q(first_name__icontains=query) |
+                Q(last_name__icontains=query)
+            )
+
+        total = queryset.count()
+        users = queryset[first:first + max_results]
+
+        return Response({
+            "count": total,
+            "results": [_user_payload(user) for user in users]
+        })
 
 
 class InternalIdpUserAuthorizationView(InternalIdpAPIView):
