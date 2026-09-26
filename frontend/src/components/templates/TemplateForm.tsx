@@ -19,6 +19,7 @@ import { AlertCircle, ChevronDown, Download, ExternalLink, Info, Loader2, Lock, 
 import type { ReactNode } from "react";
 import { documentsAPI } from "@/services/api";
 import { toast } from "@/components/ui/vault-toast";
+import CustomListbox from "@/components/ui/CustomListbox";
 import {
   resolveSource,
   isReferenceValue,
@@ -650,11 +651,20 @@ function TableColInput({ col, value, onChange, readOnly, documentId, attachmentK
 
   switch (type) {
     case "select":
+      const selectOptions = [
+        { value: "", label: "—" },
+        ...(col.options ?? []).map((o) => ({ value: o, label: o })),
+      ];
       return (
-        <select value={sval} onChange={(e) => onChange(e.target.value)} disabled={dis} className={base}>
-          <option value="">—</option>
-          {(col.options ?? []).map((o) => <option key={o} value={o}>{o}</option>)}
-        </select>
+        <CustomListbox
+          value={sval}
+          onChange={onChange}
+          options={selectOptions}
+          className={base}
+          buttonClassName="w-full"
+          ariaLabel="Select option"
+          disabled={dis}
+        />
       );
     case "boolean":
       return <input type="checkbox" checked={sval === "true"} disabled={dis} onChange={(e) => onChange(e.target.checked ? "true" : "false")} className="h-4 w-4 accent-primary" />;
@@ -1600,13 +1610,21 @@ function FormField({ field, control, errors, onChangeCb, readOnly, allValues, ed
       break;
 
     case "select":
+      const fieldSelectOptions = [
+        { value: "", label: field.placeholder ?? "Select an option…" },
+        ...(field.options ?? []).map((o) => ({ value: o, label: o })),
+      ];
       control_el = (
         <Controller control={control} name={key} rules={rules} render={({ field: f }) => (
-          <select {...f} value={String(f.value ?? "")} disabled={dis} className={inp}
-            onChange={(e) => { f.onChange(e.target.value); onChangeCb(key, e.target.value); }}>
-            <option value="">{field.placeholder ?? "Select an option…"}</option>
-            {(field.options ?? []).map((o) => <option key={o} value={o}>{o}</option>)}
-          </select>
+          <CustomListbox
+            value={String(f.value ?? "")}
+            onChange={(val) => { f.onChange(val); onChangeCb(key, val); }}
+            options={fieldSelectOptions}
+            className={inp}
+            buttonClassName="w-full"
+            ariaLabel={`Select ${field.label}`}
+            disabled={dis}
+          />
         )} />
       );
       break;

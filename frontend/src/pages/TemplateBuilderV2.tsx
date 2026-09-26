@@ -41,6 +41,7 @@ import {
 } from "@dnd-kit/core";
 import { useForm, type UseFormRegister, type FieldErrors } from "react-hook-form";
 import { toast } from "sonner";
+import CustomListbox from "@/components/ui/CustomListbox";
 import {
   ArrowLeft, Save, Undo2, Redo2, Eye, LayoutGrid, Settings,
   Plus, Trash2, GripVertical, Copy, Search, CheckCircle2,
@@ -712,9 +713,14 @@ function CreateDocTypeQuickModal({
           </div>
           <div className="space-y-1.5">
             <label className="text-xs font-semibold uppercase tracking-wider text-[#5E6870]">Document title</label>
-            <select value={titleField} onChange={(e) => setTitleField(e.target.value)} className={iCls}>
-              {QUICK_TITLE_FIELD_OPTIONS.map((o) => <option key={o.key} value={o.key}>{o.label}</option>)}
-            </select>
+            <CustomListbox
+              value={titleField}
+              onChange={setTitleField}
+              options={QUICK_TITLE_FIELD_OPTIONS.map((o) => ({ value: o.key, label: o.label }))}
+              className={iCls}
+              buttonClassName="w-full"
+              ariaLabel="Document title field"
+            />
             <p className="text-[10px] text-[#8C969E]">Which field's value names documents of this type</p>
           </div>
           <div className="space-y-1.5">
@@ -2166,12 +2172,17 @@ function RetirementConfigEditor({ column, formFields, onChange }: {
           <div className="space-y-3">
             <div>
               <span className="text-[11px] font-semibold uppercase tracking-wider text-[#5E6870]">Issued / requested amount field</span>
-              <select className={cn(iCls, "mt-1", !retirement.issuedAmountField && amountFieldOptions.length > 0 && "border-amber-400")}
+              <CustomListbox
                 value={retirement.issuedAmountField ?? ""}
-                onChange={(e) => onChange({ ...retirement, issuedAmountField: e.target.value || undefined })}>
-                <option value="">— choose a field —</option>
-                {amountFieldOptions.map((f) => <option key={f.id} value={f.key}>{f.label} ({f.key})</option>)}
-              </select>
+                onChange={(val) => onChange({ ...retirement, issuedAmountField: val || undefined })}
+                options={[
+                  { value: "", label: "— choose a field —" },
+                  ...amountFieldOptions.map((f) => ({ value: f.key, label: `${f.label} (${f.key})` })),
+                ]}
+                className={cn(iCls, "mt-1", !retirement.issuedAmountField && amountFieldOptions.length > 0 && "border-amber-400")}
+                buttonClassName="w-full"
+                ariaLabel="Issued amount field"
+              />
               {amountFieldOptions.length === 0 ? (
                 <p className="mt-1 text-[10px] text-amber-600">Add a Number or Currency field elsewhere on the form to hold the issued/requested amount.</p>
               ) : !retirement.issuedAmountField && (
@@ -2232,14 +2243,25 @@ function RetirementScenarioEditor({ label, hint, scenario, onChange }: {
             <input className={cn(iCls, "font-mono")} value={line.account}
               onChange={(e) => updateLine(idx, { account: e.target.value })}
               placeholder="Account code" />
-            <select className={iCls} value={line.dc} onChange={(e) => updateLine(idx, { dc: e.target.value as "D" | "C" })}>
-              <option value="D">Debit</option>
-              <option value="C">Credit</option>
-            </select>
-            <select className={iCls} value={line.amountSource}
-              onChange={(e) => updateLine(idx, { amountSource: e.target.value as RetirementAmountSource })}>
-              {AMOUNT_SOURCE_OPTIONS.map((o) => <option key={o.value} value={o.value}>{o.label}</option>)}
-            </select>
+            <CustomListbox
+              value={line.dc}
+              onChange={(val) => updateLine(idx, { dc: val as "D" | "C" })}
+              options={[
+                { value: "D", label: "Debit" },
+                { value: "C", label: "Credit" },
+              ]}
+              className={iCls}
+              buttonClassName="w-full"
+              ariaLabel="Debit/Credit"
+            />
+            <CustomListbox
+              value={line.amountSource}
+              onChange={(val) => updateLine(idx, { amountSource: val as RetirementAmountSource })}
+              options={AMOUNT_SOURCE_OPTIONS.map((o) => ({ value: o.value, label: o.label }))}
+              className={iCls}
+              buttonClassName="w-full"
+              ariaLabel="Amount source"
+            />
             <button type="button" onClick={() => removeLine(idx)} title="Remove line"
               className="p-1 text-[#5E6870] hover:bg-red-50 hover:text-red-600">
               <Trash2 className="h-3.5 w-3.5" />
@@ -2335,11 +2357,14 @@ function ColumnConfigModal({
               <Row label="Type">
                 {/* Currency is no longer a separate type — a Number column
                     becomes a currency purely through its number format. */}
-                <select value={draft.type === "currency" ? "number" : (draft.type ?? "text")}
-                  onChange={(e) => set({ type: e.target.value as TableColumnType })}
-                  className={iCls}>
-                  {COL_TYPES.map((t) => <option key={t.value} value={t.value}>{t.label}</option>)}
-                </select>
+                <CustomListbox
+                  value={draft.type === "currency" ? "number" : (draft.type ?? "text")}
+                  onChange={(val) => set({ type: val as TableColumnType })}
+                  options={COL_TYPES.map((t) => ({ value: t.value, label: t.label }))}
+                  className={iCls}
+                  buttonClassName="w-full"
+                  ariaLabel="Column type"
+                />
               </Row>
               {isNumeric && (
                 <Row label="Number format" hint="Controls how the cell is displayed and rounded. Turn on “Show as currency” to prefix a symbol.">
@@ -2377,10 +2402,17 @@ function ColumnConfigModal({
               </Row>
               <Row label="Default value">
                 {isDropdown ? (
-                  <select className={iCls} value={draft.defaultValue ?? ""} onChange={(e) => set({ defaultValue: e.target.value })}>
-                    <option value="">—</option>
-                    {(draft.options ?? []).map((o) => <option key={o} value={o}>{o}</option>)}
-                  </select>
+                  <CustomListbox
+                    value={draft.defaultValue ?? ""}
+                    onChange={(val) => set({ defaultValue: val })}
+                    options={[
+                      { value: "", label: "—" },
+                      ...(draft.options ?? []).map((o) => ({ value: o, label: o })),
+                    ]}
+                    className={iCls}
+                    buttonClassName="w-full"
+                    ariaLabel="Default value"
+                  />
                 ) : (
                   <input className={iCls} value={draft.defaultValue ?? ""} onChange={(e) => set({ defaultValue: e.target.value })} />
                 )}
@@ -2398,13 +2430,14 @@ function ColumnConfigModal({
                 </Row>
               )}
               <Row label="SunSystems role">
-                <select
-                  className={iCls}
+                <CustomListbox
                   value={draft.sunsystems?.role ?? ""}
-                  onChange={(e) => set({ sunsystems: { ...(draft.sunsystems ?? {}), role: e.target.value || undefined } })}
-                >
-                  {FINANCE_COLUMN_ROLES.map((o) => <option key={o.value} value={o.value}>{o.label}</option>)}
-                </select>
+                  onChange={(val) => set({ sunsystems: { ...(draft.sunsystems ?? {}), role: val || undefined } })}
+                  options={FINANCE_COLUMN_ROLES.map((o) => ({ value: o.value, label: o.label }))}
+                  className={iCls}
+                  buttonClassName="w-full"
+                  ariaLabel="SunSystems role"
+                />
               </Row>
               {draft.sunsystems?.role === "analysis" && (
                 <Row label="Analysis code number (1–10)">
@@ -2420,11 +2453,17 @@ function ColumnConfigModal({
                 <>
                   <div className="grid grid-cols-2 gap-3">
                     <Row label="Debit / Credit">
-                      <select className={iCls} value={draft.sunsystems?.dc ?? "D"}
-                        onChange={(e) => set({ sunsystems: { ...(draft.sunsystems ?? {}), dc: e.target.value as "D" | "C" } })}>
-                        <option value="D">Debit</option>
-                        <option value="C">Credit</option>
-                      </select>
+                      <CustomListbox
+                        value={draft.sunsystems?.dc ?? "D"}
+                        onChange={(val) => set({ sunsystems: { ...(draft.sunsystems ?? {}), dc: val as "D" | "C" } })}
+                        options={[
+                          { value: "D", label: "Debit" },
+                          { value: "C", label: "Credit" },
+                        ]}
+                        className={iCls}
+                        buttonClassName="w-full"
+                        ariaLabel="Debit/Credit"
+                      />
                     </Row>
                     <Row label="Default account" hint="Used unless a separate 'Account code' column is set on this table.">
                       <input className={cn(iCls, "font-mono")} value={draft.sunsystems?.account ?? ""}
@@ -2491,9 +2530,14 @@ function ColumnConfigModal({
               )}
               {(draft.type === "reference" || draft.type === "user") && (
                 <Row label="Reference source">
-                  <select className={iCls} value={draft.referenceSource ?? (draft.type === "user" ? "users" : "documents")} onChange={(e) => set({ referenceSource: e.target.value })}>
-                    {REFERENCE_SOURCE_OPTIONS.map((o) => <option key={o.value} value={o.value}>{o.label}</option>)}
-                  </select>
+                  <CustomListbox
+                    value={draft.referenceSource ?? (draft.type === "user" ? "users" : "documents")}
+                    onChange={(val) => set({ referenceSource: val })}
+                    options={REFERENCE_SOURCE_OPTIONS.map((o) => ({ value: o.value, label: o.label }))}
+                    className={iCls}
+                    buttonClassName="w-full"
+                    ariaLabel="Reference source"
+                  />
                 </Row>
               )}
               <VisibilityEditor
@@ -2767,13 +2811,17 @@ function NumberFormatEditor({
         <div className="grid grid-cols-2 gap-2">
           <label className="space-y-1">
             <span className="text-[10px] font-semibold uppercase tracking-wider text-[#5E6870]">Symbol source</span>
-            <select className={cn(inputCls, "h-8")} value={value.currencyFrom ?? ""}
-              onChange={(e) => onChange({ currencyFrom: e.target.value || undefined })}>
-              <option value="">Fixed symbol</option>
-              {symbolSources.map((s) => (
-                <option key={s.key} value={s.key}>From {symbolSourceNoun}: {s.label}</option>
-              ))}
-            </select>
+            <CustomListbox
+              value={value.currencyFrom ?? ""}
+              onChange={(val) => onChange({ currencyFrom: val || undefined })}
+              options={[
+                { value: "", label: "Fixed symbol" },
+                ...symbolSources.map((s) => ({ value: s.key, label: `From ${symbolSourceNoun}: ${s.label}` })),
+              ]}
+              className={cn(inputCls, "h-8")}
+              buttonClassName="w-full"
+              ariaLabel="Symbol source"
+            />
           </label>
           <label className="space-y-1">
             <span className="text-[10px] font-semibold uppercase tracking-wider text-[#5E6870]">
@@ -2901,18 +2949,30 @@ function FinanceBindingFields({ field, onUpdate }: {
           ? "A table becomes a journal line source when one of its columns is marked Line amount."
           : "How this field posts to the SunSystems ledger on approval."}
       >
-        <select className={inputCls} value={role} onChange={(e) => setB({ role: e.target.value || undefined })}>
-          {journalOptions.map((o) => <option key={o.value} value={o.value}>{o.label}</option>)}
-        </select>
+        <CustomListbox
+          value={role}
+          onChange={(val) => setB({ role: val || undefined })}
+          options={journalOptions}
+          className={inputCls}
+          buttonClassName="w-full"
+          ariaLabel="Journal role"
+        />
       </InspectorRow>
       {showAcct && (
         <>
           <div className="grid grid-cols-2 gap-3">
             <InspectorRow label="Debit / Credit">
-              <select className={inputCls} value={binding.dc ?? "D"} onChange={(e) => setB({ dc: e.target.value as "D" | "C" })}>
-                <option value="D">Debit</option>
-                <option value="C">Credit</option>
-              </select>
+              <CustomListbox
+                value={binding.dc ?? "D"}
+                onChange={(val) => setB({ dc: val as "D" | "C" })}
+                options={[
+                  { value: "D", label: "Debit" },
+                  { value: "C", label: "Credit" },
+                ]}
+                className={inputCls}
+                buttonClassName="w-full"
+                ariaLabel="Debit/Credit"
+              />
             </InspectorRow>
             <InspectorRow label={isTable ? "Default account" : "Account code"} hint={isTable ? "Used unless a column is 'Account code'." : undefined}>
               <input className={cn(inputCls, "font-mono")} value={binding.account ?? ""} onChange={(e) => setB({ account: e.target.value })} placeholder="e.g. 71001" />
@@ -2934,12 +2994,17 @@ function FinanceBindingFields({ field, onUpdate }: {
                     placeholder="e.g. 10101 (leave blank to skip)" />
                 </InspectorRow>
                 <InspectorRow label="Counter D/C">
-                  <select className={inputCls}
+                  <CustomListbox
                     value={binding.counterDc ?? (binding.dc === "C" ? "D" : "C")}
-                    onChange={(e) => setB({ counterDc: e.target.value as "D" | "C" })}>
-                    <option value="D">Debit</option>
-                    <option value="C">Credit</option>
-                  </select>
+                    onChange={(val) => setB({ counterDc: val as "D" | "C" })}
+                    options={[
+                      { value: "D", label: "Debit" },
+                      { value: "C", label: "Credit" },
+                    ]}
+                    className={inputCls}
+                    buttonClassName="w-full"
+                    ariaLabel="Counter D/C"
+                  />
                 </InspectorRow>
               </div>
             </div>
@@ -2948,9 +3013,14 @@ function FinanceBindingFields({ field, onUpdate }: {
       )}
       {!isTable && (
         <InspectorRow label="Budget role" hint="Independent of the journal role — the same field can do both.">
-          <select className={inputCls} value={binding.budgetRole ?? ""} onChange={(e) => setB({ budgetRole: e.target.value || undefined })}>
-            {FINANCE_BUDGET_ROLES.map((o) => <option key={o.value} value={o.value}>{o.label}</option>)}
-          </select>
+          <CustomListbox
+            value={binding.budgetRole ?? ""}
+            onChange={(val) => setB({ budgetRole: val || undefined })}
+            options={FINANCE_BUDGET_ROLES.map((o) => ({ value: o.value, label: o.label }))}
+            className={inputCls}
+            buttonClassName="w-full"
+            ariaLabel="Budget role"
+          />
         </InspectorRow>
       )}
     </div>
@@ -3027,16 +3097,22 @@ function RuleGroupEditor({ group, sources, processSteps, onChange, depth = 0 }: 
       {group.conditions.map((c, i) => (
         <div key={i} className="space-y-1.5 border border-[#E5E8EB] bg-[#FAFBFC] p-2">
           <div className="flex items-center gap-1.5">
-            <select className={cn(inputCls, "h-8 flex-1")} value={c.source}
-              onChange={(e) => {
-                const source = e.target.value as ConditionSource;
+            <CustomListbox
+              value={c.source}
+              onChange={(val) => {
+                const source = val as ConditionSource;
                 updateCond(i, source === "process_step"
                   ? { source, fieldKey: undefined, operator: "equals", value: processSteps[0]?.value ?? "" }
                   : { source, fieldKey: sources[0]?.key ?? "", value: "" });
-              }}>
-              <option value="field">Form field</option>
-              <option value="process_step">Process step</option>
-            </select>
+              }}
+              options={[
+                { value: "field", label: "Form field" },
+                { value: "process_step", label: "Process step" },
+              ]}
+              className={cn(inputCls, "h-8 flex-1")}
+              buttonClassName="w-full"
+              ariaLabel="Condition source"
+            />
             <button type="button" onClick={() => removeCond(i)} title="Remove condition"
               className="p-1 text-[#8C969E] hover:bg-red-50 hover:text-red-500">
               <X className="h-3.5 w-3.5" />
@@ -3044,11 +3120,17 @@ function RuleGroupEditor({ group, sources, processSteps, onChange, depth = 0 }: 
           </div>
 
           {c.source === "field" && (
-            <select className={cn(inputCls, "h-8")} value={c.fieldKey ?? ""}
-              onChange={(e) => updateCond(i, { fieldKey: e.target.value })}>
-              <option value="">— choose a field —</option>
-              {sources.map((s) => <option key={s.key} value={s.key}>{s.label} ({s.key})</option>)}
-            </select>
+            <CustomListbox
+              value={c.fieldKey ?? ""}
+              onChange={(val) => updateCond(i, { fieldKey: val })}
+              options={[
+                { value: "", label: "— choose a field —" },
+                ...sources.map((s) => ({ value: s.key, label: `${s.label} (${s.key})` })),
+              ]}
+              className={cn(inputCls, "h-8")}
+              buttonClassName="w-full"
+              ariaLabel="Field"
+            />
           )}
 
           <div className="grid grid-cols-2 gap-1.5">
@@ -3069,11 +3151,17 @@ function RuleGroupEditor({ group, sources, processSteps, onChange, depth = 0 }: 
             </select>
             {!VALUELESS_OPERATORS.has(c.operator) && (
               c.source === "process_step" && !LIST_OPERATORS.has(c.operator) ? (
-                <select className={cn(inputCls, "h-8")} value={c.value ?? ""}
-                  onChange={(e) => updateCond(i, { value: e.target.value })}>
-                  <option value="">— choose a step —</option>
-                  {processSteps.map((s) => <option key={s.value} value={s.value}>{s.label}</option>)}
-                </select>
+                <CustomListbox
+                  value={c.value ?? ""}
+                  onChange={(val) => updateCond(i, { value: val })}
+                  options={[
+                    { value: "", label: "— choose a step —" },
+                    ...processSteps.map((s) => ({ value: s.value, label: s.label })),
+                  ]}
+                  className={cn(inputCls, "h-8")}
+                  buttonClassName="w-full"
+                  ariaLabel="Process step"
+                />
               ) : RANGE_OPERATORS.has(c.operator) ? (
                 <div className="flex items-center gap-1">
                   <input className={cn(inputCls, "h-8 min-w-0")} value={(c.value ?? "").split(",")[0] ?? ""} placeholder="From"
@@ -3184,12 +3272,19 @@ function VisibilityEditor({ value, sources, onChange, subject, groupOptions, pro
       }
     >
       <div className="space-y-2 border border-[#C8CDD2] bg-white p-2.5">
-        <select className={inputCls} value={mode} onChange={(e) => setMode(e.target.value as VisibilityMode)}>
-          <option value="visible">Always visible</option>
-          <option value="hidden">Always hidden</option>
-          <option value="conditional">Show only when…</option>
-          {allowsGroups && <option value="groups">Visible only to groups…</option>}
-        </select>
+        <CustomListbox
+          value={mode}
+          onChange={(val) => setMode(val as VisibilityMode)}
+          options={[
+            { value: "visible", label: "Always visible" },
+            { value: "hidden", label: "Always hidden" },
+            { value: "conditional", label: "Show only when…" },
+            ...(allowsGroups ? [{ value: "groups", label: "Visible only to groups…" }] : []),
+          ]}
+          className={inputCls}
+          buttonClassName="w-full"
+          ariaLabel="Visibility mode"
+        />
         {mode === "groups" && allowsGroups && (
           <div className="space-y-1">
             {groupOptions!.length === 0 && (
@@ -3260,11 +3355,18 @@ function EditabilityEditor({ value, sources, onChange, subject, processSteps = [
       }
     >
       <div className="space-y-2 border border-[#C8CDD2] bg-white p-2.5">
-        <select className={inputCls} value={mode} onChange={(e) => setMode(e.target.value as EditabilityMode)}>
-          <option value="editable">Always editable</option>
-          <option value="readonly">Always read-only</option>
-          <option value="conditional">Editable only when…</option>
-        </select>
+        <CustomListbox
+          value={mode}
+          onChange={(val) => setMode(val as EditabilityMode)}
+          options={[
+            { value: "editable", label: "Always editable" },
+            { value: "readonly", label: "Always read-only" },
+            { value: "conditional", label: "Editable only when…" },
+          ]}
+          className={inputCls}
+          buttonClassName="w-full"
+          ariaLabel="Editability mode"
+        />
         {mode === "conditional" && rule && (
           <RuleGroupEditor group={rule} sources={sources} processSteps={processSteps}
             onChange={(g) => onChange({ editableWhen: g })} />
