@@ -15,7 +15,7 @@ import { useState, useEffect, useRef, useMemo } from "react";
 import { createPortal } from "react-dom";
 import { useForm, Controller } from "react-hook-form";
 import { useQuery } from "@tanstack/react-query";
-import { AlertCircle, ChevronDown, Download, ExternalLink, Info, Loader2, Lock, Pencil, Paperclip, Plus, Search, Star, Trash2, X, Image as ImageIcon, FileText, FileImage, FileCode2, FileSpreadsheet, FileArchive, FileVideo, FileAudio, Upload, Building2 } from "lucide-react";
+import { AlertCircle, ChevronDown, Download, ExternalLink, Info, Loader2, Lock, Pencil, Paperclip, Plus, Search, Star, Trash2, X, Image as ImageIcon, FileText, FileImage, FileCode2, FileSpreadsheet, FileArchive, FileVideo, FileAudio, Upload, Building2, PenTool, User, CalendarClock } from "lucide-react";
 import type { ReactNode } from "react";
 import { documentsAPI } from "@/services/api";
 import { toast } from "@/components/ui/vault-toast";
@@ -1206,110 +1206,72 @@ function FileAttachField({ label, fieldKey, imageOnly, disabled, value, document
 
 // ── Signature pad field ────────────────────────────────────────────────────────
 
-function SignatureField({ fieldKey, disabled, value, onChangeCb }: {
+function SignatureField({ fieldKey, disabled, value, onChangeCb, onLaunchSignatureModal, allValues }: {
   fieldKey: string;
   disabled?: boolean;
   value?: unknown;
   onChangeCb: (key: string, val: unknown) => void;
+  onLaunchSignatureModal?: () => void;
+  allValues?: TemplateFormValues;
 }) {
-  const canvasRef = useRef<HTMLCanvasElement>(null);
-  const loadedRef = useRef<string | null>(null);
-  const [drawing, setDrawing] = useState(false);
-  const [signed, setSigned] = useState(false);
-
-  // Render an existing signature (stored as a PNG data URL) onto the canvas —
-  // so it shows in read-only/approval view and when re-editing the form.
-  useEffect(() => {
-    const canvas = canvasRef.current;
-    const ctx = canvas?.getContext("2d");
-    if (!canvas || !ctx) return;
-    const v = typeof value === "string" ? value : "";
-    if (v.startsWith("data:image") && loadedRef.current !== v) {
-      loadedRef.current = v;
-      const img = new Image();
-      img.onload = () => {
-        ctx.clearRect(0, 0, canvas.width, canvas.height);
-        ctx.drawImage(img, 0, 0, canvas.width, canvas.height);
-        setSigned(true);
-      };
-      img.src = v;
-    }
-  }, [value]);
-
-  const getPos = (e: React.MouseEvent<HTMLCanvasElement> | React.TouchEvent<HTMLCanvasElement>) => {
-    const rect = canvasRef.current!.getBoundingClientRect();
-    if ("touches" in e) {
-      return { x: e.touches[0].clientX - rect.left, y: e.touches[0].clientY - rect.top };
-    }
-    return { x: (e as React.MouseEvent).clientX - rect.left, y: (e as React.MouseEvent).clientY - rect.top };
-  };
-
-  const startDraw = (e: React.MouseEvent<HTMLCanvasElement> | React.TouchEvent<HTMLCanvasElement>) => {
-    if (disabled) return;
-    const ctx = canvasRef.current!.getContext("2d")!;
-    const { x, y } = getPos(e);
-    ctx.beginPath();
-    ctx.moveTo(x, y);
-    setDrawing(true);
-  };
-
-  const draw = (e: React.MouseEvent<HTMLCanvasElement> | React.TouchEvent<HTMLCanvasElement>) => {
-    if (!drawing || disabled) return;
-    e.preventDefault();
-    const ctx = canvasRef.current!.getContext("2d")!;
-    ctx.lineWidth = 1.8;
-    ctx.lineCap = "round";
-    ctx.strokeStyle = "#0f172a";
-    const { x, y } = getPos(e);
-    ctx.lineTo(x, y);
-    ctx.stroke();
-    setSigned(true);
-  };
-
-  const endDraw = () => {
-    if (!drawing) return;
-    setDrawing(false);
-    const dataUrl = canvasRef.current!.toDataURL("image/png");
-    loadedRef.current = dataUrl; // our own stroke — don't reload it as an image
-    onChangeCb(fieldKey, dataUrl);
-  };
-
-  const clear = () => {
-    const canvas = canvasRef.current!;
-    canvas.getContext("2d")!.clearRect(0, 0, canvas.width, canvas.height);
-    loadedRef.current = null;
-    setSigned(false);
-    onChangeCb(fieldKey, undefined);
+  const hasSignature = typeof value === "string" && value.startsWith("data:image");
+  
+  // Look for associated date and name fields
+  const dateValue = allValues?.[`${fieldKey}_date`] as string | undefined;
+  const nameValue = allValues?.[`${fieldKey}_name`] as string | undefined;
+  
+  // Check for styling metadata
+  const signatureStyle = allValues?.[`${fieldKey}_style`] as { color?: string; fontSize?: string; fontFamily?: string } | undefined;
+  
+  const inlineStyle = {
+    color: signatureStyle?.color || '#1F2933',
+    fontSize: signatureStyle?.fontSize || '16px',
+    fontFamily: signatureStyle?.fontFamily || 'inherit',
+    fontWeight: '600' as const,
   };
 
   return (
-    <div className="relative">
-      <canvas
-        ref={canvasRef}
-        width={600}
-        height={120}
-        className={`w-full rounded-lg border-2 ${signed ? "border-primary/40" : "border-dashed border-border"}
-          bg-white touch-none ${disabled ? "opacity-50" : "cursor-crosshair"}`}
-        style={{ height: 120 }}
-        onMouseDown={startDraw}
-        onMouseMove={draw}
-        onMouseUp={endDraw}
-        onMouseLeave={endDraw}
-        onTouchStart={startDraw}
-        onTouchMove={draw}
-        onTouchEnd={endDraw}
-      />
-      {!signed && (
-        <div className="pointer-events-none absolute inset-0 flex items-center justify-center gap-1.5 text-xs text-muted-foreground">
-          <Pencil className="h-3.5 w-3.5" /> Sign here
+    <div className="min-w-0 space-y-3">
+      {/* Signature button */}
+      <button
+        type="button"
+        onClick={onLaunchSignatureModal}
+        disabled={disabled}
+        className="w-full border border-dashed border-[#AEB5BB] bg-[#F9FAFB] px-4 py-8 text-center transition-colors hover:border-[#287EAD] hover:bg-[#EEF6FB] disabled:opacity-50 disabled:pointer-events-none"
+      >
+        {hasSignature ? (
+          <div className="space-y-2">
+            <img 
+              src={value as string} 
+              alt="Signature" 
+              className="mx-auto h-16 filter contrast-125 brightness-95"
+              style={{ filter: 'drop-shadow(0 1px 2px rgba(0,0,0,0.1))' }}
+            />
+            <p className="text-xs text-[#5E6870]">Click to change signature</p>
+          </div>
+        ) : (
+          <div className="space-y-2">
+            <PenTool className="mx-auto h-8 w-8 text-[#5E6870]" />
+            <p className="text-sm font-medium text-[#1F2933]">Click to add signature</p>
+            <p className="text-xs text-[#5E6870]">Use your saved signature or draw a new one</p>
+          </div>
+        )}
+      </button>
+      
+      {/* Date field */}
+      {dateValue && (
+        <div className="flex items-center gap-2 text-sm" style={inlineStyle}>
+          <CalendarClock className="h-4 w-4 text-[#5E6870]" />
+          <span>{dateValue}</span>
         </div>
       )}
-      {signed && !disabled && (
-        <button type="button" onClick={clear}
-          className="absolute right-2 top-2 flex items-center gap-1 rounded px-1.5 py-0.5 text-[10px]
-            font-semibold text-muted-foreground hover:text-red-500 hover:bg-red-50 transition-colors">
-          <X className="h-3 w-3" /> Clear
-        </button>
+      
+      {/* Name field */}
+      {nameValue && (
+        <div className="flex items-center gap-2 text-sm" style={inlineStyle}>
+          <User className="h-4 w-4 text-[#5E6870]" />
+          <span>{nameValue}</span>
+        </div>
       )}
     </div>
   );
@@ -1390,7 +1352,7 @@ function labelForAuto(label: string, field: Field) {
   );
 }
 
-function FormField({ field, control, errors, onChangeCb, readOnly, allValues, editable = true, processStep, allFields }: {
+function FormField({ field, control, errors, onChangeCb, readOnly, allValues, editable = true, processStep, allFields, onLaunchSignatureModal }: {
   field: Field;
   control: any;
   errors: Record<string, any>;
@@ -1402,6 +1364,7 @@ function FormField({ field, control, errors, onChangeCb, readOnly, allValues, ed
   editable?: boolean;
   processStep?: string;
   allFields: Field[];
+  onLaunchSignatureModal?: () => void;
 }) {
   const key  = field.key ?? field.id ?? "";
   const type = field.type ?? "text";
@@ -1585,6 +1548,8 @@ function FormField({ field, control, errors, onChangeCb, readOnly, allValues, ed
           disabled={dis}
           value={allValues[key]}
           onChangeCb={onChangeCb}
+          onLaunchSignatureModal={onLaunchSignatureModal}
+          allValues={allValues}
         />
       </div>
     );
@@ -1843,7 +1808,7 @@ function FormField({ field, control, errors, onChangeCb, readOnly, allValues, ed
 
 // ── Main export ───────────────────────────────────────────────────────────────
 
-function TemplateForm({ sections, values, onChange, readOnly = false, documentId, documentStatus, canEditConditionalSections }: {
+function TemplateForm({ sections, values, onChange, readOnly = false, documentId, documentStatus, canEditConditionalSections, onLaunchSignatureModal }: {
   sections: unknown[];
   values: TemplateFormValues;
   onChange: (key: string, value: unknown) => void;
@@ -1853,6 +1818,7 @@ function TemplateForm({ sections, values, onChange, readOnly = false, documentId
   // conditions. Absent (a brand-new form) is treated as "draft".
   documentStatus?: string;
   canEditConditionalSections?: boolean;
+  onLaunchSignatureModal?: () => void;
 }) {
   const list = (Array.isArray(sections) ? sections : []) as Section[];
   const allFields = list.flatMap((s) => s.fields ?? []);
@@ -1993,6 +1959,7 @@ function TemplateForm({ sections, values, onChange, readOnly = false, documentId
                   allValues={liveValues as TemplateFormValues}
                   processStep={processStep}
                   allFields={allFields}
+                  onLaunchSignatureModal={onLaunchSignatureModal}
                 />
               ))}
               {visibleFields.length === 0 && (

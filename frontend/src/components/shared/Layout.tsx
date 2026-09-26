@@ -1,1095 +1,388 @@
-/**
- * Layout.tsx (updated)
- *
- * Changes from previous version
- * ──────────────────────────────
- * 1. FolderTree component injected into the sidebar below the main nav.
- * 2. The sidebar's nav scroll area is split so the FolderTree sits in a
- *    dedicated collapsible section that doesn't push admin links off-screen.
- * 3. All existing nav logic, group collapsing, and admin section are unchanged.
- *
- * Forms-area changes (this pass)
- * ────────────────────────────────
- * 4. New "Forms" top-level nav item pointing at /forms (the dedicated Forms
- *    landing page — see FormsPage.tsx / FormDetailPage.tsx). Placed right
- *    under the Documents group since forms are still document records under
- *    the hood, just presented through their own workspace. There's no
- *    "/forms/new" route — creating a form is a modal (NewFormModal) launched
- *    from FormsPage itself, not a separate page.
- * 5. `isFullWidthByDefaultRoute` now also recognises /forms/:id (a single
- *    form's workspace), mirroring exactly how /documents/:id is already
- *    handled — it opens with the sidebar collapsed by default, same as a
- *    single document's workspace does. /forms itself (the list/report page)
- *    is a normal page and does NOT get this treatment.
- * 6. `usesWorkspaceCommandBar` no longer includes /forms — FormsPage builds
- *    its own regular in-page header instead of the app-wide blue command bar,
- *    so Layout renders its standard header (search/notifications/profile) for
- *    that route, same as any other ordinary page. /forms/:id is still listed,
- *    since FormDetailPage supplies its own full-bleed header (same pattern as
- *    DocumentDetailPage on /documents/:id).
- */
-
-import { Suspense, lazy, useEffect, useRef, useState } from "react";
+import { Suspense, useState, useMemo } from "react";
 import { Outlet, NavLink, useNavigate, useLocation } from "react-router-dom";
 import {
-  LayoutDashboard, FileText, Upload, Search,
-  Workflow, Settings, LogOut,
-  Bell, Users, Building2, UserRoundCog, Shield,
-  ChevronDown, ChevronRight, ChevronLeft, Archive, ScanLine, Loader2, UserCheck, Monitor, Lock, History, Trash2,
-  BellRing, CircleUserRound, ClipboardCheck, Inbox, ArrowRight, FileSignature, LayoutTemplate, Database,
-  Plug, ClipboardList, BarChart3, CreditCard,
+  LayoutDashboard,
+  ClipboardList,
+  PlusCircle,
+  Building2,
+  CheckCircle2,
+  BarChart3,
+  LogOut,
+  ChevronLeft,
+  ChevronRight,
+  Bell,
+  CircleUserRound,
+  ExternalLink,
+  ShieldCheck,
+  FileText,
+  GitBranch
 } from "lucide-react";
-import { useAuthStore, useModuleEnabled } from "../../store/authStore";
-import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { notificationsAPI, workflowAPI } from "../../services/api";
+import { useAuthStore } from "@/store/authStore";
+import { useQuery } from "@tanstack/react-query";
+import { notificationsAPI, workflowAPI, sunsystemsAPI } from "@/services/api";
 import { QUERY_ONE_MINUTE_STALE } from "@/lib/reactQueryDefaults";
-import { preloadCommonRoutes, preloadRouteForPath } from "@/lib/routePreload";
-import { FolderTree } from "@/components/folders/FolderTree";
-import clsx from "clsx";
-import { FlaxemLogo } from "./FlaxemLogo";
+import { cn } from "@/lib/utils";
+import { ChatLauncher } from "@/components/chat/ChatLauncher";
+import dmsLogo from "@/assets/images/dmslogo4.png";
 
-const ChatLauncher = lazy(() =>
-  import("@/components/chat/ChatLauncher").then((module) => ({ default: module.ChatLauncher })),
-);
-
-const TASK_NOTIFICATION_TYPES = new Set(["task_assigned", "task_sla_warning", "task_overdue"]);
-
-// ── Types (unchanged) ─────────────────────────────────────────────────────────
-
-interface NavLeaf {
-  to: string;
-  icon: React.ElementType;
-  label: string;
-  exact?: boolean;
-  allowedRoles?: string[];
-  module?: string;
+interface RequisitionLayoutProps {
+  /** Optional white-label organization or brand name */
+  brandName?: string;
 }
 
-interface NavGroup {
-  icon: React.ElementType;
-  label: string;
-  prefix: string;
-  allowedRoles?: string[];
-  module?: string;
-  children: NavLeaf[];
-}
-
-type NavEntry = NavLeaf | NavGroup;
-
-function isGroup(entry: NavEntry): entry is NavGroup {
-  return "children" in entry;
-}
-
-function navTarget(to: string) {
-  const [pathname, rawSearch] = to.split("?");
-  return {
-    pathname,
-    search: rawSearch ? `?${rawSearch}` : "",
-  };
-}
-
-const sidebarItemBase =
-  "group flex items-center gap-3 rounded-md px-3 py-2 text-sm font-semibold transition-colors";
-const sidebarItemActive =
-  "bg-[#287EAD] text-white shadow-sm";
-const sidebarItemInactive =
-  "text-[#3D454D] hover:bg-white/75 hover:text-[#1F2933] hover:shadow-sm";
-const sidebarIconActive = "text-white";
-const sidebarIconInactive = "text-[#6E767D] group-hover:text-[#287EAD]";
-
-// Content-heavy routes that open with the sidebar collapsed (full-width canvas)
-// by default. The user can still toggle the sidebar back open on these pages.
-function isFullWidthByDefaultRoute(pathname: string): boolean {
-  if (pathname === "/admin/templates" || pathname === "/workflow/builder" || pathname === "/forms/new") return true;
-
-  // Single-document workspace: /documents/:id (not the upload/scan/review/etc.)
-  const docSeg = pathname.split("/")[2] ?? "";
-  const isDocumentWorkspace =
-    pathname.startsWith("/documents/") &&
-    Boolean(docSeg) &&
-    !["upload", "scan", "review", "trash", "folders"].includes(docSeg) &&
-    !pathname.slice("/documents/".length).includes("/");
-
-  // Single-form workspace: /forms/:id — same pattern as above. (There's no
-  // /forms/new route to exclude; creating a form is a modal on /forms itself.)
-  const formSeg = pathname.split("/")[2] ?? "";
-  const isFormWorkspace =
-    pathname.startsWith("/forms/") &&
-    Boolean(formSeg) &&
-    !pathname.slice("/forms/".length).includes("/");
-
-  return isDocumentWorkspace || isFormWorkspace;
-}
-
-// ── Navigation structure (unchanged) ─────────────────────────────────────────
-
-const mainNav: NavEntry[] = [
-  { to: "/", icon: LayoutDashboard, label: "Dashboard", exact: true } as NavLeaf,
-  { to: "/notifications", icon: Bell, label: "Notifications" } as NavLeaf,
-  {
-    icon: FileText,
-    label: "Documents",
-    prefix: "/documents",
-    module: "documents",
-    children: [
-      { to: "/documents",                 icon: FileText, label: "All documents", module: "documents" },
-      { to: "/documents?status=archived", icon: Archive,  label: "Archived", module: "documents" },
-      { to: "/documents/upload",          icon: Upload,   label: "Upload", module: "documents" },
-      { to: "/documents/scan",            icon: ScanLine, label: "Scan", module: "documents" },
-      { to: "/documents/review",          icon: ClipboardCheck, label: "Pending review", module: "documents" },
-      { to: "/documents/trash",           icon: Trash2,   label: "Trash", module: "documents" },
-      { to: "/templates",                 icon: LayoutTemplate, label: "Templates", module: "forms" },
-      { to: "/search",                    icon: Search,   label: "Search", module: "search" },
-    ],
-  } as NavGroup,
-  { to: "/forms", icon: ClipboardList, label: "Forms", module: "forms" } as NavLeaf,
-  {
-    icon: Building2,
-    label: "Procurement",
-    prefix: "/procurement",
-    module: "suppliers",
-    children: [
-      { to: "/procurement/requisitions", icon: ClipboardList, label: "Requisitions", module: "suppliers" },
-      { to: "/procurement/suppliers",    icon: Building2, label: "Suppliers", module: "suppliers" },
-    ],
-  } as NavGroup,
-  { to: "/payment-run", icon: CreditCard, label: "Payment run" } as NavLeaf,
-  { to: "/personal-documents", icon: Lock, label: "Personal documents" } as NavLeaf,
-  { to: "/request-signature", icon: FileSignature, label: "Request signature" } as NavLeaf,
-  {
-    to: "/workflow",
-    icon: Workflow,
-    label: "My tasks",
-    module: "workflow",
-  } as NavLeaf,
-  { to: "/audit", icon: History, label: "Audit trail", module: "audit" } as NavLeaf,
-  // Analytics moved out of the dashboard (it duplicated the stat cards) and
-  // now lives in the sidebar, manager/admin only.
-  { to: "/analytics", icon: BarChart3, label: "Analytics", allowedRoles: ["admin"] } as NavLeaf,
-  {
-    icon: UserRoundCog,
-    label: "Profile",
-    prefix: "/profile",
-    children: [
-      { to: "/profile?tab=settings", icon: Settings, label: "Settings" },
-      { to: "/profile?tab=delegation", icon: UserCheck, label: "Delegation" },
-      { to: "/profile?tab=signature", icon: FileSignature, label: "E-Signature" },
-      { to: "/profile?tab=preferences", icon: Monitor, label: "Preferences" },
-    ],
-  } as NavGroup,
-];
-
-const adminNav: NavLeaf[] = [
-  { to: "/admin/document-types", icon: FileText,  label: "Document types", allowedRoles: ["admin"], module: "admin" },
-  { to: "/admin/templates",      icon: LayoutTemplate, label: "Templates", allowedRoles: ["admin"], module: "admin" },
-  { to: "/admin/users",       icon: Users,     label: "Users",       allowedRoles: ["admin"], module: "admin" },
-  { to: "/admin/departments", icon: Building2, label: "Departments", allowedRoles: ["admin"], module: "admin" },
-  { to: "/admin/groups",      icon: Shield,    label: "Groups",      allowedRoles: ["admin"], module: "admin" },
-  { to: "/admin/settings",    icon: Settings,  label: "Settings",    allowedRoles: ["admin"], module: "admin" },
-  { to: "/admin/migration",   icon: Database,  label: "IDM Migration", allowedRoles: ["admin"], module: "admin" },
-  { to: "/admin/mailboxes",   icon: Inbox,     label: "Email Ingestion", allowedRoles: ["admin"], module: "admin" },
-  { to: "/admin/sunsystems",  icon: Plug,      label: "SunSystems", allowedRoles: ["admin"], module: "admin" },
-  { to: "/workflow/builder", icon: Settings, label: "Workflow Builder", allowedRoles: ["admin"], module: "workflow" },
-];
-
-// ── SidebarGroup ──────────────────────────────────────────────────────────────
-
-function SidebarGroup({
-  group,
-  userAccess,
-  taskCount,
-  reviewCount,
-  onWarmRoute,
-}: {
-  group: NavGroup;
-  userAccess?: string;
-  taskCount?: number;
-  reviewCount?: number;
-  onWarmRoute?: (to: string) => void;
-}) {
+export default function Layout({
+  brandName = "Requisition Portal",
+}: RequisitionLayoutProps) {
+  const navigate = useNavigate();
   const location = useLocation();
-  const isGroupActive = location.pathname.startsWith(group.prefix);
-  const [open, setOpen] = useState(isGroupActive);
+  const { user, logout } = useAuthStore();
+  const [collapsed, setCollapsed] = useState(false);
 
-  const visibleChildren = group.children.filter(
-    (child) => {
-      // Role check
-      if (child.allowedRoles && (!userAccess || !child.allowedRoles.includes(userAccess))) {
-        return false;
-      }
-      // Module check
-      if (child.module && !useModuleEnabled(child.module)) {
-        return false;
-      }
-      return true;
-    }
+  // Notifications count
+  const { data: notificationsData } = useQuery({
+    queryKey: ["notifications", "unread-count"],
+    queryFn: () => notificationsAPI.unreadCount().then((res) => res.data),
+    ...QUERY_ONE_MINUTE_STALE,
+  });
+  const unreadCount = notificationsData?.count ?? 0;
+
+  // Pending approval tasks count
+  const { data: tasksData } = useQuery({
+    queryKey: ["workflow-tasks", "pending"],
+    queryFn: () => workflowAPI.listTasks({ status: "pending", page_size: 100 }).then((res) => res.data),
+    ...QUERY_ONE_MINUTE_STALE,
+  });
+  const pendingApprovalsCount = tasksData?.results?.length ?? 0;
+
+  // Live SunSystems connection status check
+  const { data: sunConnection } = useQuery({
+    queryKey: ["sunsystems", "connection-status"],
+    queryFn: () => sunsystemsAPI.getConnection().then((res) => res.data),
+    staleTime: 5 * 60_000,
+    retry: false,
+  });
+  const isSunConnected = Boolean(sunConnection?.effective?.base_url);
+
+  const hasAdminAccess = user?.has_admin_access;
+
+  // Check if we're on the templates page
+  const isTemplatesPage = location.pathname === "/admin/templates";
+
+  const navItems = useMemo(
+    () => [
+      {
+        to: "/",
+        label: "Dashboard",
+        icon: LayoutDashboard,
+      },
+      {
+        to: "/list",
+        label: "All Requisitions",
+        icon: ClipboardList,
+      },
+      {
+        to: "/new",
+        label: "New Requisition",
+        icon: PlusCircle,
+        badge: "Create",
+        highlight: true,
+      },
+      {
+        to: "/approvals",
+        label: "Approvals Queue",
+        icon: CheckCircle2,
+        count: pendingApprovalsCount,
+      },
+      {
+        to: "/notifications",
+        label: "Notifications",
+        icon: Bell,
+        count: unreadCount,
+      },
+      {
+        to: "/suppliers",
+        label: "SunSystems Suppliers",
+        icon: Building2,
+      },
+      {
+        to: "/analytics",
+        label: "Spend Analytics",
+        icon: BarChart3,
+      },
+      {
+        to: "/profile",
+        label: "Profile",
+        icon: CircleUserRound,
+      },
+    ],
+    [pendingApprovalsCount, unreadCount]
   );
 
-  // Check if the group itself should be visible based on its module
-  if (group.module && !useModuleEnabled(group.module)) return null;
-
-  if (visibleChildren.length === 0) return null;
+  const adminNavItems = useMemo(
+    () => [
+      {
+        to: "/admin/templates",
+        label: "Templates",
+        icon: FileText,
+      },
+      {
+        to: "/forms/new/builder",
+        label: "Form Builder",
+        icon: FileText,
+      },
+      {
+        to: "/admin/users",
+        label: "Users",
+        icon: CircleUserRound,
+      },
+      {
+        to: "/admin/departments",
+        label: "Departments",
+        icon: Building2,
+      },
+      {
+        to: "/admin/groups",
+        label: "Groups",
+        icon: ShieldCheck,
+      },
+      {
+        to: "/admin/mailboxes",
+        label: "Email Ingestion",
+        icon: Bell,
+      },
+      {
+        to: "/admin/sunsystems",
+        label: "SunSystems",
+        icon: ExternalLink,
+      },
+      {
+        to: "/workflow/builder",
+        label: "Workflow Builder",
+        icon: GitBranch,
+      },
+    ],
+    []
+  );
 
   return (
-    <div className="nav-section-item">
-      <button
-        onClick={() => setOpen(!open)}
-        className={clsx(
-          sidebarItemBase,
-          "w-full",
-          isGroupActive
-            ? sidebarItemActive
-            : sidebarItemInactive
+    <div className="flex h-screen w-screen overflow-hidden bg-[#F4F6F8] font-sans antialiased text-[#1F2933]">
+      {/* ── Scoped Sidebar ── */}
+      <aside
+        className={cn(
+          "relative flex flex-col border-r border-[#E4E7EB] bg-[#111927] text-[#9AA5B1] transition-all duration-200 z-30 select-none",
+          collapsed ? "w-16" : "w-64"
         )}
       >
-        <group.icon className={clsx("h-4 w-4 flex-shrink-0", isGroupActive ? sidebarIconActive : sidebarIconInactive)} />
-        <span className="flex-1 text-left">{group.label}</span>
-        {open
-          ? <ChevronDown className="h-3.5 w-3.5 flex-shrink-0 text-[#6E767D]" />
-          : <ChevronRight className="h-3.5 w-3.5 flex-shrink-0 text-[#6E767D]" />}
-      </button>
+        {/* Brand / Logo Header */}
+        <div className="flex h-16 items-center justify-between border-b border-[#1F2937] px-4">
+          <div className="flex items-center gap-3 overflow-hidden">
+            {!collapsed && (
+              <div className="flex flex-col truncate">
+                <span className="truncate text-sm font-bold tracking-tight text-white">
+                  {brandName}
+                </span>
+                 <span className="text-[10px] font-medium uppercase tracking-wider text-[#6B7280]">
+                  Procurement
+                </span>
+              </div>
+            )}
+          </div>
 
-      {open && (
-        <div className="ml-5 border-l border-[#CDD3D8] py-1">
-          {visibleChildren.map(({ to, icon: Icon, label, exact }) => {
-            const badgeValue =
-              to === "/workflow" ? taskCount
-              : to === "/documents/review" ? reviewCount
-              : undefined;
-            const target = navTarget(to);
-            const isChildActive =
-              location.pathname === target.pathname &&
-              (target.search ? location.search === target.search : !location.search);
+          <button
+            type="button"
+            onClick={() => setCollapsed(!collapsed)}
+            className="rounded p-1 text-[#9AA5B1] hover:bg-[#1F2937] hover:text-white"
+            title={collapsed ? "Expand sidebar" : "Collapse sidebar"}
+          >
+            {collapsed ? <ChevronRight className="h-4 w-4" /> : <ChevronLeft className="h-4 w-4" />}
+          </button>
+        </div>
 
+        {/* Live SunSystems Connection Badge */}
+        {!collapsed && (
+          <div className="mx-3 mt-3 rounded-md bg-[#1F2937]/70 p-2 text-xs flex items-center justify-between border border-[#374151]">
+            <div className="flex items-center gap-2">
+              <span className={cn("h-2 w-2 rounded-full", isSunConnected ? "bg-emerald-400" : "bg-amber-400")} />
+              <span className="text-[11px] text-[#D1D5DB] font-medium">SunSystems ERP</span>
+            </div>
+            <span className="text-[10px] font-mono text-[#9CA3AF]">
+              {isSunConnected ? "Live Link" : "Standby"}
+            </span>
+          </div>
+        )}
+
+        {/* Navigation Links */}
+        <nav className="flex-1 space-y-1.5 overflow-y-auto px-2 py-4">
+          {navItems.map((item) => {
+            const Icon = item.icon;
+            const isActive = location.pathname === item.to || (item.to !== "/requisitions" && location.pathname.startsWith(item.to));
             return (
               <NavLink
-                key={to}
-                to={to}
-                end={exact}
-                onMouseEnter={() => onWarmRoute?.(to)}
-                onFocus={() => onWarmRoute?.(to)}
-                className={() =>
-                  clsx(
-                    "group flex items-center gap-2.5 rounded-md px-3 py-1.5 text-sm transition-colors",
-                    isChildActive
-                      ? "bg-[#287EAD] text-white shadow-sm"
-                      : "text-[#4B5560] hover:bg-white/75 hover:text-[#1F2933] hover:shadow-sm"
-                  )
-                }
+                key={item.to}
+                to={item.to}
+                className={cn(
+                  "group flex items-center gap-3 px-3 py-2.5 text-sm font-medium transition-colors relative",
+                  isActive
+                    ? "bg-[#287EAD] text-white shadow-sm"
+                    : "text-[#D1D5DB] hover:bg-[#1F2937] hover:text-white",
+                  item.highlight && !isActive && "text-[#54B3E5] hover:bg-[#1F2937]"
+                )}
+                title={collapsed ? item.label : undefined}
               >
-                <Icon className={clsx("h-3.5 w-3.5 flex-shrink-0", isChildActive ? sidebarIconActive : "text-[#7C8790] group-hover:text-[#287EAD]")} />
-                <span className="flex-1">{label}</span>
-                {badgeValue ? (
-                  <span
-                    className={clsx(
-                      "ml-auto inline-flex min-w-[1.25rem] items-center justify-center px-1.5 py-0.5 text-[10px] font-bold text-white",
-                      to === "/workflow" || to === "/notifications" || to === "/documents/review"
-                        ? "bg-red-700"
-                        : "bg-[#287EAD]"
-                    )}
-                  >
-                    {badgeValue > 9 ? "9+" : badgeValue}
+                <Icon className={cn("h-5 w-5 shrink-0", isActive ? "text-white" : "text-[#9AA5B1] group-hover:text-white")} />
+                {!collapsed && (
+                  <span className="truncate flex-1">{item.label}</span>
+                )}
+                {!collapsed && item.count !== undefined && item.count > 0 && (
+                  <span className="rounded-full bg-amber-500/20 px-2 py-0.5 text-xs font-semibold text-amber-300">
+                    {item.count}
                   </span>
-                ) : null}
+                )}
+                {!collapsed && item.badge && !isActive && (
+                  <span className="rounded bg-[#287EAD]/20 px-1.5 py-0.5 text-[10px] font-semibold text-[#54B3E5]">
+                    {item.badge}
+                  </span>
+                )}
               </NavLink>
             );
           })}
-        </div>
-      )}
-    </div>
-  );
-}
 
-// ── ProfileMenu (unchanged) ───────────────────────────────────────────────────
-
-function ProfileMenu({ variant = "light" }: { variant?: "light" | "blue" }) {
-  const { user, logout } = useAuthStore();
-  const _navigate = useNavigate();
-  void _navigate;
-  const [open, setOpen] = useState(false);
-
-  const buttonClassName = variant === "blue"
-    ? "flex items-center justify-center transition-all active:scale-95"
-    : "flex h-9 w-9 items-center justify-center border border-[#C8CDD2] bg-white text-[#5E6870] transition-colors hover:bg-[#EEF6FB] hover:text-[#287EAD]";
-
-  useEffect(() => {
-    if (!open) return;
-    const handleKeyDown = (event: KeyboardEvent) => {
-      if (event.key === "Escape" || event.key === "Esc") {
-        setOpen(false);
-      }
-    };
-    window.addEventListener("keydown", handleKeyDown);
-    return () => window.removeEventListener("keydown", handleKeyDown);
-  }, [open]);
-
-  return (
-    <div className="relative">
-      <button
-        onClick={() => setOpen(!open)}
-        className={buttonClassName}
-        title="Profile"
-        aria-label="Open profile menu"
-      >
-        {variant === "blue" ? (
-          <span className="flex h-9 w-9 items-center justify-center rounded-full bg-white/15 text-white ring-1 ring-white/25 transition-colors hover:bg-white/25 hover:ring-white/40">
-            <CircleUserRound className="h-5 w-5" />
-          </span>
-        ) : (
-          <CircleUserRound className="h-5 w-5" />
-        )}
-      </button>
-
-      {open && (
-        <>
-          <div className="fixed inset-0 z-10" onClick={() => setOpen(false)} />
-          <div className="absolute right-0 top-11 z-20 w-56 overflow-hidden border border-[#C8CDD2] bg-white py-1 shadow-xl">
-            <div className="border-b border-[#C8CDD2] bg-[#F5F7F8] px-4 py-2.5">
-              <p className="text-xs font-semibold text-[#1F2933]">
-                {user?.first_name} {user?.last_name}
-              </p>
-              <p className="text-[11px] text-[#5E6870]">{user?.email}</p>
-            </div>
-            <button
-              onClick={() => { setOpen(false); _navigate("/profile"); }}
-              className="flex w-full items-center gap-2 px-4 py-2 text-sm text-[#1F2933] transition-colors hover:bg-[#F5F7F8]"
-            >
-              <CircleUserRound className="w-4 h-4 text-[#5E6870]" />
-              My profile
-            </button>
-            <button
-              onClick={() => { logout(); _navigate("/login"); }}
-              className="flex w-full items-center gap-2 px-4 py-2 text-sm text-red-700 transition-colors hover:bg-red-50"
-            >
-              <LogOut className="w-4 h-4" />
-              Sign out
-            </button>
-          </div>
-        </>
-      )}
-    </div>
-  );
-}
-
-function NotificationsTray({
-  notifications,
-  tasks,
-  attentionCount,
-  variant = "light",
-}: {
-  notifications?: { id: string; type: string; message: string; link?: string; is_read: boolean; created_at: string }[];
-  tasks: unknown[];
-  attentionCount: number;
-  variant?: "light" | "blue";
-}) {
-  const _navigate = useNavigate();
-  void _navigate;
-  const queryClient = useQueryClient();
-  const [open, setOpen] = useState(false);
-
-  // The tray's list data is no longer polled (badge counts come from the
-  // summary endpoint), so refresh it whenever the user opens the tray.
-  useEffect(() => {
-    if (!open) return;
-    queryClient.invalidateQueries({ queryKey: ["notifications"] });
-    queryClient.invalidateQueries({ queryKey: ["workflow", "my-tasks"] });
-  }, [open, queryClient]);
-  const markReadMutation = useMutation({
-    mutationFn: (id: string) => notificationsAPI.markRead(id),
-    onMutate: async (id: string) => {
-      await queryClient.cancelQueries({ queryKey: ["notifications"] });
-      const previousNotifications = queryClient.getQueryData<{ id: string; type: string; message: string; link?: string; is_read: boolean; created_at: string }[]>(["notifications"]);
-      if (previousNotifications) {
-        queryClient.setQueryData(["notifications"], previousNotifications.map((notification) =>
-          notification.id === id ? { ...notification, is_read: true } : notification,
-        ));
-      }
-      return { previousNotifications };
-    },
-    onError: (_err, _id, context) => {
-      if (context?.previousNotifications) {
-        queryClient.setQueryData(["notifications"], context.previousNotifications);
-      }
-    },
-    onSettled: () => {
-      queryClient.invalidateQueries({ queryKey: ["notifications"] });
-      queryClient.invalidateQueries({ queryKey: ["notifications", "unread-count"] });
-    },
-  });
-  useEffect(() => {
-    if (!open) return;
-    const handleKeyDown = (event: KeyboardEvent) => {
-      if (event.key === "Escape" || event.key === "Esc") {
-        setOpen(false);
-      }
-    };
-    window.addEventListener("keydown", handleKeyDown);
-    return () => window.removeEventListener("keydown", handleKeyDown);
-  }, [open]);
-  const noticeNotifications = (notifications ?? [])
-    .filter((notification) => !TASK_NOTIFICATION_TYPES.has(notification.type));
-  const taskAlertNotifications = (notifications ?? [])
-    .filter((notification) => TASK_NOTIFICATION_TYPES.has(notification.type));
-  const visibleNotifications = noticeNotifications
-    .filter((notification) => !notification.is_read)
-    .slice(0, 5);
-  const visibleTaskAlerts = taskAlertNotifications
-    .filter((notification) => !notification.is_read)
-    .slice(0, 3);
-  const noticeUnreadCount = noticeNotifications.filter((notification) => !notification.is_read).length;
-  const taskAlertUnreadCount = taskAlertNotifications.filter((notification) => !notification.is_read).length;
-  const visibleTasks = tasks.slice(0, 5) as {
-    id?: string;
-    document_title?: string;
-    document_ref?: string;
-    step?: { name?: string };
-    due_at?: string | null;
-    workflow_instance?: { document?: { title?: string; reference_number?: string } };
-  }[];
-  // attentionCount (the bell badge) is supplied by the parent from the summary
-  // endpoint; the per-section counts below come from the lists shown when open.
-
-  useEffect(() => {
-    if (!open) return;
-    const handleKeyDown = (event: KeyboardEvent) => {
-      if (event.key === "Escape" || event.key === "Esc") {
-        setOpen(false);
-      }
-    };
-    window.addEventListener("keydown", handleKeyDown);
-    return () => window.removeEventListener("keydown", handleKeyDown);
-  }, [open]);
-
-  const openNotification = (notification: { id: string; link?: string; is_read: boolean }) => {
-    setOpen(false);
-    if (!notification.is_read) {
-      markReadMutation.mutate(notification.id);
-    }
-    _navigate(notification.link || "/notifications");
-  };
-
-  const openTasks = () => {
-    setOpen(false);
-    _navigate("/workflow");
-  };
-  const buttonClassName = variant === "blue"
-    ? "relative flex h-9 w-9 items-center justify-center text-white/80 transition-all hover:text-white active:scale-95"
-    : "relative flex h-9 w-9 items-center justify-center border border-[#C8CDD2] bg-white text-[#5E6870] transition-colors hover:bg-[#EEF6FB] hover:text-[#287EAD]";
-
-  return (
-    <div className="relative">
-      <button
-        onClick={() => setOpen((value) => !value)}
-        className={buttonClassName}
-        title="Notifications and tasks"
-        aria-label="Open notifications and tasks tray"
-      >
-        <BellRing className="h-5 w-5" />
-        {attentionCount > 0 && (
-          <span className="absolute -right-1 -top-1 flex h-4 min-w-[16px] items-center justify-center bg-red-700 px-1 text-[9px] font-bold text-white">
-            {attentionCount > 9 ? "9+" : attentionCount}
-          </span>
-        )}
-      </button>
-
-      {open && (
-        <>
-          <div className="fixed inset-0 z-20" onClick={() => setOpen(false)} />
-          <div className="absolute right-0 top-11 z-30 w-[380px] overflow-hidden border border-[#C8CDD2] bg-white shadow-2xl">
-            <div className="border-b border-[#C8CDD2] bg-[#287EAD] px-4 py-3 text-white">
-              <p className="text-sm font-bold">Notifications & tasks</p>
-              <p className="mt-0.5 text-xs text-white/75">Separate updates from assigned work.</p>
-            </div>
-
-            <div className="grid grid-cols-2 border-b border-[#C8CDD2] bg-[#F5F7F8] text-sm">
-              <button
-                type="button"
-                onClick={() => { setOpen(false); _navigate("/notifications"); }}
-                className="flex items-center justify-between border-r border-[#C8CDD2] px-4 py-3 text-left font-semibold text-[#1F2933] hover:bg-[#EEF6FB]"
-              >
-                <span className="inline-flex items-center gap-2">
-                  <Inbox className="h-4 w-4 text-[#287EAD]" />
-                  Notices
-                </span>
-                <span className="font-bold text-[#287EAD]">{noticeUnreadCount}</span>
-              </button>
-              <button
-                type="button"
-                onClick={openTasks}
-                className="flex items-center justify-between px-4 py-3 text-left font-semibold text-[#1F2933] hover:bg-[#EEF6FB]"
-              >
-                <span className="inline-flex items-center gap-2">
-                  <ClipboardCheck className="h-4 w-4 text-[#287EAD]" />
-                  Tasks
-                </span>
-                <span className="font-bold text-[#287EAD]">{tasks.length + taskAlertUnreadCount}</span>
-              </button>
-            </div>
-
-            <div className="grid max-h-[430px] grid-cols-1 divide-y divide-[#C8CDD2] overflow-y-auto">
-              <section className="p-3">
-                <div className="mb-2 flex items-center justify-between">
-                  <p className="text-xs font-bold uppercase tracking-wider text-[#5E6870]">Notifications</p>
-                  <button onClick={() => { setOpen(false); _navigate("/notifications"); }} className="text-xs font-bold text-[#287EAD] hover:text-[#206D99]">
-                    View all
-                  </button>
+          {/* Admin Navigation (for administrators only) */}
+          {hasAdminAccess && (
+            <>
+              {!collapsed && (
+                <div className="mt-4 px-3 py-2">
+                  <p className="text-[10px] font-semibold uppercase tracking-wider text-[#6B7280]">
+                    Administration
+                  </p>
                 </div>
-                {visibleNotifications.length === 0 ? (
-                  <div className="border border-dashed border-[#C8CDD2] bg-[#F5F7F8] px-3 py-5 text-center text-sm text-[#5E6870]">
-                    No unread updates.
-                  </div>
-                ) : (
-                  <div className="space-y-1">
-                    {visibleNotifications.map((notification) => (
-                      <button
-                        key={notification.id}
-                        type="button"
-                        onClick={() => openNotification(notification)}
-                        className="block w-full border border-transparent px-3 py-2 text-left hover:border-[#C8CDD2] hover:bg-[#F5F7F8]"
-                      >
-                        <p className="line-clamp-2 text-sm font-semibold text-[#1F2933]">{notification.message}</p>
-                        <p className="mt-1 text-xs text-[#5E6870]">
-                          {new Date(notification.created_at).toLocaleString(undefined, { dateStyle: "short", timeStyle: "short" })}
-                        </p>
-                      </button>
-                    ))}
-                  </div>
-                )}
-              </section>
-
-              <section className="p-3">
-                <div className="mb-2 flex items-center justify-between">
-                  <p className="text-xs font-bold uppercase tracking-wider text-[#5E6870]">Tasks</p>
-                  <button onClick={openTasks} className="inline-flex items-center gap-1 text-xs font-bold text-[#287EAD] hover:text-[#206D99]">
-                    Open queue <ArrowRight className="h-3.5 w-3.5" />
-                  </button>
-                </div>
-                {visibleTaskAlerts.length > 0 && (
-                  <div className="mb-2 space-y-1">
-                    {visibleTaskAlerts.map((notification) => (
-                      <button
-                        key={notification.id}
-                        type="button"
-                        onClick={() => openNotification(notification)}
-                        className="block w-full border border-amber-200 bg-amber-50 px-3 py-2 text-left hover:bg-amber-100"
-                      >
-                        <p className="line-clamp-2 text-sm font-bold text-amber-900">{notification.message}</p>
-                      </button>
-                    ))}
-                  </div>
-                )}
-                {visibleTasks.length === 0 ? (
-                  <div className="border border-dashed border-[#C8CDD2] bg-[#F5F7F8] px-3 py-5 text-center text-sm text-[#5E6870]">
-                    No active tasks.
-                  </div>
-                ) : (
-                  <div className="space-y-1">
-                    {visibleTasks.map((task, index) => {
-                      const title = task.document_title || task.workflow_instance?.document?.title || "Workflow task";
-                      const ref = task.document_ref || task.workflow_instance?.document?.reference_number || task.step?.name || "";
-                      return (
-                        <button
-                          key={task.id || `${title}-${index}`}
-                          type="button"
-                          onClick={openTasks}
-                          className="block w-full border border-[#C8CDD2] bg-white px-3 py-2 text-left hover:bg-[#EEF6FB]"
-                        >
-                          <p className="truncate text-sm font-bold text-[#1F2933]">{title}</p>
-                          <p className="mt-1 truncate text-xs text-[#5E6870]">{ref}</p>
-                        </button>
-                      );
-                    })}
-                  </div>
-                )}
-              </section>
-            </div>
-          </div>
-        </>
-      )}
-    </div>
-  );
-}
-
-function ContentFallback() {
-  const [visible, setVisible] = useState(false);
-  useEffect(() => {
-    const t = setTimeout(() => setVisible(true), 180);
-    return () => clearTimeout(t);
-  }, []);
-  if (!visible) return null;
-  return (
-    <div className="flex min-h-[18rem] items-center justify-center border border-border bg-card">
-      <div className="flex items-center gap-2 text-sm text-muted-foreground">
-        <Loader2 className="h-4 w-4 animate-spin" />
-        <span>Loading page...</span>
-      </div>
-    </div>
-  );
-}
-
-function SidebarProfile() {
-  const { user } = useAuthStore();
-  const initials = `${user?.first_name?.[0] ?? ""}${user?.last_name?.[0] ?? ""}` || "U";
-
-  return (
-    <div className="border-t border-[#C8CDD2] bg-[#F7F8F9] p-3">
-      <div className="flex items-center gap-3 border border-[#D7DCE0] bg-white px-2 py-2">
-        <div className="flex h-9 w-9 shrink-0 items-center justify-center bg-[#287EAD] text-xs font-bold text-white">
-          {initials}
-        </div>
-        <div className="min-w-0">
-          <p className="truncate text-sm font-semibold text-[#1F2933]">
-            {user?.first_name} {user?.last_name}
-          </p>
-          <p className="truncate text-[11px] capitalize text-[#5E6870]">
-            {user?.job_description || "Staff"}
-          </p>
-        </div>
-      </div>
-    </div>
-  );
-}
-
-export function WorkspaceHeaderActions({ variant = "light" }: { variant?: "light" | "blue" }) {
-  const [idleReady, setIdleReady] = useState(false);
-
-  useEffect(() => {
-    let fallbackTimer: ReturnType<typeof setTimeout> | null = null;
-    let idleHandle: number | null = null;
-    const markReady = () => setIdleReady(true);
-    if (typeof window !== "undefined" && "requestIdleCallback" in window) {
-      idleHandle = (window as any).requestIdleCallback(markReady, { timeout: 1500 });
-      fallbackTimer = setTimeout(markReady, 1600);
-      return () => {
-        if (idleHandle !== null) (window as any).cancelIdleCallback(idleHandle);
-        if (fallbackTimer) clearTimeout(fallbackTimer);
-      };
-    }
-    fallbackTimer = setTimeout(markReady, 500);
-    return () => { if (fallbackTimer) clearTimeout(fallbackTimer); };
-  }, []);
-
-  const { data: summary } = useQuery({
-    queryKey: ["notifications", "summary"],
-    queryFn: () => notificationsAPI.summary().then((r) => r.data),
-    refetchInterval: 60_000,
-    enabled: idleReady,
-    ...QUERY_ONE_MINUTE_STALE,
-  });
-
-  const { data: notifications } = useQuery({
-    queryKey: ["notifications"],
-    queryFn: () => notificationsAPI.list().then((r) => r.data.results ?? r.data),
-    enabled: idleReady,
-    ...QUERY_ONE_MINUTE_STALE,
-  });
-
-  const { data: myTasks = [] } = useQuery({
-    queryKey: ["workflow", "my-tasks"],
-    queryFn: () => workflowAPI.myTasks().then((r) => r.data.results ?? r.data),
-    enabled: idleReady,
-    ...QUERY_ONE_MINUTE_STALE,
-  });
-
-  const trayAttentionCount =
-    (summary?.unread_notifications ?? 0) +
-    (summary?.unread_task_alerts ?? 0) +
-    (summary?.pending_tasks ?? 0);
-  const isBlue = variant === "blue";
-
-  return (
-    <div className="flex shrink-0 items-center gap-2">
-      {idleReady ? (
-        <Suspense fallback={null}>
-          <ChatLauncher variant={variant} />
-        </Suspense>
-      ) : null}
-      <NotificationsTray
-        notifications={notifications as any}
-        tasks={myTasks as unknown[]}
-        attentionCount={trayAttentionCount}
-        variant={variant}
-      />
-      {!isBlue && <div className="mx-1 h-6 w-px bg-[#C8CDD2]" />}
-      <ProfileMenu variant={variant} />
-    </div>
-  );
-}
-
-// ── Layout ────────────────────────────────────────────────────────────────────
-
-export default function Layout() {
-  const { user, deployment } = useAuthStore();
-  const queryClient = useQueryClient();
-  const _navigate = useNavigate();
-  void _navigate;
-  const location = useLocation();
-  const mainRef = useRef<HTMLElement | null>(null);
-  const hasAdminAccess = Boolean(user?.has_admin_access);
-  const [idleReady, setIdleReady] = useState(false);
-
-  // ── Sidebar collapse. `collapsePref` is the user's remembered choice for
-  // regular pages (persisted). The effective collapsed state is DERIVED during
-  // render — not stored in an effect — so a navigation paints the new page at
-  // the correct width on the first frame (one smooth slide, no snap-then-slide).
-  const [collapsePref, setCollapsePref] = useState<boolean>(() => {
-    if (typeof window === "undefined") return false;
-    try { return window.localStorage.getItem("sidebarCollapsed") === "1"; } catch { return false; }
-  });
-  // A manual toggle is remembered against the path it was made on, so it applies
-  // for that visit but never leaks onto the next page.
-  const [sidebarOverride, setSidebarOverride] = useState<{ path: string; collapsed: boolean } | null>(null);
-  useEffect(() => {
-    try { window.localStorage.setItem("sidebarCollapsed", collapsePref ? "1" : "0"); } catch { /* ignore */ }
-  }, [collapsePref]);
-
-  const routeDefaultCollapsed = isFullWidthByDefaultRoute(location.pathname) ? true : collapsePref;
-  const sidebarCollapsed =
-    sidebarOverride && sidebarOverride.path === location.pathname
-      ? sidebarOverride.collapsed
-      : routeDefaultCollapsed;
-
-  const toggleSidebar = () => {
-    const next = !sidebarCollapsed;
-    setSidebarOverride({ path: location.pathname, collapsed: next });
-    // On regular pages the toggle is also the lasting preference; on the
-    // collapse-by-default routes it's only an override for the current visit.
-    if (!isFullWidthByDefaultRoute(location.pathname)) setCollapsePref(next);
-  };
-
-  useEffect(() => {
-    let fallbackTimer: ReturnType<typeof setTimeout> | null = null;
-    let idleHandle: number | null = null;
-    const markReady = () => setIdleReady(true);
-    if (typeof window !== "undefined" && "requestIdleCallback" in window) {
-      idleHandle = (window as any).requestIdleCallback(markReady, { timeout: 1500 });
-      fallbackTimer = setTimeout(markReady, 1600);
-      return () => {
-        if (idleHandle !== null) (window as any).cancelIdleCallback(idleHandle);
-        if (fallbackTimer) clearTimeout(fallbackTimer);
-      };
-    }
-    fallbackTimer = setTimeout(markReady, 500);
-    return () => { if (fallbackTimer) clearTimeout(fallbackTimer); };
-  }, []);
-
-  // All sidebar/bell badge counts come from a single consolidated endpoint that
-  // runs on every authenticated page. This is the app's constant background
-  // load multiplier, so it's one cheap COUNT request (not three row-fetching
-  // polls) every 60s. (react-query pauses it while the tab is backgrounded.)
-  const { data: summary } = useQuery({
-    queryKey: ["notifications", "summary"],
-    queryFn: () => notificationsAPI.summary().then((r) => r.data),
-    refetchInterval: 60_000,
-    enabled: idleReady,
-    ...QUERY_ONE_MINUTE_STALE,
-  });
-
-  // When the pending-task badge changes (reassignment, delegation, new work),
-  // refresh the cached My Tasks list so it stays in sync without a full reload.
-  const prevPendingTasksRef = useRef<number | null>(null);
-  useEffect(() => {
-    if (summary?.pending_tasks == null) return;
-    const prev = prevPendingTasksRef.current;
-    prevPendingTasksRef.current = summary.pending_tasks;
-    if (prev !== null && prev !== summary.pending_tasks) {
-      void queryClient.invalidateQueries({ queryKey: ["workflow", "my-tasks"] });
-    }
-  }, [summary?.pending_tasks, queryClient]);
-
-  // The notification + task *lists* only feed the expanded tray, so they're no
-  // longer polled — they load once and the tray refetches them when opened.
-  const { data: notifications } = useQuery({
-    queryKey: ["notifications"],
-    queryFn: () => notificationsAPI.list().then((r) => r.data.results ?? r.data),
-    enabled: idleReady,
-    ...QUERY_ONE_MINUTE_STALE,
-  });
-
-  const { data: myTasks = [] } = useQuery({
-    queryKey: ["workflow", "my-tasks"],
-    queryFn: () => workflowAPI.myTasks().then((r) => r.data.results ?? r.data),
-    enabled: idleReady,
-    ...QUERY_ONE_MINUTE_STALE,
-  });
-
-  const unread = summary?.unread_notifications ?? 0;
-  const pendingTasksCount = summary?.pending_tasks ?? 0;
-  const pendingReviewsCount = summary?.pending_reviews ?? 0;
-  const signatureCount = summary?.incoming_signatures ?? 0;
-  const documentsRouteSegment = location.pathname.split("/")[2] ?? "";
-  const formsRouteSegment = location.pathname.split("/")[2] ?? "";
-  const usesWorkspaceCommandBar =
-    location.pathname === "/" ||
-    location.pathname === "/notifications" ||
-    location.pathname === "/search" ||
-    location.pathname === "/analytics" ||
-    location.pathname === "/workflow" ||
-    location.pathname === "/audit" ||
-    location.pathname === "/admin/templates" ||
-    location.pathname === "/documents" ||
-    location.pathname === "/documents/upload" ||
-    location.pathname === "/documents/scan" ||
-    location.pathname === "/documents/trash" ||
-    // Review queue: the list page AND opening a specific batch both render
-    // BulkScanPage which supplies its own blue WorkspaceCommandBar.
-    location.pathname === "/documents/review" ||
-    location.pathname.startsWith("/documents/review/") ||
-    (
-      location.pathname.startsWith("/documents/") &&
-      Boolean(documentsRouteSegment) &&
-      !["upload", "scan", "review", "trash", "folders"].includes(documentsRouteSegment) &&
-      !location.pathname.slice("/documents/".length).includes("/")
-    ) ||
-    // /forms/new — the template picker and fill experience both get the
-    // full-bleed treatment (same as /forms/:id — they both supply their own
-    // blue header).
-    location.pathname === "/forms/new" ||
-    // /forms (the list page) is intentionally NOT here — it uses Layout's
-    // normal header. Only a single form's workspace (/forms/:id) supplies
-    // its own header, same as /documents/:id does.
-    (
-      location.pathname.startsWith("/forms/") &&
-      Boolean(formsRouteSegment) &&
-      !location.pathname.slice("/forms/".length).includes("/")
-    );
-  // Bell badge: every unread notification (notices + task alerts) plus pending
-  // tasks — mirrors what the tray used to sum from the now-unpolled lists.
-  const trayAttentionCount =
-    (summary?.unread_notifications ?? 0) +
-    (summary?.unread_task_alerts ?? 0) +
-    (summary?.pending_tasks ?? 0);
-
-  useEffect(() => {
-    mainRef.current?.scrollTo({ top: 0, behavior: "auto" });
-  }, [location.pathname]);
-
-  const visibleAdmin = adminNav.filter(
-    (item) => {
-      if (item.allowedRoles && !hasAdminAccess) return false;
-      if (item.module && !useModuleEnabled(item.module)) return false;
-      return true;
-    }
-  );
-  const warmRoute = (to: string) => preloadRouteForPath(navTarget(to).pathname);
-
-  useEffect(() => {
-    if (!idleReady) return;
-    preloadCommonRoutes();
-  }, [idleReady]);
-
-  return (
-    <div
-      className="flex h-screen flex-col bg-background text-foreground"
-      style={{ "--app-sidebar-width": sidebarCollapsed ? "0px" : "270px" } as React.CSSProperties}
-    >
-
-      {/* ── Single continuous blue command bar ─────────────────────────────
-          • Logo area on the left (same width as the sidebar) keeps content
-            visually aligned with the page below.
-          • Sidebar toggle sits between logo and the page-content slot.
-          • WorkspaceCommandBar portals its content into #wcb-slot.
-          • Global actions (chat / bell / profile) are on the far right.
-      ───────────────────────────────────────────────────────────────── */}
-      <div className="flex h-[69px] shrink-0 items-center bg-[#287EAD] text-white">
-
-        {/* Logo — animates with the sidebar */}
-        <div
-          className="flex h-full shrink-0 items-center overflow-hidden border-r border-[#206D99] transition-[width] duration-200"
-          style={{ width: `var(--app-sidebar-width)` }}
-        >
-          {!sidebarCollapsed && (
-            <div className="flex h-full w-full items-center px-4">
-              {deployment?.logo_url ? (
-                <img
-                  src={deployment.logo_url}
-                  alt={deployment.product_name}
-                  className="h-8 w-auto max-h-8 object-contain"
-                />
-              ) : (
-                <FlaxemLogo variant="light" />
               )}
-            </div>
-          )}
-        </div>
-
-        {/* Sidebar toggle */}
-        <button
-          type="button"
-          onClick={toggleSidebar}
-          className="flex h-full w-11 shrink-0 items-center justify-center text-white/70 transition-colors hover:bg-white/10 hover:text-white"
-          title={sidebarCollapsed ? "Expand sidebar" : "Collapse sidebar"}
-          aria-label={sidebarCollapsed ? "Expand sidebar" : "Collapse sidebar"}
-          aria-expanded={!sidebarCollapsed}
-        >
-          {sidebarCollapsed ? <ChevronRight className="h-4 w-4" /> : <ChevronLeft className="h-4 w-4" />}
-        </button>
-        <div className="h-6 w-px bg-white/25" />
-
-        {/* Portal mount — WorkspaceCommandBar from each page renders here */}
-        <div id="wcb-slot" className="flex min-w-0 flex-1 items-center" />
-
-        {/* Global actions */}
-        <div className="flex shrink-0 items-center gap-1 border-l border-white/20 pl-4 pr-3">
-          {idleReady ? (
-            <Suspense fallback={null}>
-              <ChatLauncher variant="blue" />
-            </Suspense>
-          ) : null}
-          <NotificationsTray
-            notifications={notifications as any}
-            tasks={myTasks as unknown[]}
-            attentionCount={trayAttentionCount}
-            variant="blue"
-          />
-          <div className="mx-0.5 h-5 w-px bg-white/20" />
-          <ProfileMenu variant="blue" />
-        </div>
-      </div>
-
-
-      {/* ══════════════════════════════════════════════════════════════════
-          BODY ROW — sidebar on the left, content on the right, both
-          filling the remaining height below the header.
-      ══════════════════════════════════════════════════════════════════ */}
-      <div className="flex min-h-0 flex-1">
-
-        {/* ── Sidebar ── */}
-        <aside
-          className={clsx(
-            "flex flex-shrink-0 flex-col overflow-hidden bg-[#F2F3F4] text-[#1F2933] transition-[width] duration-200",
-            sidebarCollapsed ? "w-0" : "w-[270px] border-r border-[#C8CDD2]",
-          )}
-        >
-          {/* Nav — scrollable */}
-          <nav className="scrollbar-minimal flex-1 overflow-y-auto">
-            {/* ── Primary nav ────────────────────────────────────────── */}
-            <div className="space-y-0.5 px-2 py-3">
-              {mainNav.map((entry) => {
-                if (isGroup(entry)) {
-                  if (entry.allowedRoles && !hasAdminAccess) return null;
-                  return (
-                    <SidebarGroup
-                      key={entry.prefix}
-                      group={entry}
-                      userAccess={hasAdminAccess ? "admin" : undefined}
-                      taskCount={pendingTasksCount}
-                      reviewCount={pendingReviewsCount}
-                      onWarmRoute={warmRoute}
-                    />
-                  );
-                }
-                const { to, icon: Icon, label, exact, allowedRoles, module } = entry;
-                if (allowedRoles && !hasAdminAccess) return null;
-                if (module && !useModuleEnabled(module)) return null;
-                const badgeValue = to === "/notifications" ? unread
-                  : to === "/workflow" ? pendingTasksCount
-                  : to === "/request-signature" ? (signatureCount || undefined)
-                  : undefined;
+              {adminNavItems.map((item) => {
+                const Icon = item.icon;
+                const isActive = location.pathname === item.to || (item.to !== "/workflow/builder" && location.pathname.startsWith(item.to));
                 return (
                   <NavLink
-                    key={to}
-                    to={to}
-                    end={exact}
-                    onMouseEnter={() => warmRoute(to)}
-                    onFocus={() => warmRoute(to)}
-                    className={({ isActive }) =>
-                      clsx(
-                        sidebarItemBase,
-                        isActive
-                          ? sidebarItemActive
-                          : sidebarItemInactive
-                      )
-                    }
+                    key={item.to}
+                    to={item.to}
+                    className={cn(
+                      "group flex items-center gap-3 px-3 py-2.5 text-sm font-medium transition-colors relative",
+                      isActive
+                        ? "bg-[#287EAD] text-white shadow-sm"
+                        : "text-[#D1D5DB] hover:bg-[#1F2937] hover:text-white"
+                    )}
+                    title={collapsed ? item.label : undefined}
                   >
-                    {({ isActive }) => (
-                      <>
-                        <Icon className={clsx("h-4 w-4 flex-shrink-0", isActive ? sidebarIconActive : sidebarIconInactive)} />
-                        <span className="flex-1">{label}</span>
-                            {badgeValue ? (
-                              <span
-                                className={clsx(
-                                  "inline-flex min-w-[1.25rem] items-center justify-center px-1.5 py-0.5 text-[10px] font-bold text-white",
-                                  to === "/workflow" || to === "/notifications" || to === "/request-signature" ? "bg-red-700" : "bg-[#287EAD]"
-                                )}
-                              >
-                                {badgeValue}
-                              </span>
-                            ) : null}
-                      </>
+                    <Icon className={cn("h-5 w-5 shrink-0", isActive ? "text-white" : "text-[#9AA5B1] group-hover:text-white")} />
+                    {!collapsed && (
+                      <span className="truncate flex-1">{item.label}</span>
                     )}
                   </NavLink>
                 );
               })}
-            </div>
+            </>
+          )}
+        </nav>
 
-            {/* ── Folder tree ────────────────────────────────────────── */}
-            <div className="pb-2">
-              {idleReady && (
-                <FolderTree
-                  activeFolderId={
-                    location.pathname.startsWith("/documents/folders/")
-                      ? location.pathname.split("/").pop() ?? null
-                      : null
-                  }
-                />
-              )}
-            </div>
-
-            {/* ── Administration ─────────────────────────────────────── */}
-            {visibleAdmin.length > 0 && (
-              <div className="space-y-0.5 px-2 py-3">
-                <div className="px-3 pb-1 pt-0">
-                  <p className="text-[10px] font-bold uppercase tracking-widest text-[#6E767D]">
-                    Administration
-                  </p>
-                </div>
-                {visibleAdmin.map(({ to, icon: Icon, label, module }) => {
-                  if (module && !useModuleEnabled(module)) return null;
-                  return (
-                    <NavLink
-                      key={to}
-                      to={to}
-                      onMouseEnter={() => warmRoute(to)}
-                      onFocus={() => warmRoute(to)}
-                      className={({ isActive }) =>
-                        clsx(
-                          sidebarItemBase,
-                          isActive
-                            ? sidebarItemActive
-                            : sidebarItemInactive
-                        )
-                      }
-                    >
-                      {({ isActive }) => (
-                        <>
-                          <Icon className={clsx("h-4 w-4 flex-shrink-0", isActive ? sidebarIconActive : sidebarIconInactive)} />
-                          <span>{label}</span>
-                        </>
-                      )}
-                    </NavLink>
-                  );
-                })}
+        {/* Scoped Sidebar Footer */}
+        <div className="border-t border-[#1F2937] p-3 space-y-2">
+          <div className={cn("flex items-center gap-3 rounded-lg bg-[#1F2937]/50 p-2", collapsed && "justify-center")}>
+            <CircleUserRound className="h-7 w-7 shrink-0 text-[#287EAD]" />
+            {!collapsed && (
+              <div className="flex-1 min-w-0">
+                <p className="truncate text-xs font-semibold text-white">{user?.first_name || user?.email || "User"}</p>
+                <p className="truncate text-[10px] text-[#9AA5B1]">{user?.has_admin_access ? "Administrator" : "Procurement User"}</p>
               </div>
             )}
-          </nav>
+            {!collapsed && (
+              <button
+                type="button"
+                onClick={() => logout()}
+                className="text-[#9AA5B1] hover:text-rose-400 p-1"
+                title="Log out"
+              >
+                <LogOut className="h-4 w-4" />
+              </button>
+            )}
+          </div>
+        </div>
+      </aside>
 
-          <SidebarProfile />
-        </aside>
+      {/* ── Main Work Area ── */}
+      <div className="flex flex-1 flex-col overflow-hidden">
+        {/* Top Header Bar */}
+        <header className="flex h-12 shrink-0 items-center justify-between border-b border-[#E4E7EB] bg-white px-4 shadow-sm z-20">
+          <div className="flex items-center gap-3">
+            <img src={dmsLogo} alt={brandName} className="h-9 w-auto object-contain" />
+            <h2 className="text-base font-bold tracking-tight text-[#1F2933]">
+              {location.pathname.includes("/new")
+                ? "New Requisition"
+                : location.pathname.includes("/suppliers")
+                ? "SunSystems Suppliers & Vendors"
+                : location.pathname.includes("/approvals")
+                ? "Requisition Approvals Queue"
+                : location.pathname.includes("/analytics")
+                ? "Procurement Spend Analytics"
+                : location.pathname.includes("/dashboard")
+                ? "Requisition Dashboard"
+                : "Requisitions Register"}
+            </h2>
+          </div>
 
-        {/* ── Page content ── */}
-        <main
-          ref={mainRef}
-          className={clsx(
-            "scrollbar-minimal min-w-0 flex-1 overflow-y-auto bg-background",
-            usesWorkspaceCommandBar ? "p-0" : "p-6",
-          )}
-        >
-          <Suspense fallback={<ContentFallback />}>
+          <div className="flex items-center gap-3">
+            {/* Templates page actions */}
+            {isTemplatesPage && (
+              <button
+                type="button"
+                onClick={() => navigate("/forms/new/builder")}
+                className="inline-flex items-center gap-1.5 bg-[#287EAD] px-3 py-1 text-xs font-semibold text-white shadow-sm hover:bg-[#1E6F99] transition-colors"
+              >
+                <PlusCircle className="h-3 w-3" />
+                New Form
+              </button>
+            )}
+
+            {/* Direct Create Requisition Shortcut */}
+            {!location.pathname.includes("/new") && !isTemplatesPage && (
+              <button
+                type="button"
+                onClick={() => navigate("/new")}
+                className="inline-flex items-center gap-1.5 bg-[#287EAD] px-3 py-1 text-xs font-semibold text-white shadow-sm hover:bg-[#1E6F99] transition-colors"
+              >
+                <PlusCircle className="h-3 w-3" />
+                Raise Requisition
+              </button>
+            )}
+
+            {/* Chat Launcher */}
+            <ChatLauncher variant="light" />
+
+            {/* Notification Bell */}
+            <button
+              type="button"
+              onClick={() => navigate("/notifications")}
+              className="relative rounded-full p-1.5 text-[#5E6870] hover:bg-slate-100 transition-colors"
+              title="Notifications"
+            >
+              <Bell className="h-4 w-4" />
+              {unreadCount > 0 && (
+                <span className="absolute right-1 top-1 flex h-2 w-2 rounded-full bg-rose-500" />
+              )}
+            </button>
+          </div>
+        </header>
+
+        {/* Content Outlet */}
+        <main className="flex-1 overflow-y-auto bg-[#F4F6F8]">
+          <Suspense
+            fallback={
+              <div className="flex h-64 items-center justify-center">
+                <div className="h-8 w-8 animate-spin rounded-full border-4 border-[#287EAD] border-t-transparent" />
+              </div>
+            }
+          >
             <Outlet />
           </Suspense>
         </main>
-
       </div>
     </div>
   );

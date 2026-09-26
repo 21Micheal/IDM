@@ -281,9 +281,9 @@ manually (or in CI) when updating migrations or backend-sensitive queries:
   **not** applied to PostgreSQL (PostgreSQL is strict by default).
 - **charset** — The `charset=utf8mb4` MySQL option is **not** applied to
   PostgreSQL (UTF-8 is always the default).
-- **Port conflict** — The Compose overlay publishes PostgreSQL on `5432`.
-  If you also have a local PostgreSQL instance, either stop it or change
-  the host port in the overlay (`"15432:5432"`).
+- **Port conflict** — The Compose overlay publishes PostgreSQL on host port
+  `15432` by default; containers still connect to `postgres:5432`. Set
+  `POSTGRES_HOST_PORT` to another free host port if needed.
 - **MySQL service** — When using the Compose overlay, the `db` (MySQL)
   service is still defined but receives no `depends_on` references. It
   will not start unless explicitly requested. Add `--scale db=0` to

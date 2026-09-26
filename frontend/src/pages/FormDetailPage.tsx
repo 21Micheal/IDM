@@ -17,7 +17,7 @@
  * turns out to matter for forms too, say so and it can be ported over.
  */
 
-import { Suspense, useEffect, useRef, useState } from "react";
+import { Suspense, useEffect, useRef, useState, useMemo } from "react";
 import { extractApiError } from "@/lib/apiError";
 import { useParams, useNavigate, Link } from "react-router-dom";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
@@ -42,6 +42,10 @@ import { useAuthStore } from "@/store/authStore";
 import { cn } from "@/lib/utils";
 import { QUERY_SHORT_STALE } from "@/lib/reactQueryDefaults";
 import { WorkspaceCommandBar } from "@/components/shared/WorkspaceCommandBar";
+import SignaturePlacementModal, {
+  FormTargetField,
+  SignaturePlacementResult,
+} from "@/components/signatures/SignaturePlacementModal";
 
 const AUDIT_PAGE_SIZE = 5;
 
@@ -131,6 +135,7 @@ export default function FormDetailPage() {
   const [comment, setComment] = useState("");
   const [auditPage, setAuditPage] = useState(1);
   const [workflowActionCompleted, setWorkflowActionCompleted] = useState(false);
+  const [isSigningOpen, setIsSigningOpen] = useState(false);
   // Required fields that failed the last save/submit attempt. Kept in state
   // (not just a toast) so a long list stays on screen while it's being fixed.
   const [missingFields, setMissingFields] = useState<string[]>([]);
@@ -203,6 +208,26 @@ export default function FormDetailPage() {
     refetchInterval: (query) => (query.state.data?.isActive ? 15_000 : false),
   });
   const workflowStepsCount = workflowData?.steps?.length ?? 0;
+
+  // Inspect template schema for signature and date fields
+  const detectedFormFields: FormTargetField[] = useMemo(() => {
+    const list: FormTargetField[] = [];
+    const secList = (formData?.sections ?? []) as Array<{ fields?: Array<Record<string, any>> }>;
+    for (const s of secList) {
+      for (const f of s.fields ?? []) {
+        const k = f.key ?? f.id;
+        const label = f.label || k;
+        if (/signature|sign|sig/i.test(k) || f.type === "signature") {
+          list.push({ key: k, label: `${label} (Signature)`, kind: "signature" });
+        } else if (/date/i.test(k) || f.type === "date") {
+          list.push({ key: k, label: `${label} (Date)`, kind: "date" });
+        } else if (/signer|signed_by|authorizer|requester/i.test(k)) {
+          list.push({ key: k, label: `${label} (Name)`, kind: "text" });
+        }
+      }
+    }
+    return list;
+  }, [formData?.sections]);
 
   const { data: auditLogs } = useQuery({
     queryKey: ["form-audit", id, auditPage],
@@ -416,10 +441,10 @@ export default function FormDetailPage() {
         }
       >
         <button
-          onClick={() => navigate("/forms")}
+          onClick={() => navigate("/list")}
           className="flex h-8 items-center gap-1 border border-white/20 bg-white/10 px-3 text-xs text-white/85 hover:text-white"
         >
-          <ArrowLeft className="h-3.5 w-3.5" /> Forms
+          <ArrowLeft className="h-3.5 w-3.5" /> Requisitions
         </button>
         <div className="min-w-0 flex-1">
           <div className="flex items-center gap-2">
@@ -544,6 +569,7 @@ export default function FormDetailPage() {
                 documentId={doc.id}
                 documentStatus={step}
                 canEditConditionalSections={canEditConditionalSections()}
+                onLaunchSignatureModal={() => setIsSigningOpen(true)}
               />
             </div>
           </div>
@@ -555,6 +581,55 @@ export default function FormDetailPage() {
               title={doc.title}
               availableStages={availableStages}
               onClose={() => setShowJournalXml(false)}
+            />
+          )}
+
+          {/* Signature Modal */}
+          {isSigningOpen && (
+            <SignaturePlacementModal
+              mode="form"
+              formFields={detectedFormFields}
+              confirmLabel="Apply to Form"
+              onCancel={() => setIsSigningOpen(false)}
+              onConfirm={(result) => {
+                // Use the formFieldValues from the modal result if available
+                const fieldValues = result.formFieldValues || {};
+                const updates: Record<string, unknown> = {};
+                
+                // Apply form field values from modal
+                Object.entries(fieldValues).forEach(([key, value]) => {
+                  updates[key] = value;
+                });
+                
+                // Also process items for signature styling
+                result.items.forEach((item) => {
+                  if (item.kind === "signature" && item.image_data) {
+                    updates[item.field_key || ""] = item.image_data;
+                    // Store styling metadata
+                    updates[`${item.field_key || ""}_style`] = {
+                      color: item.color,
+                      fontSize: item.font_percent ? `${item.font_percent * 10}px` : '16px',
+                      fontFamily: item.font_family || 'helvetica',
+                      bold: item.bold,
+                      italic: item.italic,
+                    };
+                  } else if (item.kind === "date" && item.date_iso) {
+                    updates[item.field_key || ""] = item.date_iso;
+                    updates[`${item.field_key || ""}_date`] = item.date_iso;
+                  } else if (item.kind === "text" && item.text) {
+                    updates[item.field_key || ""] = item.text;
+                    updates[`${item.field_key || ""}_name`] = item.text;
+                  }
+                });
+                
+                setFormValues((prev) => ({ ...prev, ...updates }));
+                formDirtyRef.current = true;
+                setIsSigningOpen(false);
+              }}
+              onApplyToForm={(fields) => {
+                setFormValues((prev) => ({ ...prev, ...fields }));
+                formDirtyRef.current = true;
+              }}
             />
           )}
 

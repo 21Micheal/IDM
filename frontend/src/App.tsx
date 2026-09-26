@@ -13,22 +13,10 @@ const Layout = lazy(() => import("@/components/shared/Layout"));
 const LoginPage = lazy(() => import("@/pages/LoginPage"));
 const PasswordResetConfirmPage = lazy(() => import("@/pages/PasswordResetConfirmPage"));
 const ForceChangePasswordPage = lazy(() => import("@/pages/ForceChangePasswordPage"));
-const DashboardPage = lazy(() => import("@/pages/DashboardPage"));
 const AnalyticsDashboardPage = lazy(() => import("@/pages/AnalyticsDashboard"));
-const DocumentsPage = lazy(() => import("@/pages/DocumentsPage"));
-const TrashPage = lazy(() => import("@/pages/TrashPage"));
-const DocumentDetailPage = lazy(() => import("@/pages/DocumentDetailPage"));
-const UploadPage = lazy(() => import("@/pages/UploadPage"));
-const RequestSignaturePage = lazy(() => import("@/pages/RequestSignaturePage"));
-const SearchPage = lazy(() => import("@/pages/SearchPage"));
 const WorkflowPage = lazy(() => import("@/pages/WorkflowPage"));
-const AdminPage = lazy(() => import("@/pages/AdminPage"));
-const AdminDocumentTypesPage = lazy(() => import("@/pages/AdminDocumentTypesPage"));
-const AdminMigrationPage = lazy(() => import("@/pages/AdminMigrationPage"));
 const AdminMailboxPage = lazy(() => import("@/pages/AdminMailboxPage"));
 const AdminSunSystemsPage = lazy(() => import("@/pages/AdminSunSystemsPage"));
-const ReviewQueuePage = lazy(() => import("@/pages/ReviewQueuePage"));
-const AuditPage = lazy(() => import("@/pages/AuditPage"));
 const UsersPage = lazy(() => import("@/pages/UsersPage"));
 const UserDetailPage = lazy(() => import("@/pages/UserDetailPage"));
 const DepartmentsPage = lazy(() => import("@/pages/DepartmentsPage"));
@@ -37,12 +25,15 @@ const ProfilePage = lazy(() => import("@/pages/ProfilePage"));
 const WorkflowBuilderPage = lazy(() => import("@/pages/WorkflowBuilderPage"));
 const NotificationsPage = lazy(() => import("@/pages/NotificationsPage"));
 const NotificationWorkflowPage = lazy(() => import("@/pages/NotificationWorkflowPage"));
-const FolderPage = lazy(() => import("@/pages/FolderPage"));
 const TemplatesPage = lazy(() => import("@/pages/TemplatesPage"));
-const FormsPage = lazy(() => import("@/pages/FormsPage"));
-const FormUploadPage = lazy(() => import("@/components/templates/FormUploadPage"));
 const FormDetailPage = lazy(() => import("@/pages/FormDetailPage"));
-const PaymentRunPage = lazy(() => import("@/pages/PaymentRunPage"));
+const RequisitionsPage = lazy(() => import("@/pages/RequisitionsPage"));
+const SuppliersPage = lazy(() => import("@/pages/SuppliersPage"));
+const RequisitionDashboardPage = lazy(() => import("@/pages/RequisitionDashboardPage"));
+const NewRequisitionPage = lazy(() => import("@/pages/NewRequisitionPage"));
+const RequisitionFormBuilder = lazy(() => import("@/pages/RequisitionFormBuilder"));
+
+
 
 // ── Guards ────────────────────────────────────────────────────────────────────
 
@@ -254,15 +245,6 @@ function RequireAdmin({ children }: { children: React.ReactNode }) {
   return <>{children}</>;
 }
 
-/** Analytics is open to admins and department heads (HOD group members). */
-function RequireAnalytics({ children }: { children: React.ReactNode }) {
-  const user = useAuthStore((s) => s.user);
-  if (!user) return <Navigate to="/login" replace />;
-  const allowed = user.has_admin_access || (user.group_names ?? []).includes("HOD");
-  if (!allowed) return <Navigate to="/" replace />;
-  return <>{children}</>;
-}
-
 const ROUTE_FALLBACK_CONTENT = [
   {
     match: (pathname: string) => pathname === "/login",
@@ -275,36 +257,6 @@ const ROUTE_FALLBACK_CONTENT = [
     description: "Loading your account safeguards for this required step.",
   },
   {
-    match: (pathname: string) => pathname.startsWith("/personal-documents"),
-    title: "Preparing personal documents",
-    description: "Loading your private uploads, tags, and personal notes.",
-  },
-  {
-    match: (pathname: string) => pathname.startsWith("/documents/upload"),
-    title: "Preparing upload workspace",
-    description: "Loading document intake and metadata capture tools.",
-  },
-  {
-    match: (pathname: string) => pathname.startsWith("/documents/bulk-scan"),
-    title: "Preparing bulk scan",
-    description: "Loading batch OCR intake and per-document review tools.",
-  },
-  {
-    match: (pathname: string) => pathname.startsWith("/documents/scan"),
-    title: "Preparing scan workspace",
-    description: "Loading OCR intake, extraction pipeline, and scan review tools.",
-  },
-  {
-    match: (pathname: string) => pathname.startsWith("/documents/"),
-    title: "Preparing document workspace",
-    description: "Loading the selected file, version history, and review actions.",
-  },
-  {
-    match: (pathname: string) => pathname === "/documents",
-    title: "Preparing document library",
-    description: "Loading folders, filters, and the latest document records.",
-  },
-  {
     match: (pathname: string) => pathname.startsWith("/workflow/builder"),
     title: "Preparing workflow builder",
     description: "Loading routing rules, approval steps, and template settings.",
@@ -315,19 +267,9 @@ const ROUTE_FALLBACK_CONTENT = [
     description: "Loading approval tasks, handoffs, and current workflow status.",
   },
   {
-    match: (pathname: string) => pathname.startsWith("/search"),
-    title: "Preparing search workspace",
-    description: "Loading indexed records, filters, and retrieval tools.",
-  },
-  {
     match: (pathname: string) => pathname.startsWith("/notifications"),
     title: "Preparing notifications",
     description: "Loading alerts, reminders, and recent workflow updates.",
-  },
-  {
-    match: (pathname: string) => pathname.startsWith("/audit"),
-    title: "Preparing audit trail",
-    description: "Loading activity history, controls, and trace records.",
   },
   {
     match: (pathname: string) => pathname.startsWith("/profile"),
@@ -335,24 +277,29 @@ const ROUTE_FALLBACK_CONTENT = [
     description: "Loading account preferences, security options, and personal details.",
   },
   {
-    match: (pathname: string) => pathname === "/forms",
-    title: "Preparing forms list",
-    description: "Loading forms, filters, and request summaries.",
+    match: (pathname: string) => pathname.startsWith("/new"),
+    title: "Preparing new requisition",
+    description: "Loading requisition form template and creation tools.",
   },
   {
-    match: (pathname: string) => pathname.startsWith("/forms/new"),
-    title: "Preparing new form",
-    description: "Loading form templates and create-workflow tools.",
+    match: (pathname: string) => pathname.startsWith("/list"),
+    title: "Preparing requisitions list",
+    description: "Loading requisitions, filters, and request summaries.",
   },
   {
-    match: (pathname: string) => pathname.startsWith("/forms/"),
-    title: "Preparing form detail",
-    description: "Loading the selected form and approval workflow.",
+    match: (pathname: string) => pathname.startsWith("/suppliers"),
+    title: "Preparing suppliers",
+    description: "Loading supplier records and integration details.",
   },
   {
     match: (pathname: string) => pathname.startsWith("/admin"),
     title: "Preparing administration",
     description: "Loading configuration, user controls, and system management tools.",
+  },
+  {
+    match: (pathname: string) => pathname.startsWith("/forms/new/builder"),
+    title: "Preparing form builder",
+    description: "Loading template builder and field configuration tools.",
   },
 ];
 
@@ -360,7 +307,7 @@ function RouteFallback() {
   const location = useLocation();
   const content = ROUTE_FALLBACK_CONTENT.find((item) => item.match(location.pathname)) ?? {
     title: "Preparing your workspace",
-    description: "Loading documents, workflow tools, and permissions for this view.",
+    description: "Loading requisition tools, workflow, and permissions for this view.",
   };
 
   return (
@@ -403,71 +350,40 @@ export default function App() {
               }
             />
 
-            {/* Protected — all regular pages */}
+            {/* Protected — requisition-only deployment */}
             <Route
               path="/"
               element={
                 <RequireAuth>
                   <RequirePasswordChanged>
-                    <Layout />
+                    <Layout
+                      brandName="REQUISITION PORTAL"
+                    />
                   </RequirePasswordChanged>
                 </RequireAuth>
               }
             >
-              <Route index element={<DashboardPage />} />
-              <Route path="analytics" element={<RequireAnalytics><AnalyticsDashboardPage /></RequireAnalytics>} />
-
-              {/* Documents */}
-              <Route path="documents"        element={<DocumentsPage />} />
-              <Route path="documents/trash"  element={<TrashPage />} />
-              <Route path="personal-documents" element={<DocumentsPage personalOnly />} />
-              <Route path="documents/upload" element={<UploadPage />} />
-              <Route path="documents/scan"   element={<UploadPage scanOnly />} />
-              <Route path="documents/bulk-upload" element={<Navigate to="/documents/upload?mode=bulk" replace />} />
-              <Route path="documents/bulk-scan" element={<Navigate to="/documents/scan?mode=bulk" replace />} />
-              {/* Review queue — must precede documents/:id so "review" isn't read as an id. */}
-              <Route path="documents/review" element={<ReviewQueuePage />} />
-              <Route path="documents/review/:batchId" element={<ReviewQueuePage />} />
-              <Route path="documents/:id"    element={<DocumentDetailPage />} />
-              <Route path="documents/folders/:folderId" element={<FolderPage />} />
-              <Route path="forms" element={<FormsPage />} />
-              <Route path="forms/new" element={<FormUploadPage />} />
-              <Route path="forms/:id" element={<FormDetailPage />} />
-              <Route path="request-signature" element={<RequestSignaturePage />} />
-
-              <Route path="templates" element={<Navigate to="/admin/templates" replace />} />
-
-              {/* SunSystems */}
-              <Route path="payment-run" element={<PaymentRunPage />} />
-
-              {/* Search */}
-              <Route path="search"    element={<SearchPage />} />
-
-              {/* Workflow */}
-              <Route path="workflow"  element={<WorkflowPage />} />
-              <Route path="workflow/builder" element={  <RequireAdmin> <WorkflowBuilderPage />  </RequireAdmin>  }/>
-
-              {/* Notifications */}
+              <Route index element={<RequisitionDashboardPage />} />
+              <Route path="list" element={<RequisitionsPage />} />
+              <Route path="new" element={<NewRequisitionPage />} />
+              <Route path="suppliers" element={<SuppliersPage />} />
+              <Route path="approvals" element={<WorkflowPage />} />
+              <Route path="analytics" element={<AnalyticsDashboardPage />} />
               <Route path="notifications" element={<NotificationsPage />} />
               <Route path="notifications/workflow/:documentId" element={<NotificationWorkflowPage />} />
-
-              {/* Audit */}
-              <Route path="audit"     element={<AuditPage />} />
-
-              {/* Profile — every user */}
-              <Route path="profile"   element={<ProfilePage />} />
-
-              {/* Admin-only */}
-              <Route path="admin/users"           element={<RequireAdmin><UsersPage /></RequireAdmin>} />
-              <Route path="admin/users/:id"       element={<RequireAdmin><UserDetailPage /></RequireAdmin>} />
-              <Route path="admin/settings"        element={<RequireAdmin><AdminPage /></RequireAdmin>} />
-              <Route path="admin/document-types"  element={<RequireAdmin><AdminDocumentTypesPage /></RequireAdmin>} />
-              <Route path="admin/templates"       element={<RequireAdmin><TemplatesPage /></RequireAdmin>} />
-              <Route path="admin/departments"     element={<RequireAdmin><DepartmentsPage /></RequireAdmin>} />
-              <Route path="admin/groups"          element={<RequireAdmin><GroupsPage /></RequireAdmin>} />
-              <Route path="admin/migration"       element={<RequireAdmin><AdminMigrationPage /></RequireAdmin>} />
-              <Route path="admin/mailboxes"       element={<RequireAdmin><AdminMailboxPage /></RequireAdmin>} />
-              <Route path="admin/sunsystems"      element={<RequireAdmin><AdminSunSystemsPage /></RequireAdmin>} />
+              <Route path=":id" element={<FormDetailPage />} />
+              <Route path="forms/new/builder" element={<RequisitionFormBuilder />} />
+              <Route path="profile" element={<ProfilePage />} />
+              
+              {/* Admin-only routes */}
+              <Route path="admin/templates" element={<RequireAdmin><TemplatesPage /></RequireAdmin>} />
+              <Route path="admin/users" element={<RequireAdmin><UsersPage /></RequireAdmin>} />
+              <Route path="admin/users/:id" element={<RequireAdmin><UserDetailPage /></RequireAdmin>} />
+              <Route path="admin/departments" element={<RequireAdmin><DepartmentsPage /></RequireAdmin>} />
+              <Route path="admin/groups" element={<RequireAdmin><GroupsPage /></RequireAdmin>} />
+              <Route path="admin/mailboxes" element={<RequireAdmin><AdminMailboxPage /></RequireAdmin>} />
+              <Route path="admin/sunsystems" element={<RequireAdmin><AdminSunSystemsPage /></RequireAdmin>} />
+              <Route path="workflow/builder" element={<RequireAdmin><WorkflowBuilderPage /></RequireAdmin>} />
             </Route>
 
             <Route path="*" element={<Navigate to="/" replace />} />

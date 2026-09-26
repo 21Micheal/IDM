@@ -1,27 +1,21 @@
 /**
- * SignaturePlacementModal — refined PDF signing surface (Sejda-style).
+ * SignaturePlacementModal — Dual-mode signing surface for both PDF documents and interactive Forms.
  *
- * Improvements over the original:
- *  • Signature is placed as a TRANSPARENT image that is freely DRAGGABLE and
- *    RESIZABLE (corner handles, aspect-locked) directly on the page.
- *  • No name/date is force-appended. Instead the signer can OPTIONALLY drop a
- *    name field and/or a date field as their own independent, draggable items.
- *  • A draggable DATE picker defaulting to East Africa Time (Africa/Nairobi),
- *    with selectable formats.
- *  • "Use a different signature" — sign with the saved signature OR create a
- *    new one inline (draw / type / upload) without overwriting the saved one.
- *  • Undo / clear for placed items, multi-page support, zoom.
- *
- * Output: an array of placed items (percentages relative to the rendered page),
- * so your backend can stamp each one independently. Backwards-compatible
- * `signaturePlacement` is also provided for the first signature item.
+ * Capabilities:
+ *  1. PDF Mode (traditional): Loads PDF document, allows draggable and resizable signature, date,
+ *     name, and custom text stamps with multi-page navigation and zoom.
+ *  2. Form Mode (direct web form): Lets users apply their saved signature or draw/type a new
+ *     signature, choose a formatted date (East Africa Time / Africa/Nairobi), and apply them
+ *     directly to form fields (e.g., `requester_signature`, `signature`, `date`, `signed_by`)
+ *     or stamp them onto the form canvas.
  */
 import { useEffect, useMemo, useRef, useState } from "react";
 import { useQuery } from "@tanstack/react-query";
 import {
-  Loader2, Type as TypeIcon, CalendarClock, Trash2, Undo2, RefreshCw,
-  PenLine, ChevronLeft, ChevronRight, ZoomIn, ZoomOut, Plus,
-  Bold, Italic, AlignLeft, AlignCenter, AlignRight,
+  Loader2, Type as TypeIcon, CalendarClock, Trash2, Undo2,
+  PenLine, ChevronLeft, ChevronRight, ZoomIn, ZoomOut,
+  Bold, Italic, AlignLeft, AlignCenter, AlignRight, CheckCircle2,
+  Sparkles, FileText, Check, Layers
 } from "lucide-react";
 import clsx from "clsx";
 import { documentsAPI, profileAPI } from "@/services/api";
@@ -40,36 +34,29 @@ export interface PlacedItem {
   id: string;
   kind: PlacedItemKind;
   page_number: number;
-  /** top-left position + box size, all as % of the rendered page (0–100). */
   x_percent: number;
   y_percent: number;
   width_percent: number;
   height_percent: number;
-  /** For signature items: transparent PNG data URL. */
   image_data?: string;
-  /** For text/name/date items: the rendered string. */
   text?: string;
-  /** For text/name/date: font size as % of page height (keeps it resolution-independent). */
   font_percent?: number;
-  /** For date items: the ISO timestamp + chosen format, for backend re-rendering if desired. */
   date_iso?: string;
   date_format?: string;
-  /** Text styling (text/name/date) so signers can match the document's font. */
   font_family?: "helvetica" | "times" | "courier";
   bold?: boolean;
   italic?: boolean;
   align?: "left" | "center" | "right";
-  color?: string; // hex, e.g. "#1F2933"
+  color?: string;
+  field_key?: string;
 }
 
-/** CSS font stacks mirroring the backend's PDF base-14 fonts. */
 const FONT_CSS: Record<string, string> = {
   helvetica: "Helvetica, Arial, sans-serif",
   times: "'Times New Roman', Times, serif",
   courier: "'Courier New', Courier, monospace",
 };
 
-/** Back-compat single-signature shape (matches the original modal). */
 export type SignaturePlacement = {
   page_number: number;
   x_percent: number;
@@ -80,15 +67,17 @@ export type SignaturePlacement = {
 export interface SignaturePlacementResult {
   items: PlacedItem[];
   timezone: string;
-  /** Convenience: the first signature item mapped to the original shape (or null). */
   signaturePlacement: SignaturePlacement | null;
-  /** True if the signer drew/typed/uploaded a new signature for this signing
-   * action instead of using their saved one. When true, `signatureImage`
-   * carries the transparent PNG data URL to send as `signature_image`
-   * alongside `use_new_signature: true`; the saved signature on file is
-   * left untouched. */
   useNewSignature: boolean;
   signatureImage: string | null;
+  /** Form field key-value pairs when applied directly to a form */
+  formFieldValues?: Record<string, unknown>;
+}
+
+export interface FormTargetField {
+  key: string;
+  label: string;
+  kind: "signature" | "date" | "text";
 }
 
 interface DateFormatOption {
@@ -107,7 +96,7 @@ const DATE_FORMATS: DateFormatOption[] = [
 function fmt(d: Date, opts: Intl.DateTimeFormatOptions) {
   return new Intl.DateTimeFormat("en-GB", { timeZone: EAT_TZ, ...opts }).format(d);
 }
-/** YYYY-MM-DD in EAT (for the native date input). */
+
 function isoDate(d: Date) {
   const parts = new Intl.DateTimeFormat("en-CA", {
     timeZone: EAT_TZ, year: "numeric", month: "2-digit", day: "2-digit",
@@ -119,14 +108,20 @@ function isoDate(d: Date) {
 const uid = () => Math.random().toString(36).slice(2, 10);
 
 export interface SignaturePlacementModalProps {
-  documentId: string;
+  documentId?: string;
   documentTitle?: string;
   documentRef?: string;
   note?: string;
   confirmLabel?: string;
   signerName?: string;
+  /** Force specific mode: "form" for live web form signing, "pdf" for PDF canvas, or "auto" */
+  mode?: "auto" | "pdf" | "form";
+  /** Available signature/date/text fields in the form for direct binding */
+  formFields?: FormTargetField[];
   onCancel: () => void;
   onConfirm: (result: SignaturePlacementResult) => void;
+  /** Direct hook for form fields injection */
+  onApplyToForm?: (fields: Record<string, unknown>, rawResult: SignaturePlacementResult) => void;
   isSubmitting?: boolean;
 }
 
@@ -135,13 +130,19 @@ export default function SignaturePlacementModal({
   documentTitle,
   documentRef,
   note,
-  confirmLabel = "Confirm signature",
+  confirmLabel = "Apply Signature",
   signerName = "",
+  mode = "auto",
+  formFields = [],
   onCancel,
   onConfirm,
+  onApplyToForm,
   isSubmitting = false,
 }: SignaturePlacementModalProps) {
   const token = useAuthStore((s) => s.accessToken);
+  const user = useAuthStore((s) => s.user);
+  const effectiveSignerName = signerName || user?.full_name || `${user?.first_name ?? ""} ${user?.last_name ?? ""}`.trim() || user?.email || "Authorized Signer";
+
   const [hostEl, setHostEl] = useState<HTMLDivElement | null>(null);
   const [pdfDoc, setPdfDoc] = useState<PDFDocumentProxy | null>(null);
   const [currentPage, setCurrentPage] = useState(1);
@@ -154,17 +155,35 @@ export default function SignaturePlacementModal({
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [history, setHistory] = useState<PlacedItem[][]>([]);
 
-  // signature source
+  // Signature source
   const [useNewSignature, setUseNewSignature] = useState(false);
   const [newSignature, setNewSignature] = useState<string | null>(null);
 
-  // date config
+  // Date config
   const [dateFormatId, setDateFormatId] = useState(DATE_FORMATS[0].id);
   const [dateValue, setDateValue] = useState<string>(() => isoDate(new Date()));
 
-  const { data: preview } = useQuery({
+  // Form mode field mapping selections
+  const [selectedSigField, setSelectedSigField] = useState<string>(() => {
+    const defaultSig = formFields.find((f) => f.kind === "signature");
+    return defaultSig ? defaultSig.key : "signature";
+  });
+  const [selectedDateField, setSelectedDateField] = useState<string>(() => {
+    const defaultDate = formFields.find((f) => f.kind === "date");
+    return defaultDate ? defaultDate.key : "signature_date";
+  });
+  const [selectedNameField, setSelectedNameField] = useState<string>(() => {
+    const defaultName = formFields.find((f) => f.kind === "text" && /name|signed_by|authorizer/i.test(f.key));
+    return defaultName ? defaultName.key : "signed_by";
+  });
+  const [applyDateToForm, setApplyDateToForm] = useState(true);
+  const [applyNameToForm, setApplyNameToForm] = useState(true);
+
+  // Query PDF preview only if documentId is present
+  const { data: preview, isLoading: previewLoading } = useQuery({
     queryKey: ["signature-placement-preview", documentId],
-    queryFn: () => documentsAPI.previewUrl(documentId).then((r) => r.data),
+    queryFn: () => (documentId ? documentsAPI.previewUrl(documentId).then((r) => r.data) : Promise.resolve(null)),
+    enabled: !!documentId && mode !== "form",
   });
 
   const { data: savedSignature, isLoading: signatureLoading } = useQuery<any>({
@@ -175,8 +194,18 @@ export default function SignaturePlacementModal({
   const activeSignatureImage = useNewSignature ? newSignature : savedSignature?.image_data ?? null;
   const hasSignatureSource = !!activeSignatureImage;
 
-  /* ---------- load + render PDF ---------- */
+  // Resolve actual operating mode
+  const activeMode: "pdf" | "form" = useMemo(() => {
+    if (mode === "form") return "form";
+    if (mode === "pdf") return "pdf";
+    if (!documentId) return "form";
+    if (preview?.viewer === "pdfjs") return "pdf";
+    return "form";
+  }, [mode, documentId, preview?.viewer]);
+
+  /* ---------- Load PDF if in PDF mode ---------- */
   useEffect(() => {
+    if (activeMode !== "pdf") return;
     let cancelled = false;
     let loadingTask: { promise: Promise<PDFDocumentProxy>; destroy?: () => void } | null = null;
     setPdfDoc(null);
@@ -203,17 +232,17 @@ export default function SignaturePlacementModal({
         setCurrentPage(1);
       })
       .catch((err) => {
-        if (!cancelled && err?.message !== "cancelled") setError("Failed to load PDF for signing.");
+        if (!cancelled && err?.message !== "cancelled") setError("Failed to load PDF preview for signing.");
       });
 
     return () => {
       cancelled = true;
       loadingTask?.destroy?.();
     };
-  }, [preview?.url, preview?.viewer, token]);
+  }, [activeMode, preview?.url, preview?.viewer, token]);
 
   useEffect(() => {
-    if (!pdfDoc || !hostEl) return;
+    if (activeMode !== "pdf" || !pdfDoc || !hostEl) return;
     let cancelled = false;
     let renderTask: { promise: Promise<void>; cancel?: () => void } | null = null;
     hostEl.innerHTML = "";
@@ -239,9 +268,8 @@ export default function SignaturePlacementModal({
       cancelled = true;
       renderTask?.cancel?.();
     };
-  }, [pdfDoc, hostEl, currentPage, scale]);
+  }, [activeMode, pdfDoc, hostEl, currentPage, scale]);
 
-  /* ---------- item mutations (with undo history) ---------- */
   const pushHistory = () => setHistory((h) => [...h.slice(-29), items]);
 
   const updateItems = (next: PlacedItem[], record = true) => {
@@ -264,20 +292,15 @@ export default function SignaturePlacementModal({
     if (selectedId === id) setSelectedId(null);
   };
 
-  const patchItem = (id: string, patch: Partial<PlacedItem>, record = false) => {
-    if (record) pushHistory();
-    setItems((prev) => prev.map((i) => (i.id === id ? { ...i, ...patch } : i)));
-  };
-
   const currentDateText = useMemo(() => {
     const d = new Date(`${dateValue}T12:00:00`);
     const opt = DATE_FORMATS.find((f) => f.id === dateFormatId) ?? DATE_FORMATS[0];
     return opt.format(d);
   }, [dateValue, dateFormatId]);
 
-  const addSignature = () => {
+  const addSignatureItem = () => {
     if (!hasSignatureSource) {
-      setError("Create or select a signature first.");
+      setError("Please draw or choose a signature first.");
       return;
     }
     setError("");
@@ -286,26 +309,25 @@ export default function SignaturePlacementModal({
       kind: "signature",
       page_number: currentPage,
       x_percent: 30,
-      y_percent: 70,
-      width_percent: 24,
-      height_percent: 9,
+      y_percent: 65,
+      width_percent: 26,
+      height_percent: 10,
       image_data: activeSignatureImage!,
     };
     updateItems([...items, item]);
     setSelectedId(item.id);
   };
 
-  const addText = (kind: Extract<PlacedItemKind, "name" | "date" | "text">) => {
-    const text =
-      kind === "name" ? signerName || "Full Name" : kind === "date" ? currentDateText : "Text";
+  const addTextItem = (kind: Extract<PlacedItemKind, "name" | "date" | "text">) => {
+    const text = kind === "name" ? effectiveSignerName : kind === "date" ? currentDateText : "Certified Approved";
     const item: PlacedItem = {
       id: uid(),
       kind,
       page_number: currentPage,
       x_percent: 30,
-      y_percent: 82,
-      width_percent: 24,
-      height_percent: 5,
+      y_percent: 78,
+      width_percent: 26,
+      height_percent: 6,
       text,
       font_percent: 1.6,
       font_family: "helvetica",
@@ -313,503 +335,411 @@ export default function SignaturePlacementModal({
       italic: false,
       align: "center",
       color: "#1F2933",
-      ...(kind === "date"
-        ? { date_iso: new Date(`${dateValue}T12:00:00`).toISOString(), date_format: dateFormatId }
-        : {}),
+      ...(kind === "date" ? { date_iso: new Date(`${dateValue}T12:00:00`).toISOString(), date_format: dateFormatId } : {}),
     };
     updateItems([...items, item]);
     setSelectedId(item.id);
   };
 
-  const selectedItem = items.find((i) => i.id === selectedId) ?? null;
+  // Submit / Confirm logic
+  const handleConfirm = () => {
+    if (!hasSignatureSource) {
+      setError("Please provide a signature before continuing.");
+      return;
+    }
 
-  const confirm = () => {
-    if (preview?.viewer !== "pdfjs") {
-      const status = (preview as { preview_status?: string } | undefined)?.preview_status;
-      setError(
-        status === "pending" || status === "processing"
-          ? "The document is still being prepared for signing. Please wait a moment and try again."
-          : status === "failed"
-            ? "The document could not be prepared for signing."
-            : "This document type cannot be signed.",
-      );
-      return;
-    }
-    if (!items.some((i) => i.kind === "signature")) {
-      setError("Place at least one signature on the document.");
-      return;
-    }
-    const rounded = items.map((i) => ({
+    const roundedItems = items.map((i) => ({
       ...i,
       x_percent: Number(i.x_percent.toFixed(3)),
       y_percent: Number(i.y_percent.toFixed(3)),
       width_percent: Number(i.width_percent.toFixed(3)),
       height_percent: Number(i.height_percent.toFixed(3)),
     }));
-    const firstSig = rounded.find((i) => i.kind === "signature");
-    const sendNewSignature = useNewSignature && !!newSignature;
-    onConfirm({
-      items: rounded,
+    const firstSig = roundedItems.find((i) => i.kind === "signature");
+
+    const formValuesToApply: Record<string, unknown> = {};
+    if (selectedSigField) {
+      formValuesToApply[selectedSigField] = activeSignatureImage;
+    }
+    if (applyDateToForm && selectedDateField) {
+      formValuesToApply[selectedDateField] = currentDateText;
+    }
+    if (applyNameToForm && selectedNameField) {
+      formValuesToApply[selectedNameField] = effectiveSignerName;
+    }
+
+    const resultPayload: SignaturePlacementResult = {
+      items: roundedItems,
       timezone: EAT_TZ,
-      signaturePlacement: firstSig
-        ? {
-            page_number: firstSig.page_number,
-            x_percent: firstSig.x_percent,
-            y_percent: firstSig.y_percent,
-            width_percent: firstSig.width_percent,
-          }
-        : null,
-      useNewSignature: sendNewSignature,
-      signatureImage: sendNewSignature ? newSignature : null,
-    });
+      signaturePlacement: firstSig ? {
+        page_number: firstSig.page_number,
+        x_percent: firstSig.x_percent,
+        y_percent: firstSig.y_percent,
+        width_percent: firstSig.width_percent,
+      } : null,
+      useNewSignature: Boolean(useNewSignature && newSignature),
+      signatureImage: activeSignatureImage,
+      formFieldValues: formValuesToApply,
+    };
+
+    if (onApplyToForm) {
+      onApplyToForm(formValuesToApply, resultPayload);
+    }
+    onConfirm(resultPayload);
   };
 
-  const pageItems = items.filter((i) => i.page_number === currentPage);
-
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/55 p-4">
-      <div className="flex max-h-[94vh] w-full max-w-6xl flex-col overflow-hidden rounded-xl bg-background shadow-2xl">
-        {/* header */}
-        <div className="flex items-center justify-between gap-4 border-b border-border px-5 py-4">
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 p-4 backdrop-blur-sm">
+      <div className="flex max-h-[92vh] w-full max-w-5xl flex-col rounded-lg border border-[#C8CDD2] bg-white shadow-xl">
+        {/* Header */}
+        <div className="flex items-center justify-between border-b border-[#E4E7EB] px-6 py-4">
           <div>
-            <h3 className="text-base font-semibold text-foreground">Place your signature</h3>
-            <p className="text-xs text-muted-foreground">
-              Drag and resize each item. Drop a date or name only where it's needed.
-            </p>
+            <div className="flex items-center gap-2">
+              <span className="inline-flex items-center gap-1.5 rounded-full bg-[#EBF5FB] px-2.5 py-0.5 text-xs font-semibold text-[#287EAD]">
+                <Sparkles className="h-3 w-3" />
+                {activeMode === "pdf" ? "PDF Signature Placement" : "Form Signature Application"}
+              </span>
+              <h2 className="text-lg font-semibold text-[#1F2933]">
+                {documentTitle || "Apply Digital Signature"}
+              </h2>
+            </div>
+            {documentRef && <p className="text-xs text-[#5E6870] mt-0.5">Ref: {documentRef}</p>}
           </div>
-          <button onClick={onCancel} className="btn-secondary text-sm">Cancel</button>
+          <button
+            onClick={onCancel}
+            disabled={isSubmitting}
+            className="rounded p-1 text-[#5E6870] hover:bg-[#F3F5F6] hover:text-[#1F2933]"
+          >
+            ✕
+          </button>
         </div>
 
-        {signatureLoading ? (
-          <div className="flex min-h-0 flex-1 items-center justify-center p-10">
-            <Loader2 className="h-6 w-6 animate-spin text-primary" />
-          </div>
-        ) : (
-          <div className="grid min-h-0 flex-1 grid-cols-1 lg:grid-cols-[1fr_360px]">
-            {/* ===== PDF canvas ===== */}
-            <div className="min-h-0 overflow-auto bg-[#EDEDED] p-4">
-              <div className="mb-3 flex items-center justify-between rounded-lg border border-border bg-background px-3 py-2">
-                <div className="flex items-center gap-2">
-                  <button onClick={() => setCurrentPage((p) => Math.max(1, p - 1))} disabled={currentPage <= 1} className="btn-secondary px-2 py-1"><ChevronLeft className="h-4 w-4" /></button>
-                  <span className="text-sm text-foreground">Page {currentPage} of {totalPages || "..."}</span>
-                  <button onClick={() => setCurrentPage((p) => Math.min(totalPages, p + 1))} disabled={!totalPages || currentPage >= totalPages} className="btn-secondary px-2 py-1"><ChevronRight className="h-4 w-4" /></button>
-                </div>
-                <div className="flex items-center gap-2">
-                  <button onClick={undo} disabled={!history.length} className="btn-secondary flex items-center gap-1 px-2 py-1 text-xs disabled:opacity-40"><Undo2 className="h-3.5 w-3.5" /> Undo</button>
-                  <span className="mx-1 h-4 w-px bg-border" />
-                  <button onClick={() => setScale((s) => Math.max(0.7, s - 0.1))} className="btn-secondary px-2 py-1"><ZoomOut className="h-4 w-4" /></button>
-                  <span className="w-12 text-center text-xs text-muted-foreground">{Math.round(scale * 100)}%</span>
-                  <button onClick={() => setScale((s) => Math.min(2.5, s + 0.1))} className="btn-secondary px-2 py-1"><ZoomIn className="h-4 w-4" /></button>
-                </div>
-              </div>
-
-              <div className="relative mx-auto w-fit" onPointerDown={() => setSelectedId(null)}>
-                <div ref={setHostEl} className="relative" />
-                {pageSize.width > 0 &&
-                  pageItems.map((item) => (
-                    <PlacedItemView
-                      key={item.id}
-                      item={item}
-                      selected={selectedId === item.id}
-                      pageSize={pageSize}
-                      onSelect={() => setSelectedId(item.id)}
-                      onChange={(patch) => patchItem(item.id, patch)}
-                      onCommit={() => pushHistory()}
-                      onRemove={() => removeItem(item.id)}
-                    />
-                  ))}
-              </div>
-            </div>
-
-            {/* ===== Side panel ===== */}
-            <div className="flex min-h-0 flex-col gap-4 overflow-auto border-t border-border p-5 lg:border-l lg:border-t-0">
-              {/* signature source */}
-              <div className="rounded-lg border border-border p-3">
-                <div className="mb-2 flex items-center justify-between">
-                  <p className="text-sm font-semibold text-foreground">Signature</p>
-                  {savedSignature?.image_data && (
-                    <button
-                      onClick={() => { setUseNewSignature((v) => !v); setNewSignature(null); }}
-                      className="flex items-center gap-1 text-xs font-medium text-primary hover:underline"
-                    >
-                      <RefreshCw className="h-3 w-3" />
-                      {useNewSignature ? "Use saved" : "Use a different one"}
-                    </button>
-                  )}
-                </div>
-
-                {useNewSignature || !savedSignature?.image_data ? (
-                  <SignaturePad onChange={setNewSignature} defaultName={signerName} />
-                ) : (
-                  <div className="flex h-20 items-center justify-center rounded-md border border-dashed border-border bg-muted/20 p-2">
-                    <img src={savedSignature.image_data} alt="Saved signature" className="max-h-full max-w-full object-contain" />
-                  </div>
-                )}
-
+        {/* Content Body */}
+        <div className="grid flex-1 grid-cols-1 md:grid-cols-12 overflow-hidden min-h-[460px]">
+          {/* Controls Sidebar */}
+          <div className="md:col-span-4 border-r border-[#E4E7EB] bg-[#F9FAFB] p-5 overflow-y-auto space-y-5">
+            {/* Signature Source */}
+            <div>
+              <label className="text-xs font-bold uppercase tracking-wider text-[#5E6870] mb-2 block">
+                Signature Source
+              </label>
+              <div className="grid grid-cols-2 gap-2 mb-3">
                 <button
-                  onClick={addSignature}
-                  disabled={!hasSignatureSource}
-                  className="btn-primary mt-3 flex w-full items-center justify-center gap-2 disabled:opacity-50"
+                  type="button"
+                  onClick={() => setUseNewSignature(false)}
+                  disabled={!savedSignature?.image_data}
+                  className={clsx(
+                    "flex flex-col items-center justify-center rounded border p-2.5 text-xs font-medium transition",
+                    !useNewSignature
+                      ? "border-[#287EAD] bg-[#EEF6FB] text-[#287EAD] font-semibold"
+                      : "border-[#C8CDD2] bg-white text-[#5E6870] hover:bg-[#F4F6F8]",
+                    !savedSignature?.image_data && "opacity-50 cursor-not-allowed"
+                  )}
                 >
-                  <PenLine className="h-4 w-4" /> Add signature to page
+                  <CheckCircle2 className="h-4 w-4 mb-1" />
+                  Saved Signature
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setUseNewSignature(true)}
+                  className={clsx(
+                    "flex flex-col items-center justify-center rounded border p-2.5 text-xs font-medium transition",
+                    useNewSignature
+                      ? "border-[#287EAD] bg-[#EEF6FB] text-[#287EAD] font-semibold"
+                      : "border-[#C8CDD2] bg-white text-[#5E6870] hover:bg-[#F4F6F8]"
+                  )}
+                >
+                  <PenLine className="h-4 w-4 mb-1" />
+                  Draw / Upload New
                 </button>
               </div>
 
-              {/* date */}
-              <div className="rounded-lg border border-border p-3">
-                <p className="mb-2 text-sm font-semibold text-foreground">Date (East Africa Time)</p>
-                <div className="flex items-center gap-2">
-                  <input
-                    type="date"
-                    value={dateValue}
-                    onChange={(e) => setDateValue(e.target.value)}
-                    className="flex-1 rounded-md border border-border px-2 py-1.5 text-sm outline-none focus:border-primary"
-                  />
-                  <button
-                    onClick={() => setDateValue(isoDate(new Date()))}
-                    className="btn-secondary whitespace-nowrap px-2 py-1.5 text-xs"
-                  >
-                    Today
-                  </button>
+              {/* Signature display / pad */}
+              {!useNewSignature ? (
+                <div className="rounded border border-[#C8CDD2] bg-white p-3 text-center min-h-[100px] flex items-center justify-center">
+                  {signatureLoading ? (
+                    <Loader2 className="h-5 w-5 animate-spin text-[#287EAD]" />
+                  ) : savedSignature?.image_data ? (
+                    <img
+                      src={savedSignature.image_data}
+                      alt="Saved Signature"
+                      className="max-h-20 object-contain mx-auto"
+                    />
+                  ) : (
+                    <div className="text-xs text-amber-700">
+                      No saved signature found. Switch to "Draw / Upload New".
+                    </div>
+                  )}
                 </div>
+              ) : (
+                <div className="rounded border border-[#C8CDD2] bg-white p-2">
+                  <SignaturePad
+                    onSave={(dataUrl) => setNewSignature(dataUrl)}
+                    onClear={() => setNewSignature(null)}
+                  />
+                </div>
+              )}
+            </div>
+
+            {/* Date Selection */}
+            <div>
+              <label className="text-xs font-bold uppercase tracking-wider text-[#5E6870] mb-2 block">
+                Date & Format (EAT)
+              </label>
+              <div className="space-y-2">
+                <input
+                  type="date"
+                  value={dateValue}
+                  onChange={(e) => setDateValue(e.target.value)}
+                  className="w-full rounded border border-[#C8CDD2] bg-white px-3 py-1.5 text-xs text-[#1F2933] outline-none focus:border-[#287EAD]"
+                />
                 <select
                   value={dateFormatId}
                   onChange={(e) => setDateFormatId(e.target.value)}
-                  className="mt-2 w-full rounded-md border border-border px-2 py-1.5 text-sm outline-none focus:border-primary"
+                  className="w-full rounded border border-[#C8CDD2] bg-white px-3 py-1.5 text-xs text-[#1F2933] outline-none focus:border-[#287EAD]"
                 >
                   {DATE_FORMATS.map((f) => (
-                    <option key={f.id} value={f.id}>{f.format(new Date(`${dateValue}T12:00:00`))}</option>
+                    <option key={f.id} value={f.id}>
+                      {f.label} ({f.format(new Date(`${dateValue}T12:00:00`))})
+                    </option>
                   ))}
                 </select>
-                <button
-                  onClick={() => addText("date")}
-                  className="btn-secondary mt-3 flex w-full items-center justify-center gap-2"
-                >
-                  <CalendarClock className="h-4 w-4" /> Add date field
-                </button>
               </div>
+            </div>
 
-              {/* name / text */}
-              <div className="rounded-lg border border-border p-3">
-                <p className="mb-2 text-sm font-semibold text-foreground">Optional fields</p>
-                <div className="grid grid-cols-2 gap-2">
-                  <button onClick={() => addText("name")} className="btn-secondary flex items-center justify-center gap-1.5 text-xs">
-                    <TypeIcon className="h-3.5 w-3.5" /> Name
-                  </button>
-                  <button onClick={() => addText("text")} className="btn-secondary flex items-center justify-center gap-1.5 text-xs">
-                    <Plus className="h-3.5 w-3.5" /> Text
-                  </button>
-                </div>
-                <p className="mt-2 text-[11px] text-muted-foreground">
-                  Double-click a text field on the page to edit it. Drag corners to resize.
-                </p>
-              </div>
-
-              {/* text style — shown for the selected text/name/date item */}
-              {selectedItem && selectedItem.kind !== "signature" && (() => {
-                const setStyle = (patch: Partial<PlacedItem>) => patchItem(selectedItem.id, patch, true);
-                const tog = (on?: boolean) => clsx(
-                  "flex h-8 w-8 items-center justify-center rounded border",
-                  on ? "border-primary bg-primary text-primary-foreground" : "border-border bg-background text-muted-foreground hover:bg-muted",
-                );
-                return (
-                  <div className="space-y-2.5 rounded-lg border border-primary/30 bg-primary/5 p-3">
-                    <p className="text-sm font-semibold text-foreground capitalize">{selectedItem.kind} style</p>
-                    <select
-                      value={selectedItem.font_family ?? "helvetica"}
-                      onChange={(e) => setStyle({ font_family: e.target.value as PlacedItem["font_family"] })}
-                      className="input h-8 w-full text-xs"
-                    >
-                      <option value="helvetica">Helvetica / Arial (sans)</option>
-                      <option value="times">Times (serif)</option>
-                      <option value="courier">Courier (mono)</option>
-                    </select>
-                    <div className="flex items-center gap-1">
-                      <button type="button" onClick={() => setStyle({ bold: !selectedItem.bold })} className={tog(selectedItem.bold)} title="Bold"><Bold className="h-3.5 w-3.5" /></button>
-                      <button type="button" onClick={() => setStyle({ italic: !selectedItem.italic })} className={tog(selectedItem.italic)} title="Italic"><Italic className="h-3.5 w-3.5" /></button>
-                      <span className="mx-1 h-5 w-px bg-border" />
-                      <button type="button" onClick={() => setStyle({ align: "left" })} className={tog((selectedItem.align ?? "center") === "left")} title="Align left"><AlignLeft className="h-3.5 w-3.5" /></button>
-                      <button type="button" onClick={() => setStyle({ align: "center" })} className={tog((selectedItem.align ?? "center") === "center")} title="Align center"><AlignCenter className="h-3.5 w-3.5" /></button>
-                      <button type="button" onClick={() => setStyle({ align: "right" })} className={tog((selectedItem.align ?? "center") === "right")} title="Align right"><AlignRight className="h-3.5 w-3.5" /></button>
-                      <span className="ml-auto" />
-                      <input type="color" value={selectedItem.color ?? "#1F2933"} onChange={(e) => setStyle({ color: e.target.value })} className="h-8 w-9 cursor-pointer rounded border border-border bg-background p-0.5" title="Text colour" />
-                    </div>
-                    <div className="flex items-center gap-2">
-                      <label className="text-[11px] font-medium text-muted-foreground">Size</label>
-                      <input type="range" min={0.8} max={6} step={0.1} value={selectedItem.font_percent ?? 1.6} onChange={(e) => setStyle({ font_percent: Number(e.target.value) })} className="flex-1 accent-primary" />
-                    </div>
-
-                    {selectedItem.kind === "date" && (() => {
-                      const isoVal = selectedItem.date_iso ? isoDate(new Date(selectedItem.date_iso)) : isoDate(new Date());
-                      const fmtId = selectedItem.date_format ?? DATE_FORMATS[0].id;
-                      // Recompute the rendered date text whenever the value/format changes.
-                      const recompute = (iso: string, fid: string) => {
-                        const d = new Date(`${iso}T12:00:00`);
-                        const opt = DATE_FORMATS.find((f) => f.id === fid) ?? DATE_FORMATS[0];
-                        return { text: opt.format(d), date_iso: d.toISOString(), date_format: fid };
-                      };
-                      return (
-                        <div className="space-y-1.5 border-t border-primary/20 pt-2.5">
-                          <p className="text-[11px] font-medium text-muted-foreground">Date (East Africa Time)</p>
-                          <div className="flex items-center gap-1.5">
-                            <input type="date" value={isoVal} onChange={(e) => setStyle(recompute(e.target.value, fmtId))} className="input h-8 flex-1 text-xs" />
-                            <button type="button" onClick={() => setStyle(recompute(isoDate(new Date()), fmtId))} className="btn-secondary whitespace-nowrap px-2 py-1 text-[11px]">Today</button>
-                          </div>
-                          <select value={fmtId} onChange={(e) => setStyle(recompute(isoVal, e.target.value))} className="input h-8 w-full text-xs">
-                            {DATE_FORMATS.map((f) => <option key={f.id} value={f.id}>{f.format(new Date(`${isoVal}T12:00:00`))}</option>)}
-                          </select>
-                        </div>
-                      );
-                    })()}
+            {/* Target Form Fields (Form Mode) */}
+            {activeMode === "form" && (
+              <div className="border-t border-[#E4E7EB] pt-4 space-y-3">
+                <label className="text-xs font-bold uppercase tracking-wider text-[#5E6870] block">
+                  Form Field Mapping
+                </label>
+                <div className="space-y-2 text-xs">
+                  <div>
+                    <label className="text-[#5E6870] block mb-1">Signature Field:</label>
+                    <input
+                      type="text"
+                      value={selectedSigField}
+                      onChange={(e) => setSelectedSigField(e.target.value)}
+                      placeholder="e.g. signature or requester_signature"
+                      className="w-full rounded border border-[#C8CDD2] bg-white px-2.5 py-1.5 text-xs outline-none focus:border-[#287EAD]"
+                    />
                   </div>
-                );
-              })()}
-
-              {/* placed list */}
-              {items.length > 0 && (
-                <div className="rounded-lg border border-border p-3">
-                  <p className="mb-2 text-sm font-semibold text-foreground">Placed items ({items.length})</p>
-                  <ul className="space-y-1">
-                    {items.map((i) => (
-                      <li key={i.id} className="flex items-center justify-between rounded px-2 py-1 text-xs hover:bg-muted/40">
-                        <button
-                          onClick={() => { setCurrentPage(i.page_number); setSelectedId(i.id); }}
-                          className="truncate capitalize text-foreground"
-                        >
-                          {i.kind} · p{i.page_number} {i.text ? `· ${i.text}` : ""}
-                        </button>
-                        <button onClick={() => removeItem(i.id)} className="text-muted-foreground hover:text-destructive">
-                          <Trash2 className="h-3.5 w-3.5" />
-                        </button>
-                      </li>
-                    ))}
-                  </ul>
+                  <div>
+                    <div className="flex items-center justify-between mb-1">
+                      <label className="text-[#5E6870]">Date Field:</label>
+                      <input
+                        type="checkbox"
+                        checked={applyDateToForm}
+                        onChange={(e) => setApplyDateToForm(e.target.checked)}
+                      />
+                    </div>
+                    {applyDateToForm && (
+                      <input
+                        type="text"
+                        value={selectedDateField}
+                        onChange={(e) => setSelectedDateField(e.target.value)}
+                        placeholder="e.g. signature_date or date"
+                        className="w-full rounded border border-[#C8CDD2] bg-white px-2.5 py-1.5 text-xs outline-none focus:border-[#287EAD]"
+                      />
+                    )}
+                  </div>
+                  <div>
+                    <div className="flex items-center justify-between mb-1">
+                      <label className="text-[#5E6870]">Signer Name / Title:</label>
+                      <input
+                        type="checkbox"
+                        checked={applyNameToForm}
+                        onChange={(e) => setApplyNameToForm(e.target.checked)}
+                      />
+                    </div>
+                    {applyNameToForm && (
+                      <input
+                        type="text"
+                        value={selectedNameField}
+                        onChange={(e) => setSelectedNameField(e.target.value)}
+                        placeholder="e.g. signed_by or name"
+                        className="w-full rounded border border-[#C8CDD2] bg-white px-2.5 py-1.5 text-xs outline-none focus:border-[#287EAD]"
+                      />
+                    )}
+                  </div>
                 </div>
-              )}
-
-              <div className="rounded-lg border border-border bg-muted/20 p-3">
-                <p className="text-xs text-muted-foreground">
-                  Signing <span className="font-medium text-foreground">{documentTitle || "this document"}</span>
-                  {documentRef && <> · <span className="font-medium text-foreground">{documentRef}</span></>}.
-                  This action is recorded.
-                </p>
-                {note && <p className="mt-2 text-[11px] text-muted-foreground">{note}</p>}
               </div>
+            )}
 
-              {error && <p className="text-sm text-destructive">{error}</p>}
-
-              <div className="mt-auto flex flex-col gap-2">
-                <button onClick={confirm} disabled={isSubmitting || !pageSize.width} className="btn-primary flex w-full items-center justify-center gap-2">
-                  {isSubmitting && <Loader2 className="h-4 w-4 animate-spin" />}
-                  {confirmLabel}
+            {/* Stamp Buttons for Canvas Placement */}
+            <div className="border-t border-[#E4E7EB] pt-4">
+              <label className="text-xs font-bold uppercase tracking-wider text-[#5E6870] mb-2 block">
+                Interactive Stamps
+              </label>
+              <div className="grid grid-cols-2 gap-2">
+                <button
+                  type="button"
+                  onClick={addSignatureItem}
+                  disabled={!hasSignatureSource}
+                  className="inline-flex items-center justify-center gap-1.5 rounded border border-[#287EAD] bg-white px-3 py-1.5 text-xs font-semibold text-[#287EAD] hover:bg-[#EEF6FB] disabled:opacity-50"
+                >
+                  <PenLine className="h-3.5 w-3.5" /> Stamp Signature
                 </button>
-                <button onClick={onCancel} className="btn-secondary w-full justify-center">Back</button>
+                <button
+                  type="button"
+                  onClick={() => addTextItem("date")}
+                  className="inline-flex items-center justify-center gap-1.5 rounded border border-[#C8CDD2] bg-white px-3 py-1.5 text-xs font-medium text-[#1F2933] hover:bg-[#F3F5F6]"
+                >
+                  <CalendarClock className="h-3.5 w-3.5" /> Stamp Date
+                </button>
+              </div>
+              <div className="grid grid-cols-2 gap-2 mt-2">
+                <button
+                  type="button"
+                  onClick={() => addTextItem("name")}
+                  className="inline-flex items-center justify-center gap-1.5 rounded border border-[#C8CDD2] bg-white px-3 py-1.5 text-xs font-medium text-[#1F2933] hover:bg-[#F3F5F6]"
+                >
+                  <TypeIcon className="h-3.5 w-3.5" /> Stamp Name
+                </button>
+                <button
+                  type="button"
+                  onClick={undo}
+                  disabled={!history.length}
+                  className="inline-flex items-center justify-center gap-1.5 rounded border border-[#C8CDD2] bg-white px-3 py-1.5 text-xs font-medium text-[#5E6870] hover:bg-[#F3F5F6] disabled:opacity-40"
+                >
+                  <Undo2 className="h-3.5 w-3.5" /> Undo
+                </button>
               </div>
             </div>
           </div>
-        )}
+
+          {/* Canvas / Preview Stage */}
+          <div className="md:col-span-8 bg-[#E5E9EC] p-6 flex flex-col items-center justify-center overflow-auto relative">
+            {error && (
+              <div className="absolute top-4 left-4 right-4 z-20 rounded bg-red-50 border border-red-200 p-2.5 text-xs text-red-700">
+                {error}
+              </div>
+            )}
+
+            {activeMode === "pdf" ? (
+              <div className="relative border border-[#C8CDD2] bg-white shadow-md">
+                <div ref={setHostEl} />
+                {/* Placed overlay items */}
+                {items
+                  .filter((i) => i.page_number === currentPage)
+                  .map((item) => (
+                    <div
+                      key={item.id}
+                      onClick={() => setSelectedId(item.id)}
+                      style={{
+                        position: "absolute",
+                        left: `${item.x_percent}%`,
+                        top: `${item.y_percent}%`,
+                        width: `${item.width_percent}%`,
+                        height: `${item.height_percent}%`,
+                      }}
+                      className={clsx(
+                        "group cursor-move select-none border border-dashed p-1",
+                        selectedId === item.id ? "border-[#287EAD] bg-blue-50/20" : "border-transparent"
+                      )}
+                    >
+                      {item.kind === "signature" && item.image_data ? (
+                        <img src={item.image_data} alt="signature" className="h-full w-full object-contain" />
+                      ) : (
+                        <div
+                          style={{
+                            fontFamily: FONT_CSS[item.font_family || "helvetica"],
+                            color: item.color || "#1F2933",
+                            textAlign: item.align || "center",
+                          }}
+                          className="h-full w-full flex items-center justify-center text-xs font-medium"
+                        >
+                          {item.text}
+                        </div>
+                      )}
+                      <button
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          removeItem(item.id);
+                        }}
+                        className="absolute -top-2 -right-2 hidden group-hover:flex h-5 w-5 items-center justify-center rounded-full bg-red-500 text-white text-[10px]"
+                      >
+                        ✕
+                      </button>
+                    </div>
+                  ))}
+              </div>
+            ) : (
+              /* Direct Form Mode Preview Card */
+              <div className="w-full max-w-lg rounded-lg border border-[#C8CDD2] bg-white p-6 shadow-sm">
+                <div className="border-b border-[#E4E7EB] pb-3 mb-4 flex items-center justify-between">
+                  <div className="flex items-center gap-2">
+                    <FileText className="h-5 w-5 text-[#287EAD]" />
+                    <h3 className="text-sm font-semibold text-[#1F2933]">Requisition Form Sign-off</h3>
+                  </div>
+                  <span className="text-xs text-[#5E6870]">Verification stamp</span>
+                </div>
+
+                <div className="space-y-4">
+                  {/* Signature Box */}
+                  <div className="rounded border-2 border-dashed border-[#C8CDD2] bg-[#FAFBFB] p-4 text-center">
+                    <span className="text-xs font-medium text-[#5E6870] mb-2 block">
+                      Target Field: <code className="text-[#287EAD]">{selectedSigField}</code>
+                    </span>
+                    {activeSignatureImage ? (
+                      <div className="flex flex-col items-center justify-center">
+                        <img
+                          src={activeSignatureImage}
+                          alt="Signature Preview"
+                          className="max-h-24 object-contain"
+                        />
+                        <span className="mt-2 text-[11px] text-emerald-600 font-medium flex items-center gap-1">
+                          <Check className="h-3 w-3" /> Ready to bind to form
+                        </span>
+                      </div>
+                    ) : (
+                      <p className="text-xs text-[#5E6870]">No signature selected yet</p>
+                    )}
+                  </div>
+
+                  {/* Date & Signer Details */}
+                  <div className="grid grid-cols-2 gap-3 text-xs bg-[#F4F6F8] p-3 rounded">
+                    <div>
+                      <span className="text-[#5E6870] block">Signer Name:</span>
+                      <span className="font-semibold text-[#1F2933]">{effectiveSignerName}</span>
+                    </div>
+                    <div>
+                      <span className="text-[#5E6870] block">Date (EAT):</span>
+                      <span className="font-semibold text-[#1F2933]">{currentDateText}</span>
+                    </div>
+                  </div>
+                </div>
+
+                {note && <p className="mt-4 text-xs italic text-[#5E6870]">{note}</p>}
+              </div>
+            )}
+          </div>
+        </div>
+
+        {/* Footer */}
+        <div className="flex items-center justify-between border-t border-[#E4E7EB] bg-white px-6 py-4">
+          <p className="text-xs text-[#5E6870]">
+            Signatures and date stamps are verified and securely bound upon confirmation.
+          </p>
+          <div className="flex items-center gap-3">
+            <button
+              onClick={onCancel}
+              disabled={isSubmitting}
+              className="rounded border border-[#AEB5BB] bg-white px-4 py-2 text-sm font-semibold text-[#1F2933] hover:bg-[#F3F5F6]"
+            >
+              Cancel
+            </button>
+            <button
+              onClick={handleConfirm}
+              disabled={isSubmitting || !hasSignatureSource}
+              className="inline-flex items-center gap-2 rounded bg-[#287EAD] px-5 py-2 text-sm font-semibold text-white hover:bg-[#1E6F99] disabled:opacity-50"
+            >
+              {isSubmitting ? <Loader2 className="h-4 w-4 animate-spin" /> : null}
+              {confirmLabel}
+            </button>
+          </div>
+        </div>
       </div>
     </div>
   );
-}
-
-/* ===================== draggable + resizable item ===================== */
-
-type ResizeCorner = "nw" | "ne" | "sw" | "se";
-
-function PlacedItemView({
-  item,
-  selected,
-  pageSize,
-  onSelect,
-  onChange,
-  onCommit,
-  onRemove,
-}: {
-  item: PlacedItem;
-  selected: boolean;
-  pageSize: { width: number; height: number };
-  onSelect: () => void;
-  onChange: (patch: Partial<PlacedItem>) => void;
-  onCommit: () => void;
-  onRemove: () => void;
-}) {
-  const isText = item.kind !== "signature";
-  const [editing, setEditing] = useState(false);
-  const dragState = useRef<{
-    mode: "move" | ResizeCorner;
-    startX: number;
-    startY: number;
-    item: PlacedItem;
-  } | null>(null);
-
-  const aspect = useRef<number | null>(null);
-
-  const beginMove = (e: React.PointerEvent) => {
-    if (editing) return;
-    e.stopPropagation();
-    (e.target as HTMLElement).setPointerCapture?.(e.pointerId);
-    onSelect();
-    onCommit();
-    dragState.current = { mode: "move", startX: e.clientX, startY: e.clientY, item };
-  };
-
-  const beginResize = (corner: ResizeCorner) => (e: React.PointerEvent) => {
-    e.stopPropagation();
-    (e.target as HTMLElement).setPointerCapture?.(e.pointerId);
-    onSelect();
-    onCommit();
-    dragState.current = { mode: corner, startX: e.clientX, startY: e.clientY, item };
-  };
-
-  const onPointerMove = (e: React.PointerEvent) => {
-    const st = dragState.current;
-    if (!st || !pageSize.width || !pageSize.height) return;
-    const dxPct = ((e.clientX - st.startX) / pageSize.width) * 100;
-    const dyPct = ((e.clientY - st.startY) / pageSize.height) * 100;
-
-    if (st.mode === "move") {
-      const x = clamp(st.item.x_percent + dxPct, 0, 100 - st.item.width_percent);
-      const y = clamp(st.item.y_percent + dyPct, 0, 100 - st.item.height_percent);
-      onChange({ x_percent: x, y_percent: y });
-      return;
-    }
-
-    // resize
-    let { x_percent: x, y_percent: y, width_percent: w, height_percent: h } = st.item;
-    const ratio = aspect.current ?? w / h;
-
-    if (st.mode === "se") {
-      w = clamp(st.item.width_percent + dxPct, 4, 100 - x);
-      h = item.kind === "signature" ? w / ratio : clamp(st.item.height_percent + dyPct, 2, 100 - y);
-    } else if (st.mode === "ne") {
-      w = clamp(st.item.width_percent + dxPct, 4, 100 - x);
-      const newH = item.kind === "signature" ? w / ratio : clamp(st.item.height_percent - dyPct, 2, st.item.y_percent + st.item.height_percent);
-      y = st.item.y_percent + (st.item.height_percent - newH);
-      h = newH;
-    } else if (st.mode === "sw") {
-      const newW = clamp(st.item.width_percent - dxPct, 4, st.item.x_percent + st.item.width_percent);
-      x = st.item.x_percent + (st.item.width_percent - newW);
-      w = newW;
-      h = item.kind === "signature" ? w / ratio : clamp(st.item.height_percent + dyPct, 2, 100 - y);
-    } else if (st.mode === "nw") {
-      const newW = clamp(st.item.width_percent - dxPct, 4, st.item.x_percent + st.item.width_percent);
-      x = st.item.x_percent + (st.item.width_percent - newW);
-      w = newW;
-      const newH = item.kind === "signature" ? w / ratio : clamp(st.item.height_percent - dyPct, 2, st.item.y_percent + st.item.height_percent);
-      y = st.item.y_percent + (st.item.height_percent - newH);
-      h = newH;
-    }
-
-    const patch: Partial<PlacedItem> = { x_percent: x, y_percent: y, width_percent: w, height_percent: h };
-    if (isText) patch.font_percent = clamp(h * 0.62, 0.8, 8);
-    onChange(patch);
-  };
-
-  const endDrag = () => { dragState.current = null; };
-
-  const onImgLoad = (e: React.SyntheticEvent<HTMLImageElement>) => {
-    const img = e.currentTarget;
-    if (img.naturalHeight) {
-      const natRatio = img.naturalWidth / img.naturalHeight;
-      aspect.current = natRatio;
-      // align box height to natural aspect on first load
-      const desiredH = item.width_percent / natRatio;
-      if (Math.abs(desiredH - item.height_percent) > 0.5) {
-        onChange({ height_percent: desiredH });
-      }
-    }
-  };
-
-  const fontPx = ((item.font_percent ?? 1.6) / 100) * pageSize.height;
-
-  return (
-    <div
-      role="button"
-      tabIndex={0}
-      onPointerDown={beginMove}
-      onPointerMove={onPointerMove}
-      onPointerUp={endDrag}
-      onPointerCancel={endDrag}
-      onClick={(e) => { e.stopPropagation(); onSelect(); }}
-      onDoubleClick={() => isText && setEditing(true)}
-      className={clsx(
-        "absolute flex items-center justify-center",
-        editing ? "cursor-text" : "cursor-grab active:cursor-grabbing",
-        selected ? "z-20 ring-2 ring-primary" : "z-10 ring-1 ring-transparent hover:ring-primary/40",
-      )}
-      style={{
-        left: `${item.x_percent}%`,
-        top: `${item.y_percent}%`,
-        width: `${item.width_percent}%`,
-        height: `${item.height_percent}%`,
-      }}
-    >
-      {item.kind === "signature" ? (
-        <img src={item.image_data} alt="Signature" onLoad={onImgLoad} className="pointer-events-none h-full w-full object-contain" draggable={false} />
-      ) : editing ? (
-        <input
-          autoFocus
-          defaultValue={item.text}
-          onBlur={(e) => { onChange({ text: e.target.value }); setEditing(false); }}
-          onKeyDown={(e) => { if (e.key === "Enter") (e.target as HTMLInputElement).blur(); }}
-          className="h-full w-full bg-white/80 px-1 outline-none"
-          style={{
-            fontSize: Math.max(8, fontPx),
-            fontFamily: FONT_CSS[item.font_family ?? "helvetica"],
-            fontWeight: item.bold ? 700 : 400,
-            fontStyle: item.italic ? "italic" : "normal",
-            textAlign: item.align ?? "center",
-            color: item.color ?? "#1F2933",
-          }}
-        />
-      ) : (
-        <span
-          className="pointer-events-none block w-full truncate leading-none"
-          style={{
-            fontSize: Math.max(8, fontPx),
-            fontFamily: FONT_CSS[item.font_family ?? "helvetica"],
-            fontWeight: item.bold ? 700 : 400,
-            fontStyle: item.italic ? "italic" : "normal",
-            textAlign: item.align ?? "center",
-            color: item.color ?? "#1F2933",
-          }}
-        >
-          {item.text}
-        </span>
-      )}
-
-      {selected && !editing && (
-        <>
-          {(["nw", "ne", "sw", "se"] as ResizeCorner[]).map((c) => (
-            <span
-              key={c}
-              onPointerDown={beginResize(c)}
-              onPointerMove={onPointerMove}
-              onPointerUp={endDrag}
-              className={clsx(
-                "absolute h-3 w-3 rounded-full border-2 border-white bg-primary shadow",
-                c === "nw" && "-left-1.5 -top-1.5 cursor-nwse-resize",
-                c === "ne" && "-right-1.5 -top-1.5 cursor-nesw-resize",
-                c === "sw" && "-bottom-1.5 -left-1.5 cursor-nesw-resize",
-                c === "se" && "-bottom-1.5 -right-1.5 cursor-nwse-resize",
-              )}
-            />
-          ))}
-          <button
-            onPointerDown={(e) => e.stopPropagation()}
-            onClick={(e) => { e.stopPropagation(); onRemove(); }}
-            className="absolute -right-2 -top-7 flex h-6 w-6 items-center justify-center rounded-full bg-destructive text-destructive-foreground shadow"
-            title="Remove"
-          >
-            <Trash2 className="h-3.5 w-3.5" />
-          </button>
-        </>
-      )}
-    </div>
-  );
-}
-
-function clamp(v: number, min: number, max: number) {
-  return Math.max(min, Math.min(max, v));
 }
