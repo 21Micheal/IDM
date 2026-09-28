@@ -39,11 +39,12 @@ export default function NewRequisitionPage() {
   const [searchParams] = useSearchParams();
   const preselectedTemplateId = searchParams.get("template_id");
 
-  const [selectedTemplateId, setSelectedTemplateId] = useState<string | null>(preselectedTemplateId || null);
+    const [selectedTemplateId, setSelectedTemplateId] = useState<string | null>(preselectedTemplateId || null);
   const [formValues, setFormValues] = useState<Record<string, unknown>>({});
   const [formDirty, setFormDirty] = useState(false);
   const [missingFields, setMissingFields] = useState<string[]>([]);
   const [isSigningOpen, setIsSigningOpen] = useState(false);
+  const [targetSignatureField, setTargetSignatureField] = useState<string | null>(null);
 
   // Formula evaluation context
   const formulaContext = useMemo(
@@ -348,14 +349,7 @@ export default function NewRequisitionPage() {
               ))}
             </select>
 
-            <button
-              type="button"
-              onClick={() => setIsSigningOpen(true)}
-              className="inline-flex items-center gap-1.5 rounded border border-[#287EAD] bg-[#EEF6FB] px-3 py-1.5 text-xs font-semibold text-[#287EAD] hover:bg-[#D9EDF8]"
-            >
-              <PenTool className="h-3.5 w-3.5" />
-              Apply Signature / Date
-            </button>
+
           </div>
         </div>
       </div>
@@ -401,57 +395,18 @@ export default function NewRequisitionPage() {
               onChange={handleFieldChange}
               readOnly={false}
               documentId={undefined}
-              onLaunchSignatureModal={() => setIsSigningOpen(true)}
+              onLaunchSignatureModal={(fieldKey?: string) => {
+                if (fieldKey && typeof fieldKey === "string") {
+                  setTargetSignatureField(fieldKey);
+                } else {
+                  const firstSig = detectedFormFields.find((f) => f.kind === "signature");
+                  setTargetSignatureField(firstSig ? firstSig.key : "signature");
+                }
+                setIsSigningOpen(true);
+              }}
             />
 
-            {/* Signature Modal */}
-            {isSigningOpen && (
-              <SignaturePlacementModal
-                mode="form"
-                formFields={detectedFormFields}
-                confirmLabel="Apply to Form"
-                onCancel={() => setIsSigningOpen(false)}
-                onConfirm={(result) => {
-                  // Use the formFieldValues from the modal result if available
-                  const fieldValues = result.formFieldValues || {};
-                  const updates: Record<string, unknown> = {};
-                  
-                  // Apply form field values from modal
-                  Object.entries(fieldValues).forEach(([key, value]) => {
-                    updates[key] = value;
-                  });
-                  
-                  // Also process items for signature styling
-                  result.items.forEach((item) => {
-                    if (item.kind === "signature" && item.image_data) {
-                      updates[item.field_key || ""] = item.image_data;
-                      // Store styling metadata
-                      updates[`${item.field_key || ""}_style`] = {
-                        color: item.color,
-                        fontSize: item.font_percent ? `${item.font_percent * 10}px` : '16px',
-                        fontFamily: item.font_family || 'helvetica',
-                        bold: item.bold,
-                        italic: item.italic,
-                      };
-                    } else if (item.kind === "date" && item.date_iso) {
-                      updates[item.field_key || ""] = item.date_iso;
-                      updates[`${item.field_key || ""}_date`] = item.date_iso;
-                    } else if (item.kind === "text" && item.text) {
-                      updates[item.field_key || ""] = item.text;
-                      updates[`${item.field_key || ""}_name`] = item.text;
-                    }
-                  });
-                  
-                  setFormValues((prev) => ({ ...prev, ...updates }));
-                  setFormDirty(true);
-                  setIsSigningOpen(false);
-                }}
-                onApplyToForm={(fields) => {
-                  setFormValues((prev) => ({ ...prev, ...fields }));
-                  setFormDirty(true);
-                }}
-              />
-            )}
+
 
             {/* Bottom Actions */}
             <div className="mt-8 flex items-center justify-between border-t border-[#E4E7EB] pt-5">
@@ -498,22 +453,32 @@ export default function NewRequisitionPage() {
         )}
       </div>
 
-      {/* Signature Placement Modal (configured for direct Form mode) */}
+      {/* Signature Placement Modal (direct Form mode) */}
       {isSigningOpen && (
         <SignaturePlacementModal
           mode="form"
           documentTitle={selectedTemplate?.name || "Requisition Authorization"}
           signerName={user?.full_name || ""}
           formFields={detectedFormFields}
-          onCancel={() => setIsSigningOpen(false)}
-          onConfirm={(result) => {
-            if (result.formFieldValues) {
-              handleApplySignature(result.formFieldValues, result);
-            } else {
-              setIsSigningOpen(false);
-            }
+          targetFieldKey={targetSignatureField}
+          onCancel={() => {
+            setIsSigningOpen(false);
+            setTargetSignatureField(null);
           }}
-          onApplyToForm={handleApplySignature}
+          onConfirm={(result) => {
+            if (result.formFieldValues && Object.keys(result.formFieldValues).length > 0) {
+              handleApplySignature(result.formFieldValues, result);
+            } else if (result.signatureImage && targetSignatureField) {
+              handleApplySignature({ [targetSignatureField]: result.signatureImage }, result);
+            }
+            setIsSigningOpen(false);
+            setTargetSignatureField(null);
+          }}
+          onApplyToForm={(fields, rawResult) => {
+            handleApplySignature(fields, rawResult);
+            setIsSigningOpen(false);
+            setTargetSignatureField(null);
+          }}
         />
       )}
     </div>

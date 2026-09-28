@@ -118,11 +118,127 @@ export interface SignaturePlacementModalProps {
   mode?: "auto" | "pdf" | "form";
   /** Available signature/date/text fields in the form for direct binding */
   formFields?: FormTargetField[];
+  /** Specific signature field that was clicked in the form */
+  targetFieldKey?: string | null;
   onCancel: () => void;
   onConfirm: (result: SignaturePlacementResult) => void;
   /** Direct hook for form fields injection */
   onApplyToForm?: (fields: Record<string, unknown>, rawResult: SignaturePlacementResult) => void;
   isSubmitting?: boolean;
+}
+
+/**
+ * Composites the signature drawing/image with the signer name and EAT date
+ * neatly formatted right below it into a high-resolution, crisp PNG image.
+ */
+export async function compositeSignatureWithMetadata(
+  signatureDataUrl: string,
+  options: {
+    name?: string;
+    includeName?: boolean;
+    date?: string;
+    includeDate?: boolean;
+    scale?: number;
+    thickenStroke?: boolean;
+  }
+): Promise<string> {
+  const { name, includeName, date, includeDate, scale = 2, thickenStroke = true } = options;
+
+  return new Promise((resolve) => {
+    const img = new Image();
+    img.crossOrigin = "anonymous";
+    img.onload = () => {
+      try {
+        const padding = 24;
+        // Substantially increased font sizes & line heights for clear visibility inside form cards
+        const nameFontSize = 21;
+        const dateFontSize = 17;
+        const lineHeight = 30;
+
+        let extraHeight = 0;
+        if (includeName && name) extraHeight += lineHeight;
+        if (includeDate && date) extraHeight += lineHeight;
+        if (extraHeight > 0) extraHeight += 20; // divider line + breathing room
+
+        const naturalW = img.naturalWidth || img.width || 420;
+        const naturalH = img.naturalHeight || img.height || 140;
+        
+        // Ensure standard readable width of at least 420px
+        const baseWidth = Math.max(naturalW, 420);
+        const sigHeight = (naturalH / naturalW) * baseWidth;
+        const totalHeight = sigHeight + extraHeight + padding;
+
+        const canvas = document.createElement("canvas");
+        canvas.width = Math.round(baseWidth * scale);
+        canvas.height = Math.round(totalHeight * scale);
+        const ctx = canvas.getContext("2d");
+        if (!ctx) {
+          resolve(signatureDataUrl);
+          return;
+        }
+
+        ctx.scale(scale, scale);
+        ctx.clearRect(0, 0, baseWidth, totalHeight);
+
+        // Increase stroke weight and opacity of the signature to make it rich and dark
+        // Multi-pass stroke dilation thickens hairline strokes without blurring
+        const sigX = 0;
+        const sigY = 10;
+        
+        if (thickenStroke) {
+          // Offsets to thicken the pen strokes
+          const offsets = [
+            [-0.75, 0], [0.75, 0], [0, -0.75], [0, 0.75],
+            [-0.5, -0.5], [0.5, 0.5], [-0.5, 0.5], [0.5, -0.5],
+            [0, 0]
+          ];
+          ctx.save();
+          for (const [ox, oy] of offsets) {
+            ctx.drawImage(img, sigX + ox, sigY + oy, baseWidth, sigHeight);
+          }
+          ctx.restore();
+        } else {
+          ctx.drawImage(img, sigX, sigY, baseWidth, sigHeight);
+        }
+
+        let currentY = sigHeight + 16;
+
+        // Distinct divider line
+        if (extraHeight > 0) {
+          ctx.strokeStyle = "#94A3B8";
+          ctx.lineWidth = 1.75;
+          ctx.beginPath();
+          ctx.moveTo(padding, currentY);
+          ctx.lineTo(baseWidth - padding, currentY);
+          ctx.stroke();
+          currentY += 18;
+        }
+
+        // Draw Signer Name below signature (Bold, prominent, high contrast)
+        if (includeName && name) {
+          ctx.fillStyle = "#0F172A";
+          ctx.font = `700 ${nameFontSize}px system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif`;
+          ctx.fillText(`Digitally signed by: ${name}`, padding, currentY + nameFontSize - 2);
+          currentY += lineHeight;
+        }
+
+        // Draw Date Stamp (EAT) below signature (Clear, bolded date label)
+        if (includeDate && date) {
+          ctx.fillStyle = "#334155";
+          ctx.font = `600 ${dateFontSize}px system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif`;
+          ctx.fillText(`Date: ${date}`, padding, currentY + dateFontSize - 2);
+          currentY += lineHeight;
+        }
+
+        resolve(canvas.toDataURL("image/png"));
+      } catch (err) {
+        console.warn("Could not composite signature on canvas, using raw signature:", err);
+        resolve(signatureDataUrl);
+      }
+    };
+    img.onerror = () => resolve(signatureDataUrl);
+    img.src = signatureDataUrl;
+  });
 }
 
 export default function SignaturePlacementModal({
@@ -134,6 +250,7 @@ export default function SignaturePlacementModal({
   signerName = "",
   mode = "auto",
   formFields = [],
+  targetFieldKey = null,
   onCancel,
   onConfirm,
   onApplyToForm,
@@ -163,21 +280,22 @@ export default function SignaturePlacementModal({
   const [dateFormatId, setDateFormatId] = useState(DATE_FORMATS[0].id);
   const [dateValue, setDateValue] = useState<string>(() => isoDate(new Date()));
 
-  // Form mode field mapping selections
+  // Form mode field mapping selections & below-signature display toggles
   const [selectedSigField, setSelectedSigField] = useState<string>(() => {
+    if (targetFieldKey) return targetFieldKey;
     const defaultSig = formFields.find((f) => f.kind === "signature");
     return defaultSig ? defaultSig.key : "signature";
   });
-  const [selectedDateField, setSelectedDateField] = useState<string>(() => {
-    const defaultDate = formFields.find((f) => f.kind === "date");
-    return defaultDate ? defaultDate.key : "signature_date";
-  });
-  const [selectedNameField, setSelectedNameField] = useState<string>(() => {
-    const defaultName = formFields.find((f) => f.kind === "text" && /name|signed_by|authorizer/i.test(f.key));
-    return defaultName ? defaultName.key : "signed_by";
-  });
-  const [applyDateToForm, setApplyDateToForm] = useState(true);
-  const [applyNameToForm, setApplyNameToForm] = useState(true);
+  const [includeName, setIncludeName] = useState(true);
+  const [includeDate, setIncludeDate] = useState(true);
+  const [customSignerName, setCustomSignerName] = useState(effectiveSignerName);
+
+  // Sync targetFieldKey if changed externally
+  useEffect(() => {
+    if (targetFieldKey) {
+      setSelectedSigField(targetFieldKey);
+    }
+  }, [targetFieldKey]);
 
   // Query PDF preview only if documentId is present
   const { data: preview, isLoading: previewLoading } = useQuery({
@@ -342,10 +460,22 @@ export default function SignaturePlacementModal({
   };
 
   // Submit / Confirm logic
-  const handleConfirm = () => {
+  const handleConfirm = async () => {
     if (!hasSignatureSource) {
       setError("Please provide a signature before continuing.");
       return;
+    }
+
+    // Composite name and date below the signature image into one neat graphic
+    let finalSignatureUrl = activeSignatureImage!;
+    if (activeMode === "form" && (includeName || includeDate)) {
+      finalSignatureUrl = await compositeSignatureWithMetadata(activeSignatureImage!, {
+        name: customSignerName || effectiveSignerName,
+        includeName,
+        date: currentDateText,
+        includeDate,
+        scale: 2,
+      });
     }
 
     const roundedItems = items.map((i) => ({
@@ -359,13 +489,7 @@ export default function SignaturePlacementModal({
 
     const formValuesToApply: Record<string, unknown> = {};
     if (selectedSigField) {
-      formValuesToApply[selectedSigField] = activeSignatureImage;
-    }
-    if (applyDateToForm && selectedDateField) {
-      formValuesToApply[selectedDateField] = currentDateText;
-    }
-    if (applyNameToForm && selectedNameField) {
-      formValuesToApply[selectedNameField] = effectiveSignerName;
+      formValuesToApply[selectedSigField] = finalSignatureUrl;
     }
 
     const resultPayload: SignaturePlacementResult = {
@@ -378,7 +502,7 @@ export default function SignaturePlacementModal({
         width_percent: firstSig.width_percent,
       } : null,
       useNewSignature: Boolean(useNewSignature && newSignature),
-      signatureImage: activeSignatureImage,
+      signatureImage: finalSignatureUrl,
       formFieldValues: formValuesToApply,
     };
 
@@ -507,15 +631,15 @@ export default function SignaturePlacementModal({
               </div>
             </div>
 
-            {/* Target Form Fields (Form Mode) */}
+            {/* Signature Field Options (Form Mode) */}
             {activeMode === "form" && (
               <div className="border-t border-[#E4E7EB] pt-4 space-y-3">
                 <label className="text-xs font-bold uppercase tracking-wider text-[#5E6870] block">
-                  Form Field Mapping
+                  Signature Details (Below Signature)
                 </label>
-                <div className="space-y-2 text-xs">
+                <div className="space-y-3 text-xs">
                   <div>
-                    <label className="text-[#5E6870] block mb-1">Signature Field:</label>
+                    <label className="text-[#5E6870] block mb-1">Target Signature Field:</label>
                     <input
                       type="text"
                       value={selectedSigField}
@@ -524,42 +648,44 @@ export default function SignaturePlacementModal({
                       className="w-full rounded border border-[#C8CDD2] bg-white px-2.5 py-1.5 text-xs outline-none focus:border-[#287EAD]"
                     />
                   </div>
-                  <div>
-                    <div className="flex items-center justify-between mb-1">
-                      <label className="text-[#5E6870]">Date Field:</label>
+
+                  {/* Include Name Checkbox */}
+                  <div className="rounded border border-[#E4E7EB] bg-white p-2.5 space-y-2">
+                    <label className="flex items-center gap-2 cursor-pointer font-medium text-[#1F2933]">
                       <input
                         type="checkbox"
-                        checked={applyDateToForm}
-                        onChange={(e) => setApplyDateToForm(e.target.checked)}
+                        checked={includeName}
+                        onChange={(e) => setIncludeName(e.target.checked)}
+                        className="h-3.5 w-3.5 rounded border-[#C8CDD2] text-[#287EAD] focus:ring-[#287EAD]"
                       />
-                    </div>
-                    {applyDateToForm && (
+                      Include Name below signature
+                    </label>
+                    {includeName && (
                       <input
                         type="text"
-                        value={selectedDateField}
-                        onChange={(e) => setSelectedDateField(e.target.value)}
-                        placeholder="e.g. signature_date or date"
-                        className="w-full rounded border border-[#C8CDD2] bg-white px-2.5 py-1.5 text-xs outline-none focus:border-[#287EAD]"
+                        value={customSignerName}
+                        onChange={(e) => setCustomSignerName(e.target.value)}
+                        placeholder="Signer full name"
+                        className="w-full rounded border border-[#C8CDD2] bg-[#FAFBFB] px-2.5 py-1 text-xs outline-none focus:border-[#287EAD]"
                       />
                     )}
                   </div>
-                  <div>
-                    <div className="flex items-center justify-between mb-1">
-                      <label className="text-[#5E6870]">Signer Name / Title:</label>
+
+                  {/* Include Date Checkbox */}
+                  <div className="rounded border border-[#E4E7EB] bg-white p-2.5 space-y-2">
+                    <label className="flex items-center gap-2 cursor-pointer font-medium text-[#1F2933]">
                       <input
                         type="checkbox"
-                        checked={applyNameToForm}
-                        onChange={(e) => setApplyNameToForm(e.target.checked)}
+                        checked={includeDate}
+                        onChange={(e) => setIncludeDate(e.target.checked)}
+                        className="h-3.5 w-3.5 rounded border-[#C8CDD2] text-[#287EAD] focus:ring-[#287EAD]"
                       />
-                    </div>
-                    {applyNameToForm && (
-                      <input
-                        type="text"
-                        value={selectedNameField}
-                        onChange={(e) => setSelectedNameField(e.target.value)}
-                        placeholder="e.g. signed_by or name"
-                        className="w-full rounded border border-[#C8CDD2] bg-white px-2.5 py-1.5 text-xs outline-none focus:border-[#287EAD]"
-                      />
+                      Include Date below signature (EAT)
+                    </label>
+                    {includeDate && (
+                      <div className="rounded bg-[#F4F6F8] p-1.5 text-[11px] text-[#5E6870]">
+                        Stamp: <span className="font-semibold text-[#1F2933]">{currentDateText}</span>
+                      </div>
                     )}
                   </div>
                 </div>
@@ -665,48 +791,55 @@ export default function SignaturePlacementModal({
                   ))}
               </div>
             ) : (
-              /* Direct Form Mode Preview Card */
+              /* Direct Form Mode Preview Card — shows signature + neat Name & Date below */
               <div className="w-full max-w-lg rounded-lg border border-[#C8CDD2] bg-white p-6 shadow-sm">
                 <div className="border-b border-[#E4E7EB] pb-3 mb-4 flex items-center justify-between">
                   <div className="flex items-center gap-2">
                     <FileText className="h-5 w-5 text-[#287EAD]" />
-                    <h3 className="text-sm font-semibold text-[#1F2933]">Requisition Form Sign-off</h3>
+                    <h3 className="text-sm font-semibold text-[#1F2933]">Requisition Signature Preview</h3>
                   </div>
-                  <span className="text-xs text-[#5E6870]">Verification stamp</span>
+                  <span className="text-xs text-[#5E6870]">
+                    Field: <code className="font-mono text-[#287EAD]">{selectedSigField}</code>
+                  </span>
                 </div>
 
                 <div className="space-y-4">
-                  {/* Signature Box */}
-                  <div className="rounded border-2 border-dashed border-[#C8CDD2] bg-[#FAFBFB] p-4 text-center">
-                    <span className="text-xs font-medium text-[#5E6870] mb-2 block">
-                      Target Field: <code className="text-[#287EAD]">{selectedSigField}</code>
+                  {/* Signature Box (simulates how it appears in the form) */}
+                  <div className="rounded border-2 border-dashed border-[#C8CDD2] bg-[#FAFBFB] p-5 text-center">
+                    <span className="text-xs font-medium text-[#5E6870] mb-3 block">
+                      Preview inside form field:
                     </span>
                     {activeSignatureImage ? (
-                      <div className="flex flex-col items-center justify-center">
-                        <img
-                          src={activeSignatureImage}
-                          alt="Signature Preview"
-                          className="max-h-24 object-contain"
-                        />
-                        <span className="mt-2 text-[11px] text-emerald-600 font-medium flex items-center gap-1">
-                          <Check className="h-3 w-3" /> Ready to bind to form
-                        </span>
+                      <div className="inline-block w-full max-w-md rounded border border-[#E2E8F0] bg-white p-4 shadow-sm text-left">
+                        {/* Signature Image with enhanced stroke weight */}
+                        <div className="flex justify-center py-2">
+                          <img
+                            src={activeSignatureImage}
+                            alt="Signature Preview"
+                            className="max-h-28 object-contain filter contrast-150 drop-shadow-sm"
+                          />
+                        </div>
+                        {/* Neatly formatted Name and Date below signature - large and prominent */}
+                        {(includeName || includeDate) && (
+                          <div className="mt-4 pt-3 border-t-2 border-[#94A3B8] space-y-1.5">
+                            {includeName && (
+                              <div className="text-sm sm:text-base font-bold text-[#0F172A]">
+                                Digitally signed by: <span>{customSignerName || effectiveSignerName}</span>
+                              </div>
+                            )}
+                            {includeDate && (
+                              <div className="text-xs sm:text-sm font-semibold text-[#334155]">
+                                Date: <span>{currentDateText}</span>
+                              </div>
+                            )}
+                          </div>
+                        )}
                       </div>
                     ) : (
-                      <p className="text-xs text-[#5E6870]">No signature selected yet</p>
+                      <p className="text-xs text-[#5E6870] py-6">
+                        No signature selected yet. Draw or choose a saved signature on the left.
+                      </p>
                     )}
-                  </div>
-
-                  {/* Date & Signer Details */}
-                  <div className="grid grid-cols-2 gap-3 text-xs bg-[#F4F6F8] p-3 rounded">
-                    <div>
-                      <span className="text-[#5E6870] block">Signer Name:</span>
-                      <span className="font-semibold text-[#1F2933]">{effectiveSignerName}</span>
-                    </div>
-                    <div>
-                      <span className="text-[#5E6870] block">Date (EAT):</span>
-                      <span className="font-semibold text-[#1F2933]">{currentDateText}</span>
-                    </div>
                   </div>
                 </div>
 

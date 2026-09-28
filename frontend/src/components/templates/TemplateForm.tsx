@@ -30,7 +30,7 @@ import { resolveFormula, evaluateFormula, formulaLabel } from "@/components/temp
 import { currencySymbolFor } from "@/lib/currencies";
 import { useAuthStore } from "@/store/authStore";
 import { Sparkles } from "lucide-react";
-import { buildCalcScope, evaluateCalcExpression, evaluateTableColumnFormulas, type CalcValue } from "@/lib/calculations";
+import { buildCalcScope, evaluateCalcExpression, evaluateTableColumnFormulas, resolveRowAggregates, formatCalcResult, type CalcValue } from "@/lib/calculations";
 import AccountMultiSelect from "@/components/ui/AccountMultiSelect";
 
 // ── Types ─────────────────────────────────────────────────────────────────────
@@ -1880,12 +1880,10 @@ function TemplateForm({ sections, values, onChange, readOnly = false, documentId
   // calc_text/calc_date) whenever any value changes — client preview only,
   // mirroring the builder's own Preview and the server's authoritative
   // compute_calculated_values. Resolves in template order so a later formula
-  // can reference an earlier calculated field's result. Skipped for an
-  // existing document the same way the auto-fill formula effect above is:
-  // the server already froze these at generation time, so client recompute
-  // here would just be superseded noise against a document's saved values.
+  // can reference an earlier calculated field's result, including on an
+  // existing document while it is being edited.
   useEffect(() => {
-    if (readOnly || documentId) return;
+    if (readOnly) return;
     // Build table registry so top-level formulas can reference table columns
     const tableRegistry: Record<string, { rows: Record<string, unknown>[]; colTypeByKey: Record<string, string | undefined> }> = {};
     for (const f of allFields) {
@@ -1899,18 +1897,19 @@ function TemplateForm({ sections, values, onChange, readOnly = false, documentId
     for (const f of allFields) {
       const k = f.key ?? f.id ?? "";
       if (!k || !f.calc?.expression) continue;
-      let result = evaluateCalcExpression(f.calc.expression, scope);
+      const expr = resolveRowAggregates(f.calc.expression, [], {}, tableRegistry);
+      let result = evaluateCalcExpression(expr, scope);
       if (typeof result === "number" && typeof f.calc.decimals === "number") {
         result = Number(result.toFixed(f.calc.decimals));
       }
+      result = formatCalcResult(f.type, result);
       scope[k] = result; // let a later formula see this one's result
-      if (values[k] !== result) onChange(k, result);
+      if (String(values[k] ?? "") !== String(result)) onChange(k, result);
     }
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [sectionsKey, JSON.stringify(values), readOnly, documentId]);
 
   // Keep a live snapshot of form values for conditional visibility
-  const liveValues = { ...values, ...(watch() as TemplateFormValues), __document_id: documentId };
+  const liveValues = { ...(watch() as TemplateFormValues), ...values, __document_id: documentId };
 
   // Viewer context for role-restricted sections.
   const viewer: FormViewer = {
