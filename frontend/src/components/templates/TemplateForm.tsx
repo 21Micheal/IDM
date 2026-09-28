@@ -7,7 +7,7 @@
  *  - Conditional visibility via visibleWhen rules
  *  - All field types: text, textarea, number, currency, date, datetime, time,
  *    email, phone, select, multi_select, radio, boolean, file, image, signature,
- *    reference, user, heading, divider, table
+ *    reference, user, heading, divider, table, budget
  *  - Table columns fully typed (currency symbol, select options, boolean, etc.)
  *  - Same public API as v1 — callers (UploadPage, DocumentDetailPage) need zero changes
  */
@@ -18,6 +18,7 @@ import { useQuery } from "@tanstack/react-query";
 import { AlertCircle, ChevronDown, Download, ExternalLink, Info, Loader2, Lock, Pencil, Paperclip, Plus, Search, Star, Trash2, X, Image as ImageIcon, FileText, FileImage, FileCode2, FileSpreadsheet, FileArchive, FileVideo, FileAudio, Upload, Building2, PenTool, User, CalendarClock } from "lucide-react";
 import type { ReactNode } from "react";
 import { documentsAPI } from "@/services/api";
+import BudgetBanner from "./BudgetBanner";
 import { toast } from "@/components/ui/vault-toast";
 import CustomListbox from "@/components/ui/CustomListbox";
 import {
@@ -89,6 +90,12 @@ type Field = {
   calc?: { expression?: string; decimals?: number } | null;
   visibleWhen?: VisibleWhen | null;
   editableWhen?: VisibleWhen | null;
+  sunsystems?: {
+    budgetAmountField?: string;
+    monitoredAmountField?: string;
+    account?: string;
+    [k: string]: unknown;
+  } | null;
 };
 
 // Field types whose value is derived from `field.calc.expression` rather than
@@ -98,7 +105,7 @@ const CALCULATED_FIELD_TYPES = new Set(["calc_number", "calc_currency", "calc_te
 /* Presentation-only field types — they never hold a value, are never required
  * and never appear in the submitted payload. Mirrors the builder's
  * PRESENTATION_TYPES. */
-const PRESENTATION_TYPES = new Set(["heading", "divider", "info", "spacer"]);
+const PRESENTATION_TYPES = new Set(["heading", "divider", "info", "spacer", "budget"]);
 
 /* Filled by the server on create (reference number), never typed. */
 const SERVER_FILLED_TYPES = new Set(["auto_number"]);
@@ -1362,6 +1369,33 @@ function labelForAuto(label: string, field: Field) {
   );
 }
 
+function parseAmount(v: unknown): number | null {
+  if (v === null || v === undefined || v === "") return null;
+  const n = typeof v === "number" ? v : parseFloat(String(v).replace(/,/g, ""));
+  return Number.isFinite(n) ? n : null;
+}
+
+/** Resolve a numeric source key: a top-level field, or a table column
+ * ("table.col" or bare "col"), in which case it sums that column across rows. */
+function resolveNumericSource(
+  key: string | undefined,
+  values: TemplateFormValues,
+  allFields: Field[],
+): number | null {
+  if (!key) return null;
+  if (allFields.some((f) => f.key === key && f.type !== "table")) return parseAmount(values[key]);
+
+  const [maybeTable, maybeCol] = key.includes(".") ? key.split(".") : [undefined, undefined];
+  const colKey = maybeCol ?? key;
+  const table = allFields.find(
+    (f) => f.type === "table" && f.key && (!maybeTable || f.key === maybeTable) &&
+    (f.columns ?? []).some((c) => c.key === colKey),
+  );
+  if (!table?.key) return null;
+  const rows = Array.isArray(values[table.key]) ? (values[table.key] as Record<string, unknown>[]) : [];
+  return rows.reduce((sum, r) => sum + (parseAmount(r?.[colKey]) ?? 0), 0);
+}
+
 function FormField({ field, control, errors, onChangeCb, readOnly, allValues, editable = true, processStep, allFields, onLaunchSignatureModal }: {
   field: Field;
   control: any;
@@ -1394,6 +1428,7 @@ function FormField({ field, control, errors, onChangeCb, readOnly, allValues, ed
     </div>
   );
   if (type === "divider") return <div className="min-w-0" style={{ gridColumn: "span 12 / span 12" }}><hr style={{ borderColor: "#E5E8EB" }} /></div>;
+  if (type === "spacer") return <div className="min-w-0" style={{ gridColumn: `span ${span} / span ${span}` }}><div className="h-8" /></div>;
 
   // Read-only guidance note — never submitted.
   if (type === "info") return (
@@ -1404,9 +1439,6 @@ function FormField({ field, control, errors, onChangeCb, readOnly, allValues, ed
       </div>
     </div>
   );
-
-  // Empty gap used to align fields on a row.
-  if (type === "spacer") return <div aria-hidden className="min-w-0" style={style} />;
 
   // Table handled separately (needs full width + local state)
   if (type === "table") return (
@@ -1549,6 +1581,37 @@ function FormField({ field, control, errors, onChangeCb, readOnly, allValues, ed
   );
 
   // Static / non-interactive types
+  if (type === "budget") {
+    const ss = field.sunsystems ?? {};
+    // Budget: chosen field/column → else the default value → else "not configured"
+    const budget =
+      resolveNumericSource(ss.budgetAmountField, allValues, allFields) ??
+      parseAmount(field.defaultValue);
+    const requested = resolveNumericSource(ss.monitoredAmountField, allValues, allFields) ?? 0;
+    const budgetNum = budget ?? 0;
+    const currency = field.currencySymbol || "KSh";
+    const formattedBudget = `${currency} ${budgetNum.toLocaleString(undefined, { minimumFractionDigits: 0, maximumFractionDigits: 2 })}`;
+
+    return (
+      <div className="min-w-0" style={style}>
+        {labelEl}
+        <div className="flex items-start gap-3">
+          <div className={`${inp} flex-1 bg-[#F6F7F8] text-[#8C969E]`}>
+            {formattedBudget}
+          </div>
+          {budget && requested > budgetNum && (
+            <BudgetBanner
+              amount={requested}
+              budget={budget}
+              currency={currency}
+              accountCode={ss.account as string | undefined}
+            />
+          )}
+        </div>
+      </div>
+    );
+  }
+
   if (type === "signature") {
     return (
       <div className="min-w-0" style={style}>

@@ -16,7 +16,6 @@ import { useNavigate, useSearchParams } from "react-router-dom";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { templatesAPI, documentsAPI } from "@/services/api";
 import TemplateForm, { requiredFieldLabels } from "@/components/templates/TemplateForm";
-import BudgetBanner from "@/components/templates/BudgetBanner";
 import { collectFormAttachments } from "@/components/templates/formAttachments";
 import { toast } from "@/components/ui/vault-toast";
 import { cn } from "@/lib/utils";
@@ -369,17 +368,6 @@ export default function NewRequisitionPage() {
               ))}
             </ul>
           </div>
-        )}
-
-        {/* Live SunSystems Budget Check Banner */}
-        {selectedTemplate && (
-          <BudgetBanner
-            values={formValues}
-            templateId={selectedTemplateId || undefined}
-            mapping={selectedTemplate?.sunsystems?.budget ?? null}
-            sections={selectedTemplate.sections ?? []}
-            enabled={true}
-          />
         )}
 
         {/* Dynamic Requisition Form */}

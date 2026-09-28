@@ -48,7 +48,7 @@ import {
   RotateCcw, Type, AlignLeft, Hash, Mail, Phone, Calendar,
   Clock, Pencil, List, CircleDot, CheckSquare, Paperclip,
   Image as ImageIcon, Table2, Heading, Minus, ChevronUp,
-  ChevronDown, AlertCircle, Tag, Layers, ArrowRight,
+  ChevronDown, AlertCircle, Tag, Layers, ArrowRight, Wallet,
   ChevronRight, X, Loader2, Sliders, Link2, User as UserIcon,
   Wrench, FileCode, Calculator, Star, Percent, Link as UrlIcon, ListOrdered,
   Info, Files, ToggleLeft, MoveLeft, MoveRight, CopyPlus, Sigma,
@@ -73,7 +73,8 @@ export type FieldType =
   | "multi_file"
   | "calc_number" | "calc_currency" | "calc_text" | "calc_date" | "calc_boolean"
   | "info" | "spacer"
-  | "sunsystems_account";
+  | "sunsystems_account"
+  | "budget";
 
 /* Field types that are auto-derived rather than typed by the person filling
  * the form: calculated values (formula over sibling field keys) and the
@@ -167,6 +168,9 @@ export interface FieldFinanceBinding {
   // See FINANCE_BUDGET_ROLES. ("budget_amount"/"budget_account"were the old
   // combined `role` values; migrated to this on load — see normalizeField.)
   budgetRole?: string;
+  // Budget banner field references (for the new budget field type)
+  budgetAmountField?: string;
+  monitoredAmountField?: string;
 }
 export interface ColumnFinanceBinding {
   role?: string;            // see FINANCE_COLUMN_ROLES
@@ -515,6 +519,7 @@ const FIELD_META: Record<FieldType, { label: string; group: FieldGroup; defaults
   email: { label: "Email", group: "input", defaults: { colSpan: 6, placeholder: "name@company.com" } },
   phone: { label: "Phone", group: "input", defaults: { colSpan: 4, placeholder: "+254 700 000000" } },
   sunsystems_account: { label: "Supplier", group: "input", defaults: { colSpan: 12, multi: true }, hint: "Live supplier lookup from SunSystems" },
+  budget: { label: "Budget Banner", group: "advanced", defaults: { colSpan: 12 }, hint: "Shows available budget for a specified account code" },
   select: { label: "Dropdown", group: "choice", defaults: { colSpan: 6, options: ["Option 1", "Option 2"] } },
   multi_select: { label: "Multi-select", group: "choice", defaults: { colSpan: 6, options: ["Option 1", "Option 2"] } },
   radio: { label: "Radio group", group: "choice", defaults: { colSpan: 6, options: ["Yes", "No"] } },
@@ -554,12 +559,13 @@ const ICONS: Record<FieldType, React.ElementType> = {
   calc_number: Calculator, calc_currency: Calculator, calc_text: Calculator, calc_date: Calculator,
   calc_boolean: Sigma, multi_file: Files, info: Info, spacer: Minus,
   sunsystems_account: Building2,
+  budget: Wallet,
 };
 
 /* Presentational-only field types. They never hold a value, so they're
  * skipped by the payload preview, can't be marked required, and never
  * appear as a formula/condition source. */
-const PRESENTATION_TYPES = new Set<FieldType>(["heading", "divider", "info", "spacer"]);
+const PRESENTATION_TYPES = new Set<FieldType>(["heading", "divider", "info", "spacer", "budget"]);
 
 const uid = () => Math.random().toString(36).slice(2, 10);
 
@@ -766,6 +772,7 @@ function cellPlaceholder(c: TableColumn): string {
     case "url": return "https://…";
     case "multi_select": return c.options?.[0] ? `${c.options[0]} +` : "Select many…";
     case "image": return "🖼 image";
+    case "budget": return "💰 Budget";
     default: return "—";
   }
 }
@@ -822,6 +829,10 @@ function newField(type: FieldType): TemplateField {
     // submit time (see FORMULA_OPTIONS / apply_formulas).
     base.readonly = true;
     base.formula = "reference_number";
+  }
+  if (type === "budget") {
+    // Budget banner is presentational - shows budget info, doesn't hold a value
+    base.readonly = true;
   }
   if (type === "sunsystems_account") {
     base.width = 12;
@@ -1499,6 +1510,13 @@ function FieldPreview({ field, onConfigureColumn, onAddColumn, onRemoveColumn, o
       );
     case "spacer":
       return <div className="h-8 border border-dashed border-zinc-200 bg-[repeating-linear-gradient(45deg,#F6F7F8,#F6F7F8_6px,#FFF_6px,#FFF_12px)]" />;
+    case "budget":
+      return (
+        <div className="flex items-center gap-2 rounded border border-[#C8CDD2] bg-[#F5F7F8] px-3 py-2 text-xs text-[#5E6870]">
+          <Wallet className="h-3.5 w-3.5" />
+          <span>Budget Banner</span>
+        </div>
+      );
     case "multi_file":
       return (
         <div className="flex h-10 items-center justify-center border border-dashed border-zinc-200 bg-zinc-50 text-xs text-zinc-400">
@@ -3011,18 +3029,6 @@ function FinanceBindingFields({ field, onUpdate }: {
           )}
         </>
       )}
-      {!isTable && (
-        <InspectorRow label="Budget role" hint="Independent of the journal role — the same field can do both.">
-          <CustomListbox
-            value={binding.budgetRole ?? ""}
-            onChange={(val) => setB({ budgetRole: val || undefined })}
-            options={FINANCE_BUDGET_ROLES.map((o) => ({ value: o.value, label: o.label }))}
-            className={inputCls}
-            buttonClassName="w-full"
-            ariaLabel="Budget role"
-          />
-        </InspectorRow>
-      )}
     </div>
   );
 }
@@ -3572,7 +3578,7 @@ function FieldEditor({ field, onUpdate, allFields, processSteps }: {
           </InspectorRow>
           {!["heading", "divider", "checkbox", "boolean", "table", "file", "image", "signature",
             "rating", "auto_number", "calc_number", "calc_currency", "calc_text", "calc_date",
-            "calc_boolean", "multi_file", "info", "spacer", "sunsystems_account"].includes(field.type) && (
+            "calc_boolean", "multi_file", "info", "spacer", "sunsystems_account", "budget"].includes(field.type) && (
               <InspectorRow label="Placeholder">
                 <input className={inputCls} value={field.placeholder ?? ""} onChange={(e) => onUpdate({ placeholder: e.target.value })} />
               </InspectorRow>
@@ -3627,6 +3633,64 @@ function FieldEditor({ field, onUpdate, allFields, processSteps }: {
               <input type="number" min={2} max={10} value={field.max ?? 5}
                 onChange={(e) => onUpdate({ max: Math.max(2, Math.min(10, Number(e.target.value))) })} className={inputCls} />
             </InspectorRow>
+          )}
+          {field.type === "budget" && (
+            <>
+              {(() => {
+                // Collect all numeric fields: top-level fields + table columns
+                const tableColumns = allFields
+                  .filter(f => f.type === "table" && f.columns)
+                  .flatMap(f => f.columns?.map((col: TableColumn) => ({
+                    key: col.key,
+                    label: col.label,
+                    type: col.type,
+                  })) || []);
+                
+                const allNumericFields = [
+                  ...allFields.filter(f => f.key && (f.type === "number" || f.type === "currency" || CALCULATED_TYPES.has(f.type)))
+                    .map(f => ({ key: f.key, label: f.label || f.key })),
+                  ...tableColumns.filter(c => c.key && (c.type === "number" || c.type === "currency"))
+                    .map(c => ({ key: c.key, label: c.label || c.key })),
+                ];
+
+                return (
+                  <>
+                    <InspectorRow label="Budget amount field" hint="Which field holds the budget amount (fallback to default value if blank)">
+                      <CustomListbox
+                        value={field.sunsystems?.budgetAmountField ?? ""}
+                        onChange={(val) => onUpdate({ sunsystems: { ...(field.sunsystems ?? {}), budgetAmountField: val } })}
+                        options={[
+                          { value: "", label: "— use default value —" },
+                          ...allNumericFields.map(f => ({ value: f.key, label: f.label })),
+                        ]}
+                        className={inputCls}
+                        buttonClassName="w-full"
+                        ariaLabel="Budget amount field"
+                      />
+                    </InspectorRow>
+                    <InspectorRow label="Default budget amount" hint="Fallback budget when budget field is blank or not set">
+                      <input className={inputCls} value={field.defaultValue ?? ""} onChange={(e) => onUpdate({ defaultValue: e.target.value })} placeholder="e.g. 100000" />
+                    </InspectorRow>
+                    <InspectorRow label="Amount field to monitor" hint="Which field's value to compare against the budget">
+                      <CustomListbox
+                        value={field.sunsystems?.monitoredAmountField ?? ""}
+                        onChange={(val) => onUpdate({ sunsystems: { ...(field.sunsystems ?? {}), monitoredAmountField: val } })}
+                        options={[
+                          { value: "", label: "— choose a field —" },
+                          ...allNumericFields.map(f => ({ value: f.key, label: f.label })),
+                        ]}
+                        className={inputCls}
+                        buttonClassName="w-full"
+                        ariaLabel="Amount field to monitor"
+                      />
+                    </InspectorRow>
+                    <InspectorRow label="Account code" hint="The SunSystems account code for this budget">
+                      <input className={cn(inputCls, "font-mono")} value={field.sunsystems?.account ?? ""} onChange={(e) => onUpdate({ sunsystems: { ...(field.sunsystems ?? {}), account: e.target.value } })} placeholder="e.g. 37400" />
+                    </InspectorRow>
+                  </>
+                );
+              })()}
+            </>
           )}
           {isNumeric && (
             <NumberFormatEditor
@@ -5935,6 +5999,13 @@ function renameKeyEverywhere(template: Template, oldKey: string, newKey: string)
     editableWhen: renameGroup(f.editableWhen),
     calc: renameCalc(f.calc),
     currencyFromField: f.currencyFromField === oldKey ? newKey : f.currencyFromField,
+    sunsystems: f.sunsystems && (f.sunsystems.budgetAmountField === oldKey || f.sunsystems.monitoredAmountField === oldKey)
+      ? {
+        ...f.sunsystems,
+        budgetAmountField: f.sunsystems.budgetAmountField === oldKey ? newKey : f.sunsystems.budgetAmountField,
+        monitoredAmountField: f.sunsystems.monitoredAmountField === oldKey ? newKey : f.sunsystems.monitoredAmountField,
+      }
+      : f.sunsystems,
     columns: f.columns ? f.columns.map(renameColumn) : f.columns,
   });
 
