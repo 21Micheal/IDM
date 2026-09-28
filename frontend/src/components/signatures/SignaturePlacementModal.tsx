@@ -149,22 +149,21 @@ export async function compositeSignatureWithMetadata(
     img.crossOrigin = "anonymous";
     img.onload = () => {
       try {
-        const padding = 24;
-        // Substantially increased font sizes & line heights for clear visibility inside form cards
-        const nameFontSize = 21;
-        const dateFontSize = 17;
-        const lineHeight = 30;
+        const padding = 28;
+        const nameFont = 30;
+        const dateFont = 26;
+        const lineHeight = 42;
+        const showName = Boolean(includeName && name);
+        const showDate = Boolean(includeDate && date);
 
         let extraHeight = 0;
-        if (includeName && name) extraHeight += lineHeight;
-        if (includeDate && date) extraHeight += lineHeight;
-        if (extraHeight > 0) extraHeight += 20; // divider line + breathing room
+        if (showName) extraHeight += lineHeight;
+        if (showDate) extraHeight += lineHeight;
+        if (extraHeight > 0) extraHeight += 28;
 
-        const naturalW = img.naturalWidth || img.width || 420;
-        const naturalH = img.naturalHeight || img.height || 140;
-        
-        // Ensure standard readable width of at least 420px
-        const baseWidth = Math.max(naturalW, 420);
+        const naturalW = img.naturalWidth || img.width || 560;
+        const naturalH = img.naturalHeight || img.height || 180;
+        const baseWidth = Math.max(naturalW, 560);
         const sigHeight = (naturalH / naturalW) * baseWidth;
         const totalHeight = sigHeight + extraHeight + padding;
 
@@ -172,61 +171,56 @@ export async function compositeSignatureWithMetadata(
         canvas.width = Math.round(baseWidth * scale);
         canvas.height = Math.round(totalHeight * scale);
         const ctx = canvas.getContext("2d");
-        if (!ctx) {
-          resolve(signatureDataUrl);
-          return;
-        }
+        if (!ctx) return resolve(signatureDataUrl);
 
         ctx.scale(scale, scale);
         ctx.clearRect(0, 0, baseWidth, totalHeight);
 
-        // Increase stroke weight and opacity of the signature to make it rich and dark
-        // Multi-pass stroke dilation thickens hairline strokes without blurring
-        const sigX = 0;
         const sigY = 10;
-        
         if (thickenStroke) {
-          // Offsets to thicken the pen strokes
-          const offsets = [
-            [-0.75, 0], [0.75, 0], [0, -0.75], [0, 0.75],
-            [-0.5, -0.5], [0.5, 0.5], [-0.5, 0.5], [0.5, -0.5],
-            [0, 0]
-          ];
-          ctx.save();
-          for (const [ox, oy] of offsets) {
-            ctx.drawImage(img, sigX + ox, sigY + oy, baseWidth, sigHeight);
+          for (const r of [0.9, 1.6]) {
+            for (let a = 0; a < 16; a += 1) {
+              const t = (a / 16) * Math.PI * 2;
+              ctx.drawImage(img, Math.cos(t) * r, sigY + Math.sin(t) * r, baseWidth, sigHeight);
+            }
           }
-          ctx.restore();
-        } else {
-          ctx.drawImage(img, sigX, sigY, baseWidth, sigHeight);
         }
+        ctx.drawImage(img, 0, sigY, baseWidth, sigHeight);
 
-        let currentY = sigHeight + 16;
+        const fontStack = 'system-ui, -apple-system, "Segoe UI", Roboto, sans-serif';
+        const fitFont = (text: string, weight: number, size: number) => {
+          let fittedSize = size;
+          ctx.font = `${weight} ${fittedSize}px ${fontStack}`;
+          while (fittedSize > 16 && ctx.measureText(text).width > baseWidth - padding * 2) {
+            fittedSize -= 1;
+            ctx.font = `${weight} ${fittedSize}px ${fontStack}`;
+          }
+          return fittedSize;
+        };
 
-        // Distinct divider line
+        let currentY = sigHeight + 18;
         if (extraHeight > 0) {
-          ctx.strokeStyle = "#94A3B8";
-          ctx.lineWidth = 1.75;
+          ctx.strokeStyle = "#64748B";
+          ctx.lineWidth = 2.5;
           ctx.beginPath();
           ctx.moveTo(padding, currentY);
           ctx.lineTo(baseWidth - padding, currentY);
           ctx.stroke();
-          currentY += 18;
+          currentY += 22;
         }
 
-        // Draw Signer Name below signature (Bold, prominent, high contrast)
-        if (includeName && name) {
-          ctx.fillStyle = "#0F172A";
-          ctx.font = `700 ${nameFontSize}px system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif`;
-          ctx.fillText(`Digitally signed by: ${name}`, padding, currentY + nameFontSize - 2);
+        if (showName) {
+          const text = `Digitally signed by: ${name}`;
+          const size = fitFont(text, 800, nameFont);
+          ctx.fillStyle = "#0B1220";
+          ctx.fillText(text, padding, currentY + size - 2);
           currentY += lineHeight;
         }
-
-        // Draw Date Stamp (EAT) below signature (Clear, bolded date label)
-        if (includeDate && date) {
-          ctx.fillStyle = "#334155";
-          ctx.font = `600 ${dateFontSize}px system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif`;
-          ctx.fillText(`Date: ${date}`, padding, currentY + dateFontSize - 2);
+        if (showDate) {
+          const text = `Date: ${date}`;
+          const size = fitFont(text, 700, dateFont);
+          ctx.fillStyle = "#1E293B";
+          ctx.fillText(text, padding, currentY + size - 2);
           currentY += lineHeight;
         }
 
@@ -258,7 +252,7 @@ export default function SignaturePlacementModal({
 }: SignaturePlacementModalProps) {
   const token = useAuthStore((s) => s.accessToken);
   const user = useAuthStore((s) => s.user);
-  const effectiveSignerName = signerName || user?.full_name || `${user?.first_name ?? ""} ${user?.last_name ?? ""}`.trim() || user?.email || "Authorized Signer";
+  const effectiveSignerName = signerName || `${user?.first_name ?? ""} ${user?.last_name ?? ""}`.trim() || user?.email || "Authorized Signer";
 
   const [hostEl, setHostEl] = useState<HTMLDivElement | null>(null);
   const [pdfDoc, setPdfDoc] = useState<PDFDocumentProxy | null>(null);
@@ -275,6 +269,7 @@ export default function SignaturePlacementModal({
   // Signature source
   const [useNewSignature, setUseNewSignature] = useState(false);
   const [newSignature, setNewSignature] = useState<string | null>(null);
+  const [compositePreview, setCompositePreview] = useState<string | null>(null);
 
   // Date config
   const [dateFormatId, setDateFormatId] = useState(DATE_FORMATS[0].id);
@@ -415,6 +410,24 @@ export default function SignaturePlacementModal({
     const opt = DATE_FORMATS.find((f) => f.id === dateFormatId) ?? DATE_FORMATS[0];
     return opt.format(d);
   }, [dateValue, dateFormatId]);
+
+  useEffect(() => {
+    if (activeMode !== "form" || !activeSignatureImage) {
+      setCompositePreview(null);
+      return;
+    }
+    let cancelled = false;
+    compositeSignatureWithMetadata(activeSignatureImage, {
+      name: customSignerName || effectiveSignerName,
+      includeName,
+      date: currentDateText,
+      includeDate,
+      scale: 1,
+    }).then((url) => {
+      if (!cancelled) setCompositePreview(url);
+    });
+    return () => { cancelled = true; };
+  }, [activeMode, activeSignatureImage, customSignerName, effectiveSignerName, includeName, includeDate, currentDateText]);
 
   const addSignatureItem = () => {
     if (!hasSignatureSource) {
@@ -597,10 +610,7 @@ export default function SignaturePlacementModal({
                 </div>
               ) : (
                 <div className="rounded border border-[#C8CDD2] bg-white p-2">
-                  <SignaturePad
-                    onSave={(dataUrl) => setNewSignature(dataUrl)}
-                    onClear={() => setNewSignature(null)}
-                  />
+                  <SignaturePad onChange={setNewSignature} />
                 </div>
               )}
             </div>
@@ -810,30 +820,8 @@ export default function SignaturePlacementModal({
                       Preview inside form field:
                     </span>
                     {activeSignatureImage ? (
-                      <div className="inline-block w-full max-w-md rounded border border-[#E2E8F0] bg-white p-4 shadow-sm text-left">
-                        {/* Signature Image with enhanced stroke weight */}
-                        <div className="flex justify-center py-2">
-                          <img
-                            src={activeSignatureImage}
-                            alt="Signature Preview"
-                            className="max-h-28 object-contain filter contrast-150 drop-shadow-sm"
-                          />
-                        </div>
-                        {/* Neatly formatted Name and Date below signature - large and prominent */}
-                        {(includeName || includeDate) && (
-                          <div className="mt-4 pt-3 border-t-2 border-[#94A3B8] space-y-1.5">
-                            {includeName && (
-                              <div className="text-sm sm:text-base font-bold text-[#0F172A]">
-                                Digitally signed by: <span>{customSignerName || effectiveSignerName}</span>
-                              </div>
-                            )}
-                            {includeDate && (
-                              <div className="text-xs sm:text-sm font-semibold text-[#334155]">
-                                Date: <span>{currentDateText}</span>
-                              </div>
-                            )}
-                          </div>
-                        )}
+                      <div className="mx-auto w-full max-w-md rounded border border-[#E2E8F0] bg-white p-3 shadow-sm">
+                        <img src={compositePreview ?? activeSignatureImage} alt="Signature Preview" className="w-full object-contain" />
                       </div>
                     ) : (
                       <p className="text-xs text-[#5E6870] py-6">

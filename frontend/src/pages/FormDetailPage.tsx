@@ -136,6 +136,7 @@ export default function FormDetailPage() {
   const [auditPage, setAuditPage] = useState(1);
   const [workflowActionCompleted, setWorkflowActionCompleted] = useState(false);
   const [isSigningOpen, setIsSigningOpen] = useState(false);
+  const [targetSignatureField, setTargetSignatureField] = useState<string | null>(null);
   // Required fields that failed the last save/submit attempt. Kept in state
   // (not just a toast) so a long list stays on screen while it's being fixed.
   const [missingFields, setMissingFields] = useState<string[]>([]);
@@ -569,7 +570,10 @@ export default function FormDetailPage() {
                 documentId={doc.id}
                 documentStatus={step}
                 canEditConditionalSections={canEditConditionalSections()}
-                onLaunchSignatureModal={() => setIsSigningOpen(true)}
+                onLaunchSignatureModal={(fieldKey?: string) => {
+                  setTargetSignatureField(fieldKey ?? null);
+                  setIsSigningOpen(true);
+                }}
               />
             </div>
           </div>
@@ -589,8 +593,12 @@ export default function FormDetailPage() {
             <SignaturePlacementModal
               mode="form"
               formFields={detectedFormFields}
+              targetFieldKey={targetSignatureField}
               confirmLabel="Apply to Form"
-              onCancel={() => setIsSigningOpen(false)}
+              onCancel={() => {
+                setIsSigningOpen(false);
+                setTargetSignatureField(null);
+              }}
               onConfirm={(result) => {
                 // Use the formFieldValues from the modal result if available
                 const fieldValues = result.formFieldValues || {};
@@ -625,6 +633,7 @@ export default function FormDetailPage() {
                 setFormValues((prev) => ({ ...prev, ...updates }));
                 formDirtyRef.current = true;
                 setIsSigningOpen(false);
+                setTargetSignatureField(null);
               }}
               onApplyToForm={(fields) => {
                 setFormValues((prev) => ({ ...prev, ...fields }));

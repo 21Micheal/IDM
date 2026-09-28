@@ -1228,7 +1228,7 @@ function SignatureField({ fieldKey, disabled, value, onChangeCb, onLaunchSignatu
   disabled?: boolean;
   value?: unknown;
   onChangeCb: (key: string, val: unknown) => void;
-  onLaunchSignatureModal?: () => void;
+  onLaunchSignatureModal?: (fieldKey?: string) => void;
   allValues?: TemplateFormValues;
 }) {
   const hasSignature = typeof value === "string" && value.startsWith("data:image");
@@ -1252,17 +1252,16 @@ function SignatureField({ fieldKey, disabled, value, onChangeCb, onLaunchSignatu
       {/* Signature button */}
       <button
         type="button"
-        onClick={onLaunchSignatureModal}
+        onClick={() => onLaunchSignatureModal?.(fieldKey)}
         disabled={disabled}
-        className="w-full border border-dashed border-[#AEB5BB] bg-[#F9FAFB] px-4 py-8 text-center transition-colors hover:border-[#287EAD] hover:bg-[#EEF6FB] disabled:opacity-50 disabled:pointer-events-none"
+        className="w-full border border-dashed border-[#AEB5BB] bg-[#F9FAFB] px-4 py-5 text-center transition-colors hover:border-[#287EAD] hover:bg-[#EEF6FB] disabled:opacity-50 disabled:pointer-events-none"
       >
         {hasSignature ? (
           <div className="space-y-2">
             <img 
               src={value as string} 
               alt="Signature" 
-              className="mx-auto h-16 filter contrast-125 brightness-95"
-              style={{ filter: 'drop-shadow(0 1px 2px rgba(0,0,0,0.1))' }}
+              className="mx-auto max-h-44 w-auto max-w-full object-contain"
             />
             <p className="text-xs text-[#5E6870]">Click to change signature</p>
           </div>
@@ -1408,7 +1407,7 @@ function FormField({ field, control, errors, onChangeCb, readOnly, allValues, ed
   editable?: boolean;
   processStep?: string;
   allFields: Field[];
-  onLaunchSignatureModal?: () => void;
+  onLaunchSignatureModal?: (fieldKey?: string) => void;
 }) {
   const key  = field.key ?? field.id ?? "";
   const type = field.type ?? "text";
@@ -1899,7 +1898,7 @@ function TemplateForm({ sections, values, onChange, readOnly = false, documentId
   // conditions. Absent (a brand-new form) is treated as "draft".
   documentStatus?: string;
   canEditConditionalSections?: boolean;
-  onLaunchSignatureModal?: () => void;
+  onLaunchSignatureModal?: (fieldKey?: string) => void;
 }) {
   const list = (Array.isArray(sections) ? sections : []) as Section[];
   const allFields = list.flatMap((s) => s.fields ?? []);

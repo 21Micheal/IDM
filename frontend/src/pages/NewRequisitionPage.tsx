@@ -446,7 +446,7 @@ export default function NewRequisitionPage() {
         <SignaturePlacementModal
           mode="form"
           documentTitle={selectedTemplate?.name || "Requisition Authorization"}
-          signerName={user?.full_name || ""}
+          signerName={`${user?.first_name ?? ""} ${user?.last_name ?? ""}`.trim()}
           formFields={detectedFormFields}
           targetFieldKey={targetSignatureField}
           onCancel={() => {
