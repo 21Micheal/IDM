@@ -37,6 +37,7 @@ import {
 } from "lucide-react";
 import { api, documentsAPI, sunsystemsAPI, workflowAPI } from "@/services/api";
 import { useAuthStore } from "@/store/authStore";
+import { getReqAmount, getReqSupplier } from "@/lib/requisitionFields";
 import { QUERY_FIVE_MIN_STALE, QUERY_SHORT_STALE } from "@/lib/reactQueryDefaults";
 import type { Document, WorkflowTask } from "@/types";
 
@@ -85,19 +86,8 @@ function isRequisitionDoc(doc: any): boolean {
   return Boolean(doc?.metadata?.form?.sections) || doc?.document_type_name?.toLowerCase().includes("requisition");
 }
 
-function getReqAmount(doc: any): number | null {
-  const requested = Number(doc?.metadata?.form?.requested_amount);
-  if (Number.isFinite(requested) && requested > 0) return requested;
-  const amt = Number(doc?.amount);
-  if (Number.isFinite(amt) && amt > 0) return amt;
-  const values = doc?.metadata?.form?.values ?? {};
-  const alt = Number(values?.amount ?? values?.total ?? values?.total_amount ?? values?.requested_amount);
-  return Number.isFinite(alt) && alt > 0 ? alt : null;
-}
-
-function getReqSupplier(doc: any): string {
-  const values = doc?.metadata?.form?.values ?? {};
-  return values?.supplier || values?.supplier_name || doc?.supplier || "—";
+function getReqDepartment(doc: any): string {
+  return doc?.department_name || doc?.uploaded_by_department_name || doc?.uploaded_by?.department_name || "—";
 }
 
 function formatMoney(amount: number | null, currency?: string) {
@@ -220,6 +210,7 @@ function DashboardMetricCard({ title, value, icon: Icon, trend, href, tone }: Da
 export default function RequisitionDashboardPage() {
   const { user } = useAuthStore();
   const navigate = useNavigate();
+  const showDepartmentColumn = Boolean(user?.has_admin_access || (user?.group_names ?? []).includes("HOD"));
 
   const [recentReqsPage, setRecentReqsPage] = useState(1);
   const [recentAuditPage, setRecentAuditPage] = useState(1);
@@ -284,7 +275,7 @@ export default function RequisitionDashboardPage() {
 
   const { data: accountsData } = useQuery({
     queryKey: ["sunsystems", "supplier-count"],
-    queryFn: () => sunsystemsAPI.getAccounts({ account_type: "supplier" }).then((res) => res.data),
+    queryFn: () => sunsystemsAPI.getAccounts({ account_type: "1" }).then((res) => res.data),
     staleTime: 5 * 60_000,
     retry: false,
   });
@@ -420,18 +411,19 @@ export default function RequisitionDashboardPage() {
               </div>
             </div>
 
-            <div className="flex-1">
+            <div className="flex-1 overflow-x-auto">
               {docsLoading ? (
                 <div className="flex h-full items-center justify-center p-10">
                   <Loader2 className="h-6 w-6 animate-spin text-muted-foreground" />
                 </div>
               ) : pagedRecentReqs.length > 0 ? (
-                <table className="w-full table-fixed text-sm">
+                <table className={`w-full table-fixed text-sm ${showDepartmentColumn ? "min-w-[940px]" : "min-w-[700px]"}`}>
                   <thead>
                     <tr className="border-b border-[#AEB5BB] bg-[#50545A] text-left text-[11px] uppercase tracking-wider text-white">
-                      <th className="w-[38%] px-5 py-3.5 font-medium">Requisition</th>
-                      <th className="hidden w-[20%] px-5 py-3.5 font-medium md:table-cell">Supplier</th>
-                      <th className="w-[18%] px-5 py-3.5 font-medium">Amount</th>
+                      <th className={`${showDepartmentColumn ? "w-[30%]" : "w-[38%]"} px-5 py-3.5 font-medium`}>Requisition</th>
+                      {showDepartmentColumn && <th className="hidden w-[16%] px-5 py-3.5 font-medium lg:table-cell">Department</th>}
+                      <th className={`${showDepartmentColumn ? "w-[16%]" : "w-[20%]"} hidden px-5 py-3.5 font-medium md:table-cell`}>Supplier</th>
+                      <th className={`${showDepartmentColumn ? "w-[14%]" : "w-[18%]"} px-5 py-3.5 font-medium`}>Amount</th>
                       <th className="w-[14%] px-5 py-3.5 font-medium">Status</th>
                       <th className="hidden w-[10%] px-5 py-3.5 font-medium lg:table-cell">Updated</th>
                     </tr>
@@ -450,17 +442,19 @@ export default function RequisitionDashboardPage() {
                             </div>
                             <div className="min-w-0 flex-1">
                               <p className="truncate font-semibold text-[#1F2933]">
-                                {doc.title || doc.reference_number || "Requisition"}
-                              </p>
-                              <p className="truncate text-[11px] text-[#5E6870]">
-                                {doc.reference_number || "REQ"} · {doc.department_name || doc.uploaded_by?.department_name || "Procurement"}
+                                {doc.reference_number || "—"}
                               </p>
                             </div>
                           </div>
                         </td>
+                        {showDepartmentColumn && (
+                          <td className="hidden max-w-0 px-5 py-4 text-xs text-[#5E6870] lg:table-cell">
+                            <span className="block truncate">{getReqDepartment(doc)}</span>
+                          </td>
+                        )}
                         <td className="hidden max-w-0 px-5 py-4 text-xs text-[#5E6870] md:table-cell">
                           <span className="block truncate font-medium text-[#1F2933]">
-                            {getReqSupplier(doc)}
+                            {getReqSupplier(doc, accountsData?.accounts ?? [])}
                           </span>
                         </td>
                         <td className="px-5 py-4 font-semibold text-[#1F2933]">

@@ -12,9 +12,11 @@ import { useNavigate } from "react-router-dom";
 import { useQuery } from "@tanstack/react-query";
 import { formatDistanceToNow } from "date-fns";
 import { Plus, Search as SearchIcon, X, ClipboardList, Loader2 } from "lucide-react";
-import { documentsAPI } from "@/services/api";
+import { documentsAPI, sunsystemsAPI } from "@/services/api";
 import StatusBadge from "@/components/documents/StatusBadge";
 import { cn } from "@/lib/utils";
+import { getReqAmount, getReqSupplier } from "@/lib/requisitionFields";
+import { useAuthStore } from "@/store/authStore";
 
 const PAGE_SIZE = 10;
 const STATS_POOL_SIZE = 500;
@@ -28,19 +30,8 @@ const STATUS_CHIPS = [
   { value: "archived", label: "Archived" },
 ];
 
-function getReqAmount(doc: any): number | null {
-  const requested = Number(doc?.metadata?.form?.requested_amount);
-  if (Number.isFinite(requested) && requested > 0) return requested;
-  const amt = Number(doc?.amount);
-  if (Number.isFinite(amt) && amt > 0) return amt;
-  const values = doc?.metadata?.form?.values ?? {};
-  const alt = Number(values?.amount ?? values?.total ?? values?.total_amount ?? values?.requested_amount);
-  return Number.isFinite(alt) && alt > 0 ? alt : null;
-}
-
-function getReqSupplier(doc: any): string {
-  const values = doc?.metadata?.form?.values ?? {};
-  return values?.supplier || values?.supplier_name || "—";
+function getReqDepartment(doc: any): string {
+  return doc?.department_name || doc?.uploaded_by_department_name || doc?.uploaded_by?.department_name || "—";
 }
 
 function formatMoney(amount: number | null, currency?: string) {
@@ -54,6 +45,8 @@ function formatMoney(amount: number | null, currency?: string) {
 
 export default function RequisitionsPage() {
   const navigate = useNavigate();
+  const user = useAuthStore((s) => s.user);
+  const showDepartmentColumn = Boolean(user?.has_admin_access || (user?.group_names ?? []).includes("HOD"));
   const [search, setSearch] = useState("");
   const [statusFilter, setStatusFilter] = useState("");
   const [departmentFilter, setDepartmentFilter] = useState("");
@@ -68,6 +61,13 @@ export default function RequisitionsPage() {
     queryFn: () =>
       documentsAPI.list({ is_form: true, ordering: "-created_at", page: 1, page_size: STATS_POOL_SIZE }).then((r) => r.data),
     staleTime: 15_000,
+  });
+
+  const { data: supplierAccounts } = useQuery({
+    queryKey: ["sunsystems", "supplier-accounts"],
+    queryFn: () => sunsystemsAPI.getAccounts({ account_type: "1" }).then((res) => res.data.accounts),
+    staleTime: 5 * 60_000,
+    retry: false,
   });
 
   const poolRows = useMemo(() => {
@@ -93,7 +93,7 @@ export default function RequisitionsPage() {
       if (q) {
         const title = String(doc.title || "").toLowerCase();
         const ref = String(doc.reference_number || "").toLowerCase();
-        const supplier = getReqSupplier(doc).toLowerCase();
+        const supplier = getReqSupplier(doc, supplierAccounts).toLowerCase();
         if (!title.includes(q) && !ref.includes(q) && !supplier.includes(q)) return false;
       }
       if (statusFilter && doc.status !== statusFilter) return false;
@@ -108,7 +108,7 @@ export default function RequisitionsPage() {
       if (amountMax && (amt === null || amt > Number(amountMax))) return false;
       return true;
     });
-  }, [poolRows, search, statusFilter, departmentFilter, dateFrom, dateTo, amountMin, amountMax]);
+  }, [poolRows, search, statusFilter, departmentFilter, dateFrom, dateTo, amountMin, amountMax, supplierAccounts]);
 
   useEffect(() => {
     setPage(1);
@@ -208,7 +208,7 @@ export default function RequisitionsPage() {
       </div>
 
       {/* Table */}
-      <div className="overflow-hidden rounded-xl border border-[#E4E7EB] bg-white shadow-sm">
+      <div className="overflow-x-auto rounded-xl border border-[#E4E7EB] bg-white shadow-sm">
         {isLoading ? (
           <div className="flex h-48 items-center justify-center">
             <Loader2 className="h-6 w-6 animate-spin text-[#287EAD]" />
@@ -226,6 +226,7 @@ export default function RequisitionsPage() {
                 <th className="px-5 py-3 font-medium">Requisition</th>
                 <th className="px-5 py-3 font-medium">Supplier</th>
                 <th className="px-5 py-3 font-medium">Requester</th>
+                {showDepartmentColumn && <th className="px-5 py-3 font-medium">Department</th>}
                 <th className="px-5 py-3 font-medium">Amount</th>
                 <th className="px-5 py-3 font-medium">Status</th>
                 <th className="px-5 py-3 font-medium">Created</th>
@@ -240,12 +241,13 @@ export default function RequisitionsPage() {
                 >
                   <td className="px-5 py-3 text-xs text-[#9AA5B1]">{(page - 1) * PAGE_SIZE + i + 1}</td>
                   <td className="px-5 py-3 font-medium text-[#1F2933]">
-                    {doc.title || doc.reference_number || "—"}
+                    {doc.reference_number || "—"}
                   </td>
-                  <td className="px-5 py-3 text-[#5E6870]">{getReqSupplier(doc)}</td>
+                  <td className="px-5 py-3 text-[#5E6870]">{getReqSupplier(doc, supplierAccounts)}</td>
                   <td className="px-5 py-3 text-[#5E6870]">
                     {doc.uploaded_by?.full_name || doc.uploaded_by?.email || "—"}
                   </td>
+                  {showDepartmentColumn && <td className="px-5 py-3 text-[#5E6870]">{getReqDepartment(doc)}</td>}
                   <td className="px-5 py-3 text-[#1F2933]">{formatMoney(getReqAmount(doc), doc.currency)}</td>
                   <td className="px-5 py-3"><StatusBadge status={doc.status} /></td>
                   <td className="px-5 py-3 text-[#5E6870]">
