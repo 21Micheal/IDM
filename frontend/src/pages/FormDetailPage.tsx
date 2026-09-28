@@ -380,12 +380,18 @@ export default function FormDetailPage() {
 
   const isRetirementPhase = doc.builder_workflow_phase === "retirement";
   const isRetirementFinalized = isRetirementPhase && isFinalFormProcessStep(step);
-  const canSubmitRequest = ["draft", "returned"].includes(doc.status) && (!isRetirementPhase || doc.status === "returned") && (canApprove || isOwnerOrSubmitter);
+  const canSubmitRequest = ["draft", "returned"].includes(doc.status)
+    && (!isRetirementPhase || doc.status === "returned")
+    && (canApprove || isOwnerOrSubmitter || (doc.permissions ?? []).includes("submit"));
   // Only allow retirement submission if template has multiple stages configured (Stage 2 exists)
   const hasRetirementStage = availableStages.includes(2);
   const canSubmitRetirement = Boolean(doc.can_submit_retirement) && !isRetirementFinalized && hasRetirementStage && (canApprove || isOwnerOrSubmitter);
   const canSubmit = canSubmitRequest || canSubmitRetirement;
-  const submitLabel = canSubmitRetirement ? "Submit retirement" : doc.status === "returned" ? "Resubmit" : "Start workflow";
+  const submitLabel = canSubmitRetirement
+    ? "Submit retirement"
+    : doc.status === "returned"
+      ? "Resubmit"
+      : "Submit for approval";
 
   const startFormEdit = () => {
     setFormValues({ ...(formData.values ?? {}) });
@@ -427,20 +433,7 @@ export default function FormDetailPage() {
 
   return (
     <div className="flex flex-1 flex-col bg-[#F5F7F8] text-[#1F2933]">
-      <WorkspaceCommandBar
-        actions={
-          canSubmit ? (
-            <button
-              onClick={() => submitMutation.mutate()}
-              disabled={submitMutation.isPending}
-              className="flex h-9 items-center gap-1.5 border border-white/20 bg-white/10 px-3 text-xs font-semibold text-white hover:bg-white/20 disabled:opacity-50"
-            >
-              {submitMutation.isPending ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Send className="h-3.5 w-3.5" />}
-              {submitLabel}
-            </button>
-          ) : undefined
-        }
-      >
+      <WorkspaceCommandBar>
         <button
           onClick={() => navigate("/list")}
           className="flex h-8 items-center gap-1 border border-white/20 bg-white/10 px-3 text-xs text-white/85 hover:text-white"
@@ -511,6 +504,17 @@ export default function FormDetailPage() {
                 </span>
               </div>
               <div className="flex items-center gap-2 flex-wrap justify-end">
+                {canSubmit && (
+                  <button
+                    type="button"
+                    onClick={() => submitMutation.mutate()}
+                    disabled={submitMutation.isPending}
+                    className="inline-flex items-center gap-1.5 bg-[#287EAD] px-3 py-1.5 text-xs font-semibold text-white hover:bg-[#1E6F99] disabled:opacity-50"
+                  >
+                    {submitMutation.isPending && <Loader2 className="h-3.5 w-3.5 animate-spin" />}
+                    <Send className="h-3.5 w-3.5" /> {submitLabel}
+                  </button>
+                )}
                 {journalEnabled && (
                   <button type="button" onClick={() => setShowJournalXml((s) => !s)}
                     className={cn(

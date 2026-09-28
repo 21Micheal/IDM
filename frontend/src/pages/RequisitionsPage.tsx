@@ -14,6 +14,7 @@ import { formatDistanceToNow } from "date-fns";
 import { Plus, Search as SearchIcon, X, ClipboardList, Loader2 } from "lucide-react";
 import { documentsAPI, sunsystemsAPI } from "@/services/api";
 import StatusBadge from "@/components/documents/StatusBadge";
+import CustomListbox from "@/components/ui/CustomListbox";
 import { cn } from "@/lib/utils";
 import { getReqAmount, getReqSupplier } from "@/lib/requisitionFields";
 import { useAuthStore } from "@/store/authStore";
@@ -186,16 +187,17 @@ export default function RequisitionsPage() {
             className="w-full rounded-lg border border-[#E4E7EB] py-2 pl-9 pr-3 text-sm focus:border-[#287EAD] focus:outline-none"
           />
         </div>
-        <select
+        <CustomListbox
           value={departmentFilter}
-          onChange={(e) => setDepartmentFilter(e.target.value)}
-          className="rounded-lg border border-[#E4E7EB] px-3 py-2 text-sm focus:border-[#287EAD] focus:outline-none"
-        >
-          <option value="">All departments</option>
-          {departmentOptions.map((d) => (
-            <option key={d} value={d}>{d}</option>
-          ))}
-        </select>
+          onChange={setDepartmentFilter}
+          options={[
+            { value: "", label: "All departments" },
+            ...departmentOptions.map((department) => ({ value: department, label: department })),
+          ]}
+          className="min-w-[190px]"
+          buttonClassName="w-full rounded-lg border border-[#E4E7EB] bg-white px-3 py-2 text-left text-sm text-[#1F2933] focus:border-[#287EAD]"
+          ariaLabel="Filter by department"
+        />
         <input type="date" value={dateFrom} onChange={(e) => setDateFrom(e.target.value)} className="rounded-lg border border-[#E4E7EB] px-3 py-2 text-sm" />
         <input type="date" value={dateTo} onChange={(e) => setDateTo(e.target.value)} className="rounded-lg border border-[#E4E7EB] px-3 py-2 text-sm" />
         <input value={amountMin} onChange={(e) => setAmountMin(e.target.value)} placeholder="Min amount" inputMode="numeric" className="w-28 rounded-lg border border-[#E4E7EB] px-3 py-2 text-sm" />

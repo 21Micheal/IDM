@@ -17,7 +17,6 @@ import {
   getTaskDocumentTitle,
   getTaskDocumentType,
   getTaskUploaderName,
-  getTaskIsForm,
   hasWorkflowTaskFilters,
   type WorkflowTaskFilters,
 } from "@/lib/workflowTaskFilters";
@@ -205,6 +204,14 @@ export default function WorkflowPage() {
     .slice(0, 5);
 
   const allTasks = tasks ?? [];
+  const openTask = (task: WorkflowTask) => {
+    if (task.target_type === "payment_run" || task.payment_run_id) {
+      setSelectedPaymentRunTask(task);
+      return;
+    }
+    const documentId = getTaskDocumentId(task);
+    if (documentId) navigate(`/${documentId}`);
+  };
   const filterOptions = useMemo(() => buildWorkflowTaskFilterOptions(allTasks), [allTasks]);
   const filteredTasks = useMemo(
     () => filterWorkflowTasks(allTasks, filters),
@@ -232,7 +239,7 @@ export default function WorkflowPage() {
   const closePaymentRunTask = () => {
     setSelectedPaymentRunTask(null);
     if (new URLSearchParams(location.search).has("task")) {
-      navigate("/workflow", { replace: true });
+      navigate("/approvals", { replace: true });
     }
   };
 
@@ -370,7 +377,10 @@ export default function WorkflowPage() {
                   type="button"
                   onClick={() => {
                     if (!notification.is_read) markReadMutation.mutate(notification.id);
-                    navigate(notification.link || "/workflow");
+                    const targetId = notificationTaskId(notification.link);
+                    const task = allTasks.find((item) => item.id === targetId || getTaskDocumentId(item) === targetId);
+                    if (task) openTask(task);
+                    else navigate(notification.link || "/approvals");
                   }}
                   className="block w-full border border-amber-200 bg-amber-50 px-3 py-2 text-left hover:bg-amber-100"
                 >
@@ -396,7 +406,6 @@ export default function WorkflowPage() {
           const documentFormat = getTaskDocumentFormat(task);
           const department = getTaskDepartment(task);
           const uploaderName = getTaskUploaderName(task);
-          const isForm = getTaskIsForm(task);
           const isPaymentRun = task.target_type === "payment_run" || Boolean(task.payment_run_id);
 
           const isOverdue = task.due_at && new Date(task.due_at) < new Date();
@@ -406,11 +415,7 @@ export default function WorkflowPage() {
               <button
                 type="button"
                 onClick={() => {
-                  if (isPaymentRun) {
-                    setSelectedPaymentRunTask(task);
-                  } else if (documentId) {
-                    navigate(isForm ? `/forms/${documentId}` : `/documents/${documentId}`);
-                  }
+                  if (documentId || isPaymentRun) openTask(task);
                 }}
                 className="flex w-full items-start gap-4 p-4 text-left transition-colors hover:bg-[#F5F7F8]"
               >

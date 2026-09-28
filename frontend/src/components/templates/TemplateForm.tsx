@@ -1907,7 +1907,7 @@ function TemplateForm({ sections, values, onChange, readOnly = false, documentId
   const sectionsKey = list.map((s) => s.id ?? "").join("|");
   const prevKeyRef = useRef(sectionsKey);
 
-  const { control, formState: { errors }, reset, watch } = useForm<TemplateFormValues>({
+  const { control, formState: { errors }, reset, watch, setValue, getValues } = useForm<TemplateFormValues>({
     defaultValues: values,
     mode: "onBlur",
   });
@@ -1919,6 +1919,18 @@ function TemplateForm({ sections, values, onChange, readOnly = false, documentId
       reset({});
     }
   }, [sectionsKey]);
+
+  // Controllers read React Hook Form state, so mirror values set externally
+  // (for example supplier prefill and template defaults) into that state.
+  useEffect(() => {
+    const current = getValues();
+    for (const [key, value] of Object.entries(values)) {
+      if (key.startsWith("__") || value instanceof File) continue;
+      if (JSON.stringify(current[key]) !== JSON.stringify(value)) {
+        setValue(key, value, { shouldDirty: false, shouldValidate: false });
+      }
+    }
+  }, [values, sectionsKey]);
 
   const currentUser = useAuthStore((s) => s.user);
 

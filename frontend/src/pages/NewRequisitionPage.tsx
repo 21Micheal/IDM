@@ -37,9 +37,11 @@ export default function NewRequisitionPage() {
   const user = useAuthStore((s) => s.user);
   const [searchParams] = useSearchParams();
   const preselectedTemplateId = searchParams.get("template_id");
+  const supplierCode = searchParams.get("supplier_code");
 
-    const [selectedTemplateId, setSelectedTemplateId] = useState<string | null>(preselectedTemplateId || null);
+  const [selectedTemplateId, setSelectedTemplateId] = useState<string | null>(preselectedTemplateId || null);
   const [formValues, setFormValues] = useState<Record<string, unknown>>({});
+  const supplierPrefillRef = useRef<string | null>(null);
   const [formDirty, setFormDirty] = useState(false);
   const [missingFields, setMissingFields] = useState<string[]>([]);
   const [isSigningOpen, setIsSigningOpen] = useState(false);
@@ -103,6 +105,35 @@ export default function NewRequisitionPage() {
       return merged;
     });
   }, [selectedTemplate?.sections, user]);
+
+  // Supplier directory links carry the selected SunSystems code. Apply it to
+  // the template's supplier account picker once per template/code pair; this
+  // avoids replacing later user edits when the template query refreshes.
+  useEffect(() => {
+    if (!supplierCode || !selectedTemplate?.sections) return;
+    const prefillKey = `${selectedTemplateId}:${supplierCode}`;
+    if (supplierPrefillRef.current === prefillKey) return;
+
+    const supplierFields = (selectedTemplate.sections as Array<{ fields?: Array<Record<string, any>> }>)
+      .flatMap((section) => section.fields ?? [])
+      .filter((field) => field.type === "sunsystems_account" && (field.key || field.id));
+    if (supplierFields.length === 0) {
+      supplierPrefillRef.current = prefillKey;
+      toast.info("This template has no supplier field to pre-fill.");
+      return;
+    }
+
+    supplierPrefillRef.current = prefillKey;
+    setFormValues((prev) => {
+      const next = { ...prev };
+      for (const field of supplierFields) {
+        const key = field.key ?? field.id;
+        if (!key) continue;
+        next[key] = field.multi === false ? supplierCode : [supplierCode];
+      }
+      return next;
+    });
+  }, [selectedTemplate?.sections, selectedTemplateId, supplierCode]);
 
   // Recalculate dynamic formulas whenever a field changes
   const handleFieldChange = (key: string, value: unknown) => {
@@ -409,7 +440,7 @@ export default function NewRequisitionPage() {
                     if (formDirty && !window.confirm("Discard changes and return to list?")) return;
                     navigate("/list");
                   }}
-                  className="rounded border border-[#AEB5BB] bg-white px-4 py-2 text-sm font-semibold text-[#1F2933] hover:bg-[#F3F5F6]"
+                  className="border border-[#AEB5BB] bg-white px-4 py-2 text-sm font-semibold text-[#1F2933] hover:bg-[#F3F5F6]"
                 >
                   Cancel
                 </button>
@@ -417,7 +448,7 @@ export default function NewRequisitionPage() {
                   type="button"
                   onClick={() => saveDraftMutation.mutate()}
                   disabled={saveDraftMutation.isPending}
-                  className="inline-flex items-center gap-2 rounded border border-[#287EAD] bg-white px-4 py-2 text-sm font-semibold text-[#287EAD] hover:bg-[#EEF6FB] disabled:opacity-50"
+                  className="inline-flex items-center gap-2 border border-[#287EAD] bg-white px-4 py-2 text-sm font-semibold text-[#287EAD] hover:bg-[#EEF6FB] disabled:opacity-50"
                 >
                   {saveDraftMutation.isPending && <Loader2 className="h-4 w-4 animate-spin" />}
                   Save Draft
@@ -426,7 +457,7 @@ export default function NewRequisitionPage() {
                   type="button"
                   onClick={() => submitMutation.mutate()}
                   disabled={submitMutation.isPending}
-                  className="inline-flex items-center gap-2 rounded bg-[#287EAD] px-5 py-2 text-sm font-semibold text-white hover:bg-[#1E6F99] disabled:opacity-50 shadow-sm"
+                  className="inline-flex items-center gap-2 bg-[#287EAD] px-5 py-2 text-sm font-semibold text-white hover:bg-[#1E6F99] disabled:opacity-50 shadow-sm"
                 >
                   {submitMutation.isPending && <Loader2 className="h-4 w-4 animate-spin" />}
                   Submit Requisition

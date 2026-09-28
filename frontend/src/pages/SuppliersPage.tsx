@@ -3,7 +3,7 @@
  *
  * Dedicated SunSystems suppliers & vendors directory under the Requisition
  * system. Suppliers are fetched LIVE from SunSystems via sunsystemsAPI.getAccounts
- * (filtered by account_type: "supplier" / "creditor") with live search, account
+ * (filtered by SunSystems account type 1: creditors/suppliers) with live search, account
  * code display, and a quick-action button to raise a requisition for that supplier.
  */
 import { useMemo, useState } from "react";
@@ -21,7 +21,7 @@ export default function SuppliersPage() {
   const [search, setSearch] = useState("");
   const [businessUnit, setBusinessUnit] = useState("");
 
-  // Live SunSystems accounts query (account_type: "supplier")
+  // SunSystems account type 1 is the creditor/supplier account class.
   const {
     data: accountsData,
     isLoading,
@@ -33,7 +33,7 @@ export default function SuppliersPage() {
     queryFn: () =>
       sunsystemsAPI
         .getAccounts({
-          account_type: "supplier",
+          account_type: "1",
           business_unit: businessUnit || undefined,
         })
         .then((res) => res.data),

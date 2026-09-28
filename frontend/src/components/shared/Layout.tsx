@@ -43,16 +43,20 @@ export default function Layout({
     queryKey: ["notifications", "unread-count"],
     queryFn: () => notificationsAPI.unreadCount().then((res) => res.data),
     ...QUERY_ONE_MINUTE_STALE,
+    refetchInterval: 30_000,
+    refetchOnWindowFocus: true,
   });
   const unreadCount = notificationsData?.count ?? 0;
 
   // Pending approval tasks count
-  const { data: tasksData } = useQuery({
-    queryKey: ["workflow-tasks", "pending"],
-    queryFn: () => workflowAPI.listTasks({ status: "pending", page_size: 100 }).then((res) => res.data),
+  const { data: myTasks = [] } = useQuery({
+    queryKey: ["workflow", "my-tasks"],
+    queryFn: () => workflowAPI.myTasks().then((res) => res.data.results ?? res.data),
     ...QUERY_ONE_MINUTE_STALE,
+    refetchInterval: 30_000,
+    refetchOnWindowFocus: true,
   });
-  const pendingApprovalsCount = tasksData?.results?.length ?? 0;
+  const pendingApprovalsCount = myTasks.length;
 
   // Live SunSystems connection status check
   const { data: sunConnection } = useQuery({
@@ -338,18 +342,6 @@ export default function Layout({
               >
                 <PlusCircle className="h-3 w-3" />
                 New Form
-              </button>
-            )}
-
-            {/* Direct Create Requisition Shortcut */}
-            {!location.pathname.includes("/new") && !isTemplatesPage && (
-              <button
-                type="button"
-                onClick={() => navigate("/new")}
-                className="inline-flex items-center gap-1.5 bg-[#287EAD] px-3 py-1 text-xs font-semibold text-white shadow-sm hover:bg-[#1E6F99] transition-colors"
-              >
-                <PlusCircle className="h-3 w-3" />
-                Raise Requisition
               </button>
             )}
 
