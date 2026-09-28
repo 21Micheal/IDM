@@ -33,6 +33,7 @@ import { useAuthStore } from "@/store/authStore";
 import { Sparkles } from "lucide-react";
 import { buildCalcScope, evaluateCalcExpression, evaluateTableColumnFormulas, resolveRowAggregates, formatCalcResult, type CalcValue } from "@/lib/calculations";
 import AccountMultiSelect from "@/components/ui/AccountMultiSelect";
+import { matchOperator, isKnownOperator, isNegativeOperator } from "@/lib/ruleOperators";
 
 // ── Types ─────────────────────────────────────────────────────────────────────
 
@@ -67,7 +68,7 @@ type VisibilityCondition = {
 // A rule group (AND/OR + conditions), or a legacy single-rule shape (fieldKey at
 // top level) still found in older saved templates / document snapshots.
 type VisibleWhen =
-  | { combinator?: "and" | "or"; conditions?: VisibilityCondition[] }
+  | { combinator?: "and" | "or"; conditions?: VisibilityCondition[]; groups?: VisibleWhen[] }
   | { fieldKey: string; operator: ConditionOperator; value?: string };
 
 type Field = {
@@ -378,17 +379,55 @@ function ReferencePicker({ source, value, onChange, disabled, compact }: {
 
 // ── Conditional visibility ────────────────────────────────────────────────────
 
-// Normalize a stored `visibleWhen` (legacy single rule or a group) into a group.
-function ruleConditions(vw?: VisibleWhen | null): { combinator: "and" | "or"; conditions: VisibilityCondition[] } | null {
+// Normalize a stored `visibleWhen` (legacy single rule or a group, with optional
+// nested `groups`) into one shape. Mirrors _normalize_group in conditions.py.
+type NormalizedRule = { combinator: "and" | "or"; conditions: VisibilityCondition[]; groups: NormalizedRule[] };
+
+function normalizeRule(vw?: VisibleWhen | null): NormalizedRule | null {
   if (!vw || typeof vw !== "object") return null;
   const obj = vw as Record<string, unknown>;
   if (Array.isArray(obj.conditions)) {
-    return { combinator: obj.combinator === "or" ? "or" : "and", conditions: obj.conditions as VisibilityCondition[] };
+    const nested = Array.isArray(obj.groups) ? (obj.groups as VisibleWhen[]) : [];
+    return {
+      combinator: obj.combinator === "or" ? "or" : "and",
+      conditions: obj.conditions as VisibilityCondition[],
+      groups: nested.map((g) => normalizeRule(g)).filter((g): g is NormalizedRule => g !== null),
+    };
   }
   if (typeof obj.fieldKey === "string") {
-    return { combinator: "and", conditions: [{ source: "field", fieldKey: obj.fieldKey as string, operator: obj.operator as ConditionOperator, value: obj.value as string | undefined }] };
+    return {
+      combinator: "and",
+      conditions: [{ source: "field", fieldKey: obj.fieldKey as string, operator: obj.operator as ConditionOperator, value: obj.value as string | undefined }],
+      groups: [],
+    };
   }
   return null;
+}
+
+function ruleHasContent(g: NormalizedRule | null): boolean {
+  return Boolean(g) && (g!.conditions.length > 0 || g!.groups.some(ruleHasContent));
+}
+
+/** Evaluate a rule group; nested groups combine with the group's own combinator.
+ *  An empty/absent group is "no restriction" (true). */
+function evalRule(
+  vw: VisibleWhen | null | undefined,
+  values: TemplateFormValues,
+  allFields: Field[],
+  processStep: string,
+  rowScope?: Record<string, unknown> | null,
+): boolean {
+  const walk = (g: NormalizedRule): boolean => {
+    const nested = g.groups.filter(ruleHasContent);
+    if (g.conditions.length === 0 && nested.length === 0) return true;
+    const results = [
+      ...g.conditions.map((c) => evalCondition(c, values, allFields, processStep, rowScope)),
+      ...nested.map(walk),
+    ];
+    return g.combinator === "or" ? results.some(Boolean) : results.every(Boolean);
+  };
+  const g = normalizeRule(vw);
+  return g ? walk(g) : true;
 }
 
 function evalCondition(c: VisibilityCondition, values: TemplateFormValues, allFields: Field[], processStep: string, rowScope?: Record<string, unknown> | null): boolean {
@@ -411,7 +450,7 @@ function evalCondition(c: VisibilityCondition, values: TemplateFormValues, allFi
       case "not_equals":   return !stepMatches(sv, c.value ?? "");
       case "is_empty":     return sv.trim() === "";
       case "is_not_empty": return sv.trim() !== "";
-      default:             return true;
+      default:             return isKnownOperator(c.operator) ? matchOperator(c.operator, sv, c.value) : true;
     }
   }
 
@@ -423,24 +462,15 @@ function evalCondition(c: VisibilityCondition, values: TemplateFormValues, allFi
   const svs = conditionSourceValues(c.fieldKey ?? "", values, allFields, rowScope);
   if (svs === null) return true; // unknown source — never hide/lock on it
 
-  const match = (sv: string): boolean => {
-    switch (c.operator) {
-      case "equals":       return sv === (c.value ?? "");
-      case "not_equals":   return sv !== (c.value ?? "");
-      case "is_empty":     return sv.trim() === "";
-      case "is_not_empty": return sv.trim() !== "";
-      default:             return true;
-    }
-  };
+  if (!isKnownOperator(c.operator)) return true; // unknown operator — never hide/lock on it
+  const match = (sv: string): boolean => matchOperator(c.operator, sv, c.value);
 
   if (svs.length === 0) {
     // No rows at all — treat as a single empty value.
     return match("");
   }
-  // Positive operators: satisfied when ANY row matches. Negative operators
-  // ("not equals" / "is empty"): every row must satisfy them.
-  const negative = c.operator === "not_equals" || c.operator === "is_empty";
-  return negative ? svs.every(match) : svs.some(match);
+  // Positive operators match ANY row; negative operators must hold for EVERY row.
+  return isNegativeOperator(c.operator) ? svs.every(match) : svs.some(match);
 }
 
 /** Resolve the value(s) a condition points at. `null` = unknown source. */
@@ -479,10 +509,7 @@ function evalVisible(
   rowScope?: Record<string, unknown> | null,
 ): boolean {
   if (item.hidden) return false;
-  const g = ruleConditions(item.visibleWhen);
-  if (!g || g.conditions.length === 0) return true;
-  const results = g.conditions.map((c) => evalCondition(c, values, allFields, processStep, rowScope));
-  return g.combinator === "or" ? results.some(Boolean) : results.every(Boolean);
+  return evalRule(item.visibleWhen, values, allFields, processStep, rowScope);
 }
 
 // Editability mirror: a field/section is editable unless always read-only
@@ -496,15 +523,11 @@ export function evalEditable(
   rowScope?: Record<string, unknown> | null,
 ): boolean {
   if (item.readonly) return false;
-  const g = ruleConditions(item.editableWhen);
-  if (!g || g.conditions.length === 0) return true;
-  const results = g.conditions.map((c) => evalCondition(c, values, allFields, processStep, rowScope));
-  return g.combinator === "or" ? results.some(Boolean) : results.every(Boolean);
+  return evalRule(item.editableWhen, values, allFields, processStep, rowScope);
 }
 
 function hasEditableRule(item: { editableWhen?: VisibleWhen | null }): boolean {
-  const g = ruleConditions(item.editableWhen);
-  return Boolean(g && g.conditions.length > 0);
+  return ruleHasContent(normalizeRule(item.editableWhen));
 }
 
 function conditionalEditBlockedForViewer(item: { editableWhen?: VisibleWhen | null }, viewer?: FormViewer): boolean {
