@@ -238,9 +238,12 @@ interface WorkflowRule {
   is_active: boolean;
 }
 
-type WorkflowPhase = "request" | "retirement" | "payment_run";
+type WorkflowPhase = "requisition" | "rfq" | "lpo" | "request" | "retirement" | "payment_run";
 
 const WORKFLOW_PHASES: { value: WorkflowPhase; label: string }[] = [
+  { value: "requisition", label: "Requisition" },
+  { value: "rfq", label: "RFQ" },
+  { value: "lpo", label: "LPO" },
   { value: "request", label: "Request" },
   { value: "retirement", label: "Retirement" },
   { value: "payment_run", label: "Payment run" },
@@ -422,6 +425,11 @@ function isFormDocumentType(type: Partial<DocumentType> | null | undefined): boo
   );
 }
 
+function isRequisitionDocumentType(type: Pick<DocumentType, "name" | "code" | "description"> | null | undefined) {
+  if (!type) return false;
+  return /requisition/i.test([type.name, type.code, type.description].filter(Boolean).join(" "));
+}
+
 function formatMoney(value: number, currency: string) {
   return `${currency} ${value.toLocaleString(undefined, { minimumFractionDigits: 0, maximumFractionDigits: 2 })}`;
 }
@@ -546,25 +554,27 @@ type RuleFormValues = {
   label: string;
 };
 
-function RuleFormFields({ values, routeKind, onChange }: {
+function RuleFormFields({ values, routeKind, isRequisitionWorkflow, onChange }: {
   values: RuleFormValues;
   routeKind: WorkflowRouteKind;
+  isRequisitionWorkflow: boolean;
   onChange: (patch: Partial<RuleFormValues>) => void;
 }) {
   const phaseOptions = WORKFLOW_PHASES
     .filter((phase) => {
+      if (isRequisitionWorkflow) return ["requisition", "rfq", "lpo"].includes(phase.value);
       if (routeKind === "payment_run") return phase.value === "payment_run";
-      if (routeKind === "form") return phase.value !== "payment_run";
+      if (routeKind === "form") return ["request", "retirement"].includes(phase.value);
       return phase.value === "request";
     })
     .map((phase) => ({ value: phase.value, label: phase.label }));
-  const showPhase = routeKind !== "document";
+  const showPhase = routeKind !== "document" || isRequisitionWorkflow;
 
   return (
     <div className="grid grid-cols-2 gap-3">
       {showPhase && (
         <div className="col-span-2">
-          <Label>Workflow phase</Label>
+          <Label>{isRequisitionWorkflow ? "Procurement stage" : "Workflow phase"}</Label>
           <CustomListbox
             value={values.phase}
             onChange={(v) => onChange({ phase: v as WorkflowPhase })}
@@ -575,7 +585,9 @@ function RuleFormFields({ values, routeKind, onChange }: {
           <p className="text-[11px] text-muted-foreground mt-1">
             {routeKind === "payment_run"
               ? "Payment run routing starts after selected lines have been marked in SunSystems."
-              : "Builder forms use Request for the first approval cycle and Retirement after the first SunSystems posting is complete."}
+              : isRequisitionWorkflow
+                ? "Each stage has its own amount thresholds and approval chain. RFQ starts after Requisition approval; LPO starts after RFQ approval."
+                : "Builder forms use Request for the first approval cycle and Retirement after the first SunSystems posting is complete."}
           </p>
         </div>
       )}
@@ -1788,7 +1800,12 @@ function RoutingRulesPanel({ template, routeKind }: { template: WorkflowTemplate
   const [showAdd, setShowAdd] = useState(false);
   const isPaymentRun = template.target_type === "payment_run";
   const isFormWorkflow = routeKind === "form";
-  const defaultPhase: WorkflowPhase = isPaymentRun ? "payment_run" : "request";
+  const isRequisitionWorkflow = isRequisitionDocumentType({
+    name: template.document_type_name ?? "",
+    code: "",
+    description: "",
+  });
+  const defaultPhase: WorkflowPhase = isPaymentRun ? "payment_run" : isRequisitionWorkflow ? "requisition" : "request";
   const blankRuleForm: RuleFormValues = {
     phase: defaultPhase,
     amount_min: "0",
@@ -1809,7 +1826,7 @@ function RoutingRulesPanel({ template, routeKind }: { template: WorkflowTemplate
   const createRule = useMutation({
     mutationFn: () => workflowAPI.createRule({
       ...form, template: templateId,
-      phase: routeKind === "document" ? "request" : form.phase,
+      phase: routeKind === "document" && !isRequisitionWorkflow ? "request" : form.phase,
       amount_min: form.amount_min || "0",
       amount_max: form.amount_max || null,
     }),
@@ -1851,7 +1868,7 @@ function RoutingRulesPanel({ template, routeKind }: { template: WorkflowTemplate
     mutationFn: () => workflowAPI.updateRule(editingId as string, {
       amount_min: editForm.amount_min || "0",
       amount_max: editForm.amount_max || null,
-      phase: routeKind === "document" ? "request" : editForm.phase,
+      phase: routeKind === "document" && !isRequisitionWorkflow ? "request" : editForm.phase,
       currency: editForm.currency, label: editForm.label,
     }),
     onSuccess: () => {
@@ -1885,7 +1902,7 @@ function RoutingRulesPanel({ template, routeKind }: { template: WorkflowTemplate
         <div className="flex-1">
           <h3 className="font-semibold text-foreground text-base flex items-center gap-2">
             <Settings2 className="w-4 h-4 text-muted-foreground" />
-            {routeKind === "document" ? "Amount routing rules" : "Phase and amount routing rules"}
+            {isRequisitionWorkflow ? "Procurement approval routing" : routeKind === "document" ? "Amount routing rules" : "Phase and amount routing rules"}
           </h3>
           <p className="text-xs text-muted-foreground mt-1">
             Rules for this template are automatically scoped to{" "}
@@ -1914,7 +1931,7 @@ function RoutingRulesPanel({ template, routeKind }: { template: WorkflowTemplate
             <h4 className="text-sm font-semibold text-foreground">New routing rule</h4>
             <button onClick={() => setShowAdd(false)} className="p-1 rounded hover:bg-muted"><X className="w-4 h-4 text-muted-foreground" /></button>
           </div>
-          <RuleFormFields values={form} routeKind={routeKind} onChange={(p) => setForm(f => ({ ...f, ...p }))} />
+          <RuleFormFields values={form} routeKind={routeKind} isRequisitionWorkflow={isRequisitionWorkflow} onChange={(p) => setForm(f => ({ ...f, ...p }))} />
           <div className="flex gap-2 pt-2">
             <button onClick={() => createRule.mutate()} disabled={createRule.isPending} className="btn-primary text-xs">
               {createRule.isPending && <Loader2 className="w-3 h-3 animate-spin" />} Create rule
@@ -1948,7 +1965,7 @@ function RoutingRulesPanel({ template, routeKind }: { template: WorkflowTemplate
                     <h4 className="text-sm font-semibold text-foreground">Edit routing rule</h4>
                     <button onClick={() => setEditingId(null)} className="p-1 rounded hover:bg-muted"><X className="w-4 h-4 text-muted-foreground" /></button>
                   </div>
-                  <RuleFormFields values={editForm} routeKind={routeKind} onChange={(p) => setEditForm(f => ({ ...f, ...p }))} />
+                  <RuleFormFields values={editForm} routeKind={routeKind} isRequisitionWorkflow={isRequisitionWorkflow} onChange={(p) => setEditForm(f => ({ ...f, ...p }))} />
                   <div className="flex gap-2 pt-2">
                     <button onClick={() => updateRule.mutate()} disabled={updateRule.isPending} className="btn-primary text-xs">
                       {updateRule.isPending && <Loader2 className="w-3 h-3 animate-spin" />} Save changes
@@ -1965,7 +1982,7 @@ function RoutingRulesPanel({ template, routeKind }: { template: WorkflowTemplate
                   <div className="flex-1 min-w-0">
                     <div className="flex items-center gap-2 flex-wrap">
                       <p className="text-sm font-semibold text-foreground">{formatRuleRange(rule)}</p>
-                      {(isPaymentRun || isFormWorkflow) && (
+                      {(isPaymentRun || isFormWorkflow || isRequisitionWorkflow) && (
                         <span className="text-[11px] px-2 py-0.5 rounded-full bg-primary/10 text-primary">
                           {workflowPhaseLabel(rule.phase)}
                         </span>

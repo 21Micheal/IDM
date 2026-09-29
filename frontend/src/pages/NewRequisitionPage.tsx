@@ -272,7 +272,7 @@ export default function NewRequisitionPage() {
       const docId = res.data?.id || res.data?.document_id;
 
       if (docId) {
-        return documentsAPI.submit(docId);
+        return documentsAPI.submit(docId, { workflow_stage: "requisition" });
       }
       throw new Error("Failed to initialize requisition document");
     },

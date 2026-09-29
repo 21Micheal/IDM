@@ -249,6 +249,7 @@ class WorkflowStep(models.Model):
 
 class WorkflowRule(models.Model):
     DEFAULT_PHASE = "request"
+    PROCUREMENT_PHASES = ("requisition", "rfq", "lpo")
 
     id               = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
     target_type      = models.CharField(max_length=30, choices=WorkflowTemplate.TARGET_TYPES, default="document", db_index=True)
@@ -277,6 +278,7 @@ class WorkflowRule(models.Model):
 
     def clean(self):
         super().clean()
+        self.phase = (self.phase or self.DEFAULT_PHASE).strip().lower()
         template_target = self.template.target_type if self.template_id else self.target_type
         if self.template_id and self.template.target_type != self.target_type:
             raise ValidationError(
@@ -309,6 +311,16 @@ class WorkflowRule(models.Model):
             raise ValidationError(
                 {"document_type": "Routing rules must use the same document type as their template."}
             )
+        document_type = self.document_type or (self.template.document_type if self.template_id else None)
+        if document_type:
+            haystack = " ".join(
+                str(value or "")
+                for value in (document_type.name, document_type.code, document_type.description)
+            ).lower()
+            if "requisition" in haystack and self.phase not in (*self.PROCUREMENT_PHASES, self.DEFAULT_PHASE):
+                raise ValidationError(
+                    {"phase": "Requisition workflows use the Requisition, RFQ, or LPO stage."}
+                )
 
     def save(self, *args, **kwargs):
         if self.template_id:

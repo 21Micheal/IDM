@@ -6,7 +6,10 @@ from apps.documents.builder_workflow import (
     builder_process_step,
     can_submit_request_workflow,
     can_submit_retirement_workflow,
+    can_start_procurement_workflow_stage,
+    completed_procurement_stages,
     infer_builder_workflow_phase,
+    record_procurement_stage_completion,
 )
 from apps.documents.models import Document, DocumentStatus, DocumentType
 from apps.workflows.models import WorkflowInstance, WorkflowRule, WorkflowTemplate
@@ -61,6 +64,16 @@ class BuilderWorkflowPhaseTests(TestCase):
             stage_label="Advance",
             status=JournalPostingStatus.POSTED,
         )
+        template = WorkflowTemplate.objects.create(
+            name="Configured retirement approval",
+            document_type=self.doc_type,
+            created_by=self.user,
+        )
+        WorkflowRule.objects.create(
+            document_type=self.doc_type,
+            template=template,
+            phase="retirement",
+        )
         self.document.metadata["form"]["workflow_phase"] = "retirement"
         self.assertTrue(can_submit_retirement_workflow(self.document, user=self.user))
 
@@ -100,3 +113,43 @@ class BuilderWorkflowPhaseTests(TestCase):
         )
 
         self.assertEqual(builder_process_step(self.document), "fully_approved")
+
+
+class ProcurementWorkflowStageTests(TestCase):
+    def setUp(self):
+        self.doc_type = DocumentType.objects.create(
+            name="Purchase Requisition",
+            code="REQ",
+            reference_prefix="REQ",
+        )
+        self.user = User.objects.create_user(
+            email="procurement@example.com",
+            password="pass",
+        )
+        self.document = _make_document(
+            title="Office supplies",
+            reference_number="REQ-00001",
+            document_type=self.doc_type,
+            uploaded_by=self.user,
+            status=DocumentStatus.DRAFT,
+            metadata={
+                "form": {
+                    "sections": [{"id": "s1", "fields": []}],
+                    "values": {},
+                }
+            },
+        )
+
+    def test_procurement_stages_must_run_in_order(self):
+        self.assertEqual(infer_builder_workflow_phase(self.document), "requisition")
+        self.assertTrue(can_start_procurement_workflow_stage(self.document, "requisition"))
+        self.assertFalse(can_start_procurement_workflow_stage(self.document, "rfq"))
+
+        self.document.status = DocumentStatus.APPROVED
+        self.document.metadata["form"]["workflow_phase"] = "requisition"
+        self.assertTrue(record_procurement_stage_completion(self.document, "approved"))
+        self.document.save(update_fields=["metadata", "status", "updated_at"])
+
+        self.assertEqual(completed_procurement_stages(self.document), ["requisition"])
+        self.assertTrue(can_start_procurement_workflow_stage(self.document, "rfq"))
+        self.assertFalse(can_start_procurement_workflow_stage(self.document, "lpo"))

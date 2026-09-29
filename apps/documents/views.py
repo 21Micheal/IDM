@@ -957,12 +957,37 @@ class DocumentViewSet(AuditMixin, viewsets.ModelViewSet):
     def submit(self, request, pk=None):
         doc = self.get_object()
         from apps.documents.builder_workflow import (
+            can_start_procurement_workflow_stage,
             can_submit_request_workflow,
             can_submit_retirement_workflow,
+            is_procurement_document,
+            set_procurement_workflow_stage,
         )
 
         self._prepare_builder_workflow_phase(doc)
         doc.refresh_from_db(fields=["metadata", "updated_at"])
+
+        requested_stage = str(request.data.get("workflow_stage") or "").strip().lower()
+        if requested_stage:
+            if not is_procurement_document(doc):
+                return Response(
+                    {"detail": "Workflow stages are only available for requisitions."},
+                    status=status.HTTP_400_BAD_REQUEST,
+                )
+            if not can_start_procurement_workflow_stage(doc, requested_stage, user=request.user):
+                return Response(
+                    {"detail": "That procurement stage is not ready to start yet."},
+                    status=status.HTTP_400_BAD_REQUEST,
+                )
+            set_procurement_workflow_stage(doc, requested_stage)
+            from apps.workflows.services import WorkflowService, WorkflowError
+            try:
+                WorkflowService.start(doc, request.user)
+            except WorkflowError as exc:
+                return Response({"detail": str(exc)}, status=status.HTTP_400_BAD_REQUEST)
+            self.record_audit("document.submitted", doc, {"workflow_stage": requested_stage})
+            doc.refresh_from_db()
+            return Response(DocumentDetailSerializer(doc, context={"request": request}).data)
 
         can_submit_retirement = can_submit_retirement_workflow(doc, user=request.user)
         can_submit_request = can_submit_request_workflow(doc, user=request.user)

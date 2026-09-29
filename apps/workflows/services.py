@@ -901,7 +901,14 @@ class WorkflowService:
         doc = instance.document
         if doc is not None:
             doc.status = outcome_status_for(doc.document_type, outcome)
-            WorkflowService._save_document(doc, update_fields=["status", "updated_at"])
+            update_fields = ["status", "updated_at"]
+            try:
+                from apps.documents.builder_workflow import record_procurement_stage_completion
+                if record_procurement_stage_completion(doc, outcome):
+                    update_fields.append("metadata")
+            except Exception:
+                logger.exception("Could not record procurement workflow completion for %s", doc.id)
+            WorkflowService._save_document(doc, update_fields=update_fields)
 
             try:
                 from apps.notifications.tasks import notify_workflow_complete

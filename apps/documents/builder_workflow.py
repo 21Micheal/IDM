@@ -1,7 +1,26 @@
-"""Built-template (imprest) multi-phase workflow helpers."""
+"""Built-template workflow helpers."""
 from __future__ import annotations
 
 from apps.documents.models import Document, DocumentStatus
+
+
+PROCUREMENT_WORKFLOW_STAGES = ("requisition", "rfq", "lpo")
+
+
+def is_procurement_document(document: Document) -> bool:
+    """Whether a built form belongs to the requisition procurement lifecycle."""
+    document_type = getattr(document, "document_type", None)
+    if not document_type:
+        return False
+    haystack = " ".join(
+        str(value or "")
+        for value in (
+            getattr(document_type, "name", ""),
+            getattr(document_type, "code", ""),
+            getattr(document_type, "description", ""),
+        )
+    ).lower()
+    return "requisition" in haystack
 
 
 def is_built_form_document(document: Document) -> bool:
@@ -13,6 +32,11 @@ def infer_builder_workflow_phase(document: Document) -> str | None:
     """Return ``request`` / ``retirement`` for builder forms, else ``None``."""
     if not is_built_form_document(document):
         return None
+
+    if is_procurement_document(document):
+        form = (document.metadata or {}).get("form") or {}
+        stage = str(form.get("workflow_phase") or "requisition").strip().lower()
+        return stage if stage in PROCUREMENT_WORKFLOW_STAGES else "requisition"
 
     phase = "request"
     try:
@@ -55,6 +79,17 @@ def sync_builder_workflow_phase(document: Document) -> str | None:
     if not is_built_form_document(document):
         return None
 
+    if is_procurement_document(document):
+        phase = infer_builder_workflow_phase(document)
+        meta = dict(document.metadata or {})
+        form = dict(meta.get("form") or {})
+        if form.get("workflow_phase") != phase:
+            form["workflow_phase"] = phase
+            meta["form"] = form
+            document.metadata = meta
+            document.save(update_fields=["metadata", "updated_at"])
+        return phase
+
     phase = infer_builder_workflow_phase(document)
     meta = dict(document.metadata or {})
     form = dict(meta.get("form") or {})
@@ -64,6 +99,76 @@ def sync_builder_workflow_phase(document: Document) -> str | None:
         document.metadata = meta
         document.save(update_fields=["metadata", "updated_at"])
     return phase
+
+
+def set_procurement_workflow_stage(document: Document, stage: str) -> None:
+    """Persist the explicit stage selected for a requisition approval cycle."""
+    normalized = (stage or "").strip().lower()
+    if not is_procurement_document(document) or normalized not in PROCUREMENT_WORKFLOW_STAGES:
+        raise ValueError("Invalid procurement workflow stage.")
+    meta = dict(document.metadata or {})
+    form = dict(meta.get("form") or {})
+    form["workflow_phase"] = normalized
+    meta["form"] = form
+    document.metadata = meta
+    document.save(update_fields=["metadata", "updated_at"])
+
+
+def completed_procurement_stages(document: Document) -> list[str]:
+    form = ((document.metadata or {}).get("form") or {})
+    stages = form.get("completed_workflow_stages")
+    if not isinstance(stages, list):
+        return []
+    return [
+        str(stage).strip().lower()
+        for stage in stages
+        if str(stage).strip().lower() in PROCUREMENT_WORKFLOW_STAGES
+    ]
+
+
+def can_start_procurement_workflow_stage(document: Document, stage: str, *, user=None) -> bool:
+    """Only allow the initial stage or the next completed procurement stage."""
+    normalized = (stage or "").strip().lower()
+    if not is_procurement_document(document) or normalized not in PROCUREMENT_WORKFLOW_STAGES:
+        return False
+    if user is not None and not user_may_submit_document(user, document):
+        return False
+
+    if normalized == "requisition":
+        return (document.status or "").strip() in {
+            DocumentStatus.DRAFT, DocumentStatus.RETURNED, "Returned for Review",
+        }
+
+    previous = PROCUREMENT_WORKFLOW_STAGES[PROCUREMENT_WORKFLOW_STAGES.index(normalized) - 1]
+    if previous not in completed_procurement_stages(document):
+        return False
+    if (document.status or "").strip() != DocumentStatus.APPROVED:
+        return False
+
+    try:
+        from apps.workflows.models import WorkflowInstance
+        return not WorkflowInstance.objects.filter(document=document, status="in_progress").exists()
+    except Exception:
+        return False
+
+
+def record_procurement_stage_completion(document: Document, outcome: str) -> bool:
+    """Add a successful requisition stage to the document progression."""
+    if outcome != "approved" or not is_procurement_document(document):
+        return False
+    form = ((document.metadata or {}).get("form") or {})
+    stage = str(form.get("workflow_phase") or "").strip().lower()
+    if stage not in PROCUREMENT_WORKFLOW_STAGES:
+        return False
+    completed = completed_procurement_stages(document)
+    if stage in completed:
+        return False
+    meta = dict(document.metadata or {})
+    next_form = dict(form)
+    next_form["completed_workflow_stages"] = [*completed, stage]
+    meta["form"] = next_form
+    document.metadata = meta
+    return True
 
 
 def sync_retirement_variance(document: Document) -> dict | None:
