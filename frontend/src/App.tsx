@@ -377,6 +377,7 @@ export default function App() {
               
               {/* Admin-only routes */}
               <Route path="admin/templates" element={<RequireAdmin><TemplatesPage /></RequireAdmin>} />
+              <Route path="admin/templates/new-document" element={<RequireAdmin><TemplatesPage initialMode="designer" /></RequireAdmin>} />
               <Route path="admin/users" element={<RequireAdmin><UsersPage /></RequireAdmin>} />
               <Route path="admin/users/:id" element={<RequireAdmin><UserDetailPage /></RequireAdmin>} />
               <Route path="admin/departments" element={<RequireAdmin><DepartmentsPage /></RequireAdmin>} />

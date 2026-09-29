@@ -591,9 +591,9 @@ function PreviewModal({ template, onClose }: {
 
 type PageMode = "list" | "builder" | "designer";
 
-export default function TemplatesPage() {
+export default function TemplatesPage({ initialMode }: { initialMode?: PageMode }) {
   const qc       = useQueryClient();
-  const [mode, setMode]               = useState<PageMode>("list");
+  const [mode, setMode]               = useState<PageMode>(initialMode ?? "list");
   const [editTarget, setEditTarget]   = useState<Template | undefined>(undefined);
   const [previewTarget, setPreviewTarget]       = useState<Template | null>(null);
   const [editUploadTarget, setEditUploadTarget] = useState<Template | null>(null);

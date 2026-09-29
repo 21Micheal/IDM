@@ -13,8 +13,8 @@ import {
   Bell,
   CircleUserRound,
   ExternalLink,
-  ShieldCheck,
   FileText,
+  ShieldCheck,
   GitBranch
 } from "lucide-react";
 import { useAuthStore } from "@/store/authStore";
@@ -127,11 +127,6 @@ export default function Layout({
       {
         to: "/admin/templates",
         label: "Templates",
-        icon: FileText,
-      },
-      {
-        to: "/forms/new/builder",
-        label: "Form Builder",
         icon: FileText,
       },
       {
@@ -335,14 +330,24 @@ export default function Layout({
           <div className="flex items-center gap-3">
             {/* Templates page actions */}
             {isTemplatesPage && (
-              <button
-                type="button"
-                onClick={() => navigate("/forms/new/builder")}
-                className="inline-flex items-center gap-1.5 bg-[#287EAD] px-3 py-1 text-xs font-semibold text-white shadow-sm hover:bg-[#1E6F99] transition-colors"
-              >
-                <PlusCircle className="h-3 w-3" />
-                New Form
-              </button>
+              <>
+                <button
+                  type="button"
+                  onClick={() => navigate("/admin/templates/new-document")}
+                  className="inline-flex items-center gap-1.5 border border-[#287EAD] bg-white px-3 py-1 text-xs font-semibold text-[#287EAD] shadow-sm hover:bg-[#EEF3F7] transition-colors"
+                >
+                  <FileText className="h-3 w-3" />
+                  New Document
+                </button>
+                <button
+                  type="button"
+                  onClick={() => navigate("/forms/new/builder")}
+                  className="inline-flex items-center gap-1.5 bg-[#287EAD] px-3 py-1 text-xs font-semibold text-white shadow-sm hover:bg-[#1E6F99] transition-colors"
+                >
+                  <PlusCircle className="h-3 w-3" />
+                  New Form
+                </button>
+              </>
             )}
 
             {/* Chat Launcher */}

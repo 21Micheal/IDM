@@ -96,6 +96,12 @@ function addMonthsSerial(serial: CalcValue, months: CalcValue): number {
   return dateToSerial(target);
 }
 
+/** Normalise a date-unit argument: "days"/"day"/"d" -> "d", "months"/"m" -> "m", "years"/"y" -> "y". */
+function dateUnit(u: CalcValue | undefined): "d" | "m" | "y" {
+  const c = calcText(u).trim().toLowerCase().charAt(0);
+  return c === "y" ? "y" : c === "m" ? "m" : "d";
+}
+
 function networkDays(a: CalcValue, b: CalcValue): number {
   let start = Math.round(toNumber(a));
   let end = Math.round(toNumber(b));
@@ -121,7 +127,7 @@ const CALC_FUNCS: Record<string, (...args: CalcValue[]) => CalcValue> = {
   CEILING: (a) => Math.ceil(toNumber(a)),
   FLOOR: (a) => Math.floor(toNumber(a)),
   INT: (a) => Math.trunc(toNumber(a)),
-  TRUNC: (a) => Math.trunc(toNumber(a)),
+  TRUNC: (a, n = 0) => { const f = Math.pow(10, Math.trunc(toNumber(n))); return Math.trunc(toNumber(a) * f) / f; },
   ABS: (a) => Math.abs(toNumber(a)),
   SIGN: (a) => Math.sign(toNumber(a)),
   SQRT: (a) => { const n = toNumber(a); return n < 0 ? 0 : Math.sqrt(n); },
@@ -131,9 +137,13 @@ const CALC_FUNCS: Record<string, (...args: CalcValue[]) => CalcValue> = {
   MAX: (...a) => (a.length ? Math.max(...a.map(toNumber)) : 0),
   AVERAGE: (...a) => (a.length ? a.reduce<number>((s, x) => s + toNumber(x), 0) / a.length : 0),
   SUMARGS: (...a) => a.reduce<number>((s, x) => s + toNumber(x), 0),
+  /** SUMALL(…) — the name the formula reference documents; same as SUMARGS. */
+  SUMALL: (...a) => a.reduce<number>((s, x) => s + toNumber(x), 0),
   CLAMP: (v, lo, hi) => Math.min(Math.max(toNumber(v), toNumber(lo)), toNumber(hi)),
   PERCENT: (part, whole) => { const w = toNumber(whole); return w === 0 ? 0 : (toNumber(part) / w) * 100; },
   APPLYRATE: (amount, ratePct) => (toNumber(amount) * toNumber(ratePct)) / 100,
+  /** PCT(n, percent) — percent% of n. Same as APPLYRATE, the name the formula reference documents. */
+  PCT: (n, pct) => (toNumber(n) * toNumber(pct)) / 100,
   GROSS: (amount, ratePct) => toNumber(amount) * (1 + toNumber(ratePct) / 100),
   NET: (gross, ratePct) => toNumber(gross) / (1 + toNumber(ratePct) / 100),
 
@@ -193,6 +203,13 @@ const CALC_FUNCS: Record<string, (...args: CalcValue[]) => CalcValue> = {
   DAYS: (end, start) => Math.round(toNumber(end) - toNumber(start)),
   NETWORKDAYS: (start, end) => networkDays(start, end),
   ADDDAYS: (s, n) => Math.round(toNumber(s)) + Math.trunc(toNumber(n)),
+  /** DATEADD(date, n, "days"|"months"|"years") — the form the formula reference documents. */
+  DATEADD: (s, n, unit = "d") => {
+    const u = dateUnit(unit);
+    if (u === "y") return addMonthsSerial(s, toNumber(n) * 12);
+    if (u === "m") return addMonthsSerial(s, n);
+    return Math.round(toNumber(s)) + Math.trunc(toNumber(n));
+  },
   ADDMONTHS: (s, n) => addMonthsSerial(s, n),
   ADDYEARS: (s, n) => addMonthsSerial(s, toNumber(n) * 12),
   EOMONTH: (s, n = 0) => {
@@ -201,7 +218,7 @@ const CALC_FUNCS: Record<string, (...args: CalcValue[]) => CalcValue> = {
   },
   DATEDIF: (start, end, unit = "d") => {
     const a = serialToDate(start), b = serialToDate(end);
-    const u = calcText(unit).toLowerCase();
+    const u = dateUnit(unit);
     if (u === "y") {
       let years = b.getUTCFullYear() - a.getUTCFullYear();
       if (b.getUTCMonth() < a.getUTCMonth() || (b.getUTCMonth() === a.getUTCMonth() && b.getUTCDate() < a.getUTCDate())) years -= 1;
@@ -247,7 +264,7 @@ class CalcParser {
         return (op.v === "==" ? equal : !equal) ? 1 : 0;
       }
       if (typeof left === "string" && typeof right === "string") {
-        const c = left.localeCompare(right);
+        const c = left < right ? -1 : left > right ? 1 : 0; // code-point order, same as the server
         if (op.v === ">") return c > 0 ? 1 : 0;
         if (op.v === "<") return c < 0 ? 1 : 0;
         if (op.v === ">=") return c >= 0 ? 1 : 0;
@@ -541,7 +558,7 @@ function matchesCriteria(raw: unknown, criteria: string): boolean {
     if (op === "<") return a < b;
     return a <= b;
   }
-  const cmp = cell.localeCompare(rhs);
+  const cmp = cell < rhs ? -1 : cell > rhs ? 1 : 0; // code-point order, same as the server
   if (op === ">") return cmp > 0;
   if (op === ">=") return cmp >= 0;
   if (op === "<") return cmp < 0;
