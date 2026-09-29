@@ -51,7 +51,7 @@ function formatTime(iso: string) {
 interface ApprovalStagesTableProps {
   steps: WorkflowStep[];
   isLoading?: boolean;
-  phase?: "request" | "retirement" | string | null;
+  phase?: "request" | "retirement" | "requisition" | "rfq" | "lpo" | "payment_run" | string | null;
 }
 
 export function ApprovalStagesTable({ steps = [], isLoading, phase }: ApprovalStagesTableProps) {
@@ -77,7 +77,16 @@ export function ApprovalStagesTable({ steps = [], isLoading, phase }: ApprovalSt
       <div className="flex items-center justify-between border-b border-[#C8CDD2] bg-white px-3 py-2">
         <div className="flex items-center gap-2">
           <p className="text-xs font-bold text-[#1F2933] uppercase tracking-wide">
-            {phase === "retirement" ? "Retirement Approval Stages" : "Request Approval Stages"}
+            {(() => {
+              switch (phase) {
+                case "requisition": return "Requisition Approval Stages";
+                case "rfq":         return "RFQ Approval Stages";
+                case "lpo":         return "LPO Approval Stages";
+                case "retirement":  return "Retirement Approval Stages";
+                case "payment_run": return "Payment Run Approval Stages";
+                default:            return "Approval Stages";
+              }
+            })()}
           </p>
           <span className="rounded-full bg-[#F1F5F9] px-2 py-0.5 text-[10px] font-semibold text-[#475569]">
             {taskSteps.length} stage{taskSteps.length !== 1 ? "s" : ""}

@@ -579,9 +579,19 @@ export default function FormDetailPage() {
                   </ul>
                 </div>
               )}
-              {budgetEnabled && formEditing && (
-                <BudgetBanner values={formValues} documentId={doc.id} sections={formData.sections ?? []} enabled />
-              )}
+              {budgetEnabled && formEditing && (() => {
+                const budgetMeta = doc.metadata?.sunsystems?.budget ?? {};
+                const amountField = budgetMeta.amount_field as string | undefined;
+                const amount = amountField ? (formValues[amountField] ?? doc.amount ?? 0) : (doc.amount ?? 0);
+                return (
+                  <BudgetBanner
+                    amount={amount as number | string}
+                    budget={budgetMeta.limit ?? budgetMeta.budget ?? null}
+                    currency={budgetMeta.currency ?? doc.currency ?? undefined}
+                    accountCode={budgetMeta.account_code ?? undefined}
+                  />
+                );
+              })()}
               <TemplateForm
                 sections={formData.sections ?? []}
                 values={formEditing ? formValues : (formData.values ?? {})}

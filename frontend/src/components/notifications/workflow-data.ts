@@ -1,6 +1,15 @@
 import { normalizeListResponse, workflowAPI } from "@/services/api";
 import type { WorkflowStep } from "./workflow-visualizer";
 
+/** All phases the workflow engine can assign to a document instance. */
+export type WorkflowPhase =
+  | "request"
+  | "retirement"
+  | "requisition"
+  | "rfq"
+  | "lpo"
+  | "payment_run";
+
 export interface WorkflowNotificationContext {
   id: string;
   title: string;
@@ -80,7 +89,7 @@ type WorkflowInstanceRecord = {
   status?: string;
   document?: string;
   template?: string;
-  phase?: "request" | "retirement" | string;
+  phase?: WorkflowPhase | string;
   started_at?: string;
   started_by?: {
     full_name?: string;
@@ -102,7 +111,7 @@ type TaskHistoryRecord = {
   created_at?: string;
 };
 
-export async function loadWorkflowData(documentId: string, workflowPhase?: "request" | "retirement" | null): Promise<{
+export async function loadWorkflowData(documentId: string, workflowPhase?: WorkflowPhase | null): Promise<{
   steps: WorkflowStep[];
   currentStep: number;
   isActive: boolean;
@@ -125,7 +134,7 @@ export async function loadWorkflowData(documentId: string, workflowPhase?: "requ
   // Use the instance's own phase field as the authoritative source. This prevents
   // a stale or missing caller-supplied phase from causing the retirement instance's
   // completed steps to show "Approved" instead of "Fully approved" (or vice-versa).
-  const effectivePhase = (instance?.phase as "request" | "retirement" | undefined) ?? workflowPhase ?? null;
+  const effectivePhase = (instance?.phase as WorkflowPhase | undefined) ?? workflowPhase ?? null;
 
   const template = instance?.template
     ? await workflowAPI
@@ -193,7 +202,7 @@ export async function loadWorkflowData(documentId: string, workflowPhase?: "requ
 function buildApproverWorkflow(
   tasksWithHistory: Array<{ task: WorkflowTaskRecord; history: TaskHistoryRecord[] }>,
   templateSteps: WorkflowTemplateStepRecord[] = [],
-  workflowPhase?: "request" | "retirement" | null,
+  workflowPhase?: WorkflowPhase | null,
 ): WorkflowStep[] {
   const grouped = tasksWithHistory.reduce((map, item) => {
     const order = item.task.step?.order ?? map.size + 1;
@@ -386,23 +395,35 @@ function describeStatus({
   stepName?: string;
   previousName?: string;
   previousIsNotification?: boolean;
-  workflowPhase?: "request" | "retirement" | null;
+  workflowPhase?: WorkflowPhase | null;
 }): string {
+  // Human-readable labels per procurement/document phase
+  const phaseApprovedLabel: Record<string, string> = {
+    requisition: "Requisition Approved",
+    rfq: "RFQ Approved",
+    lpo: "LPO Approved",
+    retirement: "Fully Approved",
+    request: "Approved",
+  };
+  const phaseRejectedLabel: Record<string, string> = {
+    requisition: "Requisition Rejected",
+    rfq: "RFQ Rejected",
+    lpo: "LPO Rejected",
+    retirement: "Retirement Rejected",
+    request: "Rejected",
+  };
+  const approvedLabel = (workflowPhase && phaseApprovedLabel[workflowPhase]) ?? "Approved";
+  const rejectedLabel = (workflowPhase && phaseRejectedLabel[workflowPhase]) ?? "Rejected";
+
   switch (status) {
     case "completed":
-      if (workflowPhase === "retirement") {
-        return isNotification ? "Notification sent" : "Fully approved";
-      }
-      return isNotification ? "Notification sent" : "Approved";
+      return isNotification ? "Notification sent" : approvedLabel;
     case "in-progress":
       return isNotification ? "Sending notification" : (stepName ? `Pending \u2014 ${stripApproval(stepName)}` : "Pending review");
     case "on-hold":
       return "On hold";
     case "rejected":
-      if (workflowPhase === "retirement") {
-        return "Retirement rejected";
-      }
-      return "Rejected";
+      return rejectedLabel;
     case "returned":
       return "Returned for review";
     case "skipped":
@@ -410,7 +431,6 @@ function describeStatus({
     case "pending":
     default:
       if (!previousName) {
-        // Nothing precedes this step — the workflow just hasn't started here yet.
         return isNotification ? "Pending notification" : "Awaiting submission";
       }
       if (isNotification) {
