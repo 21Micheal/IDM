@@ -58,15 +58,15 @@ function formHasConditionalEditability(sections?: unknown[]): boolean {
 }
 
 function isApprovalLockedStatus(status?: string): boolean {
-  return ["pending_approval", "request_pending", "retirement_pending", "on_hold"].includes(status || "");
+  return ["pending_approval", "request_pending", "retirement_pending", "requisition_pending", "rfq_pending", "lpo_pending", "on_hold"].includes(status || "");
 }
 
 function isWorkflowActiveOrCompleted(status?: string): boolean {
-  return isApprovalLockedStatus(status) || ["approved", "request_approved", "fully_approved"].includes(status || "");
+  return isApprovalLockedStatus(status) || ["approved", "request_approved", "requisition_approved", "rfq_approved", "fully_approved"].includes(status || "");
 }
 
 function isFinalFormProcessStep(step?: string): boolean {
-  return ["fully_approved", "retirement_rejected"].includes(step || "");
+  return ["fully_approved", "retirement_rejected", "requisition_rejected", "rfq_rejected", "lpo_rejected"].includes(step || "");
 }
 
 function formatBytes(b: number) {
@@ -91,7 +91,7 @@ function getCommandStatusLabel(status: string) {
 
 function getCommandStatusClass(status: string) {
   const key = status?.toLowerCase?.().replace(/\s+/g, "_") ?? "";
-  if (["approved", "active", "enabled", "completed", "request_approved", "fully_approved"].includes(key)) {
+  if (["approved", "active", "enabled", "completed", "request_approved", "requisition_approved", "rfq_approved", "fully_approved"].includes(key)) {
     return "border-emerald-200 bg-emerald-50 text-emerald-800";
   }
   if (["pending_review", "pending_approval", "on_hold", "returned", "request_pending", "retirement_pending"].includes(key)) {
@@ -171,11 +171,11 @@ export default function FormDetailPage() {
     const canEdit = hasAdminAccess || (doc.permissions ?? []).includes("edit");
     const hasConditionalEditability = formHasConditionalEditability(formData?.sections);
     const formProcessStep = doc.builder_process_step || doc.status;
-    const isRequestApproved = formProcessStep === "request_approved" || (!doc.builder_process_step && doc.status === "approved");
+    const isPostApprovalEditable = ["request_approved", "requisition_approved", "rfq_approved"].includes(formProcessStep) || (!doc.builder_process_step && doc.status === "approved");
     const canEditForm = canEdit
       && !isApprovalLockedStatus(formProcessStep)
       && !isFinalFormProcessStep(formProcessStep)
-      && (doc.status !== "approved" || (isRequestApproved && hasConditionalEditability && (hasAdminAccess || isOwnerOrSubmitter)));
+      && (doc.status !== "approved" || (isPostApprovalEditable && hasConditionalEditability && (hasAdminAccess || isOwnerOrSubmitter)));
 
     // Always sync form values from the server to get attachment descriptors
     // This ensures images show correctly after submission (storage_path instead of filename)
@@ -185,7 +185,7 @@ export default function FormDetailPage() {
 
     // Auto-enter edit mode when form has conditional editability and user is at a stage
     // where conditional editing should be allowed (request_approved for retirement, etc.)
-    if (!formEditing && hasConditionalEditability && (isRequestApproved || canEditForm)) {
+    if (!formEditing && hasConditionalEditability && (isPostApprovalEditable || canEditForm)) {
       setFormValues({ ...(formData?.values ?? {}) });
       formDirtyRef.current = false;
       setFormEditing(true);
@@ -238,7 +238,7 @@ export default function FormDetailPage() {
   });
 
   const submitMutation = useMutation({
-    mutationFn: async () => {
+    mutationFn: async (workflowStage?: "requisition" | "rfq" | "lpo") => {
       if (formEditing && formDirtyRef.current) {
         const shouldSave = window.confirm("You have unsaved changes in the form. Save them before submitting?");
         if (shouldSave) {
@@ -256,7 +256,7 @@ export default function FormDetailPage() {
           await updateFormMutation.mutateAsync();
         }
       }
-      return documentsAPI.submit(id!);
+      return documentsAPI.submit(id!, workflowStage ? { workflow_stage: workflowStage } : undefined);
     },
     onSuccess: () => {
       toast.success("Submitted for approval");
@@ -367,11 +367,11 @@ export default function FormDetailPage() {
   }
 
   const step = formProcessStep();
-  const isRequestApproved = step === "request_approved" || (!doc.builder_process_step && doc.status === "approved");
+  const isPostApprovalEditable = ["request_approved", "requisition_approved", "rfq_approved"].includes(step) || (!doc.builder_process_step && doc.status === "approved");
   const canEditForm = canEdit
     && !isApprovalLockedStatus(step)
     && !isFinalFormProcessStep(step)
-    && (doc.status !== "approved" || (isRequestApproved && hasConditionalEditability && canEditConditionalSections()));
+    && (doc.status !== "approved" || (isPostApprovalEditable && hasConditionalEditability && canEditConditionalSections()));
 
   const budgetEnabled = Boolean(doc.metadata?.sunsystems?.budget?.enabled);
   const journalEnabled = Boolean(doc.metadata?.sunsystems?.journal?.enabled);
@@ -386,8 +386,19 @@ export default function FormDetailPage() {
   // Only allow retirement submission if template has multiple stages configured (Stage 2 exists)
   const hasRetirementStage = availableStages.includes(2);
   const canSubmitRetirement = Boolean(doc.can_submit_retirement) && !isRetirementFinalized && hasRetirementStage && (canApprove || isOwnerOrSubmitter);
-  const canSubmit = canSubmitRequest || canSubmitRetirement;
-  const submitLabel = canSubmitRetirement
+  const completedProcurementStages = Array.isArray((formData as any)?.completed_workflow_stages)
+    ? (formData as any).completed_workflow_stages as string[]
+    : [];
+  const procurementNextStage = step === "requisition_approved" && completedProcurementStages.includes("requisition")
+    ? "rfq"
+    : step === "rfq_approved" && completedProcurementStages.includes("rfq")
+      ? "lpo"
+      : null;
+  const canSubmitProcurementStage = Boolean(procurementNextStage) && (canApprove || isOwnerOrSubmitter);
+  const canSubmit = canSubmitRequest || canSubmitRetirement || canSubmitProcurementStage;
+  const submitLabel = canSubmitProcurementStage
+    ? `Start ${procurementNextStage!.toUpperCase()} approval`
+    : canSubmitRetirement
     ? "Submit retirement"
     : doc.status === "returned"
       ? "Resubmit"
@@ -500,14 +511,14 @@ export default function FormDetailPage() {
               <div className="flex items-center gap-2 min-w-0">
                 <p className="text-sm font-bold text-[#1F2933]">Form</p>
                 <span className="text-xs text-[#5E6870]">
-                  {formEditing ? (formDirtyRef.current ? "Editing — unsaved changes" : "Editing — fill and save") : canSubmitRetirement ? "Retirement stage — fill expenditure, then submit" : canEditForm ? "Click Edit form to modify" : "Filled in-app"}
+                  {formEditing ? (formDirtyRef.current ? "Editing — unsaved changes" : "Editing — fill and save") : canSubmitProcurementStage ? `${procurementNextStage!.toUpperCase()} stage is ready to start` : canSubmitRetirement ? "Retirement stage — fill expenditure, then submit" : canEditForm ? "Click Edit form to modify" : "Filled in-app"}
                 </span>
               </div>
               <div className="flex items-center gap-2 flex-wrap justify-end">
                 {canSubmit && (
                   <button
                     type="button"
-                    onClick={() => submitMutation.mutate()}
+                    onClick={() => submitMutation.mutate(procurementNextStage ?? undefined)}
                     disabled={submitMutation.isPending}
                     className="inline-flex items-center gap-1.5 bg-[#287EAD] px-3 py-1.5 text-xs font-semibold text-white hover:bg-[#1E6F99] disabled:opacity-50"
                   >

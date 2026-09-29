@@ -973,12 +973,14 @@ class WorkflowService:
             if not journal_posting_enabled(document):
                 return
 
+            phase = WorkflowService._document_workflow_phase(document)
             outcomes = [outcome]
-            if (
-                WorkflowService._document_workflow_phase(document) == "retirement"
-                and outcome == "approved"
-            ):
-                # Retirement-cycle completion may use a dedicated trigger name.
+            from apps.documents.builder_workflow import completed_procurement_stages, is_procurement_document
+            if is_procurement_document(document):
+                # Intermediate approvals never post. LPO completion emits the
+                # only procurement posting trigger.
+                outcomes = ["fully_approved"] if outcome == "approved" and phase == "lpo" and "lpo" in completed_procurement_stages(document) else []
+            elif phase == "retirement" and outcome == "approved":
                 outcomes = ["retirement_approved", "approved"]
 
             for trigger in outcomes:

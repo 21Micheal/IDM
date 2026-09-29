@@ -587,7 +587,7 @@ function RuleFormFields({ values, routeKind, isRequisitionWorkflow, onChange }: 
               ? "Payment run routing starts after selected lines have been marked in SunSystems."
               : isRequisitionWorkflow
                 ? "Each stage has its own amount thresholds and approval chain. RFQ starts after Requisition approval; LPO starts after RFQ approval."
-                : "Builder forms use Request for the first approval cycle and Retirement after the first SunSystems posting is complete."}
+                : "Each phase has its own amount thresholds and approval chain for routing documents through the workflow."}
           </p>
         </div>
       )}
@@ -1128,10 +1128,10 @@ function NotificationStepFields({
 
         {recipientMode === "user" ? (
           <div className="space-y-2">
-            <select
+            <CustomListbox
               value={step.assignee_group ?? ""}
-              onChange={e => {
-                const id = e.target.value || null;
+              onChange={(v) => {
+                const id = v || null;
                 const g = groups.find(x => x.id === id);
                 onChange({
                   assignee_group: id,
@@ -1141,28 +1141,24 @@ function NotificationStepFields({
                   notify_email: "",
                 });
               }}
+              options={[{ value: "", label: "Select group" }, ...groups.map(g => ({ value: g.id, label: g.name }))]}
               className={inp}
-            >
-              <option value="">Select group</option>
-              {groups.map(g => (
-                <option key={g.id} value={g.id}>{g.name}</option>
-              ))}
-            </select>
-            <select
+              buttonClassName="w-full"
+              ariaLabel="Notification group"
+            />
+            <CustomListbox
               value={step.notify_user ?? ""}
-              onChange={e => {
-                const id = e.target.value || null;
+              onChange={(v) => {
+                const id = v || null;
                 const u = allMembers.find(x => x.id === id);
                 onChange({ notify_user: id, notify_user_name: u?.full_name, notify_email: "" });
               }}
-              disabled={!step.assignee_group}
+              options={[{ value: "", label: !step.assignee_group ? "Pick a group first" : "Select member" }, ...allMembers.map(u => ({ value: u.id, label: `${u.full_name} (${u.email})` }))]}
               className={inp}
-            >
-              <option value="">{!step.assignee_group ? "Pick a group first" : "Select member"}</option>
-              {allMembers.map(u => (
-                <option key={u.id} value={u.id}>{u.full_name} ({u.email})</option>
-              ))}
-            </select>
+              buttonClassName="w-full"
+              ariaLabel="Notification user"
+              disabled={!step.assignee_group}
+            />
           </div>
         ) : (
           <input
@@ -2270,16 +2266,14 @@ function TemplateEditor({
           <div className="mt-3 max-w-sm">
             <Label required>Document type</Label>
             {canEditDocumentType ? (
-              <select
+              <CustomListbox
                 value={selectedDocumentTypeId ?? ""}
-                onChange={(e) => { setSelectedDocumentTypeId(e.target.value || null); setIsDirty(true); }}
+                onChange={(v) => { setSelectedDocumentTypeId(v || null); setIsDirty(true); }}
+                options={[{ value: "", label: "Select document type" }, ...availableDocTypes.map((item) => ({ value: item.id, label: item.name }))]}
                 className={inp}
-              >
-                <option value="">Select document type</option>
-                {availableDocTypes.map((item) => (
-                  <option key={item.id} value={item.id}>{item.name}</option>
-                ))}
-              </select>
+                buttonClassName="w-full"
+                ariaLabel="Document type"
+              />
             ) : (
               <div className="rounded-lg border border-border bg-muted/40 px-3 py-2 text-sm font-medium text-foreground">
                 {selectedDocumentTypeName ?? "No document type assigned"}
@@ -2458,10 +2452,14 @@ function DuplicateTemplateModal({
           {!isPaymentRun && (
             <div>
               <Label required>Document type</Label>
-              <select value={selectedDocTypeId ?? ""} onChange={(e) => setSelectedDocTypeId(e.target.value || null)} className="input">
-                <option value="">Select document type</option>
-                {activeDocTypes.map((d) => <option key={d.id} value={d.id}>{d.name}</option>)}
-              </select>
+              <CustomListbox
+                value={selectedDocTypeId ?? ""}
+                onChange={(v) => setSelectedDocTypeId(v || null)}
+                options={[{ value: "", label: "Select document type" }, ...activeDocTypes.map((d) => ({ value: d.id, label: d.name }))]}
+                className="input"
+                buttonClassName="w-full"
+                ariaLabel="Document type"
+              />
               <p className="text-[11px] text-muted-foreground mt-1">The duplicate can be assigned to a different document type.</p>
             </div>
           )}

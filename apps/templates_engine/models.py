@@ -74,6 +74,19 @@ class DocumentTemplate(models.Model):
     # "connection": {...} }. Empty = no SunSystems integration for this template.
     sunsystems = models.JSONField(default=dict, blank=True)
 
+    # Workflow type: determines which workflow stages and process steps are
+    # available for visibility conditions in the form builder.
+    WORKFLOW_TYPE_CHOICES = [
+        ("imprest", "Imprest (Request → Retirement)"),
+        ("requisition", "Requisition (Requisition → RFQ → LPO)"),
+    ]
+    workflow_type = models.CharField(
+        max_length=20,
+        choices=WORKFLOW_TYPE_CHOICES,
+        default="requisition",
+        help_text="Workflow type for this template: determines available process steps.",
+    )
+
     # How many times this template has been used to create a document
     use_count = models.PositiveIntegerField(default=0)
 

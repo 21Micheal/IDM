@@ -9,6 +9,11 @@ PROCUREMENT_WORKFLOW_STAGES = ("requisition", "rfq", "lpo")
 
 def is_procurement_document(document: Document) -> bool:
     """Whether a built form belongs to the requisition procurement lifecycle."""
+    form = (document.metadata or {}).get("form") or {}
+    workflow_type = str(form.get("workflow_type") or "").strip().lower()
+    if workflow_type:
+        return workflow_type == "requisition"
+
     document_type = getattr(document, "document_type", None)
     if not document_type:
         return False
@@ -284,12 +289,7 @@ def retirement_workflow_completed(document: Document) -> bool:
 
 
 def builder_process_step(document: Document) -> str:
-    """Phase-aware process step for built-form visibility/editability rules.
-
-    ``Document.status`` is intentionally lifecycle/RBAC-oriented and therefore
-    cannot distinguish "request approved, retirement now open" from "retirement
-    fully approved". This derived value is the form engine's workflow vocabulary.
-    """
+    """Return the lifecycle value used by form visibility/editability rules."""
     status = (document.status or DocumentStatus.DRAFT).strip().lower()
     if not is_built_form_document(document):
         return status
@@ -297,22 +297,27 @@ def builder_process_step(document: Document) -> str:
     form = (document.metadata or {}).get("form") or {}
     phase = (form.get("workflow_phase") or infer_builder_workflow_phase(document) or "request").strip().lower()
 
+    if is_procurement_document(document):
+        if builder_workflow_in_progress(document):
+            return f"{phase}_pending"
+        if status == DocumentStatus.RETURNED:
+            return f"{phase}_returned"
+        if status == DocumentStatus.REJECTED:
+            return f"{phase}_rejected"
+        if status == DocumentStatus.APPROVED:
+            return "fully_approved" if phase == "lpo" and phase in completed_procurement_stages(document) else f"{phase}_approved"
+        return status
+
     if builder_workflow_in_progress(document):
         return "retirement_pending" if phase == "retirement" else "request_pending"
-
     if status == DocumentStatus.RETURNED:
         return "retirement_returned" if phase == "retirement" else "returned"
-
     if status == DocumentStatus.REJECTED:
         return "retirement_rejected" if phase == "retirement" else "rejected"
-
     if status == DocumentStatus.APPROVED:
-        if phase == "retirement" and retirement_workflow_completed(document):
-            return "fully_approved"
-        if phase == "retirement" and retirement_journal_posted(document):
+        if phase == "retirement" and (retirement_workflow_completed(document) or retirement_journal_posted(document)):
             return "fully_approved"
         return "request_approved"
-
     return status
 
 

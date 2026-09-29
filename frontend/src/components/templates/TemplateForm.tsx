@@ -436,10 +436,10 @@ function evalCondition(c: VisibilityCondition, values: TemplateFormValues, allFi
     const e = (expected || "").trim().toLowerCase();
     if (a === e) return true;
     const aliases: Record<string, string[]> = {
-      approved: ["approved", "request_approved", "fully_approved"],
-      pending_approval: ["pending_approval", "request_pending", "retirement_pending"],
-      returned: ["returned", "retirement_returned"],
-      rejected: ["rejected", "retirement_rejected"],
+      approved: ["approved", "request_approved", "requisition_approved", "rfq_approved", "fully_approved"],
+      pending_approval: ["pending_approval", "request_pending", "retirement_pending", "requisition_pending", "rfq_pending", "lpo_pending"],
+      returned: ["returned", "retirement_returned", "requisition_returned", "rfq_returned", "lpo_returned"],
+      rejected: ["rejected", "retirement_rejected", "requisition_rejected", "rfq_rejected", "lpo_rejected"],
     };
     return aliases[e]?.includes(a) ?? false;
   };

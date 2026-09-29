@@ -1287,9 +1287,12 @@ export const workflowAPI = {
   getTemplate: (id: string) => api.get(`/workflows/templates/${id}/`),
   // Process steps (statuses) a document of `documentTypeId` can be in — drives
   // "process step equals …" visibility conditions in the form builder.
-  processSteps: (documentTypeId?: string) =>
+  processSteps: (documentTypeId?: string, workflowType?: string) =>
     api.get("/workflows/templates/process-steps/", {
-      params: documentTypeId ? { document_type: documentTypeId } : {},
+      params: {
+        ...(documentTypeId ? { document_type: documentTypeId } : {}),
+        ...(workflowType ? { workflow_type: workflowType } : {}),
+      },
     }),
   createTemplate: (data: unknown) => api.post("/workflows/templates/", data),
   updateTemplate: (id: string, data: unknown) =>

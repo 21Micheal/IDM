@@ -165,10 +165,12 @@ class WorkflowTemplateViewSet(viewsets.ModelViewSet):
         standard lifecycle statuses every document can reach. ``value`` is what a
         document's ``status`` field actually holds at runtime; ``label`` is for
         display. Pass ``?document_type=<id>``; without it, only the standard
-        statuses are returned."""
+        statuses are returned. Pass ``?workflow_type=imprest|requisition`` to
+        specify which workflow stages to include."""
         from apps.documents.models import DocumentStatus
 
         doc_type = request.query_params.get("document_type")
+        workflow_type = request.query_params.get("workflow_type", "imprest")
         steps: list[dict] = []
         seen: set = set()
 
@@ -179,15 +181,33 @@ class WorkflowTemplateViewSet(viewsets.ModelViewSet):
 
         # Draft is the implicit starting state while a document is being created.
         add(DocumentStatus.DRAFT, DocumentStatus.DRAFT.label)
-        for value, label in (
-            ("request_pending", "Request approval in progress"),
-            ("request_approved", "Request approved (retirement open)"),
-            ("retirement_pending", "Retirement approval in progress"),
-            ("retirement_returned", "Retirement returned for rework"),
-            ("fully_approved", "Fully approved"),
-            ("retirement_rejected", "Retirement rejected"),
-        ):
-            add(value, label)
+
+        # Workflow-specific process steps
+        if workflow_type == "requisition":
+            # Requisition workflow stages
+            for value, label in (
+                ("requisition_pending", "Requisition approval in progress"),
+                ("requisition_approved", "Requisition approved (RFQ open)"),
+                ("rfq_pending", "RFQ approval in progress"),
+                ("rfq_approved", "RFQ approved (LPO open)"),
+                ("lpo_pending", "LPO approval in progress"),
+                ("fully_approved", "Fully approved"),
+                ("requisition_rejected", "Requisition rejected"),
+                ("rfq_rejected", "RFQ rejected"),
+                ("lpo_rejected", "LPO rejected"),
+            ):
+                add(value, label)
+        else:
+            # Imprest workflow stages (default for backward compatibility)
+            for value, label in (
+                ("request_pending", "Request approval in progress"),
+                ("request_approved", "Request approved (retirement open)"),
+                ("retirement_pending", "Retirement approval in progress"),
+                ("retirement_returned", "Retirement returned for rework"),
+                ("fully_approved", "Fully approved"),
+                ("retirement_rejected", "Retirement rejected"),
+            ):
+                add(value, label)
 
         if doc_type:
             labels = (

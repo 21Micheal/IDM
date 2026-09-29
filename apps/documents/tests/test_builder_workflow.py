@@ -9,6 +9,7 @@ from apps.documents.builder_workflow import (
     can_start_procurement_workflow_stage,
     completed_procurement_stages,
     infer_builder_workflow_phase,
+    is_procurement_document,
     record_procurement_stage_completion,
 )
 from apps.documents.models import Document, DocumentStatus, DocumentType
@@ -153,3 +154,69 @@ class ProcurementWorkflowStageTests(TestCase):
         self.assertEqual(completed_procurement_stages(self.document), ["requisition"])
         self.assertTrue(can_start_procurement_workflow_stage(self.document, "rfq"))
         self.assertFalse(can_start_procurement_workflow_stage(self.document, "lpo"))
+
+
+class ProcurementWorkflowTypeTests(TestCase):
+    def test_explicit_template_workflow_type_overrides_document_type_name(self):
+        document_type = DocumentType.objects.create(
+            name="General procurement form",
+            code="GENPROC",
+            reference_prefix="GEN",
+        )
+        user = User.objects.create_user(email="marker@example.com", password="pass")
+        document = _make_document(
+            title="Configured requisition",
+            reference_number="GEN-00001",
+            document_type=document_type,
+            uploaded_by=user,
+            metadata={
+                "form": {
+                    "workflow_type": "requisition",
+                    "sections": [{"id": "s1", "fields": []}],
+                    "values": {},
+                }
+            },
+        )
+
+        self.assertTrue(is_procurement_document(document))
+
+
+class ProcurementProcessStepTests(TestCase):
+    def setUp(self):
+        self.doc_type = DocumentType.objects.create(
+            name="Purchase Requisition",
+            code="REQSTEPS",
+            reference_prefix="REQ",
+        )
+        self.user = User.objects.create_user(
+            email="stages@example.com",
+            password="pass",
+        )
+        self.document = _make_document(
+            title="Procurement stages",
+            reference_number="REQ-00002",
+            document_type=self.doc_type,
+            uploaded_by=self.user,
+            status=DocumentStatus.APPROVED,
+            metadata={
+                "form": {
+                    "sections": [{"id": "s1", "fields": []}],
+                    "values": {},
+                    "workflow_phase": "requisition",
+                    "completed_workflow_stages": ["requisition"],
+                }
+            },
+        )
+
+    def test_procurement_process_steps_follow_approved_stage(self):
+        self.assertEqual(builder_process_step(self.document), "requisition_approved")
+
+        self.document.metadata["form"]["workflow_phase"] = "rfq"
+        self.document.metadata["form"]["completed_workflow_stages"].append("rfq")
+        self.document.save(update_fields=["metadata", "updated_at"])
+        self.assertEqual(builder_process_step(self.document), "rfq_approved")
+
+        self.document.metadata["form"]["workflow_phase"] = "lpo"
+        self.document.metadata["form"]["completed_workflow_stages"].append("lpo")
+        self.document.save(update_fields=["metadata", "updated_at"])
+        self.assertEqual(builder_process_step(self.document), "fully_approved")

@@ -1057,6 +1057,7 @@ def generate_document_from_template_sync(template, values, fmt, title, user, typ
         # file instead and follow the normal Office lifecycle — no form snapshot.
         doc_metadata["form"] = {
             "template_id": str(template.id),
+            "workflow_type": template.workflow_type,
             "sections": template.sections,
             "values": values,
         }

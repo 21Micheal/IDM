@@ -500,6 +500,7 @@ export interface Template {
   use_count?: number;
   sections: TemplateSection[];
   sunsystems?: SunSystemsConfig;
+  workflow_type?: "imprest" | "requisition";
 }
 
 export type EditableTemplate = Omit<Template, "type"> & { type?: Template["type"] };
@@ -772,7 +773,6 @@ function cellPlaceholder(c: TableColumn): string {
     case "url": return "https://…";
     case "multi_select": return c.options?.[0] ? `${c.options[0]} +` : "Select many…";
     case "image": return "🖼 image";
-    case "budget": return "💰 Budget";
     default: return "—";
   }
 }
@@ -3036,7 +3036,7 @@ function FinanceBindingFields({ field, onUpdate }: {
 /* Visibility modes shared by fields and sections. `hidden` = always hidden,
  * `visibleWhen` = conditional, `visibleToGroups` = role-restricted (sections
  * only), none = always visible. */
-type VisibilityMode = "visible" | "hidden" | "conditional" | "groups";
+type VisibilityMode = "visible" | "hidden" | "conditional";
 
 interface VisibilityState {
   hidden?: boolean;
@@ -3046,10 +3046,6 @@ interface VisibilityState {
 
 function visibilityModeOf(item: VisibilityState): VisibilityMode {
   if (item.hidden) return "hidden";
-  // A defined (even empty) list means "groups"mode is selected — keeps the
-  // picker open while the user is still choosing. Other modes clear it to
-  // undefined, so an empty list never lingers once a different mode is chosen.
-  if (item.visibleToGroups !== undefined) return "groups";
   if (item.visibleWhen) return "conditional";
   return "visible";
 }
@@ -3140,21 +3136,20 @@ function RuleGroupEditor({ group, sources, processSteps, onChange, depth = 0 }: 
           )}
 
           <div className="grid grid-cols-2 gap-1.5">
-            <select className={cn(inputCls, "h-8")} value={c.operator}
-              onChange={(e) => updateCond(i, { operator: e.target.value as ConditionOperator })}>
-              {OPERATOR_GROUPS.map((g) => {
+            <CustomListbox
+              value={c.operator}
+              onChange={(val) => updateCond(i, { operator: val as ConditionOperator })}
+              options={OPERATOR_GROUPS.flatMap((g) => {
                 /* A process step is a plain label: only text-ish operators apply. */
                 const ops = c.source === "process_step"
                   ? g.ops.filter((o) => ["equals", "not_equals", "contains", "not_contains", "starts_with", "ends_with", "in_list", "not_in_list"].includes(o))
                   : g.ops;
-                if (!ops.length) return null;
-                return (
-                  <optgroup key={g.label} label={g.label}>
-                    {ops.map((o) => <option key={o} value={o}>{OPERATOR_LABEL[o]}</option>)}
-                  </optgroup>
-                );
+                return ops.map((o) => ({ value: o, label: `${g.label}: ${OPERATOR_LABEL[o]}` }));
               })}
-            </select>
+              className={cn(inputCls, "h-8")}
+              buttonClassName="w-full"
+              ariaLabel="Operator"
+            />
             {!VALUELESS_OPERATORS.has(c.operator) && (
               c.source === "process_step" && !LIST_OPERATORS.has(c.operator) ? (
                 <CustomListbox
@@ -3249,12 +3244,11 @@ function VisibilityEditor({ value, sources, onChange, subject, groupOptions, pro
   const isGroupSelected = (id: string) => selectedGroups.some((g) => g.id === id);
 
   const setMode = (m: VisibilityMode) => {
-    const cleared = { hidden: false, visibleWhen: null, visibleToGroups: undefined } as VisibilityState;
-    if (m === "visible") onChange(cleared);
-    else if (m === "hidden") onChange({ ...cleared, hidden: true });
-    else if (m === "groups") onChange({ ...cleared, visibleToGroups: selectedGroups });
+    if (m === "visible") onChange({ hidden: false, visibleWhen: null, visibleToGroups: value.visibleToGroups });
+    else if (m === "hidden") onChange({ hidden: true, visibleWhen: null, visibleToGroups: value.visibleToGroups });
     else onChange({
-      ...cleared,
+      hidden: false,
+      visibleToGroups: value.visibleToGroups,
       visibleWhen: rule ?? { combinator: "and", conditions: [defaultCondition(sources)] },
     });
   };
@@ -3263,7 +3257,7 @@ function VisibilityEditor({ value, sources, onChange, subject, groupOptions, pro
     const next = isGroupSelected(g.id)
       ? selectedGroups.filter((s) => s.id !== g.id)
       : [...selectedGroups, { id: g.id, name: g.name }];
-    onChange({ hidden: false, visibleWhen: null, visibleToGroups: next });
+    onChange({ hidden: false, visibleWhen: value.visibleWhen, visibleToGroups: next });
   };
 
   return (
@@ -3272,8 +3266,8 @@ function VisibilityEditor({ value, sources, onChange, subject, groupOptions, pro
       hint={
         mode === "hidden"
           ? `This ${subject} is always hidden from people filling the form.`
-          : mode === "groups"
-            ? "Only members of the selected groups (and admins) see this section."
+          : selectedGroups.length > 0
+            ? "This section must satisfy its stage conditions and group access rule."
             : `Control when this ${subject} appears for people filling the form.`
       }
     >
@@ -3285,13 +3279,12 @@ function VisibilityEditor({ value, sources, onChange, subject, groupOptions, pro
             { value: "visible", label: "Always visible" },
             { value: "hidden", label: "Always hidden" },
             { value: "conditional", label: "Show only when…" },
-            ...(allowsGroups ? [{ value: "groups", label: "Visible only to groups…" }] : []),
           ]}
           className={inputCls}
           buttonClassName="w-full"
           ariaLabel="Visibility mode"
         />
-        {mode === "groups" && allowsGroups && (
+        {allowsGroups && mode !== "hidden" && (
           <div className="space-y-1">
             {groupOptions!.length === 0 && (
               <p className="text-[10px] text-amber-600">No groups defined yet.</p>
@@ -3716,16 +3709,26 @@ function FieldEditor({ field, onUpdate, allFields, processSteps }: {
           )}
           {(field.type === "reference" || field.type === "user") && (
             <InspectorRow label="Reference source">
-              <select className={inputCls} value={field.referenceSource ?? (field.type === "user" ? "users" : "documents")} onChange={(e) => onUpdate({ referenceSource: e.target.value })}>
-                {REFERENCE_SOURCE_OPTIONS.map((o) => <option key={o.value} value={o.value}>{o.label}</option>)}
-              </select>
+              <CustomListbox
+                value={field.referenceSource ?? (field.type === "user" ? "users" : "documents")}
+                onChange={(val) => onUpdate({ referenceSource: val })}
+                options={REFERENCE_SOURCE_OPTIONS.map((o) => ({ value: o.value, label: o.label }))}
+                className={inputCls}
+                buttonClassName="w-full"
+                ariaLabel="Reference source"
+              />
             </InspectorRow>
           )}
           {FORMULA_FIELD_TYPES.has(field.type) && (
             <InspectorRow label="Auto-fill" hint="Fill this field automatically — the user won't type it.">
-              <select className={inputCls} value={field.formula ?? ""} onChange={(e) => onUpdate({ formula: e.target.value || undefined })}>
-                {FORMULA_OPTIONS.map((o) => <option key={o.value} value={o.value}>{o.label}</option>)}
-              </select>
+              <CustomListbox
+                value={field.formula ?? ""}
+                onChange={(val) => onUpdate({ formula: val || undefined })}
+                options={FORMULA_OPTIONS.map((o) => ({ value: o.value, label: o.label }))}
+                className={inputCls}
+                buttonClassName="w-full"
+                ariaLabel="Auto-fill formula"
+              />
             </InspectorRow>
           )}
           {isCalculated && (
@@ -5492,10 +5495,14 @@ function Preview({ sections, templateName, processSteps }: {
           </div>
           <label className="flex flex-shrink-0 flex-col gap-1 text-right">
             <span className="text-[10px] font-semibold uppercase tracking-wider text-slate-500">Preview as step</span>
-            <select value={previewStep} onChange={(e) => setPreviewStep(e.target.value)}
-              className="h-9 min-w-[180px] border border-[#AEB5BB] bg-white px-2 text-sm text-[#1F2933] outline-none focus:border-[#287EAD]">
-              {stepOptions.map((o) => <option key={o.value} value={o.value}>{o.label}</option>)}
-            </select>
+            <CustomListbox
+              value={previewStep}
+              onChange={(val) => setPreviewStep(val)}
+              options={stepOptions.map((o) => ({ value: o.value, label: o.label }))}
+              className="h-9 min-w-[180px]"
+              buttonClassName="w-full"
+              ariaLabel="Preview as step"
+            />
           </label>
         </header>
         {sections.map((s) => {
@@ -5593,11 +5600,14 @@ function SettingsTab({ template, onCommit, documentTypes, processSteps }: {
           <div className="space-y-1.5">
             <label className="text-xs font-semibold uppercase tracking-wider text-[#5E6870]">Document type <span className="text-red-400 normal-case font-normal">*</span></label>
             <div className="flex gap-2">
-              <select value={template.document_type_id ?? ""} onChange={(e) => onCommit({ document_type_id: e.target.value })}
-                className={cn(iCls, "flex-1")}>
-                <option value="">Select document type</option>
-                {documentTypes.map((type) => <option key={type.id} value={type.id}>{type.name}</option>)}
-              </select>
+              <CustomListbox
+                value={template.document_type_id ?? ""}
+                onChange={(val) => onCommit({ document_type_id: val })}
+                options={[{ value: "", label: "Select document type" }, ...documentTypes.map((type) => ({ value: type.id, label: type.name }))]}
+                className={cn(iCls, "flex-1")}
+                buttonClassName="w-full"
+                ariaLabel="Document type"
+              />
               <button type="button" onClick={() => setShowCreate(true)} title="Create new document type"
                 className="h-9 px-3 border border-[#AEB5BB] bg-white text-[#5E6870] hover:text-[#287EAD] hover:border-[#287EAD]/60 hover:bg-[#EEF6FB] transition-all flex items-center gap-1.5 text-xs font-semibold whitespace-nowrap">
                 <Plus className="h-3.5 w-3.5" /> New type
@@ -5609,6 +5619,23 @@ function SettingsTab({ template, onCommit, documentTypes, processSteps }: {
                 onCreated={(type) => { onCommit({ document_type_id: type.id }); setShowCreate(false); }}
               />
             )}
+          </div>
+          <div className="space-y-1.5">
+            <label className="text-xs font-semibold uppercase tracking-wider text-[#5E6870]">Workflow type</label>
+            <CustomListbox
+              value={template.workflow_type ?? "requisition"}
+              onChange={(val) => onCommit({ workflow_type: val as "imprest" | "requisition" })}
+              options={[
+                { value: "imprest", label: "Imprest (Request → Retirement)" },
+                { value: "requisition", label: "Requisition (Requisition → RFQ → LPO)" },
+              ]}
+              className={iCls}
+              buttonClassName="w-full"
+              ariaLabel="Workflow type"
+            />
+            <p className="text-[10px] text-[#8C969E] mt-1">
+              Determines which workflow stages and process steps are available for visibility conditions.
+            </p>
           </div>
           <div className="space-y-1.5">
             <label className="text-xs font-semibold uppercase tracking-wider text-[#5E6870]">Tags</label>
@@ -5748,10 +5775,17 @@ function FinanceSettingsCard({ template, onCommit, iCls, processSteps }: {
             </div>
             <div className="space-y-1.5">
               <span className={label}>When over budget at submit</span>
-              <select className={iCls} value={ui.budgetMode ?? "warn"} onChange={(e) => setUi({ budgetMode: e.target.value as "warn" | "block" })}>
-                <option value="warn">Warn only</option>
-                <option value="block">Block submission</option>
-              </select>
+              <CustomListbox
+                value={ui.budgetMode ?? "warn"}
+                onChange={(val) => setUi({ budgetMode: val as "warn" | "block" })}
+                options={[
+                  { value: "warn", label: "Warn only" },
+                  { value: "block", label: "Block submission" },
+                ]}
+                className={iCls}
+                buttonClassName="w-full"
+                ariaLabel="Budget mode"
+              />
             </div>
           </div>
         )}
@@ -5768,10 +5802,17 @@ function FinanceSettingsCard({ template, onCommit, iCls, processSteps }: {
           <div className="space-y-3 border-l-2 border-[#287EAD]/30 pl-4">
             <div className="space-y-1.5">
               <span className={label}>Posting type</span>
-              <select className={iCls} value={postingKind} onChange={(e) => setUi({ postingKind: e.target.value as "journal" | "purchase_order" })}>
-                <option value="journal">Ledger journal</option>
-                <option value="purchase_order">Purchase order / LPO</option>
-              </select>
+              <CustomListbox
+                value={postingKind}
+                onChange={(val) => setUi({ postingKind: val as "journal" | "purchase_order" })}
+                options={[
+                  { value: "journal", label: "Ledger journal" },
+                  { value: "purchase_order", label: "Purchase order / LPO" },
+                ]}
+                className={iCls}
+                buttonClassName="w-full"
+                ariaLabel="Posting type"
+              />
             </div>
             <div className="grid grid-cols-2 gap-3">
               <div className="space-y-1.5"><span className={label}>Business unit</span>
@@ -5854,13 +5895,14 @@ function FinanceSettingsCard({ template, onCommit, iCls, processSteps }: {
                           </div>
                           <div className="space-y-1">
                             <span className="text-[10px] font-semibold uppercase text-[#5E6870]">Post when workflow status becomes</span>
-                            <select
-                              className={iCls}
+                            <CustomListbox
                               value={stage.postOn ?? "approved"}
-                              onChange={(e) => updateStage(index, { postOn: e.target.value })}
-                            >
-                              {stageOptions.map((s) => <option key={s.value} value={s.value}>{s.label}</option>)}
-                            </select>
+                              onChange={(val) => updateStage(index, { postOn: val })}
+                              options={stageOptions.map((s) => ({ value: s.value, label: s.label }))}
+                              className={iCls}
+                              buttonClassName="w-full"
+                              ariaLabel="Post when workflow status becomes"
+                            />
                           </div>
                           <button
                             type="button"
@@ -6069,9 +6111,9 @@ export default function TemplateBuilderV2({ initial, onSave, onCancel, isSaving,
   // Workflow process steps for this template's document type — drives the
   // "process step"visibility conditions in the inspector.
   const { data: processSteps = [] } = useQuery({
-    queryKey: ["workflow-process-steps", template?.document_type_id ?? ""],
+    queryKey: ["workflow-process-steps", template?.document_type_id ?? "", template?.workflow_type ?? "requisition"],
     queryFn: async () => {
-      const { data } = await workflowAPI.processSteps(template?.document_type_id);
+      const { data } = await workflowAPI.processSteps(template?.document_type_id, template?.workflow_type ?? "requisition");
       return (data ?? []) as { value: string; label: string }[];
     },
     staleTime: 60_000,
