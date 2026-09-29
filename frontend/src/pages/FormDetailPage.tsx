@@ -46,6 +46,7 @@ import SignaturePlacementModal, {
   FormTargetField,
   SignaturePlacementResult,
 } from "@/components/signatures/SignaturePlacementModal";
+import InvoiceAttachmentsPanel from "@/components/templates/InvoiceAttachmentsPanel";
 
 const AUDIT_PAGE_SIZE = 5;
 
@@ -368,10 +369,15 @@ export default function FormDetailPage() {
 
   const step = formProcessStep();
   const isPostApprovalEditable = ["request_approved", "requisition_approved", "rfq_approved"].includes(step) || (!doc.builder_process_step && doc.status === "approved");
+  // For procurement stages (rfq_approved, requisition_approved, etc.), the form
+  // should be editable by the owner/admin without requiring the template to have
+  // conditional editability rules. Builder-defined field-level editableWhen rules
+  // still apply normally through TemplateForm — this only controls the "Edit form" button.
+  const isProcurementApprovedStage = ["requisition_approved", "rfq_approved", "lpo_approved"].includes(step);
   const canEditForm = canEdit
     && !isApprovalLockedStatus(step)
     && !isFinalFormProcessStep(step)
-    && (doc.status !== "approved" || (isPostApprovalEditable && hasConditionalEditability && canEditConditionalSections()));
+    && (doc.status !== "approved" || isProcurementApprovedStage || (isPostApprovalEditable && hasConditionalEditability && canEditConditionalSections()));
 
   const budgetEnabled = Boolean(doc.metadata?.sunsystems?.budget?.enabled);
   const journalEnabled = Boolean(doc.metadata?.sunsystems?.journal?.enabled);
@@ -485,7 +491,6 @@ export default function FormDetailPage() {
 
       <div className={cn(
         "scrollbar-minimal relative grid min-h-0 flex-1 grid-cols-1 items-start gap-4 overflow-y-auto p-4 lg:grid-cols-12",
-        activeTask && "pb-24",
         detailsOpen ? "pr-8" : "pr-12",
       )}>
 
@@ -657,6 +662,22 @@ export default function FormDetailPage() {
             />
           )}
 
+          {/* ── Supplier Invoices & Quotations panel (RFQ stage) ── */}
+          {["rfq_pending", "rfq_approved"].includes(step) && (
+            <InvoiceAttachmentsPanel
+              documentId={doc.id}
+              supplierCodes={(doc.metadata as any)?.rfq?.supplier_codes ?? []}
+              existingAttachments={
+                Array.isArray((formData as any)?.values?.supplier_attachments)
+                  ? (formData as any).values.supplier_attachments
+                  : []
+              }
+              onAttached={() => {
+                qc.invalidateQueries({ queryKey: ["form", id] });
+              }}
+            />
+          )}
+
           {(isWorkflowActiveOrCompleted(step) || journalEnabled) && (
             <div className={cn("grid gap-3", isWorkflowActiveOrCompleted(step) && journalEnabled ? "lg:grid-cols-2" : "")}>
               {isWorkflowActiveOrCompleted(step) && (
@@ -672,6 +693,7 @@ export default function FormDetailPage() {
           )}
 
         </div>
+
 
         {/* Side column — tabs (only shown when detailsOpen is true) */}
         {detailsOpen && (
@@ -789,7 +811,7 @@ export default function FormDetailPage() {
       </div>
 
       {activeTask && (
-        <div className="fixed bottom-0 left-0 right-0 z-40 border-t border-[#C8CDD2] bg-white/95 backdrop-blur-sm">
+        <div className="sticky bottom-0 z-40 border-t border-[#C8CDD2] bg-white/95 backdrop-blur-sm">
           <Suspense fallback={<div className="px-4 py-3 text-xs text-[#5E6870]">Loading actions...</div>}>
             <WorkflowActionPanel
               task={activeTask}

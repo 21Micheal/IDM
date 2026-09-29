@@ -52,9 +52,14 @@ interface WorkflowStep {
   // Notification-step fields
   notify_user?: string | null;
   notify_user_name?: string;
+  /** Single address — kept for back-compat; UI now uses notify_emails[] */
   notify_email?: string;
+  /** Multiple recipient email addresses (RFQ supplier emails, etc.) */
+  notify_emails?: string[];
   notification_subject?: string;
   notification_message?: string;
+  /** When true the backend appends the requisition items/qty/UOM table to the email body */
+  notify_include_items_table?: boolean;
 }
 
 interface WorkflowTemplate {
@@ -465,8 +470,10 @@ function blankNotificationStep(): WorkflowStep {
     approver_email_subject: "", approver_email_body: "",
     notify_user: null,
     notify_email: "",
+    notify_emails: [],
     notification_subject: "Workflow update",
     notification_message: "Hello,\n\nThis is an automated notification regarding the document workflow.\n\nThank you.",
+    notify_include_items_table: false,
   };
 }
 
@@ -496,10 +503,12 @@ function stepToPayload(step: WorkflowStep): Partial<WorkflowStep> {
   }
 
   // Approval step: clear notification fields
-  rest.notify_user            = null;
-  rest.notify_email           = "";
-  rest.notification_subject   = "";
-  rest.notification_message   = "";
+  rest.notify_user                  = null;
+  rest.notify_email                 = "";
+  rest.notify_emails                = [];
+  rest.notification_subject         = "";
+  rest.notification_message         = "";
+  rest.notify_include_items_table   = false;
 
   if (rest.assignee_type !== "group_specific") {
     rest.assignee_user      = null;
@@ -1078,8 +1087,34 @@ function NotificationStepFields({
   onChange: (patch: Partial<WorkflowStep>) => void;
 }) {
   const [recipientMode, setRecipientMode] = useState<"user" | "email">(
-    step.notify_user ? "user" : (step.notify_email ? "email" : "user")
+    step.notify_user ? "user" : "email"
   );
+  // Tag-style multi-email input state
+  const [emailDraft, setEmailDraft] = useState("");
+  const emailDraftRef = useRef<HTMLInputElement>(null);
+
+  const emails: string[] = step.notify_emails?.length
+    ? step.notify_emails
+    : step.notify_email?.trim()
+    ? [step.notify_email.trim()]
+    : [];
+
+  const addEmail = (raw: string) => {
+    const val = raw.trim().toLowerCase();
+    if (!val) return;
+    const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+    if (!EMAIL_RE.test(val)) {
+      return; // silently ignore bad emails (border turns red via CSS)
+    }
+    if (emails.includes(val)) { setEmailDraft(""); return; }
+    onChange({ notify_emails: [...emails, val], notify_email: val, notify_user: null, notify_user_name: undefined });
+    setEmailDraft("");
+  };
+
+  const removeEmail = (addr: string) => {
+    const next = emails.filter((e) => e !== addr);
+    onChange({ notify_emails: next, notify_email: next[0] ?? "", notify_user: null });
+  };
 
   const { data: allMembers = [] } = useQuery<AppUser[]>({
     queryKey: ["notif-group-members", step.assignee_group],
@@ -1101,8 +1136,9 @@ function NotificationStepFields({
         </p>
       </div>
 
+      {/* Recipient mode toggle */}
       <div>
-        <Label required>Recipient</Label>
+        <Label required>Recipient(s)</Label>
         <div className="flex bg-muted rounded-lg p-1 mb-2">
           <button
             type="button"
@@ -1122,7 +1158,7 @@ function NotificationStepFields({
               recipientMode === "email" ? "bg-card shadow-sm text-foreground" : "text-muted-foreground"
             )}
           >
-            Custom email
+            Email address(es)
           </button>
         </div>
 
@@ -1139,6 +1175,7 @@ function NotificationStepFields({
                   notify_user: null,
                   notify_user_name: undefined,
                   notify_email: "",
+                  notify_emails: [],
                 });
               }}
               options={[{ value: "", label: "Select group" }, ...groups.map(g => ({ value: g.id, label: g.name }))]}
@@ -1151,7 +1188,7 @@ function NotificationStepFields({
               onChange={(v) => {
                 const id = v || null;
                 const u = allMembers.find(x => x.id === id);
-                onChange({ notify_user: id, notify_user_name: u?.full_name, notify_email: "" });
+                onChange({ notify_user: id, notify_user_name: u?.full_name, notify_email: "", notify_emails: [] });
               }}
               options={[{ value: "", label: !step.assignee_group ? "Pick a group first" : "Select member" }, ...allMembers.map(u => ({ value: u.id, label: `${u.full_name} (${u.email})` }))]}
               className={inp}
@@ -1161,26 +1198,75 @@ function NotificationStepFields({
             />
           </div>
         ) : (
-          <input
-            type="email"
-            value={step.notify_email ?? ""}
-            onChange={e => onChange({ notify_email: e.target.value, notify_user: null, notify_user_name: undefined })}
-            className={inp}
-            placeholder="name@example.com"
-          />
+          /* ── Multi-email tag input ── */
+          <div>
+            {/* Existing email tags */}
+            {emails.length > 0 && (
+              <div className="mb-2 flex flex-wrap gap-1.5">
+                {emails.map((addr) => (
+                  <span
+                    key={addr}
+                    className="inline-flex items-center gap-1 rounded-full border border-sky-200 bg-sky-50 px-2.5 py-0.5 text-[11px] font-medium text-sky-800"
+                  >
+                    {addr}
+                    <button
+                      type="button"
+                      onClick={() => removeEmail(addr)}
+                      className="ml-0.5 rounded-full text-sky-500 hover:text-sky-800 transition-colors"
+                      aria-label={`Remove ${addr}`}
+                    >
+                      <X className="h-3 w-3" />
+                    </button>
+                  </span>
+                ))}
+              </div>
+            )}
+            {/* New email entry */}
+            <div className="flex gap-2">
+              <input
+                ref={emailDraftRef}
+                type="email"
+                value={emailDraft}
+                onChange={(e) => setEmailDraft(e.target.value)}
+                onKeyDown={(e) => {
+                  if (e.key === "Enter" || e.key === "," || e.key === " ") {
+                    e.preventDefault();
+                    addEmail(emailDraft);
+                  } else if (e.key === "Backspace" && !emailDraft && emails.length > 0) {
+                    removeEmail(emails[emails.length - 1]);
+                  }
+                }}
+                className={clsx(inp, "flex-1")}
+                placeholder="name@supplier.com — press Enter or comma to add"
+              />
+              <button
+                type="button"
+                onClick={() => addEmail(emailDraft)}
+                disabled={!emailDraft.trim()}
+                className="rounded border border-border px-2.5 py-1.5 text-xs font-medium hover:bg-muted disabled:opacity-40 transition-colors"
+              >
+                Add
+              </button>
+            </div>
+            <p className="mt-1 text-[11px] text-muted-foreground">
+              Add one or more recipient emails. Press Enter, comma, or click Add after each address.
+            </p>
+          </div>
         )}
       </div>
 
+      {/* Subject */}
       <div>
         <Label required>Email subject</Label>
         <input
           value={step.notification_subject ?? ""}
           onChange={e => onChange({ notification_subject: e.target.value })}
           className={inp}
-          placeholder="e.g. Document approved — action complete"
+          placeholder="e.g. RFQ — Quotation Request for [Document Title]"
         />
       </div>
 
+      {/* Message body */}
       <div>
         <Label required>Email message</Label>
         <textarea
@@ -1188,11 +1274,63 @@ function NotificationStepFields({
           onChange={e => onChange({ notification_message: e.target.value })}
           rows={8}
           className={clsx(inp, "resize-none font-mono text-xs leading-relaxed")}
-          placeholder={"Hello,\n\nYour document has progressed..."}
+          placeholder={"Hello,\n\nPlease find below a request for quotation..."}
         />
         <p className="text-[11px] text-muted-foreground mt-1">
-          Plain text. The recipient will receive this message by email when this step is reached.
+          Plain text. Use <code className="text-[10px] bg-muted px-1 rounded">{`{document_title}`}</code>,{" "}
+          <code className="text-[10px] bg-muted px-1 rounded">{`{document_ref}`}</code>,{" "}
+          <code className="text-[10px] bg-muted px-1 rounded">{`{uploader_name}`}</code> as placeholders.
         </p>
+      </div>
+
+      {/* Items table toggle */}
+      <div className="rounded-lg border border-border p-3 space-y-1.5">
+        <label className="flex cursor-pointer items-start gap-3">
+          <div className="relative mt-0.5 flex-shrink-0">
+            <input
+              type="checkbox"
+              checked={Boolean(step.notify_include_items_table)}
+              onChange={(e) => onChange({ notify_include_items_table: e.target.checked })}
+              className="sr-only"
+            />
+            <div className={clsx(
+              "h-4 w-4 rounded border-2 transition-colors flex items-center justify-center",
+              step.notify_include_items_table
+                ? "border-primary bg-primary"
+                : "border-muted-foreground bg-background"
+            )}>
+              {step.notify_include_items_table && (
+                <svg className="h-2.5 w-2.5 text-primary-foreground" viewBox="0 0 12 12" fill="none">
+                  <path d="M2 6l3 3 5-5" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" />
+                </svg>
+              )}
+            </div>
+          </div>
+          <div>
+            <p className="text-xs font-medium text-foreground">Include requisition items table</p>
+            <p className="text-[11px] text-muted-foreground leading-relaxed">
+              Appends the Items, Quantity, and Unit of Measure from the requisition form as a
+              formatted table in the email body. Ideal for RFQ supplier notifications.
+            </p>
+          </div>
+        </label>
+        {step.notify_include_items_table && (
+          <div className="ml-7 rounded border border-dashed border-sky-300 bg-sky-50 px-3 py-2">
+            <p className="text-[11px] text-sky-800 font-medium">Preview — items table will appear here:</p>
+            <div className="mt-1.5 overflow-hidden rounded border border-sky-200 text-[10px]">
+              <div className="grid grid-cols-3 bg-sky-100 font-semibold text-sky-700">
+                <div className="border-r border-sky-200 px-2 py-1">Item</div>
+                <div className="border-r border-sky-200 px-2 py-1">Qty</div>
+                <div className="px-2 py-1">UOM</div>
+              </div>
+              <div className="grid grid-cols-3 text-sky-600">
+                <div className="border-r border-t border-sky-200 px-2 py-1 italic">from form…</div>
+                <div className="border-r border-t border-sky-200 px-2 py-1 italic">—</div>
+                <div className="border-t border-sky-200 px-2 py-1 italic">—</div>
+              </div>
+            </div>
+          </div>
+        )}
       </div>
     </div>
   );
@@ -2136,10 +2274,18 @@ function TemplateEditor({
     for (const s of stepsForSave) {
       if (!s.name.trim()) { toast.error(`Step ${s.order} needs a name`); return; }
       if (s.step_type === "notification") {
-        if (!s.notify_user && !(s.notify_email && s.notify_email.trim())) {
-          toast.error(`"${s.name}" needs a recipient (user or email)`); return;
+        const notifEmails = s.notify_emails?.filter(e => e.trim()) ?? [];
+        const hasSingleEmail = s.notify_email && s.notify_email.trim();
+        if (!s.notify_user && notifEmails.length === 0 && !hasSingleEmail) {
+          toast.error(`"${s.name}" needs at least one recipient (user or email)`); return;
         }
-        if (s.notify_email && s.notify_email.trim() && !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(s.notify_email.trim())) {
+        // Validate all email addresses
+        const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+        const badEmail = notifEmails.find(e => !EMAIL_RE.test(e.trim()));
+        if (badEmail) {
+          toast.error(`"${s.name}" has an invalid email address: ${badEmail}`); return;
+        }
+        if (hasSingleEmail && !EMAIL_RE.test(s.notify_email!.trim())) {
           toast.error(`"${s.name}" has an invalid email address`); return;
         }
         if (!s.notification_subject || !s.notification_subject.trim()) {

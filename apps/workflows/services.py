@@ -61,24 +61,65 @@ class WorkflowService:
 
     @staticmethod
     def _document_workflow_phase(document):
+        # Delegate to the canonical phase-inference helper which handles
+        # procurement forms (defaults to "requisition" when no explicit phase
+        # is written into metadata), retirement detection, and the general
+        # "request" case.  Using this avoids the previous gap where a plain
+        # metadata.form.workflow_phase read fell back to DEFAULT_PHASE="request"
+        # even for procurement documents, causing routing rules stored under
+        # phase="requisition" to be skipped.
+        try:
+            from apps.documents.builder_workflow import (
+                infer_builder_workflow_phase,
+                is_built_form_document,
+            )
+            if is_built_form_document(document):
+                inferred = infer_builder_workflow_phase(document)
+                if inferred:
+                    return inferred
+        except Exception:
+            pass
+        # Fallback for non-builder documents: read from metadata directly
         metadata = document.metadata if isinstance(document.metadata, dict) else {}
         form = metadata.get("form") if isinstance(metadata.get("form"), dict) else None
-        if not form:
-            return WorkflowRule.DEFAULT_PHASE
-        phase = (
-            form.get("workflow_phase")
-            or metadata.get("workflow_phase")
-            or WorkflowRule.DEFAULT_PHASE
-        )
-        return (str(phase).strip().lower() or WorkflowRule.DEFAULT_PHASE)
+        if form:
+            phase = form.get("workflow_phase") or metadata.get("workflow_phase")
+            if phase:
+                return str(phase).strip().lower()
+        return WorkflowRule.DEFAULT_PHASE
 
     @staticmethod
     def _resolve_routing(document):
         """Pick the (rule, template) for a document by builder phase and amount threshold."""
         doc_type = document.document_type
-        amount   = document.amount or 0
         currency = (document.currency or "").upper()
         phase = WorkflowService._document_workflow_phase(document)
+
+        # Use document.amount when set; otherwise try to derive it from form values.
+        # Builder-form requisitions never populate document.amount directly — the
+        # total lives inside metadata.form.values as computed fields (e.g.
+        # "total_gross_copy", "total_net_price_*").  Scan those fields and take the
+        # largest numeric value whose key contains a common total-related keyword.
+        amount = document.amount
+        if not amount:
+            try:
+                form_values = (
+                    ((document.metadata or {}).get("form") or {}).get("values") or {}
+                )
+                AMOUNT_KEYWORDS = ("total", "amount", "gross", "net", "cost", "price", "sum")
+                candidates = []
+                for key, val in form_values.items():
+                    key_lower = key.lower()
+                    if any(kw in key_lower for kw in AMOUNT_KEYWORDS):
+                        try:
+                            candidates.append(float(val))
+                        except (TypeError, ValueError):
+                            pass
+                if candidates:
+                    amount = max(candidates)
+            except Exception:
+                pass
+        amount = amount or 0
 
         base_rules = WorkflowRule.objects.filter(
             target_type="document",

@@ -10,6 +10,8 @@
  *   • Live Infor SunSystems budget checks via integrated BudgetBanner.
  *   • Direct in-form signature application with SignaturePlacementModal: users can apply
  *     their saved or freshly drawn signature, date (EAT), and text directly to the form fields.
+ *   • Form renderer restyled to match the builder preview — document-width card, tinted section
+ *     header strip, sticky bottom action bar with live unsaved-changes indicator.
  */
 import { useEffect, useMemo, useRef, useState } from "react";
 import { useNavigate, useSearchParams } from "react-router-dom";
@@ -20,8 +22,8 @@ import { collectFormAttachments } from "@/components/templates/formAttachments";
 import { toast } from "@/components/ui/vault-toast";
 import { cn } from "@/lib/utils";
 import {
-  Loader2, ArrowLeft, FileText, PenTool, CheckCircle2,
-  AlertCircle, RefreshCw, Sparkles
+  Loader2, ArrowLeft, FileText, CheckCircle2,
+  AlertCircle, RefreshCw, Sparkles, ChevronDown, ClipboardList,
 } from "lucide-react";
 import { useAuthStore } from "@/store/authStore";
 import { QUERY_SHORT_STALE } from "@/lib/reactQueryDefaults";
@@ -46,6 +48,7 @@ export default function NewRequisitionPage() {
   const [missingFields, setMissingFields] = useState<string[]>([]);
   const [isSigningOpen, setIsSigningOpen] = useState(false);
   const [targetSignatureField, setTargetSignatureField] = useState<string | null>(null);
+  const [templatePickerOpen, setTemplatePickerOpen] = useState(false);
 
   // Formula evaluation context
   const formulaContext = useMemo(
@@ -56,6 +59,7 @@ export default function NewRequisitionPage() {
     }),
     [user, formValues]
   );
+  void formulaContext;
 
   // Fetch requisition templates
   const { data: templates = [], isLoading: loadingTemplates } = useQuery({
@@ -94,7 +98,6 @@ export default function NewRequisitionPage() {
   // while preserving fields the user has already touched ("surviving updates").
   useEffect(() => {
     if (!selectedTemplate?.sections) return;
-
     setFormValues((prevValues) => {
       const merged = applyFormulasAndDefaults(
         selectedTemplate.sections,
@@ -107,8 +110,7 @@ export default function NewRequisitionPage() {
   }, [selectedTemplate?.sections, user]);
 
   // Supplier directory links carry the selected SunSystems code. Apply it to
-  // the template's supplier account picker once per template/code pair; this
-  // avoids replacing later user edits when the template query refreshes.
+  // the template's supplier account picker once per template/code pair.
   useEffect(() => {
     if (!supplierCode || !selectedTemplate?.sections) return;
     const prefillKey = `${selectedTemplateId}:${supplierCode}`;
@@ -141,8 +143,6 @@ export default function NewRequisitionPage() {
     setFormValues((prev) => {
       const nextValues = { ...prev, [key]: value };
       if (!selectedTemplate?.sections) return nextValues;
-
-      // Recalculate any dependent dynamic formula fields (e.g. IF conditions, regex tests, sums)
       const secList = (selectedTemplate.sections ?? []) as Array<{ fields?: Array<Record<string, any>> }>;
       for (const s of secList) {
         for (const f of s.fields ?? []) {
@@ -185,7 +185,6 @@ export default function NewRequisitionPage() {
   const saveDraftMutation = useMutation({
     mutationFn: async () => {
       if (!selectedTemplateId) throw new Error("No template selected");
-
       const missing = requiredFieldLabels(
         selectedTemplate?.sections ?? [],
         formValues,
@@ -196,37 +195,29 @@ export default function NewRequisitionPage() {
         },
         "draft"
       );
-
       if (missing.length) {
         setMissingFields(missing);
         toast.error(`${missing.length} required field${missing.length === 1 ? "" : "s"} need${missing.length === 1 ? "s" : ""} attention.`);
         throw new Error("Form validation failed");
       }
-
       setMissingFields([]);
       const { jsonValues, attachments } = collectFormAttachments(formValues);
-
       const payload = {
         template_id: selectedTemplateId,
-        output_format: "pdf",
+        output_format: "pdf" as const,
         values: jsonValues,
         title: (jsonValues.title as string) || (selectedTemplate?.name ? `Requisition — ${selectedTemplate.name}` : "Requisition"),
         document_type_id: selectedTemplate?.document_type_id,
         draft_from_template: true,
         attachments,
       };
-
       return templatesAPI.fillTemplateWithAttachments(payload);
     },
     onSuccess: (res) => {
       toast.success("Requisition draft saved successfully");
       setFormDirty(false);
       const docId = res.data?.id || res.data?.document_id;
-      if (docId) {
-        navigate(`/${docId}`);
-      } else {
-        navigate("/list");
-      }
+      navigate(docId ? `/${docId}` : "/list");
     },
     onError: (err: any) => {
       toast.error(err?.response?.data?.detail || "Failed to save draft");
@@ -237,7 +228,6 @@ export default function NewRequisitionPage() {
   const submitMutation = useMutation({
     mutationFn: async () => {
       if (!selectedTemplateId) throw new Error("No template selected");
-
       const missing = requiredFieldLabels(
         selectedTemplate?.sections ?? [],
         formValues,
@@ -248,32 +238,25 @@ export default function NewRequisitionPage() {
         },
         "submit"
       );
-
       if (missing.length) {
         setMissingFields(missing);
         toast.error(`${missing.length} required field${missing.length === 1 ? "" : "s"} still need${missing.length === 1 ? "s" : ""} attention.`);
         throw new Error("Form validation failed");
       }
-
       setMissingFields([]);
       const { jsonValues, attachments } = collectFormAttachments(formValues);
-
       const payload = {
         template_id: selectedTemplateId,
-        output_format: "pdf",
+        output_format: "pdf" as const,
         values: jsonValues,
         title: (jsonValues.title as string) || (selectedTemplate?.name ? `Requisition — ${selectedTemplate.name}` : "Requisition"),
         document_type_id: selectedTemplate?.document_type_id,
         draft_from_template: false,
         attachments,
       };
-
       const res = await templatesAPI.fillTemplateWithAttachments(payload);
       const docId = res.data?.id || res.data?.document_id;
-
-      if (docId) {
-        return documentsAPI.submit(docId, { workflow_stage: "requisition" });
-      }
+      if (docId) return documentsAPI.submit(docId, { workflow_stage: "requisition" });
       throw new Error("Failed to initialize requisition document");
     },
     onSuccess: () => {
@@ -292,7 +275,6 @@ export default function NewRequisitionPage() {
   const handleApplySignature = (fieldValues: Record<string, unknown>, result: SignaturePlacementResult) => {
     setFormValues((prev) => {
       const next = { ...prev, ...fieldValues };
-      // Fallback if specific keys not mapped: inject standard keys
       if (result.signatureImage && !Object.keys(fieldValues).some((k) => /signature/i.test(k))) {
         next["signature"] = result.signatureImage;
       }
@@ -303,9 +285,10 @@ export default function NewRequisitionPage() {
     toast.success("Signature and date stamp applied to requisition form.");
   };
 
+  // ── Loading state ──────────────────────────────────────────────────────────
   if (loadingTemplates) {
     return (
-      <div className="flex h-screen items-center justify-center bg-[#F4F6F8]">
+      <div className="flex h-screen items-center justify-center bg-[#F0F2F5]">
         <Loader2 className="h-8 w-8 animate-spin text-[#287EAD]" />
       </div>
     );
@@ -313,87 +296,138 @@ export default function NewRequisitionPage() {
 
   if (templates.length === 0) {
     return (
-      <div className="mx-auto mt-12 max-w-xl border border-[#C8CDD2] bg-white p-8 shadow-sm">
-        <div className="flex items-start gap-3">
-          <FileText className="mt-1 h-6 w-6 text-amber-500" />
-          <div>
-            <h2 className="text-xl font-semibold text-[#1F2933]">No Requisition Templates Found</h2>
-            <p className="mt-2 text-sm text-[#5E6870]">
-              Create a requisition form template in your Form Builder to get started.
-            </p>
+      <div className="flex h-screen items-center justify-center bg-[#F0F2F5] p-6">
+        <div className="w-full max-w-md border border-[#C8CDD2] bg-white p-8 shadow-sm">
+          <div className="flex items-start gap-3">
+            <div className="flex h-10 w-10 flex-shrink-0 items-center justify-center rounded-lg bg-amber-50">
+              <FileText className="h-5 w-5 text-amber-500" />
+            </div>
+            <div>
+              <h2 className="text-base font-bold text-[#1F2933]">No Requisition Templates Found</h2>
+              <p className="mt-1.5 text-sm text-[#5E6870]">
+                Create a requisition form template in your Form Builder to get started.
+              </p>
+            </div>
           </div>
+          <button
+            onClick={() => navigate("/forms/new/builder")}
+            className="mt-6 inline-flex items-center gap-2 bg-[#287EAD] px-4 py-2 text-sm font-semibold text-white hover:bg-[#1E6F99]"
+          >
+            <FileText className="h-4 w-4" /> Open Form Builder
+          </button>
         </div>
-        <button
-          onClick={() => navigate("/forms/new/builder")}
-          className="mt-6 inline-flex items-center gap-2 bg-[#287EAD] px-4 py-2 text-sm font-semibold text-white hover:bg-[#1E6F99]"
-        >
-          <FileText className="h-4 w-4" /> Open Form Builder
-        </button>
       </div>
     );
   }
 
+  const isSubmitting = submitMutation.isPending;
+  const isSavingDraft = saveDraftMutation.isPending;
+
+  // ── Main render ────────────────────────────────────────────────────────────
   return (
-    <div className="min-h-screen bg-[#F4F6F8] pb-16">
-      {/* Top Header Bar */}
-      <div className="border-b border-[#E4E7EB] bg-white px-6 py-4 shadow-sm sticky top-0 z-30">
-        <div className="flex items-center justify-between">
-          <div className="flex items-center gap-4">
+    <div className="min-h-screen bg-[#F0F2F5] pb-20">
+
+      {/* ── Top Navigation Bar ── */}
+      <div className="sticky top-0 z-30 border-b border-[#D9DDE2] bg-white shadow-sm">
+        <div className="flex w-full items-center justify-between gap-4 px-6 py-3">
+
+          {/* Left: back button */}
+          <div className="flex items-center gap-3 min-w-0">
             <button
               onClick={() => {
                 if (formDirty && !window.confirm("Discard unsaved changes?")) return;
                 navigate("/list");
               }}
-              className="text-[#5E6870] hover:text-[#1F2933]"
+              className="flex h-8 w-8 flex-shrink-0 items-center justify-center rounded-lg border border-[#E4E7EB] bg-white text-[#5E6870] hover:bg-[#F5F7F8] hover:text-[#1F2933] transition-colors"
+              title="Back to requisitions"
             >
-              <ArrowLeft className="h-5 w-5" />
+              <ArrowLeft className="h-4 w-4" />
             </button>
-            <div>
-              <div className="flex items-center gap-2">
-                <h1 className="text-xl font-bold text-[#1F2933]">New Requisition</h1>
-                {refreshingTemplate && (
-                  <span className="flex items-center gap-1 text-[11px] text-[#287EAD]">
-                    <RefreshCw className="h-3 w-3 animate-spin" /> Syncing template...
-                  </span>
-                )}
+            <div className="h-5 w-px flex-shrink-0 bg-[#E4E7EB]" />
+
+            {/* Title area — shows form name when selected, generic title otherwise */}
+            <div className="flex items-center gap-2 min-w-0">
+              <ClipboardList className="h-4 w-4 flex-shrink-0 text-[#287EAD]" />
+              <div className="min-w-0">
+                <div className="flex items-center gap-2">
+                  <h1 className="text-sm font-bold text-[#1F2933] truncate">
+                    {selectedTemplate ? selectedTemplate.name : "New Requisition"}
+                  </h1>
+                  {refreshingTemplate && (
+                    <span className="flex flex-shrink-0 items-center gap-1 rounded-full bg-[#EEF6FB] px-2 py-0.5 text-[10px] font-medium text-[#287EAD]">
+                      <RefreshCw className="h-2.5 w-2.5 animate-spin" /> Syncing
+                    </span>
+                  )}
+                </div>
+                <p className="text-[11px] text-[#8C969E] truncate">
+                  {selectedTemplate
+                    ? `Requested by ${user?.first_name ? `${user.first_name} ${user.last_name ?? ""}`.trim() : (user?.email ?? "—")}`
+                    : "Fill in all required fields and submit for approval"}
+                </p>
               </div>
-              <p className="text-xs text-[#5E6870]">
-                Live builder updates &amp; dynamic IF/regex formulas active
-              </p>
             </div>
           </div>
 
-          <div className="flex items-center gap-3">
-            <label className="text-xs font-semibold uppercase tracking-wider text-[#5E6870]">
-              Template:
-            </label>
-            <select
-              value={selectedTemplateId || ""}
-              onChange={(e) => setSelectedTemplateId(e.target.value)}
-              className="h-9 border border-[#AEB5BB] bg-white px-3 text-sm font-medium text-[#1F2933] outline-none focus:border-[#287EAD] focus:ring-1 focus:ring-[#287EAD]"
-            >
-              {templates.map((t: any) => (
-                <option key={t.id} value={t.id}>
-                  {t.name}
-                </option>
-              ))}
-            </select>
-
-
+          {/* Right: Draft status + template picker */}
+          <div className="flex flex-shrink-0 items-center gap-3">
+            {selectedTemplate && (
+              <span className="inline-flex items-center gap-1.5 rounded border border-[#C8CDD2] bg-[#F5F7F8] px-2.5 py-1 text-[11px] font-semibold text-[#5E6870]">
+                <span className="h-1.5 w-1.5 rounded-full bg-slate-400" />
+                Draft
+              </span>
+            )}
+            {templates.length > 1 && (
+              <div className="relative">
+                <button
+                  type="button"
+                  onClick={() => setTemplatePickerOpen((o) => !o)}
+                  className="flex h-8 items-center gap-2 rounded-lg border border-[#E4E7EB] bg-white px-3 text-xs font-medium text-[#1F2933] hover:bg-[#F5F7F8] transition-colors"
+                >
+                  <FileText className="h-3.5 w-3.5 text-[#287EAD]" />
+                  <span className="max-w-[160px] truncate">{selectedTemplate?.name || "Select template"}</span>
+                  <ChevronDown className="h-3.5 w-3.5 text-[#5E6870]" />
+                </button>
+                {templatePickerOpen && (
+                  <div className="absolute right-0 top-full z-50 mt-1 w-64 border border-[#D9DDE2] bg-white shadow-lg">
+                    {templates.map((t: any) => (
+                      <button
+                        key={t.id}
+                        type="button"
+                        onClick={() => {
+                          setSelectedTemplateId(t.id);
+                          setTemplatePickerOpen(false);
+                        }}
+                        className={cn(
+                          "flex w-full items-center gap-2 px-4 py-2.5 text-left text-sm hover:bg-[#F5F7F8]",
+                          selectedTemplateId === t.id ? "bg-[#EEF6FB] font-semibold text-[#287EAD]" : "text-[#1F2933]"
+                        )}
+                      >
+                        <FileText className="h-3.5 w-3.5 flex-shrink-0 text-[#287EAD]" />
+                        <span className="truncate">{t.name}</span>
+                        {selectedTemplateId === t.id && <CheckCircle2 className="ml-auto h-3.5 w-3.5" />}
+                      </button>
+                    ))}
+                  </div>
+                )}
+              </div>
+            )}
           </div>
+
         </div>
+
       </div>
 
-      {/* Main Container */}
-      <div className="max-w-5xl mx-auto p-6 space-y-4">
+      {/* ── Main Document Area ── */}
+      <div className="px-6 pt-6 pb-4">
+
         {/* Missing fields banner */}
         {missingFields.length > 0 && (
-          <div className="rounded border border-amber-300 bg-amber-50 p-4 text-xs text-amber-900">
-            <div className="flex items-center gap-2 font-semibold">
+          <div className="mb-4 border border-amber-300 bg-amber-50 p-4">
+            <div className="flex items-center gap-2 text-xs font-bold text-amber-900">
               <AlertCircle className="h-4 w-4 text-amber-600" />
               Please complete the following required fields before submitting:
             </div>
-            <ul className="mt-2 list-disc list-inside space-y-0.5">
+            <ul className="mt-2 list-inside list-disc space-y-0.5 text-xs text-amber-800">
               {missingFields.map((f) => (
                 <li key={f}>{f}</li>
               ))}
@@ -401,13 +435,17 @@ export default function NewRequisitionPage() {
           </div>
         )}
 
-        {/* Dynamic Requisition Form */}
+        {/* ── Document Card ── */}
         {loadingTemplate ? (
-          <div className="flex h-64 items-center justify-center rounded border border-[#C8CDD2] bg-white">
-            <Loader2 className="h-6 w-6 animate-spin text-[#287EAD]" />
+          <div className="flex h-64 items-center justify-center border border-[#C8CDD2] bg-white shadow-sm">
+            <div className="flex flex-col items-center gap-3">
+              <Loader2 className="h-6 w-6 animate-spin text-[#287EAD]" />
+              <p className="text-xs text-[#5E6870]">Loading form template…</p>
+            </div>
           </div>
         ) : selectedTemplate ? (
-          <div className="rounded border border-[#C8CDD2] bg-white p-6 shadow-sm">
+          <>
+            {/* Form sections — detached cards, matching builder preview */}
             <TemplateForm
               sections={selectedTemplate.sections ?? []}
               values={formValues}
@@ -424,55 +462,52 @@ export default function NewRequisitionPage() {
                 setIsSigningOpen(true);
               }}
             />
-
-
-
-            {/* Bottom Actions */}
-            <div className="mt-8 flex items-center justify-between border-t border-[#E4E7EB] pt-5">
-              <span className="text-xs text-[#5E6870]">
-                {formDirty ? "● Unsaved edits" : "Form is up-to-date"}
-              </span>
-
-              <div className="flex items-center gap-3">
-                <button
-                  type="button"
-                  onClick={() => {
-                    if (formDirty && !window.confirm("Discard changes and return to list?")) return;
-                    navigate("/list");
-                  }}
-                  className="border border-[#AEB5BB] bg-white px-4 py-2 text-sm font-semibold text-[#1F2933] hover:bg-[#F3F5F6]"
-                >
-                  Cancel
-                </button>
-                <button
-                  type="button"
-                  onClick={() => saveDraftMutation.mutate()}
-                  disabled={saveDraftMutation.isPending}
-                  className="inline-flex items-center gap-2 border border-[#287EAD] bg-white px-4 py-2 text-sm font-semibold text-[#287EAD] hover:bg-[#EEF6FB] disabled:opacity-50"
-                >
-                  {saveDraftMutation.isPending && <Loader2 className="h-4 w-4 animate-spin" />}
-                  Save Draft
-                </button>
-                <button
-                  type="button"
-                  onClick={() => submitMutation.mutate()}
-                  disabled={submitMutation.isPending}
-                  className="inline-flex items-center gap-2 bg-[#287EAD] px-5 py-2 text-sm font-semibold text-white hover:bg-[#1E6F99] disabled:opacity-50 shadow-sm"
-                >
-                  {submitMutation.isPending && <Loader2 className="h-4 w-4 animate-spin" />}
-                  Submit Requisition
-                </button>
-              </div>
-            </div>
-          </div>
+          </>
         ) : (
-          <div className="flex h-64 items-center justify-center rounded border border-[#C8CDD2] bg-white text-[#5E6870]">
-            Select a requisition template to begin
+          <div className="flex h-64 items-center justify-center border border-[#C8CDD2] bg-white shadow-sm">
+            <div className="flex flex-col items-center gap-3">
+              <FileText className="h-8 w-8 text-[#C1C7CD]" />
+              <p className="text-sm text-[#5E6870]">Select a requisition template to begin</p>
+            </div>
           </div>
         )}
       </div>
 
-      {/* Signature Placement Modal (direct Form mode) */}
+      {/* ── Floating Action Buttons (fixed bottom-right, no panel) ── */}
+      {selectedTemplate && !loadingTemplate && (
+        <div className="fixed bottom-6 right-6 z-40 flex items-center gap-2">
+          <button
+            type="button"
+            onClick={() => {
+              if (formDirty && !window.confirm("Discard changes and return to list?")) return;
+              navigate("/list");
+            }}
+            className="h-9 border border-[#C8CDD2] bg-white px-4 text-sm font-medium text-[#1F2933] shadow-md hover:bg-[#F5F7F8] transition-colors"
+          >
+            Cancel
+          </button>
+          <button
+            type="button"
+            onClick={() => saveDraftMutation.mutate()}
+            disabled={isSavingDraft}
+            className="inline-flex h-9 items-center gap-1.5 border border-[#287EAD] bg-white px-4 text-sm font-semibold text-[#287EAD] shadow-md hover:bg-[#EEF6FB] disabled:opacity-50 transition-colors"
+          >
+            {isSavingDraft && <Loader2 className="h-3.5 w-3.5 animate-spin" />}
+            Save Draft
+          </button>
+          <button
+            type="button"
+            onClick={() => submitMutation.mutate()}
+            disabled={isSubmitting}
+            className="inline-flex h-9 items-center gap-1.5 bg-[#287EAD] px-5 text-sm font-semibold text-white shadow-md hover:bg-[#1E6F99] disabled:opacity-50 transition-colors"
+          >
+            {isSubmitting ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Sparkles className="h-3.5 w-3.5" />}
+            Submit Requisition
+          </button>
+        </div>
+      )}
+
+      {/* ── Signature Placement Modal ── */}
       {isSigningOpen && (
         <SignaturePlacementModal
           mode="form"
@@ -499,6 +534,11 @@ export default function NewRequisitionPage() {
             setTargetSignatureField(null);
           }}
         />
+      )}
+
+      {/* Backdrop to close template picker on outside click */}
+      {templatePickerOpen && (
+        <div className="fixed inset-0 z-40" onClick={() => setTemplatePickerOpen(false)} />
       )}
     </div>
   );
