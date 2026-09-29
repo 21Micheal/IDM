@@ -8,7 +8,7 @@ cp .env.example .env
 # Edit .env — at minimum change SECRET_KEY and passwords.
 # For server deployment, set MEDIA_ROOT to the production filesystem path and configure LDAP_SERVER_URI if Active Directory should be enabled.
 
-# 2. Start all services
+# 2. Start all services (full DMS with OCR)
 docker compose up --build
 
 # 3. Run migrations and create a superuser
@@ -24,6 +24,26 @@ docker compose exec backend python manage.py search_index --rebuild
 open http://localhost        # Full app via Nginx
 open http://localhost:3000   # React dev server (hot reload)
 open http://localhost:8000/admin  # Django admin
+```
+
+## Procurement/Forms-only deployment
+
+For lightweight deployments focused on requisition forms and supplier workflows (without OCR and Office conversion):
+
+```bash
+# Use the procurement-specific docker-compose configuration
+docker compose -f docker-compose.procurement.yml up --build
+
+# This excludes:
+# - OCR worker (PaddleOCR/Tesseract)
+# - Office preview generation (LibreOffice)
+# - Preview worker queue
+
+# This keeps:
+# - Document viewer (for viewing supplier invoices/PDFs)
+# - Elasticsearch for search
+# - All core backend functionality
+# - Form builder and requisition workflows
 ```
 
 ## Architecture overview
