@@ -1,4 +1,4 @@
-import { useState, useEffect } from "react";
+import { useState } from "react";
 import { extractApiError } from "@/lib/apiError";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useSearchParams } from "react-router-dom";
@@ -45,28 +45,23 @@ interface UserPreferences {
   notify_system_announcements: boolean;
 }
 
-type ProfileTab = "settings" | "signature" | "delegation" | "preferences";
+const PROFILE_TABS = ["settings", "signature", "delegation", "preferences"] as const;
+type ProfileTab = (typeof PROFILE_TABS)[number];
 
 export default function ProfilePage() {
-  const [searchParams] = useSearchParams();
+  const [searchParams, setSearchParams] = useSearchParams();
   const user = useAuthStore((s) => s.user);
   const qc = useQueryClient();
-  const [activeTab, setActiveTab] = useState<ProfileTab>("settings");
+  // The URL (?tab=) is the single source of truth so the sidebar sub-menu,
+  // in-page tab buttons and deep links always agree. "security" is a legacy alias.
+  const tabParam = searchParams.get("tab");
+  const activeTab: ProfileTab =
+    tabParam && (PROFILE_TABS as readonly string[]).includes(tabParam)
+      ? (tabParam as ProfileTab)
+      : "settings";
+  const setActiveTab = (tab: ProfileTab) => setSearchParams({ tab });
   const [showPw, setShowPw] = useState(false);
   const [showPasswordForm, setShowPasswordForm] = useState(false);
-
-  // Handle URL parameter for tab navigation
-  useEffect(() => {
-    const tabParam = searchParams.get("tab");
-    if (!tabParam) return;
-    if (tabParam === "security") {
-      setActiveTab("settings");
-      return;
-    }
-    if (["settings", "signature", "delegation", "preferences"].includes(tabParam)) {
-      setActiveTab(tabParam as ProfileTab);
-    }
-  }, [searchParams]);
 
   const { register, handleSubmit, reset, formState: { errors } } = useForm<PwForm>({
     resolver: zodResolver(pwSchema),

@@ -1,7 +1,7 @@
 /**
  * InvoiceAttachmentsPanel
  *
- * Shown in FormDetailPage at the RFQ stage (rfq_pending | rfq_approved).
+ * Shown in FormDetailPage at the RFQ stage (rfq_approved only).
  * Provides two attachment sources for supplier quotations / invoices:
  *
  *  1. Auto-surfaced — recently ingested documents from the mailbox system,
@@ -9,7 +9,7 @@
  *     Each card shows filename, sender, date, and an "Attach" button that calls
  *     documentsAPI.updateForm to append the file to the requisition.
  *
- *  2. Manual upload — multi-file dropzone. Dropped / selected files are
+ *  2. Manual upload — inline blue button for file upload. Selected files are
  *     immediately uploaded and attached to the requisition document.
  *
  * The panel is self-contained — it owns its own queries and mutations so
@@ -85,7 +85,6 @@ export default function InvoiceAttachmentsPanel({
 }: Props) {
   const qc = useQueryClient();
   const fileInputRef = useRef<HTMLInputElement>(null);
-  const [dragOver, setDragOver] = useState(false);
   const [attachingId, setAttachingId] = useState<string | null>(null);
   const [pendingFiles, setPendingFiles] = useState<{ id: string; file: File; progress: "uploading" | "done" | "error" }[]>([]);
 
@@ -176,15 +175,6 @@ export default function InvoiceAttachmentsPanel({
     [documentId, qc, onAttached]
   );
 
-  const handleDrop = useCallback(
-    (e: React.DragEvent) => {
-      e.preventDefault();
-      setDragOver(false);
-      uploadFiles(e.dataTransfer.files);
-    },
-    [uploadFiles]
-  );
-
   const removePending = (id: string) =>
     setPendingFiles((prev) => prev.filter((p) => p.id !== id));
 
@@ -203,127 +193,92 @@ export default function InvoiceAttachmentsPanel({
         <FilePlus2 className="h-4 w-4 text-[#8C969E]" />
       </div>
 
-      <div className="space-y-4 p-4">
-        {/* ── Existing Attachments ── */}
-        {existingAttachments.length > 0 && (
-          <div>
-            <p className="mb-2 text-[11px] font-semibold uppercase tracking-wider text-[#8C969E]">
-              Attached ({existingAttachments.length})
-            </p>
-            <div className="space-y-1.5">
-              {existingAttachments.map((att, i) => (
-                <div
-                  key={i}
-                  className="flex items-center gap-3 rounded border border-[#E4E7EB] bg-[#F8FAFB] px-3 py-2"
+      <div className="p-4">
+        {/* ── Inline Attachment List (Existing + Ingested) ── */}
+        <div className="flex flex-wrap items-center gap-2">
+          {/* Existing attachments as inline icons */}
+          {existingAttachments.map((att, i) => (
+            <div
+              key={`existing-${i}`}
+              className="group relative inline-flex items-center gap-1.5 rounded border border-[#E4E7EB] bg-[#F8FAFB] px-2 py-1.5 hover:border-[#287EAD]/40 hover:bg-[#F8FCFF] transition-colors"
+              title={att.name}
+            >
+              {fileIcon(att.name)}
+              <span className="max-w-[120px] truncate text-[11px] font-medium text-[#1F2933]">
+                {att.name}
+              </span>
+              {att.url && (
+                <a
+                  href={att.url}
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  className="flex h-5 w-5 flex-shrink-0 items-center justify-center rounded text-[#5E6870] hover:text-[#287EAD] transition-colors"
+                  title="Download"
                 >
-                  {fileIcon(att.name)}
-                  <div className="min-w-0 flex-1">
-                    <p className="truncate text-xs font-medium text-[#1F2933]">{att.name}</p>
-                    {att.file_size && (
-                      <p className="text-[10px] text-[#8C969E]">{formatBytes(att.file_size)}</p>
-                    )}
-                  </div>
-                  {att.url && (
-                    <a
-                      href={att.url}
-                      target="_blank"
-                      rel="noopener noreferrer"
-                      className="flex h-7 w-7 flex-shrink-0 items-center justify-center rounded border border-[#E4E7EB] bg-white text-[#5E6870] hover:text-[#287EAD] transition-colors"
-                      title="Download"
-                    >
-                      <Download className="h-3.5 w-3.5" />
-                    </a>
-                  )}
-                </div>
-              ))}
+                  <Download className="h-3 w-3" />
+                </a>
+              )}
             </div>
-          </div>
-        )}
+          ))}
 
-        {/* ── Auto-ingested suggestions ── */}
-        {(loadingIngested || ingestedDocs.length > 0) && (
-          <div>
-            <p className="mb-2 text-[11px] font-semibold uppercase tracking-wider text-[#8C969E]">
-              From email ingestion
-            </p>
-            {loadingIngested ? (
-              <div className="flex items-center gap-2 py-3 text-xs text-[#8C969E]">
-                <Loader2 className="h-3.5 w-3.5 animate-spin" /> Checking ingested emails…
-              </div>
-            ) : (
-              <div className="space-y-1.5">
-                {ingestedDocs.slice(0, 8).map((doc) => (
-                  <div
-                    key={doc.id}
-                    className="flex items-center gap-3 rounded border border-[#E4E7EB] bg-white px-3 py-2 hover:border-[#287EAD]/40 hover:bg-[#F8FCFF] transition-colors"
-                  >
-                    {fileIcon(doc.file_name || doc.title)}
-                    <div className="min-w-0 flex-1">
-                      <p className="truncate text-xs font-medium text-[#1F2933]">
-                        {doc.file_name || doc.title}
-                      </p>
-                      <p className="text-[10px] text-[#8C969E]">
-                        {doc.metadata?.ingestion?.sender_email
-                          ? `From: ${doc.metadata.ingestion.sender_email} · `
-                          : ""}
-                        {format(new Date(doc.created_at), "dd MMM yyyy HH:mm")}
-                      </p>
-                    </div>
-                    <button
-                      type="button"
-                      onClick={() => attachIngestedMutation.mutate(doc)}
-                      disabled={attachingId === doc.id}
-                      className={cn(
-                        "inline-flex flex-shrink-0 items-center gap-1 rounded px-2.5 py-1 text-[11px] font-semibold transition-colors",
-                        attachingId === doc.id
-                          ? "cursor-not-allowed bg-[#EEF6FB] text-[#287EAD] opacity-60"
-                          : "bg-[#287EAD]/10 text-[#287EAD] hover:bg-[#287EAD] hover:text-white"
-                      )}
-                    >
-                      {attachingId === doc.id ? (
-                        <Loader2 className="h-3 w-3 animate-spin" />
-                      ) : (
-                        <Paperclip className="h-3 w-3" />
-                      )}
-                      Attach
-                    </button>
-                  </div>
-                ))}
-                {ingestedDocs.length === 0 && !loadingIngested && (
-                  <p className="py-2 text-xs text-[#8C969E]">
-                    No recently ingested emails found. Upload documents manually below.
-                  </p>
+          {/* Ingested documents as inline icons */}
+          {ingestedDocs.slice(0, 6).map((doc) => (
+            <div
+              key={`ingested-${doc.id}`}
+              className="group relative inline-flex items-center gap-1.5 rounded border border-[#E4E7EB] bg-white px-2 py-1.5 hover:border-[#287EAD]/40 hover:bg-[#F8FCFF] transition-colors"
+              title={`${doc.file_name || doc.title} - From: ${doc.metadata?.ingestion?.sender_email || 'Unknown'}`}
+            >
+              {fileIcon(doc.file_name || doc.title)}
+              <span className="max-w-[120px] truncate text-[11px] font-medium text-[#1F2933]">
+                {doc.file_name || doc.title}
+              </span>
+              <button
+                type="button"
+                onClick={() => attachIngestedMutation.mutate(doc)}
+                disabled={attachingId === doc.id}
+                className={cn(
+                  "flex h-5 w-5 flex-shrink-0 items-center justify-center rounded transition-colors",
+                  attachingId === doc.id
+                    ? "cursor-not-allowed text-[#287EAD] opacity-60"
+                    : "text-[#5E6870] hover:text-[#287EAD] hover:bg-[#EEF6FB]"
                 )}
-              </div>
-            )}
-          </div>
-        )}
+                title="Attach to requisition"
+              >
+                {attachingId === doc.id ? (
+                  <Loader2 className="h-3 w-3 animate-spin" />
+                ) : (
+                  <Paperclip className="h-3 w-3" />
+                )}
+              </button>
+            </div>
+          ))}
 
-        {/* ── Manual Upload Dropzone ── */}
-        <div>
-          <p className="mb-2 text-[11px] font-semibold uppercase tracking-wider text-[#8C969E]">
-            Upload manually
-          </p>
-          <div
-            onDragOver={(e) => { e.preventDefault(); setDragOver(true); }}
-            onDragLeave={() => setDragOver(false)}
-            onDrop={handleDrop}
+          {/* Loading indicator */}
+          {loadingIngested && (
+            <div className="flex items-center gap-1.5 text-[11px] text-[#8C969E]">
+              <Loader2 className="h-3 w-3 animate-spin" /> Loading...
+            </div>
+          )}
+        </div>
+
+        {/* ── Inline Upload Button ── */}
+        <div className="mt-3 flex items-center gap-2">
+          <button
+            type="button"
             onClick={() => fileInputRef.current?.click()}
-            className={cn(
-              "cursor-pointer rounded border-2 border-dashed px-6 py-6 text-center transition-colors",
-              dragOver
-                ? "border-[#287EAD] bg-[#EEF6FB]"
-                : "border-[#C8CDD2] bg-[#F8FAFB] hover:border-[#287EAD]/50 hover:bg-[#F5F9FC]"
-            )}
+            onDragOver={(e) => { e.preventDefault(); }}
+            onDrop={(e) => {
+              e.preventDefault();
+              uploadFiles(e.dataTransfer.files);
+            }}
+            className="inline-flex items-center gap-2 rounded bg-[#287EAD] px-3 py-1.5 text-[11px] font-semibold text-white hover:bg-[#1E6F99] transition-colors"
           >
-            <Upload className={cn("mx-auto h-6 w-6 mb-2", dragOver ? "text-[#287EAD]" : "text-[#9AA5B1]")} />
-            <p className="text-xs font-medium text-[#1F2933]">
-              {dragOver ? "Drop files here" : "Drag & drop or click to upload"}
-            </p>
-            <p className="mt-0.5 text-[11px] text-[#8C969E]">
-              PDF, images, Office files — multiple files accepted
-            </p>
-          </div>
+            <Upload className="h-3.5 w-3.5" />
+            Upload Documents
+          </button>
+          <span className="text-[10px] text-[#8C969E]">
+            PDF, images, Office files
+          </span>
           <input
             ref={fileInputRef}
             type="file"
@@ -332,42 +287,42 @@ export default function InvoiceAttachmentsPanel({
             className="hidden"
             onChange={(e) => e.target.files && uploadFiles(e.target.files)}
           />
-
-          {/* Upload progress list */}
-          {pendingFiles.length > 0 && (
-            <div className="mt-2 space-y-1.5">
-              {pendingFiles.map((p) => (
-                <div
-                  key={p.id}
-                  className={cn(
-                    "flex items-center gap-3 rounded border px-3 py-2 text-xs",
-                    p.progress === "done"
-                      ? "border-emerald-200 bg-emerald-50"
-                      : p.progress === "error"
-                      ? "border-red-200 bg-red-50"
-                      : "border-[#E4E7EB] bg-white"
-                  )}
-                >
-                  {p.progress === "uploading" && <Loader2 className="h-3.5 w-3.5 animate-spin text-[#287EAD]" />}
-                  {p.progress === "done" && <CheckCircle2 className="h-3.5 w-3.5 text-emerald-500" />}
-                  {p.progress === "error" && <X className="h-3.5 w-3.5 text-red-500" />}
-                  <span className={cn(
-                    "flex-1 truncate",
-                    p.progress === "done" ? "text-emerald-700" : p.progress === "error" ? "text-red-700" : "text-[#1F2933]"
-                  )}>
-                    {p.file.name}
-                  </span>
-                  <span className="text-[10px] text-[#8C969E]">{formatBytes(p.file.size)}</span>
-                  {p.progress !== "uploading" && (
-                    <button type="button" onClick={() => removePending(p.id)} className="text-[#8C969E] hover:text-[#1F2933]">
-                      <X className="h-3.5 w-3.5" />
-                    </button>
-                  )}
-                </div>
-              ))}
-            </div>
-          )}
         </div>
+
+        {/* Upload progress list */}
+        {pendingFiles.length > 0 && (
+          <div className="mt-2 space-y-1">
+            {pendingFiles.map((p) => (
+              <div
+                key={p.id}
+                className={cn(
+                  "flex items-center gap-2 rounded border px-2 py-1 text-[11px]",
+                  p.progress === "done"
+                    ? "border-emerald-200 bg-emerald-50"
+                    : p.progress === "error"
+                    ? "border-red-200 bg-red-50"
+                    : "border-[#E4E7EB] bg-white"
+                )}
+              >
+                {p.progress === "uploading" && <Loader2 className="h-3 w-3 animate-spin text-[#287EAD]" />}
+                {p.progress === "done" && <CheckCircle2 className="h-3 w-3 text-emerald-500" />}
+                {p.progress === "error" && <X className="h-3 w-3 text-red-500" />}
+                <span className={cn(
+                  "flex-1 truncate",
+                  p.progress === "done" ? "text-emerald-700" : p.progress === "error" ? "text-red-700" : "text-[#1F2933]"
+                )}>
+                  {p.file.name}
+                </span>
+                <span className="text-[10px] text-[#8C969E]">{formatBytes(p.file.size)}</span>
+                {p.progress !== "uploading" && (
+                  <button type="button" onClick={() => removePending(p.id)} className="text-[#8C969E] hover:text-[#1F2933]">
+                    <X className="h-3 w-3" />
+                  </button>
+                )}
+              </div>
+            ))}
+          </div>
+        )}
       </div>
     </div>
   );

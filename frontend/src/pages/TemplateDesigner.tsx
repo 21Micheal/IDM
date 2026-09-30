@@ -1,2036 +1,816 @@
 /**
- * DocumentTemplateDesigner.tsx — Enterprise document template designer (v1)
+ * TemplateDesigner.tsx — structured, paginated document template designer (v2)
  *
- * Companion to TemplateBuilderV2 (the FORM editor). Where TemplateBuilderV2
- * builds the *data-entry form* (sections + fields a user fills in), this file
- * builds the *printable document itself* — the WYSIWYG layout that replaces
- * uploading Word/Excel templates.
+ * Drop-in React component for a DMS. Unlike the original flat block composer,
+ * this version stores pages -> rows -> cells -> elements, allowing precise
+ * business-document layouts without fragile absolute positioning.
  *
- * Admins compose a paginated A4/Letter document out of content blocks
- * (headings, rich paragraphs, lists, key/value grids, bound data tables,
- * images/logos, signatures, dividers, spacers, page breaks, two-column rows)
- * and drop {{merge_field}} tokens anywhere. At generation time those tokens
- * are substituted with the document's metadata / form values.
- *
- * Design language is intentionally identical to TemplateBuilderV2:
- *  - UniFi palette (#287EAD primary), square-ish chrome, grouped/searchable
- *    palette, draggable blocks, history undo/redo, fixed-overlay shell,
- *    Design / Preview / Settings tabs, AutoSave toggle.
- *
- * Highly configurable:
- *  - Page: size (A4 / Letter / Legal), orientation, margins, default font
- *    family / size / line-height, text + heading + accent colours.
- *  - Header / footer bands (left / center / right slots, page numbers, rule).
- *  - Per-block styling: alignment, weight, italic, font size, colour, spacing.
- *  - Merge fields are pulled from `mergeFields` prop (defaults provided) and
- *    grouped; every text-bearing block has an "Insert field" menu.
- *  - Data tables can be STATIC (fixed rows) or BOUND to a repeating data
- *    source key (one row rendered per record at generation time).
- *
- * Output: `onSave(outputDocumentTemplate(...))` returns a normalized
- * DocumentTemplate whose `placeholders[]` is auto-derived by scanning every
- * block for {{tokens}}, so your backend/merge engine knows exactly which
- * values it must supply.
- *
- * Dependencies (already used by TemplateBuilderV2): react,
- * @dnd-kit/core, lucide-react, sonner, and `cn` from "@/lib/utils".
+ * Runtime dependencies: react, @dnd-kit/core, lucide-react, sonner
  */
-
-import { useState, useCallback, useMemo, useRef, useEffect, Fragment } from "react";
 import {
-  DndContext, PointerSensor, useSensor, useSensors,
-  useDraggable, useDroppable, DragOverlay,
-  defaultDropAnimationSideEffects,
-  type DragEndEvent, type DragStartEvent,
+  Fragment, useCallback, useEffect, useMemo, useRef, useState,
+  type CSSProperties, type ReactNode,
+} from "react";
+import {
+  DndContext, DragOverlay, PointerSensor, useDraggable, useDroppable,
+  useSensor, useSensors, type DragEndEvent, type DragStartEvent,
 } from "@dnd-kit/core";
-import { toast } from "sonner";
 import {
-  ArrowLeft, Save, Undo2, Redo2, Eye, LayoutGrid, Settings, Printer,
-  Plus, Trash2, GripVertical, Copy, Search, ChevronDown, ChevronUp,
-  Heading, AlignLeft, AlignCenter, AlignRight, List, ListOrdered,
-  Quote, Table2, Image as ImageIcon, Minus, SeparatorHorizontal,
-  FileText, PenLine, Columns2, Bold, Italic, Underline, Tag, X,
-  Braces, Rows3, ScrollText, Building2,
+  AlignCenter, AlignJustify, AlignLeft, AlignRight, ArrowDown, ArrowLeft,
+  ArrowUp, Bold, Braces, Check, ChevronDown, ChevronRight, Columns2, Copy,
+  Download, Eye, FileJson, FileText, GripVertical, Heading, Image as ImageIcon,
+  Italic, LayoutGrid, List, ListOrdered, Minus, PanelLeftClose, PanelRightClose,
+  PenLine, Plus, Printer, Quote, Redo2, Rows3, Save, Search, Settings,
+  Table2, Trash2, Underline, Undo2, Upload, X, ZoomIn, ZoomOut,
 } from "lucide-react";
-import { cn } from "@/lib/utils";
-import { FORMULAS, evaluateFormula } from "@/components/templates/formulas";
-import { useAuthStore } from "@/store/authStore";
+import { toast } from "sonner";
 
-/* ============================================================
- * Types
- * ============================================================ */
+const cx = (...values: Array<string | false | null | undefined>) => values.filter(Boolean).join(" ");
+const uid = () => Math.random().toString(36).slice(2, 10);
 
-export type BlockType =
-  | "heading" | "paragraph" | "bulleted_list" | "numbered_list" | "quote"
-  | "key_value" | "data_table" | "image" | "logo"
-  | "divider" | "spacer" | "page_break" | "two_column" | "signature";
+/* ========================================================================== *
+ * Public schema
+ * ========================================================================== */
 
-export type BlockGroup = "text" | "data" | "media" | "layout" | "signoff";
-
+export type PageSize = "A4" | "Letter" | "Legal";
+export type Orientation = "portrait" | "landscape";
 export type Align = "left" | "center" | "right" | "justify";
+export type VerticalAlign = "start" | "center" | "end";
+export type ElementType =
+  | "text" | "heading" | "bulleted_list" | "numbered_list" | "note"
+  | "field_group" | "data_table" | "image" | "divider" | "spacer"
+  | "signature_group";
 
-export interface DocTableColumn {
-  id: string;
-  key: string;
-  label: string;
-  align?: Align;
-  width?: number;        // relative weight, default 1
-}
-
-export interface KeyValuePair {
-  id: string;
-  label: string;
-  value: string;         // may contain {{tokens}}
-}
-
-export interface Signatory {
-  id: string;
-  role: string;          // e.g. "Prepared by"
-  nameToken?: string;    // e.g. "{{author_name}}"
-  dateToken?: string;    // e.g. "{{document_date}}"
-}
-
-/** A single content block on the page. Most fields are optional and only
- *  meaningful for specific block types — kept flat for easy persistence. */
-export interface DocBlock {
-  id: string;
-  type: BlockType;
-
-  /* shared text content (heading / paragraph / quote) — supports {{tokens}} */
-  text?: string;
-
-  /* shared styling */
-  align?: Align;
-  bold?: boolean;
-  italic?: boolean;
-  underline?: boolean;
-  fontSize?: number;      // px
-  color?: string;         // hex; falls back to theme text/heading colour
-  marginTop?: number;     // px
-  marginBottom?: number;  // px
-
-  /* heading */
-  level?: 1 | 2 | 3;
-
-  /* lists */
-  items?: string[];
-
-  /* key/value grid */
-  pairs?: KeyValuePair[];
-  labelWidth?: number;    // px width of the label column
-
-  /* data table */
-  columns?: DocTableColumn[];
-  rows?: string[][];      // static rows (each cell may hold {{tokens}})
-  bound?: boolean;        // if true, render fillable/repeating rows (not static)
-  sourceKey?: string;     // optional data key to bind to, e.g. "line_items"
-  fillRows?: number;      // blank rows to render for the user to fill (when bound, no data)
-  striped?: boolean;
-  bordered?: boolean;
-
-  /* image / logo */
-  src?: string;
-  alt?: string;
-  width?: number;         // px (image)
-  height?: number;        // px (image / spacer)
-  /* image/logo layout: "none" = full-width stacked (default); "left"/"right" put
-   * the image on that side with `beside` content filling the remaining space. */
-  float?: "none" | "left" | "right";
-  beside?: string;        // content shown next to the image (tokens allowed)
-
-  /* two column */
-  left?: string;          // tokens allowed
-  right?: string;
-
-  /* signature */
-  signatories?: Signatory[];
-}
-
-export interface PageSettings {
-  size: "A4" | "Letter" | "Legal";
-  orientation: "portrait" | "landscape";
-  margin: { top: number; right: number; bottom: number; left: number }; // mm
-}
-
-export interface ThemeSettings {
-  fontFamily: string;
-  headingFamily: string;
-  baseFontSize: number;   // px
-  lineHeight: number;
-  textColor: string;
-  headingColor: string;
-  accentColor: string;
-}
-
-export interface BandSlot {
-  left?: string;
-  center?: string;
-  right?: string;
-}
-
-export interface BandSettings {
-  enabled: boolean;
-  content: BandSlot;      // tokens allowed; {{page}} / {{pages}} supported in footer
-  rule: boolean;          // show the divider rule
-}
-
-export interface DocumentTemplate {
-  id?: string;
-  name: string;
-  description?: string;
-  type: "built";
-  kind: "document";       // distinguishes from form templates
-  category?: string;
-  tags?: string[];
-  document_type_id?: string;
-  page: PageSettings;
-  theme: ThemeSettings;
-  header: BandSettings;
-  footer: BandSettings;
-  blocks: DocBlock[];
-  /** Document-reference fields: at create time the user picks a related document
-   *  per entry; {{key}} resolves to its label and {{key__field}} pulls its data. */
-  references?: Array<{ key: string; label: string }>;
-  placeholders?: string[];
-  created_at?: string;
-  updated_at?: string;
-}
-
-export type EditableDocumentTemplate =
-  Omit<DocumentTemplate, "type" | "kind"> & { type?: "built"; kind?: "document" };
-
-/** A merge field that can be inserted into the document. */
 export interface MergeField {
   key: string;
   label: string;
   group?: string;
-  /** true => a repeating collection usable as a bound data-table source */
+  type?: "text" | "number" | "date" | "image" | "collection";
   repeating?: boolean;
+  children?: Array<{ key: string; label: string; type?: "text" | "number" | "date" }>;
 }
 
-/* ============================================================
- * Constants
- * ============================================================ */
+export interface ElementStyle {
+  align?: Align;
+  bold?: boolean;
+  italic?: boolean;
+  underline?: boolean;
+  fontSize?: number;
+  color?: string;
+  background?: string;
+  padding?: number;
+  marginTop?: number;
+  marginBottom?: number;
+  borderWidth?: number;
+  borderColor?: string;
+  borderStyle?: "solid" | "dashed" | "dotted";
+  radius?: number;
+  minHeight?: number;
+}
 
-const BLOCK_META: Record<BlockType, {
-  label: string; group: BlockGroup; icon: React.ElementType; hint?: string;
-}> = {
-  heading:       { label: "Heading",        group: "text",   icon: Heading },
-  paragraph:     { label: "Paragraph",      group: "text",   icon: AlignLeft },
-  bulleted_list: { label: "Bulleted list",  group: "text",   icon: List },
-  numbered_list: { label: "Numbered list",  group: "text",   icon: ListOrdered },
-  quote:         { label: "Quote / note",   group: "text",   icon: Quote },
-  key_value:     { label: "Field grid",     group: "data",   icon: Rows3,   hint: "Label / value pairs bound to fields" },
-  data_table:    { label: "Data table",     group: "data",   icon: Table2,  hint: "Static or repeating per record" },
-  image:         { label: "Image",          group: "media",  icon: ImageIcon },
-  logo:          { label: "Logo",           group: "media",  icon: Building2 },
-  two_column:    { label: "Two columns",    group: "layout", icon: Columns2 },
-  divider:       { label: "Divider",        group: "layout", icon: SeparatorHorizontal },
-  spacer:        { label: "Spacer",         group: "layout", icon: Minus },
-  page_break:    { label: "Page break",     group: "layout", icon: ScrollText },
-  signature:     { label: "Signature",      group: "signoff", icon: PenLine },
+export interface TableColumn {
+  id: string;
+  key: string;
+  label: string;
+  width: number;
+  align?: Align;
+  format?: "text" | "number" | "currency" | "percent" | "date";
+}
+
+export interface TableSummary {
+  id: string;
+  label: string;
+  labelSpan: number;
+  values: string[];
+  bold?: boolean;
+}
+
+export interface FieldPair {
+  id: string;
+  label: string;
+  value: string;
+  boldLabel?: boolean;
+  boldValue?: boolean;
+}
+
+export interface Signatory {
+  id: string;
+  step?: string;
+  role: string;
+  name: string;
+  date: string;
+  signature?: string;
+}
+
+export interface DocumentElement {
+  id: string;
+  type: ElementType;
+  text?: string;
+  level?: 1 | 2 | 3;
+  items?: string[];
+  fields?: FieldPair[];
+  labelWidth?: number;
+  columns?: TableColumn[];
+  staticRows?: string[][];
+  sourceKey?: string;
+  previewRows?: number;
+  summaries?: TableSummary[];
+  showHeader?: boolean;
+  repeatHeader?: boolean;
+  striped?: boolean;
+  cellPadding?: number;
+  headerBackground?: string;
+  headerColor?: string;
+  src?: string;
+  alt?: string;
+  width?: number;
+  height?: number;
+  objectFit?: "contain" | "cover" | "fill";
+  opacity?: number;
+  signatories?: Signatory[];
+  style?: ElementStyle;
+}
+
+export interface GridCell {
+  id: string;
+  width: number;
+  verticalAlign?: VerticalAlign;
+  padding?: number;
+  background?: string;
+  borderWidth?: number;
+  borderColor?: string;
+  elements: DocumentElement[];
+}
+
+export interface GridRow {
+  id: string;
+  columns: GridCell[];
+  gap: number;
+  marginTop?: number;
+  marginBottom?: number;
+  minHeight?: number;
+  keepTogether?: boolean;
+  fullBleed?: boolean;
+}
+
+export interface PageBand {
+  enabled: boolean;
+  rows: GridRow[];
+  height?: number;
+  border?: boolean;
+}
+
+export interface WatermarkSettings {
+  enabled: boolean;
+  kind: "text" | "image";
+  value: string;
+  opacity: number;
+  width?: number;
+  rotation?: number;
+}
+
+export interface DocumentPage {
+  id: string;
+  name: string;
+  rows: GridRow[];
+}
+
+export interface DocumentTemplateV2 {
+  schemaVersion: 2;
+  id?: string;
+  name: string;
+  description?: string;
+  documentTypeId?: string;
+  category?: string;
+  tags?: string[];
+  page: {
+    size: PageSize;
+    orientation: Orientation;
+    margin: { top: number; right: number; bottom: number; left: number };
+  };
+  theme: {
+    fontFamily: string;
+    headingFamily: string;
+    baseFontSize: number;
+    lineHeight: number;
+    textColor: string;
+    headingColor: string;
+    accentColor: string;
+  };
+  header: PageBand;
+  footer: PageBand;
+  watermark: WatermarkSettings;
+  pages: DocumentPage[];
+  requiredFields: string[];
+  updatedAt?: string;
+}
+
+export interface TemplateDesignerProps {
+  initial?: DocumentTemplateV2 | null;
+  mergeFields?: MergeField[];
+  sampleData?: Record<string, unknown>;
+  documentTypes?: Array<{ id: string; name: string; code?: string }>;
+  onSave: (template: DocumentTemplateV2, stayOpen?: boolean) => void | Promise<string | void>;
+  onCancel: () => void;
+  isSaving?: boolean;
+}
+
+type Selection =
+  | { kind: "page"; pageId: string }
+  | { kind: "row"; pageId: string; rowId: string }
+  | { kind: "cell"; pageId: string; rowId: string; cellId: string }
+  | { kind: "element"; pageId: string; rowId: string; cellId: string; elementId: string };
+
+type EditorTab = "design" | "preview" | "settings";
+type PaletteGroup = "text" | "data" | "media" | "layout" | "signoff";
+
+/* ========================================================================== *
+ * Constants and factories
+ * ========================================================================== */
+
+const PAGE_DIMS: Record<PageSize, { w: number; h: number }> = {
+  A4: { w: 210, h: 297 }, Letter: { w: 216, h: 279 }, Legal: { w: 216, h: 356 },
 };
 
-const BLOCK_GROUPS: Array<{ key: BlockGroup; label: string }> = [
-  { key: "text",    label: "Text" },
-  { key: "data",    label: "Data & Fields" },
-  { key: "media",   label: "Media" },
-  { key: "layout",  label: "Layout" },
+const DEFAULT_FIELDS: MergeField[] = [
+  { key: "company.name", label: "Company name", group: "Organisation" },
+  { key: "company.address", label: "Company address", group: "Organisation" },
+  { key: "company.phone", label: "Company phone", group: "Organisation" },
+  { key: "company.email", label: "Company email", group: "Organisation" },
+  { key: "company.logo_left", label: "Left logo", group: "Organisation", type: "image" },
+  { key: "company.logo_right", label: "Right logo", group: "Organisation", type: "image" },
+  { key: "lpo.number", label: "LPO number", group: "Purchase order" },
+  { key: "lpo.date", label: "LPO date", group: "Purchase order", type: "date" },
+  { key: "lpo.valid_until", label: "Valid until", group: "Purchase order", type: "date" },
+  { key: "lpo.description", label: "Description", group: "Purchase order" },
+  { key: "lpo.currency", label: "Currency", group: "Purchase order" },
+  { key: "lpo.subtotal", label: "Subtotal", group: "Computed", type: "number" },
+  { key: "lpo.vat_total", label: "VAT total", group: "Computed", type: "number" },
+  { key: "lpo.grand_total", label: "Grand total", group: "Computed", type: "number" },
+  { key: "lpo.amount_words", label: "Amount in words", group: "Computed" },
+  { key: "supplier.code", label: "Supplier code", group: "Supplier" },
+  { key: "supplier.name", label: "Supplier name", group: "Supplier" },
+  { key: "supplier.email", label: "Supplier email", group: "Supplier" },
+  { key: "supplier.phone", label: "Supplier telephone", group: "Supplier" },
+  { key: "supplier.address", label: "Supplier address", group: "Supplier" },
+  { key: "prepared_by.role", label: "Prepared by role", group: "Approvals" },
+  { key: "prepared_by.name", label: "Prepared by name", group: "Approvals" },
+  { key: "prepared_by.date", label: "Prepared date", group: "Approvals", type: "date" },
+  { key: "approved_by.role", label: "Approver role", group: "Approvals" },
+  { key: "approved_by.name", label: "Approver name", group: "Approvals" },
+  { key: "approved_by.date", label: "Approval date", group: "Approvals", type: "date" },
+  {
+    key: "line_items", label: "Line items", group: "Collections", type: "collection", repeating: true,
+    children: [
+      { key: "number", label: "No" }, { key: "item", label: "Item" }, { key: "uom", label: "U.O.M" },
+      { key: "quantity", label: "Qty", type: "number" }, { key: "unit_price", label: "Unit price", type: "number" },
+      { key: "net_price", label: "Net price", type: "number" }, { key: "vat_percent", label: "VAT%", type: "number" },
+      { key: "vat", label: "VAT", type: "number" }, { key: "gross_value", label: "Gross value", type: "number" },
+    ],
+  },
+];
+
+const SAMPLE_DATA: Record<string, unknown> = {
+  "company.name": "Flaxem System Enterprises Ltd",
+  "company.address": "Mombasa Road, NEXTGEN Mall, Third Floor, Unit 3&4\nP. O. Box 3885-00100 Nairobi, Kenya",
+  "company.phone": "+254 20 2305051 / +254 722 956048",
+  "company.email": "info@example.com",
+  "lpo.number": "FLM/LPO/2026/133",
+  "lpo.date": "September 07, 2026 18:09",
+  "lpo.valid_until": "06-12-2026",
+  "lpo.description": "Office Chairs",
+  "lpo.currency": "USD",
+  "lpo.subtotal": "180.00",
+  "lpo.vat_total": "28.80",
+  "lpo.grand_total": "208.80",
+  "lpo.amount_words": "Two hundred eight and eighty cents USD only",
+  "supplier.code": "SUP.07.0004",
+  "supplier.name": "IBM General Supplies",
+  "supplier.email": "supplier@example.com",
+  "supplier.phone": "+254 722 222 475",
+  "supplier.address": "North Airport Road\nEmbakasi",
+  "prepared_by.role": "Procurement Officer",
+  "prepared_by.name": "Alimon Sakala",
+  "prepared_by.date": "September 07 2026, 18:09",
+  "approved_by.role": "Managing Director",
+  "approved_by.name": "Alimon Sakala",
+  "approved_by.date": "September 08, 2026 - 08:07",
+  line_items: [
+    { number: "1", item: "NCIC-530 - HIGH BACK ERGONOMIC OFFICE CHAIR - High Back Office Chair", uom: "Pcs", quantity: 1, unit_price: 60, net_price: 60, vat_percent: 16, vat: 9.6, gross_value: 69.6 },
+    { number: "2", item: "NCIC-1790 - SUKI EXECUTIVE OFFICE CHAIR - Executive office Chair", uom: "Pcs", quantity: 1, unit_price: 120, net_price: 120, vat_percent: 16, vat: 19.2, gross_value: 139.2 },
+  ],
+};
+
+const elementMeta: Record<ElementType, { label: string; group: PaletteGroup; icon: typeof FileText; hint: string }> = {
+  text: { label: "Paragraph", group: "text", icon: FileText, hint: "Text with inline DMS fields" },
+  heading: { label: "Heading", group: "text", icon: Heading, hint: "Section or document heading" },
+  bulleted_list: { label: "Bulleted list", group: "text", icon: List, hint: "List with editable items" },
+  numbered_list: { label: "Numbered list", group: "text", icon: ListOrdered, hint: "Ordered clauses and terms" },
+  note: { label: "Note / callout", group: "text", icon: Quote, hint: "Emphasized note or disclaimer" },
+  field_group: { label: "Field group", group: "data", icon: Rows3, hint: "Label and value pairs" },
+  data_table: { label: "Data table", group: "data", icon: Table2, hint: "Static or repeating DMS records" },
+  image: { label: "Image / logo", group: "media", icon: ImageIcon, hint: "Uploaded image or image field" },
+  divider: { label: "Divider", group: "layout", icon: Minus, hint: "Horizontal rule" },
+  spacer: { label: "Spacer", group: "layout", icon: Rows3, hint: "Controlled vertical space" },
+  signature_group: { label: "Approvals", group: "signoff", icon: PenLine, hint: "Signatories, roles, dates and signatures" },
+};
+
+const groupLabels: Array<{ key: PaletteGroup; label: string }> = [
+  { key: "text", label: "Text" }, { key: "data", label: "Data & fields" },
+  { key: "media", label: "Media" }, { key: "layout", label: "Layout" },
   { key: "signoff", label: "Sign-off" },
 ];
 
-/** mm dimensions per page size (portrait). */
-const PAGE_DIMS: Record<PageSettings["size"], { w: number; h: number }> = {
-  A4:     { w: 210, h: 297 },
-  Letter: { w: 216, h: 279 },
-  Legal:  { w: 216, h: 356 },
+const makeElement = (type: ElementType): DocumentElement => {
+  const base: DocumentElement = { id: uid(), type, style: { marginBottom: 8 } };
+  if (type === "heading") return { ...base, text: "Section heading", level: 2, style: { ...base.style, bold: true, fontSize: 16 } };
+  if (type === "text") return { ...base, text: "Write text or insert a {{field}}.", style: { ...base.style, fontSize: 11 } };
+  if (type === "note") return { ...base, text: "Important note", style: { ...base.style, padding: 8, borderWidth: 1, background: "#F8FAFC" } };
+  if (type === "bulleted_list" || type === "numbered_list") return { ...base, items: ["First item", "Second item"] };
+  if (type === "field_group") return { ...base, labelWidth: 120, fields: [{ id: uid(), label: "Label", value: "{{field}}", boldLabel: true }] };
+  if (type === "image") return { ...base, src: "", alt: "Image", width: 140, height: 64, objectFit: "contain", opacity: 1 };
+  if (type === "divider") return { ...base, style: { marginTop: 8, marginBottom: 8, borderWidth: 1, borderColor: "#94A3B8" } };
+  if (type === "spacer") return { ...base, height: 24 };
+  if (type === "signature_group") return { ...base, signatories: [{ id: uid(), step: "1", role: "Prepared by", name: "{{prepared_by.name}}", date: "{{prepared_by.date}}" }] };
+  return {
+    ...base, sourceKey: "line_items", showHeader: true, repeatHeader: true, striped: false, cellPadding: 4,
+    headerBackground: "#E7E9F8", headerColor: "#111827", previewRows: 2,
+    columns: [
+      { id: uid(), key: "number", label: "No", width: 5 }, { id: uid(), key: "item", label: "Item", width: 38 },
+      { id: uid(), key: "uom", label: "U.O.M", width: 7 }, { id: uid(), key: "quantity", label: "Qty", width: 5, align: "right" },
+      { id: uid(), key: "unit_price", label: "Unit Price", width: 11, align: "right" },
+      { id: uid(), key: "net_price", label: "Net Price", width: 11, align: "right" },
+      { id: uid(), key: "vat_percent", label: "VAT%", width: 7, align: "right" },
+      { id: uid(), key: "vat", label: "VAT", width: 6, align: "right" },
+      { id: uid(), key: "gross_value", label: "Gross Value", width: 10, align: "right" },
+    ],
+    summaries: [{ id: uid(), label: "Totals in {{lpo.currency}}", labelSpan: 4, values: ["{{lpo.subtotal}}", "", "{{lpo.vat_total}}", "{{lpo.grand_total}}"], bold: true }],
+  };
 };
 
-const FONT_OPTIONS = [
-  { value: "'Inter', system-ui, sans-serif",            label: "Inter (sans)" },
-  { value: "Arial, Helvetica, sans-serif",              label: "Arial" },
-  { value: "'Times New Roman', Times, serif",           label: "Times New Roman" },
-  { value: "Georgia, 'Times New Roman', serif",         label: "Georgia (serif)" },
-  { value: "'Courier New', Courier, monospace",         label: "Courier (mono)" },
-  { value: "Calibri, 'Segoe UI', sans-serif",           label: "Calibri" },
+const makeCell = (width = 1, elements: DocumentElement[] = []): GridCell => ({ id: uid(), width, verticalAlign: "start", padding: 0, elements });
+const makeRow = (ratios: number[] = [1], elements?: DocumentElement[][]): GridRow => ({
+  id: uid(), gap: 12, marginBottom: 8,
+  columns: ratios.map((w, i) => makeCell(w, elements?.[i] ?? [])),
+});
+const text = (value: string, style?: ElementStyle): DocumentElement => ({ id: uid(), type: "text", text: value, style: { fontSize: 11, marginBottom: 4, ...style } });
+const heading = (value: string, level: 1 | 2 | 3 = 2, style?: ElementStyle): DocumentElement => ({ id: uid(), type: "heading", text: value, level, style: { bold: true, fontSize: level === 1 ? 20 : level === 2 ? 15 : 12, marginBottom: 8, ...style } });
+
+const terms = [
+  "Fixed Price: The prices indicated above are fixed and not subject to any adjustment.",
+  "Payment: The payment will be effected in 30 days from receipt of dated Invoice, Delivery Notes and a copy of this LPO. Failing to deliver these documents may result in delayed payment.",
+  "Technical Specifications of the Goods offered: The Goods shall comply with the technical specification indicated in the Contractor's quotation attached to this Purchase Order.",
+  "Delivery Schedule: Delivery shall be completed according to the Contractor's quotation and calculated from signature of the Purchase Order.",
+  "Delivery Instructions: The items will be delivered to the address specified by the purchaser.",
+  "Liquidated Damages: Failure to deliver within the specified period may result in liquidated damages up to the maximum permitted by the Purchase Order.",
+  "Failure to Perform: The purchaser may cancel the Purchase Order if the Contractor fails to deliver according to these terms without compensation.",
 ];
 
-/**
- * Auto-fill merge fields — resolved server-side at create time (and STATIC in the
- * document thereafter). The formula entries share the exact vocabulary the form
- * builder uses (frontend/src/components/templates/formulas.ts ↔ backend
- * apps/documents/form_formulas.py); apps/templates_engine/tasks.py
- * `_designer_merge_values` resolves them. The host also appends the selected
- * document type's own metadata fields to this list.
- */
-const DEFAULT_MERGE_FIELDS: MergeField[] = [
-  ...Object.values(FORMULAS).map((f) => ({ key: f.key, label: f.label, group: "Auto-fill (formula)" })),
-  { key: "document_title",   label: "Document title",      group: "Auto-fill (formula)" },
-  { key: "company_name",     label: "Company name",        group: "Organisation" },
-  { key: "company_address",  label: "Company address",     group: "Organisation" },
-];
+export const createLpoTemplate = (): DocumentTemplateV2 => {
+  const header: PageBand = {
+    enabled: true, height: 30, border: true,
+    rows: [makeRow([1, 2.7, 1.5], [
+      [{ ...makeElement("image"), alt: "Left logo", text: "{{company.logo_left}}", width: 72, height: 52 }],
+      [text("{{company.name}}\n{{company.address}}\nTel: {{company.phone}}\nEmail: {{company.email}}", { align: "center", fontSize: 9 })],
+      [{ ...makeElement("image"), alt: "Right logo", text: "{{company.logo_right}}", width: 120, height: 52, style: { align: "right" } }],
+    ])],
+  };
+  const footer: PageBand = {
+    enabled: true, height: 14, border: true,
+    rows: [makeRow([1], [[text("Purchase Order {{lpo.number}} : Page {{page}} of {{pages}}", { align: "center", bold: true, italic: true, fontSize: 8 })]])],
+  };
+  const itemTable = makeElement("data_table");
+  const page1: DocumentPage = {
+    id: uid(), name: "Purchase order",
+    rows: [
+      makeRow([1], [[heading("Purchase Order", 1, { align: "center", underline: true, marginTop: 12, marginBottom: 24 })]]),
+      makeRow([1, 1], [
+        [],
+        [{ ...makeElement("field_group"), labelWidth: 74, fields: [
+          { id: uid(), label: "Date:", value: "{{lpo.date}}", boldLabel: true },
+          { id: uid(), label: "LPO No:", value: "{{lpo.number}}", boldLabel: true, boldValue: true },
+          { id: uid(), label: "Valid Until:", value: "{{lpo.valid_until}}", boldLabel: false, boldValue: true },
+        ], style: { fontSize: 11, align: "right", marginBottom: 18 } }],
+      ]),
+      makeRow([1], [[
+        heading("SUPPLIER DETAILS", 3, { marginBottom: 2 }),
+        { ...makeElement("field_group"), labelWidth: 66, fields: [
+          { id: uid(), label: "Code:", value: "{{supplier.code}}", boldValue: true },
+          { id: uid(), label: "Name:", value: "{{supplier.name}}", boldValue: true },
+          { id: uid(), label: "Email:", value: "{{supplier.email}}", boldValue: true },
+          { id: uid(), label: "Telephone:", value: "{{supplier.phone}}", boldValue: true },
+          { id: uid(), label: "", value: "{{supplier.address}}" },
+        ], style: { marginBottom: 12 } },
+        text("Description: {{lpo.description}}", { bold: false, marginBottom: 28 }),
+      ]]),
+      makeRow([1], [[heading("Please Supply the Underlisted", 1, { align: "center", underline: true, fontSize: 17, marginBottom: 10 })]]),
+      makeRow([1], [[itemTable]]),
+      makeRow([1], [[text("Total in Words: {{lpo.amount_words}}", { bold: true, padding: 4, borderWidth: 1, marginBottom: 22 })]]),
+      makeRow([1], [[heading("APPROVALS", 3, { marginBottom: 14 })]]),
+      makeRow([1], [[{ ...makeElement("signature_group"), signatories: [{ id: uid(), step: "1", role: "Prepared By\n{{prepared_by.role}}", name: "{{prepared_by.name}}", date: "{{prepared_by.date}}" }] }]]),
+    ],
+  };
+  const page2: DocumentPage = {
+    id: uid(), name: "Approval and terms",
+    rows: [
+      makeRow([1], [[{ ...makeElement("signature_group"), signatories: [{ id: uid(), step: "2", role: "Approved By\n{{approved_by.role}}", name: "{{approved_by.name}}", date: "{{approved_by.date}}", signature: "[[Signature]]" }] }]]),
+      { ...makeRow([1], [[{ ...makeElement("divider"), style: { borderWidth: 1, borderColor: "#94A3B8", marginTop: 26, marginBottom: 26 } }]]), keepTogether: true },
+      makeRow([1], [[heading("Standard Terms & Conditions", 2, { align: "center", marginBottom: 14 })]]),
+      makeRow([1], [[{ ...makeElement("numbered_list"), items: terms, style: { fontSize: 10.5, marginBottom: 8 } }]]),
+    ],
+  };
+  const template: DocumentTemplateV2 = {
+    schemaVersion: 2,
+    name: "Purchase Order Template", description: "Structured two-page local purchase order", category: "procurement", tags: ["LPO", "purchase order"],
+    page: { size: "A4", orientation: "portrait", margin: { top: 12, right: 15, bottom: 12, left: 15 } },
+    theme: { fontFamily: "Arial, Helvetica, sans-serif", headingFamily: "Georgia, 'Times New Roman', serif", baseFontSize: 11, lineHeight: 1.25, textColor: "#111827", headingColor: "#111827", accentColor: "#287EAD" },
+    header, footer,
+    watermark: { enabled: true, kind: "text", value: "{{company.name}}", opacity: 0.055, width: 300, rotation: 0 },
+    pages: [page1, page2], requiredFields: [],
+  };
+  return normalizeTemplate(template);
+};
 
-const uid = () => Math.random().toString(36).slice(2, 10);
+/* ========================================================================== *
+ * Data and schema helpers
+ * ========================================================================== */
 
-function slugify(s: string) {
-  return s.toLowerCase().replace(/[^a-z0-9]+/g, "_").replace(/^_+|_+$/g, "").slice(0, 50);
+const TOKEN_RE = /\{\{\s*([a-zA-Z0-9_.]+)\s*\}\}/g;
+const MANUAL_RE = /\[\[([^\]]+)\]\]/g;
+
+function valueAt(data: Record<string, unknown>, path: string): unknown {
+  if (Object.prototype.hasOwnProperty.call(data, path)) return data[path];
+  return path.split(".").reduce<unknown>((value, key) =>
+    value && typeof value === "object" ? (value as Record<string, unknown>)[key] : undefined, data);
 }
 
-/** Find every {{token}} inside a string. */
-function tokensIn(s?: string): string[] {
-  if (!s) return [];
-  const out: string[] = [];
-  const re = /\{\{\s*([a-zA-Z0-9_.]+)\s*\}\}/g;
-  let m: RegExpExecArray | null;
-  while ((m = re.exec(s)) !== null) out.push(m[1]);
-  return out;
-}
-
-/** Substitute {{tokens}} using a flat sample-data map (for preview). */
-function substitute(s: string | undefined, data: Record<string, string>): string {
-  if (!s) return "";
-  return s.replace(/\{\{\s*([a-zA-Z0-9_.]+)\s*\}\}/g, (_, key) =>
-    data[key] ?? `\u00ab${key}\u00bb`,
-  );
-}
-
-/** Render a string with [[user placeholders]] shown as highlighted fill-in
- *  markers \u2014 matching how the generated document highlights them for the user. */
-function highlightPlaceholders(str: string): React.ReactNode {
-  if (!str || !str.includes("[[")) return str;
-  return str.split(/(\[\[[^\]]+\]\])/g).map((part, i) => {
-    const m = /^\[\[([^\]]+)\]\]$/.exec(part);
-    return m
-      ? <mark key={i} className="rounded-sm bg-yellow-200 px-0.5 text-[#1F2933]">{m[1]}</mark>
-      : part;
+function substitute(value: string | undefined, data: Record<string, unknown>, page = 1, pages = 1): string {
+  if (!value) return "";
+  return value.replace(TOKEN_RE, (_match, key: string) => {
+    if (key === "page") return String(page);
+    if (key === "pages") return String(pages);
+    const result = valueAt(data, key);
+    return result == null || typeof result === "object" ? `⟪${key}⟫` : String(result);
   });
 }
 
-/* ============================================================
- * Factories
- * ============================================================ */
-
-function newColumn(label = "Column"): DocTableColumn {
-  return { id: uid(), key: `${slugify(label)}_${uid().slice(0, 4)}`, label, align: "left", width: 1 };
+function renderedText(value: string | undefined, data: Record<string, unknown> | null, page = 1, pages = 1): ReactNode {
+  const resolved = data ? substitute(value, data, page, pages) : (value ?? "");
+  const parts = resolved.split(/(\[\[[^\]]+\]\]|⟪[^⟫]+⟫)/g);
+  return parts.map((part, index) => {
+    if (/^\[\[/.test(part)) return <mark key={index} className="dtd-manual">{part.slice(2, -2)}</mark>;
+    if (/^⟪/.test(part)) return <span key={index} className="dtd-missing" title="No preview value supplied">{part}</span>;
+    return <Fragment key={index}>{part}</Fragment>;
+  });
 }
 
-function newBlock(type: BlockType): DocBlock {
-  const base: DocBlock = { id: uid(), type, align: "left", marginTop: 0, marginBottom: 12 };
-  switch (type) {
-    case "heading":
-      return { ...base, text: "Section heading", level: 2 };
-    case "paragraph":
-      return { ...base, text: "Write your paragraph here. Insert merge fields like {{document_title}} anywhere." };
-    case "quote":
-      return { ...base, text: "Important note or disclaimer." };
-    case "bulleted_list":
-      return { ...base, items: ["First point", "Second point", "Third point"] };
-    case "numbered_list":
-      return { ...base, items: ["First step", "Second step", "Third step"] };
-    case "key_value":
-      return {
-        ...base, labelWidth: 160,
-        pairs: [
-          { id: uid(), label: "Document No.", value: "{{document_no}}" },
-          { id: uid(), label: "Date",         value: "{{document_date}}" },
-          { id: uid(), label: "Prepared by",  value: "{{author_name}}" },
-        ],
-      };
-    case "data_table":
-      return {
-        ...base, bordered: true, striped: false, bound: false,
-        columns: [newColumn("Item"), newColumn("Description"), newColumn("Amount")],
-        rows: [["", "", ""], ["", "", ""]],
-      };
-    case "image":
-      return { ...base, align: "center", src: "", alt: "Image", width: 320, height: 180 };
-    case "logo":
-      return { ...base, align: "left", src: "", alt: "Company logo", width: 160, height: 64 };
-    case "two_column":
-      return { ...base, left: "Left column text. {{company_name}}", right: "Right column text. {{document_date}}" };
-    case "divider":
-      return { ...base, marginBottom: 16 };
-    case "spacer":
-      return { ...base, height: 24, marginBottom: 0 };
-    case "page_break":
-      return { ...base, marginBottom: 0 };
-    case "signature":
-      return {
-        ...base, marginTop: 24,
-        signatories: [
-          { id: uid(), role: "Prepared by", nameToken: "{{current_user}}", dateToken: "{{today}}" },
-          { id: uid(), role: "Approved by", nameToken: "[[Approver name]]", dateToken: "[[Date]]" },
-        ],
-      };
-    default:
-      return base;
-  }
-}
-
-const initialDocument: DocumentTemplate = {
-  name: "Untitled Document Template",
-  description: "",
-  type: "built",
-  kind: "document",
-  category: "other",
-  tags: [],
-  page: { size: "A4", orientation: "portrait", margin: { top: 20, right: 18, bottom: 20, left: 18 } },
-  theme: {
-    fontFamily: "'Inter', system-ui, sans-serif",
-    headingFamily: "'Inter', system-ui, sans-serif",
-    baseFontSize: 13,
-    lineHeight: 1.5,
-    textColor: "#1F2933",
-    headingColor: "#0F2A3A",
-    accentColor: "#287EAD",
-  },
-  header: { enabled: true, rule: true, content: { left: "{{company_name}}", center: "", right: "{{document_no}}" } },
-  footer: { enabled: true, rule: true, content: { left: "{{document_title}}", center: "", right: "Page {{page}} of {{pages}}" } },
-  blocks: [
-    { ...newBlock("logo") },
-    { ...newBlock("heading"), text: "{{document_title}}", level: 1, align: "left" },
-    { ...newBlock("key_value") },
-    { ...newBlock("paragraph") },
-    { ...newBlock("data_table") },
-    { ...newBlock("signature") },
-  ],
-  references: [],
-};
-
-/* ============================================================
- * Normalize / output
- * ============================================================ */
-
-function normalizeTemplate(t: EditableDocumentTemplate): DocumentTemplate {
-  return {
-    ...initialDocument,
-    ...t,
-    type: "built",
-    kind: "document",
-    page: { ...initialDocument.page, ...(t.page ?? {}), margin: { ...initialDocument.page.margin, ...(t.page?.margin ?? {}) } },
-    theme: { ...initialDocument.theme, ...(t.theme ?? {}) },
-    header: { ...initialDocument.header, ...(t.header ?? {}), content: { ...initialDocument.header.content, ...(t.header?.content ?? {}) } },
-    footer: { ...initialDocument.footer, ...(t.footer ?? {}), content: { ...initialDocument.footer.content, ...(t.footer?.content ?? {}) } },
-    blocks: Array.isArray(t.blocks) && t.blocks.length ? t.blocks : initialDocument.blocks,
-    references: Array.isArray(t.references) ? t.references : [],
-    tags: t.tags ?? [],
+function collectRequiredFields(template: DocumentTemplateV2): string[] {
+  const fields = new Set<string>();
+  const scan = (value?: string) => {
+    if (!value) return;
+    for (const match of value.matchAll(TOKEN_RE)) if (!['page', 'pages'].includes(match[1])) fields.add(match[1]);
   };
+  const scanElement = (el: DocumentElement) => {
+    scan(el.text); scan(el.src); (el.items ?? []).forEach(scan);
+    (el.fields ?? []).forEach((item) => { scan(item.label); scan(item.value); });
+    (el.staticRows ?? []).flat().forEach(scan);
+    (el.summaries ?? []).forEach((summary) => { scan(summary.label); summary.values.forEach(scan); });
+    (el.signatories ?? []).forEach((sig) => { scan(sig.role); scan(sig.name); scan(sig.date); scan(sig.signature); });
+    if (el.sourceKey) fields.add(el.sourceKey);
+  };
+  const scanRows = (rows: GridRow[]) => rows.forEach((row) => row.columns.forEach((cell) => cell.elements.forEach(scanElement)));
+  scanRows(template.header.rows); scanRows(template.footer.rows); template.pages.forEach((page) => scanRows(page.rows)); scan(template.watermark.value);
+  return [...fields].sort();
 }
 
-/** Collect every distinct {{token}} used across the whole document. */
-function collectPlaceholders(t: DocumentTemplate): string[] {
-  const set = new Set<string>();
-  const add = (s?: string) => tokensIn(s).forEach((k) => set.add(k));
-  [t.header.content, t.footer.content].forEach((c) => { add(c.left); add(c.center); add(c.right); });
-  for (const b of t.blocks) {
-    add(b.text); add(b.left); add(b.right); add(b.alt); add(b.beside);
-    (b.items ?? []).forEach(add);
-    (b.pairs ?? []).forEach((p) => { add(p.label); add(p.value); });
-    (b.rows ?? []).forEach((r) => r.forEach(add));
-    (b.signatories ?? []).forEach((s) => { add(s.nameToken); add(s.dateToken); });
-    if (b.bound && b.sourceKey) set.add(b.sourceKey);
-  }
-  set.delete("page"); set.delete("pages");
-  return [...set].sort();
+function normalizeTemplate(template: DocumentTemplateV2): DocumentTemplateV2 {
+  const copy = JSON.parse(JSON.stringify(template)) as DocumentTemplateV2;
+  copy.schemaVersion = 2;
+  copy.pages = Array.isArray(copy.pages) && copy.pages.length ? copy.pages : [{ id: uid(), name: "Page 1", rows: [makeRow()] }];
+  copy.requiredFields = collectRequiredFields(copy);
+  return copy;
 }
 
-function outputDocumentTemplate(t: DocumentTemplate, keepId: boolean): DocumentTemplate {
-  const out: DocumentTemplate = { ...t, type: "built", kind: "document", placeholders: collectPlaceholders(t) };
-  if (!keepId) {
-    // eslint-disable-next-line @typescript-eslint/no-unused-vars
-    const { id, ...rest } = out;
-    return rest as DocumentTemplate;
-  }
-  return out;
+export function outputDocumentTemplate(template: DocumentTemplateV2): DocumentTemplateV2 {
+  return { ...normalizeTemplate(template), updatedAt: new Date().toISOString() };
 }
 
-/* ============================================================
- * Shared styles
- * ============================================================ */
+function cloneWithNewIds<T>(input: T): T {
+  const value = JSON.parse(JSON.stringify(input)) as T;
+  const visit = (node: unknown) => {
+    if (!node || typeof node !== "object") return;
+    const record = node as Record<string, unknown>;
+    if (typeof record.id === "string") record.id = uid();
+    Object.values(record).forEach(visit);
+  };
+  visit(value);
+  return value;
+}
 
-const inputCls =
-  "h-9 w-full border border-[#AEB5BB] bg-white px-3 text-sm text-[#1F2933] " +
-  "placeholder:text-[#8C969E] outline-none focus:border-[#287EAD] focus:ring-1 focus:ring-[#287EAD]";
+function downloadJson(template: DocumentTemplateV2) {
+  const blob = new Blob([JSON.stringify(outputDocumentTemplate(template), null, 2)], { type: "application/json" });
+  const url = URL.createObjectURL(blob);
+  const anchor = document.createElement("a");
+  anchor.href = url;
+  anchor.download = `${template.name.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "") || "document-template"}.json`;
+  anchor.click(); URL.revokeObjectURL(url);
+}
 
-const labelCls = "text-[11px] font-semibold uppercase tracking-wider text-[#5E6870]";
+/* ========================================================================== *
+ * Shared controls
+ * ========================================================================== */
 
-/* ============================================================
- * Merge field insert menu
- * ============================================================ */
+const inputClass = "dtd-input";
+function Field({ label, children }: { label: string; children: ReactNode }) {
+  return <label className="dtd-field"><span>{label}</span>{children}</label>;
+}
+function NumberInput({ value, onChange, min = 0, max = 999, suffix }: { value?: number; onChange: (value: number) => void; min?: number; max?: number; suffix?: string }) {
+  return <div className="dtd-number"><input type="number" min={min} max={max} value={value ?? 0} onChange={(event) => onChange(Number(event.target.value))} />{suffix && <small>{suffix}</small>}</div>;
+}
+function IconButton({ title, onClick, disabled, children, active }: { title: string; onClick: () => void; disabled?: boolean; children: ReactNode; active?: boolean }) {
+  return <button type="button" className={cx("dtd-icon-button", active && "is-active")} title={title} aria-label={title} disabled={disabled} onClick={onClick}>{children}</button>;
+}
+function Segmented<T extends string>({ value, options, onChange }: { value: T; options: Array<{ value: T; label: ReactNode; title?: string }>; onChange: (value: T) => void }) {
+  return <div className="dtd-segmented">{options.map((option) => <button type="button" title={option.title} className={value === option.value ? "is-active" : ""} key={option.value} onClick={() => onChange(option.value)}>{option.label}</button>)}</div>;
+}
 
-function MergeFieldMenu({ fields, onPick, label = "Insert field", repeatingOnly = false, allowPlaceholder = true }: {
-  fields: MergeField[];
-  onPick: (token: string, field: MergeField) => void;
-  label?: string;
-  repeatingOnly?: boolean;
-  /** Show the "Ask the user (fill-in)" control that inserts [[label]] placeholders. */
-  allowPlaceholder?: boolean;
-}) {
+function FieldPicker({ fields, onPick, label = "Insert field" }: { fields: MergeField[]; onPick: (token: string) => void; label?: string }) {
   const [open, setOpen] = useState(false);
-  const [q, setQ] = useState("");
-  const [ph, setPh] = useState("");
-  const ref = useRef<HTMLDivElement>(null);
-
+  const [query, setQuery] = useState("");
+  const [manual, setManual] = useState("");
+  const root = useRef<HTMLDivElement>(null);
   useEffect(() => {
     if (!open) return;
-    const onClick = (e: MouseEvent) => {
-      if (ref.current && !ref.current.contains(e.target as Node)) setOpen(false);
-    };
-    document.addEventListener("mousedown", onClick);
-    return () => document.removeEventListener("mousedown", onClick);
+    const close = (event: MouseEvent) => { if (root.current && !root.current.contains(event.target as Node)) setOpen(false); };
+    document.addEventListener("mousedown", close); return () => document.removeEventListener("mousedown", close);
   }, [open]);
-
-  const pool = fields.filter((f) => (repeatingOnly ? f.repeating : true));
-  const filtered = pool.filter((f) =>
-    f.label.toLowerCase().includes(q.toLowerCase()) || f.key.toLowerCase().includes(q.toLowerCase()),
-  );
-  const groups = [...new Set(filtered.map((f) => f.group ?? "Fields"))];
-
-  return (
-    <div ref={ref} className="relative inline-block">
-      <button type="button" onClick={() => setOpen((v) => !v)}
-              className="inline-flex items-center gap-1 border border-[#287EAD]/40 bg-white px-2 py-1 text-[11px] font-semibold text-[#287EAD] hover:bg-[#EEF6FB]">
-        <Braces className="h-3 w-3" /> {label}
-      </button>
-      {open && (
-        <div className="absolute right-0 z-50 mt-1 w-72 border border-[#C8CDD2] bg-white shadow-xl">
-          {allowPlaceholder && !repeatingOnly && (
-            <div className="border-b border-[#C8CDD2] bg-[#FFFBEB] p-2">
-              <p className="mb-1 text-[10px] font-semibold uppercase tracking-wider text-[#92700A]">Ask the user (fill when editing)</p>
-              <div className="flex items-center gap-1">
-                <input value={ph} onChange={(e) => setPh(e.target.value)}
-                       onKeyDown={(e) => { if (e.key === "Enter" && ph.trim()) { e.preventDefault(); onPick(`[[${ph.trim()}]]`, { key: ph.trim(), label: ph.trim() }); setOpen(false); setPh(""); } }}
-                       placeholder="e.g. Amount, Due date"
-                       className="h-8 w-full border border-[#E3C765] bg-white px-2 text-xs outline-none focus:border-[#C9A227]" />
-                <button type="button" disabled={!ph.trim()}
-                        onClick={() => { if (ph.trim()) { onPick(`[[${ph.trim()}]]`, { key: ph.trim(), label: ph.trim() }); setOpen(false); setPh(""); } }}
-                        className="h-8 shrink-0 bg-[#C9A227] px-2 text-[11px] font-semibold text-white disabled:opacity-40">Add</button>
-              </div>
-            </div>
-          )}
-          <div className="border-b border-[#C8CDD2] p-2">
-            <p className="mb-1 text-[10px] font-semibold uppercase tracking-wider text-[#8C969E]">Auto-fill field (static on create)</p>
-            <div className="relative">
-              <Search className="pointer-events-none absolute left-2 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-[#5E6870]" />
-              <input value={q} onChange={(e) => setQ(e.target.value)} placeholder="Search fields…"
-                     className="h-8 w-full border border-[#AEB5BB] bg-white pl-7 pr-2 text-xs outline-none focus:border-[#287EAD]" />
-            </div>
-          </div>
-          <div className="max-h-64 overflow-y-auto py-1">
-            {groups.map((g) => (
-              <div key={g}>
-                <p className="px-3 py-1 text-[10px] font-semibold uppercase tracking-wider text-[#8C969E]">{g}</p>
-                {filtered.filter((f) => (f.group ?? "Fields") === g).map((f) => (
-                  <button key={f.key} type="button"
-                          onClick={() => { onPick(`{{${f.key}}}`, f); setOpen(false); setQ(""); }}
-                          className="flex w-full items-center justify-between gap-2 px-3 py-1.5 text-left text-xs hover:bg-[#EEF6FB]">
-                    <span className="text-[#1F2933]">{f.label}</span>
-                    <span className="font-mono text-[10px] text-[#8C969E]">{f.key}</span>
-                  </button>
-                ))}
-              </div>
-            ))}
-            {filtered.length === 0 && <p className="px-3 py-4 text-center text-xs text-[#8C969E]">No fields</p>}
-          </div>
-          {!repeatingOnly && !pool.some((f) => (f.group ?? "") === "Document references") && (
-            <div className="border-t border-[#C8CDD2] bg-[#F6F7F8] px-3 py-1.5 text-[10px] leading-snug text-[#8C969E]">
-              Need data from another document? Add a reference in{" "}
-              <strong>Settings → Document references</strong>.
-            </div>
-          )}
-        </div>
-      )}
-    </div>
-  );
+  const filtered = fields.filter((field) => !field.repeating && `${field.label} ${field.key}`.toLowerCase().includes(query.toLowerCase()));
+  const groups = [...new Set(filtered.map((field) => field.group ?? "Fields"))];
+  return <div className="dtd-picker" ref={root}>
+    <button type="button" className="dtd-secondary" onClick={() => setOpen((value) => !value)}><Braces size={13} />{label}</button>
+    {open && <div className="dtd-picker-menu">
+      <div className="dtd-picker-search"><Search size={14} /><input value={query} onChange={(event) => setQuery(event.target.value)} placeholder="Search DMS fields" /></div>
+      <div className="dtd-picker-scroll">{groups.map((group) => <div key={group}><h5>{group}</h5>{filtered.filter((field) => (field.group ?? "Fields") === group).map((field) => <button key={field.key} type="button" onClick={() => { onPick(`{{${field.key}}}`); setOpen(false); }}><span>{field.label}</span><code>{field.key}</code></button>)}</div>)}</div>
+      <div className="dtd-manual-row"><input value={manual} onChange={(event) => setManual(event.target.value)} placeholder="Manual fill-in label" /><button type="button" disabled={!manual.trim()} onClick={() => { onPick(`[[${manual.trim()}]]`); setManual(""); setOpen(false); }}><Plus size={14} /></button></div>
+    </div>}
+  </div>;
 }
 
-/* ============================================================
- * Palette
- * ============================================================ */
-
-function PaletteItem({ type }: { type: BlockType }) {
-  const meta = BLOCK_META[type];
-  const Icon = meta.icon;
-  const { attributes, listeners, setNodeRef, isDragging } = useDraggable({
-    id: `palette-${type}`,
-    data: { source: "palette", blockType: type },
-  });
-  return (
-    <button ref={setNodeRef} {...listeners} {...attributes} type="button" title={meta.hint ?? meta.label}
-      className={cn(
-        "group flex w-full cursor-grab items-center gap-2.5 border border-transparent px-3 py-2 text-left text-sm",
-        "transition-all active:cursor-grabbing hover:border-[#287EAD] hover:bg-[#EEF6FB]",
-        isDragging && "opacity-30",
-      )}>
-      <Icon className="h-4 w-4 shrink-0 text-[#287EAD]" />
-      <span className="font-medium text-[#1F2933]">{meta.label}</span>
-    </button>
-  );
-}
-
-function Palette() {
-  const [query, setQuery] = useState("");
-  const [openGroups, setOpenGroups] = useState<Record<BlockGroup, boolean>>({
-    text: true, data: true, media: false, layout: false, signoff: false,
-  });
-  const all = Object.keys(BLOCK_META) as BlockType[];
-  const filtered = all.filter((t) => BLOCK_META[t].label.toLowerCase().includes(query.toLowerCase()));
-  const isSearching = query.trim().length > 0;
-
-  return (
-    <aside className="flex h-full w-full flex-col overflow-hidden border-r border-[#C8CDD2] bg-[#F6F7F8]">
-      <div className="border-b border-[#C8CDD2] px-3 pb-3 pt-3">
-        <p className="mb-2 px-1 text-[10px] font-semibold uppercase tracking-widest text-[#5E6870]">Content Blocks</p>
-        <div className="relative">
-          <Search className="pointer-events-none absolute left-2.5 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-[#5E6870]" />
-          <input value={query} onChange={(e) => setQuery(e.target.value)} placeholder="Search…"
-                 className="h-8 w-full border border-[#AEB5BB] bg-white pl-8 pr-2 text-sm text-[#1F2933] outline-none placeholder:text-[#8C969E] focus:border-[#287EAD]" />
-        </div>
-      </div>
-      <div className="flex-1 overflow-y-auto py-2">
-        {BLOCK_GROUPS.map((g) => {
-          const items = filtered.filter((t) => BLOCK_META[t].group === g.key);
-          if (!items.length) return null;
-          const open = isSearching || openGroups[g.key];
-          return (
-            <div key={g.key} className="mb-0.5">
-              <button onClick={() => setOpenGroups((s) => ({ ...s, [g.key]: !s[g.key] }))}
-                      className="flex w-full items-center justify-between gap-2 px-3 py-2 text-left transition hover:bg-white">
-                <span className="flex items-center gap-1.5">
-                  <ChevronDown className={cn("h-3 w-3 text-[#5E6870] transition-transform", !open && "-rotate-90")} />
-                  <span className="text-[11px] font-semibold uppercase tracking-wider text-[#1F2933]">{g.label}</span>
-                </span>
-                <span className="rounded bg-[#E5E8EB] px-1.5 py-0.5 text-[10px] font-semibold text-[#5E6870]">{items.length}</span>
-              </button>
-              {open && <div className="flex flex-col">{items.map((t) => <PaletteItem key={t} type={t} />)}</div>}
-            </div>
-          );
-        })}
-        {filtered.length === 0 && <p className="pt-6 text-center text-sm text-[#5E6870]">No blocks match</p>}
-      </div>
-      <div className="border-t border-[#C8CDD2] px-3 py-3">
-        <p className="border border-dashed border-[#AEB5BB] bg-white p-2.5 text-[11px] leading-relaxed text-[#5E6870]">
-          Drag a block onto the page. Click any block to edit it in the inspector.
-        </p>
-      </div>
-    </aside>
-  );
-}
-
-/* ============================================================
- * Block rendering (canvas + preview share this)
- * ============================================================ */
-
-function alignClass(a?: Align) {
-  return a === "center" ? "text-center" : a === "right" ? "text-right" : a === "justify" ? "text-justify" : "text-left";
-}
-
-function blockTextStyle(b: DocBlock, theme: ThemeSettings, heading = false): React.CSSProperties {
-  return {
-    fontWeight: b.bold ? 700 : undefined,
-    fontStyle: b.italic ? "italic" : undefined,
-    textDecoration: b.underline ? "underline" : undefined,
-    fontSize: b.fontSize ? `${b.fontSize}px` : undefined,
-    color: b.color ?? (heading ? theme.headingColor : theme.textColor),
-    marginTop: b.marginTop ? `${b.marginTop}px` : undefined,
-    marginBottom: b.marginBottom != null ? `${b.marginBottom}px` : undefined,
-    whiteSpace: "pre-wrap",
-  };
-}
-
-/** Render a block as it will appear in the document. `data` non-null => preview
- *  (tokens substituted); when null we show raw tokens. */
-function RenderBlock({ block: b, theme, data }: {
-  block: DocBlock; theme: ThemeSettings; data: Record<string, string> | null;
-}) {
-  // String form (for attributes like alt); node form highlights [[placeholders]].
-  const renderStr = (s?: string) => (data ? substitute(s, data) : (s ?? ""));
-  const render = (s?: string): React.ReactNode => highlightPlaceholders(renderStr(s));
-  const headingSize = b.level === 1 ? 24 : b.level === 2 ? 18 : 15;
-
-  switch (b.type) {
-    case "heading":
-      return (
-        <div className={alignClass(b.align)} style={{ ...blockTextStyle(b, theme, true), fontFamily: theme.headingFamily, fontSize: b.fontSize ?? headingSize, fontWeight: 700 }}>
-          {render(b.text) || "Heading"}
-        </div>
-      );
-    case "paragraph":
-      return <p className={alignClass(b.align)} style={blockTextStyle(b, theme)}>{render(b.text)}</p>;
-    case "quote":
-      return (
-        <blockquote className={alignClass(b.align)} style={{ ...blockTextStyle(b, theme), borderLeft: `3px solid ${theme.accentColor}`, paddingLeft: 12, fontStyle: "italic" }}>
-          {render(b.text)}
-        </blockquote>
-      );
-    case "bulleted_list":
-      return (
-        <ul className={cn("list-disc pl-5", alignClass(b.align))} style={blockTextStyle(b, theme)}>
-          {(b.items ?? []).map((it, i) => <li key={i}>{render(it)}</li>)}
-        </ul>
-      );
-    case "numbered_list":
-      return (
-        <ol className={cn("list-decimal pl-5", alignClass(b.align))} style={blockTextStyle(b, theme)}>
-          {(b.items ?? []).map((it, i) => <li key={i}>{render(it)}</li>)}
-        </ol>
-      );
-    case "key_value":
-      return (
-        <table style={{ ...blockTextStyle(b, theme), borderCollapse: "collapse", width: "100%" }}>
-          <tbody>
-            {(b.pairs ?? []).map((p) => (
-              <tr key={p.id}>
-                <td style={{ width: b.labelWidth ?? 160, padding: "3px 8px 3px 0", fontWeight: 600, verticalAlign: "top", color: theme.textColor }}>
-                  {render(p.label)}
-                </td>
-                <td style={{ padding: "3px 0", color: theme.textColor }}>{render(p.value)}</td>
-              </tr>
-            ))}
-          </tbody>
-        </table>
-      );
-    case "data_table": {
-      const cols = b.columns ?? [];
-      const border = b.bordered ? "1px solid #C8CDD2" : "none";
-      const totalW = cols.reduce((a, c) => a + (c.width ?? 1), 0) || 1;
-      const fillRows = Math.max(1, b.fillRows ?? 3);
-      const rows = b.bound ? Array.from({ length: fillRows }, () => cols.map(() => "")) : (b.rows ?? []);
-      return (
-        <div style={blockTextStyle(b, theme)}>
-          {b.bound && (
-            <div className="mb-1 inline-flex items-center gap-1 rounded bg-[#FFFBEB] px-2 py-0.5 text-[10px] font-semibold text-[#92700A]">
-              <Rows3 className="h-3 w-3" /> {b.sourceKey ? `Repeats per “${b.sourceKey}” (or ${fillRows} blank rows)` : `${fillRows} blank rows for the user to fill`}
-            </div>
-          )}
-          <table style={{ borderCollapse: "collapse", width: "100%", border }}>
-            <thead>
-              <tr style={{ background: theme.accentColor, color: "#fff" }}>
-                {cols.map((c) => (
-                  <th key={c.id} style={{ width: `${((c.width ?? 1) / totalW) * 100}%`, textAlign: c.align ?? "left", padding: "6px 8px", border, fontWeight: 600 }}>
-                    {c.label}
-                  </th>
-                ))}
-              </tr>
-            </thead>
-            <tbody>
-              {rows.map((r, ri) => (
-                <tr key={ri} style={{ background: b.striped && ri % 2 ? "#F3F5F6" : undefined }}>
-                  {cols.map((c, ci) => (
-                    <td key={c.id} style={{ textAlign: c.align ?? "left", padding: "6px 8px", border, color: theme.textColor, minWidth: 40 }}>
-                      {b.bound ? <span>&nbsp;</span> : render(r?.[ci])}
-                    </td>
-                  ))}
-                </tr>
-              ))}
-              {rows.length === 0 && (
-                <tr><td colSpan={Math.max(1, cols.length)} style={{ padding: "8px", textAlign: "center", color: "#8C969E", border }}>No rows</td></tr>
-              )}
-            </tbody>
-          </table>
-        </div>
-      );
-    }
-    case "image":
-    case "logo": {
-      const side = b.float ?? "none";
-      const imgEl = b.src ? (
-        <img src={b.src} alt={renderStr(b.alt)} style={{ width: b.width, height: b.height, objectFit: "contain" }} />
-      ) : (
-        <div style={{ width: b.width, height: b.height, border: "1px dashed #AEB5BB", display: "flex", alignItems: "center", justifyContent: "center", color: "#8C969E", fontSize: 11, background: "#F6F7F8" }}>
-          {b.type === "logo" ? "Company logo" : "Image"}
-        </div>
-      );
-      // Side-by-side: image on the chosen side, `beside` content fills the rest.
-      if (side === "left" || side === "right") {
-        const imgCol = <div style={{ flexShrink: 0, width: b.width }}>{imgEl}</div>;
-        const textCol = <div style={{ flex: 1, minWidth: 0 }}>{render(b.beside)}</div>;
-        return (
-          <div style={{ display: "flex", gap: 20, alignItems: "flex-start", marginTop: b.marginTop, marginBottom: b.marginBottom }}>
-            {side === "left" ? <>{imgCol}{textCol}</> : <>{textCol}{imgCol}</>}
-          </div>
-        );
-      }
-      const wrapAlign = b.align === "center" ? "center" : b.align === "right" ? "flex-end" : "flex-start";
-      return (
-        <div style={{ display: "flex", justifyContent: wrapAlign, marginTop: b.marginTop, marginBottom: b.marginBottom }}>
-          {imgEl}
-        </div>
-      );
-    }
-    case "two_column":
-      return (
-        <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 24, ...blockTextStyle(b, theme) }}>
-          <div>{render(b.left)}</div>
-          <div>{render(b.right)}</div>
-        </div>
-      );
-    case "divider":
-      return <hr style={{ border: "none", borderTop: "1px solid #C8CDD2", marginTop: b.marginTop, marginBottom: b.marginBottom }} />;
-    case "spacer":
-      return <div style={{ height: b.height ?? 24 }} />;
-    case "page_break":
-      return (
-        <div className="my-2 flex items-center gap-2 text-[10px] font-semibold uppercase tracking-widest text-[#8C969E]" style={{ pageBreakAfter: "always" }}>
-          <div className="h-px flex-1 bg-[#C8CDD2]" /> Page break <div className="h-px flex-1 bg-[#C8CDD2]" />
-        </div>
-      );
-    case "signature":
-      return (
-        <div style={{ display: "grid", gridTemplateColumns: `repeat(${Math.min((b.signatories ?? []).length || 1, 3)}, 1fr)`, gap: 28, marginTop: b.marginTop, marginBottom: b.marginBottom }}>
-          {(b.signatories ?? []).map((s) => (
-            <div key={s.id} style={{ color: theme.textColor, fontSize: 12 }}>
-              <div style={{ fontWeight: 600, marginBottom: 30 }}>{s.role}</div>
-              <div style={{ borderTop: "1px solid #1F2933", paddingTop: 3 }}>
-                <div style={{ fontSize: 10, textTransform: "uppercase", letterSpacing: "0.05em", color: "#5E6870" }}>Signature</div>
-                {(s.nameToken || s.dateToken) && (
-                  <div style={{ marginTop: 6, lineHeight: 1.6 }}>
-                    {s.nameToken && <div><span style={{ color: "#5E6870" }}>Name: </span>{render(s.nameToken)}</div>}
-                    {s.dateToken && <div><span style={{ color: "#5E6870" }}>Date: </span>{render(s.dateToken)}</div>}
-                  </div>
-                )}
-              </div>
-            </div>
-          ))}
-        </div>
-      );
-    default:
-      return null;
-  }
-}
-
-/* ============================================================
- * Canvas — the editable paper
- * ============================================================ */
-
-function DropZone({ id, data }: { id: string; data: Record<string, unknown> }) {
-  const { setNodeRef, isOver } = useDroppable({ id, data });
-  return (
-    <div ref={setNodeRef}
-         className={cn(
-           "flex items-center justify-center rounded border-2 border-dashed text-[11px] font-medium transition",
-           isOver ? "h-10 border-[#287EAD] bg-[#EEF6FB] text-[#287EAD]" : "h-2 border-transparent text-transparent hover:h-8 hover:border-[#287EAD]/40 hover:text-[#287EAD]/60",
-         )}>
-      Drop here
-    </div>
-  );
-}
-
-/** Lightweight theme carrier so the (pointer-events-none) canvas preview can
- *  read the current theme without prop drilling into RenderBlock. */
-const CANVAS_THEME: { current: ThemeSettings } = { current: initialDocument.theme };
-
-function BlockCard({ block, index, count, isSelected, onSelect, onRemove, onDuplicate, onMove }: {
-  block: DocBlock; index: number; count: number; isSelected: boolean;
-  onSelect: () => void; onRemove: () => void; onDuplicate: () => void;
-  onMove: (dir: "up" | "down") => void;
-}) {
-  const { attributes, listeners, setNodeRef, isDragging } = useDraggable({
-    id: `canvas-${block.id}`, data: { source: "canvas-block", blockId: block.id },
-  });
-  const meta = BLOCK_META[block.type];
-  return (
-    <div ref={setNodeRef} onClick={(e) => { e.stopPropagation(); onSelect(); }}
-         className={cn(
-           "group relative rounded border bg-white px-3 py-2 transition-all",
-           isDragging && "opacity-40",
-           isSelected ? "border-[#287EAD] ring-2 ring-[#287EAD]/20" : "border-transparent hover:border-[#287EAD]/40",
-         )}>
-      <div className="absolute -top-3 right-2 z-10 flex items-center gap-0.5 rounded border border-[#C8CDD2] bg-white px-0.5 py-0.5 opacity-0 shadow-sm transition group-hover:opacity-100">
-        <span {...listeners} {...attributes} title="Drag to move"
-              className="cursor-grab rounded p-1 text-slate-400 hover:bg-slate-100 hover:text-slate-700 active:cursor-grabbing">
-          <GripVertical className="h-3 w-3" />
-        </span>
-        <button onClick={(e) => { e.stopPropagation(); onMove("up"); }} disabled={index === 0} title="Move up"
-                className="rounded p-1 text-slate-400 hover:bg-slate-100 disabled:opacity-20"><ChevronUp className="h-3 w-3" /></button>
-        <button onClick={(e) => { e.stopPropagation(); onMove("down"); }} disabled={index === count - 1} title="Move down"
-                className="rounded p-1 text-slate-400 hover:bg-slate-100 disabled:opacity-20"><ChevronDown className="h-3 w-3" /></button>
-        <button onClick={(e) => { e.stopPropagation(); onDuplicate(); }} title="Duplicate"
-                className="rounded p-1 text-slate-400 hover:bg-slate-100 hover:text-slate-700"><Copy className="h-3 w-3" /></button>
-        <button onClick={(e) => { e.stopPropagation(); onRemove(); }} title="Remove"
-                className="rounded p-1 text-slate-400 hover:bg-red-50 hover:text-red-500"><Trash2 className="h-3 w-3" /></button>
-      </div>
-      <span className="absolute -top-2.5 left-2 z-10 rounded bg-[#EEF6FB] px-1.5 py-0.5 text-[9px] font-semibold uppercase tracking-wider text-[#287EAD] opacity-0 transition group-hover:opacity-100">
-        {meta.label}
-      </span>
-      <div className="pointer-events-none">
-        <RenderBlock block={block} theme={CANVAS_THEME.current} data={null} />
-      </div>
-    </div>
-  );
-}
-
-function BandRow({ slot, data }: { slot: BandSlot; data?: Record<string, string> }) {
-  const r = (s?: string) => (data ? substitute(s, { page: "1", pages: "1", ...data }) : (s ?? ""));
-  return (
-    <div className="flex items-center justify-between gap-4 text-[11px]">
-      <span className="flex-1 text-left">{r(slot.left)}</span>
-      <span className="flex-1 text-center">{r(slot.center)}</span>
-      <span className="flex-1 text-right">{r(slot.right)}</span>
-    </div>
-  );
-}
-
-/** A larger drop target (page end / empty page). `index` is the insert position
- *  in the flat blocks array. */
-function BigDropZone({ id, index, label }: { id: string; index: number; label: string }) {
-  const { setNodeRef, isOver } = useDroppable({ id, data: { source: "canvas", kind: "before", index } });
-  return (
-    <div ref={setNodeRef}
-         className={cn("mt-1 flex h-12 items-center justify-center rounded border-2 border-dashed text-xs font-medium transition",
-           isOver ? "border-[#287EAD] bg-[#EEF6FB] text-[#287EAD]" : "border-slate-200 text-slate-400 hover:border-[#287EAD]/60")}>
-      <Plus className="mr-1.5 h-3.5 w-3.5" /> {label}
-    </div>
-  );
-}
-
-/** Split the flat blocks array into pages at every `page_break` block. Each page
- *  keeps its blocks' *global* indices so drag/drop insert positions stay correct. */
-type PageSlice = { items: { b: DocBlock; i: number }[]; breakBlock: DocBlock | null; startIndex: number };
-function splitPages(blocks: DocBlock[]): PageSlice[] {
-  const slices: PageSlice[] = [];
-  let cur: PageSlice = { items: [], breakBlock: null, startIndex: 0 };
-  blocks.forEach((b, i) => {
-    if (b.type === "page_break") {
-      cur.breakBlock = b;
-      slices.push(cur);
-      cur = { items: [], breakBlock: null, startIndex: i + 1 };
-    } else {
-      cur.items.push({ b, i });
-    }
-  });
-  slices.push(cur);
-  return slices;
-}
-
-/** Overlay that draws a dashed guide wherever the sheet's content grows past a
- *  physical page height — so admins see content will spill onto another printed
- *  page and can add a page break to control it. Zoom-safe: a hidden `mm` ruler is
- *  measured in the same units as the sheet, and guides are positioned in `mm`. */
-function PageOverflowGuides({ pageHmm }: { pageHmm: number }) {
-  const rulerRef = useRef<HTMLDivElement>(null);
-  const [count, setCount] = useState(0);
-  useEffect(() => {
-    const ruler = rulerRef.current;
-    const sheet = ruler?.parentElement;
-    if (!ruler || !sheet) return;
-    const measure = () => {
-      const pageHpx = ruler.getBoundingClientRect().height || 1;
-      const sheetH = sheet.getBoundingClientRect().height;
-      setCount(Math.max(0, Math.floor((sheetH - 2) / pageHpx)));
-    };
-    const ro = new ResizeObserver(measure);
-    ro.observe(sheet);
-    measure();
-    return () => ro.disconnect();
-  }, [pageHmm]);
-  return (
-    <>
-      <div ref={rulerRef} className="pointer-events-none" style={{ position: "absolute", top: 0, left: 0, width: 0, height: `${pageHmm}mm`, visibility: "hidden" }} />
-      {Array.from({ length: count }).map((_, k) => (
-        <div key={k} className="pointer-events-none" style={{ position: "absolute", left: 0, right: 0, top: `${(k + 1) * pageHmm}mm`, zIndex: 5 }}>
-          <div style={{ borderTop: "1px dashed #E0736B" }} />
-          <span style={{ position: "absolute", right: 6, top: 2, fontSize: 9, fontWeight: 600, color: "#C0564E", background: "#FFF5F4", border: "1px solid #F1C3BF", padding: "0 4px", borderRadius: 2 }}>
-            ↧ spills to page {k + 2} — add a page break
-          </span>
-        </div>
-      ))}
-    </>
-  );
-}
-
-function Paper({ template, selectedId, onSelect, onRemove, onDuplicate, onMove, onAddPage }: {
-  template: DocumentTemplate;
-  selectedId: string | null;
-  onSelect: (id: string | null) => void;
-  onRemove: (id: string) => void;
-  onDuplicate: (id: string) => void;
-  onMove: (id: string, dir: "up" | "down") => void;
-  onAddPage: () => void;
-}) {
-  CANVAS_THEME.current = template.theme;
-  const dims = PAGE_DIMS[template.page.size];
-  const portrait = template.page.orientation === "portrait";
-  const pageW = portrait ? dims.w : dims.h;
-  const pageH = portrait ? dims.h : dims.w;
-  const m = template.page.margin;
-  const count = template.blocks.length;
-  const pages = splitPages(template.blocks);
-
-  const header = template.header.enabled && (
-    <div className="text-[#5E6870]" style={{ padding: `${m.top}mm ${m.right}mm 4mm ${m.left}mm`, borderBottom: template.header.rule ? "1px solid #C8CDD2" : "none" }}>
-      <BandRow slot={template.header.content} />
-    </div>
-  );
-  const footer = template.footer.enabled && (
-    <div className="text-[#5E6870]" style={{ padding: `4mm ${m.right}mm ${m.bottom}mm ${m.left}mm`, borderTop: template.footer.rule ? "1px solid #C8CDD2" : "none" }}>
-      <BandRow slot={template.footer.content} />
-    </div>
-  );
-
-  return (
-    <div className="flex flex-col items-center gap-3 px-8 py-8" onClick={() => onSelect(null)}>
-      {pages.map((page, pageNo) => {
-        const endIndex = page.items.length ? page.items[page.items.length - 1].i + 1 : page.startIndex;
-        return (
-          <Fragment key={pageNo}>
-            <div className="flex flex-col items-center gap-1" style={{ width: `${pageW}mm` }}>
-              <div className="w-full text-[10px] font-semibold uppercase tracking-widest text-[#8C969E]">
-                Page {pageNo + 1} of {pages.length}
-              </div>
-              <div className="relative w-full bg-white shadow-lg" style={{ minHeight: `${pageH}mm`, fontFamily: template.theme.fontFamily, fontSize: template.theme.baseFontSize, lineHeight: template.theme.lineHeight }}>
-                <PageOverflowGuides pageHmm={pageH} />
-                {header}
-                <div style={{ padding: `${template.header.enabled ? 6 : m.top}mm ${m.right}mm ${template.footer.enabled ? 6 : m.bottom}mm ${m.left}mm` }}>
-                  {page.items.length > 0 && (
-                    <DropZone id={`drop-before-${page.startIndex}`} data={{ source: "canvas", kind: "before", index: page.startIndex }} />
-                  )}
-                  {page.items.map(({ b, i }, idx) => (
-                    <div key={b.id}>
-                      <BlockCard block={b} index={i} count={count}
-                                 isSelected={selectedId === b.id}
-                                 onSelect={() => onSelect(b.id)}
-                                 onRemove={() => onRemove(b.id)}
-                                 onDuplicate={() => onDuplicate(b.id)}
-                                 onMove={(d) => onMove(b.id, d)} />
-                      {idx < page.items.length - 1 && (
-                        <DropZone id={`drop-before-${i + 1}`} data={{ source: "canvas", kind: "before", index: i + 1 }} />
-                      )}
-                    </div>
-                  ))}
-                  <BigDropZone id={`drop-page-end-${pageNo}`} index={endIndex}
-                               label={page.items.length ? "Drop a block here" : "Empty page — drop a block here"} />
-                </div>
-                {footer}
-              </div>
-            </div>
-            {page.breakBlock && (
-              <div className="flex items-center gap-2" onClick={(e) => e.stopPropagation()}>
-                <div className="h-px w-20 bg-[#C8CDD2]" />
-                <button onClick={() => onRemove(page.breakBlock!.id)} title="Remove page break (merge with next page)"
-                        className="flex items-center gap-1 rounded border border-[#C8CDD2] bg-white px-2 py-0.5 text-[10px] font-semibold uppercase tracking-wider text-[#8C969E] hover:border-red-300 hover:text-red-500">
-                  <ScrollText className="h-3 w-3" /> Page break <X className="h-3 w-3" />
-                </button>
-                <div className="h-px w-20 bg-[#C8CDD2]" />
-              </div>
-            )}
-          </Fragment>
-        );
-      })}
-      <button onClick={(e) => { e.stopPropagation(); onAddPage(); }}
-              className="mt-1 flex items-center gap-1.5 rounded border-2 border-dashed border-[#AEB5BB] bg-white/70 px-4 py-2 text-xs font-semibold text-[#5E6870] transition hover:border-[#287EAD] hover:bg-[#EEF6FB] hover:text-[#287EAD]">
-        <Plus className="h-3.5 w-3.5" /> Add page
-      </button>
-    </div>
-  );
-}
-
-/* ============================================================
- * Inspector
- * ============================================================ */
-
-function Field({ label, children }: { label: string; children: React.ReactNode }) {
-  return <div className="space-y-1.5"><label className={labelCls}>{label}</label>{children}</div>;
-}
-
-function NumberRow({ label, value, onChange, min, max, suffix }: {
-  label: string; value?: number; onChange: (n: number) => void; min?: number; max?: number; suffix?: string;
-}) {
-  return (
-    <div className="flex items-center justify-between gap-2">
-      <label className="text-xs text-[#5E6870]">{label}</label>
-      <div className="flex items-center gap-1">
-        <input type="number" min={min} max={max} value={value ?? 0} onChange={(e) => onChange(Number(e.target.value))}
-               className="h-8 w-20 border border-[#AEB5BB] bg-white px-2 text-sm outline-none focus:border-[#287EAD]" />
-        {suffix && <span className="text-xs text-[#8C969E]">{suffix}</span>}
-      </div>
-    </div>
-  );
-}
-
-function AlignJustifyIcon(props: React.SVGProps<SVGSVGElement>) {
-  return (
-    <svg {...props} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2} strokeLinecap="round">
-      <line x1="3" y1="6" x2="21" y2="6" /><line x1="3" y1="12" x2="21" y2="12" /><line x1="3" y1="18" x2="21" y2="18" />
-    </svg>
-  );
-}
-
-function AlignToggle({ value, onChange }: { value?: Align; onChange: (a: Align) => void }) {
-  const opts: Array<{ a: Align; icon: React.ElementType }> = [
-    { a: "left", icon: AlignLeft }, { a: "center", icon: AlignCenter },
-    { a: "right", icon: AlignRight }, { a: "justify", icon: AlignJustifyIcon },
-  ];
-  return (
-    <div className="flex border border-[#AEB5BB]">
-      {opts.map(({ a, icon: Icon }) => (
-        <button key={a} type="button" onClick={() => onChange(a)}
-                className={cn("flex h-8 flex-1 items-center justify-center border-r border-[#AEB5BB] last:border-0",
-                  (value ?? "left") === a ? "bg-[#287EAD] text-white" : "bg-white text-[#5E6870] hover:bg-[#EEF6FB]")}>
-          <Icon className="h-3.5 w-3.5" />
-        </button>
-      ))}
-    </div>
-  );
-}
-
-function StyleToggles({ block, patch }: { block: DocBlock; patch: (p: Partial<DocBlock>) => void }) {
-  const Tog = ({ on, onClick, icon: Icon }: { on?: boolean; onClick: () => void; icon: React.ElementType }) => (
-    <button type="button" onClick={onClick}
-            className={cn("flex h-8 w-9 items-center justify-center border border-[#AEB5BB]", on ? "bg-[#287EAD] text-white" : "bg-white text-[#5E6870] hover:bg-[#EEF6FB]")}>
-      <Icon className="h-3.5 w-3.5" />
-    </button>
-  );
-  return (
-    <div className="flex gap-1">
-      <Tog on={block.bold} onClick={() => patch({ bold: !block.bold })} icon={Bold} />
-      <Tog on={block.italic} onClick={() => patch({ italic: !block.italic })} icon={Italic} />
-      <Tog on={block.underline} onClick={() => patch({ underline: !block.underline })} icon={Underline} />
-    </div>
-  );
-}
-
-function TokenTextarea({ value, onChange, rows = 3, fields, placeholder }: {
-  value: string; onChange: (v: string) => void; rows?: number; fields: MergeField[]; placeholder?: string;
-}) {
+function TokenArea({ value, onChange, fields, rows = 3 }: { value: string; onChange: (value: string) => void; fields: MergeField[]; rows?: number }) {
   const ref = useRef<HTMLTextAreaElement>(null);
   const insert = (token: string) => {
-    const el = ref.current;
-    const start = el?.selectionStart ?? value.length;
-    const end = el?.selectionEnd ?? value.length;
+    const node = ref.current; if (!node) return onChange(value + token);
+    const start = node.selectionStart; const end = node.selectionEnd;
     onChange(value.slice(0, start) + token + value.slice(end));
-    requestAnimationFrame(() => { el?.focus(); el?.setSelectionRange(start + token.length, start + token.length); });
+    requestAnimationFrame(() => { node.focus(); node.setSelectionRange(start + token.length, start + token.length); });
   };
-  return (
-    <div className="space-y-1.5">
-      <div className="flex justify-end"><MergeFieldMenu fields={fields} onPick={(t) => insert(t)} /></div>
-      <textarea ref={ref} value={value} rows={rows} placeholder={placeholder} onChange={(e) => onChange(e.target.value)}
-                className={cn(inputCls, "h-auto resize-y py-2")} />
-    </div>
-  );
+  return <div className="dtd-token-area"><textarea ref={ref} className={inputClass} rows={rows} value={value} onChange={(event) => onChange(event.target.value)} /><FieldPicker fields={fields} onPick={insert} /></div>;
 }
 
-function DataTableInspector({ block, repeatingFields, patch }: {
-  block: DocBlock; repeatingFields: MergeField[]; patch: (p: Partial<DocBlock>) => void;
-}) {
-  const cols = block.columns ?? [];
-  const setCols = (next: DocTableColumn[]) => patch({ columns: next });
-  const setRows = (next: string[][]) => patch({ rows: next });
+/* ========================================================================== *
+ * Renderer
+ * ========================================================================== */
 
-  const addColumn = () => {
-    const c = newColumn(`Column ${cols.length + 1}`);
-    setCols([...cols, c]);
-    setRows((block.rows ?? []).map((r) => [...r, ""]));
+function elementStyle(element: DocumentElement, theme: DocumentTemplateV2["theme"]): CSSProperties {
+  const style = element.style ?? {};
+  return {
+    textAlign: style.align, fontWeight: style.bold ? 700 : undefined, fontStyle: style.italic ? "italic" : undefined,
+    textDecoration: style.underline ? "underline" : undefined, fontSize: style.fontSize ?? theme.baseFontSize,
+    color: style.color ?? theme.textColor, background: style.background, padding: style.padding,
+    marginTop: style.marginTop, marginBottom: style.marginBottom, minHeight: style.minHeight,
+    borderWidth: style.borderWidth, borderColor: style.borderColor ?? "#CBD5E1", borderStyle: style.borderWidth ? (style.borderStyle ?? "solid") : undefined,
+    borderRadius: style.radius, whiteSpace: "pre-wrap", overflowWrap: "anywhere",
   };
-  const removeColumn = (idx: number) => {
-    setCols(cols.filter((_, i) => i !== idx));
-    setRows((block.rows ?? []).map((r) => r.filter((_, i) => i !== idx)));
-  };
-
-  return (
-    <div className="space-y-4">
-      <Field label="Rows">
-        <div className="space-y-2">
-          <label className="flex items-center gap-2 text-xs text-[#1F2933]">
-            <input type="radio" checked={!block.bound} onChange={() => patch({ bound: false })} /> Static rows (typed in the template)
-          </label>
-          <label className="flex items-center gap-2 text-xs text-[#1F2933]">
-            <input type="radio" checked={!!block.bound} onChange={() => patch({ bound: true })} /> Fillable rows — the user completes them when editing
-          </label>
-          {block.bound && (
-            <div className="space-y-2 border-l-2 border-[#E3C765] pl-3">
-              <NumberRow label="Blank rows" value={block.fillRows ?? 3} min={1} max={50} onChange={(n) => patch({ fillRows: Math.max(1, n) })} />
-              <div>
-                <p className="mb-1 text-[10px] text-[#8C969E]">Optionally bind to a collection (one row per record when data is supplied):</p>
-                <select value={block.sourceKey ?? ""} onChange={(e) => patch({ sourceKey: e.target.value })} className={cn(inputCls, "h-8")}>
-                  <option value="">No collection — blank rows</option>
-                  {repeatingFields.map((f) => <option key={f.key} value={f.key}>{f.label}</option>)}
-                </select>
-              </div>
-            </div>
-          )}
-        </div>
-      </Field>
-
-      <div className="grid grid-cols-2 gap-2">
-        <label className="flex items-center gap-2 text-xs text-[#1F2933]">
-          <input type="checkbox" checked={!!block.bordered} onChange={(e) => patch({ bordered: e.target.checked })} /> Borders
-        </label>
-        <label className="flex items-center gap-2 text-xs text-[#1F2933]">
-          <input type="checkbox" checked={!!block.striped} onChange={(e) => patch({ striped: e.target.checked })} /> Zebra rows
-        </label>
-      </div>
-
-      <Field label="Columns">
-        <div className="space-y-2">
-          {cols.map((c, i) => (
-            <div key={c.id} className="flex items-center gap-1">
-              <input value={c.label} onChange={(e) => setCols(cols.map((x) => x.id === c.id ? { ...x, label: e.target.value } : x))} className={cn(inputCls, "h-8")} />
-              <select value={c.align ?? "left"} onChange={(e) => setCols(cols.map((x) => x.id === c.id ? { ...x, align: e.target.value as Align } : x))}
-                      className="h-8 w-20 border border-[#AEB5BB] bg-white px-1 text-xs outline-none focus:border-[#287EAD]">
-                <option value="left">Left</option><option value="center">Center</option><option value="right">Right</option>
-              </select>
-              <button onClick={() => removeColumn(i)} className="flex h-8 w-8 shrink-0 items-center justify-center border border-[#AEB5BB] text-[#5E6870] hover:bg-red-50 hover:text-red-500"><Minus className="h-3.5 w-3.5" /></button>
-            </div>
-          ))}
-          <button onClick={addColumn} className="inline-flex items-center gap-1.5 border border-[#287EAD]/40 bg-white px-3 py-1.5 text-xs font-semibold text-[#287EAD] hover:bg-[#EEF6FB]"><Plus className="h-3.5 w-3.5" /> Add column</button>
-        </div>
-      </Field>
-
-      {!block.bound && (
-        <Field label="Static rows">
-          <div className="space-y-2">
-            {(block.rows ?? []).map((r, ri) => (
-              <div key={ri} className="flex items-start gap-1">
-                <div className="flex-1 space-y-1">
-                  {cols.map((c, ci) => (
-                    <input key={c.id} value={r[ci] ?? ""} placeholder={c.label}
-                           onChange={(e) => setRows((block.rows ?? []).map((row, i) => i === ri ? row.map((cell, j) => j === ci ? e.target.value : cell) : row))}
-                           className={cn(inputCls, "h-8 text-xs")} />
-                  ))}
-                </div>
-                <button onClick={() => setRows((block.rows ?? []).filter((_, i) => i !== ri))}
-                        className="flex h-8 w-8 shrink-0 items-center justify-center border border-[#AEB5BB] text-[#5E6870] hover:bg-red-50 hover:text-red-500"><Trash2 className="h-3.5 w-3.5" /></button>
-              </div>
-            ))}
-            <button onClick={() => setRows([...(block.rows ?? []), cols.map(() => "")])}
-                    className="inline-flex items-center gap-1.5 border border-[#287EAD]/40 bg-white px-3 py-1.5 text-xs font-semibold text-[#287EAD] hover:bg-[#EEF6FB]"><Plus className="h-3.5 w-3.5" /> Add row</button>
-          </div>
-        </Field>
-      )}
-    </div>
-  );
 }
 
-function BlockInspector({ block, theme, fields, repeatingFields, patch }: {
-  block: DocBlock; theme: ThemeSettings; fields: MergeField[]; repeatingFields: MergeField[];
-  patch: (p: Partial<DocBlock>) => void;
-}) {
-  const common = (
-    <>
-      {!["divider", "spacer", "page_break", "image", "logo"].includes(block.type) && (
-        <Field label="Alignment"><AlignToggle value={block.align} onChange={(a) => patch({ align: a })} /></Field>
-      )}
-      {["heading", "paragraph", "quote", "bulleted_list", "numbered_list", "key_value", "two_column"].includes(block.type) && (
-        <>
-          <Field label="Text style"><StyleToggles block={block} patch={patch} /></Field>
-          <div className="grid grid-cols-2 gap-2">
-            <Field label="Font size"><input type="number" value={block.fontSize ?? ""} placeholder={`${theme.baseFontSize}`}
-              onChange={(e) => patch({ fontSize: e.target.value ? Number(e.target.value) : undefined })} className={inputCls} /></Field>
-            <Field label="Text colour">
-              <input type="color" value={block.color ?? theme.textColor} onChange={(e) => patch({ color: e.target.value })} className="h-9 w-full border border-[#AEB5BB] bg-white p-1" />
-            </Field>
-          </div>
-        </>
-      )}
-      <div className="grid grid-cols-2 gap-2">
-        <NumberRow label="Space above" value={block.marginTop} onChange={(n) => patch({ marginTop: n })} suffix="px" />
-        <NumberRow label="Space below" value={block.marginBottom} onChange={(n) => patch({ marginBottom: n })} suffix="px" />
-      </div>
-    </>
-  );
-
-  return (
-    <div className="space-y-4">
-      {block.type === "heading" && (
-        <>
-          <Field label="Heading text"><TokenTextarea value={block.text ?? ""} rows={2} fields={fields} onChange={(v) => patch({ text: v })} /></Field>
-          <Field label="Level">
-            <div className="flex border border-[#AEB5BB]">
-              {[1, 2, 3].map((lvl) => (
-                <button key={lvl} type="button" onClick={() => patch({ level: lvl as 1 | 2 | 3 })}
-                        className={cn("h-8 flex-1 border-r border-[#AEB5BB] text-xs font-semibold last:border-0",
-                          (block.level ?? 2) === lvl ? "bg-[#287EAD] text-white" : "bg-white text-[#5E6870] hover:bg-[#EEF6FB]")}>H{lvl}</button>
-              ))}
-            </div>
-          </Field>
-        </>
-      )}
-
-      {(block.type === "paragraph" || block.type === "quote") && (
-        <Field label="Content"><TokenTextarea value={block.text ?? ""} rows={5} fields={fields} onChange={(v) => patch({ text: v })} /></Field>
-      )}
-
-      {(block.type === "bulleted_list" || block.type === "numbered_list") && (
-        <Field label="List items">
-          <div className="space-y-2">
-            {(block.items ?? []).map((it, i) => (
-              <div key={i} className="flex gap-1">
-                <input value={it} onChange={(e) => patch({ items: (block.items ?? []).map((x, xi) => xi === i ? e.target.value : x) })} className={inputCls} />
-                <button onClick={() => patch({ items: (block.items ?? []).filter((_, xi) => xi !== i) })}
-                        className="flex h-9 w-9 shrink-0 items-center justify-center border border-[#AEB5BB] text-[#5E6870] hover:bg-red-50 hover:text-red-500"><Minus className="h-3.5 w-3.5" /></button>
-              </div>
-            ))}
-            <button onClick={() => patch({ items: [...(block.items ?? []), "New item"] })}
-                    className="inline-flex items-center gap-1.5 border border-[#287EAD]/40 bg-white px-3 py-1.5 text-xs font-semibold text-[#287EAD] hover:bg-[#EEF6FB]"><Plus className="h-3.5 w-3.5" /> Add item</button>
-          </div>
-        </Field>
-      )}
-
-      {block.type === "key_value" && (
-        <>
-          <NumberRow label="Label width" value={block.labelWidth} onChange={(n) => patch({ labelWidth: n })} suffix="px" />
-          <Field label="Rows">
-            <div className="space-y-2">
-              {(block.pairs ?? []).map((p) => (
-                <div key={p.id} className="space-y-1 border border-[#E5E8EB] p-2">
-                  <div className="flex gap-1">
-                    <input value={p.label} placeholder="Label"
-                           onChange={(e) => patch({ pairs: (block.pairs ?? []).map((x) => x.id === p.id ? { ...x, label: e.target.value } : x) })} className={cn(inputCls, "h-8")} />
-                    <button onClick={() => patch({ pairs: (block.pairs ?? []).filter((x) => x.id !== p.id) })}
-                            className="flex h-8 w-8 shrink-0 items-center justify-center border border-[#AEB5BB] text-[#5E6870] hover:bg-red-50 hover:text-red-500"><Minus className="h-3.5 w-3.5" /></button>
-                  </div>
-                  <div className="flex items-center gap-1">
-                    <input value={p.value} placeholder="Value or {{field}}"
-                           onChange={(e) => patch({ pairs: (block.pairs ?? []).map((x) => x.id === p.id ? { ...x, value: e.target.value } : x) })} className={cn(inputCls, "h-8 font-mono text-xs")} />
-                    <MergeFieldMenu fields={fields} label="" onPick={(t) => patch({ pairs: (block.pairs ?? []).map((x) => x.id === p.id ? { ...x, value: (x.value ? x.value + " " : "") + t } : x) })} />
-                  </div>
-                </div>
-              ))}
-              <button onClick={() => patch({ pairs: [...(block.pairs ?? []), { id: uid(), label: "New", value: "" }] })}
-                      className="inline-flex items-center gap-1.5 border border-[#287EAD]/40 bg-white px-3 py-1.5 text-xs font-semibold text-[#287EAD] hover:bg-[#EEF6FB]"><Plus className="h-3.5 w-3.5" /> Add row</button>
-            </div>
-          </Field>
-        </>
-      )}
-
-      {block.type === "data_table" && (
-        <DataTableInspector block={block} repeatingFields={repeatingFields} patch={patch} />
-      )}
-
-      {(block.type === "image" || block.type === "logo") && (
-        <>
-          <Field label="Upload image">
-            <div className="space-y-2">
-              <label className="flex cursor-pointer items-center justify-center gap-2 border border-dashed border-[#287EAD]/50 bg-[#EEF6FB] px-3 py-2 text-xs font-semibold text-[#287EAD] hover:bg-[#E3F0F8]">
-                <ImageIcon className="h-3.5 w-3.5" /> Choose image…
-                <input type="file" accept="image/*" className="hidden"
-                       onChange={(e) => {
-                         const f = e.target.files?.[0];
-                         if (!f) return;
-                         const reader = new FileReader();
-                         reader.onload = () => patch({ src: String(reader.result) });
-                         reader.readAsDataURL(f);
-                         e.target.value = "";
-                       }} />
-              </label>
-              {block.src?.startsWith("data:image") && (
-                <div className="flex items-center justify-between gap-2 border border-[#C8CDD2] bg-white p-2">
-                  <img src={block.src} alt="" className="h-10 w-auto object-contain" />
-                  <button type="button" onClick={() => patch({ src: "" })} className="text-[11px] font-semibold text-[#5E6870] hover:text-red-600">Remove</button>
-                </div>
-              )}
-            </div>
-          </Field>
-          <Field label="…or image URL"><input value={block.src?.startsWith("data:") ? "" : (block.src ?? "")} placeholder="https://… or {{logo_url}}" onChange={(e) => patch({ src: e.target.value })} className={inputCls} /></Field>
-          <Field label="Alt text"><input value={block.alt ?? ""} onChange={(e) => patch({ alt: e.target.value })} className={inputCls} /></Field>
-          <div className="grid grid-cols-2 gap-2">
-            <NumberRow label="Width" value={block.width} onChange={(n) => patch({ width: n })} suffix="px" />
-            <NumberRow label="Height" value={block.height} onChange={(n) => patch({ height: n })} suffix="px" />
-          </div>
-          <Field label="Layout">
-            <select value={block.float ?? "none"} onChange={(e) => patch({ float: e.target.value as DocBlock["float"] })} className={inputCls}>
-              <option value="none">Full width (stacked)</option>
-              <option value="left">Beside content — image on left</option>
-              <option value="right">Beside content — image on right</option>
-            </select>
-          </Field>
-          {(block.float === "left" || block.float === "right") ? (
-            <Field label="Content beside image">
-              <TokenTextarea value={block.beside ?? ""} rows={4} fields={fields}
-                             placeholder="e.g. company name, address, contact — {{company_address}}"
-                             onChange={(v) => patch({ beside: v })} />
-            </Field>
-          ) : (
-            <Field label="Alignment"><AlignToggle value={block.align} onChange={(a) => patch({ align: a })} /></Field>
-          )}
-        </>
-      )}
-
-      {block.type === "two_column" && (
-        <>
-          <Field label="Left column"><TokenTextarea value={block.left ?? ""} rows={4} fields={fields} onChange={(v) => patch({ left: v })} /></Field>
-          <Field label="Right column"><TokenTextarea value={block.right ?? ""} rows={4} fields={fields} onChange={(v) => patch({ right: v })} /></Field>
-        </>
-      )}
-
-      {block.type === "spacer" && <NumberRow label="Height" value={block.height} onChange={(n) => patch({ height: n })} suffix="px" />}
-
-      {block.type === "signature" && (
-        <Field label="Signatories">
-          <div className="space-y-2">
-            <p className="text-[11px] text-[#8C969E]">
-              Each entry is a signature line. Set <strong>Name</strong>/<strong>Date</strong> to an
-              auto-fill field (e.g. <code className="font-mono">{"{{current_user}}"}</code>), a
-              fill-in <code className="font-mono">[[placeholder]]</code>, or plain text. Add as many
-              approvers as you need.
-            </p>
-            {(block.signatories ?? []).map((s, idx) => {
-              const setSig = (p: Partial<Signatory>) =>
-                patch({ signatories: (block.signatories ?? []).map((x) => x.id === s.id ? { ...x, ...p } : x) });
-              return (
-              <div key={s.id} className="space-y-1.5 border border-[#E5E8EB] p-2">
-                <div className="flex items-center gap-1">
-                  <span className="shrink-0 text-[10px] font-semibold text-[#8C969E]">#{idx + 1}</span>
-                  <input value={s.role} placeholder="Role e.g. Approved by" onChange={(e) => setSig({ role: e.target.value })} className={cn(inputCls, "h-8")} />
-                  <button onClick={() => patch({ signatories: (block.signatories ?? []).filter((x) => x.id !== s.id) })}
-                          title="Remove signatory"
-                          className="flex h-8 w-8 shrink-0 items-center justify-center border border-[#AEB5BB] text-[#5E6870] hover:bg-red-50 hover:text-red-500"><Minus className="h-3.5 w-3.5" /></button>
-                </div>
-                <div className="flex items-center gap-1">
-                  <input value={s.nameToken ?? ""} placeholder="Name — field, [[ask]] or text" onChange={(e) => setSig({ nameToken: e.target.value })} className={cn(inputCls, "h-8 font-mono text-xs")} />
-                  <MergeFieldMenu fields={fields} label="" onPick={(t) => setSig({ nameToken: (s.nameToken ? s.nameToken + " " : "") + t })} />
-                </div>
-                <div className="flex items-center gap-1">
-                  <input value={s.dateToken ?? ""} placeholder="Date — field, [[ask]] or text" onChange={(e) => setSig({ dateToken: e.target.value })} className={cn(inputCls, "h-8 font-mono text-xs")} />
-                  <MergeFieldMenu fields={fields} label="" onPick={(t) => setSig({ dateToken: (s.dateToken ? s.dateToken + " " : "") + t })} />
-                </div>
-              </div>
-              );
-            })}
-            <button onClick={() => patch({ signatories: [...(block.signatories ?? []), { id: uid(), role: "Approved by", nameToken: "[[Name]]", dateToken: "[[Date]]" }] })}
-                    className="inline-flex items-center gap-1.5 border border-[#287EAD]/40 bg-white px-3 py-1.5 text-xs font-semibold text-[#287EAD] hover:bg-[#EEF6FB]"><Plus className="h-3.5 w-3.5" /> Add approver / signatory</button>
-          </div>
-        </Field>
-      )}
-
-      <div className="border-t border-[#E5E8EB] pt-4">{common}</div>
-    </div>
-  );
-}
-
-function Inspector({ template, selectedId, fields, onUpdateBlock, onCollapse }: {
-  template: DocumentTemplate; selectedId: string | null; fields: MergeField[];
-  onUpdateBlock: (id: string, patch: Partial<DocBlock>) => void; onCollapse: () => void;
-}) {
-  const block = template.blocks.find((b) => b.id === selectedId) ?? null;
-  const repeatingFields = fields.filter((f) => f.repeating);
-
-  return (
-    <aside className="flex h-full w-full flex-col overflow-hidden border-l border-[#C8CDD2] bg-white">
-      <div className="flex items-center justify-between border-b border-[#C8CDD2] bg-[#F3F5F6] px-4 py-3">
-        <div className="flex items-center gap-2">
-          <Settings className="h-4 w-4 text-[#287EAD]" />
-          <span className="text-sm font-bold text-[#1F2933]">{block ? BLOCK_META[block.type].label : "Inspector"}</span>
-        </div>
-        <button onClick={onCollapse} className="p-1 text-[#5E6870] hover:text-[#1F2933]"><X className="h-4 w-4" /></button>
-      </div>
-      <div className="flex-1 overflow-y-auto p-4">
-        {block ? (
-          <BlockInspector block={block} theme={template.theme} fields={fields} repeatingFields={repeatingFields} patch={(p) => onUpdateBlock(block.id, p)} />
-        ) : (
-          <div className="flex h-full flex-col items-center justify-center text-center text-[#8C969E]">
-            <FileText className="mb-3 h-10 w-10 text-[#C8CDD2]" />
-            <p className="text-sm font-medium text-[#5E6870]">Select a block to edit it</p>
-            <p className="mt-1 text-xs">Use the <strong>Settings</strong> tab for page setup, fonts, and header/footer.</p>
-          </div>
-        )}
-      </div>
-    </aside>
-  );
-}
-
-/* ============================================================
- * Preview tab — sample-data rendered, print-ready
- * ============================================================ */
-
-function buildSampleData(fields: MergeField[], provided?: Record<string, string>): Record<string, string> {
-  const out: Record<string, string> = {};
-  for (const f of fields) {
-    if (f.repeating) continue;
-    out[f.key] = provided?.[f.key] ?? `[${f.label}]`;
+function ElementRenderer({ element, theme, data, page, pages }: { element: DocumentElement; theme: DocumentTemplateV2["theme"]; data: Record<string, unknown> | null; page: number; pages: number }) {
+  const render = (value?: string) => renderedText(value, data, page, pages);
+  const style = elementStyle(element, theme);
+  if (element.type === "heading") return <div style={{ ...style, fontFamily: theme.headingFamily, color: element.style?.color ?? theme.headingColor }}>{render(element.text)}</div>;
+  if (element.type === "text") return <div style={style}>{render(element.text)}</div>;
+  if (element.type === "note") return <div style={style}>{render(element.text)}</div>;
+  if (element.type === "divider") return <div style={{ borderTop: `${element.style?.borderWidth ?? 1}px ${element.style?.borderStyle ?? "solid"} ${element.style?.borderColor ?? "#94A3B8"}`, marginTop: element.style?.marginTop, marginBottom: element.style?.marginBottom }} />;
+  if (element.type === "spacer") return <div style={{ height: element.height ?? 24 }} />;
+  if (element.type === "bulleted_list" || element.type === "numbered_list") {
+    const Tag = element.type === "bulleted_list" ? "ul" : "ol";
+    return <Tag style={{ ...style, paddingLeft: 20 }}>{(element.items ?? []).map((item, index) => <li key={index}>{render(item)}</li>)}</Tag>;
   }
-  return { ...out, ...(provided ?? {}) };
+  if (element.type === "field_group") return <div style={style}>{(element.fields ?? []).map((field) => <div className="dtd-kv" key={field.id}><span style={{ width: element.labelWidth ?? 120, fontWeight: field.boldLabel ? 700 : undefined }}>{render(field.label)}</span><span style={{ fontWeight: field.boldValue ? 700 : undefined }}>{render(field.value)}</span></div>)}</div>;
+  if (element.type === "image") {
+    const source = data && element.text ? valueAt(data, element.text.replace(/[{}\s]/g, "")) : element.src;
+    return <div style={{ ...style, display: "flex", justifyContent: style.textAlign === "right" ? "flex-end" : style.textAlign === "center" ? "center" : "flex-start" }}>{typeof source === "string" && source ? <img src={source} alt={element.alt ?? ""} style={{ width: element.width, height: element.height, objectFit: element.objectFit ?? "contain", opacity: element.opacity ?? 1 }} /> : <div className="dtd-image-placeholder" style={{ width: element.width, height: element.height }}><ImageIcon size={18} /><span>{element.alt || "Image"}</span></div>}</div>;
+  }
+  if (element.type === "signature_group") return <div className="dtd-signatures" style={style}>{(element.signatories ?? []).map((sig) => <div className="dtd-signatory" key={sig.id}><strong>{sig.step ? `${sig.step}. ` : ""}{render(sig.role)}</strong><div className="dtd-signatory-line"><span>{render(sig.name)}</span><span><b>Date:</b> {render(sig.date)}</span></div>{sig.signature && <div><b>Signature:</b> {render(sig.signature)}</div>}</div>)}</div>;
+  const columns = element.columns ?? [];
+  const source = data && element.sourceKey ? valueAt(data, element.sourceKey) : null;
+  const rows = Array.isArray(source) ? source as Array<Record<string, unknown>> : element.staticRows ?? Array.from({ length: element.previewRows ?? 2 }, () => columns.map(() => ""));
+  const border = `${element.style?.borderWidth ?? 1}px solid ${element.style?.borderColor ?? "#475569"}`;
+  return <div style={style} className="dtd-table-wrap"><table className="dtd-data-table" style={{ borderCollapse: "collapse", width: "100%", tableLayout: "fixed" }}>
+    {element.showHeader !== false && <thead><tr style={{ background: element.headerBackground, color: element.headerColor }}>{columns.map((column) => <th key={column.id} style={{ width: `${column.width}%`, textAlign: column.align ?? "left", border, padding: element.cellPadding ?? 4 }}>{column.label}</th>)}</tr></thead>}
+    <tbody>{rows.map((row, rowIndex) => <tr key={rowIndex} style={{ background: element.striped && rowIndex % 2 ? "#F8FAFC" : undefined }}>{columns.map((column, columnIndex) => {
+      const raw = Array.isArray(row) ? row[columnIndex] : row[column.key];
+      return <td key={column.id} style={{ textAlign: column.align ?? "left", border, padding: element.cellPadding ?? 4 }}>{render(String(raw ?? ""))}</td>;
+    })}</tr>)}</tbody>
+    {!!element.summaries?.length && <tfoot>{element.summaries.map((summary) => <tr key={summary.id}><td colSpan={Math.max(1, summary.labelSpan)} style={{ border, padding: element.cellPadding ?? 4, textAlign: "right", fontWeight: summary.bold ? 700 : undefined }}>{render(summary.label)}</td>{summary.values.map((value, index) => <td key={index} style={{ border, padding: element.cellPadding ?? 4, textAlign: "right", fontWeight: summary.bold ? 700 : undefined }}>{render(value)}</td>)}</tr>)}</tfoot>}
+  </table></div>;
 }
 
-function PreviewTab({ template, fields, sampleData }: {
-  template: DocumentTemplate; fields: MergeField[]; sampleData?: Record<string, string>;
-}) {
-  const data = useMemo(() => buildSampleData(fields, sampleData), [fields, sampleData]);
-  const dims = PAGE_DIMS[template.page.size];
-  const portrait = template.page.orientation === "portrait";
-  const pageW = portrait ? dims.w : dims.h;
-  const pageH = portrait ? dims.h : dims.w;
-  const m = template.page.margin;
-  const pages = splitPages(template.blocks);
+function RowRenderer({ row, theme, data, page, pages, children }: { row: GridRow; theme: DocumentTemplateV2["theme"]; data: Record<string, unknown> | null; page: number; pages: number; children?: (cell: GridCell, cellIndex: number) => ReactNode }) {
+  return <div className="dtd-grid-row" style={{ display: "grid", gridTemplateColumns: row.columns.map((column) => `${column.width}fr`).join(" "), gap: row.gap, marginTop: row.marginTop, marginBottom: row.marginBottom, minHeight: row.minHeight, breakInside: row.keepTogether ? "avoid" : undefined }}>
+    {row.columns.map((cell, index) => children ? children(cell, index) : <div key={cell.id} style={{ alignSelf: cell.verticalAlign === "center" ? "center" : cell.verticalAlign === "end" ? "end" : "start", padding: cell.padding, background: cell.background, border: cell.borderWidth ? `${cell.borderWidth}px solid ${cell.borderColor ?? "#CBD5E1"}` : undefined }}>{cell.elements.map((element) => <ElementRenderer key={element.id} element={element} theme={theme} data={data} page={page} pages={pages} />)}</div>)}
+  </div>;
+}
 
-  return (
-    <div className="flex flex-col items-center gap-6 px-8 py-8">
-      {pages.map((page, pageNo) => (
-        <div key={pageNo} className="doc-preview-sheet bg-white shadow-lg"
-             style={{ width: `${pageW}mm`, minHeight: `${pageH}mm`, display: "flex", flexDirection: "column",
-                      fontFamily: template.theme.fontFamily, fontSize: template.theme.baseFontSize, lineHeight: template.theme.lineHeight, color: template.theme.textColor }}>
-          {template.header.enabled && (
-            <div style={{ padding: `${m.top}mm ${m.right}mm 4mm ${m.left}mm`, borderBottom: template.header.rule ? "1px solid #C8CDD2" : "none", color: "#5E6870" }}>
-              <BandRow slot={template.header.content} data={{ ...data, page: String(pageNo + 1), pages: String(pages.length) }} />
-            </div>
-          )}
-          <div style={{ flex: 1, padding: `${template.header.enabled ? 6 : m.top}mm ${m.right}mm ${template.footer.enabled ? 6 : m.bottom}mm ${m.left}mm` }}>
-            {page.items.map(({ b }) => (
-              <div key={b.id}><RenderBlock block={b} theme={template.theme} data={data} /></div>
-            ))}
-          </div>
-          {template.footer.enabled && (
-            <div style={{ padding: `4mm ${m.right}mm ${m.bottom}mm ${m.left}mm`, borderTop: template.footer.rule ? "1px solid #C8CDD2" : "none", color: "#5E6870" }}>
-              <BandRow slot={template.footer.content} data={{ ...data, page: String(pageNo + 1), pages: String(pages.length) }} />
-            </div>
-          )}
-        </div>
-      ))}
-      <p className="text-xs text-[#8C969E]">Preview uses sample values. Repeating tables show one representative row.</p>
+function BandRenderer({ band, theme, data, page, pages, kind }: { band: PageBand; theme: DocumentTemplateV2["theme"]; data: Record<string, unknown> | null; page: number; pages: number; kind: "header" | "footer" }) {
+  if (!band.enabled) return null;
+  return <div className={cx("dtd-band", `dtd-${kind}`, band.border && "has-rule")} style={{ minHeight: band.height }}>{band.rows.map((row) => <RowRenderer key={row.id} row={row} theme={theme} data={data} page={page} pages={pages} />)}</div>;
+}
+
+function Watermark({ watermark, data }: { watermark: WatermarkSettings; data: Record<string, unknown> | null }) {
+  if (!watermark.enabled) return null;
+  const value = data ? substitute(watermark.value, data) : watermark.value;
+  return <div className="dtd-watermark" style={{ opacity: watermark.opacity, transform: `translate(-50%, -50%) rotate(${watermark.rotation ?? 0}deg)`, width: watermark.width }}>{watermark.kind === "image" && value && !value.includes("{{") ? <img src={value} alt="" /> : <span>{value}</span>}</div>;
+}
+
+/* ========================================================================== *
+ * Design canvas and dragging
+ * ========================================================================== */
+
+function PaletteItem({ type }: { type: ElementType }) {
+  const meta = elementMeta[type]; const Icon = meta.icon;
+  const draggable = useDraggable({ id: `palette:${type}`, data: { source: "palette", type } });
+  return <button ref={draggable.setNodeRef} {...draggable.listeners} {...draggable.attributes} type="button" className={cx("dtd-palette-item", draggable.isDragging && "is-dragging")} title={meta.hint}><Icon size={15} /><span>{meta.label}</span></button>;
+}
+
+function Palette({ onAddRow }: { onAddRow: (ratios: number[]) => void }) {
+  const [query, setQuery] = useState("");
+  const [open, setOpen] = useState<Record<PaletteGroup, boolean>>({ text: true, data: true, media: true, layout: true, signoff: true });
+  const types = Object.keys(elementMeta) as ElementType[];
+  const filtered = types.filter((type) => elementMeta[type].label.toLowerCase().includes(query.toLowerCase()));
+  return <aside className="dtd-palette"><div className="dtd-panel-title"><span>Elements</span></div><div className="dtd-search"><Search size={14} /><input value={query} onChange={(event) => setQuery(event.target.value)} placeholder="Search elements" /></div><div className="dtd-palette-scroll">
+    {groupLabels.map((group) => { const items = filtered.filter((type) => elementMeta[type].group === group.key); if (!items.length) return null; return <section key={group.key}><button type="button" className="dtd-group-title" onClick={() => setOpen((state) => ({ ...state, [group.key]: !state[group.key] }))}>{open[group.key] ? <ChevronDown size={13} /> : <ChevronRight size={13} />}<span>{group.label}</span><small>{items.length}</small></button>{open[group.key] && items.map((type) => <PaletteItem key={type} type={type} />)}</section>; })}
+    <section><div className="dtd-group-title static"><Columns2 size={13} /><span>Rows & columns</span></div><div className="dtd-layout-presets">{[[1], [1, 1], [1, 2], [2, 1], [1, 1, 1], [1, 2, 1]].map((ratios) => <button type="button" key={ratios.join("-")} title={`Add ${ratios.length}-column row`} onClick={() => onAddRow(ratios)}>{ratios.map((ratio, index) => <i key={index} style={{ flex: ratio }} />)}</button>)}</div></section>
+  </div><div className="dtd-palette-help">Drag an element into any cell, or add a row layout.</div></aside>;
+}
+
+function ElementFrame({ element, selected, onSelect, onDelete, onDuplicate, onMove, theme, page, pages }: { element: DocumentElement; selected: boolean; onSelect: () => void; onDelete: () => void; onDuplicate: () => void; onMove: (direction: -1 | 1) => void; theme: DocumentTemplateV2["theme"]; page: number; pages: number }) {
+  const drag = useDraggable({ id: `element:${element.id}`, data: { source: "element", elementId: element.id } });
+  return <div ref={drag.setNodeRef} className={cx("dtd-element-frame", selected && "is-selected", drag.isDragging && "is-dragging")} onClick={(event) => { event.stopPropagation(); onSelect(); }}><div className="dtd-element-toolbar"><button type="button" className="dtd-grip" title="Drag element" {...drag.listeners} {...drag.attributes}><GripVertical size={13} /></button><IconButton title="Move up" onClick={() => onMove(-1)}><ArrowUp size={12} /></IconButton><IconButton title="Move down" onClick={() => onMove(1)}><ArrowDown size={12} /></IconButton><IconButton title="Duplicate" onClick={onDuplicate}><Copy size={12} /></IconButton><IconButton title="Delete" onClick={onDelete}><Trash2 size={12} /></IconButton></div><ElementRenderer element={element} theme={theme} data={null} page={page} pages={pages} /></div>;
+}
+
+function CellCanvas({ pageId, row, cell, selection, onSelect, onDeleteElement, onDuplicateElement, onMoveElement, theme, pageNo, pages }: { pageId: string; row: GridRow; cell: GridCell; selection: Selection | null; onSelect: (selection: Selection) => void; onDeleteElement: (elementId: string) => void; onDuplicateElement: (elementId: string) => void; onMoveElement: (elementId: string, direction: -1 | 1) => void; theme: DocumentTemplateV2["theme"]; pageNo: number; pages: number }) {
+  const drop = useDroppable({ id: `cell:${pageId}:${row.id}:${cell.id}`, data: { source: "cell", pageId, rowId: row.id, cellId: cell.id } });
+  const selected = selection?.kind === "cell" && selection.cellId === cell.id;
+  return <div ref={drop.setNodeRef} className={cx("dtd-cell-canvas", selected && "is-selected", drop.isOver && "is-over")} style={{ alignSelf: cell.verticalAlign === "center" ? "center" : cell.verticalAlign === "end" ? "end" : "start", padding: cell.padding, background: cell.background, borderWidth: cell.borderWidth, borderColor: cell.borderColor, minHeight: row.minHeight }} onClick={(event) => { event.stopPropagation(); onSelect({ kind: "cell", pageId, rowId: row.id, cellId: cell.id }); }}>
+    {cell.elements.map((element) => <ElementFrame key={element.id} element={element} theme={theme} page={pageNo} pages={pages} selected={selection?.kind === "element" && selection.elementId === element.id} onSelect={() => onSelect({ kind: "element", pageId, rowId: row.id, cellId: cell.id, elementId: element.id })} onDelete={() => onDeleteElement(element.id)} onDuplicate={() => onDuplicateElement(element.id)} onMove={(direction) => onMoveElement(element.id, direction)} />)}
+    {!cell.elements.length && <div className="dtd-empty-cell"><Plus size={13} />Drop an element here</div>}
+  </div>;
+}
+
+function DesignerPage({ template, page, pageIndex, selection, onSelect, onDeleteRow, onDuplicateRow, onMoveRow, onDeleteElement, onDuplicateElement, onMoveElement }: { template: DocumentTemplateV2; page: DocumentPage; pageIndex: number; selection: Selection | null; onSelect: (selection: Selection) => void; onDeleteRow: (rowId: string) => void; onDuplicateRow: (rowId: string) => void; onMoveRow: (rowId: string, direction: -1 | 1) => void; onDeleteElement: (elementId: string) => void; onDuplicateElement: (elementId: string) => void; onMoveElement: (elementId: string, direction: -1 | 1) => void }) {
+  const dims = PAGE_DIMS[template.page.size]; const portrait = template.page.orientation === "portrait";
+  const width = portrait ? dims.w : dims.h; const height = portrait ? dims.h : dims.w; const margin = template.page.margin;
+  return <div className="dtd-page-wrap" style={{ width: `${width}mm` }}><div className="dtd-page-label">{page.name} · Page {pageIndex + 1} of {template.pages.length}</div><article className="dtd-paper" style={{ width: `${width}mm`, minHeight: `${height}mm`, fontFamily: template.theme.fontFamily, fontSize: template.theme.baseFontSize, lineHeight: template.theme.lineHeight }} onClick={() => onSelect({ kind: "page", pageId: page.id })}>
+    <Watermark watermark={template.watermark} data={null} /><BandRenderer band={template.header} theme={template.theme} data={null} page={pageIndex + 1} pages={template.pages.length} kind="header" />
+    <div className="dtd-page-content" style={{ padding: `${margin.top}mm ${margin.right}mm ${margin.bottom}mm ${margin.left}mm` }}>{page.rows.map((row) => <div key={row.id} className={cx("dtd-row-frame", selection?.kind === "row" && selection.rowId === row.id && "is-selected")} onClick={(event) => { event.stopPropagation(); onSelect({ kind: "row", pageId: page.id, rowId: row.id }); }}><div className="dtd-row-toolbar"><IconButton title="Move row up" onClick={() => onMoveRow(row.id, -1)}><ArrowUp size={12} /></IconButton><IconButton title="Move row down" onClick={() => onMoveRow(row.id, 1)}><ArrowDown size={12} /></IconButton><IconButton title="Duplicate row" onClick={() => onDuplicateRow(row.id)}><Copy size={12} /></IconButton><IconButton title="Delete row" onClick={() => onDeleteRow(row.id)}><Trash2 size={12} /></IconButton></div><RowRenderer row={row} theme={template.theme} data={null} page={pageIndex + 1} pages={template.pages.length}>{(cell) => <CellCanvas key={cell.id} pageId={page.id} row={row} cell={cell} selection={selection} onSelect={onSelect} onDeleteElement={onDeleteElement} onDuplicateElement={onDuplicateElement} onMoveElement={onMoveElement} theme={template.theme} pageNo={pageIndex + 1} pages={template.pages.length} />}</RowRenderer></div>)}</div>
+    <BandRenderer band={template.footer} theme={template.theme} data={null} page={pageIndex + 1} pages={template.pages.length} kind="footer" />
+  </article></div>;
+}
+
+/* ========================================================================== *
+ * Inspector
+ * ========================================================================== */
+
+function StyleInspector({ element, patch }: { element: DocumentElement; patch: (value: Partial<DocumentElement>) => void }) {
+  const style = element.style ?? {};
+  const setStyle = (value: Partial<ElementStyle>) => patch({ style: { ...style, ...value } });
+  return <div className="dtd-inspector-section"><h4>Style</h4><Field label="Alignment"><Segmented value={style.align ?? "left"} onChange={(align) => setStyle({ align })} options={[{ value: "left", label: <AlignLeft size={14} />, title: "Left" }, { value: "center", label: <AlignCenter size={14} />, title: "Center" }, { value: "right", label: <AlignRight size={14} />, title: "Right" }, { value: "justify", label: <AlignJustify size={14} />, title: "Justify" }]} /></Field><div className="dtd-inline-controls"><IconButton title="Bold" active={style.bold} onClick={() => setStyle({ bold: !style.bold })}><Bold size={14} /></IconButton><IconButton title="Italic" active={style.italic} onClick={() => setStyle({ italic: !style.italic })}><Italic size={14} /></IconButton><IconButton title="Underline" active={style.underline} onClick={() => setStyle({ underline: !style.underline })}><Underline size={14} /></IconButton></div><div className="dtd-two"><Field label="Font size"><NumberInput value={style.fontSize} min={6} max={96} onChange={(fontSize) => setStyle({ fontSize })} suffix="px" /></Field><Field label="Text colour"><input type="color" value={style.color ?? "#111827"} onChange={(event) => setStyle({ color: event.target.value })} /></Field></div><div className="dtd-two"><Field label="Space above"><NumberInput value={style.marginTop} onChange={(marginTop) => setStyle({ marginTop })} suffix="px" /></Field><Field label="Space below"><NumberInput value={style.marginBottom} onChange={(marginBottom) => setStyle({ marginBottom })} suffix="px" /></Field></div><div className="dtd-two"><Field label="Padding"><NumberInput value={style.padding} onChange={(padding) => setStyle({ padding })} suffix="px" /></Field><Field label="Border"><NumberInput value={style.borderWidth} max={12} onChange={(borderWidth) => setStyle({ borderWidth })} suffix="px" /></Field></div></div>;
+}
+
+function ElementInspector({ element, fields, patch }: { element: DocumentElement; fields: MergeField[]; patch: (value: Partial<DocumentElement>) => void }) {
+  const updateList = (index: number, value: string) => patch({ items: (element.items ?? []).map((item, itemIndex) => itemIndex === index ? value : item) });
+  return <div>
+    <div className="dtd-inspector-section"><h4>Content</h4>
+      {(["text", "heading", "note"] as ElementType[]).includes(element.type) && <TokenArea value={element.text ?? ""} onChange={(textValue) => patch({ text: textValue })} fields={fields} rows={element.type === "text" ? 5 : 2} />}
+      {element.type === "heading" && <Field label="Heading level"><Segmented value={String(element.level ?? 2)} onChange={(value) => patch({ level: Number(value) as 1 | 2 | 3 })} options={[1, 2, 3].map((level) => ({ value: String(level), label: `H${level}` }))} /></Field>}
+      {(element.type === "bulleted_list" || element.type === "numbered_list") && <div className="dtd-stack">{(element.items ?? []).map((item, index) => <div className="dtd-list-input" key={index}><textarea value={item} rows={2} onChange={(event) => updateList(index, event.target.value)} /><IconButton title="Remove item" onClick={() => patch({ items: (element.items ?? []).filter((_, itemIndex) => itemIndex !== index) })}><Trash2 size={13} /></IconButton></div>)}<button type="button" className="dtd-secondary" onClick={() => patch({ items: [...(element.items ?? []), "New item"] })}><Plus size={13} />Add item</button></div>}
+      {element.type === "field_group" && <div className="dtd-stack"><Field label="Label width"><NumberInput value={element.labelWidth} onChange={(labelWidth) => patch({ labelWidth })} suffix="px" /></Field>{(element.fields ?? []).map((item) => <div className="dtd-box" key={item.id}><input className={inputClass} value={item.label} placeholder="Label" onChange={(event) => patch({ fields: (element.fields ?? []).map((field) => field.id === item.id ? { ...field, label: event.target.value } : field) })} /><TokenArea rows={2} fields={fields} value={item.value} onChange={(value) => patch({ fields: (element.fields ?? []).map((field) => field.id === item.id ? { ...field, value } : field) })} /><div className="dtd-check-row"><label><input type="checkbox" checked={!!item.boldLabel} onChange={(event) => patch({ fields: (element.fields ?? []).map((field) => field.id === item.id ? { ...field, boldLabel: event.target.checked } : field) })} />Bold label</label><label><input type="checkbox" checked={!!item.boldValue} onChange={(event) => patch({ fields: (element.fields ?? []).map((field) => field.id === item.id ? { ...field, boldValue: event.target.checked } : field) })} />Bold value</label><IconButton title="Remove row" onClick={() => patch({ fields: (element.fields ?? []).filter((field) => field.id !== item.id) })}><Trash2 size={13} /></IconButton></div></div>)}<button type="button" className="dtd-secondary" onClick={() => patch({ fields: [...(element.fields ?? []), { id: uid(), label: "Label", value: "" }] })}><Plus size={13} />Add field row</button></div>}
+      {element.type === "image" && <><Field label="Image field or URL"><TokenArea value={element.text ?? element.src ?? ""} onChange={(value) => patch(value.startsWith("{{") ? { text: value, src: "" } : { src: value, text: "" })} fields={fields} rows={2} /></Field><label className="dtd-upload"><Upload size={14} />Choose local image<input type="file" accept="image/*" onChange={(event) => { const file = event.target.files?.[0]; if (!file) return; const reader = new FileReader(); reader.onload = () => patch({ src: String(reader.result), text: "" }); reader.readAsDataURL(file); }} /></label><div className="dtd-two"><Field label="Width"><NumberInput value={element.width} onChange={(width) => patch({ width })} suffix="px" /></Field><Field label="Height"><NumberInput value={element.height} onChange={(height) => patch({ height })} suffix="px" /></Field></div><Field label="Alternative text"><input className={inputClass} value={element.alt ?? ""} onChange={(event) => patch({ alt: event.target.value })} /></Field></>}
+      {element.type === "spacer" && <Field label="Height"><NumberInput value={element.height} onChange={(height) => patch({ height })} suffix="px" /></Field>}
+      {element.type === "data_table" && <TableInspector element={element} fields={fields} patch={patch} />}
+      {element.type === "signature_group" && <SignatureInspector element={element} fields={fields} patch={patch} />}
     </div>
-  );
+    {!(["divider", "spacer"] as ElementType[]).includes(element.type) && <StyleInspector element={element} patch={patch} />}
+    {element.type === "divider" && <StyleInspector element={element} patch={patch} />}
+  </div>;
 }
 
-/* ============================================================
- * Settings tab — metadata, page setup, theme, header/footer
- * ============================================================ */
-
-function Card({ title, subtitle, children }: { title: string; subtitle?: string; children: React.ReactNode }) {
-  return (
-    <div className="border border-[#C8CDD2] bg-white shadow-sm">
-      <div className="border-b border-[#C8CDD2] bg-[#F3F5F6] px-5 py-3">
-        <h2 className="text-sm font-bold text-[#1F2933]">{title}</h2>
-        {subtitle && <p className="mt-0.5 text-xs text-[#5E6870]">{subtitle}</p>}
-      </div>
-      <div className="space-y-4 p-5">{children}</div>
-    </div>
-  );
+function TableInspector({ element, fields, patch }: { element: DocumentElement; fields: MergeField[]; patch: (value: Partial<DocumentElement>) => void }) {
+  const collections = fields.filter((field) => field.repeating);
+  const collection = collections.find((field) => field.key === element.sourceKey);
+  const columns = element.columns ?? [];
+  return <div className="dtd-stack"><Field label="Repeating source"><select className={inputClass} value={element.sourceKey ?? ""} onChange={(event) => patch({ sourceKey: event.target.value })}><option value="">Static rows</option>{collections.map((field) => <option key={field.key} value={field.key}>{field.label}</option>)}</select></Field><div className="dtd-check-row"><label><input type="checkbox" checked={element.showHeader !== false} onChange={(event) => patch({ showHeader: event.target.checked })} />Header</label><label><input type="checkbox" checked={!!element.repeatHeader} onChange={(event) => patch({ repeatHeader: event.target.checked })} />Repeat</label><label><input type="checkbox" checked={!!element.striped} onChange={(event) => patch({ striped: event.target.checked })} />Striped</label></div><Field label="Cell padding"><NumberInput value={element.cellPadding} max={24} onChange={(cellPadding) => patch({ cellPadding })} suffix="px" /></Field><h5 className="dtd-subtitle">Columns</h5>{columns.map((column) => <div className="dtd-box" key={column.id}><div className="dtd-list-input"><input className={inputClass} value={column.label} onChange={(event) => patch({ columns: columns.map((item) => item.id === column.id ? { ...item, label: event.target.value } : item) })} /><IconButton title="Remove column" onClick={() => patch({ columns: columns.filter((item) => item.id !== column.id) })}><Trash2 size={13} /></IconButton></div><div className="dtd-two"><Field label="Data field"><select className={inputClass} value={column.key} onChange={(event) => patch({ columns: columns.map((item) => item.id === column.id ? { ...item, key: event.target.value } : item) })}>{collection?.children?.map((child) => <option key={child.key} value={child.key}>{child.label}</option>)}{!collection?.children?.some((child) => child.key === column.key) && <option value={column.key}>{column.key}</option>}</select></Field><Field label="Width %"><NumberInput value={column.width} min={1} max={100} onChange={(width) => patch({ columns: columns.map((item) => item.id === column.id ? { ...item, width } : item) })} /></Field></div></div>)}<button type="button" className="dtd-secondary" onClick={() => patch({ columns: [...columns, { id: uid(), key: collection?.children?.[0]?.key ?? "field", label: "Column", width: 10 }] })}><Plus size={13} />Add column</button><h5 className="dtd-subtitle">Summary rows</h5>{(element.summaries ?? []).map((summary) => <div className="dtd-box" key={summary.id}><TokenArea fields={fields} value={summary.label} onChange={(label) => patch({ summaries: (element.summaries ?? []).map((item) => item.id === summary.id ? { ...item, label } : item) })} rows={2} /><div className="dtd-list-input"><NumberInput value={summary.labelSpan} min={1} max={Math.max(1, columns.length)} onChange={(labelSpan) => patch({ summaries: (element.summaries ?? []).map((item) => item.id === summary.id ? { ...item, labelSpan } : item) })} /><IconButton title="Remove summary" onClick={() => patch({ summaries: (element.summaries ?? []).filter((item) => item.id !== summary.id) })}><Trash2 size={13} /></IconButton></div><Field label="Remaining cell values"><input className={inputClass} value={summary.values.join(" | ")} onChange={(event) => patch({ summaries: (element.summaries ?? []).map((item) => item.id === summary.id ? { ...item, values: event.target.value.split("|").map((value) => value.trim()) } : item) })} /></Field></div>)}<button type="button" className="dtd-secondary" onClick={() => patch({ summaries: [...(element.summaries ?? []), { id: uid(), label: "Total", labelSpan: Math.max(1, columns.length - 1), values: ["{{total}}"], bold: true }] })}><Plus size={13} />Add summary</button></div>;
 }
 
-function BandEditor({ title, band, fields, allowPageTokens, onChange }: {
-  title: string; band: BandSettings; fields: MergeField[]; allowPageTokens?: boolean;
-  onChange: (b: BandSettings) => void;
-}) {
-  const slot = (k: keyof BandSlot, label: string) => (
-    <Field label={label}>
-      <div className="flex items-center gap-1">
-        <input value={band.content[k] ?? ""} onChange={(e) => onChange({ ...band, content: { ...band.content, [k]: e.target.value } })}
-               className={cn(inputCls, "font-mono text-xs")} placeholder="text or {{field}}" />
-        <MergeFieldMenu fields={fields} label="" onPick={(t) => onChange({ ...band, content: { ...band.content, [k]: (band.content[k] ? band.content[k] + " " : "") + t } })} />
-      </div>
-    </Field>
-  );
-  return (
-    <Card title={title}>
-      <label className="flex items-center gap-2 text-sm text-[#1F2933]">
-        <input type="checkbox" checked={band.enabled} onChange={(e) => onChange({ ...band, enabled: e.target.checked })} /> Show {title.toLowerCase()}
-      </label>
-      {band.enabled && (
-        <>
-          <div className="grid grid-cols-1 gap-3">
-            {slot("left", "Left")}
-            {slot("center", "Center")}
-            {slot("right", "Right")}
-          </div>
-          <label className="flex items-center gap-2 text-sm text-[#1F2933]">
-            <input type="checkbox" checked={band.rule} onChange={(e) => onChange({ ...band, rule: e.target.checked })} /> Divider rule
-          </label>
-          {allowPageTokens && (
-            <p className="text-[11px] text-[#8C969E]">Tip: use <code className="font-mono">{"{{page}}"}</code> and <code className="font-mono">{"{{pages}}"}</code> for page numbers.</p>
-          )}
-        </>
-      )}
-    </Card>
-  );
+function SignatureInspector({ element, fields, patch }: { element: DocumentElement; fields: MergeField[]; patch: (value: Partial<DocumentElement>) => void }) {
+  const signatures = element.signatories ?? [];
+  const set = (id: string, value: Partial<Signatory>) => patch({ signatories: signatures.map((item) => item.id === id ? { ...item, ...value } : item) });
+  return <div className="dtd-stack">{signatures.map((signature) => <div className="dtd-box" key={signature.id}><div className="dtd-list-input"><input className={inputClass} value={signature.step ?? ""} placeholder="Step" onChange={(event) => set(signature.id, { step: event.target.value })} /><IconButton title="Remove signatory" onClick={() => patch({ signatories: signatures.filter((item) => item.id !== signature.id) })}><Trash2 size={13} /></IconButton></div><Field label="Role"><TokenArea fields={fields} value={signature.role} onChange={(role) => set(signature.id, { role })} rows={2} /></Field><Field label="Name"><TokenArea fields={fields} value={signature.name} onChange={(name) => set(signature.id, { name })} rows={2} /></Field><Field label="Date"><TokenArea fields={fields} value={signature.date} onChange={(date) => set(signature.id, { date })} rows={2} /></Field><Field label="Signature"><TokenArea fields={fields} value={signature.signature ?? ""} onChange={(signatureValue) => set(signature.id, { signature: signatureValue })} rows={2} /></Field></div>)}<button type="button" className="dtd-secondary" onClick={() => patch({ signatories: [...signatures, { id: uid(), step: String(signatures.length + 1), role: "Approved by", name: "[[Name]]", date: "[[Date]]", signature: "[[Signature]]" }] })}><Plus size={13} />Add signatory</button></div>;
 }
 
-function SettingsTab({ template, documentTypes, fields, onCommit }: {
-  template: DocumentTemplate;
-  documentTypes: Array<{ id: string; name: string; code: string }>;
-  fields: MergeField[];
-  onCommit: (patch: Partial<DocumentTemplate>) => void;
-}) {
-  const [tagInput, setTagInput] = useState("");
-  const addTag = () => {
-    const t = tagInput.trim();
-    if (t && !(template.tags ?? []).includes(t)) onCommit({ tags: [...(template.tags ?? []), t] });
-    setTagInput("");
-  };
-  const [refInput, setRefInput] = useState("");
-  const refs = template.references ?? [];
-  const addRef = () => {
-    const label = refInput.trim();
-    const key = slugify(label);
-    if (key && !refs.some((r) => r.key === key)) onCommit({ references: [...refs, { key, label }] });
-    setRefInput("");
-  };
-  const theme = template.theme;
-  const setTheme = (p: Partial<ThemeSettings>) => onCommit({ theme: { ...theme, ...p } });
-  const page = template.page;
-  const setPage = (p: Partial<PageSettings>) => onCommit({ page: { ...page, ...p } });
-  const setMargin = (p: Partial<PageSettings["margin"]>) => onCommit({ page: { ...page, margin: { ...page.margin, ...p } } });
-
-  return (
-    <div className="mx-auto max-w-2xl space-y-5 p-8">
-      <Card title="Template metadata" subtitle="Used for search, organisation, and document filing.">
-        <Field label="Name"><input value={template.name} onChange={(e) => onCommit({ name: e.target.value })} className={inputCls} /></Field>
-        <Field label="Description"><textarea value={template.description ?? ""} rows={3} onChange={(e) => onCommit({ description: e.target.value })} className={cn(inputCls, "h-auto py-2 resize-none")} /></Field>
-        <Field label="Document type">
-          <select value={template.document_type_id ?? ""} onChange={(e) => onCommit({ document_type_id: e.target.value })} className={inputCls}>
-            <option value="">Select document type</option>
-            {documentTypes.map((t) => <option key={t.id} value={t.id}>{t.name}</option>)}
-          </select>
-        </Field>
-        <Field label="Tags">
-          <div className="flex gap-2">
-            <input value={tagInput} onChange={(e) => setTagInput(e.target.value)} onKeyDown={(e) => e.key === "Enter" && (e.preventDefault(), addTag())} placeholder="Add tag and press Enter" className={cn(inputCls, "flex-1")} />
-            <button onClick={addTag} className="h-9 px-3 bg-[#287EAD] text-white text-sm font-semibold hover:bg-[#1E6F99]"><Plus className="h-4 w-4" /></button>
-          </div>
-          {(template.tags ?? []).length > 0 && (
-            <div className="mt-2 flex flex-wrap gap-2">
-              {(template.tags ?? []).map((tag) => (
-                <span key={tag} className="flex items-center gap-1.5 border border-[#287EAD]/20 bg-[#EEF6FB] px-2.5 py-1 text-xs font-semibold text-[#287EAD]">
-                  <Tag className="h-2.5 w-2.5" />{tag}
-                  <button onClick={() => onCommit({ tags: (template.tags ?? []).filter((x) => x !== tag) })} className="ml-0.5 text-[#287EAD]/60 hover:text-[#287EAD]"><Minus className="h-2.5 w-2.5" /></button>
-                </span>
-              ))}
-            </div>
-          )}
-        </Field>
-      </Card>
-
-      <Card title="Page setup">
-        <div className="grid grid-cols-2 gap-3">
-          <Field label="Size">
-            <select value={page.size} onChange={(e) => setPage({ size: e.target.value as PageSettings["size"] })} className={inputCls}>
-              <option value="A4">A4</option><option value="Letter">Letter</option><option value="Legal">Legal</option>
-            </select>
-          </Field>
-          <Field label="Orientation">
-            <select value={page.orientation} onChange={(e) => setPage({ orientation: e.target.value as PageSettings["orientation"] })} className={inputCls}>
-              <option value="portrait">Portrait</option><option value="landscape">Landscape</option>
-            </select>
-          </Field>
-        </div>
-        <Field label="Margins (mm)">
-          <div className="grid grid-cols-4 gap-2">
-            {(["top", "right", "bottom", "left"] as const).map((side) => (
-              <div key={side}>
-                <input type="number" min={0} max={60} value={page.margin[side]} onChange={(e) => setMargin({ [side]: Number(e.target.value) })} className={cn(inputCls, "text-center")} />
-                <p className="mt-1 text-center text-[10px] uppercase tracking-wider text-[#8C969E]">{side}</p>
-              </div>
-            ))}
-          </div>
-        </Field>
-      </Card>
-
-      <Card title="Typography & colours">
-        <div className="grid grid-cols-2 gap-3">
-          <Field label="Body font">
-            <select value={theme.fontFamily} onChange={(e) => setTheme({ fontFamily: e.target.value })} className={inputCls}>
-              {FONT_OPTIONS.map((f) => <option key={f.value} value={f.value}>{f.label}</option>)}
-            </select>
-          </Field>
-          <Field label="Heading font">
-            <select value={theme.headingFamily} onChange={(e) => setTheme({ headingFamily: e.target.value })} className={inputCls}>
-              {FONT_OPTIONS.map((f) => <option key={f.value} value={f.value}>{f.label}</option>)}
-            </select>
-          </Field>
-        </div>
-        <div className="grid grid-cols-2 gap-3">
-          <NumberRow label="Base size" value={theme.baseFontSize} onChange={(n) => setTheme({ baseFontSize: n })} suffix="px" />
-          <NumberRow label="Line height" value={theme.lineHeight} onChange={(n) => setTheme({ lineHeight: n })} />
-        </div>
-        <div className="grid grid-cols-3 gap-3">
-          {([["Text", "textColor"], ["Heading", "headingColor"], ["Accent", "accentColor"]] as const).map(([lbl, key]) => (
-            <Field key={key} label={lbl}>
-              <input type="color" value={theme[key]} onChange={(e) => setTheme({ [key]: e.target.value } as Partial<ThemeSettings>)} className="h-9 w-full border border-[#AEB5BB] bg-white p-1" />
-            </Field>
-          ))}
-        </div>
-      </Card>
-
-      <BandEditor title="Header" band={template.header} fields={fields} onChange={(b) => onCommit({ header: b })} />
-      <BandEditor title="Footer" band={template.footer} fields={fields} allowPageTokens onChange={(b) => onCommit({ footer: b })} />
-
-      <Card title="Document references" subtitle="Pull data from a related document. The user picks the document at create time; insert {{key}} for its label and {{key__field}} (e.g. supplier, amount) for its data.">
-        <div className="flex gap-2">
-          <input value={refInput} onChange={(e) => setRefInput(e.target.value)} onKeyDown={(e) => e.key === "Enter" && (e.preventDefault(), addRef())} placeholder="e.g. Related Purchase Order" className={cn(inputCls, "flex-1")} />
-          <button onClick={addRef} className="h-9 bg-[#287EAD] px-3 text-sm font-semibold text-white hover:bg-[#1E6F99]"><Plus className="h-4 w-4" /></button>
-        </div>
-        {refs.length === 0 ? (
-          <p className="mt-2 border border-dashed border-[#C8CDD2] bg-[#F9FAFB] px-3 py-2 text-[11px] leading-relaxed text-[#5E6870]">
-            None yet. Add one above (e.g. <em>Related Invoice</em>), then insert{" "}
-            <code className="rounded bg-[#EEF6FB] px-1 font-mono text-[#287EAD]">{"{{related_invoice}}"}</code> or{" "}
-            <code className="rounded bg-[#EEF6FB] px-1 font-mono text-[#287EAD]">{"{{related_invoice__supplier}}"}</code>{" "}
-            from any block's <strong>Insert field</strong> menu on the <strong>Design</strong> tab. When a user creates the
-            document they'll pick the related document, and its data fills these in.
-          </p>
-        ) : (
-          <div className="mt-2 space-y-1.5">
-            {refs.map((r) => (
-              <div key={r.key} className="flex items-center justify-between gap-2 border border-[#E5E8EB] px-2.5 py-1.5 text-xs">
-                <span className="text-[#1F2933]">{r.label} <span className="ml-1 font-mono text-[10px] text-[#8C969E]">{`{{${r.key}}}`}</span></span>
-                <button onClick={() => onCommit({ references: refs.filter((x) => x.key !== r.key) })} className="text-[#8C969E] hover:text-red-600"><Minus className="h-3.5 w-3.5" /></button>
-              </div>
-            ))}
-            <p className="text-[11px] text-[#8C969E]">
-              Insert these from any block's <strong>Insert field</strong> menu (Design tab) → <em>Document references</em>.
-            </p>
-          </div>
-        )}
-      </Card>
-
-      <Card title="Merge fields in use">
-        <div className="flex flex-wrap gap-2">
-          {collectPlaceholders(template).length === 0 && <p className="text-xs text-[#8C969E]">No merge fields used yet.</p>}
-          {collectPlaceholders(template).map((p) => (
-            <span key={p} className="border border-[#287EAD]/20 bg-[#EEF6FB] px-2 py-1 font-mono text-[11px] text-[#287EAD]">{`{{${p}}}`}</span>
-          ))}
-        </div>
-      </Card>
-    </div>
-  );
+function Inspector({ template, selection, fields, onPatchElement, onPatchRow, onPatchCell, onClose }: { template: DocumentTemplateV2; selection: Selection | null; fields: MergeField[]; onPatchElement: (value: Partial<DocumentElement>) => void; onPatchRow: (value: Partial<GridRow>) => void; onPatchCell: (value: Partial<GridCell>) => void; onClose: () => void }) {
+  let title = "Properties"; let body: ReactNode = <div className="dtd-empty-inspector"><Settings size={30} /><p>Select a page, row, cell, or element.</p></div>;
+  if (selection?.kind === "element") { const element = template.pages.flatMap((page) => page.rows).flatMap((row) => row.columns).flatMap((cell) => cell.elements).find((item) => item.id === selection.elementId); if (element) { title = elementMeta[element.type].label; body = <ElementInspector element={element} fields={fields} patch={onPatchElement} />; } }
+  if (selection?.kind === "row") { const row = template.pages.flatMap((page) => page.rows).find((item) => item.id === selection.rowId); if (row) { title = "Row layout"; body = <div className="dtd-inspector-section"><h4>Structure</h4><div className="dtd-two"><Field label="Column gap"><NumberInput value={row.gap} max={80} onChange={(gap) => onPatchRow({ gap })} suffix="px" /></Field><Field label="Min height"><NumberInput value={row.minHeight} onChange={(minHeight) => onPatchRow({ minHeight })} suffix="px" /></Field></div><div className="dtd-two"><Field label="Space above"><NumberInput value={row.marginTop} onChange={(marginTop) => onPatchRow({ marginTop })} suffix="px" /></Field><Field label="Space below"><NumberInput value={row.marginBottom} onChange={(marginBottom) => onPatchRow({ marginBottom })} suffix="px" /></Field></div><label className="dtd-checkbox"><input type="checkbox" checked={!!row.keepTogether} onChange={(event) => onPatchRow({ keepTogether: event.target.checked })} />Keep row together when printing</label><h4>Column ratios</h4>{row.columns.map((cell) => <Field key={cell.id} label={`Column ${row.columns.indexOf(cell) + 1}`}><NumberInput min={1} max={12} value={cell.width} onChange={(width) => onPatchRow({ columns: row.columns.map((item) => item.id === cell.id ? { ...item, width } : item) })} /></Field>)}</div>; } }
+  if (selection?.kind === "cell") { const cell = template.pages.flatMap((page) => page.rows).flatMap((row) => row.columns).find((item) => item.id === selection.cellId); if (cell) { title = "Column"; body = <div className="dtd-inspector-section"><h4>Cell layout</h4><Field label="Vertical alignment"><Segmented value={cell.verticalAlign ?? "start"} onChange={(verticalAlign) => onPatchCell({ verticalAlign })} options={[{ value: "start", label: "Top" }, { value: "center", label: "Middle" }, { value: "end", label: "Bottom" }]} /></Field><div className="dtd-two"><Field label="Padding"><NumberInput value={cell.padding} onChange={(padding) => onPatchCell({ padding })} suffix="px" /></Field><Field label="Border"><NumberInput value={cell.borderWidth} max={12} onChange={(borderWidth) => onPatchCell({ borderWidth })} suffix="px" /></Field></div><Field label="Background"><input type="color" value={cell.background ?? "#FFFFFF"} onChange={(event) => onPatchCell({ background: event.target.value })} /></Field></div>; } }
+  return <aside className="dtd-inspector"><div className="dtd-panel-title"><span>{title}</span><IconButton title="Close properties" onClick={onClose}><X size={15} /></IconButton></div><div className="dtd-inspector-scroll">{body}</div></aside>;
 }
 
-/* ============================================================
- * Root component
- * ============================================================ */
+/* ========================================================================== *
+ * Settings and preview
+ * ========================================================================== */
 
-type Tab = "design" | "preview" | "settings";
-
-export interface DocumentTemplateDesignerProps {
-  initial?: EditableDocumentTemplate | null;
-  /**
-   * Persist the template. May return the saved template's id so the designer can
-   * turn a first (create) autosave into updates thereafter — without it, repeated
-   * autosaves of a brand-new template would each create a duplicate row.
-   */
-  onSave: (template: DocumentTemplate, stayOpen?: boolean) => void | Promise<string | void>;
-  onCancel: () => void;
-  isSaving?: boolean;
-  /** Document types for filing. Their metadata fields become insertable merge fields. */
-  documentTypes?: Array<{
-    id: string; name: string; code: string;
-    metadata_fields?: Array<{ key?: string; field_key?: string; label: string }>;
-  }>;
-  /** Merge fields available to insert. Defaults + the doc type's fields if omitted. */
-  mergeFields?: MergeField[];
-  /** Optional sample values used by the Preview tab. */
-  sampleData?: Record<string, string>;
+function SettingsView({ template, documentTypes, commit }: { template: DocumentTemplateV2; documentTypes: TemplateDesignerProps["documentTypes"]; commit: (value: DocumentTemplateV2) => void }) {
+  const setPage = (value: Partial<DocumentTemplateV2["page"]>) => commit({ ...template, page: { ...template.page, ...value } });
+  const setTheme = (value: Partial<DocumentTemplateV2["theme"]>) => commit({ ...template, theme: { ...template.theme, ...value } });
+  const setMargin = (key: keyof DocumentTemplateV2["page"]["margin"], value: number) => setPage({ margin: { ...template.page.margin, [key]: value } });
+  return <main className="dtd-settings"><div className="dtd-settings-grid"><section><h3>Template details</h3><Field label="Name"><input className={inputClass} value={template.name} onChange={(event) => commit({ ...template, name: event.target.value })} /></Field><Field label="Description"><textarea className={inputClass} rows={3} value={template.description ?? ""} onChange={(event) => commit({ ...template, description: event.target.value })} /></Field>{!!documentTypes?.length && <Field label="Document type"><select className={inputClass} value={template.documentTypeId ?? ""} onChange={(event) => commit({ ...template, documentTypeId: event.target.value })}><option value="">Select type</option>{documentTypes.map((type) => <option key={type.id} value={type.id}>{type.name}</option>)}</select></Field>}</section><section><h3>Page setup</h3><div className="dtd-two"><Field label="Size"><select className={inputClass} value={template.page.size} onChange={(event) => setPage({ size: event.target.value as PageSize })}><option>A4</option><option>Letter</option><option>Legal</option></select></Field><Field label="Orientation"><select className={inputClass} value={template.page.orientation} onChange={(event) => setPage({ orientation: event.target.value as Orientation })}><option value="portrait">Portrait</option><option value="landscape">Landscape</option></select></Field></div><h4>Margins (mm)</h4><div className="dtd-four">{(["top", "right", "bottom", "left"] as const).map((key) => <Field key={key} label={key}><NumberInput value={template.page.margin[key]} min={0} max={60} onChange={(value) => setMargin(key, value)} /></Field>)}</div></section><section><h3>Typography & colour</h3><div className="dtd-two"><Field label="Body font"><select className={inputClass} value={template.theme.fontFamily} onChange={(event) => setTheme({ fontFamily: event.target.value })}><option value="Arial, Helvetica, sans-serif">Arial</option><option value="Calibri, 'Segoe UI', sans-serif">Calibri</option><option value="Georgia, 'Times New Roman', serif">Georgia</option><option value="'Times New Roman', Times, serif">Times New Roman</option></select></Field><Field label="Heading font"><select className={inputClass} value={template.theme.headingFamily} onChange={(event) => setTheme({ headingFamily: event.target.value })}><option value="Arial, Helvetica, sans-serif">Arial</option><option value="Georgia, 'Times New Roman', serif">Georgia</option><option value="'Times New Roman', Times, serif">Times New Roman</option></select></Field></div><div className="dtd-four"><Field label="Base size"><NumberInput value={template.theme.baseFontSize} min={7} max={24} onChange={(baseFontSize) => setTheme({ baseFontSize })} /></Field><Field label="Line height"><NumberInput value={template.theme.lineHeight} min={1} max={3} onChange={(lineHeight) => setTheme({ lineHeight })} /></Field><Field label="Text"><input type="color" value={template.theme.textColor} onChange={(event) => setTheme({ textColor: event.target.value })} /></Field><Field label="Accent"><input type="color" value={template.theme.accentColor} onChange={(event) => setTheme({ accentColor: event.target.value })} /></Field></div></section><section><h3>Page bands & watermark</h3><div className="dtd-check-row"><label><input type="checkbox" checked={template.header.enabled} onChange={(event) => commit({ ...template, header: { ...template.header, enabled: event.target.checked } })} />Header</label><label><input type="checkbox" checked={template.footer.enabled} onChange={(event) => commit({ ...template, footer: { ...template.footer, enabled: event.target.checked } })} />Footer</label><label><input type="checkbox" checked={template.watermark.enabled} onChange={(event) => commit({ ...template, watermark: { ...template.watermark, enabled: event.target.checked } })} />Watermark</label></div><Field label="Watermark value"><input className={inputClass} value={template.watermark.value} onChange={(event) => commit({ ...template, watermark: { ...template.watermark, value: event.target.value } })} /></Field><div className="dtd-two"><Field label="Opacity"><input type="range" min="0.01" max="0.4" step="0.01" value={template.watermark.opacity} onChange={(event) => commit({ ...template, watermark: { ...template.watermark, opacity: Number(event.target.value) } })} /></Field><Field label="Rotation"><NumberInput min={-180} max={180} value={template.watermark.rotation} onChange={(rotation) => commit({ ...template, watermark: { ...template.watermark, rotation } })} suffix="°" /></Field></div></section><section className="dtd-wide"><h3>Required DMS fields</h3><div className="dtd-field-chips">{collectRequiredFields(template).map((field) => <code key={field}>{`{{${field}}}`}</code>)}</div></section></div></main>;
 }
 
-export default function DocumentTemplateDesigner({
-  initial, onSave, onCancel, isSaving, documentTypes = [], mergeFields, sampleData,
-}: DocumentTemplateDesignerProps) {
-  // History + cursor in ONE state so they can never desync (a split lets a stale
-  // `cursor` closure outrun the stack and make `history[cursor]` undefined).
-  const [hist, setHist] = useState<{ stack: DocumentTemplate[]; cursor: number }>(() => ({
-    stack: [normalizeTemplate(initial ?? initialDocument)],
-    cursor: 0,
-  }));
-  const { stack: history, cursor } = hist;
-  const template = history[cursor];
-
-  const currentUser = useAuthStore((s) => s.user);
-
-  // Live preview values for formula merge fields — evaluated client-side with the
-  // current user (mirrors the form builder preview), so the Preview tab shows real
-  // values (your name, today's date) instead of placeholders.
-  const formulaSample = useMemo<Record<string, string>>(() => {
-    const ctx = { user: currentUser as Parameters<typeof evaluateFormula>[1]["user"], now: new Date() };
-    const out: Record<string, string> = {};
-    for (const f of Object.values(FORMULAS)) {
-      const v = evaluateFormula(f.key, ctx);
-      if (v) out[f.key] = v;
-    }
-    out.document_title = template?.name || "Document title";
-    return out;
-  }, [currentUser, template?.name]);
-
-  // Available merge fields = caller override, else the auto-fill defaults plus the
-  // selected document type's own metadata fields (so admins insert real fields).
-  const fields = useMemo<MergeField[]>(() => {
-    if (mergeFields && mergeFields.length) return mergeFields;
-    const dt = documentTypes.find((t) => t.id === template?.document_type_id);
-    const meta: MergeField[] = (dt?.metadata_fields ?? [])
-      .map((f) => ({ key: (f.key ?? f.field_key ?? "").trim(), label: f.label, group: "Document fields" }))
-      .filter((f) => f.key);
-    // Each document-reference field offers its link label + pull-through subfields.
-    const refs: MergeField[] = (template?.references ?? []).flatMap((r) => [
-      { key: r.key, label: `${r.label} — link label`, group: "Document references" },
-      { key: `${r.key}__reference_number`, label: `${r.label} — reference no.`, group: "Document references" },
-      { key: `${r.key}__supplier`, label: `${r.label} — supplier`, group: "Document references" },
-      { key: `${r.key}__amount`, label: `${r.label} — amount`, group: "Document references" },
-      { key: `${r.key}__document_date`, label: `${r.label} — date`, group: "Document references" },
-    ]);
-    const seen = new Set(DEFAULT_MERGE_FIELDS.map((f) => f.key));
-    return [...DEFAULT_MERGE_FIELDS, ...meta.filter((f) => !seen.has(f.key)), ...refs];
-  }, [mergeFields, documentTypes, template?.document_type_id, template?.references]);
-  const [selectedId, setSelectedId] = useState<string | null>(null);
-  const [tab, setTab] = useState<Tab>("design");
-  const [dragType, setDragType] = useState<BlockType | null>(null);
-  const [inspectorOpen, setInspectorOpen] = useState(true);
-  const [visible, setVisible] = useState(false);
-  const [closing, setClosing] = useState(false);
-  const [autoSave, setAutoSave] = useState<boolean>(() =>
-    typeof window !== "undefined" && window.localStorage.getItem("dtd:autoSave") === "1");
-  const autoSaveSkip = useRef(true);
-  const autoSaveTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
-  const [lastSavedAt, setLastSavedAt] = useState<number | null>(null);
-  // The id the backend assigns on the first (create) save. Once known, every later
-  // save carries it so the mutation updates that row instead of creating a new one.
-  const assignedIdRef = useRef<string | null>(initial?.id ?? null);
-  const savingRef = useRef(false);
-
-  useEffect(() => { if (typeof window !== "undefined") window.localStorage.setItem("dtd:autoSave", autoSave ? "1" : "0"); }, [autoSave]);
-  useEffect(() => { const id = requestAnimationFrame(() => setVisible(true)); return () => cancelAnimationFrame(id); }, []);
-  // Re-initialise only when a *different* template is opened. The parent rebuilds
-  // the `initial` object on every render (and re-renders on each autosave), so we
-  // must compare by identity (id) — depending on the object reference would reset
-  // history mid-edit and clobber in-progress typing (e.g. renaming).
-  const loadedTemplateId = useRef<string | null>(initial?.id ?? null);
-  useEffect(() => {
-    const incomingId = initial?.id ?? null;
-    if (incomingId === loadedTemplateId.current) return;
-    loadedTemplateId.current = incomingId;
-    assignedIdRef.current = incomingId;
-    setHist({ stack: [normalizeTemplate(initial ?? initialDocument)], cursor: 0 });
-    setSelectedId(null); autoSaveSkip.current = true;
-  }, [initial]);
-
-  const handleCancel = () => { setClosing(true); setTimeout(onCancel, 220); };
-
-  const commit = useCallback((next: DocumentTemplate) => {
-    setHist(({ stack, cursor }) => {
-      const nstack = [...stack.slice(0, cursor + 1), next];
-      return { stack: nstack, cursor: nstack.length - 1 };
-    });
-  }, []);
-
-  const canUndo = cursor > 0;
-  const canRedo = cursor < history.length - 1;
-
-  const sensors = useSensors(useSensor(PointerSensor, { activationConstraint: { distance: 4 } }));
-
-  const onDragStart = (e: DragStartEvent) => {
-    const t = e.active.data.current?.blockType as BlockType | undefined;
-    if (t) setDragType(t);
-  };
-
-  const insertBlock = (block: DocBlock, atIndex: number) => {
-    const blocks = [...template.blocks];
-    blocks.splice(Math.max(0, Math.min(atIndex, blocks.length)), 0, block);
-    commit({ ...template, blocks });
-    setSelectedId(block.id);
-  };
-
-  const onDragEnd = (e: DragEndEvent) => {
-    setDragType(null);
-    const { active, over } = e;
-    if (!over) return;
-    const src = active.data.current;
-    const dst = over.data.current;
-
-    if (src?.source === "palette") {
-      const block = newBlock(src.blockType as BlockType);
-      const idx = dst?.kind === "before" ? (dst.index as number) : template.blocks.length;
-      insertBlock(block, idx);
-      return;
-    }
-    if (src?.source === "canvas-block") {
-      const fromIdx = template.blocks.findIndex((b) => b.id === src.blockId);
-      if (fromIdx < 0) return;
-      let toIdx = dst?.kind === "before" ? (dst.index as number) : template.blocks.length;
-      const blocks = [...template.blocks];
-      const [moved] = blocks.splice(fromIdx, 1);
-      if (toIdx > fromIdx) toIdx -= 1;
-      blocks.splice(Math.max(0, Math.min(toIdx, blocks.length)), 0, moved);
-      commit({ ...template, blocks });
-    }
-  };
-
-  const updateBlock = (id: string, patch: Partial<DocBlock>) =>
-    commit({ ...template, blocks: template.blocks.map((b) => b.id === id ? { ...b, ...patch } : b) });
-  const removeBlock = (id: string) => {
-    commit({ ...template, blocks: template.blocks.filter((b) => b.id !== id) });
-    if (selectedId === id) setSelectedId(null);
-  };
-  const duplicateBlock = (id: string) => {
-    const idx = template.blocks.findIndex((b) => b.id === id);
-    if (idx < 0) return;
-    const copy: DocBlock = JSON.parse(JSON.stringify(template.blocks[idx]));
-    copy.id = uid();
-    (copy.columns ?? []).forEach((c) => (c.id = uid()));
-    (copy.pairs ?? []).forEach((p) => (p.id = uid()));
-    (copy.signatories ?? []).forEach((s) => (s.id = uid()));
-    const blocks = [...template.blocks];
-    blocks.splice(idx + 1, 0, copy);
-    commit({ ...template, blocks });
-  };
-  const addPage = () => {
-    // A page is delimited by a page_break block — append one to start a new page.
-    commit({ ...template, blocks: [...template.blocks, newBlock("page_break")] });
-  };
-  const moveBlock = (id: string, dir: "up" | "down") => {
-    const idx = template.blocks.findIndex((b) => b.id === id);
-    const target = dir === "up" ? idx - 1 : idx + 1;
-    if (idx < 0 || target < 0 || target >= template.blocks.length) return;
-    const blocks = [...template.blocks];
-    [blocks[idx], blocks[target]] = [blocks[target], blocks[idx]];
-    commit({ ...template, blocks });
-  };
-
-  // Single save path. Carries the known id (from `initial` or a prior create) so the
-  // backend updates rather than duplicates, and records the id returned by the first
-  // create. `savingRef` prevents an overlapping autosave from firing a second create
-  // before the first one's id comes back.
-  const persist = async (stayOpen: boolean) => {
-    const effId = initial?.id ?? assignedIdRef.current;
-    if (!effId && savingRef.current) return; // a create is already in flight — don't duplicate
-    const out = outputDocumentTemplate(template, Boolean(effId));
-    if (effId) out.id = effId;
-    savingRef.current = true;
-    try {
-      const savedId = await onSave(out, stayOpen);
-      if (typeof savedId === "string" && savedId && !initial?.id) assignedIdRef.current = savedId;
-    } finally {
-      savingRef.current = false;
-    }
-  };
-
-  const handleSave = (stayOpen = false) => {
-    if (!template.document_type_id) {
-      toast.error("Select a document type before saving (Settings tab).");
-      setTab("settings");
-      return;
-    }
-    if (template.blocks.length === 0) {
-      toast.error("Add at least one block to the document.");
-      return;
-    }
-    void persist(stayOpen);
-  };
-
-  useEffect(() => {
-    if (!autoSave) return;
-    if (autoSaveSkip.current) { autoSaveSkip.current = false; return; }
-    if (autoSaveTimer.current) clearTimeout(autoSaveTimer.current);
-    autoSaveTimer.current = setTimeout(async () => {
-      if (!template.document_type_id || template.blocks.length === 0) return;
-      await persist(true);
-      setLastSavedAt(Date.now());
-    }, 1200);
-    return () => { if (autoSaveTimer.current) clearTimeout(autoSaveTimer.current); };
-  }, [template, autoSave]); // eslint-disable-line react-hooks/exhaustive-deps
-
-  const blockCount = template.blocks.length;
-
-  return (
-    <div className={cn("fixed inset-0 z-50 flex h-screen w-full flex-col overflow-hidden transition-all duration-200",
-      visible && !closing ? "opacity-100 translate-y-0" : "opacity-0 translate-y-3")}
-      style={{ background: "#EDEDED" }}>
-      <style>{`@media print { body * { visibility: hidden; } .doc-preview-sheet, .doc-preview-sheet * { visibility: visible; } .doc-preview-sheet { position: absolute; left: 0; top: 0; box-shadow: none !important; } }`}</style>
-
-      {/* Top bar */}
-      <header className="flex h-14 shrink-0 items-center justify-between border-b border-[#1E6F99] bg-[#287EAD] px-5 text-white">
-        <div className="flex items-center gap-3">
-          <button onClick={handleCancel} className="p-1.5 text-white/75 hover:bg-white/10 hover:text-white"><ArrowLeft className="h-4 w-4" /></button>
-          <div className="h-5 w-px bg-white/25" />
-          <input value={template.name} onChange={(e) => commit({ ...template, name: e.target.value })}
-                 className="h-9 w-72 border border-transparent bg-transparent px-2 text-sm font-semibold text-white outline-none hover:border-white/25 focus:border-white/70 focus:bg-white/10" />
-          <span className="border border-white/25 bg-white/10 px-2.5 py-0.5 text-[10px] font-semibold text-white/80">
-            {template.page.size} · {blockCount} block{blockCount !== 1 ? "s" : ""}
-          </span>
-          <div className="ml-2 flex items-center gap-2 border border-white/25 bg-white/10 px-2 py-1">
-            <span className="text-[11px] font-semibold uppercase tracking-wider text-white/80">AutoSave</span>
-            <button onClick={() => setAutoSave((v) => !v)} role="switch" aria-checked={autoSave}
-                    className={cn("relative h-5 w-10 rounded-full border transition-colors", autoSave ? "border-emerald-300 bg-emerald-400" : "border-white/40 bg-white/20")}>
-              <span className={cn("absolute top-0.5 h-4 w-4 rounded-full bg-white shadow transition-all", autoSave ? "left-[22px]" : "left-0.5")} />
-            </button>
-          </div>
-          {autoSave && lastSavedAt && <span className="text-[10px] text-white/70">Saved {Math.max(1, Math.round((Date.now() - lastSavedAt) / 1000))}s ago</span>}
-        </div>
-
-        <div className="flex h-9 items-center gap-0.5 border border-white/25 bg-white/10 p-0.5">
-          {([
-            { id: "design", label: "Design", icon: LayoutGrid },
-            { id: "preview", label: "Preview", icon: Eye },
-            { id: "settings", label: "Settings", icon: Settings },
-          ] as const).map((t) => {
-            const Icon = t.icon;
-            return (
-              <button key={t.id} onClick={() => setTab(t.id)}
-                      className={cn("flex items-center gap-1.5 px-3 py-1.5 text-xs font-semibold transition-all",
-                        tab === t.id ? "bg-white text-[#287EAD]" : "text-white/70 hover:bg-white/10 hover:text-white")}>
-                <Icon className="h-3.5 w-3.5" />{t.label}
-              </button>
-            );
-          })}
-        </div>
-
-        <div className="flex items-center gap-2">
-          {tab === "preview" && (
-            <button onClick={() => window.print()} className="inline-flex items-center gap-1.5 p-1.5 text-white/75 hover:bg-white/10 hover:text-white" title="Print / PDF">
-              <Printer className="h-4 w-4" />
-            </button>
-          )}
-          <div className="flex items-center gap-1">
-            <button disabled={!canUndo} onClick={() => setHist((s) => ({ ...s, cursor: Math.max(0, s.cursor - 1) }))} title="Undo" className="p-1.5 text-white/70 hover:bg-white/10 hover:text-white disabled:opacity-25"><Undo2 className="h-4 w-4" /></button>
-            <button disabled={!canRedo} onClick={() => setHist((s) => ({ ...s, cursor: Math.min(s.stack.length - 1, s.cursor + 1) }))} title="Redo" className="p-1.5 text-white/70 hover:bg-white/10 hover:text-white disabled:opacity-25"><Redo2 className="h-4 w-4" /></button>
-          </div>
-          <div className="h-5 w-px bg-white/25" />
-          <button onClick={() => handleSave(false)} disabled={isSaving}
-                  className="inline-flex items-center gap-2 border border-white/30 bg-white px-4 py-2 text-sm font-semibold text-[#287EAD] hover:bg-[#EEF6FB] disabled:opacity-50">
-            <Save className="h-4 w-4" />{isSaving ? "Saving…" : "Save template"}
-          </button>
-        </div>
-      </header>
-
-      {/* Body */}
-      <DndContext sensors={sensors} onDragStart={onDragStart} onDragEnd={onDragEnd}>
-        <div className="flex flex-1 overflow-hidden">
-          {tab === "design" && (
-            <div className="flex flex-1 overflow-hidden animate-in fade-in duration-150">
-              <div className="w-[260px] shrink-0"><Palette /></div>
-              <main className="relative flex-1 overflow-y-auto" style={{ background: "#EDEDED" }}>
-                <Paper template={template} selectedId={selectedId} onSelect={setSelectedId}
-                       onRemove={removeBlock} onDuplicate={duplicateBlock} onMove={moveBlock} onAddPage={addPage} />
-                {!inspectorOpen && (
-                  <button onClick={() => setInspectorOpen(true)} title="Open inspector"
-                          className="absolute right-4 top-4 flex items-center gap-1.5 border border-[#AEB5BB] bg-white px-3 py-2 text-xs font-semibold text-[#5E6870] shadow-md hover:border-[#287EAD] hover:bg-[#EEF6FB] hover:text-[#287EAD]">
-                    <Settings className="h-3.5 w-3.5" /> Inspector
-                  </button>
-                )}
-              </main>
-              <div className={cn("shrink-0 overflow-hidden transition-all duration-200", inspectorOpen ? "w-[380px]" : "w-0")}>
-                <Inspector template={template} selectedId={selectedId} fields={fields}
-                           onUpdateBlock={updateBlock} onCollapse={() => setInspectorOpen(false)} />
-              </div>
-            </div>
-          )}
-          {tab === "preview" && (
-            <main className="flex-1 overflow-y-auto bg-slate-100 animate-in fade-in duration-150">
-              <PreviewTab template={template} fields={fields} sampleData={{ ...formulaSample, ...sampleData }} />
-            </main>
-          )}
-          {tab === "settings" && (
-            <main className="flex-1 overflow-y-auto bg-slate-100 animate-in fade-in duration-150">
-              <SettingsTab template={template} documentTypes={documentTypes} fields={fields}
-                           onCommit={(patch) => commit({ ...template, ...patch })} />
-            </main>
-          )}
-        </div>
-
-        <DragOverlay dropAnimation={{ sideEffects: defaultDropAnimationSideEffects({ styles: { active: { opacity: "0.4" } } }) }}>
-          {dragType ? (
-            <div className="flex items-center gap-2 rounded-lg border border-[#287EAD] bg-[#287EAD] px-3 py-2 text-sm font-semibold text-white shadow-xl">
-              {(() => { const Icon = BLOCK_META[dragType].icon; return <Icon className="h-4 w-4" />; })()}
-              {BLOCK_META[dragType].label}
-            </div>
-          ) : null}
-        </DragOverlay>
-      </DndContext>
-    </div>
-  );
+function Preview({ template, data }: { template: DocumentTemplateV2; data: Record<string, unknown> }) {
+  const dims = PAGE_DIMS[template.page.size]; const portrait = template.page.orientation === "portrait";
+  const width = portrait ? dims.w : dims.h; const height = portrait ? dims.h : dims.w; const margin = template.page.margin;
+  return <main className="dtd-preview">{template.pages.map((page, index) => <article key={page.id} className="dtd-paper dtd-preview-paper" style={{ width: `${width}mm`, minHeight: `${height}mm`, fontFamily: template.theme.fontFamily, fontSize: template.theme.baseFontSize, lineHeight: template.theme.lineHeight }}><Watermark watermark={template.watermark} data={data} /><BandRenderer band={template.header} theme={template.theme} data={data} page={index + 1} pages={template.pages.length} kind="header" /><div className="dtd-page-content" style={{ padding: `${margin.top}mm ${margin.right}mm ${margin.bottom}mm ${margin.left}mm` }}>{page.rows.map((row) => <RowRenderer key={row.id} row={row} theme={template.theme} data={data} page={index + 1} pages={template.pages.length} />)}</div><BandRenderer band={template.footer} theme={template.theme} data={data} page={index + 1} pages={template.pages.length} kind="footer" /></article>)}</main>;
 }
 
-/* Re-exports for convenience when wiring into the host app. */
-export {
-  initialDocument as defaultDocumentTemplate,
-  normalizeTemplate as normalizeDocumentTemplate,
-  outputDocumentTemplate,
-  collectPlaceholders,
-  DEFAULT_MERGE_FIELDS,
-};
+/* ========================================================================== *
+ * Main component
+ * ========================================================================== */
+
+export default function TemplateDesigner({ initial, mergeFields = DEFAULT_FIELDS, sampleData, documentTypes = [], onSave, onCancel, isSaving }: TemplateDesignerProps) {
+  const [history, setHistory] = useState<DocumentTemplateV2[]>(() => [normalizeTemplate(initial ?? createLpoTemplate())]);
+  const [cursor, setCursor] = useState(0); const template = history[cursor];
+  const [selection, setSelection] = useState<Selection | null>(() => ({ kind: "page", pageId: template.pages[0].id }));
+  const [tab, setTab] = useState<EditorTab>("design"); const [zoom, setZoom] = useState(0.78);
+  const [leftOpen, setLeftOpen] = useState(true); const [rightOpen, setRightOpen] = useState(true);
+  const [dragType, setDragType] = useState<ElementType | null>(null); const importRef = useRef<HTMLInputElement>(null);
+  const sensors = useSensors(useSensor(PointerSensor, { activationConstraint: { distance: 5 } }));
+  const data = useMemo(() => ({ ...SAMPLE_DATA, ...(sampleData ?? {}) }), [sampleData]);
+
+  const commit = useCallback((next: DocumentTemplateV2) => { setHistory((current) => [...current.slice(0, cursor + 1), normalizeTemplate(next)].slice(-80)); setCursor((current) => Math.min(current + 1, 79)); }, [cursor]);
+  const mutatePages = (mutator: (pages: DocumentPage[]) => DocumentPage[]) => commit({ ...template, pages: mutator(template.pages) });
+  const mapRows = (mapper: (row: GridRow, page: DocumentPage) => GridRow) => mutatePages((pages) => pages.map((page) => ({ ...page, rows: page.rows.map((row) => mapper(row, page)) })));
+  const mapCells = (mapper: (cell: GridCell, row: GridRow, page: DocumentPage) => GridCell) => mapRows((row, page) => ({ ...row, columns: row.columns.map((cell) => mapper(cell, row, page)) }));
+
+  const selectedPageId = selection?.pageId ?? template.pages[0].id;
+  const addRow = (ratios: number[]) => { const pageId = selectedPageId; const row = makeRow(ratios); mutatePages((pages) => pages.map((page) => page.id === pageId ? { ...page, rows: [...page.rows, row] } : page)); setSelection({ kind: "row", pageId, rowId: row.id }); };
+  const deleteRow = (rowId: string) => { mutatePages((pages) => pages.map((page) => ({ ...page, rows: page.rows.filter((row) => row.id !== rowId) }))); setSelection(null); };
+  const duplicateRow = (rowId: string) => mutatePages((pages) => pages.map((page) => { const index = page.rows.findIndex((row) => row.id === rowId); if (index < 0) return page; const rows = [...page.rows]; rows.splice(index + 1, 0, cloneWithNewIds(rows[index])); return { ...page, rows }; }));
+  const moveRow = (rowId: string, direction: -1 | 1) => mutatePages((pages) => pages.map((page) => { const index = page.rows.findIndex((row) => row.id === rowId); const target = index + direction; if (index < 0 || target < 0 || target >= page.rows.length) return page; const rows = [...page.rows]; [rows[index], rows[target]] = [rows[target], rows[index]]; return { ...page, rows }; }));
+  const deleteElement = (elementId: string) => { mapCells((cell) => ({ ...cell, elements: cell.elements.filter((element) => element.id !== elementId) })); setSelection(null); };
+  const duplicateElement = (elementId: string) => mapCells((cell) => { const index = cell.elements.findIndex((element) => element.id === elementId); if (index < 0) return cell; const elements = [...cell.elements]; elements.splice(index + 1, 0, cloneWithNewIds(elements[index])); return { ...cell, elements }; });
+  const moveElement = (elementId: string, direction: -1 | 1) => mapCells((cell) => { const index = cell.elements.findIndex((element) => element.id === elementId); const target = index + direction; if (index < 0 || target < 0 || target >= cell.elements.length) return cell; const elements = [...cell.elements]; [elements[index], elements[target]] = [elements[target], elements[index]]; return { ...cell, elements }; });
+  const patchElement = (value: Partial<DocumentElement>) => { if (selection?.kind !== "element") return; mapCells((cell) => ({ ...cell, elements: cell.elements.map((element) => element.id === selection.elementId ? { ...element, ...value } : element) })); };
+  const patchRow = (value: Partial<GridRow>) => { if (selection?.kind !== "row") return; mapRows((row) => row.id === selection.rowId ? { ...row, ...value } : row); };
+  const patchCell = (value: Partial<GridCell>) => { if (selection?.kind !== "cell") return; mapCells((cell) => cell.id === selection.cellId ? { ...cell, ...value } : cell); };
+
+  const onDragStart = (event: DragStartEvent) => { const type = event.active.data.current?.type as ElementType | undefined; setDragType(type ?? null); };
+  const onDragEnd = (event: DragEndEvent) => {
+    setDragType(null); const target = event.over?.data.current; if (!target || target.source !== "cell") return;
+    const pageId = String(target.pageId); const rowId = String(target.rowId); const cellId = String(target.cellId);
+    const source = event.active.data.current;
+    if (source?.source === "palette") { const element = makeElement(source.type as ElementType); mapCells((cell, row, page) => cell.id === cellId && row.id === rowId && page.id === pageId ? { ...cell, elements: [...cell.elements, element] } : cell); setSelection({ kind: "element", pageId, rowId, cellId, elementId: element.id }); return; }
+    if (source?.source === "element") { const elementId = String(source.elementId); let moved: DocumentElement | undefined; template.pages.forEach((page) => page.rows.forEach((row) => row.columns.forEach((cell) => { const found = cell.elements.find((element) => element.id === elementId); if (found) moved = found; }))); if (!moved) return; mutatePages((pages) => pages.map((page) => ({ ...page, rows: page.rows.map((row) => ({ ...row, columns: row.columns.map((cell) => ({ ...cell, elements: cell.id === cellId ? [...cell.elements.filter((element) => element.id !== elementId), moved as DocumentElement] : cell.elements.filter((element) => element.id !== elementId) })) })) }))); setSelection({ kind: "element", pageId, rowId, cellId, elementId }); }
+  };
+
+  const addPage = () => { const page = { id: uid(), name: `Page ${template.pages.length + 1}`, rows: [makeRow()] }; commit({ ...template, pages: [...template.pages, page] }); setSelection({ kind: "page", pageId: page.id }); };
+  const duplicatePage = () => { const page = template.pages.find((item) => item.id === selectedPageId) ?? template.pages[0]; const copy = cloneWithNewIds(page); copy.name = `${page.name} copy`; commit({ ...template, pages: [...template.pages, copy] }); setSelection({ kind: "page", pageId: copy.id }); };
+  const removePage = () => { if (template.pages.length === 1) return toast.error("A template needs at least one page."); commit({ ...template, pages: template.pages.filter((page) => page.id !== selectedPageId) }); setSelection({ kind: "page", pageId: template.pages.find((page) => page.id !== selectedPageId)?.id ?? template.pages[0].id }); };
+  const importJson = async (file?: File) => { if (!file) return; try { const parsed = JSON.parse(await file.text()) as DocumentTemplateV2; if (parsed.schemaVersion !== 2 || !Array.isArray(parsed.pages)) throw new Error("Not a v2 document template"); const normalized = normalizeTemplate(parsed); setHistory([normalized]); setCursor(0); setSelection({ kind: "page", pageId: normalized.pages[0].id }); toast.success("Template imported"); } catch (error) { toast.error(error instanceof Error ? error.message : "Could not import template"); } };
+  const save = async () => { try { await onSave(outputDocumentTemplate(template), false); toast.success("Template saved"); } catch (error) { toast.error(error instanceof Error ? error.message : "Template could not be saved"); } };
+
+  return <div className="dtd-root"><style>{STYLES}</style><header className="dtd-topbar"><div className="dtd-top-left"><IconButton title="Close designer" onClick={onCancel}><ArrowLeft size={16} /></IconButton><div className="dtd-top-divider" /><input className="dtd-name" value={template.name} onChange={(event) => commit({ ...template, name: event.target.value })} /><span className="dtd-version">V2 · {template.pages.length} pages</span></div><nav className="dtd-tabs">{([{ id: "design", label: "Design", icon: LayoutGrid }, { id: "preview", label: "Preview", icon: Eye }, { id: "settings", label: "Settings", icon: Settings }] as const).map((item) => <button key={item.id} type="button" className={tab === item.id ? "is-active" : ""} onClick={() => setTab(item.id)}><item.icon size={14} />{item.label}</button>)}</nav><div className="dtd-top-actions"><IconButton title="Undo" disabled={cursor === 0} onClick={() => setCursor((value) => Math.max(0, value - 1))}><Undo2 size={15} /></IconButton><IconButton title="Redo" disabled={cursor >= history.length - 1} onClick={() => setCursor((value) => Math.min(history.length - 1, value + 1))}><Redo2 size={15} /></IconButton>{tab === "preview" && <IconButton title="Print or save as PDF" onClick={() => window.print()}><Printer size={15} /></IconButton>}<button type="button" className="dtd-save" disabled={isSaving} onClick={() => void save()}><Save size={14} />{isSaving ? "Saving…" : "Save template"}</button></div></header>
+    <div className="dtd-subbar"><div><IconButton title={leftOpen ? "Hide elements" : "Show elements"} active={leftOpen} onClick={() => setLeftOpen((value) => !value)}><PanelLeftClose size={15} /></IconButton>{tab === "design" && <><button type="button" className="dtd-secondary" onClick={addPage}><Plus size={13} />Add page</button><button type="button" className="dtd-secondary" onClick={duplicatePage}><Copy size={13} />Duplicate page</button><IconButton title="Delete page" disabled={template.pages.length === 1} onClick={removePage}><Trash2 size={14} /></IconButton></>}</div><div className="dtd-zoom"><IconButton title="Zoom out" onClick={() => setZoom((value) => Math.max(.45, value - .1))}><ZoomOut size={14} /></IconButton><span>{Math.round(zoom * 100)}%</span><IconButton title="Zoom in" onClick={() => setZoom((value) => Math.min(1.35, value + .1))}><ZoomIn size={14} /></IconButton></div><div><input ref={importRef} hidden type="file" accept="application/json" onChange={(event) => { void importJson(event.target.files?.[0]); event.target.value = ""; }} /><button type="button" className="dtd-secondary" onClick={() => importRef.current?.click()}><FileJson size={13} />Import JSON</button><button type="button" className="dtd-secondary" onClick={() => downloadJson(template)}><Download size={13} />Export JSON</button>{tab === "design" && <IconButton title={rightOpen ? "Hide properties" : "Show properties"} active={rightOpen} onClick={() => setRightOpen((value) => !value)}><PanelRightClose size={15} /></IconButton>}</div></div>
+    {tab === "settings" ? <SettingsView template={template} documentTypes={documentTypes} commit={commit} /> : tab === "preview" ? <Preview template={template} data={data} /> : <DndContext sensors={sensors} onDragStart={onDragStart} onDragEnd={onDragEnd}><div className="dtd-workspace">{leftOpen && <Palette onAddRow={addRow} />}<main className="dtd-canvas"><div className="dtd-canvas-scale" style={{ transform: `scale(${zoom})`, transformOrigin: "top center", width: `${100 / zoom}%` }}>{template.pages.map((page, pageIndex) => <DesignerPage key={page.id} template={template} page={page} pageIndex={pageIndex} selection={selection} onSelect={setSelection} onDeleteRow={deleteRow} onDuplicateRow={duplicateRow} onMoveRow={moveRow} onDeleteElement={deleteElement} onDuplicateElement={duplicateElement} onMoveElement={moveElement} />)}</div></main>{rightOpen && <Inspector template={template} selection={selection} fields={mergeFields} onPatchElement={patchElement} onPatchRow={patchRow} onPatchCell={patchCell} onClose={() => setRightOpen(false)} />}</div><DragOverlay>{dragType && <div className="dtd-drag-overlay">{(() => { const Icon = elementMeta[dragType].icon; return <Icon size={15} />; })()}{elementMeta[dragType].label}</div>}</DragOverlay></DndContext>}
+  </div>;
+}
+
+/* ========================================================================== *
+ * Component-scoped CSS (keeps this deliverable genuinely single-file)
+ * ========================================================================== */
+
+const STYLES = `
+.dtd-root{--blue:#287EAD;--blue-dark:#1E6F99;--ink:#1F2933;--muted:#63717C;--line:#C8CDD2;--panel:#F6F7F8;--workspace:#E7E9EC;position:fixed;inset:0;z-index:9999;display:flex;flex-direction:column;background:var(--workspace);color:var(--ink);font-family:Arial,Helvetica,sans-serif;font-size:13px;letter-spacing:0}.dtd-root *{box-sizing:border-box}.dtd-root button,.dtd-root input,.dtd-root textarea,.dtd-root select{font:inherit;letter-spacing:0}.dtd-root button{cursor:pointer}.dtd-root button:disabled{cursor:not-allowed;opacity:.35}
+.dtd-topbar{height:54px;flex:none;display:grid;grid-template-columns:1fr auto 1fr;align-items:center;padding:0 14px;background:var(--blue);border-bottom:1px solid var(--blue-dark);color:#fff}.dtd-top-left,.dtd-top-actions,.dtd-subbar>div{display:flex;align-items:center;gap:6px}.dtd-top-actions{justify-content:flex-end}.dtd-top-divider{width:1px;height:22px;background:rgba(255,255,255,.3)}.dtd-name{width:min(300px,32vw);height:34px;border:1px solid transparent;background:transparent;color:#fff;font-weight:700;padding:0 8px;outline:none}.dtd-name:hover,.dtd-name:focus{border-color:rgba(255,255,255,.45);background:rgba(255,255,255,.08)}.dtd-version{padding:4px 8px;border:1px solid rgba(255,255,255,.25);font-size:10px;font-weight:700;text-transform:uppercase}.dtd-tabs{display:flex;padding:2px;border:1px solid rgba(255,255,255,.25);background:rgba(255,255,255,.08)}.dtd-tabs button{display:flex;align-items:center;gap:5px;border:0;background:transparent;color:rgba(255,255,255,.75);padding:7px 12px;font-size:12px;font-weight:700}.dtd-tabs button.is-active{background:#fff;color:var(--blue)}.dtd-topbar .dtd-icon-button{border-color:transparent;color:#fff;background:transparent}.dtd-topbar .dtd-icon-button:hover{background:rgba(255,255,255,.12)}.dtd-save{display:flex;align-items:center;gap:7px;height:34px;padding:0 13px;border:1px solid #fff;background:#fff;color:var(--blue);font-weight:700}
+.dtd-subbar{height:42px;flex:none;display:grid;grid-template-columns:1fr auto 1fr;align-items:center;padding:0 10px;background:#fff;border-bottom:1px solid var(--line)}.dtd-subbar>div:last-child{justify-content:flex-end}.dtd-zoom span{width:42px;text-align:center;font-size:11px;font-weight:700;color:var(--muted)}.dtd-icon-button{width:30px;height:30px;display:inline-flex;align-items:center;justify-content:center;border:1px solid var(--line);background:#fff;color:var(--muted);padding:0}.dtd-icon-button:hover,.dtd-icon-button.is-active{border-color:var(--blue);color:var(--blue);background:#EEF6FB}.dtd-secondary{height:30px;display:inline-flex;align-items:center;justify-content:center;gap:6px;border:1px solid var(--line);background:#fff;color:var(--ink);padding:0 9px;font-size:11px;font-weight:700}.dtd-secondary:hover{border-color:var(--blue);color:var(--blue);background:#EEF6FB}
+.dtd-workspace{min-height:0;flex:1;display:flex;overflow:hidden}.dtd-palette{width:238px;flex:none;display:flex;flex-direction:column;background:var(--panel);border-right:1px solid var(--line)}.dtd-panel-title{height:42px;flex:none;display:flex;align-items:center;justify-content:space-between;padding:0 12px;border-bottom:1px solid var(--line);background:#fff;font-size:12px;font-weight:800;text-transform:uppercase}.dtd-search{position:relative;margin:10px}.dtd-search svg{position:absolute;left:9px;top:9px;color:var(--muted)}.dtd-search input{width:100%;height:32px;border:1px solid var(--line);background:#fff;padding:0 8px 0 30px;outline:none}.dtd-search input:focus{border-color:var(--blue)}.dtd-palette-scroll{flex:1;overflow:auto}.dtd-group-title{width:100%;height:34px;display:flex;align-items:center;gap:6px;border:0;border-top:1px solid #E5E8EB;background:transparent;padding:0 10px;text-align:left;font-size:10px;font-weight:800;text-transform:uppercase;color:var(--ink)}.dtd-group-title:hover{background:#fff}.dtd-group-title small{margin-left:auto;padding:2px 5px;background:#E5E8EB;color:var(--muted)}.dtd-group-title.static{cursor:default}.dtd-palette-item{width:100%;height:34px;display:flex;align-items:center;gap:9px;border:1px solid transparent;background:transparent;padding:0 14px;text-align:left;color:var(--ink)}.dtd-palette-item svg{color:var(--blue)}.dtd-palette-item:hover{border-color:var(--blue);background:#EEF6FB}.dtd-palette-item.is-dragging{opacity:.3}.dtd-layout-presets{display:grid;grid-template-columns:1fr 1fr;gap:6px;padding:7px 10px 12px}.dtd-layout-presets button{height:32px;display:flex;gap:3px;border:1px solid var(--line);background:#fff;padding:6px}.dtd-layout-presets button:hover{border-color:var(--blue)}.dtd-layout-presets i{height:100%;background:#DDE3E8;border:1px solid #BBC5CC}.dtd-palette-help{flex:none;padding:10px;border-top:1px solid var(--line);font-size:10px;line-height:1.4;color:var(--muted)}
+.dtd-canvas{flex:1;min-width:0;overflow:auto;background:var(--workspace)}.dtd-canvas-scale{display:flex;flex-direction:column;align-items:center;gap:26px;padding:24px 0 80px}.dtd-page-wrap{flex:none}.dtd-page-label{height:18px;font-size:9px;font-weight:800;text-transform:uppercase;color:#66727B}.dtd-paper{position:relative;display:flex;flex-direction:column;background:#fff;color:#111827;box-shadow:0 3px 14px rgba(23,35,45,.18);overflow:hidden}.dtd-page-content{position:relative;z-index:1;flex:1}.dtd-band{position:relative;z-index:2;padding:10px 15mm}.dtd-header.has-rule{border-bottom:3px solid #D71920}.dtd-footer{margin-top:auto;padding-top:7px;padding-bottom:7px}.dtd-footer.has-rule{border-top:1px solid #64748B}.dtd-watermark{position:absolute;z-index:0;left:50%;top:54%;text-align:center;pointer-events:none}.dtd-watermark span{display:block;font-size:28px;font-weight:800;color:#287EAD}.dtd-watermark img{display:block;width:100%;height:auto}.dtd-grid-row{position:relative}.dtd-row-frame{position:relative;outline:1px solid transparent;transition:outline-color .12s}.dtd-row-frame:hover,.dtd-row-frame.is-selected{outline-color:rgba(40,126,173,.48)}.dtd-row-toolbar,.dtd-element-toolbar{position:absolute;z-index:20;right:0;top:-26px;display:none;height:25px;padding:2px;background:#fff;border:1px solid var(--line);box-shadow:0 2px 5px rgba(0,0,0,.08)}.dtd-row-frame:hover>.dtd-row-toolbar,.dtd-row-frame.is-selected>.dtd-row-toolbar,.dtd-element-frame:hover>.dtd-element-toolbar,.dtd-element-frame.is-selected>.dtd-element-toolbar{display:flex}.dtd-row-toolbar .dtd-icon-button,.dtd-element-toolbar .dtd-icon-button{width:20px;height:20px;border:0}.dtd-cell-canvas{position:relative;min-height:30px;border-style:solid;outline:1px dashed transparent}.dtd-cell-canvas:hover,.dtd-cell-canvas.is-selected{outline-color:#8CB9D2}.dtd-cell-canvas.is-over{outline:2px solid var(--blue);background:#EEF6FB!important}.dtd-empty-cell{min-height:34px;display:flex;align-items:center;justify-content:center;gap:5px;border:1px dashed #C8CDD2;color:#8C969E;font-size:10px}.dtd-element-frame{position:relative;min-height:10px;outline:1px solid transparent}.dtd-element-frame:hover,.dtd-element-frame.is-selected{outline-color:var(--blue)}.dtd-element-frame.is-dragging{opacity:.25}.dtd-element-toolbar{top:-24px}.dtd-grip{width:20px;border:0;background:#fff;color:#64748B;cursor:grab}.dtd-drag-overlay{display:flex;align-items:center;gap:7px;padding:8px 10px;border:1px solid var(--blue);background:#fff;color:var(--blue);font-weight:700;box-shadow:0 8px 24px rgba(0,0,0,.16)}
+.dtd-kv{display:flex;min-height:19px}.dtd-kv>span:first-child{flex:none}.dtd-kv>span:last-child{flex:1;white-space:pre-wrap}.dtd-image-placeholder{display:flex;flex-direction:column;align-items:center;justify-content:center;gap:4px;border:1px dashed #AEB5BB;background:#F8FAFC;color:#87939C;font-size:9px}.dtd-signatures{display:grid;gap:18px}.dtd-signatory{padding:4px 6px;white-space:pre-wrap}.dtd-signatory>strong{display:block;margin-bottom:8px}.dtd-signatory-line{display:grid;grid-template-columns:1fr 1fr;gap:16px;margin-top:4px}.dtd-data-table th{font-weight:700}.dtd-data-table td{vertical-align:top;overflow-wrap:anywhere}.dtd-manual{padding:0 2px;background:#FEF3C7;color:#854D0E}.dtd-missing{background:#FEE2E2;color:#991B1B;padding:0 2px}.dtd-table-wrap{overflow:hidden}
+.dtd-inspector{width:350px;flex:none;display:flex;flex-direction:column;background:#fff;border-left:1px solid var(--line)}.dtd-inspector-scroll{flex:1;overflow:auto}.dtd-inspector-section{padding:13px;border-bottom:1px solid #E5E8EB}.dtd-inspector-section h4,.dtd-settings h4{margin:4px 0 10px;font-size:10px;font-weight:800;text-transform:uppercase;color:var(--muted)}.dtd-field{display:block;margin-bottom:10px}.dtd-field>span{display:block;margin-bottom:4px;font-size:9px;font-weight:800;text-transform:uppercase;color:var(--muted)}.dtd-input,.dtd-field select,.dtd-field>input:not([type=color]):not([type=range]){width:100%;min-height:34px;border:1px solid var(--line);background:#fff;color:var(--ink);padding:7px 9px;outline:none;resize:vertical}.dtd-input:focus,.dtd-field select:focus,.dtd-field input:focus{border-color:var(--blue)}.dtd-field input[type=color]{width:100%;height:34px;border:1px solid var(--line);background:#fff;padding:3px}.dtd-token-area textarea{display:block}.dtd-token-area>.dtd-picker{margin-top:5px}.dtd-number{display:flex;height:34px;border:1px solid var(--line);background:#fff}.dtd-number input{min-width:0;width:100%;border:0;padding:0 7px;outline:none}.dtd-number small{display:flex;align-items:center;padding:0 7px;color:var(--muted);background:#F6F7F8}.dtd-segmented{display:flex;border:1px solid var(--line)}.dtd-segmented button{min-width:32px;height:30px;flex:1;border:0;border-right:1px solid var(--line);background:#fff;color:var(--muted)}.dtd-segmented button:last-child{border-right:0}.dtd-segmented button.is-active{background:var(--blue);color:#fff}.dtd-inline-controls,.dtd-check-row{display:flex;align-items:center;gap:7px;margin-bottom:10px}.dtd-check-row{flex-wrap:wrap;justify-content:space-between}.dtd-check-row label,.dtd-checkbox{display:flex;align-items:center;gap:5px;font-size:11px}.dtd-two{display:grid;grid-template-columns:1fr 1fr;gap:8px}.dtd-four{display:grid;grid-template-columns:repeat(4,1fr);gap:8px}.dtd-stack{display:flex;flex-direction:column;gap:7px}.dtd-box{padding:8px;border:1px solid #E0E5E8;background:#FAFBFC}.dtd-list-input{display:flex;align-items:flex-start;gap:5px}.dtd-list-input>input,.dtd-list-input>textarea,.dtd-list-input>.dtd-input,.dtd-list-input>.dtd-number{flex:1;min-width:0}.dtd-list-input textarea{min-height:50px;padding:6px;border:1px solid var(--line);resize:vertical}.dtd-subtitle{margin:7px 0 0!important}.dtd-upload{height:34px;display:flex;align-items:center;justify-content:center;gap:6px;margin:7px 0 10px;border:1px dashed var(--blue);background:#EEF6FB;color:var(--blue);font-size:11px;font-weight:700;cursor:pointer}.dtd-upload input{display:none}.dtd-empty-inspector{height:260px;display:flex;flex-direction:column;align-items:center;justify-content:center;color:#8C969E;text-align:center}.dtd-picker{position:relative;display:inline-block}.dtd-picker-menu{position:absolute;z-index:100;right:0;top:34px;width:300px;border:1px solid var(--line);background:#fff;box-shadow:0 10px 28px rgba(0,0,0,.16)}.dtd-picker-search{position:relative;padding:8px;border-bottom:1px solid var(--line)}.dtd-picker-search svg{position:absolute;left:16px;top:17px}.dtd-picker-search input{width:100%;height:32px;border:1px solid var(--line);padding-left:30px}.dtd-picker-scroll{max-height:250px;overflow:auto;padding:4px 0}.dtd-picker-scroll h5{margin:6px 10px 2px;font-size:9px;text-transform:uppercase;color:var(--muted)}.dtd-picker-scroll button{width:100%;display:flex;justify-content:space-between;gap:8px;border:0;background:#fff;padding:6px 10px;text-align:left}.dtd-picker-scroll button:hover{background:#EEF6FB}.dtd-picker-scroll code{font-size:9px;color:#7A8790}.dtd-manual-row{display:flex;padding:8px;border-top:1px solid var(--line);background:#FFFBEB}.dtd-manual-row input{flex:1;min-width:0;height:30px;border:1px solid #D9BD56;padding:0 7px}.dtd-manual-row button{width:30px;border:0;background:#B99216;color:#fff}
+.dtd-preview,.dtd-settings{flex:1;overflow:auto;background:var(--workspace);padding:28px}.dtd-preview{display:flex;flex-direction:column;align-items:center;gap:24px}.dtd-preview-paper{flex:none;box-shadow:0 3px 14px rgba(23,35,45,.18)}.dtd-settings-grid{max-width:960px;margin:auto;display:grid;grid-template-columns:1fr 1fr;gap:16px}.dtd-settings section{padding:16px;border:1px solid var(--line);background:#fff}.dtd-settings section.dtd-wide{grid-column:1/-1}.dtd-settings h3{margin:0 0 16px;padding-bottom:10px;border-bottom:1px solid var(--line);font-size:14px}.dtd-field-chips{display:flex;flex-wrap:wrap;gap:6px}.dtd-field-chips code{padding:5px 7px;border:1px solid #B9D4E3;background:#EEF6FB;color:var(--blue);font-size:10px}
+@media(max-width:1000px){.dtd-topbar{grid-template-columns:1fr auto}.dtd-tabs{order:3;position:absolute;left:50%;transform:translateX(-50%)}.dtd-version{display:none}.dtd-palette{width:200px}.dtd-inspector{width:300px}.dtd-subbar .dtd-secondary{font-size:0}.dtd-subbar .dtd-secondary svg{margin:0}.dtd-settings-grid{grid-template-columns:1fr}.dtd-settings section.dtd-wide{grid-column:auto}}
+@media(max-width:760px){.dtd-name{width:150px}.dtd-tabs{position:static;transform:none}.dtd-tabs button{padding:7px}.dtd-tabs button{font-size:0}.dtd-topbar{grid-template-columns:1fr auto auto}.dtd-palette,.dtd-inspector{position:absolute;z-index:100;top:96px;bottom:0}.dtd-palette{left:0}.dtd-inspector{right:0}.dtd-four{grid-template-columns:1fr 1fr}}
+@media print{body *{visibility:hidden!important}.dtd-preview,.dtd-preview *{visibility:visible!important}.dtd-root{position:static;background:#fff}.dtd-topbar,.dtd-subbar{display:none!important}.dtd-preview{display:block;padding:0;overflow:visible}.dtd-preview-paper{margin:0;box-shadow:none;break-after:page}.dtd-preview-paper:last-child{break-after:auto}.dtd-data-table thead{display:table-header-group}}
+`;
+
+export { DEFAULT_FIELDS as defaultMergeFields, SAMPLE_DATA as lpoSampleData, collectRequiredFields, normalizeTemplate };

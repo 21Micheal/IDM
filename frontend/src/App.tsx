@@ -1,5 +1,5 @@
 import { Suspense, lazy, useEffect, useState } from "react";
-import { Routes, Route, Navigate, useLocation, useNavigate } from "react-router-dom";
+import { Routes, Route, Navigate, useLocation } from "react-router-dom";
 import { useQuery } from "@tanstack/react-query";
 import { useAuthStore, applyServerSessionPolicy } from "@/store/authStore";
 import { useSessionUiStore } from "@/store/sessionUiStore";
@@ -326,8 +326,6 @@ function RouteFallback() {
 // ── App ───────────────────────────────────────────────────────────────────────
 
 export default function App() {
-  const navigate = useNavigate();
-
   return (
     <AuthBootstrap>
       <>

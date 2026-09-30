@@ -449,7 +449,7 @@ export default function FormDetailPage() {
   ];
 
   return (
-    <div className="flex flex-1 flex-col bg-[#F5F7F8] text-[#1F2933]">
+    <div className="flex min-h-0 flex-1 flex-col bg-[#F5F7F8] text-[#1F2933]">
       <WorkspaceCommandBar>
         <button
           onClick={() => navigate("/list")}
@@ -673,7 +673,7 @@ export default function FormDetailPage() {
           )}
 
           {/* ── Supplier Invoices & Quotations panel (RFQ stage) ── */}
-          {["rfq_pending", "rfq_approved"].includes(step) && (
+          {step === "rfq_approved" && (
             <InvoiceAttachmentsPanel
               documentId={doc.id}
               supplierCodes={(doc.metadata as any)?.rfq?.supplier_codes ?? []}
@@ -821,7 +821,7 @@ export default function FormDetailPage() {
       </div>
 
       {activeTask && (
-        <div className="sticky bottom-0 z-40 border-t border-[#C8CDD2] bg-white/95 backdrop-blur-sm">
+        <div className="z-10 shrink-0 border-t border-[#C8CDD2] bg-white">
           <Suspense fallback={<div className="px-4 py-3 text-xs text-[#5E6870]">Loading actions...</div>}>
             <WorkflowActionPanel
               task={activeTask}
