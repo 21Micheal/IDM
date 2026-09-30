@@ -112,6 +112,7 @@ class WorkflowTemplateViewSet(viewsets.ModelViewSet):
                 target_type=source.target_type,
                 document_type=source.document_type,
                 is_active=True, created_by=request.user,
+                definition=source.definition,  # Preserve v2 workflow definition
             )
             for step in source.steps.order_by("order"):
                 WorkflowStep.objects.create(

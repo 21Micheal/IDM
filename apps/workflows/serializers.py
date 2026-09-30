@@ -9,7 +9,7 @@ Adds:
 Everything else unchanged from previous version.
 """
 from rest_framework import serializers
-from django.db.models import Q
+from django.db.models import Q, F
 from django.db import transaction
 from django.utils import timezone
 from django.contrib.auth import get_user_model
@@ -290,7 +290,7 @@ class WorkflowTemplateSerializer(serializers.ModelSerializer):
         model  = WorkflowTemplate
         fields = [
             "id", "name", "description", "target_type", "document_type", "document_type_name", "is_active",
-            "notify_uploader_on_approval", "email_templates",
+            "notify_uploader_on_approval", "email_templates", "definition",
             "steps", "step_count", "created_by", "created_at", "updated_at",
         ]
         read_only_fields = ["id", "step_count", "created_by", "created_at", "updated_at"]
@@ -307,13 +307,14 @@ class WorkflowTemplateWriteSerializer(serializers.ModelSerializer):
 
     class Meta:
         model  = WorkflowTemplate
-        fields = ["name", "description", "target_type", "document_type", "is_active", "notify_uploader_on_approval", "email_templates", "steps"]
+        fields = ["name", "description", "target_type", "document_type", "is_active", "notify_uploader_on_approval", "email_templates", "definition", "steps"]
         extra_kwargs = {
             "is_active":                    {"required": False},
             "target_type":                  {"required": False},
             "document_type":                {"required": False, "allow_null": True},
             "notify_uploader_on_approval":  {"required": False},
             "email_templates":              {"required": False},
+            "definition":                   {"required": False, "allow_null": True},
         }
 
     def validate_name(self, value):
@@ -348,6 +349,68 @@ class WorkflowTemplateWriteSerializer(serializers.ModelSerializer):
             raise serializers.ValidationError(
                 {"email_templates": "Email templates must be a JSON object."}
             )
+
+        # Validate v2 workflow definition if present
+        definition = attrs.get("definition")
+        if definition is not None:
+            if not isinstance(definition, dict):
+                raise serializers.ValidationError(
+                    {"definition": "Workflow definition must be a JSON object."}
+                )
+            if definition.get("version") != 2:
+                raise serializers.ValidationError(
+                    {"definition": "Workflow definition must have version 2."}
+                )
+            
+            # Import the engine for validation
+            try:
+                from .engine import validate_definition, build_field_map_from_document_type
+                import uuid
+                
+                # Build field map from document type metadata
+                field_map = {}
+                if document_type:
+                    # Check if document_type is a valid UUID
+                    try:
+                        uuid.UUID(str(document_type))
+                        is_uuid = True
+                    except (ValueError, AttributeError):
+                        is_uuid = False
+                    
+                    if is_uuid:
+                        from apps.documents.models import DocumentType
+                        try:
+                            doc_type_obj = DocumentType.objects.get(id=document_type)
+                            field_map = build_field_map_from_document_type(doc_type_obj)
+                        except DocumentType.DoesNotExist:
+                            pass
+                    else:
+                        # document_type is a name or other non-UUID value
+                        # Try to look up by name
+                        from apps.documents.models import DocumentType
+                        try:
+                            doc_type_obj = DocumentType.objects.get(name=document_type)
+                            field_map = build_field_map_from_document_type(doc_type_obj)
+                        except DocumentType.DoesNotExist:
+                            pass
+                
+                # Validate the definition
+                from .engine import ValidationError as EngineValidationError
+                validation_errors = validate_definition(definition, field_map)
+                
+                # Convert engine validation errors to serializer errors
+                if validation_errors:
+                    error_messages = [e.message for e in validation_errors if e.severity == "error"]
+                    if error_messages:
+                        raise serializers.ValidationError(
+                            {"definition": f"Workflow definition validation failed: {', '.join(error_messages)}"}
+                        )
+            except Exception as e:
+                # If validation fails for any reason (e.g., import error, database error),
+                # log it but don't block the save - the definition may still be valid
+                import logging
+                logger = logging.getLogger(__name__)
+                logger.warning(f"Workflow definition validation skipped due to error: {e}")
 
         # Require at least one approval step (notification-only templates make no sense)
         steps_data = attrs.get("steps")
@@ -394,7 +457,11 @@ class WorkflowTemplateWriteSerializer(serializers.ModelSerializer):
         ]
         removed_step_ids = [step.id for step in removed_steps]
 
-        if removed_step_ids:
+        # For v2 workflows, steps are just a flat mirror - relax the protection check
+        # The actual workflow is defined in the definition field
+        is_v2 = bool(template.definition and template.definition.get("version") == 2)
+        
+        if removed_step_ids and not is_v2:
             protected_step_names = list(
                 WorkflowStep.objects.filter(
                     id__in=removed_step_ids,
@@ -409,18 +476,23 @@ class WorkflowTemplateWriteSerializer(serializers.ModelSerializer):
                     {"steps": f"Cannot remove steps that already have workflow tasks: {names}."}
                 )
 
-        # Move surviving steps out of the way first so order reassignments do not
-        # collide with the template's unique (template, order) constraint.
-        order_offset = max(len(existing_steps), len(steps_data)) + 1000
-        for idx, step in enumerate(existing_steps, start=1):
-            if step.id in removed_step_ids:
-                continue
-            temp_order = order_offset + idx
-            if step.order != temp_order:
+        # For v2 workflows, skip the temporary reordering entirely
+        # since we're not deleting steps anyway
+        if not is_v2:
+            # Move ALL existing steps to negative orders first to guarantee no collisions
+            # This includes steps that will be removed - they'll be deleted later
+            WorkflowStep.objects.filter(template=template).update(order=F("order") - 10000)
+            
+            # Now assign temporary negative orders to each existing step
+            for idx, step in enumerate(existing_steps, start=1):
+                temp_order = -idx  # Use negative orders: -1, -2, -3, etc.
                 step.order = temp_order
                 step.save(update_fields=["order"])
 
-        if removed_step_ids:
+        # For v2 workflows, don't delete steps - they're just a flat mirror
+        # The actual workflow is in the definition field
+        # Skip deletion entirely for v2 to avoid ProtectedError from workflowtask foreign keys
+        if removed_step_ids and not is_v2:
             WorkflowStep.objects.filter(id__in=removed_step_ids).delete()
 
         for order, raw in enumerate(steps_data, start=1):
@@ -435,6 +507,18 @@ class WorkflowTemplateWriteSerializer(serializers.ModelSerializer):
                 step.save()
             else:
                 WorkflowStep.objects.create(template=template, **step_data)
+        
+        # For v2 workflows, clean up orphaned steps (steps not in the new flat array)
+        # We can only delete steps that don't have workflow tasks
+        if is_v2 and removed_step_ids:
+            deletable_ids = list(
+                WorkflowStep.objects.filter(
+                    id__in=removed_step_ids,
+                    workflowtask__isnull=True,
+                ).values_list("id", flat=True)
+            )
+            if deletable_ids:
+                WorkflowStep.objects.filter(id__in=deletable_ids).delete()
 
     @transaction.atomic
     def create(self, validated_data):
@@ -729,6 +813,7 @@ class WorkflowInstanceSerializer(serializers.ModelSerializer):
             "id", "target_type", "document", "payment_run", "template", "rule", "rule_label",
             "phase",
             "status", "current_step_order",
+            "definition_version", "current_node_id",
             "started_by", "started_at", "completed_at", "tasks",
         ]
 

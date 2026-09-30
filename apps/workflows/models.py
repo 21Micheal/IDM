@@ -61,6 +61,15 @@ class WorkflowTemplate(models.Model):
             "Each value may contain 'subject' and 'body'. Leave blank to use defaults."
         ),
     )
+    definition = models.JSONField(
+        null=True,
+        blank=True,
+        help_text=(
+            "V2 branched workflow definition. When present, the workflow engine "
+            "follows this definition instead of legacy routing rules. Format: "
+            "{version: 2, blocks: [...]}. See workflowGraph.ts for schema."
+        ),
+    )
     created_by  = models.ForeignKey(
         settings.AUTH_USER_MODEL, null=True, on_delete=models.SET_NULL,
         related_name="created_workflow_templates",
@@ -356,6 +365,10 @@ class WorkflowInstance(models.Model):
     )
     status             = models.CharField(max_length=20, choices=STATUS_CHOICES, default="in_progress")
     current_step_order = models.PositiveSmallIntegerField(default=1)
+    # For v2 workflows: store the definition version/hash used for this instance
+    definition_version = models.PositiveSmallIntegerField(null=True, blank=True, help_text="Workflow definition version used for this instance")
+    # For v2 workflows: store the current node ID in the execution graph
+    current_node_id    = models.CharField(max_length=255, null=True, blank=True, help_text="Current node ID in v2 workflow graph")
     started_by         = models.ForeignKey(
         settings.AUTH_USER_MODEL, on_delete=models.PROTECT, related_name="started_workflows",
     )

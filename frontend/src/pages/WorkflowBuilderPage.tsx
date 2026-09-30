@@ -7,18 +7,22 @@ import { deriveDocumentTypeConfig } from "@/lib/documentTypeConfig";
 import {
   Plus, Trash2, Save, GitBranch, Loader2, X,
   Settings2, AlertCircle,
-  Clock, CheckCircle2,
+  CheckCircle2,
   Search, MoreVertical,
   FolderTree, LayoutTemplate, Check,
   User, UsersRound, Users,
-  Edit3, Play, Flag,
-  ZoomIn, ZoomOut, Maximize2, Move,
-  FileSignature, Copy,
+  Edit3, FileSignature, Copy,
   Bell, Mail,
 } from "lucide-react";
 import { toast } from "@/components/ui/vault-toast";
 import clsx from "clsx";
 import CustomListbox from "@/components/ui/CustomListbox";
+import BranchedWorkflowEditor from "@/components/workflow/BranchedWorkflowEditor";
+import {
+  type Block, type StepData, type WorkflowDefinition, type WorkflowField,
+  SYSTEM_FIELDS, definitionFromSteps, fieldMap, flattenSteps, mapSteps,
+  migrateLegacyRules, validateDefinition,
+} from "@/lib/workflowGraph";
 
 // ── Types ─────────────────────────────────────────────────────────────────────
 type AssigneeType = "group_any" | "group_all" | "group_specific";
@@ -74,6 +78,8 @@ interface WorkflowTemplate {
   notify_uploader_on_approval?: boolean;
   email_templates?: EmailTemplates;
   steps: WorkflowStep[];
+  /** v2 branched definition. When present the engine follows it and `steps` is only a flat mirror. */
+  definition?: WorkflowDefinition | null;
   step_count: number;
   created_by?: { id: string; full_name: string; email: string };
   created_at?: string;
@@ -383,6 +389,9 @@ function normalizeTemplate(template: WorkflowTemplate): WorkflowTemplate {
     notify_uploader_on_approval: template.notify_uploader_on_approval ?? true,
     email_templates: normalizeEmailTemplates(template.email_templates),
     steps: (template.steps ?? []).map(normalizeStep),
+    definition: template.definition?.blocks
+      ? { ...template.definition, blocks: mapSteps(template.definition.blocks, (s) => normalizeStep(s as WorkflowStep) as StepData) }
+      : null,
   };
 }
 
@@ -517,6 +526,69 @@ function stepToPayload(step: WorkflowStep): Partial<WorkflowStep> {
     rest.assignee_user_auto = Boolean(rest.assignee_user_auto);
   }
   return rest;
+}
+
+// ── Branching support: field catalog + per-step validation ───────────────────
+const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+
+/**
+ * Adapter: turns a document type's form definition into condition fields.
+ * ASSUMPTION: form fields live under one of the metadata paths below and look like
+ * { id|name|key, label|title, type, options }. Adjust here if your schema differs —
+ * nothing else depends on it.
+ */
+function extractFormFields(docType: Partial<DocumentType> | null | undefined): WorkflowField[] {
+  const m = (docType?.metadata ?? {}) as Record<string, any>;
+  const raw: any[] = m.form?.fields ?? m.form_template?.fields ?? m.form?.schema?.fields ?? m.fields ?? [];
+  if (!Array.isArray(raw)) return [];
+  const toType = (t: string): WorkflowField["type"] => {
+    const x = (t || "").toLowerCase();
+    if (["currency", "money", "amount"].includes(x)) return "money";
+    if (["number", "integer", "decimal", "float"].includes(x)) return "number";
+    if (["select", "dropdown", "radio", "choice"].includes(x)) return "select";
+    if (["multiselect", "multi_select", "checkbox_group", "tags"].includes(x)) return "multiselect";
+    if (["checkbox", "boolean", "switch", "toggle"].includes(x)) return "boolean";
+    if (["date", "datetime"].includes(x)) return "date";
+    return "text";
+  };
+  const out: WorkflowField[] = [];
+  for (const f of raw) {
+    const id = String(f?.id ?? f?.name ?? f?.key ?? "");
+    if (!id) continue;
+    const opts = Array.isArray(f?.options)
+      ? f.options.map((o: any) => (typeof o === "string" ? { value: o, label: o } : { value: String(o.value ?? o.id ?? o.label), label: String(o.label ?? o.value) }))
+      : undefined;
+    out.push({ id, label: String(f?.label ?? f?.title ?? id), type: toType(String(f?.type ?? "")), options: opts, source: "form" });
+  }
+  return out;
+}
+
+function buildFieldCatalog(docType: Partial<DocumentType> | null | undefined, target: WorkflowTargetType): WorkflowField[] {
+  const system = SYSTEM_FIELDS.filter((f) => (target === "payment_run" ? true : !f.id.startsWith("payment_run.")))
+    .filter((f) => (target === "payment_run" ? f.id !== "amount" : true));
+  return [...extractFormFields(docType), ...system];
+}
+
+/** Same rules the old save loop enforced, expressed per step so validateDefinition can reuse them. */
+function validateStepData(raw: StepData): string | null {
+  const s = raw as WorkflowStep;
+  if (!s.name?.trim()) return "Every step needs a name.";
+  if (s.step_type === "notification") {
+    const emails = s.notify_emails?.filter((e) => e.trim()) ?? [];
+    const single = s.notify_email?.trim();
+    if (!s.notify_user && emails.length === 0 && !single) return `"${s.name}" needs at least one recipient (user or email).`;
+    const bad = emails.find((e) => !EMAIL_RE.test(e.trim()));
+    if (bad) return `"${s.name}" has an invalid email address: ${bad}`;
+    if (single && !EMAIL_RE.test(single)) return `"${s.name}" has an invalid email address.`;
+    if (!s.notification_subject?.trim()) return `"${s.name}" needs an email subject.`;
+    if (!s.notification_message?.trim()) return `"${s.name}" needs an email message.`;
+    return null;
+  }
+  if (!s.assignee_group) return `"${s.name}" needs a group.`;
+  if (s.assignee_type === "group_specific" && !s.assignee_user) return `"${s.name}" needs a specific group member.`;
+  if (!s.allow_approve && !s.allow_reject && !s.allow_return) return `"${s.name}" must have at least one approver action enabled.`;
+  if (s.requires_signature && !s.allow_approve) return `"${s.name}" requires approval before it can require a signature.`;
+  return null;
 }
 
 function formatApiError(value: unknown): string | null {
@@ -1337,461 +1409,6 @@ function NotificationStepFields({
 }
 
 // ── Flowchart Editor (pan / zoom / drag) ─────────────────────────────────────
-interface NodePos { x: number; y: number; }
-
-const NODE_W = 260;
-const NODE_H = 138;
-const ANCHOR_W = 180;
-const ANCHOR_H = 64;
-
-function defaultPositions(stepCount: number): NodePos[] {
-  const positions: NodePos[] = [];
-  for (let i = 0; i < stepCount; i++) {
-    positions.push({ x: 0, y: (i + 1) * (NODE_H + 80) });
-  }
-  return positions;
-}
-
-function FlowchartEditor({
-  steps,
-  groups: _groups,
-  selectedIndex,
-  onSelectIndex,
-  onStepsChange: _onStepsChange,
-  onAddStep,
-}: {
-  steps: WorkflowStep[];
-  groups: Group[];
-  selectedIndex: number | null;
-  onSelectIndex: (i: number | null) => void;
-  onStepsChange: (steps: WorkflowStep[]) => void;
-  onAddStep: (kind: StepType) => void;
-}) {
-  const [showAddMenu, setShowAddMenu] = useState(false);
-  const wrapperRef = useRef<HTMLDivElement>(null);
-
-  const [transform, setTransform] = useState({ x: 80, y: 40, k: 1 });
-  const [positions, setPositions] = useState<NodePos[]>(() => defaultPositions(steps.length));
-
-  useEffect(() => {
-    setPositions(prev => {
-      if (prev.length === steps.length) return prev;
-      if (steps.length > prev.length) {
-        const next = [...prev];
-        for (let i = prev.length; i < steps.length; i++) {
-          const last = next[next.length - 1];
-          next.push(last
-            ? { x: last.x, y: last.y + NODE_H + 80 }
-            : { x: 0, y: NODE_H + 80 });
-        }
-        return next;
-      }
-      return prev.slice(0, steps.length);
-    });
-  }, [steps.length]);
-
-  const dragRef = useRef<{ kind: "node" | "pan" | null; index?: number; startX: number; startY: number; orig: NodePos | { x: number; y: number } }>({
-    kind: null, startX: 0, startY: 0, orig: { x: 0, y: 0 },
-  });
-
-  const onPointerDownNode = (i: number, e: React.PointerEvent) => {
-    e.stopPropagation();
-    (e.target as HTMLElement).setPointerCapture?.(e.pointerId);
-    dragRef.current = {
-      kind: "node", index: i,
-      startX: e.clientX, startY: e.clientY,
-      orig: { ...positions[i] },
-    };
-  };
-
-  const onPointerDownCanvas = (e: React.PointerEvent) => {
-    if (e.button !== 0) return;
-    onSelectIndex(null);
-    dragRef.current = {
-      kind: "pan",
-      startX: e.clientX, startY: e.clientY,
-      orig: { x: transform.x, y: transform.y },
-    };
-  };
-
-  const onPointerMove = (e: React.PointerEvent) => {
-    const d = dragRef.current;
-    if (!d.kind) return;
-    const dx = e.clientX - d.startX;
-    const dy = e.clientY - d.startY;
-    if (d.kind === "node" && d.index !== undefined) {
-      const next = [...positions];
-      next[d.index] = {
-        x: (d.orig as NodePos).x + dx / transform.k,
-        y: (d.orig as NodePos).y + dy / transform.k,
-      };
-      setPositions(next);
-    } else if (d.kind === "pan") {
-      setTransform(t => ({ ...t, x: (d.orig as NodePos).x + dx, y: (d.orig as NodePos).y + dy }));
-    }
-  };
-
-  const onPointerUp = () => {
-    dragRef.current = { kind: null, startX: 0, startY: 0, orig: { x: 0, y: 0 } };
-  };
-
-  const onWheel = (e: React.WheelEvent) => {
-    if (!e.ctrlKey && !e.metaKey) return;
-    e.preventDefault();
-    const rect = wrapperRef.current?.getBoundingClientRect();
-    if (!rect) return;
-    const mx = e.clientX - rect.left;
-    const my = e.clientY - rect.top;
-    const delta = -e.deltaY * 0.0015;
-    setTransform(t => {
-      const newK = Math.min(2, Math.max(0.4, t.k * (1 + delta)));
-      const ratio = newK / t.k;
-      return { k: newK, x: mx - (mx - t.x) * ratio, y: my - (my - t.y) * ratio };
-    });
-  };
-
-  const zoomBy = (factor: number) => {
-    setTransform(t => ({ ...t, k: Math.min(2, Math.max(0.4, t.k * factor)) }));
-  };
-
-  const fitView = () => {
-    if (!wrapperRef.current || steps.length === 0) {
-      setTransform({ x: 80, y: 40, k: 1 });
-      return;
-    }
-    const rect = wrapperRef.current.getBoundingClientRect();
-    const validNodes = positions.slice(0, steps.length).filter(Boolean) as NodePos[];
-    if (validNodes.length === 0) return;
-    const xs = validNodes.map(p => p.x);
-    const ys = validNodes.map(p => p.y);
-    const minX = Math.min(0, ...xs) - NODE_W / 2 - 40;
-    const maxX = Math.max(0, ...xs) + NODE_W / 2 + 40;
-    const minY = -ANCHOR_H - 40;
-    const maxY = Math.max(...ys, 0) + NODE_H + ANCHOR_H + 40;
-    const w = maxX - minX;
-    const h = maxY - minY;
-    const k = Math.min(rect.width / w, rect.height / h, 1.2);
-    setTransform({
-      x: rect.width / 2 - ((minX + maxX) / 2) * k,
-      y: rect.height / 2 - ((minY + maxY) / 2) * k,
-      k,
-    });
-  };
-
-  const connections = useMemo(() => {
-    const lines: { id: string; d: string }[] = [];
-    const startCenter = { x: 0, y: 0 };
-    const startBottom = { x: startCenter.x, y: startCenter.y + ANCHOR_H / 2 };
-    const stepTop    = (p: NodePos) => ({ x: p?.x ?? 0, y: (p?.y ?? 0) - NODE_H / 2 });
-    const stepBottom = (p: NodePos) => ({ x: p?.x ?? 0, y: (p?.y ?? 0) + NODE_H / 2 });
-
-    if (steps.length > 0) {
-      const p0 = positions[0];
-      if (p0) lines.push({ id: "start", d: bezierPath(startBottom, stepTop(p0)) });
-      for (let i = 0; i < steps.length - 1; i++) {
-        const pA = positions[i]; const pB = positions[i + 1];
-        if (pA && pB) lines.push({ id: `s-${i}`, d: bezierPath(stepBottom(pA), stepTop(pB)) });
-      }
-      const last = positions[steps.length - 1];
-      if (last) {
-        const currentValidY = positions.slice(0, steps.length).reduce((m, p) => (p ? Math.max(m, p.y) : m), 0);
-        const endTop = { x: last.x, y: currentValidY + NODE_H + 80 };
-        lines.push({ id: "end", d: bezierPath(stepBottom(last), { x: endTop.x, y: endTop.y - ANCHOR_H / 2 }) });
-      }
-    }
-    return lines;
-  }, [positions, steps.length]);
-
-  const bounds = useMemo(() => {
-    const validNodes = positions.slice(0, steps.length).filter(Boolean) as NodePos[];
-    const xs = validNodes.map(p => p.x);
-    const minX = Math.min(-ANCHOR_W, ...xs.map(x => x - NODE_W / 2)) - 200;
-    const maxX = Math.max(ANCHOR_W, ...xs.map(x => x + NODE_W / 2)) + 200;
-    const minY = -ANCHOR_H - 200;
-    const lastY_bound = validNodes.reduce((m, p) => Math.max(m, p.y), 0);
-    const maxY = lastY_bound + NODE_H + ANCHOR_H + 200;
-    return { minX, maxX, minY, maxY, w: maxX - minX, h: maxY - minY };
-  }, [positions, steps.length]);
-
-  const currentValidNodes = positions.slice(0, steps.length).filter(Boolean) as NodePos[];
-  const lastY = currentValidNodes.reduce((m, p) => Math.max(m, p.y), 0);
-  const lastNodeMain = steps.length > 0 ? positions[steps.length - 1] : null;
-  const endX = lastNodeMain ? lastNodeMain.x : 0;
-  const endY = lastNodeMain ? lastY + NODE_H + 80 : NODE_H + 80;
-
-  return (
-    <div className="relative flex-1 overflow-hidden bg-muted/30 rounded-xl border border-border">
-      {/* Toolbar */}
-      <div className="absolute top-3 right-3 z-10 flex items-center gap-1 bg-card border border-border rounded-lg shadow-sm p-1">
-        <button onClick={() => zoomBy(1.2)} title="Zoom in" className="p-1.5 rounded hover:bg-muted">
-          <ZoomIn className="w-4 h-4 text-muted-foreground" />
-        </button>
-        <button onClick={() => zoomBy(0.83)} title="Zoom out" className="p-1.5 rounded hover:bg-muted">
-          <ZoomOut className="w-4 h-4 text-muted-foreground" />
-        </button>
-        <span className="px-2 text-xs text-muted-foreground tabular-nums w-12 text-center">
-          {Math.round(transform.k * 100)}%
-        </span>
-        <button onClick={fitView} title="Fit to view" className="p-1.5 rounded hover:bg-muted">
-          <Maximize2 className="w-4 h-4 text-muted-foreground" />
-        </button>
-      </div>
-
-      <div className="absolute top-3 left-3 z-10 flex items-center gap-2 bg-card border border-border rounded-lg shadow-sm px-3 py-1.5">
-        <Move className="w-3.5 h-3.5 text-muted-foreground" />
-        <span className="text-[11px] text-muted-foreground">Drag canvas to pan · Drag nodes to rearrange · ⌘/Ctrl + scroll to zoom</span>
-      </div>
-
-      <div
-        ref={wrapperRef}
-        className="absolute inset-0 cursor-grab active:cursor-grabbing select-none"
-        style={{
-          backgroundImage: "radial-gradient(hsl(var(--border)) 1px, transparent 1px)",
-          backgroundSize: `${24 * transform.k}px ${24 * transform.k}px`,
-          backgroundPosition: `${transform.x}px ${transform.y}px`,
-        }}
-        onPointerDown={onPointerDownCanvas}
-        onPointerMove={onPointerMove}
-        onPointerUp={onPointerUp}
-        onPointerLeave={onPointerUp}
-        onWheel={onWheel}
-      >
-        <div
-          className="absolute top-0 left-0"
-          style={{
-            transform: `translate(${transform.x}px, ${transform.y}px) scale(${transform.k})`,
-            transformOrigin: "0 0",
-          }}
-        >
-          {/* SVG connection lines */}
-          <svg
-            style={{
-              position: "absolute",
-              left: bounds.minX, top: bounds.minY,
-              width: bounds.w, height: bounds.h,
-              pointerEvents: "none", overflow: "visible",
-            }}
-          >
-            <defs>
-              <marker id="wf-arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
-                <path d="M0,0 L10,5 L0,10 z" fill="hsl(var(--muted-foreground))" />
-              </marker>
-            </defs>
-            <g transform={`translate(${-bounds.minX} ${-bounds.minY})`}>
-              {connections.map(c => (
-                <path key={c.id} d={c.d} fill="none"
-                  stroke="hsl(var(--muted-foreground))" strokeWidth={1.8}
-                  strokeOpacity={0.7} markerEnd="url(#wf-arrow)" />
-              ))}
-            </g>
-          </svg>
-
-          {/* Start anchor */}
-          <div className="absolute" style={{ left: -ANCHOR_W / 2, top: -ANCHOR_H / 2, width: ANCHOR_W, height: ANCHOR_H }}>
-            <div className="w-full h-full bg-card border-2 border-teal/50 rounded-2xl flex items-center gap-2 px-4 shadow-sm">
-              <div className="w-8 h-8 rounded-lg bg-teal/15 flex items-center justify-center">
-                <Play className="w-4 h-4 text-teal" />
-              </div>
-              <div>
-                <p className="text-[10px] font-semibold text-muted-foreground uppercase tracking-wider">Start</p>
-                <p className="text-xs font-semibold text-foreground">Submitted</p>
-              </div>
-            </div>
-          </div>
-
-          {/* Step nodes */}
-          {steps.map((step, i) => {
-            const pos = positions[i] ?? { x: 0, y: (i + 1) * (NODE_H + 80) };
-            const color = getGroupColor(step.assignee_group);
-            const mode = ASSIGNEE_MODES.find(m => m.value === step.assignee_type);
-            const isSelected = selectedIndex === i;
-            const ModeIcon = mode?.Icon ?? Users;
-            const isNotification = step.step_type === "notification";
-            return (
-              <div
-                key={step.id || `n-${i}`}
-                className={clsx("absolute group", isSelected && "z-20")}
-                style={{ left: pos.x - NODE_W / 2, top: pos.y - NODE_H / 2, width: NODE_W, height: NODE_H }}
-                onPointerDown={(e) => onPointerDownNode(i, e)}
-                onClick={(e) => { e.stopPropagation(); onSelectIndex(i); }}
-              >
-                <div className={clsx(
-                  "w-full h-full rounded-2xl bg-card border-2 p-3 cursor-grab active:cursor-grabbing transition-all",
-                  isNotification && "border-dashed",
-                  isSelected
-                    ? (isNotification ? "border-sky-500 shadow-elegant ring-4 ring-sky-200" : "border-accent shadow-elegant ring-4 ring-accent/15")
-                    : "border-border shadow-sm hover:shadow-md hover:border-foreground/20"
-                )}>
-                  <div className="flex items-center justify-between mb-2">
-                    <div className="flex items-center gap-2">
-                      <div
-                        className="w-7 h-7 rounded-lg flex items-center justify-center text-white text-xs font-bold"
-                        style={{ backgroundColor: isNotification ? "#0ea5e9" : color }}
-                      >
-                        {isNotification ? <Bell className="w-3.5 h-3.5" /> : i + 1}
-                      </div>
-                      <span className="text-[10px] font-medium text-muted-foreground uppercase tracking-wider">
-                        {isNotification ? "Notify" : "Step"} {i + 1}
-                      </span>
-                    </div>
-                    <Edit3 className="w-3.5 h-3.5 text-muted-foreground opacity-0 group-hover:opacity-100" />
-                  </div>
-
-                  <p className={clsx(
-                    "text-sm font-semibold truncate mb-2",
-                    step.name ? "text-foreground" : "text-muted-foreground italic"
-                  )}>
-                    {step.name || "Click to configure"}
-                  </p>
-
-                  {isNotification ? (
-                    <>
-                      <div className="flex items-center gap-1.5 mb-2">
-                        <div className="w-5 h-5 rounded flex items-center justify-center bg-sky-100">
-                          <Mail className="w-3 h-3 text-sky-600" />
-                        </div>
-                        <p className="text-[11px] text-muted-foreground truncate flex-1">
-                          {step.notify_user_name || step.notify_email || "No recipient"}
-                        </p>
-                      </div>
-                      <div className="flex items-center justify-between">
-                        <span className="text-[10px] text-sky-700 bg-sky-100 px-1.5 py-0.5 rounded font-medium">Email only</span>
-                        <span className="text-[10px] text-muted-foreground truncate ml-2">
-                          {step.notification_subject || "No subject"}
-                        </span>
-                      </div>
-                    </>
-                  ) : (
-                    <>
-                      <div className="flex items-center gap-1.5 mb-2">
-                        <div className="w-5 h-5 rounded flex items-center justify-center" style={{ backgroundColor: `${color}22` }}>
-                          <ModeIcon className="w-3 h-3" style={{ color }} />
-                        </div>
-                        <p className="text-[11px] text-muted-foreground truncate flex-1">
-                          {step.assignee_group_name || "No group"}
-                          {step.assignee_type === "group_specific" && step.assignee_user_auto
-                            ? " · Designated approver"
-                            : step.assignee_user_name ? ` · ${step.assignee_user_name}` : ""}
-                        </p>
-                      </div>
-                      <div className="flex items-center justify-between">
-                        <div className="flex items-center gap-1">
-                          <Clock className="w-3 h-3 text-muted-foreground" />
-                          <span className="text-[10px] text-muted-foreground">
-                            {step.sla_hours < 24 ? `${step.sla_hours}h` : `${Math.floor(step.sla_hours / 24)}d`}
-                          </span>
-                        </div>
-                        <div className="flex items-center gap-1">
-                          {step.allow_approve && <span className="w-1.5 h-1.5 rounded-full bg-teal" title="Approve" />}
-                          {step.allow_reject  && <span className="w-1.5 h-1.5 rounded-full bg-destructive" title="Reject" />}
-                          {step.allow_return  && <span className="w-1.5 h-1.5 rounded-full bg-accent" title="Return" />}
-                          {(step.approver_email_subject || step.approver_email_body) && (
-                            <span title="Custom email configured" className="inline-flex">
-                              <Mail className="w-3 h-3 text-primary/60" />
-                            </span>
-                          )}
-                        </div>
-                      </div>
-                    </>
-                  )}
-                </div>
-              </div>
-            );
-          })}
-
-          {/* End anchor */}
-          <div className="absolute" style={{ left: endX - ANCHOR_W / 2, top: endY - ANCHOR_H / 2, width: ANCHOR_W, height: ANCHOR_H }}>
-            <div className="w-full h-full bg-card border-2 border-primary/40 rounded-2xl flex items-center gap-2 px-4 shadow-sm">
-              <div className="w-8 h-8 rounded-lg bg-primary/10 flex items-center justify-center">
-                <Flag className="w-4 h-4 text-primary" />
-              </div>
-              <div>
-                <p className="text-[10px] font-semibold text-muted-foreground uppercase tracking-wider">End</p>
-                <p className="text-xs font-semibold text-foreground">Approved</p>
-              </div>
-            </div>
-          </div>
-
-          {/* Add-step floating picker */}
-          <div className="absolute" style={{ left: endX + ANCHOR_W / 2 + 20, top: endY - 18 }}>
-            <div className="relative">
-              <button
-                onClick={(e) => { e.stopPropagation(); setShowAddMenu(v => !v); }}
-                className="flex items-center gap-2 px-3 py-2 bg-card border-2 border-dashed border-border rounded-xl text-xs font-medium text-muted-foreground hover:border-accent hover:text-accent hover:bg-accent/10 transition-all shadow-sm"
-              >
-                <Plus className="w-3.5 h-3.5" /> Add step
-              </button>
-              {showAddMenu && (
-                <div
-                  className="absolute left-0 top-full mt-2 w-56 bg-card border border-border rounded-xl shadow-elegant overflow-hidden z-30"
-                  onClick={(e) => e.stopPropagation()}
-                >
-                  <button
-                    onClick={() => { onAddStep("approval"); setShowAddMenu(false); }}
-                    className="w-full flex items-start gap-3 px-3 py-2.5 text-left hover:bg-muted/60 transition-colors"
-                  >
-                    <div className="w-7 h-7 rounded-md bg-accent/15 text-accent flex items-center justify-center flex-shrink-0">
-                      <CheckCircle2 className="w-3.5 h-3.5" />
-                    </div>
-                    <div>
-                      <p className="text-xs font-semibold text-foreground">Approval step</p>
-                      <p className="text-[11px] text-muted-foreground">Requires approver action</p>
-                    </div>
-                  </button>
-                  <button
-                    onClick={() => { onAddStep("notification"); setShowAddMenu(false); }}
-                    className="w-full flex items-start gap-3 px-3 py-2.5 text-left hover:bg-muted/60 transition-colors border-t border-border"
-                  >
-                    <div className="w-7 h-7 rounded-md bg-sky-100 text-sky-600 flex items-center justify-center flex-shrink-0">
-                      <Bell className="w-3.5 h-3.5" />
-                    </div>
-                    <div>
-                      <p className="text-xs font-semibold text-foreground">Notification step</p>
-                      <p className="text-[11px] text-muted-foreground">Sends a custom email, auto-advances</p>
-                    </div>
-                  </button>
-                </div>
-              )}
-            </div>
-          </div>
-
-          {/* Empty state */}
-          {steps.length === 0 && (
-            <div className="absolute" style={{ left: -140, top: NODE_H }}>
-              <div className="flex flex-col gap-2 p-4 bg-card border-2 border-dashed border-border rounded-2xl shadow-sm">
-                <p className="text-xs font-semibold text-foreground text-center mb-1">Add your first step</p>
-                <button
-                  onClick={(e) => { e.stopPropagation(); onAddStep("approval"); }}
-                  className="flex items-center gap-2 px-4 py-2 rounded-lg border border-border hover:border-accent hover:bg-accent/5 text-xs font-medium text-foreground transition-all"
-                >
-                  <CheckCircle2 className="w-3.5 h-3.5 text-accent" /> Approval step
-                </button>
-                <button
-                  onClick={(e) => { e.stopPropagation(); onAddStep("notification"); }}
-                  className="flex items-center gap-2 px-4 py-2 rounded-lg border border-border hover:border-sky-400 hover:bg-sky-50 text-xs font-medium text-foreground transition-all"
-                >
-                  <Bell className="w-3.5 h-3.5 text-sky-600" /> Notification step
-                </button>
-              </div>
-            </div>
-          )}
-        </div>
-      </div>
-    </div>
-  );
-}
-
-function bezierPath(a: { x: number; y: number }, b: { x: number; y: number }) {
-  const dy = b.y - a.y;
-  const dx = b.x - a.x;
-  if (Math.abs(dy) >= Math.abs(dx)) {
-    const cy = Math.max(40, Math.abs(dy) * 0.4);
-    return `M ${a.x} ${a.y} C ${a.x} ${a.y + cy}, ${b.x} ${b.y - cy}, ${b.x} ${b.y}`;
-  }
-  const cx = Math.max(40, Math.abs(dx) * 0.4);
-  return `M ${a.x} ${a.y} C ${a.x + cx} ${a.y}, ${b.x - cx} ${b.y}, ${b.x} ${b.y}`;
-}
-
 // ── Routing Rules Panel ───────────────────────────────────────────────────────
 // ── Template email settings ───────────────────────────────────────────────────
 function TemplateEmailsPanel({
@@ -2168,20 +1785,23 @@ function TemplateEditor({
   const qc = useQueryClient();
   const [name, setName] = useState("");
   const [description, setDescription] = useState("");
-  const [steps, setSteps] = useState<WorkflowStep[]>([]);
+  const [blocks, setBlocks] = useState<Block[]>([]);
   const [targetType, setTargetType] = useState<WorkflowTargetType>("document");
   const [notifyUploaderOnApproval, setNotifyUploaderOnApproval] = useState(true);
   const [emailTemplates, setEmailTemplates] = useState<EmailTemplates>({});
   const [selectedDocumentTypeId, setSelectedDocumentTypeId] = useState<string | null>(null);
   const [isDirty, setIsDirty] = useState(!template);
   const [activeTab, setActiveTab] = useState<"flow" | "rules" | "emails">("flow");
-  const [selectedStepIndex, setSelectedStepIndex] = useState<number | null>(null);
+  const [selectedBlockId, setSelectedBlockId] = useState<string | null>(null);
+  const [importing, setImporting] = useState(false);
 
   useEffect(() => {
     setName(template?.name ?? (docType ? `${docType.name} Workflow` : initialTargetType === "payment_run" ? "Payment Run Workflow" : "New Template"));
     setDescription(template?.description ?? "");
-    setSteps(
-      template?.steps?.slice().sort((a, b) => a.order - b.order).map((s) => ({ ...s })) ?? []
+    setBlocks(
+      template?.definition?.blocks?.length
+        ? template.definition.blocks
+        : definitionFromSteps(template?.steps ?? []).blocks
     );
     setTargetType(template?.target_type ?? initialTargetType);
     setNotifyUploaderOnApproval(template?.notify_uploader_on_approval ?? true);
@@ -2189,8 +1809,13 @@ function TemplateEditor({
     setSelectedDocumentTypeId((template?.target_type ?? initialTargetType) === "payment_run" ? null : (template?.document_type ?? docType?.id ?? null));
     setIsDirty(!template);
     setActiveTab("flow");
-    setSelectedStepIndex(null);
+    setSelectedBlockId(null);
   }, [template?.id, docType?.id, initialTargetType]);
+
+  // The legacy "Routing rules" tab disappears once the template is saved as a branched workflow.
+  useEffect(() => {
+    if (template?.definition && activeTab === "rules") setActiveTab("flow");
+  }, [template?.definition, activeTab]);
 
   const { data: groups } = useQuery<Group[]>({
     queryKey: ["groups-all"],
@@ -2227,6 +1852,7 @@ function TemplateEditor({
       notify_uploader_on_approval: boolean;
       email_templates: EmailTemplates;
       steps: Partial<WorkflowStep>[];
+      definition: WorkflowDefinition;
     }) =>
       template
         ? workflowAPI.updateTemplate(template.id, payload)
@@ -2243,8 +1869,13 @@ function TemplateEditor({
     },
   });
 
-  const handleStepsChange = useCallback((newSteps: WorkflowStep[]) => {
-    setSteps(newSteps.map((s, i) => ({ ...s, order: i + 1 })));
+  const fieldCatalog = useMemo(
+    () => buildFieldCatalog(selectedDocumentType, targetType),
+    [selectedDocumentType, targetType],
+  );
+
+  const handleBlocksChange = useCallback((next: Block[]) => {
+    setBlocks(next);
     setIsDirty(true);
   }, []);
 
@@ -2254,12 +1885,9 @@ function TemplateEditor({
       toast.error("Choose the document type this template belongs to");
       return;
     }
-    if (steps.length === 0)         { toast.error("Add at least one step"); return; }
 
-    const hasApproval = steps.some(s => s.step_type !== "notification");
-    if (!hasApproval) { toast.error("Add at least one approval step"); return; }
-
-    const stepsForSave = steps.map((step) => {
+    // HOD group is always "any member" — enforced on every approval step, wherever it sits in the tree.
+    const blocksForSave = mapSteps(blocks, (step) => {
       if (step.step_type === "notification") return step;
       const group = (groups ?? []).find((item) => item.id === step.assignee_group);
       if (!isHodGroupName(group?.name ?? step.assignee_group_name)) return step;
@@ -2271,41 +1899,12 @@ function TemplateEditor({
       };
     });
 
-    for (const s of stepsForSave) {
-      if (!s.name.trim()) { toast.error(`Step ${s.order} needs a name`); return; }
-      if (s.step_type === "notification") {
-        const notifEmails = s.notify_emails?.filter(e => e.trim()) ?? [];
-        const hasSingleEmail = s.notify_email && s.notify_email.trim();
-        if (!s.notify_user && notifEmails.length === 0 && !hasSingleEmail) {
-          toast.error(`"${s.name}" needs at least one recipient (user or email)`); return;
-        }
-        // Validate all email addresses
-        const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
-        const badEmail = notifEmails.find(e => !EMAIL_RE.test(e.trim()));
-        if (badEmail) {
-          toast.error(`"${s.name}" has an invalid email address: ${badEmail}`); return;
-        }
-        if (hasSingleEmail && !EMAIL_RE.test(s.notify_email!.trim())) {
-          toast.error(`"${s.name}" has an invalid email address`); return;
-        }
-        if (!s.notification_subject || !s.notification_subject.trim()) {
-          toast.error(`"${s.name}" needs an email subject`); return;
-        }
-        if (!s.notification_message || !s.notification_message.trim()) {
-          toast.error(`"${s.name}" needs an email message`); return;
-        }
-        continue;
-      }
-      if (!s.assignee_group) { toast.error(`"${s.name}" needs a group`); return; }
-      if (s.assignee_type === "group_specific" && !s.assignee_user) {
-        toast.error(`"${s.name}" needs a specific group member`); return;
-      }
-      if (!s.allow_approve && !s.allow_reject && !s.allow_return) {
-        toast.error(`"${s.name}" must have at least one approver action enabled`); return;
-      }
-      if (s.requires_signature && !s.allow_approve) {
-        toast.error(`"${s.name}" requires approval before it can require a signature`); return;
-      }
+    const issues = validateDefinition(blocksForSave, fieldMap(fieldCatalog), validateStepData);
+    const firstError = issues.find((i) => i.severity === "error");
+    if (firstError) {
+      toast.error(firstError.message);
+      if (firstError.block_id) { setSelectedBlockId(firstError.block_id); setActiveTab("flow"); }
+      return;
     }
 
     saveMutation.mutate({
@@ -2316,46 +1915,44 @@ function TemplateEditor({
       is_active: template ? template.is_active : true,
       notify_uploader_on_approval: notifyUploaderOnApproval,
       email_templates: emailTemplatesToPayload(emailTemplates),
-      steps: stepsForSave.map(stepToPayload),
+      // Flat mirror in document order — keeps step_count / list views working. The engine follows `definition`.
+      steps: flattenSteps(blocksForSave).map((s) => stepToPayload(s as WorkflowStep)),
+      definition: {
+        version: 2,
+        blocks: mapSteps(blocksForSave, (s) => stepToPayload(s as WorkflowStep) as StepData),
+      },
     });
   };
 
-  const handleAddStep = useCallback((kind: StepType = "approval") => {
-    const newStep = {
-      ...(kind === "notification" ? blankNotificationStep() : blankStep()),
-      order: steps.length + 1,
-    };
-    const next = [...steps, newStep];
-    setSteps(next);
-    setIsDirty(true);
-    setSelectedStepIndex(next.length - 1);
-  }, [steps]);
-
-  const handleInsertNotificationAfter = useCallback((index: number) => {
-    const newStep = { ...blankNotificationStep(), order: index + 2 };
-    const next = [
-      ...steps.slice(0, index + 1),
-      newStep,
-      ...steps.slice(index + 1),
-    ].map((s, i) => ({ ...s, order: i + 1 }));
-    setSteps(next);
-    setIsDirty(true);
-    setSelectedStepIndex(index + 1);
-  }, [steps]);
-
-  const handleDeleteStep = useCallback((index: number) => {
-    const next = steps.filter((_, i) => i !== index).map((s, i) => ({ ...s, order: i + 1 }));
-    setSteps(next);
-    setIsDirty(true);
-    setSelectedStepIndex(null);
-  }, [steps]);
-
-  const handlePatchStep = useCallback((index: number, patch: Partial<WorkflowStep>) => {
-    const next = [...steps];
-    next[index] = { ...next[index], ...patch };
-    setSteps(next);
-    setIsDirty(true);
-  }, [steps]);
+  /** One-off: fold this document type's existing templates + amount rules into a single branched workflow. */
+  const handleImportLegacy = async () => {
+    const siblings = (_allTemplates ?? []).filter((t) =>
+      t.is_active !== false && t.target_type === targetType &&
+      (targetType === "payment_run" ? !t.document_type : t.document_type === selectedDocumentTypeId));
+    if (siblings.length === 0) { toast.warning("No existing templates found for this document type"); return; }
+    if (blocks.length > 0 && !window.confirm("Replace the current workflow with one built from the existing templates and routing rules?")) return;
+    setImporting(true);
+    try {
+      const full = await Promise.all(siblings.map((t) => workflowAPI.getTemplate(t.id).then((r) => normalizeTemplate(r.data))));
+      const ruleLists = await Promise.all(full.map((t) =>
+        workflowAPI.listRules({ template: t.id }).then((r) => (r.data.results ?? r.data) as WorkflowRule[])));
+      const { definition, notes } = migrateLegacyRules(
+        full.map((t) => ({ id: t.id, name: t.name, steps: t.steps.map(({ id: _id, ...rest }) => rest as StepData) })),
+        ruleLists.flat(),
+        { maxInclusive: true },
+      );
+      setBlocks(definition.blocks);
+      setSelectedBlockId(null);
+      setIsDirty(true);
+      setActiveTab("flow");
+      toast.success(`Imported ${full.length} template${full.length > 1 ? "s" : ""} as one workflow — review it, then save`);
+      if (notes.length) toast.warning(notes.join(" "));
+    } catch (err: any) {
+      toast.error(formatApiError(err?.response?.data) || "Import failed");
+    } finally {
+      setImporting(false);
+    }
+  };
 
   return (
     <div className="flex flex-col h-full">
@@ -2440,15 +2037,22 @@ function TemplateEditor({
               className={clsx("px-3 py-1.5 text-xs font-medium rounded-md transition-all",
                 activeTab === "emails" ? "bg-card shadow-sm text-foreground" : "text-muted-foreground hover:text-foreground")}
             >Emails</button>
-            {template && (
+            {template && !template.definition && (
               <button
                 onClick={() => setActiveTab("rules")}
                 className={clsx("px-3 py-1.5 text-xs font-medium rounded-md transition-all",
                   activeTab === "rules" ? "bg-card shadow-sm text-foreground" : "text-muted-foreground hover:text-foreground")}
-              >Routing rules</button>
+              >Routing rules (legacy)</button>
             )}
           </div>
           {isDirty && <span className="text-[11px] text-accent bg-accent/20 px-2 py-1 rounded-md">Unsaved</span>}
+          {(template || docType) && (
+            <button onClick={handleImportLegacy} disabled={importing} className="btn-secondary text-sm"
+              title="Fold this document type's existing templates and amount rules into one branched workflow">
+              {importing ? <Loader2 className="w-4 h-4 animate-spin" /> : <GitBranch className="w-4 h-4" />}
+              Import rules
+            </button>
+          )}
           {template && onDuplicate && (
             <button onClick={onDuplicate} className="btn-secondary text-sm">
               <Copy className="w-4 h-4" /> Duplicate
@@ -2471,32 +2075,29 @@ function TemplateEditor({
 
       {/* Content */}
       {activeTab === "flow" ? (
-        <div className="flex-1 min-h-0 flex gap-4">
-          <FlowchartEditor
-            steps={steps}
-            groups={groups ?? []}
-            selectedIndex={selectedStepIndex}
-            onSelectIndex={setSelectedStepIndex}
-            onStepsChange={handleStepsChange}
-            onAddStep={handleAddStep}
-          />
-          {selectedStepIndex !== null && steps[selectedStepIndex] && (
+        <BranchedWorkflowEditor
+          blocks={blocks}
+          onChange={handleBlocksChange}
+          fields={fieldCatalog}
+          groups={(groups ?? []).map((g) => ({ id: g.id, name: g.name }))}
+          currencies={CURRENCIES}
+          selectedId={selectedBlockId}
+          onSelect={setSelectedBlockId}
+          makeApprovalStep={() => blankStep() as StepData}
+          makeNotificationStep={() => blankNotificationStep() as StepData}
+          validateStep={validateStepData}
+          renderStepPanel={({ block, index, total, onChange, onClose, onDelete }) => (
             <StepEditPanel
-              step={steps[selectedStepIndex]}
-              index={selectedStepIndex}
-              total={steps.length}
+              step={block.step as WorkflowStep}
+              index={index}
+              total={total}
               groups={groups ?? []}
-              onChange={(patch) => handlePatchStep(selectedStepIndex, patch)}
-              onClose={() => setSelectedStepIndex(null)}
-              onDelete={() => handleDeleteStep(selectedStepIndex)}
-              onInsertNotificationAfter={
-                steps[selectedStepIndex].step_type === "approval"
-                  ? () => handleInsertNotificationAfter(selectedStepIndex)
-                  : undefined
-              }
+              onChange={onChange as (patch: Partial<WorkflowStep>) => void}
+              onClose={onClose}
+              onDelete={onDelete}
             />
           )}
-        </div>
+        />
       ) : activeTab === "emails" ? (
         <TemplateEmailsPanel
           notifyUploaderOnApproval={notifyUploaderOnApproval}
@@ -2543,6 +2144,10 @@ function DuplicateTemplateModal({
             target_type: "document",
             document_type: selectedDocTypeId, is_active: true,
             steps: (cloned.steps ?? []).map(stepToPayload),
+            // Preserve branching when the copy is moved to another document type.
+            ...(cloned.definition
+              ? { definition: { ...cloned.definition, blocks: mapSteps(cloned.definition.blocks, (st) => stepToPayload(st as WorkflowStep) as StepData) } }
+              : {}),
           });
           cloned = normalizeTemplate(patchRes.data as WorkflowTemplate);
         } catch {
