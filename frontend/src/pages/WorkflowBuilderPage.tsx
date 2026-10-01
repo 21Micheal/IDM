@@ -658,10 +658,14 @@ type RuleFormValues = {
   label: string;
 };
 
-function RuleFormFields({ values, routeKind, isRequisitionWorkflow, onChange }: {
+function RuleFormFields({ values, routeKind, isRequisitionWorkflow, disabledPhases = [], onChange }: {
   values: RuleFormValues;
   routeKind: WorkflowRouteKind;
   isRequisitionWorkflow: boolean;
+  /* Procurement stages that cannot be configured yet (the preceding stage has
+   * no routing rule). RFQ needs Requisition; LPO needs RFQ (or Requisition for
+   * Travel requisitions, which skip RFQ). */
+  disabledPhases?: WorkflowPhase[];
   onChange: (patch: Partial<RuleFormValues>) => void;
 }) {
   const phaseOptions = WORKFLOW_PHASES
@@ -671,7 +675,11 @@ function RuleFormFields({ values, routeKind, isRequisitionWorkflow, onChange }: 
       if (routeKind === "form") return ["request", "retirement"].includes(phase.value);
       return phase.value === "request";
     })
-    .map((phase) => ({ value: phase.value, label: phase.label }));
+    .map((phase) => ({
+      value: phase.value,
+      label: phase.label,
+      disabled: disabledPhases.includes(phase.value) && phase.value !== values.phase,
+    }));
   const showPhase = routeKind !== "document" || isRequisitionWorkflow;
 
   return (
@@ -693,6 +701,13 @@ function RuleFormFields({ values, routeKind, isRequisitionWorkflow, onChange }: 
                 ? "Each stage has its own amount thresholds and approval chain. RFQ starts after Requisition approval; LPO starts after RFQ approval."
                 : "Each phase has its own amount thresholds and approval chain for routing documents through the workflow."}
           </p>
+          {isRequisitionWorkflow && disabledPhases.length > 0 && (
+            <p className="text-[11px] text-amber-600 mt-1">
+              Configure the earlier procurement stage first — a later stage cannot start until the
+              preceding one is approved. (Travel requisitions skip RFQ, so LPO is also unlocked once
+              Requisition is configured.)
+            </p>
+          )}
         </div>
       )}
       <div>
@@ -1929,6 +1944,19 @@ function RoutingRulesPanel({ template, routeKind }: { template: WorkflowTemplate
     [rules]
   );
 
+  // Stage-aware gating: a later procurement stage may only be configured once
+  // its predecessor has a routing rule. LPO is additionally unlocked by a
+  // Requisition rule because Travel requisitions skip RFQ.
+  const configuredPhases = new Set(
+    (rules ?? []).map((r) => (r.phase || defaultPhase).trim().toLowerCase()),
+  );
+  const disabledPhases: WorkflowPhase[] = isRequisitionWorkflow
+    ? (["rfq", "lpo"] as WorkflowPhase[]).filter((phase) => {
+        if (phase === "rfq") return !configuredPhases.has("requisition");
+        return !(configuredPhases.has("rfq") || configuredPhases.has("requisition"));
+      })
+    : [];
+
   const openAddRule = () => {
     const existingCurrency = rules?.[0]?.currency;
     if (existingCurrency) setForm(f => ({ ...f, currency: existingCurrency }));
@@ -1970,7 +1998,7 @@ function RoutingRulesPanel({ template, routeKind }: { template: WorkflowTemplate
             <h4 className="text-sm font-semibold text-foreground">New routing rule</h4>
             <button onClick={() => setShowAdd(false)} className="p-1 rounded hover:bg-muted"><X className="w-4 h-4 text-muted-foreground" /></button>
           </div>
-          <RuleFormFields values={form} routeKind={routeKind} isRequisitionWorkflow={isRequisitionWorkflow} onChange={(p) => setForm(f => ({ ...f, ...p }))} />
+          <RuleFormFields values={form} routeKind={routeKind} isRequisitionWorkflow={isRequisitionWorkflow} disabledPhases={disabledPhases} onChange={(p) => setForm(f => ({ ...f, ...p }))} />
           <div className="flex gap-2 pt-2">
             <button onClick={() => createRule.mutate()} disabled={createRule.isPending} className="btn-primary text-xs">
               {createRule.isPending && <Loader2 className="w-3 h-3 animate-spin" />} Create rule
@@ -2004,7 +2032,7 @@ function RoutingRulesPanel({ template, routeKind }: { template: WorkflowTemplate
                     <h4 className="text-sm font-semibold text-foreground">Edit routing rule</h4>
                     <button onClick={() => setEditingId(null)} className="p-1 rounded hover:bg-muted"><X className="w-4 h-4 text-muted-foreground" /></button>
                   </div>
-                  <RuleFormFields values={editForm} routeKind={routeKind} isRequisitionWorkflow={isRequisitionWorkflow} onChange={(p) => setEditForm(f => ({ ...f, ...p }))} />
+                  <RuleFormFields values={editForm} routeKind={routeKind} isRequisitionWorkflow={isRequisitionWorkflow} disabledPhases={disabledPhases} onChange={(p) => setEditForm(f => ({ ...f, ...p }))} />
                   <div className="flex gap-2 pt-2">
                     <button onClick={() => updateRule.mutate()} disabled={updateRule.isPending} className="btn-primary text-xs">
                       {updateRule.isPending && <Loader2 className="w-3 h-3 animate-spin" />} Save changes

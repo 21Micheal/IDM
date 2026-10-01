@@ -1058,6 +1058,10 @@ def generate_document_from_template_sync(template, values, fmt, title, user, typ
         doc_metadata["form"] = {
             "template_id": str(template.id),
             "workflow_type": template.workflow_type,
+            # Procurement stage gating config, snapshotted so runtime decisions
+            # survive later template edits (see is_travel_requisition).
+            "requisition_type_field": getattr(template, "requisition_type_field", "") or "",
+            "travel_type_value": getattr(template, "travel_type_value", "Travel") or "Travel",
             "sections": template.sections,
             "values": values,
         }

@@ -392,14 +392,8 @@ export default function FormDetailPage() {
   // Only allow retirement submission if template has multiple stages configured (Stage 2 exists)
   const hasRetirementStage = availableStages.includes(2);
   const canSubmitRetirement = Boolean(doc.can_submit_retirement) && !isRetirementFinalized && hasRetirementStage && (canApprove || isOwnerOrSubmitter);
-  const completedProcurementStages = Array.isArray((formData as any)?.completed_workflow_stages)
-    ? (formData as any).completed_workflow_stages as string[]
-    : [];
-  const procurementNextStage = step === "requisition_approved" && completedProcurementStages.includes("requisition")
-    ? "rfq"
-    : step === "rfq_approved" && completedProcurementStages.includes("rfq")
-      ? "lpo"
-      : null;
+  // Server-computed, travel-aware: requisition -> (rfq | lpo for Travel) -> lpo.
+  const procurementNextStage = doc.builder_next_stage ?? null;
   const canSubmitProcurementStage = Boolean(procurementNextStage) && (canApprove || isOwnerOrSubmitter);
   const canSubmit = canSubmitRequest || canSubmitRetirement || canSubmitProcurementStage;
   const submitLabel = canSubmitProcurementStage

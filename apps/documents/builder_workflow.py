@@ -131,6 +131,70 @@ def completed_procurement_stages(document: Document) -> list[str]:
     ]
 
 
+def requisition_type_config(document: Document) -> tuple[str, str]:
+    """``(field_key, travel_value)`` for the requisition-type dropdown. Prefers
+    the snapshot on ``metadata.form``; falls back to the source template."""
+    form = ((document.metadata or {}).get("form") or {})
+    field = str(form.get("requisition_type_field") or "").strip()
+    value = str(form.get("travel_type_value") or "").strip() or "Travel"
+    if field:
+        return field, value
+    template_id = form.get("template_id")
+    if template_id:
+        try:
+            from apps.templates_engine.models import DocumentTemplate
+
+            tpl = DocumentTemplate.objects.filter(pk=template_id).first()
+            if tpl and tpl.requisition_type_field:
+                return tpl.requisition_type_field, (tpl.travel_type_value or "Travel")
+        except Exception:
+            pass
+    return "", value
+
+
+def is_travel_requisition(document: Document) -> bool:
+    """True when the requisition-type field holds the configured Travel value.
+    Travel requisitions skip the RFQ stage (Requisition → LPO)."""
+    if not is_procurement_document(document):
+        return False
+    field, travel_value = requisition_type_config(document)
+    if not field:
+        return False
+    form = ((document.metadata or {}).get("form") or {})
+    values = form.get("values")
+    if not isinstance(values, dict):
+        return False
+    raw = values.get(field)
+    if raw is None:
+        return False
+    return str(raw).strip().lower() == travel_value.strip().lower()
+
+
+def next_procurement_stage(document: Document) -> str | None:
+    """The stage the document is ready to start next, or ``None``.
+
+    Mirrors ``can_start_procurement_workflow_stage``: the previous stage must be
+    complete and the document approved, with no workflow still running. Travel
+    requisitions skip RFQ and go straight from Requisition to LPO."""
+    if not is_procurement_document(document):
+        return None
+    if (document.status or "").strip() != DocumentStatus.APPROVED:
+        return None
+    if builder_workflow_in_progress(document):
+        return None
+    form = ((document.metadata or {}).get("form") or {})
+    phase = str(form.get("workflow_phase") or "").strip().lower()
+    completed = completed_procurement_stages(document)
+    if phase not in PROCUREMENT_WORKFLOW_STAGES or phase not in completed:
+        return None
+    if phase == "requisition":
+        return "lpo" if is_travel_requisition(document) else "rfq"
+    index = PROCUREMENT_WORKFLOW_STAGES.index(phase)
+    if index + 1 < len(PROCUREMENT_WORKFLOW_STAGES):
+        return PROCUREMENT_WORKFLOW_STAGES[index + 1]
+    return None
+
+
 def can_start_procurement_workflow_stage(document: Document, stage: str, *, user=None) -> bool:
     """Only allow the initial stage or the next completed procurement stage."""
     normalized = (stage or "").strip().lower()
@@ -144,7 +208,14 @@ def can_start_procurement_workflow_stage(document: Document, stage: str, *, user
             DocumentStatus.DRAFT, DocumentStatus.RETURNED, "Returned for Review",
         }
 
-    previous = PROCUREMENT_WORKFLOW_STAGES[PROCUREMENT_WORKFLOW_STAGES.index(normalized) - 1]
+    # Travel requisitions skip RFQ: LPO follows Requisition directly.
+    travel = is_travel_requisition(document)
+    if normalized == "rfq" and travel:
+        return False
+    if normalized == "lpo" and travel:
+        previous = "requisition"
+    else:
+        previous = PROCUREMENT_WORKFLOW_STAGES[PROCUREMENT_WORKFLOW_STAGES.index(normalized) - 1]
     if previous not in completed_procurement_stages(document):
         return False
     if (document.status or "").strip() != DocumentStatus.APPROVED:

@@ -100,6 +100,7 @@ export interface Document {
   is_edit_locked?: boolean;
   builder_workflow_phase?: "request" | "retirement" | "requisition" | "rfq" | "lpo" | "payment_run" | null;
   builder_process_step?: string | null;
+  builder_next_stage?: "rfq" | "lpo" | null;
   can_submit_retirement?: boolean;
   relationship_count?: number;
   relationship_suggestion_count?: number;

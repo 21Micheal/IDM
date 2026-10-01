@@ -42,7 +42,7 @@
  * normalizes back to width/help_text/type=boolean for your API.
  */
 
-import { useState, useCallback, useMemo, useRef, useEffect, createContext, useContext } from "react";
+import { useState, useCallback, useMemo, useRef, useEffect, createContext, useContext, type ReactNode } from "react";
 import { useQueryClient, useMutation, useQuery, useQueries } from "@tanstack/react-query";
 import {
   DndContext, PointerSensor, useSensor, useSensors,
@@ -288,6 +288,42 @@ export interface VisibilityCondition {
   operator: ConditionOperator;
   value?: string;             // a field value, or a status_label for process_step
   groups?: SectionGroupRef[]; // when source === "user_group"
+}
+
+/* A single process-step choice from the workflow process-steps API. Procurement
+ * steps are STAGE-AWARE: `stage`/`group` bucket them (Requisition/RFQ/LPO) and
+ * `generic` marks the stage-wide option that covers EVERY approval step in that
+ * stage. `covered` lists the workflow-builder step labels folded into it. */
+export interface ProcessStepOption {
+  value: string;
+  label: string;
+  stage?: string | null;
+  generic?: boolean;
+  group?: string;
+  covered?: string[];
+}
+
+/* Stage badge + label used by the stage-aware process-step menus. */
+function ProcessStepOptionLabel({ step }: { step: ProcessStepOption }) {
+  const badge = (step.group ?? "").replace(/\s*stage$/i, "");
+  return (
+    <span className="flex min-w-0 items-center gap-2">
+      {badge && (
+        <span className="shrink-0 rounded bg-[#EEF6FB] px-1.5 py-0.5 text-[9px] font-semibold uppercase tracking-wide text-[#287EAD]">
+          {badge}
+        </span>
+      )}
+      <span className="truncate">{step.label}</span>
+    </span>
+  );
+}
+
+function processStepOptions(
+  steps: ProcessStepOption[],
+  opts: { includeBlank?: boolean } = {},
+): { value: string; label: ReactNode }[] {
+  const out = steps.map((s) => ({ value: s.value, label: <ProcessStepOptionLabel step={s} /> }));
+  return opts.includeBlank ? [{ value: "", label: "\u2014 choose a step \u2014" }, ...out] : out;
 }
 
 /* A group of conditions combined with AND/OR. A field/section is shown only when
@@ -622,6 +658,10 @@ export interface Template {
   sections: TemplateSection[];
   sunsystems?: SunSystemsConfig;
   workflow_type?: "imprest" | "requisition";
+  /* Requisition-type gating: the form dropdown that names the requisition
+   * type, and the value (default "Travel") that skips the RFQ stage. */
+  requisition_type_field?: string;
+  travel_type_value?: string;
 }
 
 export type EditableTemplate = Omit<Template, "type"> & { type?: Template["type"] };
@@ -2705,7 +2745,7 @@ function ColumnConfigModal({
   column: TableColumn;
   siblingColumns?: TableColumn[];
   formFields?: TemplateField[];
-  processSteps?: { value: string; label: string }[];
+  processSteps?: ProcessStepOption[];
   onClose: () => void;
   onSave: (col: TableColumn) => void;
   onDelete: () => void;
@@ -3478,7 +3518,7 @@ function defaultCondition(sources: { key: string }[]): VisibilityCondition {
 function RuleGroupEditor({ group, sources, processSteps, onChange, depth = 0 }: {
   group: RuleGroup;
   sources: { key: string; label: string }[];
-  processSteps: { value: string; label: string }[];
+  processSteps: ProcessStepOption[];
   onChange: (g: RuleGroup) => void;
   /* Nesting level. One extra level is allowed (depth 1) — deeper rule trees
    * are unreadable in a side panel and are better modelled as two rules. */
@@ -3613,10 +3653,7 @@ function RuleGroupEditor({ group, sources, processSteps, onChange, depth = 0 }: 
                 <CustomListbox
                   value={c.value ?? ""}
                   onChange={(val) => updateCond(i, { value: val })}
-                  options={[
-                    { value: "", label: "— choose a step —" },
-                    ...processSteps.map((s) => ({ value: s.value, label: s.label })),
-                  ]}
+                  options={processStepOptions(processSteps, { includeBlank: true })}
                   className={cn(inputCls, "h-8")}
                   buttonClassName="w-full"
                   ariaLabel="Process step"
@@ -3640,6 +3677,16 @@ function RuleGroupEditor({ group, sources, processSteps, onChange, depth = 0 }: 
           {c.source !== "user_group" && LIST_OPERATORS.has(c.operator) && (
             <p className="text-[10px] text-[#8C969E]">Separate each accepted value with a comma.</p>
           )}
+          {c.source === "process_step" && (() => {
+            const selected = processSteps.find((s) => s.value === (c.value ?? ""));
+            if (!selected?.covered?.length) return null;
+            const stageName = (selected.group ?? "").replace(/\s*stage$/i, "") || "stage";
+            return (
+              <p className="text-[10px] text-[#287EAD]">
+                Covers every {stageName} approval step: {selected.covered.join(", ")}.
+              </p>
+            );
+          })()}
           <p className="text-[10px] text-[#8C969E]">{summarizeCondition(c)}</p>
         </div>
       ))}
@@ -3695,7 +3742,7 @@ function VisibilityEditor({ value, sources, onChange, subject, processSteps = []
   sources: { key: string; label: string }[];
   onChange: (patch: VisibilityState) => void;
   subject: "field" | "section" | "column";
-  processSteps?: { value: string; label: string }[];
+  processSteps?: ProcessStepOption[];
 }) {
   const mode = visibilityModeOf(value);
   const rule = value.visibleWhen ?? null;
@@ -3762,7 +3809,7 @@ function EditabilityEditor({ value, sources, onChange, subject, processSteps = [
   sources: { key: string; label: string }[];
   onChange: (patch: EditabilityState) => void;
   subject: "field" | "section" | "column";
-  processSteps?: { value: string; label: string }[];
+  processSteps?: ProcessStepOption[];
 }) {
   const mode = editabilityModeOf(value);
   const rule = value.editableWhen ?? null;
@@ -4212,7 +4259,7 @@ function FieldEditor({ field, onUpdate, allFields, processSteps }: {
   field: TemplateField;
   onUpdate: (patch: Partial<TemplateField>) => void;
   allFields: TemplateField[];
-  processSteps: { value: string; label: string }[];
+  processSteps: ProcessStepOption[];
 }) {
   const [tab, setTab] = useState<"field" | "advanced">("field");
   const isTable = field.type === "table";
@@ -4515,7 +4562,7 @@ function SectionEditor({ section, onUpdate, allFields, processSteps }: {
   section: TemplateSection;
   onUpdate: (patch: Partial<TemplateSection>) => void;
   allFields: TemplateField[];
-  processSteps: { value: string; label: string }[];
+  processSteps: ProcessStepOption[];
 }) {
   // A section rule can be driven by any field on the form (sections have no
   // siblings of their own), excluding fields that live in this same section —
@@ -4582,7 +4629,7 @@ function Inspector({ sections, calcSections, selectedId, onUpdateField, onUpdate
   onUpdateField: (sectionId: string, fieldId: string, patch: Partial<TemplateField>) => void;
   onUpdateSection: (sectionId: string, patch: Partial<TemplateSection>) => void;
   onCollapse: () => void;
-  processSteps: { value: string; label: string }[];
+  processSteps: ProcessStepOption[];
 }) {
   let target:
     | { kind: "field"; field: TemplateField; sectionId: string }
@@ -6101,7 +6148,7 @@ function PreviewField({ field, register, errors, values, allFields, editable = t
 
 function Preview({ sections, templateName, processSteps }: {
   sections: TemplateSection[]; templateName: string;
-  processSteps: { value: string; label: string }[];
+  processSteps: ProcessStepOption[];
 }) {
   const { register, handleSubmit, reset, watch, setValue, unregister, formState: { errors } } = useForm<Record<string, unknown>>();
   const [submitted, setSubmitted] = useState<Record<string, unknown> | null>(null);
@@ -6358,7 +6405,7 @@ function Preview({ sections, templateName, processSteps }: {
               <CustomListbox
                 value={previewStep}
                 onChange={(val) => setPreviewStep(val)}
-                options={stepOptions.map((o) => ({ value: o.value, label: o.label }))}
+                options={processStepOptions(stepOptions)}
                 className="min-w-[180px]"
                 buttonClassName="w-full h-9 rounded-md border border-[#C8CDD2] bg-white px-3 text-sm font-medium text-[#1F2933] shadow-sm transition-colors hover:border-[#287EAD] focus:outline-none focus-visible:ring-2 focus-visible:ring-[#287EAD]/30"
                 ariaLabel="Preview as step"
@@ -6472,7 +6519,7 @@ function SettingsTab({ template, onCommit, documentTypes, processSteps }: {
   template: Template;
   onCommit: (patch: Partial<Template>) => void;
   documentTypes: Array<{ id: string; name: string; code: string }>;
-  processSteps: { value: string; label: string }[];
+  processSteps: ProcessStepOption[];
 }) {
   const [tagInput, setTagInput] = useState("");
   const [showCreate, setShowCreate] = useState(false);
@@ -6487,6 +6534,14 @@ function SettingsTab({ template, onCommit, documentTypes, processSteps }: {
     onCommit({ tags: (template.tags ?? []).filter((t) => t !== tag) });
 
   const fieldCount = template.sections.reduce((a, s) => a + s.fields.length, 0);
+
+  // Dropdown-ish fields that can carry the requisition type ("Travel", etc).
+  const requisitionTypeFields = template.sections
+    .flatMap((s) => s.fields ?? [])
+    .filter((f) => f.key && ["select", "radio"].includes(f.type));
+  const requisitionTypeOptions = requisitionTypeFields.map((f) => ({ value: f.key, label: f.label || f.key }));
+  const selectedTypeField = requisitionTypeFields.find((f) => f.key === template.requisition_type_field);
+  const travelValueOptions = selectedTypeField?.options ?? [];
 
   const iCls =
     "h-9 w-full border border-[#AEB5BB] bg-white px-3 text-sm text-[#1F2933] " +
@@ -6574,6 +6629,57 @@ function SettingsTab({ template, onCommit, documentTypes, processSteps }: {
           </div>
         </div>
       </div>
+      {template.workflow_type === "requisition" && (
+        <div className="border border-[#C8CDD2] bg-white shadow-sm">
+          <div className="border-b border-[#C8CDD2] bg-[#F3F5F6] px-5 py-3">
+            <h2 className="text-sm font-bold text-[#1F2933]">Requisition type &amp; stage gating</h2>
+            <p className="text-xs text-[#5E6870] mt-0.5">
+              Pick the dropdown that identifies the requisition type. Requisitions whose type equals the
+              travel value skip the RFQ stage and move from Requisition straight to LPO.
+            </p>
+          </div>
+          <div className="space-y-4 p-5">
+            <div className="space-y-1.5">
+              <label className="text-xs font-semibold uppercase tracking-wider text-[#5E6870]">Requisition type field</label>
+              <CustomListbox
+                value={template.requisition_type_field ?? ""}
+                onChange={(val) => onCommit({ requisition_type_field: val })}
+                options={[{ value: "", label: "Select a dropdown field" }, ...requisitionTypeOptions]}
+                className={iCls}
+                buttonClassName="w-full"
+                ariaLabel="Requisition type field"
+              />
+              {requisitionTypeOptions.length === 0 ? (
+                <p className="text-[10px] text-amber-600 mt-1">
+                  Add a single-value choice field (Dropdown / Radio group) to this form, then choose it here.
+                </p>
+              ) : (
+                <p className="text-[10px] text-[#8C969E] mt-1">
+                  The submitted form value of this field decides the requisition type.
+                </p>
+              )}
+            </div>
+            <div className="space-y-1.5">
+              <label className="text-xs font-semibold uppercase tracking-wider text-[#5E6870]">Travel value</label>
+              <input
+                value={template.travel_type_value ?? "Travel"}
+                onChange={(e) => onCommit({ travel_type_value: e.target.value })}
+                placeholder="Travel"
+                list="requisition-travel-values"
+                className={iCls}
+              />
+              {travelValueOptions.length > 0 && (
+                <datalist id="requisition-travel-values">
+                  {travelValueOptions.map((opt) => <option key={opt} value={opt} />)}
+                </datalist>
+              )}
+              <p className="text-[10px] text-[#8C969E] mt-1">
+                A requisition whose type matches this value skips RFQ: Requisition → LPO.
+              </p>
+            </div>
+          </div>
+        </div>
+      )}
       <div className="border border-[#C8CDD2] bg-white shadow-sm">
         <div className="border-b border-[#C8CDD2] bg-[#F3F5F6] px-5 py-3">
           <h2 className="text-sm font-bold text-[#1F2933]">Template summary</h2>
@@ -6604,7 +6710,7 @@ function FinanceSettingsCard({ template, onCommit, iCls, processSteps }: {
   template: Template;
   onCommit: (patch: Partial<Template>) => void;
   iCls: string;
-  processSteps: { value: string; label: string }[];
+  processSteps: ProcessStepOption[];
 }) {
   const ss = template.sunsystems ?? {};
   const ui: SunSystemsUi = ss.ui ?? {};
@@ -7041,7 +7147,7 @@ export default function TemplateBuilderV2({ initial, onSave, onCancel, isSaving,
     queryKey: ["workflow-process-steps", template?.document_type_id ?? "", template?.workflow_type ?? "requisition"],
     queryFn: async () => {
       const { data } = await workflowAPI.processSteps(template?.document_type_id, template?.workflow_type ?? "requisition");
-      return (data ?? []) as { value: string; label: string }[];
+      return (data ?? []) as ProcessStepOption[];
     },
     staleTime: 60_000,
   });

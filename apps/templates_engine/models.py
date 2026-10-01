@@ -87,6 +87,22 @@ class DocumentTemplate(models.Model):
         help_text="Workflow type for this template: determines available process steps.",
     )
 
+    # Procurement stage gating. A requisition form carries a dropdown whose
+    # value is the requisition type; one value (default "Travel") may skip the
+    # RFQ stage entirely and move straight from Requisition to LPO approval.
+    requisition_type_field = models.CharField(
+        max_length=100,
+        blank=True,
+        default="",
+        help_text="Key of the form dropdown field that holds the requisition type.",
+    )
+    travel_type_value = models.CharField(
+        max_length=120,
+        blank=True,
+        default="Travel",
+        help_text="Requisition-type value that skips the RFQ stage (Requisition → LPO).",
+    )
+
     # How many times this template has been used to create a document
     use_count = models.PositiveIntegerField(default=0)
 

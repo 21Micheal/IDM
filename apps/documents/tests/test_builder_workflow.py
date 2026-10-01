@@ -10,7 +10,10 @@ from apps.documents.builder_workflow import (
     completed_procurement_stages,
     infer_builder_workflow_phase,
     is_procurement_document,
+    is_travel_requisition,
+    next_procurement_stage,
     record_procurement_stage_completion,
+    requisition_type_config,
 )
 from apps.documents.models import Document, DocumentStatus, DocumentType
 from apps.workflows.models import WorkflowInstance, WorkflowRule, WorkflowTemplate
@@ -220,3 +223,75 @@ class ProcurementProcessStepTests(TestCase):
         self.document.metadata["form"]["completed_workflow_stages"].append("lpo")
         self.document.save(update_fields=["metadata", "updated_at"])
         self.assertEqual(builder_process_step(self.document), "fully_approved")
+
+
+class TravelRequisitionStageTests(TestCase):
+    """Travel requisitions skip RFQ: Requisition -> LPO. Everything else keeps
+    the Requisition -> RFQ -> LPO order and may only advance once the previous
+    stage is fully approved."""
+
+    def setUp(self):
+        self.doc_type = DocumentType.objects.create(
+            name="Purchase Requisition",
+            code="REQTRAVEL",
+            reference_prefix="REQ",
+        )
+        self.user = User.objects.create_user(
+            email="travel@example.com",
+            password="pass",
+        )
+        self.document = _make_document(
+            title="Travel requisition",
+            reference_number="REQ-TR-01",
+            document_type=self.doc_type,
+            uploaded_by=self.user,
+            status=DocumentStatus.DRAFT,
+            metadata={
+                "form": {
+                    "workflow_type": "requisition",
+                    "workflow_phase": "requisition",
+                    "requisition_type_field": "requisition_type",
+                    "travel_type_value": "Travel",
+                    "completed_workflow_stages": [],
+                    "values": {"requisition_type": "Travel"},
+                    "sections": [{"id": "s1", "fields": []}],
+                }
+            },
+        )
+
+    def _approve_current_stage(self):
+        self.document.status = DocumentStatus.APPROVED
+        self.assertTrue(record_procurement_stage_completion(self.document, "approved"))
+        self.document.save(update_fields=["metadata", "status", "updated_at"])
+
+    def test_requisition_type_config_and_detection(self):
+        self.assertEqual(
+            requisition_type_config(self.document),
+            ("requisition_type", "Travel"),
+        )
+        self.assertTrue(is_travel_requisition(self.document))
+
+    def test_non_travel_value_is_not_travel(self):
+        self.document.metadata["form"]["values"]["requisition_type"] = "General"
+        self.document.save(update_fields=["metadata", "updated_at"])
+        self.assertFalse(is_travel_requisition(self.document))
+
+    def test_travel_requisition_cannot_start_rfq(self):
+        self._approve_current_stage()
+        self.assertEqual(completed_procurement_stages(self.document), ["requisition"])
+        self.assertFalse(can_start_procurement_workflow_stage(self.document, "rfq"))
+        # ...but LPO is immediately available.
+        self.assertTrue(can_start_procurement_workflow_stage(self.document, "lpo"))
+        self.assertEqual(next_procurement_stage(self.document), "lpo")
+
+    def test_non_travel_requisition_follows_rfq_then_lpo(self):
+        self.document.metadata["form"]["values"]["requisition_type"] = "General"
+        self._approve_current_stage()
+        self.assertEqual(next_procurement_stage(self.document), "rfq")
+        self.assertTrue(can_start_procurement_workflow_stage(self.document, "rfq"))
+        self.assertFalse(can_start_procurement_workflow_stage(self.document, "lpo"))
+
+    def test_travel_cannot_start_lpo_before_requisition_approved(self):
+        self.assertTrue(is_travel_requisition(self.document))
+        self.assertFalse(can_start_procurement_workflow_stage(self.document, "lpo"))
+        self.assertIsNone(next_procurement_stage(self.document))
