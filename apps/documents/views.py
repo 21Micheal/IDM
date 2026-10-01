@@ -1262,21 +1262,23 @@ class DocumentViewSet(AuditMixin, viewsets.ModelViewSet):
         # stored value; conditions are evaluated against the STORED values (a user
         # can't unlock a field within the same request that edits it).
         from apps.documents.builder_workflow import builder_process_step
+        from apps.documents.access import viewer_for_user
         from apps.templates_engine.conditions import is_editable
         process_step = builder_process_step(doc)
+        viewer = viewer_for_user(request.user)
         prior_render = descriptors_to_names(prior_values)
         owns_document = user_owns_document(request.user, doc) or getattr(request.user, "has_admin_access", False)
         owner_only_conditional_edit = process_step.strip().lower() != "returned"
         locked_keys = set()
         for section in sections:
-            section_editable = is_editable(section, prior_render, process_step)
+            section_editable = is_editable(section, prior_render, process_step, viewer)
             if section.get("editableWhen") and owner_only_conditional_edit and not owns_document:
                 section_editable = False
             for f in section.get("fields", []):
                 key = f.get("key")
                 if not key:
                     continue
-                field_editable = is_editable(f, prior_render, process_step)
+                field_editable = is_editable(f, prior_render, process_step, viewer)
                 if f.get("editableWhen") and owner_only_conditional_edit and not owns_document:
                     field_editable = False
                 if not (section_editable and field_editable):

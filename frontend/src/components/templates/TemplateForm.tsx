@@ -15,7 +15,7 @@ import { useState, useEffect, useRef, useMemo } from "react";
 import { createPortal } from "react-dom";
 import { useForm, Controller } from "react-hook-form";
 import { useQuery } from "@tanstack/react-query";
-import { AlertCircle, ChevronDown, Download, ExternalLink, Info, Loader2, Lock, Pencil, Paperclip, Plus, Search, Star, Trash2, X, Image as ImageIcon, FileText, FileImage, FileCode2, FileSpreadsheet, FileArchive, FileVideo, FileAudio, Upload, Building2, PenTool, User, CalendarClock } from "lucide-react";
+import { AlertCircle, Calculator, CheckCircle2, ChevronDown, Download, ExternalLink, Info, Loader2, Lock, Pencil, Paperclip, Plus, Search, Star, Trash2, X, Image as ImageIcon, FileText, FileImage, FileCode2, FileSpreadsheet, FileArchive, FileVideo, FileAudio, Upload, Building2, PenTool, User, CalendarClock } from "lucide-react";
 import type { ReactNode } from "react";
 import { documentsAPI } from "@/services/api";
 import BudgetBanner from "./BudgetBanner";
@@ -59,10 +59,13 @@ type Column = {
 type ConditionOperator = "equals" | "not_equals" | "is_empty" | "is_not_empty" | string;
 
 type VisibilityCondition = {
-  source?: "field" | "process_step";
+  source?: "field" | "process_step" | "user_group";
   fieldKey?: string;
   operator: ConditionOperator;
   value?: string;
+  /** For source "user_group": the RBAC groups the condition tests. The client
+   * only has group names, so name matching is used (mirrors the builder). */
+  groups?: SectionGroupRef[];
 };
 
 // A rule group (AND/OR + conditions), or a legacy single-rule shape (fieldKey at
@@ -70,6 +73,21 @@ type VisibilityCondition = {
 type VisibleWhen =
   | { combinator?: "and" | "or"; conditions?: VisibilityCondition[]; groups?: VisibleWhen[] }
   | { fieldKey: string; operator: ConditionOperator; value?: string };
+
+/* A "button" field's behaviour. Buttons hold no value; they either reveal an
+ * on-demand SECTION via "add_block", or evaluate a formula once and write the
+ * result into "targetKey" via "calculate". Mirrors the builder's ButtonConfig. */
+export interface ButtonConfig {
+  action: "add_block" | "calculate";
+  variant?: "primary" | "secondary" | "outline";
+  /* add_block */
+  targetSectionId?: string;
+  placement?: "end_of_form" | "below_button" | "after_section";
+  anchorSectionId?: string;
+  /* calculate */
+  targetKey?: string;
+  calc?: { expression?: string; decimals?: number } | null;
+}
 
 type Field = {
   id?: string; key?: string; type?: string; label?: string;
@@ -91,6 +109,8 @@ type Field = {
   calc?: { expression?: string; decimals?: number } | null;
   visibleWhen?: VisibleWhen | null;
   editableWhen?: VisibleWhen | null;
+  /* Button behaviour (type === "button"). Mirrors the builder's ButtonConfig. */
+  button?: ButtonConfig | null;
   sunsystems?: {
     budgetAmountField?: string;
     monitoredAmountField?: string;
@@ -106,7 +126,7 @@ const CALCULATED_FIELD_TYPES = new Set(["calc_number", "calc_currency", "calc_te
 /* Presentation-only field types — they never hold a value, are never required
  * and never appear in the submitted payload. Mirrors the builder's
  * PRESENTATION_TYPES. */
-const PRESENTATION_TYPES = new Set(["heading", "divider", "info", "spacer", "budget"]);
+const PRESENTATION_TYPES = new Set(["heading", "divider", "info", "spacer", "budget", "button"]);
 
 /* Filled by the server on create (reference number), never typed. */
 const SERVER_FILLED_TYPES = new Set(["auto_number"]);
@@ -180,11 +200,15 @@ type Section = {
   hidden?: boolean; visibleWhen?: VisibleWhen | null;
   visibleToGroups?: SectionGroupRef[];
   readonly?: boolean; editableWhen?: VisibleWhen | null;
+  /* "Add on demand": absent from the form until a Button (action "add_block")
+   * adds it. `removable` lets the person take it back out again. Mirrors the
+   * builder's TemplateSection. */
+  onDemand?: boolean; removable?: boolean;
 };
 
 /** The person filling/viewing the form, used to evaluate role-restricted
  * sections. The auth payload carries group *names* + admin flags. */
-export type FormViewer = { groupNames?: string[]; isAdmin?: boolean; canEditConditionalSections?: boolean };
+export type FormViewer = { groupNames?: string[]; groupIds?: string[]; isAdmin?: boolean; canEditConditionalSections?: boolean };
 
 /** A section restricted to RBAC groups is visible only to members of those
  * groups (matched by name — the client only has names) and to admins. An empty
@@ -416,12 +440,13 @@ function evalRule(
   allFields: Field[],
   processStep: string,
   rowScope?: Record<string, unknown> | null,
+  viewer?: FormViewer,
 ): boolean {
   const walk = (g: NormalizedRule): boolean => {
     const nested = g.groups.filter(ruleHasContent);
     if (g.conditions.length === 0 && nested.length === 0) return true;
     const results = [
-      ...g.conditions.map((c) => evalCondition(c, values, allFields, processStep, rowScope)),
+      ...g.conditions.map((c) => evalCondition(c, values, allFields, processStep, rowScope, viewer)),
       ...nested.map(walk),
     ];
     return g.combinator === "or" ? results.some(Boolean) : results.every(Boolean);
@@ -430,7 +455,26 @@ function evalRule(
   return g ? walk(g) : true;
 }
 
-function evalCondition(c: VisibilityCondition, values: TemplateFormValues, allFields: Field[], processStep: string, rowScope?: Record<string, unknown> | null): boolean {
+function evalCondition(c: VisibilityCondition, values: TemplateFormValues, allFields: Field[], processStep: string, rowScope?: Record<string, unknown> | null, viewer?: FormViewer): boolean {
+  // RBAC group membership. The condition stores groups as [{id, name}]; the
+  // client only has group names, so matching is by name (and id, if present).
+  // No viewer context or an unknown operator never restricts.
+  if (c.source === "user_group") {
+    if (c.operator !== "in_list" && c.operator !== "not_in_list") return true;
+    if (!viewer || viewer.isAdmin) return true;
+    const wanted = c.groups ?? [];
+    if (wanted.length === 0) return true;
+    const mine = new Set([
+      ...(viewer.groupNames ?? []).map((g) => g.trim().toLowerCase()),
+      ...(viewer.groupIds ?? []).map((g) => String(g).trim().toLowerCase()),
+    ]);
+    const member = wanted.some((g) => {
+      const id = g?.id != null ? String(g.id).trim().toLowerCase() : "";
+      const name = (g?.name ?? "").trim().toLowerCase();
+      return (id !== "" && mine.has(id)) || (name !== "" && mine.has(name));
+    });
+    return c.operator === "in_list" ? member : !member;
+  }
   const stepMatches = (actual: string, expected: string) => {
     const a = (actual || "").trim().toLowerCase();
     const e = (expected || "").trim().toLowerCase();
@@ -498,6 +542,53 @@ function conditionSourceValues(
   return [str(values[sib.key ?? ""])];
 }
 
+/* On-demand sections (section.onDemand) are absent from the form until a Button
+ * (action "add_block") adds them. `spawned` is the click-ordered list of
+ * additions; each remembers the section it should follow ("" = end of form).
+ * Mirrors the builder preview's orderSections. */
+interface SpawnRecord { sectionId: string; anchorId: string }
+
+function orderSections(sections: Section[], spawned: SpawnRecord[]): Section[] {
+  const byId = new Map(sections.map((x) => [x.id ?? "", x]));
+  const out = sections.filter((x) => !x.onDemand);
+  for (const rec of spawned) {
+    const sec = byId.get(rec.sectionId);
+    if (!sec || out.some((x) => x.id === sec.id)) continue;
+    const idx = rec.anchorId ? out.findIndex((x) => x.id === rec.anchorId) : -1;
+    if (idx < 0) { out.push(sec); continue; }
+    let at = idx + 1;
+    while (at < out.length && out[at].onDemand) at++;
+    out.splice(at, 0, sec);
+  }
+  return out;
+}
+
+/* On-demand sections that already carry saved values (an existing document
+ * reopened) are revealed without the person re-clicking the button. */
+function spawnedFromValues(sections: Section[], values: TemplateFormValues, allFields: Field[]): SpawnRecord[] {
+  const out: SpawnRecord[] = [];
+  for (const s of sections) {
+    if (!s.onDemand || !s.id) continue;
+    const hasData = (s.fields ?? []).some((f) => {
+      const k = f.key ?? f.id ?? "";
+      if (!k) return false;
+      const v = values[k];
+      if (v == null) return false;
+      if (typeof v === "string") return v.trim() !== "";
+      if (Array.isArray(v)) return v.length > 0;
+      return true;
+    });
+    if (!hasData) continue;
+    const btn = allFields.find((f) => f.type === "button" && f.button?.action === "add_block" && f.button?.targetSectionId === s.id);
+    const b = btn?.button;
+    const host = btn ? sections.find((x) => (x.fields ?? []).includes(btn)) : undefined;
+    const anchorId = b?.placement === "below_button" ? (host?.id ?? "")
+      : b?.placement === "after_section" ? (b.anchorSectionId ?? "") : "";
+    out.push({ sectionId: s.id, anchorId });
+  }
+  return out;
+}
+
 // Works for a field OR a section — both carry `hidden` + `visibleWhen`. An
 // empty/absent rule group means no restriction (visible). `processStep` is the
 // document's current workflow status ("draft" while a new form is being filled).
@@ -507,9 +598,10 @@ function evalVisible(
   allFields: Field[],
   processStep = "draft",
   rowScope?: Record<string, unknown> | null,
+  viewer?: FormViewer,
 ): boolean {
   if (item.hidden) return false;
-  return evalRule(item.visibleWhen, values, allFields, processStep, rowScope);
+  return evalRule(item.visibleWhen, values, allFields, processStep, rowScope, viewer);
 }
 
 // Editability mirror: a field/section is editable unless always read-only
@@ -521,9 +613,10 @@ export function evalEditable(
   allFields: Field[],
   processStep = "draft",
   rowScope?: Record<string, unknown> | null,
+  viewer?: FormViewer,
 ): boolean {
   if (item.readonly) return false;
-  return evalRule(item.editableWhen, values, allFields, processStep, rowScope);
+  return evalRule(item.editableWhen, values, allFields, processStep, rowScope, viewer);
 }
 
 function hasEditableRule(item: { editableWhen?: VisibleWhen | null }): boolean {
@@ -549,7 +642,7 @@ function evalEditableForViewer(
   if (conditionalEditBlockedForViewer(item, viewer)) {
     return false;
   }
-  return evalEditable(item, values, allFields, processStep);
+  return evalEditable(item, values, allFields, processStep, null, viewer);
 }
 
 // ── Table column cell ─────────────────────────────────────────────────────────
@@ -782,7 +875,7 @@ function TableColInput({ col, value, onChange, readOnly, documentId, attachmentK
 
 // ── Table field ───────────────────────────────────────────────────────────────
 
-function TableField({ field, value, onChange, readOnly, tableKey, documentId, allValues, processStep, allFields }: {
+function TableField({ field, value, onChange, readOnly, tableKey, documentId, allValues, processStep, allFields, viewer }: {
   field: Field;
   value: Record<string, unknown>[];
   onChange: (rows: Record<string, unknown>[]) => void;
@@ -792,6 +885,7 @@ function TableField({ field, value, onChange, readOnly, tableKey, documentId, al
   allValues: TemplateFormValues;
   processStep?: string;
   allFields: Field[];
+  viewer?: FormViewer;
 }) {
   // ALL columns — used by the calc engine. Hidden helper columns must still
   // participate in formula evaluation even though they are not rendered.
@@ -805,9 +899,9 @@ function TableField({ field, value, onChange, readOnly, tableKey, documentId, al
   // (nothing to show anywhere); otherwise it stays and individual cells that
   // fail the rule render as "—".
   const colVisibleInRow = (c: Column, row?: Record<string, unknown> | null) =>
-    evalVisible({ hidden: c.hidden, visibleWhen: c.visibleWhen }, allValues, allFields, step, row ?? null);
+    evalVisible({ hidden: c.hidden, visibleWhen: c.visibleWhen }, allValues, allFields, step, row ?? null, viewer);
   const colEditableInRow = (c: Column, row?: Record<string, unknown> | null) =>
-    evalEditable({ readonly: c.readonly, editableWhen: c.editableWhen }, allValues, allFields, step, row ?? null);
+    evalEditable({ readonly: c.readonly, editableWhen: c.editableWhen }, allValues, allFields, step, row ?? null, viewer);
 
   const emptyRow = (): Record<string, unknown> => {
     const r: Record<string, unknown> = {};
@@ -1418,7 +1512,7 @@ function resolveNumericSource(
   return rows.reduce((sum, r) => sum + (parseAmount(r?.[colKey]) ?? 0), 0);
 }
 
-function FormField({ field, control, errors, onChangeCb, readOnly, allValues, editable = true, processStep, allFields, onLaunchSignatureModal }: {
+function FormField({ field, control, errors, onChangeCb, readOnly, allValues, editable = true, processStep, allFields, onLaunchSignatureModal, onButtonClick, buttonDone = false, viewer }: {
   field: Field;
   control: any;
   errors: Record<string, any>;
@@ -1431,6 +1525,9 @@ function FormField({ field, control, errors, onChangeCb, readOnly, allValues, ed
   processStep?: string;
   allFields: Field[];
   onLaunchSignatureModal?: (fieldKey?: string) => void;
+  onButtonClick?: (field: Field) => void;
+  buttonDone?: boolean;
+  viewer?: FormViewer;
 }) {
   const key  = field.key ?? field.id ?? "";
   const type = field.type ?? "text";
@@ -1442,6 +1539,25 @@ function FormField({ field, control, errors, onChangeCb, readOnly, allValues, ed
   const err   = errors[key]?.message as string | undefined;
 
   if (field.hidden) return null;
+
+  // Action button — reveals an on-demand section or runs a one-shot calculation.
+  if (type === "button") {
+    const variant = field.button?.variant ?? "primary";
+    return (
+      <div className="min-w-0" style={style}>
+        <button type="button" disabled={dis || buttonDone} onClick={() => onButtonClick?.(field)}
+          className={
+            "inline-flex h-10 items-center gap-2 px-4 text-sm font-semibold transition disabled:cursor-not-allowed disabled:opacity-60 "
+            + (variant === "primary" ? "bg-[#287EAD] text-white hover:bg-[#1E6F99]"
+              : variant === "secondary" ? "bg-[#E5E8EB] text-[#1F2933] hover:bg-[#D5D9DC]"
+                : "border border-[#287EAD] bg-white text-[#287EAD] hover:bg-[#EEF6FB]")
+          }>
+          {buttonDone ? <CheckCircle2 className="h-4 w-4" /> : field.button?.action === "calculate" ? <Calculator className="h-4 w-4" /> : <Plus className="h-4 w-4" />}
+          {buttonDone ? `${label} — added` : (label || "Button")}
+        </button>
+      </div>
+    );
+  }
 
   // Layout-only elements
   if (type === "heading") return (
@@ -1474,6 +1590,7 @@ function FormField({ field, control, errors, onChangeCb, readOnly, allValues, ed
       allValues={allValues}
       processStep={processStep}
       allFields={allFields}
+      viewer={viewer}
     />
   );
 
@@ -1926,11 +2043,17 @@ function TemplateForm({ sections, values, onChange, readOnly = false, documentId
   const list = (Array.isArray(sections) ? sections : []) as Section[];
   const allFields = list.flatMap((s) => s.fields ?? []);
 
+  // On-demand sections a Button has added, in click order. Un-spawned
+  // on-demand sections are not rendered at all (mirrors the builder preview).
+  const [spawned, setSpawned] = useState<SpawnRecord[]>(() => spawnedFromValues(list, values, allFields));
+  // Sections the person explicitly removed — never auto-reveal them again.
+  const manuallyRemovedRef = useRef<Set<string>>(new Set());
+
   // Derive a stable key from section IDs so we can detect template changes
   const sectionsKey = list.map((s) => s.id ?? "").join("|");
   const prevKeyRef = useRef(sectionsKey);
 
-  const { control, formState: { errors }, reset, watch, setValue, getValues } = useForm<TemplateFormValues>({
+  const { control, formState: { errors }, reset, watch, setValue, getValues, unregister } = useForm<TemplateFormValues>({
     defaultValues: values,
     mode: "onBlur",
   });
@@ -1940,6 +2063,8 @@ function TemplateForm({ sections, values, onChange, readOnly = false, documentId
     if (prevKeyRef.current !== sectionsKey) {
       prevKeyRef.current = sectionsKey;
       reset({});
+      setSpawned(spawnedFromValues(list, values, allFields));
+      manuallyRemovedRef.current = new Set();
     }
   }, [sectionsKey]);
 
@@ -2005,6 +2130,66 @@ function TemplateForm({ sections, values, onChange, readOnly = false, documentId
     }
   }, [sectionsKey, JSON.stringify(values), readOnly, documentId]);
 
+  // Reveal on-demand blocks that already carry saved data (an existing document
+  // reopened). Add-only: removing a block clears its values, so it won't return.
+  useEffect(() => {
+    const found = spawnedFromValues(list, values, allFields).filter(
+      (r) => !manuallyRemovedRef.current.has(r.sectionId),
+    );
+    if (!found.length) return;
+    setSpawned((prev) => {
+      const missing = found.filter((r) => !prev.some((s) => s.sectionId === r.sectionId));
+      return missing.length ? [...prev, ...missing] : prev;
+    });
+  }, [JSON.stringify(values), sectionsKey]);
+
+  /* Button click: reveal the target on-demand section at the chosen spot, or
+   * evaluate a formula once and write it into the target field. */
+  const runButton = (btn: Field, hostSectionId: string) => {
+    const b = btn.button;
+    if (!b) return;
+    if (b.action === "add_block") {
+      if (!b.targetSectionId || spawned.some((r) => r.sectionId === b.targetSectionId)) return;
+      manuallyRemovedRef.current.delete(b.targetSectionId);
+      const anchorId = b.placement === "below_button" ? hostSectionId
+        : b.placement === "after_section" ? (b.anchorSectionId ?? "") : "";
+      setSpawned((prev) => [...prev, { sectionId: b.targetSectionId as string, anchorId }]);
+      return;
+    }
+    const target = allFields.find((f) => f.key === b.targetKey);
+    if (!target || !b.calc?.expression) return;
+    const tableRegistry: Record<string, { rows: Record<string, unknown>[]; colTypeByKey: Record<string, string | undefined> }> = {};
+    for (const f of allFields) {
+      if (f.type !== "table" || !f.key) continue;
+      const rows = Array.isArray(values[f.key]) ? (values[f.key] as Record<string, unknown>[]) : [];
+      const typeByKey: Record<string, string | undefined> = {};
+      (f.columns ?? []).forEach((c) => { if (c.key) typeByKey[c.key] = c.type; });
+      tableRegistry[f.key] = { rows, colTypeByKey: typeByKey };
+    }
+    const scope = buildCalcScope(allFields, values, tableRegistry);
+    const expr = resolveRowAggregates(b.calc.expression, [], {}, tableRegistry);
+    let result = evaluateCalcExpression(expr, scope);
+    if (typeof result === "number" && typeof b.calc.decimals === "number") {
+      result = Number(result.toFixed(b.calc.decimals));
+    }
+    result = formatCalcResult(target.type, result);
+    const k = target.key ?? target.id ?? "";
+    if (k) onChange(k, result);
+  };
+
+  const removeSpawned = (section: Section) => {
+    if (section.id) manuallyRemovedRef.current.add(section.id);
+    setSpawned((prev) => prev.filter((r) => r.sectionId !== section.id));
+    for (const f of section.fields ?? []) {
+      const k = f.key ?? f.id ?? "";
+      if (!k) continue;
+      unregister(k);
+      onChange(k, undefined);
+    }
+  };
+
+  const ordered = orderSections(list, spawned);
+
   // Keep a live snapshot of form values for conditional visibility
   const liveValues = { ...(watch() as TemplateFormValues), ...values, __document_id: documentId };
 
@@ -2027,7 +2212,7 @@ function TemplateForm({ sections, values, onChange, readOnly = false, documentId
   // attachment download buttons (the approver needs to open attachments).
   return (
     <div className="space-y-6">
-      {list.map((section, si) => {
+      {ordered.map((section, si) => {
         // Hidden / conditionally-hidden / role-restricted sections drop out
         // entirely. Whether the viewer is ALLOWED TO EDIT a conditionally-
         // editable section/field is a different axis — handled below via
@@ -2035,10 +2220,10 @@ function TemplateForm({ sections, values, onChange, readOnly = false, documentId
         // controls to read-only. It must never also hide the section, or an
         // approver reviewing the document loses visibility into content
         // they're specifically there to review.
-        if (!evalVisible(section, liveValues as TemplateFormValues, allFields, processStep)) return null;
+        if (!evalVisible(section, liveValues as TemplateFormValues, allFields, processStep, null, viewer)) return null;
         if (!sectionVisibleToViewer(section, viewer)) return null;
         const visibleFields = (section.fields ?? []).filter((f) =>
-          evalVisible(f, liveValues as TemplateFormValues, allFields, processStep)
+          evalVisible(f, liveValues as TemplateFormValues, allFields, processStep, null, viewer)
         );
         // Editability cascades: a read-only/locked section locks all its fields.
         const sectionEditable = evalEditableForViewer(section, liveValues as TemplateFormValues, allFields, processStep, viewer);
@@ -2053,6 +2238,12 @@ function TemplateForm({ sections, values, onChange, readOnly = false, documentId
                   <span className="inline-flex items-center gap-1 px-1.5 py-0.5 text-[10px] font-semibold" style={{ backgroundColor: "#F0F2F4", color: "#5E6870" }}>
                     <Lock className="h-2.5 w-2.5" /> Read-only at this step
                   </span>
+                )}
+                {section.onDemand && section.removable && (
+                  <button type="button" onClick={() => removeSpawned(section)}
+                    className="ml-auto inline-flex items-center gap-1 text-xs font-semibold hover:text-red-600" style={{ color: "#5E6870" }}>
+                    <Trash2 className="h-3.5 w-3.5" /> Remove
+                  </button>
                 )}
               </h3>
               {section.description && (
@@ -2074,6 +2265,9 @@ function TemplateForm({ sections, values, onChange, readOnly = false, documentId
                   processStep={processStep}
                   allFields={allFields}
                   onLaunchSignatureModal={onLaunchSignatureModal}
+                  onButtonClick={(btn) => runButton(btn, section.id ?? "")}
+                  buttonDone={f.button?.action === "add_block" && spawned.some((r) => r.sectionId === f.button?.targetSectionId)}
+                  viewer={viewer}
                 />
               ))}
               {visibleFields.length === 0 && (
@@ -2105,8 +2299,11 @@ export function requiredFieldLabels(
     // Don't require fields the user never sees because their section is hidden
     // (always-hidden, a conditional rule that isn't met, or a role restriction
     // the viewer isn't a member of).
-    if (!evalVisible(s, values, allFields, processStep)) continue;
+    if (!evalVisible(s, values, allFields, processStep, null, viewer)) continue;
     if (!sectionVisibleToViewer(s, viewer)) continue;
+    // On-demand sections aren't part of the form until a Button adds them, so
+    // their fields can't be required up-front (matches the renderer + server).
+    if (s.onDemand) continue;
     if (conditionalEditBlockedForViewer(s, viewer)) continue;
     // A read-only/locked section's fields can't be filled at this step.
     const sectionEditable = evalEditableForViewer(s, values, allFields, processStep, viewer);
@@ -2119,7 +2316,7 @@ export function requiredFieldLabels(
       // Formula fields auto-fill (and the server finalizes them); never block on them.
       if (resolveFormula(f.formula)) continue;
       // Don't require a field the user can't see (hidden / conditionally hidden).
-      if (f.hidden || !evalVisible(f, values, allFields, processStep)) continue;
+      if (f.hidden || !evalVisible(f, values, allFields, processStep, null, viewer)) continue;
       if (conditionalEditBlockedForViewer(f, viewer)) continue;
       // Don't require a field the user can't edit at this step (read-only / locked).
       if (!sectionEditable || !evalEditableForViewer(f, values, allFields, processStep, viewer)) continue;
@@ -2143,10 +2340,10 @@ export function requiredFieldLabels(
           // actually shown and editable.
           const missingInAnyRow =
             rows.length === 0
-              ? evalVisible(col, values, allFields, processStep, null) && evalEditable(col, values, allFields, processStep, null)
+              ? evalVisible(col, values, allFields, processStep, null, viewer) && evalEditable(col, values, allFields, processStep, null, viewer)
               : rows.some((row) => {
-                  if (!evalVisible(col, values, allFields, processStep, row)) return false;
-                  if (!evalEditable(col, values, allFields, processStep, row)) return false;
+                  if (!evalVisible(col, values, allFields, processStep, row, viewer)) return false;
+                  if (!evalEditable(col, values, allFields, processStep, row, viewer)) return false;
                   const v = row?.[colKey];
                   return v === undefined || v === null || (typeof v === "string" && v.trim() === "");
                 });

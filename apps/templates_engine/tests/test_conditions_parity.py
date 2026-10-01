@@ -65,3 +65,31 @@ def test_nested_groups_and_row_semantics():
 def test_bad_formulas_never_raise():
     for expr in ["NOSUCHFN(1)", "1 +", "IF(1, 2)", "ROUND()", "((((", "1 / 0", '"unterminated']:
         assert c.evaluate_calc_expression(expr, {}) in (0, 0.0)
+
+def test_user_group_conditions():
+    """`user_group` conditions match the viewer's group ids/names, never
+    restrict without viewer context, and let admins through."""
+    def rule(op, groups):
+        return {"combinator": "and", "conditions": [
+            {"source": "user_group", "operator": op, "groups": groups}]}
+
+    finance = {"id": "g1", "name": "Finance"}
+    fin = c.build_viewer(["g1"], ["Finance"], False)
+    ops = c.build_viewer(["g2"], ["Operations"], False)
+    admin = c.build_viewer([], [], True)
+
+    assert c.eval_group(rule("in_list", [finance]), {}, "draft", fin) is True
+    assert c.eval_group(rule("in_list", [finance]), {}, "draft", ops) is False
+    assert c.eval_group(rule("not_in_list", [finance]), {}, "draft", ops) is True
+    assert c.eval_group(rule("not_in_list", [finance]), {}, "draft", fin) is False
+    # No viewer context / admin -> never restrict.
+    assert c.eval_group(rule("in_list", [finance]), {}, "draft") is True
+    assert c.eval_group(rule("not_in_list", [finance]), {}, "draft", admin) is True
+    # Matched by name when only the label is stored.
+    assert c.eval_group(rule("in_list", [{"id": "zzz", "name": "Finance"}]), {}, "draft", fin) is True
+    # Composes with the other sources via the group combinator.
+    combo = {"combinator": "and", "conditions": [
+        {"source": "user_group", "operator": "in_list", "groups": [finance]},
+        {"source": "process_step", "operator": "equals", "value": "approved"}]}
+    assert c.eval_group(combo, {}, "approved", fin) is True
+    assert c.eval_group(combo, {}, "draft", fin) is False

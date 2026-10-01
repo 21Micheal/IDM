@@ -3,8 +3,10 @@ field/section **visibility** and **editability** (TemplateForm.tsx / TemplateBui
 
 A rule group is ``{"combinator": "and"|"or", "conditions": [ {source, fieldKey,
 operator, value}, ... ], "groups": [ <nested rule groups> ]}``. Legacy single-rule ``{fieldKey, operator, value}`` is
-tolerated. Conditions test either a form field's value (``source: "field"``) or
-the document's current process step (``source: "process_step"``).
+tolerated. Conditions test a form field's value (``source: "field"``), the
+document's current process step (``source: "process_step"``), or the viewer's
+RBAC membership (``source: "user_group"`` with ``groups: [{id, name}]`` and
+operator ``in_list`` / ``not_in_list``).
 
 Kept dependency-free so both apps/templates_engine and apps/documents can import it.
 """
@@ -54,6 +56,38 @@ def _normalize_group(vw):
 
 def _group_has_conditions(g) -> bool:
     return bool(g) and (bool(g["conditions"]) or any(_group_has_conditions(n) for n in g["groups"]))
+
+
+def build_viewer(group_ids=(), group_names=(), is_admin=False) -> dict:
+    """Viewer context for ``user_group`` conditions. A plain dict keeps this
+    module dependency-free; callers pass the ids/names they already have."""
+    return {
+        "group_ids": {str(g) for g in (group_ids or [])},
+        "group_names": set(group_names or []),
+        "is_admin": bool(is_admin),
+    }
+
+
+def _match_user_group(cond: dict, viewer) -> bool:
+    """Evaluate one ``user_group`` condition. Group rules are a convenience, not
+    an access boundary: with no viewer context (or for admins) they never
+    restrict, matching the frontend's behaviour."""
+    operator = cond.get("operator")
+    if operator not in ("in_list", "not_in_list"):
+        return True  # unknown operator — never hide/lock on it
+    if not viewer or viewer.get("is_admin"):
+        return True
+    groups = cond.get("groups") or []
+    ids = viewer.get("group_ids") or set()
+    names = viewer.get("group_names") or set()
+    member = any(
+        isinstance(g, dict) and (
+            (g.get("id") and str(g["id"]) in ids)
+            or (g.get("name") and g["name"] in names)
+        )
+        for g in groups
+    )
+    return member if operator == "in_list" else not member
 
 
 def _condition_values(field_key, values: dict):
@@ -169,12 +203,15 @@ def match_operator(operator, sv: str, expected: str) -> bool:
     return True
 
 
-def eval_condition(cond: dict, values: dict, process_step: str) -> bool:
+def eval_condition(cond: dict, values: dict, process_step: str, viewer=None) -> bool:
     operator = cond.get("operator")
     expected = cond.get("value") or ""
 
     if operator not in _KNOWN_OPERATORS:
         return True  # unknown operator — never hide/lock on it
+
+    if cond.get("source") == "user_group":
+        return _match_user_group(cond, viewer)
 
     if cond.get("source") == "process_step":
         candidates = [process_step]
@@ -186,39 +223,39 @@ def eval_condition(cond: dict, values: dict, process_step: str) -> bool:
     return any(match_operator(operator, sv, expected) for sv in candidates)
 
 
-def _eval_normalized(g, values: dict, process_step: str) -> bool:
+def _eval_normalized(g, values: dict, process_step: str, viewer=None) -> bool:
     nested = [n for n in g["groups"] if _group_has_conditions(n)]
     if not g["conditions"] and not nested:
         return True
-    results = [eval_condition(c, values, process_step) for c in g["conditions"]]
-    results += [_eval_normalized(n, values, process_step) for n in nested]
+    results = [eval_condition(c, values, process_step, viewer) for c in g["conditions"]]
+    results += [_eval_normalized(n, values, process_step, viewer) for n in nested]
     return any(results) if g["combinator"] == "or" else all(results)
 
 
-def eval_group(group, values: dict, process_step: str) -> bool:
+def eval_group(group, values: dict, process_step: str, viewer=None) -> bool:
     """True if the rule group matches. An empty/absent group is True (no
     restriction). Nested ``groups`` are combined with the group's own combinator."""
     g = _normalize_group(group)
     if g is None:
         return True
-    return _eval_normalized(g, values, process_step)
+    return _eval_normalized(g, values, process_step, viewer)
 
 
-def is_visible(item: dict, values: dict, process_step: str = "draft") -> bool:
+def is_visible(item: dict, values: dict, process_step: str = "draft", viewer=None) -> bool:
     """A field/section is visible unless always-hidden or its ``visibleWhen`` group
-    doesn't match at the current step/values."""
+    doesn't match at the current step/values/viewer."""
     if item.get("hidden"):
         return False
-    return eval_group(item.get("visibleWhen"), values, process_step)
+    return eval_group(item.get("visibleWhen"), values, process_step, viewer)
 
 
-def is_editable(item: dict, values: dict, process_step: str = "draft") -> bool:
+def is_editable(item: dict, values: dict, process_step: str = "draft", viewer=None) -> bool:
     """A field/section is editable unless always read-only (``readonly``) or it has
-    an ``editableWhen`` group that doesn't match at the current step/values.
+    an ``editableWhen`` group that doesn't match at the current step/values/viewer.
     Absent ``editableWhen`` = editable by default (preserves prior behaviour)."""
     if item.get("readonly"):
         return False
-    return eval_group(item.get("editableWhen"), values, process_step)
+    return eval_group(item.get("editableWhen"), values, process_step, viewer)
 
 
 def row_scoped_values(values: dict, row: dict) -> dict:
@@ -230,29 +267,29 @@ def row_scoped_values(values: dict, row: dict) -> dict:
     return merged
 
 
-def is_column_visible(column: dict, values: dict, rows=None, process_step: str = "draft") -> bool:
+def is_column_visible(column: dict, values: dict, rows=None, process_step: str = "draft", viewer=None) -> bool:
     """Column headers are shared by every row, so a column stays visible when
     ANY row satisfies its ``visibleWhen`` (evaluated with that row's own cell
     values merged in). With no rows, the form-level values decide."""
     if column.get("hidden"):
         return False
     if not rows:
-        return eval_group(column.get("visibleWhen"), values, process_step)
+        return eval_group(column.get("visibleWhen"), values, process_step, viewer)
     return any(
-        eval_group(column.get("visibleWhen"), row_scoped_values(values, row), process_step)
+        eval_group(column.get("visibleWhen"), row_scoped_values(values, row), process_step, viewer)
         for row in rows
     )
 
 
-def is_cell_editable(column: dict, values: dict, row: dict, process_step: str = "draft") -> bool:
+def is_cell_editable(column: dict, values: dict, row: dict, process_step: str = "draft", viewer=None) -> bool:
     """Per-row editability for one table cell: the column must be editable AND
     visible for THIS row's values."""
     if column.get("hidden") or column.get("readonly"):
         return False
     scoped = row_scoped_values(values, row)
     return (
-        eval_group(column.get("visibleWhen"), scoped, process_step)
-        and eval_group(column.get("editableWhen"), scoped, process_step)
+        eval_group(column.get("visibleWhen"), scoped, process_step, viewer)
+        and eval_group(column.get("editableWhen"), scoped, process_step, viewer)
     )
 
 

@@ -184,7 +184,22 @@ def is_built_form_document(document: Document) -> bool:
     return isinstance(form, dict) and bool(form.get("sections"))
 
 
-def form_has_editable_fields(document: Document) -> bool:
+def viewer_for_user(user):
+    """Build the ``user_group`` condition context (group ids/names + admin) for a
+    request user. Returns ``None`` for an anonymous/missing user, which makes
+    group rules non-restrictive (they are a convenience, not access control)."""
+    if user is None or not getattr(user, "is_authenticated", False):
+        return None
+    from apps.templates_engine.conditions import build_viewer
+    memberships = getattr(user, "group_memberships", None)
+    ids, names = set(), set()
+    if memberships is not None:
+        ids = {str(v) for v in memberships.values_list("group_id", flat=True)}
+        names = set(memberships.select_related("group").values_list("group__name", flat=True))
+    return build_viewer(ids, names, bool(getattr(user, "has_admin_access", False)))
+
+
+def form_has_editable_fields(document: Document, user=None) -> bool:
     """True when the built form exposes at least one visible, editable field at
     the document's current process step (``status``)."""
     form = (document.metadata or {}).get("form")
@@ -198,22 +213,23 @@ def form_has_editable_fields(document: Document) -> bool:
     values = form.get("values") if isinstance(form.get("values"), dict) else {}
     process_step = builder_process_step(document)
     render_values = descriptors_to_names(values)
+    viewer = viewer_for_user(user)
 
     for section in sections:
         if not isinstance(section, dict):
             continue
-        if not is_visible(section, render_values, process_step):
+        if not is_visible(section, render_values, process_step, viewer):
             continue
-        section_editable = is_editable(section, render_values, process_step)
+        section_editable = is_editable(section, render_values, process_step, viewer)
         for field in section.get("fields") or []:
             if not isinstance(field, dict):
                 continue
             if not field.get("key"):
                 continue
             if (
-                is_visible(field, render_values, process_step)
+                is_visible(field, render_values, process_step, viewer)
                 and section_editable
-                and is_editable(field, render_values, process_step)
+                and is_editable(field, render_values, process_step, viewer)
             ):
                 return True
     return False
@@ -255,7 +271,7 @@ def document_allows_form_edit(document: Document, *, user=None) -> bool:
     except Exception:
         pass
 
-    if not form_has_editable_fields(document):
+    if not form_has_editable_fields(document, user=user):
         return False
 
     if stage == ACCESS_STAGE_AFTER_APPROVAL:

@@ -273,15 +273,21 @@ export interface ConditionalRule {
   value?: string;
 }
 
-/* A single visibility condition. `source` selects what it tests:
+/* A single visibility/editability condition. `source` selects what it tests:
  *  - "field":        a sibling field's value (by key)
- *  - "process_step": the document's current workflow status (status_label) */
-export type ConditionSource = "field" | "process_step";
+ *  - "process_step": the document's current workflow status (status_label)
+ *  - "user_group":   the VIEWER's RBAC group membership. Uses `groups` plus the
+ *                    operators in_list ("member of any of") / not_in_list
+ *                    ("not a member of any of"). Because it is an ordinary
+ *                    condition it can be AND/OR-ed and nested with the other
+ *                    sources, e.g. step = Finance Approval AND group = Finance. */
+export type ConditionSource = "field" | "process_step" | "user_group";
 export interface VisibilityCondition {
   source: ConditionSource;
   fieldKey?: string;          // when source === "field"
   operator: ConditionOperator;
   value?: string;             // a field value, or a status_label for process_step
+  groups?: SectionGroupRef[]; // when source === "user_group"
 }
 
 /* A group of conditions combined with AND/OR. A field/section is shown only when
@@ -308,10 +314,13 @@ function toRuleGroup(v: unknown): RuleGroup | null {
     return {
       combinator: obj.combinator === "or" ? "or" : "and",
       conditions: (obj.conditions as VisibilityCondition[]).map((c) => ({
-        source: c.source === "process_step" ? "process_step" : "field",
+        source: c.source === "process_step" || c.source === "user_group" ? c.source : "field",
         fieldKey: c.fieldKey,
         operator: c.operator,
         value: c.value,
+        ...(c.source === "user_group"
+          ? { groups: (c.groups ?? []).map((g) => ({ id: String(g.id), name: String(g.name) })) }
+          : {}),
       })),
       ...(nested.length ? { groups: nested } : {}),
     };
@@ -323,6 +332,29 @@ function toRuleGroup(v: unknown): RuleGroup | null {
     };
   }
   return null;
+}
+
+/* Legacy migration: sections used to carry a separate `visibleToGroups` list that
+ * could not be combined with the rule group. Fold it into the rule group as a
+ * "user_group" condition, AND-ed with whatever rule already exists (so the old
+ * "stage conditions AND group access" behaviour is preserved). Idempotent: once
+ * folded, `visibleToGroups` is dropped and there is nothing left to fold. */
+function withGroupAccess(rule: RuleGroup | null, groups?: SectionGroupRef[]): RuleGroup | null {
+  if (!groups || groups.length === 0) return rule;
+  const cond: VisibilityCondition = { source: "user_group", operator: "in_list", groups: groups.map((g) => ({ id: String(g.id), name: String(g.name) })) };
+  if (!rule || !ruleGroupHasConditions(rule)) return { combinator: "and", conditions: [cond] };
+  if (rule.combinator === "and") return { ...rule, conditions: [...rule.conditions, cond] };
+  /* An OR rule can't simply take another sibling without changing meaning. */
+  return { combinator: "and", conditions: [cond], groups: [rule] };
+}
+
+/* Every RBAC group a rule tree mentions (for canvas badges). */
+function ruleUserGroupNames(g?: RuleGroup | null): string[] {
+  if (!g) return [];
+  return [
+    ...g.conditions.filter((c) => c.source === "user_group").flatMap((c) => (c.groups ?? []).map((x) => x.name)),
+    ...(g.groups ?? []).flatMap(ruleUserGroupNames),
+  ];
 }
 
 const OPERATOR_LABEL: Record<ConditionOperator, string> = {
@@ -345,6 +377,10 @@ const OPERATOR_GROUPS: Array<{ label: string; ops: ConditionOperator[] }> = [
 ];
 
 function summarizeCondition(c: VisibilityCondition): string {
+  if (c.source === "user_group") {
+    const names = (c.groups ?? []).map((g) => g.name).join(", ") || "…";
+    return `user ${c.operator === "not_in_list" ? "not in" : "in"} ${names}`;
+  }
   const left = c.source === "process_step" ? "step" : (c.fieldKey || "field");
   const op = OPERATOR_LABEL[c.operator] ?? c.operator;
   if (VALUELESS_OPERATORS.has(c.operator)) return `${left} ${op}`;
@@ -543,11 +579,12 @@ export interface TemplateSection {
   fields: TemplateField[];
   collapsible?: boolean;
   /* Visibility — mirrors the per-field model. `hidden` always hides the whole
-   * section (and its fields); `visibleWhen` shows it only when a field matches;
-   * `visibleToGroups` restricts the section to members of the listed RBAC groups
-   * (empty/absent = everyone). The three are mutually-exclusive modes in the UI. */
+   * section (and its fields); `visibleWhen` shows it only when its rule group
+   * matches (field values, process step and user groups, AND/OR-nestable). */
   hidden?: boolean;
   visibleWhen?: RuleGroup | null;
+  /** @deprecated Legacy. Read once on load and folded into `visibleWhen` as a
+   *  "user_group" condition (see withGroupAccess); never written any more. */
   visibleToGroups?: SectionGroupRef[];
   /* Editability (cascades to the section's fields). `readonly` = always
    * read-only; `editableWhen` = editable only when the rule group matches. */
@@ -1167,12 +1204,15 @@ function normalizeTemplate(template: EditableTemplate): Template {
     type: template.type ?? "built",
     category: template.category ?? "other",
     tags: template.tags ?? [],
-    sections: sections.map((s) => ({
-      ...s,
-      visibleWhen: toRuleGroup(s.visibleWhen),
-      editableWhen: toRuleGroup(s.editableWhen),
-      fields: Array.isArray(s.fields) ? s.fields.map(normalizeField) : [],
-    })),
+    sections: sections.map((s) => {
+      const { visibleToGroups, ...rest } = s;
+      return {
+        ...rest,
+        visibleWhen: withGroupAccess(toRuleGroup(s.visibleWhen), visibleToGroups),
+        editableWhen: toRuleGroup(s.editableWhen),
+        fields: Array.isArray(s.fields) ? s.fields.map(normalizeField) : [],
+      };
+    }),
   };
 }
 
@@ -1975,10 +2015,16 @@ function FieldCard({
             ) : ruleGroupHasConditions(field.visibleWhen) && (
               <span className="bg-amber-50 px-1.5 py-0.5 text-[9px] font-semibold text-amber-700 border border-amber-200 flex-shrink-0" title={`Show when ${summarizeRuleGroup(field.visibleWhen)}`}>cond</span>
             )}
+            {ruleUserGroupNames(field.visibleWhen).length > 0 && (
+              <span className="bg-[#EEF6FB] px-1.5 py-0.5 text-[9px] font-semibold text-[#287EAD] border border-[#287EAD]/30 flex-shrink-0" title={`Visible to: ${ruleUserGroupNames(field.visibleWhen).join(", ")}`}>group</span>
+            )}
             {field.readonly ? (
               <span className="bg-slate-100 px-1.5 py-0.5 text-[9px] font-semibold text-slate-500 border border-slate-300 flex-shrink-0" title="Always read-only">read-only</span>
             ) : ruleGroupHasConditions(field.editableWhen) && (
               <span className="bg-violet-50 px-1.5 py-0.5 text-[9px] font-semibold text-violet-700 border border-violet-200 flex-shrink-0" title={`Editable when ${summarizeRuleGroup(field.editableWhen)}`}>edit-cond</span>
+            )}
+            {ruleUserGroupNames(field.editableWhen).length > 0 && (
+              <span className="bg-violet-50 px-1.5 py-0.5 text-[9px] font-semibold text-violet-700 border border-violet-200 flex-shrink-0" title={`Editable by: ${ruleUserGroupNames(field.editableWhen).join(", ")}`}>edit-group</span>
             )}
           </div>
           <div className="flex items-center gap-0.5 opacity-0 transition group-hover:opacity-100 flex-shrink-0">
@@ -2102,17 +2148,19 @@ function SectionBlock(props: {
             )}
             {section.hidden ? (
               <span className="bg-slate-100 px-1.5 py-0.5 text-[9px] font-semibold text-slate-500 border border-slate-300 flex-shrink-0" title="Section always hidden from people filling the form">hidden</span>
-            ) : section.visibleToGroups && section.visibleToGroups.length > 0 ? (
-              <span className="bg-[#EEF6FB] px-1.5 py-0.5 text-[9px] font-semibold text-[#287EAD] border border-[#287EAD]/30 flex-shrink-0" title={`Visible only to: ${section.visibleToGroups.map((g) => g.name).join(", ")}`}>
-                {section.visibleToGroups.length === 1 ? section.visibleToGroups[0].name : `${section.visibleToGroups.length} groups`}
-              </span>
             ) : ruleGroupHasConditions(section.visibleWhen) && (
               <span className="bg-amber-50 px-1.5 py-0.5 text-[9px] font-semibold text-amber-700 border border-amber-200 flex-shrink-0" title={`Section shows when ${summarizeRuleGroup(section.visibleWhen)}`}>cond</span>
+            )}
+            {ruleUserGroupNames(section.visibleWhen).length > 0 && (
+              <span className="bg-[#EEF6FB] px-1.5 py-0.5 text-[9px] font-semibold text-[#287EAD] border border-[#287EAD]/30 flex-shrink-0" title={`Visible to: ${ruleUserGroupNames(section.visibleWhen).join(", ")}`}>group</span>
             )}
             {section.readonly ? (
               <span className="bg-slate-100 px-1.5 py-0.5 text-[9px] font-semibold text-slate-500 border border-slate-300 flex-shrink-0" title="Section always read-only">read-only</span>
             ) : ruleGroupHasConditions(section.editableWhen) && (
               <span className="bg-violet-50 px-1.5 py-0.5 text-[9px] font-semibold text-violet-700 border border-violet-200 flex-shrink-0" title={`Section editable when ${summarizeRuleGroup(section.editableWhen)}`}>edit-cond</span>
+            )}
+            {ruleUserGroupNames(section.editableWhen).length > 0 && (
+              <span className="bg-violet-50 px-1.5 py-0.5 text-[9px] font-semibold text-violet-700 border border-violet-200 flex-shrink-0" title={`Editable by: ${ruleUserGroupNames(section.editableWhen).join(", ")}`}>edit-group</span>
             )}
           </div>
           <input value={section.description ?? ""}
@@ -3390,21 +3438,35 @@ function FinanceBindingFields({ field, onUpdate }: {
   );
 }
 
-/* Visibility modes shared by fields and sections. `hidden` = always hidden,
- * `visibleWhen` = conditional, `visibleToGroups` = role-restricted (sections
- * only), none = always visible. */
+/* Visibility modes shared by fields, sections and columns. `hidden` = always
+ * hidden, `visibleWhen` = conditional (process step / field value / user group,
+ * freely combined and nestable), none = always visible. */
 type VisibilityMode = "visible" | "hidden" | "conditional";
 
 interface VisibilityState {
   hidden?: boolean;
   visibleWhen?: RuleGroup | null;
-  visibleToGroups?: SectionGroupRef[];
 }
 
 function visibilityModeOf(item: VisibilityState): VisibilityMode {
   if (item.hidden) return "hidden";
   if (item.visibleWhen) return "conditional";
   return "visible";
+}
+
+/* RBAC groups for "user group" conditions. Shared react-query cache, so every
+ * rule editor on screen reuses one request. */
+function useRbacGroups(): SectionGroupRef[] {
+  const { data = [] } = useQuery({
+    queryKey: ["groups", "list"],
+    queryFn: async () => {
+      const res = await groupsAPI.list();
+      const rows = (res.data?.results ?? res.data ?? []) as Array<{ id: string; name: string }>;
+      return rows.map((g) => ({ id: String(g.id), name: String(g.name) }));
+    },
+    staleTime: 60_000,
+  });
+  return data;
 }
 
 function defaultCondition(sources: { key: string }[]): VisibilityCondition {
@@ -3422,6 +3484,7 @@ function RuleGroupEditor({ group, sources, processSteps, onChange, depth = 0 }: 
    * are unreadable in a side panel and are better modelled as two rules. */
   depth?: number;
 }) {
+  const groupOptions = useRbacGroups();
   const updateCond = (i: number, patch: Partial<VisibilityCondition>) =>
     onChange({ ...group, conditions: group.conditions.map((c, idx) => (idx === i ? { ...c, ...patch } : c)) });
   const removeCond = (i: number) =>
@@ -3461,12 +3524,15 @@ function RuleGroupEditor({ group, sources, processSteps, onChange, depth = 0 }: 
               onChange={(val) => {
                 const source = val as ConditionSource;
                 updateCond(i, source === "process_step"
-                  ? { source, fieldKey: undefined, operator: "equals", value: processSteps[0]?.value ?? "" }
-                  : { source, fieldKey: sources[0]?.key ?? "", value: "" });
+                  ? { source, fieldKey: undefined, groups: undefined, operator: "equals", value: processSteps[0]?.value ?? "" }
+                  : source === "user_group"
+                    ? { source, fieldKey: undefined, groups: [], operator: "in_list", value: undefined }
+                    : { source, fieldKey: sources[0]?.key ?? "", groups: undefined, operator: "equals", value: "" });
               }}
               options={[
                 { value: "field", label: "Form field" },
                 { value: "process_step", label: "Process step" },
+                { value: "user_group", label: "User group" },
               ]}
               className={cn(inputCls, "h-8 flex-1")}
               buttonClassName="w-full"
@@ -3492,6 +3558,41 @@ function RuleGroupEditor({ group, sources, processSteps, onChange, depth = 0 }: 
             />
           )}
 
+          {c.source === "user_group" && (
+            <div className="space-y-1.5">
+              <CustomListbox
+                value={c.operator === "not_in_list" ? "not_in_list" : "in_list"}
+                onChange={(val) => updateCond(i, { operator: val as ConditionOperator })}
+                options={[
+                  { value: "in_list", label: "User is a member of any of…" },
+                  { value: "not_in_list", label: "User is not a member of any of…" },
+                ]}
+                className={cn(inputCls, "h-8")}
+                buttonClassName="w-full"
+                ariaLabel="Group membership operator"
+              />
+              {groupOptions.length === 0 && <p className="text-[10px] text-amber-600">No groups defined yet.</p>}
+              <div className="max-h-40 overflow-y-auto border border-[#E5E8EB] divide-y divide-[#F0F2F3] bg-white">
+                {groupOptions.map((g) => {
+                  const picked = (c.groups ?? []).some((x) => x.id === g.id);
+                  return (
+                    <label key={g.id} className="flex cursor-pointer items-center gap-2 px-2 py-1.5 text-xs text-[#1F2933] hover:bg-[#F6F7F8]">
+                      <input type="checkbox" checked={picked} className="h-3.5 w-3.5 accent-[#287EAD]"
+                        onChange={() => updateCond(i, {
+                          groups: picked ? (c.groups ?? []).filter((x) => x.id !== g.id) : [...(c.groups ?? []), { id: g.id, name: g.name }],
+                        })} />
+                      <span className="truncate">{g.name}</span>
+                    </label>
+                  );
+                })}
+              </div>
+              {(c.groups ?? []).length === 0 && (
+                <p className="text-[10px] text-amber-600">Pick at least one group, or this condition has no effect.</p>
+              )}
+            </div>
+          )}
+
+          {c.source !== "user_group" && (
           <div className="grid grid-cols-2 gap-1.5">
             <CustomListbox
               value={c.operator}
@@ -3535,7 +3636,8 @@ function RuleGroupEditor({ group, sources, processSteps, onChange, depth = 0 }: 
               )
             )}
           </div>
-          {LIST_OPERATORS.has(c.operator) && (
+          )}
+          {c.source !== "user_group" && LIST_OPERATORS.has(c.operator) && (
             <p className="text-[10px] text-[#8C969E]">Separate each accepted value with a comma.</p>
           )}
           <p className="text-[10px] text-[#8C969E]">{summarizeCondition(c)}</p>
@@ -3580,41 +3682,31 @@ function RuleGroupEditor({ group, sources, processSteps, onChange, depth = 0 }: 
   );
 }
 
-/* Unified visibility control used by both the field inspector and the section
- * inspector. A single mode selector:
+/* Unified visibility control for fields, sections and table columns. One mode
+ * selector:
  *   Always visible · Always hidden · Show only when <rule group>
- *   · Visible only to groups…   (sections only — pass `groupOptions`)
- * `sources` are the fields whose values can drive a conditional rule;
- * `processSteps` are the workflow statuses for "process step"conditions. */
-function VisibilityEditor({ value, sources, onChange, subject, groupOptions, processSteps = [] }: {
+ * The rule group combines (AND/OR, nestable) any mix of form-field values,
+ * process steps and USER GROUPS, so "step = Finance Approval AND user in
+ * Finance" is just two conditions in one group.
+ * `sources` are the fields whose values can drive a rule; `processSteps` are the
+ * workflow statuses for "process step" conditions. */
+function VisibilityEditor({ value, sources, onChange, subject, processSteps = [] }: {
   value: VisibilityState;
   sources: { key: string; label: string }[];
   onChange: (patch: VisibilityState) => void;
   subject: "field" | "section" | "column";
-  groupOptions?: { id: string; name: string }[];
   processSteps?: { value: string; label: string }[];
 }) {
   const mode = visibilityModeOf(value);
   const rule = value.visibleWhen ?? null;
-  const allowsGroups = Array.isArray(groupOptions);
-  const selectedGroups = value.visibleToGroups ?? [];
-  const isGroupSelected = (id: string) => selectedGroups.some((g) => g.id === id);
 
   const setMode = (m: VisibilityMode) => {
-    if (m === "visible") onChange({ hidden: false, visibleWhen: null, visibleToGroups: value.visibleToGroups });
-    else if (m === "hidden") onChange({ hidden: true, visibleWhen: null, visibleToGroups: value.visibleToGroups });
+    if (m === "visible") onChange({ hidden: false, visibleWhen: null });
+    else if (m === "hidden") onChange({ hidden: true, visibleWhen: null });
     else onChange({
       hidden: false,
-      visibleToGroups: value.visibleToGroups,
       visibleWhen: rule ?? { combinator: "and", conditions: [defaultCondition(sources)] },
     });
-  };
-
-  const toggleGroup = (g: { id: string; name: string }) => {
-    const next = isGroupSelected(g.id)
-      ? selectedGroups.filter((s) => s.id !== g.id)
-      : [...selectedGroups, { id: g.id, name: g.name }];
-    onChange({ hidden: false, visibleWhen: value.visibleWhen, visibleToGroups: next });
   };
 
   return (
@@ -3623,9 +3715,9 @@ function VisibilityEditor({ value, sources, onChange, subject, groupOptions, pro
       hint={
         mode === "hidden"
           ? `This ${subject} is always hidden from people filling the form.`
-          : selectedGroups.length > 0
-            ? "This section must satisfy its stage conditions and group access rule."
-            : `Control when this ${subject} appears for people filling the form.`
+          : mode === "conditional"
+            ? `Shown only while the rules below match. Mix process step, field value and user group conditions.`
+            : `Control when this ${subject} appears — by process step, field value or user group.`
       }
     >
       <div className="space-y-2 border border-[#C8CDD2] bg-white p-2.5">
@@ -3641,25 +3733,6 @@ function VisibilityEditor({ value, sources, onChange, subject, groupOptions, pro
           buttonClassName="w-full"
           ariaLabel="Visibility mode"
         />
-        {allowsGroups && mode !== "hidden" && (
-          <div className="space-y-1">
-            {groupOptions!.length === 0 && (
-              <p className="text-[10px] text-amber-600">No groups defined yet.</p>
-            )}
-            <div className="max-h-40 overflow-y-auto border border-[#E5E8EB] divide-y divide-[#F0F2F3]">
-              {groupOptions!.map((g) => (
-                <label key={g.id} className="flex cursor-pointer items-center gap-2 px-2 py-1.5 text-xs text-[#1F2933] hover:bg-[#F6F7F8]">
-                  <input type="checkbox" checked={isGroupSelected(g.id)} onChange={() => toggleGroup(g)}
-                    className="h-3.5 w-3.5 accent-[#287EAD]" />
-                  <span className="truncate">{g.name}</span>
-                </label>
-              ))}
-            </div>
-            {selectedGroups.length === 0 && (
-              <p className="text-[10px] text-amber-600">Pick at least one group, or the section stays visible to everyone.</p>
-            )}
-          </div>
-        )}
         {mode === "conditional" && rule && (
           <RuleGroupEditor group={rule} sources={sources} processSteps={processSteps}
             onChange={(g) => onChange({ visibleWhen: g })} />
@@ -3706,7 +3779,7 @@ function EditabilityEditor({ value, sources, onChange, subject, processSteps = [
         mode === "readonly"
           ? `This ${subject} is always read-only.`
           : mode === "conditional"
-            ? `Editable only while the rules below match — read-only at every other step.`
+            ? `Editable only while the rules below match (process step, field value, user group) — read-only otherwise.`
             : `Control when people can edit this ${subject}.`
       }
     >
@@ -4450,16 +4523,6 @@ function SectionEditor({ section, onUpdate, allFields, processSteps }: {
   const ownFieldIds = new Set(section.fields.map((f) => f.id));
   const sources = conditionSourcesFrom(allFields.filter((f) => f.key && !ownFieldIds.has(f.id)));
 
-  // RBAC groups for the "visible only to groups"mode.
-  const { data: groups = [] } = useQuery({
-    queryKey: ["groups", "list"],
-    queryFn: async () => {
-      const res = await groupsAPI.list();
-      const rows = (res.data?.results ?? res.data ?? []) as Array<{ id: string; name: string }>;
-      return rows.map((g) => ({ id: String(g.id), name: String(g.name) }));
-    },
-    staleTime: 60_000,
-  });
   return (
     <div className="space-y-4">
       <InspectorRow label="Section title">
@@ -4499,7 +4562,6 @@ function SectionEditor({ section, onUpdate, allFields, processSteps }: {
         sources={sources}
         onChange={onUpdate}
         subject="section"
-        groupOptions={groups}
         processSteps={processSteps}
       />
       <EditabilityEditor
@@ -4667,7 +4729,7 @@ function PreviewColumnInput({ col, value, onChange, row, disabled }: { col: Tabl
   }
 }
 
-function PreviewTableField({ field, readOnly = false, rows, onUpdateCell, onAddRow, onRemoveRow, values, allFields, previewStep }: {
+function PreviewTableField({ field, readOnly = false, rows, onUpdateCell, onAddRow, onRemoveRow, values, allFields, previewStep, previewGroups }: {
   field: TemplateField;
   readOnly?: boolean;
   rows: Record<string, string>[];
@@ -4677,6 +4739,7 @@ function PreviewTableField({ field, readOnly = false, rows, onUpdateCell, onAddR
   values: Record<string, unknown>;
   allFields: TemplateField[];
   previewStep: string;
+  previewGroups?: string[];
 }) {
   // Column rules use the same hidden/visibleWhen/readonly/editableWhen shape
   // as fields and sections, but they are resolved with the row's own cell
@@ -4686,8 +4749,8 @@ function PreviewTableField({ field, readOnly = false, rows, onUpdateCell, onAddR
   // row, so a cell can be locked on one row and editable on the next.
   const cols = (field.columns ?? []).filter((c) =>
     rows.length === 0
-      ? evalVisible(c, values, allFields, previewStep)
-      : rows.some((r) => evalVisible(c, rowScopedValues(values, r), allFields, previewStep)),
+      ? evalVisible(c, values, allFields, previewStep, previewGroups)
+      : rows.some((r) => evalVisible(c, rowScopedValues(values, r), allFields, previewStep, previewGroups)),
   );
 
 
@@ -4717,8 +4780,8 @@ function PreviewTableField({ field, readOnly = false, rows, onUpdateCell, onAddR
                 {cols.map((col) => {
                   const rowValues = rowScopedValues(values, row);
                   const colDisabled = readOnly
-                    || !evalVisible(col, rowValues, allFields, previewStep)
-                    || !evalEditable(col, rowValues, allFields, previewStep);
+                    || !evalVisible(col, rowValues, allFields, previewStep, previewGroups)
+                    || !evalEditable(col, rowValues, allFields, previewStep, previewGroups);
 
                   return (
                     <td key={col.id} className="px-3 py-2.5 border-r border-slate-300 last:border-0">
@@ -4750,7 +4813,16 @@ function PreviewTableField({ field, readOnly = false, rows, onUpdateCell, onAddR
 /* Evaluate one condition. In the builder preview there is no live document, so
  * the process step is treated as "draft" (the implicit start state). Field
  * values here are keyed by field id (react-hook-form register key). */
-function evalCondition(c: VisibilityCondition, values: Record<string, unknown>, allFields: TemplateField[], processStep: string): boolean {
+function evalCondition(c: VisibilityCondition, values: Record<string, unknown>, allFields: TemplateField[], processStep: string, userGroups?: string[]): boolean {
+  /* Group membership. `userGroups` = the viewer's group ids/names. With no
+   * viewer context (undefined) or no group picked, the condition doesn't restrict. */
+  if (c.source === "user_group") {
+    const wanted = c.groups ?? [];
+    if (wanted.length === 0 || !userGroups) return true;
+    const mine = new Set(userGroups.map((g) => g.trim().toLowerCase()));
+    const member = wanted.some((g) => mine.has(g.id.toLowerCase()) || mine.has(g.name.trim().toLowerCase()));
+    return c.operator === "not_in_list" ? !member : member;
+  }
   let sv: string;
   if (c.source === "process_step") {
     sv = processStep;
@@ -4812,29 +4884,29 @@ function evalCondition(c: VisibilityCondition, values: Record<string, unknown>, 
 /* Evaluate a (possibly nested) rule group. Plain conditions and nested
  * groups are combined with the SAME combinator, so a group reads exactly
  * like its summary string. An empty group is "no restriction"= true. */
-function evalRuleGroup(group: RuleGroup | null | undefined, values: Record<string, unknown>, allFields: TemplateField[], processStep: string): boolean {
+function evalRuleGroup(group: RuleGroup | null | undefined, values: Record<string, unknown>, allFields: TemplateField[], processStep: string, userGroups?: string[]): boolean {
   if (!group) return true;
   const nested = (group.groups ?? []).filter(ruleGroupHasConditions);
   if (group.conditions.length === 0 && nested.length === 0) return true;
   const results = [
-    ...group.conditions.map((c) => evalCondition(c, values, allFields, processStep)),
-    ...nested.map((g) => evalRuleGroup(g, values, allFields, processStep)),
+    ...group.conditions.map((c) => evalCondition(c, values, allFields, processStep, userGroups)),
+    ...nested.map((g) => evalRuleGroup(g, values, allFields, processStep, userGroups)),
   ];
   return group.combinator === "or" ? results.some(Boolean) : results.every(Boolean);
 }
 
 /* Visibility for a field OR a section (both carry `hidden` + `visibleWhen`).
  * An empty/absent rule group means no restriction (visible). */
-function evalVisible(item: VisibilityState, values: Record<string, unknown>, allFields: TemplateField[], processStep = "draft"): boolean {
+function evalVisible(item: VisibilityState, values: Record<string, unknown>, allFields: TemplateField[], processStep = "draft", userGroups?: string[]): boolean {
   if (item.hidden) return false;
-  return evalRuleGroup(item.visibleWhen, values, allFields, processStep);
+  return evalRuleGroup(item.visibleWhen, values, allFields, processStep, userGroups);
 }
 
 /* Editability mirror (both carry `readonly` + `editableWhen`). Absent group =
  * editable. The builder Preview evaluates at the "draft"process step. */
-function evalEditable(item: EditabilityState, values: Record<string, unknown>, allFields: TemplateField[], processStep = "draft"): boolean {
+function evalEditable(item: EditabilityState, values: Record<string, unknown>, allFields: TemplateField[], processStep = "draft", userGroups?: string[]): boolean {
   if (item.readonly) return false;
-  return evalRuleGroup(item.editableWhen, values, allFields, processStep);
+  return evalRuleGroup(item.editableWhen, values, allFields, processStep, userGroups);
 }
 
 /* ── Calculated fields ────────────────────────────────────────────────────
@@ -5725,7 +5797,7 @@ function formatCalcResult(fieldType: string | undefined, result: CalcValue): Cal
   return result;
 }
 
-function PreviewField({ field, register, errors, values, allFields, editable = true, tableRows, onUpdateTableCell, onAddTableRow, onRemoveTableRow, previewStep = "draft", onButtonClick, buttonDone = false }: {
+function PreviewField({ field, register, errors, values, allFields, editable = true, tableRows, onUpdateTableCell, onAddTableRow, onRemoveTableRow, previewStep = "draft", previewGroups, onButtonClick, buttonDone = false }: {
   field: TemplateField;
   register: UseFormRegister<Record<string, unknown>>;
   errors: FieldErrors<Record<string, unknown>>;
@@ -5737,6 +5809,7 @@ function PreviewField({ field, register, errors, values, allFields, editable = t
   onAddTableRow?: (tableKey: string) => void;
   onRemoveTableRow?: (tableKey: string, rowIdx: number) => void;
   previewStep?: string;
+  previewGroups?: string[];
   onButtonClick?: (field: TemplateField) => void;
   buttonDone?: boolean;
 }) {
@@ -5769,7 +5842,7 @@ function PreviewField({ field, register, errors, values, allFields, editable = t
         onRemoveRow={(rowIdx) => onRemoveTableRow?.(field.key, rowIdx)}
         values={values}
         allFields={allFields}
-        previewStep={previewStep}
+        previewStep={previewStep} previewGroups={previewGroups}
       />
     );
   }
@@ -6035,6 +6108,38 @@ function Preview({ sections, templateName, processSteps }: {
   // Simulate the document being at a given workflow step, so process-step
   // visibility/editability rules can be exercised without a live document.
   const [previewStep, setPreviewStep] = useState("draft");
+  // Simulate the viewer's RBAC group membership, so "user group" rules can be exercised.
+  const rbacGroups = useRbacGroups();
+  const [previewGroupIds, setPreviewGroupIds] = useState<string[]>([]);
+  const previewGroups = rbacGroups.filter((g) => previewGroupIds.includes(g.id)).flatMap((g) => [g.id, g.name]);
+
+  // Group picker popover — a proper bordered control; closes on Escape or an
+  // outside click (a native <details> would stay open on Escape).
+  const [groupMenuOpen, setGroupMenuOpen] = useState(false);
+  const groupMenuRef = useRef<HTMLDivElement | null>(null);
+  const selectedGroupNames = rbacGroups.filter((g) => previewGroupIds.includes(g.id)).map((g) => g.name);
+  const groupSummary = selectedGroupNames.length === 0
+    ? "All groups"
+    : selectedGroupNames.length <= 2
+      ? selectedGroupNames.join(", ")
+      : `${selectedGroupNames.length} groups selected`;
+  useEffect(() => {
+    if (!groupMenuOpen) return;
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === "Escape") { e.preventDefault(); setGroupMenuOpen(false); }
+    };
+    const onDocClick = (e: MouseEvent) => {
+      if (!(e.target instanceof Node)) return;
+      if (groupMenuRef.current?.contains(e.target)) return;
+      setGroupMenuOpen(false);
+    };
+    document.addEventListener("keydown", onKey);
+    document.addEventListener("mousedown", onDocClick);
+    return () => {
+      document.removeEventListener("keydown", onKey);
+      document.removeEventListener("mousedown", onDocClick);
+    };
+  }, [groupMenuOpen]);
   // On-demand sections a Button has added so far, in click order.
   const [spawned, setSpawned] = useState<SpawnRecord[]>([]);
   const values = watch();
@@ -6247,21 +6352,67 @@ function Preview({ sections, templateName, processSteps }: {
             <h1 className="text-2xl font-bold text-slate-900">{templateName}</h1>
             <p className="mt-1 text-sm text-slate-500">Fill out the form below to preview how end users will experience this template.</p>
           </div>
-          <label className="flex flex-shrink-0 flex-col gap-1 text-right">
-            <span className="text-[10px] font-semibold uppercase tracking-wider text-slate-500">Preview as step</span>
-            <CustomListbox
-              value={previewStep}
-              onChange={(val) => setPreviewStep(val)}
-              options={stepOptions.map((o) => ({ value: o.value, label: o.label }))}
-              className="h-9 min-w-[180px]"
-              buttonClassName="w-full"
-              ariaLabel="Preview as step"
-            />
-          </label>
+          <div className="flex flex-shrink-0 items-start gap-3">
+            <label className="flex flex-col gap-1">
+              <span className="text-[10px] font-semibold uppercase tracking-wider text-slate-500">Preview as step</span>
+              <CustomListbox
+                value={previewStep}
+                onChange={(val) => setPreviewStep(val)}
+                options={stepOptions.map((o) => ({ value: o.value, label: o.label }))}
+                className="min-w-[180px]"
+                buttonClassName="w-full h-9 rounded-md border border-[#C8CDD2] bg-white px-3 text-sm font-medium text-[#1F2933] shadow-sm transition-colors hover:border-[#287EAD] focus:outline-none focus-visible:ring-2 focus-visible:ring-[#287EAD]/30"
+                ariaLabel="Preview as step"
+              />
+            </label>
+
+            <div ref={groupMenuRef} className="relative flex flex-col gap-1">
+              <span className="text-[10px] font-semibold uppercase tracking-wider text-slate-500">Preview as group</span>
+              <button
+                type="button"
+                onClick={() => setGroupMenuOpen((v) => !v)}
+                aria-haspopup="true"
+                aria-expanded={groupMenuOpen}
+                className={cn(
+                  "inline-flex h-9 min-w-[200px] items-center justify-between gap-2 rounded-md border bg-white px-3 text-sm font-medium text-[#1F2933] shadow-sm transition-colors",
+                  groupMenuOpen
+                    ? "border-[#287EAD] ring-2 ring-[#287EAD]/30"
+                    : "border-[#C8CDD2] hover:border-[#287EAD]",
+                )}
+              >
+                <span className="flex min-w-0 items-center gap-2">
+                  <Layers className="h-4 w-4 shrink-0 text-[#287EAD]" />
+                  <span className="truncate">{groupSummary}</span>
+                </span>
+                <ChevronDown className={cn("h-4 w-4 shrink-0 opacity-60 transition-transform", groupMenuOpen && "rotate-180")} />
+              </button>
+              {groupMenuOpen && (
+                <div className="absolute right-0 top-full z-20 mt-1 max-h-56 min-w-[240px] overflow-y-auto rounded-md border border-[#C8CDD2] bg-white py-1 shadow-lg">
+                  <div className="flex items-center justify-between border-b border-slate-100 px-3 py-1.5">
+                    <span className="text-[10px] font-semibold uppercase tracking-wider text-slate-400">Viewer groups</span>
+                    {previewGroupIds.length > 0 && (
+                      <button type="button" onClick={() => setPreviewGroupIds([])}
+                        className="text-[10px] font-semibold text-[#287EAD] hover:underline">
+                        Clear
+                      </button>
+                    )}
+                  </div>
+                  {rbacGroups.length === 0 && <p className="px-3 py-2 text-xs text-slate-500">No groups defined.</p>}
+                  {rbacGroups.map((g) => (
+                    <label key={g.id} className="flex cursor-pointer items-center gap-2 px-3 py-2 text-sm hover:bg-[#EEF6FB]">
+                      <input type="checkbox" className="h-4 w-4 accent-[#287EAD]" checked={previewGroupIds.includes(g.id)}
+                        onChange={() => setPreviewGroupIds((p) => p.includes(g.id) ? p.filter((x) => x !== g.id) : [...p, g.id])} />
+                      <span className="truncate text-[#1F2933]">{g.name}</span>
+                    </label>
+                  ))}
+                  <p className="border-t border-slate-100 px-3 py-1.5 text-[10px] text-slate-400">Press Esc to close</p>
+                </div>
+              )}
+            </div>
+          </div>
         </header>
         {ordered.map((s) => {
-          if (!evalVisible(s, values, allFields, previewStep)) return null;
-          const sectionEditable = evalEditable(s, values, allFields, previewStep);
+          if (!evalVisible(s, values, allFields, previewStep, previewGroups)) return null;
+          const sectionEditable = evalEditable(s, values, allFields, previewStep, previewGroups);
           return (
             <section key={s.id} className="border border-slate-300 bg-white p-6 shadow-sm">
               <div className="mb-5 pb-4 border-b border-slate-200">
@@ -6281,14 +6432,14 @@ function Preview({ sections, templateName, processSteps }: {
               </div>
               <div className="grid grid-cols-12 gap-4">
                 {s.fields.map((f) => {
-                  if (!evalVisible(f, values, allFields, previewStep)) return null;
+                  if (!evalVisible(f, values, allFields, previewStep, previewGroups)) return null;
                   return (
                     <div key={f.id} className="min-w-0" style={{ gridColumn: `span ${f.colSpan ?? 12} / span ${f.colSpan ?? 12}` }}>
                       <PreviewField field={f} register={register} errors={errors} values={values} allFields={allFields}
-                        editable={sectionEditable && evalEditable(f, values, allFields, previewStep)}
+                        editable={sectionEditable && evalEditable(f, values, allFields, previewStep, previewGroups)}
                         tableRows={tableRows} onUpdateTableCell={updateTableCell}
                         onAddTableRow={addTableRow} onRemoveTableRow={removeTableRow}
-                        previewStep={previewStep}
+                        previewStep={previewStep} previewGroups={previewGroups}
                         onButtonClick={(btn) => runButton(btn, s.id)}
                         buttonDone={f.button?.action === "add_block" && spawned.some((r) => r.sectionId === f.button?.targetSectionId)} />
                     </div>

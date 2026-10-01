@@ -682,6 +682,27 @@ export default function TemplatesPage({ initialMode }: { initialMode?: PageMode 
     return counts;
   }, [templates]);
 
+  // ── Cross-form table references ─────────────────────────────────────────
+  // Lets the builder's "Table → Another form" picker read other saved form
+  // templates. Only interactive forms qualify (not Office uploads or
+  // WYSIWYG document layouts — neither has sections/tables to link to).
+  const externalTemplates = useMemo(() => ({
+    list: async () => {
+      const res = await templatesAPI.list();
+      const rows = normalizeListResponse<Template & { workflow_type?: string }>(res.data);
+      return rows
+        .filter((t) => t.type === "built" && t.kind !== "document" && !!t.id)
+        .map((t) => ({
+          id: String(t.id),
+          name: t.name,
+          workflow_type: t.workflow_type,
+          document_type_id: t.document_type_id || t.document_type,
+          document_type_name: t.document_type_name,
+        }));
+    },
+    get: async (id: string) => (await templatesAPI.get(id)).data,
+  }), []);
+
   // ── Builder mode ────────────────────────────────────────────────────────
 
   if (mode === "builder") {
@@ -689,6 +710,7 @@ export default function TemplatesPage({ initialMode }: { initialMode?: PageMode 
       <TemplateBuilderV2
         initial={editTarget}
         documentTypes={docTypes}
+        externalTemplates={externalTemplates}
         onSave={(tpl, stayOpen) => saveMutation.mutate({ template: tpl as unknown as Template, stayOpen })}
         onCancel={() => { setMode("list"); setEditTarget(undefined); }}
         isSaving={saveMutation.isPending}

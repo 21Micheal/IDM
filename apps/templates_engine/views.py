@@ -21,7 +21,7 @@ def _request_bool(value) -> bool:
 
 
 from apps.templates_engine.conditions import (  # noqa: E402
-    is_visible as _eval_visible, is_editable, compute_calculated_values,
+    is_visible as _eval_visible, is_editable, compute_calculated_values, build_viewer,
 )
 
 
@@ -270,12 +270,18 @@ class DocumentTemplateViewSet(viewsets.ModelViewSet):
                 .values_list("group__name", flat=True)
             )
             is_admin = bool(getattr(request.user, "has_admin_access", False))
+            # Viewer context for "user_group" visibility rules.
+            viewer = build_viewer(group_ids, group_names, is_admin)
 
+            # On-demand sections ("Add on demand" blocks revealed by a Button)
+            # are not part of the form until the user clicks their button, so
+            # their fields can't be required up-front. Mirrors TemplateForm.tsx.
             visible_editable_sections = [
                 section for section in template.sections
-                if _eval_visible(section, generation_values)
+                if not section.get("onDemand")
+                and _eval_visible(section, generation_values, viewer=viewer)
                 and _section_visible_to_user(section, group_ids, group_names, is_admin)
-                and is_editable(section, generation_values)
+                and is_editable(section, generation_values, viewer=viewer)
             ]
 
             all_fields = [
@@ -283,8 +289,8 @@ class DocumentTemplateViewSet(viewsets.ModelViewSet):
                 for f in section.get("fields", [])
                 if f.get("required") and f.get("type") not in ("divider", "heading")
                 and not f.get("formula") and not f.get("calc")
-                and _eval_visible(f, generation_values)
-                and is_editable(f, generation_values)
+                and _eval_visible(f, generation_values, viewer=viewer)
+                and is_editable(f, generation_values, viewer=viewer)
             ]
             missing = [f["label"] for f in all_fields if not generation_values.get(f["key"])]
 
@@ -300,8 +306,8 @@ class DocumentTemplateViewSet(viewsets.ModelViewSet):
                 f for section in visible_editable_sections
                 for f in section.get("fields", [])
                 if f.get("type") == "table"
-                and _eval_visible(f, generation_values)
-                and is_editable(f, generation_values)
+                and _eval_visible(f, generation_values, viewer=viewer)
+                and is_editable(f, generation_values, viewer=viewer)
             ]
             for f in table_fields:
                 rows = generation_values.get(f.get("key")) or []
@@ -311,7 +317,7 @@ class DocumentTemplateViewSet(viewsets.ModelViewSet):
                     col_key = col.get("key")
                     if not col.get("required") or not col_key:
                         continue
-                    if not _eval_visible(col, generation_values) or not is_editable(col, generation_values):
+                    if not _eval_visible(col, generation_values, viewer=viewer) or not is_editable(col, generation_values, viewer=viewer):
                         continue
                     missing_in_any_row = (
                         len(rows) == 0
